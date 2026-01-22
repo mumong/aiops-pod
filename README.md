@@ -93,8 +93,10 @@ curl -X POST "http://<NODE_IP>:30800/ask" -d "q=安装 observability" -d "max_st
 | `/ask` | GET/POST | 主要查询入口 |
 | `/health` | GET | 健康检查 |
 | `/tools` | GET | 可用工具列表 |
+| `/tools/detail` | GET | 工具详情（按 toolset 分组，含 schema/描述，便于二次开发） |
 | `/runbooks` | GET | 可用 Runbooks |
 | `/api/v1/mcp/status` | GET | MCP 服务器状态 |
+| `/artifacts/{artifact_id}` | GET | 拉取被截断的大输出全文（TTL 内有效） |
 
 ### API 参数
 
@@ -102,8 +104,29 @@ curl -X POST "http://<NODE_IP>:30800/ask" -d "q=安装 observability" -d "max_st
 |------|------|--------|------|
 | `q` | string | 必填 | 问题内容 |
 | `stream` | bool | true | 是否流式输出 |
-| `format` | string | text | 输出格式: text/sse |
+| `format` | string | text | 输出格式: text(人类可读)/sse(结构化事件流，推荐) |
 | `max_steps` | int | 20 | 最大执行步数 (1-100) |
+
+### ✅ 推荐：使用结构化 SSE（可稳定看到每一步 + 一定有最终结果）
+
+```bash
+curl -N -G "http://<NODE_IP>:30800/ask" \
+  --data-urlencode "q=我的集群有什么问题" \
+  --data-urlencode "format=sse"
+```
+
+SSE 会持续输出 `event: <type>` / `data: {...}`，关键事件：
+- `tool_start` / `tool_result`：每次工具调用（若结果过长会带 `artifact_id`）
+- `iteration_end`：每轮迭代结束的 token/耗时
+- `blocked`：被安全策略阻塞（例如需要批准）
+- `error`：执行错误
+- `final`：**最终结论（保证一定出现，且不会把 DSML 片段当最终答案）**
+
+如 `tool_result.result_truncated=true` 且带 `artifact_id`，可拉取全文：
+
+```bash
+curl "http://<NODE_IP>:30800/artifacts/<artifact_id>"
+```
 
 ---
 
@@ -260,8 +283,8 @@ mcp_servers:
 │   ├── core/
 │   │   ├── service.py          # 核心服务（⭐重点）
 │   │   ├── prompts.py          # System Prompt（分层诊断模型）
-│   │   ├── dspy_enhancer.py    # DSPy 问题分类器
-│   │   ├── mcp_manager.py      # MCP 服务器管理
+│   │   ├── mcp/manager.py      # MCP 本地 auto-start 管理（默认关闭）
+│   │   ├── holmes/             # Holmes 相关能力拆分（配置/流式/日志等）
 │   │   └── runbook.py          # Runbook 加载
 │   └── main.py                 # 应用入口
 ├── deploy/                     # K8s 部署文件
@@ -326,16 +349,9 @@ curl -X POST "http://localhost:8000/ask" -d "q=检查集群状态"
                             │
                             ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│                      DSPy 问题分类器                               │
-│              识别问题类型 → 匹配 FOCUSED_PROMPT                    │
-└───────────────────────────┬───────────────────────────────────────┘
-                            │
-                            ▼
-┌───────────────────────────────────────────────────────────────────┐
 │                       HolmesGPT 引擎                               │
 │  ┌─────────────────────────────────────────────────────────────┐  │
 │  │  SYSTEM_PROMPT (分层诊断模型 L0-L4)                          │  │
-│  │  + FOCUSED_PROMPT (针对性诊断指引)                           │  │
 │  │  + Runbooks (故障知识库)                                     │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 └───────────────────────────┬───────────────────────────────────────┘
@@ -362,5 +378,4 @@ curl -X POST "http://localhost:8000/ask" -d "q=检查集群状态"
 ## 🤝 致谢
 
 - [HolmesGPT](https://github.com/robusta-dev/holmesgpt) - AI 故障诊断引擎
-- [DSPy](https://github.com/stanfordnlp/dspy) - 声明式 LLM 编程框架
 - [DeepSeek](https://www.deepseek.com/) - LLM 提供商

@@ -25,6 +25,7 @@ from fastapi import HTTPException, Query, Form
 from fastapi.responses import StreamingResponse, PlainTextResponse
 
 from app.core.service import get_service
+from app.core.holmes.artifacts import get_artifact_store
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,19 @@ def register_routes(app):
         except Exception as e:
             logger.error(f"获取工具列表失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/tools/detail")
+    async def list_tools_detail():
+        """
+        列出更详细的工具信息（按 toolset 分组，含尽可能多的 schema/描述）
+        用途：排障、二次开发（例如你要做多集群能力时先摸清现有工具结构）
+        """
+        try:
+            service = get_service()
+            return service.get_tools_detail()
+        except Exception as e:
+            logger.error(f"获取工具详情失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
     
     @app.get("/runbooks")
     async def list_runbooks():
@@ -222,11 +236,22 @@ def register_routes(app):
         except Exception as e:
             logger.error(f"获取 Runbooks 失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/artifacts/{artifact_id}")
+    async def get_artifact(artifact_id: str):
+        """
+        获取被截断的大输出全文（内存缓存，带 TTL）
+        """
+        store = get_artifact_store()
+        artifact = store.get(artifact_id)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="artifact not found or expired")
+        return PlainTextResponse(content=artifact.content, media_type=artifact.content_type)
     
     @app.get("/api/v1/mcp/status")
     async def get_mcp_status():
         """获取 MCP 服务器状态"""
-        from app.core.mcp_manager import get_mcp_manager
+        from app.core.mcp import get_mcp_manager
         manager = get_mcp_manager()
         return {"success": True, "servers": manager.get_status()}
     

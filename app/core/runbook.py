@@ -13,11 +13,7 @@ from holmes.plugins.runbooks import RunbookCatalog
 
 logger = logging.getLogger(__name__)
 
-
-def get_project_root() -> Path:
-    """获取项目根目录"""
-    # app/core/runbook.py -> 项目根目录
-    return Path(__file__).parent.parent.parent
+from app.core.paths import get_project_root
 
 
 class RunbookManager:
