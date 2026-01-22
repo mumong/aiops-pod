@@ -6,7 +6,7 @@ Core 模块
 from .service import HolmesService, get_service
 from .runbook import RunbookManager
 from .prompts import SYSTEM_PROMPT
-from .mcp_manager import (
+from .mcp import (
     MCPServerManager,
     get_mcp_manager,
     auto_start_mcp_servers,

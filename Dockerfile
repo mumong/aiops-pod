@@ -59,8 +59,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY config/ ./config/
 COPY knowledge_base/ ./knowledge_base/
-COPY tools/ ./tools/
-COPY mcp_bridges/ ./mcp_bridges/
 COPY run.py .
 COPY VERSION .
 

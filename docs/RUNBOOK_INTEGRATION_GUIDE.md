@@ -95,8 +95,10 @@ vim knowledge_base/runbooks/pod-restart-troubleshooting.md
 ### 步骤 3: 验证
 
 ```bash
-# 验证 catalog 格式
-python3 scripts/validate_runbooks.py
+# 当前仓库未内置 validate_runbooks.py；如需验证：
+# - 重点检查 catalog.json 是否是合法 JSON
+# - link 指向的 .md 文件是否存在
+# - K8s 部署场景下，更新 ConfigMap 后执行 make restart 触发滚动更新
 ```
 
 **完成！下次查询自动生效，无需重启。**
@@ -334,6 +336,5 @@ A: 可以使用中文，但建议：
 
 ## 下一步
 
-- [使用指南](./USAGE_GUIDE.md) - 如何使用 HolmesGPT
-- [MCP 工具集成指南](./MCP_INTEGRATION_GUIDE.md) - 集成工具
+- 回到 `docs/ARCHITECTURE.md`：快速定位“要改什么应该去哪改”
 
