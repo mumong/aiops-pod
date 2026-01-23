@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logfill
+  namespace: aiops-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logfill
+  template:
+    metadata:
+      labels:
+        app: logfill
+    spec:
+      containers:
+        - name: logfill
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              mkdir -p /logs
+              echo "start writing..."
+              i=0
+              while true; do
+                i=$((i+1))
+                echo "$(date) line=$i $(head -c 1024 </dev/urandom | base64)" >> /logs/app.log || true
+                # 通过 emptyDir.sizeLimit 触发 ENOSPC
+                dd if=/dev/zero of=/logs/bigfile bs=1M count=5 oflag=append conv=notrunc 2>/logs/dd.err || true
+                tail -n 1 /logs/dd.err || true
+                sleep 0.2
+              done
+          volumeMounts:
+            - name: logs
+              mountPath: /logs
+      volumes:
+        - name: logs
+          emptyDir:
+            sizeLimit: 30Mi
+

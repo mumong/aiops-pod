@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dep503
+  namespace: aiops-e2e
+spec:
+  selector:
+    app: dep503
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dep503
+  namespace: aiops-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dep503
+  template:
+    metadata:
+      labels:
+        app: dep503
+    spec:
+      containers:
+        - name: dep
+          image: hashicorp/http-echo:1.0.0
+          args: ["-listen=:8080", "-code=503", "-text=dependency always 503"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: appcaller
+  namespace: aiops-e2e
+spec:
+  selector:
+    app: appcaller
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appcaller
+  namespace: aiops-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: appcaller
+  template:
+    metadata:
+      labels:
+        app: appcaller
+    spec:
+      containers:
+        - name: app
+          image: python:3.11-slim
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DEP_URL
+              value: "http://dep503.aiops-e2e.svc.cluster.local:8080/"
+          command: ["python", "-c"]
+          args:
+            - |
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+              import os, requests
+              DEP=os.environ["DEP_URL"]
+              class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                  try:
+                    r=requests.get(DEP, timeout=1.5)
+                    code=r.status_code
+                  except Exception as e:
+                    code=503
+                    print("dependency_error", repr(e), flush=True)
+                  if code != 200:
+                    print("received_upstream_status", code, "dep", DEP, flush=True)
+                    self.send_response(503); self.end_headers(); self.wfile.write(b"upstream 503")
+                  else:
+                    self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+              HTTPServer(("0.0.0.0",8080),H).serve_forever()
+

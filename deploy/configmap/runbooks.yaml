@@ -178,6 +178,54 @@ data:
           "link": "app-config-errors.md"
         },
         {
+          "_comment": "========== 2026-01-22: L0-L4 典型目标（决策型 procedure，重根因分析） =========="
+        },
+        {
+          "id": "l0-diskfull-logfile",
+          "type": "procedure",
+          "layer": "L0",
+          "update_date": "2026-01-22",
+          "description": "【L0-流程型】日志文件占满磁盘 - Disk >95% / ENOSPC，定位写满点/句柄泄漏/安全清理（证据链）",
+          "link": "l0-diskfull-logfile.md",
+          "operations": ["诊断", "排查", "清理"]
+        },
+        {
+          "id": "l1-kubelet-cert-invalid",
+          "type": "procedure",
+          "layer": "L1",
+          "update_date": "2026-01-22",
+          "description": "【L1-流程型】Kubelet 证书异常导致 Node NotReady - conditions + kubelet 日志 x509 证据链，修复=还原证书+重启 kubelet",
+          "link": "l1-kubelet-cert-invalid.md",
+          "operations": ["诊断", "排查", "修复"]
+        },
+        {
+          "id": "l2-oomkilled",
+          "type": "procedure",
+          "layer": "L2",
+          "update_date": "2026-01-22",
+          "description": "【L2-流程型】OOMKilled (Exit 137) - 固定取证（pod json/events/previous logs）+ 规则判定 + 临时调高 memory limit",
+          "link": "l2-oomkilled.md",
+          "operations": ["诊断", "排查", "修复"]
+        },
+        {
+          "id": "l3-dns-latency",
+          "type": "procedure",
+          "layer": "L3",
+          "update_date": "2026-01-22",
+          "description": "【L3-流程型】CoreDNS 网络延迟注入（例如 tc 500ms）- 量化 p95 DNS 耗时 + 分型 + 修复=移除 tc 规则",
+          "link": "l3-dns-latency.md",
+          "operations": ["诊断", "排查", "修复"]
+        },
+        {
+          "id": "l4-dependency-503",
+          "type": "procedure",
+          "layer": "L4",
+          "update_date": "2026-01-22",
+          "description": "【L4-流程型】依赖服务固定返回 503 导致应用 5xx 激增 - 建立因果证据链（app logs + curl 依赖）+ 修复=滚更/重启依赖",
+          "link": "l4-dependency-503.md",
+          "operations": ["诊断", "排查", "修复"]
+        },
+        {
           "_comment": "========== 操作流程类 ==========",
           "id": "helm-observability-install",
           "type": "procedure",
@@ -2556,81 +2604,350 @@ data:
        - 文件挂载：支持热更新（但应用需监听文件变化）
        - 环境变量：需重启 Pod 才能更新
 
+
   # ==========================================================================
-  # Helm 管理 Observability 可观测性平台
+  # L0-L4 典型场景增强版 Runbook
   # ==========================================================================
-  helm-observability-install.md: |
-    # Helm 管理 Observability 平台
 
-    > **类型**: `procedure`（流程型）
-    > **包含操作**: 安装 | 升级 | 卸载
-    > **⚠️ 根据用户意图选择对应流程，不要从头执行！**
+  l0-diskfull-logfile.md: |
+    # L0 日志文件占满磁盘（DiskFull/ENOSPC）
 
-    ## ⛔ 约束
-    **禁止使用 `run_bash_command` 执行 helm 命令，必须使用 MCP 工具！**
-
-    ## 🔐 固定配置（私有 Repo）
-    | 参数 | 值 |
-    |------|-----|
-    | repo_name | `observability` |
-    | url | `http://192.168.1.63/api/v4/projects/65/packages/helm/stable` |
-    | username | `wanghuhu` |
-    | password | `glpat-n_ZsxoVt4HxN_ExHENy3` |
-    | chart | `observability/observability` |
-
-    ## 🔄 动态参数（根据用户输入决定）
-    | 参数 | 默认值 | 说明 |
-    |------|--------|------|
-    | release_name | `observability` | 用户可指定其他名称 |
-    | namespace | `xnet` | 用户可指定其他命名空间 |
+    > **层级**: L0 - 基础设施层 | **类型**: procedure | **场景ID**: L0-DiskFull
 
     ---
+
+    ## 1. 场景识别特征
+
+    ### 1.1 触发关键词
+    | 类别 | 关键词 |
+    |------|--------|
+    | 中文 | 磁盘满、磁盘空间不足、写入失败、空间耗尽 |
+    | 英文 | disk full, no space left, ENOSPC, disk pressure |
+    | 指标 | node_disk_utilization > 95%, Use% >= 95 |
+
+    ### 1.2 快速判定
+    ```
+    IF (df -h 显示 Use% >= 95%) OR (日志包含 ENOSPC):
+        场景 = L0-DiskFull, 置信度 = 高
+    ```
+
+    ## 2. 证据清单
+
+    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
+    |---|--------|------|----------|----------|
+    | E1 | 磁盘使用率 | Critical | `df -h` | Use% >= 95% |
+    | E2 | Inode 使用率 | Critical | `df -i` | IUse% >= 95% |
+    | E3 | Top 占用目录 | Important | `du -sh /var/log/* | sort -hr | head` | 定位写满点 |
+    | E4 | Top 大文件 | Important | `find /var/log -size +100M` | 定位具体文件 |
+    | E5 | 删未释放 | Optional | `lsof +L1 | grep deleted` | 句柄泄漏 |
+
+    ## 3. 固定取证流程
+
+    ```bash
+    # Step 1: 确认磁盘状态
+    df -h && df -i
+
+    # Step 2: 定位 Top 占用目录
+    du -sh /var/log/* 2>/dev/null | sort -hr | head -20
+
+    # Step 3: 定位大文件
+    find /var/log -type f -size +100M -exec ls -lh {} \; 2>/dev/null | head -20
+
+    # Step 4: 检查删未释放
+    lsof +L1 2>/dev/null | grep deleted | head -30
+    ```
+
+    ## 4. 判定规则
+
+    | 规则ID | 条件 | 结论 | 置信度 |
+    |--------|------|------|--------|
+    | R-L0-DISK-1 | Use% >= 95% 或 ENOSPC | DiskFull(Block) | 高 |
+    | R-L0-DISK-2 | IUse% >= 95% 且 Use% 正常 | DiskFull(Inode) | 高 |
+    | R-L0-DISK-3 | lsof 显示大 deleted 文件 | 句柄泄漏 | 中 |
+
+    ## 5. 修复方案
+
+    ### 立即止血
+    ```bash
+    truncate -s 0 /var/log/xxx.log  # 优先 truncate，保留句柄
+    df -h  # 确认释放
+    ```
+
+    ### 根治（需审批）
+    - 配置 logrotate 日志轮转
+    - 重启占用 deleted 文件的进程
+
+    ### 禁止操作
+    - ❌ `rm -rf /var/log/*`
+    - ❌ `rm -rf /var/lib/docker/*`
+
+  l1-kubelet-cert-invalid.md: |
+    # L1 Kubelet 证书异常导致 Node NotReady
+
+    > **层级**: L1 - 集群与节点层 | **类型**: procedure | **场景ID**: L1-KubeletCert
+
     ---
 
-    ## 📦 操作：安装（当用户说"安装"时执行此流程）
+    ## 1. 场景识别特征
 
-    **Step 1**: 添加 Repo
+    ### 1.1 触发关键词
+    | 类别 | 关键词 |
+    |------|--------|
+    | 中文 | 节点异常、节点不可用、证书过期 |
+    | 英文 | node notready, kubelet, x509, certificate, TLS |
+    | 状态 | Ready=False, Ready=Unknown |
+
+    ### 1.2 快速判定
     ```
-    工具: helm_repo_add
-    参数: name=observability, url=<固定URL>, username=<固定>, password=<固定>
+    IF (kubectl get nodes 显示 NotReady) AND (kubelet 日志包含 x509):
+        场景 = L1-KubeletCert, 置信度 = 高
     ```
 
-    **Step 2**: 安装 Chart
+    ## 2. 证据清单
+
+    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
+    |---|--------|------|----------|----------|
+    | E1 | 节点状态 | Critical | `kubectl get nodes` | Ready=False |
+    | E2 | 节点 Conditions | Critical | `kubectl describe node` | conditions.message |
+    | E3 | kubelet 日志 | Critical | `journalctl -u kubelet` | x509 错误 |
+    | E4 | 证书有效期 | Important | `openssl x509 -noout -dates` | 过期检查 |
+
+    ## 3. 固定取证流程
+
+    ```bash
+    # Step 1: 确认节点状态
+    kubectl get nodes -o wide
+    kubectl describe node <node-name>
+
+    # Step 2: 获取 kubelet 日志
+    journalctl -u kubelet --since "60 min ago" | grep -i "x509\|cert" | tail -50
+
+    # Step 3: 检查证书
+    ls -la /var/lib/kubelet/pki/
+    openssl x509 -in /var/lib/kubelet/pki/kubelet-client-current.pem -noout -dates
     ```
-    工具: helm_install
-    参数: release_name=<动态>, chart=observability/observability, namespace=<动态>, create_namespace=true, wait=true
+
+    ## 4. 判定规则
+
+    | 规则ID | 条件 | 结论 | 置信度 |
+    |--------|------|------|--------|
+    | R-L1-CERT-1 | NotReady + kubelet x509 错误 | KubeletCertInvalid | 高 |
+    | R-L1-CERT-2 | 证书文件丢失 | 证书被删除 | 高 |
+    | R-L1-CERT-3 | 证书过期 | 证书需要轮换 | 高 |
+
+    ## 5. 修复方案
+
+    ### 立即止血
+    ```bash
+    mv /path/to/backup/kubelet-client.pem /var/lib/kubelet/pki/  # 还原证书
+    systemctl restart kubelet
+    kubectl get nodes  # 确认恢复
     ```
+
+    ### 根治
+    - 建立证书过期告警
+    - 配置证书自动轮换
+
+  l2-oomkilled.md: |
+    # L2 OOMKilled（Exit Code 137）
+
+    > **层级**: L2 - 工作负载层 | **类型**: procedure | **场景ID**: L2-OOMKilled
 
     ---
+
+    ## 1. 场景识别特征
+
+    ### 1.1 触发关键词
+    | 类别 | 关键词 |
+    |------|--------|
+    | 中文 | 内存超限、OOM、被杀、重启 |
+    | 英文 | OOMKilled, out of memory, exit code 137 |
+    | 状态 | CrashLoopBackOff, exitCode=137 |
+
+    ### 1.2 快速判定
+    ```
+    IF (terminated.reason == OOMKilled) OR (exitCode == 137):
+        场景 = L2-OOMKilled, 置信度 = 高
+    ```
+
+    ## 2. 证据清单
+
+    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
+    |---|--------|------|----------|----------|
+    | E1 | Pod 状态 | Critical | `kubectl get pod -o json` | terminated.reason |
+    | E2 | Exit Code | Critical | `kubectl describe pod` | exitCode=137 |
+    | E3 | 崩溃前日志 | Important | `kubectl logs --previous` | 内存错误 |
+    | E4 | 资源限制 | Important | `kubectl get pod -o yaml` | limits.memory |
+
+    ## 3. 固定取证流程
+
+    ```bash
+    # Step 1: 确认 Pod 状态
+    kubectl get pod <pod> -n <ns> -o json | jq '.status.containerStatuses'
+
+    # Step 2: 获取事件和描述
+    kubectl describe pod <pod> -n <ns>
+
+    # Step 3: 获取崩溃前日志
+    kubectl logs <pod> -n <ns> --previous --tail=200
+
+    # Step 4: 检查资源配置
+    kubectl get pod <pod> -n <ns> -o jsonpath='{.spec.containers[*].resources}'
+    ```
+
+    ## 4. 判定规则
+
+    | 规则ID | 条件 | 结论 | 置信度 |
+    |--------|------|------|--------|
+    | R-L2-OOM-1 | terminated.reason=OOMKilled 或 exitCode=137 | OOMKilled | 高 |
+    | R-L2-OOM-2 | 日志包含 "Cannot allocate memory" | OOMKilled | 高 |
+    | R-L2-OOM-3 | exitCode=1/127 且无 OOM 标记 | 非 OOM | 中 |
+
+    ## 5. 修复方案
+
+    ### 立即止血（需审批）
+    ```bash
+    kubectl patch deploy <name> -n <ns> -p \
+      '{"spec":{"template":{"spec":{"containers":[{"name":"<c>","resources":{"limits":{"memory":"1Gi"}}}]}}}}'
+    ```
+
+    ### 根治
+    - 分析日志确定内存消耗来源
+    - 若为泄漏：修复代码
+    - 建立 memory 使用率告警
+
+  l3-dns-latency.md: |
+    # L3 CoreDNS 网络延迟
+
+    > **层级**: L3 - 服务与网络层 | **类型**: procedure | **场景ID**: L3-DNSLatency
+
     ---
 
-    ## 🔄 操作：升级（当用户说"升级/更新"时执行此流程）
+    ## 1. 场景识别特征
 
-    **Step 1**: 更新 Repo 索引
+    ### 1.1 触发关键词
+    | 类别 | 关键词 |
+    |------|--------|
+    | 中文 | DNS 延迟、域名解析慢、CoreDNS |
+    | 英文 | DNS latency, dns lookup slow, coredns |
+    | 指标 | dns_lookup_seconds > 0.45 |
+
+    ### 1.2 快速判定
     ```
-    工具: helm_repo_update
+    IF (dns_lookup_seconds p95 >= 0.45s):
+        场景 = L3-DNSLatency, 置信度 = 高
     ```
 
-    **Step 2**: 升级 Release
+    ## 2. 证据清单
+
+    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
+    |---|--------|------|----------|----------|
+    | E1 | DNS 查询耗时 | Critical | `time nslookup xxx` | >= 450ms |
+    | E2 | CoreDNS 状态 | Important | `kubectl get pods -n kube-system -l k8s-app=kube-dns` | Running |
+    | E3 | CoreDNS 日志 | Important | `kubectl logs -n kube-system -l k8s-app=kube-dns` | 错误 |
+    | E4 | TC 规则 | Optional | `tc qdisc show` | 延迟注入 |
+
+    ## 3. 固定取证流程
+
+    ```bash
+    # Step 1: 在 Pod 内测试 DNS 延迟
+    for i in $(seq 1 10); do
+      /usr/bin/time -f "dns_lookup_seconds=%e" nslookup kubernetes.default >/dev/null 2>&1
+    done
+
+    # Step 2: 检查 CoreDNS 状态
+    kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide
+    kubectl logs -n kube-system -l k8s-app=kube-dns --tail=200
+
+    # Step 3: 检查 TC 规则
+    tc qdisc show
     ```
-    工具: helm_upgrade
-    参数: release_name=<动态>, chart=observability/observability, namespace=<动态>, wait=true
+
+    ## 4. 判定规则
+
+    | 规则ID | 条件 | 结论 | 置信度 |
+    |--------|------|------|--------|
+    | R-L3-DNS-1 | dns p95 >= 0.45s 且 CoreDNS 正常 | DNSLatency(network) | 高 |
+    | R-L3-DNS-2 | CoreDNS 日志有 timeout/error | DNSLatency(coredns) | 中 |
+    | R-L3-DNS-3 | tc qdisc 有 netem delay | TC 注入 | 高 |
+
+    ## 5. 修复方案
+
+    ### 立即止血
+    ```bash
+    tc qdisc del dev eth0 root  # 如果是 TC 注入
+    kubectl rollout restart deploy/coredns -n kube-system  # CoreDNS 异常
     ```
+
+    ### 根治
+    - 建立 DNS 延迟 SLO
+    - 排查 node→CoreDNS 路径
+
+  l4-dependency-503.md: |
+    # L4 依赖服务固定返回 503
+
+    > **层级**: L4 - 应用层 | **类型**: procedure | **场景ID**: L4-Dependency503
 
     ---
-    ---
 
-    ## 🗑️ 操作：卸载（当用户说"卸载/删除/移除"时执行此流程）
+    ## 1. 场景识别特征
 
-    **仅需 1 步**:
+    ### 1.1 触发关键词
+    | 类别 | 关键词 |
+    |------|--------|
+    | 中文 | 依赖异常、上游 503、5xx 激增 |
+    | 英文 | upstream 503, service unavailable, 5xx |
+    | 状态 | HTTP 503 |
+
+    ### 1.2 快速判定
     ```
-    工具: helm_uninstall
-    参数: release_name=<动态>, namespace=<动态>
+    IF (curl 依赖返回 503) AND (应用日志有 upstream 503):
+        场景 = L4-Dependency503, 置信度 = 高
     ```
 
-    ---
-    ---
+    ## 2. 证据清单
 
-    ## ⚠️ 故障排查
-    - 网络问题: 检查 `192.168.1.63` 是否可达
-    - 验证状态: `kubectl get pods -n <namespace>`
+    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
+    |---|--------|------|----------|----------|
+    | E1 | 应用 5xx 统计 | Critical | `kubectl logs | grep -c 5xx` | 有 5xx |
+    | E2 | 应用日志上游错误 | Critical | `kubectl logs | grep upstream` | upstream 503 |
+    | E3 | 依赖服务返回码 | Critical | `curl -w "%{http_code}"` | 503 |
+    | E4 | 依赖 Endpoints | Important | `kubectl get endpoints` | 有后端 |
+
+    ## 3. 固定取证流程
+
+    ```bash
+    # Step 1: 量化应用 5xx
+    kubectl logs -n <ns> deploy/<app> --tail=500 | grep -c " 5[0-9][0-9]"
+
+    # Step 2: 从应用日志证明 upstream=503
+    kubectl logs -n <ns> deploy/<app> --tail=500 | grep -i "upstream\|503" | tail -30
+
+    # Step 3: 直接验证依赖返回码
+    kubectl run curl-test --rm -it --image=curlimages/curl -- \
+      curl -s -o /dev/null -w "http_code=%{http_code}\n" http://<dep-svc>:<port>/
+
+    # Step 4: 检查依赖 Endpoints
+    kubectl get endpoints <dep-svc> -n <ns> -o wide
+    ```
+
+    ## 4. 判定规则
+
+    | 规则ID | 条件 | 结论 | 置信度 |
+    |--------|------|------|--------|
+    | R-L4-DEP-1 | 依赖 curl=503 + 应用日志有 upstream 503 | Dependency503 | 高 |
+    | R-L4-DEP-2 | 依赖 curl=200 但应用仍 5xx | 非依赖原因 | 中 |
+    | R-L4-DEP-3 | Endpoints 为空 | L3 问题 | 高 |
+
+    ## 5. 修复方案
+
+    ### 立即止血
+    ```bash
+    kubectl rollout undo deploy/<dep> -n <ns>  # 回滚
+    kubectl rollout restart deploy/<dep> -n <ns>  # 或重启
+    curl http://<dep-svc>:<port>/health  # 确认恢复
+    ```
+
+    ### 根治
+    - 依赖侧：健康检查 + 灰度发布
+    - 应用侧：熔断 + 降级 + 重试策略
