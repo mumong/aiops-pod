@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator, Optional, List
 
 from holmes.utils.stream import StreamEvents
 
@@ -24,6 +24,7 @@ from app.core.holmes.event_schema import (
     preview_text,
     select_final_answer,
 )
+from app.core.skills import evaluate_deterministic_decision, format_decision_markdown
 
 
 def iter_internal_events(
@@ -65,14 +66,17 @@ def iter_internal_events(
 
     last_ai_content = ""
     framework_final = ""
+    internal_events: List[Dict] = []
 
-    yield emit(
+    ev_run_start = emit(
         "run_start",
         {
             "question": question,
             "timestamp": datetime.now().isoformat(),
         },
     )
+    internal_events.append(ev_run_start)
+    yield ev_run_start
 
     for stream_event in service.ai.call_stream(
         system_prompt=system_prompt,
@@ -85,7 +89,7 @@ def iter_internal_events(
         if et == StreamEvents.START_TOOL:
             current_tool_start = time.time()
             current_tool_name = ed.get("tool_name", "unknown")
-            yield emit(
+            ev_tool_start = emit(
                 "tool_start",
                 {
                     "iteration": iteration_count + 1,
@@ -93,6 +97,8 @@ def iter_internal_events(
                     "tool_id": ed.get("id", ""),
                 },
             )
+            internal_events.append(ev_tool_start)
+            yield ev_tool_start
 
         elif et == StreamEvents.TOOL_RESULT:
             tool_name = ed.get("name") or ed.get("tool_name") or current_tool_name or "unknown"
@@ -123,7 +129,7 @@ def iter_internal_events(
             if truncated and result_str:
                 artifact_id = get_artifact_store().put(str(result_str))
 
-            yield emit(
+            ev_tool_result = emit(
                 "tool_result",
                 {
                     "iteration": iteration_count + 1,
@@ -137,6 +143,8 @@ def iter_internal_events(
                     "artifact_id": artifact_id,
                 },
             )
+            internal_events.append(ev_tool_result)
+            yield ev_tool_result
 
             current_tool_start = None
             current_tool_name = None
@@ -150,9 +158,13 @@ def iter_internal_events(
                 last_ai_content = content
 
             if reasoning:
-                yield emit("ai_reasoning", {"iteration": iteration_count + 1, "reasoning": reasoning})
+                ev_reasoning = emit("ai_reasoning", {"iteration": iteration_count + 1, "reasoning": reasoning})
+                internal_events.append(ev_reasoning)
+                yield ev_reasoning
             if content:
-                yield emit("ai_message", {"iteration": iteration_count + 1, "content": content})
+                ev_msg = emit("ai_message", {"iteration": iteration_count + 1, "content": content})
+                internal_events.append(ev_msg)
+                yield ev_msg
 
         elif et == StreamEvents.TOKEN_COUNT:
             iter_duration = time.time() - llm_iteration_start if llm_iteration_start else None
@@ -161,7 +173,7 @@ def iter_internal_events(
 
             metadata = ed.get("metadata", {}) or {}
             usage = metadata.get("usage", {}) or {}
-            yield emit(
+            ev_iter_end = emit(
                 "iteration_end",
                 {
                     "iteration": iteration_count,
@@ -170,14 +182,18 @@ def iter_internal_events(
                     "elapsed_seconds": round(time.time() - total_start, 3),
                 },
             )
+            internal_events.append(ev_iter_end)
+            yield ev_iter_end
 
         elif et == StreamEvents.CONVERSATION_HISTORY_COMPACTED:
-            yield emit("history_compacted", {"iteration": iteration_count + 1})
+            ev_hist = emit("history_compacted", {"iteration": iteration_count + 1})
+            internal_events.append(ev_hist)
+            yield ev_hist
 
         elif et == StreamEvents.APPROVAL_REQUIRED:
             saw_approval_required = True
             pending = ed.get("pending_approvals", [])
-            yield emit(
+            ev_blocked = emit(
                 "blocked",
                 {
                     "iteration": iteration_count + 1,
@@ -185,16 +201,20 @@ def iter_internal_events(
                     "pending_approvals": pending,
                 },
             )
+            internal_events.append(ev_blocked)
+            yield ev_blocked
 
         elif et == StreamEvents.ERROR:
             saw_errors = True
-            yield emit(
+            ev_error = emit(
                 "error",
                 {
                     "iteration": iteration_count + 1,
                     "error": ed.get("msg", "未知错误"),
                 },
             )
+            internal_events.append(ev_error)
+            yield ev_error
 
         elif et == StreamEvents.ANSWER_END:
             framework_final = ed.get("content", "") or ""
@@ -212,6 +232,22 @@ def iter_internal_events(
     final_content = selection.content or ""
     final_reason = selection.reason
 
+    # 软拦截：基于 tool_result 等事件做确定性规则判定，并将结果附加到最终答案
+    # 注意：不阻断、不抛错；若无法判定则跳过。
+    try:
+        decision = evaluate_deterministic_decision(question, internal_events)
+        if decision:
+            # 先发一个事件，方便 SSE/调试消费
+            ev_det = emit("deterministic_decision", decision.to_dict())
+            internal_events.append(ev_det)
+            yield ev_det
+
+            # 将 deterministic appendix 附加到最终内容（不改变主报告内容）
+            final_content = (final_content or "") + format_decision_markdown(decision)
+    except Exception:
+        # 软拦截必须“永远不影响主流程”
+        pass
+
     if saw_approval_required:
         final_status = "blocked"
         if not final_content or is_dsml(final_content):
@@ -222,7 +258,7 @@ def iter_internal_events(
         final_reason = "final_contains_dsml"
         final_content = "本次执行未能生成可读的最终结论（模型停留在工具调用草稿/DSML）。请回看 tool_result/error/blocked 事件定位失败点。"
 
-    yield emit(
+    ev_final = emit(
         "final",
         {
             "status": final_status,
@@ -233,7 +269,11 @@ def iter_internal_events(
             "elapsed_seconds": round(time.time() - total_start, 3),
         },
     )
+    internal_events.append(ev_final)
+    yield ev_final
 
-    yield emit("run_end", {"elapsed_seconds": round(time.time() - total_start, 3)})
+    ev_end = emit("run_end", {"elapsed_seconds": round(time.time() - total_start, 3)})
+    internal_events.append(ev_end)
+    yield ev_end
 
 

@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dns-latency-client
+  namespace: aiops-e2e
+  labels:
+    app: dns-latency-client
+spec:
+  restartPolicy: Always
+  containers:
+    - name: netshoot
+      image: nicolaka/netshoot:latest
+      securityContext:
+        capabilities:
+          add: ["NET_ADMIN"]
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -e
+          echo "Injecting tc netem delay=500ms on eth0"
+          tc qdisc add dev eth0 root netem delay 500ms
+          echo "Starting dns probe loop..."
+          while true; do
+            /usr/bin/time -f "dns_lookup_seconds=%e" nslookup kubernetes.default.svc.cluster.local >/dev/null 2>&1 || true
+            sleep 1
+          done
+
