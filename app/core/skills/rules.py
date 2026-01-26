@@ -139,6 +139,29 @@ RULES: Dict[str, Rule] = {
         description="容器内存使用超过 limit 被 OOM Killer 终止",
         root_cause_template="容器 {container} 内存使用超过 limit ({memory_limit})，被 cgroup OOM Killer 终止 (exitCode=137)"
     ),
+
+    "R-L2-VOL-1": Rule(
+        id="R-L2-VOL-1",
+        name="Pod 存储卷超限",
+        layer=Layer.L2,
+        scenario="EmptyDir/HostPath Volume 超限",
+        category="VolumeLimitExceeded",
+        conditions=[
+            Condition("evicted_reason", ConditionOp.EXISTS, None, "Pod 被 Evicted"),
+            Condition("volume_limit_exceeded", ConditionOp.EXISTS, None, "Volume 超限错误"),
+        ],
+        condition_logic="OR",
+        base_confidence=0.9,
+        remediation_steps=[
+            "检查 Volume 配置: kubectl describe pod <pod> | grep -A5 Volumes",
+            "清理 EmptyDir 中的临时文件（如果可以）: kubectl exec <pod> -- rm /path/to/temp/*",
+            "增大 SizeLimit: 在 Deployment spec 中修改 volume sizeLimit 值",
+            "使用 persistent volume 替代临时存储（长期数据）",
+            "监控 Pod 状态: kubectl get pods -w",
+        ],
+        description="EmptyDir/HostPath Volume 超过 SizeLimit 导致 Pod 被 Evicted",
+        root_cause_template="Pod {pod} 的 {volume_type} Volume 超过 SizeLimit ({size_limit})，kubelet 驱逐 Pod"
+    ),
     
     "R-L3-DNS-1": Rule(
         id="R-L3-DNS-1",

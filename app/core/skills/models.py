@@ -184,7 +184,20 @@ class DeterministicDecision:
     @property
     def has_critical_missing(self) -> bool:
         return len(self.critical_missing) > 0
-    
+
+    def _calculate_evidence_completeness(self) -> str:
+        """
+        计算证据完整度百分比
+
+        Returns:
+            格式化的百分比字符串，如 "75%"
+        """
+        total = len(self.collected_evidence) + len(self.missing_evidence)
+        if total == 0:
+            return "0%"
+        percentage = (len(self.collected_evidence) / total) * 100
+        return f"{percentage:.0f}%"
+
     def get_context_value(self, key: str, default: str = "<未知>") -> str:
         """安全获取上下文值"""
         return self.context.get(key, default)

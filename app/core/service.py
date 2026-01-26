@@ -265,6 +265,20 @@ class HolmesService:
         Yields:
             根据 output_format 返回纯文本或 SSE 格式的事件字符串
         """
+        # 检查是否启用工作流模式
+        # 配置方式: 在 deploy/secrets/core.yaml 中设置 USE_WORKFLOW: "true"
+        use_workflow = os.getenv("USE_WORKFLOW", "false").lower() in ("true", "1", "yes")
+        
+        if use_workflow:
+            # 工作流模式（POC）
+            logger.info("🔄 使用工作流模式执行查询")
+            yield from self._execute_query_stream_workflow(
+                question=question,
+                output_format=output_format
+            )
+            return
+        
+        # 原有模式（HolmesGPT agentic loop）
         if output_format == "text":
             yield from execute_query_stream_text(self, question, system_prompt, api_key, model, max_steps)
             return
@@ -278,6 +292,174 @@ class HolmesService:
             max_steps=max_steps,
             output_format=output_format,
         )
+    
+    def _execute_query_stream_workflow(
+        self,
+        question: str,
+        output_format: str = "sse"
+    ) -> Generator[str, None, None]:
+        """
+        使用工作流模式执行查询（新方法）
+        
+        设计：
+        - 与现有 execute_query_stream 并行存在
+        - 可通过配置开关选择使用哪种模式
+        - 支持 text 和 sse 两种输出格式
+        
+        Args:
+            question: 用户问题
+            output_format: 输出格式 ("text" 或 "sse")
+        
+        Yields:
+            格式化的事件字符串
+        """
+        try:
+            from app.core.workflow.executor import WorkflowExecutor
+            from app.core.holmes.streaming import create_sse_message_cn, format_duration
+            
+            # 创建执行器
+            executor = WorkflowExecutor(holmes_service=self)
+            
+            # text 格式输出（终端友好）
+            if output_format == "text":
+                yield from self._workflow_to_text(executor, question)
+                return
+            
+            # SSE 格式输出
+            for event in executor.execute_stream(question):
+                event_type = event.get("type", "unknown")
+                payload = {k: v for k, v in event.items() if k != "type"}
+                yield create_sse_message_cn(event_type, payload)
+        
+        except ImportError as e:
+            logger.error(f"工作流模块导入失败: {e}")
+            if output_format == "text":
+                yield f"❌ 工作流模块导入失败: {e}\n"
+            else:
+                yield create_sse_message_cn("error", {
+                    "error": f"工作流模块未安装或导入失败: {str(e)}",
+                    "suggestion": "请确保已安装 langgraph: pip install langgraph"
+                })
+        except Exception as e:
+            logger.error(f"工作流执行失败: {e}", exc_info=True)
+            if output_format == "text":
+                yield f"❌ 工作流执行失败: {e}\n"
+            else:
+                yield create_sse_message_cn("error", {
+                    "error": f"工作流执行失败: {str(e)}"
+                })
+    
+    def _workflow_to_text(
+        self,
+        executor: Any,
+        question: str
+    ) -> Generator[str, None, None]:
+        """
+        工作流执行结果转换为美观的文本格式
+        专为终端 curl 等命令行工具优化
+        """
+        from app.core.holmes.streaming import format_duration
+        
+        def emit(text: str) -> str:
+            return text + "\n"
+        
+        yield emit("=" * 70)
+        yield emit("🔄 K8s AIOps Copilot - 工作流诊断模式")
+        yield emit("=" * 70)
+        yield emit("")
+        yield emit(f"📝 问题: {question[:100]}...")
+        yield emit("")
+        yield emit("-" * 70)
+        
+        final_answer = ""
+        metrics_data = None
+        
+        for event in executor.execute_stream(question):
+            event_type = event.get("type", "unknown")
+            
+            if event_type == "run_start":
+                run_id = event.get("run_id", "?")
+                yield emit(f"🚀 开始诊断 [run_id: {run_id}]")
+                yield emit("")
+            
+            elif event_type == "node_start":
+                node_name = event.get("node_name", event.get("node", "?"))
+                yield emit(f"📍 [{node_name}] 执行中...")
+            
+            elif event_type == "node_complete":
+                node_name = event.get("node_name", event.get("node", "?"))
+                duration = event.get("duration_seconds", 0)
+                snapshot = event.get("state_snapshot", {})
+                
+                yield emit(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
+                
+                # 输出节点摘要
+                node_id = event.get("node", "")
+                if node_id == "layer":
+                    layer = snapshot.get("layer", "?")
+                    conf = snapshot.get("layer_confidence", 0) or 0
+                    yield emit(f"      层级: {layer}, 置信度: {conf:.0%}")
+                elif node_id == "evidence":
+                    count = snapshot.get("evidence_count", 0)
+                    collected = snapshot.get("collected_count", 0)
+                    yield emit(f"      证据: {collected}/{count} 项")
+                elif node_id == "rca":
+                    root_cause = (snapshot.get("root_cause") or "")[:60]
+                    yield emit(f"      根因: {root_cause}...")
+                elif node_id == "conclusion":
+                    length = snapshot.get("conclusion_length", 0)
+                    yield emit(f"      报告: {length} 字符")
+                
+                yield emit("")
+            
+            elif event_type == "final":
+                final_answer = event.get("answer", "")
+                metrics_data = event.get("metrics", {})
+                elapsed = event.get("elapsed_seconds", 0)
+                yield emit("-" * 70)
+                yield emit(f"📊 诊断完成! 总耗时: {format_duration(elapsed)}")
+                yield emit("-" * 70)
+                yield emit("")
+            
+            elif event_type == "error":
+                error = event.get("error", "未知错误")
+                yield emit(f"❌ 错误: {error}")
+                yield emit("")
+        
+        # 输出最终报告
+        if final_answer:
+            yield emit("=" * 70)
+            yield emit("🎯 诊断报告")
+            yield emit("=" * 70)
+            yield emit("")
+            yield final_answer
+            yield emit("")
+        
+        # 输出指标摘要
+        if metrics_data:
+            yield emit("-" * 70)
+            yield emit("📈 质量指标")
+            yield emit("-" * 70)
+            
+            mttr = metrics_data.get("mttr", {})
+            evidence = metrics_data.get("evidence_completeness", {})
+            rca = metrics_data.get("root_cause_confidence", {})
+            runbook = metrics_data.get("runbook_coverage", {})
+            
+            mttr_pass = "✅" if mttr.get("pass") else "❌"
+            evidence_pass = "✅" if evidence.get("pass") else "⚠️"
+            rca_pass = "✅" if rca.get("pass") else "⚠️"
+            runbook_pass = "✅" if runbook.get("pass") else "⚠️"
+            
+            yield emit(f"  MTTR:        {mttr.get('value', '?')} {mttr_pass} (要求 < 10m)")
+            yield emit(f"  根因置信度: {rca.get('value', '?')} {rca_pass} (要求 >= 80%)")
+            yield emit(f"  证据完整率: {evidence.get('value', '?')} {evidence_pass} (要求 > 90%)")
+            yield emit(f"  Runbook:    {'已匹配' if runbook.get('matched') else '未匹配'} {runbook_pass}")
+            yield emit("")
+        
+        yield emit("=" * 70)
+        yield emit("✅ 诊断完成!")
+        yield emit("=" * 70)
     
     def _execute_query_stream_text(
         self,
