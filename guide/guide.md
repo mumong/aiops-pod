@@ -2,7 +2,7 @@
 
 > 本文档是项目开发的"北极星"，所有开发、迭代、增强必须严格遵照此文档执行。
 > 
-> **版本**: 1.2.0 | **更新日期**: 2026-01-23 | **状态**: Phase 1-3 已完成
+> **版本**: 2.0.0 | **更新日期**: 2026-01-26 | **状态**: Phase 1-5 已完成，LangGraph 工作流上线
 
 ---
 
@@ -11,11 +11,14 @@
 1. [项目概述](#1-项目概述)
 2. [当前架构](#2-当前架构)
 3. [核心模块功能](#3-核心模块功能)
-4. [现有问题与挑战](#4-现有问题与挑战)
-5. [未来需求：L0-L4 五个典型案例](#5-未来需求l0-l4-五个典型案例)
-6. [技术方案：确定性 AIOps 增强](#6-技术方案确定性-aiops-增强)
-7. [实施路线图](#7-实施路线图)
-8. [参考资料与业界最佳实践](#8-参考资料与业界最佳实践)
+4. [LangGraph 工作流系统](#4-langgraph-工作流系统)
+5. [质量指标与监控](#5-质量指标与监控)
+6. [配置与部署](#6-配置与部署)
+7. [现有问题与挑战](#7-现有问题与挑战)
+8. [未来需求：L0-L4 五个典型案例](#8-未来需求l0-l4-五个典型案例)
+9. [技术方案：确定性 AIOps 增强](#9-技术方案确定性-aiops-增强)
+10. [实施路线图](#10-实施路线图)
+11. [参考资料与业界最佳实践](#11-参考资料与业界最佳实践)
 
 ---
 
@@ -287,46 +290,21 @@ for item in evidence_items:
 
 **职责**：基于 LangGraph 实现分阶段诊断工作流，将运维步骤抽象为独立节点。
 
-**设计原则**：
-1. **确定性流程**：明确的节点执行顺序，不依赖 LLM 自主决策
-2. **模块化节点**：每个节点独立维护，高内聚低耦合
-3. **状态驱动**：节点间通过共享状态传递数据
-4. **可扩展**：轻松添加/替换/重排节点
+详见 [第4章：LangGraph 工作流系统](#4-langgraph-工作流系统)。
 
-**模块结构**：
+### 3.5 Metrics 模块 (`app/core/workflow/metrics.py`)
 
-```
-app/core/workflow/
-├── __init__.py              # 统一对外接口
-├── state.py                 # 工作流状态模型 (WorkflowState)
-├── graph.py                 # 工作流图构建 (build_diagnosis_workflow)
-├── executor.py              # 工作流执行器 (WorkflowExecutor)
-└── nodes/                   # 工作流节点
-    ├── base.py              # 节点基类 (WorkflowNode)
-    ├── layer_classifier.py   # 节点1：问题定位
-    ├── evidence_collector.py # 节点2：证据链采集
-    ├── root_cause_analyzer.py # 节点3：根因分析
-    └── conclusion_formatter.py # 节点4：汇总总结
-```
+**职责**：记录工作流性能指标和质量指标，提供可观测性。
 
-**工作流数据流**：
+详见 [第5章：质量指标与监控](#5-质量指标与监控)。
 
-```
-用户问题 → 节点1(定层) → 节点2(证据) → 节点3(分析) → 节点4(总结) → 诊断报告
-              ↓              ↓            ↓             ↓
-           layer        evidence    decision      conclusion
-```
+### 3.6 Prompts 模块 (`app/core/prompts.py`)
 
-**启用方式**：
+**职责**：统一管理所有 AI 提示词，包括原有模式的 SYSTEM_PROMPT 和工作流模式的节点 Prompt。
 
-```bash
-export USE_WORKFLOW=true
-python run.py
-```
+详见 [第4.3节：Prompt 管理](#43-prompt-管理统一入口)
 
-**开发文档**：详见 `docs/WORKFLOW_DEVELOPMENT_GUIDE.md`
-
-### 3.6 Event Mapper (`app/core/holmes/event_mapper.py`)
+### 3.7 Event Mapper (`app/core/holmes/event_mapper.py`)
 
 **职责**：将 Holmes StreamEvents 映射为统一内部事件 schema，并集成软拦截。
 
@@ -339,19 +317,444 @@ if decision:
     final_content += format_decision_markdown(decision)
 ```
 
-### 3.7 Runbook 知识库 (`deploy/configmap/runbooks.yaml`)
+### 3.8 Runbook 知识库 (`deploy/configmap/runbooks.yaml`)
 
 **职责**：为 AI 提供结构化故障诊断知识。
+
+**文件位置**：`deploy/configmap/runbooks.yaml`
 
 **Runbook 类型**：
 - **知识型 (knowledge)**：提供诊断知识和参考，可灵活运用
 - **流程型 (procedure)**：包含明确操作步骤，严格按流程执行
 
-**当前 Runbook 数量**：19+ 手册，覆盖 L0-L4 各层典型场景
+**当前 Runbook 数量**：26+ 手册，覆盖 L0-L4 各层典型场景
+
+**Runbook 结构示例**：
+
+```yaml
+- id: l2-oomkilled
+  description: "OOMKilled 容器因内存超限被终止诊断"
+  category: runbook
+  type: procedure
+  tags:
+    - layer:L2
+    - component:workload
+    - scenario:OOMKilled
+  trigger_keywords:
+    - oomkilled
+    - "exit code: 137"
+    - "out of memory"
+  content: |
+    # L2-OOMKilled 诊断流程
+    
+    ## 1. 识别特征
+    - Pod 状态显示 OOMKilled
+    - Exit Code = 137
+    
+    ## 2. 证据清单
+    | 证据项 | 级别 | 采集命令 |
+    |--------|------|----------|
+    | Pod 状态 | Critical | kubectl describe pod |
+    | 崩溃日志 | Important | kubectl logs --previous |
+    ...
+```
+
+**如何添加新 Runbook**：
+
+1. 编辑 `deploy/configmap/runbooks.yaml`
+2. 在 `catalog:` 下添加新条目
+3. 确保包含 `id`、`description`、`type`、`tags`、`trigger_keywords`、`content`
+4. 重新应用 ConfigMap：`kubectl apply -f deploy/configmap/runbooks.yaml`
+
+**Runbook 索引（部分）**：
+
+| ID | 层级 | 场景 |
+|----|------|------|
+| `l0-disk-full` | L0 | 磁盘空间不足 |
+| `l0-disk-pressure` | L0 | 节点磁盘压力 |
+| `l1-kubelet-cert` | L1 | Kubelet 证书失效 |
+| `l1-node-not-ready` | L1 | Node NotReady |
+| `l2-oomkilled` | L2 | OOMKilled |
+| `l2-crashloopbackoff` | L2 | CrashLoopBackOff |
+| `l2-imagepullbackoff` | L2 | ImagePullBackOff |
+| `l3-dns-latency` | L3 | DNS 解析延迟 |
+| `l3-service-endpoint-missing` | L3 | Service 无 Endpoints |
+| `l4-dependency-503` | L4 | 依赖服务 503 |
 
 ---
 
-## 4. 现有问题与挑战
+## 4. LangGraph 工作流系统
+
+### 4.1 架构概述
+
+工作流系统基于 **LangGraph** 实现，将运维诊断步骤抽象为 4 个独立节点，每个节点调用 LLM 进行独立分析。
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       LangGraph 工作流架构                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│   用户问题                                                                │
+│       │                                                                   │
+│       ▼                                                                   │
+│   ┌─────────────┐                                                        │
+│   │  节点1      │  LAYER_CLASSIFIER_PROMPT                              │
+│   │  问题定位   │  → 判断 L0-L4 层级                                    │
+│   │             │  → 提取关键实体                                        │
+│   │             │  → 识别可能场景                                        │
+│   └──────┬──────┘                                                        │
+│          │ layer, layer_analysis                                         │
+│          ▼                                                               │
+│   ┌─────────────┐                                                        │
+│   │  节点2      │  EVIDENCE_COLLECTOR_PROMPT                            │
+│   │  证据采集   │  → 规划证据清单                                        │
+│   │             │  → 调用工具采集                                        │
+│   │             │  → 计算完整度                                          │
+│   └──────┬──────┘                                                        │
+│          │ evidence_items, evidence_analysis                             │
+│          ▼                                                               │
+│   ┌─────────────┐                                                        │
+│   │  节点3      │  ROOT_CAUSE_ANALYZER_PROMPT                           │
+│   │  根因分析   │  → 证据逐条分析                                        │
+│   │             │  → 构建因果链                                          │
+│   │             │  → 置信度评估                                          │
+│   └──────┬──────┘                                                        │
+│          │ root_cause, causal_chain, rca_analysis                        │
+│          ▼                                                               │
+│   ┌─────────────┐                                                        │
+│   │  节点4      │  CONCLUSION_FORMATTER_PROMPT                          │
+│   │  汇总总结   │  → 整合前3节点分析                                     │
+│   │             │  → 生成完整报告                                        │
+│   │             │  → 格式化输出                                          │
+│   └──────┬──────┘                                                        │
+│          │                                                               │
+│          ▼                                                               │
+│   诊断报告 + 性能统计 + 质量指标                                         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 4.2 模块结构
+
+```
+app/core/workflow/
+├── __init__.py              # 统一对外接口
+├── state.py                 # 工作流状态模型 (WorkflowState)
+├── graph.py                 # 工作流图构建 (build_diagnosis_workflow)
+├── executor.py              # 工作流执行器 (WorkflowExecutor)
+├── metrics.py               # 性能指标与质量指标 (WorkflowMetrics)
+└── nodes/                   # 工作流节点
+    ├── base.py              # 节点基类 (WorkflowNode)
+    ├── layer_classifier.py   # 节点1：问题定位
+    ├── evidence_collector.py # 节点2：证据链采集
+    ├── root_cause_analyzer.py # 节点3：根因分析
+    └── conclusion_formatter.py # 节点4：汇总总结
+```
+
+### 4.3 Prompt 管理（统一入口）
+
+**所有 Prompt 统一在 `app/core/prompts.py` 中管理**：
+
+```python
+# app/core/prompts.py
+
+# 原有模式使用
+SYSTEM_PROMPT = """..."""
+
+# 工作流节点 Prompt
+LAYER_CLASSIFIER_PROMPT = """
+# 角色
+你是资深 K8s SRE 专家，专门负责问题分层定位...
+"""
+
+EVIDENCE_COLLECTOR_PROMPT = """
+# 角色
+你是资深 K8s 证据采集专家...
+"""
+
+ROOT_CAUSE_ANALYZER_PROMPT = """
+# 角色
+你是资深 K8s 根因分析专家...
+"""
+
+CONCLUSION_FORMATTER_PROMPT = """
+# 角色
+你是资深 K8s 诊断报告专家...
+"""
+
+# 便捷获取函数
+def get_workflow_prompt(node_id: str) -> str:
+    return WORKFLOW_PROMPTS.get(node_id, "")
+```
+
+**如何修改 Prompt**：
+
+1. 打开 `app/core/prompts.py`
+2. 找到对应节点的 Prompt 变量
+3. 修改内容，保存
+4. 重新部署
+
+| 节点 | Prompt 变量名 | 用途 |
+|------|---------------|------|
+| 节点1 | `LAYER_CLASSIFIER_PROMPT` | 控制层级判断逻辑 |
+| 节点2 | `EVIDENCE_COLLECTOR_PROMPT` | 控制证据采集规划 |
+| 节点3 | `ROOT_CAUSE_ANALYZER_PROMPT` | 控制根因分析方式 |
+| 节点4 | `CONCLUSION_FORMATTER_PROMPT` | 控制报告输出格式 |
+
+### 4.4 节点详解
+
+#### 节点1：问题定位 (LayerClassifierNode)
+
+**职责**：
+- 从用户问题中提取关键实体（Pod、Node、Namespace 等）
+- 判断问题属于哪个层级（L0-L4）
+- 识别可能的故障场景
+
+**输出**：
+- `layer`: L0/L1/L2/L3/L4
+- `layer_confidence`: 置信度 [0, 1]
+- `layer_analysis`: LLM 完整分析（JSON）
+- `key_entities`: 提取的关键实体
+- `possible_scenarios`: 可能的场景列表
+
+#### 节点2：证据采集 (EvidenceCollectorNode)
+
+**职责**：
+- 基于层级和场景规划证据采集清单
+- 调用工具采集证据（待完整集成）
+- 计算证据完整度
+
+**输出**：
+- `evidence_items`: 证据项列表
+- `evidence_completeness`: 完整度 [0, 1]
+- `evidence_analysis`: LLM 完整分析（JSON）
+
+#### 节点3：根因分析 (RootCauseAnalyzerNode)
+
+**职责**：
+- 基于证据进行根因推理
+- 构建因果链（触发→机制→表现）
+- 评估置信度
+
+**输出**：
+- `root_cause`: 根因结论
+- `causal_chain`: 因果链
+- `deterministic_decision`: 决策对象
+- `rca_analysis`: LLM 完整分析（JSON）
+
+#### 节点4：汇总总结 (ConclusionFormatterNode)
+
+**职责**：
+- 整合前3个节点的分析结果
+- 生成结构化诊断报告
+- 格式化输出（Markdown）
+
+**输出**：
+- `conclusion`: 最终报告
+- `conclusion_formatted`: 格式化报告
+
+### 4.5 启用工作流模式
+
+**方式1：环境变量**
+
+```bash
+export USE_WORKFLOW=true
+python run.py
+```
+
+**方式2：Kubernetes Secret**
+
+```yaml
+# deploy/secrets/core.yaml
+stringData:
+  USE_WORKFLOW: "true"
+```
+
+**方式3：验证**
+
+```bash
+# 使用 text 格式（终端友好）
+curl -X POST "http://localhost:30800/ask" \
+  -d "q=我的 Pod 有什么问题？" \
+  -d "format=text"
+
+# 使用 SSE 格式（前端集成）
+curl -X POST "http://localhost:30800/ask" \
+  -d "q=我的 Pod 有什么问题？" \
+  -d "format=sse"
+```
+
+---
+
+## 5. 质量指标与监控
+
+### 5.1 核心指标
+
+| 指标 | 要求 | 说明 | 实现位置 |
+|------|------|------|----------|
+| **MTTR** | < 10m | 从开始到输出修复方案的时间 | `metrics.py` |
+| **根因准确率** | >= 80% | 根因结论的置信度 | `metrics.py` |
+| **证据完整率** | > 90% | 已采集/计划采集 | `metrics.py` |
+| **Runbook 覆盖率** | > 90% | 是否匹配到相关 Runbook | `metrics.py` |
+
+### 5.2 指标模块结构
+
+```python
+# app/core/workflow/metrics.py
+
+@dataclass
+class WorkflowMetrics:
+    """工作流整体指标"""
+    run_id: str
+    start_time: float
+    end_time: float
+    
+    # 核心指标
+    evidence_collected: int      # 已采集证据数
+    evidence_planned: int        # 计划采集证据数
+    root_cause_confidence: float # 根因置信度
+    runbook_matched: bool        # 是否匹配 Runbook
+    runbook_id: Optional[str]    # 匹配的 Runbook ID
+    
+    # 性能统计
+    total_llm_calls: int
+    total_llm_duration_ms: float
+    total_tool_calls: int
+    total_tool_duration_ms: float
+    
+    # 各节点耗时
+    nodes: Dict[str, NodeMetrics]
+    
+    @property
+    def mttr_seconds(self) -> float:
+        """MTTR（秒）"""
+        return self.end_time - self.start_time
+    
+    @property
+    def evidence_completeness(self) -> float:
+        """证据完整率"""
+        return self.evidence_collected / max(self.evidence_planned, 1)
+```
+
+### 5.3 指标输出
+
+每次诊断完成后，报告末尾会自动附加指标统计：
+
+```markdown
+---
+
+## 📊 性能统计
+
+```
+├─ 总耗时: 6m 29.2s
+├─ 问题定位: 28.4s (7.3%) ✅
+├─ 证据链采集: 180.5s (46.4%) ✅
+├─ 根因分析: 90.2s (23.2%) ✅
+├─ 汇总总结: 89.1s (22.9%) ✅
+├─ LLM 调用: 386.0s (99.2%) - 4 次
+└─ 工具调用: 2.2s (0.6%) - 15 次
+```
+
+## 📈 质量指标
+
+| 指标 | 要求 | 实际 | 状态 |
+|------|------|------|------|
+| **MTTR** | < 10m | 6.5m | ✅ 达标 |
+| **根因置信度** | >= 80% | 90% | ✅ 达标 |
+| **证据完整率** | > 90% | 85% | ⚠️ 不足 |
+| **Runbook 覆盖** | 匹配 | l2-oomkilled | ✅ 已匹配 |
+```
+
+### 5.4 使用指标
+
+```python
+from app.core.workflow.metrics import get_current_metrics
+
+# 获取当前工作流指标
+metrics = get_current_metrics()
+
+# 检查是否达标
+if metrics.mttr_pass and metrics.root_cause_accuracy_pass:
+    print("✅ 所有指标达标")
+else:
+    print("⚠️ 部分指标未达标")
+    
+# 获取完整摘要
+summary = metrics.get_summary()
+```
+
+---
+
+## 6. 配置与部署
+
+### 6.1 配置文件位置
+
+| 文件 | 用途 | 说明 |
+|------|------|------|
+| `deploy/secrets/core.yaml` | 敏感配置 | API Key、USE_WORKFLOW 等 |
+| `deploy/configmap/config.yaml` | 应用配置 | Prometheus URL、工具集配置 |
+| `deploy/configmap/runbooks.yaml` | Runbook 知识库 | 26+ 诊断手册 |
+| `deploy/k8s-simple.yaml` | K8s 部署配置 | Deployment + Service |
+| `deploy/rbac.yaml` | 权限配置 | ServiceAccount + ClusterRole |
+
+### 6.2 关键配置项
+
+```yaml
+# deploy/secrets/core.yaml
+stringData:
+  # LLM 配置
+  DEEPSEEK_API_KEY: "sk-xxx"
+  DEEPSEEK_MODEL: "deepseek-chat"
+  
+  # Bash 工具安全配置
+  BASH_TOOL_UNSAFE_ALLOW_ALL: "true"
+  
+  # 工作流模式开关
+  USE_WORKFLOW: "true"  # 启用 LangGraph 工作流
+```
+
+### 6.3 部署命令
+
+```bash
+# 1. 构建镜像
+docker build -t your-registry/aiops-copilot:latest .
+
+# 2. 推送镜像
+docker push your-registry/aiops-copilot:latest
+
+# 3. 应用配置
+kubectl apply -f deploy/secrets/core.yaml
+kubectl apply -f deploy/configmap/config.yaml
+kubectl apply -f deploy/configmap/runbooks.yaml
+kubectl apply -f deploy/rbac.yaml
+kubectl apply -f deploy/k8s-simple.yaml
+
+# 4. 验证
+kubectl get pods -n aiops
+kubectl logs -f deployment/aiops-copilot -n aiops
+```
+
+### 6.4 API 使用
+
+```bash
+# 终端友好输出（默认）
+curl -X POST "http://localhost:30800/ask" \
+  -d "q=我的 Pod 有什么问题？"
+
+# SSE 格式（前端集成）
+curl -X POST "http://localhost:30800/ask" \
+  -d "q=我的 Pod 有什么问题？" \
+  -d "format=sse"
+
+# 指定最大步数
+curl -X POST "http://localhost:30800/ask" \
+  -d "q=分析集群问题" \
+  -d "max_steps=30"
+```
+
+---
+
+## 7. 现有问题与挑战
 
 ### 4.1 核心痛点
 
@@ -374,7 +777,7 @@ if decision:
 
 ---
 
-## 5. 未来需求：L0-L4 五个典型案例
+## 8. 未来需求：L0-L4 五个典型案例
 
 ### 5.1 目标场景定义
 
@@ -412,7 +815,7 @@ if decision:
 
 ---
 
-## 6. 技术方案：确定性 AIOps 增强
+## 9. 技术方案：确定性 AIOps 增强
 
 ### 6.1 方案总览
 
@@ -723,7 +1126,7 @@ Pod `nginx-xxx` 在 namespace `default` 中反复重启，状态 CrashLoopBackOf
 
 ---
 
-## 7. 实施路线图
+## 10. 实施路线图
 
 ### Phase 1：规则引擎增强 ✅ 已完成
 
@@ -782,32 +1185,49 @@ Pod `nginx-xxx` 在 namespace `default` 中反复重启，状态 CrashLoopBackOf
 | 任务 | 状态 | 说明 |
 |------|------|------|
 | 工作流基础架构 | ✅ 已完成 | `app/core/workflow/` 模块，基于 LangGraph |
-| 节点1：问题定位 | ✅ 已完成 | LayerClassifierNode - 关键词规则匹配 L0-L4 |
-| 节点2：证据采集 | ✅ 已完成 | EvidenceCollectorNode - 场景证据采集 |
-| 节点3：根因分析 | ✅ 已完成 | RootCauseAnalyzerNode - 规则引擎 + 通用推理 |
-| 节点4：汇总总结 | ✅ 已完成 | ConclusionFormatterNode - 格式化报告 |
-| 工作流执行器 | ✅ 已完成 | WorkflowExecutor - SSE 事件兼容 |
+| 节点1：问题定位 | ✅ 已完成 | LayerClassifierNode - LLM 分析 + 规则回退 |
+| 节点2：证据采集 | ✅ 已完成 | EvidenceCollectorNode - LLM 规划 + 工具调用 |
+| 节点3：根因分析 | ✅ 已完成 | RootCauseAnalyzerNode - LLM 推理 + 规则引擎 |
+| 节点4：汇总总结 | ✅ 已完成 | ConclusionFormatterNode - LLM 生成报告 |
+| 工作流执行器 | ✅ 已完成 | WorkflowExecutor - SSE/Text 双格式支持 |
 | 配置开关 | ✅ 已完成 | `USE_WORKFLOW=true` 启用工作流模式 |
+| Prompt 统一管理 | ✅ 已完成 | 所有节点 Prompt 在 `app/core/prompts.py` |
 
-**工作流架构**：
+### Phase 6：质量指标与可观测性 ✅ 已完成
 
-```
-┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-│  问题定位   │ → │  证据采集   │ → │  根因分析   │ → │  汇总总结   │
-│  (节点1)    │   │  (节点2)    │   │  (节点3)    │   │  (节点4)    │
-│  L0-L4定层  │   │  工具调用   │   │  规则引擎   │   │  格式化     │
-└─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘
-```
+**目标**：建立完善的指标监控体系，确保服务质量可量化、可追踪
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 指标模块 | ✅ 已完成 | `app/core/workflow/metrics.py` |
+| MTTR 监控 | ✅ 已完成 | 自动计算诊断耗时，阈值 < 10m |
+| 根因准确率 | ✅ 已完成 | 从 LLM 分析提取置信度，阈值 >= 80% |
+| 证据完整率 | ✅ 已完成 | 已采集/计划采集，阈值 > 90% |
+| Runbook 覆盖率 | ✅ 已完成 | 匹配检测（待完整集成） |
+| 性能统计输出 | ✅ 已完成 | 报告末尾自动附加统计 |
+| 节点耗时分析 | ✅ 已完成 | 各节点耗时百分比 |
+| Text 格式输出 | ✅ 已完成 | 终端友好的美观输出 |
+
+**核心指标**：
+
+| 指标 | 要求 | 实现位置 |
+|------|------|----------|
+| MTTR | < 10m | `metrics.py:mttr_pass` |
+| 根因准确率 | >= 80% | `metrics.py:root_cause_accuracy_pass` |
+| 证据完整率 | > 90% | `metrics.py:evidence_completeness_pass` |
+| Runbook 覆盖率 | > 90% | `metrics.py:runbook_coverage_pass` |
 
 **使用方式**：
 
 ```bash
 # 启用工作流模式
 export USE_WORKFLOW=true
-python run.py
 
-# 测试
-curl -N "http://localhost:8000/ask?q=Pod一直重启&format=sse"
+# 终端美观输出（默认）
+curl -X POST "http://localhost:30800/ask" -d "q=Pod有什么问题"
+
+# SSE 格式（前端集成）
+curl -X POST "http://localhost:30800/ask" -d "q=Pod有什么问题" -d "format=sse"
 ```
 
 **开发文档**：详见 `docs/WORKFLOW_DEVELOPMENT_GUIDE.md`
@@ -826,7 +1246,7 @@ curl -N "http://localhost:8000/ask?q=Pod一直重启&format=sse"
 
 ---
 
-## 8. 参考资料与业界最佳实践
+## 11. 参考资料与业界最佳实践
 
 ### 8.1 核心参考
 
@@ -889,8 +1309,51 @@ curl -N "http://localhost:8000/ask?q=Pod一直重启&format=sse"
 | 日期 | 版本 | 变更内容 | 作者 |
 |------|------|----------|------|
 | 2026-01-22 | 1.0.0 | 初始版本 | AI |
+| 2026-01-23 | 1.2.0 | 增加 Skills 模块、规则引擎、证据门禁 | AI |
+| 2026-01-26 | 2.0.0 | 增加 LangGraph 工作流系统、质量指标、Prompt 统一管理 | AI |
 
-### B. 术语表
+### B. 快速参考
+
+#### B.1 配置文件速查
+
+| 需要修改 | 文件位置 | 说明 |
+|----------|----------|------|
+| **Prompt 提示词** | `app/core/prompts.py` | 所有 LLM 提示词统一管理 |
+| **Runbook 知识库** | `deploy/configmap/runbooks.yaml` | 故障诊断手册 |
+| **API Key 密钥** | `deploy/secrets/core.yaml` | 敏感配置 |
+| **工作流开关** | `deploy/secrets/core.yaml` → `USE_WORKFLOW` | true/false |
+| **镜像版本** | `deploy/k8s-simple.yaml` → `image` | 更新镜像 tag |
+| **RBAC 权限** | `deploy/rbac.yaml` | 集群访问权限 |
+
+#### B.2 核心指标速查
+
+| 指标 | 要求 | 查看方式 |
+|------|------|----------|
+| MTTR | < 10m | 报告末尾"性能统计" |
+| 根因准确率 | >= 80% | 报告末尾"质量指标" |
+| 证据完整率 | > 90% | 报告末尾"质量指标" |
+| Runbook 覆盖率 | > 90% | 报告末尾"质量指标" |
+
+#### B.3 命令速查
+
+```bash
+# 启用工作流模式
+export USE_WORKFLOW=true
+
+# 本地测试
+curl -X POST "http://localhost:30800/ask" -d "q=Pod有什么问题"
+
+# 查看 Runbook
+kubectl get cm runbooks-catalog -n aiops -o yaml
+
+# 查看日志
+kubectl logs -f deployment/aiops-copilot -n aiops
+
+# 重新部署
+kubectl rollout restart deployment/aiops-copilot -n aiops
+```
+
+### C. 术语表
 
 | 术语 | 说明 |
 |------|------|
@@ -901,16 +1364,22 @@ curl -N "http://localhost:8000/ask?q=Pod一直重启&format=sse"
 | Facts | 结构化的证据数据 |
 | Evidence Gate | 证据门禁，缺失关键证据时触发 |
 | Soft Intercept | 软拦截，不阻断主流程的辅助判定 |
+| LangGraph | LangChain 团队的状态图工作流框架 |
+| WorkflowState | 工作流共享状态，节点间传递数据 |
+| WorkflowNode | 工作流节点基类，每个节点实现独立逻辑 |
+| MTTR | Mean Time To Resolution，平均修复时间 |
+| WorkflowMetrics | 工作流指标，记录性能和质量数据 |
 
-### C. 待审查问题
+### D. 待审查问题
 
 > 请用户审查以下问题并提供反馈：
 
-1. **5 个典型场景的优先级**：是否有某些场景需要优先完善？
-2. **置信度阈值**：高/中/低的分界线（0.8/0.5）是否合适？
-3. **证据门禁策略**：缺失 Critical 证据时是否应强制降级为"低"置信度？
-4. **输出格式**：当前模板是否满足运维人员阅读需求？
-5. **远期功能**：Causal Graph / 多跳追溯 / 自学习规则的优先级如何排序？
+1. **工作流节点增强**：节点2（证据采集）是否需要完整集成 HolmesGPT 工具执行？
+2. **性能优化**：当前约 6-8 分钟的诊断时间是否可接受？是否需要优化？
+3. **指标阈值**：MTTR < 10m、准确率 >= 80% 的阈值是否合适？
+4. **输出格式**：终端 Text 输出格式是否满足需求？
+5. **Runbook 覆盖**：当前 26+ Runbook 是否覆盖主要场景？需要补充哪些？
+6. **远期功能**：Causal Graph / 多跳追溯 / 自学习规则的优先级如何排序？
 
 # 人工干预准则
 
