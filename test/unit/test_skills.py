@@ -40,17 +40,20 @@ def test_scenario_detection():
     assert engine.detect_scenario("节点 NotReady", "x509 certificate") == "L1-KubeletCert"
     
     # L2: OOMKilled
-    assert engine.detect_scenario("Pod OOM", "") == "L2-OOMKilled"
-    assert engine.detect_scenario("", "exit code: 137") == "L2-OOMKilled"
-    assert engine.detect_scenario("", "OOMKilled") == "L2-OOMKilled"
+    assert engine.detect_scenario("Pod OOMKilled", "") == "L2-OOMKilled"
+    assert engine.detect_scenario("out of memory", "") == "L2-OOMKilled"
+
+    # L2: VolumeLimitExceeded
+    assert engine.detect_scenario("Pod 被驱逐", "exceeds limit") == "L2-VolumeLimitExceeded"
+    assert engine.detect_scenario("", "evicted") == "L2-VolumeLimitExceeded"
     
     # L3: DNSLatency
-    assert engine.detect_scenario("DNS 延迟", "") == "L3-DNSLatency"
+    assert engine.detect_scenario("DNS latency", "") == "L3-DNSLatency"
     assert engine.detect_scenario("", "dns_lookup_seconds=0.5") == "L3-DNSLatency"
     
     # L4: Dependency503
-    assert engine.detect_scenario("依赖 503", "") == "L4-Dependency503"
-    assert engine.detect_scenario("", "upstream 503") == "L4-Dependency503"
+    assert engine.detect_scenario("upstream 503", "") == "L4-Dependency503"
+    assert engine.detect_scenario("", "service unavailable") == "L4-Dependency503"
     
     print("✅ 场景检测测试通过")
 

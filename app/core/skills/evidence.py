@@ -137,6 +137,41 @@ EVIDENCE_SPECS: Dict[str, List[EvidenceSpec]] = {
             patterns=[r"memory[:\s]+\d+[mgMG]i?"],
         ),
     ],
+
+    "L2-VolumeLimitExceeded": [
+        EvidenceSpec(
+            id="evicted_reason",
+            description="Pod 被 Evicted 的原因",
+            level=EvidenceLevel.CRITICAL,
+            weight=0.3,
+            keywords=["evicted", "reason: evicted"],
+            patterns=[r"reason[:\s]+evicted", r"status[:\s]+evicted"],
+        ),
+        EvidenceSpec(
+            id="volume_limit_exceeded",
+            description="Volume 超限错误信息",
+            level=EvidenceLevel.CRITICAL,
+            weight=0.4,
+            keywords=["exceeds limit", "sizelimit", "volumelimit"],
+            patterns=[r"exceeds\s*limit", r"sizelimit[:\s]+\d+[mgMG]i?"],
+            extract_pattern=r"sizelimit[:\s]+(\d+)",
+            extract_type="int"
+        ),
+        EvidenceSpec(
+            id="pod_events",
+            description="Pod 事件（包含驱逐原因）",
+            level=EvidenceLevel.IMPORTANT,
+            weight=0.2,
+            keywords=["events", "message:", "reason:"],
+        ),
+        EvidenceSpec(
+            id="volume_config",
+            description="Volume 配置（SizeLimit, EmptyDir）",
+            level=EvidenceLevel.IMPORTANT,
+            weight=0.2,
+            keywords=["volumes:", "emptydir", "sizelimit", "type:"],
+        ),
+    ],
     
     "L3-DNSLatency": [
         EvidenceSpec(

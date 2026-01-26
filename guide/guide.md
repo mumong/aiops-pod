@@ -283,7 +283,50 @@ for item in evidence_items:
 - L3-DNSLatency: DNS 查询延迟 (dns_lookup_seconds p95 >= 0.45s)
 - L4-Dependency503: 依赖服务固定返回 503
 
-### 3.4 Event Mapper (`app/core/holmes/event_mapper.py`)
+### 3.4 Workflow 模块 (`app/core/workflow/`)
+
+**职责**：基于 LangGraph 实现分阶段诊断工作流，将运维步骤抽象为独立节点。
+
+**设计原则**：
+1. **确定性流程**：明确的节点执行顺序，不依赖 LLM 自主决策
+2. **模块化节点**：每个节点独立维护，高内聚低耦合
+3. **状态驱动**：节点间通过共享状态传递数据
+4. **可扩展**：轻松添加/替换/重排节点
+
+**模块结构**：
+
+```
+app/core/workflow/
+├── __init__.py              # 统一对外接口
+├── state.py                 # 工作流状态模型 (WorkflowState)
+├── graph.py                 # 工作流图构建 (build_diagnosis_workflow)
+├── executor.py              # 工作流执行器 (WorkflowExecutor)
+└── nodes/                   # 工作流节点
+    ├── base.py              # 节点基类 (WorkflowNode)
+    ├── layer_classifier.py   # 节点1：问题定位
+    ├── evidence_collector.py # 节点2：证据链采集
+    ├── root_cause_analyzer.py # 节点3：根因分析
+    └── conclusion_formatter.py # 节点4：汇总总结
+```
+
+**工作流数据流**：
+
+```
+用户问题 → 节点1(定层) → 节点2(证据) → 节点3(分析) → 节点4(总结) → 诊断报告
+              ↓              ↓            ↓             ↓
+           layer        evidence    decision      conclusion
+```
+
+**启用方式**：
+
+```bash
+export USE_WORKFLOW=true
+python run.py
+```
+
+**开发文档**：详见 `docs/WORKFLOW_DEVELOPMENT_GUIDE.md`
+
+### 3.6 Event Mapper (`app/core/holmes/event_mapper.py`)
 
 **职责**：将 Holmes StreamEvents 映射为统一内部事件 schema，并集成软拦截。
 
@@ -296,7 +339,7 @@ if decision:
     final_content += format_decision_markdown(decision)
 ```
 
-### 3.5 Runbook 知识库 (`deploy/configmap/runbooks.yaml`)
+### 3.7 Runbook 知识库 (`deploy/configmap/runbooks.yaml`)
 
 **职责**：为 AI 提供结构化故障诊断知识。
 
@@ -732,10 +775,50 @@ Pod `nginx-xxx` 在 namespace `default` 中反复重启，状态 CrashLoopBackOf
 | 自动化验收脚本 | ✅ 已完成 | test/e2e/test_scenarios.sh |
 | CI/CD 集成 | 📋 待开始 | GitHub Actions |
 
-### Phase 5：高级功能（远期）
+### Phase 5：LangGraph 工作流 ✅ 已完成
+
+**目标**：将运维诊断步骤抽象为分阶段工作流，实现确定性流程控制
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 工作流基础架构 | ✅ 已完成 | `app/core/workflow/` 模块，基于 LangGraph |
+| 节点1：问题定位 | ✅ 已完成 | LayerClassifierNode - 关键词规则匹配 L0-L4 |
+| 节点2：证据采集 | ✅ 已完成 | EvidenceCollectorNode - 场景证据采集 |
+| 节点3：根因分析 | ✅ 已完成 | RootCauseAnalyzerNode - 规则引擎 + 通用推理 |
+| 节点4：汇总总结 | ✅ 已完成 | ConclusionFormatterNode - 格式化报告 |
+| 工作流执行器 | ✅ 已完成 | WorkflowExecutor - SSE 事件兼容 |
+| 配置开关 | ✅ 已完成 | `USE_WORKFLOW=true` 启用工作流模式 |
+
+**工作流架构**：
+
+```
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│  问题定位   │ → │  证据采集   │ → │  根因分析   │ → │  汇总总结   │
+│  (节点1)    │   │  (节点2)    │   │  (节点3)    │   │  (节点4)    │
+│  L0-L4定层  │   │  工具调用   │   │  规则引擎   │   │  格式化     │
+└─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘
+```
+
+**使用方式**：
+
+```bash
+# 启用工作流模式
+export USE_WORKFLOW=true
+python run.py
+
+# 测试
+curl -N "http://localhost:8000/ask?q=Pod一直重启&format=sse"
+```
+
+**开发文档**：详见 `docs/WORKFLOW_DEVELOPMENT_GUIDE.md`
+
+### Phase 6：高级功能（远期）
 
 | 任务 | 说明 |
 |------|------|
+| 工作流节点增强 | 集成完整 HolmesGPT 工具调用 |
+| 条件分支 | 根据证据完整度动态跳过节点 |
+| 人工干预 | 关键节点暂停等待用户确认 |
 | Causal Graph 构建 | 基于 PyRCA/DoWhy 构建因果图 |
 | 多跳因果追溯 | A → B → C 自动追溯 |
 | 异常检测集成 | 与 Prometheus Alertmanager 联动 |

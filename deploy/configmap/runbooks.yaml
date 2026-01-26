@@ -178,23 +178,21 @@ data:
           "link": "app-config-errors.md"
         },
         {
-          "_comment": "========== 2026-01-22: L0-L4 典型目标（决策型 procedure，重根因分析） =========="
-        },
-        {
+          "_comment": "========== 2026-01-22: L0-L4 典型目标（决策型 procedure，重根因分析） ==========",
           "id": "l0-diskfull-logfile",
           "type": "procedure",
           "layer": "L0",
           "update_date": "2026-01-22",
-          "description": "【L0-流程型】日志文件占满磁盘 - Disk >95% / ENOSPC，定位写满点/句柄泄漏/安全清理（证据链）",
+          "description": "【L0】Pod存储卷超限被驱逐 - EmptyDir/HostPath Volume 超过 SizeLimit 30Mi，kubelet 驱逐 (Evicted)，证据链：Pod 状态+Events+Describe+Volume Limits+磁盘使用率",
           "link": "l0-diskfull-logfile.md",
-          "operations": ["诊断", "排查", "清理"]
+          "operations": ["诊断", "排查", "修复"]
         },
         {
           "id": "l1-kubelet-cert-invalid",
           "type": "procedure",
           "layer": "L1",
           "update_date": "2026-01-22",
-          "description": "【L1-流程型】Kubelet 证书异常导致 Node NotReady - conditions + kubelet 日志 x509 证据链，修复=还原证书+重启 kubelet",
+          "description": "【L1】Kubelet 证书异常导致 Node NotReady - 证书过期/损坏/丢失 (x509 TLS 握手失败)，kubelet 无法与 API Server 通信，证据链：Node Conditions+kubelet 日志+证书状态+证书有效期",
           "link": "l1-kubelet-cert-invalid.md",
           "operations": ["诊断", "排查", "修复"]
         },
@@ -203,7 +201,7 @@ data:
           "type": "procedure",
           "layer": "L2",
           "update_date": "2026-01-22",
-          "description": "【L2-流程型】OOMKilled (Exit 137) - 固定取证（pod json/events/previous logs）+ 规则判定 + 临时调高 memory limit",
+          "description": "【L2】Pod OOMKilled (ExitCode=137) - 容器内存超限被 cgroup OOM Killer 终止 (SIGKILL)，Pod 自动重启，证据链：Exit Code 137+OOMKilled Reason+Memory Limit+Previous Logs+Resource Limits",
           "link": "l2-oomkilled.md",
           "operations": ["诊断", "排查", "修复"]
         },
@@ -212,7 +210,7 @@ data:
           "type": "procedure",
           "layer": "L3",
           "update_date": "2026-01-22",
-          "description": "【L3-流程型】CoreDNS 网络延迟注入（例如 tc 500ms）- 量化 p95 DNS 耗时 + 分型 + 修复=移除 tc 规则",
+          "description": "【L3】DNS 查询延迟高 (>0.45s) - CoreDNS 性能问题或网络延迟注入 (TC qdisc netem)，证据链：DNS Lookup Time+CoreDNS 状态+TC 规则+节点间网络测试",
           "link": "l3-dns-latency.md",
           "operations": ["诊断", "排查", "修复"]
         },
@@ -221,7 +219,7 @@ data:
           "type": "procedure",
           "layer": "L4",
           "update_date": "2026-01-22",
-          "description": "【L4-流程型】依赖服务固定返回 503 导致应用 5xx 激增 - 建立因果证据链（app logs + curl 依赖）+ 修复=滚更/重启依赖",
+          "description": "【L4】依赖服务固定返回 503 (Service Unavailable) - 上游服务异常/过载/熔断，导致应用 5xx 错误，证据链：应用 5xx 日志+upstream 503+依赖服务健康检查+Endpoints 状态",
           "link": "l4-dependency-503.md",
           "operations": ["诊断", "排查", "修复"]
         },
@@ -2610,9 +2608,9 @@ data:
   # ==========================================================================
 
   l0-diskfull-logfile.md: |
-    # L0 日志文件占满磁盘（DiskFull/ENOSPC）
+    # L0 Pod 存储卷超限被驱逐 (Volume Limit Exceeded)
 
-    > **层级**: L0 - 基础设施层 | **类型**: procedure | **场景ID**: L0-DiskFull
+    > **层级**: L0 - 基础设施层 | **类型**: procedure | **场景ID**: L0-VolumeLimit
 
     ---
 
@@ -2682,7 +2680,7 @@ data:
     - ❌ `rm -rf /var/lib/docker/*`
 
   l1-kubelet-cert-invalid.md: |
-    # L1 Kubelet 证书异常导致 Node NotReady
+    # L1 Kubelet 证书异常导致 Node NotReady - 证书过期/损坏/丢失 (x509 TLS 握手失败)
 
     > **层级**: L1 - 集群与节点层 | **类型**: procedure | **场景ID**: L1-KubeletCert
 
@@ -2693,9 +2691,9 @@ data:
     ### 1.1 触发关键词
     | 类别 | 关键词 |
     |------|--------|
-    | 中文 | 节点异常、节点不可用、证书过期 |
+    | 中文 | 节点异常、节点不可用、证书过期、x509 TLS 握手失败 |
     | 英文 | node notready, kubelet, x509, certificate, TLS |
-    | 状态 | Ready=False, Ready=Unknown |
+    | 状态 | Ready=False, NotReady=True |
 
     ### 1.2 快速判定
     ```
@@ -2760,9 +2758,9 @@ data:
     ### 1.1 触发关键词
     | 类别 | 关键词 |
     |------|--------|
-    | 中文 | 内存超限、OOM、被杀、重启 |
+    | 中文 | 内存超限、OOM、被杀、重启、ExitCode=137 |
     | 英文 | OOMKilled, out of memory, exit code 137 |
-    | 状态 | CrashLoopBackOff, exitCode=137 |
+    | 状态 | DNS Lookup > 0.45s |
 
     ### 1.2 快速判定
     ```
@@ -2828,7 +2826,7 @@ data:
     ### 1.1 触发关键词
     | 类别 | 关键词 |
     |------|--------|
-    | 中文 | DNS 延迟、域名解析慢、CoreDNS |
+    | 中文 | DNS 延迟、域名解析慢、CoreDNS、DNS Latency |
     | 英文 | DNS latency, dns lookup slow, coredns |
     | 指标 | dns_lookup_seconds > 0.45 |
 
@@ -2895,9 +2893,9 @@ data:
     ### 1.1 触发关键词
     | 类别 | 关键词 |
     |------|--------|
-    | 中文 | 依赖异常、上游 503、5xx 激增 |
+    | 中文 | 依赖异常、上游 503、5xx 激增、Service Unavailable |
     | 英文 | upstream 503, service unavailable, 5xx |
-    | 状态 | HTTP 503 |
+    | 状态 | HTTP 503 (Service Unavailable) |
 
     ### 1.2 快速判定
     ```
