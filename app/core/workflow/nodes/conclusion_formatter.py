@@ -161,20 +161,34 @@ class ConclusionFormatterNode(WorkflowNode):
 3. 修复建议具体可执行
 """
 
-            # 使用 build_initial_ask_messages 构建消息
-            # 这样可以支持 runbooks 和 tools
-            messages = build_initial_ask_messages(
-                console=self.holmes_service.console,
-                initial_user_prompt=user_message,
-                file_paths=None,
-                tool_executor=self.holmes_service.ai.tool_executor,
-                runbooks=self.runbook_catalog,
-                system_prompt_additions=CONCLUSION_FORMATTER_PROMPT
-            )
+            # 构建消息（禁用工具调用，确保直接返回文本结果）
+            # 结论节点只需要生成报告，不需要调用工具
+            messages = [
+                {"role": "system", "content": CONCLUSION_FORMATTER_PROMPT},
+                {"role": "user", "content": user_message},
+            ]
 
             # 调用 LLM（使用非流式调用以确保获取完整响应）
-            # 流式调用可能导致响应不完整，这里直接使用 ai.call()
-            response = self.holmes_service.ai.call(messages)
+            # 注意：不使用 build_initial_ask_messages，避免触发工具调用
+            # 直接使用 llm.completion()，这样可以完全控制不使用工具
+            from litellm import completion
+            response_text = completion(
+                model=self.holmes_service.ai.llm.model,
+                messages=messages,
+                temperature=0.3,
+            )
+            content = response_text.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+            llm_duration_ms = (time.time() - start_time) * 1000
+
+            # 记录 LLM 调用
+            if self.metrics:
+                self.metrics.record_llm_call("conclusion", llm_duration_ms)
+
+            logger.debug(f"LLM 报告生成完成 (耗时 {llm_duration_ms:.0f}ms, 长度: {len(content)})")
+
+            if content:
+                return content
 
             llm_duration_ms = (time.time() - start_time) * 1000
 
