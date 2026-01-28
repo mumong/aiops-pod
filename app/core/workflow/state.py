@@ -55,3 +55,9 @@ class WorkflowState(TypedDict, total=False):
     current_node: Optional[str]          # 当前执行节点
     errors: List[str]                    # 错误列表
     warnings: List[str]                  # 警告列表
+
+    # ========== 多场景模式新增字段 ==========
+    # 全局场景检测结果
+    multi_scenario_decisions: Optional[Dict[str, Any]]  # 多场景输出对象
+    detected_scenarios: List[Dict]            # 检测到的场景列表
+    detection_duration: Optional[float]       # 检测耗时（秒）

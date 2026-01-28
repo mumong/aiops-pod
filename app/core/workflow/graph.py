@@ -18,31 +18,33 @@ from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 
 def build_diagnosis_workflow(
     holmes_service: Any = None,
-    full_mode: bool = True
+    metrics: Any = None,
+    runbook_catalog: Any = None
 ) -> StateGraph:
     """
     构建诊断工作流图
-    
-    每个节点都会调用 LLM 进行独立分析：
+
+    每个节点都会调用 LLM 进行独立分析，并使用 runbooks：
     - 节点1: 使用 LAYER_CLASSIFIER_PROMPT 判断问题层级
     - 节点2: 使用 EVIDENCE_COLLECTOR_PROMPT 规划证据采集
     - 节点3: 使用 ROOT_CAUSE_ANALYZER_PROMPT 进行根因推理
     - 节点4: 使用 CONCLUSION_FORMATTER_PROMPT 生成最终报告
-    
+
     Args:
         holmes_service: HolmesService 实例（用于 LLM 调用）
-        full_mode: 是否使用完整4节点流程（默认 True）
-    
+        metrics: WorkflowMetrics 实例（用于记录统计）
+        runbook_catalog: RunbookCatalog 实例（用于 runbook 匹配）
+
     Returns:
         编译后的工作流图
     """
     workflow = StateGraph(WorkflowState)
-    
-    # 创建节点实例（每个节点都接收 holmes_service 用于 LLM 调用）
-    layer_node = LayerClassifierNode(holmes_service)
-    evidence_node = EvidenceCollectorNode(holmes_service)
-    rca_node = RootCauseAnalyzerNode(holmes_service)
-    conclusion_node = ConclusionFormatterNode(holmes_service)
+
+    # 创建节点实例（传递 holmes_service、metrics 和 runbook_catalog）
+    layer_node = LayerClassifierNode(holmes_service, metrics, runbook_catalog)
+    evidence_node = EvidenceCollectorNode(holmes_service, metrics, runbook_catalog)
+    rca_node = RootCauseAnalyzerNode(holmes_service, metrics, runbook_catalog)
+    conclusion_node = ConclusionFormatterNode(holmes_service, metrics, runbook_catalog)
     
     # 添加节点
     workflow.add_node("layer", layer_node.execute)
@@ -61,22 +63,22 @@ def build_diagnosis_workflow(
     return workflow.compile()
 
 
-def build_simple_workflow(holmes_service: Any = None) -> StateGraph:
+def build_simple_workflow(holmes_service: Any = None, runbook_catalog: Any = None) -> StateGraph:
     """
     构建简化工作流（仅包含节点1和节点4）
-    
+
     用于快速测试或简单场景
     """
     workflow = StateGraph(WorkflowState)
-    
-    layer_node = LayerClassifierNode()
-    conclusion_node = ConclusionFormatterNode()
-    
+
+    layer_node = LayerClassifierNode(holmes_service, None, runbook_catalog)
+    conclusion_node = ConclusionFormatterNode(holmes_service, None, runbook_catalog)
+
     workflow.add_node("layer", layer_node.execute)
     workflow.add_node("conclusion", conclusion_node.execute)
-    
+
     workflow.set_entry_point("layer")
     workflow.add_edge("layer", "conclusion")
     workflow.add_edge("conclusion", END)
-    
+
     return workflow.compile()

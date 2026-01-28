@@ -8,7 +8,8 @@
 
 设计：
 - 有自己的专用 prompt
-- 调用 LLM 进行独立分析
+- 调用 LLM 进行独立分析（使用和 HolmesService 相同的方式）
+- 支持使用 runbooks 和 tools
 - 结合规则引擎验证结论
 """
 
@@ -20,12 +21,13 @@ from typing import Any, Dict, List, Optional
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import (
-    Layer, DeterministicDecision, EvidenceItem, 
+    Layer, DeterministicDecision, EvidenceItem,
     EvidenceLevel, Confidence
 )
 from app.core.skills.engine import get_engine
 from app.core.skills.gate import apply_gate
 from app.core.prompts import ROOT_CAUSE_ANALYZER_PROMPT
+from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +35,22 @@ logger = logging.getLogger(__name__)
 class RootCauseAnalyzerNode(WorkflowNode):
     """
     根因分析节点
-    
+
     每次执行都会调用 LLM 进行根因推理
     """
-    
-    def __init__(self, holmes_service: Any = None):
+
+    def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
         """
         初始化节点
-        
+
         Args:
             holmes_service: HolmesService 实例（用于 LLM 调用）
+            metrics: WorkflowMetrics 实例（用于记录统计）
+            runbook_catalog: RunbookCatalog 实例（用于 runbook 匹配）
         """
         self.holmes_service = holmes_service
+        self.metrics = metrics
+        self.runbook_catalog = runbook_catalog
         self.engine = get_engine()
     
     @property
@@ -134,30 +140,50 @@ class RootCauseAnalyzerNode(WorkflowNode):
         layer: Optional[Layer],
         evidence_summary: str
     ) -> Dict:
-        """使用 LLM 进行根因分析"""
+        """使用 LLM 进行根因分析（使用和 HolmesService 相同的方式）"""
+        import time
+
         try:
             layer_str = layer.value if layer else "L2"
-            
+
+            start_time = time.time()
+
             # 构建 system prompt
             system_prompt = ROOT_CAUSE_ANALYZER_PROMPT.format(
                 layer=layer_str,
                 evidence_summary=evidence_summary
             )
-            
-            # 构建消息列表
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
-            ]
-            
-            # 调用 LLM
-            response = self.holmes_service.ai.call(messages)
-            
+
+            # 使用 build_initial_ask_messages 构建消息
+            # 这样可以支持 runbooks 和 tools
+            messages = build_initial_ask_messages(
+                console=self.holmes_service.console,
+                initial_user_prompt=question,
+                file_paths=None,
+                tool_executor=self.holmes_service.ai.tool_executor,
+                runbooks=self.runbook_catalog,
+                system_prompt_additions=system_prompt
+            )
+
+            # 调用 LLM（使用和 HolmesService 相同的方式，注入 prompt）
+            if self.holmes_service.stream_output:
+                response = self.holmes_service._call_with_stream(messages)
+            else:
+                response = self.holmes_service.ai.call(messages)
+
+            llm_duration_ms = (time.time() - start_time) * 1000
+
+            # 记录 LLM 调用
+            if self.metrics:
+                self.metrics.record_llm_call("rca", llm_duration_ms)
+
+            logger.debug(f"LLM 根因分析完成 (耗时 {llm_duration_ms:.0f}ms)")
+
             if response and response.result:
                 return self._parse_llm_response(response.result)
-            
+
             return self._analyze_with_rules(question, layer, [])
-        
+
         except Exception as e:
             logger.warning(f"LLM 分析失败，回退到规则: {e}")
             return self._analyze_with_rules(question, layer, [])

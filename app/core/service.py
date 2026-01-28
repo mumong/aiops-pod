@@ -359,21 +359,72 @@ class HolmesService:
         专为终端 curl 等命令行工具优化
         """
         from app.core.holmes.streaming import format_duration
-        
+        import json
+
         def emit(text: str) -> str:
             return text + "\n"
-        
+
+        # 节点输出格式化函数（局部函数，不需要 self）
+        def format_layer_node_output(snapshot: dict) -> str:
+            """格式化问题定位节点的输出"""
+            lines = []
+            layer = snapshot.get("layer", "?")
+            conf = snapshot.get("layer_confidence", 0) or 0
+            layer_reasoning = snapshot.get("layer_reasoning", "")
+
+            lines.append(f"**层级**: {layer}")
+            lines.append(f"**置信度**: {conf:.0%}")
+            if layer_reasoning:
+                lines.append(f"**判定理由**: {layer_reasoning}")
+
+            return "\n".join(lines)
+
+        def format_evidence_node_output(snapshot: dict) -> str:
+            """格式化证据采集节点的输出"""
+            lines = []
+            count = snapshot.get("evidence_count", 0)
+            collected = snapshot.get("collected_count", 0)
+            completeness = snapshot.get("completeness", 0) or 0
+
+            lines.append(f"**证据数量**: {count}")
+            lines.append(f"**已采集**: {collected}")
+            lines.append(f"**完整度**: {completeness:.0%}")
+
+            return "\n".join(lines)
+
+        def format_rca_node_output(snapshot: dict) -> str:
+            """格式化根因分析节点的输出"""
+            lines = []
+            root_cause = snapshot.get("root_cause", "")
+            conf = snapshot.get("confidence")
+            conf_str = f"{conf:.0%}" if conf else "?"
+
+            lines.append(f"**根因**: {root_cause}")
+            lines.append(f"**置信度**: {conf_str}")
+
+            return "\n".join(lines)
+
         yield emit("=" * 70)
         yield emit("🔄 K8s AIOps Copilot - 工作流诊断模式")
         yield emit("=" * 70)
         yield emit("")
-        yield emit(f"📝 问题: {question[:100]}...")
+
+        # 安全截断问题文本（避免在多字节字符中间截断）
+        question_display = question[:100] if len(question) > 100 else question
+        yield emit(f"📝 问题: {question_display}")
         yield emit("")
         yield emit("-" * 70)
-        
+
         final_answer = ""
         metrics_data = None
-        
+        # 用于收集各节点的详细输出
+        node_outputs = {
+            "layer": "",
+            "evidence": "",
+            "rca": "",
+            "conclusion": ""
+        }
+
         for event in executor.execute_stream(question):
             event_type = event.get("type", "unknown")
             
@@ -390,32 +441,128 @@ class HolmesService:
                 node_name = event.get("node_name", event.get("node", "?"))
                 duration = event.get("duration_seconds", 0)
                 snapshot = event.get("state_snapshot", {})
-                
+
                 yield emit(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
-                
-                # 输出节点摘要
+                yield emit("")
+
+                # 输出节点详细内容
                 node_id = event.get("node", "")
                 if node_id == "layer":
+                    yield emit("   ┌──────────────────────────────────────────┐")
+                    yield emit("   │ 📊 问题定位结果                              │")
+                    yield emit("   └──────────────────────────────────────────┘")
+                    yield emit("")
                     layer = snapshot.get("layer", "?")
                     conf = snapshot.get("layer_confidence", 0) or 0
-                    yield emit(f"      层级: {layer}, 置信度: {conf:.0%}")
+                    yield emit(f"   层级: {layer}")
+                    yield emit(f"   置信度: {conf:.0%}")
+                    # 显示完整分析
+                    layer_analysis = snapshot.get("layer_analysis", "")
+                    if layer_analysis:
+                        yield emit("   📋 完整分析:")
+                        try:
+                            if isinstance(layer_analysis, str) and layer_analysis.startswith("{"):
+                                yield emit(f"   {json.dumps(json.loads(layer_analysis), ensure_ascii=False, indent=6)}")
+                            else:
+                                for line in str(layer_analysis).split("\n"):
+                                    yield emit(f"   {line}")
+                        except:
+                            for line in str(layer_analysis).split("\n"):
+                                yield emit(f"   {line}")
+                        yield emit("")
+                    # 保存节点完整分析用于最终答案
+                    node_outputs["layer"] = layer_analysis or format_layer_node_output(snapshot)
+
                 elif node_id == "evidence":
+                    yield emit("   ┌──────────────────────────────────────────┐")
+                    yield emit("   │ 🔍 证据采集结果                              │")
+                    yield emit("   └──────────────────────────────────────────┘")
+                    yield emit("")
                     count = snapshot.get("evidence_count", 0)
                     collected = snapshot.get("collected_count", 0)
-                    yield emit(f"      证据: {collected}/{count} 项")
+                    completeness = snapshot.get("completeness", 0) or 0
+                    yield emit(f"   证据: {collected}/{count} 项, 完整度: {completeness:.0%}")
+
+                    # 显示完整分析
+                    evidence_analysis = snapshot.get("evidence_analysis", "")
+                    if evidence_analysis:
+                        yield emit("   📋 完整分析:")
+                        try:
+                            if isinstance(evidence_analysis, str) and evidence_analysis.startswith("{"):
+                                yield emit(f"   {json.dumps(json.loads(evidence_analysis), ensure_ascii=False, indent=6)}")
+                            else:
+                                for line in str(evidence_analysis).split("\n"):
+                                    yield emit(f"   {line}")
+                        except:
+                            for line in str(evidence_analysis).split("\n"):
+                                yield emit(f"   {line}")
+                        yield emit("")
+
+                    # 保存节点完整分析用于最终答案
+                    node_outputs["evidence"] = evidence_analysis or format_evidence_node_output(snapshot)
+
                 elif node_id == "rca":
-                    root_cause = (snapshot.get("root_cause") or "")[:60]
-                    yield emit(f"      根因: {root_cause}...")
+                    yield emit("   ┌──────────────────────────────────────────┐")
+                    yield emit("   │ 🎯 根因分析结果                              │")
+                    yield emit("   └──────────────────────────────────────────┘")
+                    yield emit("")
+                    root_cause = snapshot.get("root_cause", "")
+                    conf = snapshot.get("confidence")
+                    conf_str = f"{conf:.0%}" if conf else "?"
+                    if root_cause:
+                        yield emit(f"   根因: {root_cause}")
+                    yield emit(f"   置信度: {conf_str}")
+
+                    # 显示因果链
+                    causal_chain = snapshot.get("causal_chain", {})
+                    if causal_chain:
+                        yield emit("   🔗 因果链:")
+                        trigger = causal_chain.get("trigger") or causal_chain.get("root_cause", "")
+                        mechanism = causal_chain.get("mechanism") or causal_chain.get("propagation", "")
+                        manifestation = causal_chain.get("manifestation", "")
+                        if trigger:
+                            yield emit(f"     根本原因: {trigger}")
+                        if mechanism:
+                            yield emit(f"     传导机制: {mechanism}")
+                        if manifestation:
+                            yield emit(f"     最终表现: {manifestation}")
+                        yield emit("")
+
+                    # 显示完整分析
+                    rca_analysis = snapshot.get("rca_analysis", "")
+                    if rca_analysis:
+                        yield emit("   📋 完整分析:")
+                        try:
+                            if isinstance(rca_analysis, str) and rca_analysis.startswith("{"):
+                                yield emit(f"   {json.dumps(json.loads(rca_analysis), ensure_ascii=False, indent=6)}")
+                            else:
+                                for line in str(rca_analysis).split("\n"):
+                                    yield emit(f"   {line}")
+                        except:
+                            for line in str(rca_analysis).split("\n"):
+                                yield emit(f"   {line}")
+                        yield emit("")
+
+                    # 保存节点完整分析用于最终答案
+                    node_outputs["rca"] = rca_analysis or format_rca_node_output(snapshot)
+
                 elif node_id == "conclusion":
+                    yield emit("   ┌──────────────────────────────────────────┐")
+                    yield emit("   │ 📋 汇总总结结果                              │")
+                    yield emit("   └──────────────────────────────────────────┘")
+                    yield emit("")
                     length = snapshot.get("conclusion_length", 0)
-                    yield emit(f"      报告: {length} 字符")
-                
+                    yield emit(f"   报告长度: {length} 字符")
+                    # 节点输出将在 final 事件中保存
+
                 yield emit("")
             
             elif event_type == "final":
                 final_answer = event.get("answer", "")
                 metrics_data = event.get("metrics", {})
                 elapsed = event.get("elapsed_seconds", 0)
+                # 保存结论节点输出
+                node_outputs["conclusion"] = final_answer or "（汇总节点生成最终报告）"
                 yield emit("-" * 70)
                 yield emit(f"📊 诊断完成! 总耗时: {format_duration(elapsed)}")
                 yield emit("-" * 70)
@@ -426,14 +573,62 @@ class HolmesService:
                 yield emit(f"❌ 错误: {error}")
                 yield emit("")
         
-        # 输出最终报告
+        # 输出最终报告（包含所有节点的详细输出）
         if final_answer:
             yield emit("=" * 70)
-            yield emit("🎯 诊断报告")
+            yield emit("🎯 诊断报告 - 完整分析")
             yield emit("=" * 70)
             yield emit("")
-            yield final_answer
-            yield emit("")
+
+            # 输出所有节点的详细分析
+            if node_outputs["layer"]:
+                yield emit("## 📍 节点一：问题定位")
+                yield emit("-" * 70)
+                # 尝试格式化 JSON 输出
+                layer_text = node_outputs["layer"]
+                try:
+                    layer_data = json.loads(layer_text) if isinstance(layer_text, str) and layer_text.startswith("{") else layer_text
+                    if isinstance(layer_data, dict):
+                        yield emit(json.dumps(layer_data, ensure_ascii=False, indent=2))
+                    else:
+                        yield emit(str(layer_text))
+                except:
+                    yield emit(str(layer_text))
+                yield emit("")
+
+            if node_outputs["evidence"]:
+                yield emit("## 🔍 节点二：证据采集")
+                yield emit("-" * 70)
+                evidence_text = node_outputs["evidence"]
+                try:
+                    evidence_data = json.loads(evidence_text) if isinstance(evidence_text, str) and evidence_text.startswith("{") else evidence_text
+                    if isinstance(evidence_data, dict):
+                        yield emit(json.dumps(evidence_data, ensure_ascii=False, indent=2))
+                    else:
+                        yield emit(str(evidence_text))
+                except:
+                    yield emit(str(evidence_text))
+                yield emit("")
+
+            if node_outputs["rca"]:
+                yield emit("## 🎯 节点三：根因分析")
+                yield emit("-" * 70)
+                rca_text = node_outputs["rca"]
+                try:
+                    rca_data = json.loads(rca_text) if isinstance(rca_text, str) and rca_text.startswith("{") else rca_text
+                    if isinstance(rca_data, dict):
+                        yield emit(json.dumps(rca_data, ensure_ascii=False, indent=2))
+                    else:
+                        yield emit(str(rca_text))
+                except:
+                    yield emit(str(rca_text))
+                yield emit("")
+
+            if node_outputs["conclusion"]:
+                yield emit("## 📋 节点四：汇总总结")
+                yield emit("-" * 70)
+                yield emit(node_outputs["conclusion"])
+                yield emit("")
         
         # 输出指标摘要
         if metrics_data:
@@ -454,7 +649,17 @@ class HolmesService:
             yield emit(f"  MTTR:        {mttr.get('value', '?')} {mttr_pass} (要求 < 10m)")
             yield emit(f"  根因置信度: {rca.get('value', '?')} {rca_pass} (要求 >= 80%)")
             yield emit(f"  证据完整率: {evidence.get('value', '?')} {evidence_pass} (要求 > 90%)")
-            yield emit(f"  Runbook:    {'已匹配' if runbook.get('matched') else '未匹配'} {runbook_pass}")
+
+            # 显示 Runbook 信息
+            if runbook.get('matched'):
+                runbook_id = runbook.get('id', '')
+                yield emit(f"  Runbook:    已匹配 {runbook_pass}")
+                if runbook_id:
+                    # 美化显示 runbook ID (去除.md后缀，用逗号分隔)
+                    runbook_names = [name.replace('.md', '') for name in runbook_id.split(', ')]
+                    yield emit(f"    使用的Runbook: {', '.join(runbook_names)}")
+            else:
+                yield emit(f"  Runbook:    未匹配 {runbook_pass}")
             yield emit("")
         
         yield emit("=" * 70)
@@ -536,6 +741,8 @@ class HolmesService:
             if schema:
                 d["schema"] = schema
             return d
+            # 注释掉 schema 输出（避免终端 JSON 解析错误）
+            # d["schema"] = schema  # 暂时禁用，避免终端误解析
 
         toolsets_detail = []
         for toolset in tool_executor.toolsets:

@@ -30,6 +30,23 @@ from app.core.holmes.artifacts import get_artifact_store
 logger = logging.getLogger(__name__)
 
 
+def fix_double_encoding(text: str) -> str:
+    """
+    修复客户端双重 UTF-8 编码的问题
+
+    某些客户端会先 UTF-8 编码，再被错误地当作 Latin-1 解码，
+    导致中文变成乱码。这个函数尝试修复这个问题。
+    """
+    try:
+        # 尝试将错误的字符串编码回字节，再用正确的编码解码
+        fixed = text.encode('latin-1').decode('utf-8')
+        logger.debug(f"✅ 修复了双重编码: {text[:20]} -> {fixed[:20]}")
+        return fixed
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        # 如果修复失败，说明原始数据就是正确的
+        return text
+
+
 def register_routes(app):
     """注册所有 API 路由"""
     
@@ -60,7 +77,7 @@ def register_routes(app):
         curl "http://localhost:8000/ask?q=查看集群状态&stream=false"
         ```
         """
-        question = unquote(q)
+        question = fix_double_encoding(q) # FastAPI 的 Query 已自动解码
         logger.info(f"📝 收到查询: {question[:80]}...")
         
         if stream:
@@ -88,9 +105,17 @@ def register_routes(app):
           -d "max_steps=30"
         ```
         """
-        question = q
+        question = fix_double_encoding(q) # 解码 URL 编码的表单数据
         logger.info(f"📝 收到查询 (POST): {question[:80]}...")
         
+        ###
+        logger.info(f"📝 收到查询 (POST): {question[:80]}...")
+        logger.info(f"📝 测试----收到查询 (POST): {q}")
+        logger.info(f"🔍 调试 - 字符串长度: {len(q)}")
+        logger.info(f"🔍 调试 - 前20字节: {q[:20].encode('utf-8')}")
+        logger.info(f"🔍 调试 - repr: {repr(q[:50])}")
+        ###
+
         if stream:
             return _stream_response(question, format, max_steps)
         else:
@@ -119,7 +144,7 @@ def register_routes(app):
         
         注意：问题中的特殊字符需要 URL 编码
         """
-        question = unquote(question)
+        question = fix_double_encoding(question)  # 修复双重编码
         logger.info(f"📝 收到查询 (路径): {question[:80]}...")
         
         if stream:
@@ -138,10 +163,10 @@ def register_routes(app):
         
         保留向后兼容，推荐使用 /ask
         """
-        question = request.get("question", "")
+        question = fix_double_encoding(request.get("question", ""))
         output_format = request.get("output_format", "text")
         max_steps = request.get("max_steps", 20)
-        
+
         logger.info(f"📝 收到查询 (旧API): {question[:80]}...")
         return _stream_response(question, output_format, max_steps)
     
@@ -152,9 +177,9 @@ def register_routes(app):
         
         保留向后兼容，推荐使用 /ask?stream=false
         """
-        question = request.get("question", "")
+        question = fix_double_encoding(request.get("question", ""))
         max_steps = request.get("max_steps", 20)
-        
+
         logger.info(f"📝 收到查询 (旧API): {question[:80]}...")
         return await _sync_response(question, max_steps)
     
