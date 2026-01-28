@@ -36,15 +36,23 @@ class WorkflowExecutor:
     - 记录性能和质量指标
     """
     
-    def __init__(self, holmes_service: Any = None):
+    def __init__(self, holmes_service: Any = None, metrics: Any = None):
         """
         初始化执行器
-        
+
         Args:
             holmes_service: HolmesService 实例
+            metrics: WorkflowMetrics 实例（用于记录统计）
         """
         self.holmes_service = holmes_service
-        self.workflow = build_diagnosis_workflow(holmes_service)
+        self.metrics = metrics
+        # 获取 runbook_catalog（从 HolmesService）
+        runbook_catalog = (
+            holmes_service.merged_catalog
+            if holmes_service and holmes_service.merged_catalog
+            else None
+        )
+        self.workflow = build_diagnosis_workflow(holmes_service, metrics, runbook_catalog)
     
     def execute_stream(
         self,
@@ -64,8 +72,17 @@ class WorkflowExecutor:
         if run_id is None:
             run_id = uuid.uuid4().hex[:16]
         
-        # 开始指标记录
-        metrics = start_workflow_metrics(run_id, question)
+        # 开始指标记录（如果没有传入，则创建新 metrics）
+        if self.metrics is None:
+            metrics = start_workflow_metrics(run_id, question)
+        else:
+            # 使用传入的 metrics（重置状态）
+            metrics = self.metrics
+            # 重置 metrics 状态
+            metrics.run_id = run_id
+            metrics.question = question
+            metrics.start_time = time.time()
+
         total_start = time.time()
         
         # 初始化状态
@@ -106,24 +123,28 @@ class WorkflowExecutor:
         }
         
         # 执行工作流（流式）
+        completed_nodes = set()  # 已完成的节点
+        current_nodes = set()   # 当前批次的节点
         node_start_times = {}
         seq = 0
         final_state = initial_state.copy()
-        
+
         try:
             for event in self.workflow.stream(initial_state):
                 # LangGraph 返回格式: {node_name: updated_state}
+                new_nodes_in_this_event = set()
+
                 for node_name, updated_state in event.items():
-                    seq += 1
-                    
-                    # 节点开始
+                    new_nodes_in_this_event.add(node_name)
+
+                    # 节点开始（只记录一次）
                     if node_name not in node_start_times:
                         node_start_times[node_name] = time.time()
                         metrics.start_node(node_name, self._get_node_display_name(node_name))
-                        
+
                         # 日志输出节点开始
                         logger.info(f"📍 [{node_name}] {self._get_node_display_name(node_name)} 开始...")
-                        
+
                         yield {
                             "type": "node_start",
                             "id": f"{run_id}-node_start-{node_name}",
@@ -133,34 +154,41 @@ class WorkflowExecutor:
                             "node": node_name,
                             "node_name": self._get_node_display_name(node_name),
                         }
-                    
-                    # 更新最终状态
-                    final_state.update(updated_state)
-                    
-                    # 节点完成
-                    node_duration = time.time() - node_start_times.get(node_name, time.time())
-                    metrics.finish_node(node_name, success=True)
-                    
-                    # 提取节点输出摘要用于日志
-                    snapshot = self._extract_state_snapshot(updated_state, node_name)
-                    node_summary = self._format_node_summary(node_name, updated_state, snapshot)
-                    
-                    # 日志输出节点完成和摘要
-                    logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
-                    if node_summary:
-                        logger.info(f"   {node_summary}")
-                    
-                    yield {
-                        "type": "node_complete",
-                        "id": f"{run_id}-node_complete-{node_name}",
-                        "run_id": run_id,
-                        "seq": seq + 1,
-                        "ts_ms": int(time.time() * 1000),
-                        "node": node_name,
-                        "node_name": self._get_node_display_name(node_name),
-                        "duration_seconds": round(node_duration, 3),
-                        "state_snapshot": snapshot,
-                    }
+
+                # 更新最终状态
+                final_state.update(updated_state)
+
+                # 检查是否有节点完成（不在当前事件中的节点）
+                for node_name in current_nodes:
+                    if node_name not in new_nodes_in_this_event:
+                        # 节点完成
+                        node_duration = time.time() - node_start_times.get(node_name, time.time())
+                        metrics.finish_node(node_name, success=True)
+                        completed_nodes.add(node_name)
+
+                        # 提取节点输出摘要用于日志
+                        snapshot = self._extract_state_snapshot(final_state, node_name)
+                        node_summary = self._format_node_summary(node_name, final_state, snapshot)
+
+                        # 日志输出节点完成和摘要
+                        logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
+                        if node_summary:
+                            logger.info(f"   {node_summary}")
+
+                        yield {
+                            "type": "node_complete",
+                            "id": f"{run_id}-node_complete-{node_name}",
+                            "run_id": run_id,
+                            "seq": seq + 1,
+                            "ts_ms": int(time.time() * 1000),
+                            "node": node_name,
+                            "node_name": self._get_node_display_name(node_name),
+                            "duration_seconds": round(node_duration, 3),
+                            "state_snapshot": snapshot,
+                        }
+
+                # 更新当前节点集合
+                current_nodes = new_nodes_in_this_event
             
             # 更新指标
             self._update_metrics_from_state(metrics, final_state)
@@ -241,16 +269,22 @@ class WorkflowExecutor:
         state: WorkflowState,
         node_name: str
     ) -> Dict[str, Any]:
-        """提取状态快照（用于调试和日志）"""
+        """提取状态快照（用于调试和日志）
+
+        设计：
+        - 包含完整的分析 JSON (layer_analysis, evidence_analysis, rca_analysis)
+        - 用于 service.py 中收集并显示所有节点的完整输出
+        """
         snapshot = {}
-        
+
         if node_name == "layer":
             snapshot = {
                 "layer": str(state.get("layer", "")),
                 "layer_confidence": state.get("layer_confidence"),
-                "layer_reasoning": (state.get("layer_reasoning") or "")[:100],
-                "key_entities_count": len(state.get("key_entities", [])),
-                "possible_scenarios": state.get("possible_scenarios", [])[:3],
+                "layer_reasoning": state.get("layer_reasoning") or "",
+                "layer_analysis": state.get("layer_analysis", ""),
+                "key_entities": state.get("key_entities", []),
+                "possible_scenarios": state.get("possible_scenarios", []),
             }
         elif node_name == "evidence":
             evidence_items = state.get("evidence_items", [])
@@ -259,20 +293,28 @@ class WorkflowExecutor:
                 "evidence_count": len(evidence_items),
                 "collected_count": collected,
                 "completeness": state.get("evidence_completeness"),
+                "evidence_analysis": state.get("evidence_analysis", ""),
+                "evidence_items": evidence_items,
             }
         elif node_name == "rca":
+            decision = state.get("deterministic_decision")
             snapshot = {
-                "root_cause": (state.get("root_cause") or "")[:100],
+                "root_cause": state.get("root_cause") or "",
                 "has_causal_chain": bool(state.get("causal_chain")),
-                "confidence": state.get("deterministic_decision").confidence_score if state.get("deterministic_decision") else None,
+                "causal_chain": state.get("causal_chain", {}),
+                "confidence": decision.confidence_score if decision else None,
+                "category": decision.category if decision else None,
+                "rca_analysis": state.get("rca_analysis", ""),
             }
         elif node_name == "conclusion":
             snapshot = {
                 "conclusion_length": len(state.get("conclusion", "") or ""),
                 "has_errors": len(state.get("errors", [])) > 0,
                 "has_warnings": len(state.get("warnings", [])) > 0,
+                "conclusion": state.get("conclusion", ""),
+                "conclusion_formatted": state.get("conclusion_formatted", ""),
             }
-        
+
         return snapshot
     
     def _format_node_summary(
@@ -330,7 +372,54 @@ class WorkflowExecutor:
             except:
                 metrics.root_cause_confidence = 0.5
         
-        # Runbook 匹配（检查是否有匹配的 runbook）
-        # TODO: 集成 runbook 匹配逻辑
-        metrics.runbook_matched = False
-        metrics.runbook_id = None
+        # Runbook 使用记录（检查实际调用的 runbook）
+        # 从工具调用结果中提取使用的 runbook ID
+        runbook_ids_used = []
+        runbook_names = []  # 存储中文runbook名称
+
+        # 从 tool_call_details 中查找 runbook 相关调用
+        for detail in metrics.tool_call_details:
+            tool_name = detail.get('tool', '')
+            result = detail.get('result', '')
+
+            # 检查是否是 runbook 相关调用（扩展检测范围）
+            # 支持多种工具名称：runbook, fetch_runbook, show_runbook等
+            is_runbook_tool = (
+                'runbook' in tool_name.lower() or
+                'fetch' in tool_name.lower() or
+                'show' in tool_name.lower()
+            )
+
+            if is_runbook_tool and result:
+                # 提取 runbook 名称
+                import re
+
+                # 1. 尝试提取 Markdown 文件名
+                runbook_match = re.search(r'[\w-]+\.md', result)
+                if runbook_match:
+                    runbook_id = runbook_match.group(0)
+                    if runbook_id not in runbook_ids_used:
+                        runbook_ids_used.append(runbook_id)
+
+                # 2. 尝试提取中文 runbook 名称（如 "容器崩溃循环 (CrashLoopBackOff) 诊断手册"）
+                chinese_runbook_match = re.search(r'[*【](.*?)[*】]', result)
+                if chinese_runbook_match:
+                    runbook_name = chinese_runbook_match.group(1).strip('*【】')
+                    if runbook_name and runbook_name not in runbook_names:
+                        runbook_names.append(runbook_name)
+
+                # 3. 尝试提取以 ** 标记的 runbook 名称
+                bold_runbook_match = re.search(r'\*\*(.+?)\*\*', result)
+                if bold_runbook_match:
+                    runbook_name = bold_runbook_match.group(1).strip()
+                    if runbook_name and runbook_name not in runbook_names:
+                        runbook_names.append(runbook_name)
+
+        if runbook_ids_used or runbook_names:
+            metrics.runbook_matched = True
+            # 优先显示中文runbook名称，如果没有则显示文件ID
+            metrics.runbook_id = ', '.join(runbook_names) if runbook_names else ', '.join(runbook_ids_used)
+            logger.info(f"   Runbook 使用: {metrics.runbook_id}")
+        else:
+            metrics.runbook_matched = False
+            metrics.runbook_id = None

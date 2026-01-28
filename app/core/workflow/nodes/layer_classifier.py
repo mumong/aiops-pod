@@ -8,7 +8,8 @@
 
 设计：
 - 有自己的专用 prompt
-- 调用 LLM 进行独立分析
+- 调用 LLM 进行独立分析（使用和 HolmesService 相同的方式）
+- 支持使用 runbooks 和 tools
 - 输出结构化的分析结果供下游节点使用
 """
 
@@ -21,6 +22,7 @@ from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
 from app.core.prompts import LAYER_CLASSIFIER_PROMPT
+from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
 
@@ -28,18 +30,22 @@ logger = logging.getLogger(__name__)
 class LayerClassifierNode(WorkflowNode):
     """
     问题定位节点
-    
+
     每次执行都会调用 LLM 进行独立分析
     """
-    
-    def __init__(self, holmes_service: Any = None):
+
+    def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
         """
         初始化节点
-        
+
         Args:
             holmes_service: HolmesService 实例（用于 LLM 调用）
+            metrics: WorkflowMetrics 实例（用于记录统计）
+            runbook_catalog: RunbookCatalog 实例（用于 runbook 匹配）
         """
         self.holmes_service = holmes_service
+        self.metrics = metrics
+        self.runbook_catalog = runbook_catalog
     
     @property
     def node_id(self) -> str:
@@ -103,26 +109,127 @@ class LayerClassifierNode(WorkflowNode):
         return new_state
     
     def _analyze_with_llm(self, question: str) -> Dict:
-        """使用 LLM 分析问题层级"""
+        """使用 LLM 分析问题层级（使用和 HolmesService 相同的方式）"""
+        import time
+
         try:
-            # 构建消息列表（不使用 HolmesGPT 原有的 system prompt）
-            messages = [
-                {"role": "system", "content": LAYER_CLASSIFIER_PROMPT},
-                {"role": "user", "content": question}
-            ]
-            
-            # 调用 LLM
-            response = self.holmes_service.ai.call(messages)
-            
+            start_time = time.time()
+
+            # 获取 tool_executor（如果不存在则为 None）
+            tool_executor = getattr(self.holmes_service.ai, "tool_executor", None)
+
+            # 输出可用的工具和 runbooks 信息
+            # self._log_available_tools(tool_executor)
+            # self._log_available_runbooks(self.runbook_catalog)
+
+            # 使用 build_initial_ask_messages 构建消息
+            # 这样可以支持 runbooks 和 tools
+            messages = build_initial_ask_messages(
+                console=self.holmes_service.console,
+                initial_user_prompt=question,
+                file_paths=None,
+                tool_executor=tool_executor,
+                runbooks=self.runbook_catalog,
+                system_prompt_additions=LAYER_CLASSIFIER_PROMPT  # 使用节点专用的 prompt
+            )
+
+            # 调用 LLM（使用和 HolmesService 相同的方式）
+            if self.holmes_service.stream_output:
+                response = self.holmes_service._call_with_stream(messages)
+            else:
+                response = self.holmes_service.ai.call(messages)
+
+            llm_duration_ms = (time.time() - start_time) * 1000
+
+            # 记录 LLM 调用
+            if self.metrics:
+                self.metrics.record_llm_call("layer", llm_duration_ms)
+
+            logger.debug(f"LLM 分析完成 (耗时 {llm_duration_ms:.0f}ms)")
+
             # 解析 JSON 输出
             if response and response.result:
                 return self._parse_llm_response(response.result)
-            
+
             return self._analyze_with_rules(question)
-        
+
         except Exception as e:
             logger.warning(f"LLM 分析失败，回退到规则: {e}")
             return self._analyze_with_rules(question)
+
+    # def _log_available_tools(self, tool_executor: Any):
+    #     """输出可用的工具信息"""
+    #     if not tool_executor:
+    #         logger.info("🔧 可用工具: 无 tool_executor")
+    #         return
+
+    #     # 分类工具
+    #     builtin_tools = []
+    #     mcp_tools = []
+    #     mcp_servers = []
+
+    #     for toolset in tool_executor.toolsets:
+    #         toolset_class = toolset.__class__.__name__
+    #         toolset_name = getattr(toolset, "name", str(toolset))
+    #         is_enabled = getattr(toolset, "enabled", False)
+
+    #         # 判断是否是 MCP 工具
+    #         is_mcp = "mcp" in toolset_class.lower() or (
+    #             hasattr(toolset, "type") and str(toolset.type).lower() == "mcp"
+    #         )
+
+    #         if is_mcp:
+    #             mcp_servers.append({
+    #                 "name": toolset_name,
+    #                 "enabled": is_enabled,
+    #             })
+    #         else:
+    #             # 内置工具
+    #             if hasattr(toolset, "tools") and toolset.tools:
+    #                 tool_count = 0
+    #                 for t in toolset.tools:
+    #                     if hasattr(t, "name"):
+    #                         tool_count += 1
+    #                         builtin_tools.append(getattr(t, "name", str(t)))
+
+    #     # 输出日志
+    #     if mcp_servers:
+    #         logger.info(f"🌐 MCP 工具集: {len(mcp_servers)} 个")
+    #         for server in mcp_servers:
+    #             status = "✅ 启用" if server["enabled"] else "❌ 禁用"
+    #             logger.info(f"   {status} {server['name']}")
+    #     else:
+    #         logger.info("🌐 MCP 工具集: 无")
+
+    #     if builtin_tools:
+    #         logger.info(f"🔧 内置工具: {len(builtin_tools)} 个")
+    #         for tool in builtin_tools[:20]:  # 最多显示20个
+    #             logger.info(f"   • {tool}")
+    #         if len(builtin_tools) > 20:
+    #             logger.info(f"   ... 还有 {len(builtin_tools) - 20} 个工具")
+
+    # def _log_available_runbooks(self, runbook_catalog: Any):
+    #     """输出可用的 runbooks 信息"""
+    #     if not runbook_catalog:
+    #         logger.info("📚 Runbook 知识库: 无")
+    #         return
+
+    #     catalog = runbook_catalog.catalog if hasattr(runbook_catalog, "catalog") else []
+    #     if not catalog:
+    #         logger.info("📚 Runbook 知识库: 0 个")
+    #         return
+
+    #     logger.info(f"📚 Runbook 知识库: {len(catalog)} 个")
+    #     for entry in catalog[:10]:  # 最多显示10个
+    #         if hasattr(entry, "title"):
+    #             title = entry.title
+    #         elif isinstance(entry, dict):
+    #             title = entry.get("title", "Unknown")
+    #         else:
+    #             title = str(entry)
+    #         logger.info(f"   • {title}")
+    #     if len(catalog) > 10:
+    #         logger.info(f"   ... 还有 {len(catalog) - 10} 个 runbook")
     
     def _parse_llm_response(self, response_text: str) -> Dict:
         """解析 LLM 的 JSON 响应"""

@@ -9,6 +9,7 @@
 设计：
 - 有自己的专用 prompt
 - 基于前3个节点的输出进行总结和扩展
+- 使用和 HolmesService 相同的调用方式，支持 runbooks 和 tools
 - 输出符合标准模板的完整报告
 """
 
@@ -20,6 +21,7 @@ from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem, Confidence
 from app.core.prompts import CONCLUSION_FORMATTER_PROMPT
+from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +29,22 @@ logger = logging.getLogger(__name__)
 class ConclusionFormatterNode(WorkflowNode):
     """
     汇总总结节点
-    
+
     整合前3个节点的分析结果，生成最终报告
     """
-    
-    def __init__(self, holmes_service: Any = None):
+
+    def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
         """
         初始化节点
-        
+
         Args:
             holmes_service: HolmesService 实例（用于 LLM 调用）
+            metrics: WorkflowMetrics 实例（用于记录统计）
+            runbook_catalog: RunbookCatalog 实例（用于 runbook 匹配）
         """
         self.holmes_service = holmes_service
+        self.metrics = metrics
+        self.runbook_catalog = runbook_catalog
     
     @property
     def node_id(self) -> str:
@@ -128,8 +134,12 @@ class ConclusionFormatterNode(WorkflowNode):
         evidence_analysis: str,
         rca_analysis: str
     ) -> str:
-        """使用 LLM 生成最终报告"""
+        """使用 LLM 生成最终报告（使用和 HolmesService 相同的方式）"""
+        import time
+
         try:
+            start_time = time.time()
+
             # 构建用户消息（包含所有阶段的分析结果）
             user_message = f"""
 # 用户问题
@@ -150,21 +160,35 @@ class ConclusionFormatterNode(WorkflowNode):
 2. 逻辑严谨，因果链清晰
 3. 修复建议具体可执行
 """
-            
-            # 构建消息列表
-            messages = [
-                {"role": "system", "content": CONCLUSION_FORMATTER_PROMPT},
-                {"role": "user", "content": user_message}
-            ]
-            
-            # 调用 LLM
+
+            # 使用 build_initial_ask_messages 构建消息
+            # 这样可以支持 runbooks 和 tools
+            messages = build_initial_ask_messages(
+                console=self.holmes_service.console,
+                initial_user_prompt=user_message,
+                file_paths=None,
+                tool_executor=self.holmes_service.ai.tool_executor,
+                runbooks=self.runbook_catalog,
+                system_prompt_additions=CONCLUSION_FORMATTER_PROMPT
+            )
+
+            # 调用 LLM（使用非流式调用以确保获取完整响应）
+            # 流式调用可能导致响应不完整，这里直接使用 ai.call()
             response = self.holmes_service.ai.call(messages)
-            
+
+            llm_duration_ms = (time.time() - start_time) * 1000
+
+            # 记录 LLM 调用
+            if self.metrics:
+                self.metrics.record_llm_call("conclusion", llm_duration_ms)
+
+            logger.debug(f"LLM 报告生成完成 (耗时 {llm_duration_ms:.0f}ms)")
+
             if response and response.result:
                 return response.result
-            
+
             return self._format_fallback(question, layer_analysis, evidence_analysis, rca_analysis)
-        
+
         except Exception as e:
             logger.warning(f"LLM 生成失败，回退到模板: {e}")
             return self._format_fallback(question, layer_analysis, evidence_analysis, rca_analysis)

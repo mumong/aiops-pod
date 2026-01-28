@@ -15,11 +15,26 @@
 
 import time
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# 指标阈值配置（可从环境变量覆盖）
+# ============================================================================
+
+# MTTR 阈值（秒），默认 10 分钟
+MTTR_THRESHOLD_SECONDS = float(os.getenv("METRICS_MTTR_THRESHOLD", "600"))  # 600s = 10m
+
+# 根因准确率阈值，默认 80%
+ROOT_CAUSE_CONFIDENCE_THRESHOLD = float(os.getenv("METRICS_RCA_CONFIDENCE_THRESHOLD", "0.8"))
+
+# 证据完整率阈值，默认 90%
+EVIDENCE_COMPLETENESS_THRESHOLD = float(os.getenv("METRICS_EVIDENCE_THRESHOLD", "0.9"))
 
 
 @dataclass
@@ -30,17 +45,22 @@ class NodeMetrics:
     start_time: float = 0.0
     end_time: float = 0.0
     duration_ms: float = 0.0
+    _finished: bool = False  # 内部标记：是否已完成
     llm_calls: int = 0
     llm_duration_ms: float = 0.0
     tool_calls: int = 0
     tool_duration_ms: float = 0.0
     success: bool = True
     error: Optional[str] = None
-    
+
     def finish(self):
-        """标记节点完成，计算耗时"""
+        """标记节点完成，计算耗时（只执行一次）"""
+        if self._finished:
+            return  # 已完成，跳过
+
         self.end_time = time.time()
         self.duration_ms = (self.end_time - self.start_time) * 1000
+        self._finished = True
 
 
 @dataclass
@@ -70,7 +90,10 @@ class WorkflowMetrics:
     runbook_matched: bool = False
     runbook_id: Optional[str] = None
     root_cause_confidence: float = 0.0
-    
+
+    # 多场景指标
+    detected_scenarios_count: int = 0  # 检测到的场景总数
+
     # 最终状态
     success: bool = True
     errors: List[str] = field(default_factory=list)
@@ -86,14 +109,16 @@ class WorkflowMetrics:
         return node
     
     def finish_node(self, node_id: str, success: bool = True, error: str = None):
-        """完成节点执行记录"""
+        """完成节点执行记录（只处理未完成的节点）"""
         if node_id in self.nodes:
             node = self.nodes[node_id]
-            node.finish()
-            node.success = success
-            node.error = error
-            if not success and error:
-                self.errors.append(f"[{node_id}] {error}")
+            # 只处理未完成的节点，避免重复
+            if not node._finished:
+                node.finish()
+                node.success = success
+                node.error = error
+                if not success and error:
+                    self.errors.append(f"[{node_id}] {error}")
     
     def record_llm_call(self, node_id: str, duration_ms: float):
         """记录 LLM 调用"""
@@ -150,25 +175,25 @@ class WorkflowMetrics:
     
     @property
     def mttr_pass(self) -> bool:
-        """MTTR 是否达标 (< 10m = 600s)"""
-        return self.mttr_seconds < 600
-    
+        """MTTR 是否达标（使用配置阈值）"""
+        return self.mttr_seconds < MTTR_THRESHOLD_SECONDS
+
     @property
     def evidence_completeness(self) -> float:
         """证据完整率"""
         if self.evidence_planned == 0:
             return 0.0
         return self.evidence_collected / self.evidence_planned
-    
+
     @property
     def evidence_completeness_pass(self) -> bool:
-        """证据完整率是否达标 (> 90%)"""
-        return self.evidence_completeness > 0.9
-    
+        """证据完整率是否达标（使用配置阈值）"""
+        return self.evidence_completeness > EVIDENCE_COMPLETENESS_THRESHOLD
+
     @property
     def root_cause_accuracy_pass(self) -> bool:
-        """根因准确率是否达标 (>= 80%)"""
-        return self.root_cause_confidence >= 0.8
+        """根因准确率是否达标（使用配置阈值）"""
+        return self.root_cause_confidence >= ROOT_CAUSE_CONFIDENCE_THRESHOLD
     
     @property
     def runbook_coverage_pass(self) -> bool:
@@ -177,31 +202,36 @@ class WorkflowMetrics:
     
     def get_summary(self) -> Dict[str, Any]:
         """获取指标摘要"""
+        # 格式化阈值显示
+        mttr_threshold_str = f"< {MTTR_THRESHOLD_SECONDS // 60}m"
+        rca_threshold_str = f">= {int(ROOT_CAUSE_CONFIDENCE_THRESHOLD * 100)}%"
+        ev_threshold_str = f"> {int(EVIDENCE_COMPLETENESS_THRESHOLD * 100)}%"
+
         return {
             "run_id": self.run_id,
             "mttr": {
                 "value": self.mttr_formatted,
                 "seconds": self.mttr_seconds,
                 "pass": self.mttr_pass,
-                "threshold": "< 10m"
+                "threshold": mttr_threshold_str
             },
             "evidence_completeness": {
                 "value": f"{self.evidence_completeness:.0%}",
                 "collected": self.evidence_collected,
                 "planned": self.evidence_planned,
                 "pass": self.evidence_completeness_pass,
-                "threshold": "> 90%"
+                "threshold": ev_threshold_str
             },
             "root_cause_confidence": {
                 "value": f"{self.root_cause_confidence:.0%}",
                 "pass": self.root_cause_accuracy_pass,
-                "threshold": ">= 80%"
+                "threshold": rca_threshold_str
             },
             "runbook_coverage": {
                 "matched": self.runbook_matched,
                 "runbook_id": self.runbook_id,
                 "pass": self.runbook_coverage_pass,
-                "threshold": "> 90%"
+                "threshold": ev_threshold_str
             },
             "performance": {
                 "total_duration_ms": self.total_duration_ms,
@@ -231,33 +261,39 @@ class WorkflowMetrics:
         lines.append("## 📊 性能统计")
         lines.append("")
         
-        # 总耗时
+        # 计算节点总耗时（用于节点百分比计算）
+        total_nodes_duration_ms = sum(n.duration_ms for n in self.nodes.values())
+        total_llm_duration_ms = self.total_llm_duration_ms
+        total_tool_duration_ms = self.total_tool_duration_ms
+
+        # 格式化总耗时字符串
         total_s = self.total_duration_seconds
         if total_s < 60:
             total_str = f"{total_s:.1f}s"
+        elif total_s < 3600:
+            total_str = f"{total_s / 60:.1f}m"
         else:
-            minutes = int(total_s // 60)
-            seconds = total_s % 60
-            total_str = f"{minutes}m {seconds:.1f}s"
-        
-        lines.append("```")
+            total_str = f"{total_s / 3600:.1f}h"
+
         lines.append(f"├─ 总耗时: {total_str}")
-        
+
         # 各节点耗时
         for node_id, node in self.nodes.items():
             node_s = node.duration_ms / 1000
-            pct = (node.duration_ms / self.total_duration_ms * 100) if self.total_duration_ms > 0 else 0
+            # 节点百分比：使用节点总耗时作为分母
+            node_pct = (node.duration_ms / total_nodes_duration_ms * 100) if total_nodes_duration_ms > 0 else 0
             status = "✅" if node.success else "❌"
-            lines.append(f"├─ {node.node_name}: {node_s:.1f}s ({pct:.1f}%) {status}")
+            lines.append(f"├─ {node.node_name}: {node_s:.1f}s ({node_pct:.1f}%) {status}")
         
-        # LLM 统计
+        # LLM 统计（使用节点总耗时作为分母，更准确）
+        total_nodes_duration_ms = sum(n.duration_ms for n in self.nodes.values())
         llm_s = self.total_llm_duration_ms / 1000
-        llm_pct = (self.total_llm_duration_ms / self.total_duration_ms * 100) if self.total_duration_ms > 0 else 0
+        llm_pct = (self.total_llm_duration_ms / total_nodes_duration_ms * 100) if total_nodes_duration_ms > 0 else 0
         lines.append(f"├─ LLM 调用: {llm_s:.1f}s ({llm_pct:.1f}%) - {self.total_llm_calls} 次")
-        
+
         # 工具调用统计
         tool_s = self.total_tool_duration_ms / 1000
-        tool_pct = (self.total_tool_duration_ms / self.total_duration_ms * 100) if self.total_duration_ms > 0 else 0
+        tool_pct = (self.total_tool_duration_ms / total_nodes_duration_ms * 100) if total_nodes_duration_ms > 0 else 0
         lines.append(f"└─ 工具调用: {tool_s:.1f}s ({tool_pct:.1f}%) - {self.total_tool_calls} 次")
         lines.append("```")
         lines.append("")
@@ -271,26 +307,31 @@ class WorkflowMetrics:
         lines.append("")
         lines.append("| 指标 | 要求 | 实际 | 状态 |")
         lines.append("|------|------|------|------|")
-        
+
+        # 格式化阈值显示
+        mttr_threshold_str = f"< {MTTR_THRESHOLD_SECONDS // 60}m"
+        rca_threshold_str = f">= {int(ROOT_CAUSE_CONFIDENCE_THRESHOLD * 100)}%"
+        ev_threshold_str = f"> {int(EVIDENCE_COMPLETENESS_THRESHOLD * 100)}%"
+
         # MTTR
         mttr_status = "✅ 达标" if self.mttr_pass else "❌ 未达标"
-        lines.append(f"| **MTTR** | < 10m | {self.mttr_formatted} | {mttr_status} |")
-        
+        lines.append(f"| **MTTR** | {mttr_threshold_str} | {self.mttr_formatted} | {mttr_status} |")
+
         # 根因准确率
         rca_status = "✅ 达标" if self.root_cause_accuracy_pass else "⚠️ 待验证"
-        lines.append(f"| **根因置信度** | >= 80% | {self.root_cause_confidence:.0%} | {rca_status} |")
-        
+        lines.append(f"| **根因置信度** | {rca_threshold_str} | {self.root_cause_confidence:.0%} | {rca_status} |")
+
         # 证据完整率
         ev_status = "✅ 达标" if self.evidence_completeness_pass else "⚠️ 不足"
-        lines.append(f"| **证据完整率** | > 90% | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |")
-        
+        lines.append(f"| **证据完整率** | {ev_threshold_str} | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |")
+
         # Runbook 覆盖
         rb_status = "✅ 已匹配" if self.runbook_matched else "⚠️ 未匹配"
         rb_value = self.runbook_id if self.runbook_id else "-"
         lines.append(f"| **Runbook 覆盖** | 匹配 | {rb_value} | {rb_status} |")
-        
+
         lines.append("")
-        
+
         return "\n".join(lines)
 
 
