@@ -325,11 +325,6 @@ class WorkflowMetrics:
         ev_status = "✅ 达标" if self.evidence_completeness_pass else "⚠️ 不足"
         lines.append(f"| **证据完整率** | {ev_threshold_str} | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |")
 
-        # Runbook 覆盖
-        rb_status = "✅ 已匹配" if self.runbook_matched else "⚠️ 未匹配"
-        rb_value = self.runbook_id if self.runbook_id else "-"
-        lines.append(f"| **Runbook 覆盖** | 匹配 | {rb_value} | {rb_status} |")
-
         lines.append("")
 
         return "\n".join(lines)
