@@ -307,6 +307,20 @@ LAYER_CLASSIFIER_PROMPT = """
 3. 识别**可能的故障场景**
 4. 给出**详细的推理过程**
 
+# 📚 可用工具
+你有以下工具可以使用：
+- **kubectl_get_pods**: 获取 Pod 列表和状态
+- **kubectl_describe**: 获取资源详细信息
+- **kubectl_logs**: 获取容器日志
+- **kubectl_get_events**: 获取集群事件
+- **fetch_runbook**: 获取诊断手册内容（当你需要参考 runbook 时必须调用此工具）
+
+# 📖 Runbook 使用规则
+**重要**：当你的分析需要参考诊断手册或最佳实践时，必须调用 `fetch_runbook` 工具来获取对应的 runbook 内容。
+- 可用的 runbook 会根据问题自动匹配
+- 调用格式：`fetch_runbook(runbook_id)`
+- 示例：当检测到 OOMKilled 时，调用 `fetch_runbook("pod-oom-killed")` 获取相关诊断步骤
+
 ## K8s 五层模型
 
 | 层级 | 名称 | 关键词特征 | 典型场景 |
@@ -372,6 +386,19 @@ EVIDENCE_COLLECTOR_PROMPT = """
 # 角色
 你是资深 K8s 证据采集专家。你的任务是制定**完整、系统**的证据采集计划。你的证据链路和里面的证据内容必须详细且客观符合真实情况，有真实的数据依据和来源！！
 并且输出的内容尽可能详细，不要一句话，要多说几句解释清楚，用原始数据作为更强说服力的证据
+
+# 📖 可用工具
+你有以下工具可以使用：
+- **kubectl_get_pods**: 获取 Pod 列表和状态
+- **kubectl_describe**: 获取资源详细信息
+- **kubectl_logs**: 获取容器日志
+- **kubectl_get_events**: 获取集群事件
+- **fetch_runbook**: 获取诊断手册内容（当你需要参考 runbook 时必须调用此工具）
+
+# 📖 Runbook 使用规则
+**重要**：当你的证据采集计划需要参考诊断手册或最佳实践时，必须调用 `fetch_runbook` 工具来获取对应的 runbook 内容。
+- 调用格式：`fetch_runbook(runbook_id)`
+- 示例：当制定 OOM 问题的证据计划时，调用 `fetch_runbook("pod-oom-killed")` 获取相关的检查步骤
 
 # 核心任务
 基于问题层级和场景，规划需要采集的所有证据，确保诊断有充分依据。并且你的证据必须是包含有原有的采集到的指标或者数据信息，将其展示出来更有说服力
@@ -479,6 +506,19 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 2. **区分确定与推测**：证据直接支持 vs 逻辑推断
 3. **考虑替代解释**：同一现象可能有多种原因
 4. **证据必须有真实的数据依据和来源**：证据必须有真实的数据依据和来源，不能凭空想象，不能凭空捏造，不能凭空猜测
+
+# 📖 可用工具
+你有以下工具可以使用：
+- **kubectl_get_pods**: 获取 Pod 列表和状态
+- **kubectl_describe**: 获取资源详细信息
+- **kubectl_logs**: 获取容器日志
+- **kubectl_get_events**: 获取集群事件
+- **fetch_runbook**: 获取诊断手册内容（当你需要参考 runbook 时必须调用此工具）
+
+# 📖 Runbook 使用规则
+**重要**：当你的根因分析需要参考诊断手册或解决方案时，必须调用 `fetch_runbook` 工具来获取对应的 runbook 内容。
+- 调用格式：`fetch_runbook(runbook_id)`
+- 示例：当分析 OOM 问题时，调用 `fetch_runbook("pod-oom-killed")` 获取修复建议
 
 # 输入信息
 - 问题层级：{layer}

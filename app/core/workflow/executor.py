@@ -22,6 +22,7 @@ from app.core.workflow.metrics import (
     finish_workflow_metrics,
     get_current_metrics,
 )
+from app.core.holmes.log_listener import create_log_listener, HolmesLogListener
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,10 @@ class WorkflowExecutor:
             metrics.start_time = time.time()
 
         total_start = time.time()
-        
+
+        # 创建并附加日志监听器（用于捕获 HolmesGPT 内部的工具调用）
+        log_listener: Optional[HolmesLogListener] = create_log_listener()
+
         # 初始化状态
         initial_state: WorkflowState = {
             "question": question,
@@ -109,7 +113,7 @@ class WorkflowExecutor:
             "errors": [],
             "warnings": [],
         }
-        
+
         # 发出开始事件
         logger.info(f"🚀 工作流开始: run_id={run_id}")
         yield {
@@ -121,7 +125,7 @@ class WorkflowExecutor:
             "question": question,
             "timestamp": datetime.now().isoformat(),
         }
-        
+
         # 执行工作流（流式）
         completed_nodes = set()  # 已完成的节点
         current_nodes = set()   # 当前批次的节点
@@ -192,7 +196,20 @@ class WorkflowExecutor:
             
             # 更新指标
             self._update_metrics_from_state(metrics, final_state)
-            
+
+            # 从日志监听器提取 runbook 信息
+            runbook_summary = log_listener.get_runbook_summary()
+            if runbook_summary["matched"]:
+                metrics.runbook_matched = True
+                metrics.runbook_id = ", ".join(runbook_summary["runbook_ids"])
+                logger.info(f"   Runbook 使用: {metrics.runbook_id}")
+            else:
+                metrics.runbook_matched = False
+                metrics.runbook_id = None
+
+            # 分离日志监听器
+            log_listener.detach()
+
             # 完成指标记录
             finish_workflow_metrics()
             
@@ -238,6 +255,10 @@ class WorkflowExecutor:
             }
         
         except Exception as e:
+            # 分离日志监听器
+            if log_listener:
+                log_listener.detach()
+
             logger.error(f"❌ 工作流执行失败: {e}", exc_info=True)
             metrics.success = False
             metrics.errors.append(str(e))

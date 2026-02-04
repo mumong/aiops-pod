@@ -547,33 +547,20 @@ class HolmesService:
             yield emit("-" * 70)
             yield emit("📈 质量指标")
             yield emit("-" * 70)
-            
+
             mttr = metrics_data.get("mttr", {})
             evidence = metrics_data.get("evidence_completeness", {})
             rca = metrics_data.get("root_cause_confidence", {})
-            runbook = metrics_data.get("runbook_coverage", {})
-            
+
             mttr_pass = "✅" if mttr.get("pass") else "❌"
             evidence_pass = "✅" if evidence.get("pass") else "⚠️"
             rca_pass = "✅" if rca.get("pass") else "⚠️"
-            runbook_pass = "✅" if runbook.get("pass") else "⚠️"
-            
+
             yield emit(f"  MTTR:        {mttr.get('value', '?')} {mttr_pass} (要求 < 10m)")
             yield emit(f"  根因置信度: {rca.get('value', '?')} {rca_pass} (要求 >= 80%)")
             yield emit(f"  证据完整率: {evidence.get('value', '?')} {evidence_pass} (要求 > 90%)")
-
-            # 显示 Runbook 信息
-            if runbook.get('matched'):
-                runbook_id = runbook.get('id', '')
-                yield emit(f"  Runbook:    已匹配 {runbook_pass}")
-                if runbook_id:
-                    # 美化显示 runbook ID (去除.md后缀，用逗号分隔)
-                    runbook_names = [name.replace('.md', '') for name in runbook_id.split(', ')]
-                    yield emit(f"    使用的Runbook: {', '.join(runbook_names)}")
-            else:
-                yield emit(f"  Runbook:    未匹配 {runbook_pass}")
             yield emit("")
-        
+
         yield emit("=" * 70)
         yield emit("✅ 诊断完成!")
         yield emit("=" * 70)
