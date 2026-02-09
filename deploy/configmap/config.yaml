@@ -10,55 +10,62 @@ metadata:
 data:
   config.yaml: |
     # 内置工具集配置（Built-in Toolsets）
+    # 注意：启用过多 toolsets 会导致初始化变慢（Holmes 会对每个做后处理）
+    # 建议：优先使用 MCP 服务器，只启用必要的内置工具
     toolsets:
-      # ✅ 下面这些是从你的启动日志确认“已启用并可用”的内置 toolsets
-      #    这里显式写开关，方便你未来做多集群/权限控制时统一管理
-      helm/core:
-        enabled: true
-      kubernetes/core:
-        enabled: true
-      kubernetes/kube-prometheus-stack:
-        enabled: true
+      # 核心工具（必需）
       core_investigation:
-        enabled: true
-      internet:
-        enabled: true
-      connectivity_check:
-        enabled: true
-      bash:
         enabled: true
       runbook:
         enabled: true
-
+      bash:
+        enabled: false
+      
+      # K8s 工具（临时启用以确认不是 MCP 的问题）
+      kubernetes/core:
+        enabled: false
+      
+      # 其他工具（可选，按需启用）
+      helm/core:
+        enabled: false
+      kubernetes/kube-prometheus-stack:
+        enabled: false
+      internet:
+        enabled: false
+      connectivity_check:
+        enabled: false
       prometheus/metrics:
-        enabled: true
+        enabled: false  # 如需要再启用
         config:
           prometheus_url: "http://observability-prometheus.xnet.svc:9090"
-      docker/core:
-        # 容器内通常没有 docker daemon / socket，开启会导致 `docker version` 报 127
-        enabled: false
-      kubernetes/logs:
-        enabled: true
     
     # 第三方 MCP 服务器配置（Remote MCP Servers）
+    # 使用完整的 Kubernetes FQDN 确保 DNS 解析可靠
     mcp_servers:
       test_tool_server:
         description: "测试工具集临时输出 - 只有当用户需要测试的时候才运行"
         config:
-          url: "http://mcp-server-manager.mcp:8091/sse"
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8091/sse"
           mode: "sse"
         llm_instructions: "只有当用户需要测试临时输出的时候才运行这个工具。"
-        enabled: true
+        enabled: true  # 第一个测试
       
       elasticsearch:
         description: "Elasticsearch MCP 工具集 - 用于查询索引、搜索日志数据"
         config:
-          url: "http://mcp-server-manager.mcp:8088/sse"
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8088/sse"
           mode: "sse"
         enabled: true
       helmcharts:
         description: "Helm MCP 工具集 - 用于查询 Helm 资源"
         config:
-          url: "http://mcp-server-manager.mcp:8092/sse"
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8092/sse"
+          mode: "sse"
+        enabled: true
+      
+      k8s-mcp-service:
+        description: "K8s MCP 工具集 - 用于查询 K8s 资源"
+        config:
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8093/sse"
           mode: "sse"
         enabled: true

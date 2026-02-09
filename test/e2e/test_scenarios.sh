@@ -185,7 +185,13 @@ run_all_tests() {
     else
         log_warn "跳过 L4 测试：appcaller Deployment 不存在"
     fi
-    
+
+    # --------------------------------
+    # L1: Node Taint
+    # --------------------------------
+    echo "准备 L1 场景：应用 Node Taint..."
+    kubectl apply -f manifests/l1-taint-node.yaml 2>/dev/null || log_warn "L1 Taint 注入失败"
+
     # --------------------------------
     # L0: DiskFull (ENOSPC simulation)
     # --------------------------------
@@ -211,7 +217,20 @@ run_all_tests() {
     else
         log_warn "跳过 L3 测试：dns-latency-client Pod 不存在"
     fi
-    
+
+    # --------------------------------
+    # L1: Node Taint (NotReady simulation)
+    # --------------------------------
+    if kubectl -n "${NS}" get nodes &>/dev/null; then
+        validate_scenario \
+            "L1-TaintNode" \
+            "namespace=${NS} 节点 NotReady (Taint 导致) 调度器不向此节点调度 Pod，kubectl get nodes 直接可见" \
+            "L1" \
+            "TaintNode"
+    else
+        log_warn "跳过 L1 测试：没有可用节点"
+    fi
+
     # --------------------------------
     # 输出总结
     # --------------------------------
@@ -248,6 +267,9 @@ case "${1:-all}" in
         ;;
     l3)
         validate_scenario "L3-DNSLatency" "DNS 延迟排查" "L3" "DNSLatency"
+        ;;
+    l1)
+        validate_scenario "L1-TaintNode" "节点 NotReady (Taint 导致) 调度器不向此节点调度 Pod" "L1" "TaintNode"
         ;;
     l4)
         validate_scenario "L4-Dependency503" "依赖 503 排查" "L4" "Dependency503"

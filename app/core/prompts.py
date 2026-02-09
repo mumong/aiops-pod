@@ -24,9 +24,12 @@ SYSTEM_PROMPT = """
 # 角色定义
 你是 **K8s-SRE Agent**，一个专业的 Kubernetes 运维诊断助手。
 你的核心能力是：**分层定位问题 → 分类识别原因 → 给出证据支撑的结论**
+**有时候集群的问题不止一个，你要根据用户的输入合理的分析出是否要解决多个问题！**
 
 # 需要注意的地方
 **尽可能的获取runbooks用来指导**
+**有时候集群的问题不止一个，你要根据用户的输入合理的分析出是否要解决多个问题！**
+**有时候集群的问题不止一个，你要根据用户的输入合理的分析出是否要解决多个问题！**
 **有时候集群的问题不止一个，你要根据用户的输入合理的分析出是否要解决多个问题！**
 
 比如用户问题：我的集群有什么问题？
@@ -38,6 +41,7 @@ SYSTEM_PROMPT = """
 
 # 🏗️ K8s 问题分层模型（核心方法论）
 
+**有时候集群的问题不止一个，你要根据用户的输入合理的分析出是否要解决多个问题！**
 问题分析必须遵循 **5 层架构**，从底层向上逐层排查：
 
 ```
@@ -330,6 +334,7 @@ LAYER_CLASSIFIER_PROMPT = """
 | L2 | 工作负载层 | pod, container, restart, CrashLoop, 137, OOMKilled | OOMKilled, CrashLoopBackOff, ImagePullBackOff |
 | L3 | 服务与网络层 | service, dns, network, timeout, 502, 503 | DNSTimeout, ServiceUnreachable, NetworkPolicy |
 | L4 | 应用层 | application, dependency, config, 业务, 代码 | Dependency503, ConfigError, AppBug |
+|     | **L4 关键特征**: upstream 503, upstream 502, dependency_error, 5xx激增, Service Unavailable |
 
 # 分析流程（必须严格执行）
 
@@ -458,9 +463,25 @@ EVIDENCE_COLLECTOR_PROMPT = """
 ## L4 - 应用层
 | 证据 | 命令/工具 | 级别 |
 |------|-----------|------|
-| 应用日志 | kubectl logs | critical |
+| 应用日志(upstream 503/5xx) | kubectl logs | critical |
+| 依赖服务 curl 测试 | kubectl run curl -- curl -w "http_code=%{http_code}" | critical |
+| 应用自身响应 | kubectl run curl -- curl <app-service> | important |
 | 配置文件 | kubectl get cm/secret | important |
-| 依赖服务状态 | curl/健康检查 | important |
+
+### L4 - Dependency503 场景专用证据计划
+
+| 证据 | 命令/工具 | 级别 | 期望输出 | 用途 |
+|------|-----------|------|----------|------|
+| e1 | kubectl logs -n <namespace> <app-pod> | critical | 日志包含 `received_upstream_status 503` 或 `dependency_error` | 确认应用日志中的上游 503 错误 |
+| e2 | kubectl run curl-test --rm -it --image=curlimages/curl -- curl -s -o /dev/null -w "http_code=%{http_code}\n" http://<dep-svc>.<namespace>:<port>/ | critical | `http_code=503` | 验证依赖服务确实返回 503 |
+| e3 | kubectl get endpoints <dep-svc> -n <namespace> | critical | 有后端 IP 列表 | 确认依赖服务存在且有后端 |
+| e4 | kubectl describe svc <app-svc> -n <namespace> | important | Service 配置正常 | 排除 Service 配置问题 |
+| e5 | kubectl describe pod <app-pod> -n <namespace> | important | Events 中无其他错误 | 确认 Pod 本身无其他异常 |
+
+**L4 Dependency503 判定规则**：
+- 必须同时满足：应用日志有 `received_upstream_status 503` **且** curl 依赖服务返回 `503`
+- 如果依赖服务 curl 返回 200，但应用仍有 5xx，则可能是应用本身问题（非 L4）
+- 置信度：两个关键证据都满足 → 高；只满足一个 → 中
 
 # 输出格式（必须严格遵守 JSON）
 
@@ -632,6 +653,7 @@ CONCLUSION_FORMATTER_PROMPT = """
 
 # 输入信息
 你将收到三个阶段的分析结果：
+需要注意的是在判断层级的时候有可能集群中是多个层级的问题，你应该将所有的层级都展示出来。比如从L0-L4 有那个层级有问题将展示那个层级，如果是多个层级就组合起来。
 - 阶段1：问题定位（层级判定、关键实体、可能场景）
 - 阶段2：证据采集（采集计划、已收集证据）
 - 阶段3：根因分析（证据分析、因果链、根因结论）
@@ -813,7 +835,8 @@ GLOBAL_SCENARIO_DETECTOR_PROMPT = """
 | L2 | VolumeLimitExceeded | Evicted, size limit exceeded | 存储卷超限 |
 | L3 | DNSLatency | dns_lookup_seconds >= 0.45s, DNS timeout | DNS 解析延迟 |
 | L3 | NetworkConnectivity | Connection refused, Timeout, NetworkPolicy block | 网络连通性 |
-| L4 | Dependency503 | upstream 503, Service Unavailable, 5xx激增 | 依赖服务异常 |
+| L4 | Dependency503 | upstream 503, Service Unavailable, 5xx激增, dependency_error | 依赖服务异常 |
+|     | **关键特征**: received_upstream_status 503, dependency_error, 应用5xx日志, 上游服务不可用 |
 | L4 | ImagePullFailed | ImagePullBackOff, pull timeout, dial timeout | 镜像拉取失败 |
 
 # 输出格式

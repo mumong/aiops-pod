@@ -3,18 +3,23 @@ kind: Service
 metadata:
   name: dep503
   namespace: aiops-e2e
+  labels:
+    l4-scenario: dependency-503
 spec:
   selector:
     app: dep503
   ports:
-    - port: 8080
-      targetPort: 8080
+    - name: http
+      port: 80
+      targetPort: 80
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dep503
   namespace: aiops-e2e
+  labels:
+    l4-scenario: dependency-503
 spec:
   replicas: 1
   selector:
@@ -24,29 +29,57 @@ spec:
     metadata:
       labels:
         app: dep503
+        l4-scenario: dependency-503
     spec:
       containers:
         - name: dep
-          image: hashicorp/http-echo:1.0.0
-          args: ["-listen=:8080", "-code=503", "-text=dependency always 503"]
+          image: nginx:alpine
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "L4_DEPENDENCY_503_SERVICE: Starting - All requests will return 503"
+              echo "=========================="
+              echo "nginx config: all requests return 503"
+
+              cat >/etc/nginx/conf.d/return503.conf <<'EOF'
+              server {
+                listen 80;
+                location / {
+                  return 503;
+                  add_header X-L4-Fault-Injection dependency-503;
+                }
+              }
+              EOF
+
+              exec nginx -g "daemon off; error_log /dev/stderr alert; access_log /dev/stdout;"
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: appcaller
   namespace: aiops-e2e
+  labels:
+    l4-scenario: dependency-503
 spec:
   selector:
     app: appcaller
   ports:
-    - port: 8080
-      targetPort: 8080
+    - name: http
+      port: 80
+      targetPort: 80
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: appcaller
   namespace: aiops-e2e
+  labels:
+    l4-scenario: dependency-503
 spec:
   replicas: 1
   selector:
@@ -56,33 +89,35 @@ spec:
     metadata:
       labels:
         app: appcaller
+        l4-scenario: dependency-503
     spec:
       containers:
         - name: app
-          image: python:3.11-slim
-          ports:
-            - containerPort: 8080
-          env:
-            - name: DEP_URL
-              value: "http://dep503.aiops-e2e.svc.cluster.local:8080/"
-          command: ["python", "-c"]
+          image: curlimages/curl:latest
+          imagePullPolicy: Never
+          command: ["sh", "-c"]
           args:
             - |
-              from http.server import BaseHTTPRequestHandler, HTTPServer
-              import os, requests
-              DEP=os.environ["DEP_URL"]
-              class H(BaseHTTPRequestHandler):
-                def do_GET(self):
-                  try:
-                    r=requests.get(DEP, timeout=1.5)
-                    code=r.status_code
-                  except Exception as e:
-                    code=503
-                    print("dependency_error", repr(e), flush=True)
-                  if code != 200:
-                    print("received_upstream_status", code, "dep", DEP, flush=True)
-                    self.send_response(503); self.end_headers(); self.wfile.write(b"upstream 503")
-                  else:
-                    self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
-              HTTPServer(("0.0.0.0",8080),H).serve_forever()
+              echo "L4_DEPENDENCY_503_CLIENT: Starting - Continuous monitoring of dep503 service"
+              echo "=========================="
+
+              while true; do
+                TIMESTAMP="$(date -Iseconds)"
+                echo "--- L4_FAULT_TEST [$TIMESTAMP] ---"
+
+                RESULT="$(curl -s -o /dev/null -w '%{http_code}\n' --max-time 2 http://dep503.aiops-e2e.svc.cluster.local:80/ || echo 000)"
+                echo "L4_UPSTREAM_HTTP_CODE: ${RESULT}"
+
+                if [ "${RESULT}" = "503" ]; then
+                  echo "L4_DEPENDENCY_FAULT: DEP503 returning 503 - ISSUE CONFIRMED"
+                  echo "L4_FAULT_STATUS: ACTIVE"
+                  echo "=========================="
+                else
+                  echo "L4_DEPENDENCY_OK: DEP503 returned ${RESULT} - ISSUE RESOLVED"
+                  echo "L4_FAULT_STATUS: RESOLVED"
+                  echo "=========================="
+                fi
+
+                sleep 3
+              done
 

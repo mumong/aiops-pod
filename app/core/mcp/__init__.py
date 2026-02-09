@@ -14,6 +14,7 @@ from .manager import (
     shutdown_mcp_servers,
     shutdown_mcp_servers_sync,
 )
+from .mcp_patch import patch_mcp_toolset, unpatch_mcp_toolset
 
 __all__ = [
     "MCPServerInfo",
@@ -22,6 +23,8 @@ __all__ = [
     "auto_start_mcp_servers",
     "shutdown_mcp_servers",
     "shutdown_mcp_servers_sync",
+    "patch_mcp_toolset",
+    "unpatch_mcp_toolset",
 ]
 
 

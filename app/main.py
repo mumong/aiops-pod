@@ -77,7 +77,23 @@ async def lifespan(app: FastAPI):
     
     try:
         service = get_service()
-        service.initialize()
+        init_timeout = int(os.getenv("HOLMES_INIT_TIMEOUT_SECONDS", "0"))  # 默认不超时
+        
+        if init_timeout > 0:
+            # 有超时：异步初始化，到时间就继续
+            init_task = asyncio.create_task(asyncio.to_thread(service.initialize))
+            done, pending = await asyncio.wait({init_task}, timeout=init_timeout)
+            if pending:
+                logger.warning(
+                    "   ⚠️ HolmesGPT 初始化超时（%ss），先继续启动服务；初始化将在后台继续运行",
+                    init_timeout,
+                )
+                # 不取消任务，让它在后台继续
+        else:
+            # 无超时：同步等待初始化完成
+            logger.info("   📌 等待 HolmesGPT 完全初始化（无超时限制）...")
+            service.initialize()
+            logger.info("   ✅ HolmesGPT 初始化完成")
     except Exception as e:
         logger.error(f"   ❌ HolmesGPT 初始化失败: {e}", exc_info=True)
     

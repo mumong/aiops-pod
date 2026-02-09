@@ -5,6 +5,7 @@ HolmesGPT Service
 """
 import os
 import logging
+import threading
 from pathlib import Path
 from typing import Optional, Tuple, Any, Generator, Dict
 from datetime import datetime
@@ -24,8 +25,12 @@ from app.core.holmes.introspection import log_loaded_resources
 from app.core.holmes.query_stream import execute_query_stream_sse, execute_query_stream_text
 from app.core.holmes.config_loader import load_stream_output_flag, load_holmes_config_from_yaml
 from app.core.holmes.call_wrapper import call_with_stream
+from app.core.mcp.mcp_patch import patch_mcp_toolset
 
 logger = logging.getLogger(__name__)
+
+# 在导入后立即应用 MCP 补丁
+patch_mcp_toolset()
 
 
 class HolmesService:
@@ -39,6 +44,10 @@ class HolmesService:
         self.runbook_manager = RunbookManager()
         self.merged_catalog: Optional[RunbookCatalog] = None
         self.stream_output: bool = False  # 流式输出配置
+        self._init_lock = threading.Lock()
+        self._init_in_progress: bool = False
+        self._init_error: Optional[str] = None
+        self._init_started_at: Optional[datetime] = None
     
     def initialize(
         self,
@@ -62,74 +71,104 @@ class HolmesService:
         # 如果已经初始化，直接返回
         if self.config is not None and self.ai is not None:
             return self.config, self.ai
-        
-        logger.info("初始化 HolmesGPT 配置...")
-        
-        # 获取项目根目录
-        project_root = get_project_root()
-        
-        # 获取配置文件路径（自动检测环境）
-        if config_file is None:
-            config_file, env_name = get_config_file_path(project_root)
-            logger.info(f"🔧 运行环境: {env_name}")
-        
-        # 先读取流式输出配置（在 Config.load_from_file 之前，避免验证错误）
-        if config_file.exists():
-            self.stream_output = load_stream_output_flag(config_file, logger)
-        else:
-            self.stream_output = False
-        
-        # 确定使用的 API Key
-        final_api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not final_api_key:
-            raise ValueError(
-                "未提供 API Key，请通过参数或环境变量 DEEPSEEK_API_KEY/OPENAI_API_KEY 设置"
-            )
-        
-        # 确定使用的模型
-        # 优先级: 参数 > 环境变量 DEEPSEEK_MODEL > 默认值
-        env_model = os.getenv("DEEPSEEK_MODEL")
-        if env_model and not env_model.startswith("deepseek/"):
-            # LiteLLM 需要 deepseek/ 前缀
-            env_model = f"deepseek/{env_model}"
-        final_model = model or env_model or "deepseek/deepseek-chat"
-        
-        # 加载配置（需要先创建一个临时配置文件，移除 stream_output 字段）
-        if config_file.exists():
-            logger.info(f"从配置文件加载: {config_file}")
-            self.config = load_holmes_config_from_yaml(
-                config_file=config_file,
-                api_key=final_api_key,
-                model=final_model,
-                max_steps=max_steps,
-                logger=logger,
-            )
-        else:
-            logger.warning(f"配置文件不存在: {config_file}，使用默认配置")
-            self.config = Config(
-                api_key=final_api_key,
-                model=final_model,
-                max_steps=max_steps
-            )
-        
-        # 加载和合并 runbook catalogs
-        self._load_runbooks()
-        
-        # 创建 AI 实例
-        logger.info("创建 AI 实例...")
-        self.ai = self.config.create_console_toolcalling_llm()
-        
-        # 配置自定义 runbook 搜索路径
-        if self.runbook_manager.runbook_dir.exists():
-            self.runbook_manager.configure_search_path(self.ai)
-        
-        logger.info(f"✅ HolmesGPT 初始化完成，模型: {self.config.model}")
-        logger.info(f"📡 输出模式: {'流式输出 (stream)' if self.stream_output else '非流式输出 (invoke)'}")
-        
-        # 输出加载的资源信息
-        self._log_loaded_resources()
-        
-        return self.config, self.ai
+
+        with self._init_lock:
+            # 可能在等待锁期间已经初始化
+            if self.config is not None and self.ai is not None:
+                return self.config, self.ai
+
+            self._init_in_progress = True
+            self._init_error = None
+            self._init_started_at = datetime.now()
+
+            logger.info("初始化 HolmesGPT 配置...")
+
+            try:
+                # 获取项目根目录
+                project_root = get_project_root()
+
+                # 获取配置文件路径（自动检测环境）
+                if config_file is None:
+                    config_file, env_name = get_config_file_path(project_root)
+                    logger.info(f"🔧 运行环境: {env_name}")
+
+                # 先读取流式输出配置（在 Config.load_from_file 之前，避免验证错误）
+                if config_file.exists():
+                    self.stream_output = load_stream_output_flag(config_file, logger)
+                else:
+                    self.stream_output = False
+
+                # 确定使用的 API Key
+                final_api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
+                if not final_api_key:
+                    raise ValueError(
+                        "未提供 API Key，请通过参数或环境变量 DEEPSEEK_API_KEY/OPENAI_API_KEY 设置"
+                    )
+
+                # 确定使用的模型
+                # 优先级: 参数 > 环境变量 DEEPSEEK_MODEL > 默认值
+                env_model = os.getenv("DEEPSEEK_MODEL")
+                if env_model and not env_model.startswith("deepseek/"):
+                    # LiteLLM 需要 deepseek/ 前缀
+                    env_model = f"deepseek/{env_model}"
+                final_model = model or env_model or "deepseek/deepseek-chat"
+
+                # 加载配置（需要先创建一个临时配置文件，移除 stream_output 字段）
+                if config_file.exists():
+                    logger.info(f"从配置文件加载: {config_file}")
+                    self.config = load_holmes_config_from_yaml(
+                        config_file=config_file,
+                        api_key=final_api_key,
+                        model=final_model,
+                        max_steps=max_steps,
+                        logger=logger,
+                    )
+                else:
+                    logger.warning(f"配置文件不存在: {config_file}，使用默认配置")
+                    self.config = Config(
+                        api_key=final_api_key,
+                        model=final_model,
+                        max_steps=max_steps
+                    )
+
+                # 加载和合并 runbook catalogs
+                import time
+                step_start = time.time()
+                logger.info("🔄 加载 runbook catalogs...")
+                self._load_runbooks()
+                logger.info(f"   ✅ Runbook 加载完成 ({time.time() - step_start:.2f}s)")
+
+                # 创建 AI 实例
+                step_start = time.time()
+                logger.info("🔄 创建 AI 实例...")
+                logger.info("   📍 调用 config.create_console_toolcalling_llm()...")
+                
+                self.ai = self.config.create_console_toolcalling_llm()
+                
+                logger.info(f"   ✅ AI 实例创建完成 ({time.time() - step_start:.2f}s)")
+
+                # 配置自定义 runbook 搜索路径
+                step_start = time.time()
+                logger.info("🔄 配置 runbook 搜索路径...")
+                if self.runbook_manager.runbook_dir.exists():
+                    self.runbook_manager.configure_search_path(self.ai)
+                logger.info(f"   ✅ 搜索路径配置完成 ({time.time() - step_start:.2f}s)")
+
+                logger.info(f"✅ HolmesGPT 初始化完成，模型: {self.config.model}")
+                logger.info(f"📡 输出模式: {'流式输出 (stream)' if self.stream_output else '非流式输出 (invoke)'}")
+
+                # 输出加载的资源信息
+                step_start = time.time()
+                logger.info("🔄 输出资源信息...")
+                self._log_loaded_resources()
+                logger.info(f"   ✅ 资源信息输出完成 ({time.time() - step_start:.2f}s)")
+
+                return self.config, self.ai
+            except Exception as e:
+                self._init_error = str(e)
+                raise
+            finally:
+                self._init_in_progress = False
     
     def _call_with_stream(self, messages: list) -> Any:
         """兼容层：内部委托给 app.core.holmes.call_wrapper.call_with_stream"""
@@ -183,6 +222,27 @@ class HolmesService:
             
             # 初始化（如果还未初始化）
             self.initialize(api_key=api_key, model=model, max_steps=max_steps)
+            
+            # 等待初始化完成（最多60秒）
+            import time
+            max_wait = 60
+            waited = 0
+            while (self.config is None or self.ai is None) and waited < max_wait:
+                if waited == 0:
+                    logger.info("⏳ 等待 HolmesGPT 初始化完成...")
+                time.sleep(1)
+                waited += 1
+            
+            if self.config is None or self.ai is None:
+                return {
+                    "success": False,
+                    "error": "HolmesGPT 初始化超时或失败",
+                    "execution_time": (datetime.now() - start_time).total_seconds(),
+                    "timestamp": datetime.now().isoformat()
+                }
+            
+            if waited > 0:
+                logger.info(f"✅ 初始化完成（等待了 {waited}s）")
             
             # 使用系统提示词
             final_system_prompt = system_prompt or SYSTEM_PROMPT
@@ -265,6 +325,29 @@ class HolmesService:
         Yields:
             根据 output_format 返回纯文本或 SSE 格式的事件字符串
         """
+        # 等待初始化完成（最多60秒）
+        import time
+        max_wait = 60
+        waited = 0
+        while (self.config is None or self.ai is None) and waited < max_wait:
+            if waited == 0:
+                logger.info("⏳ 等待 HolmesGPT 初始化完成...")
+            time.sleep(1)
+            waited += 1
+        
+        if self.config is None or self.ai is None:
+            error_msg = "HolmesGPT 初始化超时或失败"
+            logger.error(error_msg)
+            if output_format == "text":
+                yield f"❌ {error_msg}\n"
+            else:
+                from app.core.holmes.streaming import create_sse_message_cn
+                yield create_sse_message_cn("error", {"error": error_msg})
+            return
+        
+        if waited > 0:
+            logger.info(f"✅ 初始化完成（等待了 {waited}s）")
+        
         # 检查是否启用工作流模式
         # 配置方式: 在 deploy/secrets/core.yaml 中设置 USE_WORKFLOW: "true"
         use_workflow = os.getenv("USE_WORKFLOW", "false").lower() in ("true", "1", "yes")
@@ -673,18 +756,32 @@ class HolmesService:
     
     def health_check(self) -> dict:
         """健康检查"""
-        try:
-            self.initialize()
+        if self.config is not None and self.ai is not None:
             return {
                 "status": "healthy",
-                "config_loaded": self.config is not None,
-                "ai_initialized": self.ai is not None
+                "config_loaded": True,
+                "ai_initialized": True
             }
-        except Exception as e:
+
+        if self._init_in_progress:
+            return {
+                "status": "initializing",
+                "config_loaded": self.config is not None,
+                "ai_initialized": self.ai is not None,
+                "started_at": self._init_started_at.isoformat() if self._init_started_at else None,
+            }
+
+        if self._init_error:
             return {
                 "status": "unhealthy",
-                "error": str(e)
+                "error": self._init_error
             }
+
+        return {
+            "status": "uninitialized",
+            "config_loaded": self.config is not None,
+            "ai_initialized": self.ai is not None
+        }
 
 
 # 全局服务实例（单例模式）

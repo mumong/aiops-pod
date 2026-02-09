@@ -74,8 +74,19 @@ def log_loaded_resources(ai: Any, merged_catalog: Optional[RunbookCatalog], logg
             logger.info(f"🌐 MCP 服务器 ({len(enabled_mcp)} 个已连接):")
             for toolset in enabled_mcp:
                 tool_count = len(toolset.tools) if hasattr(toolset, "tools") else 0
-                status_icon = "✅" if getattr(getattr(toolset, "status", None), "value", "") == "enabled" else "❌"
+                status_value = getattr(getattr(toolset, "status", None), "value", "")
+                status_icon = "✅" if status_value == "enabled" else "❌"
+                
+                # 详细调试信息
                 logger.info(f"   {status_icon} {toolset.name} ({tool_count} 个工具)")
+                logger.info(f"      - 状态: {status_value}")
+                logger.info(f"      - 启用: {getattr(toolset, 'enabled', False)}")
+                logger.info(f"      - 配置: {getattr(toolset, '_mcp_config', None)}")
+                logger.info(f"      - 工具列表: {[t.name for t in toolset.tools] if hasattr(toolset, 'tools') and toolset.tools else '[]'}")
+                
+                # 如果有错误信息，输出
+                if hasattr(toolset, "error") and toolset.error:
+                    logger.error(f"      - 错误: {toolset.error}")
         else:
             logger.info("🌐 MCP 服务器: 无已启用的服务器")
     else:
