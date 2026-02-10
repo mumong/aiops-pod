@@ -10,32 +10,35 @@ metadata:
 data:
   config.yaml: |
     # 内置工具集配置（Built-in Toolsets）
-    # 注意：启用过多 toolsets 会导致初始化变慢（Holmes 会对每个做后处理）
-    # 建议：优先使用 MCP 服务器，只启用必要的内置工具
+    # 每个 toolset 下的工具列表见下方注释，便于学习与排查
     toolsets:
-      # 核心工具（必需）
+      # 核心：任务分解与规划 | 工具: TodoWrite
       core_investigation:
         enabled: true
+      # 核心：Runbook 知识库 | 工具: fetch_runbook, runbook
       runbook:
         enabled: true
+      # Bash 执行（有安全风险，按需启用）| 工具: run_bash_command, kubectl_run_image
       bash:
         enabled: false
-      
-      # K8s 工具（临时启用以确认不是 MCP 的问题）
+      # K8s 只读：get/describe/events 等 | 工具: kubectl_describe, kubectl_get_by_name, kubectl_get_by_kind_in_namespace, kubectl_get_by_kind_in_cluster, kubectl_find_resource, kubectl_get_yaml, kubectl_events, kubernetes_jq_query, kubernetes_tabular_query, kubernetes_count, kubectl_top_pods, kubectl_top_nodes, get_prometheus_target, kubectl_lineage_children, kubectl_lineage_parents
       kubernetes/core:
         enabled: false
-      
-      # 其他工具（可选，按需启用）
+      # Helm 只读 | 工具: helm_list, helm_values, helm_status, helm_history, helm_manifest, helm_hooks, helm_chart, helm_notes
       helm/core:
         enabled: false
+      # kube-prometheus-stack 相关 | 工具: get_prometheus_target
       kubernetes/kube-prometheus-stack:
         enabled: false
+      # 网页抓取 | 工具: fetch_webpage, internet
       internet:
         enabled: false
+      # TCP 连通性检查 | 工具: tcp_check
       connectivity_check:
         enabled: false
+      # Prometheus 查询 | 工具: list_prometheus_rules, get_metric_names, get_label_values, get_all_labels, get_series, get_metric_metadata, execute_prometheus_instant_query, execute_prometheus_range_query
       prometheus/metrics:
-        enabled: false  # 如需要再启用
+        enabled: false
         config:
           prometheus_url: "http://observability-prometheus.xnet.svc:9090"
     
@@ -55,7 +58,7 @@ data:
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8088/sse"
           mode: "sse"
-        enabled: true
+        enabled: false
       helmcharts:
         description: "Helm MCP 工具集 - 用于查询 Helm 资源"
         config:
@@ -67,5 +70,33 @@ data:
         description: "K8s MCP 工具集 - 用于查询 K8s 资源"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8093/sse"
+          mode: "sse"
+        enabled: true
+
+      bash_tool:
+        description: "bash的mcp工具，用于执行bash命令"
+        config:
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8094/sse"
+          mode: "sse"
+        enabled: true
+
+      prometheus_tool:
+        description: "prometheus的mcp工具，用于查询prometheus资源"      
+        config:
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8095/sse"
+          mode: "sse"
+        enabled: true
+
+      internete:
+        description: "internet的mcp工具，用于查询internet资源"
+        config:
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8096/sse"
+          mode: "sse"
+        enabled: true
+
+      connectivity_check_tool:
+        description: "connectivity_check的mcp工具，用于查询connectivity_check资源"
+        config:
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8097/sse"
           mode: "sse"
         enabled: true
