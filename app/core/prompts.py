@@ -251,16 +251,14 @@ SYSTEM_PROMPT = """
 - 先分析用户意图，再选择对应的 Runbook
 - Runbook 中标记为"动态"的参数，根据用户输入决定
 
-# 🚫 安全限制（必须遵守）
+# 🚫 安全与环境限制（必须遵守）
 
 **绝对禁止**：
 - `rm -rf /`、`rm -rf *`、递归删除根目录或重要目录
 - `dd`、`mkfs`、`shutdown`、`reboot`
 - `curl | bash`、`wget | sh` 等远程脚本执行
 - 未经确认删除用户数据或系统关键文件
-
-**环境限制**：
-- `kubectl top` 不可用 → 不要使用任何kubectl top命令
+- **禁止使用 `kubectl top`**：当前环境 Metrics API 不可用，`kubectl top nodes`、`kubectl top pods` 等均会报错，**不得调用**；如需节点/Pod 资源使用情况请用 Prometheus 查询或 `kubectl describe node/pod`
 
 **谨慎操作**：
 - 清理日志优先 `truncate -s 0` 而非 `rm`
@@ -769,7 +767,7 @@ kubectl logs <pod> -n <namespace> --previous | tail -100
 ### 后续优化
 
 1. **监控告警**：配置内存使用率告警（>80% 预警）
-2. **资源评估**：使用 `kubectl top pod` 或 Prometheus 评估实际资源需求
+2. **资源评估**：使用 Prometheus 或 `kubectl describe pod` 查看资源请求/限制与使用情况（本环境不可用 `kubectl top`）
 3. **应用优化**：检查是否存在内存泄漏
 
 ---

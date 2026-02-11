@@ -26,11 +26,14 @@ from app.core.holmes.query_stream import execute_query_stream_sse, execute_query
 from app.core.holmes.config_loader import load_stream_output_flag, load_holmes_config_from_yaml
 from app.core.holmes.call_wrapper import call_with_stream
 from app.core.mcp.mcp_patch import patch_mcp_toolset
+from app.core.holmes.tool_logging_patch import apply_tool_result_logging_patch
 
 logger = logging.getLogger(__name__)
 
 # 在导入后立即应用 MCP 补丁
 patch_mcp_toolset()
+# 使每次工具调用的输出与错误写入 app 日志，便于调试 MCP
+apply_tool_result_logging_patch()
 
 
 class HolmesService:

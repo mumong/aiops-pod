@@ -151,15 +151,15 @@ def iter_internal_events(
             # 额外输出一条日志，方便排障时查看每次工具调用的结果 / 错误
             try:
                 preview_for_log = (preview or "").replace("\n", " ")
-                if len(preview_for_log) > 300:
-                    preview_for_log = preview_for_log[:300] + "... (已截断)"
+                if len(preview_for_log) > 500:
+                    preview_for_log = preview_for_log[:500] + "... (已截断)"
                 status_icon = "✅" if status == "success" and not error_str else "❌"
                 logger.info(
                     "🔧 工具调用结果: %s %s | 状态: %s | 耗时: %s | 错误: %s | 结果预览: %s",
                     status_icon,
                     tool_name,
                     status,
-                    f"{duration_s:.3f}s" if isinstance(duration_s, (int, float, float)) else "-",
+                    f"{duration_s:.3f}s" if isinstance(duration_s, (int, float)) else "-",
                     str(error_str) if error_str else "无",
                     preview_for_log or "<空结果>",
                 )
