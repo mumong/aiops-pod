@@ -271,25 +271,49 @@ class HolmesService:
             else:
                 response = self.ai.call(messages)
             
-            # 提取工具调用信息
+            # 提取工具调用信息，并输出调试日志（便于排障）
             tool_calls = []
-            if response and hasattr(response, 'tool_calls') and response.tool_calls:
-                if isinstance(response.tool_calls, list) and len(response.tool_calls) > 0:
-                    if isinstance(response.tool_calls[0], dict):
-                        tool_calls = response.tool_calls
+            if response and hasattr(response, "tool_calls") and response.tool_calls:
+                raw_tool_calls = response.tool_calls
+                if isinstance(raw_tool_calls, list) and raw_tool_calls:
+                    if isinstance(raw_tool_calls[0], dict):
+                        tool_calls = raw_tool_calls  # 已经是 dict 列表
                     else:
-                        for tool in response.tool_calls:
-                            tool_calls.append({
-                                "tool_name": tool.tool_name,
-                                "result": str(tool.result) if hasattr(tool, 'result') else None,
-                                "error": str(tool.error) if hasattr(tool, 'error') and tool.error else None
-                            })
+                        for tool in raw_tool_calls:
+                            tool_calls.append(
+                                {
+                                    "tool_name": getattr(tool, "tool_name", getattr(tool, "name", None)),
+                                    "result": str(getattr(tool, "result", None)) if hasattr(tool, "result") else None,
+                                    "error": str(getattr(tool, "error", None))
+                                    if hasattr(tool, "error") and getattr(tool, "error", None)
+                                    else None,
+                                }
+                            )
+
+            # 日志中打印每一次工具调用的结果预览和错误，方便排障
+            if tool_calls:
+                logger.info(f"🔧 本次查询共调用 {len(tool_calls)} 个工具（同步模式）:")
+                for idx, tc in enumerate(tool_calls, start=1):
+                    name = tc.get("tool_name") or tc.get("name") or f"tool_{idx}"
+                    result_text = tc.get("result") or ""
+                    error_text = tc.get("error") or ""
+
+                    preview = result_text[:500].replace("\n", " ") if result_text else ""
+                    logger.info(f"   #{idx} 工具: {name}")
+                    if preview:
+                        logger.info(f"      📄 结果预览: {preview}{'... (已截断)' if len(result_text) > 500 else ''}")
+                    else:
+                        logger.info("      📄 结果预览: <空结果>")
+
+                    if error_text:
+                        logger.error(f"      ⚠️ 错误: {error_text}")
             
             execution_time = (datetime.now() - start_time).total_seconds()
             
             return {
                 "success": True,
                 "result": response.result if response else None,
+                "tool_calls": tool_calls,
             }
             
         except Exception as e:

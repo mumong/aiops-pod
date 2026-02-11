@@ -11,6 +11,7 @@ Holmes StreamEvents -> 统一内部事件（schema）映射层
 from __future__ import annotations
 
 import time
+import logging
 from datetime import datetime
 from typing import Any, Dict, Generator, Optional, List
 
@@ -25,6 +26,9 @@ from app.core.holmes.event_schema import (
     select_final_answer,
 )
 from app.core.skills import evaluate_deterministic_decision, format_decision_markdown
+
+
+logger = logging.getLogger(__name__)
 
 
 def iter_internal_events(
@@ -144,6 +148,24 @@ def iter_internal_events(
                 },
             )
             internal_events.append(ev_tool_result)
+            # 额外输出一条日志，方便排障时查看每次工具调用的结果 / 错误
+            try:
+                preview_for_log = (preview or "").replace("\n", " ")
+                if len(preview_for_log) > 300:
+                    preview_for_log = preview_for_log[:300] + "... (已截断)"
+                status_icon = "✅" if status == "success" and not error_str else "❌"
+                logger.info(
+                    "🔧 工具调用结果: %s %s | 状态: %s | 耗时: %s | 错误: %s | 结果预览: %s",
+                    status_icon,
+                    tool_name,
+                    status,
+                    f"{duration_s:.3f}s" if isinstance(duration_s, (int, float, float)) else "-",
+                    str(error_str) if error_str else "无",
+                    preview_for_log or "<空结果>",
+                )
+            except Exception:
+                # 日志打印绝不能影响主流程
+                pass
             yield ev_tool_result
 
             current_tool_start = None
