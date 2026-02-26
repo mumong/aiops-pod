@@ -15,6 +15,7 @@
 
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
@@ -24,6 +25,20 @@ from app.core.prompts import CONCLUSION_FORMATTER_PROMPT
 from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
+
+# 模型单次输出上限：仅当 API 传入的 conclusion_max_tokens 超过此值时才使用此值，否则完全按传入参数。
+# 可通过环境变量 CONCLUSION_MAX_TOKENS_CAP 覆盖（例如换用支持更大输出的模型时设为 32768），默认 8192（DeepSeek）。
+def _get_conclusion_max_tokens_cap() -> int:
+    try:
+        v = os.environ.get("CONCLUSION_MAX_TOKENS_CAP", "")
+        if v and v.isdigit():
+            return int(v)
+    except Exception:
+        pass
+    return 8192
+
+
+CONCLUSION_MAX_TOKENS_CAP = _get_conclusion_max_tokens_cap()
 
 
 class ConclusionFormatterNode(WorkflowNode):
@@ -89,7 +104,8 @@ class ConclusionFormatterNode(WorkflowNode):
                     question=question,
                     layer_analysis=layer_analysis,
                     evidence_analysis=evidence_analysis,
-                    rca_analysis=rca_analysis
+                    rca_analysis=rca_analysis,
+                    conclusion_max_tokens=state.get("conclusion_max_tokens"),
                 )
             else:
                 # 回退到模板格式化
@@ -132,10 +148,18 @@ class ConclusionFormatterNode(WorkflowNode):
         question: str,
         layer_analysis: str,
         evidence_analysis: str,
-        rca_analysis: str
+        rca_analysis: str,
+        conclusion_max_tokens: Optional[int] = None,
     ) -> str:
         """使用 LLM 生成最终报告（使用和 HolmesService 相同的方式）"""
         import time
+
+        # 完全由你的参数控制；只有当你传的值超过「模型/环境配置的上限」时才用上限，避免 API 报错
+        cap = _get_conclusion_max_tokens_cap()
+        requested = conclusion_max_tokens if conclusion_max_tokens is not None else cap
+        max_tokens = min(requested, cap) if requested > cap else requested
+        if requested > cap:
+            logger.info("conclusion_max_tokens=%d 超过当前上限 %d，已使用 %d", requested, cap, max_tokens)
 
         try:
             start_time = time.time()
@@ -162,26 +186,22 @@ class ConclusionFormatterNode(WorkflowNode):
 """
 
             # 构建消息（禁用工具调用，确保直接返回文本结果）
-            # 结论节点只需要生成报告，不需要调用工具
             messages = [
                 {"role": "system", "content": CONCLUSION_FORMATTER_PROMPT},
                 {"role": "user", "content": user_message},
             ]
 
-            # 调用 LLM（使用非流式调用以确保获取完整响应）
-            # 注意：不使用 build_initial_ask_messages，避免触发工具调用
-            # 直接使用 llm.completion()，这样可以完全控制不使用工具
             from litellm import completion
             response_text = completion(
                 model=self.holmes_service.ai.llm.model,
                 messages=messages,
                 temperature=0.3,
+                max_tokens=max_tokens,
             )
             content = response_text.get("choices", [{}])[0].get("message", {}).get("content", "")
 
             llm_duration_ms = (time.time() - start_time) * 1000
 
-            # 记录 LLM 调用
             if self.metrics:
                 self.metrics.record_llm_call("conclusion", llm_duration_ms)
 
@@ -189,17 +209,6 @@ class ConclusionFormatterNode(WorkflowNode):
 
             if content:
                 return content
-
-            llm_duration_ms = (time.time() - start_time) * 1000
-
-            # 记录 LLM 调用
-            if self.metrics:
-                self.metrics.record_llm_call("conclusion", llm_duration_ms)
-
-            logger.debug(f"LLM 报告生成完成 (耗时 {llm_duration_ms:.0f}ms)")
-
-            if response and response.result:
-                return response.result
 
             return self._format_fallback(question, layer_analysis, evidence_analysis, rca_analysis)
 
