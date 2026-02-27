@@ -133,8 +133,8 @@ class EvidenceCollectorNode(WorkflowNode):
                 "tool_call_count": len(tool_results),
             })
 
-            # 同步写入通用节点分析视图
-            node_analyses = new_state.get("node_analyses") or {}
+            # 同步写入通用节点分析视图（从当前 state 累积，避免覆盖前一节点）
+            node_analyses = dict(state.get("node_analyses") or {})
             node_analyses[self.node_id] = evidence_analysis_text
             new_state["node_analyses"] = node_analyses
 
