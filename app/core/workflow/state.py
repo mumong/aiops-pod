@@ -56,6 +56,10 @@ class WorkflowState(TypedDict, total=False):
     errors: List[str]                    # 错误列表
     warnings: List[str]                  # 警告列表
 
+    # ========== 通用节点分析视图 ==========
+    # key 为节点 ID（如 "layer"、"evidence"、"rca" 等），value 为该节点的完整分析文本（JSON 字符串或 Markdown 文本）
+    node_analyses: Optional[Dict[str, str]]
+
     # ========== 多场景模式新增字段 ==========
     # 全局场景检测结果
     multi_scenario_decisions: Optional[Dict[str, Any]]  # 多场景输出对象

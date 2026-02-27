@@ -16,6 +16,7 @@ from typing import Generator, Dict, Any, Optional
 
 from app.core.workflow.state import WorkflowState
 from app.core.workflow.graph import build_diagnosis_workflow
+from app.core.workflow.node_registry import get_display_name
 from app.core.workflow.metrics import (
     WorkflowMetrics,
     start_workflow_metrics,
@@ -112,6 +113,7 @@ class WorkflowExecutor:
             "current_node": None,
             "errors": [],
             "warnings": [],
+            "node_analyses": {},
         }
 
         # 发出开始事件
@@ -276,27 +278,18 @@ class WorkflowExecutor:
             }
     
     def _get_node_display_name(self, node_id: str) -> str:
-        """获取节点显示名称"""
-        name_map = {
-            "layer": "问题定位",
-            "evidence": "证据链采集",
-            "rca": "根因分析",
-            "conclusion": "汇总总结",
-        }
-        return name_map.get(node_id, node_id)
+        """从注册表获取节点显示名，未注册则返回 node_id"""
+        return get_display_name(node_id)
     
     def _extract_state_snapshot(
         self,
         state: WorkflowState,
         node_name: str
     ) -> Dict[str, Any]:
-        """提取状态快照（用于调试和日志）
-
-        设计：
-        - 包含完整的分析 JSON (layer_analysis, evidence_analysis, rca_analysis)
-        - 用于 service.py 中收集并显示所有节点的完整输出
-        """
-        snapshot = {}
+        """提取状态快照；优先使用注册表对应节点的 analysis_key，并统一带上 analysis 供通用消费"""
+        snapshot: Dict[str, Any] = {}
+        node_analyses = state.get("node_analyses") or {}
+        analysis_text = node_analyses.get(node_name, "")
 
         if node_name == "layer":
             snapshot = {
@@ -335,7 +328,11 @@ class WorkflowExecutor:
                 "conclusion": state.get("conclusion", ""),
                 "conclusion_formatted": state.get("conclusion_formatted", ""),
             }
+        else:
+            snapshot = {"node_id": node_name, "analysis": analysis_text}
 
+        if analysis_text and "analysis" not in snapshot:
+            snapshot["analysis"] = analysis_text
         return snapshot
     
     def _format_node_summary(

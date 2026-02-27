@@ -25,7 +25,7 @@ from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
 from app.core.skills.evidence import EvidenceExtractor, EVIDENCE_SPECS
-from app.core.prompts import EVIDENCE_COLLECTOR_PROMPT
+from app.core.prompts import get_workflow_prompt
 from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
@@ -118,18 +118,25 @@ class EvidenceCollectorNode(WorkflowNode):
             # 5. 更新 metrics（记录 LLM 调用和工具调用次数）
             self._update_metrics(evidence_plan, tool_results)
 
+            evidence_analysis_text = json.dumps({
+                "evidence_plan": evidence_plan,
+                "tool_results": [r.get("summary", "") for r in tool_results],
+                "collection_summary": f"计划 {len(evidence_plan)} 项，实际采集 {sum(1 for e in evidence_items if e.collected)} 项"
+            }, ensure_ascii=False)
+
             new_state.update({
                 "evidence_items": evidence_items,
-                "evidence_analysis": json.dumps({
-                    "evidence_plan": evidence_plan,
-                    "tool_results": [r.get("summary", "") for r in tool_results],
-                    "collection_summary": f"计划 {len(evidence_plan)} 项，实际采集 {sum(1 for e in evidence_items if e.collected)} 项"
-                }, ensure_ascii=False),
+                "evidence_analysis": evidence_analysis_text,
                 "evidence_completeness": completeness,
                 "tool_results": tool_results,
                 "llm_calls": 1,  # 规划阶段调用了 1 次 LLM
                 "tool_call_count": len(tool_results),
             })
+
+            # 同步写入通用节点分析视图
+            node_analyses = new_state.get("node_analyses") or {}
+            node_analyses[self.node_id] = evidence_analysis_text
+            new_state["node_analyses"] = node_analyses
 
             collected = sum(1 for e in evidence_items if e.collected)
             logger.info(f"✅ 证据采集完成: {collected}/{len(evidence_items)} 项, 完整度 {completeness:.0%}")
@@ -187,7 +194,8 @@ class EvidenceCollectorNode(WorkflowNode):
                 ])
 
             # 构建完整的 system prompt
-            system_prompt = EVIDENCE_COLLECTOR_PROMPT.format(
+            base_prompt = get_workflow_prompt(self.node_id)
+            system_prompt = base_prompt.format(
                 layer=layer_str,
                 possible_scenarios=scenarios_str
             )

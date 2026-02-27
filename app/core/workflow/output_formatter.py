@@ -193,7 +193,7 @@ class WorkflowOutputFormatter:
         yield from self._format_footer()
 
     def _handle_node_complete(self, event: Dict[str, Any]):
-        """处理节点完成事件"""
+        """处理节点完成事件；从 snapshot 通用字段 analysis 或兼容字段取该节点分析"""
         node_id = event.get("node", "")
         node_name = event.get("node_name", event.get("node", "?"))
         duration = event.get("duration_seconds", 0)
@@ -202,14 +202,24 @@ class WorkflowOutputFormatter:
         yield self._emit(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
         yield self._emit("")
 
-        # 只在需要显示中间节点时保存
         if self.show_intermediate:
-            if node_id == "layer":
-                self.ctx.node_outputs.layer = snapshot.get("layer_analysis", "")
-            elif node_id == "evidence":
-                self.ctx.node_outputs.evidence = snapshot.get("evidence_analysis", "")
-            elif node_id == "rca":
-                self.ctx.node_outputs.rca = snapshot.get("rca_analysis", "")
+            if self.ctx.node_outputs is None:
+                self.ctx.node_outputs = NodeOutputs()
+            analysis = snapshot.get("analysis")
+            if analysis is None:
+                analysis = (
+                    snapshot.get("layer_analysis")
+                    or snapshot.get("evidence_analysis")
+                    or snapshot.get("rca_analysis")
+                    or ""
+                )
+            if analysis:
+                if node_id == "layer":
+                    self.ctx.node_outputs.layer = analysis
+                elif node_id == "evidence":
+                    self.ctx.node_outputs.evidence = analysis
+                elif node_id == "rca":
+                    self.ctx.node_outputs.rca = analysis
 
 
 def format_workflow_text(events: list, question: str, show_intermediate: bool = True) -> Generator[str, None, None]:

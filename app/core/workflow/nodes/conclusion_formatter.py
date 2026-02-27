@@ -2,13 +2,13 @@
 节点4：汇总总结
 
 职责：
-- 整合前3个节点的 LLM 分析结果
+- 整合前置节点的 LLM 分析结果（通过注册表 + node_analyses 动态收集）
 - 调用 LLM 生成最终结构化报告
 - 输出：conclusion, conclusion_formatted
 
 设计：
 - 有自己的专用 prompt
-- 基于前3个节点的输出进行总结和扩展
+- 基于注册表中 conclusion 之前的所有节点输出进行总结
 - 使用和 HolmesService 相同的调用方式，支持 runbooks 和 tools
 - 输出符合标准模板的完整报告
 """
@@ -16,12 +16,12 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem, Confidence
-from app.core.prompts import CONCLUSION_FORMATTER_PROMPT
+from app.core.prompts import get_workflow_prompt
 from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class ConclusionFormatterNode(WorkflowNode):
     """
     汇总总结节点
 
-    整合前3个节点的分析结果，生成最终报告
+    整合注册表中本节点之前的所有分析节点的结果，生成最终报告
     """
 
     def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
@@ -76,7 +76,7 @@ class ConclusionFormatterNode(WorkflowNode):
         """
         执行汇总总结逻辑
         
-        1. 收集前3个节点的分析结果
+        1. 从注册表 + node_analyses 动态收集前置节点分析
         2. 调用 LLM 生成最终报告
         3. 格式化输出
         """
@@ -85,30 +85,21 @@ class ConclusionFormatterNode(WorkflowNode):
         }
         
         try:
-            # 收集前3个节点的分析结果
             question = state.get("question", "")
-            layer_analysis = state.get("layer_analysis", "{}")
-            evidence_analysis = state.get("evidence_analysis", "{}")
-            rca_analysis = state.get("rca_analysis", "{}")
-            
-            # 提取其他关键信息
+            preceding = self._collect_preceding_analyses(state)
             layer = state.get("layer")
             evidence_items = state.get("evidence_items", [])
             decision = state.get("deterministic_decision")
             root_cause = state.get("root_cause", "")
             causal_chain = state.get("causal_chain", {})
             
-            # 使用 LLM 生成最终报告
             if self.holmes_service and self.holmes_service.ai:
                 conclusion = self._generate_with_llm(
                     question=question,
-                    layer_analysis=layer_analysis,
-                    evidence_analysis=evidence_analysis,
-                    rca_analysis=rca_analysis,
+                    preceding_analyses=preceding,
                     conclusion_max_tokens=state.get("conclusion_max_tokens"),
                 )
             else:
-                # 回退到模板格式化
                 logger.info("⚠️ 无 LLM 服务，使用模板格式化")
                 conclusion = self._format_with_template(
                     question=question,
@@ -117,9 +108,7 @@ class ConclusionFormatterNode(WorkflowNode):
                     decision=decision,
                     root_cause=root_cause,
                     causal_chain=causal_chain,
-                    layer_analysis=layer_analysis,
-                    evidence_analysis=evidence_analysis,
-                    rca_analysis=rca_analysis,
+                    preceding_analyses=preceding,
                     errors=state.get("errors", []),
                     warnings=state.get("warnings", []),
                 )
@@ -142,19 +131,29 @@ class ConclusionFormatterNode(WorkflowNode):
             })
         
         return new_state
+
+    def _collect_preceding_analyses(self, state: WorkflowState) -> List[Tuple[str, str, str]]:
+        """
+        根据注册表收集 conclusion 之前所有节点的分析结果。
+        返回 [(node_id, display_name, analysis_text), ...]，顺序与注册表一致。
+        """
+        from app.core.workflow.node_registry import get_specs_before
+        node_analyses = state.get("node_analyses") or {}
+        result: List[Tuple[str, str, str]] = []
+        for spec in get_specs_before(self.node_id):
+            text = node_analyses.get(spec.id) or (state.get(spec.analysis_key or "") or "{}")
+            result.append((spec.id, spec.name, text))
+        return result
     
     def _generate_with_llm(
         self,
         question: str,
-        layer_analysis: str,
-        evidence_analysis: str,
-        rca_analysis: str,
+        preceding_analyses: List[Tuple[str, str, str]],
         conclusion_max_tokens: Optional[int] = None,
     ) -> str:
-        """使用 LLM 生成最终报告（使用和 HolmesService 相同的方式）"""
+        """使用 LLM 生成最终报告；前置分析由注册表动态收集。"""
         import time
 
-        # 完全由你的参数控制；只有当你传的值超过「模型/环境配置的上限」时才用上限，避免 API 报错
         cap = _get_conclusion_max_tokens_cap()
         requested = conclusion_max_tokens if conclusion_max_tokens is not None else cap
         max_tokens = min(requested, cap) if requested > cap else requested
@@ -163,31 +162,21 @@ class ConclusionFormatterNode(WorkflowNode):
 
         try:
             start_time = time.time()
+            parts = [f"# 用户问题\n{question}\n"]
+            for i, (node_id, display_name, text) in enumerate(preceding_analyses, 1):
+                parts.append(f"# 阶段{i}：{display_name}分析\n{text}\n")
+            parts.append(
+                "请基于以上各阶段的分析结果，生成一份详尽、完整的诊断报告。\n"
+                "要求：\n"
+                "1. 尽可能多引用原始数据和证据\n"
+                "2. 逻辑严谨，因果链清晰\n"
+                "3. 修复建议具体可执行"
+            )
+            user_message = "\n".join(parts)
 
-            # 构建用户消息（包含所有阶段的分析结果）
-            user_message = f"""
-# 用户问题
-{question}
-
-# 阶段1：问题定位分析
-{layer_analysis}
-
-# 阶段2：证据采集分析
-{evidence_analysis}
-
-# 阶段3：根因分析
-{rca_analysis}
-
-请基于以上三个阶段的分析结果，生成一份详尽、完整的诊断报告。
-要求：
-1. 尽可能多引用原始数据和证据
-2. 逻辑严谨，因果链清晰
-3. 修复建议具体可执行
-"""
-
-            # 构建消息（禁用工具调用，确保直接返回文本结果）
+            system_prompt = get_workflow_prompt(self.node_id)
             messages = [
-                {"role": "system", "content": CONCLUSION_FORMATTER_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ]
 
@@ -201,54 +190,41 @@ class ConclusionFormatterNode(WorkflowNode):
             content = response_text.get("choices", [{}])[0].get("message", {}).get("content", "")
 
             llm_duration_ms = (time.time() - start_time) * 1000
-
             if self.metrics:
                 self.metrics.record_llm_call("conclusion", llm_duration_ms)
-
             logger.debug(f"LLM 报告生成完成 (耗时 {llm_duration_ms:.0f}ms, 长度: {len(content)})")
 
             if content:
                 return content
-
-            return self._format_fallback(question, layer_analysis, evidence_analysis, rca_analysis)
+            return self._format_fallback(question, preceding_analyses)
 
         except Exception as e:
             logger.warning(f"LLM 生成失败，回退到模板: {e}")
-            return self._format_fallback(question, layer_analysis, evidence_analysis, rca_analysis)
+            return self._format_fallback(question, preceding_analyses)
     
     def _format_fallback(
         self,
         question: str,
-        layer_analysis: str,
-        evidence_analysis: str,
-        rca_analysis: str
+        preceding_analyses: List[Tuple[str, str, str]],
     ) -> str:
-        """简单格式化回退 - 分层展示各阶段分析"""
-        # 解析各阶段的 JSON 分析结果，格式化展示
-        layer_formatted = self._format_layer_section(layer_analysis)
-        evidence_formatted = self._format_evidence_section(evidence_analysis)
-        rca_formatted = self._format_rca_section(rca_analysis)
-        
+        """简单格式化回退 - 按前置分析列表分层展示"""
+        section_blocks: List[str] = []
+        for i, (node_id, display_name, text) in enumerate(preceding_analyses, 1):
+            if node_id == "layer":
+                section_blocks.append(f"## 📍 阶段{i}：问题定位与分层\n\n{self._format_layer_section(text)}")
+            elif node_id == "evidence":
+                section_blocks.append(f"## 🔍 阶段{i}：证据采集与分析\n\n{self._format_evidence_section(text)}")
+            elif node_id == "rca":
+                section_blocks.append(f"## 🎯 阶段{i}：根因分析与因果链\n\n{self._format_rca_section(text)}")
+            else:
+                section_blocks.append(f"## 阶段{i}：{display_name}\n\n{text or '*无分析数据*'}")
+        sections = "\n\n---\n\n".join(section_blocks)
         return f"""
 # 🔬 K8s 诊断报告
 
 ---
 
-## 📍 阶段一：问题定位与分层
-
-{layer_formatted}
-
----
-
-## 🔍 阶段二：证据采集与分析
-
-{evidence_formatted}
-
----
-
-## 🎯 阶段三：根因分析与因果链
-
-{rca_formatted}
+{sections}
 
 ---
 
@@ -256,7 +232,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
 **用户问题**：{question}
 
-> 请根据以上三个阶段的分析，参考证据链和因果分析，制定修复方案。
+> 请根据以上各阶段的分析，参考证据链和因果分析，制定修复方案。
 
 ---
 """
@@ -472,13 +448,15 @@ class ConclusionFormatterNode(WorkflowNode):
         decision: Optional[DeterministicDecision],
         root_cause: str,
         causal_chain: Dict,
-        layer_analysis: str,
-        evidence_analysis: str,
-        rca_analysis: str,
+        preceding_analyses: List[Tuple[str, str, str]],
         errors: List[str],
         warnings: List[str],
     ) -> str:
-        """使用模板格式化 - 分层展示各阶段完整分析"""
+        """使用模板格式化 - 分层展示各阶段完整分析；分析内容来自 preceding_analyses。"""
+        by_id = {node_id: text for node_id, _name, text in preceding_analyses}
+        layer_analysis = by_id.get("layer", "{}")
+        evidence_analysis = by_id.get("evidence", "{}")
+        rca_analysis = by_id.get("rca", "{}")
         
         # 层级名称映射
         layer_name_map = {

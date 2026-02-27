@@ -2,18 +2,17 @@
 工作流图构建
 
 设计原则：
-- 节点顺序：layer → evidence → rca → conclusion
+- 节点顺序：由节点注册表统一管理（默认：layer → evidence → rca → conclusion）
 - 线性流程（未来可扩展条件分支）
 - 每个节点独立，易于替换/扩展
 """
 
-from typing import Any
-from langgraph.graph import StateGraph, END
+from typing import Any, Iterable, List
+
+from langgraph.graph import END, StateGraph
+
 from app.core.workflow.state import WorkflowState
-from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
-from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
-from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
-from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
+from app.core.workflow.node_registry import NodeSpec, iter_specs
 
 
 def build_diagnosis_workflow(
@@ -39,27 +38,14 @@ def build_diagnosis_workflow(
         编译后的工作流图
     """
     workflow = StateGraph(WorkflowState)
+    _register_nodes_and_edges(
+        workflow=workflow,
+        specs=iter_specs(),
+        holmes_service=holmes_service,
+        metrics=metrics,
+        runbook_catalog=runbook_catalog,
+    )
 
-    # 创建节点实例（传递 holmes_service、metrics 和 runbook_catalog）
-    layer_node = LayerClassifierNode(holmes_service, metrics, runbook_catalog)
-    evidence_node = EvidenceCollectorNode(holmes_service, metrics, runbook_catalog)
-    rca_node = RootCauseAnalyzerNode(holmes_service, metrics, runbook_catalog)
-    conclusion_node = ConclusionFormatterNode(holmes_service, metrics, runbook_catalog)
-    
-    # 添加节点
-    workflow.add_node("layer", layer_node.execute)
-    workflow.add_node("evidence", evidence_node.execute)
-    workflow.add_node("rca", rca_node.execute)
-    workflow.add_node("conclusion", conclusion_node.execute)
-    
-    # 定义边（完整4节点流程）
-    workflow.set_entry_point("layer")
-    workflow.add_edge("layer", "evidence")
-    workflow.add_edge("evidence", "rca")
-    workflow.add_edge("rca", "conclusion")
-    workflow.add_edge("conclusion", END)
-    
-    # 编译工作流
     return workflow.compile()
 
 
@@ -71,14 +57,49 @@ def build_simple_workflow(holmes_service: Any = None, runbook_catalog: Any = Non
     """
     workflow = StateGraph(WorkflowState)
 
-    layer_node = LayerClassifierNode(holmes_service, None, runbook_catalog)
-    conclusion_node = ConclusionFormatterNode(holmes_service, None, runbook_catalog)
-
-    workflow.add_node("layer", layer_node.execute)
-    workflow.add_node("conclusion", conclusion_node.execute)
-
-    workflow.set_entry_point("layer")
-    workflow.add_edge("layer", "conclusion")
-    workflow.add_edge("conclusion", END)
+    # 从注册表中仅选择 layer 和 conclusion 两个节点，保持原有行为
+    specs = [
+        spec
+        for spec in iter_specs()
+        if spec.id in ("layer", "conclusion")
+    ]
+    _register_nodes_and_edges(
+        workflow=workflow,
+        specs=specs,
+        holmes_service=holmes_service,
+        metrics=None,
+        runbook_catalog=runbook_catalog,
+    )
 
     return workflow.compile()
+
+
+def _register_nodes_and_edges(
+    workflow: StateGraph,
+    specs: Iterable[NodeSpec],
+    holmes_service: Any,
+    metrics: Any,
+    runbook_catalog: Any,
+) -> None:
+    """
+    根据节点规格列表注册节点并构建线性边关系
+    """
+    specs_list: List[NodeSpec] = list(specs)
+    if not specs_list:
+        return
+
+    # 添加节点
+    for spec in specs_list:
+        node_instance = spec.cls(holmes_service, metrics, runbook_catalog)
+        workflow.add_node(spec.id, node_instance.execute)
+
+    # 设置入口与边（线性）
+    first = specs_list[0]
+    workflow.set_entry_point(first.id)
+
+    for prev, curr in zip(specs_list, specs_list[1:]):
+        workflow.add_edge(prev.id, curr.id)
+
+    # 末节点指向 END
+    last = specs_list[-1]
+    workflow.add_edge(last.id, END)
