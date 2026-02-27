@@ -26,7 +26,7 @@ from app.core.skills.models import (
 )
 from app.core.skills.engine import get_engine
 from app.core.skills.gate import apply_gate
-from app.core.prompts import ROOT_CAUSE_ANALYZER_PROMPT
+from app.core.prompts import get_workflow_prompt
 from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
@@ -102,12 +102,19 @@ class RootCauseAnalyzerNode(WorkflowNode):
             # 构建决策对象
             decision = self._build_decision(layer, evidence_items, rca_result)
             
+            rca_analysis_text = json.dumps(rca_result, ensure_ascii=False)
+
             new_state.update({
                 "deterministic_decision": decision,
                 "root_cause": rca_result.get("root_cause", ""),
                 "causal_chain": rca_result.get("causal_chain", {}),
-                "rca_analysis": json.dumps(rca_result, ensure_ascii=False),
+                "rca_analysis": rca_analysis_text,
             })
+
+            # 同步写入通用节点分析视图
+            node_analyses = new_state.get("node_analyses") or {}
+            node_analyses[self.node_id] = rca_analysis_text
+            new_state["node_analyses"] = node_analyses
             
             logger.info(f"✅ 根因分析完成: {rca_result.get('root_cause', '')[:50]}...")
         
@@ -149,7 +156,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
             start_time = time.time()
 
             # 构建 system prompt
-            system_prompt = ROOT_CAUSE_ANALYZER_PROMPT.format(
+            base_prompt = get_workflow_prompt(self.node_id)
+            system_prompt = base_prompt.format(
                 layer=layer_str,
                 evidence_summary=evidence_summary
             )

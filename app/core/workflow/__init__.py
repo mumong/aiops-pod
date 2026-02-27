@@ -29,8 +29,16 @@ from .state import WorkflowState
 from .nodes.base import WorkflowNode
 
 # 工作流图和执行器
-from .graph import build_diagnosis_workflow
+from .graph import build_diagnosis_workflow, build_simple_workflow
 from .executor import WorkflowExecutor
+from .node_registry import (
+    NodeSpec,
+    WORKFLOW_NODE_SPECS,
+    get_specs_before,
+    get_display_name,
+    get_spec,
+    iter_specs,
+)
 
 # 指标模块
 from .metrics import (
@@ -47,7 +55,15 @@ __all__ = [
     "WorkflowNode",
     # 图和执行器
     "build_diagnosis_workflow",
+    "build_simple_workflow",
     "WorkflowExecutor",
+    # 节点注册表
+    "NodeSpec",
+    "WORKFLOW_NODE_SPECS",
+    "get_specs_before",
+    "get_display_name",
+    "get_spec",
+    "iter_specs",
     # 指标
     "WorkflowMetrics",
     "NodeMetrics",

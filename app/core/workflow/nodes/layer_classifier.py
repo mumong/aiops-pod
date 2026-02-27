@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
-from app.core.prompts import LAYER_CLASSIFIER_PROMPT
+from app.core.prompts import get_workflow_prompt
 from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
@@ -81,15 +81,22 @@ class LayerClassifierNode(WorkflowNode):
             # 解析层级
             layer = self._parse_layer(layer_result.get("layer", "L2"))
             
+            layer_analysis_text = json.dumps(layer_result, ensure_ascii=False)
+
             new_state.update({
                 "layer": layer,
                 "layer_confidence": layer_result.get("confidence", 0.5),
                 "layer_reasoning": layer_result.get("reasoning", ""),
                 # 保存完整的 LLM 分析结果供下游使用
-                "layer_analysis": json.dumps(layer_result, ensure_ascii=False),
+                "layer_analysis": layer_analysis_text,
                 "key_entities": layer_result.get("key_entities", []),
                 "possible_scenarios": layer_result.get("possible_scenarios", []),
             })
+
+            # 同步写入通用节点分析视图
+            node_analyses = new_state.get("node_analyses") or {}
+            node_analyses[self.node_id] = layer_analysis_text
+            new_state["node_analyses"] = node_analyses
             
             logger.info(f"✅ 问题定位完成: {layer} (置信度: {layer_result.get('confidence', 0):.0%})")
         
@@ -124,13 +131,14 @@ class LayerClassifierNode(WorkflowNode):
 
             # 使用 build_initial_ask_messages 构建消息
             # 这样可以支持 runbooks 和 tools
+            system_prompt = get_workflow_prompt(self.node_id)
             messages = build_initial_ask_messages(
                 console=self.holmes_service.console,
                 initial_user_prompt=question,
                 file_paths=None,
                 tool_executor=tool_executor,
                 runbooks=self.runbook_catalog,
-                system_prompt_additions=LAYER_CLASSIFIER_PROMPT  # 使用节点专用的 prompt
+                system_prompt_additions=system_prompt,  # 使用节点专用的 prompt
             )
 
             # 调用 LLM（使用和 HolmesService 相同的方式）
