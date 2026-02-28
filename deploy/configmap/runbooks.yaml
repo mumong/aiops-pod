@@ -51,7 +51,7 @@ data:
           "type": "procedure",
           "layer": "L4",
           "update_date": "2026-02-04",
-          "description": "【L4】依赖服务固定返回503 (Dependency 503) - 应用调用上游依赖服务收到 503 响应，典型表现：应用日志显示 'received_upstream_status 503' / 'dependency_error'，curl 依赖服务返回 503，应用自身返回 5xx。证据链：应用日志(upstream 503)+依赖服务curl测试(503)+依赖服务Endpoints状态",
+          "description": "【L4】依赖服务固定返回503 (Dependency 503) - 应用调用上游依赖服务收到 503 响应，典型表现：应用日志显示 'received_upstream_status 503' / 'dependency_error'，或测试环境中的 'L4_DEPENDENCY_FAULT' / 'L4_UPSTREAM_HTTP_CODE: 503' 标记，curl 依赖服务返回 503，应用自身返回 5xx。证据链：应用日志(upstream 503/L4_DEPENDENCY_*)+依赖服务curl测试(503)+依赖服务Endpoints状态",
           "link": "l4-dependency-503.md",
           "operations": ["诊断", "排查", "修复"]
         }
@@ -313,10 +313,11 @@ data:
     | 中文 | 依赖异常、上游 503、5xx 激增、Service Unavailable |
     | 英文 | upstream 503, service unavailable, 5xx |
     | 状态 | HTTP 503 (Service Unavailable) |
+    | 特定标记 | 日志中出现 `L4_DEPENDENCY_FAULT`, `L4_UPSTREAM_HTTP_CODE: 503`，或资源带有 `l4-scenario=dependency-503` Label |
 
     ### 1.2 快速判定
     ```
-    IF (curl 依赖返回 503) AND (应用日志有 upstream 503):
+    IF (curl 依赖返回 503) AND (应用日志有 upstream 503 或 L4_DEPENDENCY_FAULT/L4_UPSTREAM_HTTP_CODE:503 等标记):
         场景 = L4-Dependency503, 置信度 = 高
     ```
 
@@ -325,7 +326,7 @@ data:
     | # | 证据项 | 级别 | 采集命令 | 判定依据 |
     |---|--------|------|----------|----------|
     | E1 | 应用 5xx 统计 | Critical | `kubectl logs | grep -c 5xx` | 有 5xx |
-    | E2 | 应用日志上游错误 | Critical | `kubectl logs | grep upstream` | upstream 503 |
+    | E2 | 应用日志上游错误 | Critical | `kubectl logs | grep -E "upstream 503|L4_DEPENDENCY_FAULT|L4_UPSTREAM_HTTP_CODE"` | upstream 503 或 L4 依赖故障标记 |
     | E3 | 依赖服务返回码 | Critical | `curl -w "%{http_code}"` | 503 |
     | E4 | 依赖 Endpoints | Important | `kubectl get endpoints` | 有后端 |
 

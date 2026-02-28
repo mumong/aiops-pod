@@ -110,7 +110,7 @@ SYSTEM_PROMPT = """
 - Service 不可达: `Connection refused`, `502/503`
 
 **L4 - 应用层**:
-- 依赖服务 503: `upstream returned 503`, `dependency unavailable`
+- 依赖服务 503: `upstream returned 503`, `dependency unavailable`，日志标记如 `L4_DEPENDENCY_FAULT`, `L4_UPSTREAM_HTTP_CODE: 503`，或资源 Label `l4-scenario=dependency-503`
 
 ## Phase 2: 证据收集（Evidence Collection）
 
@@ -332,7 +332,7 @@ LAYER_CLASSIFIER_PROMPT = """
 | L2 | 工作负载层 | pod, container, restart, CrashLoop, 137, OOMKilled | OOMKilled, CrashLoopBackOff, ImagePullBackOff |
 | L3 | 服务与网络层 | service, dns, network, timeout, 502, 503 | DNSTimeout, ServiceUnreachable, NetworkPolicy |
 | L4 | 应用层 | application, dependency, config, 业务, 代码 | Dependency503, ConfigError, AppBug |
-|     | **L4 关键特征**: upstream 503, upstream 502, dependency_error, 5xx激增, Service Unavailable |
+|     | **L4 关键特征**: upstream 503, upstream 502, dependency_error, 5xx激增, Service Unavailable, L4_DEPENDENCY_FAULT, L4_UPSTREAM_HTTP_CODE, l4-scenario=dependency-503 |
 
 # 分析流程（必须严格执行）
 
@@ -461,7 +461,7 @@ EVIDENCE_COLLECTOR_PROMPT = """
 ## L4 - 应用层
 | 证据 | 命令/工具 | 级别 |
 |------|-----------|------|
-| 应用日志(upstream 503/5xx) | kubectl logs | critical |
+| 应用日志(upstream 503/5xx/L4_DEPENDENCY_*) | kubectl logs | critical |
 | 依赖服务 curl 测试 | kubectl run curl -- curl -w "http_code=%{http_code}" | critical |
 | 应用自身响应 | kubectl run curl -- curl <app-service> | important |
 | 配置文件 | kubectl get cm/secret | important |
@@ -470,7 +470,7 @@ EVIDENCE_COLLECTOR_PROMPT = """
 
 | 证据 | 命令/工具 | 级别 | 期望输出 | 用途 |
 |------|-----------|------|----------|------|
-| e1 | kubectl logs -n <namespace> <app-pod> | critical | 日志包含 `received_upstream_status 503` 或 `dependency_error` | 确认应用日志中的上游 503 错误 |
+| e1 | kubectl logs -n <namespace> <app-pod> | critical | 日志包含 `received_upstream_status 503`、`dependency_error`，或测试场景中的 `L4_DEPENDENCY_FAULT` / `L4_UPSTREAM_HTTP_CODE: 503` | 确认应用日志中的上游 503 错误 |
 | e2 | kubectl run curl-test --rm -it --image=curlimages/curl -- curl -s -o /dev/null -w "http_code=%{http_code}\n" http://<dep-svc>.<namespace>:<port>/ | critical | `http_code=503` | 验证依赖服务确实返回 503 |
 | e3 | kubectl get endpoints <dep-svc> -n <namespace> | critical | 有后端 IP 列表 | 确认依赖服务存在且有后端 |
 | e4 | kubectl describe svc <app-svc> -n <namespace> | important | Service 配置正常 | 排除 Service 配置问题 |
@@ -833,8 +833,8 @@ GLOBAL_SCENARIO_DETECTOR_PROMPT = """
 | L2 | VolumeLimitExceeded | Evicted, size limit exceeded | 存储卷超限 |
 | L3 | DNSLatency | dns_lookup_seconds >= 0.45s, DNS timeout | DNS 解析延迟 |
 | L3 | NetworkConnectivity | Connection refused, Timeout, NetworkPolicy block | 网络连通性 |
-| L4 | Dependency503 | upstream 503, Service Unavailable, 5xx激增, dependency_error | 依赖服务异常 |
-|     | **关键特征**: received_upstream_status 503, dependency_error, 应用5xx日志, 上游服务不可用 |
+| L4 | Dependency503 | upstream 503, Service Unavailable, 5xx激增, dependency_error, L4_DEPENDENCY_FAULT, L4_UPSTREAM_HTTP_CODE | 依赖服务异常 |
+|     | **关键特征**: received_upstream_status 503, dependency_error, 应用5xx日志, 上游服务不可用, 测试标记 L4_DEPENDENCY_FAULT / L4_UPSTREAM_HTTP_CODE:503, 以及 `l4-scenario=dependency-503` Label |\n*** End Patch```}"/>
 | L4 | ImagePullFailed | ImagePullBackOff, pull timeout, dial timeout | 镜像拉取失败 |
 
 # 输出格式

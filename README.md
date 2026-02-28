@@ -3,7 +3,7 @@
 
 > 本文档是项目开发的"北极星"，所有开发、迭代、增强必须严格遵照此文档执行。
 
-> **版本**: 2.0.0 | **更新日期**: 2026-01-28 | **状态**: Phase 1-6 已完成
+> **版本**: 10.0.0 | **更新日期**: 2026-02-27 | **状态**: 工作流解耦与 L0-L4 Runbook 增强已完成
 
 ---
 
@@ -190,22 +190,33 @@
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| **状态模型** | `state.py` | WorkflowState，节点间共享状态的数据模型 |
-| **图构建** | `graph.py` | build_diagnosis_workflow，LangGraph 工作流图 |
-| **执行器** | `executor.py` | WorkflowExecutor，执行工作流并发出事件 |
+| **节点注册表** | `node_registry.py` | NodeSpec、WORKFLOW_NODE_SPECS，单一事实来源，图与结论节点据此动态编排 |
+| **状态模型** | `state.py` | WorkflowState，含 node_analyses 统一视图，节点间共享状态 |
+| **图构建** | `graph.py` | build_diagnosis_workflow / build_simple_workflow，从注册表循环构建节点与边 |
+| **执行器** | `executor.py` | WorkflowExecutor，执行工作流并发出事件，显示名与快照从注册表获取 |
+| **输出格式化** | `output_formatter.py` | 工作流事件转文本，从 snapshot 通用字段取节点分析 |
 | **指标** | `metrics.py` | WorkflowMetrics，性能与质量指标记录 |
 | **节点基类** | `nodes/base.py` | WorkflowNode，节点抽象基类 |
 
 **工作流节点结构**：
 
 ```
-app/core/workflow/nodes/
-├── base.py              # 节点基类
-├── layer_classifier.py    # 节点1：问题定位
-├── evidence_collector.py # 节点2：证据采集
-├── root_cause_analyzer.py # 节点3：根因分析
-└── conclusion_formatter.py  # 节点4：汇总总结
+app/core/workflow/
+├── node_registry.py       # 节点注册表（NodeSpec、get_specs_before、get_display_name）
+├── state.py
+├── graph.py
+├── executor.py
+├── output_formatter.py
+├── metrics.py
+└── nodes/
+    ├── base.py
+    ├── layer_classifier.py
+    ├── evidence_collector.py
+    ├── root_cause_analyzer.py
+    └── conclusion_formatter.py
 ```
+
+**扩展节点**：在 `node_registry.WORKFLOW_NODE_SPECS` 中追加或调整 `NodeSpec`，并在 `prompts.WORKFLOW_PROMPTS` 中为对应 node_id 配置 Prompt，无需改 graph / conclusion 的节点枚举逻辑。
 
 ### 3.5 确定性技能层 (`app/core/skills/`)
 
@@ -435,49 +446,21 @@ YOUR_NODE_PROMPT = """
 """
 ```
 
-#### 步骤 4：更新图构建 (`graph.py`)
+#### 步骤 4：在节点注册表中注册 (`node_registry.py`)
 
-在 `app/core/workflow/graph.py` 的 `build_diagnosis_workflow` 函数中添加新节点：
+图由注册表自动构建，**只需在 `app/core/workflow/node_registry.py` 的 `WORKFLOW_NODE_SPECS` 中追加新节点的 `NodeSpec`**：
 
 ```python
-def build_diagnosis_workflow(holmes_service, metrics, runbook_catalog):
-    from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
-    from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
-    from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
-    from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
-    from app.core.workflow.nodes.your_node import YourNodeNameNode  # 新增节点导入
-
-    # 创建各节点实例
-    layer_node = LayerClassifierNode(holmes_service, metrics, runbook_catalog)
-    evidence_node = EvidenceCollectorNode(holmes_service, metrics, runbook_catalog)
-    rca_node = RootCauseAnalyzerNode(holmes_service, metrics, runbook_catalog)
-    conclusion_node = ConclusionFormatterNode(holmes_service, metrics, runbook_catalog)
-    your_node = YourNodeNameNode(holmes_service, metrics, runbook_catalog)  # 新节点实例
-
-    # 构建工作流图
-    workflow = StateGraph(WorkflowState)
-
-    # 添加节点和边
-    workflow.add_node("layer", layer_node)
-    workflow.add_node("evidence", evidence_node)
-    workflow.add_node("rca", rca_node)
-    workflow.add_node("conclusion", conclusion_node)
-    workflow.add_node("your_node", your_node)  # 添加新节点
-
-    # 定义节点之间的边
-    workflow.add_edge("layer", "evidence")
-    workflow.add_edge("evidence", "rca")
-    workflow.add_edge("rca", "conclusion")
-
-    # 添加新节点的边（根据实际流程）
-    # workflow.add_edge("rca", "your_node")
-
-    # 设置起点和终点
-    workflow.set_entry_point("layer")
-    workflow.set_finish_point("conclusion")
-
-    return workflow
+# 在 WORKFLOW_NODE_SPECS 列表末尾追加（保持顺序与执行顺序一致）
+NodeSpec(
+    node_id="your_node_id",
+    node_cls=YourNodeNameNode,
+    before_ids=["rca"],  # 此节点排在哪些节点之后（用于边与结论收集顺序）
+),
 ```
+
+- `graph.py` 会按 `WORKFLOW_NODE_SPECS` 循环 `add_node` 并依 `before_ids` 添加边，无需改 `graph.py` 内部逻辑。
+- 结论节点通过 `get_specs_before("conclusion")` 动态收集前置节点，新节点会自动进入「前置分析」列表。
 
 #### 步骤 5：更新 Prompt 管理
 
@@ -554,13 +537,16 @@ evidence_completeness | float      | 证据完整度
 evidence_analysis   | str       | 证据分析结果（JSON）
 root_cause          | str       | 根因结论
 causal_chain        | dict       | 因果链
-rca_analysis         | str       | 根因分析结果（JSON）
-conclusion           | str       | 最终报告
+rca_analysis        | str       | 根因分析结果（JSON）
+conclusion          | str       | 最终报告
 conclusion_formatted | str       | 格式化后的报告
+node_analyses       | dict       | 各节点分析结果 key=node_id，结论节点据此动态收集前置分析
 current_node        | str       | 当前执行节点
-errors               | List      | 错误列表
-warnings             | List      | 警告列表
+errors              | List      | 错误列表
+warnings            | List      | 警告列表
 ```
+
+**节点写入约定**：layer / evidence / rca 等分析节点应从 `state.get("node_analyses")` 读取并合并后再写回，避免覆盖导致结论节点拿不到完整证据链。
 
 **使用示例**：
 
@@ -676,3 +662,4 @@ tail -f logs/app.log
 | 日期 | 版本 | 作者 | 变更内容 |
 |------|------|------|----------|
 | 2026-01-28 | 2.0.0 | AI | 初始版本：LangGraph 工作流系统上线 |
+| 2026-02-27 | 10.0.0 | - | 工作流解耦：节点注册表（NodeSpec）、state.node_analyses、结论节点动态收集前置分析；图从注册表构建；Runbook/Prompts 与 e2e 对齐（L4 dependency-503 等） |
