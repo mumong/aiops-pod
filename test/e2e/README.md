@@ -18,6 +18,7 @@ cd test/e2e
 ### 设计说明
 - **L2 OOMKilled**：纯 K8s 方式稳定复现（Deployment + 小内存 limit）。
 - **L4 依赖 503**：mock 依赖固定 503，应用侧透传 503 并打印证据日志。
+- **L4 应用健康失败 (AppHealthFail)**：单 Pod 循环输出 `L4_APP_HEALTH_FAIL`、`L4_LAYER_APPLICATION` 等标记，易于 AI 识别 L4 层级；部署 `kubectl apply -f manifests/l4-app-health-fail.yaml`。
 - **L3 DNS 延迟**：在客户端 Pod 注入 `tc netem delay 500ms` 并打印 `dns_lookup_seconds=...` 样本。
 - **L0 磁盘满**：
   - 安全版本：使用 `emptyDir.sizeLimit` 写满触发 `No space left on device`（不会把宿主机磁盘打爆）。

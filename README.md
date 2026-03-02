@@ -634,6 +634,11 @@ python app/main.py
 tail -f logs/app.log
 ```
 
+### 5.5 E2E 与 Runbook 对齐
+
+- 典型场景清单与 L0–L4 用例见 `test/e2e/` 与 `test/e2e/README.md`。
+- Runbook 与 Prompts 中 L4 依赖故障（如 `L4_DEPENDENCY_FAULT`、`l4-scenario=dependency-503`）已与 e2e 场景对齐，便于证据匹配与分层判定。
+
 ---
 
 ## 附录：设计哲学
