@@ -17,6 +17,7 @@ from typing import Generator, Dict, Any, Optional
 from dataclasses import dataclass
 
 from app.core.holmes.streaming import format_duration
+from app.core.text_helpers import truncate_question, emit_text
 
 logger = logging.getLogger(__name__)
 
@@ -63,52 +64,38 @@ class WorkflowOutputFormatter:
         self.show_intermediate = show_intermediate
         self._section_count = 0
 
-    def _emit(self, text: str) -> str:
-        """发出带换行的文本"""
-        return text + "\n"
-
-    def _draw_box(self, title: str) -> Generator[str, None, None]:
-        """绘制 ASCII 边框"""
-        width = 50
-        line = "─" * width
-        yield self._emit("┌" + line + "┐")
-        padding = (width - len(title) - 4) // 2
-        title_with_padding = " " * padding + title + " " * padding
-        yield self._emit("│" + title_with_padding + "│")
-        yield self._emit("└" + line + "┘")
-
     def _format_header(self) -> Generator[str, None, None]:
         """格式化报告头部"""
-        yield self._emit("=" * 70)
-        yield self._emit("🔄 K8s AIOps Copilot - 工作流诊断模式")
-        yield self._emit("=" * 70)
-        yield self._emit("")
+        yield emit_text("=" * 70)
+        yield emit_text("🔄 K8s AIOps Copilot - 工作流诊断模式")
+        yield emit_text("=" * 70)
+        yield emit_text("")
 
         if self.show_intermediate:
-            yield self._emit(f"📝 问题: {self.ctx.question[:100] if len(self.ctx.question) > 100 else self.ctx.question}")
+            yield emit_text(f"📝 问题: {truncate_question(self.ctx.question)}")
 
     def _format_final_report(self) -> Generator[str, None, None]:
         """格式化最终诊断报告"""
         # 只显示最终 LLM 响应，不显示中间节点分析
-        yield self._emit("=" * 70)
-        yield self._emit("🎯 诊断报告")
-        yield self._emit("=" * 70)
-        yield self._emit("")
+        yield emit_text("=" * 70)
+        yield emit_text("🎯 诊断报告")
+        yield emit_text("=" * 70)
+        yield emit_text("")
 
         # 输出最终 LLM 响应
         conclusion = self.ctx.final_answer or ""
         if conclusion:
-            yield self._emit(conclusion)
+            yield emit_text(conclusion)
 
     def _format_metrics(self) -> Generator[str, None, None]:
         """格式化质量指标"""
         if not self.ctx.metrics_data:
             return
 
-        yield self._emit("-" * 70)
-        yield self._emit("📈 质量指标")
-        yield self._emit("-" * 70)
-        yield self._emit("")
+        yield emit_text("-" * 70)
+        yield emit_text("📈 质量指标")
+        yield emit_text("-" * 70)
+        yield emit_text("")
 
         mttr = self.ctx.metrics_data.get("mttr", {})
         evidence = self.ctx.metrics_data.get("evidence_completeness", {})
@@ -120,27 +107,27 @@ class WorkflowOutputFormatter:
         rca_pass = "✅" if rca.get("pass") else "⚠️"
         runbook_pass = "✅" if runbook.get("pass") else "⚠️"
 
-        yield self._emit(f"  MTTR:        {mttr.get('value', '?')} {mttr_pass} (要求 < 10m)")
-        yield self._emit(f"  根因置信度: {rca.get('value', '?')} {rca_pass} (要求 >= 80%)")
-        yield self._emit(f"  证据完整率: {evidence.get('value', '?')} {evidence_pass} (要求 > 80%)")
+        yield emit_text(f"  MTTR:        {mttr.get('value', '?')} {mttr_pass} (要求 < 10m)")
+        yield emit_text(f"  根因置信度: {rca.get('value', '?')} {rca_pass} (要求 >= 80%)")
+        yield emit_text(f"  证据完整率: {evidence.get('value', '?')} {evidence_pass} (要求 > 80%)")
 
         if runbook.get('matched'):
             runbook_id = runbook.get('id', '')
-            yield self._emit(f"  Runbook:    已匹配 {runbook_pass}")
+            yield emit_text(f"  Runbook:    已匹配 {runbook_pass}")
             if runbook_id:
                 runbook_names = [name.replace('.md', '') for name in runbook_id.split(', ')]
-                yield self._emit(f"    使用的Runbook: {', '.join(runbook_names)}")
+                yield emit_text(f"    使用的Runbook: {', '.join(runbook_names)}")
         else:
-            yield self._emit(f"  Runbook:    未匹配 {runbook_pass}")
+            yield emit_text(f"  Runbook:    未匹配 {runbook_pass}")
 
-        yield self._emit("")
+        yield emit_text("")
 
     def _format_footer(self) -> Generator[str, None, None]:
         """格式化报告尾部"""
-        yield self._emit("=" * 70)
-        yield self._emit("✅ 诊断完成!")
-        yield self._emit("=" * 70)
-        yield self._emit("")
+        yield emit_text("=" * 70)
+        yield emit_text("✅ 诊断完成!")
+        yield emit_text("=" * 70)
+        yield emit_text("")
 
     def format_workflow_text(self, events: list, question: str, show_intermediate: bool = True) -> Generator[str, None, None]:
         """
@@ -169,10 +156,10 @@ class WorkflowOutputFormatter:
 
             elif event_type == "node_start":
                 node_name = event.get("node_name", event.get("node", "?"))
-                yield self._emit(f"📍 [{node_name}] 执行中...")
+                yield emit_text(f"📍 [{node_name}] 执行中...")
 
             elif event_type == "node_complete":
-                self._handle_node_complete(event)
+                yield from self._handle_node_complete(event)
 
             elif event_type == "final":
                 self.ctx.final_answer = event.get("answer", "")
@@ -181,7 +168,7 @@ class WorkflowOutputFormatter:
 
             elif event_type == "error":
                 error = event.get("error", "未知错误")
-                yield self._emit(f"❌ 错误: {error}")
+                yield emit_text(f"❌ 错误: {error}")
 
         # 格式化最终报告
         yield from self._format_final_report()
@@ -199,8 +186,8 @@ class WorkflowOutputFormatter:
         duration = event.get("duration_seconds", 0)
         snapshot = event.get("state_snapshot", {})
 
-        yield self._emit(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
-        yield self._emit("")
+        yield emit_text(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
+        yield emit_text("")
 
         # 只在需要显示中间节点时保存
         if self.show_intermediate:

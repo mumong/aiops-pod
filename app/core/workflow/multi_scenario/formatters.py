@@ -14,6 +14,7 @@
 from typing import List, Dict, Any
 from app.core.workflow.multi_scenario.output import ScenarioDecision, ScenarioSeverity
 from app.core.skills.models import Layer
+from app.core.text_helpers import truncate_question
 
 
 class MultiScenarioFormatter:
@@ -43,7 +44,7 @@ class MultiScenarioFormatter:
         lines.append("")
 
         # 用户问题
-        lines.append(f"📝 用户问题: {question[:100]}...")
+        lines.append(f"📝 用户问题: {truncate_question(question)}")
         lines.append("")
 
         # 统计摘要

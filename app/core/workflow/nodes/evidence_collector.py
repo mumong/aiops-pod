@@ -27,6 +27,8 @@ from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
 from app.core.skills.evidence import EvidenceExtractor, EVIDENCE_SPECS
 from app.core.prompts import EVIDENCE_COLLECTOR_PROMPT
 from holmes.core.prompt import build_initial_ask_messages
+from app.core.constants import DEFAULT_COMMAND_TIMEOUT
+from app.core.text_helpers import truncate_preview
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +222,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 self.metrics.record_llm_call("evidence", llm_duration_ms)
 
             if response and response.result:
-                logger.debug(f"LLM 规划响应 (耗时 {llm_duration_ms:.0f}ms): {response.result[:500]}...")
+                logger.debug(f"LLM 规划响应 (耗时 {llm_duration_ms:.0f}ms): {truncate_preview(response.result)}...")
                 return self._parse_llm_evidence_plan(response.result)
 
             logger.warning("LLM 未返回有效响应，使用规则规划")
@@ -423,7 +425,7 @@ class EvidenceCollectorNode(WorkflowNode):
                     tool_results.append({
                         "tool": "kubectl",
                         "command": cmd,
-                        "result": result[:500] if len(result) > 500 else result,
+                        "result": truncate_preview(result, 500),
                         "success": True,
                         "duration_ms": duration_ms,
                         "summary": f"✅ {cmd[:40]}... (成功, {duration_ms/1000:.1f}s)"
@@ -516,13 +518,13 @@ class EvidenceCollectorNode(WorkflowNode):
         logger.debug(f"执行命令: {cmd}")
 
         try:
-            # 超时 15 秒（证据采集需要更长超时）
+            # 超时 DEFAULT_COMMAND_TIMEOUT 秒（证据采集需要更长超时）
             result = subprocess.run(
                 cmd,
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=DEFAULT_COMMAND_TIMEOUT,
                 encoding='utf-8',
                 errors='replace'
             )

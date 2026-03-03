@@ -19,6 +19,12 @@ from holmes.utils.stream import StreamEvents
 from app.core.prompts import SYSTEM_PROMPT
 from app.core.holmes.streaming import create_sse_message_cn, format_duration
 from app.core.holmes.event_mapper import iter_internal_events
+from app.core.constants import (
+    DEFAULT_MAX_STEPS,
+    MAX_QUESTION_DISPLAY_LENGTH,
+)
+from app.core.config_helpers import should_reset_config, reset_service_config
+from app.core.text_helpers import truncate_question
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +35,7 @@ def execute_query_stream_sse(
     system_prompt: Optional[str] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
-    max_steps: int = 50,
+    max_steps: int = DEFAULT_MAX_STEPS,
     output_format: str = "sse",
 ) -> Generator[str, None, None]:
     """
@@ -44,9 +50,8 @@ def execute_query_stream_sse(
         # 初始化阶段
         init_start = time.time()
 
-        if api_key or model or max_steps != 50:
-            service.config = None
-            service.ai = None
+        if should_reset_config(api_key, model, max_steps):
+            reset_service_config(service)
 
         service.initialize(api_key=api_key, model=model, max_steps=max_steps)
         timing_stats["initialization"] = time.time() - init_start
@@ -54,14 +59,14 @@ def execute_query_stream_sse(
         final_system_prompt = system_prompt or SYSTEM_PROMPT
 
         logger.info("=" * 60)
-        logger.info(f"📝 [流式查询] 问题: {question[:100]}...")
+        logger.info(f"📝 [流式查询] 问题: {truncate_question(question)}")
         logger.info(f"⏱️  初始化耗时: {format_duration(timing_stats['initialization'])}")
 
         yield create_sse_message_cn(
             "run_start",
             {
                 "message": "🚀 开始处理查询...",
-                "question": question[:100],
+                "question": truncate_question(question),
                 "phase": "initialization",
                 "init_time": format_duration(timing_stats["initialization"]),
                 "timestamp": datetime.now().isoformat(),
@@ -141,7 +146,7 @@ def execute_query_stream_text(
     system_prompt: Optional[str] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
-    max_steps: int = 50,
+    max_steps: int = DEFAULT_MAX_STEPS,
 ) -> Generator[str, None, None]:
     """
     易读纯文本流式输出（专为 curl 等命令行优化）
@@ -155,9 +160,8 @@ def execute_query_stream_text(
     try:
         init_start = time.time()
 
-        if api_key or model or max_steps != 50:
-            service.config = None
-            service.ai = None
+        if should_reset_config(api_key, model, max_steps):
+            reset_service_config(service)
 
         service.initialize(api_key=api_key, model=model, max_steps=max_steps)
         init_duration = time.time() - init_start
@@ -167,7 +171,7 @@ def execute_query_stream_text(
         yield emit("=" * 70)
         yield emit("🔍 HolmesGPT 流式查询")
         yield emit("=" * 70)
-        yield emit(f"📝 问题: {question[:100]}")
+        yield emit(f"📝 问题: {truncate_question(question)}")
         yield emit(f"⏱️  初始化: {format_duration(init_duration)}")
         yield emit("-" * 70)
         yield emit("")
