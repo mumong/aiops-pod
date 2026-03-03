@@ -26,6 +26,8 @@ from app.core.holmes.event_schema import (
     select_final_answer,
 )
 from app.core.skills import evaluate_deterministic_decision, format_decision_markdown
+from app.core.constants import MAX_ARTIFACT_LENGTH
+from app.core.text_helpers import truncate_preview
 
 
 logger = logging.getLogger(__name__)
@@ -39,7 +41,7 @@ def iter_internal_events(
     user_prompt: Optional[str],
     msgs: Optional[list],
     run_id: str,
-    max_preview_chars: int = 1200,
+    max_preview_chars: int = MAX_ARTIFACT_LENGTH,
 ) -> Generator[Dict, None, None]:
     """
     产生统一内部事件 dict：
@@ -152,7 +154,7 @@ def iter_internal_events(
             try:
                 preview_for_log = (preview or "").replace("\n", " ")
                 if len(preview_for_log) > 500:
-                    preview_for_log = preview_for_log[:500] + "... (已截断)"
+                    preview_for_log = truncate_preview(preview_for_log).replace("\n", " ")
                 status_icon = "✅" if status == "success" and not error_str else "❌"
                 logger.info(
                     "🔧 工具调用结果: %s %s | 状态: %s | 耗时: %s | 错误: %s | 结果预览: %s",

@@ -21,6 +21,7 @@ from app.core.workflow.nodes.global_detector import GlobalDetectorNode
 from app.core.workflow.multi_scenario.output import MultiScenarioOutput, ScenarioSeverity
 from app.core.workflow.multi_scenario.formatters import MultiScenarioFormatter
 from app.core.workflow.metrics import WorkflowMetrics, start_workflow_metrics, finish_workflow_metrics
+from app.core.text_helpers import truncate_question, emit_text
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class MultiScenarioWorkflowExecutor:
         except Exception as e:
             logger.error(f"❌ 多场景工作流执行失败: {e}", exc_info=True)
             if output_format == "text":
-                yield f"❌ 多场景工作流执行失败: {e}\n"
+                yield emit_text(f"❌ 多场景工作流执行失败: {e}")
             else:
                 yield self._create_sse_message("error", {
                     "error": f"多场景工作流执行失败: {str(e)}"
@@ -96,17 +97,14 @@ class MultiScenarioWorkflowExecutor:
         """
         工作流执行结果转换为美观的文本格式
         """
-        def emit(text: str) -> str:
-            return text + "\n"
-
-        yield emit("=" * 70)
-        yield emit("🔍 K8s 多场景诊断模式")
-        yield emit("=" * 70)
-        yield emit("")
-        yield emit(f"📝 问题: {question[:100]}...")
-        yield emit("")
-        yield emit("-" * 70)
-        yield emit("")
+        yield emit_text("=" * 70)
+        yield emit_text("🔍 K8s 多场景诊断模式")
+        yield emit_text("=" * 70)
+        yield emit_text("")
+        yield emit_text(f"📝 问题: {truncate_question(question)}")
+        yield emit_text("")
+        yield emit_text("-" * 70)
+        yield emit_text("")
 
         # 执行检测
         initial_state = WorkflowState(
@@ -138,24 +136,24 @@ class MultiScenarioWorkflowExecutor:
             report = self.formatter.format_full_report(multi_output.scenarios, question)
 
             # 输出报告
-            yield emit("-" * 70)
-            yield emit(report)
-            yield emit("")
+            yield emit_text("-" * 70)
+            yield emit_text(report)
+            yield emit_text("")
 
             # 输出指标
             self._output_metrics_text(metrics)
 
         else:
-            yield emit("-" * 70)
-            yield emit("⚠️  未检测到异常场景")
-            yield emit("")
+            yield emit_text("-" * 70)
+            yield emit_text("⚠️  未检测到异常场景")
+            yield emit_text("")
 
             # 输出指标
             self._output_metrics_text(metrics)
 
-        yield emit("=" * 70)
-        yield emit("✅ 多场景诊断完成")
-        yield emit("=" * 70)
+        yield emit_text("=" * 70)
+        yield emit_text("✅ 多场景诊断完成")
+        yield emit_text("=" * 70)
 
     def _workflow_to_sse(
         self,

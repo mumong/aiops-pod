@@ -28,6 +28,7 @@ from app.core.skills.engine import get_engine
 from app.core.skills.gate import apply_gate
 from app.core.prompts import ROOT_CAUSE_ANALYZER_PROMPT
 from holmes.core.prompt import build_initial_ask_messages
+from app.core.text_helpers import truncate_question
 
 logger = logging.getLogger(__name__)
 
@@ -237,13 +238,14 @@ class RootCauseAnalyzerNode(WorkflowNode):
         
         # 通用回退
         layer_str = layer.value if layer else "L2"
+        question_short = truncate_question(question)
         return {
-            "phenomenon": question[:100],
+            "phenomenon": question_short,
             "evidence_analysis": [],
             "causal_chain": {
                 "trigger": "待进一步分析",
                 "mechanism": "待进一步分析",
-                "manifestation": question[:100]
+                "manifestation": question_short
             },
             "root_cause": f"[{layer_str}层] 需要更多证据才能确定根本原因",
             "confidence": 0.3,
