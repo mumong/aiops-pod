@@ -27,6 +27,7 @@ from app.core.holmes.config_loader import load_stream_output_flag, load_holmes_c
 from app.core.holmes.call_wrapper import call_with_stream
 from app.core.mcp.mcp_patch import patch_mcp_toolset
 from app.core.holmes.tool_logging_patch import apply_tool_result_logging_patch
+from app.core.federation import get_federation_coordinator, FederationCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class HolmesService:
         self.runbook_manager = RunbookManager()
         self.merged_catalog: Optional[RunbookCatalog] = None
         self.stream_output: bool = False  # 流式输出配置
+        self.federation_coordinator: Optional[FederationCoordinator] = None
         self._init_lock = threading.Lock()
         self._init_in_progress: bool = False
         self._init_error: Optional[str] = None
@@ -101,6 +103,13 @@ class HolmesService:
                 else:
                     self.stream_output = False
 
+                # 读取原始 YAML 用于联邦配置（在 holmes.Config 加载之前）
+                _raw_config: dict = {}
+                if config_file.exists():
+                    import yaml as _yaml
+                    with open(config_file, "r", encoding="utf-8") as _f:
+                        _raw_config = _yaml.safe_load(_f) or {}
+
                 # 确定使用的 API Key
                 final_api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
                 if not final_api_key:
@@ -149,6 +158,19 @@ class HolmesService:
                 self.ai = self.config.create_console_toolcalling_llm()
                 
                 logger.info(f"   ✅ AI 实例创建完成 ({time.time() - step_start:.2f}s)")
+
+                # 初始化联邦协调器（如配置了 federation.enabled=true）
+                _federation_cfg = _raw_config.get("federation", {})
+                if _federation_cfg.get("enabled", False):
+                    self.federation_coordinator = get_federation_coordinator(
+                        federation_config=_federation_cfg,
+                        model=final_model,
+                        api_key=final_api_key,
+                    )
+                    if self.federation_coordinator:
+                        logger.info("[FEDERATION] 联邦协调器初始化完成")
+                else:
+                    logger.debug("[FEDERATION] federation 未启用，跳过")
 
                 # 配置自定义 runbook 搜索路径
                 step_start = time.time()

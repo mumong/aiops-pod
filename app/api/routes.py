@@ -284,6 +284,78 @@ def register_routes(app):
     # 内部辅助函数
     # =========================================================================
     
+    # =========================================================================
+    # 联邦查询 API：/federation/ask - 多集群并发诊断入口
+    # =========================================================================
+
+    @app.get("/federation/ask")
+    async def federation_ask_get(
+        q: str = Query(..., description="问题内容"),
+        max_steps: int = Query(30, description="每个子集群最大执行步数", ge=1, le=100),
+    ):
+        """
+        🌐 多集群联邦查询（GET 方式）
+
+        并发调用所有已配置的子集群，汇总诊断报告后由 LLM 合成统一结论：
+
+        ```bash
+        curl -G "http://localhost:8000/federation/ask" --data-urlencode "q=哪个集群CPU利用率最高"
+        ```
+        """
+        question = fix_double_encoding(q)
+        logger.info(f"[FEDERATION] 收到联邦查询 (GET): {question[:80]}...")
+        return _federation_stream_response(question, max_steps)
+
+    @app.post("/federation/ask")
+    async def federation_ask_post(
+        q: str = Form(..., description="问题内容"),
+        max_steps: int = Form(30, description="每个子集群最大执行步数"),
+    ):
+        """
+        🌐 多集群联邦查询（POST 方式）
+
+        ```bash
+        curl -X POST "http://localhost:8000/federation/ask" -d "q=集群有什么问题" -d "max_steps=20"
+        ```
+        """
+        question = fix_double_encoding(q)
+        logger.info(f"[FEDERATION] 收到联邦查询 (POST): {question[:80]}...")
+        return _federation_stream_response(question, max_steps)
+
+    def _federation_stream_response(question: str, max_steps: int):
+        """生成联邦查询流式响应"""
+
+        def generate() -> Generator[str, None, None]:
+            try:
+                service = get_service()
+                coordinator = service.federation_coordinator
+                if coordinator is None:
+                    yield (
+                        "❌ 联邦查询未启用。\n\n"
+                        "请在主集群 config.yaml 中设置 federation.enabled: true 并配置子集群列表。\n"
+                        "若要查询单集群，请使用 /ask 端点。\n"
+                    )
+                    return
+                logger.info(
+                    f"[FEDERATION] 开始联邦查询, "
+                    f"子集群数量: {len(coordinator._registry.get_enabled_agents())}, "
+                    f"问题: {question[:60]}..."
+                )
+                yield from coordinator.ask_stream(question=question, max_steps=max_steps)
+            except Exception as exc:
+                logger.error(f"[FEDERATION] 联邦查询出错: {exc}", exc_info=True)
+                yield f"\n❌ 联邦查询错误: {str(exc)}\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     def _stream_response(question: str, output_format: str, max_steps: int):
         """生成流式响应"""
         
