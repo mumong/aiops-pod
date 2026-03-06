@@ -292,6 +292,7 @@ def register_routes(app):
     async def federation_ask_get(
         q: str = Query(..., description="问题内容"),
         max_steps: int = Query(30, description="每个子集群最大执行步数", ge=1, le=100),
+        conclusion_max_tokens: int = Query(8192, description="子集群诊断结论最大 token 数", ge=0),
     ):
         """
         🌐 多集群联邦查询（GET 方式）
@@ -304,12 +305,13 @@ def register_routes(app):
         """
         question = fix_double_encoding(q)
         logger.info(f"[FEDERATION] 收到联邦查询 (GET): {question[:80]}...")
-        return _federation_stream_response(question, max_steps)
+        return _federation_stream_response(question, max_steps, conclusion_max_tokens)
 
     @app.post("/federation/ask")
     async def federation_ask_post(
         q: str = Form(..., description="问题内容"),
         max_steps: int = Form(30, description="每个子集群最大执行步数"),
+        conclusion_max_tokens: int = Form(8192, description="子集群诊断结论最大 token 数"),
     ):
         """
         🌐 多集群联邦查询（POST 方式）
@@ -320,9 +322,9 @@ def register_routes(app):
         """
         question = fix_double_encoding(q)
         logger.info(f"[FEDERATION] 收到联邦查询 (POST): {question[:80]}...")
-        return _federation_stream_response(question, max_steps)
+        return _federation_stream_response(question, max_steps, conclusion_max_tokens)
 
-    def _federation_stream_response(question: str, max_steps: int):
+    def _federation_stream_response(question: str, max_steps: int, conclusion_max_tokens: int):
         """生成联邦查询流式响应"""
 
         def generate() -> Generator[str, None, None]:
@@ -341,7 +343,11 @@ def register_routes(app):
                     f"子集群数量: {len(coordinator._registry.get_enabled_agents())}, "
                     f"问题: {question[:60]}..."
                 )
-                yield from coordinator.ask_stream(question=question, max_steps=max_steps)
+                yield from coordinator.ask_stream(
+                    question=question,
+                    max_steps=max_steps,
+                    conclusion_max_tokens=conclusion_max_tokens
+                )
             except Exception as exc:
                 logger.error(f"[FEDERATION] 联邦查询出错: {exc}", exc_info=True)
                 yield f"\n❌ 联邦查询错误: {str(exc)}\n"

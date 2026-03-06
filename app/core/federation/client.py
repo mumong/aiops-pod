@@ -38,6 +38,7 @@ class SubAgentClient:
         agent: SubAgentConfig,
         question: str,
         max_steps: int = 30,
+        conclusion_max_tokens: int = 8192,
         timeout: float = 300.0,
     ) -> SubAgentResult:
         """
@@ -47,6 +48,7 @@ class SubAgentClient:
             agent: 子集群配置
             question: 用户问题
             max_steps: 最大执行步数
+            conclusion_max_tokens: 诊断结论最大 token 数
             timeout: 超时秒数
 
         Returns:
@@ -60,7 +62,12 @@ class SubAgentClient:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     url,
-                    data={"q": question, "stream": "false", "max_steps": str(max_steps)},
+                    data={
+                        "q": question,
+                        "stream": "false",
+                        "max_steps": str(max_steps),
+                        "conclusion_max_tokens": str(conclusion_max_tokens),
+                    },
                 )
                 resp.raise_for_status()
                 text = resp.text
