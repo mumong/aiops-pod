@@ -6,12 +6,15 @@
 1. 并发调用所有已启用的子集群
 2. Token 估算与单报告压缩
 3. 调用 LLM 合成多集群统一报告（流式输出）
+4. 保存子集群报告到本地
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 import litellm
@@ -23,21 +26,146 @@ logger = logging.getLogger(__name__)
 
 # 多集群协调者合成提示词（独立常量，不影响单集群 prompts.py）
 FEDERATION_SYNTHESIS_PROMPT = """\
-你是多集群 Kubernetes 运维协调专家。
-以下是各子集群独立执行诊断后的报告，每份报告都由子集群的 AIOps Agent 生成。
+# 角色定义
+你是多集群 Kubernetes 运维协调专家。以下是各子集群独立执行诊断后的报告，每份报告都由子集群的 AIOps Agent 生成。
 
-请综合分析所有子集群的报告，输出一份多集群统一诊断报告，格式要求如下：
+# 核心任务
+综合分析所有子集群的报告，输出一份**高度结构化**的多集群统一诊断报告。
 
-1. **各集群问题概览对比表**（Markdown 表格，含集群名称、主要问题、严重程度、状态）
-2. **共性问题**（多个集群都存在的问题，按优先级排序）
-3. **差异化问题**（仅个别集群存在的特有问题）
-4. **跨集群优先级排序**（最需要立即处理的问题，不分集群）
-5. **分集群修复建议**（按集群分节，给出具体操作步骤）
+# 问题类型判断（必须先判断）
 
-规范：
-- 严格基于各子集群报告中的证据，不要臆测
-- 保留原始报告中的关键数据（Pod 名称、错误信息、指标值等）
-- 如某子集群查询失败，在报告中注明并跳过
+根据用户原始问题，判断分析模式：
+
+**1. 对比分析模式**：用户明确要求对比（如"谁的 CPU 高"、"哪个集群问题多"、"对比各集群"）
+- 重点：横向对比各集群的相同指标或问题
+- 输出：突出差异和排名
+
+**2. 全局诊断模式**：用户询问整体问题（如"我的集群有什么问题"、"集群状态"、"有哪些异常"）
+- 重点：列出所有集群的所有问题
+- 输出：按严重程度和集群分组
+
+# 输出模板（必须严格遵守 Markdown 格式）
+
+---
+
+## 📊 多集群诊断概览
+
+| 项目 | 内容 |
+|------|------|
+| **分析模式** | 对比分析 / 全局诊断 |
+| **子集群总数** | X 个（Y 个成功，Z 个失败） |
+| **问题总数** | X 个（Critical: Y, High: Z, Medium: W） |
+| **数据完整度** | XX%（说明哪些集群数据不足） |
+
+---
+
+## 🌐 各集群状态对比表
+
+| 集群名称 | 主要问题 | 严重程度 | 问题数量 | 数据状态 |
+|----------|----------|----------|----------|----------|
+| cluster-A | [问题摘要] | 🔴 Critical | 3 | ✅ 完整 |
+| cluster-B | [问题摘要] | 🟡 Medium | 1 | ⚠️ 监控缺失 |
+
+**说明**：
+- 🔴 Critical：需要立即处理，影响整个集群
+- 🟠 High：影响节点级，需要优先处理
+- 🟡 Medium：影响工作负载，建议尽快处理
+- ⚪ Low：应用层问题，影响范围有限
+
+---
+
+## 🕵️ 跨集群证据汇总
+
+### 关键证据追溯
+
+| 集群 | 证据来源 | 原始数据 | 支持的结论 |
+|------|----------|----------|------------|
+| cluster-A | kubectl describe node | `CPU 限制 101%` | master 节点超配 |
+| cluster-B | Prometheus | `CPU 使用率 25%` | 主控集群正常 |
+
+### 数据不足说明（如有）
+
+| 集群 | 缺失数据 | 影响 | 建议 |
+|------|----------|------|------|
+| cluster-B | 节点监控指标 | 无法获取 CPU 利用率 | 部署 node-exporter |
+
+---
+
+## 🎯 问题分析
+
+### 共性问题（多个集群都存在）
+
+**问题1：[问题名称]**
+- **涉及集群**：cluster-A, cluster-B
+- **严重程度**：🔴 Critical
+- **根因**：[基于证据的根因分析]
+- **置信度**：高 (85%)
+
+### 差异化问题（特定集群独有）
+
+**cluster-A 特有问题：**
+1. **[问题名称]**
+   - **层级**：L? - [层级名称]
+   - **根因**：[基于证据的分析]
+   - **置信度**：高/中/低
+
+---
+
+## 📋 跨集群优先级排序
+
+按严重程度和影响范围排序，最需要立即处理的问题：
+
+| 优先级 | 问题 | 涉及集群 | 严重程度 | 影响范围 |
+|--------|------|----------|----------|----------|
+| 1 | [问题描述] | cluster-A | 🔴 Critical | 整个集群 |
+| 2 | [问题描述] | cluster-B, cluster-C | 🟠 High | 多个节点 |
+
+---
+
+## 🛠️ 分集群修复建议
+
+### 集群：cluster-A
+
+**修复步骤：**
+
+**1. [优先] [操作名称]**
+```bash
+# 具体命令
+kubectl xxx
+```
+*依据*：证据 #1 显示...
+*预期结果*：...
+
+**2. [可选] [操作名称]**
+```bash
+# 具体命令
+```
+
+### 集群：cluster-B
+
+**修复步骤：**
+...
+
+---
+
+## ⚠️ 注意事项
+
+- 如果某集群数据不足，建议先修复数据收集问题（如部署监控组件），再进行深入分析
+- 跨集群问题可能有关联性，建议按优先级顺序修复
+- 修复后建议重新执行联邦查询，验证问题是否解决
+
+---
+
+# 严格规则
+
+1. **必须使用上述 Markdown 模板格式**
+2. **证据汇总表格必须包含原始数据列**，可追溯到具体集群和命令
+3. **置信度必须基于证据充分性**，数据不足时明确说明
+4. **修复命令必须可直接复制执行**，包含具体的集群、namespace、资源名称
+5. **如有数据不足，必须在"数据不足说明"表格中列出**，不要在结论中混淆"数据不足"和"问题诊断"
+6. **保留原始报告中的关键数据**：Pod 名称、错误信息、指标值、节点名称等
+7. **对比分析模式**：必须明确给出对比结果（如"cluster-A 的 CPU 使用率最高，为 85%"）
+8. **全局诊断模式**：必须列出所有集群的所有问题，不要遗漏
 """
 
 COMPRESS_PROMPT = """\
@@ -79,7 +207,7 @@ class FederationAggregator:
             self._model = f"deepseek/{self._model}"
         self._api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-    async def query_all(self, question: str, max_steps: int) -> List[SubAgentResult]:
+    async def query_all(self, question: str, max_steps: int, conclusion_max_tokens: int = 8192) -> List[SubAgentResult]:
         """并发查询所有已启用的子集群"""
         agents = self._registry.get_enabled_agents()
         if not agents:
@@ -96,12 +224,49 @@ class FederationAggregator:
                 agent=agent,
                 question=question,
                 max_steps=max_steps,
+                conclusion_max_tokens=conclusion_max_tokens,
                 timeout=self._synthesis_timeout,
             )
             for agent in agents
         ]
         results = await asyncio.gather(*tasks, return_exceptions=False)
+
+        # 保存子集群报告到本地
+        self._save_reports(results)
+
         return list(results)
+
+    def _save_reports(self, results: List[SubAgentResult]) -> None:
+        """保存子集群报告到本地目录"""
+        try:
+            # 创建 reports 目录
+            reports_dir = Path("reports")
+            reports_dir.mkdir(exist_ok=True)
+
+            # 生成时间戳
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            for result in results:
+                if not result.success:
+                    continue
+
+                # 文件名格式：{cluster_name}_{timestamp}.md
+                filename = f"{result.name}_{timestamp}.md"
+                filepath = reports_dir / filename
+
+                # 写入报告
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(f"# 子集群诊断报告 - {result.name}\n\n")
+                    f.write(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"**集群 URL**: {result.url}\n")
+                    f.write(f"**耗时**: {result.elapsed_seconds:.1f} 秒\n\n")
+                    f.write("---\n\n")
+                    f.write(result.text)
+
+                logger.info(f"[FEDERATION] 已保存 {result.name} 报告到: {filepath}")
+
+        except Exception as exc:
+            logger.error(f"[FEDERATION] 保存报告失败: {exc}", exc_info=True)
 
     def _compress_single(self, result: SubAgentResult) -> str:
         """调用 LLM 将单个子集群报告压缩为关键摘要"""
@@ -162,16 +327,41 @@ class FederationAggregator:
             yield "\n"
 
         # Token 估算与压缩
+        # max_tokens_per_agent=0 表示不设限，但需检测模型上下文限制
+        MODEL_CONTEXT_LIMIT = 60000  # DeepSeek 上下文限制约 64K tokens，预留 4K
         contents: List[str] = []
         total_tokens = 0
+
         for r in successful:
             text = r.text
             token_count = _estimate_tokens(text)
-            if token_count > self._max_tokens_per_agent:
+
+            # 如果设置了单个子集群限制（非0），则按限制压缩
+            if self._max_tokens_per_agent > 0 and token_count > self._max_tokens_per_agent:
                 text = self._compress_single(r)
                 token_count = _estimate_tokens(text)
+
             contents.append((r.name, r.url, text, token_count))
             total_tokens += token_count
+
+        # 如果总 token 数超过模型上下文限制，强制压缩
+        if total_tokens > MODEL_CONTEXT_LIMIT:
+            logger.warning(
+                f"[FEDERATION] 总 tokens ({total_tokens}) 超过模型限制 ({MODEL_CONTEXT_LIMIT})，"
+                f"开始强制压缩..."
+            )
+            compressed_contents = []
+            total_tokens = 0
+            for name, url, text, _ in contents:
+                # 重新创建 SubAgentResult 用于压缩
+                temp_result = SubAgentResult(
+                    name=name, url=url, success=True, text=text, error=None, elapsed_seconds=0
+                )
+                compressed_text = self._compress_single(temp_result)
+                compressed_tokens = _estimate_tokens(compressed_text)
+                compressed_contents.append((name, url, compressed_text, compressed_tokens))
+                total_tokens += compressed_tokens
+            contents = compressed_contents
 
         logger.info(
             f"[FEDERATION] 开始 LLM 合成，总输入 tokens 约: {total_tokens}，"

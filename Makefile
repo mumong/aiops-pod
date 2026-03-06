@@ -8,7 +8,7 @@ DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME)
 VERSION ?= $(shell cat VERSION)
 DOCKER_TAG := $(VERSION)
 
-.PHONY: build push deploy delete restart logs sync-version
+.PHONY: build push deploy delete restart logs sync-version master slave
 
 build:
 	@echo "Building $(DOCKER_NAME):$(DOCKER_TAG)..."
@@ -29,6 +29,24 @@ deploy:
 	# 4. 等待滚动更新完成
 	@echo "Waiting for rollout to complete..."
 	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=120s
+
+master:
+	@echo "Deploying as MASTER cluster (federation enabled)..."
+	# 1. 配置 federation.enabled=true
+	@sed -i 's/enabled: false  # 主集群部署时改为 true/enabled: true  # 主集群部署时改为 true/' deploy/configmap/config.yaml
+	@sed -i 's/enabled: false$$/enabled: true/' deploy/configmap/config.yaml
+	# 2. 构建、推送、部署
+	$(MAKE) build push deploy
+	@echo "✅ Master cluster deployed successfully!"
+
+slave:
+	@echo "Deploying as SLAVE cluster (federation disabled)..."
+	# 1. 配置 federation.enabled=false
+	@sed -i 's/enabled: true  # 主集群部署时改为 true/enabled: false  # 主集群部署时改为 true/' deploy/configmap/config.yaml
+	@sed -i 's/enabled: true$$/enabled: false/' deploy/configmap/config.yaml
+	# 2. 构建、推送、部署
+	$(MAKE) build push deploy
+	@echo "✅ Slave cluster deployed successfully!"
 
 delete:
 	@echo "Deleting (keeping namespace)..."

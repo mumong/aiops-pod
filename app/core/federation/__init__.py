@@ -54,7 +54,7 @@ class FederationCoordinator:
         """检查是否有可用的已启用子集群"""
         return len(self._registry.get_enabled_agents()) > 0
 
-    def ask_stream(self, question: str, max_steps: int = 30) -> Generator[str, None, None]:
+    def ask_stream(self, question: str, max_steps: int = 30, conclusion_max_tokens: int = 8192) -> Generator[str, None, None]:
         """
         执行联邦查询并以流式文本 yield 结果。
 
@@ -65,7 +65,7 @@ class FederationCoordinator:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
                 asyncio.run,
-                self._aggregator.query_all(question=question, max_steps=max_steps),
+                self._aggregator.query_all(question=question, max_steps=max_steps, conclusion_max_tokens=conclusion_max_tokens),
             )
             results = future.result()
 
