@@ -96,7 +96,6 @@ class WorkflowNode(ABC):
         tool_executor = getattr(holmes_service.ai, "tool_executor", None)
 
         messages = build_initial_ask_messages(
-            console=holmes_service.console,
             initial_user_prompt=question,
             file_paths=None,
             tool_executor=tool_executor,

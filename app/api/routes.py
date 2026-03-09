@@ -18,6 +18,8 @@ API 使用示例：
     curl -X POST "http://localhost:8000/ask" -d "q=Pod状态异常"
 """
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Generator
 from urllib.parse import unquote
 
@@ -279,6 +281,73 @@ def register_routes(app):
         from app.core.mcp import get_mcp_manager
         manager = get_mcp_manager()
         return {"success": True, "servers": manager.get_status()}
+
+    # =========================================================================
+    # 报告查看 API：/reports - 查看保存的子集群诊断报告
+    # =========================================================================
+
+    @app.get("/reports")
+    async def list_reports(
+        cluster: Optional[str] = Query(None, description="按集群名称过滤"),
+        limit: int = Query(50, description="返回数量限制", ge=1, le=500),
+    ):
+        """
+        📄 列出已保存的子集群诊断报告
+
+        ```bash
+        # 列出所有报告
+        curl "http://localhost:8000/reports"
+
+        # 按集群过滤
+        curl "http://localhost:8000/reports?cluster=cluster-24"
+
+        # 限制数量
+        curl "http://localhost:8000/reports?limit=10"
+        ```
+        """
+        reports_dir = Path("reports")
+        if not reports_dir.exists():
+            return {"count": 0, "reports": []}
+
+        files = sorted(reports_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+
+        if cluster:
+            files = [f for f in files if f.name.startswith(f"{cluster}_")]
+
+        files = files[:limit]
+
+        report_list = []
+        for f in files:
+            stat = f.stat()
+            report_list.append({
+                "filename": f.name,
+                "size_bytes": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+
+        return {"count": len(report_list), "reports": report_list}
+
+    @app.get("/reports/{filename}")
+    async def get_report(filename: str):
+        """
+        📄 查看具体报告内容
+
+        ```bash
+        curl "http://localhost:8000/reports/cluster-24_20260309_143000.md"
+        ```
+        """
+        reports_dir = Path("reports")
+        filepath = reports_dir / filename
+
+        if not filepath.exists() or not filepath.is_file():
+            raise HTTPException(status_code=404, detail=f"报告不存在: {filename}")
+
+        # 防止路径穿越
+        if not filepath.resolve().is_relative_to(reports_dir.resolve()):
+            raise HTTPException(status_code=403, detail="禁止访问")
+
+        content = filepath.read_text(encoding="utf-8")
+        return PlainTextResponse(content=content, media_type="text/plain; charset=utf-8")
     
     # =========================================================================
     # 内部辅助函数

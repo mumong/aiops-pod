@@ -10,13 +10,13 @@
 federation:
   enabled: true  # 主集群设为 true
   sub_agents:
-    # 主集群本身（重要：让主集群也可被查询）
+    # 主集群本身（重要：容器内用 8000 端口，不是 NodePort 30800）
     - name: "main"
-      url: "http://localhost:30800"
+      url: "http://localhost:8000"
       description: "主集群"
       enabled: true
 
-    # 子集群列表
+    # 子集群列表（跨节点用 NodePort 30800）
     - name: "cluster-24"
       url: "http://10.2.0.24:30800"
       description: "子集群 24"
@@ -30,8 +30,8 @@ federation:
 
 **关键点**：
 - `federation.enabled: true`
-- 必须包含主集群本身（name: "main", url: "http://localhost:30800"）
-- 添加所有子集群
+- 主集群 URL 用 `http://localhost:8000`（容器内应用端口），**不能用** `http://localhost:30800`（NodePort 在宿主机上，容器内不可达）
+- 子集群使用 NodePort `30800`（跨节点通过宿主机 IP 访问）
 
 ### 子集群配置
 
@@ -136,7 +136,7 @@ A: 当用户问"所有集群"时，应该包括主集群。配置后主集群与
 
 **Q: 主集群的 URL 用什么？**
 
-A: 使用 `http://localhost:30800` 或 `http://127.0.0.1:30800`
+A: 使用 `http://localhost:8000`（容器内应用端口，不是 NodePort 30800）
 
 **Q: 如何禁用某个子集群？**
 

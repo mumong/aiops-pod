@@ -79,7 +79,6 @@ def execute_query_stream_sse(
         runbook_catalog = service.merged_catalog if service.merged_catalog else service.config.get_runbook_catalog()
 
         messages = build_initial_ask_messages(
-            console=service.console,
             initial_user_prompt=question,
             file_paths=None,
             tool_executor=service.ai.tool_executor,
@@ -181,7 +180,6 @@ def execute_query_stream_text(
         runbook_catalog = service.merged_catalog if service.merged_catalog else service.config.get_runbook_catalog()
 
         messages = build_initial_ask_messages(
-            console=service.console,
             initial_user_prompt=question,
             file_paths=None,
             tool_executor=service.ai.tool_executor,
