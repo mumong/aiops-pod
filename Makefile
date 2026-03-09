@@ -32,18 +32,16 @@ deploy:
 
 master:
 	@echo "Deploying as MASTER cluster (federation enabled)..."
-	# 1. 配置 federation.enabled=true
-	@sed -i 's/enabled: false  # 主集群部署时改为 true/enabled: true  # 主集群部署时改为 true/' deploy/configmap/config.yaml
-	@sed -i 's/enabled: false$$/enabled: true/' deploy/configmap/config.yaml
+	# 1. 在 federation 块内将 enabled: false 改为 enabled: true（无视空格和注释）
+	@sed -i '/^    federation:/,/^    [^ ]/{s/enabled: false/enabled: true/}' deploy/configmap/config.yaml
 	# 2. 构建、推送、部署
 	$(MAKE) build push deploy
 	@echo "✅ Master cluster deployed successfully!"
 
 slave:
 	@echo "Deploying as SLAVE cluster (federation disabled)..."
-	# 1. 配置 federation.enabled=false
-	@sed -i 's/enabled: true  # 主集群部署时改为 true/enabled: false  # 主集群部署时改为 true/' deploy/configmap/config.yaml
-	@sed -i 's/enabled: true$$/enabled: false/' deploy/configmap/config.yaml
+	# 1. 在 federation 块内将 enabled: true 改为 enabled: false（无视空格和注释）
+	@sed -i '/^    federation:/,/^    [^ ]/{s/enabled: true/enabled: false/}' deploy/configmap/config.yaml
 	# 2. 构建、推送、部署
 	$(MAKE) build push deploy
 	@echo "✅ Slave cluster deployed successfully!"

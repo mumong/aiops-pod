@@ -2,7 +2,7 @@
 """
 联邦查询模块 - 多集群 Agent-to-Agent 联邦查询
 
-公开接口：FederationCoordinator
+公开接口：FederationCoordinator, FederationAgent
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from typing import Any, Dict, Generator, List, Optional
 from app.core.federation.registry import AgentRegistry, SubAgentConfig
 from app.core.federation.client import SubAgentResult
 from app.core.federation.aggregator import FederationAggregator
+from app.core.federation.agent import FederationAgent
 
 logger = logging.getLogger(__name__)
 
@@ -116,3 +117,41 @@ def get_federation_coordinator(
     )
     logger.info("[FEDERATION] FederationCoordinator 初始化完成")
     return _global_coordinator
+
+
+# ============================================================================
+# FederationAgent 单例
+# ============================================================================
+
+_global_agent: Optional[FederationAgent] = None
+
+
+def get_federation_agent(
+    federation_config: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Optional[FederationAgent]:
+    """
+    获取全局 FederationAgent 单例（真正的 Agent-to-Agent）。
+
+    首次调用需传入 federation_config；后续调用返回已创建的实例。
+    若 federation.enabled=false，返回 None。
+    """
+    global _global_agent
+    if _global_agent is not None:
+        return _global_agent
+    if federation_config is None:
+        return None
+    if not federation_config.get("enabled", False):
+        logger.info("[FEDERATION] federation.enabled=false，跳过 Agent 初始化")
+        return None
+
+    registry = AgentRegistry.load_from_dict(federation_config)
+    _global_agent = FederationAgent(
+        registry=registry,
+        model=model or "deepseek/deepseek-chat",
+        api_key=api_key,
+        max_steps=30
+    )
+    logger.info("[FEDERATION] FederationAgent 初始化完成（真正的 Agent-to-Agent）")
+    return _global_agent

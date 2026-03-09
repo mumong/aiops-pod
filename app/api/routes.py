@@ -362,6 +362,77 @@ def register_routes(app):
             },
         )
 
+    # =========================================================================
+    # Agent-to-Agent 联邦查询 API：/federation/ask/v2 - 真正的智能路由
+    # =========================================================================
+
+    @app.get("/federation/ask/v2")
+    async def federation_ask_v2_get(
+        q: str = Query(..., description="问题内容"),
+        max_steps: int = Query(30, description="Agent 最大执行步数", ge=1, le=100),
+    ):
+        """
+        🤖 Agent-to-Agent 联邦查询（GET 方式）
+
+        使用 HolmesGPT Tool Calling 实现真正的智能路由：
+        - 主 Agent 理解用户意图，决定查询哪些集群
+        - 针对不同集群发送不同问题
+        - 支持选择性查询（如"查询集群 1、3、5"）
+
+        ```bash
+        curl -G "http://localhost:8000/federation/ask/v2" --data-urlencode "q=查询 cluster-24 的 CPU"
+        ```
+        """
+        question = fix_double_encoding(q)
+        logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询 (GET): {question[:80]}...")
+        return _federation_agent_stream_response(question, max_steps)
+
+    @app.post("/federation/ask/v2")
+    async def federation_ask_v2_post(
+        q: str = Form(..., description="问题内容"),
+        max_steps: int = Form(30, description="Agent 最大执行步数"),
+    ):
+        """
+        🤖 Agent-to-Agent 联邦查询（POST 方式）
+
+        ```bash
+        curl -X POST "http://localhost:8000/federation/ask/v2" -d "q=查询集群 1 的 memory 和集群 3 的 cpu"
+        ```
+        """
+        question = fix_double_encoding(q)
+        logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询 (POST): {question[:80]}...")
+        return _federation_agent_stream_response(question, max_steps)
+
+    def _federation_agent_stream_response(question: str, max_steps: int):
+        """生成 Agent-to-Agent 联邦查询流式响应"""
+
+        def generate() -> Generator[str, None, None]:
+            try:
+                service = get_service()
+                agent = service.federation_agent
+                if agent is None:
+                    yield (
+                        "❌ Agent-to-Agent 联邦查询未启用。\n\n"
+                        "请在主集群 config.yaml 中设置 federation.enabled: true 并配置子集群列表。\n"
+                        "若要查询单集群，请使用 /ask 端点。\n"
+                    )
+                    return
+                logger.info(f"[FEDERATION A2A] 开始 Agent-to-Agent 查询, 问题: {question[:60]}...")
+                yield from agent.ask_stream(question=question)
+            except Exception as exc:
+                logger.error(f"[FEDERATION A2A] Agent-to-Agent 查询出错: {exc}", exc_info=True)
+                yield f"\n❌ Agent-to-Agent 查询错误: {str(exc)}\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     def _stream_response(question: str, output_format: str, max_steps: int):
         """生成流式响应"""
         

@@ -27,7 +27,7 @@ from app.core.holmes.config_loader import load_stream_output_flag, load_holmes_c
 from app.core.holmes.call_wrapper import call_with_stream
 from app.core.mcp.mcp_patch import patch_mcp_toolset
 from app.core.holmes.tool_logging_patch import apply_tool_result_logging_patch
-from app.core.federation import get_federation_coordinator, FederationCoordinator
+from app.core.federation import get_federation_coordinator, FederationCoordinator, get_federation_agent, FederationAgent
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ class HolmesService:
         self.merged_catalog: Optional[RunbookCatalog] = None
         self.stream_output: bool = False  # 流式输出配置
         self.federation_coordinator: Optional[FederationCoordinator] = None
+        self.federation_agent: Optional[FederationAgent] = None
         self._init_lock = threading.Lock()
         self._init_in_progress: bool = False
         self._init_error: Optional[str] = None
@@ -169,6 +170,15 @@ class HolmesService:
                     )
                     if self.federation_coordinator:
                         logger.info("[FEDERATION] 联邦协调器初始化完成")
+
+                    # 初始化 FederationAgent（真正的 Agent-to-Agent）
+                    self.federation_agent = get_federation_agent(
+                        federation_config=_federation_cfg,
+                        model=final_model,
+                        api_key=final_api_key,
+                    )
+                    if self.federation_agent:
+                        logger.info("[FEDERATION] FederationAgent 初始化完成（真正的 Agent-to-Agent）")
                 else:
                     logger.debug("[FEDERATION] federation 未启用，跳过")
 
