@@ -125,12 +125,11 @@ class LayerClassifierNode(WorkflowNode):
             # 使用 build_initial_ask_messages 构建消息
             # 这样可以支持 runbooks 和 tools
             messages = build_initial_ask_messages(
-                console=self.holmes_service.console,
                 initial_user_prompt=question,
                 file_paths=None,
                 tool_executor=tool_executor,
                 runbooks=self.runbook_catalog,
-                system_prompt_additions=LAYER_CLASSIFIER_PROMPT  # 使用节点专用的 prompt
+                system_prompt_additions=LAYER_CLASSIFIER_PROMPT
             )
 
             # 调用 LLM（使用和 HolmesService 相同的方式）

@@ -201,7 +201,6 @@ class EvidenceCollectorNode(WorkflowNode):
             # 使用 build_initial_ask_messages 构建消息
             # 这样可以支持 runbooks 和 tools
             messages = build_initial_ask_messages(
-                console=self.holmes_service.console,
                 initial_user_prompt=question,
                 file_paths=None,
                 tool_executor=self.holmes_service.ai.tool_executor,

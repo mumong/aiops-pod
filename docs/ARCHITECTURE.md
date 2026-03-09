@@ -1,162 +1,151 @@
-# 架构与模块地图（你要改哪里，一看就懂）
+# 架构与模块地图
 
-## 目标与设计原则
+## 设计原则
 
-本项目的目标是做一个“可长期演进”的运维 Agent：
-
-- **高内聚**：同一类能力（配置加载、流式输出、MCP 管理、Runbook）放在同一模块域里。
-- **低耦合**：主服务不依赖“本地 tools”，默认仅通过配置连接 **第三方 MCP Server**；本地 auto-start 只是可选能力。
-- **功能不变**：当前重构都遵循“只拆分/搬运，不改默认行为与输出协议”。
+- **高内聚**：同一类能力（配置加载、流式输出、MCP 管理、Runbook、联邦查询）放在同一模块域
+- **低耦合**：主服务不依赖"本地 tools"，默认仅通过配置连接第三方 MCP Server
+- **多集群优先**：联邦查询（Agent-to-Agent）是核心差异化能力
 
 ---
 
-## 一条请求的完整链路（从 `/ask` 到工具调用）
+## 目录结构总览
 
-1. 用户请求进入 API：
-   - `app/api/routes.py`：处理 `/ask`（GET/POST）、`/tools`、`/runbooks`、`/api/v1/mcp/status`
-2. 进入核心编排器：
-   - `app/core/service.py`：`HolmesService.execute_query()` 或 `HolmesService.execute_query_stream()`
-3. HolmesGPT 运行（tool calling）：
-   - 读取配置（toolsets / mcp_servers）
-   - 构建 messages（System Prompt + Runbook catalog + tools 信息）
-   - LLM 在迭代中触发 tool calls（Holmes 框架内部执行）
-4. 输出返回：
-   - text 模式：返回“可读的文本流”
-   - sse 模式：返回“JSON SSE events”
-
----
-
-## 目录结构（按模块域拆分）
-
-### 1) 入口与 API
-
-- **`run.py`**
-  - 启动入口：调用 `app/main.py`
-- **`app/main.py`**
-  - FastAPI 应用与生命周期（lifespan）
-  - 可选：本地 MCP auto-start（默认关闭，通过 `MCP_AUTO_START_LOCAL=true` 开启）
-- **`app/api/routes.py`**
-  - HTTP API：
-    - `GET/POST /ask`：主入口
-    - `GET /tools`：列出 Holmes 已注册工具（含 MCP tools）
-    - `GET /runbooks`：列出 runbook catalog
-    - `GET /api/v1/mcp/status`：仅显示“本地 auto-start 管理器”的状态（与远程 MCP 的连通性不是一回事）
-
-你要改什么：
-- **加/改 API**：改 `app/api/routes.py`
-- **服务启动流程**：改 `app/main.py`
-
----
-
-### 2) 核心编排器（尽量保持薄）
-
-- **`app/core/service.py`**
-  - `HolmesService.initialize()`：加载配置、创建 AI、加载/合并 runbooks
-  - `execute_query()`：同步执行
-  - `execute_query_stream()`：流式执行（根据 output_format 路由）
-
-它依赖下方的“holmes 子模块”实现细节，但自身只保留编排逻辑。
-
-你要改什么：
-- **改变执行流程（但不建议把细节塞回 service.py）**：优先新增/修改 `app/core/holmes/` 下的实现，再由 `service.py` 组合。
+```
+robusta/
+├── run.py                              # 启动入口
+├── app/
+│   ├── main.py                         # FastAPI 应用 + 生命周期
+│   ├── api/
+│   │   └── routes.py                   # 所有 HTTP API 端点
+│   └── core/
+│       ├── service.py                  # HolmesService（全局单例编排器）
+│       ├── prompts.py                  # 所有提示词（单集群 + 联邦）
+│       ├── runbook.py                  # RunbookManager
+│       ├── environment.py              # 环境检测与配置路径
+│       ├── paths.py                    # 项目根目录工具
+│       ├── federation/                 # 联邦查询模块（多集群）
+│       │   ├── __init__.py             # FederationCoordinator + Agent 全局单例
+│       │   ├── registry.py             # AgentRegistry（子集群配置注册）
+│       │   ├── client.py               # SubAgentClient（httpx 连接池）
+│       │   ├── aggregator.py           # FederationAggregator（v1 并发聚合）
+│       │   ├── toolset.py              # ListClustersTool + QueryClusterTool
+│       │   └── agent.py                # FederationAgent（v2 智能路由）
+│       ├── holmes/                     # HolmesGPT 封装层
+│       │   ├── config_loader.py        # YAML 配置加载
+│       │   ├── query_stream.py         # 流式输出（text/sse）
+│       │   ├── streaming.py            # SSE 消息封装
+│       │   ├── call_wrapper.py         # 流式事件收集
+│       │   ├── introspection.py        # 启动自检
+│       │   └── tool_logging_patch.py   # 工具调用日志
+│       ├── mcp/
+│       │   └── mcp_patch.py            # MCP 工具补丁
+│       └── workflow/                   # LangGraph 工作流（可选）
+│           └── ...
+├── knowledge_base/runbooks/            # Runbook 知识库
+├── config/config.yaml                  # 本地开发配置
+├── deploy/                             # K8s 部署配置
+│   ├── configmap/config.yaml           # 生产配置
+│   └── deployment.yaml
+├── reports/                            # 子集群诊断报告保存目录（运行时生成）
+└── Makefile                            # 构建 & 部署命令
+```
 
 ---
 
-### 3) Holmes 子模块（被抽离出来的可复用能力）
+## API 端点总览
 
-这些文件是你提到的“逻辑抽离后看不懂”的核心。可以把它们理解为：`HolmesService` 的“组件库”。
-
-- **`app/core/holmes/config_loader.py`**
-  - 负责：读取 YAML、环境变量替换 `${VAR}`、去掉 `stream_output` 字段写入临时文件、再调用 `Config.load_from_file`
-  - 你要改的场景：
-    - 想增加新的配置源（比如从远程读取配置）
-    - 想调整环境变量替换策略
-
-- **`app/core/holmes/query_stream.py`**
-  - 负责：两种流式输出实现（行为与输出保持原样）
-    - `execute_query_stream_text()`：人类可读纯文本流
-    - `execute_query_stream_sse()`：JSON SSE events
-  - 你要改的场景：
-    - 想修改“流式输出格式/字段/事件类型”
-
-- **`app/core/holmes/call_wrapper.py`**
-  - 负责：把 `ai.call_stream(...)` 的事件收集成一个“类似 ai.call() 的响应对象”
-  - 你要改的场景：
-    - 想改变“stream 模式下 tool_calls 的收集方式”
-
-- **`app/core/holmes/streaming.py`**
-  - 负责：SSE 消息封装、耗时格式化
-
-- **`app/core/holmes/introspection.py`**
-  - 负责：启动时输出工具集/MCP/runbooks 的加载摘要（方便排障）
+| 端点 | 方法 | 说明 | 适用场景 |
+|------|------|------|----------|
+| `/ask` | GET/POST | 单集群查询（HolmesGPT） | 查询当前集群 |
+| `/federation/ask` | GET/POST | 多集群并发查询（v1） | 全局对比，查询所有集群 |
+| `/federation/ask/v2` | GET/POST | Agent-to-Agent 智能路由（v2） | 选择性查询、复杂问题 |
+| `/reports` | GET | 列出已保存的子集群报告 | 审核历史报告 |
+| `/reports/{filename}` | GET | 查看具体报告内容 | 查看诊断详情 |
+| `/health` | GET | 健康检查 | 监控 |
+| `/tools` | GET | 工具列表 | 排障 |
+| `/tools/detail` | GET | 工具详情（按 toolset 分组） | 二次开发 |
+| `/runbooks` | GET | Runbook 列表 | 排障 |
 
 ---
 
-### 4) Prompt（方法论与输出规范）
+## 请求链路
 
-- **`app/core/prompts.py`**
-  - `SYSTEM_PROMPT`：分层诊断模型（L0-L4）、强制输出模板、安全禁令等
+### 单集群查询（`/ask`）
 
-你要改什么：
-- **改 Agent 的“思考方式/输出模板/安全规则”**：改 `app/core/prompts.py`
+```
+用户 → /ask?q=Pod重启
+       ↓
+  routes.py: ask_get/ask_post
+       ↓
+  HolmesService.execute_query_stream()
+       ↓
+  HolmesGPT agentic loop（Tool Calling）
+    ├─ 读取 toolsets / mcp_servers 配置
+    ├─ 构建 messages（System Prompt + Runbook + tools）
+    └─ LLM 迭代触发 tool calls → 生成诊断结论
+       ↓
+  流式文本 / SSE 返回给用户
+```
 
----
+### Agent-to-Agent 联邦查询（`/federation/ask/v2`）
 
-### 5) Runbooks（知识库/RAG）
-
-- **`knowledge_base/runbooks/`**
-  - `catalog.json`：runbook 索引（AI 用 description 做匹配）
-  - `*.md`：具体 runbook 内容
-- **`app/core/runbook.py`**
-  - `RunbookManager`：加载并校验 catalog、合并内置与自定义 runbooks、配置搜索路径
-
-你要改什么：
-- **新增/编辑 runbook 内容**：改 `knowledge_base/runbooks/*.md`
-- **新增/编辑索引条目**：改 `knowledge_base/runbooks/catalog.json`
-- **改变 runbook 的加载/合并策略**：改 `app/core/runbook.py`
-
----
-
-### 6) Tools（你未来最关心：只用第三方 MCP）
-
-你现在的推荐模式是：**禁用本地 tools，只通过配置连接第三方 MCP Server**。
-
-- **第三方 MCP（推荐）**
-  - 配置位置：
-    - 本地：`config/config.yaml`
-    - K8s：`deploy/configmap/config.yaml`（由 Deployment 通过 `CONFIG_FILE` 指向挂载路径）
-  - 配置字段：`mcp_servers.<name>.config.url`（SSE URL）+ `enabled: true`
-  - 你要改什么：
-    - **新增一个你自己的 MCP tool**：写一个独立 MCP Server（HTTP/SSE），部署后把 URL 写进 `mcp_servers`
-
-- **内置 toolsets（可选）**
-  - 配置字段：`toolsets.<toolset_name>.enabled`
-  - 你要改什么：
-    - 想完全不用内置工具：把 `toolsets` 全部设为 `enabled: false`（只剩第三方 MCP）
-
-- **本地 MCP auto-start（可选，不推荐在生产依赖）**
-  - 代码位置：`app/core/mcp/manager.py`
-  - 开关：
-    - 环境变量：`MCP_AUTO_START_LOCAL=true`
-    - 单个 server：`mcp_servers.<name>.autostart: true` 且 url 必须是 `localhost/127.0.0.1`
-  - 用途：本地开发时方便启动 test MCP server（生产推荐只连第三方 MCP）
+详见 [A2A 技术设计文档](./A2A_TECHNICAL_DESIGN.md)
 
 ---
 
-## “我该改哪个文件？”速查表
+## 核心模块说明
+
+### 1. 入口与 API（`app/api/routes.py`）
+
+注册所有 HTTP 路由，包括单集群、联邦查询、报告查看等端点。
+
+### 2. 编排器（`app/core/service.py`）
+
+`HolmesService` 是全局单例，负责：
+- 加载配置 → 创建 AI 实例 → 加载 Runbooks
+- 条件性初始化 FederationCoordinator 和 FederationAgent
+- 提供 `execute_query()` 和 `execute_query_stream()` 方法
+
+### 3. Holmes 子模块（`app/core/holmes/`）
+
+| 模块 | 职责 |
+|------|------|
+| `config_loader.py` | 读取 YAML、环境变量替换、排除非 Holmes 字段 |
+| `query_stream.py` | `execute_query_stream_text()` / `_sse()` |
+| `call_wrapper.py` | 流式事件收集为响应对象 |
+| `streaming.py` | SSE 消息封装、耗时格式化 |
+| `introspection.py` | 启动时输出资源加载摘要 |
+
+### 4. 联邦查询（`app/core/federation/`）
+
+详见 [A2A 技术设计文档](./A2A_TECHNICAL_DESIGN.md)
+
+### 5. 提示词（`app/core/prompts.py`）
+
+| 常量 | 用途 |
+|------|------|
+| `SYSTEM_PROMPT` | 单集群 HolmesGPT 五层诊断模型 |
+| `CONCLUSION_FORMATTER_PROMPT` | 诊断结论格式化模板 |
+| `FEDERATION_AGENT_PROMPT` | A2A 智能路由 + 结构化输出模板 |
+| `FEDERATION_SYNTHESIS_PROMPT` | v1 多集群合成提示词（aggregator 使用） |
+
+### 6. Runbooks（`knowledge_base/runbooks/`）
+
+- `catalog.json`：runbook 索引（AI 用 description 做语义匹配）
+- `*.md`：具体 runbook 内容
+
+---
+
+## "我该改哪个文件？"速查表
 
 | 你要做的事 | 去改哪里 |
 |---|---|
-| 改 Agent 的诊断框架/输出模板/安全禁令 | `app/core/prompts.py` |
-| 新增/修改 Runbook 内容 | `knowledge_base/runbooks/*.md` |
-| 新增/修改 Runbook 目录索引 | `knowledge_base/runbooks/catalog.json` |
-| 改 Runbook 加载/合并逻辑 | `app/core/runbook.py` |
-| 只使用第三方 MCP（不跑本地工具） | 配置 `mcp_servers`（`config/config.yaml` 或 `deploy/configmap/config.yaml`） |
-| 新增一个你自己的 tool（推荐方式） | 写独立 MCP Server（HTTP/SSE）+ 配置到 `mcp_servers` |
-| 修改流式输出格式（text/sse） | `app/core/holmes/query_stream.py` |
-| 修改 SSE 消息封装/耗时显示 | `app/core/holmes/streaming.py` |
-| 修改启动时输出哪些工具/资源信息 | `app/core/holmes/introspection.py` |
-| 修改服务启动/生命周期 | `app/main.py` |
-| 增加新的 HTTP API | `app/api/routes.py` |
-
-
+| 改 Agent 诊断输出模板 | `app/core/prompts.py` |
+| 改 A2A 联邦查询行为 | `app/core/federation/agent.py` |
+| 改 A2A 输出格式 | `app/core/prompts.py` → `FEDERATION_AGENT_PROMPT` |
+| 新增/编辑 Runbook | `knowledge_base/runbooks/*.md` + `catalog.json` |
+| 新增 MCP 工具 | 写独立 MCP Server + 配置 `mcp_servers` |
+| 改流式输出格式 | `app/core/holmes/query_stream.py` |
+| 增加新 API | `app/api/routes.py` |
+| 改服务启动流程 | `app/main.py` |
+| 修改子集群配置 | `config/config.yaml` 或 `deploy/configmap/config.yaml` |

@@ -292,7 +292,6 @@ class HolmesService:
             
             # 构建消息
             messages = build_initial_ask_messages(
-                console=self.console,
                 initial_user_prompt=question,
                 file_paths=None,
                 tool_executor=self.ai.tool_executor,

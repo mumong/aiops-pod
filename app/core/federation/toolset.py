@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from holmes.core.tools import Tool, Toolset, ToolsetStatusEnum
@@ -107,6 +109,7 @@ class QueryClusterTool(Tool):
             result = future.result()
 
         if result.success:
+            self._save_report(cluster_name, result)
             return {
                 "cluster": cluster_name,
                 "success": True,
@@ -125,6 +128,28 @@ class QueryClusterTool(Tool):
         cluster = params.get("cluster_name", "?")
         question = params.get("question", "?")
         return f"query_cluster(cluster_name='{cluster}', question='{question[:30]}...')"
+
+    def _save_report(self, cluster_name: str, result: Dict[str, Any]) -> None:
+        """保存子集群报告到本地 reports/ 目录"""
+        try:
+            reports_dir = Path("reports")
+            reports_dir.mkdir(exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{cluster_name}_{timestamp}.md"
+            filepath = reports_dir / filename
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(f"# 子集群诊断报告 - {cluster_name}\n\n")
+                f.write(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"**来源**: Agent-to-Agent (v2)\n")
+                f.write(f"**耗时**: {result.elapsed_seconds:.1f} 秒\n\n")
+                f.write("---\n\n")
+                f.write(result.text)
+
+            logger.info(f"[FEDERATION A2A] 已保存 {cluster_name} 报告到: {filepath}")
+        except Exception as exc:
+            logger.error(f"[FEDERATION A2A] 保存报告失败: {exc}", exc_info=True)
 
 
 class FederationToolset(Toolset):
