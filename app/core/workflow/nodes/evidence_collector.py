@@ -199,7 +199,6 @@ class EvidenceCollectorNode(WorkflowNode):
                 system_prompt += f"\n\n# 已提取的关键实体\n{entities_str}\n"
 
             # 使用 build_initial_ask_messages 构建消息
-            # 这样可以支持 runbooks 和 tools
             messages = build_initial_ask_messages(
                 initial_user_prompt=question,
                 file_paths=None,
@@ -359,6 +358,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 return scenario
 
         layer_default = {
+            Layer.QUERY: "QUERY",
             Layer.L0: "L0-DiskFull",
             Layer.L1: "L1-KubeletCert",
             Layer.L2: "L2-OOMKilled",
@@ -461,6 +461,9 @@ class EvidenceCollectorNode(WorkflowNode):
         """获取默认命令列表"""
         # 基于层级的默认命令集
         layer_commands = {
+            Layer.QUERY: [
+                # 直接查询不需要诊断命令，由 LLM 根据 prompt 决定
+            ],
             Layer.L0: [
                 "df -h",
                 "kubectl get events -A --sort-by='.lastTimestamp' | head -20",

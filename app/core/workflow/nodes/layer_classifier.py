@@ -255,7 +255,31 @@ class LayerClassifierNode(WorkflowNode):
             "key_entities": [],
             "possible_scenarios": []
         }
-        
+
+        # 优先检测 QUERY 模式
+        query_indicators = [
+            r'"layer"\s*:\s*"QUERY"',
+            r'QUERY',
+            r'直接查询',
+            r'查询结果',
+            r'query_results',
+        ]
+        # 同时检测是否有诊断指标
+        diagnosis_indicators = [
+            r'故障', r'异常', r'报错', r'重启', r'crash', r'oom',
+            r'排查', r'诊断',
+        ]
+        text_lower = text.lower()
+        has_query_indicator = any(re.search(p, text, re.IGNORECASE) for p in query_indicators)
+        has_diagnosis_indicator = any(re.search(p, text_lower) for p in diagnosis_indicators)
+
+        if has_query_indicator and not has_diagnosis_indicator:
+            result["layer"] = "QUERY"
+            result["layer_name"] = "直接查询"
+            result["confidence"] = 0.9
+            result["possible_scenarios"] = [{"scenario": "用户直接查询", "probability": "高", "reason": "数据请求"}]
+            return result
+
         # 提取层级
         layer_patterns = [
             (r'L0|基础设施', "L0", "基础设施层"),
@@ -264,19 +288,45 @@ class LayerClassifierNode(WorkflowNode):
             (r'L3|服务.*网络|DNS', "L3", "服务与网络层"),
             (r'L4|应用|依赖', "L4", "应用层"),
         ]
-        
+
         for pattern, layer, name in layer_patterns:
             if re.search(pattern, text, re.IGNORECASE):
                 result["layer"] = layer
                 result["layer_name"] = name
                 break
-        
+
         return result
     
     def _analyze_with_rules(self, question: str) -> Dict:
         """使用规则匹配分析（回退方案）"""
         q_lower = question.lower()
-        
+
+        # 优先检测：是否为直接查询（非故障诊断）
+        query_keywords = [
+            "使用率", "用了多少", "占用", "cpu", "内存", "memory", "磁盘",
+            "多少", "状态", "列表", "有哪些", "pod列表", "节点列表",
+            "查询", "查看", "获取", "统计", "概况", "概览", "情况",
+        ]
+        diagnosis_keywords = [
+            "故障", "问题", "异常", "报错", "错误", "失败", "不通",
+            "重启", "crash", "oom", "排查", "诊断", "为什么",
+            "不正常", "不可用", "挂了", "宕机",
+        ]
+
+        has_query = any(kw in q_lower for kw in query_keywords)
+        has_diagnosis = any(kw in q_lower for kw in diagnosis_keywords)
+
+        # 有查询关键词且无诊断关键词 → QUERY
+        if has_query and not has_diagnosis:
+            return {
+                "layer": "QUERY",
+                "layer_name": "直接查询",
+                "confidence": 0.9,
+                "reasoning": "检测到数据查询关键词，无故障诊断关键词，判定为直接查询",
+                "key_entities": [],
+                "possible_scenarios": [{"scenario": "用户直接查询", "probability": "高", "reason": "数据请求，非故障"}]
+            }
+
         # 规则匹配：关键词 -> 层级映射
         layer_rules = {
             # L0: 基础设施层
@@ -341,6 +391,7 @@ class LayerClassifierNode(WorkflowNode):
     def _parse_layer(self, layer_str: str) -> Layer:
         """解析层级字符串为 Layer 枚举"""
         layer_map = {
+            "QUERY": Layer.QUERY,
             "L0": Layer.L0,
             "L1": Layer.L1,
             "L2": Layer.L2,
