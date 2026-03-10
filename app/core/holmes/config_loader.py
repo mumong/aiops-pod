@@ -5,7 +5,7 @@ Holmes 配置加载（从 HolmesService.initialize 中抽离）
 保持行为不变：
 - 读取 YAML
 - 进行 ${VAR} / ${VAR:-default} 环境变量替换
-- 为了兼容 holmes.Config 的校验：移除顶级 stream_output 字段后写入临时文件再加载
+- 为了兼容 holmes.Config 的校验：移除顶级非 Holmes 字段后写入临时文件再加载
 """
 
 from __future__ import annotations
@@ -80,10 +80,12 @@ def load_holmes_config_from_yaml(
     api_key: str,
     model: str,
     max_steps: int,
+    api_base: str = None,
     logger,
 ) -> Config:
     """
-    从 YAML 文件加载 Holmes Config（保持原有“临时文件移除 stream_output”的方式）
+    从 YAML 文件加载 Holmes Config
+    移除非 Holmes 字段（stream_output, sub_agents, federation, llm）后写入临时文件再加载
     """
     with open(config_file, "r", encoding="utf-8") as f:
         config_dict = yaml.safe_load(f) or {}
@@ -91,7 +93,7 @@ def load_holmes_config_from_yaml(
     config_dict = substitute_env_vars(config_dict, logger)
     logger.info("✅ 环境变量替换完成")
 
-    _excluded_keys = {"stream_output", "sub_agents", "federation"}
+    _excluded_keys = {"stream_output", "sub_agents", "federation", "llm"}
     temp_config_dict = {k: v for k, v in config_dict.items() if k not in _excluded_keys}
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as temp_file:
@@ -99,17 +101,17 @@ def load_holmes_config_from_yaml(
         temp_config_path = Path(temp_file.name)
 
     try:
-        return Config.load_from_file(
+        kwargs = dict(
             config_file=temp_config_path,
             api_key=api_key,
             model=model,
             max_steps=max_steps,
         )
+        if api_base:
+            kwargs["api_base"] = api_base
+        return Config.load_from_file(**kwargs)
     finally:
         try:
             temp_config_path.unlink()
         except Exception:
-            # 临时文件清理失败不影响主流程
             pass
-
-

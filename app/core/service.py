@@ -104,27 +104,46 @@ class HolmesService:
                 else:
                     self.stream_output = False
 
-                # 读取原始 YAML 用于联邦配置（在 holmes.Config 加载之前）
+                # 读取原始 YAML 用于联邦配置和 LLM 配置（在 holmes.Config 加载之前）
                 _raw_config: dict = {}
                 if config_file.exists():
                     import yaml as _yaml
                     with open(config_file, "r", encoding="utf-8") as _f:
                         _raw_config = _yaml.safe_load(_f) or {}
 
+                # 从 config.yaml 读取 llm 配置块
+                _llm_config = _raw_config.get("llm", {})
+
                 # 确定使用的 API Key
-                final_api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
+                # 优先级: 参数 > llm.api_key > LLM_API_KEY > DEEPSEEK_API_KEY > OPENAI_API_KEY
+                final_api_key = (
+                    api_key
+                    or _llm_config.get("api_key")
+                    or os.getenv("LLM_API_KEY")
+                    or os.getenv("DEEPSEEK_API_KEY")
+                    or os.getenv("OPENAI_API_KEY")
+                )
                 if not final_api_key:
                     raise ValueError(
-                        "未提供 API Key，请通过参数或环境变量 DEEPSEEK_API_KEY/OPENAI_API_KEY 设置"
+                        "未提供 API Key，请通过 config.yaml llm.api_key 或环境变量 LLM_API_KEY 设置"
                     )
 
                 # 确定使用的模型
-                # 优先级: 参数 > 环境变量 DEEPSEEK_MODEL > 默认值
-                env_model = os.getenv("DEEPSEEK_MODEL")
-                if env_model and not env_model.startswith("deepseek/"):
-                    # LiteLLM 需要 deepseek/ 前缀
-                    env_model = f"deepseek/{env_model}"
-                final_model = model or env_model or "deepseek/deepseek-chat"
+                # 优先级: 参数 > llm.model > LLM_MODEL > DEEPSEEK_MODEL > 默认值
+                final_model = (
+                    model
+                    or _llm_config.get("model")
+                    or os.getenv("LLM_MODEL")
+                    or os.getenv("DEEPSEEK_MODEL")
+                    or "deepseek/deepseek-chat"
+                )
+                # 过滤空字符串（环境变量设为空时回退到下一个优先级）
+                if not final_model.strip():
+                    final_model = "deepseek/deepseek-chat"
+
+                # 确定 api_base（可选，用于代理或兼容端点）
+                # 优先级: llm.api_base > LLM_API_BASE 环境变量
+                final_api_base = _llm_config.get("api_base") or os.getenv("LLM_API_BASE") or None
 
                 # 加载配置（需要先创建一个临时配置文件，移除 stream_output 字段）
                 if config_file.exists():
@@ -134,6 +153,7 @@ class HolmesService:
                         api_key=final_api_key,
                         model=final_model,
                         max_steps=max_steps,
+                        api_base=final_api_base,
                         logger=logger,
                     )
                 else:
@@ -167,6 +187,7 @@ class HolmesService:
                         federation_config=_federation_cfg,
                         model=final_model,
                         api_key=final_api_key,
+                        api_base=final_api_base,
                     )
                     if self.federation_coordinator:
                         logger.info("[FEDERATION] 联邦协调器初始化完成")
@@ -176,6 +197,7 @@ class HolmesService:
                         federation_config=_federation_cfg,
                         model=final_model,
                         api_key=final_api_key,
+                        api_base=final_api_base,
                     )
                     if self.federation_agent:
                         logger.info("[FEDERATION] FederationAgent 初始化完成（真正的 Agent-to-Agent）")
