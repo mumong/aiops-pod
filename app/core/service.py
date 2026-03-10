@@ -111,39 +111,45 @@ class HolmesService:
                     with open(config_file, "r", encoding="utf-8") as _f:
                         _raw_config = _yaml.safe_load(_f) or {}
 
+                # 对原始配置做环境变量替换（处理 ${VAR:-default} 语法）
+                from app.core.holmes.config_loader import substitute_env_vars
+                _raw_config = substitute_env_vars(_raw_config, logger)
+
                 # 从 config.yaml 读取 llm 配置块
-                _llm_config = _raw_config.get("llm", {})
+                _llm_config = _raw_config.get("llm", {}) or {}
 
                 # 确定使用的 API Key
-                # 优先级: 参数 > llm.api_key > LLM_API_KEY > DEEPSEEK_API_KEY > OPENAI_API_KEY
+                # 优先级: 参数 > LLM_API_KEY 环境变量 > config llm.api_key > 默认值
                 final_api_key = (
                     api_key
-                    or _llm_config.get("api_key")
                     or os.getenv("LLM_API_KEY")
+                    or _llm_config.get("api_key")
                     or os.getenv("DEEPSEEK_API_KEY")
                     or os.getenv("OPENAI_API_KEY")
                 )
                 if not final_api_key:
                     raise ValueError(
-                        "未提供 API Key，请通过 config.yaml llm.api_key 或环境变量 LLM_API_KEY 设置"
+                        "未提供 API Key，请通过 Secret LLM_API_KEY 或 config.yaml llm.api_key 设置"
                     )
 
                 # 确定使用的模型
-                # 优先级: 参数 > llm.model > LLM_MODEL > DEEPSEEK_MODEL > 默认值
+                # 优先级: 参数 > LLM_MODEL 环境变量 > config llm.model > 默认值
                 final_model = (
                     model
-                    or _llm_config.get("model")
                     or os.getenv("LLM_MODEL")
-                    or os.getenv("DEEPSEEK_MODEL")
+                    or _llm_config.get("model")
                     or "deepseek/deepseek-chat"
                 )
                 # 过滤空字符串（环境变量设为空时回退到下一个优先级）
                 if not final_model.strip():
-                    final_model = "deepseek/deepseek-chat"
+                    final_model = _llm_config.get("model") or "deepseek/deepseek-chat"
 
                 # 确定 api_base（可选，用于代理或兼容端点）
-                # 优先级: llm.api_base > LLM_API_BASE 环境变量
-                final_api_base = _llm_config.get("api_base") or os.getenv("LLM_API_BASE") or None
+                # 优先级: LLM_API_BASE 环境变量 > config llm.api_base
+                final_api_base = os.getenv("LLM_API_BASE") or _llm_config.get("api_base") or None
+                # 空字符串视为无
+                if final_api_base is not None and not final_api_base.strip():
+                    final_api_base = None
 
                 # 加载配置（需要先创建一个临时配置文件，移除 stream_output 字段）
                 if config_file.exists():
