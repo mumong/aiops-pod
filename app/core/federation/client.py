@@ -216,3 +216,159 @@ class SubAgentClient:
                 name=agent.name, url=agent.url, success=False,
                 error=err, elapsed_seconds=elapsed,
             )
+
+    # ------------------------------------------------------------------
+    # 流式查询方法（获取完整的结构化报告）
+    # ------------------------------------------------------------------
+
+    async def query_stream(
+        self,
+        agent: SubAgentConfig,
+        question: str,
+        max_steps: int = 30,
+        conclusion_max_tokens: int = 8192,
+        timeout: float = 600.0,
+    ) -> SubAgentResult:
+        """
+        向子集群发起流式（stream=true, format=text）查询请求。
+
+        流式模式会触发 evaluate_deterministic_decision 等后处理，
+        返回包含因果链、证据表格等完整结构化报告。
+
+        Args:
+            agent: 子集群配置
+            question: 用户问题
+            max_steps: 最大执行步数
+            conclusion_max_tokens: 诊断结论最大 token 数
+            timeout: 超时秒数（流式模式需要更长，默认 600s）
+
+        Returns:
+            SubAgentResult（text 为完整的流式文本拼接）
+        """
+        url = f"{agent.url}/ask"
+        start = time.monotonic()
+        logger.info(f"[FEDERATION] 开始流式查询子集群 {agent.name}: {url}")
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout, connect=10.0)
+            ) as client:
+                return await self._query_stream_with_client(
+                    client, agent, question, max_steps, conclusion_max_tokens
+                )
+        except httpx.TimeoutException:
+            elapsed = time.monotonic() - start
+            err = f"流式请求超时（{timeout}s）"
+            logger.error(f"[FEDERATION] {agent.name} {err}")
+            return SubAgentResult(
+                name=agent.name, url=agent.url, success=False,
+                error=err, elapsed_seconds=elapsed,
+            )
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            err = str(exc)
+            logger.error(f"[FEDERATION] {agent.name} 流式请求异常: {err}", exc_info=True)
+            return SubAgentResult(
+                name=agent.name, url=agent.url, success=False,
+                error=err, elapsed_seconds=elapsed,
+            )
+
+    async def _query_stream_with_client(
+        self,
+        client: httpx.AsyncClient,
+        agent: SubAgentConfig,
+        question: str,
+        max_steps: int,
+        conclusion_max_tokens: int,
+    ) -> SubAgentResult:
+        """使用已有的 httpx.AsyncClient 流式查询单个子集群"""
+        url = f"{agent.url}/ask"
+        start = time.monotonic()
+        logger.info(f"[FEDERATION] 开始流式查询子集群 {agent.name}: {url}")
+
+        try:
+            async with client.stream(
+                "POST",
+                url,
+                data={
+                    "q": question,
+                    "stream": "true",
+                    "format": "text",
+                    "max_steps": str(max_steps),
+                    "conclusion_max_tokens": str(conclusion_max_tokens),
+                },
+            ) as resp:
+                resp.raise_for_status()
+                chunks: List[str] = []
+                async for chunk in resp.aiter_text():
+                    chunks.append(chunk)
+
+            text = "".join(chunks)
+            elapsed = time.monotonic() - start
+            logger.info(
+                f"[FEDERATION] {agent.name} 流式响应成功，"
+                f"长度: {len(text)} chars，耗时: {elapsed:.1f}s"
+            )
+            return SubAgentResult(
+                name=agent.name,
+                url=agent.url,
+                success=True,
+                text=text,
+                elapsed_seconds=elapsed,
+            )
+        except httpx.TimeoutException:
+            elapsed = time.monotonic() - start
+            err = "流式请求超时"
+            logger.error(f"[FEDERATION] {agent.name} {err}")
+            return SubAgentResult(
+                name=agent.name, url=agent.url, success=False,
+                error=err, elapsed_seconds=elapsed,
+            )
+        except httpx.HTTPStatusError as exc:
+            elapsed = time.monotonic() - start
+            err = f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+            logger.error(f"[FEDERATION] {agent.name} 流式请求失败: {err}")
+            return SubAgentResult(
+                name=agent.name, url=agent.url, success=False,
+                error=err, elapsed_seconds=elapsed,
+            )
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            err = str(exc)
+            logger.error(f"[FEDERATION] {agent.name} 流式请求异常: {err}", exc_info=True)
+            return SubAgentResult(
+                name=agent.name, url=agent.url, success=False,
+                error=err, elapsed_seconds=elapsed,
+            )
+
+    async def batch_query_stream(
+        self,
+        queries: List[dict],
+        timeout: float = 600.0,
+    ) -> List[SubAgentResult]:
+        """
+        在同一个事件循环中并发流式查询多个子集群（asyncio.gather）。
+
+        与 batch_query() 结构对称，内部调用 _query_stream_with_client()。
+
+        Args:
+            queries: [{"agent": SubAgentConfig, "question": str, "max_steps": int, "conclusion_max_tokens": int}, ...]
+            timeout: 超时秒数
+
+        Returns:
+            SubAgentResult 列表（与输入顺序一致）
+        """
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=10.0)
+        ) as client:
+            tasks = [
+                self._query_stream_with_client(
+                    client,
+                    q["agent"],
+                    q["question"],
+                    q.get("max_steps", 30),
+                    q.get("conclusion_max_tokens", 8192),
+                )
+                for q in queries
+            ]
+            return list(await asyncio.gather(*tasks))

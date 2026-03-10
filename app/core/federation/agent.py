@@ -28,6 +28,7 @@ import litellm
 from app.core.federation.registry import AgentRegistry
 from app.core.federation.toolset import FederationToolset
 from app.core.federation.client import SubAgentClient
+from app.core.federation.report_parser import extract_final_answer
 from app.core.prompts import FEDERATION_AGENT_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -212,11 +213,11 @@ class FederationAgent:
             else:
                 tc_map.append((tc, cluster_name, False))
 
-        # 在独立线程中执行异步批量查询
+        # 在独立线程中执行异步批量流式查询
         client = SubAgentClient()
 
         def _run_batch():
-            return asyncio.run(client.batch_query(queries))
+            return asyncio.run(client.batch_query_stream(queries))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_run_batch)
@@ -231,12 +232,13 @@ class FederationAgent:
                 batch_idx += 1
 
                 if sub_result.success:
-                    # 保存报告
+                    # 解析报告：提取最终答案给 LLM，完整文本保存到磁盘
+                    parsed = extract_final_answer(sub_result.text)
                     self._save_report(cluster_name, sub_result)
                     result = {
                         "cluster": cluster_name,
                         "success": True,
-                        "response": sub_result.text,
+                        "response": parsed.final_answer,
                         "elapsed_seconds": sub_result.elapsed_seconds
                     }
                 else:
