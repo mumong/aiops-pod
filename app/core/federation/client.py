@@ -245,9 +245,8 @@ class SubAgentClient:
         Returns:
             SubAgentResult（text 为完整的流式文本拼接）
         """
-        url = f"{agent.url}/ask"
         start = time.monotonic()
-        logger.info(f"[FEDERATION] 开始流式查询子集群 {agent.name}: {url}")
+        logger.info(f"[FEDERATION] 开始流式查询子集群 {agent.name}: {agent.url}/ask")
 
         try:
             async with httpx.AsyncClient(
@@ -284,7 +283,8 @@ class SubAgentClient:
         """使用已有的 httpx.AsyncClient 流式查询单个子集群"""
         url = f"{agent.url}/ask"
         start = time.monotonic()
-        logger.info(f"[FEDERATION] 开始流式查询子集群 {agent.name}: {url}")
+        # batch 场景下此方法直接被调用，需要日志
+        logger.debug(f"[FEDERATION] 流式请求子集群 {agent.name}: {url}")
 
         try:
             async with client.stream(
