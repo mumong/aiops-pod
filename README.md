@@ -362,7 +362,7 @@ mcp_servers:
 
 ### 修改提示词
 
-所有 LLM 提示词集中在 `app/core/prompts.py`，详见 [提示词参考文档](docs/PROMPTS.md)。
+所有 LLM 提示词集中在 `app/core/prompts.py`，详见 [架构与开发参考](docs/ARCHITECTURE.md)。
 
 ### 切换 LLM 提供商
 
@@ -374,11 +374,8 @@ mcp_servers:
 
 | 文档 | 说明 |
 |------|------|
-| [架构设计](docs/ARCHITECTURE.md) | 目录结构、请求链路、模块说明 |
-| [配置指南](docs/CONFIGURATION.md) | LLM 配置、工具集、联邦查询、环境变量 |
-| [提示词参考](docs/PROMPTS.md) | 所有提示词的位置、职责、修改方法 |
-| [快速开始](docs/QUICKSTART.md) | 多集群部署和使用 |
-| [A2A 技术设计](docs/A2A_TECHNICAL_DESIGN.md) | Agent-to-Agent 联邦查询技术细节 |
+| [架构与开发参考](docs/ARCHITECTURE.md) | 目录结构、请求链路、提示词参考、配置详解 |
+| [部署与使用指南](docs/GUIDE.md) | 部署步骤、API 使用、常见问题 |
 
 ## 技术栈
 
