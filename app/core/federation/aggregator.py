@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
@@ -197,15 +196,15 @@ class FederationAggregator:
         synthesis_timeout: float = 300.0,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
     ):
         self._registry = registry
         self._max_tokens_per_agent = max_tokens_per_agent
         self._synthesis_timeout = synthesis_timeout
         self._client = SubAgentClient()
-        self._model = model or os.getenv("DEEPSEEK_MODEL") or "deepseek/deepseek-chat"
-        if self._model and not self._model.startswith("deepseek/") and "deepseek" in self._model.lower():
-            self._model = f"deepseek/{self._model}"
-        self._api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self._model = model
+        self._api_key = api_key
+        self._api_base = api_base
 
     async def query_all(self, question: str, max_steps: int, conclusion_max_tokens: int = 8192) -> List[SubAgentResult]:
         """并发查询所有已启用的子集群"""
@@ -277,13 +276,16 @@ class FederationAggregator:
         )
         prompt = COMPRESS_PROMPT + result.text
         try:
-            resp = litellm.completion(
+            _completion_kwargs = dict(
                 model=self._model,
                 api_key=self._api_key,
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 max_tokens=1200,
             )
+            if self._api_base:
+                _completion_kwargs["base_url"] = self._api_base
+            resp = litellm.completion(**_completion_kwargs)
             compressed = resp.choices[0].message.content or result.text
             after_tokens = _estimate_tokens(compressed)
             logger.info(
@@ -386,12 +388,15 @@ class FederationAggregator:
 
         # 流式 LLM 合成
         try:
-            stream = litellm.completion(
+            _completion_kwargs = dict(
                 model=self._model,
                 api_key=self._api_key,
                 messages=messages,
                 stream=True,
             )
+            if self._api_base:
+                _completion_kwargs["base_url"] = self._api_base
+            stream = litellm.completion(**_completion_kwargs)
             for chunk in stream:
                 delta = chunk.choices[0].delta
                 if delta and delta.content:

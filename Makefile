@@ -8,7 +8,7 @@ DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME)
 VERSION ?= $(shell cat VERSION)
 DOCKER_TAG := $(VERSION)
 
-.PHONY: build push deploy delete restart logs sync-version master slave
+.PHONY: build push deploy deploy-master deploy-slave delete restart logs sync-version
 
 build:
 	@echo "Building $(DOCKER_NAME):$(DOCKER_TAG)..."
@@ -18,32 +18,27 @@ push:
 	@echo "Pushing $(DOCKER_NAME):$(DOCKER_TAG)..."
 	docker push $(DOCKER_NAME):$(DOCKER_TAG)
 
+# 通用部署（不修改 federation 配置，直接应用当前 configmap）
 deploy:
 	@echo "Deploying $(DOCKER_NAME):$(DOCKER_TAG)..."
-	# 1. 同步版本到 k8s-simple.yaml
 	@sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
-	# 2. 创建 namespace（如果不存在）
 	@kubectl create namespace aiops --dry-run=client -o yaml | kubectl apply -f -
-	# 3. 应用所有配置（会自动触发滚动更新）
 	kubectl apply -f deploy/ --recursive
-	# 4. 等待滚动更新完成
 	@echo "Waiting for rollout to complete..."
 	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=120s
 
-master:
+# 主集群部署：federation.enabled = true，然后 deploy
+deploy-master:
 	@echo "Deploying as MASTER cluster (federation enabled)..."
-	# 1. 在 federation 块内将 enabled: false 改为 enabled: true（无视空格和注释）
 	@sed -i '/^    federation:/,/^    [^ ]/{s/enabled: false/enabled: true/}' deploy/configmap/config.yaml
-	# 2. 构建、推送、部署
-	$(MAKE) build push deploy
+	$(MAKE) deploy
 	@echo "✅ Master cluster deployed successfully!"
 
-slave:
+# 子集群部署：federation.enabled = false，然后 deploy
+deploy-slave:
 	@echo "Deploying as SLAVE cluster (federation disabled)..."
-	# 1. 在 federation 块内将 enabled: true 改为 enabled: false（无视空格和注释）
 	@sed -i '/^    federation:/,/^    [^ ]/{s/enabled: true/enabled: false/}' deploy/configmap/config.yaml
-	# 2. 构建、推送、部署
-	$(MAKE) build push deploy
+	$(MAKE) deploy
 	@echo "✅ Slave cluster deployed successfully!"
 
 delete:
@@ -61,7 +56,6 @@ restart:
 logs:
 	kubectl logs -f deployment/aiops-copilot -n aiops
 
-# 同步 VERSION 到 k8s-simple.yaml
 sync-version:
 	@echo "Syncing version to $(DOCKER_TAG)..."
 	sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
