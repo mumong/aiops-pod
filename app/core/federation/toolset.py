@@ -101,7 +101,7 @@ class QueryClusterTool(Tool):
                     question=question,
                     max_steps=max_steps,
                     conclusion_max_tokens=conclusion_max_tokens,
-                    timeout=600.0
+                    timeout=1800.0
                 )
             )
 
@@ -138,7 +138,7 @@ class QueryClusterTool(Tool):
             reports_dir = Path("reports")
             reports_dir.mkdir(exist_ok=True)
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"{cluster_name}_{timestamp}.md"
             filepath = reports_dir / filename
 
@@ -152,7 +152,7 @@ class QueryClusterTool(Tool):
 
             logger.info(f"[FEDERATION A2A] 已保存 {cluster_name} 报告到: {filepath}")
         except Exception as exc:
-            logger.error(f"[FEDERATION A2A] 保存报告失败: {exc}", exc_info=True)
+            logger.error(f"[FEDERATION A2A] 保存报告失败 ({cluster_name}): {exc}", exc_info=True)
 
 
 class FederationToolset(Toolset):

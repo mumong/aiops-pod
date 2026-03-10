@@ -227,7 +227,7 @@ class SubAgentClient:
         question: str,
         max_steps: int = 30,
         conclusion_max_tokens: int = 8192,
-        timeout: float = 600.0,
+        timeout: float = 1800.0,
     ) -> SubAgentResult:
         """
         向子集群发起流式（stream=true, format=text）查询请求。
@@ -344,7 +344,7 @@ class SubAgentClient:
     async def batch_query_stream(
         self,
         queries: List[dict],
-        timeout: float = 600.0,
+        timeout: float = 1800.0,
     ) -> List[SubAgentResult]:
         """
         在同一个事件循环中并发流式查询多个子集群（asyncio.gather）。

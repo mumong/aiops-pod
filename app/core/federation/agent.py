@@ -275,7 +275,7 @@ class FederationAgent:
             reports_dir = Path("reports")
             reports_dir.mkdir(exist_ok=True)
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"{cluster_name}_{timestamp}.md"
             filepath = reports_dir / filename
 
@@ -289,7 +289,7 @@ class FederationAgent:
 
             logger.info(f"[FEDERATION A2A] 已保存 {cluster_name} 报告到: {filepath}")
         except Exception as exc:
-            logger.error(f"[FEDERATION A2A] 保存报告失败: {exc}", exc_info=True)
+            logger.error(f"[FEDERATION A2A] 保存报告失败 ({cluster_name}): {exc}", exc_info=True)
 
     def _stream_final_answer(self, messages: List[Dict]) -> Generator[str, None, None]:
         """
