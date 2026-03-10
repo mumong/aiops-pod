@@ -39,6 +39,7 @@ class FederationCoordinator:
         federation_config: Dict[str, Any],
         model: Optional[str] = None,
         api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
     ) -> "FederationCoordinator":
         """从 config.yaml 的 federation 配置块创建协调器"""
         registry = AgentRegistry.load_from_dict(federation_config)
@@ -48,6 +49,7 @@ class FederationCoordinator:
             synthesis_timeout=float(federation_config.get("synthesis_timeout", 300)),
             model=model,
             api_key=api_key,
+            api_base=api_base,
         )
         return cls(aggregator=aggregator, registry=registry)
 
@@ -94,6 +96,7 @@ def get_federation_coordinator(
     federation_config: Optional[Dict[str, Any]] = None,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
+    api_base: Optional[str] = None,
 ) -> Optional[FederationCoordinator]:
     """
     获取全局 FederationCoordinator 单例。
@@ -114,6 +117,7 @@ def get_federation_coordinator(
         federation_config=federation_config,
         model=model,
         api_key=api_key,
+        api_base=api_base,
     )
     logger.info("[FEDERATION] FederationCoordinator 初始化完成")
     return _global_coordinator
@@ -130,6 +134,7 @@ def get_federation_agent(
     federation_config: Optional[Dict[str, Any]] = None,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
+    api_base: Optional[str] = None,
 ) -> Optional[FederationAgent]:
     """
     获取全局 FederationAgent 单例（真正的 Agent-to-Agent）。
@@ -149,8 +154,9 @@ def get_federation_agent(
     registry = AgentRegistry.load_from_dict(federation_config)
     _global_agent = FederationAgent(
         registry=registry,
-        model=model or "deepseek/deepseek-chat",
+        model=model,
         api_key=api_key,
+        api_base=api_base,
         max_steps=30
     )
     logger.info("[FEDERATION] FederationAgent 初始化完成（真正的 Agent-to-Agent）")

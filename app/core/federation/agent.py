@@ -42,12 +42,14 @@ class FederationAgent:
         registry: AgentRegistry,
         model: str,
         api_key: str,
+        api_base: str = None,
         max_steps: int = 30
     ):
         self.registry = registry
         self.toolset = FederationToolset(registry)
         self.model = model
         self.api_key = api_key
+        self.api_base = api_base
         self.max_steps = max_steps
 
     def ask_stream(self, question: str) -> Generator[str, None, None]:
@@ -74,14 +76,17 @@ class FederationAgent:
 
             try:
                 # 调用 LLM（中间步骤使用非流式，快速获取工具调用决策）
-                response = litellm.completion(
+                _completion_kwargs = dict(
                     model=self.model,
                     api_key=self.api_key,
                     messages=messages,
                     tools=self._get_tools_schema(),
                     tool_choice="auto",
-                    stream=False
+                    stream=False,
                 )
+                if self.api_base:
+                    _completion_kwargs["base_url"] = self.api_base
+                response = litellm.completion(**_completion_kwargs)
 
                 message = response.choices[0].message
 
@@ -294,12 +299,15 @@ class FederationAgent:
         让用户在生成过程中就能看到输出，减少等待时间。
         """
         try:
-            stream = litellm.completion(
+            _completion_kwargs = dict(
                 model=self.model,
                 api_key=self.api_key,
                 messages=messages,
-                stream=True
+                stream=True,
             )
+            if self.api_base:
+                _completion_kwargs["base_url"] = self.api_base
+            stream = litellm.completion(**_completion_kwargs)
             for chunk in stream:
                 delta = chunk.choices[0].delta
                 if delta and delta.content:
