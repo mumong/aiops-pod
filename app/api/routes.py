@@ -107,16 +107,8 @@ def register_routes(app):
           -d "max_steps=30"
         ```
         """
-        question = fix_double_encoding(q) # 解码 URL 编码的表单数据
+        question = fix_double_encoding(q)
         logger.info(f"📝 收到查询 (POST): {question[:80]}...")
-        
-        ###
-        logger.info(f"📝 收到查询 (POST): {question[:80]}...")
-        logger.info(f"📝 测试----收到查询 (POST): {q}")
-        logger.info(f"🔍 调试 - 字符串长度: {len(q)}")
-        logger.info(f"🔍 调试 - 前20字节: {q[:20].encode('utf-8')}")
-        logger.info(f"🔍 调试 - repr: {repr(q[:50])}")
-        ###
 
         if stream:
             return _stream_response(question, format, max_steps)
