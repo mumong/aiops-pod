@@ -20,6 +20,7 @@ from pydantic import Field, PrivateAttr
 
 from app.core.federation.registry import AgentRegistry
 from app.core.federation.client import SubAgentClient
+from app.core.federation.report_parser import extract_final_answer
 
 logger = logging.getLogger(__name__)
 
@@ -90,17 +91,17 @@ class QueryClusterTool(Tool):
                 "available_clusters": [a.name for a in registry.get_enabled_agents()]
             }
 
-        # 调用子集群（同步包装异步调用）
+        # 调用子集群（同步包装异步调用，使用流式模式获取完整报告）
         client = SubAgentClient()
 
         def sync_query():
             return asyncio.run(
-                client.query(
+                client.query_stream(
                     agent=agent,
                     question=question,
                     max_steps=max_steps,
                     conclusion_max_tokens=conclusion_max_tokens,
-                    timeout=300.0
+                    timeout=600.0
                 )
             )
 
@@ -109,11 +110,13 @@ class QueryClusterTool(Tool):
             result = future.result()
 
         if result.success:
+            # 解析报告：提取最终答案给 LLM，完整文本保存到磁盘
+            parsed = extract_final_answer(result.text)
             self._save_report(cluster_name, result)
             return {
                 "cluster": cluster_name,
                 "success": True,
-                "response": result.text,
+                "response": parsed.final_answer,
                 "elapsed_seconds": result.elapsed_seconds
             }
         else:
