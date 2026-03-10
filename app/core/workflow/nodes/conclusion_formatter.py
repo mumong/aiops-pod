@@ -106,6 +106,7 @@ class ConclusionFormatterNode(WorkflowNode):
                     evidence_analysis=evidence_analysis,
                     rca_analysis=rca_analysis,
                     conclusion_max_tokens=state.get("conclusion_max_tokens"),
+                    layer=layer,
                 )
             else:
                 # 回退到模板格式化
@@ -150,6 +151,7 @@ class ConclusionFormatterNode(WorkflowNode):
         evidence_analysis: str,
         rca_analysis: str,
         conclusion_max_tokens: Optional[int] = None,
+        layer: Optional[Layer] = None,
     ) -> str:
         """使用 LLM 生成最终报告（使用和 HolmesService 相同的方式）"""
         import time
@@ -163,6 +165,22 @@ class ConclusionFormatterNode(WorkflowNode):
 
         try:
             start_time = time.time()
+
+            # 根据 layer 决定指令
+            is_query = layer == Layer.QUERY
+            if is_query:
+                instruction = """请基于以上各阶段的分析结果，直接回答用户的查询。
+要求：
+1. 用简洁的表格或数据摘要呈现结果
+2. 引用实际采集到的数据（Prometheus 查询结果、命令输出等）
+3. 不要套诊断报告模板，不要做故障分析
+4. 如果数据显示明显异常，可以简要提醒"""
+            else:
+                instruction = """请基于以上三个阶段的分析结果，生成一份详尽、完整的诊断报告。
+要求：
+1. 尽可能多引用原始数据和证据
+2. 逻辑严谨，因果链清晰
+3. 修复建议具体可执行"""
 
             # 构建用户消息（包含所有阶段的分析结果）
             user_message = f"""
@@ -178,11 +196,7 @@ class ConclusionFormatterNode(WorkflowNode):
 # 阶段3：根因分析
 {rca_analysis}
 
-请基于以上三个阶段的分析结果，生成一份详尽、完整的诊断报告。
-要求：
-1. 尽可能多引用原始数据和证据
-2. 逻辑严谨，因果链清晰
-3. 修复建议具体可执行
+{instruction}
 """
 
             # 构建消息（禁用工具调用，确保直接返回文本结果）
@@ -192,12 +206,24 @@ class ConclusionFormatterNode(WorkflowNode):
             ]
 
             from litellm import completion
-            response_text = completion(
-                model=self.holmes_service.ai.llm.model,
-                messages=messages,
-                temperature=0.3,
-                max_tokens=max_tokens,
-            )
+
+            # 从 HolmesGPT AI 实例获取模型和认证信息
+            model = self.holmes_service.ai.llm.model
+            api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
+            api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
+
+            completion_kwargs = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+            }
+            if api_key:
+                completion_kwargs["api_key"] = api_key
+            if api_base:
+                completion_kwargs["api_base"] = api_base
+
+            response_text = completion(**completion_kwargs)
             content = response_text.get("choices", [{}])[0].get("message", {}).get("content", "")
 
             llm_duration_ms = (time.time() - start_time) * 1000
@@ -482,6 +508,7 @@ class ConclusionFormatterNode(WorkflowNode):
         
         # 层级名称映射
         layer_name_map = {
+            Layer.QUERY: "QUERY - 直接查询",
             Layer.L0: "L0 - 基础设施层",
             Layer.L1: "L1 - 集群与节点层",
             Layer.L2: "L2 - 工作负载层",

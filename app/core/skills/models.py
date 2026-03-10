@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 class Layer(str, Enum):
     """诊断层级"""
+    QUERY = "QUERY"  # 直接查询（非故障诊断）
     L0 = "L0"  # 基础设施层
     L1 = "L1"  # 集群与节点层
     L2 = "L2"  # 工作负载层

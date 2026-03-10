@@ -155,12 +155,13 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 evidence_summary=evidence_summary
             )
 
-            # 使用 build_initial_ask_messages 构建消息
-            # 这样可以支持 runbooks 和 tools
+            # 获取 tool_executor（如果不存在则为 None）
+            tool_executor = getattr(self.holmes_service.ai, "tool_executor", None)
+
             messages = build_initial_ask_messages(
                 initial_user_prompt=question,
                 file_paths=None,
-                tool_executor=self.holmes_service.ai.tool_executor,
+                tool_executor=tool_executor,
                 runbooks=self.runbook_catalog,
                 system_prompt_additions=system_prompt
             )
@@ -261,17 +262,20 @@ class RootCauseAnalyzerNode(WorkflowNode):
         """构建决策对象"""
         collected = [e for e in evidence_items if e.collected]
         missing = [e for e in evidence_items if not e.collected]
-        
+
         confidence_score = rca_result.get("confidence", 0.5)
         confidence = Confidence.from_score(confidence_score)
-        
+
+        # QUERY 模式：非故障，issue_found=False
+        is_query = layer == Layer.QUERY
+
         return DeterministicDecision(
             layer=layer or Layer.L2,
             scenario=rca_result.get("phenomenon", "")[:50],
-            category="LLMAnalysis" if self.holmes_service else "RuleAnalysis",
+            category="DataQuery" if is_query else ("LLMAnalysis" if self.holmes_service else "RuleAnalysis"),
             confidence=confidence,
             confidence_score=confidence_score,
-            issue_found=True,
+            issue_found=not is_query,
             issue_summary=rca_result.get("root_cause", ""),
             context={},
             matched_rules=[],
