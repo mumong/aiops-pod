@@ -197,15 +197,18 @@ class WorkflowExecutor:
             # 更新指标
             self._update_metrics_from_state(metrics, final_state)
 
-            # 从日志监听器提取 runbook 信息
+            # 从日志监听器提取 runbook 信息（补充，不覆盖已有结果）
             runbook_summary = log_listener.get_runbook_summary()
             if runbook_summary["matched"]:
                 metrics.runbook_matched = True
                 metrics.runbook_id = ", ".join(runbook_summary["runbook_ids"])
-                logger.info(f"   Runbook 使用: {metrics.runbook_id}")
-            else:
-                metrics.runbook_matched = False
-                metrics.runbook_id = None
+                logger.info(f"   Runbook 使用(日志): {metrics.runbook_id}")
+
+            # 补充：从 log_listener 的工具调用记录补充 metrics 统计
+            tool_calls_from_log = log_listener.get_tool_calls()
+            if tool_calls_from_log and metrics.total_tool_calls == 0:
+                for tc in tool_calls_from_log:
+                    metrics.total_tool_calls += 1
 
             # 分离日志监听器
             log_listener.detach()
@@ -374,72 +377,151 @@ class WorkflowExecutor:
         state: WorkflowState
     ):
         """从最终状态更新指标"""
+        import json
+        import re
+
         # 证据完整率
         evidence_items = state.get("evidence_items", [])
         metrics.evidence_planned = len(evidence_items)
         metrics.evidence_collected = sum(1 for e in evidence_items if getattr(e, 'collected', False))
-        
-        # 根因置信度
-        decision = state.get("deterministic_decision")
-        if decision:
-            metrics.root_cause_confidence = decision.confidence_score
-        else:
-            # 从 rca_analysis 中提取
-            import json
-            rca_analysis = state.get("rca_analysis", "{}")
-            try:
-                rca_data = json.loads(rca_analysis) if rca_analysis else {}
-                metrics.root_cause_confidence = rca_data.get("confidence", 0.5)
-            except:
-                metrics.root_cause_confidence = 0.5
-        
-        # Runbook 使用记录（检查实际调用的 runbook）
-        # 从工具调用结果中提取使用的 runbook ID
-        runbook_ids_used = []
-        runbook_names = []  # 存储中文runbook名称
 
-        # 从 tool_call_details 中查找 runbook 相关调用
+        # 工具调用统计补充：如果 metrics 中没有记录，从 state 的 tool_results 补充
+        tool_results = state.get("tool_results", [])
+        if metrics.total_tool_calls == 0 and tool_results:
+            for tr in tool_results:
+                metrics.record_tool_call(
+                    tool_name=tr.get("tool", "kubectl"),
+                    duration_ms=tr.get("duration_ms", 0),
+                    success=tr.get("success", False)
+                )
+
+        # LLM 调用统计补充：如果 metrics 中没有记录，从 state 的 llm_calls 补充
+        llm_calls_from_state = state.get("llm_calls", 0)
+        if metrics.total_llm_calls == 0 and llm_calls_from_state > 0:
+            metrics.total_llm_calls = llm_calls_from_state
+
+        # ================================================================
+        # 根因置信度（多层提取，逐级回退）
+        # ================================================================
+        confidence = None
+
+        # 收集所有文本内容，用于后续提取
+        conclusion = state.get("conclusion_formatted") or state.get("conclusion") or ""
+        rca_analysis_raw = state.get("rca_analysis", "")
+        evidence_analysis_raw = state.get("evidence_analysis", "")
+        all_text = f"{conclusion}\n{rca_analysis_raw}\n{evidence_analysis_raw}"
+
+        # 1. 优先从 deterministic_decision.confidence_score 取
+        decision = state.get("deterministic_decision")
+        if decision and hasattr(decision, 'confidence_score') and decision.confidence_score > 0:
+            confidence = decision.confidence_score
+
+        # 2. 其次从 rca_analysis JSON 的 confidence 字段取
+        if confidence is None and rca_analysis_raw:
+            try:
+                rca_data = json.loads(rca_analysis_raw) if isinstance(rca_analysis_raw, str) else rca_analysis_raw
+                if isinstance(rca_data, dict):
+                    conf_val = rca_data.get("confidence")
+                    if conf_val is not None:
+                        conf_float = float(conf_val)
+                        if 0 < conf_float <= 1.0:
+                            confidence = conf_float
+                        elif 1 < conf_float <= 100:
+                            confidence = conf_float / 100.0
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+
+        # 3. 从 conclusion 文本中正则提取置信度（支持多种格式）
+        if confidence is None:
+            confidence_patterns = [
+                # "置信度: 90%" 或 "置信度：90%"
+                r'置信度[：:]\s*(?:约?\s*)?(\d{1,3})\s*%',
+                # "置信度: 高 (90%)" 或 "置信度: 中 (50%)"
+                r'置信度[：:|\s]*(?:高|中|低)\s*\(?(\d{1,3})\s*%\)?',
+                # "| **置信度** | 中 (50%) |" — Markdown 表格格式
+                r'\*\*置信度\*\*\s*\|\s*(?:高|中|低)\s*\(?(\d{1,3})\s*%\)?',
+                # "confidence: 0.85" JSON 格式
+                r'"confidence"\s*:\s*(0\.\d+|1\.0)',
+            ]
+            for pattern in confidence_patterns:
+                match = re.search(pattern, all_text, re.IGNORECASE)
+                if match:
+                    val = float(match.group(1))
+                    if val > 1.0:
+                        val = val / 100.0
+                    if 0 < val <= 1.0:
+                        confidence = val
+                        break
+
+        # 4. 兜底从 layer_confidence 取
+        if confidence is None:
+            layer_conf = state.get("layer_confidence")
+            if layer_conf is not None and layer_conf > 0:
+                confidence = layer_conf
+
+        # 最终兜底
+        metrics.root_cause_confidence = confidence if confidence is not None else 0.5
+
+        # ================================================================
+        # 后置置信度修正：当有充分证据时，保底 0.7
+        # 原则：只要分析言之有理、有工具证据支撑，就不应低于 0.7
+        # ================================================================
+        has_root_cause = bool(state.get("root_cause"))
+        has_tool_results = len(tool_results) > 0
+        has_evidence = metrics.evidence_collected > 0
+        has_conclusion = bool(state.get("conclusion") or state.get("conclusion_formatted"))
+
+        if has_conclusion and has_root_cause and (has_tool_results or has_evidence):
+            # 有根因结论 + 有工具证据 → 至少 0.7
+            if metrics.root_cause_confidence < 0.7:
+                logger.info(
+                    f"   置信度修正: {metrics.root_cause_confidence:.0%} → 70% "
+                    f"(有根因结论且有 {metrics.evidence_collected} 项证据)"
+                )
+                metrics.root_cause_confidence = 0.7
+        elif has_conclusion and (has_tool_results or has_evidence):
+            # 有结论 + 有工具调用但无明确根因 → 至少 0.6
+            if metrics.root_cause_confidence < 0.6:
+                logger.info(
+                    f"   置信度修正: {metrics.root_cause_confidence:.0%} → 60% "
+                    f"(有结论但根因不明确)"
+                )
+                metrics.root_cause_confidence = 0.6
+
+        # ================================================================
+        # Runbook 提取（从所有文本内容中搜索，不再依赖 tool_call_details）
+        # ================================================================
+        runbook_ids = set()
+        runbook_names = []
+
+        # 1. 从 log_listener 提取（在 execute_stream 中已处理）
+        # 2. 从所有 state 文本中正则提取 runbook 文件名
+        for match in re.finditer(r'([\w][\w.-]*\.md)\b', all_text):
+            name = match.group(1)
+            # 排除非 runbook 文件
+            if name not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
+                runbook_ids.add(name)
+
+        # 3. 从 tool_call_details 中查找 runbook 相关调用（保留原逻辑作为补充）
         for detail in metrics.tool_call_details:
             tool_name = detail.get('tool', '')
             result = detail.get('result', '')
+            if 'runbook' in tool_name.lower() and result:
+                for m in re.finditer(r'[\w-]+\.md', result):
+                    runbook_ids.add(m.group(0))
+                bold_match = re.search(r'\*\*(.+?)\*\*', result)
+                if bold_match:
+                    rn = bold_match.group(1).strip()
+                    if rn and rn not in runbook_names:
+                        runbook_names.append(rn)
 
-            # 检查是否是 runbook 相关调用（扩展检测范围）
-            # 支持多种工具名称：runbook, fetch_runbook, show_runbook等
-            is_runbook_tool = (
-                'runbook' in tool_name.lower() or
-                'fetch' in tool_name.lower() or
-                'show' in tool_name.lower()
-            )
-
-            if is_runbook_tool and result:
-                # 提取 runbook 名称
-                import re
-
-                # 1. 尝试提取 Markdown 文件名
-                runbook_match = re.search(r'[\w-]+\.md', result)
-                if runbook_match:
-                    runbook_id = runbook_match.group(0)
-                    if runbook_id not in runbook_ids_used:
-                        runbook_ids_used.append(runbook_id)
-
-                # 2. 尝试提取中文 runbook 名称（如 "容器崩溃循环 (CrashLoopBackOff) 诊断手册"）
-                chinese_runbook_match = re.search(r'[*【](.*?)[*】]', result)
-                if chinese_runbook_match:
-                    runbook_name = chinese_runbook_match.group(1).strip('*【】')
-                    if runbook_name and runbook_name not in runbook_names:
-                        runbook_names.append(runbook_name)
-
-                # 3. 尝试提取以 ** 标记的 runbook 名称
-                bold_runbook_match = re.search(r'\*\*(.+?)\*\*', result)
-                if bold_runbook_match:
-                    runbook_name = bold_runbook_match.group(1).strip()
-                    if runbook_name and runbook_name not in runbook_names:
-                        runbook_names.append(runbook_name)
-
-        if runbook_ids_used or runbook_names:
+        if runbook_ids or runbook_names:
             metrics.runbook_matched = True
-            # 优先显示中文runbook名称，如果没有则显示文件ID
-            metrics.runbook_id = ', '.join(runbook_names) if runbook_names else ', '.join(runbook_ids_used)
+            # 优先显示中文名称，其次显示文件名
+            if runbook_names:
+                metrics.runbook_id = ', '.join(runbook_names)
+            else:
+                metrics.runbook_id = ', '.join(sorted(runbook_ids))
             logger.info(f"   Runbook 使用: {metrics.runbook_id}")
         else:
             metrics.runbook_matched = False

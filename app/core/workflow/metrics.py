@@ -327,6 +327,15 @@ class WorkflowMetrics:
 
         lines.append("")
 
+        # 诊断追踪
+        lines.append("📋 诊断追踪")
+        lines.append("")
+        runbook_display = self.runbook_id if self.runbook_matched and self.runbook_id else "无"
+        lines.append(f"- **参考 Runbook**: {runbook_display}")
+        lines.append(f"- **工具调用**: {self.total_tool_calls} 次")
+        lines.append(f"- **LLM 调用**: {self.total_llm_calls} 次")
+        lines.append("")
+
         return "\n".join(lines)
 
 

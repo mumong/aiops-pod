@@ -119,60 +119,225 @@ make delete                      # 删除部署（保留 namespace）
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/ask` | GET / POST | 单集群查询（主入口） |
-| `/federation/ask` | GET / POST | 多集群并发查询 |
-| `/federation/ask/v2` | GET / POST | Agent-to-Agent 智能路由 |
+| `/q/{问题}` | GET | 路径参数方式查询（简洁 URL） |
+| `/federation/ask` | GET / POST | 多集群并发查询（v1，查询所有集群） |
+| `/federation/ask/v2` | GET / POST | Agent-to-Agent 智能路由（v2，按需选择集群） |
 | `/health` | GET | 健康检查 |
-| `/tools` | GET | 工具列表 |
-| `/tools/detail` | GET | 工具详情（按 toolset 分组） |
-| `/runbooks` | GET | Runbook 列表 |
-| `/reports` | GET | 子集群诊断报告列表 |
+| `/tools` | GET | 可用工具列表 |
+| `/tools/detail` | GET | 工具详情（按 toolset 分组，含参数 schema） |
+| `/runbooks` | GET | Runbook 知识库列表 |
+| `/reports` | GET | 子集群诊断报告列表（支持 `cluster`、`limit` 过滤） |
 | `/reports/{filename}` | GET | 查看具体报告内容 |
+| `/artifacts/{artifact_id}` | GET | 获取被截断的大输出全文 |
 
-### `/ask` 参数
+---
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `q` | string | **必填** | 问题内容 |
-| `stream` | bool | `true` | 是否流式输出 |
-| `format` | string | `"text"` | 输出格式：`text`（纯文本）或 `sse`（结构化事件流） |
-| `max_steps` | int | `20` | LLM 最大工具调用轮数（范围 1-100） |
+### 1. `/ask` — 单集群查询（最常用）
 
-### `/federation/ask` 参数
+用自然语言向当前集群提问，支持故障诊断和数据查询。
+
+**参数：**
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `q` | string | **必填** | 问题内容 |
-| `max_steps` | int | `30` | 每个子集群最大执行步数 |
-| `conclusion_max_tokens` | int | `8192` | 子集群结论最大 token 数（`0` = 不限制） |
+| `q` | string | **必填** | 问题内容（中文需 URL 编码，推荐用 `--data-urlencode`） |
+| `stream` | bool | `true` | 是否流式输出。`true`=实时推送，`false`=等全部完成后一次返回 |
+| `format` | string | `"text"` | 流式输出格式：`text`（纯文本流）或 `sse`（结构化事件流，适合前端解析） |
+| `max_steps` | int | `20` | LLM 最大工具调用轮数（范围 1-100）。简单查询可设小值加快返回，复杂诊断建议调大 |
 
-### `/federation/ask/v2` 参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `q` | string | **必填** | 问题内容 |
-| `max_steps` | int | `30` | Agent 最大执行步数 |
-
-### 使用示例
+**使用示例：**
 
 ```bash
-# 单集群：故障诊断
-curl -G "http://HOST:30800/ask" --data-urlencode "q=payment-service 的 Pod 为什么一直重启"
+# ============================================================
+# 基本用法（GET + 流式输出，最常用的方式）
+# ============================================================
 
-# 单集群：数据查询
-curl -G "http://HOST:30800/ask" --data-urlencode "q=集群 CPU 使用率" --data-urlencode "max_steps=10"
+# 故障诊断：Pod 为什么一直重启
+curl -G "http://10.2.0.48:30800/ask" \
+  --data-urlencode "q=payment-service 的 Pod 为什么一直重启"
 
-# 单集群：非流式
-curl -G "http://HOST:30800/ask" --data-urlencode "q=Pod列表" --data-urlencode "stream=false"
+# 数据查询：查看集群 CPU 使用率
+curl -G "http://10.2.0.48:30800/ask" \
+  --data-urlencode "q=集群 CPU 使用率是多少"
 
-# 联邦：查询所有集群
-curl -G "http://HOST:30800/federation/ask" --data-urlencode "q=哪个集群 CPU 最高"
+# 查看某个 namespace 下的 Pod 状态
+curl -G "http://10.2.0.48:30800/ask" \
+  --data-urlencode "q=查看 namespace kube-system 下所有 Pod 状态"
 
-# A2A：智能路由到指定集群
-curl -G "http://HOST:30800/federation/ask/v2" --data-urlencode "q=查询 cluster-24 的内存使用"
+# ============================================================
+# 调整参数
+# ============================================================
 
-# A2A：对比多个集群
-curl -G "http://HOST:30800/federation/ask/v2" --data-urlencode "q=对比 main 和 cluster-24 的 CPU"
+# 加快返回：简单查询只需要少量工具调用，把 max_steps 设小
+curl -G "http://10.2.0.48:30800/ask" \
+  --data-urlencode "q=集群有多少个节点" \
+  --data-urlencode "max_steps=5"
+
+# 深度诊断：复杂问题需要更多工具调用轮数
+curl -G "http://10.2.0.48:30800/ask" \
+  --data-urlencode "q=分析 production namespace 下所有异常 Pod 的根因" \
+  --data-urlencode "max_steps=50"
+
+# 非流式输出：等待全部完成后一次性返回（适合脚本调用）
+curl -G "http://10.2.0.48:30800/ask" \
+  --data-urlencode "q=列出所有 CrashLoopBackOff 的 Pod" \
+  --data-urlencode "stream=false"
+
+# SSE 格式输出：返回结构化事件流（适合前端 EventSource 解析）
+curl -G "http://10.2.0.48:30800/ask" \
+  --data-urlencode "q=磁盘使用率" \
+  --data-urlencode "format=sse"
+
+# ============================================================
+# POST 方式（表单提交，适合长问题或脚本集成）
+# ============================================================
+
+curl -X POST "http://10.2.0.48:30800/ask" \
+  -d "q=查看 namespace kube-system 下所有 Pod 状态" \
+  -d "max_steps=30"
+
+# ============================================================
+# 路径参数方式（最简洁的 URL，适合英文或简单问题）
+# ============================================================
+
+curl "http://10.2.0.48:30800/q/check+cluster+health"
 ```
+
+---
+
+### 2. `/federation/ask` — 多集群并发查询（v1）
+
+向所有已配置的子集群并发发送同一问题，汇总后由 LLM 合成统一结论。适合"哪个集群 XX 最高"这类需要对比所有集群的场景。
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `q` | string | **必填** | 问题内容 |
+| `max_steps` | int | `30` | 每个子集群的最大工具调用步数 |
+| `conclusion_max_tokens` | int | `8192` | 每个子集群结论的最大 token 数。设为 `0` 表示不限制（返回完整报告） |
+
+**使用示例：**
+
+```bash
+# 查询所有集群的 CPU 使用率，自动对比
+curl -G "http://10.2.0.48:30800/federation/ask" \
+  --data-urlencode "q=哪个集群 CPU 利用率最高"
+
+# 限制每个子集群的结论长度（加快汇总速度）
+curl -G "http://10.2.0.48:30800/federation/ask" \
+  --data-urlencode "q=所有集群的节点状态" \
+  --data-urlencode "conclusion_max_tokens=4096"
+
+# 简单查询减少步数
+curl -G "http://10.2.0.48:30800/federation/ask" \
+  --data-urlencode "q=所有集群各有多少个 Pod" \
+  --data-urlencode "max_steps=10"
+
+# 不限制结论长度，获取完整报告
+curl -G "http://10.2.0.48:30800/federation/ask" \
+  --data-urlencode "q=对比所有集群的内存使用情况" \
+  --data-urlencode "conclusion_max_tokens=0"
+```
+
+---
+
+### 3. `/federation/ask/v2` — Agent-to-Agent 智能路由（v2，推荐）
+
+主 Agent 先理解用户意图，智能决定查询哪些集群、对每个集群发送什么问题。支持：
+- **选择性查询**：只查指定的集群，不浪费时间查无关集群
+- **跨集群对比**：同时查多个集群不同指标，然后合成对比
+- **不同问题路由**：对不同集群问不同的问题
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `q` | string | **必填** | 问题内容 |
+| `max_steps` | int | `30` | Agent 最大执行步数（包含集群查询 + 合成推理） |
+
+**使用示例：**
+
+```bash
+# 查询指定集群的指标（Agent 自动只查 main 和 cluster-24）
+curl -G "http://10.2.0.48:30800/federation/ask/v2" \
+  --data-urlencode "q=我想要知道 main 的内存使用率和 cluster-24 的 CPU 使用率"
+
+# 查询单个集群（Agent 智能路由，只查 cluster-24）
+curl -G "http://10.2.0.48:30800/federation/ask/v2" \
+  --data-urlencode "q=查询 cluster-24 的内存使用情况"
+
+# 对比两个集群
+curl -G "http://10.2.0.48:30800/federation/ask/v2" \
+  --data-urlencode "q=对比 main 和 cluster-24 的 CPU 使用率"
+
+# 跨集群故障排查
+curl -G "http://10.2.0.48:30800/federation/ask/v2" \
+  --data-urlencode "q=检查所有集群是否有 Pod 处于异常状态"
+
+# 增加步数以支持更复杂的多集群分析
+curl -G "http://10.2.0.48:30800/federation/ask/v2" \
+  --data-urlencode "q=分析 main 集群的磁盘告警和 cluster-24 的内存告警" \
+  --data-urlencode "max_steps=50"
+```
+
+---
+
+### 4. 辅助端点
+
+```bash
+# 健康检查
+curl "http://10.2.0.48:30800/health"
+
+# 查看所有可用工具（AI 能调用的工具列表）
+curl "http://10.2.0.48:30800/tools"
+
+# 查看工具详情（含参数 schema，按 toolset 分组）
+curl "http://10.2.0.48:30800/tools/detail"
+
+# 查看已加载的 Runbook 知识库
+curl "http://10.2.0.48:30800/runbooks"
+
+# 查看子集群诊断报告列表
+curl "http://10.2.0.48:30800/reports"
+
+# 按集群名过滤报告
+curl "http://10.2.0.48:30800/reports?cluster=cluster-24&limit=10"
+
+# 查看具体报告内容
+curl "http://10.2.0.48:30800/reports/cluster-24_20260309_143000.md"
+
+# 获取被截断的大输出全文（artifact_id 来自流式输出中的链接）
+curl "http://10.2.0.48:30800/artifacts/{artifact_id}"
+```
+
+---
+
+### 5. `/ask` vs `/federation/ask` vs `/federation/ask/v2` 怎么选？
+
+| 场景 | 推荐端点 | 说明 |
+|------|----------|------|
+| 查询当前集群的状态/指标 | `/ask` | 直接查，速度最快 |
+| 诊断当前集群的故障 | `/ask` | 单集群深度诊断 |
+| 对比所有集群的某个指标 | `/federation/ask` | 并发查所有集群，自动汇总 |
+| 只查指定的 1-2 个集群 | `/federation/ask/v2` | Agent 智能路由，不查无关集群 |
+| 对不同集群问不同问题 | `/federation/ask/v2` | Agent 自动拆分问题并路由 |
+| 跨集群对比分析 | `/federation/ask/v2` | 最灵活，推荐多集群场景首选 |
+
+### 参数调优建议
+
+| 参数 | 场景 | 建议值 |
+|------|------|--------|
+| `max_steps` | 简单状态查询（Pod 列表、节点数量） | `5-10` |
+| `max_steps` | 常规指标查询（CPU、内存使用率） | `10-20`（默认） |
+| `max_steps` | 深度故障诊断（根因分析、多维采证） | `30-50` |
+| `max_steps` | 复杂多集群分析 | `50+` |
+| `conclusion_max_tokens` | 快速概览 | `2048-4096` |
+| `conclusion_max_tokens` | 完整报告 | `0`（不限制） |
+| `stream` | 交互式使用（终端/浏览器） | `true`（默认） |
+| `stream` | 脚本/程序集成 | `false` |
+| `format` | 终端查看 | `text`（默认） |
+| `format` | 前端 EventSource 解析 | `sse` |
 
 ---
 
@@ -221,14 +386,23 @@ llm:
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `LLM_API_KEY` | — | LLM API Key |
-| `LLM_MODEL` | `deepseek/deepseek-chat` | litellm 模型 ID |
-| `LLM_API_BASE` | — | API 端点覆盖（代理或兼容端点） |
-| `USE_WORKFLOW` | `false` | 启用 LangGraph 工作流模式 |
-| `BASH_TOOL_UNSAFE_ALLOW_ALL` | `false` | 允许执行所有 bash 命令 |
-| `CONFIG_FILE` | 自动检测 | 指定配置文件路径 |
+| **LLM 配置** | | |
+| `LLM_API_KEY` | — | LLM API Key（必填） |
+| `LLM_MODEL` | `deepseek/deepseek-chat` | litellm 模型 ID，格式 `提供商/模型名` |
+| `LLM_API_BASE` | — | API 端点覆盖（用于代理或兼容端点，留空使用默认） |
+| **服务配置** | | |
 | `API_HOST` | `0.0.0.0` | 服务监听地址 |
 | `API_PORT` | `8000` | 服务监听端口 |
+| `CONFIG_FILE` | 自动检测 | 指定配置文件路径（绝对或相对路径） |
+| **功能开关** | | |
+| `USE_WORKFLOW` | `false` | 启用 LangGraph 四阶段工作流模式 |
+| `BASH_TOOL_UNSAFE_ALLOW_ALL` | `false` | 允许执行所有 bash 命令（生产环境建议 false） |
+| `MCP_AUTO_START_LOCAL` | `false` | 是否自动启动本地 MCP 子进程（开发环境用） |
+| `HOLMES_INIT_TIMEOUT_SECONDS` | `0` | HolmesGPT 初始化超时秒数（0=无限等待） |
+
+> **配置优先级**：环境变量（Secret） > `config.yaml` 中的 `llm` 块 > 默认值
+>
+> 配置文件自动检测：K8s 环境 → `config/config.k8s.yaml`，本地环境 → `config/config.yaml`
 
 ### 工具集配置
 
@@ -385,3 +559,15 @@ mcp_servers:
 - **LLM 路由**：[litellm](https://github.com/BerriAI/litellm)（多提供商统一接口）
 - **工具协议**：[MCP](https://modelcontextprotocol.io/)（Model Context Protocol）
 - **LLM**：DeepSeek / Claude / GLM / OpenAI（通过 litellm 支持任意提供商）
+
+
+ 可量化 — 每个指标都有具体数字
+
+  ┌────────────┬─────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │    指标    │    量化方式     │                                                          数据来源                                                          │
+  ├────────────┼─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ MTTR       │ 精确到秒的耗时  │ 从 run_start 到 run_end 的时间差                                                                                           │
+  ├────────────┼─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 根因置信度 │ 0-100% 的百分比 │ 4 层逐级提取：① 确定性规则引擎打分 → ② RCA JSON 的 confidence 字段 → ③ 从 LLM 输出正则提取"置信度: XX%" → ④ 层级判定置信度 │
+  ├────────────┼─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 证据完整率 │ 已采集/计划总数 │ 工作流模式：从 evidence_items 的 collected 标记统计；默认模式：从 tool_result 事件的 success/total 统计                    │

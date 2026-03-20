@@ -25,6 +25,7 @@ from app.core.constants import (
 )
 from app.core.config_helpers import should_reset_config, reset_service_config
 from app.core.text_helpers import truncate_question
+from app.core.holmes.metrics_extractor import DiagnosisMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,7 @@ def execute_query_stream_text(
         run_id = uuid.uuid4().hex[:16]
         final_answer = ""
         final_status = "unknown"
+        diagnosis_metrics: Optional[DiagnosisMetrics] = None
 
         for ev in iter_internal_events(
             service=service,
@@ -259,6 +261,21 @@ def execute_query_stream_text(
             elif t == "error":
                 yield emit(f"  ❌ [{ev.get('iteration')}] 错误: {ev.get('error')}")
                 yield emit("")
+            elif t == "metrics":
+                # 从 metrics 事件重建 DiagnosisMetrics 用于最终输出
+                m = ev.get("diagnosis_metrics", {})
+                diagnosis_metrics = DiagnosisMetrics(
+                    run_id=m.get("run_id", ""),
+                    mttr_seconds=m.get("mttr_seconds", 0),
+                    layer=m.get("layer"),
+                    layer_name=m.get("layer_name", ""),
+                    confidence_score=m.get("confidence_score", 0),
+                    evidence_collected=m.get("evidence_collected", 0),
+                    evidence_total=m.get("evidence_total", 0),
+                    runbooks_referenced=m.get("runbooks_referenced", []),
+                    tool_calls_count=m.get("tool_calls_count", 0),
+                    is_diagnosis=m.get("is_diagnosis", False),
+                )
             elif t == "final":
                 final_status = ev.get("status") or "unknown"
                 final_answer = ev.get("answer") or ""
@@ -277,6 +294,13 @@ def execute_query_stream_text(
             yield emit(f"  (无可用最终内容，状态: {final_status})")
 
         yield emit("-" * 50)
+
+        # 追加质量指标表（与工作流模式输出格式一致）
+        if diagnosis_metrics:
+            metrics_block = diagnosis_metrics.format_metrics_block()
+            for line in metrics_block.split("\n"):
+                yield emit(f"  {line}")
+
         yield emit("")
         yield emit(f"📊 总耗时: {format_duration(total_time)} | run_id: {run_id} | status: {final_status}")
         yield emit("=" * 70)
