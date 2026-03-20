@@ -711,24 +711,7 @@ class HolmesService:
                 yield emit(node_outputs["conclusion"])
                 yield emit("")
         
-        # 输出指标摘要
-        if metrics_data:
-            yield emit("-" * 70)
-            yield emit("📈 质量指标")
-            yield emit("-" * 70)
-
-            mttr = metrics_data.get("mttr", {})
-            evidence = metrics_data.get("evidence_completeness", {})
-            rca = metrics_data.get("root_cause_confidence", {})
-
-            mttr_pass = "✅" if mttr.get("pass") else "❌"
-            evidence_pass = "✅" if evidence.get("pass") else "⚠️"
-            rca_pass = "✅" if rca.get("pass") else "⚠️"
-
-            yield emit(f"  MTTR:        {mttr.get('value', '?')} {mttr_pass} (要求 < 10m)")
-            yield emit(f"  根因置信度: {rca.get('value', '?')} {rca_pass} (要求 >= 80%)")
-            yield emit(f"  证据完整率: {evidence.get('value', '?')} {evidence_pass} (要求 > 90%)")
-            yield emit("")
+        # 指标摘要已包含在 final_answer（format_metrics_block）中，不再重复输出
 
         yield emit("=" * 70)
         yield emit("✅ 诊断完成!")

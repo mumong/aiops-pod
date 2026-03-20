@@ -19,10 +19,12 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
+import httpx
 import litellm
 
 from app.core.federation.registry import AgentRegistry
@@ -51,6 +53,42 @@ class FederationAgent:
         self.api_key = api_key
         self.api_base = api_base
         self.max_steps = max_steps
+        self._max_retries = 3
+        self._retry_base_delay = 2  # 秒
+
+    def _completion_with_retry(self, **kwargs) -> Any:
+        """带重试的 litellm.completion 调用，处理 DeepSeek 连接中断等瞬态错误"""
+        # 设置较长超时（DeepSeek 有时响应较慢）
+        kwargs.setdefault("timeout", 120)
+
+        # 可重试的异常类型
+        retryable = (
+            litellm.InternalServerError,
+            litellm.APIConnectionError,
+            litellm.Timeout,
+            litellm.ServiceUnavailableError,
+            httpx.RemoteProtocolError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+            ConnectionError,
+        )
+
+        last_exc = None
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                return litellm.completion(**kwargs)
+            except retryable as exc:
+                last_exc = exc
+                if attempt < self._max_retries:
+                    delay = self._retry_base_delay * (2 ** (attempt - 1))  # 指数退避: 2s, 4s, 8s
+                    logger.warning(
+                        f"[FEDERATION AGENT] LLM 调用失败 (第{attempt}次), "
+                        f"{delay}s 后重试: {type(exc).__name__}: {str(exc)[:120]}"
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"[FEDERATION AGENT] LLM 调用失败 (已重试{self._max_retries}次): {exc}")
+        raise last_exc
 
     def ask_stream(self, question: str) -> Generator[str, None, None]:
         """
@@ -86,7 +124,7 @@ class FederationAgent:
                 )
                 if self.api_base:
                     _completion_kwargs["base_url"] = self.api_base
-                response = litellm.completion(**_completion_kwargs)
+                response = self._completion_with_retry(**_completion_kwargs)
 
                 message = response.choices[0].message
 
@@ -293,28 +331,53 @@ class FederationAgent:
 
     def _stream_final_answer(self, messages: List[Dict]) -> Generator[str, None, None]:
         """
-        流式生成最终答案
+        流式生成最终答案（带重试）
 
         不带 tools 参数重新调用 LLM，使用 stream=True，
         让用户在生成过程中就能看到输出，减少等待时间。
         """
-        try:
-            _completion_kwargs = dict(
-                model=self.model,
-                api_key=self.api_key,
-                messages=messages,
-                stream=True,
-            )
-            if self.api_base:
-                _completion_kwargs["base_url"] = self.api_base
-            stream = litellm.completion(**_completion_kwargs)
-            for chunk in stream:
-                delta = chunk.choices[0].delta
-                if delta and delta.content:
-                    yield delta.content
-        except Exception as exc:
-            logger.error(f"[FEDERATION AGENT] 流式最终回答失败: {exc}", exc_info=True)
-            yield f"\n❌ 生成最终报告失败: {str(exc)}\n"
+        retryable = (
+            litellm.InternalServerError,
+            litellm.APIConnectionError,
+            litellm.Timeout,
+            litellm.ServiceUnavailableError,
+            httpx.RemoteProtocolError,
+            httpx.ReadTimeout,
+            ConnectionError,
+        )
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                _completion_kwargs = dict(
+                    model=self.model,
+                    api_key=self.api_key,
+                    messages=messages,
+                    stream=True,
+                    timeout=120,
+                )
+                if self.api_base:
+                    _completion_kwargs["base_url"] = self.api_base
+                stream = litellm.completion(**_completion_kwargs)
+                for chunk in stream:
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        yield delta.content
+                return  # 成功完成
+            except retryable as exc:
+                if attempt < self._max_retries:
+                    delay = self._retry_base_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"[FEDERATION AGENT] 流式回答失败 (第{attempt}次), "
+                        f"{delay}s 后重试: {type(exc).__name__}"
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"[FEDERATION AGENT] 流式回答失败 (已重试{self._max_retries}次): {exc}", exc_info=True)
+                    yield f"\n❌ 生成最终报告失败: {str(exc)}\n"
+            except Exception as exc:
+                logger.error(f"[FEDERATION AGENT] 流式最终回答失败: {exc}", exc_info=True)
+                yield f"\n❌ 生成最终报告失败: {str(exc)}\n"
+                return
 
     def _parse_tool_args(self, arguments: str) -> Dict[str, Any]:
         """解析工具参数（优先 JSON，回退 eval）"""

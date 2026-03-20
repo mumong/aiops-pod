@@ -28,6 +28,7 @@ from app.core.holmes.event_schema import (
 from app.core.skills import evaluate_deterministic_decision, format_decision_markdown
 from app.core.constants import MAX_ARTIFACT_LENGTH
 from app.core.text_helpers import truncate_preview
+from app.core.holmes.metrics_extractor import MetricsExtractor
 
 
 logger = logging.getLogger(__name__)
@@ -294,6 +295,33 @@ def iter_internal_events(
         },
     )
     internal_events.append(ev_final)
+
+    # 后置指标提取：从所有内部事件中提取诊断质量指标
+    try:
+        extractor = MetricsExtractor()
+        diagnosis_metrics = extractor.extract(internal_events, question)
+        ev_final["metrics"] = {
+            "run_id": diagnosis_metrics.run_id,
+            "mttr_seconds": diagnosis_metrics.mttr_seconds,
+            "mttr_formatted": diagnosis_metrics.mttr_formatted,
+            "layer": diagnosis_metrics.layer,
+            "layer_name": diagnosis_metrics.layer_name,
+            "confidence_score": diagnosis_metrics.confidence_score,
+            "confidence_pct": diagnosis_metrics.confidence_pct,
+            "evidence_collected": diagnosis_metrics.evidence_collected,
+            "evidence_total": diagnosis_metrics.evidence_total,
+            "runbooks_referenced": diagnosis_metrics.runbooks_referenced,
+            "tool_calls_count": diagnosis_metrics.tool_calls_count,
+            "is_diagnosis": diagnosis_metrics.is_diagnosis,
+        }
+        # 生成独立的 metrics 事件
+        ev_metrics = emit("metrics", {"diagnosis_metrics": ev_final["metrics"]})
+        internal_events.append(ev_metrics)
+        yield ev_metrics
+    except Exception:
+        # 指标提取绝不影响主流程
+        pass
+
     yield ev_final
 
     ev_end = emit("run_end", {"elapsed_seconds": round(time.time() - total_start, 3)})
