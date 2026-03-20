@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
-from app.core.skills.evidence import EvidenceExtractor, EVIDENCE_SPECS
+from app.core.skills.evidence import EVIDENCE_SPECS
 from app.core.prompts import EVIDENCE_COLLECTOR_PROMPT
 from holmes.core.prompt import build_initial_ask_messages
 from app.core.constants import DEFAULT_COMMAND_TIMEOUT
@@ -563,29 +563,35 @@ class EvidenceCollectorNode(WorkflowNode):
         """
         evidence_items = []
 
-        # 从问题中初步提取已有证据
-        scenario = self._layer_to_scenario(None, " ".join([p.get("description", "") for p in evidence_plan]))
-        initial_items, _ = EvidenceExtractor.extract_all(
-            " ".join([p.get("description", "") for p in evidence_plan]),
-            scenario
-        )
+        # 跟踪已匹配的 tool_result 索引，避免重复匹配
+        matched_tool_indices = set()
 
         # 合并规划项和实际采集结果
-        for plan_item in evidence_plan:
+        for idx, plan_item in enumerate(evidence_plan):
             item_id = plan_item.get("id", f"ev_{len(evidence_items)}")
 
             # 检查是否有对应的工具结果
             has_result = False
             result_value = None
 
-            for tool_result in tool_results:
+            for ti, tool_result in enumerate(tool_results):
+                if ti in matched_tool_indices:
+                    continue
+
                 tool_cmd = tool_result.get("command", "")
                 plan_cmd = plan_item.get("command", "")
+                tool_success = tool_result.get("success", False)
 
-                # 命令匹配
-                if plan_cmd and tool_cmd and plan_cmd in tool_cmd:
+                # 命令匹配：双向子串匹配或索引对齐
+                cmd_match = (
+                    (plan_cmd and tool_cmd and (plan_cmd in tool_cmd or tool_cmd in plan_cmd))
+                    or (not plan_cmd and idx == ti)  # 无命令时按索引对齐
+                )
+
+                if cmd_match and tool_success:
                     has_result = True
                     result_value = tool_result.get("result", "")
+                    matched_tool_indices.add(ti)
                     break
 
             # 确定证据级别
@@ -606,10 +612,40 @@ class EvidenceCollectorNode(WorkflowNode):
                 source="tool_result" if has_result else "planned"
             ))
 
-        # 添加初始提取的证据
-        for init_item in initial_items:
-            if not any(e.id == init_item.id for e in evidence_items):
-                evidence_items.append(init_item)
+        # 关键修复：如果 evidence_plan 为空但 tool_results 不为空，
+        # 从 tool_results 反向生成 evidence_items
+        if not evidence_plan and tool_results:
+            for ti, tool_result in enumerate(tool_results):
+                if ti in matched_tool_indices:
+                    continue
+                tool_success = tool_result.get("success", False)
+                cmd = tool_result.get("command", f"tool_call_{ti}")
+                evidence_items.append(EvidenceItem(
+                    id=f"auto_{ti}",
+                    description=f"工具采集: {cmd[:60]}",
+                    level=EvidenceLevel.IMPORTANT,
+                    weight=0.2,
+                    collected=tool_success,
+                    value=tool_result.get("result", "") if tool_success else None,
+                    source="tool_result" if tool_success else "tool_failed"
+                ))
+                matched_tool_indices.add(ti)
+
+        # 补充：将未匹配的成功 tool_result 也加入证据列表
+        for ti, tool_result in enumerate(tool_results):
+            if ti in matched_tool_indices:
+                continue
+            if tool_result.get("success", False):
+                cmd = tool_result.get("command", f"tool_call_{ti}")
+                evidence_items.append(EvidenceItem(
+                    id=f"extra_{ti}",
+                    description=f"额外采集: {cmd[:60]}",
+                    level=EvidenceLevel.OPTIONAL,
+                    weight=0.1,
+                    collected=True,
+                    value=tool_result.get("result", ""),
+                    source="tool_result"
+                ))
 
         return evidence_items
 
