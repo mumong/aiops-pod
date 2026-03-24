@@ -1,60 +1,103 @@
 # LLM 提供商配置（litellm 格式）
-# api_key 优先从环境变量 LLM_API_KEY 读取，也可在此处配置
 llm:
-  model: "deepseek/deepseek-chat"    # litellm 模型 ID
-  # api_key: "sk-xxx"                # 可选，优先级低于 LLM_API_KEY 环境变量
-  # api_base: "https://api.deepseek.com"  # 可选，覆盖默认端点
+  model: "deepseek/deepseek-chat"
 
-# 内置工具集配置（Built-in Toolsets）
+# 内置工具集配置 - 只保留 MCP 无法替代的
 toolsets:
+  core_investigation:
+    enabled: true
+  runbook:
+    enabled: true
+  bash:
+    enabled: false
+  kubernetes/core:
+    enabled: false
+  helm/core:
+    enabled: false
+  kubernetes/kube-prometheus-stack:
+    enabled: false
+  internet:
+    enabled: false
+  connectivity_check:
+    enabled: false
   prometheus/metrics:
-    enabled: true
-    config:
-      # 使用 NodePort 访问 Prometheus（API 服务器在集群外）
-      prometheus_url: "http://10.2.0.48:30090"
-  docker/core:
-    enabled: true
-
+    enabled: false
   kubernetes/logs:
-    enabled: false # HolmesGPT's default logging mechanism MUST be disabled
+    enabled: false
+  docker/core:
+    enabled: false
 
-# 第三方 MCP 服务器配置（Remote MCP Servers）
+# 第三方 MCP 服务器配置（主力工具）
 mcp_servers:
-  test_tool_server:
-    description: "测试工具集临时输出 - 只有当用户需要测试的时候才运行"
-    config:
-      url: "http://localhost:8090/sse"
-      mode: "sse"
-    llm_instructions: "只有当用户需要测试临时输出的时候才运行这个工具。这是一个简单的测试工具，用于验证 MCP 集成是否正常工作。"
-    enabled: true
-  
-  elasticsearch:
-    description: "Elasticsearch MCP 工具集 - 用于查询索引、搜索日志数据"
-    config:
-      url: "http://localhost:8082/sse"
-      mode: "sse"
-    enabled: true
-  
-  helmcharts:
-    description: "Helm MCP 工具集 - 用于查询 Helm 资源"
-    config:
-      url: "http://localhost:8092/sse"
-      mode: "sse"
-    enabled: true
-  
   k8s-mcp-service:
-    description: "K8s MCP 工具集 - 用于查询 K8s 资源"
+    description: "K8s MCP - kubectl get/describe/logs/events 等"
     config:
       url: "http://localhost:8093/sse"
       mode: "sse"
     enabled: true
 
-# 联邦查询配置（多集群 Agent-to-Agent）
-# 主集群设 enabled: true，子集群设 enabled: false 或省略此块
+  helmcharts:
+    description: "Helm MCP - helm list/status/values 等"
+    config:
+      url: "http://localhost:8092/sse"
+      mode: "sse"
+    enabled: true
+
+  bash_tool:
+    description: "Bash MCP - 执行 bash 命令"
+    config:
+      url: "http://localhost:8094/sse"
+      mode: "sse"
+    enabled: true
+
+  prometheus_tool:
+    description: "Prometheus MCP - PromQL 查询"
+    config:
+      url: "http://localhost:8095/sse"
+      mode: "sse"
+    enabled: true
+
+  elasticsearch:
+    description: "Elasticsearch MCP - 查询索引、搜索日志"
+    config:
+      url: "http://localhost:8082/sse"
+      mode: "sse"
+    enabled: true
+
+  internete:
+    description: "Internet MCP - 网页抓取"
+    config:
+      url: "http://localhost:8096/sse"
+      mode: "sse"
+    enabled: true
+
+  connectivity_check_tool:
+    description: "TCP 连通性检查"
+    config:
+      url: "http://localhost:8097/sse"
+      mode: "sse"
+    enabled: true
+
+  test_tool_server:
+    description: "测试工具集"
+    config:
+      url: "http://localhost:8090/sse"
+      mode: "sse"
+    enabled: false
+
+# 工作流配置
+workflow:
+  max_steps:
+    layer: 3
+    evidence: 10
+    rca: 8
+    conclusion: 3
+
+# 联邦查询配置
 federation:
-  enabled: true                    # 主集群开启，子集群保持 false
-  max_tokens_per_agent: 0     # 单个子集群报告超过此 token 数则压缩
-  synthesis_timeout: 300           # 等待子集群响应的最大秒数
+  enabled: true
+  max_tokens_per_agent: 0
+  synthesis_timeout: 300
   sub_agents:
     - name: "cluster-24"
       url: "http://10.2.0.24:30800"

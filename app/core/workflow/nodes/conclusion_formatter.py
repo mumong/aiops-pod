@@ -129,9 +129,12 @@ class ConclusionFormatterNode(WorkflowNode):
                 "conclusion": conclusion,
                 "conclusion_formatted": conclusion,
             })
-            
+
+            # 透传 thinking_events（conclusion 节点不产生新 thinking，但需保留上游的）
+            new_state["thinking_events"] = state.get("thinking_events", [])
+
             logger.info(f"✅ 汇总总结完成: {len(conclusion)} 字符")
-        
+
         except Exception as e:
             logger.error(f"汇总总结失败: {e}", exc_info=True)
             new_state.setdefault("errors", []).append(
@@ -141,6 +144,7 @@ class ConclusionFormatterNode(WorkflowNode):
                 "conclusion": f"报告生成失败: {str(e)}",
                 "conclusion_formatted": f"报告生成失败: {str(e)}",
             })
+            new_state["thinking_events"] = state.get("thinking_events", [])
         
         return new_state
     

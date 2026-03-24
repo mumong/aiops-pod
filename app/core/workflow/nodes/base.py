@@ -5,15 +5,16 @@
 - 高内聚：每个节点封装完整的业务逻辑
 - 低耦合：只依赖状态输入，不依赖其他节点
 - 可扩展：新增节点只需继承此类
-- 数据完整性：通过 _run_with_accumulator 保留所有工具和 AI 中间输出
+- 公共 LLM 调用：通过 _call_llm() 统一 streaming + metrics + thinking
 """
 
 import logging
+import queue
+import time
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import Any, ClassVar, List, Optional, Tuple
 
 from app.core.workflow.state import WorkflowState
-from app.core.workflow.node_accumulator import AccumulatedResult, NodeEventAccumulator
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,23 @@ logger = logging.getLogger(__name__)
 class WorkflowNode(ABC):
     """
     工作流节点基类
-    
+
     所有工作流节点必须继承此类并实现 execute 方法
     """
+
+    # 共享事件队列：当不为 None 时，_call_llm 使用 call_with_stream_and_queue
+    # 以便 executor 实时读取 thinking 事件
+    _event_queue: ClassVar[Optional[queue.Queue]] = None
+
+    @classmethod
+    def set_event_queue(cls, q: queue.Queue):
+        """设置共享事件队列（executor 在启动 workflow 前调用）"""
+        cls._event_queue = q
+
+    @classmethod
+    def clear_event_queue(cls):
+        """清除事件队列（executor 在 workflow 结束后调用）"""
+        cls._event_queue = None
     
     @property
     @abstractmethod
@@ -66,70 +81,77 @@ class WorkflowNode(ABC):
     def get_required_fields(self) -> List[str]:
         """
         返回节点执行所需的前置字段（用于依赖检查）
-        
+
         默认返回空列表，子类可重写
         """
         return []
 
-    def _run_with_accumulator(
-        self,
-        holmes_service: Any,
-        system_prompt: str,
-        question: str,
-        runbook_catalog: Any = None,
-    ) -> AccumulatedResult:
+    def _call_llm(self, question: str, system_prompt: str) -> Tuple[Any, list]:
         """
-        使用 NodeEventAccumulator 运行 HolmesGPT loop，
-        捕获所有工具调用结果和 AI 中间消息。
+        公共 LLM 调用（统一 streaming + metrics + thinking）
+
+        当 _event_queue 已设置时，使用 call_with_stream_and_queue 实现
+        thinking 事件的实时推送；否则走原有 _call_with_stream_limited 路径。
 
         Args:
-            holmes_service: HolmesService 实例
-            system_prompt: 节点专用 system prompt
             question: 用户问题
-            runbook_catalog: 可选 runbook catalog
+            system_prompt: 节点专用 system prompt
 
         Returns:
-            AccumulatedResult，包含完整的工具数据和 AI 消息
+            (response, thinking_events)
         """
         from holmes.core.prompt import build_initial_ask_messages
 
-        tool_executor = getattr(holmes_service.ai, "tool_executor", None)
+        tool_executor = getattr(self.holmes_service.ai, "tool_executor", None)
 
         messages = build_initial_ask_messages(
             initial_user_prompt=question,
             file_paths=None,
             tool_executor=tool_executor,
-            runbooks=runbook_catalog,
+            runbooks=self.runbook_catalog,
             system_prompt_additions=system_prompt,
         )
 
-        sys_prompt = ""
-        user_prompt: Optional[str] = None
-        extra_msgs: list = []
+        start_time = time.time()
+        max_steps = self.holmes_service.get_node_max_steps(self.node_id)
 
-        for msg in messages:
-            role = msg.get("role")
-            if role == "system":
-                sys_prompt = msg.get("content", "")
-            elif role == "user" and user_prompt is None:
-                user_prompt = msg.get("content", "")
-            else:
-                extra_msgs.append(msg)
+        if self._event_queue is not None:
+            # 实时模式：每个 intermediate_event 同时 put 到 queue
+            from app.core.holmes.call_wrapper import call_with_stream_and_queue
 
-        accumulator = NodeEventAccumulator()
-        result = accumulator.run(
-            ai=holmes_service.ai,
-            system_prompt=sys_prompt,
-            user_prompt=user_prompt,
-            msgs=extra_msgs if extra_msgs else None,
-        )
+            original = getattr(self.holmes_service.ai, 'max_steps', None)
+            try:
+                if original is not None:
+                    self.holmes_service.ai.max_steps = max_steps
+                response = call_with_stream_and_queue(
+                    self.holmes_service.ai,
+                    messages,
+                    self._event_queue,
+                    self.node_id,
+                )
+            finally:
+                if original is not None:
+                    self.holmes_service.ai.max_steps = original
+        else:
+            # 原有路径
+            response = self.holmes_service._call_with_stream_limited(messages, max_steps=max_steps)
 
-        logger.info(
-            "📦 [%s] 积累器: %d 工具调用, %d AI 消息, best=%d字符",
-            self.node_id,
-            len(result.tool_results),
-            len(result.ai_messages),
-            len(result.best_ai_content),
-        )
+        llm_duration_ms = (time.time() - start_time) * 1000
 
-        return result
+        # metrics
+        if self.metrics:
+            actual_duration = getattr(response, 'duration_ms', llm_duration_ms) or llm_duration_ms
+            self.metrics.record_llm_call(self.node_id, actual_duration)
+            tc_count = getattr(response, 'tool_call_count', 0) or len(getattr(response, 'tool_calls', []))
+            for _ in range(tc_count):
+                self.metrics.record_tool_call("llm_tool", 0, success=True)
+
+        thinking_events = getattr(response, 'intermediate_events', []) or []
+        return response, thinking_events
+
+    def _save_thinking(self, state: WorkflowState, new_state: dict, thinking_events: list):
+        """将 thinking_events 带 node 标记存入 state"""
+        prev = state.get("thinking_events", [])
+        new_state["thinking_events"] = prev + [
+            {**ev, "node": self.node_id} for ev in thinking_events
+        ]

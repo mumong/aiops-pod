@@ -283,7 +283,11 @@ class WorkflowMetrics:
             # 节点百分比：使用节点总耗时作为分母
             node_pct = (node.duration_ms / total_nodes_duration_ms * 100) if total_nodes_duration_ms > 0 else 0
             status = "✅" if node.success else "❌"
-            lines.append(f"├─ {node.node_name}: {node_s:.1f}s ({node_pct:.1f}%) {status}")
+            # 显示节点内 LLM 迭代和工具调用
+            detail = ""
+            if node.llm_calls > 0 or node.tool_calls > 0:
+                detail = f" [LLM:{node.llm_calls} 工具:{node.tool_calls}]"
+            lines.append(f"├─ {node.node_name}: {node_s:.1f}s ({node_pct:.1f}%){detail} {status}")
         
         # LLM 统计（使用节点总耗时作为分母，更准确）
         total_nodes_duration_ms = sum(n.duration_ms for n in self.nodes.values())

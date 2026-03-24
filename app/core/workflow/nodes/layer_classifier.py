@@ -22,7 +22,6 @@ from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
 from app.core.prompts import LAYER_CLASSIFIER_PROMPT
-from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
 
@@ -58,29 +57,30 @@ class LayerClassifierNode(WorkflowNode):
     def execute(self, state: WorkflowState) -> WorkflowState:
         """
         执行定层逻辑
-        
+
         1. 构建专用 prompt
         2. 调用 LLM 分析
         3. 解析输出，提取层级信息
         """
         question = state.get("question", "")
-        
+
         new_state: WorkflowState = {
             "current_node": self.node_id,
         }
-        
+
         try:
             # 如果有 HolmesService，使用 LLM 分析
             if self.holmes_service and self.holmes_service.ai:
-                layer_result = self._analyze_with_llm(question)
+                layer_result, thinking_events = self._analyze_with_llm(question)
             else:
                 # 回退到规则匹配
                 logger.info("⚠️ 无 LLM 服务，使用规则匹配")
                 layer_result = self._analyze_with_rules(question)
-            
+                thinking_events = []
+
             # 解析层级
             layer = self._parse_layer(layer_result.get("layer", "L2"))
-            
+
             new_state.update({
                 "layer": layer,
                 "layer_confidence": layer_result.get("confidence", 0.5),
@@ -90,9 +90,12 @@ class LayerClassifierNode(WorkflowNode):
                 "key_entities": layer_result.get("key_entities", []),
                 "possible_scenarios": layer_result.get("possible_scenarios", []),
             })
-            
+
+            # 存入 thinking_events（带 node 标记）
+            self._save_thinking(state, new_state, thinking_events)
+
             logger.info(f"✅ 问题定位完成: {layer} (置信度: {layer_result.get('confidence', 0):.0%})")
-        
+
         except Exception as e:
             logger.error(f"问题定位失败: {e}", exc_info=True)
             new_state.setdefault("errors", []).append(
@@ -105,56 +108,27 @@ class LayerClassifierNode(WorkflowNode):
                 "layer_reasoning": f"定层失败，使用默认值（错误: {str(e)}）",
                 "layer_analysis": "{}",
             })
-        
+            self._save_thinking(state, new_state, [])
+
         return new_state
     
-    def _analyze_with_llm(self, question: str) -> Dict:
-        """使用 LLM 分析问题层级（使用和 HolmesService 相同的方式）"""
-        import time
+    def _analyze_with_llm(self, question: str) -> tuple:
+        """使用 LLM 分析问题层级
 
+        Returns:
+            (layer_result_dict, intermediate_events_list)
+        """
         try:
-            start_time = time.time()
+            response, thinking_events = self._call_llm(question, LAYER_CLASSIFIER_PROMPT)
 
-            # 获取 tool_executor（如果不存在则为 None）
-            tool_executor = getattr(self.holmes_service.ai, "tool_executor", None)
-
-            # 输出可用的工具和 runbooks 信息
-            # self._log_available_tools(tool_executor)
-            # self._log_available_runbooks(self.runbook_catalog)
-
-            # 使用 build_initial_ask_messages 构建消息
-            # 这样可以支持 runbooks 和 tools
-            messages = build_initial_ask_messages(
-                initial_user_prompt=question,
-                file_paths=None,
-                tool_executor=tool_executor,
-                runbooks=self.runbook_catalog,
-                system_prompt_additions=LAYER_CLASSIFIER_PROMPT
-            )
-
-            # 调用 LLM（使用和 HolmesService 相同的方式）
-            if self.holmes_service.stream_output:
-                response = self.holmes_service._call_with_stream(messages)
-            else:
-                response = self.holmes_service.ai.call(messages)
-
-            llm_duration_ms = (time.time() - start_time) * 1000
-
-            # 记录 LLM 调用
-            if self.metrics:
-                self.metrics.record_llm_call("layer", llm_duration_ms)
-
-            logger.debug(f"LLM 分析完成 (耗时 {llm_duration_ms:.0f}ms)")
-
-            # 解析 JSON 输出
             if response and response.result:
-                return self._parse_llm_response(response.result)
+                return self._parse_llm_response(response.result), thinking_events
 
-            return self._analyze_with_rules(question)
+            return self._analyze_with_rules(question), thinking_events
 
         except Exception as e:
             logger.warning(f"LLM 分析失败，回退到规则: {e}")
-            return self._analyze_with_rules(question)
+            return self._analyze_with_rules(question), []
 
     # def _log_available_tools(self, tool_executor: Any):
     #     """输出可用的工具信息"""

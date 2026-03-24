@@ -55,6 +55,7 @@ class WorkflowState(TypedDict, total=False):
     current_node: Optional[str]          # 当前执行节点
     errors: List[str]                    # 错误列表
     warnings: List[str]                  # 警告列表
+    thinking_events: List[Dict]          # 各节点的中间推理事件
 
     # ========== 多场景模式新增字段 ==========
     # 全局场景检测结果
