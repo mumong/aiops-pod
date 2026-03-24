@@ -230,6 +230,9 @@ class HolmesService:
                 self._log_loaded_resources()
                 logger.info(f"   ✅ 资源信息输出完成 ({time.time() - step_start:.2f}s)")
 
+                # 从工具列表中移除 kubectl_top（Metrics API 不可用）
+                self._disable_tools(["kubectl_top_nodes", "kubectl_top_pods"])
+
                 return self.config, self.ai
             except Exception as e:
                 self._init_error = str(e)
@@ -237,6 +240,16 @@ class HolmesService:
             finally:
                 self._init_in_progress = False
     
+    def _disable_tools(self, tool_names: list):
+        """从 tool_executor 中移除指定工具（工具层面禁用）"""
+        if not self.ai or not getattr(self.ai, "tool_executor", None):
+            return
+        tools_by_name = self.ai.tool_executor.tools_by_name
+        for name in tool_names:
+            if name in tools_by_name:
+                del tools_by_name[name]
+                logger.info(f"⛔ 已禁用工具: {name}")
+
     def _call_with_stream(self, messages: list) -> Any:
         """兼容层：内部委托给 app.core.holmes.call_wrapper.call_with_stream"""
         return call_with_stream(self.ai, messages, logger_override=logger)
@@ -712,7 +725,11 @@ class HolmesService:
                     conf = snapshot.get("confidence")
                     conf_str = f"{conf:.0%}" if conf else "?"
                     if root_cause:
-                        yield emit(f"   根因: {root_cause}")
+                        # 截断过长的根因文本（避免显示 LLM 对话过程）
+                        rc_display = root_cause[:150]
+                        if len(root_cause) > 150:
+                            rc_display += "..."
+                        yield emit(f"   根因: {rc_display}")
                     yield emit(f"   置信度: {conf_str}")
 
                     # 显示因果链
