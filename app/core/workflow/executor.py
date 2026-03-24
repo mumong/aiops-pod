@@ -180,6 +180,23 @@ class WorkflowExecutor:
                 if tag == "thinking":
                     # 实时 thinking 事件 — 立刻 yield
                     node_id = data.get("node", "")
+
+                    # 如果该节点还没有 node_start，先补发 node_start
+                    if node_id and node_id not in node_start_times:
+                        node_start_times[node_id] = time.time()
+                        metrics.start_node(node_id, self._get_node_display_name(node_id))
+                        logger.info(f"📍 [{node_id}] {self._get_node_display_name(node_id)} 开始...")
+                        yield {
+                            "type": "node_start",
+                            "id": f"{run_id}-node_start-{node_id}",
+                            "run_id": run_id,
+                            "seq": seq,
+                            "ts_ms": int(time.time() * 1000),
+                            "node": node_id,
+                            "node_name": self._get_node_display_name(node_id),
+                        }
+                        seq += 1
+
                     yield {
                         "type": "thinking",
                         "id": f"{run_id}-thinking-{node_id}-{seq}",
@@ -577,21 +594,21 @@ class WorkflowExecutor:
         has_conclusion = bool(state.get("conclusion") or state.get("conclusion_formatted"))
 
         if has_conclusion and has_root_cause and (has_tool_results or has_evidence):
-            # 有根因结论 + 有工具证据 → 至少 0.7
+            # 有根因结论 + 有工具证据 → 至少 0.8
+            if metrics.root_cause_confidence < 0.8:
+                logger.info(
+                    f"   置信度修正: {metrics.root_cause_confidence:.0%} → 80% "
+                    f"(有根因结论且有 {metrics.evidence_collected} 项证据)"
+                )
+                metrics.root_cause_confidence = 0.8
+        elif has_conclusion and (has_tool_results or has_evidence):
+            # 有结论 + 有工具调用但无明确根因 → 至少 0.7
             if metrics.root_cause_confidence < 0.7:
                 logger.info(
                     f"   置信度修正: {metrics.root_cause_confidence:.0%} → 70% "
-                    f"(有根因结论且有 {metrics.evidence_collected} 项证据)"
-                )
-                metrics.root_cause_confidence = 0.7
-        elif has_conclusion and (has_tool_results or has_evidence):
-            # 有结论 + 有工具调用但无明确根因 → 至少 0.6
-            if metrics.root_cause_confidence < 0.6:
-                logger.info(
-                    f"   置信度修正: {metrics.root_cause_confidence:.0%} → 60% "
                     f"(有结论但根因不明确)"
                 )
-                metrics.root_cause_confidence = 0.6
+                metrics.root_cause_confidence = 0.7
 
         # ================================================================
         # Runbook 提取（从所有文本内容中搜索，不再依赖 tool_call_details）
@@ -612,14 +629,22 @@ class WorkflowExecutor:
         for ev in thinking_events:
             tool_name = ev.get("tool_name", "") or ""
             if "runbook" in tool_name.lower() or "fetch_runbook" in tool_name.lower():
+                if ev.get("type") != "tool_result":
+                    continue
                 preview = ev.get("result_preview", "") or ""
-                if preview:
-                    for m in re.finditer(r'([\w][\w.-]*\.md)', preview):
-                        fname = m.group(1)
-                        if fname not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
-                            runbook_ids.add(fname)
-                if not runbook_ids:
-                    runbook_ids.add(tool_name)
+                if not preview or ev.get("status") != "success":
+                    continue
+                # 提取 .md 文件名
+                for m in re.finditer(r'([\w][\w.-]*\.md)', preview):
+                    fname = m.group(1)
+                    if fname not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
+                        runbook_ids.add(fname)
+                # 提取 runbook 标题（如 "# L2 OOMKilled（Exit Code 137）"）
+                title_match = re.search(r'#\s+(.+?)(?:\n|$)', preview)
+                if title_match:
+                    title = title_match.group(1).strip()
+                    if title and title not in runbook_names:
+                        runbook_names.append(title)
 
         # 4. 从 tool_call_details 中查找 runbook 相关调用（保留原逻辑作为补充）
         for detail in metrics.tool_call_details:

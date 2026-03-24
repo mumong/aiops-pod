@@ -260,13 +260,8 @@ class WorkflowMetrics:
         lines.append("")
         lines.append("## 📊 性能统计")
         lines.append("")
-        
-        # 计算节点总耗时（用于节点百分比计算）
-        total_nodes_duration_ms = sum(n.duration_ms for n in self.nodes.values())
-        total_llm_duration_ms = self.total_llm_duration_ms
-        total_tool_duration_ms = self.total_tool_duration_ms
 
-        # 格式化总耗时字符串
+        # 总耗时
         total_s = self.total_duration_seconds
         if total_s < 60:
             total_str = f"{total_s:.1f}s"
@@ -277,31 +272,20 @@ class WorkflowMetrics:
 
         lines.append(f"├─ 总耗时: {total_str}")
 
-        # 各节点耗时
+        # 各节点耗时（百分比以总耗时为分母，加起来≈100%）
+        total_ms = self.total_duration_seconds * 1000
         for node_id, node in self.nodes.items():
             node_s = node.duration_ms / 1000
-            # 节点百分比：使用节点总耗时作为分母
-            node_pct = (node.duration_ms / total_nodes_duration_ms * 100) if total_nodes_duration_ms > 0 else 0
+            node_pct = (node.duration_ms / total_ms * 100) if total_ms > 0 else 0
             status = "✅" if node.success else "❌"
-            # 显示节点内 LLM 迭代和工具调用
-            detail = ""
-            if node.llm_calls > 0 or node.tool_calls > 0:
-                detail = f" [LLM:{node.llm_calls} 工具:{node.tool_calls}]"
-            lines.append(f"├─ {node.node_name}: {node_s:.1f}s ({node_pct:.1f}%){detail} {status}")
-        
-        # LLM 统计（使用节点总耗时作为分母，更准确）
-        total_nodes_duration_ms = sum(n.duration_ms for n in self.nodes.values())
-        llm_s = self.total_llm_duration_ms / 1000
-        llm_pct = (self.total_llm_duration_ms / total_nodes_duration_ms * 100) if total_nodes_duration_ms > 0 else 0
-        lines.append(f"├─ LLM 调用: {llm_s:.1f}s ({llm_pct:.1f}%) - {self.total_llm_calls} 次")
+            lines.append(f"├─ {node.node_name}: {node_s:.1f}s ({node_pct:.0f}%) {status}")
 
-        # 工具调用统计
-        tool_s = self.total_tool_duration_ms / 1000
-        tool_pct = (self.total_tool_duration_ms / total_nodes_duration_ms * 100) if total_nodes_duration_ms > 0 else 0
-        lines.append(f"└─ 工具调用: {tool_s:.1f}s ({tool_pct:.1f}%) - {self.total_tool_calls} 次")
+        # LLM 和工具调用次数（简洁，不显示百分比）
+        lines.append(f"├─ LLM 调用: {self.total_llm_calls} 次")
+        lines.append(f"└─ 工具调用: {self.total_tool_calls} 次")
         lines.append("```")
         lines.append("")
-        
+
         return "\n".join(lines)
     
     def format_metrics_block(self) -> str:

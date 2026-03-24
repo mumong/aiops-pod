@@ -81,11 +81,16 @@ class RootCauseAnalyzerNode(WorkflowNode):
             layer = state.get("layer")
             evidence_items = state.get("evidence_items", [])
             evidence_analysis = state.get("evidence_analysis", "{}")
-            
+
             logger.info(f"🔍 根因分析: 层级={layer}, 证据数量={len(evidence_items)}")
-            
-            # 构建证据摘要
+
+            # 构建证据摘要（包含实际工具数据）
             evidence_summary = self._build_evidence_summary(evidence_items)
+
+            # 追加 evidence 节点的 LLM 分析和工具数据
+            extra_data = self._extract_tool_data_for_rca(evidence_analysis)
+            if extra_data:
+                evidence_summary += "\n\n# 工具采集的原始数据\n" + extra_data
             
             # 使用 LLM 分析
             if self.holmes_service and self.holmes_service.ai:
@@ -177,18 +182,16 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 return json.loads(json_match.group(1))
             return json.loads(response_text)
         except json.JSONDecodeError:
-            # 从文本中提取关键信息
+            # JSON 解析失败 — 把 LLM 原始文本作为分析结果保留
+            # 不要把对话过程塞进 root_cause
             return {
                 "phenomenon": "",
                 "evidence_analysis": [],
-                "causal_chain": {
-                    "trigger": "待分析",
-                    "mechanism": "待分析",
-                    "manifestation": "待分析"
-                },
-                "root_cause": response_text[:300],
-                "confidence": 0.5,
-                "confidence_reason": "LLM 输出解析失败",
+                "causal_chain": {},
+                "root_cause": "详见 LLM 原始分析",
+                "llm_raw_analysis": response_text,
+                "confidence": 0.6,
+                "confidence_reason": "LLM 未输出结构化 JSON，使用原始分析文本",
                 "alternative_causes": []
             }
     
@@ -273,3 +276,33 @@ class RootCauseAnalyzerNode(WorkflowNode):
             next_steps=[],
             facts=[]
         )
+
+    def _extract_tool_data_for_rca(self, evidence_analysis: str) -> str:
+        """
+        从 evidence_analysis JSON 中提取工具采集的真实数据，
+        供 RCA prompt 使用，确保根因分析基于实际数据。
+        """
+        try:
+            data = json.loads(evidence_analysis) if isinstance(evidence_analysis, str) else evidence_analysis
+            if not isinstance(data, dict):
+                return ""
+
+            parts = []
+
+            # 1. LLM 的分析文本（包含工具调用结果的总结）
+            llm_analysis = data.get("llm_analysis", "")
+            if llm_analysis:
+                parts.append(f"## LLM 证据分析\n{llm_analysis[:2000]}")
+
+            # 2. MCP 工具的原始输出
+            tool_data = data.get("tool_data", [])
+            if tool_data:
+                parts.append("## 工具原始输出")
+                for i, td in enumerate(tool_data[:10], 1):
+                    tool = td.get("tool", "unknown")
+                    raw = td.get("data", "")[:500]
+                    parts.append(f"{i}. [{tool}]: {raw}")
+
+            return "\n".join(parts)
+        except (json.JSONDecodeError, TypeError):
+            return ""
