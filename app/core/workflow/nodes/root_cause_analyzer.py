@@ -163,6 +163,14 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 evidence_summary=evidence_summary
             )
 
+            # 告诉 LLM 不要重复采集数据，基于已有证据分析
+            system_prompt += """
+
+# ⚠️ 重要：不要重复采集数据
+上面的「已采集证据」和「工具采集的原始数据」已经包含了所有需要的信息。
+请直接基于这些数据进行分析，**不要重新调用工具采集数据**。
+如果数据不足，在 limitations 中说明即可。"""
+
             response, thinking_events = self._call_llm(question, system_prompt)
 
             if response and response.result:

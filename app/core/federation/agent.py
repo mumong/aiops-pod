@@ -174,14 +174,13 @@ class FederationAgent:
 
     def _execute_tools_streaming(self, tool_calls, cluster_reports: Dict[str, str]) -> Generator[str, None, List[tuple]]:
         """
-        执行工具调用，query_cluster 时实时 yield 子集群的流式输出。
+        执行工具调用，query_cluster 时并发查询 + 实时 yield 子集群输出。
 
-        对于 query_cluster：用 query_stream_realtime 逐 chunk yield 给用户
-        对于其他工具（list_clusters）：直接执行
-
-        Returns (via generator return):
-            [(tool_call, result_dict), ...]
+        并发策略：所有 query_cluster 同时发起，按完成顺序输出。
         """
+        import queue as _queue
+        import threading
+
         parsed = []
         for tc in tool_calls:
             args = self._parse_tool_args(tc.function.arguments)
@@ -198,69 +197,117 @@ class FederationAgent:
             result = self._execute_tool(name, args)
             results[tc.id] = (tc, result)
 
-        # 逐个流式执行 query_cluster（实时输出）
-        if query_calls:
-            registry = self.toolset.get_context().get("federation_registry")
-            enabled_agents = {a.name: a for a in registry.get_enabled_agents()} if registry else {}
+        if not query_calls:
+            return [results[tc.id] for tc in tool_calls]
 
-            for tc, args in query_calls:
-                cluster_name = args.get("cluster_name", "")
-                agent_cfg = enabled_agents.get(cluster_name)
+        registry = self.toolset.get_context().get("federation_registry")
+        enabled_agents = {a.name: a for a in registry.get_enabled_agents()} if registry else {}
 
-                if not agent_cfg:
-                    results[tc.id] = (tc, {
-                        "error": f"Cluster '{cluster_name}' not found",
-                        "available_clusters": list(enabled_agents.keys())
-                    })
-                    continue
+        # 并发流式查询所有子集群
+        # 用一个共享 queue 收集所有子集群的 chunk，带 cluster_name 标记
+        chunk_queue = _queue.Queue()
+        cluster_chunks: Dict[str, list] = {}  # cluster_name → [chunks]
+        tc_by_cluster: Dict[str, Any] = {}  # cluster_name → tool_call
 
-                # 输出子集群查询开始标记
-                yield f"\n{'=' * 70}\n"
-                yield f"🔍 查询子集群: {cluster_name}\n"
-                yield f"{'=' * 70}\n\n"
-
-                # 实时流式查询
-                client = SubAgentClient()
-                chunks = []
-
-                # 在线程中运行 async generator
-                import queue as _queue
-                chunk_queue = _queue.Queue()
-
-                async def _stream_to_queue():
-                    async for name, chunk in client.query_stream_realtime(
-                        agent_cfg,
-                        args.get("question", ""),
-                        args.get("max_steps", 30),
-                        args.get("conclusion_max_tokens", 8192),
-                    ):
-                        chunk_queue.put(chunk)
-                    chunk_queue.put(None)  # sentinel
-
-                import threading
-                t = threading.Thread(target=lambda: asyncio.run(_stream_to_queue()), daemon=True)
-                t.start()
-
-                while True:
-                    chunk = chunk_queue.get()
-                    if chunk is None:
-                        break
-                    chunks.append(chunk)
-                    yield chunk
-
-                t.join(timeout=5)
-
-                full_text = "".join(chunks)
-                cluster_reports[cluster_name] = full_text
-                self._save_report(cluster_name, type('R', (), {'text': full_text, 'elapsed_seconds': 0})())
-
-                # 提取最终答案给 LLM
-                parsed_report = extract_final_answer(full_text)
+        valid_queries = []
+        for tc, args in query_calls:
+            cluster_name = args.get("cluster_name", "")
+            agent_cfg = enabled_agents.get(cluster_name)
+            if not agent_cfg:
                 results[tc.id] = (tc, {
-                    "cluster": cluster_name,
-                    "success": True,
-                    "response": parsed_report.final_answer,
+                    "error": f"Cluster '{cluster_name}' not found",
+                    "available_clusters": list(enabled_agents.keys())
                 })
+                continue
+            valid_queries.append((tc, args, cluster_name, agent_cfg))
+            cluster_chunks[cluster_name] = []
+            tc_by_cluster[cluster_name] = tc
+
+        if not valid_queries:
+            return [results[tc.id] for tc in tool_calls]
+
+        # 每个子集群一个线程，并发执行
+        active_count = len(valid_queries)
+
+        def _stream_cluster(agent_cfg, cluster_name, question, max_steps, conclusion_max_tokens):
+            """在独立线程中流式查询一个子集群"""
+            client = SubAgentClient()
+            try:
+                async def _run():
+                    async for name, chunk in client.query_stream_realtime(
+                        agent_cfg, question, max_steps, conclusion_max_tokens
+                    ):
+                        chunk_queue.put((cluster_name, chunk))
+                    chunk_queue.put((cluster_name, None))  # sentinel
+                asyncio.run(_run())
+            except Exception as exc:
+                chunk_queue.put((cluster_name, f"\n❌ {cluster_name} 查询失败: {exc}\n"))
+                chunk_queue.put((cluster_name, None))
+
+        # 启动所有线程
+        threads = []
+        for tc, args, cluster_name, agent_cfg in valid_queries:
+            t = threading.Thread(
+                target=_stream_cluster,
+                args=(agent_cfg, cluster_name, args.get("question", ""),
+                      args.get("max_steps", 30), args.get("conclusion_max_tokens", 8192)),
+                daemon=True
+            )
+            threads.append(t)
+            t.start()
+
+        logger.info(f"[FEDERATION AGENT] 并发启动 {len(threads)} 个子集群查询")
+
+        # 输出所有子集群的查询开始标记
+        yield f"\n{'=' * 70}\n"
+        yield f"🔍 并发查询 {len(valid_queries)} 个子集群: {', '.join(c for _, _, c, _ in valid_queries)}\n"
+        yield f"{'=' * 70}\n\n"
+
+        # 按到达顺序实时输出 chunk
+        finished_clusters = set()
+        current_cluster = None
+
+        while len(finished_clusters) < active_count:
+            try:
+                cluster_name, chunk = chunk_queue.get(timeout=1.0)
+            except _queue.Empty:
+                # 检查线程是否还活着
+                if not any(t.is_alive() for t in threads):
+                    break
+                continue
+
+            if chunk is None:
+                finished_clusters.add(cluster_name)
+                yield f"\n   ✅ [{cluster_name}] 查询完成\n\n"
+                current_cluster = None
+                continue
+
+            # 切换集群时输出标记
+            if cluster_name != current_cluster:
+                if current_cluster is not None:
+                    yield "\n"
+                yield f"📡 [{cluster_name}] "
+                current_cluster = cluster_name
+
+            cluster_chunks[cluster_name].append(chunk)
+            yield chunk
+
+        # 等待所有线程结束
+        for t in threads:
+            t.join(timeout=5)
+
+        # 组装结果
+        for tc, args, cluster_name, agent_cfg in valid_queries:
+            full_text = "".join(cluster_chunks.get(cluster_name, []))
+            cluster_reports[cluster_name] = full_text
+            self._save_report(cluster_name, type('R', (), {'text': full_text, 'elapsed_seconds': 0})())
+
+            parsed_report = extract_final_answer(full_text)
+            results[tc.id] = (tc, {
+                "cluster": cluster_name,
+                "success": True,
+                "response": parsed_report.final_answer,
+            })
 
         return [results[tc.id] for tc in tool_calls]
 
