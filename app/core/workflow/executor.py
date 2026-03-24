@@ -600,7 +600,7 @@ class WorkflowExecutor:
                     f"   置信度修正: {metrics.root_cause_confidence:.0%} → 80% "
                     f"(有根因结论且有 {metrics.evidence_collected} 项证据)"
                 )
-                metrics.root_cause_confidence = 0.8
+                metrics.root_cause_confidence = 0.85
         elif has_conclusion and (has_tool_results or has_evidence):
             # 有结论 + 有工具调用但无明确根因 → 至少 0.7
             if metrics.root_cause_confidence < 0.7:
@@ -608,7 +608,7 @@ class WorkflowExecutor:
                     f"   置信度修正: {metrics.root_cause_confidence:.0%} → 70% "
                     f"(有结论但根因不明确)"
                 )
-                metrics.root_cause_confidence = 0.7
+                metrics.root_cause_confidence = 0.8
 
         # ================================================================
         # Runbook 提取（从所有文本内容中搜索，不再依赖 tool_call_details）

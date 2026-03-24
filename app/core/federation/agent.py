@@ -92,13 +92,10 @@ class FederationAgent:
 
     def ask_stream(self, question: str) -> Generator[str, None, None]:
         """
-        执行联邦查询，流式返回结果
+        执行联邦查询，流式返回结果。
 
-        Args:
-            question: 用户问题
-
-        Yields:
-            流式文本块
+        子集群查询时实时转发流式输出（与 /ask 一致的 thinking 效果），
+        最后由 LLM 合成统一报告。
         """
         logger.info(f"[FEDERATION AGENT] 开始处理问题: {question[:60]}...")
 
@@ -108,12 +105,14 @@ class FederationAgent:
             {"role": "user", "content": question}
         ]
 
+        # 收集各子集群的完整报告文本（用于最终合成）
+        cluster_reports: Dict[str, str] = {}
+
         # Tool Calling 循环
         for step in range(self.max_steps):
             logger.info(f"[FEDERATION AGENT] Step {step + 1}/{self.max_steps}")
 
             try:
-                # 调用 LLM（中间步骤使用非流式，快速获取工具调用决策）
                 _completion_kwargs = dict(
                     model=self.model,
                     api_key=self.api_key,
@@ -128,7 +127,6 @@ class FederationAgent:
 
                 message = response.choices[0].message
 
-                # 检查是否有工具调用
                 if message.tool_calls:
                     # 添加 assistant 消息
                     messages.append({
@@ -147,10 +145,12 @@ class FederationAgent:
                         ]
                     })
 
-                    # 执行所有工具调用（多个 query_cluster 会并发执行）
-                    tool_results = self._execute_tools(message.tool_calls)
+                    # 执行工具调用 — 实时 yield 子集群输出
+                    tool_results = yield from self._execute_tools_streaming(
+                        message.tool_calls, cluster_reports
+                    )
 
-                    # 按顺序添加工具结果到消息历史
+                    # 添加工具结果到消息历史
                     for tool_call, result in tool_results:
                         messages.append({
                             "role": "tool",
@@ -171,6 +171,98 @@ class FederationAgent:
 
         # 达到最大步数
         yield f"\n⚠️ 达到最大步数 ({self.max_steps})，Agent 未完成任务\n"
+
+    def _execute_tools_streaming(self, tool_calls, cluster_reports: Dict[str, str]) -> Generator[str, None, List[tuple]]:
+        """
+        执行工具调用，query_cluster 时实时 yield 子集群的流式输出。
+
+        对于 query_cluster：用 query_stream_realtime 逐 chunk yield 给用户
+        对于其他工具（list_clusters）：直接执行
+
+        Returns (via generator return):
+            [(tool_call, result_dict), ...]
+        """
+        parsed = []
+        for tc in tool_calls:
+            args = self._parse_tool_args(tc.function.arguments)
+            parsed.append((tc, tc.function.name, args))
+
+        query_calls = [(tc, args) for tc, name, args in parsed if name == "query_cluster"]
+        other_calls = [(tc, name, args) for tc, name, args in parsed if name != "query_cluster"]
+
+        results = {}
+
+        # 先执行非查询工具
+        for tc, name, args in other_calls:
+            logger.info(f"[FEDERATION AGENT] 调用工具: {name}({args})")
+            result = self._execute_tool(name, args)
+            results[tc.id] = (tc, result)
+
+        # 逐个流式执行 query_cluster（实时输出）
+        if query_calls:
+            registry = self.toolset.get_context().get("federation_registry")
+            enabled_agents = {a.name: a for a in registry.get_enabled_agents()} if registry else {}
+
+            for tc, args in query_calls:
+                cluster_name = args.get("cluster_name", "")
+                agent_cfg = enabled_agents.get(cluster_name)
+
+                if not agent_cfg:
+                    results[tc.id] = (tc, {
+                        "error": f"Cluster '{cluster_name}' not found",
+                        "available_clusters": list(enabled_agents.keys())
+                    })
+                    continue
+
+                # 输出子集群查询开始标记
+                yield f"\n{'=' * 70}\n"
+                yield f"🔍 查询子集群: {cluster_name}\n"
+                yield f"{'=' * 70}\n\n"
+
+                # 实时流式查询
+                client = SubAgentClient()
+                chunks = []
+
+                # 在线程中运行 async generator
+                import queue as _queue
+                chunk_queue = _queue.Queue()
+
+                async def _stream_to_queue():
+                    async for name, chunk in client.query_stream_realtime(
+                        agent_cfg,
+                        args.get("question", ""),
+                        args.get("max_steps", 30),
+                        args.get("conclusion_max_tokens", 8192),
+                    ):
+                        chunk_queue.put(chunk)
+                    chunk_queue.put(None)  # sentinel
+
+                import threading
+                t = threading.Thread(target=lambda: asyncio.run(_stream_to_queue()), daemon=True)
+                t.start()
+
+                while True:
+                    chunk = chunk_queue.get()
+                    if chunk is None:
+                        break
+                    chunks.append(chunk)
+                    yield chunk
+
+                t.join(timeout=5)
+
+                full_text = "".join(chunks)
+                cluster_reports[cluster_name] = full_text
+                self._save_report(cluster_name, type('R', (), {'text': full_text, 'elapsed_seconds': 0})())
+
+                # 提取最终答案给 LLM
+                parsed_report = extract_final_answer(full_text)
+                results[tc.id] = (tc, {
+                    "cluster": cluster_name,
+                    "success": True,
+                    "response": parsed_report.final_answer,
+                })
+
+        return [results[tc.id] for tc in tool_calls]
 
     def _execute_tools(self, tool_calls) -> List[tuple]:
         """

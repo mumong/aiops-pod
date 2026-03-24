@@ -218,6 +218,47 @@ class SubAgentClient:
             )
 
     # ------------------------------------------------------------------
+    # 实时流式查询（逐 chunk yield，用于联邦查询实时输出）
+    # ------------------------------------------------------------------
+
+    async def query_stream_realtime(
+        self,
+        agent: SubAgentConfig,
+        question: str,
+        max_steps: int = 30,
+        conclusion_max_tokens: int = 8192,
+        timeout: float = 1800.0,
+    ):
+        """
+        流式查询子集群，逐 chunk yield (cluster_name, chunk_text)。
+        用于联邦查询的实时输出：主集群边收边转发给用户。
+        """
+        url = f"{agent.url}/ask"
+        logger.info(f"[FEDERATION] 开始实时流式查询 {agent.name}: {url}")
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout, connect=10.0)
+            ) as client:
+                async with client.stream(
+                    "POST", url,
+                    data={
+                        "q": question,
+                        "stream": "true",
+                        "format": "text",
+                        "max_steps": str(max_steps),
+                        "conclusion_max_tokens": str(conclusion_max_tokens),
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_text():
+                        if chunk:
+                            yield (agent.name, chunk)
+        except Exception as exc:
+            logger.error(f"[FEDERATION] {agent.name} 实时流式异常: {exc}")
+            yield (agent.name, f"\n❌ {agent.name} 查询失败: {exc}\n")
+
+    # ------------------------------------------------------------------
     # 流式查询方法（获取完整的结构化报告）
     # ------------------------------------------------------------------
 
