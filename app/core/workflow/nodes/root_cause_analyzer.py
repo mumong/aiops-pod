@@ -27,7 +27,6 @@ from app.core.skills.models import (
 from app.core.skills.engine import get_engine
 from app.core.skills.gate import apply_gate
 from app.core.prompts import ROOT_CAUSE_ANALYZER_PROMPT
-from holmes.core.prompt import build_initial_ask_messages
 from app.core.text_helpers import truncate_question
 
 logger = logging.getLogger(__name__)
@@ -90,7 +89,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
             
             # 使用 LLM 分析
             if self.holmes_service and self.holmes_service.ai:
-                rca_result = self._analyze_with_llm(
+                rca_result, thinking_events = self._analyze_with_llm(
                     question, layer, evidence_summary
                 )
             else:
@@ -99,6 +98,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 rca_result = self._analyze_with_rules(
                     question, layer, evidence_items
                 )
+                thinking_events = []
             
             # 构建决策对象
             decision = self._build_decision(layer, evidence_items, rca_result)
@@ -109,9 +109,12 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "causal_chain": rca_result.get("causal_chain", {}),
                 "rca_analysis": json.dumps(rca_result, ensure_ascii=False),
             })
-            
+
+            # 存入 thinking_events（带 node 标记）
+            self._save_thinking(state, new_state, thinking_events)
+
             logger.info(f"✅ 根因分析完成: {rca_result.get('root_cause', '')[:50]}...")
-        
+
         except Exception as e:
             logger.error(f"根因分析失败: {e}", exc_info=True)
             new_state.setdefault("errors", []).append(
@@ -123,7 +126,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "causal_chain": {},
                 "rca_analysis": "{}",
             })
-        
+            self._save_thinking(state, new_state, [])
+
         return new_state
     
     def _build_evidence_summary(self, evidence_items: List[EvidenceItem]) -> str:
@@ -140,54 +144,30 @@ class RootCauseAnalyzerNode(WorkflowNode):
         question: str,
         layer: Optional[Layer],
         evidence_summary: str
-    ) -> Dict:
-        """使用 LLM 进行根因分析（使用和 HolmesService 相同的方式）"""
-        import time
+    ) -> tuple:
+        """使用 LLM 进行根因分析
 
+        Returns:
+            (rca_result_dict, intermediate_events_list)
+        """
         try:
             layer_str = layer.value if layer else "L2"
 
-            start_time = time.time()
-
-            # 构建 system prompt
             system_prompt = ROOT_CAUSE_ANALYZER_PROMPT.format(
                 layer=layer_str,
                 evidence_summary=evidence_summary
             )
 
-            # 获取 tool_executor（如果不存在则为 None）
-            tool_executor = getattr(self.holmes_service.ai, "tool_executor", None)
-
-            messages = build_initial_ask_messages(
-                initial_user_prompt=question,
-                file_paths=None,
-                tool_executor=tool_executor,
-                runbooks=self.runbook_catalog,
-                system_prompt_additions=system_prompt
-            )
-
-            # 调用 LLM（使用和 HolmesService 相同的方式，注入 prompt）
-            if self.holmes_service.stream_output:
-                response = self.holmes_service._call_with_stream(messages)
-            else:
-                response = self.holmes_service.ai.call(messages)
-
-            llm_duration_ms = (time.time() - start_time) * 1000
-
-            # 记录 LLM 调用
-            if self.metrics:
-                self.metrics.record_llm_call("rca", llm_duration_ms)
-
-            logger.debug(f"LLM 根因分析完成 (耗时 {llm_duration_ms:.0f}ms)")
+            response, thinking_events = self._call_llm(question, system_prompt)
 
             if response and response.result:
-                return self._parse_llm_response(response.result)
+                return self._parse_llm_response(response.result), thinking_events
 
-            return self._analyze_with_rules(question, layer, [])
+            return self._analyze_with_rules(question, layer, []), thinking_events
 
         except Exception as e:
             logger.warning(f"LLM 分析失败，回退到规则: {e}")
-            return self._analyze_with_rules(question, layer, [])
+            return self._analyze_with_rules(question, layer, []), []
     
     def _parse_llm_response(self, response_text: str) -> Dict:
         """解析 LLM 的 JSON 响应"""

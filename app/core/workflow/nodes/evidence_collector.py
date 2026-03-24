@@ -26,7 +26,6 @@ from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
 from app.core.skills.evidence import EVIDENCE_SPECS
 from app.core.prompts import EVIDENCE_COLLECTOR_PROMPT
-from holmes.core.prompt import build_initial_ask_messages
 from app.core.constants import DEFAULT_COMMAND_TIMEOUT
 from app.core.text_helpers import truncate_preview
 
@@ -93,7 +92,7 @@ class EvidenceCollectorNode(WorkflowNode):
             logger.info(f"📋 证据采集: 层级={layer}, 可能场景={possible_scenarios}")
 
             # 1. 调用 LLM 规划证据采集计划
-            evidence_plan = self._plan_evidence_with_llm(
+            evidence_plan, thinking_events = self._plan_evidence_with_llm(
                 question=question,
                 layer=layer,
                 possible_scenarios=possible_scenarios,
@@ -129,13 +128,14 @@ class EvidenceCollectorNode(WorkflowNode):
                 }, ensure_ascii=False),
                 "evidence_completeness": completeness,
                 "tool_results": tool_results,
-                "llm_calls": 1,  # 规划阶段调用了 1 次 LLM
-                "tool_call_count": len(tool_results),
             })
 
             collected = sum(1 for e in evidence_items if e.collected)
             logger.info(f"✅ 证据采集完成: {collected}/{len(evidence_items)} 项, 完整度 {completeness:.0%}")
             logger.info(f"   LLM 调用: 1 次, 工具调用: {len(tool_results)} 次")
+
+            # 存入 thinking_events（带 node 标记）
+            self._save_thinking(state, new_state, thinking_events)
 
         except Exception as e:
             logger.error(f"证据采集失败: {e}", exc_info=True)
@@ -148,6 +148,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 "evidence_completeness": 0.0,
                 "tool_results": [],
             })
+            self._save_thinking(state, new_state, [])
 
         return new_state
 
@@ -157,26 +158,18 @@ class EvidenceCollectorNode(WorkflowNode):
         layer: Optional[Layer],
         possible_scenarios: List[str],
         key_entities: List[Dict]
-    ) -> List[Dict]:
+    ) -> tuple:
         """
-        调用 LLM 规划证据采集（使用和 HolmesService 相同的方式）
-
-        Args:
-            question: 用户问题
-            layer: 判定的层级
-            possible_scenarios: 可能的场景
-            key_entities: 关键实体
+        调用 LLM 规划证据采集
 
         Returns:
-            证据采集计划列表
+            (evidence_plan_list, intermediate_events_list)
         """
         if not self.holmes_service or not self.holmes_service.ai:
             logger.warning("⚠️ 无 LLM 服务，使用规则规划")
-            return self._plan_with_rules(question, layer)
+            return self._plan_with_rules(question, layer), []
 
         try:
-            start_time = time.time()
-
             layer_str = layer.value if layer else "L2"
             scenarios_str = ", ".join(possible_scenarios) if possible_scenarios else "未知"
 
@@ -198,37 +191,18 @@ class EvidenceCollectorNode(WorkflowNode):
             if entities_str:
                 system_prompt += f"\n\n# 已提取的关键实体\n{entities_str}\n"
 
-            # 使用 build_initial_ask_messages 构建消息
-            messages = build_initial_ask_messages(
-                initial_user_prompt=question,
-                file_paths=None,
-                tool_executor=self.holmes_service.ai.tool_executor,
-                runbooks=self.runbook_catalog,
-                system_prompt_additions=system_prompt
-            )
-
-            # 调用 LLM（使用和 HolmesService 相同的方式）
-            if self.holmes_service.stream_output:
-                response = self.holmes_service._call_with_stream(messages)
-            else:
-                response = self.holmes_service.ai.call(messages)
-
-            llm_duration_ms = (time.time() - start_time) * 1000
-
-            # 记录 LLM 调用
-            if self.metrics:
-                self.metrics.record_llm_call("evidence", llm_duration_ms)
+            response, thinking_events = self._call_llm(question, system_prompt)
 
             if response and response.result:
-                logger.debug(f"LLM 规划响应 (耗时 {llm_duration_ms:.0f}ms): {truncate_preview(response.result)}...")
-                return self._parse_llm_evidence_plan(response.result)
+                logger.debug(f"LLM 规划响应: {truncate_preview(response.result)}...")
+                return self._parse_llm_evidence_plan(response.result), thinking_events
 
             logger.warning("LLM 未返回有效响应，使用规则规划")
-            return self._plan_with_rules(question, layer)
+            return self._plan_with_rules(question, layer), thinking_events
 
         except Exception as e:
             logger.warning(f"LLM 规划失败，回退到规则: {e}")
-            return self._plan_with_rules(question, layer)
+            return self._plan_with_rules(question, layer), []
 
     def _parse_llm_evidence_plan(self, response_text: str) -> List[Dict]:
         """

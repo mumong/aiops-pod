@@ -54,6 +54,7 @@ class HolmesService:
         self._init_in_progress: bool = False
         self._init_error: Optional[str] = None
         self._init_started_at: Optional[datetime] = None
+        self.workflow_config: Dict = {}  # 工作流配置（max_steps 等）
     
     def initialize(
         self,
@@ -117,6 +118,9 @@ class HolmesService:
 
                 # 从 config.yaml 读取 llm 配置块
                 _llm_config = _raw_config.get("llm", {}) or {}
+
+                # 从 config.yaml 读取 workflow 配置块
+                self.workflow_config = _raw_config.get("workflow", {}) or {}
 
                 # 确定使用的 API Key
                 # 优先级: 参数 > LLM_API_KEY 环境变量 > config llm.api_key > 默认值
@@ -236,6 +240,49 @@ class HolmesService:
     def _call_with_stream(self, messages: list) -> Any:
         """兼容层：内部委托给 app.core.holmes.call_wrapper.call_with_stream"""
         return call_with_stream(self.ai, messages, logger_override=logger)
+
+    def _call_with_stream_limited(self, messages: list, max_steps: int = 10) -> Any:
+        """
+        带 max_steps 限制的 LLM 调用
+
+        临时修改 ai.max_steps，调用后恢复原值。
+        用于节点级控制，避免 LLM 发散导致过多迭代。
+
+        Args:
+            messages: 消息列表
+            max_steps: 本次调用的最大迭代步数
+        """
+        original = getattr(self.ai, 'max_steps', None)
+        try:
+            if original is not None:
+                self.ai.max_steps = max_steps
+            return call_with_stream(self.ai, messages, logger_override=logger)
+        finally:
+            if original is not None:
+                self.ai.max_steps = original
+
+    def get_node_max_steps(self, node_id: str) -> int:
+        """
+        获取节点 max_steps，优先级: 环境变量 > config.yaml > 默认值
+
+        Args:
+            node_id: 节点 ID（layer, evidence, rca, conclusion）
+
+        Returns:
+            该节点的 max_steps 值
+        """
+        defaults = {"layer": 3, "evidence": 10, "rca": 8, "conclusion": 3}
+        # 1. 环境变量
+        env_key = f"WORKFLOW_MAX_STEPS_{node_id.upper()}"
+        env_val = os.getenv(env_key)
+        if env_val and env_val.isdigit():
+            return int(env_val)
+        # 2. config.yaml
+        config_val = self.workflow_config.get("max_steps", {}).get(node_id)
+        if config_val is not None:
+            return int(config_val)
+        # 3. 默认值
+        return defaults.get(node_id, 10)
     
     def _load_runbooks(self):
         """加载和合并 runbook catalogs"""
@@ -605,6 +652,22 @@ class HolmesService:
             elif event_type == "node_start":
                 node_name = event.get("node_name", event.get("node", "?"))
                 yield emit(f"📍 [{node_name}] 执行中...")
+
+            elif event_type == "thinking":
+                node_name = event.get("node_name", "?")
+                think_type = event.get("thinking_type", event.get("type", ""))
+                if think_type == "tool_start":
+                    yield emit(f"   💭 [{node_name}] 调用工具: {event.get('tool_name')}")
+                elif think_type == "tool_result":
+                    yield emit(f"   💭 [{node_name}] 工具结果: {event.get('tool_name')} ({event.get('status')})")
+                    preview = event.get("result_preview", "")
+                    if preview:
+                        yield emit(f"      📄 {preview[:300]}{'...' if len(preview) > 300 else ''}")
+                elif think_type == "ai_message":
+                    content = (event.get("content") or "")[:200]
+                    yield emit(f"   💭 [{node_name}] AI: {content}")
+                elif think_type == "iteration_end":
+                    yield emit(f"   💭 [{node_name}] 迭代 #{event.get('iteration')} 完成")
             
             elif event_type == "node_complete":
                 node_name = event.get("node_name", event.get("node", "?"))

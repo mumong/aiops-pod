@@ -11,11 +11,15 @@
 import uuid
 import time
 import logging
+import queue
+import re
+import threading
 from datetime import datetime
 from typing import Generator, Dict, Any, Optional
 
 from app.core.workflow.state import WorkflowState
 from app.core.workflow.graph import build_diagnosis_workflow
+from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.metrics import (
     WorkflowMetrics,
     start_workflow_metrics,
@@ -48,12 +52,13 @@ class WorkflowExecutor:
         self.holmes_service = holmes_service
         self.metrics = metrics
         # 获取 runbook_catalog（从 HolmesService）
-        runbook_catalog = (
+        self.runbook_catalog = (
             holmes_service.merged_catalog
             if holmes_service and holmes_service.merged_catalog
             else None
         )
-        self.workflow = build_diagnosis_workflow(holmes_service, metrics, runbook_catalog)
+        # 延迟构建 workflow：在 execute_stream 中创建 metrics 后再构建
+        self.workflow = None
     
     def execute_stream(
         self,
@@ -84,6 +89,12 @@ class WorkflowExecutor:
             metrics.question = question
             metrics.start_time = time.time()
 
+        # 延迟构建 workflow：此时 metrics 已就绪，节点可拿到正确实例
+        if self.workflow is None:
+            self.workflow = build_diagnosis_workflow(
+                self.holmes_service, metrics, self.runbook_catalog
+            )
+
         total_start = time.time()
 
         # 创建并附加日志监听器（用于捕获 HolmesGPT 内部的工具调用）
@@ -112,6 +123,7 @@ class WorkflowExecutor:
             "current_node": None,
             "errors": [],
             "warnings": [],
+            "thinking_events": [],
         }
 
         # 发出开始事件
@@ -126,73 +138,156 @@ class WorkflowExecutor:
             "timestamp": datetime.now().isoformat(),
         }
 
-        # 执行工作流（流式）
-        completed_nodes = set()  # 已完成的节点
-        current_nodes = set()   # 当前批次的节点
+        # 执行工作流（threading + queue 实时模式）
+        completed_nodes = set()
+        current_nodes = set()
         node_start_times = {}
         seq = 0
         final_state = initial_state.copy()
 
+        # 创建共享事件队列
+        event_queue: queue.Queue = queue.Queue(maxsize=500)
+
+        def _run_workflow_in_thread():
+            """在后台线程中运行 LangGraph workflow.stream()"""
+            try:
+                for lg_event in self.workflow.stream(initial_state):
+                    event_queue.put(("langgraph_event", lg_event))
+                event_queue.put(("langgraph_done", None))
+            except Exception as exc:
+                event_queue.put(("langgraph_error", exc))
+
         try:
-            for event in self.workflow.stream(initial_state):
-                # LangGraph 返回格式: {node_name: updated_state}
-                new_nodes_in_this_event = set()
+            # 设置节点级事件队列（节点 _call_llm 会实时推送 thinking 事件）
+            WorkflowNode.set_event_queue(event_queue)
 
-                for node_name, updated_state in event.items():
-                    new_nodes_in_this_event.add(node_name)
+            # 启动后台线程
+            worker = threading.Thread(target=_run_workflow_in_thread, daemon=True)
+            worker.start()
 
-                    # 节点开始（只记录一次）
-                    if node_name not in node_start_times:
-                        node_start_times[node_name] = time.time()
-                        metrics.start_node(node_name, self._get_node_display_name(node_name))
+            workflow_done = False
+            while not workflow_done:
+                try:
+                    item = event_queue.get(timeout=0.3)
+                except queue.Empty:
+                    # 检查线程是否还活着
+                    if not worker.is_alive():
+                        workflow_done = True
+                    continue
 
-                        # 日志输出节点开始
-                        logger.info(f"📍 [{node_name}] {self._get_node_display_name(node_name)} 开始...")
+                tag, data = item
 
-                        yield {
-                            "type": "node_start",
-                            "id": f"{run_id}-node_start-{node_name}",
-                            "run_id": run_id,
-                            "seq": seq,
-                            "ts_ms": int(time.time() * 1000),
-                            "node": node_name,
-                            "node_name": self._get_node_display_name(node_name),
-                        }
+                if tag == "thinking":
+                    # 实时 thinking 事件 — 立刻 yield
+                    node_id = data.get("node", "")
+                    yield {
+                        "type": "thinking",
+                        "id": f"{run_id}-thinking-{node_id}-{seq}",
+                        "run_id": run_id,
+                        "node": node_id,
+                        "node_name": self._get_node_display_name(node_id),
+                        "thinking_type": data.get("type", ""),
+                        "tool_name": data.get("tool_name"),
+                        "content": data.get("content"),
+                        "status": data.get("status"),
+                        "result_preview": data.get("result_preview"),
+                        "duration_seconds": data.get("duration_seconds"),
+                        "iteration": data.get("iteration"),
+                        "ts_ms": data.get("ts_ms", int(time.time() * 1000)),
+                    }
+                    seq += 1
 
-                # 更新最终状态
-                final_state.update(updated_state)
+                elif tag == "langgraph_event":
+                    lg_event = data
+                    new_nodes_in_this_event = set()
 
-                # 检查是否有节点完成（不在当前事件中的节点）
-                for node_name in current_nodes:
-                    if node_name not in new_nodes_in_this_event:
-                        # 节点完成
-                        node_duration = time.time() - node_start_times.get(node_name, time.time())
-                        metrics.finish_node(node_name, success=True)
-                        completed_nodes.add(node_name)
+                    for node_name, updated_state in lg_event.items():
+                        new_nodes_in_this_event.add(node_name)
 
-                        # 提取节点输出摘要用于日志
-                        snapshot = self._extract_state_snapshot(final_state, node_name)
-                        node_summary = self._format_node_summary(node_name, final_state, snapshot)
+                        # 节点开始（只记录一次）
+                        if node_name not in node_start_times:
+                            node_start_times[node_name] = time.time()
+                            metrics.start_node(node_name, self._get_node_display_name(node_name))
+                            logger.info(f"📍 [{node_name}] {self._get_node_display_name(node_name)} 开始...")
 
-                        # 日志输出节点完成和摘要
-                        logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
-                        if node_summary:
-                            logger.info(f"   {node_summary}")
+                            yield {
+                                "type": "node_start",
+                                "id": f"{run_id}-node_start-{node_name}",
+                                "run_id": run_id,
+                                "seq": seq,
+                                "ts_ms": int(time.time() * 1000),
+                                "node": node_name,
+                                "node_name": self._get_node_display_name(node_name),
+                            }
+                            seq += 1
 
-                        yield {
-                            "type": "node_complete",
-                            "id": f"{run_id}-node_complete-{node_name}",
-                            "run_id": run_id,
-                            "seq": seq + 1,
-                            "ts_ms": int(time.time() * 1000),
-                            "node": node_name,
-                            "node_name": self._get_node_display_name(node_name),
-                            "duration_seconds": round(node_duration, 3),
-                            "state_snapshot": snapshot,
-                        }
+                    # 更新最终状态
+                    final_state.update(updated_state)
 
-                # 更新当前节点集合
-                current_nodes = new_nodes_in_this_event
+                    # 检查是否有节点完成
+                    for node_name in current_nodes:
+                        if node_name not in new_nodes_in_this_event:
+                            node_duration = time.time() - node_start_times.get(node_name, time.time())
+                            metrics.finish_node(node_name, success=True)
+                            completed_nodes.add(node_name)
+
+                            snapshot = self._extract_state_snapshot(final_state, node_name)
+                            node_summary = self._format_node_summary(node_name, final_state, snapshot)
+
+                            logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
+                            if node_summary:
+                                logger.info(f"   {node_summary}")
+
+                            yield {
+                                "type": "node_complete",
+                                "id": f"{run_id}-node_complete-{node_name}",
+                                "run_id": run_id,
+                                "seq": seq,
+                                "ts_ms": int(time.time() * 1000),
+                                "node": node_name,
+                                "node_name": self._get_node_display_name(node_name),
+                                "duration_seconds": round(node_duration, 3),
+                                "state_snapshot": snapshot,
+                            }
+                            seq += 1
+
+                    current_nodes = new_nodes_in_this_event
+
+                elif tag == "langgraph_done":
+                    workflow_done = True
+
+                elif tag == "langgraph_error":
+                    raise data  # re-raise exception from worker thread
+
+            # 等待线程结束
+            worker.join(timeout=5)
+
+            # Finalize 剩余节点（最后一个节点）
+            for node_name in current_nodes:
+                if node_name not in completed_nodes:
+                    node_duration = time.time() - node_start_times.get(node_name, time.time())
+                    metrics.finish_node(node_name, success=True)
+                    completed_nodes.add(node_name)
+
+                    snapshot = self._extract_state_snapshot(final_state, node_name)
+                    node_summary = self._format_node_summary(node_name, final_state, snapshot)
+
+                    logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
+                    if node_summary:
+                        logger.info(f"   {node_summary}")
+
+                    yield {
+                        "type": "node_complete",
+                        "id": f"{run_id}-node_complete-{node_name}",
+                        "run_id": run_id,
+                        "seq": seq,
+                        "ts_ms": int(time.time() * 1000),
+                        "node": node_name,
+                        "node_name": self._get_node_display_name(node_name),
+                        "duration_seconds": round(node_duration, 3),
+                        "state_snapshot": snapshot,
+                    }
+                    seq += 1
             
             # 更新指标
             self._update_metrics_from_state(metrics, final_state)
@@ -227,9 +322,15 @@ class WorkflowExecutor:
             
             # 日志输出完成信息
             logger.info(f"🎉 工作流完成: 耗时 {metrics.mttr_formatted}")
-            logger.info(f"   MTTR: {metrics.mttr_formatted} {'✅' if metrics.mttr_pass else '❌'}")
-            logger.info(f"   根因置信度: {metrics.root_cause_confidence:.0%} {'✅' if metrics.root_cause_accuracy_pass else '⚠️'}")
-            logger.info(f"   证据完整率: {metrics.evidence_completeness:.0%} {'✅' if metrics.evidence_completeness_pass else '⚠️'}")
+            logger.info("=" * 60)
+            logger.info("⏱️ [耗时分析] 各节点耗时明细:")
+            for nid, node in metrics.nodes.items():
+                pct = (node.duration_ms / metrics.total_duration_ms * 100) if metrics.total_duration_ms > 0 else 0
+                logger.info(f"   {node.node_name}: {node.duration_ms/1000:.1f}s ({pct:.0f}%)")
+            logger.info(f"   LLM 总耗时: {metrics.total_llm_duration_ms/1000:.1f}s ({metrics.total_llm_calls} 次)")
+            logger.info(f"   工具总耗时: {metrics.total_tool_duration_ms/1000:.1f}s ({metrics.total_tool_calls} 次)")
+            logger.info(f"   总计: {metrics.total_duration_seconds:.1f}s")
+            logger.info("=" * 60)
             
             # 发出最终答案事件
             seq += 1
@@ -266,7 +367,7 @@ class WorkflowExecutor:
             metrics.success = False
             metrics.errors.append(str(e))
             finish_workflow_metrics()
-            
+
             # 错误事件
             seq += 1
             yield {
@@ -277,6 +378,11 @@ class WorkflowExecutor:
                 "ts_ms": int(time.time() * 1000),
                 "error": str(e),
             }
+        finally:
+            # 清除事件队列 + 等待后台线程结束
+            WorkflowNode.clear_event_queue()
+            if worker.is_alive():
+                worker.join(timeout=5)
     
     def _get_node_display_name(self, node_id: str) -> str:
         """获取节点显示名称"""
@@ -378,7 +484,6 @@ class WorkflowExecutor:
     ):
         """从最终状态更新指标"""
         import json
-        import re
 
         # 证据完整率
         evidence_items = state.get("evidence_items", [])
@@ -502,7 +607,21 @@ class WorkflowExecutor:
             if name not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
                 runbook_ids.add(name)
 
-        # 3. 从 tool_call_details 中查找 runbook 相关调用（保留原逻辑作为补充）
+        # 3. 从 thinking_events 中检测 runbook 调用
+        thinking_events = state.get("thinking_events", [])
+        for ev in thinking_events:
+            tool_name = ev.get("tool_name", "") or ""
+            if "runbook" in tool_name.lower() or "fetch_runbook" in tool_name.lower():
+                preview = ev.get("result_preview", "") or ""
+                if preview:
+                    for m in re.finditer(r'([\w][\w.-]*\.md)', preview):
+                        fname = m.group(1)
+                        if fname not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
+                            runbook_ids.add(fname)
+                if not runbook_ids:
+                    runbook_ids.add(tool_name)
+
+        # 4. 从 tool_call_details 中查找 runbook 相关调用（保留原逻辑作为补充）
         for detail in metrics.tool_call_details:
             tool_name = detail.get('tool', '')
             result = detail.get('result', '')
