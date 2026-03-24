@@ -100,6 +100,10 @@ class ConclusionFormatterNode(WorkflowNode):
             
             # 使用 LLM 生成最终报告
             if self.holmes_service and self.holmes_service.ai:
+                # 从 thinking_events 提取工具真实数据，补充给 conclusion LLM
+                tool_data_text = self._build_tool_data_section(
+                    state.get("thinking_events", [])
+                )
                 conclusion = self._generate_with_llm(
                     question=question,
                     layer_analysis=layer_analysis,
@@ -107,6 +111,7 @@ class ConclusionFormatterNode(WorkflowNode):
                     rca_analysis=rca_analysis,
                     conclusion_max_tokens=state.get("conclusion_max_tokens"),
                     layer=layer,
+                    tool_data_text=tool_data_text,
                 )
             else:
                 # 回退到模板格式化
@@ -130,8 +135,9 @@ class ConclusionFormatterNode(WorkflowNode):
                 "conclusion_formatted": conclusion,
             })
 
-            # 透传 thinking_events（conclusion 节点不产生新 thinking，但需保留上游的）
-            new_state["thinking_events"] = state.get("thinking_events", [])
+            # 合并 conclusion 节点自己的 thinking_events + 上游的
+            conclusion_thinking = getattr(self, '_conclusion_thinking', [])
+            self._save_thinking(state, new_state, conclusion_thinking)
 
             logger.info(f"✅ 汇总总结完成: {len(conclusion)} 字符")
 
@@ -144,7 +150,7 @@ class ConclusionFormatterNode(WorkflowNode):
                 "conclusion": f"报告生成失败: {str(e)}",
                 "conclusion_formatted": f"报告生成失败: {str(e)}",
             })
-            new_state["thinking_events"] = state.get("thinking_events", [])
+            self._save_thinking(state, new_state, [])
         
         return new_state
     
@@ -156,34 +162,36 @@ class ConclusionFormatterNode(WorkflowNode):
         rca_analysis: str,
         conclusion_max_tokens: Optional[int] = None,
         layer: Optional[Layer] = None,
+        tool_data_text: str = "",
     ) -> str:
-        """使用 LLM 生成最终报告（使用和 HolmesService 相同的方式）"""
+        """
+        使用 litellm 直接调用生成最终报告（纯文本生成，不带工具）。
+
+        conclusion 节点不需要调工具，只需要基于前面节点的数据生成报告。
+        如果带工具，LLM 会去调 fetch_runbook/TodoWrite 浪费时间且不生成报告。
+        """
         import time
 
-        # 完全由你的参数控制；只有当你传的值超过「模型/环境配置的上限」时才用上限，避免 API 报错
         cap = _get_conclusion_max_tokens_cap()
         requested = conclusion_max_tokens if conclusion_max_tokens is not None else cap
         max_tokens = min(requested, cap) if requested > cap else requested
-        if requested > cap:
-            logger.info("conclusion_max_tokens=%d 超过当前上限 %d，已使用 %d", requested, cap, max_tokens)
 
-        try:
-            start_time = time.time()
-
-            # 根据 layer 决定指令
-            is_query = layer == Layer.QUERY
-            if is_query:
-                instruction = """请基于以上各阶段的分析结果，直接回答用户的查询。
-严格按照 system prompt 中的「查询模板」格式输出（## 📊 查询结果 → ## 📈 数据摘要 → ## 💡 结论）。
+        # 根据 layer 决定指令
+        is_query = layer == Layer.QUERY
+        if is_query:
+            instruction = """请基于以上各阶段的分析结果，直接回答用户的查询。
+严格按照 system prompt 中的「查询模板」格式输出。
 引用实际采集到的数据，不要套诊断报告模板。"""
-            else:
-                instruction = """请基于以上三个阶段的分析结果，生成一份详尽、完整的诊断报告。
+        else:
+            instruction = """请基于以上三个阶段的分析结果，生成一份详尽、完整的诊断报告。
 严格按照 system prompt 中的「诊断模板」格式输出（## 📊 诊断概览 → ## 🔍 现象描述 → ## 🕵️ 证据链 → ## 🎯 根因分析 → ## 🛠️ 修复建议）。
 尽可能多引用原始数据和证据，修复命令可直接复制执行。"""
 
-            # 构建用户消息（包含所有阶段的分析结果）
-            user_message = f"""
-# 用户问题
+        tool_section = ""
+        if tool_data_text:
+            tool_section = f"\n# 工具采集的原始数据（重要！必须引用这些真实数据）\n{tool_data_text}\n"
+
+        user_message = f"""# 用户问题
 {question}
 
 # 阶段1：问题定位分析
@@ -194,52 +202,48 @@ class ConclusionFormatterNode(WorkflowNode):
 
 # 阶段3：根因分析
 {rca_analysis}
+{tool_section}
+{instruction}"""
 
-{instruction}
-"""
+        start_time = time.time()
 
-            # 构建消息（禁用工具调用，确保直接返回文本结果）
-            messages = [
+        from litellm import completion
+
+        model = self.holmes_service.ai.llm.model
+        api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
+        api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
+
+        completion_kwargs = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": CONCLUSION_FORMATTER_PROMPT},
                 {"role": "user", "content": user_message},
-            ]
+            ],
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+        }
+        if api_key:
+            completion_kwargs["api_key"] = api_key
+        if api_base:
+            completion_kwargs["api_base"] = api_base
 
-            from litellm import completion
+        resp = completion(**completion_kwargs)
+        content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # 从 HolmesGPT AI 实例获取模型和认证信息
-            model = self.holmes_service.ai.llm.model
-            api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
-            api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
+        llm_duration_ms = (time.time() - start_time) * 1000
 
-            completion_kwargs = {
-                "model": model,
-                "messages": messages,
-                "temperature": 0.3,
-                "max_tokens": max_tokens,
-            }
-            if api_key:
-                completion_kwargs["api_key"] = api_key
-            if api_base:
-                completion_kwargs["api_base"] = api_base
+        if self.metrics:
+            self.metrics.record_llm_call("conclusion", llm_duration_ms)
 
-            response_text = completion(**completion_kwargs)
-            content = response_text.get("choices", [{}])[0].get("message", {}).get("content", "")
+        logger.info(f"LLM 报告生成完成 (耗时 {llm_duration_ms:.0f}ms, 长度: {len(content)})")
 
-            llm_duration_ms = (time.time() - start_time) * 1000
+        # conclusion 不走 _call_llm，没有 thinking_events
+        self._conclusion_thinking = []
 
-            if self.metrics:
-                self.metrics.record_llm_call("conclusion", llm_duration_ms)
+        if content:
+            return content
 
-            logger.debug(f"LLM 报告生成完成 (耗时 {llm_duration_ms:.0f}ms, 长度: {len(content)})")
-
-            if content:
-                return content
-
-            return self._format_fallback(question, layer_analysis, evidence_analysis, rca_analysis)
-
-        except Exception as e:
-            logger.warning(f"LLM 生成失败，回退到模板: {e}")
-            return self._format_fallback(question, layer_analysis, evidence_analysis, rca_analysis)
+        return f"报告生成失败：LLM 未返回有效内容。\n\n原始数据：\n{tool_data_text[:1000] if tool_data_text else '无'}"
     
     def _format_fallback(
         self,
@@ -656,3 +660,33 @@ class ConclusionFormatterNode(WorkflowNode):
         report_lines.append("*报告由 K8s AIOps Copilot 工作流生成*")
         
         return "\n".join(report_lines)
+
+    def _build_tool_data_section(self, thinking_events: list) -> str:
+        """
+        从 thinking_events 中提取所有节点的工具真实输出数据，
+        构建一个文本段落供 conclusion LLM 引用。
+
+        只提取 tool_result 类型且 status=success 的事件。
+        """
+        parts = []
+        seen = set()
+        for ev in thinking_events:
+            if ev.get("type") != "tool_result":
+                continue
+            if ev.get("status") != "success":
+                continue
+            tool_name = ev.get("tool_name", "unknown")
+            preview = ev.get("result_preview", "")
+            if not preview:
+                continue
+            # 去重（同一工具同一数据不重复）
+            key = f"{tool_name}:{preview[:80]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            node = ev.get("node", "")
+            parts.append(f"[{node}] {tool_name}: {preview}")
+
+        if not parts:
+            return ""
+        return "\n".join(parts[:20])  # 最多 20 条，避免超长

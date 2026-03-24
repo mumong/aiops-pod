@@ -92,7 +92,7 @@ class EvidenceCollectorNode(WorkflowNode):
             logger.info(f"📋 证据采集: 层级={layer}, 可能场景={possible_scenarios}")
 
             # 1. 调用 LLM 规划证据采集计划
-            evidence_plan, thinking_events = self._plan_evidence_with_llm(
+            evidence_plan, thinking_events, llm_result_text = self._plan_evidence_with_llm(
                 question=question,
                 layer=layer,
                 possible_scenarios=possible_scenarios,
@@ -119,11 +119,16 @@ class EvidenceCollectorNode(WorkflowNode):
             # 5. 更新 metrics（记录 LLM 调用和工具调用次数）
             self._update_metrics(evidence_plan, tool_results)
 
+            # 6. 从 thinking_events 提取 MCP 工具的真实输出数据
+            tool_data_from_llm = self._extract_tool_data_from_thinking(thinking_events)
+
             new_state.update({
                 "evidence_items": evidence_items,
                 "evidence_analysis": json.dumps({
                     "evidence_plan": evidence_plan,
                     "tool_results": [r.get("summary", "") for r in tool_results],
+                    "tool_data": tool_data_from_llm,
+                    "llm_analysis": llm_result_text[:3000] if llm_result_text else "",
                     "collection_summary": f"计划 {len(evidence_plan)} 项，实际采集 {sum(1 for e in evidence_items if e.collected)} 项"
                 }, ensure_ascii=False),
                 "evidence_completeness": completeness,
@@ -163,11 +168,12 @@ class EvidenceCollectorNode(WorkflowNode):
         调用 LLM 规划证据采集
 
         Returns:
-            (evidence_plan_list, intermediate_events_list)
+            (evidence_plan_list, intermediate_events_list, llm_result_text)
+            llm_result_text: LLM 的完整输出文本（包含工具调用结果和分析）
         """
         if not self.holmes_service or not self.holmes_service.ai:
             logger.warning("⚠️ 无 LLM 服务，使用规则规划")
-            return self._plan_with_rules(question, layer), []
+            return self._plan_with_rules(question, layer), [], ""
 
         try:
             layer_str = layer.value if layer else "L2"
@@ -193,16 +199,18 @@ class EvidenceCollectorNode(WorkflowNode):
 
             response, thinking_events = self._call_llm(question, system_prompt)
 
+            llm_text = (response.result or "") if response else ""
+
             if response and response.result:
                 logger.debug(f"LLM 规划响应: {truncate_preview(response.result)}...")
-                return self._parse_llm_evidence_plan(response.result), thinking_events
+                return self._parse_llm_evidence_plan(response.result), thinking_events, llm_text
 
             logger.warning("LLM 未返回有效响应，使用规则规划")
-            return self._plan_with_rules(question, layer), thinking_events
+            return self._plan_with_rules(question, layer), thinking_events, llm_text
 
         except Exception as e:
             logger.warning(f"LLM 规划失败，回退到规则: {e}")
-            return self._plan_with_rules(question, layer), []
+            return self._plan_with_rules(question, layer), [], ""
 
     def _parse_llm_evidence_plan(self, response_text: str) -> List[Dict]:
         """
@@ -657,3 +665,24 @@ class EvidenceCollectorNode(WorkflowNode):
                 duration_ms=duration_ms,
                 success=success
             )
+
+    def _extract_tool_data_from_thinking(self, thinking_events: list) -> List[Dict]:
+        """
+        从 thinking_events 中提取 MCP 工具的真实输出数据
+
+        这些数据来自 LLM agentic loop 中的工具调用（kubectl, prometheus 等），
+        是下游节点（rca, conclusion）生成准确报告的关键数据源。
+        """
+        tool_data = []
+        for ev in thinking_events:
+            if ev.get("type") == "tool_result":
+                tool_name = ev.get("tool_name", "")
+                preview = ev.get("result_preview", "")
+                status = ev.get("status", "")
+                if preview and status == "success":
+                    tool_data.append({
+                        "tool": tool_name,
+                        "data": preview,
+                        "duration_s": ev.get("duration_seconds", 0),
+                    })
+        return tool_data
