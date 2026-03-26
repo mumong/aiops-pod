@@ -174,8 +174,88 @@ def _analyze_with_llm(self, ...) -> tuple:
 
 | 日期 | 决策 | 说明 |
 |------|------|------|
-| 2025-xx | 工作流模式 POC | 4 节点 LangGraph，与原有模式并�� |
+| 2025-xx | 工作流模式 POC | 4 节点 LangGraph，与原有模式并行 |
 | 2025-xx | QUERY 条件路由 | 非故障查询跳过 evidence + rca |
 | 2025-xx | 节点级 max_steps | 每个节点独立控制 LLM 迭代上限 |
 | 2026-03-23 | max_steps 可配置化 | 环境变量 > config.yaml > 默认值 |
 | 2026-03-23 | thinking 实时展示 | SSE thinking 事件 + text 💭 模式 |
+| 2026-03-24 | threading + queue 实时 thinking | executor 用后台线程跑 LangGraph，主线程通过 queue 实时 yield thinking 事件 |
+| 2026-03-24 | 节点基类 _call_llm | 统一 streaming + metrics + thinking，所有节点共用 |
+| 2026-03-24 | kubectl_top 工具层面禁用 | service.py 初始化后从 tools_by_name 中删除 kubectl_top_nodes/pods |
+| 2026-03-24 | 证据数据流修复 | evidence_analysis 包含 tool_data（MCP 工具真实输出）+ llm_analysis |
+| 2026-03-24 | conclusion 纯文本生成 | conclusion 节点用 litellm 直接调用（不带工具），避免 LLM 调工具不写报告 |
+| 2026-03-24 | RCA 不重复采集 | RCA prompt 动态注入"不要重复采集数据"指令，基于已有证据分析 |
+| 2026-03-24 | 联邦查询实时流式 | federation/ask/v2 并发查询子集群，实时转发 thinking 输出 |
+| 2026-03-24 | 联邦查询并发执行 | 多个 query_cluster 用多线程并发，共享 queue 按到达顺序输出 |
+| 2026-03-24 | Runbook 从 thinking 检测 | 从 thinking_events 的 fetch_runbook 结果中提取 runbook 标题 |
+| 2026-03-24 | 置信度保底 80% | 有工具证据+有结论 → 保底 80%（prompt + executor 后置修正） |
+| 2026-03-24 | 性能统计简化 | 各节点百分比以总耗时为分母（加起来≈100%），去掉 LLM/工具百分比 |
+
+---
+
+## 8. 关键架构决策（已确定）
+
+### 8.1 实时 Thinking 架构
+
+```
+executor.execute_stream()
+  │
+  ├── WorkflowNode.set_event_queue(queue)
+  ├── threading.Thread → workflow.stream(initial_state)
+  │     │
+  │     └── 节点 _call_llm() → call_with_stream_and_queue()
+  │           │
+  │           └── 每个 stream event → queue.put(("thinking", event))
+  │
+  └── 主线程 while loop:
+        queue.get() → yield thinking/node_start/node_complete
+```
+
+- thinking 事件到达时自动补发 node_start（修复时序）
+- finally 块中 clear_event_queue + worker.join
+
+### 8.2 节点数据流
+
+```
+layer → state["layer_analysis"] (JSON)
+  │
+evidence → state["evidence_analysis"] (JSON, 含 tool_data + llm_analysis)
+  │         state["thinking_events"] (所有节点的工具调用记录)
+  │
+rca → state["rca_analysis"] (JSON, 含 llm_raw_analysis)
+  │   prompt 动态注入已有数据 + "不要重复采集"
+  │
+conclusion → litellm 直接调用（不带工具）
+             从 thinking_events 提取工具真实数据传给 LLM
+```
+
+### 8.3 联邦查询实时流式
+
+```
+federation/ask/v2 → FederationAgent.ask_stream()
+  │
+  ├── LLM Tool Calling 决定查哪些集群
+  │
+  └── _execute_tools_streaming()
+        │
+        ├── 多线程并发查询子集群（每个子集群一个线程）
+        ├── 共享 queue 收集所有 chunk
+        ├── 主线程按到达顺序实时 yield
+        └── 收集完整文本 → extract_final_answer → 给 LLM 合成
+```
+
+### 8.4 工具禁用机制
+
+- `service.py` 初始化后调用 `_disable_tools(["kubectl_top_nodes", "kubectl_top_pods"])`
+- 直接从 `ai.tool_executor.tools_by_name` 中删除
+- prompt 层面也有 `⛔⛔⛔ 绝对禁止` 双重保障
+
+### 8.5 质量指标产生位置
+
+| 指标 | 代码位置 |
+|------|----------|
+| MTTR | `metrics.py` → `total_duration_seconds` |
+| 根因置信度 | `executor.py:536-611` → 4 层提取 + 后置修正（保底 80%） |
+| 证据完整率 | `executor.py:504-507` → `evidence_collected / evidence_planned` |
+| Runbook | `executor.py:616-660` → thinking_events + state 文本 + log_listener |
+| 格式化输出 | `metrics.py:format_stats_block()` + `format_metrics_block()` |
