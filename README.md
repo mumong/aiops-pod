@@ -16,10 +16,12 @@
 |------|------|
 | **智能意图识别** | 自动区分数据查询（QUERY）和故障诊断（L0-L4），走不同处理路径 |
 | **分层诊断 (L0-L4)** | 五层故障分类：基础设施→集群节点→工作负载→服务网络→应用层 |
-| **多集群联邦查询** | Agent-to-Agent 智能路由，支持跨集群对比和选择性查询 |
+| **四阶段工作流** | 问题定层→证据采集→根因分析→报告生成，每个阶段独立 LLM 调用，实时 thinking 输出 |
+| **多集群联邦查询** | Agent-to-Agent 智能路由，并发查询子集群，实时转发每个子集群的诊断过程 |
+| **实时 Thinking 输出** | 工具调用、AI 推理、数据预览全程实时流式展示（threading + queue 架构） |
 | **MCP 工具扩展** | 通过 MCP 协议接入任意外部工具（K8s、Prometheus、ES、Helm 等） |
-| **Runbook 知识库** | 内置 26+ 故障手册，AI 自动匹配场景 |
-| **流式输出** | SSE 实时推送工具调用和 AI 推理过程 |
+| **Runbook 知识库** | 内置 26+ 故障手册，AI 自动匹配场景，质量指标自动检测引用 |
+| **质量指标体系** | MTTR、根因置信度、证据完整率、Runbook 覆盖率，每次诊断自动评估 |
 | **多 LLM 提供商** | 支持 DeepSeek / Claude / GLM / OpenAI，通过配置切换 |
 
 ---
@@ -74,6 +76,48 @@ FastAPI ────────────────────────
 
 - **QUERY 路径**：数据查询 → 工具采集 → 数据汇总 → 表格输出（跳过根因分析）
 - **L0-L4 路径**：故障诊断 → 多维采证 → 因果链推理 → 结构化诊断报告
+
+**实时 Thinking 输出**：每个节点执行时，工具调用、AI 推理、数据预览全程实时流式展示：
+
+```
+📍 [问题定位] 执行中...
+   💭 [问题定位] 迭代 #1 完成
+   💭 [问题定位] AI: 我来帮您检查集群的问题...
+   💭 [问题定位] 调用工具: kubectl_get_by_kind_in_cluster
+   💭 [问题定位] 工具结果: kubectl_get_by_kind_in_cluster (success)
+      📄 NAME     STATUS   ROLES           AGE    VERSION
+      master   Ready    control-plane   179d   v1.26.8 ...
+   ✅ [问题定位] 完成 (41.8s)
+```
+
+**节点级 max_steps 控制**：每个节点的 LLM 最大迭代次数可独立配置：
+
+```yaml
+# config.yaml
+workflow:
+  max_steps:
+    layer: 3          # 问题定位（只做分层，不需要多次迭代）
+    evidence: 10       # 证据采集（需要多次工具调用）
+    rca: 8             # 根因分析（基于已有数据分析，减少重复调用）
+    conclusion: 3      # 报告生成（纯文本生成，不调工具）
+```
+
+也可通过环境变量覆盖：`WORKFLOW_MAX_STEPS_LAYER=3`、`WORKFLOW_MAX_STEPS_EVIDENCE=10` 等。
+
+**联邦查询实时输出**：`/federation/ask/v2` 并发查询多个子集群时，每个子集群的工作流 thinking 过程实时转发：
+
+```
+🔍 并发查询 2 个子集群: main, cluster-24
+
+📡 [main] 📍 [问题定位] 执行中...
+📡 [main]    💭 [问题定位] AI: ...
+📡 [cluster-24] 📍 [证据链采集] 执行中...
+📡 [cluster-24]    💭 [证据链采集] 调用工具: execute_prometheus_instant_query
+   ✅ [main] 查询完成
+   ✅ [cluster-24] 查询完成
+
+（LLM 合成的最终跨集群报告）
+```
 
 ---
 
@@ -399,6 +443,15 @@ llm:
 | `BASH_TOOL_UNSAFE_ALLOW_ALL` | `false` | 允许执行所有 bash 命令（生产环境建议 false） |
 | `MCP_AUTO_START_LOCAL` | `false` | 是否自动启动本地 MCP 子进程（开发环境用） |
 | `HOLMES_INIT_TIMEOUT_SECONDS` | `0` | HolmesGPT 初始化超时秒数（0=无限等待） |
+| **工作流 max_steps** | | |
+| `WORKFLOW_MAX_STEPS_LAYER` | `3` | 问题定位节点最大 LLM 迭代次数 |
+| `WORKFLOW_MAX_STEPS_EVIDENCE` | `10` | 证据采集节点最大 LLM 迭代次数 |
+| `WORKFLOW_MAX_STEPS_RCA` | `8` | 根因分析节点最大 LLM 迭代次数 |
+| `WORKFLOW_MAX_STEPS_CONCLUSION` | `3` | 报告生成节点最大 LLM 迭代次数 |
+| **质量指标阈值** | | |
+| `METRICS_MTTR_THRESHOLD` | `600` | MTTR 达标阈值（秒），默认 10 分钟 |
+| `METRICS_RCA_CONFIDENCE_THRESHOLD` | `0.8` | 根因置信度达标阈值 |
+| `METRICS_EVIDENCE_THRESHOLD` | `0.9` | 证据完整率达标阈值 |
 
 > **配置优先级**：环境变量（Secret） > `config.yaml` 中的 `llm` 块 > 默认值
 >
@@ -488,12 +541,17 @@ robusta/
 │       │   └── agent.py                # v2 Agent-to-Agent 路由
 │       ├── holmes/                     # HolmesGPT 封装层
 │       │   ├── config_loader.py        # YAML 配置加载
+│       │   ├── call_wrapper.py         # LLM 调用封装（streaming + queue 实时推送）
+│       │   ├── log_listener.py         # 日志监听器（捕获工具调用和 Runbook）
 │       │   ├── query_stream.py         # 流式输出
 │       │   └── streaming.py            # SSE 消息封装
 │       ├── workflow/                   # LangGraph 工作流（USE_WORKFLOW=true）
-│       │   ├── graph.py                # 工作流图构建
-│       │   ├── executor.py             # 执行器
+│       │   ├── graph.py                # 工作流图构建（条件路由）
+│       │   ├── executor.py             # 执行器（threading + queue 实时 thinking）
+│       │   ├── metrics.py              # 性能指标和质量评估
+│       │   ├── state.py                # 工作流状态定义
 │       │   └── nodes/                  # 四个工作流节点
+│       │       ├── base.py             # 节点基类（_call_llm + _save_thinking）
 │       │       ├── layer_classifier.py
 │       │       ├── evidence_collector.py
 │       │       ├── root_cause_analyzer.py
@@ -551,23 +609,48 @@ mcp_servers:
 | [架构与开发参考](docs/ARCHITECTURE.md) | 目录结构、请求链路、提示词参考、配置详解 |
 | [部署与使用指南](docs/GUIDE.md) | 部署步骤、API 使用、常见问题 |
 
+## 质量指标体系
+
+每次工作流诊断自动输出质量评估，所有指标可量化：
+
+| 指标 | 量化方式 | 达标阈值 | 数据来源 |
+|------|----------|----------|----------|
+| **MTTR** | 精确到秒 | < 10 分钟 | run_start 到 run_end 的时间差 |
+| **根因置信度** | 0-100% | >= 80% | RCA JSON confidence → LLM 输出正则提取 → 后置修正（有证据+有结论 ≥ 80%） |
+| **证据完整率** | 已采集/计划总数 | > 90% | evidence_items 的 collected 标记统计 |
+| **Runbook 覆盖** | 是否匹配 | — | 从 thinking_events 中检测 fetch_runbook 调用，提取 runbook 标题 |
+
+输出示例：
+```
+## 📊 性能统计
+├─ 总耗时: 3.0m
+├─ 问题定位: 68.3s (38%) ✅
+├─ 证据链采集: 72.6s (40%) ✅
+├─ 根因分析: 24.9s (14%) ✅
+├─ 汇总总结: 15.3s (8%) ✅
+├─ LLM 调用: 4 次
+└─ 工具调用: 30 次
+
+## 📈 质量指标
+| 指标 | 要求 | 实际 | 状态 |
+|------|------|------|------|
+| MTTR | < 10.0m | 3.0m | ✅ 达标 |
+| 根因置信度 | >= 80% | 85% | ✅ 达标 |
+| 证据完整率 | > 90% | 100% (3/3) | ✅ 达标 |
+
+📋 诊断追踪
+- 参考 Runbook: L2 OOMKilled（Exit Code 137）
+- 工具调用: 30 次
+- LLM 调用: 4 次
+```
+
+指标阈值可通过环境变量覆盖（见上方环境变量表）。
+
 ## 技术栈
 
 - **API 框架**：[FastAPI](https://fastapi.tiangolo.com/)
 - **AI 引擎**：[HolmesGPT](https://github.com/robusta-dev/holmesgpt)（Tool Calling 框架）
-- **工作流编排**：[LangGraph](https://github.com/langchain-ai/langgraph)（工作流模式）
+- **工作流编排**：[LangGraph](https://github.com/langchain-ai/langgraph)（四阶段工作流）
 - **LLM 路由**：[litellm](https://github.com/BerriAI/litellm)（多提供商统一接口）
 - **工具协议**：[MCP](https://modelcontextprotocol.io/)（Model Context Protocol）
 - **LLM**：DeepSeek / Claude / GLM / OpenAI（通过 litellm 支持任意提供商）
-
-
- 可量化 — 每个指标都有具体数字
-
-  ┌────────────┬─────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-  │    指标    │    量化方式     │                                                          数据来源                                                          │
-  ├────────────┼─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ MTTR       │ 精确到秒的耗时  │ 从 run_start 到 run_end 的时间差                                                                                           │
-  ├────────────┼─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ 根因置信度 │ 0-100% 的百分比 │ 4 层逐级提取：① 确定性规则引擎打分 → ② RCA JSON 的 confidence 字段 → ③ 从 LLM 输出正则提取"置信度: XX%" → ④ 层级判定置信度 │
-  ├────────────┼─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-  │ 证据完整率 │ 已采集/计划总数 │ 工作流模式：从 evidence_items 的 collected 标记统计；默认模式：从 tool_result 事件的 success/total 统计                    │
