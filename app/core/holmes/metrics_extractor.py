@@ -12,6 +12,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from app.core.workflow.metrics import (
+    MTTR_THRESHOLD_SECONDS,
+    ROOT_CAUSE_CONFIDENCE_THRESHOLD,
+    EVIDENCE_COMPLETENESS_THRESHOLD,
+)
+
 logger = logging.getLogger(__name__)
 
 # 层级映射
@@ -67,6 +73,11 @@ class DiagnosisMetrics:
         """格式化为与工作流模式一致的质量指标表"""
         lines = []
 
+        # 使用配置化阈值
+        mttr_threshold_str = f"< {MTTR_THRESHOLD_SECONDS // 60}m"
+        rca_threshold_str = f">= {int(ROOT_CAUSE_CONFIDENCE_THRESHOLD * 100)}%"
+        ev_threshold_str = f"> {int(EVIDENCE_COMPLETENESS_THRESHOLD * 100)}%"
+
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -76,22 +87,22 @@ class DiagnosisMetrics:
         lines.append("|------|------|------|------|")
 
         # MTTR
-        mttr_pass = self.mttr_seconds < 600
+        mttr_pass = self.mttr_seconds < MTTR_THRESHOLD_SECONDS
         mttr_status = "✅ 达标" if mttr_pass else "❌ 未达标"
-        lines.append(f"| **MTTR** | < 10.0m | {self.mttr_formatted} | {mttr_status} |")
+        lines.append(f"| **MTTR** | {mttr_threshold_str} | {self.mttr_formatted} | {mttr_status} |")
 
         if self.is_diagnosis:
             # 根因置信度
-            conf_pass = self.confidence_score >= 0.8
+            conf_pass = self.confidence_score >= ROOT_CAUSE_CONFIDENCE_THRESHOLD
             conf_status = "✅ 达标" if conf_pass else "⚠️ 待验证"
-            lines.append(f"| **根因置信度** | >= 80% | {self.confidence_pct} | {conf_status} |")
+            lines.append(f"| **根因置信度** | {rca_threshold_str} | {self.confidence_pct} | {conf_status} |")
 
             # 证据完整率
             if self.evidence_total > 0:
                 ratio = self.evidence_collected / self.evidence_total
-                ev_pass = ratio > 0.9
+                ev_pass = ratio > EVIDENCE_COMPLETENESS_THRESHOLD
                 ev_status = "✅ 达标" if ev_pass else "⚠️ 不足"
-                lines.append(f"| **证据完整率** | > 90% | {ratio:.0%} ({self.evidence_ratio}) | {ev_status} |")
+                lines.append(f"| **证据完整率** | {ev_threshold_str} | {ratio:.0%} ({self.evidence_ratio}) | {ev_status} |")
             else:
                 lines.append(f"| **证据数量** | - | {self.evidence_collected} 项 | ℹ️ |")
 
@@ -209,15 +220,7 @@ class MetricsExtractor:
                 runbook_set.add(name)
         metrics.runbooks_referenced = sorted(runbook_set)
 
-        # 后置置信度修正：有工具证据 + 诊断场景 → 保底 0.7
-        if metrics.is_diagnosis and metrics.tool_calls_count > 0 and metrics.evidence_collected > 0:
-            if metrics.confidence_score < 0.7:
-                metrics.confidence_score = 0.7
-        elif metrics.is_diagnosis and metrics.tool_calls_count > 0:
-            if metrics.confidence_score < 0.6:
-                metrics.confidence_score = 0.6
-
-        # 置信度标签（修正后重新计算）
+        # 置信度标签
         if metrics.confidence_score >= 0.85:
             metrics.confidence_label = "高"
         elif metrics.confidence_score >= 0.7:

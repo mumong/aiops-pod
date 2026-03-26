@@ -30,6 +30,8 @@ robusta/
 │       ├── workflow/                   # LangGraph 工作流（USE_WORKFLOW=true）
 │       │   ├── graph.py                # 工作流图构建
 │       │   ├── executor.py             # 执行器
+│       │   ├── metrics.py              # 性能指标 + 质量指标数据结构
+│       │   ├── quality_scorer.py       # 质量评分引擎（5维度加权 + 惩罚项）
 │       │   └── nodes/                  # 四个工作流节点
 │       │       ├── layer_classifier.py
 │       │       ├── evidence_collector.py

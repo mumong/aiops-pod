@@ -24,17 +24,32 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 指标阈值配置（可从环境变量覆盖）
+# 指标阈值配置（可从环境变量 / config.yaml 覆盖）
 # ============================================================================
 
-# MTTR 阈值（秒），默认 10 分钟
+# 运行时由 load_metrics_config() 设置，初始值为默认值
 MTTR_THRESHOLD_SECONDS = float(os.getenv("METRICS_MTTR_THRESHOLD", "600"))  # 600s = 10m
-
-# 根因准确率阈值，默认 80%
 ROOT_CAUSE_CONFIDENCE_THRESHOLD = float(os.getenv("METRICS_RCA_CONFIDENCE_THRESHOLD", "0.8"))
-
-# 证据完整率阈值，默认 90%
 EVIDENCE_COMPLETENESS_THRESHOLD = float(os.getenv("METRICS_EVIDENCE_THRESHOLD", "0.9"))
+
+
+def load_metrics_config(config: Optional[Dict] = None):
+    """从 config.yaml 的 metrics 块加载阈值（环境变量优先）"""
+    global MTTR_THRESHOLD_SECONDS, ROOT_CAUSE_CONFIDENCE_THRESHOLD, EVIDENCE_COMPLETENESS_THRESHOLD
+    if not config:
+        return
+    thresholds = config.get("thresholds", {})
+    if not os.getenv("METRICS_MTTR_THRESHOLD") and "mttr_seconds" in thresholds:
+        MTTR_THRESHOLD_SECONDS = float(thresholds["mttr_seconds"])
+    if not os.getenv("METRICS_RCA_CONFIDENCE_THRESHOLD") and "rca_confidence" in thresholds:
+        ROOT_CAUSE_CONFIDENCE_THRESHOLD = float(thresholds["rca_confidence"])
+    if not os.getenv("METRICS_EVIDENCE_THRESHOLD") and "evidence_completeness" in thresholds:
+        EVIDENCE_COMPLETENESS_THRESHOLD = float(thresholds["evidence_completeness"])
+    logger.info(
+        f"📊 指标阈值: MTTR<{MTTR_THRESHOLD_SECONDS}s, "
+        f"RCA>={ROOT_CAUSE_CONFIDENCE_THRESHOLD:.0%}, "
+        f"Evidence>{EVIDENCE_COMPLETENESS_THRESHOLD:.0%}"
+    )
 
 
 @dataclass
@@ -90,6 +105,13 @@ class WorkflowMetrics:
     runbook_matched: bool = False
     runbook_id: Optional[str] = None
     root_cause_confidence: float = 0.0
+
+    # 评分明细（可解释性）
+    confidence_breakdown: List[Dict] = field(default_factory=list)
+    confidence_penalties: List[Dict] = field(default_factory=list)
+    confidence_weighted_total: float = 0.0
+    confidence_fallback_applied: bool = False
+    evidence_breakdown: Dict = field(default_factory=dict)
 
     # 多场景指标
     detected_scenarios_count: int = 0  # 检测到的场景总数
@@ -231,8 +253,10 @@ class WorkflowMetrics:
                 "matched": self.runbook_matched,
                 "runbook_id": self.runbook_id,
                 "pass": self.runbook_coverage_pass,
-                "threshold": ev_threshold_str
             },
+            "confidence_breakdown": self.confidence_breakdown,
+            "confidence_penalties": self.confidence_penalties,
+            "evidence_breakdown": self.evidence_breakdown,
             "performance": {
                 "total_duration_ms": self.total_duration_ms,
                 "llm_calls": self.total_llm_calls,
@@ -314,6 +338,36 @@ class WorkflowMetrics:
         lines.append(f"| **证据完整率** | {ev_threshold_str} | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |")
 
         lines.append("")
+
+        # 评分明细（可解释性）
+        if self.confidence_breakdown:
+            lines.append("📊 置信度评分明细")
+            lines.append("")
+            for i, dim in enumerate(self.confidence_breakdown):
+                prefix = "├─" if i < len(self.confidence_breakdown) - 1 or self.confidence_penalties else "└─"
+                lines.append(
+                    f"  {prefix} {dim.get('description', dim.get('name', ''))}: "
+                    f"{dim.get('score', 0):.0%} (权重 {dim.get('weight', 0):.0%}) "
+                    f"→ 贡献 {dim.get('weighted_score', 0):.1%}"
+                )
+            for i, p in enumerate(self.confidence_penalties):
+                prefix = "└─" if i == len(self.confidence_penalties) - 1 else "├─"
+                lines.append(f"  {prefix} 惩罚 {p.get('name', '')}: -{p.get('value', 0):.0%} ({p.get('reason', '')})")
+            lines.append("")
+
+        # 证据明细
+        if self.evidence_breakdown and self.evidence_breakdown.get("breakdown"):
+            lines.append("📊 证据完整率明细")
+            lines.append("")
+            breakdown = self.evidence_breakdown["breakdown"]
+            items = list(breakdown.items())
+            for i, (level, stats) in enumerate(items):
+                prefix = "└─" if i == len(items) - 1 else "├─"
+                lines.append(
+                    f"  {prefix} {level}: {stats['collected']}/{stats['total']} "
+                    f"(权重 {stats['weight']}) → {stats['rate']:.0%}"
+                )
+            lines.append("")
 
         # 诊断追踪
         lines.append("📋 诊断追踪")

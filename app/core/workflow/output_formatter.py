@@ -107,9 +107,19 @@ class WorkflowOutputFormatter:
         rca_pass = "✅" if rca.get("pass") else "⚠️"
         runbook_pass = "✅" if runbook.get("pass") else "⚠️"
 
-        yield emit_text(f"  MTTR:        {mttr.get('value', '?')} {mttr_pass} (要求 < 10m)")
-        yield emit_text(f"  根因置信度: {rca.get('value', '?')} {rca_pass} (要求 >= 80%)")
-        yield emit_text(f"  证据完整率: {evidence.get('value', '?')} {evidence_pass} (要求 > 80%)")
+        # 使用配置化阈值显示
+        from app.core.workflow.metrics import (
+            MTTR_THRESHOLD_SECONDS,
+            ROOT_CAUSE_CONFIDENCE_THRESHOLD,
+            EVIDENCE_COMPLETENESS_THRESHOLD,
+        )
+        mttr_threshold_str = f"< {MTTR_THRESHOLD_SECONDS // 60}m"
+        rca_threshold_str = f">= {int(ROOT_CAUSE_CONFIDENCE_THRESHOLD * 100)}%"
+        ev_threshold_str = f"> {int(EVIDENCE_COMPLETENESS_THRESHOLD * 100)}%"
+
+        yield emit_text(f"  MTTR:        {mttr.get('value', '?')} {mttr_pass} (要求 {mttr_threshold_str})")
+        yield emit_text(f"  根因置信度: {rca.get('value', '?')} {rca_pass} (要求 {rca_threshold_str})")
+        yield emit_text(f"  证据完整率: {evidence.get('value', '?')} {evidence_pass} (要求 {ev_threshold_str})")
 
         if runbook.get('matched'):
             runbook_id = runbook.get('id', '')

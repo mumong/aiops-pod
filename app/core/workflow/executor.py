@@ -500,7 +500,6 @@ class WorkflowExecutor:
         state: WorkflowState
     ):
         """从最终状态更新指标"""
-        import json
 
         # 证据完整率
         evidence_items = state.get("evidence_items", [])
@@ -522,99 +521,19 @@ class WorkflowExecutor:
         if metrics.total_llm_calls == 0 and llm_calls_from_state > 0:
             metrics.total_llm_calls = llm_calls_from_state
 
-        # ================================================================
-        # 根因置信度（多层提取，逐级回退）
-        # ================================================================
-        confidence = None
-
-        # 收集所有文本内容，用于后续提取
-        conclusion = state.get("conclusion_formatted") or state.get("conclusion") or ""
-        rca_analysis_raw = state.get("rca_analysis", "")
-        evidence_analysis_raw = state.get("evidence_analysis", "")
-        all_text = f"{conclusion}\n{rca_analysis_raw}\n{evidence_analysis_raw}"
-
-        # 1. 优先从 deterministic_decision.confidence_score 取
-        decision = state.get("deterministic_decision")
-        if decision and hasattr(decision, 'confidence_score') and decision.confidence_score > 0:
-            confidence = decision.confidence_score
-
-        # 2. 其次从 rca_analysis JSON 的 confidence 字段取
-        if confidence is None and rca_analysis_raw:
-            try:
-                rca_data = json.loads(rca_analysis_raw) if isinstance(rca_analysis_raw, str) else rca_analysis_raw
-                if isinstance(rca_data, dict):
-                    conf_val = rca_data.get("confidence")
-                    if conf_val is not None:
-                        conf_float = float(conf_val)
-                        if 0 < conf_float <= 1.0:
-                            confidence = conf_float
-                        elif 1 < conf_float <= 100:
-                            confidence = conf_float / 100.0
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass
-
-        # 3. 从 conclusion 文本中正则提取置信度（支持多种格式）
-        if confidence is None:
-            confidence_patterns = [
-                # "置信度: 90%" 或 "置信度：90%"
-                r'置信度[：:]\s*(?:约?\s*)?(\d{1,3})\s*%',
-                # "置信度: 高 (90%)" 或 "置信度: 中 (50%)"
-                r'置信度[：:|\s]*(?:高|中|低)\s*\(?(\d{1,3})\s*%\)?',
-                # "| **置信度** | 中 (50%) |" — Markdown 表格格式
-                r'\*\*置信度\*\*\s*\|\s*(?:高|中|低)\s*\(?(\d{1,3})\s*%\)?',
-                # "confidence: 0.85" JSON 格式
-                r'"confidence"\s*:\s*(0\.\d+|1\.0)',
-            ]
-            for pattern in confidence_patterns:
-                match = re.search(pattern, all_text, re.IGNORECASE)
-                if match:
-                    val = float(match.group(1))
-                    if val > 1.0:
-                        val = val / 100.0
-                    if 0 < val <= 1.0:
-                        confidence = val
-                        break
-
-        # 4. 兜底从 layer_confidence 取
-        if confidence is None:
-            layer_conf = state.get("layer_confidence")
-            if layer_conf is not None and layer_conf > 0:
-                confidence = layer_conf
-
-        # 最终兜底
-        metrics.root_cause_confidence = confidence if confidence is not None else 0.5
-
-        # ================================================================
-        # 后置置信度修正：当有充分证据时，保底 0.7
-        # 原则：只要分析言之有理、有工具证据支撑，就不应低于 0.7
-        # ================================================================
-        has_root_cause = bool(state.get("root_cause"))
-        has_tool_results = len(tool_results) > 0
-        has_evidence = metrics.evidence_collected > 0
-        has_conclusion = bool(state.get("conclusion") or state.get("conclusion_formatted"))
-
-        if has_conclusion and has_root_cause and (has_tool_results or has_evidence):
-            # 有根因结论 + 有工具证据 → 至少 0.8
-            if metrics.root_cause_confidence < 0.8:
-                logger.info(
-                    f"   置信度修正: {metrics.root_cause_confidence:.0%} → 80% "
-                    f"(有根因结论且有 {metrics.evidence_collected} 项证据)"
-                )
-                metrics.root_cause_confidence = 0.85
-        elif has_conclusion and (has_tool_results or has_evidence):
-            # 有结论 + 有工具调用但无明确根因 → 至少 0.7
-            if metrics.root_cause_confidence < 0.7:
-                logger.info(
-                    f"   置信度修正: {metrics.root_cause_confidence:.0%} → 70% "
-                    f"(有结论但根因不明确)"
-                )
-                metrics.root_cause_confidence = 0.8
+        # （QualityScorer 在 runbook 提取之后执行，见下方）
 
         # ================================================================
         # Runbook 提取（从所有文本内容中搜索，不再依赖 tool_call_details）
         # ================================================================
         runbook_ids = set()
         runbook_names = []
+
+        # 构建文本搜索源
+        conclusion = state.get("conclusion_formatted") or state.get("conclusion") or ""
+        rca_analysis_raw = state.get("rca_analysis", "")
+        evidence_analysis_raw = state.get("evidence_analysis", "")
+        all_text = f"{conclusion}\n{rca_analysis_raw}\n{evidence_analysis_raw}"
 
         # 1. 从 log_listener 提取（在 execute_stream 中已处理）
         # 2. 从所有 state 文本中正则提取 runbook 文件名
@@ -670,3 +589,35 @@ class WorkflowExecutor:
         else:
             metrics.runbook_matched = False
             metrics.runbook_id = None
+
+        # ================================================================
+        # 根因置信度 + 证据完整率（多维度加权评分）
+        # 必须在 runbook 提取之后执行，确保 runbook_matched 已设置
+        # ================================================================
+        from app.core.workflow.quality_scorer import QualityScorer
+
+        metrics_config = None
+        if self.holmes_service:
+            full_config = getattr(self.holmes_service, 'raw_config', None)
+            if full_config and isinstance(full_config, dict):
+                metrics_config = full_config.get("metrics")
+
+        scorer = QualityScorer(metrics_config)
+
+        # 计算根因置信度
+        confidence_result = scorer.score_confidence(state, metrics)
+        metrics.root_cause_confidence = confidence_result.final_score
+        metrics.confidence_breakdown = [d.to_dict() for d in confidence_result.dimensions]
+        metrics.confidence_penalties = [p.to_dict() for p in confidence_result.penalties]
+        metrics.confidence_weighted_total = confidence_result.weighted_total
+        metrics.confidence_fallback_applied = confidence_result.fallback_applied
+
+        logger.info(
+            f"   置信度评分: {confidence_result.final_score:.0%} "
+            f"(加权 {confidence_result.weighted_total:.0%}, "
+            f"fallback={confidence_result.fallback_applied})"
+        )
+
+        # 计算加权证据完整率
+        ev_completeness, ev_detail = scorer.score_evidence_completeness(evidence_items)
+        metrics.evidence_breakdown = ev_detail

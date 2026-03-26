@@ -93,7 +93,7 @@ def load_holmes_config_from_yaml(
     config_dict = substitute_env_vars(config_dict, logger)
     logger.info("✅ 环境变量替换完成")
 
-    _excluded_keys = {"stream_output", "sub_agents", "federation", "llm", "workflow"}
+    _excluded_keys = {"stream_output", "sub_agents", "federation", "llm", "workflow", "metrics"}
     temp_config_dict = {k: v for k, v in config_dict.items() if k not in _excluded_keys}
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as temp_file:
