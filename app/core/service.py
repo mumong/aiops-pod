@@ -55,6 +55,8 @@ class HolmesService:
         self._init_error: Optional[str] = None
         self._init_started_at: Optional[datetime] = None
         self.workflow_config: Dict = {}  # 工作流配置（max_steps 等）
+        self.metrics_config: Dict = {}   # 质量指标配置
+        self.raw_config: Dict = {}       # 完整原始配置
     
     def initialize(
         self,
@@ -121,6 +123,12 @@ class HolmesService:
 
                 # 从 config.yaml 读取 workflow 配置块
                 self.workflow_config = _raw_config.get("workflow", {}) or {}
+
+                # 从 config.yaml 读取 metrics 配置块并加载阈值
+                self.metrics_config = _raw_config.get("metrics", {}) or {}
+                self.raw_config = _raw_config  # 保存完整配置供 QualityScorer 使用
+                from app.core.workflow.metrics import load_metrics_config
+                load_metrics_config(self.metrics_config)
 
                 # 确定使用的 API Key
                 # 优先级: 参数 > LLM_API_KEY 环境变量 > config llm.api_key > 默认值

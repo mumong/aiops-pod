@@ -21,7 +21,7 @@
 | **实时 Thinking 输出** | 工具调用、AI 推理、数据预览全程实时流式展示（threading + queue 架构） |
 | **MCP 工具扩展** | 通过 MCP 协议接入任意外部工具（K8s、Prometheus、ES、Helm 等） |
 | **Runbook 知识库** | 内置 26+ 故障手册，AI 自动匹配场景，质量指标自动检测引用 |
-| **质量指标体系** | MTTR、根因置信度、证据完整率、Runbook 覆盖率，每次诊断自动评估 |
+| **质量指标体系** | MTTR、根因置信度（5维度加权评分）、证据完整率（按级别加权）、Runbook 覆盖率。详见 [质量指标说明](docs/quality-metrics.md) |
 | **多 LLM 提供商** | 支持 DeepSeek / Claude / GLM / OpenAI，通过配置切换 |
 
 ---
@@ -453,9 +453,11 @@ llm:
 | `METRICS_RCA_CONFIDENCE_THRESHOLD` | `0.8` | 根因置信度达标阈值 |
 | `METRICS_EVIDENCE_THRESHOLD` | `0.9` | 证据完整率达标阈值 |
 
-> **配置优先级**：环境变量（Secret） > `config.yaml` 中的 `llm` 块 > 默认值
+> **配置优先级**：环境变量（Secret） > `config.yaml` 中的对应配置块 > 默认值
 >
 > 配置文件自动检测：K8s 环境 → `config/config.k8s.yaml`，本地环境 → `config/config.yaml`
+>
+> 质量指标的评分维度权重、惩罚项、证据级别权重均可通过 `config.yaml` 的 `metrics` 块配置，详见 [质量指标说明](docs/quality-metrics.md)
 
 ### 工具集配置
 
