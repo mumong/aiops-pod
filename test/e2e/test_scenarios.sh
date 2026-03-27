@@ -174,16 +174,16 @@ run_all_tests() {
     fi
     
     # --------------------------------
-    # L4: Dependency 503
+    # L4: App Health Fail
     # --------------------------------
-    if kubectl -n "${NS}" get deploy appcaller &>/dev/null; then
+    if kubectl -n "${NS}" get deploy apphealth &>/dev/null; then
         validate_scenario \
-            "L4-Dependency503" \
-            "namespace=${NS} 应用 appcaller 报 5xx 错误，依赖服务 dep503 返回 503" \
+            "L4-AppHealthFail" \
+            "namespace=${NS} 应用 apphealth 健康检查失败 日志有 L4_APP_HEALTH_FAIL" \
             "L4" \
-            "Dependency503"
+            "AppHealthFail"
     else
-        log_warn "跳过 L4 测试：appcaller Deployment 不存在"
+        log_warn "跳过 L4 测试：apphealth Deployment 不存在"
     fi
 
     # --------------------------------
@@ -206,16 +206,16 @@ run_all_tests() {
     fi
     
     # --------------------------------
-    # L3: DNS Latency
+    # L3: ImagePullBackOff
     # --------------------------------
-    if kubectl -n "${NS}" get pod dns-latency-client &>/dev/null; then
+    if kubectl -n "${NS}" get pod imagepull-fail-victim &>/dev/null; then
         validate_scenario \
-            "L3-DNSLatency" \
-            "namespace=${NS} DNS 查询延迟很高 500ms dns_lookup_seconds coredns 排查" \
+            "L3-ImagePullFailed" \
+            "namespace=${NS} Pod imagepull-fail-victim 镜像拉取失败 ImagePullBackOff" \
             "L3" \
-            "DNSLatency"
+            "ImagePull"
     else
-        log_warn "跳过 L3 测试：dns-latency-client Pod 不存在"
+        log_warn "跳过 L3 测试：imagepull-fail-victim Pod 不存在"
     fi
 
     # --------------------------------
@@ -260,22 +260,22 @@ case "${1:-all}" in
         run_all_tests
         ;;
     l0)
-        validate_scenario "L0-DiskFull" "日志写入失败 ENOSPC" "L0" "DiskFull"
+        validate_scenario "L0-DiskFull" "Pod logfill 日志写入失败 ENOSPC" "L0" "DiskFull"
+        ;;
+    l1)
+        validate_scenario "L1-TaintNode" "节点有 taint 不可调度" "L1" "TaintNode"
         ;;
     l2)
         validate_scenario "L2-OOMKilled" "Pod OOMKilled 排查" "L2" "OOMKilled"
         ;;
     l3)
-        validate_scenario "L3-DNSLatency" "DNS 延迟排查" "L3" "DNSLatency"
-        ;;
-    l1)
-        validate_scenario "L1-TaintNode" "节点 NotReady (Taint 导致) 调度器不向此节点调度 Pod" "L1" "TaintNode"
+        validate_scenario "L3-ImagePullFailed" "镜像拉取失败 ImagePullBackOff" "L3" "ImagePull"
         ;;
     l4)
-        validate_scenario "L4-Dependency503" "依赖 503 排查" "L4" "Dependency503"
+        validate_scenario "L4-AppHealthFail" "应用健康检查失败 L4_APP_HEALTH_FAIL" "L4" "AppHealthFail"
         ;;
     *)
-        echo "Usage: $0 [all|l0|l2|l3|l4]"
+        echo "Usage: $0 [all|l0|l1|l2|l3|l4]"
         exit 1
         ;;
 esac

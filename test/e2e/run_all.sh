@@ -1,35 +1,39 @@
 #!/usr/bin/env bash
+# ==========================================================================
+# E2E 一键部署脚本
+# 部署 L0-L4 五个故障场景的 manifest 到 aiops-e2e namespace
+# ==========================================================================
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLUSTER_NAME="${CLUSTER_NAME:-aiops-e2e}"
 NS="aiops-e2e"
 
-need() { command -v "$1" >/dev/null 2>&1 || { echo "missing dependency: $1" >&2; exit 1; }; }
-need docker
-need kubectl
-need curl
+echo "============================================================"
+echo "  E2E 故障场景部署"
+echo "============================================================"
 
-echo "[1/5] Creating kind cluster: ${CLUSTER_NAME}"
-kind get clusters | grep -qx "${CLUSTER_NAME}" || kind create cluster --name "${CLUSTER_NAME}"
-
-echo "[1/5] Applying manifests"
+echo "[1/3] 创建 namespace"
 kubectl apply -f "${ROOT}/manifests/00-namespace.yaml"
-kubectl apply -f "${ROOT}/manifests/l2-oomkilled.yaml"
-kubectl apply -f "${ROOT}/manifests/l4-dependency-503.yaml"
+
+echo "[2/3] 部署故障场景 manifests"
 kubectl apply -f "${ROOT}/manifests/l0-logfill-enospc.yaml"
-kubectl apply -f "${ROOT}/manifests/l3-dns-tc-client.yaml"
 kubectl apply -f "${ROOT}/manifests/l1-taint-node.yaml"
+kubectl apply -f "${ROOT}/manifests/l2-oomkilled.yaml"
+kubectl apply -f "${ROOT}/manifests/l3-imagepull-fail-victim.yaml"
+kubectl apply -f "${ROOT}/manifests/l4-app-health-fail.yaml"
 
-echo "[1/5] Waiting for workloads (best effort)"
-kubectl -n "${NS}" rollout status deploy/memhog --timeout=120s || true
-kubectl -n "${NS}" rollout status deploy/dep503 --timeout=120s || true
-kubectl -n "${NS}" rollout status deploy/logfill --timeout=120s || true
-kubectl -n "${NS}" rollout status deploy/appcaller --timeout=120s || true
+echo "[3/3] 等待工作负载就绪"
+kubectl -n "${NS}" rollout status deploy/logfill --timeout=60s 2>/dev/null || true
+kubectl -n "${NS}" rollout status deploy/memhog --timeout=60s 2>/dev/null || true
+kubectl -n "${NS}" rollout status deploy/apphealth --timeout=60s 2>/dev/null || true
 
-echo "[1/5] Optional: Inject L1 taint (easier validation)"
-kubectl taint node aiops-e2e-control-plane aiops-test-scenario=l1-node-issue:NoSchedule || true
-
-echo "[1/5] Validate (prints suggestions for /ask queries)"
-bash "${ROOT}/validate.sh" "${CLUSTER_NAME}"
-echo "Done."
+echo ""
+echo "✅ 部署完成。可用场景："
+echo "  L0: logfill (EmptyDir 超限驱逐)"
+echo "  L1: l1-test-nginx (Node Taint)"
+echo "  L2: memhog (OOMKilled)"
+echo "  L3: imagepull-fail-victim (ImagePullBackOff)"
+echo "  L4: apphealth (应用健康检查失败)"
+echo ""
+echo "运行验收测试："
+echo "  ./test_scenarios.sh"
