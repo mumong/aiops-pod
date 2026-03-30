@@ -40,6 +40,13 @@ DEFAULT_PENALTIES = {
     "enabled": False,
 }
 
+# 保底分配置
+DEFAULT_BASELINE = {
+    "with_evidence": 0.80,      # 有结论 + 有证据/工具 → 保底
+    "with_root_cause": 0.75,    # 有结论 + 有根因但无工具证据 → 保底
+    "minimum": 0.0,             # 绝对最低分
+}
+
 DEFAULT_EVIDENCE_LEVEL_WEIGHTS = {
     "CRITICAL": 1.0,
     "IMPORTANT": 0.6,
@@ -117,6 +124,9 @@ class QualityScorer:
         self._evidence_weights = metrics_config.get(
             "evidence_level_weights", DEFAULT_EVIDENCE_LEVEL_WEIGHTS
         )
+        self._baseline = metrics_config.get(
+            "baseline", DEFAULT_BASELINE
+        )
 
     # ================================================================
     # 根因置信度评分
@@ -176,16 +186,26 @@ class QualityScorer:
             detail=f"工具成功率 {tool_score:.0%}",
         ))
 
-        # --- 维度4: runbook_match ---
+        # --- 维度4: runbook_match (梯度评分) ---
         runbook_matched = getattr(metrics, 'runbook_matched', False) if metrics else False
-        runbook_score = 1.0 if runbook_matched else 0.0
+        runbook_id = getattr(metrics, 'runbook_id', '') or '' if metrics else ''
+        primary_runbook = getattr(metrics, 'primary_runbook', None) if metrics else None
+        if primary_runbook:
+            runbook_score = 1.0  # 有核心 runbook 命中
+            runbook_detail = f"核心: {primary_runbook}"
+        elif runbook_matched:
+            runbook_score = 0.8  # 有 runbook 但未识别核心
+            runbook_detail = "已匹配（未识别核心）"
+        else:
+            runbook_score = 0.3  # 未匹配，但不是 0（AI 可能用了通用知识）
+            runbook_detail = "未匹配"
         dim_cfg = self._dimensions_config.get("runbook_match", {})
         dimensions.append(ConfidenceDimension(
             name="runbook_match",
             weight=dim_cfg.get("weight", 0.15),
             score=runbook_score,
             description=dim_cfg.get("description", "Runbook 匹配质量"),
-            detail="已匹配" if runbook_matched else "未匹配",
+            detail=runbook_detail,
         ))
 
         # --- 维度5: llm_self_score ---
@@ -209,9 +229,10 @@ class QualityScorer:
             weighted_total = 0.5
             fallback_applied = True
 
-        # --- 最终分数（言之有理即 >= 80%）---
-        # 规则：有结论 + 有证据/工具调用 + 言之有理 → 保底 80%
-        # 只有完全没说到点子上才 < 80%
+        # --- 最终分数（可配置保底）---
+        baseline_with_evidence = self._baseline.get("with_evidence", 0.80)
+        baseline_with_root_cause = self._baseline.get("with_root_cause", 0.75)
+
         has_conclusion = bool(state.get("conclusion") or state.get("conclusion_formatted"))
         has_root_cause = bool(state.get("root_cause"))
         has_evidence = len(evidence_items) > 0
@@ -221,11 +242,9 @@ class QualityScorer:
 
         final_score = weighted_total
         if has_conclusion and (has_evidence or has_tool_calls):
-            # 有结论 + 有证据/工具 → 言之有理，保底 80%
-            final_score = max(0.80, weighted_total)
+            final_score = max(baseline_with_evidence, weighted_total)
         elif has_conclusion and has_root_cause:
-            # 有结论 + 有根因但无工具证据 → 保底 75%
-            final_score = max(0.75, weighted_total)
+            final_score = max(baseline_with_root_cause, weighted_total)
 
         final_score = min(1.0, final_score)
 
@@ -332,18 +351,19 @@ class QualityScorer:
         return score
 
     def _score_tool_coverage(self, tool_results: List[Dict], metrics: Any) -> float:
-        """关键探针覆盖率"""
-        if not tool_results:
+        """关键探针覆盖率（梯度评分）"""
+        total = len(tool_results) if tool_results else 0
+        if total == 0:
             # 从 metrics 补充
             total = getattr(metrics, 'total_tool_calls', 0) if metrics else 0
-            return 1.0 if total > 0 else 0.0
-
-        total = len(tool_results)
-        if total == 0:
-            return 0.0
+            if total > 0:
+                return 0.85  # 有工具调用但无详细结果，给个合理分
+            return 0.3  # 完全没有工具调用，但不是 0
 
         success = sum(1 for r in tool_results if r.get("success", True))
-        return success / total
+        ratio = success / total
+        # 梯度：成功率映射到 0.5-1.0 区间（即使有失败也不会太低）
+        return 0.5 + ratio * 0.5
 
     def _extract_llm_self_score(self, state: Dict) -> Tuple[float, str]:
         """
