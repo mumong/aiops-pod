@@ -63,6 +63,15 @@ data:
           "description": "【L4】应用健康检查失败 (AppHealthFail) - 应用自身健康逻辑返回 503，日志含 L4_APP_HEALTH_FAIL、L4_LAYER_APPLICATION，或 Label l4-scenario=app-health-fail。证据链：kubectl logs 命中 L4_APP_HEALTH_FAIL",
           "link": "l4-app-health-fail.md",
           "operations": ["诊断", "排查", "修复"]
+        },
+        {
+          "id": "query-reference",
+          "type": "reference",
+          "layer": "QUERY",
+          "update_date": "2026-03-30",
+          "description": "【QUERY】快速查询参考手册 - CPU/内存/磁盘/网络使用率查询，PromQL label 使用规则，节点IP映射，数据验证方法，Prometheus 查询最佳实践",
+          "link": "query-reference.md",
+          "operations": ["查询", "监控", "验证"]
         }
       ]
     }
@@ -577,4 +586,75 @@ data:
 
     # 查看 kubelet 日志
     journalctl -u kubelet --tail=50
+    ```
+
+  # ==========================================================================
+  # QUERY: 快速查询参考手册
+  # ==========================================================================
+  query-reference.md: |
+    # QUERY 模式快速查询参考手册
+
+    > **类型**: reference | **适用**: 数据查询、指标获取、状态检查
+
+    ## 1. 基础：节点与 IP 映射
+
+    查询任何指标前，**必须先建立节点名称与 IP 的映射关系**：
+    ```bash
+    kubectl get nodes -o wide
+    ```
+    Prometheus 的 `instance` label 格式为 `IP:9100`，**不是节点名称**。
+
+    ## 2. PromQL Label 使用规则
+
+    **核心原则：不要假设 label 存在，先查确认。**
+    ```promql
+    # 先查原始指标，看返回了哪些 label
+    node_memory_MemTotal_bytes
+    ```
+    - ❌ `{node="master"}` — 通常不存在
+    - ❌ `{kubernetes_io_hostname="master"}` — 通常不存在
+    - ✅ `{instance="10.2.0.48:9100"}` — 用 instance label
+    - ✅ `by (instance)` — 按 instance 分组
+
+    ## 3. 常见指标查询
+
+    ### CPU
+    ```promql
+    # 集群总体
+    100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+    # 按节点
+    (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance)) * 100
+    ```
+
+    ### 内存
+    ```promql
+    # 集群总体
+    (1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100
+    # 按节点
+    (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
+    ```
+
+    ### 磁盘
+    ```promql
+    (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100
+    ```
+
+    ### 网络
+    ```promql
+    rate(node_network_receive_bytes_total{device!~"lo|veth.*|cali.*"}[5m])
+    ```
+
+    ## 4. 数据验证（Double Check）
+
+    - kubectl 显示 N 个节点 → Prometheus 按节点查询应返回 N 条结果
+    - 每个节点的数据必须独立展示，不能合并
+    - 内存总量应为 8/16/32/64/128GB 级别
+    - 使用率 0-100% 范围
+    - bytes 除以 1024^3 = GiB
+
+    ### 交叉验证
+    ```bash
+    free -h      # 内存验证
+    nproc        # CPU 核心数
+    df -h        # 磁盘验证
     ```
