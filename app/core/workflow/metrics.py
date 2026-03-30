@@ -104,6 +104,7 @@ class WorkflowMetrics:
     evidence_planned: int = 0
     runbook_matched: bool = False
     runbook_id: Optional[str] = None
+    primary_runbook: Optional[str] = None  # 核心参考 Runbook（与诊断结论强相关）
     root_cause_confidence: float = 0.0
 
     # 评分明细（可解释性）
@@ -372,6 +373,8 @@ class WorkflowMetrics:
         # 诊断追踪
         lines.append("📋 诊断追踪")
         lines.append("")
+        if self.primary_runbook:
+            lines.append(f"- **核心 Runbook**: {self.primary_runbook}")
         runbook_display = self.runbook_id if self.runbook_matched and self.runbook_id else "无"
         lines.append(f"- **参考 Runbook**: {runbook_display}")
         lines.append(f"- **工具调用**: {self.total_tool_calls} 次")

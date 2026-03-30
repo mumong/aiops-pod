@@ -580,15 +580,88 @@ class WorkflowExecutor:
 
         if runbook_ids or runbook_names:
             metrics.runbook_matched = True
-            # 优先显示中文名称，其次显示文件名
+
+            # ============================================================
+            # 核心 Runbook 识别
+            # 优先从 RCA JSON 的 primary_runbooks 字段提取（AI 自己声明的）
+            # 回退到关键词匹配
+            # ============================================================
+            primary_runbooks = []
+
+            # 方法1: 从 rca_analysis JSON 提取 AI 声明的 primary_runbooks
+            if rca_analysis_raw:
+                try:
+                    import json as _json
+                    rca_data = _json.loads(rca_analysis_raw) if isinstance(rca_analysis_raw, str) else rca_analysis_raw
+                    if isinstance(rca_data, dict):
+                        ai_primary = rca_data.get("primary_runbooks", [])
+                        if isinstance(ai_primary, list) and ai_primary:
+                            # 验证 AI 声明的 runbook 确实在本次调用过的 runbook 中
+                            for rb in ai_primary:
+                                if isinstance(rb, str) and rb.strip():
+                                    # 模糊匹配：AI 声明的名称可能与 runbook_names 不完全一致
+                                    for known_name in runbook_names:
+                                        if rb.strip().lower() in known_name.lower() or known_name.lower() in rb.strip().lower():
+                                            if known_name not in primary_runbooks:
+                                                primary_runbooks.append(known_name)
+                                            break
+                                    else:
+                                        # 没有精确匹配，直接用 AI 声明的
+                                        if rb.strip() not in primary_runbooks:
+                                            primary_runbooks.append(rb.strip())
+                except (ValueError, TypeError):
+                    pass
+
+            # 方法2: 回退 — 从 conclusion 文本关键词匹配
+            if not primary_runbooks:
+                conclusion_text = (conclusion + "\n" + rca_analysis_raw).lower()
+                root_cause = (state.get("root_cause", "") or "").lower()
+
+                all_catalog_descs = {}
+                if self.runbook_catalog and hasattr(self.runbook_catalog, 'catalog'):
+                    for entry in self.runbook_catalog.catalog:
+                        desc = getattr(entry, 'description', '') or ''
+                        all_catalog_descs[desc.lower()] = desc
+
+                skip_words = {'诊断', '手册', '故障', '排查', '层', 'pod', 'node',
+                              'the', 'and', 'for', 'with', 'from', 'that'}
+                relevant_runbooks = []
+                for name in runbook_names:
+                    relevance = 0
+                    match_text = name.lower()
+                    for desc_lower in all_catalog_descs.keys():
+                        name_core = re.sub(r'^L\d\s+|诊断手册|\(.*?\)|-', ' ', name).strip()
+                        if any(part in desc_lower for part in name_core.lower().split() if len(part) > 2):
+                            match_text += " " + desc_lower
+                    keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', match_text)
+                    keywords = list(set(k.lower() for k in keywords if k.lower() not in skip_words))
+                    for kw in keywords:
+                        if kw in conclusion_text:
+                            relevance += 2
+                        if kw in root_cause:
+                            relevance += 3
+                    if relevance > 0:
+                        relevant_runbooks.append((name, relevance))
+
+                relevant_runbooks.sort(key=lambda x: x[1], reverse=True)
+                if relevant_runbooks:
+                    primary_runbooks = [relevant_runbooks[0][0]]
+
+            metrics.primary_runbook = ', '.join(primary_runbooks) if primary_runbooks else None
+
+            # 参考 Runbook：展示所有 AI 调用过的 runbook（完整列表）
             if runbook_names:
                 metrics.runbook_id = ', '.join(runbook_names)
             else:
                 metrics.runbook_id = ', '.join(sorted(runbook_ids))
-            logger.info(f"   Runbook 使用: {metrics.runbook_id}")
+
+            if metrics.primary_runbook:
+                logger.info(f"   核心 Runbook: {metrics.primary_runbook}")
+            logger.info(f"   参考 Runbook: {metrics.runbook_id}")
         else:
             metrics.runbook_matched = False
             metrics.runbook_id = None
+            metrics.primary_runbook = None
 
         # ================================================================
         # 根因置信度 + 证据完整率（多维度加权评分）
