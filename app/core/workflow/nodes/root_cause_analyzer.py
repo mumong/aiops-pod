@@ -8,14 +8,17 @@
 
 设计：
 - 有自己的专用 prompt
-- 调用 LLM 进行独立分析（使用和 HolmesService 相同的方式）
-- 支持使用 runbooks 和 tools
+- 支持两种 LLM 调用模式（通过 config/环境变量切换）：
+  - lite: litellm 直接调用（不带工具），避免重复 fetch_runbook/TodoWrite
+  - full: 原有 _call_llm 全工具模式
 - 结合规则引擎验证结论
 """
 
 import json
 import logging
+import os
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
@@ -144,17 +147,112 @@ class RootCauseAnalyzerNode(WorkflowNode):
             lines.append(f"{i}. [{status}] {item.description} {value}")
         return "\n".join(lines) if lines else "暂无证据"
     
+    def _get_rca_mode(self) -> str:
+        """
+        获取 RCA 调用模式，优先级: 环境变量 > config.yaml > 默认值(lite)
+
+        Returns:
+            "lite" 或 "full"
+        """
+        # 1. 环境变量
+        env_val = os.getenv("WORKFLOW_RCA_MODE", "").lower()
+        if env_val in ("lite", "full"):
+            return env_val
+        # 2. config.yaml → workflow.rca_mode
+        if self.holmes_service:
+            wf_config = getattr(self.holmes_service, "workflow_config", {}) or {}
+            config_val = wf_config.get("rca_mode", "")
+            if str(config_val).lower() in ("lite", "full"):
+                return str(config_val).lower()
+        # 3. 默认 lite（不带工具，避免重复执行）
+        return "lite"
+
     def _analyze_with_llm(
         self,
         question: str,
         layer: Optional[Layer],
         evidence_summary: str
     ) -> tuple:
-        """使用 LLM 进行根因分析
+        """使用 LLM 进行根因分析（自动路由 lite/full 模式）
 
         Returns:
             (rca_result_dict, intermediate_events_list)
         """
+        mode = self._get_rca_mode()
+        logger.info(f"🔍 RCA 调用模式: {mode}")
+
+        if mode == "lite":
+            return self._analyze_with_llm_lite(question, layer, evidence_summary)
+        else:
+            return self._analyze_with_llm_full(question, layer, evidence_summary)
+
+    def _analyze_with_llm_lite(
+        self,
+        question: str,
+        layer: Optional[Layer],
+        evidence_summary: str
+    ) -> tuple:
+        """lite 模式：litellm 直接调用，不带工具，避免重复 fetch_runbook/TodoWrite"""
+        try:
+            from litellm import completion as litellm_completion
+
+            layer_str = layer.value if layer else "L2"
+            system_prompt = ROOT_CAUSE_ANALYZER_PROMPT.format(
+                layer=layer_str,
+                evidence_summary=evidence_summary
+            )
+
+            user_message = f"""# 用户问题
+{question}
+
+# 已采集证据
+{evidence_summary}
+
+请直接基于以上证据进行根因分析，输出 JSON 格式结果。"""
+
+            model = self.holmes_service.ai.llm.model
+            api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
+            api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
+
+            completion_kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "temperature": 0.3,
+            }
+            if api_key:
+                completion_kwargs["api_key"] = api_key
+            if api_base:
+                completion_kwargs["api_base"] = api_base
+
+            start_time = time.time()
+            resp = litellm_completion(**completion_kwargs)
+            content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            duration_ms = (time.time() - start_time) * 1000
+
+            if self.metrics:
+                self.metrics.record_llm_call("rca", duration_ms)
+
+            logger.info(f"✅ RCA lite 模式完成 ({duration_ms:.0f}ms)")
+
+            if content:
+                return self._parse_llm_response(content), []
+
+            return self._analyze_with_rules(question, layer, []), []
+
+        except Exception as e:
+            logger.warning(f"RCA lite 模式失败，回退到规则: {e}")
+            return self._analyze_with_rules(question, layer, []), []
+
+    def _analyze_with_llm_full(
+        self,
+        question: str,
+        layer: Optional[Layer],
+        evidence_summary: str
+    ) -> tuple:
+        """full 模式：原有 _call_llm 全工具调用"""
         try:
             layer_str = layer.value if layer else "L2"
 

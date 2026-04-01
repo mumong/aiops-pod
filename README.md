@@ -656,3 +656,89 @@ mcp_servers:
 - **LLM 路由**：[litellm](https://github.com/BerriAI/litellm)（多提供商统一接口）
 - **工具协议**：[MCP](https://modelcontextprotocol.io/)（Model Context Protocol）
 - **LLM**：DeepSeek / Claude / GLM / OpenAI（通过 litellm 支持任意提供商）
+
+---
+
+ 完整 Prompt 架构图
+
+  LLM 收到的 messages 只有两条：system + user。你的 prompts.py 里的内容和框架注入的内容，分别被塞进这两个 role 里。
+
+  一、messages 结构
+
+  messages = [
+      {"role": "system", "content": <system_prompt>},   ← 第1条
+      {"role": "user",   "content": <user_prompt>},      ← 第2条
+  ]
+
+  二、System Prompt 的组装（role: system）
+
+  由 generic_ask.jinja2 模板渲染，按顺序拼接：
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  role: system                                               │
+  ├─────────────────────────────────────────────────────────────┤
+  │                                                             │
+  │  ① HolmesGPT 框架 intro（固定文本）                          │
+  │     "You are a tool-calling AI assist..."                   │
+  │     "Ask for multiple tool calls at the same time..."       │
+  │     来源: generic_ask.jinja2 intro_enabled 块               │
+  │                                                             │
+  │  ② investigation_procedure（TodoWrite 调查流程指令）          │
+  │     "You MUST use the TodoWrite tool..."                    │
+  │     "Your FIRST tool call MUST be TodoWrite..."             │
+  │     来源: _general_instructions.jinja2 → todowrite_enabled  │
+  │                                                             │
+  │  ③ AI Safety 指令                                           │
+  │     来源: _ai_safety.jinja2                                 │
+  │                                                             │
+  │  ④ General Instructions（K8s 调查通用指令）                   │
+  │     "use the five whys methodology..."                      │
+  │     "if a runbook url is present you MUST fetch..."         │
+  │     来源: _general_instructions.jinja2                      │
+  │                                                             │
+  │  ⑤ Toolset Instructions（各工具集的使用说明）                 │
+  │     每个启用的 toolset 的 llm_instructions                   │
+  │     来源: _toolsets_instructions.jinja2                     │
+  │                                                             │
+  │  ⑥ MANDATORY Task Management（TodoWrite 强制指令）           │
+  │     "Your FIRST tool call MUST be TodoWrite..."             │
+  │     "FAILURE TO UPDATE TodoList = INCOMPLETE..."            │
+  │     来源: _general_instructions.jinja2 todowrite_enabled    │
+  │                                                             │
+  │  ⑦ ★ 你的 prompts.py ★（system_prompt_additions）           │
+  │     通过 {{ system_prompt_additions }} 插入到最末尾           │
+  │     来源: generic_ask.jinja2 最后一个块                      │
+  │                                                             │
+  └─────────────────────────────────────────────────────────────┘
+
+  三、User Prompt 的组装（role: user）
+
+  由 build_user_prompt() 函数拼接：
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  role: user                                                 │
+  ├─────────────────────────────────────────────────────────────┤
+  │                                                             │
+  │  ① 用户的原始问题                                            │
+  │     就是 initial_user_prompt（如"集群有什么问题"）            │
+  │     来源: 前端/API 传入的 question                           │
+  │                                                             │
+  │  ② TodoWrite Reminder（追加在问题后面）                      │
+  │     "<system-reminder>IMPORTANT: You have access to         │
+  │      the TodoWrite tool... FAILURE TO UPDATE TodoList       │
+  │      = INCOMPLETE INVESTIGATION</system-reminder>"          │
+  │     来源: get_tasks_management_system_reminder()            │
+  │     ⚠️  虽然叫 system-reminder，但实际在 user message 里！    │
+  │                                                             │
+  │  ③ Runbook Catalog（runbook 目录索引）                       │
+  │     "# Runbook Selection"                                   │
+  │     "If one of the following runbooks relates to..."        │
+  │     + catalog.json 的全部 runbook 描述列表                   │
+  │     来源: _runbook_instructions.jinja2                      │
+  │                                                             │
+  │  ④ 当前日期时间                                              │
+  │     来源: _current_date_time.jinja2                         │
+  │                                                             │
+  └─────────────────────────────────────────────────────────────┘
+
+---
