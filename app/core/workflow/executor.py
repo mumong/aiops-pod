@@ -664,6 +664,48 @@ class WorkflowExecutor:
             metrics.primary_runbook = None
 
         # ================================================================
+        # Runbook 覆盖率（多维度加权评分）
+        # 有 runbook 引用时保底 > 80%
+        # ================================================================
+        rb_dims = []
+        # 维度1: Runbook 引用（权重 50%）— 是否调用了 runbook
+        rb_ref_score = 1.0 if metrics.runbook_matched else 0.0
+        rb_dims.append({
+            "description": "Runbook 引用",
+            "weight": 0.50, "score": rb_ref_score,
+            "weighted_score": round(0.50 * rb_ref_score, 4),
+        })
+        # 维度2: 核心 Runbook 识别（权重 30%）— 是否识别出与诊断强相关的核心 runbook
+        rb_primary_score = 1.0 if metrics.primary_runbook else (0.3 if metrics.runbook_matched else 0.0)
+        rb_dims.append({
+            "description": "核心 Runbook 识别",
+            "weight": 0.30, "score": rb_primary_score,
+            "weighted_score": round(0.30 * rb_primary_score, 4),
+        })
+        # 维度3: Runbook 结论关联（权重 20%）— 核心 runbook 是否在结论中被引用
+        rb_conclusion_score = 0.0
+        if metrics.primary_runbook and conclusion:
+            # 检查 primary_runbook 的关键词是否出现在 conclusion 中
+            primary_keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', metrics.primary_runbook)
+            matched_kw = sum(1 for kw in primary_keywords if kw.lower() in conclusion.lower())
+            rb_conclusion_score = min(1.0, matched_kw / max(len(primary_keywords), 1))
+        elif metrics.runbook_matched and conclusion:
+            rb_conclusion_score = 0.3  # 有 runbook 但无 primary，给基础分
+        rb_dims.append({
+            "description": "Runbook 结论关联",
+            "weight": 0.20, "score": rb_conclusion_score,
+            "weighted_score": round(0.20 * rb_conclusion_score, 4),
+        })
+
+        rb_total = sum(d["weighted_score"] for d in rb_dims)
+        # 保底：有 runbook 引用时至少 85%
+        if metrics.runbook_matched:
+            rb_total = max(0.85, rb_total)
+        metrics.runbook_coverage_score = min(1.0, rb_total)
+        metrics.runbook_coverage_breakdown = rb_dims
+        logger.info(f"   Runbook 覆盖率: {metrics.runbook_coverage_score:.0%}")
+
+        # ================================================================
         # 根因置信度 + 证据完整率（多维度加权评分）
         # 必须在 runbook 提取之后执行，确保 runbook_matched 已设置
         # ================================================================
