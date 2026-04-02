@@ -114,6 +114,10 @@ class WorkflowMetrics:
     confidence_fallback_applied: bool = False
     evidence_breakdown: Dict = field(default_factory=dict)
 
+    # Runbook 覆盖率明细
+    runbook_coverage_score: float = 0.0       # 最终覆盖率 [0, 1]
+    runbook_coverage_breakdown: List[Dict] = field(default_factory=list)
+
     # 多场景指标
     detected_scenarios_count: int = 0  # 检测到的场景总数
 
@@ -220,8 +224,8 @@ class WorkflowMetrics:
     
     @property
     def runbook_coverage_pass(self) -> bool:
-        """Runbook 覆盖率是否达标"""
-        return self.runbook_matched
+        """Runbook 覆盖率是否达标（>= 80%）"""
+        return self.runbook_coverage_score >= 0.80
     
     def get_summary(self) -> Dict[str, Any]:
         """获取指标摘要"""
@@ -254,6 +258,8 @@ class WorkflowMetrics:
                 "matched": self.runbook_matched,
                 "runbook_id": self.runbook_id,
                 "pass": self.runbook_coverage_pass,
+                "score": self.runbook_coverage_score,
+                "breakdown": self.runbook_coverage_breakdown,
             },
             "confidence_breakdown": self.confidence_breakdown,
             "confidence_penalties": self.confidence_penalties,
@@ -338,6 +344,10 @@ class WorkflowMetrics:
         ev_status = "✅ 达标" if self.evidence_completeness_pass else "⚠️ 不足"
         lines.append(f"| **证据完整率** | {ev_threshold_str} | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |")
 
+        # Runbook 覆盖率
+        rb_status = "✅ 达标" if self.runbook_coverage_pass else "⚠️ 不足"
+        lines.append(f"| **Runbook 覆盖率** | >= 80% | {self.runbook_coverage_score:.0%} | {rb_status} |")
+
         lines.append("")
 
         # 评分明细（可解释性）
@@ -367,6 +377,19 @@ class WorkflowMetrics:
                 lines.append(
                     f"  {prefix} {level}: {stats['collected']}/{stats['total']} "
                     f"(权重 {stats['weight']}) → {stats['rate']:.0%}"
+                )
+            lines.append("")
+
+        # Runbook 覆盖率明细
+        if self.runbook_coverage_breakdown:
+            lines.append("📊 Runbook 覆盖率明细")
+            lines.append("")
+            for i, dim in enumerate(self.runbook_coverage_breakdown):
+                prefix = "└─" if i == len(self.runbook_coverage_breakdown) - 1 else "├─"
+                lines.append(
+                    f"  {prefix} {dim.get('description', '')}: "
+                    f"{dim.get('score', 0):.0%} (权重 {dim.get('weight', 0):.0%}) "
+                    f"→ 贡献 {dim.get('weighted_score', 0):.1%}"
                 )
             lines.append("")
 
