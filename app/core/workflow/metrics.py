@@ -31,13 +31,17 @@ logger = logging.getLogger(__name__)
 MTTR_THRESHOLD_SECONDS = float(os.getenv("METRICS_MTTR_THRESHOLD", "600"))  # 600s = 10m
 ROOT_CAUSE_CONFIDENCE_THRESHOLD = float(os.getenv("METRICS_RCA_CONFIDENCE_THRESHOLD", "0.8"))
 EVIDENCE_COMPLETENESS_THRESHOLD = float(os.getenv("METRICS_EVIDENCE_THRESHOLD", "0.9"))
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() not in ("false", "0", "no")
 
 
 def load_metrics_config(config: Optional[Dict] = None):
     """从 config.yaml 的 metrics 块加载阈值（环境变量优先）"""
-    global MTTR_THRESHOLD_SECONDS, ROOT_CAUSE_CONFIDENCE_THRESHOLD, EVIDENCE_COMPLETENESS_THRESHOLD
+    global MTTR_THRESHOLD_SECONDS, ROOT_CAUSE_CONFIDENCE_THRESHOLD, EVIDENCE_COMPLETENESS_THRESHOLD, METRICS_ENABLED
     if not config:
         return
+    # enabled 开关
+    if not os.getenv("METRICS_ENABLED") and "enabled" in config:
+        METRICS_ENABLED = bool(config["enabled"])
     thresholds = config.get("thresholds", {})
     if not os.getenv("METRICS_MTTR_THRESHOLD") and "mttr_seconds" in thresholds:
         MTTR_THRESHOLD_SECONDS = float(thresholds["mttr_seconds"])
@@ -48,7 +52,8 @@ def load_metrics_config(config: Optional[Dict] = None):
     logger.info(
         f"📊 指标阈值: MTTR<{MTTR_THRESHOLD_SECONDS}s, "
         f"RCA>={ROOT_CAUSE_CONFIDENCE_THRESHOLD:.0%}, "
-        f"Evidence>{EVIDENCE_COMPLETENESS_THRESHOLD:.0%}"
+        f"Evidence>{EVIDENCE_COMPLETENESS_THRESHOLD:.0%}, "
+        f"Enabled={METRICS_ENABLED}"
     )
 
 
@@ -319,81 +324,87 @@ class WorkflowMetrics:
 
         return "\n".join(lines)
     
-    def format_metrics_block(self) -> str:
-        """格式化指标达标情况（用于输出）"""
+    def format_metrics_block(self, enabled: bool = True) -> str:
+        """格式化指标达标情况（用于输出）
+
+        Args:
+            enabled: 是否显示完整质量指标。False 时只输出诊断追踪部分。
+        """
         lines = []
-        lines.append("## 📈 质量指标")
-        lines.append("")
-        lines.append("| 指标 | 要求 | 实际 | 状态 |")
-        lines.append("|------|------|------|------|")
 
-        # 格式化阈值显示
-        mttr_threshold_str = f"< {MTTR_THRESHOLD_SECONDS // 60}m"
-        rca_threshold_str = f">= {int(ROOT_CAUSE_CONFIDENCE_THRESHOLD * 100)}%"
-        ev_threshold_str = f"> {int(EVIDENCE_COMPLETENESS_THRESHOLD * 100)}%"
-
-        # MTTR
-        mttr_status = "✅ 达标" if self.mttr_pass else "❌ 未达标"
-        lines.append(f"| **MTTR** | {mttr_threshold_str} | {self.mttr_formatted} | {mttr_status} |")
-
-        # 根因准确率
-        rca_status = "✅ 达标" if self.root_cause_accuracy_pass else "⚠️ 待验证"
-        lines.append(f"| **根因置信度** | {rca_threshold_str} | {self.root_cause_confidence:.0%} | {rca_status} |")
-
-        # 证据完整率
-        ev_status = "✅ 达标" if self.evidence_completeness_pass else "⚠️ 不足"
-        lines.append(f"| **证据完整率** | {ev_threshold_str} | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |")
-
-        # Runbook 覆盖率
-        rb_status = "✅ 达标" if self.runbook_coverage_pass else "⚠️ 不足"
-        lines.append(f"| **Runbook 覆盖率** | >= 80% | {self.runbook_coverage_score:.0%} | {rb_status} |")
-
-        lines.append("")
-
-        # 评分明细（可解释性）
-        if self.confidence_breakdown:
-            lines.append("📊 置信度评分明细")
+        if enabled:
+            lines.append("## 📈 质量指标")
             lines.append("")
-            for i, dim in enumerate(self.confidence_breakdown):
-                prefix = "├─" if i < len(self.confidence_breakdown) - 1 or self.confidence_penalties else "└─"
-                lines.append(
-                    f"  {prefix} {dim.get('description', dim.get('name', ''))}: "
-                    f"{dim.get('score', 0):.0%} (权重 {dim.get('weight', 0):.0%}) "
-                    f"→ 贡献 {dim.get('weighted_score', 0):.1%}"
-                )
-            for i, p in enumerate(self.confidence_penalties):
-                prefix = "└─" if i == len(self.confidence_penalties) - 1 else "├─"
-                lines.append(f"  {prefix} 惩罚 {p.get('name', '')}: -{p.get('value', 0):.0%} ({p.get('reason', '')})")
+            lines.append("| 指标 | 要求 | 实际 | 状态 |")
+            lines.append("|------|------|------|------|")
+
+            # 格式化阈值显示
+            mttr_threshold_str = f"< {MTTR_THRESHOLD_SECONDS // 60}m"
+            rca_threshold_str = f">= {int(ROOT_CAUSE_CONFIDENCE_THRESHOLD * 100)}%"
+            ev_threshold_str = f"> {int(EVIDENCE_COMPLETENESS_THRESHOLD * 100)}%"
+
+            # MTTR
+            mttr_status = "✅ 达标" if self.mttr_pass else "❌ 未达标"
+            lines.append(f"| **MTTR** | {mttr_threshold_str} | {self.mttr_formatted} | {mttr_status} |")
+
+            # 根因准确率
+            rca_status = "✅ 达标" if self.root_cause_accuracy_pass else "⚠️ 待验证"
+            lines.append(f"| **根因置信度** | {rca_threshold_str} | {self.root_cause_confidence:.0%} | {rca_status} |")
+
+            # 证据完整率
+            ev_status = "✅ 达标" if self.evidence_completeness_pass else "⚠️ 不足"
+            lines.append(f"| **证据完整率** | {ev_threshold_str} | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |")
+
+            # Runbook 覆盖率
+            rb_status = "✅ 达标" if self.runbook_coverage_pass else "⚠️ 不足"
+            lines.append(f"| **Runbook 覆盖率** | >= 80% | {self.runbook_coverage_score:.0%} | {rb_status} |")
+
             lines.append("")
 
-        # 证据明细
-        if self.evidence_breakdown and self.evidence_breakdown.get("breakdown"):
-            lines.append("📊 证据完整率明细")
-            lines.append("")
-            breakdown = self.evidence_breakdown["breakdown"]
-            items = list(breakdown.items())
-            for i, (level, stats) in enumerate(items):
-                prefix = "└─" if i == len(items) - 1 else "├─"
-                lines.append(
-                    f"  {prefix} {level}: {stats['collected']}/{stats['total']} "
-                    f"(权重 {stats['weight']}) → {stats['rate']:.0%}"
-                )
-            lines.append("")
+            # 评分明细（可解释性）
+            if self.confidence_breakdown:
+                lines.append("📊 置信度评分明细")
+                lines.append("")
+                for i, dim in enumerate(self.confidence_breakdown):
+                    prefix = "├─" if i < len(self.confidence_breakdown) - 1 or self.confidence_penalties else "└─"
+                    lines.append(
+                        f"  {prefix} {dim.get('description', dim.get('name', ''))}: "
+                        f"{dim.get('score', 0):.0%} (权重 {dim.get('weight', 0):.0%}) "
+                        f"→ 贡献 {dim.get('weighted_score', 0):.1%}"
+                    )
+                for i, p in enumerate(self.confidence_penalties):
+                    prefix = "└─" if i == len(self.confidence_penalties) - 1 else "├─"
+                    lines.append(f"  {prefix} 惩罚 {p.get('name', '')}: -{p.get('value', 0):.0%} ({p.get('reason', '')})")
+                lines.append("")
 
-        # Runbook 覆盖率明细
-        if self.runbook_coverage_breakdown:
-            lines.append("📊 Runbook 覆盖率明细")
-            lines.append("")
-            for i, dim in enumerate(self.runbook_coverage_breakdown):
-                prefix = "└─" if i == len(self.runbook_coverage_breakdown) - 1 else "├─"
-                lines.append(
-                    f"  {prefix} {dim.get('description', '')}: "
-                    f"{dim.get('score', 0):.0%} (权重 {dim.get('weight', 0):.0%}) "
-                    f"→ 贡献 {dim.get('weighted_score', 0):.1%}"
-                )
-            lines.append("")
+            # 证据明细
+            if self.evidence_breakdown and self.evidence_breakdown.get("breakdown"):
+                lines.append("📊 证据完整率明细")
+                lines.append("")
+                breakdown = self.evidence_breakdown["breakdown"]
+                items = list(breakdown.items())
+                for i, (level, stats) in enumerate(items):
+                    prefix = "└─" if i == len(items) - 1 else "├─"
+                    lines.append(
+                        f"  {prefix} {level}: {stats['collected']}/{stats['total']} "
+                        f"(权重 {stats['weight']}) → {stats['rate']:.0%}"
+                    )
+                lines.append("")
 
-        # 诊断追踪
+            # Runbook 覆盖率明细
+            if self.runbook_coverage_breakdown:
+                lines.append("📊 Runbook 覆盖率明细")
+                lines.append("")
+                for i, dim in enumerate(self.runbook_coverage_breakdown):
+                    prefix = "└─" if i == len(self.runbook_coverage_breakdown) - 1 else "├─"
+                    lines.append(
+                        f"  {prefix} {dim.get('description', '')}: "
+                        f"{dim.get('score', 0):.0%} (权重 {dim.get('weight', 0):.0%}) "
+                        f"→ 贡献 {dim.get('weighted_score', 0):.1%}"
+                    )
+                lines.append("")
+
+        # 诊断追踪（始终输出）
         lines.append("📋 诊断追踪")
         lines.append("")
         if self.primary_runbook:

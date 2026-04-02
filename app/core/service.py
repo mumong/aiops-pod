@@ -696,6 +696,11 @@ class HolmesService:
                 snapshot = event.get("state_snapshot", {})
 
                 yield emit(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
+
+                # 输出节点间数据传递摘要
+                handoff = event.get("handoff_summary", "")
+                if handoff:
+                    yield emit(f"   📤 → 下游数据: {handoff}")
                 yield emit("")
 
                 # 输出节点详细内容
