@@ -90,6 +90,14 @@ class RootCauseAnalyzerNode(WorkflowNode):
             # 构建证据摘要（包含实际工具数据）
             evidence_summary = self._build_evidence_summary(evidence_items)
 
+            # 注入上游 layer 节点的分析结果
+            layer_analysis = state.get("layer_analysis", "")
+            if layer_analysis:
+                evidence_summary = (
+                    f"# 问题定位结果（layer 节点输出）\n{layer_analysis}\n\n"
+                    f"# 证据采集结果\n{evidence_summary}"
+                )
+
             # 追加 evidence 节点的 LLM 分析和工具数据
             extra_data = self._extract_tool_data_for_rca(evidence_analysis)
             if extra_data:

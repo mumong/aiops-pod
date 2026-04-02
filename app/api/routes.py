@@ -18,6 +18,7 @@ API 使用示例：
     curl -X POST "http://localhost:8000/ask" -d "q=Pod状态异常"
 """
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Generator
@@ -297,7 +298,7 @@ def register_routes(app):
         curl "http://localhost:8000/reports?limit=10"
         ```
         """
-        reports_dir = Path("reports")
+        reports_dir = Path(os.environ.get("REPORTS_DIR", "/tmp/aiops/reports"))
         if not reports_dir.exists():
             return {"count": 0, "reports": []}
 
@@ -328,7 +329,7 @@ def register_routes(app):
         curl "http://localhost:8000/reports/cluster-24_20260309_143000.md"
         ```
         """
-        reports_dir = Path("reports")
+        reports_dir = Path(os.environ.get("REPORTS_DIR", "/tmp/aiops/reports"))
         filepath = reports_dir / filename
 
         if not filepath.exists() or not filepath.is_file():

@@ -9,6 +9,7 @@
 """
 
 import uuid
+import os
 import time
 import logging
 import queue
@@ -59,7 +60,44 @@ class WorkflowExecutor:
         )
         # 延迟构建 workflow：在 execute_stream 中创建 metrics 后再构建
         self.workflow = None
-    
+
+    # 报告保存目录（固定路径，不随工作目录变化）
+    REPORTS_DIR = os.environ.get("REPORTS_DIR", "/tmp/aiops/reports")
+
+    def _save_report(self, layer, question: str, full_answer: str):
+        """保存诊断报告到固定目录"""
+        try:
+            from pathlib import Path
+            import re as _re
+
+            reports_dir = Path(self.REPORTS_DIR)
+            logger.info(f"📄 [报告保存] 目标目录: {reports_dir} (存在: {reports_dir.exists()})")
+
+            reports_dir.mkdir(parents=True, exist_ok=True)
+
+            # 层级前缀
+            layer_str = layer.value if hasattr(layer, "value") else str(layer or "UNKNOWN")
+            logger.info(f"📄 [报告保存] 层级: {layer_str}, 问题: {question[:50]}")
+
+            # 从问题中提取摘要（去掉特殊字符，截取前30字符）
+            summary = _re.sub(r'[\\/:*?"<>|\n\r\t]', '', question)[:30].strip()
+            if not summary:
+                summary = "query"
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{layer_str}-{summary}_{ts}.md"
+            filepath = reports_dir / filename
+
+            content_size = len(full_answer.encode("utf-8"))
+            filepath.write_text(full_answer, encoding="utf-8")
+            logger.info(f"📄 [报告保存] 成功: {filepath} ({content_size} bytes)")
+        except PermissionError as e:
+            logger.error(f"❌ [报告保存] 权限不足: {e} (目录: {self.REPORTS_DIR})")
+        except OSError as e:
+            logger.error(f"❌ [报告保存] 文件系统错误: {e} (目录: {self.REPORTS_DIR})")
+        except Exception as e:
+            logger.error(f"❌ [报告保存] 未知错误: {type(e).__name__}: {e}", exc_info=True)
+
     def execute_stream(
         self,
         question: str,
@@ -250,10 +288,13 @@ class WorkflowExecutor:
 
                             snapshot = self._extract_state_snapshot(final_state, node_name)
                             node_summary = self._format_node_summary(node_name, final_state, snapshot)
+                            handoff = self._format_handoff_summary(node_name, final_state)
 
                             logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
                             if node_summary:
                                 logger.info(f"   {node_summary}")
+                            if handoff:
+                                logger.info(f"   📤 传递给下游: {handoff}")
 
                             yield {
                                 "type": "node_complete",
@@ -265,6 +306,7 @@ class WorkflowExecutor:
                                 "node_name": self._get_node_display_name(node_name),
                                 "duration_seconds": round(node_duration, 3),
                                 "state_snapshot": snapshot,
+                                "handoff_summary": handoff,
                             }
                             seq += 1
 
@@ -333,9 +375,14 @@ class WorkflowExecutor:
             
             # 添加性能统计和指标到报告末尾
             stats_block = metrics.format_stats_block()
-            metrics_block = metrics.format_metrics_block()
-            
+            from app.core.workflow.metrics import METRICS_ENABLED
+            metrics_block = metrics.format_metrics_block(enabled=METRICS_ENABLED)
+
             full_answer = f"{conclusion}\n{stats_block}\n{metrics_block}"
+
+            # 保存诊断报告到 reports/ 目录
+            layer = final_state.get("layer")
+            self._save_report(layer, question, full_answer)
             
             # 日志输出完成信息
             logger.info(f"🎉 工作流完成: 耗时 {metrics.mttr_formatted}")
@@ -493,7 +540,46 @@ class WorkflowExecutor:
             return f"报告长度: {length} 字符"
         
         return ""
-    
+
+    def _format_handoff_summary(self, node_name: str, state: WorkflowState) -> str:
+        """格式化节点间传递的完整数据（不截断，供审查）"""
+        import json as _json
+
+        if node_name == "layer":
+            layer = state.get("layer", "?")
+            scenarios = state.get("possible_scenarios", [])
+            entities = state.get("key_entities", [])
+            analysis = state.get("layer_analysis", "")
+            reasoning = state.get("layer_reasoning", "")
+            return (
+                f"layer={layer}\n"
+                f"   scenarios={scenarios}\n"
+                f"   entities={_json.dumps(entities, ensure_ascii=False)}\n"
+                f"   reasoning={reasoning}\n"
+                f"   layer_analysis={analysis}"
+            )
+        elif node_name == "evidence":
+            items = state.get("evidence_items", [])
+            collected = sum(1 for e in items if getattr(e, 'collected', False))
+            analysis = state.get("evidence_analysis", "")
+            return (
+                f"evidence_items={collected}/{len(items)}\n"
+                f"   evidence_analysis={analysis}"
+            )
+        elif node_name == "rca":
+            root_cause = state.get("root_cause", "") or ""
+            decision = state.get("deterministic_decision")
+            conf = f"{decision.confidence_score:.0%}" if decision else "?"
+            causal_chain = state.get("causal_chain", {})
+            rca_analysis = state.get("rca_analysis", "")
+            return (
+                f"root_cause={root_cause}\n"
+                f"   confidence={conf}\n"
+                f"   causal_chain={_json.dumps(causal_chain, ensure_ascii=False)}\n"
+                f"   rca_analysis={rca_analysis}"
+            )
+        return ""
+
     def _update_metrics_from_state(
         self,
         metrics: WorkflowMetrics,
@@ -650,10 +736,24 @@ class WorkflowExecutor:
             metrics.primary_runbook = ', '.join(primary_runbooks) if primary_runbooks else None
 
             # 参考 Runbook：展示所有 AI 调用过的 runbook（完整列表）
-            if runbook_names:
-                metrics.runbook_id = ', '.join(runbook_names)
-            else:
+            # 确保核心 Runbook 也在参考列表中
+            all_ref_names = list(runbook_names)  # 从 thinking_events 提取的
+            for pr in primary_runbooks:
+                if pr not in all_ref_names:
+                    all_ref_names.insert(0, pr)
+
+            # 过滤掉 QUERY 参考手册（非 QUERY 模式下不应出现）
+            layer = state.get("layer")
+            layer_val = layer.value if hasattr(layer, "value") else str(layer or "")
+            if layer_val != "QUERY":
+                all_ref_names = [n for n in all_ref_names if "QUERY" not in n.upper() and "快速查询参考" not in n]
+
+            if all_ref_names:
+                metrics.runbook_id = ', '.join(all_ref_names)
+            elif runbook_ids:
                 metrics.runbook_id = ', '.join(sorted(runbook_ids))
+            else:
+                metrics.runbook_id = None
 
             if metrics.primary_runbook:
                 logger.info(f"   核心 Runbook: {metrics.primary_runbook}")

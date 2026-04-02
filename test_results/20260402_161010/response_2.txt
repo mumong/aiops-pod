@@ -1,0 +1,60 @@
+## 📍 问题定位
+
+**层级**: L0 - 基础设施层  
+**置信度**: 高
+
+## 🕵️ 证据链
+
+| # | 证据来源 | 原始数据 | 支持的结论 |
+|---|----------|----------|------------|
+| 1 | 节点状态检查 | 3个节点全部Ready，无Taint标记 | 集群节点层健康 |
+| 2 | Pod状态检查 | 发现2类异常Pod：<br>• aiops-e2e/logfill-* (9个Error状态)<br>• default/crash-demo-exit (CrashLoopBackOff) | 存在工作负载层问题 |
+| 3 | 集群事件分析 | logfill Pod事件显示：<br>`Warning Evicted - Usage of EmptyDir volume "logs" exceeds the limit "30Mi"` | 存储卷超限导致驱逐 |
+| 4 | 资源使用检查 | CPU使用率正常，内存使用正常<br>• kube-apiserver: 895MB<br>• elasticsearch: 1.55GB<br>• observability-deepflow-server: 1.61GB | 资源使用在合理范围 |
+| 5 | 网络服务检查 | 所有服务Endpoints正常，无空Endpoints | 网络层健康 |
+| 6 | logfill Pod分析 | EmptyDir volume sizeLimit: 30Mi<br>Pod命令持续写入5MB文件到/logs目录 | 设计为触发存储超限的测试场景 |
+| 7 | crash-demo-exit分析 | Exit Code: 1<br>Command: `sleep 5; echo "Crashing now"; exit 1` | 设计为崩溃测试场景 |
+
+## 🎯 根因结论
+
+**结论**: 集群整体健康，发现的异常Pod是**人为设计的测试场景**，不是真实故障：
+
+1. **logfill Pods** (aiops-e2e命名空间):
+   - 设计目的：测试EmptyDir存储卷超限驱逐机制
+   - 配置：EmptyDir sizeLimit=30Mi，Pod持续写入5MB文件
+   - 行为：每30秒左右触发驱逐，然后自动重建
+   - 证据：事件显示`Usage of EmptyDir volume "logs" exceeds the limit "30Mi"`
+
+2. **crash-demo-exit Pod** (default命名空间):
+   - 设计目的：演示CrashLoopBackOff场景
+   - 配置：执行`sleep 5; exit 1`命令
+   - 行为：每5秒崩溃一次，持续重启
+   - 证据：Exit Code=1，重启78次
+
+## 🛠️ 修复建议
+
+**无需修复** - 这些是预期的测试场景：
+
+1. **logfill测试场景**：
+   - 目的：验证kubelet存储卷监控和驱逐机制
+   - 预期行为：持续触发驱逐和重建
+   - 可选项：如需清理，删除deployment：`kubectl delete deployment logfill -n aiops-e2e`
+
+2. **crash-demo-exit测试场景**：
+   - 目的：演示Pod崩溃和重启策略
+   - 预期行为：持续CrashLoopBackOff
+   - 可选项：如需清理，删除pod：`kubectl delete pod crash-demo-exit -n default`
+
+## 📈 诊断指标
+
+- **层级**: L0 (基础设施层测试场景)
+- **置信度**: 95%
+- **参考Runbook**: l0-volume-limit.md (存储卷超限驱逐)
+- **证据数量**: 7项
+- **集群整体状态**: ✅ 健康
+  - 节点：3/3 Ready
+  - 核心服务：全部正常运行
+  - 资源使用：正常范围
+  - 网络连接：全部正常
+
+**集群无真实故障，发现的异常是预期的测试场景。**
