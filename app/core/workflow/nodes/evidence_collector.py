@@ -193,6 +193,12 @@ class EvidenceCollectorNode(WorkflowNode):
                 possible_scenarios=scenarios_str
             )
 
+            # 注入上游 layer 节点的分析结果，避免 evidence 重复分析
+            layer_analysis = state.get("layer_analysis", "")
+            if layer_analysis:
+                system_prompt += f"\n\n# 上游问题定位结果（已完成，不要重复分析）\n{layer_analysis}\n"
+                system_prompt += "\n请直接基于以上定位结果采集证据，不要重新分析问题或重新获取 runbook。\n"
+
             # 添加 entities 信息到 prompt
             if entities_str:
                 system_prompt += f"\n\n# 已提取的关键实体\n{entities_str}\n"

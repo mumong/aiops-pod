@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
@@ -239,8 +240,8 @@ class FederationAggregator:
         """保存子集群报告到本地目录"""
         try:
             # 创建 reports 目录
-            reports_dir = Path("reports")
-            reports_dir.mkdir(exist_ok=True)
+            reports_dir = Path(os.environ.get("REPORTS_DIR", "/tmp/aiops/reports"))
+            reports_dir.mkdir(parents=True, exist_ok=True)
 
             # 生成时间戳
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

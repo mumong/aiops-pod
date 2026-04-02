@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -135,8 +136,8 @@ class QueryClusterTool(Tool):
     def _save_report(self, cluster_name: str, result: Dict[str, Any]) -> None:
         """保存子集群报告到本地 reports/ 目录"""
         try:
-            reports_dir = Path("reports")
-            reports_dir.mkdir(exist_ok=True)
+            reports_dir = Path(os.environ.get("REPORTS_DIR", "/tmp/aiops/reports"))
+            reports_dir.mkdir(parents=True, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"{cluster_name}_{timestamp}.md"

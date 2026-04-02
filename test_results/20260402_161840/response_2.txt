@@ -1,0 +1,52 @@
+## 📍 问题定位
+- **层级**: L2 - 工作负载层
+- **置信度**: 高
+
+## 🕵️ 证据链
+| # | 证据来源 | 原始数据 | 支持的结论 |
+|---|----------|----------|------------|
+| 1 | 集群节点状态 | 3个节点全部Ready (master, node1, node2) | 集群基础设施正常 |
+| 2 | Pod状态检查 | 发现15个logfill Pod处于Error状态 | 工作负载异常 |
+| 3 | Pod事件分析 | `Usage of EmptyDir volume "logs" exceeds the limit "30Mi"` | 存储卷超限导致驱逐 |
+| 4 | Pod描述信息 | EmptyDir volume "logs" SizeLimit: 30Mi | 配置了30Mi存储限制 |
+| 5 | 资源使用率 | CPU: 20.98%, 内存: 26.19%, 磁盘: node1 50.84%, master 82.12% | 磁盘使用率偏高 |
+| 6 | 其他异常Pod | crash-demo-exit (CrashLoopBackOff), pre-install-observability-kibana-477c7 (Error) | 其他工作负载问题 |
+
+## 🎯 根因结论
+**结论**: 集群存在多个工作负载问题，主要问题是 `aiops-e2e` 命名空间下的 `logfill` Deployment 配置了30Mi的EmptyDir存储限制，但应用持续写入数据导致存储超限，触发kubelet驱逐机制。同时存在其他异常Pod。
+
+## 🛠️ 修复建议
+1. **立即修复logfill问题**:
+   ```bash
+   # 查看logfill deployment配置
+   kubectl get deployment logfill -n aiops-e2e -o yaml
+   
+   # 临时解决方案：删除logfill deployment
+   kubectl delete deployment logfill -n aiops-e2e
+   
+   # 或调整存储限制（如果应用需要更多存储）
+   kubectl edit deployment logfill -n aiops-e2e
+   # 修改volume配置中的sizeLimit值
+   ```
+
+2. **清理异常Pod**:
+   ```bash
+   # 清理crash-demo-exit
+   kubectl delete pod crash-demo-exit -n default
+   
+   # 清理失败的Job Pod
+   kubectl delete job pre-install-observability-kibana -n xnet
+   ```
+
+3. **监控磁盘使用率**:
+   - master节点磁盘使用率82.12%，接近临界值
+   - 建议清理不必要的日志和临时文件
+
+## 📈 诊断指标
+- **层级**: L2
+- **置信度**: 95%
+- **参考 Runbook**: l0-volume-limit.md (存储卷超限)
+- **证据数量**: 6项
+- **集群状态**: 3/3节点正常，服务网络正常，资源使用率正常范围
+
+**集群整体健康度**: 中等 - 工作负载层存在多个异常，但基础设施层正常。
