@@ -178,7 +178,12 @@ class ConclusionFormatterNode(WorkflowNode):
 
         # 根据 layer 决定指令
         is_query = layer == Layer.QUERY
-        if is_query:
+        is_healthy = layer == Layer.HEALTHY
+        if is_healthy:
+            instruction = f"""用户问了「{question}」，经过检查集群状态正常，没有发现异常。
+请输出一份简洁的健康报告，列出检查过的项目和结果（节点状态、Pod 状态、事件等），
+明确告诉用户"集群当前运行正常，未发现异常"。不要套诊断报告模板。"""
+        elif is_query:
             instruction = """请基于以上各阶段的分析结果，直接回答用户的查询。
 严格按照 system prompt 中的「查询模板」格式输出。
 引用实际采集到的数据，不要套诊断报告模板。"""

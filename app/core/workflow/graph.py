@@ -3,13 +3,14 @@
 
 设计原则：
 - 节点顺序：layer → evidence → rca → conclusion
-- QUERY 模式走简化路径：layer → conclusion（跳过 evidence + rca）
-- 诊断模式走完整路径：layer → evidence → rca → conclusion
+- 节点可通过 config.yaml 的 workflow.nodes 启用/禁用
+- QUERY 模式走简化路径（跳过 evidence + rca）
+- conclusion 始终保留（最终输出节点）
 - 每个节点独立，易于替换/扩展
 """
 
 import logging
-from typing import Any
+from typing import Any, Dict, Optional
 from langgraph.graph import StateGraph, END
 from app.core.workflow.state import WorkflowState
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
@@ -20,91 +21,113 @@ from app.core.skills.models import Layer
 
 logger = logging.getLogger(__name__)
 
+# 节点定义注册表：id → (类, 显示名)
+NODE_REGISTRY = {
+    "layer": (LayerClassifierNode, "问题定位"),
+    "evidence": (EvidenceCollectorNode, "证据采集"),
+    "rca": (RootCauseAnalyzerNode, "根因分析"),
+    "conclusion": (ConclusionFormatterNode, "汇总总结"),
+}
 
-def _route_after_layer(state: WorkflowState) -> str:
-    """
-    layer 节点后的条件路由
+# 默认节点执行顺序
+DEFAULT_NODE_ORDER = ["layer", "evidence", "rca", "conclusion"]
 
-    - QUERY 模式：跳过 evidence + rca，直接到 conclusion
-    - 诊断模式（L0-L4）：走完整流程 evidence → rca → conclusion
-    """
-    layer = state.get("layer")
-    if layer == Layer.QUERY:
-        logger.info("🚀 QUERY 模式：跳过 evidence + rca，直接到 conclusion")
-        return "conclusion"
-    return "evidence"
+
+def _get_enabled_nodes(node_config: Optional[Dict[str, bool]] = None) -> list:
+    """根据配置返回启用的节点列表（保持顺序，conclusion 强制启用）"""
+    if not node_config:
+        return list(DEFAULT_NODE_ORDER)
+
+    enabled = []
+    for node_id in DEFAULT_NODE_ORDER:
+        if node_id == "conclusion":
+            enabled.append(node_id)  # conclusion 不可禁用
+        elif node_config.get(node_id, True):
+            enabled.append(node_id)
+        else:
+            logger.info(f"⏭️ 节点 [{node_id}] 已禁用，跳过")
+    return enabled
 
 
 def build_diagnosis_workflow(
     holmes_service: Any = None,
     metrics: Any = None,
-    runbook_catalog: Any = None
+    runbook_catalog: Any = None,
+    node_config: Optional[Dict[str, bool]] = None,
 ) -> StateGraph:
     """
-    构建诊断工作流图（带条件路由）
-
-    路由逻辑：
-    - QUERY 模式：layer → conclusion（2 节点，快速响应）
-    - 诊断模式：layer → evidence → rca → conclusion（4 节点，完整诊断）
+    构建诊断工作流图（支持节点启用/禁用）
 
     Args:
-        holmes_service: HolmesService 实例（用于 LLM 调用）
-        metrics: WorkflowMetrics 实例（用于记录统计）
-        runbook_catalog: RunbookCatalog 实例（用于 runbook 匹配）
+        holmes_service: HolmesService 实例
+        metrics: WorkflowMetrics 实例
+        runbook_catalog: RunbookCatalog 实例
+        node_config: 节点启用配置，如 {"layer": False, "rca": False}
 
     Returns:
         编译后的工作流图
     """
+    enabled = _get_enabled_nodes(node_config)
+    logger.info(f"🔧 工作流节点: {' → '.join(enabled)}")
+
     workflow = StateGraph(WorkflowState)
 
-    # 创建节点实例（传递 holmes_service、metrics 和 runbook_catalog）
-    layer_node = LayerClassifierNode(holmes_service, metrics, runbook_catalog)
-    evidence_node = EvidenceCollectorNode(holmes_service, metrics, runbook_catalog)
-    rca_node = RootCauseAnalyzerNode(holmes_service, metrics, runbook_catalog)
-    conclusion_node = ConclusionFormatterNode(holmes_service, metrics, runbook_catalog)
+    # 创建并添加启用的节点
+    for node_id in enabled:
+        cls, display_name = NODE_REGISTRY[node_id]
+        node = cls(holmes_service, metrics, runbook_catalog)
+        workflow.add_node(node_id, node.execute)
 
-    # 添加节点
-    workflow.add_node("layer", layer_node.execute)
-    workflow.add_node("evidence", evidence_node.execute)
-    workflow.add_node("rca", rca_node.execute)
-    workflow.add_node("conclusion", conclusion_node.execute)
+    # 设置入口点
+    workflow.set_entry_point(enabled[0])
 
-    # 定义边（条件路由）
-    workflow.set_entry_point("layer")
+    # 构建边
+    layer_enabled = "layer" in enabled
+    for i, node_id in enumerate(enabled[:-1]):
+        next_node = enabled[i + 1]
 
-    # layer 节点后根据结果条件路由
-    workflow.add_conditional_edges("layer", _route_after_layer, {
-        "conclusion": "conclusion",
-        "evidence": "evidence",
-    })
+        if node_id == "layer" and layer_enabled:
+            # layer 节点有条件路由：QUERY 跳到 conclusion
+            workflow.add_conditional_edges(
+                "layer",
+                _make_layer_router(enabled),
+                _make_layer_route_map(enabled),
+            )
+        else:
+            workflow.add_edge(node_id, next_node)
 
-    # 诊断模式的后续边
-    workflow.add_edge("evidence", "rca")
-    workflow.add_edge("rca", "conclusion")
-    workflow.add_edge("conclusion", END)
+    # 终点
+    workflow.add_edge(enabled[-1], END)
 
-    # 编译工作流
     return workflow.compile()
 
 
-def build_simple_workflow(holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None) -> StateGraph:
-    """
-    构建简化工作流（仅包含节点1和节点4）
+def _make_layer_router(enabled: list):
+    """创建 layer 节点的条件路由函数"""
+    def router(state: WorkflowState) -> str:
+        layer = state.get("layer")
+        if layer in (Layer.QUERY, Layer.HEALTHY):
+            logger.info(f"🚀 {layer.value} 模式：直接到 conclusion")
+            return "conclusion"
+        # 找 layer 之后的下一个节点
+        idx = enabled.index("layer")
+        return enabled[idx + 1] if idx + 1 < len(enabled) else "conclusion"
+    return router
 
-    用于快速测试或简单场景。
-    注意：build_diagnosis_workflow 现在内置条件路由，QUERY 模式会自动跳过 evidence+rca。
-    此函数保留用于显式构建最小工作流。
-    """
-    workflow = StateGraph(WorkflowState)
 
-    layer_node = LayerClassifierNode(holmes_service, metrics, runbook_catalog)
-    conclusion_node = ConclusionFormatterNode(holmes_service, metrics, runbook_catalog)
+def _make_layer_route_map(enabled: list) -> dict:
+    """创建 layer 路由的目标映射"""
+    route_map = {"conclusion": "conclusion"}
+    idx = enabled.index("layer")
+    if idx + 1 < len(enabled):
+        next_node = enabled[idx + 1]
+        route_map[next_node] = next_node
+    return route_map
 
-    workflow.add_node("layer", layer_node.execute)
-    workflow.add_node("conclusion", conclusion_node.execute)
 
-    workflow.set_entry_point("layer")
-    workflow.add_edge("layer", "conclusion")
-    workflow.add_edge("conclusion", END)
-
-    return workflow.compile()
+def build_simple_workflow(holmes_service=None, metrics=None, runbook_catalog=None):
+    """构建简化工作流（仅 layer + conclusion）"""
+    return build_diagnosis_workflow(
+        holmes_service, metrics, runbook_catalog,
+        node_config={"layer": True, "evidence": False, "rca": False, "conclusion": True},
+    )

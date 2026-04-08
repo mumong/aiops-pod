@@ -711,8 +711,12 @@ class HolmesService:
                     yield emit("   └──────────────────────────────────────────┘")
                     yield emit("")
                     layer = snapshot.get("layer", "?")
+                    layers = snapshot.get("layers", [])
                     conf = snapshot.get("layer_confidence", 0) or 0
-                    yield emit(f"   层级: {layer}")
+                    if layers and len(layers) > 1:
+                        yield emit(f"   层级: {' + '.join(layers)}（主层级: {layer}）")
+                    else:
+                        yield emit(f"   层级: {layer}")
                     yield emit(f"   置信度: {conf:.0%}")
                     # 保存节点分析用于最终答案（不在节点完成时显示完整分析）
                     node_outputs["layer"] = snapshot.get("layer_analysis", "") or format_layer_node_output(snapshot)

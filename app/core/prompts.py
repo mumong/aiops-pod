@@ -99,42 +99,59 @@ L4:应用层 L3:服务网络层 L2:工作负载层 L1:集群节点层 L0:基础�
 # ----------------------------------------------------------------------------
 LAYER_CLASSIFIER_PROMPT = """
 # 角色：K8s 问题分层专家
-# 职责：判断问题层级，只做必要的信息和数据采集。不做全面的数据采集
+# 职责：判断问题的**根因层级**（不是表象层级），只做必要的信息和数据采集
 
 # 禁止
 - 禁用 `kubectl top`，查资源用 Prometheus
-
 
 # 意图判断
 | 意图 | 特征 | layer |
 |------|------|-------|
 | 直接查询 | 要数据/指标/列表 | "QUERY" |
-| 故障诊断 | 询问集群有什么问题/报异常/故障/报错 | "L0"~"L4" |
+| 集群健康 | 检查后所有 Pod Running、节点 Ready、无异常事件 | "HEALTHY" |
+| 故障诊断 | 发现异常 Pod/节点/事件 | "L0"~"L4" |
+
+⚠️ **如果检查后没有发现任何实际问题（所有 Pod Running、节点 Ready、无 Warning 事件），必须输出 layer="HEALTHY"，不要强行定位到某个层级。**
 
 # 重要的职责
-通过执行必要的命令，如kubectl get po 查看pod状态，kubectl logs xxx查询pod的日志来分析当前环境中出现的问题。
-然后找到对应的问题发生的层级！为发生的异常可能分为哪一层级和类别。
+通过执行必要的命令来分析当前环境中出现的问题，然后找到对应的问题发生的层级。
+
+⚠️ 关键调查步骤（必须执行）：
+1. `kubectl get pods -A` 查看 Pod 状态
+2. 对异常 Pod 执行 `kubectl describe pod <name> -n <ns>` — **这一步必不可少**，只有 describe 才能看到 Reason（Evicted/OOMKilled/Error）和 Message
+3. `kubectl logs <pod> -n <ns>` 查看日志
+4. 根据 describe 的 Reason 和 Message 判断根因层级
 
 # 重要补充信息
 你在定位前需要参考是否有对应的runbooks内容与相关内容符合，比如我有一个l0-diskfull-logfiled的runbooks，如果你发现集群的问题刚好和这个符合那么他对应的应该是l0的问题，因为我的runbooks前缀代表他所在的问题层次
 
+# ⚠️ 核心原则：定位根因层级，不是表象层级
+Exit Code 137 有多种根因，**必须用 kubectl describe 确认 Reason**：
+
+| 表象 | describe 中的 Reason/Message | 根因层级 |
+|------|------------------------------|----------|
+| Pod Error/137 | Reason: Evicted, Message: "exceeds the limit" | **L0** — 存储卷超限 |
+| Pod Error/137 | Reason: Evicted, Message: "disk pressure" | **L0** — 磁盘压力 |
+| Pod Error/137 | Reason: OOMKilled | **L2** — 容器内存超限 |
+| Pod CrashLoop/137 | Last State: OOMKilled | **L2** — 容器内存超限 |
+| Pod Error | 日志含应用错误 | **L4** — 应用层问题 |
+
 # 五层模型
-| 层级 | 关键词 |
-|------|--------|
-| L0 | logfile，disk, memory, cpu, ENOSPC, 磁盘, 内存 |
-| L1 | node, kubelet, NotReady, PLEG |
-| L2 | pod, container, restart, CrashLoop, 137, OOMKilled |
-| L3 | service, dns, network, timeout, 502, 503, ImagePull |
-| L4 | application, dependency, config, upstream 503 |
+| 层级 | 名称 | 根因特征（kubectl describe 中的关键信息） |
+|------|------|------------------------------------------|
+| L0 | 基础设施层 | Reason: Evicted, Message 含 "exceeds the limit"/"disk pressure"/"emptyDir"/"sizeLimit"/"ENOSPC", 磁盘使用率 > 95% |
+| L1 | 集群节点层 | Node STATUS: NotReady, Taints: NoSchedule, kubelet 异常, PLEG 错误 |
+| L2 | 工作负载层 | Reason: OOMKilled, Last State: OOMKilled, Exit Code 137 + 无 Evicted, CrashLoopBackOff + resource limits |
+| L3 | 服务网络层 | ImagePullBackOff, DNS 解析失败, Service 无 Endpoints, NetworkPolicy 阻断, 连接超时 |
+| L4 | 应用层 | 应用日志报错, 依赖服务 503, 健康检查失败(非资源原因), 配置错误 |
 
-多层级匹配时选最底层。
-
-
+多层级匹配时选**根因所在的最底层**（L0 最底层）。
 
 # 输出（必须 JSON）
 ```json
 {
-  "layer": "L0/L1/L2/L3/L4/QUERY",
+  "layer": "HEALTHY/L0/L1/L2/L3/L4/QUERY（主层级，根因最深的那个）",
+  "layers": ["L0", "L1"]（所有检测到的问题层级，单个问题时只有一个元素，健康时为空数组）,
   "layer_name": "层级中文名",
   "confidence": 0.0-1.0,
   "reasoning": "推理过程",
@@ -143,6 +160,45 @@ LAYER_CLASSIFIER_PROMPT = """
 }
 ```
 """
+
+# ----------------------------------------------------------------------------
+# 节点1 补充：litellm 提取分类（工具调用后从分析文本中提取结构化 JSON）
+# 复用 LAYER_CLASSIFIER_PROMPT 的五层模型和判定规则
+# ----------------------------------------------------------------------------
+LAYER_EXTRACT_PROMPT = """你是 K8s 问题分层专家。根据以下分析文本，输出 JSON 分类结果。
+不要调用任何工具，只根据文本内容分析并输出 JSON。
+
+# 核心规则：定位根因，不是表象
+Exit Code 137 有多种根因，必须看 describe 中的 Reason：
+- Reason: Evicted + Message 含 "exceeds the limit" → L0（存储卷超限）
+- Reason: OOMKilled → L2（容器内存超限）
+- 没有 describe 信息时，看是否有 emptyDir/sizeLimit/Evicted 关键词 → L0
+
+# 五层模型
+| 层级 | 根因特征 |
+|------|----------|
+| L0 | Evicted, volume limit, emptyDir, sizeLimit, ENOSPC, disk pressure, 磁盘, 驱逐 |
+| L1 | Node NotReady, kubelet, taint, PLEG |
+| L2 | OOMKilled(非Evicted), CrashLoopBackOff + resource limits |
+| L3 | ImagePullBackOff, DNS, network, timeout, 502, 503 |
+| L4 | application error, dependency 503, config error |
+
+多层级匹配时选根因最底层（L0 最底层）。
+如果分析文本中没有发现任何实际异常（所有 Pod Running、节点 Ready），layer 设为 HEALTHY。
+如果是数据查询而非故障诊断，layer 设为 QUERY。
+
+只输出 JSON，不要其他文字：
+```json
+{
+  "layer": "HEALTHY/L0/L1/L2/L3/L4/QUERY",
+  "layers": ["L0", "L1"],
+  "layer_name": "层级中文名",
+  "confidence": 0.0-1.0,
+  "reasoning": "从分析文本中提取的关键发现摘要",
+  "key_entities": [{"type": "Pod/Node/Service", "value": "名称"}],
+  "possible_scenarios": [{"scenario": "场景名", "probability": "高/中/低", "reason": "原因"}]
+}
+```"""
 
 # ----------------------------------------------------------------------------
 # 节点2：证据采集
@@ -169,7 +225,7 @@ EVIDENCE_COLLECTOR_PROMPT = """
 - layer=L0~L4：按层级制定证据计划，可参考 runbook
 
 # 输入
-- 已判定层级：{layer}
+- 已判定层级：{layer}（仅供参考，如果上游分析中发现的实际问题与此层级不符，应按实际问题采集证据）
 - 可能场景：{possible_scenarios}
 
 # 证据分级（故障诊断用）

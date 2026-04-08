@@ -28,7 +28,8 @@ class WorkflowState(TypedDict, total=False):
     run_id: str
     
     # ========== 节点1 输出：问题定位 ==========
-    layer: Optional[Layer]               # L0-L4
+    layer: Optional[Layer]               # 主层级（根因最深的层级，用于路由和下游处理）
+    layers: List[Layer]                  # 所有检测到的层级（多问题并存时有多个）
     layer_confidence: Optional[float]    # 定层置信度 [0, 1]
     layer_reasoning: Optional[str]       # 定层理由
     layer_analysis: Optional[str]        # LLM 完整分析（JSON 字符串）

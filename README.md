@@ -206,9 +206,77 @@ curl -G "http://10.2.0.48:30800/ask" \
 | `llm` | LLM 提供商 | model、api_key、api_base（litellm 格式） |
 | `toolsets` | 内置工具开关 | core_investigation、runbook 默认开启，其余由 MCP 替代 |
 | `mcp_servers` | MCP 远程工具 | url、mode(sse)、description、enabled |
-| `workflow` | 工作流参数 | rca_mode(lite/full)、各节点 max_steps |
-| `metrics` | 质量指标阈值 | MTTR、置信度权重、证据级别权重、惩罚项 |
+| `workflow` | 工作流参数 | 节点开关、rca_mode、各节点 max_steps |
+| `metrics` | 质量指标 | 输出开关、达标阈值、置信度评分权重、惩罚项 |
 | `federation` | 多集群联邦 | enabled、sub_agents 列表、synthesis_timeout |
+
+### 工作流配置（workflow）
+
+```yaml
+workflow:
+  rca_mode: lite          # RCA 节点调用模式
+  nodes:                  # 节点启用/禁用
+    layer: true
+    evidence: true
+    rca: true
+    conclusion: true      # 不可禁用
+  max_steps:              # 各节点 LLM 最大工具调用轮数
+    layer: 14
+    evidence: 18
+    rca: 0                # lite 模式下无效（不调工具）
+    conclusion: 0         # 始终无效（不调工具）
+```
+
+| 参数 | 说明 |
+|------|------|
+| `rca_mode` | `lite`：RCA 节点用 litellm 直接调用，基于已有证据分析，不调工具（避免重复采集）。`full`：走 HolmesGPT agentic loop，可调工具补充数据 |
+| `nodes.*` | 节点开关。设为 `false` 跳过该节点，工作流自动连接相邻的启用节点。`conclusion` 强制启用 |
+| `max_steps.layer` | 问题定位节点的工具调用轮数。控制 LLM 在定位阶段最多执行多少轮 kubectl/prometheus 等工具调用 |
+| `max_steps.evidence` | 证据采集节点的工具调用轮数。这是最关键的参数，决定了采集证据的深度 |
+| `max_steps.rca` | 仅 `rca_mode: full` 时有效。`lite` 模式下 RCA 不调工具，此值无效 |
+| `max_steps.conclusion` | 始终无效。conclusion 节点用 litellm 直接生成报告，不调工具 |
+
+### 质量指标配置（metrics）
+
+```yaml
+metrics:
+  enabled: true           # 输出开关
+  thresholds:             # 达标阈值
+    mttr_seconds: 600
+    rca_confidence: 0.8
+    evidence_completeness: 0.9
+  confidence_dimensions:  # 置信度 5 维评分权重
+    evidence_strength:    { weight: 0.35 }
+    causal_chain:         { weight: 0.20 }
+    tool_coverage:        { weight: 0.10 }
+    runbook_match:        { weight: 0.15 }
+    llm_self_score:       { weight: 0.20 }
+  penalties:              # 惩罚项
+    critical_missing: 0.15
+    critical_missing_cap: 0.45
+    fallback_applied: 0.05
+  evidence_level_weights: # 证据级别权重
+    CRITICAL: 1.0
+    IMPORTANT: 0.6
+    SUPPLEMENTARY: 0.3
+  baseline:               # 保底分
+    with_evidence: 0.80
+    with_root_cause: 0.75
+```
+
+| 参数 | 说明 |
+|------|------|
+| `enabled` | `false` 时输出只显示性能统计和诊断追踪，隐藏质量指标表和评分明细。环境变量 `METRICS_ENABLED` 可覆盖 |
+| `thresholds.mttr_seconds` | MTTR 达标阈值（秒）。默认 600s = 10 分钟 |
+| `thresholds.rca_confidence` | 根因置信度达标阈值。默认 0.8 = 80% |
+| `thresholds.evidence_completeness` | 证据完整率达标阈值。默认 0.9 = 90% |
+| `confidence_dimensions` | 置信度 5 个评分维度的权重（总和应为 1.0）。`evidence_strength`：加权证据完整率。`causal_chain`：因果链是否完整。`tool_coverage`：工具调用成功率。`runbook_match`：是否匹配到 Runbook。`llm_self_score`：LLM 自评分数 |
+| `penalties.critical_missing` | 每缺失一项关键证据（CRITICAL 级别）扣多少分 |
+| `penalties.critical_missing_cap` | 关键证据缺失扣分的上限 |
+| `penalties.fallback_applied` | 使用回退路径（如规则引擎替代 LLM）时的扣分 |
+| `evidence_level_weights` | 证据完整率计算时各级别的权重。CRITICAL 级证据权重最高（1.0），SUPPLEMENTARY 最低（0.3） |
+| `baseline.with_evidence` | 有结论 + 有证据/工具调用时的最低置信度保底分 |
+| `baseline.with_root_cause` | 有结论 + 有根因但无工具证据时的最低置信度保底分 |
 
 ### MCP 工具配置
 

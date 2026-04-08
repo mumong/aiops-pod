@@ -1,0 +1,210 @@
+======================================================================
+🔄 K8s AIOps Copilot - 工作流诊断模式
+======================================================================
+
+📝 问题: 我的集群有什么问题，根本原因在哪？
+
+----------------------------------------------------------------------
+🚀 开始诊断 [run_id: b1225a0032dc4998]
+
+📍 [问题定位] 执行中...
+📍 [证据链采集] 执行中...
+   ✅ [问题定位] 完成 (236ms)
+   📤 → 下游数据: layer=Layer.L1, layers=L1
+   scenarios=[{'scenario': '节点污点导致Pod无法调度', 'probability': '高', 'reason': 'Pod的节点选择器与节点污点冲突，且无容忍度'}]
+   entities=[{"type": "Pod", "value": "l1-test-nginx-6c69dc7c76-sxwsp"}, {"type": "Node", "value": "node2"}]
+   reasoning=Pod l1-test-nginx-6c69dc7c76-sxwsp 处于 Pending 状态。根本原因是节点调度失败：Pod 指定了节点选择器 kubernetes.io/hostname=node2，但 node2 节点存在 Taint `test-unschedulable=true:NoSchedule`，且 Pod 没有对应的 Toleration 来容忍此污点。
+   layer_analysis={"layer": "L1", "layers": ["L1"], "layer_name": "节点调度问题", "confidence": 0.95, "reasoning": "Pod l1-test-nginx-6c69dc7c76-sxwsp 处于 Pending 状态。根本原因是节点调度失败：Pod 指定了节点选择器 kubernetes.io/hostname=node2，但 node2 节点存在 Taint `test-unschedulable=true:NoSchedule`，且 Pod 没有对应的 Toleration 来容忍此污点。", "key_entities": [{"type": "Pod", "value": "l1-test-nginx-6c69dc7c76-sxwsp"}, {"type": "Node", "value": "node2"}], "possible_scenarios": [{"scenario": "节点污点导致Pod无法调度", "probability": "高", "reason": "Pod的节点选择器与节点污点冲突，且无容忍度"}]}
+
+   ┌──────────────────────────────────────────┐
+   │ 📊 问题定位结果                              │
+   └──────────────────────────────────────────┘
+
+   层级: Layer.L1
+   置信度: 95%
+
+📍 [根因分析] 执行中...
+   ✅ [证据链采集] 完成 (33.2s)
+   📤 → 下游数据: evidence_items=3/3
+   evidence_analysis={"evidence_plan": [{"id": "node_status", "description": "节点状态（NotReady）", "level": "critical", "command": "kubectl get nodes -o wide", "tool": "kubectl", "purpose": "节点状态（NotReady）"}, {"id": "cert_error", "description": "证书错误日志（x509/certificate）", "level": "critical", "command": "kubectl get events -A --field-selector='reason.*certificate' --sort-by='.lastTimestamp'", "tool": "kubectl", "purpose": "证书错误日志（x509/certificate）"}, {"id": "kubelet_logs", "description": "kubelet 日志", "level": "important", "command": "journalctl -u kubelet -n 50 --no-pager", "tool": "kubectl", "purpose": "kubelet 日志"}], "tool_results": ["✅ kubectl get nodes -o wide... (成功, 0.1s)", "✅ kubectl get events -A --field-selector='... (成功, 0.1s)", "✅ journalctl -u kubelet -n 50 --no-pager... (成功, 0.0s)"], "tool_data": [], "llm_analysis": "", "collection_summary": "计划 3 项，实际采集 3 项"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🔍 证据采集结果                              │
+   └──────────────────────────────────────────┘
+
+   证据: 3/3 项, 完整度: 100%
+
+📍 [汇总总结] 执行中...
+   ✅ [根因分析] 完成 (54.6s)
+   📤 → 下游数据: root_cause=
+   confidence=90%
+   causal_chain={"root_cause": "节点 node2 上存在污点 `test-unschedulable=true:NoSchedule`，而 Pod `l1-test-nginx-6c69dc7c76-sxwsp` 的节点选择器指定了 `kubernetes.io/hostname=node2`，且 Pod 没有配置相应的容忍度（Toleration）。", "propagation": "污点阻止了无容忍度的 Pod 调度到 node2 → 调度器无法为 Pod 找到符合条件的节点 → Pod 状态持续为 Pending。", "direct_cause": "Pod 的调度约束（节点选择器）与节点的调度策略（污点）不兼容。", "manifestation": "Pod `l1-test-nginx-6c69dc7c76-sxwsp` 处于 Pending 状态。"}
+   rca_analysis={"phenomenon": "Pod l1-test-nginx-6c69dc7c76-sxwsp 处于 Pending 状态，无法调度到指定节点 node2。", "evidence_inventory": [{"id": "e1", "content": "问题定位结果：Pod 调度失败，节点选择器与污点冲突", "source": "layer 节点输出", "reliability": "高"}, {"id": "e2", "content": "节点状态：所有节点（master, node1, node2）均为 Ready 状态", "source": "kubectl get nodes", "reliability": "高"}, {"id": "e3", "content": "证书错误日志查询失败：查询语法错误", "source": "kubectl get events 命令", "reliability": "中"}, {"id": "e4", "content": "kubelet 日志采集失败：目标节点无 journalctl 命令", "source": "journalctl 命令", "reliability": "中"}], "evidence_analysis": [{"evidence_id": "e1", "raw_data": "{\"layer\": \"L1\", \"layer_name\": \"节点调度问题\", \"confidence\": 0.95, \"reasoning\": \"Pod l1-test-nginx-6c69dc7c76-sxwsp 处于 Pending 状态。根本原因是节点调度失败：Pod 指定了节点选择器 kubernetes.io/hostname=node2，但 node2 节点存在 Taint `test-unschedulable=true:NoSchedule`，且 Pod 没有对应的 Toleration 来容忍此污点。\"}", "interpretation": "根因分析工具已明确识别出调度失败的根本原因：Pod 的节点选择器（node2）与节点污点（test-unschedulable=true:NoSchedule）冲突，且 Pod 无容忍度。"}, {"evidence_id": "e2", "raw_data": "NAME     STATUS   ROLES           AGE    VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION       CONTAINER-RUNTIME\nmaster   Ready    control-plane   195d   v1.26.8   10.2.0.48     <none>        Ubuntu 22.04.4 LTS   5.15.0-164-generic   containerd://1.6.32\nnode1    Ready    <none>          194d   v1.26.8   10.2.0.49     <none>        Ubuntu 22.04.4 LTS   5.15.0-164-generic   containerd://1.6.32\nnode2    Ready    <none>          195d   v1.26.8   10.2.0.50     <none>        ...", "interpretation": "所有节点（master, node1, node2）状态均为 Ready，版本 v1.26.8，运行时 containerd 1.6.32。这表明集群节点基础状态正常，Pod 的 Pending 并非由节点 NotReady 导致。"}, {"evidence_id": "e3", "raw_data": "Error from server (BadRequest): Unable to find \"/v1, Resource=events\" that match label selector \"\", field selector \"reason.*certificate\": invalid selector: 'reason.*certificate'; can't understand 'reason.*certificate'", "interpretation": "查询证书相关事件时使用了无效的字段选择器语法（`reason.*certificate`），导致命令执行失败。此证据未提供有效的证书错误信息，仅表明查询方法有误。"}, {"evidence_id": "e4", "raw_data": "/bin/sh: 1: journalctl: not found", "interpretation": "在目标节点上执行 journalctl 命令失败，因为该命令不存在。这表明无法通过标准方式获取 kubelet 日志，可能是节点操作系统环境问题或命令路径问题。"}], "causal_chain": {"root_cause": "节点 node2 上存在污点 `test-unschedulable=true:NoSchedule`，而 Pod `l1-test-nginx-6c69dc7c76-sxwsp` 的节点选择器指定了 `kubernetes.io/hostname=node2`，且 Pod 没有配置相应的容忍度（Toleration）。", "propagation": "污点阻止了无容忍度的 Pod 调度到 node2 → 调度器无法为 Pod 找到符合条件的节点 → Pod 状态持续为 Pending。", "direct_cause": "Pod 的调度约束（节点选择器）与节点的调度策略（污点）不兼容。", "manifestation": "Pod `l1-test-nginx-6c69dc7c76-sxwsp` 处于 Pending 状态。"}, "root_cause_summary": "根本原因是 Pod `l1-test-nginx-6c69dc7c76-sxwsp` 的调度需求与节点 `node2` 的污点策略冲突。具体证据：1) 根因分析工具（e1）明确指出冲突原因为 `test-unschedulable=true:NoSchedule` 污点与无容忍度的 Pod；2) 节点状态（e2）显示 node2 为 Ready，排除了节点故障导致调度的可能性。", "confidence": 0.9, "primary_runbooks": [], "alternative_causes": [], "limitations": "1. 证据 e3（证书错误日志）因查询语法错误而未提供有效数据，无法评估集群是否存在证书问题。2. 证据 e4（kubelet 日志）因目标节点缺少 journalctl 命令而采集失败，无法从 kubelet 日志中获取调度决策的详细记录或潜在错误。3. 分析主要依赖根因分析工具的输出，缺少对 Pod YAML 定义和节点污点的直接查验作为交叉验证。"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🎯 根因分析结果                              │
+   └──────────────────────────────────────────┘
+
+   置信度: 90%
+   🔗 因果链:
+     根本原因: 节点 node2 上存在污点 `test-unschedulable=true:NoSchedule`，而 Pod `l1-test-nginx-6c69dc7c76-sxwsp` 的节点选择器指定了 `kubernetes.io/hostname=node2`，且 Pod 没有配置相应的容忍度（Toleration）。
+     传导机制: 污点阻止了无容忍度的 Pod 调度到 node2 → 调度器无法为 Pod 找到符合条件的节点 → Pod 状态持续为 Pending。
+     最终表现: Pod `l1-test-nginx-6c69dc7c76-sxwsp` 处于 Pending 状态。
+
+
+   ✅ [汇总总结] 完成 (8ms)
+
+   ┌──────────────────────────────────────────┐
+   │ 📋 汇总总结结果                              │
+   └──────────────────────────────────────────┘
+
+   报告长度: 5272 字符
+
+----------------------------------------------------------------------
+📊 诊断完成! 总耗时: 3m 55.1s
+----------------------------------------------------------------------
+
+======================================================================
+🎯 诊断报告
+======================================================================
+
+## 📋 节点四：汇总总结
+----------------------------------------------------------------------
+## 📊 诊断概览
+| 项目 | 内容 |
+|------|------|
+| **问题层级** | L1 - 节点调度问题 |
+| **问题分类** | 污点与节点选择器冲突 |
+| **置信度** | 高 (90%) |
+| **证据完整度** | 67%（已采集2/3项关键证据） |
+
+## 🔍 现象描述
+**用户报告**：
+> 我的集群有什么问题，根本原因在哪？
+
+**关键实体**：
+| 类型 | 值 |
+|------|-----|
+| Pod | `l1-test-nginx-6c69dc7c76-sxwsp` |
+| Namespace | `aiops-e2e` |
+| Node | `node2` |
+| 错误信息 | Pod 状态为 `Pending`，无法调度到指定节点。 |
+
+## 🕵️ 证据链
+### 已采集证据
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 1 | Pod 状态与调度失败原因 | 根因分析工具输出 | `{"layer": "L1", "layer_name": "节点调度问题", "confidence": 0.95, "reasoning": "Pod l1-test-nginx-6c69dc7c76-sxwsp 处于 Pending 状态。根本原因是节点调度失败：Pod 指定了节点选择器 kubernetes.io/hostname=node2，但 node2 节点存在 Taint `test-unschedulable=true:NoSchedule`，且 Pod 没有对应的 Toleration 来容忍此污点。"}` | 明确指出了调度失败的根本原因：节点选择器与污点冲突。 |
+| 2 | 节点状态 | `kubectl get nodes -o wide` | `NAME STATUS ROLES AGE VERSION ...` <br> `master Ready control-plane 195d v1.26.8 ...` <br> `node1 Ready <none> 194d v1.26.8 ...` <br> `node2 Ready <none> 195d v1.26.8 ...` | 所有节点（包括 `node2`）状态均为 `Ready`，排除了节点故障导致调度的可能性。 |
+| 3 | Pod 详情 | `kubectl describe pod l1-test-nginx-6c69dc7c76-sxwsp` | `Name: l1-test-nginx-6c69dc7c76-sxwsp` <br> `Namespace: aiops-e2e` <br> `Node: <none>` <br> `Labels: app=nginx, e2e-te...` | Pod 未被调度到任何节点（`Node: <none>`），处于 `Pending` 状态。 |
+
+### 证据关联分析
+- **证据 #1 + #2 印证**：根因分析工具指出 `node2` 有污点 `test-unschedulable=true:NoSchedule`，而节点状态显示 `node2` 是 `Ready` 的。这表明调度失败并非因为节点不健康，而是调度策略（污点）阻止了 Pod。
+- **证据链**：Pod 指定调度到 `node2` → `node2` 存在 `NoSchedule` 污点 → Pod 无对应容忍度 → 调度器找不到符合条件的节点 → Pod 状态持续为 `Pending`。
+
+### 缺失证据（如有）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| 节点 `node2` 的污点详情 | critical | 无法直接验证污点 `test-unschedulable=true:NoSchedule` 的具体配置。 |
+| Pod 的 YAML 定义（含节点选择器） | important | 无法直接验证 Pod 的 `nodeSelector` 配置。 |
+| kubelet 日志（调度器决策细节） | low | 无法获取调度器尝试调度时的详细日志，但不影响根因判断。 |
+
+## 🎯 根因分析
+### 因果链
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 根本原因                                                        │
+│ 节点 node2 上存在污点 `test-unschedulable=true:NoSchedule`，    │
+│ 而 Pod 的节点选择器指定了 `kubernetes.io/hostname=node2`，      │
+│ 且 Pod 没有配置相应的容忍度（Toleration）。                      │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 传导机制                                                        │
+│ 污点阻止了无容忍度的 Pod 调度到 node2 →                         │
+│ 调度器无法为 Pod 找到符合条件的节点。                           │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 直接原因                                                        │
+│ Pod 的调度约束（节点选择器）与节点的调度策略（污点）不兼容。      │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 用户可见现象                                                    │
+│ Pod `l1-test-nginx-6c69dc7c76-sxwsp` 处于 Pending 状态。         │
+└─────────────────────────────────────────────────────────────────┘
+```
+### 根因结论
+**结论**：根据证据 #1 (根因分析工具输出) 和证据 #2 (节点状态 Ready)，问题的根本原因是**Pod `l1-test-nginx-6c69dc7c76-sxwsp` 的调度需求与节点 `node2` 的污点策略冲突**。具体来说，Pod 要求调度到 `node2`，但 `node2` 设置了 `test-unschedulable=true:NoSchedule` 污点，且 Pod 没有容忍此污点，导致调度失败。
+
+**置信度**：高 (90%)
+- ✅ 证据 #1 直接、明确地指出了污点与节点选择器的冲突。
+- ✅ 证据 #2 排除了节点 `NotReady` 等基础故障的可能性。
+- ⚠️ 缺少对节点污点和 Pod YAML 的直接查验作为最终确认。
+
+## 🛠️ 修复建议
+### 立即执行（按优先级排序）
+**1. [优先] 为 Pod 添加容忍度（Toleration）**
+如果业务允许 Pod 运行在带有 `test-unschedulable` 污点的节点上，修改 Pod 所属的 Deployment 或直接编辑 Pod 模板，添加容忍度。
+```bash
+# 假设 Pod 由 Deployment `l1-test-nginx` 管理
+kubectl patch deployment l1-test-nginx -n aiops-e2e --type='json' -p='[{"op": "add", "path": "/spec/template/spec/tolerations", "value": [{"key": "test-unschedulable", "operator": "Equal", "value": "true", "effect": "NoSchedule"}]}]'
+```
+*依据*：使 Pod 能够容忍 `node2` 的污点，从而被调度。
+
+**2. [备选] 移除节点污点**
+如果 `test-unschedulable` 污点是测试残留或不再需要，可以直接从 `node2` 上移除它。
+```bash
+kubectl taint nodes node2 test-unschedulable=true:NoSchedule-
+```
+*依据*：移除调度障碍，使所有 Pod（无需容忍度）都能调度到 `node2`。
+
+**3. [备选] 修改 Pod 的节点选择器**
+如果 Pod 不一定非要运行在 `node2` 上，可以修改其节点选择器，使其可以调度到其他节点（如 `node1`）。
+```bash
+kubectl patch deployment l1-test-nginx -n aiops-e2e --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/nodeSelector/kubernetes.io~1hostname", "value": "node1"}]'
+```
+*依据*：将 Pod 调度到没有冲突污点的节点。
+
+### 后续优化
+1.  **污点与容忍度管理**：建立清晰的污点使用规范，确保关键工作负载配置了正确的容忍度。
+2.  **调度策略检查**：在部署应用前，使用 `kubectl describe node <node-name>` 检查目标节点的污点情况。
+3.  **事件监控**：关注 `kubectl get events -n aiops-e2e` 的输出，及时发现调度失败等事件。
+
+## 📋 验证步骤
+| 步骤 | 命令 | 预期结果 |
+|------|------|----------|
+| 1. 确认 Pod 状态 | `kubectl get pod l1-test-nginx-6c69dc7c76-sxwsp -n aiops-e2e` | `STATUS` 从 `Pending` 变为 `Running` 或 `ContainerCreating` |
+| 2. 确认 Pod 调度节点 | `kubectl get pod l1-test-nginx-6c69dc7c76-sxwsp -n aiops-e2e -o wide` | `NODE` 列显示 Pod 已被调度到某个节点（如 `node2` 或 `node1`） |
+| 3. 检查节点污点（修复方案1/2后） | `kubectl describe node node2 \| grep -A5 Taints` | 根据采取的方案，查看污点是否已移除或 Pod 是否已容忍。 |
+
+## ⚠️ 注意事项
+- 选择修复方案前，请评估业务需求：Pod 是否必须运行在 `node2`？`test-unschedulable` 污点存在的意义是什么？
+- 如果采取“添加容忍度”的方案，需确保 `node2` 的资源、标签等其他条件也满足 Pod 要求。
+- 直接移除污点可能会影响该节点上原有的调度策略，请确认影响范围。
+
+---
+
+## 📊 性能统计
+
+├─ 总耗时: 3.7m
+├─ 问题定位: 0.2s (0%) ✅
+├─ 证据链采集: 33.2s (15%) ✅
+├─ 根因分析: 54.6s (25%) ✅
+├─ 汇总总结: 0.0s (0%) ✅
+├─ LLM 调用: 3 次
+└─ 工具调用: 24 次
+```
+
+📋 诊断追踪
+
+- **核心 Runbook**: L1 Kubelet 通信故障 - Node NotReady 诊断手册
+- **参考 Runbook**: L1 Kubelet 通信故障 - Node NotReady 诊断手册, L0 Pod 存储卷超限被驱逐 (Volume Limit Exceeded), L2 OOMKilled（Exit Code 137）, L4 依赖服务固定返回 503, L4 应用健康检查失败 (AppHealthFail), 镜像拉取失败 (ImagePullBackOff) 诊断手册
+- **工具调用**: 24 次
+- **LLM 调用**: 3 次
+
+
+======================================================================
+✅ 诊断完成!
+======================================================================
