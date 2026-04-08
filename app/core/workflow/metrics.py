@@ -418,24 +418,39 @@ class WorkflowMetrics:
         return "\n".join(lines)
 
 
-# 全局指标存储（用于跨模块访问）
+# ── 以下全局函数已废弃，保留向后兼容 ──
+# 新代码请直接使用 WorkflowMetrics(run_id=..., question=...) 实例
+import warnings
+
 _current_metrics: Optional[WorkflowMetrics] = None
 
 
 def start_workflow_metrics(run_id: str, question: str = "") -> WorkflowMetrics:
-    """开始工作流指标记录"""
+    """[deprecated] 开始工作流指标记录 — 请改用 WorkflowMetrics() 实例"""
+    warnings.warn(
+        "start_workflow_metrics() is deprecated, use WorkflowMetrics() directly",
+        DeprecationWarning, stacklevel=2,
+    )
     global _current_metrics
     _current_metrics = WorkflowMetrics(run_id=run_id, question=question)
     return _current_metrics
 
 
 def get_current_metrics() -> Optional[WorkflowMetrics]:
-    """获取当前工作流指标"""
+    """[deprecated] 获取当前工作流指标"""
+    warnings.warn(
+        "get_current_metrics() is deprecated",
+        DeprecationWarning, stacklevel=2,
+    )
     return _current_metrics
 
 
 def finish_workflow_metrics() -> Optional[WorkflowMetrics]:
-    """完成工作流指标记录"""
+    """[deprecated] 完成工作流指标记录 — 请改用 metrics.finish()"""
+    warnings.warn(
+        "finish_workflow_metrics() is deprecated, use metrics.finish() directly",
+        DeprecationWarning, stacklevel=2,
+    )
     global _current_metrics
     if _current_metrics:
         _current_metrics.finish()

@@ -36,6 +36,7 @@ from .executor import WorkflowExecutor
 from .metrics import (
     WorkflowMetrics,
     NodeMetrics,
+    # 以下全局函数已废弃，保留兼容导入
     start_workflow_metrics,
     finish_workflow_metrics,
     get_current_metrics,
@@ -51,6 +52,7 @@ __all__ = [
     # 指标
     "WorkflowMetrics",
     "NodeMetrics",
+    # deprecated（保留兼容）
     "start_workflow_metrics",
     "finish_workflow_metrics",
     "get_current_metrics",

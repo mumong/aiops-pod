@@ -50,7 +50,7 @@ RUN curl -fsSL https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz | tar -xzf - 
     && helm repo update
     
 # 复制依赖文件
-COPY requirements.txt .
+
 COPY requirements.lock.txt .
 
 # 安装 Python 依赖（使用锁定版本）

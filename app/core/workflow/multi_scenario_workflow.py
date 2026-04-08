@@ -20,7 +20,7 @@ from app.core.workflow.state import WorkflowState
 from app.core.workflow.nodes.global_detector import GlobalDetectorNode
 from app.core.workflow.multi_scenario.output import MultiScenarioOutput, ScenarioSeverity
 from app.core.workflow.multi_scenario.formatters import MultiScenarioFormatter
-from app.core.workflow.metrics import WorkflowMetrics, start_workflow_metrics, finish_workflow_metrics
+from app.core.workflow.metrics import WorkflowMetrics
 from app.core.text_helpers import truncate_question, emit_text
 
 logger = logging.getLogger(__name__)
@@ -69,8 +69,8 @@ class MultiScenarioWorkflowExecutor:
             import uuid
             run_id = uuid.uuid4().hex[:16]
 
-        # 开始指标记录
-        metrics = start_workflow_metrics(run_id, question)
+        # 开始指标记录（per-request，并发安全）
+        metrics = WorkflowMetrics(run_id=run_id, question=question)
 
         try:
             # 输出格式：终端友好或 SSE

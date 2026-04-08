@@ -1,0 +1,246 @@
+======================================================================
+🔄 K8s AIOps Copilot - 工作流诊断模式
+======================================================================
+
+📝 问题: 我的集群有什么问题，根本原因在哪？
+
+----------------------------------------------------------------------
+🚀 开始诊断 [run_id: 74f123a250974d4f]
+
+📍 [问题定位] 执行中...
+📍 [证据链采集] 执行中...
+   ✅ [问题定位] 完成 (240ms)
+   📤 → 下游数据: layer=Layer.L1, layers=L1+L3
+   scenarios=[{'scenario': '节点污点导致Pod调度失败', 'probability': '高', 'reason': '事件明确显示Pod因节点污点（test-unschedulable: true）而无法调度'}, {'scenario': '网络问题导致镜像拉取失败', 'probability': '高', 'reason': 'Pod状态为ErrImagePull，错误信息显示连接Docker Hub时被重置'}]
+   entities=[{"type": "Pod", "value": "l1-test-nginx-6c69dc7c76-sxwsp"}, {"type": "Pod", "value": "imagepull-fail-victim"}]
+   reasoning=分析文本中发现了两个主要问题：1) L1层问题：Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 调度失败，原因是节点存在不可容忍的污点（taint {test-unschedulable: true}），这直接对应L1层（集群节点层）的根因特征。2) L3层问题：Pod 'imagepull-fail-victim' 处于 ErrImagePull 状态，原因是网络连接被重置导致镜像拉取失败，这属于L3层（网络层）问题。根据核心规则（定位根因，不是表象）和多层级匹配时选根因最底层（L0最底层，L1次之），调度失败（L1）是比镜像拉取失败（L3）更底层的根因。
+   layer_analysis={"layer": "L1", "layers": ["L1", "L3"], "layer_name": "集群节点层", "confidence": 0.9, "reasoning": "分析文本中发现了两个主要问题：1) L1层问题：Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 调度失败，原因是节点存在不可容忍的污点（taint {test-unschedulable: true}），这直接对应L1层（集群节点层）的根因特征。2) L3层问题：Pod 'imagepull-fail-victim' 处于 ErrImagePull 状态，原因是网络连接被重置导致镜像拉取失败，这属于L3层（网络层）问题。根据核心规则（定位根因，不是表象）和多层级匹配时选根因最底层（L0最底层，L1次之），调度失败（L1）是比镜像拉取失败（L3）更底层的根因。", "key_entities": [{"type": "Pod", "value": "l1-test-nginx-6c69dc7c76-sxwsp"}, {"type": "Pod", "value": "imagepull-fail-victim"}], "possible_scenarios": [{"scenario": "节点污点导致Pod调度失败", "probability": "高", "reason": "事件明确显示Pod因节点污点（test-unschedulable: true）而无法调度"}, {"scenario": "网络问题导致镜像拉取失败", "probability": "高", "reason": "Pod状态为ErrImagePull，错误信息显示连接Docker Hub时被重置"}]}
+
+   ┌──────────────────────────────────────────┐
+   │ 📊 问题定位结果                              │
+   └──────────────────────────────────────────┘
+
+   层级: L1 + L3（主层级: Layer.L1）
+   置信度: 90%
+
+📍 [根因分析] 执行中...
+   ✅ [证据链采集] 完成 (43.0s)
+   📤 → 下游数据: evidence_items=3/3
+   evidence_analysis={"evidence_plan": [{"id": "node_status", "description": "节点状态（NotReady）", "level": "critical", "command": "kubectl get nodes -o wide", "tool": "kubectl", "purpose": "节点状态（NotReady）"}, {"id": "cert_error", "description": "证书错误日志（x509/certificate）", "level": "critical", "command": "kubectl get events -A --field-selector='reason.*certificate' --sort-by='.lastTimestamp'", "tool": "kubectl", "purpose": "证书错误日志（x509/certificate）"}, {"id": "kubelet_logs", "description": "kubelet 日志", "level": "important", "command": "journalctl -u kubelet -n 50 --no-pager", "tool": "kubectl", "purpose": "kubelet 日志"}], "tool_results": ["✅ kubectl get nodes -o wide... (成功, 0.1s)", "✅ kubectl get events -A --field-selector='... (成功, 0.1s)", "✅ journalctl -u kubelet -n 50 --no-pager... (成功, 0.0s)"], "tool_data": [], "llm_analysis": "", "collection_summary": "计划 3 项，实际采集 3 项"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🔍 证据采集结果                              │
+   └──────────────────────────────────────────┘
+
+   证据: 3/3 项, 完整度: 100%
+
+📍 [汇总总结] 执行中...
+   ✅ [根因分析] 完成 (55.2s)
+   📤 → 下游数据: root_cause=
+   confidence=85%
+   causal_chain={"root_cause": "集群节点（L1层）上存在污点（taint）配置 test-unschedulable: true，且 Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 的容忍度（tolerations）配置中未包含对此污点的容忍，导致调度器无法将其调度到任何节点。", "propagation": "节点污点（L1层根因） → Pod 调度失败（L1层直接现象） → 可能影响依赖该 Pod 的服务可用性（应用层现象）。同时，独立的网络问题（L3层）导致另一个 Pod 'imagepull-fail-victim' 镜像拉取失败。", "direct_cause": "Pod 的 spec.tolerations 与节点的 spec.taints 不匹配，违反了 Kubernetes 调度规则。", "manifestation": "1) Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 处于 Pending 状态，事件显示 0/3 nodes are available: 3 node(s) had untolerated taint {test-unschedulable: true}。2) Pod 'imagepull-fail-victim' 处于 ErrImagePull 状态，错误信息显示连接被重置。"}
+   rca_analysis={"phenomenon": "集群中存在两个主要问题：1) Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 调度失败，无法分配到节点；2) Pod 'imagepull-fail-victim' 镜像拉取失败，处于 ErrImagePull 状态。", "evidence_inventory": [{"id": "e1", "content": "问题定位结果：识别出 L1 层（节点污点导致调度失败）和 L3 层（网络问题导致镜像拉取失败）两个问题，并确定 L1 层为更底层的根因", "source": "layer 节点输出", "reliability": "高"}, {"id": "e2", "content": "节点状态：所有节点（master、node1、node2）状态均为 Ready，版本 v1.26.8，运行时 containerd 1.6.32", "source": "kubectl get nodes", "reliability": "高"}, {"id": "e3", "content": "证书错误日志查询失败：kubectl 命令语法错误，无法查询到证书相关事件", "source": "kubectl get events", "reliability": "中"}, {"id": "e4", "content": "kubelet 日志获取失败：目标节点上 journalctl 命令不存在", "source": "journalctl -u kubelet", "reliability": "中"}], "evidence_analysis": [{"evidence_id": "e1", "raw_data": "{\"layer\": \"L1\", \"layers\": [\"L1\", \"L3\"], \"layer_name\": \"集群节点层\", \"confidence\": 0.9, \"reasoning\": \"分析文本中发现了两个主要问题：1) L1层问题：Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 调度失败，原因是节点存在不可容忍的污点（taint {test-unschedulable: true}），这直接对应L1层（集群节点层）的根因特征。2) L3层问题：Pod 'imagepull-fail-victim' 处于 ErrImagePull 状态，原因是网络连接被重置导致镜像拉取失败，这属于L3层（网络层）问题。根据核心规则（定位根因，不是表象）和多层级匹配时选根因最底层（L0最底层，L1次之），调度失败（L1）是比镜像拉取失败（L3）更底层的根因。\", \"key_entities\": [{\"type\": \"Pod\", \"value\": \"l1-test-nginx-6c69dc7c76-sxwsp\"}, {\"type\": \"Pod\", \"value\": \"imagepull-fail-victim\"}], \"possible_scenarios\": [{\"scenario\": \"节点污点导致Pod调度失败\", \"probability\": \"高\", \"reason\": \"事件明确显示Pod因节点污点（test-unschedulable: true）而无法调度\"}, {\"scenario\": \"网络问题导致镜像拉取失败\", \"probability\": \"高\", \"reason\": \"Pod状态为ErrImagePull，错误信息显示连接Docker Hub时被重置\"}]}", "interpretation": "该分析基于原始问题描述（未在本次证据中提供）识别出两个具体问题：Pod调度失败（L1层根因）和镜像拉取失败（L3层现象）。调度失败的原因是节点存在污点 test-unschedulable: true，这是集群节点层的配置问题。"}, {"evidence_id": "e2", "raw_data": "NAME     STATUS   ROLES           AGE    VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION       CONTAINER-RUNTIME\nmaster   Ready    control-plane   195d   v1.26.8   10.2.0.48     <none>        Ubuntu 22.04.4 LTS   5.15.0-164-generic   containerd://1.6.32\nnode1    Ready    <none>          195d   v1.26.8   10.2.0.49     <none>        Ubuntu 22.04.4 LTS   5.15.0-164-generic   containerd://1.6.32\nnode2    Ready    <none>          195d   v1.26.8   10.2.0.50     <none>        ...", "interpretation": "所有3个节点（master、node1、node2）状态均为 Ready，表明节点层面的基础运行状态正常，Kubernetes 版本一致（v1.26.8），容器运行时一致（containerd 1.6.32）。这排除了节点 NotReady 导致调度失败的可能性。"}, {"evidence_id": "e3", "raw_data": "Error from server (BadRequest): Unable to find \"/v1, Resource=events\" that match label selector \"\", field selector \"reason.*certificate\": invalid selector: 'reason.*certificate'; can't understand 'reason.*certificate'", "interpretation": "查询证书相关事件时使用了错误的 kubectl 语法（reason.*certificate 不是有效的字段选择器），因此未能获取到任何证书错误信息。这不能证明集群存在或不存在证书问题，只是查询方法错误。"}, {"evidence_id": "e4", "raw_data": "/bin/sh: 1: journalctl: not found", "interpretation": "在尝试获取 kubelet 日志时，目标节点上不存在 journalctl 命令（可能使用了非 systemd 的初始化系统，或者环境不完整）。因此无法从 kubelet 日志中获取调度失败或网络问题的直接证据。"}], "causal_chain": {"root_cause": "集群节点（L1层）上存在污点（taint）配置 test-unschedulable: true，且 Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 的容忍度（tolerations）配置中未包含对此污点的容忍，导致调度器无法将其调度到任何节点。", "propagation": "节点污点（L1层根因） → Pod 调度失败（L1层直接现象） → 可能影响依赖该 Pod 的服务可用性（应用层现象）。同时，独立的网络问题（L3层）导致另一个 Pod 'imagepull-fail-victim' 镜像拉取失败。", "direct_cause": "Pod 的 spec.tolerations 与节点的 spec.taints 不匹配，违反了 Kubernetes 调度规则。", "manifestation": "1) Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 处于 Pending 状态，事件显示 0/3 nodes are available: 3 node(s) had untolerated taint {test-unschedulable: true}。2) Pod 'imagepull-fail-victim' 处于 ErrImagePull 状态，错误信息显示连接被重置。"}, "root_cause_summary": "根本原因是集群节点层的污点配置问题。根据问题定位结果（证据 e1），Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 调度失败的直接原因是所有 3 个节点上都存在污点 {test-unschedulable: true}，而该 Pod 无法容忍此污点，导致 0/3 个节点可用。证据 e2 显示所有节点状态为 Ready，排除了节点故障导致调度失败的可能性。证据 e3 和 e4 未能提供额外信息。因此，节点污点是导致调度失败的根因。", "confidence": 0.85, "primary_runbooks": [], "alternative_causes": ["Pod 'imagepull-fail-victim' 的镜像拉取失败可能是由于集群网络出口策略、Docker Hub 限流或节点 DNS 配置问题导致，但这与调度失败是独立问题。"], "limitations": "1) 本次提供的证据中未包含原始的 Pod 事件、污点列表或 Pod 配置详情，根因分析严重依赖问题定位结果（证据 e1）的推理。2) 证据 e3 和 e4 因采集命令错误或环境问题未能提供有效数据。3) 未采集到节点污点列表（kubectl describe nodes | grep Taints）和 Pod 详细事件（kubectl describe pod <pod-name>）来直接验证污点配置。"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🎯 根因分析结果                              │
+   └──────────────────────────────────────────┘
+
+   置信度: 85%
+   🔗 因果链:
+     根本原因: 集群节点（L1层）上存在污点（taint）配置 test-unschedulable: true，且 Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 的容忍度（tolerations）配置中未包含对此污点的容忍，导致调度器无法将其调度到任何节点。
+     传导机制: 节点污点（L1层根因） → Pod 调度失败（L1层直接现象） → 可能影响依赖该 Pod 的服务可用性（应用层现象）。同时，独立的网络问题（L3层）导致另一个 Pod 'imagepull-fail-victim' 镜像拉取失败。
+     最终表现: 1) Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 处于 Pending 状态，事件显示 0/3 nodes are available: 3 node(s) had untolerated taint {test-unschedulable: true}。2) Pod 'imagepull-fail-victim' 处于 ErrImagePull 状态，错误信息显示连接被重置。
+
+
+   ✅ [汇总总结] 完成 (4ms)
+
+   ┌──────────────────────────────────────────┐
+   │ 📋 汇总总结结果                              │
+   └──────────────────────────────────────────┘
+
+   报告长度: 5989 字符
+
+----------------------------------------------------------------------
+📊 诊断完成! 总耗时: 4m 0.6s
+----------------------------------------------------------------------
+
+======================================================================
+🎯 诊断报告
+======================================================================
+
+## 📋 节点四：汇总总结
+----------------------------------------------------------------------
+## 📊 诊断概览
+| 项目 | 内容 |
+|------|------|
+| **问题层级** | L1 - 集群节点层 |
+| **问题分类** | 节点污点导致Pod调度失败 |
+| **置信度** | 高 (85%) |
+| **证据完整度** | 60%（已采集部分节点和Pod状态，缺失污点列表和Pod详细事件） |
+
+---
+## 🔍 现象描述
+**用户报告**：
+> 我的集群有什么问题，根本原因在哪？
+
+**关键实体**：
+| 类型 | 值 |
+|------|-----|
+| Pod | `l1-test-nginx-6c69dc7c76-sxwsp` (调度失败) |
+| Pod | `imagepull-fail-victim` (镜像拉取失败) |
+| Namespace | `aiops-e2e` |
+| Node | `master`, `node1`, `node2` |
+| 错误信息 | `0/3 nodes are available: 3 node(s) had untolerated taint {test-unschedulable: true}` |
+
+**集群当前状态总结**：
+您的集群存在两个独立的问题：
+1.  **Pod调度失败**：Pod `l1-test-nginx-6c69dc7c76-sxwsp` 因节点污点 `test-unschedulable: true` 而无法被调度到任何节点，处于 `Pending` 状态。
+2.  **镜像拉取失败**：Pod `imagepull-fail-victim` 因网络连接被重置导致镜像拉取失败，处于 `ErrImagePull` 状态。
+
+根据根因分析，**调度失败（L1层问题）是比镜像拉取失败（L3层问题）更底层的根本原因**。
+
+---
+## 🕵️ 证据链
+### 已采集证据
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 1 | 问题定位分析 | 阶段1输出 | `"layer": "L1", "reasoning": "Pod 'l1-test-nginx-6c69dc7c76-sxwsp' 调度失败，原因是节点存在不可容忍的污点（taint {test-unschedulable: true}）"` | 识别出L1层（节点污点）和L3层（网络）问题，并判定L1为更底层根因。 |
+| 2 | 节点状态 | `kubectl get nodes -o wide` | `master Ready control-plane 195d v1.26.8 ...`<br>`node1 Ready <none> 195d v1.26.8 ...`<br>`node2 Ready <none> 195d v1.26.8 ...` | 所有3个节点状态均为 `Ready`，运行正常，排除了节点故障导致调度失败的可能性。 |
+| 3 | Pod `imagepull-fail-victim` 状态 | `kubectl describe pod imagepull-fail-victim -n aiops-e2e` | `Name: imagepull-fail-victim`<br>`Namespace: aiops-e2e`<br>`Node: node2/10.2.0.50`<br>`Status: Pending` | 该Pod被调度到 `node2`，但处于 `Pending` 状态，原因是镜像拉取失败。 |
+| 4 | Pod `l1-test-nginx` 状态 | `kubectl describe pod l1-test-nginx-6c69dc7c76-sxwsp -n aiops-e2e` | `Error from server (NotFound): pods "l1-test-nginx-6c69dc7c76-sxwsp" not found` | 该Pod可能已被删除或从未成功创建，与调度失败的描述相符。 |
+| 5 | 节点污点查询（部分） | `kubectl describe node master` | 输出中未直接显示 `Taints` 字段（原始数据被截断） | 需要完整命令输出来确认污点配置。 |
+| 6 | 通用Pod状态筛查 | `kubectl get -A --show-labels -o wide pods \| grep Evicted/OOMKilled/CrashLoopBackOff/Error` | 所有命令均返回 `Command failed (exit 1)` | 未发现因驱逐、OOM、崩溃循环或通用错误而异常的Pod。 |
+
+### 证据关联分析
+- **证据 #1 + #2 印证**：问题定位指出调度失败的原因是节点污点，而证据 #2 显示所有节点状态正常。这表明调度失败并非由于节点宕机，而是由于**策略性限制（污点）**。
+- **证据 #3 独立**：Pod `imagepull-fail-victim` 的 `ErrImagePull` 是一个独立的L3层网络问题，与调度失败无直接因果关系。
+- **证据 #4 佐证**：无法找到 Pod `l1-test-nginx` 的详细信息，符合一个因调度失败而从未成功运行的 Pod 的特征。
+
+### 缺失证据（如有）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| 节点污点列表 (`kubectl describe nodes \| grep Taints`) | critical | 无法直接确认所有节点上是否存在 `test-unschedulable: true` 污点。 |
+| Pod `l1-test-nginx` 的详细事件 (`kubectl describe pod <name>`) | important | 无法直接查看调度失败的具体事件消息。 |
+| 正确的证书错误事件查询 | low | 无法确认集群是否存在证书相关问题（查询命令语法错误）。 |
+| kubelet 日志 | low | 无法从系统服务日志中获取调度决策的详细记录。 |
+
+---
+## 🎯 根因分析
+### 因果链
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 根本原因                                                        │
+│ 集群所有节点被配置了污点 `test-unschedulable: true`，           │
+│ 且目标Pod未配置相应的容忍（Toleration）。                         │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 传导机制                                                        │
+│ Kubernetes调度器过滤节点时，发现Pod无法容忍节点的污点，           │
+│ 导致0个节点可用。                                                │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 直接原因                                                        │
+│ Pod `l1-test-nginx-6c69dc7c76-sxwsp` 调度失败，处于Pending状态。 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 用户可见现象                                                    │
+│ 1. 特定Pod无法运行。                                             │
+│ 2. 集群事件显示 “0/3 nodes are available: 3 node(s) had         │
+│    untolerated taint {test-unschedulable: true}”。              │
+└─────────────────────────────────────────────────────────────────┘
+```
+### 根因结论
+**结论**：根据问题定位分析（证据 #1），集群**最根本的问题**是**节点层的污点配置**。所有节点上的 `test-unschedulable: true` 污点阻止了未容忍此污点的 Pod（如 `l1-test-nginx`）被调度。证据 #2 排除了节点故障的可能性，使污点配置成为唯一合理的根因。同时，Pod `imagepull-fail-victim` 的镜像拉取失败是一个独立的网络层（L3）问题。
+
+**置信度**：高 (85%)
+- ✅ 问题定位逻辑清晰，将调度失败归因于节点污点。
+- ✅ 节点状态正常，与污点导致调度失败的场景吻合。
+- ⚠️ 缺失直接查看节点污点列表的命令输出作为最终确凿证据。
+
+---
+## 🛠️ 修复建议
+### 立即执行（按优先级排序）
+**1. [优先] 检查并清理节点污点**
+检查所有节点上的污点，并移除测试用的 `test-unschedulable` 污点。
+```bash
+# 1. 查看所有节点污点
+kubectl describe nodes | grep -A 5 -B 5 Taints
+
+# 2. 从所有节点移除特定污点
+kubectl taint nodes master test-unschedulable:true-
+kubectl taint nodes node1 test-unschedulable:true-
+kubectl taint nodes node2 test-unschedulable:true-
+```
+*依据*：根因是污点阻止调度。移除污点将允许Pod被调度。
+
+**2. [可选] 为Pod添加污点容忍**
+如果污点是业务需要，则修改Pod的部署配置，添加对应的容忍度。
+```yaml
+# 在Pod或Deployment的spec中添加
+tolerations:
+- key: "test-unschedulable"
+  operator: "Equal"
+  value: "true"
+  effect: "NoSchedule"
+```
+*目的*：让Pod能够被调度到带有该污点的节点上。
+
+**3. [并行] 诊断镜像拉取失败问题**
+针对 `imagepull-fail-victim` Pod 的网络问题。
+```bash
+# 查看详细的失败原因
+kubectl describe pod imagepull-fail-victim -n aiops-e2e | grep -A 10 -B 5 "Error"
+
+# 尝试在节点上手动拉取镜像，诊断网络
+kubectl debug node/node2 -it --image=busybox
+# 在debug容器内执行
+docker pull <你的镜像名>
+```
+*目的*：区分是集群网络出口问题、镜像仓库问题还是节点DNS问题。
+
+### 后续优化
+1.  **污点管理规范**：建立污点的申请、审批和清理流程，避免测试污点长期存在。
+2.  **网络策略检查**：检查集群的NetworkPolicy、Calico配置或云厂商的安全组规则，确保对公网镜像仓库（如Docker Hub）的访问不受阻。
+3.  **使用本地镜像仓库**：搭建私有镜像仓库，避免依赖不稳定的公网仓库。
+
+---
+## 📋 验证步骤
+| 步骤 | 命令 | 预期结果 |
+|------|------|----------|
+| 1. 确认污点已清除 | `kubectl describe nodes \| grep Taints` | 输出中不包含 `test-unschedulable:true` |
+| 2. 重新部署测试Pod | `kubectl create deployment test-nginx --image=nginx -n aiops-e2e` | Pod应成功调度并进入 `Running` 状态 |
+| 3. 检查原失败Pod | `kubectl get pod imagepull-fail-victim -n aiops-e2e -o wide` | 需根据网络问题修复情况，状态可能变为 `Running` 或仍为 `ErrImagePull` |
+
+---
+## ⚠️ 注意事项
+- 移除污点是一个全局操作，请确认该污点确实不再需要。
+- 镜像拉取失败（L3问题）与调度失败（L1问题）是独立的，需要分别修复。
+- 如果 `imagepull-fail-victim` 使用的镜像需要特殊网络权限，即使调度成功，拉取仍可能失败。
+
+---
+
+## 📊 性能统计
+
+├─ 总耗时: 4.0m
+├─ 问题定位: 0.2s (0%) ✅
+├─ 证据链采集: 43.0s (18%) ✅
+├─ 根因分析: 55.2s (23%) ✅
+├─ 汇总总结: 0.0s (0%) ✅
+├─ LLM 调用: 3 次
+└─ 工具调用: 32 次
+```
+
+📋 诊断追踪
+
+- **核心 Runbook**: L1 Kubelet 通信故障 - Node NotReady 诊断手册
+- **参考 Runbook**: L0 Pod 存储卷超限被驱逐 (Volume Limit Exceeded), L2 OOMKilled（Exit Code 137）, L1 Kubelet 通信故障 - Node NotReady 诊断手册, L4 应用健康检查失败 (AppHealthFail), L4 依赖服务固定返回 503, 镜像拉取失败 (ImagePullBackOff) 诊断手册
+- **工具调用**: 32 次
+- **LLM 调用**: 3 次
+
+
+======================================================================
+✅ 诊断完成!
+======================================================================
