@@ -96,7 +96,8 @@ class EvidenceCollectorNode(WorkflowNode):
                 question=question,
                 layer=layer,
                 possible_scenarios=possible_scenarios,
-                key_entities=key_entities
+                key_entities=key_entities,
+                layer_analysis=layer_analysis
             )
 
             # 2. 根据规划调用工具采集证据
@@ -162,7 +163,8 @@ class EvidenceCollectorNode(WorkflowNode):
         question: str,
         layer: Optional[Layer],
         possible_scenarios: List[str],
-        key_entities: List[Dict]
+        key_entities: List[Dict],
+        layer_analysis: str = ""
     ) -> tuple:
         """
         调用 LLM 规划证据采集
@@ -194,10 +196,9 @@ class EvidenceCollectorNode(WorkflowNode):
             )
 
             # 注入上游 layer 节点的分析结果，避免 evidence 重复分析
-            layer_analysis = state.get("layer_analysis", "")
             if layer_analysis:
-                system_prompt += f"\n\n# 上游问题定位结果（已完成，不要重复分析）\n{layer_analysis}\n"
-                system_prompt += "\n请直接基于以上定位结果采集证据，不要重新分析问题或重新获取 runbook。\n"
+                system_prompt += f"\n\n# 上游问题定位结果（已完成，不要重复分析或重新获取 runbook）\n{layer_analysis}\n"
+                system_prompt += "\n请直接基于以上定位结果采集证据。如果上游分析中发现的实际问题与定位层级不符（例如上游发现 Pod 被驱逐是 L0 问题但定位为 L1），应按实际问题采集证据。\n"
 
             # 添加 entities 信息到 prompt
             if entities_str:

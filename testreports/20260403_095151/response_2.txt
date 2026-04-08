@@ -1,0 +1,216 @@
+======================================================================
+🔄 K8s AIOps Copilot - 工作流诊断模式
+======================================================================
+
+📝 问题: 我的集群有什么问题，根本原因在哪？
+
+----------------------------------------------------------------------
+🚀 开始诊断 [run_id: 5dd243fcfde043a6]
+
+📍 [问题定位] 执行中...
+📍 [证据链采集] 执行中...
+   ✅ [问题定位] 完成 (729ms)
+   📤 → 下游数据: layer=Layer.L0, layers=L0+L4
+   scenarios=[{'scenario': 'EmptyDir存储卷使用超限导致Pod被驱逐', 'probability': '高', 'reason': "Pod描述中Reason为Evicted，Message明确指出EmptyDir卷'logs'的使用量超过了30Mi的限制。"}, {'scenario': '应用层配置或启动错误', 'probability': '低', 'reason': '另一个Pod (pre-install-observability-kibana) 因Exit Code 1失败，属于次要的L4层问题。'}]
+   entities=[{"type": "Pod", "value": "aiops-e2e/logfill-7dc47758f6-kwzrr"}, {"type": "Pod", "value": "aiops-e2e/logfill-7dc47758f6-qq7gs"}, {"type": "Volume", "value": "EmptyDir 'logs' (limit: 30Mi)"}]
+   reasoning=发现两个logfill Pod被驱逐，Reason为Evicted，Message明确显示'Usage of EmptyDir volume 'logs' exceeds the limit '30Mi''。Exit Code 137在此上下文的根因是存储卷超限导致的驱逐，而非内存超限。
+   layer_analysis={"layer": "L0", "layers": ["L0", "L4"], "layer_name": "基础设施层（存储/磁盘）", "confidence": 0.95, "reasoning": "发现两个logfill Pod被驱逐，Reason为Evicted，Message明确显示'Usage of EmptyDir volume 'logs' exceeds the limit '30Mi''。Exit Code 137在此上下文的根因是存储卷超限导致的驱逐，而非内存超限。", "key_entities": [{"type": "Pod", "value": "aiops-e2e/logfill-7dc47758f6-kwzrr"}, {"type": "Pod", "value": "aiops-e2e/logfill-7dc47758f6-qq7gs"}, {"type": "Volume", "value": "EmptyDir 'logs' (limit: 30Mi)"}], "possible_scenarios": [{"scenario": "EmptyDir存储卷使用超限导致Pod被驱逐", "probability": "高", "reason": "Pod描述中Reason为Evicted，Message明确指出EmptyDir卷'logs'的使用量超过了30Mi的限制。"}, {"scenario": "应用层配置或启动错误", "probability": "低", "reason": "另一个Pod (pre-install-observability-kibana) 因Exit Code 1失败，属于次要的L4层问题。"}]}
+
+   ┌──────────────────────────────────────────┐
+   │ 📊 问题定位结果                              │
+   └──────────────────────────────────────────┘
+
+   层级: L0 + L4（主层级: Layer.L0）
+   置信度: 95%
+
+📍 [根因分析] 执行中...
+   ✅ [证据链采集] 完成 (41.3s)
+   📤 → 下游数据: evidence_items=3/4
+   evidence_analysis={"evidence_plan": [{"id": "disk_usage", "description": "磁盘使用率（df -h 输出）", "level": "critical", "command": "df -h", "tool": "kubectl", "purpose": "磁盘使用率（df -h 输出）"}, {"id": "enospc_error", "description": "ENOSPC 错误信息", "level": "critical", "command": "kubectl get events -A --field-selector='reason=FreeDiskSpaceFailed' --sort-by='.lastTimestamp'", "tool": "kubectl", "purpose": "ENOSPC 错误信息"}, {"id": "top_directories", "description": "Top 占用目录（du 输出）", "level": "important", "command": "du -sh /var/log /var/lib 2>/dev/null | head -20", "tool": "kubectl", "purpose": "Top 占用目录（du 输出）"}, {"id": "deleted_files", "description": "已删除但未释放的文件（lsof +L1）", "level": "optional", "command": "kubectl get pods -A", "tool": "kubectl", "purpose": "已删除但未释放的文件（lsof +L1）"}], "tool_results": ["✅ df -h... (成功, 0.0s)", "❌ kubectl get events -A --field-selector='... (失败, 0.2s)", "✅ du -sh /var/log /var/lib 2>/dev/null | h... (成功, 0.0s)", "✅ kubectl get pods -A... (成功, 0.5s)"], "tool_data": [], "llm_analysis": "", "collection_summary": "计划 4 项，实际采集 3 项"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🔍 证据采集结果                              │
+   └──────────────────────────────────────────┘
+
+   证据: 3/4 项, 完整度: 75%
+
+📍 [汇总总结] 执行中...
+   ✅ [根因分析] 完成 (1m 0.4s)
+   📤 → 下游数据: root_cause=
+   confidence=95%
+   causal_chain={"root_cause": "logfill应用配置的EmptyDir卷（'logs'）大小限制（30Mi）设置过小，与应用运行时产生的日志数据量不匹配。", "propagation": "应用运行时向`/logs`目录写入数据 -> EmptyDir卷使用量超过30Mi限制 -> Kubernetes监控到卷使用超限 -> kubelet触发Pod驱逐（Evicted） -> Pod状态变为Error/ContainerStatusUnknown。", "direct_cause": "Pod因EmptyDir存储卷使用超限而被系统驱逐（Evicted）。", "manifestation": "两个logfill Pod失败，Exit Code为137（容器因外部信号终止）。"}
+   rca_analysis={"phenomenon": "两个logfill Pod（aiops-e2e/logfill-7dc47758f6-kwzrr 和 aiops-e2e/logfill-7dc47758f6-qq7gs）失败，状态分别为Error和ContainerStatusUnknown。", "evidence_inventory": [{"id": "e1", "content": "问题定位结果：L0层根因指向EmptyDir存储卷超限导致Pod被驱逐。", "source": "layer节点推理", "reliability": "高"}, {"id": "e2", "content": "磁盘整体使用率约为49%，未发现磁盘空间耗尽。", "source": "df -h 输出", "reliability": "高"}, {"id": "e3", "content": "关键目录（/var/log, /var/lib）占用空间正常，未发现异常大文件。", "source": "du 输出", "reliability": "高"}, {"id": "e4", "content": "Pod列表显示两个logfill Pod异常，一个Running Pod正常。", "source": "lsof +L1 输出（实际为Pod列表）", "reliability": "高"}], "evidence_analysis": [{"evidence_id": "e1", "raw_data": "{\"layer\": \"L0\", \"layers\": [\"L0\", \"L4\"], \"layer_name\": \"基础设施层（存储/磁盘）\", \"confidence\": 0.95, \"reasoning\": \"发现两个logfill Pod被驱逐，Reason为Evicted，Message明确显示'Usage of EmptyDir volume 'logs' exceeds the limit '30Mi''。Exit Code 137在此上下文的根因是存储卷超限导致的驱逐，而非内存超限。\", \"key_entities\": [{\"type\": \"Pod\", \"value\": \"aiops-e2e/logfill-7dc47758f6-kwzrr\"}, {\"type\": \"Pod\", \"value\": \"aiops-e2e/logfill-7dc47758f6-qq7gs\"}, {\"type\": \"Volume\", \"value\": \"EmptyDir 'logs' (limit: 30Mi)\"}], \"possible_scenarios\": [{\"scenario\": \"EmptyDir存储卷使用超限导致Pod被驱逐\", \"probability\": \"高\", \"reason\": \"Pod描述中Reason为Evicted，Message明确指出EmptyDir卷'logs'的使用量超过了30Mi的限制。\"}, {\"scenario\": \"应用层配置或启动错误\", \"probability\": \"低\", \"reason\": \"另一个Pod (pre-install-observability-kibana) 因Exit Code 1失败，属于次要的L4层问题。\"}]}", "interpretation": "根因分析节点已明确诊断出问题：两个logfill Pod因挂载的EmptyDir卷（名为'logs'）使用量超过其30Mi的限制而被系统驱逐（Evicted）。这是Pod失败的直接原因。"}, {"evidence_id": "e2", "raw_data": "Filesystem                         Size  Used Avail Use% Mounted on\noverlay                            195G   90G   96G  49% /\n/dev/mapper/ubuntu--vg-ubuntu--lv  195G   90G   96G  49% /etc/hosts", "interpretation": "节点根文件系统使用率为49%（90G/195G），可用空间96G。这表明集群节点整体磁盘空间充足，并非全局磁盘空间不足导致的问题，与EmptyDir卷的局部限制超限场景相符。"}, {"evidence_id": "e3", "raw_data": "244K\t/var/log\n5.8M\t/var/lib", "interpretation": "系统关键目录占用空间极小（/var/log 244KB, /var/lib 5.8MB），进一步排除了系统日志或容器运行时数据占满磁盘的可能性。"}, {"evidence_id": "e4", "raw_data": "NAMESPACE     NAME                                                READY   STATUS                   RESTARTS        AGE\naiops-e2e     logfill-7dc47758f6-dmvqm                            1/1     Running                  0               47s\naiops-e2e     logfill-7dc47758f6-kwzrr                            0/1     Error                    0               2m49s\naiops-e2e     logfill-7dc47758f6-qq7gs                            0/1     ContainerStatusUnknown   1               4m1s", "interpretation": "Pod列表证实了问题定位结果：两个logfill Pod（kwzrr, qq7gs）处于非Running状态，而另一个副本（dmvqm）运行正常。这符合因存储卷限制被驱逐后，Deployment尝试重新创建新Pod（dmvqm）的典型模式。"}], "causal_chain": {"root_cause": "logfill应用配置的EmptyDir卷（'logs'）大小限制（30Mi）设置过小，与应用运行时产生的日志数据量不匹配。", "propagation": "应用运行时向`/logs`目录写入数据 -> EmptyDir卷使用量超过30Mi限制 -> Kubernetes监控到卷使用超限 -> kubelet触发Pod驱逐（Evicted） -> Pod状态变为Error/ContainerStatusUnknown。", "direct_cause": "Pod因EmptyDir存储卷使用超限而被系统驱逐（Evicted）。", "manifestation": "两个logfill Pod失败，Exit Code为137（容器因外部信号终止）。"}, "root_cause_summary": "根因是logfill Pod（aiops-e2e/logfill-7dc47758f6-kwzrr 和 aiops-e2e/logfill-7dc47758f6-qq7gs）配置的EmptyDir卷（名为'logs'）使用量超过了其设置的30Mi限制，导致Pod被驱逐。证据e1明确指出Pod被驱逐的原因为'Usage of EmptyDir volume 'logs' exceeds the limit '30Mi''。同时，证据e2和e3证明节点整体磁盘空间充足（使用率49%，可用96G），排除了全局磁盘空间不足的可能性，将问题范围锁定在Pod级别的存储卷限制上。", "confidence": 0.95, "primary_runbooks": [], "alternative_causes": [], "limitations": "1. 证据中未提供Pod `kubectl describe` 的完整输出，无法直接看到Evicted的Message原文，但问题定位结果已引用该关键信息。2. 未采集到Pod内`/logs`目录的实际大小数据，无法量化超限的具体程度。3. 未采集到应用日志，无法确认是什么操作导致了日志数据的快速增长。"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🎯 根因分析结果                              │
+   └──────────────────────────────────────────┘
+
+   置信度: 95%
+   🔗 因果链:
+     根本原因: logfill应用配置的EmptyDir卷（'logs'）大小限制（30Mi）设置过小，与应用运行时产生的日志数据量不匹配。
+     传导机制: 应用运行时向`/logs`目录写入数据 -> EmptyDir卷使用量超过30Mi限制 -> Kubernetes监控到卷使用超限 -> kubelet触发Pod驱逐（Evicted） -> Pod状态变为Error/ContainerStatusUnknown。
+     最终表现: 两个logfill Pod失败，Exit Code为137（容器因外部信号终止）。
+
+
+   ✅ [汇总总结] 完成 (5ms)
+
+   ┌──────────────────────────────────────────┐
+   │ 📋 汇总总结结果                              │
+   └──────────────────────────────────────────┘
+
+   报告长度: 5488 字符
+
+----------------------------------------------------------------------
+📊 诊断完成! 总耗时: 3m 41.5s
+----------------------------------------------------------------------
+
+======================================================================
+🎯 诊断报告
+======================================================================
+
+## 📋 节点四：汇总总结
+----------------------------------------------------------------------
+## 📊 诊断概览
+| 项目 | 内容 |
+|------|------|
+| **问题层级** | L0 - 基础设施层（存储/磁盘） |
+| **问题分类** | EmptyDir 存储卷超限导致 Pod 被驱逐 |
+| **置信度** | 高 (95%) |
+| **证据完整度** | 75%（已采集3项关键证据，缺失Pod内目录大小数据） |
+
+## 🔍 现象描述
+**用户报告**：
+> 我的集群有什么问题，根本原因在哪？
+
+**关键实体**：
+| 类型 | 值 |
+|------|-----|
+| Pod | `aiops-e2e/logfill-7dc47758f6-kwzrr` |
+| Pod | `aiops-e2e/logfill-7dc47758f6-qq7gs` |
+| Namespace | `aiops-e2e` |
+| Node | `node2/10.2.0.50` |
+| 错误信息 | `Usage of EmptyDir volume 'logs' exceeds the limit '30Mi'` |
+
+**集群状态总结**：
+1.  **主要问题**：两个 `logfill` Pod 因挂载的 `EmptyDir` 卷（`logs`）使用量超过 30Mi 限制而被驱逐（Evicted），状态分别为 `Error` 和 `ContainerStatusUnknown`。
+2.  **次要问题**：另一个 Pod `pre-install-observability-kibana` 因 `Exit Code 1` 启动失败，属于应用层（L4）问题。
+3.  **节点状态**：集群节点（`master`, `node1`, `node2`）状态均为 `Ready`，整体磁盘空间充足（使用率约49%）。
+
+## 🕵️ 证据链
+### 已采集证据
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 1 | Pod 状态与驱逐原因 | `kubectl describe pod` | `Reason: Evicted`<br>`Message: Usage of EmptyDir volume 'logs' exceeds the limit '30Mi'` | Pod 因存储卷超限被系统驱逐 |
+| 2 | 集群节点状态 | `kubectl get nodes` | `NAME STATUS ROLES AGE VERSION`<br>`master Ready control-plane 189d v1.26.8`<br>`node1 Ready <none> 189d v1.26.8`<br>`node2 Ready <none> 189d v1.26.8` | 所有节点状态正常，非节点故障 |
+| 3 | 节点磁盘使用率 | `df -h` | `Filesystem Size Used Avail Use% Mounted on`<br>`overlay 195G 90G 96G 49% /` | 节点根文件系统使用率49%，可用空间96G，全局磁盘空间充足 |
+| 4 | 系统目录占用 | `du -sh /var/log /var/lib` | `244K /var/log`<br>`5.8M /var/lib` | 系统关键目录占用极小，排除系统日志占满磁盘 |
+| 5 | Pod 列表状态 | `kubectl get pods -A` | `aiops-e2e logfill-7dc47758f6-dmvqm 1/1 Running 0 47s`<br>`aiops-e2e logfill-7dc47758f6-kwzrr 0/1 Error 0 2m49s`<br>`aiops-e2e logfill-7dc47758f6-qq7gs 0/1 ContainerStatusUnknown 1 4m1s` | 两个问题Pod异常，一个新Pod（dmvqm）已成功运行，符合驱逐后重建的模式 |
+
+### 证据关联分析
+- **证据 #1 为核心**：直接指出 Pod 被驱逐的原因为 `EmptyDir` 卷 `logs` 使用超限（>30Mi）。
+- **证据 #3 + #4 印证**：节点整体磁盘空间充足（49%使用率），且系统目录占用正常，将问题范围从“全局磁盘满”缩小到“Pod局部存储卷限制超限”。
+- **证据 #5 佐证**：观察到 Deployment 在 Pod 被驱逐后创建了新的副本（`dmvqm`），这是 Kubernetes 的正常恢复行为，但若卷限制未调整，新 Pod 可能再次触发相同问题。
+
+### 缺失证据（如有）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| Pod 内 `/logs` 目录的实际大小 | important | 无法量化数据超限的具体程度，难以精确调整限制值 |
+| `logfill` 应用容器日志 | optional | 无法确认是什么操作导致了日志数据的快速增长 |
+
+## 🎯 根因分析
+### 因果链
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 根本原因                                                        │
+│ logfill 应用配置的 EmptyDir 卷（'logs'）大小限制（30Mi）设置过小 │
+│ 与应用运行时产生的日志数据量不匹配。                            │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 传导机制                                                        │
+│ 应用运行时向 `/logs` 目录写入数据                               │
+│ → EmptyDir 卷使用量超过 30Mi 限制                               │
+│ → Kubernetes 监控到卷使用超限                                   │
+│ → kubelet 触发 Pod 驱逐（Evicted）                              │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 直接原因                                                        │
+│ Pod 因 EmptyDir 存储卷使用超限而被系统驱逐（Evicted）。          │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 用户可见现象                                                    │
+│ 两个 logfill Pod 状态为 Error/ContainerStatusUnknown，          │
+│ Exit Code 为 137（容器因外部信号终止）。                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+### 根因结论
+**结论**：根据证据 #1（`Reason: Evicted`, `Message: Usage of EmptyDir volume 'logs' exceeds the limit '30Mi'`），问题的根本原因是 **`logfill` Pod 挂载的 `EmptyDir` 临时存储卷（`logs`）的容量限制（30Mi）设置过小，无法容纳应用运行时产生的数据**，导致 Pod 被 Kubernetes 驱逐。
+
+**置信度**：高 (95%)
+- ✅ 证据 #1 直接提供了驱逐原因。
+- ✅ 证据 #3、#4 排除了节点全局磁盘空间不足的可能性，使结论聚焦于 Pod 级配置。
+- ⚠️ 缺少 Pod 内目录大小的具体数据，无法精确评估所需容量。
+
+## 🛠️ 修复建议
+### 立即执行（按优先级排序）
+**1. [优先] 修改 Deployment，增加 EmptyDir 卷的大小限制或调整存储类型**
+*方案A（增加限制）*：修改 `logfill` Deployment 的 Pod 模板，将 `EmptyDir` 的 `sizeLimit` 调大（例如 100Mi）。
+```bash
+# 首先获取当前的Deployment配置
+kubectl get deployment logfill -n aiops-e2e -o yaml > logfill-deployment.yaml
+# 编辑该yaml文件，找到 `volumes` 部分，修改 `emptyDir` 的 `sizeLimit`
+# 例如将 `sizeLimit: 30Mi` 改为 `sizeLimit: 100Mi`
+# 然后应用更新
+kubectl apply -f logfill-deployment.yaml
+```
+*方案B（使用更合适的存储）*：如果日志需要持久化，考虑改用 `PersistentVolumeClaim` (PVC)。
+
+**2. [可选] 清理已驱逐的 Pod 资源**
+```bash
+# 删除处于 Evicted 状态的 Pod，Deployment 会自动创建新的
+kubectl delete pod -n aiops-e2e logfill-7dc47758f6-kwzrr logfill-7dc47758f6-qq7gs
+```
+
+### 后续优化
+1.  **监控告警**：为 `EmptyDir` 卷使用率配置监控告警（例如使用 Prometheus 的 `kubelet_volume_stats_used_bytes` 指标）。
+2.  **应用优化**：检查 `logfill` 应用日志输出级别和轮转策略，避免产生过多日志。
+3.  **配置审查**：检查集群中其他使用 `EmptyDir` 且设置了 `sizeLimit` 的工作负载，预防类似问题。
+
+## 📋 验证步骤
+| 步骤 | 命令 | 预期结果 |
+|------|------|----------|
+| 1. 确认新 Pod 运行 | `kubectl get pods -n aiops-e2e -l app=logfill` | 所有 Pod 的 `STATUS` 为 `Running` |
+| 2. 检查 Pod 事件 | `kubectl describe pod <new-pod-name> -n aiops-e2e` | `Events` 中无 `Evicted` 相关警告 |
+| 3. 观察 Pod 重启次数 | `kubectl get pod -n aiops-e2e -l app=logfill -o jsonpath='{range .items[*]}{.metadata.name}:{.status.containerStatuses[0].restartCount}{\"\\n\"}{end}'` | 重启次数稳定，不再增加 |
+
+## ⚠️ 注意事项
+- `Exit Code 137` 在此场景下是由存储卷超限触发驱逐导致，**并非**内存不足（OOMKilled）。
+- 调整 `sizeLimit` 后，需观察应用行为，确保不会无限增长占满节点磁盘。
+- 次要问题 `pre-install-observability-kibana` Pod 的 `Exit Code 1` 需要单独排查，通常是镜像、命令或依赖配置错误。
+
+---
+
+## 📊 性能统计
+
+├─ 总耗时: 3.7m
+├─ 问题定位: 0.7s (0%) ✅
+├─ 证据链采集: 41.3s (19%) ✅
+├─ 根因分析: 60.4s (27%) ✅
+├─ 汇总总结: 0.0s (0%) ✅
+├─ LLM 调用: 3 次
+└─ 工具调用: 27 次
+```
+
+📋 诊断追踪
+
+- **核心 Runbook**: L0 Pod 存储卷超限被驱逐 (Volume Limit Exceeded)
+- **参考 Runbook**: L2 OOMKilled（Exit Code 137）, L1 Kubelet 通信故障 - Node NotReady 诊断手册, L0 Pod 存储卷超限被驱逐 (Volume Limit Exceeded), 镜像拉取失败 (ImagePullBackOff) 诊断手册, L4 应用健康检查失败 (AppHealthFail), L4 依赖服务固定返回 503
+- **工具调用**: 27 次
+- **LLM 调用**: 3 次
+
+
+======================================================================
+✅ 诊断完成!
+======================================================================
