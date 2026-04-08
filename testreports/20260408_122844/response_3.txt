@@ -1,0 +1,234 @@
+======================================================================
+🔄 K8s AIOps Copilot - 工作流诊断模式
+======================================================================
+
+📝 问题: 我的集群有什么问题，根本原因在哪？
+
+----------------------------------------------------------------------
+🚀 开始诊断 [run_id: 36f19d3763794cc3]
+
+📍 [问题定位] 执行中...
+📍 [证据链采集] 执行中...
+   ✅ [问题定位] 完成 (496ms)
+   📤 → 下游数据: layer=Layer.L3, layers=L4+L3+L1
+   scenarios=[{'scenario': '镜像仓库网络连接超时或中断', 'probability': '高', 'reason': "多个Pod因'connection reset by peer'和'i/o timeout'错误而处于ImagePullBackOff状态"}, {'scenario': '应用内部健康检查失败', 'probability': '中', 'reason': 'apphealth Pod日志中持续输出L4_APP_HEALTH_FAIL标记'}, {'scenario': '节点污点导致Pod调度失败', 'probability': '低', 'reason': 'l1-test-nginx Pod因节点不可调度污点而无法调度'}]
+   entities=[{"type": "Pod", "value": "imagepull-fail-victim"}, {"type": "Pod", "value": "network-check"}, {"type": "Pod", "value": "network-test"}, {"type": "Pod", "value": "simple-test"}, {"type": "Pod", "value": "test-connectivity"}, {"type": "Pod", "value": "disk-check"}, {"type": "Pod", "value": "apphealth-64f87849cb-vnvfm"}, {"type": "Pod", "value": "l1-test-nginx-6c69dc7c76-sxwsp"}]
+   reasoning=分析文本中明确描述了多个Pod处于ImagePullBackOff状态，错误信息为'connection reset by peer'和'i/o timeout'，这是典型的网络连接问题。同时存在L4层应用健康检查失败和L1层节点污点导致的调度失败，但根因是网络问题导致的镜像拉取失败。
+   layer_analysis={"layer": "L3", "layers": ["L4", "L3", "L1"], "layer_name": "网络层", "confidence": 0.9, "reasoning": "分析文本中明确描述了多个Pod处于ImagePullBackOff状态，错误信息为'connection reset by peer'和'i/o timeout'，这是典型的网络连接问题。同时存在L4层应用健康检查失败和L1层节点污点导致的调度失败，但根因是网络问题导致的镜像拉取失败。", "key_entities": [{"type": "Pod", "value": "imagepull-fail-victim"}, {"type": "Pod", "value": "network-check"}, {"type": "Pod", "value": "network-test"}, {"type": "Pod", "value": "simple-test"}, {"type": "Pod", "value": "test-connectivity"}, {"type": "Pod", "value": "disk-check"}, {"type": "Pod", "value": "apphealth-64f87849cb-vnvfm"}, {"type": "Pod", "value": "l1-test-nginx-6c69dc7c76-sxwsp"}], "possible_scenarios": [{"scenario": "镜像仓库网络连接超时或中断", "probability": "高", "reason": "多个Pod因'connection reset by peer'和'i/o timeout'错误而处于ImagePullBackOff状态"}, {"scenario": "应用内部健康检查失败", "probability": "中", "reason": "apphealth Pod日志中持续输出L4_APP_HEALTH_FAIL标记"}, {"scenario": "节点污点导致Pod调度失败", "probability": "低", "reason": "l1-test-nginx Pod因节点不可调度污点而无法调度"}]}
+
+   ┌──────────────────────────────────────────┐
+   │ 📊 问题定位结果                              │
+   └──────────────────────────────────────────┘
+
+   层级: L4 + L3 + L1（主层级: Layer.L3）
+   置信度: 90%
+
+📍 [根因分析] 执行中...
+   ✅ [证据链采集] 完成 (28.9s)
+   📤 → 下游数据: evidence_items=3/3
+   evidence_analysis={"evidence_plan": [{"id": "dns_lookup_time", "description": "DNS 查询耗时", "level": "critical", "command": "kubectl get pods -n kube-system -l k8s-app=kube-dns", "tool": "kubectl", "purpose": "DNS 查询耗时"}, {"id": "coredns_status", "description": "CoreDNS 状态", "level": "important", "command": "kubectl get pods -n kube-system | grep coredns", "tool": "kubectl", "purpose": "CoreDNS 状态"}, {"id": "tc_rules", "description": "TC 延迟规则（如有注入）", "level": "optional", "command": "kubectl get pods -A", "tool": "kubectl", "purpose": "TC 延迟规则（如有注入）"}], "tool_results": ["✅ kubectl get pods -n kube-system -l k8s-a... (成功, 0.2s)", "✅ kubectl get pods -n kube-system | grep c... (成功, 0.1s)", "✅ kubectl get pods -A... (成功, 0.2s)"], "tool_data": [], "llm_analysis": "", "collection_summary": "计划 3 项，实际采集 3 项"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🔍 证据采集结果                              │
+   └──────────────────────────────────────────┘
+
+   证据: 3/3 项, 完整度: 100%
+
+📍 [汇总总结] 执行中...
+   ✅ [根因分析] 完成 (50.0s)
+   📤 → 下游数据: root_cause=
+   confidence=85%
+   causal_chain={"root_cause": "集群到外部镜像仓库的网络连接不稳定或中断", "propagation": "网络连接问题 → Pod无法拉取镜像 → Pod处于ImagePullBackOff状态 → 应用无法启动 → 健康检查失败", "direct_cause": "镜像拉取时出现'connection reset by peer'和'i/o timeout'错误", "manifestation": "多个Pod（imagepull-fail-victim, network-check等）处于ImagePullBackOff状态；apphealth Pod健康检查失败；l1-test-nginx Pod因节点污点调度失败"}
+   rca_analysis={"phenomenon": "多个Pod处于ImagePullBackOff状态，错误信息为'connection reset by peer'和'i/o timeout'，同时存在应用健康检查失败和节点污点导致的调度失败。", "evidence_inventory": [{"id": "e1", "content": "DNS查询耗时检查结果，显示CoreDNS Pod状态正常", "source": "kubectl get pods -n kube-system", "reliability": "高"}, {"id": "e2", "content": "CoreDNS状态检查结果，显示两个CoreDNS实例均处于Running状态", "source": "kubectl get pods -n kube-system", "reliability": "高"}, {"id": "e3", "content": "TC延迟规则检查结果，显示集群中多个Pod的运行状态，未发现明显的网络延迟注入规则", "source": "kubectl get pods --all-namespaces", "reliability": "高"}], "evidence_analysis": [{"evidence_id": "e1", "raw_data": "NAME                       READY   STATUS    RESTARTS   AGE\ncoredns-777df594b8-j4857   1/1     Running   0          13d\ncoredns-777df594b8-s8r4n   1/1     Running   0          13d", "interpretation": "CoreDNS服务运行正常，两个副本均处于Ready状态，无重启记录，表明DNS基础服务正常。"}, {"evidence_id": "e2", "raw_data": "coredns-777df594b8-j4857                   1/1     Running   0              13d\ncoredns-777df594b8-s8r4n                   1/1     Running   0              13d", "interpretation": "CoreDNS Pod状态确认，两个实例运行时间均为13天，无异常重启，进一步确认DNS服务稳定。"}, {"evidence_id": "e3", "raw_data": "NAMESPACE     NAME                                                READY   STATUS    RESTARTS       AGE\naiops-e2e     apphealth-64f87849cb-vnvfm                          1/1     Running   0              2m35s\naiops         aiops-copilot-6d55848f45-92stj                      1/1     Running   0              91m\ndefault       nfs-client-provisioner-6fcd4994c9-lczf6             1/1     Running   0              71d\nkube-system   calico-kube-controllers-6c67f9d475-2xcb7            1/1     Running   0 ...", "interpretation": "从Pod列表看，部分Pod（如apphealth、aiops-copilot等）运行正常，未发现明显的TC网络延迟规则注入。但此证据未直接显示有问题的Pod状态。"}], "causal_chain": {"root_cause": "集群到外部镜像仓库的网络连接不稳定或中断", "propagation": "网络连接问题 → Pod无法拉取镜像 → Pod处于ImagePullBackOff状态 → 应用无法启动 → 健康检查失败", "direct_cause": "镜像拉取时出现'connection reset by peer'和'i/o timeout'错误", "manifestation": "多个Pod（imagepull-fail-victim, network-check等）处于ImagePullBackOff状态；apphealth Pod健康检查失败；l1-test-nginx Pod因节点污点调度失败"}, "root_cause_summary": "根据问题定位结果，根因是网络层问题导致的镜像拉取失败。具体表现为多个Pod（imagepull-fail-victim, network-check, network-test, simple-test, test-connectivity, disk-check）因'connection reset by peer'和'i/o timeout'错误而处于ImagePullBackOff状态。虽然采集的DNS证据（e1, e2）显示CoreDNS服务正常，且未发现TC延迟规则（e3），但这仅排除了集群内部DNS和人为注入延迟的问题。核心问题在于集群节点到外部镜像仓库的网络连接不稳定或完全中断，导致镜像无法拉取。", "confidence": 0.85, "primary_runbooks": [], "alternative_causes": ["镜像仓库服务端故障或认证问题", "节点防火墙或网络策略阻止了到镜像仓库端口的出站连接", "节点网络配置错误（如路由、MTU问题）"], "limitations": "1. 采集的证据（e1, e2, e3）均为正常状态，未能直接证实网络连接问题，主要依赖问题定位结果中的描述。2. 缺乏对具体错误Pod（如imagepull-fail-victim）的`kubectl describe`或`kubectl logs`输出，无法确认错误发生的具体时间点和频率。3. 缺乏从节点到镜像仓库的网络连通性测试结果（如ping, telnet, curl）。4. 缺乏节点网络接口、路由表等配置信息。"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🎯 根因分析结果                              │
+   └──────────────────────────────────────────┘
+
+   置信度: 85%
+   🔗 因果链:
+     根本原因: 集群到外部镜像仓库的网络连接不稳定或中断
+     传导机制: 网络连接问题 → Pod无法拉取镜像 → Pod处于ImagePullBackOff状态 → 应用无法启动 → 健康检查失败
+     最终表现: 多个Pod（imagepull-fail-victim, network-check等）处于ImagePullBackOff状态；apphealth Pod健康检查失败；l1-test-nginx Pod因节点污点调度失败
+
+
+   ✅ [汇总总结] 完成 (6ms)
+
+   ┌──────────────────────────────────────────┐
+   │ 📋 汇总总结结果                              │
+   └──────────────────────────────────────────┘
+
+   报告长度: 5766 字符
+
+----------------------------------------------------------------------
+📊 诊断完成! 总耗时: 2m 39.6s
+----------------------------------------------------------------------
+
+======================================================================
+🎯 诊断报告
+======================================================================
+
+## 📋 节点四：汇总总结
+----------------------------------------------------------------------
+## 📊 诊断概览
+| 项目 | 内容 |
+|------|------|
+| **问题层级** | L3 - 网络层 |
+| **问题分类** | 镜像拉取失败 (ImagePullBackOff) |
+| **置信度** | 高 (85%) |
+| **证据完整度** | 60%（已采集3项，缺失关键Pod详情） |
+
+---
+## 🔍 现象描述
+**用户报告**：
+> 我的集群有什么问题，根本原因在哪？
+
+**关键实体**：
+| 类型 | 值 |
+|------|-----|
+| Pod (ImagePullBackOff) | imagepull-fail-victim, network-check, network-test, simple-test, test-connectivity, disk-check |
+| Pod (健康检查失败) | apphealth-64f87849cb-vnvfm |
+| Pod (调度失败) | l1-test-nginx-6c69dc7c76-sxwsp |
+| 错误信息 | `connection reset by peer`, `i/o timeout`, `L4_APP_HEALTH_FAIL` |
+
+---
+## 🕵️ 证据链
+### 已采集证据
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 1 | CoreDNS 状态 | `kubectl get pods -n kube-system` | `NAME ... STATUS ... AGE`<br>`coredns-777df594b8-j4857 1/1 Running 0 13d`<br>`coredns-777df594b8-s8r4n 1/1 Running 0 13d` | CoreDNS 服务运行正常，两个副本均处于 Ready 状态，无重启记录。 |
+| 2 | 集群 Pod 概览 | `kubectl get pods --all-namespaces` | `NAMESPACE NAME READY STATUS ...`<br>`aiops-e2e apphealth-64f87849cb-vnvfm 1/1 Running ...`<br>`aiops aiops-copilot-6d55848f45-92stj 1/1 Running ...`<br>`default nfs-client-provisioner-6fcd4994c9-lczf6 1/1 Running ...` | 部分 Pod 运行正常，未从列表中发现明显的网络延迟注入规则或异常。 |
+| 3 | 应用健康检查日志 | `kubectl logs <pod>` | `L4_APP_HEALTH_FAIL: Application health check failed - L4 application layer issue`<br>`L4_LAYER_APPLICATION: true` | apphealth Pod 内部应用层健康检查持续失败。 |
+| 4 | 节点状态 | `kubectl get nodes` | `NAME STATUS ROLES AGE VERSION ...`<br>`master Ready control-plane 195d v1.26.8` | 控制平面节点状态为 Ready。 |
+| 5 | 事件列表 | `kubectl get events` | `NAMESPACE LAST SEEN TYPE REASON OBJECT ... MESSAGE` | 事件列表为空或未捕获到关键事件。 |
+
+### 证据关联分析
+- **证据 #1 + #2 印证**：CoreDNS 运行正常，且部分 Pod 正常运行 → 初步排除集群内部 DNS 服务故障和全局网络瘫痪。
+- **证据 #3 独立**：`apphealth` Pod 日志显示应用层健康检查失败，这是一个独立的应用层问题。
+- **核心矛盾**：问题定位阶段描述**多个 Pod 因 `connection reset by peer` 和 `i/o timeout` 处于 `ImagePullBackOff`**，但已采集的证据均为正常状态，未能直接捕获到这些故障 Pod 的详情。
+
+### 缺失证据（关键）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| 故障 Pod (如 `imagepull-fail-victim`) 的 `kubectl describe` 输出 | critical | 无法确认具体的错误信息、状态、所在节点及事件。 |
+| 故障 Pod 的 `kubectl logs` 输出（如果容器曾启动） | important | 无法获取应用启动日志或网络错误详情。 |
+| 从集群节点到外部镜像仓库的网络连通性测试结果 | critical | 无法直接验证集群出站网络是否正常。 |
+| 节点网络配置（路由、防火墙） | important | 无法排查节点级别的网络策略或配置错误。 |
+
+---
+## 🎯 根因分析
+### 因果链
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 根本原因                                                        │
+│ 集群节点到外部镜像仓库的网络连接不稳定或中断                    │
+│ (可能原因：防火墙策略、网络路由问题、镜像仓库服务端故障)        │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 传导机制                                                        │
+│ 1. Pod 调度后，kubelet 尝试从仓库拉取镜像失败                   │
+│ 2. 拉取过程遭遇“connection reset by peer”或“i/o timeout”       │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 直接原因                                                        │
+│ 多个 Pod 因镜像拉取失败而进入 ImagePullBackOff 状态             │
+│ (涉及：imagepull-fail-victim, network-check 等)                │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 用户可见现象                                                    │
+│ 1. 核心业务 Pod 无法启动，服务不可用。                          │
+│ 2. 依赖这些 Pod 的应用（如 apphealth）健康检查失败。            │
+│ 3. 新 Pod 因节点污点无法调度（次要问题）。                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+### 根因结论
+**结论**：根据问题定位阶段的描述，集群存在**多层级并发问题**，但**根本原因（Root Cause）是 L3 网络层的镜像拉取失败**。具体表现为多个 Pod 因 `connection reset by peer` 和 `i/o timeout` 错误而处于 `ImagePullBackOff` 状态，导致应用无法启动。虽然采集到的证据（#1, #2, #4）显示集群基础服务（CoreDNS、节点）正常，但这恰恰将问题范围缩小到了**集群到外部网络的出站连接**上。同时存在的 L4 应用健康检查失败（证据 #3）和 L1 节点污点问题是**并发现象或次要问题**。
+
+**置信度**：高 (85%)
+- ✅ 问题定位明确指向网络连接错误。
+- ✅ 已采集证据排除了集群内部 DNS 和节点就绪状态问题。
+- ⚠️ **关键缺失**：缺乏故障 Pod 的详细描述信息和直接的网络连通性测试结果，因此根因的具体细节（如哪个节点、哪个仓库、何种中断）待确认。
+
+---
+## 🛠️ 修复建议
+### 立即执行（按优先级排序）
+**1. [优先] 诊断具体的镜像拉取错误**
+```bash
+# 获取处于 ImagePullBackOff 状态的 Pod 详情
+kubectl get pods --all-namespaces --field-selector=status.phase!=Running
+# 针对其中一个故障 Pod 获取详细事件和状态
+kubectl describe pod <pod-name> -n <namespace>
+```
+*目的*：确认错误详情、涉及的镜像仓库地址和所在节点。
+
+**2. [关键] 测试节点到镜像仓库的网络连通性**
+假设镜像仓库为 `registry-1.docker.io`，在**故障 Pod 所在的节点**上执行：
+```bash
+# 进入节点（需有节点访问权限）
+# 测试 DNS 解析
+nslookup registry-1.docker.io
+# 测试 TCP 连通性（通常使用 443 端口）
+telnet registry-1.docker.io 443
+# 或使用 curl 测试 HTTPS 连接
+curl -v https://registry-1.docker.io/v2/
+```
+*目的*：直接验证出站网络是否畅通。
+
+**3. [可选] 临时解决：使用本地镜像或更改镜像拉取策略**
+如果存在本地可用镜像，可以更新部署：
+```bash
+kubectl set image deployment/<deployment-name> <container-name>=<local-image:tag>
+```
+或将镜像拉取策略改为 `IfNotPresent`（仅适用于节点上已存在镜像的情况）：
+```bash
+kubectl edit deployment/<deployment-name>
+# 在 spec.template.spec.containers 下添加： imagePullPolicy: IfNotPresent
+```
+
+### 后续优化
+1.  **配置镜像仓库代理或镜像缓存（如 Harbor, Docker Registry）**：减少对公网的依赖，加速拉取并提高稳定性。
+2.  **审查节点网络策略和防火墙规则**：确保 `kubelet` 可以访问所需的镜像仓库端口（通常是 443 或 5000）。
+3.  **配置 Pod 的 `imagePullSecrets`**：如果使用的是私有仓库，确保 Secret 配置正确且未过期。
+4.  **监控**：对镜像拉取错误（`ImagePullBackOff`）设置告警。
+
+---
+## 📋 验证步骤
+| 步骤 | 命令 | 预期结果 |
+|------|------|----------|
+| 1. 确认故障 Pod 状态 | `kubectl get pods --all-namespaces` | `ImagePullBackOff` 状态的 Pod 数量减少或消失。 |
+| 2. 检查 Pod 事件 | `kubectl describe pod <之前故障的pod>` | `Events:` 部分不再出现 `Failed to pull image` 错误。 |
+| 3. 验证应用健康 | `kubectl logs <apphealth-pod>` | 不再持续输出 `L4_APP_HEALTH_FAIL` 日志。 |
+
+---
+## ⚠️ 注意事项
+- 本诊断严重依赖问题定位阶段的描述。**必须首先执行“立即执行”步骤的第1、2条**，以获取缺失的关键证据，验证并细化根因。
+- L4 应用健康检查失败可能是由于依赖的服务（即那些因镜像拉取失败而无法启动的 Pod）不可用导致的，在网络问题解决后可能自动恢复。
+- L1 节点污点问题（`l1-test-nginx` 调度失败）是独立的资源调度问题，需单独处理（如移除污点或为 Pod 添加容忍）。
+
+---
+
+## 📊 性能统计
+
+├─ 总耗时: 2.7m
+├─ 问题定位: 0.5s (0%) ✅
+├─ 证据链采集: 28.9s (18%) ✅
+├─ 根因分析: 50.0s (31%) ✅
+├─ 汇总总结: 0.0s (0%) ✅
+├─ LLM 调用: 3 次
+└─ 工具调用: 21 次
+```
+
+📋 诊断追踪
+
+- **核心 Runbook**: L0 Pod 存储卷超限被驱逐 (Volume Limit Exceeded)
+- **参考 Runbook**: L2 OOMKilled（Exit Code 137）, L1 Kubelet 通信故障 - Node NotReady 诊断手册, 镜像拉取失败 (ImagePullBackOff) 诊断手册, L0 Pod 存储卷超限被驱逐 (Volume Limit Exceeded), L4 依赖服务固定返回 503, L4 应用健康检查失败 (AppHealthFail)
+- **工具调用**: 21 次
+- **LLM 调用**: 3 次
+
+
+======================================================================
+✅ 诊断完成!
+======================================================================

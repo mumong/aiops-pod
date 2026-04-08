@@ -54,7 +54,7 @@ def build_diagnosis_workflow(
     metrics: Any = None,
     runbook_catalog: Any = None,
     node_config: Optional[Dict[str, bool]] = None,
-) -> StateGraph:
+) -> tuple:
     """
     构建诊断工作流图（支持节点启用/禁用）
 
@@ -65,7 +65,7 @@ def build_diagnosis_workflow(
         node_config: 节点启用配置，如 {"layer": False, "rca": False}
 
     Returns:
-        编译后的工作流图
+        (compiled_workflow, node_instances) — 编译后的工作流图 + 节点实例列表
     """
     enabled = _get_enabled_nodes(node_config)
     logger.info(f"🔧 工作流节点: {' → '.join(enabled)}")
@@ -73,9 +73,11 @@ def build_diagnosis_workflow(
     workflow = StateGraph(WorkflowState)
 
     # 创建并添加启用的节点
+    node_instances = []
     for node_id in enabled:
         cls, display_name = NODE_REGISTRY[node_id]
         node = cls(holmes_service, metrics, runbook_catalog)
+        node_instances.append(node)
         workflow.add_node(node_id, node.execute)
 
     # 设置入口点
@@ -99,7 +101,7 @@ def build_diagnosis_workflow(
     # 终点
     workflow.add_edge(enabled[-1], END)
 
-    return workflow.compile()
+    return workflow.compile(), node_instances
 
 
 def _make_layer_router(enabled: list):
