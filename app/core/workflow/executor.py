@@ -75,8 +75,10 @@ class WorkflowExecutor:
 
             reports_dir.mkdir(parents=True, exist_ok=True)
 
-            # 层级前缀
-            layer_str = layer.value if hasattr(layer, "value") else str(layer or "UNKNOWN")
+            # 从报告文本中提取实际层级（conclusion 节点的判断比 layer 节点更准确）
+            layer_str = self._extract_layer_from_report(full_answer)
+            if not layer_str:
+                layer_str = layer.value if hasattr(layer, "value") else str(layer or "UNKNOWN")
             logger.info(f"📄 [报告保存] 层级: {layer_str}, 问题: {question[:50]}")
 
             # 从问题中提取摘要（去掉特殊字符，截取前30字符）
@@ -97,6 +99,19 @@ class WorkflowExecutor:
             logger.error(f"❌ [报告保存] 文件系统错误: {e} (目录: {self.REPORTS_DIR})")
         except Exception as e:
             logger.error(f"❌ [报告保存] 未知错误: {type(e).__name__}: {e}", exc_info=True)
+
+    @staticmethod
+    def _extract_layer_from_report(text: str) -> str:
+        """从报告文本中提取实际层级（优先用 conclusion 的判断）"""
+        # 方法1: 表格格式 "| **问题层级** | L0 - xxx |"
+        m = re.search(r'\|\s*\*{0,2}问题层级\*{0,2}\s*\|\s*\*{0,2}\s*(L[0-4]|QUERY)', text, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        # 方法2: "**层级**: L0" 或 "- **层级**: L0" 或 "层级: L0"
+        m = re.search(r'\*{0,2}层级\*{0,2}[：:\s]*\*{0,2}\s*(L[0-4]|QUERY)', text, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        return ""
 
     def execute_stream(
         self,
@@ -129,8 +144,12 @@ class WorkflowExecutor:
 
         # 延迟构建 workflow：此时 metrics 已就绪，节点可拿到正确实例
         if self.workflow is None:
+            # 从 workflow_config 读取节点启用配置
+            wf_config = getattr(self.holmes_service, "workflow_config", {}) or {}
+            node_config = wf_config.get("nodes", {})
             self.workflow = build_diagnosis_workflow(
-                self.holmes_service, metrics, self.runbook_catalog
+                self.holmes_service, metrics, self.runbook_catalog,
+                node_config=node_config,
             )
 
         total_start = time.time()
@@ -143,6 +162,7 @@ class WorkflowExecutor:
             "question": question,
             "run_id": run_id,
             "layer": None,
+            "layers": [],
             "layer_confidence": None,
             "layer_reasoning": None,
             "layer_analysis": None,
@@ -472,8 +492,10 @@ class WorkflowExecutor:
         snapshot = {}
 
         if node_name == "layer":
+            layers = state.get("layers", [])
             snapshot = {
                 "layer": str(state.get("layer", "")),
+                "layers": [l.value if hasattr(l, 'value') else str(l) for l in layers],
                 "layer_confidence": state.get("layer_confidence"),
                 "layer_reasoning": state.get("layer_reasoning") or "",
                 "layer_analysis": state.get("layer_analysis", ""),
@@ -547,12 +569,14 @@ class WorkflowExecutor:
 
         if node_name == "layer":
             layer = state.get("layer", "?")
+            layers = state.get("layers", [])
             scenarios = state.get("possible_scenarios", [])
             entities = state.get("key_entities", [])
             analysis = state.get("layer_analysis", "")
             reasoning = state.get("layer_reasoning", "")
+            layers_str = "+".join(l.value if hasattr(l, 'value') else str(l) for l in layers) if layers else str(layer)
             return (
-                f"layer={layer}\n"
+                f"layer={layer}, layers={layers_str}\n"
                 f"   scenarios={scenarios}\n"
                 f"   entities={_json.dumps(entities, ensure_ascii=False)}\n"
                 f"   reasoning={reasoning}\n"

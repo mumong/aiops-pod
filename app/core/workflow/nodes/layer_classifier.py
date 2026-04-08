@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
-from app.core.prompts import LAYER_CLASSIFIER_PROMPT
+from app.core.prompts import LAYER_CLASSIFIER_PROMPT, LAYER_EXTRACT_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +81,13 @@ class LayerClassifierNode(WorkflowNode):
             # 解析层级
             layer = self._parse_layer(layer_result.get("layer", "L2"))
 
+            # 解析多层级（多问题并存）
+            raw_layers = layer_result.get("layers", [])
+            layers = [self._parse_layer(l) for l in raw_layers if l] if raw_layers else [layer]
+
             new_state.update({
                 "layer": layer,
+                "layers": layers,
                 "layer_confidence": layer_result.get("confidence", 0.5),
                 "layer_reasoning": layer_result.get("reasoning", ""),
                 # 保存完整的 LLM 分析结果供下游使用
@@ -122,13 +127,58 @@ class LayerClassifierNode(WorkflowNode):
             response, thinking_events = self._call_llm(question, LAYER_CLASSIFIER_PROMPT)
 
             if response and response.result:
-                return self._parse_llm_response(response.result), thinking_events
+                result = self._parse_llm_response(response.result)
+                # 如果 JSON 解析成功（有具体 scenarios 或高置信度），直接返回
+                if result.get("possible_scenarios") or result.get("confidence", 0) > 0.6:
+                    return result, thinking_events
+
+                # JSON 解析失败或回退到默认值，用 litellm 从分析文本中提取结构化分类
+                logger.info("⚠️ Layer JSON 解析不完整，追加 litellm 提取分类")
+                extracted = self._extract_classification_with_litellm(response.result)
+                if extracted:
+                    return extracted, thinking_events
+                return result, thinking_events
 
             return self._analyze_with_rules(question), thinking_events
 
         except Exception as e:
             logger.warning(f"LLM 分析失败，回退到规则: {e}")
             return self._analyze_with_rules(question), []
+
+    def _extract_classification_with_litellm(self, analysis_text: str) -> Optional[Dict]:
+        """用 litellm 从工具调用后的分析文本中提取结构化 JSON 分类"""
+        try:
+            from litellm import completion
+
+            model = self.holmes_service.ai.llm.model
+            api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
+            api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
+
+            completion_kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": LAYER_EXTRACT_PROMPT},
+                    {"role": "user", "content": analysis_text},
+                ],
+                "temperature": 0.1,
+            }
+            if api_key:
+                completion_kwargs["api_key"] = api_key
+            if api_base:
+                completion_kwargs["api_base"] = api_base
+
+            resp = completion(**completion_kwargs)
+            content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+            if content:
+                result = self._parse_llm_response(content)
+                if result.get("layer") and result.get("confidence", 0) > 0.5:
+                    logger.info(f"✅ litellm 提取分类成功: layer={result['layer']}, confidence={result.get('confidence')}")
+                    return result
+
+        except Exception as e:
+            logger.warning(f"litellm 提取分类失败: {e}")
+        return None
 
     # def _log_available_tools(self, tool_executor: Any):
     #     """输出可用的工具信息"""
@@ -254,13 +304,23 @@ class LayerClassifierNode(WorkflowNode):
             result["possible_scenarios"] = [{"scenario": "用户直接查询", "probability": "高", "reason": "数据请求"}]
             return result
 
-        # 提取层级
+        # 检测 HEALTHY（集群正常，无异常）
+        healthy_indicators = [r'HEALTHY', r'正常', r'健康', r'no.?issue', r'all.*running', r'all.*ready']
+        has_healthy = any(re.search(p, text, re.IGNORECASE) for p in healthy_indicators)
+        if has_healthy and not has_diagnosis_indicator:
+            result["layer"] = "HEALTHY"
+            result["layer_name"] = "集群健康"
+            result["confidence"] = 0.9
+            result["possible_scenarios"] = []
+            return result
+
+        # 提取层级（按根因优先级排序，L0 最优先）
         layer_patterns = [
-            (r'L0|基础设施', "L0", "基础设施层"),
-            (r'L1|集群.*节点', "L1", "集群与节点层"),
-            (r'L2|工作负载|Pod|容器', "L2", "工作负载层"),
-            (r'L3|服务.*网络|DNS', "L3", "服务与网络层"),
-            (r'L4|应用|依赖', "L4", "应用层"),
+            (r'L0|基础设施|Evicted|volume.?limit|emptyDir|sizeLimit|disk.?pressure|ENOSPC|磁盘|驱逐', "L0", "基础设施层"),
+            (r'L1|NotReady|kubelet|taint|节点.*不可调度', "L1", "集群与节点层"),
+            (r'L2|OOMKilled|CrashLoop|Exit.?Code.?137|容器.*重启', "L2", "工作负载层"),
+            (r'L3|ImagePull|DNS|NetworkPolicy|服务.*网络', "L3", "服务与网络层"),
+            (r'L4|应用.*错误|依赖.*503|upstream', "L4", "应用层"),
         ]
 
         for pattern, layer, name in layer_patterns:
@@ -365,6 +425,7 @@ class LayerClassifierNode(WorkflowNode):
     def _parse_layer(self, layer_str: str) -> Layer:
         """解析层级字符串为 Layer 枚举"""
         layer_map = {
+            "HEALTHY": Layer.HEALTHY,
             "QUERY": Layer.QUERY,
             "L0": Layer.L0,
             "L1": Layer.L1,

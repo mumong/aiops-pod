@@ -9,12 +9,14 @@
 ### 1.1 触发关键词
 | 类别 | 关键词 |
 |------|--------|
-| 中文 | 磁盘满、磁盘空间不足、写入失败、空间耗尽 |
-| 英文 | disk full, no space left, ENOSPC, disk pressure |
+| 中文 | 磁盘满、磁盘空间不足、写入失败、空间耗尽、存储卷超限、被驱逐 |
+| 英文 | disk full, no space left, ENOSPC, disk pressure, Evicted, volume limit, emptyDir, sizeLimit, ephemeral-storage |
 | 指标 | node_disk_utilization > 95%, Use% >= 95 |
 
 ### 1.2 快速判定
 ```
+IF (Pod Status = Evicted) AND (Message 包含 "exceeds the limit" 或 "emptyDir"):
+    场景 = L0-VolumeLimit, 置信度 = 高
 IF (df -h 显示 Use% >= 95%) OR (日志包含 ENOSPC):
     场景 = L0-DiskFull, 置信度 = 高
 ```
