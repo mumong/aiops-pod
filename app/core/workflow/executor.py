@@ -21,12 +21,7 @@ from typing import Generator, Dict, Any, Optional
 from app.core.workflow.state import WorkflowState
 from app.core.workflow.graph import build_diagnosis_workflow
 from app.core.workflow.nodes.base import WorkflowNode
-from app.core.workflow.metrics import (
-    WorkflowMetrics,
-    start_workflow_metrics,
-    finish_workflow_metrics,
-    get_current_metrics,
-)
+from app.core.workflow.metrics import WorkflowMetrics
 from app.core.holmes.log_listener import create_log_listener, HolmesLogListener
 
 logger = logging.getLogger(__name__)
@@ -58,8 +53,7 @@ class WorkflowExecutor:
             if holmes_service and holmes_service.merged_catalog
             else None
         )
-        # 延迟构建 workflow：在 execute_stream 中创建 metrics 后再构建
-        self.workflow = None
+        # workflow 不再缓存，每次 execute_stream 重建（并发安全）
 
     # 报告保存目录（固定路径，不随工作目录变化）
     REPORTS_DIR = os.environ.get("REPORTS_DIR", "/tmp/aiops/reports")
@@ -131,9 +125,9 @@ class WorkflowExecutor:
         if run_id is None:
             run_id = uuid.uuid4().hex[:16]
         
-        # 开始指标记录（如果没有传入，则创建新 metrics）
+        # 开始指标记录（每次请求独立创建，并发安全）
         if self.metrics is None:
-            metrics = start_workflow_metrics(run_id, question)
+            metrics = WorkflowMetrics(run_id=run_id, question=question)
         else:
             # 使用传入的 metrics（重置状态）
             metrics = self.metrics
@@ -142,15 +136,13 @@ class WorkflowExecutor:
             metrics.question = question
             metrics.start_time = time.time()
 
-        # 延迟构建 workflow：此时 metrics 已就绪，节点可拿到正确实例
-        if self.workflow is None:
-            # 从 workflow_config 读取节点启用配置
-            wf_config = getattr(self.holmes_service, "workflow_config", {}) or {}
-            node_config = wf_config.get("nodes", {})
-            self.workflow = build_diagnosis_workflow(
-                self.holmes_service, metrics, self.runbook_catalog,
-                node_config=node_config,
-            )
+        # 每次请求重建 workflow（并发安全，避免共享节点实例）
+        wf_config = getattr(self.holmes_service, "workflow_config", {}) or {}
+        node_config = wf_config.get("nodes", {})
+        workflow, node_instances = build_diagnosis_workflow(
+            self.holmes_service, metrics, self.runbook_catalog,
+            node_config=node_config,
+        )
 
         total_start = time.time()
 
@@ -166,6 +158,7 @@ class WorkflowExecutor:
             "layer_confidence": None,
             "layer_reasoning": None,
             "layer_analysis": None,
+            "layer_full_analysis": None,
             "key_entities": [],
             "possible_scenarios": [],
             "evidence_items": [],
@@ -209,15 +202,16 @@ class WorkflowExecutor:
         def _run_workflow_in_thread():
             """在后台线程中运行 LangGraph workflow.stream()"""
             try:
-                for lg_event in self.workflow.stream(initial_state):
+                for lg_event in workflow.stream(initial_state):
                     event_queue.put(("langgraph_event", lg_event))
                 event_queue.put(("langgraph_done", None))
             except Exception as exc:
                 event_queue.put(("langgraph_error", exc))
 
         try:
-            # 设置节点级事件队列（节点 _call_llm 会实时推送 thinking 事件）
-            WorkflowNode.set_event_queue(event_queue)
+            # 设置节点级事件队列（per-request，并发安全）
+            for node in node_instances:
+                node.set_event_queue(event_queue)
 
             # 启动后台线程
             worker = threading.Thread(target=_run_workflow_in_thread, daemon=True)
@@ -388,7 +382,7 @@ class WorkflowExecutor:
             log_listener.detach()
 
             # 完成指标记录
-            finish_workflow_metrics()
+            metrics.finish()
             
             # 构建最终答案（包含性能统计）
             conclusion = final_state.get("conclusion_formatted") or final_state.get("conclusion") or ""
@@ -450,7 +444,7 @@ class WorkflowExecutor:
             logger.error(f"❌ 工作流执行失败: {e}", exc_info=True)
             metrics.success = False
             metrics.errors.append(str(e))
-            finish_workflow_metrics()
+            metrics.finish()
 
             # 错误事件
             seq += 1
@@ -463,8 +457,9 @@ class WorkflowExecutor:
                 "error": str(e),
             }
         finally:
-            # 清除事件队列 + 等待后台线程结束
-            WorkflowNode.clear_event_queue()
+            # 清除事件队列（实例级，无需类级别清理）+ 等待后台线程结束
+            for node in node_instances:
+                node.set_event_queue(None)
             if worker.is_alive():
                 worker.join(timeout=5)
     
@@ -640,9 +635,9 @@ class WorkflowExecutor:
         runbook_names = []
 
         # 构建文本搜索源
-        conclusion = state.get("conclusion_formatted") or state.get("conclusion") or ""
-        rca_analysis_raw = state.get("rca_analysis", "")
-        evidence_analysis_raw = state.get("evidence_analysis", "")
+        conclusion = (state.get("conclusion_formatted") or state.get("conclusion") or "")
+        rca_analysis_raw = state.get("rca_analysis") or ""
+        evidence_analysis_raw = state.get("evidence_analysis") or ""
         all_text = f"{conclusion}\n{rca_analysis_raw}\n{evidence_analysis_raw}"
 
         # 1. 从 log_listener 提取（在 execute_stream 中已处理）

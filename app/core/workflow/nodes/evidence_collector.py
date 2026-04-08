@@ -86,6 +86,8 @@ class EvidenceCollectorNode(WorkflowNode):
             question = state.get("question", "")
             layer = state.get("layer")
             layer_analysis = state.get("layer_analysis", "{}")
+            # 优先使用阶段1完整分析文本（含工具输出），回退到结构化 JSON
+            layer_full_analysis = state.get("layer_full_analysis", "") or layer_analysis
             possible_scenarios = state.get("possible_scenarios", [])
             key_entities = state.get("key_entities", [])
 
@@ -97,7 +99,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 layer=layer,
                 possible_scenarios=possible_scenarios,
                 key_entities=key_entities,
-                layer_analysis=layer_analysis
+                layer_analysis=layer_full_analysis
             )
 
             # 2. 根据规划调用工具采集证据

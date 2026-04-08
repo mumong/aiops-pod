@@ -91,7 +91,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
             evidence_summary = self._build_evidence_summary(evidence_items)
 
             # 注入上游 layer 节点的分析结果
-            layer_analysis = state.get("layer_analysis", "")
+            # 优先使用阶段1完整分析文本（含工具输出），回退到结构化 JSON
+            layer_analysis = state.get("layer_full_analysis", "") or state.get("layer_analysis", "")
             if layer_analysis:
                 evidence_summary = (
                     f"# 问题定位结果（layer 节点输出）\n{layer_analysis}\n\n"

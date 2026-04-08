@@ -190,6 +190,7 @@ def _analyze_with_llm(self, ...) -> tuple:
 | 2026-03-24 | Runbook 从 thinking 检测 | 从 thinking_events 的 fetch_runbook 结果中提取 runbook 标题 |
 | 2026-03-24 | 置信度保底 80% | 有工具证据+有结论 → 保底 80%（prompt + executor 后置修正） |
 | 2026-03-24 | 性能统计简化 | 各节点百分比以总耗时为分母（加起来≈100%），去掉 LLM/工具百分比 |
+| 2026-04-08 | layer_full_analysis 数据流修复 | 两阶段架构中阶段1完整分析文本（含工具输出）被阶段2精简JSON丢弃，导致下游evidence/rca"证据不足"。新增 `layer_full_analysis` state 字段传递完整数据 |
 
 ---
 
@@ -217,17 +218,40 @@ executor.execute_stream()
 ### 8.2 节点数据流
 
 ```
-layer → state["layer_analysis"] (JSON)
+layer → state["layer_analysis"] (JSON, 结构化分类结果)
+  │     state["layer_full_analysis"] (阶段1完整分析文本，含工具输出)
+  │
+  │  ⚠️ 重要：下游节点必须优先使用 layer_full_analysis（含 kubectl describe/logs 等原始数据）
+  │     layer_analysis 只是精简的 JSON（layer, confidence, reasoning），不含工具输出！
   │
 evidence → state["evidence_analysis"] (JSON, 含 tool_data + llm_analysis)
   │         state["thinking_events"] (所有节点的工具调用记录)
+  │         读取: state.get("layer_full_analysis", "") or state.get("layer_analysis", "{}")
   │
 rca → state["rca_analysis"] (JSON, 含 llm_raw_analysis)
+  │   读取: state.get("layer_full_analysis", "") or state.get("layer_analysis", "")
   │   prompt 动态注入已有数据 + "不要重复采集"
   │
 conclusion → litellm 直接调用（不带工具）
              从 thinking_events 提取工具真实数据传给 LLM
 ```
+
+#### ⚠️ layer 两阶段架构数据流约定（不可破坏）
+
+layer 节点使用两阶段架构：
+- 阶段1: HolmesGPT agentic loop → 调用工具收集数据，输出自然语言分析（enriched_text）
+- 阶段2: litellm 提取 → 从分析文本中提取结构化 JSON（layer, confidence, reasoning 等）
+
+**关键约定**：阶段2 的 extracted dict 中必须注入 `full_analysis = enriched_text`，
+然后在 execute() 中 `pop("full_analysis")` 存入 `state["layer_full_analysis"]`。
+下游 evidence/rca 必须优先读取 `layer_full_analysis`，回退到 `layer_analysis`。
+
+涉及文件：
+- `layer_classifier.py`: `_analyze_with_llm()` 注入 full_analysis，`execute()` pop 到 state
+- `evidence_collector.py`: `execute()` 读取 layer_full_analysis
+- `root_cause_analyzer.py`: `execute()` 读取 layer_full_analysis
+- `state.py`: WorkflowState 类型定义
+- `executor.py`: state 初始化包含 layer_full_analysis
 
 ### 8.3 联邦查询实时流式
 

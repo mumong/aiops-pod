@@ -33,6 +33,7 @@ class WorkflowState(TypedDict, total=False):
     layer_confidence: Optional[float]    # 定层置信度 [0, 1]
     layer_reasoning: Optional[str]       # 定层理由
     layer_analysis: Optional[str]        # LLM 完整分析（JSON 字符串）
+    layer_full_analysis: Optional[str]   # 阶段1完整分析文本（含工具输出），供下游 evidence/rca 使用
     key_entities: List[str]              # 提取的关键实体
     possible_scenarios: List[str]        # 可能的场景
     

@@ -12,7 +12,7 @@ import logging
 import queue
 import time
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from app.core.workflow.state import WorkflowState
 
@@ -26,19 +26,24 @@ class WorkflowNode(ABC):
     所有工作流节点必须继承此类并实现 execute 方法
     """
 
-    # 共享事件队列：当不为 None 时，_call_llm 使用 call_with_stream_and_queue
-    # 以便 executor 实时读取 thinking 事件
-    _event_queue: ClassVar[Optional[queue.Queue]] = None
+    # 实例级事件队列：当不为 None 时，_call_llm 使用 call_with_stream_and_queue
+    # 以便 executor 实时读取 thinking 事件（每个请求独立）
+    _event_queue: Optional[queue.Queue] = None
 
+    def set_event_queue(self, q: Optional[queue.Queue]):
+        """设置实例级事件队列（executor 在启动 workflow 前调用）"""
+        self._event_queue = q
+
+    # 保留类方法兼容旧调用，但标记为 deprecated
     @classmethod
-    def set_event_queue(cls, q: queue.Queue):
-        """设置共享事件队列（executor 在启动 workflow 前调用）"""
-        cls._event_queue = q
+    def set_event_queue_cls(cls, q: queue.Queue):
+        """[deprecated] 类级别设置，并发不安全，请用实例方法"""
+        pass  # no-op，不再修改类属性
 
     @classmethod
     def clear_event_queue(cls):
-        """清除事件队列（executor 在 workflow 结束后调用）"""
-        cls._event_queue = None
+        """[deprecated] 类级别清除，并发不安全"""
+        pass  # no-op
     
     @property
     @abstractmethod

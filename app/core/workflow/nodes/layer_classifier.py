@@ -85,13 +85,18 @@ class LayerClassifierNode(WorkflowNode):
             raw_layers = layer_result.get("layers", [])
             layers = [self._parse_layer(l) for l in raw_layers if l] if raw_layers else [layer]
 
+            # 提取阶段1的完整分析文本（包含工具调用数据），单独传递给下游
+            full_analysis = layer_result.pop("full_analysis", "")
+
             new_state.update({
                 "layer": layer,
                 "layers": layers,
                 "layer_confidence": layer_result.get("confidence", 0.5),
                 "layer_reasoning": layer_result.get("reasoning", ""),
-                # 保存完整的 LLM 分析结果供下游使用
+                # 保存结构化分类结果
                 "layer_analysis": json.dumps(layer_result, ensure_ascii=False),
+                # 保存阶段1完整分析文本（含工具输出），供 evidence/rca 使用
+                "layer_full_analysis": full_analysis,
                 "key_entities": layer_result.get("key_entities", []),
                 "possible_scenarios": layer_result.get("possible_scenarios", []),
             })
@@ -118,32 +123,77 @@ class LayerClassifierNode(WorkflowNode):
         return new_state
     
     def _analyze_with_llm(self, question: str) -> tuple:
-        """使用 LLM 分析问题层级
+        """使用 LLM 分析问题层级（两阶段架构）
+
+        阶段1: HolmesGPT agentic loop — 调用工具收集数据，输出自然语言分析
+        阶段2: litellm 直接调用 — 基于分析文本+工具数据，提取结构化 JSON
 
         Returns:
             (layer_result_dict, intermediate_events_list)
         """
         try:
+            # ── 阶段1：工具调用，收集集群状态 ──
             response, thinking_events = self._call_llm(question, LAYER_CLASSIFIER_PROMPT)
 
-            if response and response.result:
-                result = self._parse_llm_response(response.result)
-                # 如果 JSON 解析成功（有具体 scenarios 或高置信度），直接返回
-                if result.get("possible_scenarios") or result.get("confidence", 0) > 0.6:
-                    return result, thinking_events
+            if not (response and response.result):
+                return self._analyze_with_rules(question), thinking_events
 
-                # JSON 解析失败或回退到默认值，用 litellm 从分析文本中提取结构化分类
-                logger.info("⚠️ Layer JSON 解析不完整，追加 litellm 提取分类")
-                extracted = self._extract_classification_with_litellm(response.result)
-                if extracted:
-                    return extracted, thinking_events
+            # 尝试从 response.result 直接解析 JSON（偶尔 LLM 会直接输出 JSON）
+            result = self._try_parse_json(response.result)
+            if result and result.get("possible_scenarios") and result.get("confidence", 0) > 0.6:
+                logger.info(f"✅ 阶段1直接输出了合法 JSON: layer={result.get('layer')}")
                 return result, thinking_events
 
-            return self._analyze_with_rules(question), thinking_events
+            # ── 阶段2：结构化提取（始终执行） ──
+            logger.info("📋 阶段2: 使用 litellm 从分析文本中提取结构化分类")
+            enriched_text = self._build_extraction_input(response.result, thinking_events)
+            extracted = self._extract_classification_with_litellm(enriched_text)
+            if extracted:
+                # 关键：把阶段1的完整分析文本注入结果，供下游 evidence/rca 使用
+                extracted["full_analysis"] = enriched_text
+                return extracted, thinking_events
+
+            # 阶段2 也失败 → 最终兜底
+            logger.warning("⚠️ 阶段2 litellm 提取失败，使用层级关键词兜底")
+            fallback = self._extract_from_text(response.result)
+            fallback["full_analysis"] = enriched_text
+            return fallback, thinking_events
 
         except Exception as e:
             logger.warning(f"LLM 分析失败，回退到规则: {e}")
             return self._analyze_with_rules(question), []
+
+    @staticmethod
+    def _try_parse_json(text: str) -> Optional[Dict]:
+        """尝试从文本中提取 JSON，失败返回 None"""
+        try:
+            json_match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(1))
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    @staticmethod
+    def _build_extraction_input(llm_text: str, thinking_events: list) -> str:
+        """构建阶段2的输入：LLM 分析文本 + 工具返回的原始数据"""
+        parts = [llm_text]
+
+        tool_data = []
+        for ev in thinking_events:
+            # 收集工具调用结果
+            if ev.get("type") == "tool_result" and ev.get("status") == "success":
+                tool_name = ev.get("tool_name", "unknown")
+                # 优先用完整结果，回退到 preview
+                result_text = ev.get("result", "") or ev.get("result_preview", "")
+                if result_text:
+                    tool_data.append(f"[{tool_name}]\n{result_text}")
+
+        if tool_data:
+            parts.append("\n\n# 工具返回的原始数据（以此为准）")
+            parts.extend(tool_data)
+
+        return "\n".join(parts)
 
     def _extract_classification_with_litellm(self, analysis_text: str) -> Optional[Dict]:
         """用 litellm 从工具调用后的分析文本中提取结构化 JSON 分类"""
@@ -171,106 +221,24 @@ class LayerClassifierNode(WorkflowNode):
             content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
 
             if content:
-                result = self._parse_llm_response(content)
-                if result.get("layer") and result.get("confidence", 0) > 0.5:
+                result = self._try_parse_json(content)
+                if result and result.get("layer") and result.get("confidence", 0) > 0.5:
                     logger.info(f"✅ litellm 提取分类成功: layer={result['layer']}, confidence={result.get('confidence')}")
                     return result
+                elif content:
+                    logger.warning(f"litellm 返回内容无法解析为 JSON: {content[:200]}")
 
         except Exception as e:
             logger.warning(f"litellm 提取分类失败: {e}")
         return None
 
-    # def _log_available_tools(self, tool_executor: Any):
-    #     """输出可用的工具信息"""
-    #     if not tool_executor:
-    #         logger.info("🔧 可用工具: 无 tool_executor")
-    #         return
 
-    #     # 分类工具
-    #     builtin_tools = []
-    #     mcp_tools = []
-    #     mcp_servers = []
-
-    #     for toolset in tool_executor.toolsets:
-    #         toolset_class = toolset.__class__.__name__
-    #         toolset_name = getattr(toolset, "name", str(toolset))
-    #         is_enabled = getattr(toolset, "enabled", False)
-
-    #         # 判断是否是 MCP 工具
-    #         is_mcp = "mcp" in toolset_class.lower() or (
-    #             hasattr(toolset, "type") and str(toolset.type).lower() == "mcp"
-    #         )
-
-    #         if is_mcp:
-    #             mcp_servers.append({
-    #                 "name": toolset_name,
-    #                 "enabled": is_enabled,
-    #             })
-    #         else:
-    #             # 内置工具
-    #             if hasattr(toolset, "tools") and toolset.tools:
-    #                 tool_count = 0
-    #                 for t in toolset.tools:
-    #                     if hasattr(t, "name"):
-    #                         tool_count += 1
-    #                         builtin_tools.append(getattr(t, "name", str(t)))
-
-    #     # 输出日志
-    #     if mcp_servers:
-    #         logger.info(f"🌐 MCP 工具集: {len(mcp_servers)} 个")
-    #         for server in mcp_servers:
-    #             status = "✅ 启用" if server["enabled"] else "❌ 禁用"
-    #             logger.info(f"   {status} {server['name']}")
-    #     else:
-    #         logger.info("🌐 MCP 工具集: 无")
-
-    #     if builtin_tools:
-    #         logger.info(f"🔧 内置工具: {len(builtin_tools)} 个")
-    #         for tool in builtin_tools[:20]:  # 最多显示20个
-    #             logger.info(f"   • {tool}")
-    #         if len(builtin_tools) > 20:
-    #             logger.info(f"   ... 还有 {len(builtin_tools) - 20} 个工具")
-
-    # def _log_available_runbooks(self, runbook_catalog: Any):
-    #     """输出可用的 runbooks 信息"""
-    #     if not runbook_catalog:
-    #         logger.info("📚 Runbook 知识库: 无")
-    #         return
-
-    #     catalog = runbook_catalog.catalog if hasattr(runbook_catalog, "catalog") else []
-    #     if not catalog:
-    #         logger.info("📚 Runbook 知识库: 0 个")
-    #         return
-
-    #     logger.info(f"📚 Runbook 知识库: {len(catalog)} 个")
-    #     for entry in catalog[:10]:  # 最多显示10个
-    #         if hasattr(entry, "title"):
-    #             title = entry.title
-    #         elif isinstance(entry, dict):
-    #             title = entry.get("title", "Unknown")
-    #         else:
-    #             title = str(entry)
-    #         logger.info(f"   • {title}")
-    #     if len(catalog) > 10:
-    #         logger.info(f"   ... 还有 {len(catalog) - 10} 个 runbook")
-    
-    def _parse_llm_response(self, response_text: str) -> Dict:
-        """解析 LLM 的 JSON 响应"""
-        try:
-            # 提取 JSON 块
-            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(1))
-            
-            # 尝试直接解析
-            return json.loads(response_text)
-        
-        except json.JSONDecodeError:
-            # 解析失败，从文本中提取关键信息
-            return self._extract_from_text(response_text)
-    
     def _extract_from_text(self, text: str) -> Dict:
-        """从非 JSON 文本中提取信息"""
+        """从非 JSON 文本中提取层级信息（最终兜底，仅匹配 L0-L4）
+
+        注意：HEALTHY/QUERY 的判断完全交给 _extract_classification_with_litellm，
+        这里不做 HEALTHY/QUERY 的硬编码判断，避免误判。
+        """
         result = {
             "layer": "L2",
             "layer_name": "工作负载层",
@@ -279,40 +247,6 @@ class LayerClassifierNode(WorkflowNode):
             "key_entities": [],
             "possible_scenarios": []
         }
-
-        # 优先检测 QUERY 模式
-        query_indicators = [
-            r'"layer"\s*:\s*"QUERY"',
-            r'QUERY',
-            r'直接查询',
-            r'查询结果',
-            r'query_results',
-        ]
-        # 同时检测是否有诊断指标
-        diagnosis_indicators = [
-            r'故障', r'异常', r'报错', r'重启', r'crash', r'oom',
-            r'排查', r'诊断',
-        ]
-        text_lower = text.lower()
-        has_query_indicator = any(re.search(p, text, re.IGNORECASE) for p in query_indicators)
-        has_diagnosis_indicator = any(re.search(p, text_lower) for p in diagnosis_indicators)
-
-        if has_query_indicator and not has_diagnosis_indicator:
-            result["layer"] = "QUERY"
-            result["layer_name"] = "直接查询"
-            result["confidence"] = 0.9
-            result["possible_scenarios"] = [{"scenario": "用户直接查询", "probability": "高", "reason": "数据请求"}]
-            return result
-
-        # 检测 HEALTHY（集群正常，无异常）
-        healthy_indicators = [r'HEALTHY', r'正常', r'健康', r'no.?issue', r'all.*running', r'all.*ready']
-        has_healthy = any(re.search(p, text, re.IGNORECASE) for p in healthy_indicators)
-        if has_healthy and not has_diagnosis_indicator:
-            result["layer"] = "HEALTHY"
-            result["layer_name"] = "集群健康"
-            result["confidence"] = 0.9
-            result["possible_scenarios"] = []
-            return result
 
         # 提取层级（按根因优先级排序，L0 最优先）
         layer_patterns = [
