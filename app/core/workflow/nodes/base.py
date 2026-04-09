@@ -93,10 +93,7 @@ class WorkflowNode(ABC):
 
     def _call_llm(self, question: str, system_prompt: str) -> Tuple[Any, list]:
         """
-        公共 LLM 调用（统一 streaming + metrics + thinking）
-
-        当 _event_queue 已设置时，使用 call_with_stream_and_queue 实现
-        thinking 事件的实时推送；否则走原有 _call_with_stream_limited 路径。
+        公共 LLM 调用 — 自动选择 aicall 或 legacy 路径
 
         Args:
             question: 用户问题
@@ -105,6 +102,57 @@ class WorkflowNode(ABC):
         Returns:
             (response, thinking_events)
         """
+        if getattr(self, 'ai_call', None) is not None:
+            return self._call_llm_aicall(question, system_prompt)
+        return self._call_llm_legacy(question, system_prompt)
+
+    def _call_llm_aicall(self, question: str, system_prompt: str) -> Tuple[Any, list]:
+        """LLM 调用 — aicall 路径（替代 HolmesGPT）"""
+        start_time = time.time()
+        max_steps = 10
+        if getattr(self, 'holmes_service', None):
+            max_steps = self.holmes_service.get_node_max_steps(self.node_id)
+
+        # Inject runbook catalog into system_prompt
+        catalog_text = ""
+        if getattr(self, 'runbook_catalog', None) and hasattr(self.runbook_catalog, 'catalog'):
+            entries = self.runbook_catalog.catalog
+            if entries:
+                lines = ["# Available Runbooks",
+                         "If a runbook matches the issue, use the fetch_runbook tool.", ""]
+                for e in entries:
+                    desc = getattr(e, 'description', '') or ''
+                    link = getattr(e, 'link', '') or ''
+                    lines.append(f"- {link}: {desc}")
+                catalog_text = "\n".join(lines)
+
+        full_prompt = system_prompt
+        if catalog_text:
+            full_prompt = catalog_text + "\n\n" + system_prompt
+
+        tools = getattr(self, 'tools', []) or []
+        result, thinking_events = self.ai_call.call(
+            system_prompt=full_prompt,
+            question=question,
+            tools=tools,
+            max_steps=max_steps,
+            stream_queue=self._event_queue,
+            node_id=self.node_id,
+        )
+
+        llm_duration_ms = (time.time() - start_time) * 1000
+
+        # metrics
+        if getattr(self, 'metrics', None):
+            actual_duration = result.duration_ms or llm_duration_ms
+            self.metrics.record_llm_call(self.node_id, actual_duration)
+            for _ in range(result.tool_call_count):
+                self.metrics.record_tool_call("llm_tool", 0, success=True)
+
+        return result, thinking_events
+
+    def _call_llm_legacy(self, question: str, system_prompt: str) -> Tuple[Any, list]:
+        """LLM 调用 — legacy HolmesGPT 路径（向后兼容）"""
         from holmes.core.prompt import build_initial_ask_messages
 
         tool_executor = getattr(self.holmes_service.ai, "tool_executor", None)
