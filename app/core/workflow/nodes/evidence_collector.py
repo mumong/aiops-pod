@@ -116,6 +116,15 @@ class EvidenceCollectorNode(WorkflowNode):
                 tool_results=tool_results
             )
 
+            # 3.5 与 EVIDENCE_SPECS 基准合并：补充 LLM 未覆盖的证据项
+            evidence_items = self._merge_with_baseline(
+                evidence_items=evidence_items,
+                layer=layer,
+                question=question,
+                thinking_events=thinking_events,
+                llm_result_text=llm_result_text
+            )
+
             # 4. 计算完整度
             completeness = self._calculate_completeness(evidence_items)
 
@@ -695,3 +704,57 @@ class EvidenceCollectorNode(WorkflowNode):
                         "duration_s": ev.get("duration_seconds", 0),
                     })
         return tool_data
+
+    def _merge_with_baseline(
+        self,
+        evidence_items: List[EvidenceItem],
+        layer: Optional[Layer],
+        question: str,
+        thinking_events: list,
+        llm_result_text: str
+    ) -> List[EvidenceItem]:
+        """
+        将 LLM 采集的证据与 EVIDENCE_SPECS 基准合并。
+
+        逻辑：
+        1. 确定当前场景对应的 EVIDENCE_SPECS 基准清单
+        2. 将所有 thinking_events 工具输出 + llm_result_text 合并为全文
+        3. 用 EvidenceExtractor.check_evidence 检查基准中每项证据是否在全文中存在
+        4. 已存在于 evidence_items 中的不重复添加
+        5. 基准中未被 LLM 覆盖的项追加到列表（标记为已采集或未采集）
+        """
+        from app.core.skills.evidence import EVIDENCE_SPECS, EvidenceExtractor
+
+        scenario = self._layer_to_scenario(layer, question)
+        baseline_specs = EVIDENCE_SPECS.get(scenario, [])
+        if not baseline_specs:
+            return evidence_items
+
+        # 合并所有文本用于证据检测
+        all_text_parts = [llm_result_text or ""]
+        for ev in thinking_events:
+            if ev.get("type") == "tool_result":
+                preview = ev.get("result_preview", "") or ev.get("result", "")
+                if preview:
+                    all_text_parts.append(preview)
+        full_text = "\n".join(all_text_parts)
+
+        # 已有证据的 id 集合
+        existing_ids = {e.id for e in evidence_items}
+
+        for spec in baseline_specs:
+            if spec.id in existing_ids:
+                continue
+            # 检查全文中是否包含该证据
+            exists, value = EvidenceExtractor.check_evidence(full_text, spec)
+            evidence_items.append(EvidenceItem(
+                id=spec.id,
+                description=spec.description,
+                level=spec.level,
+                weight=spec.weight,
+                collected=exists,
+                value=value,
+                source="baseline_match" if exists else "baseline_missing"
+            ))
+
+        return evidence_items
