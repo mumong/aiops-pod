@@ -28,6 +28,7 @@ from app.core.holmes.call_wrapper import call_with_stream
 from app.core.mcp.mcp_patch import patch_mcp_toolset
 from app.core.holmes.tool_logging_patch import apply_tool_result_logging_patch
 from app.core.federation import get_federation_coordinator, FederationCoordinator, get_federation_agent, FederationAgent
+from app.core.aicall import AICall
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ class HolmesService:
         self.workflow_config: Dict = {}  # 工作流配置（max_steps 等）
         self.metrics_config: Dict = {}   # 质量指标配置
         self.raw_config: Dict = {}       # 完整原始配置
+        self.ai_call: Optional[AICall] = None  # New aicall path (replaces HolmesGPT LLM calls)
     
     def initialize(
         self,
@@ -197,6 +199,18 @@ class HolmesService:
                 self.ai = self.config.create_console_toolcalling_llm()
                 
                 logger.info(f"   ✅ AI 实例创建完成 ({time.time() - step_start:.2f}s)")
+
+                # 创建 AICall 实例（USE_AICALL=true 激活，默认 false 保持 HolmesGPT）
+                use_aicall = os.getenv("USE_AICALL", "false").lower() in ("true", "1", "yes")
+                if use_aicall:
+                    self.ai_call = AICall(
+                        model=final_model,
+                        api_key=final_api_key,
+                        api_base=final_api_base or "",
+                    )
+                    logger.info(f"   ✅ AICall 实例创建完成 (model={final_model})")
+                else:
+                    logger.info("   ℹ️ AICall 未激活 (USE_AICALL != true)")
 
                 # 初始化联邦协调器（如配置了 federation.enabled=true）
                 _federation_cfg = _raw_config.get("federation", {})
@@ -556,6 +570,10 @@ class HolmesService:
             
             # 创建执行器
             executor = WorkflowExecutor(holmes_service=self)
+
+            # Activate aicall path on executor
+            if self.ai_call:
+                executor.ai_call = self.ai_call
             
             # text 格式输出（终端友好）
             if output_format == "text":
