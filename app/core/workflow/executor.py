@@ -169,6 +169,7 @@ class WorkflowExecutor:
             "root_cause": None,
             "causal_chain": None,
             "rca_analysis": None,
+            "primary_runbook_id": None,
             "conclusion": None,
             "conclusion_formatted": None,
             "current_node": None,
@@ -688,13 +689,23 @@ class WorkflowExecutor:
 
             # ============================================================
             # 核心 Runbook 识别
-            # 优先从 RCA JSON 的 primary_runbooks 字段提取（AI 自己声明的）
-            # 回退到关键词匹配
+            # 优先级：
+            #   1. state["primary_runbook_id"]（RCA 节点 AI 判定的）
+            #   2. 从 rca_analysis JSON 的 primary_runbooks 字段提取
+            #   3. 回退到关键词匹配
             # ============================================================
             primary_runbooks = []
 
-            # 方法1: 从 rca_analysis JSON 提取 AI 声明的 primary_runbooks
-            if rca_analysis_raw:
+            # 方法0: 直接从 state 读取（RCA 节点已提取）
+            state_primary = state.get("primary_runbook_id")
+            if state_primary:
+                for rb in state_primary.split(", "):
+                    rb = rb.strip()
+                    if rb and rb not in primary_runbooks:
+                        primary_runbooks.append(rb)
+
+            # 方法1: 从 rca_analysis JSON 提取 AI 声明的 primary_runbooks（补充）
+            if not primary_runbooks and rca_analysis_raw:
                 try:
                     import json as _json
                     rca_data = _json.loads(rca_analysis_raw) if isinstance(rca_analysis_raw, str) else rca_analysis_raw

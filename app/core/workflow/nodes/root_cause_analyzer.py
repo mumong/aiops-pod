@@ -125,6 +125,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "root_cause": rca_result.get("root_cause", ""),
                 "causal_chain": rca_result.get("causal_chain", {}),
                 "rca_analysis": json.dumps(rca_result, ensure_ascii=False),
+                # AI 判定的核心 Runbook（从 primary_runbooks 列表取第一个）
+                "primary_runbook_id": ", ".join(rca_result.get("primary_runbooks", []) or []) or None,
             })
 
             # 存入 thinking_events（带 node 标记）
