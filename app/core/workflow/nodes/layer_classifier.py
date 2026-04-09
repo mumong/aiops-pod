@@ -198,27 +198,36 @@ class LayerClassifierNode(WorkflowNode):
     def _extract_classification_with_litellm(self, analysis_text: str) -> Optional[Dict]:
         """用 litellm 从工具调用后的分析文本中提取结构化 JSON 分类"""
         try:
-            from litellm import completion
+            # Use ai_call.call_simple if available (aicall path)
+            ai_call = getattr(self, 'ai_call', None)
+            if ai_call:
+                content = ai_call.call_simple(
+                    system_prompt=LAYER_EXTRACT_PROMPT,
+                    question=analysis_text,
+                )
+            else:
+                # Legacy litellm path
+                from litellm import completion
 
-            model = self.holmes_service.ai.llm.model
-            api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
-            api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
+                model = self.holmes_service.ai.llm.model
+                api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
+                api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
 
-            completion_kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": LAYER_EXTRACT_PROMPT},
-                    {"role": "user", "content": analysis_text},
-                ],
-                "temperature": 0.1,
-            }
-            if api_key:
-                completion_kwargs["api_key"] = api_key
-            if api_base:
-                completion_kwargs["api_base"] = api_base
+                completion_kwargs = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": LAYER_EXTRACT_PROMPT},
+                        {"role": "user", "content": analysis_text},
+                    ],
+                    "temperature": 0.1,
+                }
+                if api_key:
+                    completion_kwargs["api_key"] = api_key
+                if api_base:
+                    completion_kwargs["api_base"] = api_base
 
-            resp = completion(**completion_kwargs)
-            content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+                resp = completion(**completion_kwargs)
+                content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
 
             if content:
                 result = self._try_parse_json(content)

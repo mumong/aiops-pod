@@ -47,6 +47,8 @@ class WorkflowExecutor:
         """
         self.holmes_service = holmes_service
         self.metrics = metrics
+        self.ai_call = None       # Set externally to enable aicall path
+        self.mcp_tools = []       # Set externally (list of tool defs for aicall)
         # 获取 runbook_catalog（从 HolmesService）
         self.runbook_catalog = (
             holmes_service.merged_catalog
@@ -143,6 +145,12 @@ class WorkflowExecutor:
             self.holmes_service, metrics, self.runbook_catalog,
             node_config=node_config,
         )
+
+        # Propagate aicall to nodes if available
+        if self.ai_call:
+            for node in node_instances:
+                node.ai_call = self.ai_call
+                node.tools = self.mcp_tools or []
 
         total_start = time.time()
 

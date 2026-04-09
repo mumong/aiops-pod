@@ -203,10 +203,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
         layer: Optional[Layer],
         evidence_summary: str
     ) -> tuple:
-        """lite 模式：litellm 直接调用，不带工具，避免重复 fetch_runbook/TodoWrite"""
+        """lite 模式：直接调用 LLM（不带工具），避免重复 fetch_runbook/TodoWrite"""
         try:
-            from litellm import completion as litellm_completion
-
             layer_str = layer.value if layer else "L2"
             system_prompt = ROOT_CAUSE_ANALYZER_PROMPT.format(
                 layer=layer_str,
@@ -221,26 +219,39 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
 请直接基于以上证据进行根因分析，输出 JSON 格式结果。"""
 
-            model = self.holmes_service.ai.llm.model
-            api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
-            api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
-
-            completion_kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                "temperature": 0.3,
-            }
-            if api_key:
-                completion_kwargs["api_key"] = api_key
-            if api_base:
-                completion_kwargs["api_base"] = api_base
-
             start_time = time.time()
-            resp = litellm_completion(**completion_kwargs)
-            content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+            # Use ai_call.call_simple if available (aicall path)
+            ai_call = getattr(self, 'ai_call', None)
+            if ai_call:
+                content = ai_call.call_simple(
+                    system_prompt=system_prompt,
+                    question=user_message,
+                )
+            else:
+                # Legacy litellm path
+                from litellm import completion as litellm_completion
+
+                model = self.holmes_service.ai.llm.model
+                api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
+                api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
+
+                completion_kwargs = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                    "temperature": 0.3,
+                }
+                if api_key:
+                    completion_kwargs["api_key"] = api_key
+                if api_base:
+                    completion_kwargs["api_base"] = api_base
+
+                resp = litellm_completion(**completion_kwargs)
+                content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+
             duration_ms = (time.time() - start_time) * 1000
 
             if self.metrics:

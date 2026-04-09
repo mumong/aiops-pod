@@ -219,28 +219,38 @@ class ConclusionFormatterNode(WorkflowNode):
 
         start_time = time.time()
 
-        from litellm import completion
+        # Use ai_call.call_simple if available (aicall path)
+        ai_call = getattr(self, 'ai_call', None)
+        if ai_call:
+            content = ai_call.call_simple(
+                system_prompt=CONCLUSION_FORMATTER_PROMPT,
+                question=user_message,
+                max_tokens=max_tokens,
+            )
+        else:
+            # Legacy litellm path
+            from litellm import completion
 
-        model = self.holmes_service.ai.llm.model
-        api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
-        api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
+            model = self.holmes_service.ai.llm.model
+            api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
+            api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
 
-        completion_kwargs = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": CONCLUSION_FORMATTER_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            "temperature": 0.3,
-            "max_tokens": max_tokens,
-        }
-        if api_key:
-            completion_kwargs["api_key"] = api_key
-        if api_base:
-            completion_kwargs["api_base"] = api_base
+            completion_kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": CONCLUSION_FORMATTER_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+            }
+            if api_key:
+                completion_kwargs["api_key"] = api_key
+            if api_base:
+                completion_kwargs["api_base"] = api_base
 
-        resp = completion(**completion_kwargs)
-        content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            resp = completion(**completion_kwargs)
+            content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
 
         llm_duration_ms = (time.time() - start_time) * 1000
 
