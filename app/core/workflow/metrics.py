@@ -118,6 +118,7 @@ class WorkflowMetrics:
     confidence_weighted_total: float = 0.0
     confidence_fallback_applied: bool = False
     evidence_breakdown: Dict = field(default_factory=dict)
+    evidence_details: List[Dict] = field(default_factory=list)  # 每项证据的名称+状态
 
     # Runbook 覆盖率明细
     runbook_coverage_score: float = 0.0       # 最终覆盖率 [0, 1]
@@ -388,6 +389,20 @@ class WorkflowMetrics:
                     lines.append(
                         f"  {prefix} {level}: {stats['collected']}/{stats['total']} "
                         f"(权重 {stats['weight']}) → {stats['rate']:.0%}"
+                    )
+                lines.append("")
+
+            # 证据采集清单（每项证据的名称和状态）
+            if self.evidence_details:
+                lines.append("📋 证据采集清单")
+                lines.append("")
+                lines.append("| # | 证据项 | 级别 | 状态 |")
+                lines.append("|---|--------|------|------|")
+                for i, ev in enumerate(self.evidence_details):
+                    status_icon = "✅" if ev.get("collected") else "❌"
+                    lines.append(
+                        f"| {i+1} | {ev.get('description', '未知')} | "
+                        f"{ev.get('level', 'IMPORTANT')} | {status_icon} |"
                     )
                 lines.append("")
 
