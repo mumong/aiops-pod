@@ -612,6 +612,15 @@ class WorkflowExecutor:
         metrics.evidence_planned = len(evidence_items)
         metrics.evidence_collected = sum(1 for e in evidence_items if getattr(e, 'collected', False))
 
+        # 填充证据详情（每项证据的名称+级别+状态）
+        metrics.evidence_details = []
+        for e in evidence_items:
+            metrics.evidence_details.append({
+                "description": getattr(e, 'description', '未知'),
+                "level": getattr(e, 'level', 'IMPORTANT').value if hasattr(getattr(e, 'level', None), 'value') else str(getattr(e, 'level', 'IMPORTANT')),
+                "collected": getattr(e, 'collected', False),
+            })
+
         # 工具调用统计补充：如果 metrics 中没有记录，从 state 的 tool_results 补充
         tool_results = state.get("tool_results", [])
         if metrics.total_tool_calls == 0 and tool_results:
@@ -689,14 +698,11 @@ class WorkflowExecutor:
 
             # ============================================================
             # 核心 Runbook 识别
-            # 优先级：
-            #   1. state["primary_runbook_id"]（RCA 节点 AI 判定的）
-            #   2. 从 rca_analysis JSON 的 primary_runbooks 字段提取
-            #   3. 回退到关键词匹配
+            # 只用 AI 明确声明的，不做关键词猜测
             # ============================================================
             primary_runbooks = []
 
-            # 方法0: 直接从 state 读取（RCA 节点已提取）
+            # 方法1: 直接从 state 读取（RCA 节点 lite 模式输出的 primary_runbooks）
             state_primary = state.get("primary_runbook_id")
             if state_primary:
                 for rb in state_primary.split(", "):
@@ -704,64 +710,36 @@ class WorkflowExecutor:
                     if rb and rb not in primary_runbooks:
                         primary_runbooks.append(rb)
 
-            # 方法1: 从 rca_analysis JSON 提取 AI 声明的 primary_runbooks（补充）
+            # 方法2: 从 rca_analysis JSON 提取 primary_runbooks 字段
             if not primary_runbooks and rca_analysis_raw:
                 try:
                     import json as _json
                     rca_data = _json.loads(rca_analysis_raw) if isinstance(rca_analysis_raw, str) else rca_analysis_raw
                     if isinstance(rca_data, dict):
                         ai_primary = rca_data.get("primary_runbooks", [])
-                        if isinstance(ai_primary, list) and ai_primary:
-                            # 验证 AI 声明的 runbook 确实在本次调用过的 runbook 中
+                        if isinstance(ai_primary, list):
                             for rb in ai_primary:
-                                if isinstance(rb, str) and rb.strip():
-                                    # 模糊匹配：AI 声明的名称可能与 runbook_names 不完全一致
-                                    for known_name in runbook_names:
-                                        if rb.strip().lower() in known_name.lower() or known_name.lower() in rb.strip().lower():
-                                            if known_name not in primary_runbooks:
-                                                primary_runbooks.append(known_name)
-                                            break
-                                    else:
-                                        # 没有精确匹配，直接用 AI 声明的
-                                        if rb.strip() not in primary_runbooks:
-                                            primary_runbooks.append(rb.strip())
+                                if isinstance(rb, str) and rb.strip() and rb.strip() not in primary_runbooks:
+                                    primary_runbooks.append(rb.strip())
+                        # 方法2b: JSON 解析失败时从 llm_raw_analysis 提取 "I found a runbook named **xxx**"
+                        if not primary_runbooks:
+                            raw = rca_data.get("llm_raw_analysis", "")
+                            if raw:
+                                for m in re.finditer(r'found a runbook named \*\*(.+?)\*\*', raw):
+                                    name = m.group(1).strip()
+                                    if name not in primary_runbooks:
+                                        primary_runbooks.append(name)
                 except (ValueError, TypeError):
                     pass
 
-            # 方法2: 回退 — 从 conclusion 文本关键词匹配
-            if not primary_runbooks:
-                conclusion_text = (conclusion + "\n" + rca_analysis_raw).lower()
-                root_cause = (state.get("root_cause", "") or "").lower()
-
-                all_catalog_descs = {}
-                if self.runbook_catalog and hasattr(self.runbook_catalog, 'catalog'):
-                    for entry in self.runbook_catalog.catalog:
-                        desc = getattr(entry, 'description', '') or ''
-                        all_catalog_descs[desc.lower()] = desc
-
-                skip_words = {'诊断', '手册', '故障', '排查', '层', 'pod', 'node',
-                              'the', 'and', 'for', 'with', 'from', 'that'}
-                relevant_runbooks = []
+            # 方法3: 从 thinking_events 中提取 AI 实际 fetch 并使用的 runbook 标题
+            if not primary_runbooks and runbook_names:
+                # 在 conclusion 文本中查找哪个 runbook 被引用了
                 for name in runbook_names:
-                    relevance = 0
-                    match_text = name.lower()
-                    for desc_lower in all_catalog_descs.keys():
-                        name_core = re.sub(r'^L\d\s+|诊断手册|\(.*?\)|-', ' ', name).strip()
-                        if any(part in desc_lower for part in name_core.lower().split() if len(part) > 2):
-                            match_text += " " + desc_lower
-                    keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', match_text)
-                    keywords = list(set(k.lower() for k in keywords if k.lower() not in skip_words))
-                    for kw in keywords:
-                        if kw in conclusion_text:
-                            relevance += 2
-                        if kw in root_cause:
-                            relevance += 3
-                    if relevance > 0:
-                        relevant_runbooks.append((name, relevance))
-
-                relevant_runbooks.sort(key=lambda x: x[1], reverse=True)
-                if relevant_runbooks:
-                    primary_runbooks = [relevant_runbooks[0][0]]
+                    if name.lower() in conclusion.lower():
+                        if name not in primary_runbooks:
+                            primary_runbooks.append(name)
+                            break  # 只取第一个匹配的
 
             metrics.primary_runbook = ', '.join(primary_runbooks) if primary_runbooks else None
 
