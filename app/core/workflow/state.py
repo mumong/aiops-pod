@@ -48,6 +48,7 @@ class WorkflowState(TypedDict, total=False):
     root_cause: Optional[str]            # 根因结论
     causal_chain: Optional[Dict[str, str]]  # 因果链
     rca_analysis: Optional[str]          # LLM 完整分析（JSON 字符串）
+    primary_runbook_id: Optional[str]    # AI 判定的核心 Runbook（与诊断结论最匹配的）
     
     # ========== 节点4 输出：汇总总结 ==========
     conclusion: Optional[str]            # 最终报告

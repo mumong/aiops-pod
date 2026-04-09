@@ -13,17 +13,23 @@ from contextlib import asynccontextmanager
 
 from app.api import register_routes
 
-# 配置日志
+# 配置日志（通过 LOG_LEVEL 环境变量控制，默认 INFO）
+# DEBUG: 完整工具调用参数和响应体、节点间传递的完整数据
+# INFO:  工具调用摘要、节点状态、耗时统计
+# WARNING: 工具调用失败、非零退出码
+# ERROR: 异常、超时
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     force=True
 )
 logger = logging.getLogger(__name__)
 
 # 确保相关模块的日志也能输出
-logging.getLogger('app.core.service').setLevel(logging.INFO)
-logging.getLogger('app.core.mcp.manager').setLevel(logging.INFO)
+logging.getLogger('app.core.service').setLevel(_log_level)
+logging.getLogger('app.core.mcp.manager').setLevel(_log_level)
+logging.getLogger('app.core.holmes.call_wrapper').setLevel(_log_level)
 
 
 @asynccontextmanager
