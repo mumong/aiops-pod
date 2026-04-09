@@ -106,10 +106,6 @@ def call_with_stream(ai: Any, messages: list, logger_override=None) -> Any:
                 tool_duration = time.time() - current_tool_start if current_tool_start else 0
                 tool_name = (tool_data.get("name") or tool_data.get("tool_name")
                              or current_tool_name or "unknown") if tool_data else "unknown"
-                log.info(
-                    "[call_wrapper]   tool_done #%d: %s | %.1fs",
-                    tool_call_count, tool_name, tool_duration
-                )
                 current_tool_start = None
 
                 if tool_data:
@@ -121,6 +117,21 @@ def call_with_stream(ai: Any, messages: list, logger_override=None) -> Any:
                     else:
                         result_str = str(result_dict)
                         error_str = None
+
+                    # 增强日志：输出工具结果预览
+                    result_len = len(str(result_str)) if result_str else 0
+                    status_icon = "❌" if error_str else "✅"
+                    preview_len = 2000 if log.isEnabledFor(logging.DEBUG) else 500
+                    preview = (str(result_str)[:preview_len] if result_str else "(empty)").replace("\n", "\\n")
+                    log.info(
+                        "[call_wrapper]   %s tool_done #%d: %s | %.1fs | len=%d | preview=%s",
+                        status_icon, tool_call_count, tool_name, tool_duration, result_len, preview
+                    )
+                    if error_str:
+                        log.warning(
+                            "[call_wrapper]   ❌ tool_error #%d: %s | error=%s",
+                            tool_call_count, tool_name, str(error_str)[:500]
+                        )
 
                     final_tool_calls.append(
                         {
@@ -135,6 +146,7 @@ def call_with_stream(ai: Any, messages: list, logger_override=None) -> Any:
                         "tool_name": tool_name,
                         "status": "error" if error_str else "success",
                         "result_preview": (str(result_str)[:200] if result_str else ""),
+                        "result": str(result_str) if result_str else "",
                         "duration_seconds": round(tool_duration, 2),
                         "iteration": iteration_count + 1,
                         "ts_ms": int(time.time() * 1000),
@@ -277,10 +289,7 @@ def call_with_stream_and_queue(
                 tool_duration = time.time() - current_tool_start if current_tool_start else 0
                 tool_name = (tool_data.get("name") or tool_data.get("tool_name")
                              or current_tool_name or "unknown") if tool_data else "unknown"
-                log.info(
-                    "[call_wrapper+queue]   tool_done #%d: %s | %.1fs",
-                    tool_call_count, tool_name, tool_duration
-                )
+
                 current_tool_start = None
 
                 if tool_data:
@@ -291,6 +300,21 @@ def call_with_stream_and_queue(
                     else:
                         result_str = str(result_dict)
                         error_str = None
+
+                    # 增强日志：输出工具结果预览（INFO 级别 500 字符，DEBUG 级别 2000 字符）
+                    result_len = len(str(result_str)) if result_str else 0
+                    status_icon = "❌" if error_str else "✅"
+                    preview_len = 2000 if log.isEnabledFor(logging.DEBUG) else 500
+                    preview = (str(result_str)[:preview_len] if result_str else "(empty)").replace("\n", "\\n")
+                    log.info(
+                        "[call_wrapper+queue]   %s tool_done #%d: %s | %.1fs | len=%d | preview=%s",
+                        status_icon, tool_call_count, tool_name, tool_duration, result_len, preview
+                    )
+                    if error_str:
+                        log.warning(
+                            "[call_wrapper+queue]   ❌ tool_error #%d: %s | error=%s",
+                            tool_call_count, tool_name, str(error_str)[:500]
+                        )
 
                     final_tool_calls.append({
                         "tool_name": tool_name,
@@ -303,6 +327,7 @@ def call_with_stream_and_queue(
                         "tool_name": tool_name,
                         "status": "error" if error_str else "success",
                         "result_preview": (str(result_str)[:200] if result_str else ""),
+                        "result": str(result_str) if result_str else "",
                         "duration_seconds": round(tool_duration, 2),
                         "iteration": iteration_count + 1,
                         "ts_ms": int(time.time() * 1000),

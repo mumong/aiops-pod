@@ -87,9 +87,10 @@ class ConclusionFormatterNode(WorkflowNode):
         try:
             # 收集前3个节点的分析结果
             question = state.get("question", "")
-            layer_analysis = state.get("layer_analysis", "{}")
-            evidence_analysis = state.get("evidence_analysis", "{}")
-            rca_analysis = state.get("rca_analysis", "{}")
+            # 优先使用完整分析文本（含工具原始输出），回退到精简 JSON
+            layer_analysis = state.get("layer_full_analysis", "") or state.get("layer_analysis", "{}")
+            evidence_analysis = state.get("evidence_analysis") or "{}"
+            rca_analysis = state.get("rca_analysis") or "{}"
             
             # 提取其他关键信息
             layer = state.get("layer")
