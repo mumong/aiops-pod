@@ -133,6 +133,9 @@ class LayerClassifierNode(WorkflowNode):
         """
         try:
             # ── 阶段1：工具调用，收集集群状态 ──
+            logger.debug("📍 [layer] 阶段1开始 | ai_call=%s tools=%d",
+                         type(getattr(self, 'ai_call', None)).__name__,
+                         len(getattr(self, 'tools', [])))
             response, thinking_events = self._call_llm(question, LAYER_CLASSIFIER_PROMPT)
 
             if not (response and response.result):

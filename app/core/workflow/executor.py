@@ -116,6 +116,8 @@ class WorkflowExecutor:
             for node in node_instances:
                 node.ai_call = self.ai_call
                 node.tools = self.mcp_tools or []
+                logger.debug("   🔧 [%s] ai_call=%s tools=%d",
+                             node.node_id, type(node.ai_call).__name__, len(node.tools))
 
         total_start = time.time()
 
