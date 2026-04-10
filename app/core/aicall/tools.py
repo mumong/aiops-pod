@@ -24,40 +24,44 @@ async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
     if not mcp_servers_config:
-        logger.info("[tools] No MCP servers configured")
+        logger.info("🔧 [MCP-Tools] 无 MCP 服务器配置")
         return []
 
     # Build connections dict for MultiServerMCPClient
     connections: Dict[str, dict] = {}
     for name, server_cfg in mcp_servers_config.items():
         if not server_cfg.get("enabled", False):
-            logger.debug("[tools] Skipping disabled MCP server: %s", name)
+            logger.debug("   ⏭️ [MCP-Tools] 跳过已禁用: %s", name)
             continue
 
         config = server_cfg.get("config", {})
         url = config.get("url", "")
         if not url:
-            logger.warning("[tools] MCP server %s has no url, skipping", name)
+            logger.warning("   ⚠️ [MCP-Tools] %s 无 url，跳过", name)
             continue
 
         connections[name] = {
             "transport": "sse",
             "url": url,
         }
-        logger.info("[tools] Registered MCP server: %s → %s", name, url)
+        logger.debug("   📡 [MCP-Tools] 注册: %s → %s", name, url)
 
     if not connections:
-        logger.info("[tools] No enabled MCP servers found")
+        logger.info("🔧 [MCP-Tools] 无已启用的 MCP 服务器")
         return []
 
     # Connect and load tools
     all_tools: List = []
     try:
-        async with MultiServerMCPClient(connections) as client:
-            all_tools = await client.get_tools()
-        logger.info("[tools] Loaded %d tools from %d MCP servers",
-                    len(all_tools), len(connections))
+        logger.info("🔄 [MCP-Tools] 连接 %d 个 MCP 服务器...", len(connections))
+        client = MultiServerMCPClient(connections)
+        all_tools = await client.get_tools()
+        tool_names = [t.name for t in all_tools]
+        logger.info("✅ [MCP-Tools] 加载 %d 个工具: %s",
+                    len(all_tools), ", ".join(tool_names[:10]))
+        if len(tool_names) > 10:
+            logger.debug("   ... 完整列表: %s", ", ".join(tool_names))
     except Exception as e:
-        logger.error("[tools] Failed to load MCP tools: %s", e, exc_info=True)
+        logger.error("❌ [MCP-Tools] 加载失败: %s", e, exc_info=True)
 
     return all_tools

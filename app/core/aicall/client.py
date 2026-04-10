@@ -1,29 +1,57 @@
-"""AICall — 统一 LLM 调用层，基于 litellm + LangChain tools
+"""AICall — 统一 LLM 调用层，基于 LangChain + LangGraph
+
+核心能力：
+- call(): LangGraph ReAct agent loop（支持 tool calling、interrupt、checkpointer）
+- call_simple(): LangChain ChatModel 直接调用（无工具）
+- 完全控制 system prompt，无框架注入
 
 用法:
     ai = AICall(model="deepseek/deepseek-chat", api_key="sk-xxx")
     result, events = ai.call(system_prompt, question, tools=tools, max_steps=10)
     text = ai.call_simple(system_prompt, question)
 """
-import json
 import logging
 import queue
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import litellm
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from .streaming import push_event
 from .types import AICallResult
 
 logger = logging.getLogger(__name__)
 
-# litellm 日志太吵，默认压到 WARNING
-litellm.suppress_debug_info = True
+# 已知模型提供商 → base_url 映射
+_PROVIDER_BASE_URLS = {
+    "deepseek": "https://api.deepseek.com/v1",
+    "openai": None,  # 默认
+}
+
+
+def _parse_model(model_str: str, api_base: str = "") -> Tuple[str, Optional[str]]:
+    """解析 litellm 格式模型名为 (model_name, base_url)
+
+    'deepseek/deepseek-chat' → ('deepseek-chat', 'https://api.deepseek.com/v1')
+    'openai/gpt-4o' → ('gpt-4o', None)
+    'anthropic/claude-sonnet-4-6' → ('claude-sonnet-4-6', api_base)
+    """
+    if api_base and api_base.strip():
+        # 用户指定了 api_base，直接用
+        parts = model_str.split("/", 1)
+        model_name = parts[-1] if len(parts) > 1 else model_str
+        return model_name, api_base.strip()
+
+    if "/" in model_str:
+        provider, model_name = model_str.split("/", 1)
+        base_url = _PROVIDER_BASE_URLS.get(provider.lower())
+        return model_name, base_url
+    return model_str, None
 
 
 class AICall:
-    """LLM 调用核心类，支持 tool calling ReAct 循环"""
+    """LLM 调用核心类，基于 LangChain ChatModel + LangGraph ReAct Agent"""
 
     def __init__(self, model: str, api_key: str, api_base: str = ""):
         """
@@ -32,25 +60,53 @@ class AICall:
             api_key: API Key
             api_base: 可选代理地址（覆盖默认 endpoint）
         """
-        self.model = model
+        self.model_str = model
         self.api_key = api_key
-        self.api_base = api_base or None
-        logger.info("[AICall] init model=%s api_base=%s", model, api_base or "(default)")
+        self.api_base = api_base
+
+        model_name, base_url = _parse_model(model, api_base)
+        kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "api_key": api_key,
+        }
+        if base_url:
+            kwargs["base_url"] = base_url
+
+        self.chat_model = ChatOpenAI(**kwargs)
+        logger.info("🔧 [AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
+                     model_name, base_url or "(default)")
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def call_simple(self, system_prompt: str, question: str) -> str:
-        """直接 LLM 调用（不带工具）"""
-        messages = self._build_messages(system_prompt, question)
-        resp = litellm.completion(
-            model=self.model,
-            messages=messages,
-            api_key=self.api_key,
-            api_base=self.api_base,
-        )
-        return resp.choices[0].message.content or ""
+    def call_simple(self, system_prompt: str, question: str, **kwargs) -> str:
+        """直接 LLM 调用（不带工具）
+
+        Args:
+            system_prompt: 系统提示词（你写的就是全部，无框架注入）
+            question: 用户问题
+            **kwargs: 透传给 ChatModel（如 max_tokens, temperature）
+        """
+        logger.debug("📍 [AICall] call_simple 开始 | prompt=%d字 question=%d字 extra=%s",
+                      len(system_prompt), len(question), list(kwargs.keys()) or "无")
+        start = time.time()
+
+        messages = []
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+        messages.append(HumanMessage(content=question))
+
+        # 透传 kwargs（如 max_tokens）到 model.invoke
+        model = self.chat_model
+        if kwargs:
+            model = model.bind(**kwargs)
+
+        result = model.invoke(messages)
+        content = result.content or ""
+        logger.debug("✅ [AICall] call_simple 完成 | %.1fs | 输出=%d字",
+                      time.time() - start, len(content))
+        return content
 
     def call(
         self,
@@ -61,185 +117,133 @@ class AICall:
         stream_queue: Optional[queue.Queue] = None,
         node_id: str = "",
     ) -> Tuple[AICallResult, List[Dict]]:
-        """ReAct agent loop with tool calling
+        """LangGraph ReAct agent loop with tool calling
 
         Args:
-            system_prompt: 系统提示词
+            system_prompt: 系统提示词（你写的就是全部，无框架注入）
             question: 用户问题
             tools: LangChain BaseTool 列表（来自 load_mcp_tools）
-            max_steps: 最大迭代次数
-            stream_queue: 实时事件队列
+            max_steps: 最大迭代次数（LangGraph recursion_limit）
+            stream_queue: 实时事件队列（thinking 事件推送）
             node_id: 节点 ID（用于事件标记）
 
         Returns:
             (AICallResult, thinking_events)
         """
-        messages = self._build_messages(system_prompt, question)
+        call_start = time.time()
         thinking_events: List[Dict] = []
         all_tool_calls: List[Dict] = []
         tool_call_count = 0
-        call_start = time.time()
+        iteration = 0
 
-        # Build tool schemas + lookup map
-        tool_schemas = None
-        tools_by_name: Dict[str, Any] = {}
-        if tools:
-            tool_schemas = [self._tool_to_schema(t) for t in tools]
-            tools_by_name = {t.name: t for t in tools}
+        logger.debug("📍 [AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字",
+                      node_id or "?", max_steps, len(tools or []), len(system_prompt))
 
-        for iteration in range(1, max_steps + 1):
-            # LLM call
-            kwargs: Dict[str, Any] = dict(
-                model=self.model,
-                messages=messages,
-                api_key=self.api_key,
-                api_base=self.api_base,
+        # 无工具时直接调用 call_simple
+        if not tools:
+            content = self.call_simple(system_prompt, question)
+            total_ms = (time.time() - call_start) * 1000
+            result = AICallResult(
+                result=content, iterations=1, duration_ms=total_ms,
             )
-            if tool_schemas:
-                kwargs["tools"] = tool_schemas
-            resp = litellm.completion(**kwargs)
-            choice = resp.choices[0].message
+            return result, thinking_events
 
-            # Append assistant message
-            assistant_msg: Dict[str, Any] = {"role": "assistant", "content": choice.content or ""}
-            if choice.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
-                    for tc in choice.tool_calls
-                ]
-            messages.append(assistant_msg)
+        # 创建 LangGraph ReAct agent
+        from langgraph.prebuilt import create_react_agent
 
-            # AI message event
-            if choice.content:
-                evt = {"type": "ai_message", "content": choice.content[:500],
-                       "iteration": iteration}
-                self._push(stream_queue, node_id, thinking_events, **evt)
+        agent = create_react_agent(
+            model=self.chat_model,
+            tools=tools,
+            prompt=system_prompt,
+        )
 
-            # No tool calls → done
-            if not choice.tool_calls:
-                break
+        # 使用 async stream 模式（MCP 工具需要异步调用）
+        import asyncio
+        import concurrent.futures
 
-            # Execute tool calls
-            for tc in choice.tool_calls:
-                fn_name = tc.function.name
-                try:
-                    fn_args = json.loads(tc.function.arguments)
-                except (json.JSONDecodeError, TypeError):
-                    fn_args = {}
+        input_messages = {"messages": [{"role": "user", "content": question}]}
+        config = {"recursion_limit": max_steps * 2 + 5}
 
-                tool_call_count += 1
-                push_event(stream_queue, "tool_start", node_id,
-                           tool_name=fn_name, iteration=iteration)
-                self._record(thinking_events, "tool_start", node_id,
-                             tool_name=fn_name, iteration=iteration)
+        final_content = ""
 
-                # Execute
-                tool_start = time.time()
-                result_str, error_str = self._execute_tool(tools_by_name, fn_name, fn_args)
-                tool_duration = time.time() - tool_start
+        async def _run_agent():
+            nonlocal final_content, iteration, tool_call_count
+            async for chunk in agent.astream(input_messages, config=config, stream_mode="updates"):
+                for node_name, update in chunk.items():
+                    messages = update.get("messages", [])
+                    for msg in messages:
+                        if isinstance(msg, AIMessage):
+                            # AI 文本输出
+                            if msg.content:
+                                final_content = msg.content
+                                iteration += 1
+                                evt = {"type": "ai_message",
+                                       "content": msg.content[:500],
+                                       "iteration": iteration}
+                                self._push(stream_queue, node_id, thinking_events, **evt)
 
-                status = "error" if error_str else "success"
-                logger.info("[AICall] tool #%d %s | %s | %.1fs",
-                            tool_call_count, fn_name, status, tool_duration)
+                            # AI 工具调用
+                            if msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    tool_call_count += 1
+                                    push_event(stream_queue, "tool_start", node_id,
+                                               tool_name=tc["name"], iteration=iteration)
+                                    self._record(thinking_events, "tool_start", node_id,
+                                                 tool_name=tc["name"], iteration=iteration)
 
-                all_tool_calls.append({
-                    "tool_name": fn_name,
-                    "result": result_str,
-                    "error": error_str,
-                })
+                        elif hasattr(msg, 'type') and msg.type == 'tool':
+                            # 工具执行结果
+                            tool_name = getattr(msg, 'name', '') or ''
+                            tool_content = msg.content or ''
+                            status = "success"
+                            all_tool_calls.append({
+                                "tool_name": tool_name,
+                                "result": tool_content,
+                            })
+                            logger.info("   ✅ [AICall] tool #%d %s | %s | len=%d",
+                                        tool_call_count, tool_name, status,
+                                        len(tool_content))
+                            evt = {
+                                "type": "tool_result",
+                                "tool_name": tool_name,
+                                "status": status,
+                                "result_preview": tool_content[:200],
+                                "result": tool_content,
+                                "iteration": iteration,
+                            }
+                            push_event(stream_queue, "tool_result", node_id, **evt)
+                            self._record(thinking_events, "tool_result", node_id, **evt)
 
-                evt = {
-                    "type": "tool_result", "tool_name": fn_name,
-                    "status": status,
-                    "result_preview": (result_str or "")[:200],
-                    "result": result_str or "",
-                    "duration_seconds": round(tool_duration, 2),
-                    "iteration": iteration,
-                }
-                push_event(stream_queue, "tool_result", node_id, **evt)
-                self._record(thinking_events, "tool_result", node_id, **evt)
+        # 在新线程中运行异步 agent（避免与 uvicorn event loop 冲突）
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(lambda: asyncio.run(_run_agent())).result(timeout=max_steps * 30)
+        except concurrent.futures.TimeoutError:
+            logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
+            if not final_content:
+                final_content = "Agent 执行超时"
+        except Exception as e:
+            logger.error("❌ [AICall] agent 执行异常: %s", e, exc_info=True)
+            if not final_content:
+                final_content = f"Agent 执行异常: {e}"
 
-                # Append tool message for next LLM turn
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result_str or error_str or "",
-                })
-
-            # Iteration end event
-            elapsed = time.time() - call_start
-            evt = {"type": "iteration_end", "iteration": iteration,
-                   "tool_calls_in_iteration": len(choice.tool_calls),
-                   "elapsed_seconds": round(elapsed, 2)}
-            push_event(stream_queue, "iteration_end", node_id, **evt)
-            self._record(thinking_events, "iteration_end", node_id, **evt)
-
-        # Build result
         total_ms = (time.time() - call_start) * 1000
-        final_content = messages[-1].get("content", "") if messages else ""
-        # Walk back to find last assistant content
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant" and msg.get("content"):
-                final_content = msg["content"]
-                break
-
         result = AICallResult(
             result=final_content,
             tool_calls=all_tool_calls,
-            iterations=min(iteration, max_steps) if tools else 1,
+            iterations=max(iteration, 1),
             tool_call_count=tool_call_count,
             duration_ms=total_ms,
             intermediate_events=thinking_events,
         )
-        logger.info("[AICall] done | %.1fs | iterations=%d | tools=%d",
-                    total_ms / 1000, result.iterations, tool_call_count)
+        logger.info("✅ [AICall] call 完成 | node=%s | %.1fs | iterations=%d | tools=%d | 输出=%d字",
+                    node_id or "?", total_ms / 1000, result.iterations, tool_call_count,
+                    len(final_content))
         return result, thinking_events
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_messages(system_prompt: str, question: str) -> List[Dict]:
-        msgs = []
-        if system_prompt:
-            msgs.append({"role": "system", "content": system_prompt})
-        msgs.append({"role": "user", "content": question})
-        return msgs
-
-    @staticmethod
-    def _tool_to_schema(tool) -> Dict:
-        """Convert LangChain BaseTool to OpenAI function-calling schema."""
-        schema = tool.args_schema.schema() if tool.args_schema else {"type": "object", "properties": {}}
-        # Remove title if present (not part of OpenAI spec)
-        schema.pop("title", None)
-        return {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description or "",
-                "parameters": schema,
-            },
-        }
-
-    @staticmethod
-    def _execute_tool(tools_by_name: Dict, name: str, args: Dict) -> Tuple[Optional[str], Optional[str]]:
-        """Execute a LangChain tool, return (result, error)."""
-        tool = tools_by_name.get(name)
-        if not tool:
-            err = f"Tool not found: {name}"
-            logger.warning("[AICall] %s", err)
-            return None, err
-        try:
-            result = tool.invoke(args)
-            return str(result), None
-        except Exception as e:
-            logger.error("[AICall] Tool %s failed: %s", name, e, exc_info=True)
-            return None, str(e)
 
     @staticmethod
     def _push(q: Optional[queue.Queue], node_id: str, events: List[Dict], **data):
