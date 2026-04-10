@@ -103,7 +103,9 @@ class WorkflowNode(ABC):
             (response, thinking_events)
         """
         if getattr(self, 'ai_call', None) is not None:
+            logger.debug("🔀 [%s] _call_llm → aicall 路径", self.node_id)
             return self._call_llm_aicall(question, system_prompt)
+        logger.debug("🔀 [%s] _call_llm → legacy HolmesGPT 路径", self.node_id)
         return self._call_llm_legacy(question, system_prompt)
 
     def _call_llm_aicall(self, question: str, system_prompt: str) -> Tuple[Any, list]:
@@ -125,12 +127,16 @@ class WorkflowNode(ABC):
                     link = getattr(e, 'link', '') or ''
                     lines.append(f"- {link}: {desc}")
                 catalog_text = "\n".join(lines)
+                logger.debug("📚 [%s] 注入 %d 条 Runbook 到 prompt", self.node_id, len(entries))
 
         full_prompt = system_prompt
         if catalog_text:
             full_prompt = catalog_text + "\n\n" + system_prompt
 
         tools = getattr(self, 'tools', []) or []
+        logger.debug("📍 [%s] aicall.call() 开始 | max_steps=%d tools=%d",
+                      self.node_id, max_steps, len(tools))
+
         result, thinking_events = self.ai_call.call(
             system_prompt=full_prompt,
             question=question,
@@ -141,6 +147,9 @@ class WorkflowNode(ABC):
         )
 
         llm_duration_ms = (time.time() - start_time) * 1000
+        logger.debug("✅ [%s] aicall.call() 完成 | %.1fs | tools=%d | 输出=%d字",
+                      self.node_id, llm_duration_ms / 1000,
+                      result.tool_call_count, len(result.result or ""))
 
         # metrics
         if getattr(self, 'metrics', None):

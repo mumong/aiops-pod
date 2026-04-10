@@ -59,6 +59,7 @@ class HolmesService:
         self.metrics_config: Dict = {}   # 质量指标配置
         self.raw_config: Dict = {}       # 完整原始配置
         self.ai_call: Optional[AICall] = None  # New aicall path (replaces HolmesGPT LLM calls)
+        self.mcp_tools: list = []               # LangChain BaseTool list for aicall path
     
     def initialize(
         self,
@@ -209,6 +210,32 @@ class HolmesService:
                         api_base=final_api_base or "",
                     )
                     logger.info(f"   ✅ AICall 实例创建完成 (model={final_model})")
+
+                    # 加载 MCP 工具为 LangChain BaseTool（aicall 路径需要）
+                    mcp_cfg = _raw_config.get("mcp_servers", {})
+                    if mcp_cfg:
+                        import asyncio
+                        import concurrent.futures
+                        from app.core.aicall.tools import load_mcp_tools
+                        try:
+                            step_start = time.time()
+                            logger.info("🔄 [AICall] 加载 MCP 工具...")
+                            # 在新线程中运行 asyncio.run()，避免与 uvicorn event loop 冲突
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                                self.mcp_tools = pool.submit(
+                                    lambda cfg=mcp_cfg: asyncio.run(load_mcp_tools(cfg))
+                                ).result(timeout=60)
+                            logger.info(f"   ✅ [AICall] MCP 工具加载完成: {len(self.mcp_tools)} 个 ({time.time() - step_start:.2f}s)")
+                            for t in self.mcp_tools[:5]:
+                                logger.debug(f"      📡 {t.name}")
+                            if len(self.mcp_tools) > 5:
+                                logger.debug(f"      ... 共 {len(self.mcp_tools)} 个")
+                        except Exception as e:
+                            logger.error(f"   ❌ [AICall] MCP 工具加载失败: {e}", exc_info=True)
+                            self.mcp_tools = []
+                    else:
+                        self.mcp_tools = []
+                        logger.info("   ℹ️ [AICall] 无 MCP 服务器配置")
                 else:
                     logger.info("   ℹ️ AICall 未激活 (USE_AICALL != true)")
 
@@ -574,6 +601,8 @@ class HolmesService:
             # Activate aicall path on executor
             if self.ai_call:
                 executor.ai_call = self.ai_call
+                executor.mcp_tools = self.mcp_tools or []
+                logger.debug("🔀 [Workflow] aicall 路径激活 | tools=%d", len(executor.mcp_tools))
             
             # text 格式输出（终端友好）
             if output_format == "text":
