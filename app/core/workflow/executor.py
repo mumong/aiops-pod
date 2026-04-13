@@ -77,15 +77,17 @@ class WorkflowExecutor:
     def execute_stream(
         self,
         question: str,
-        run_id: Optional[str] = None
+        run_id: Optional[str] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Generator[Dict, None, None]:
         """
         流式执行工作流（SSE 兼容）
-        
+
         Args:
             question: 用户问题
             run_id: 运行 ID（可选，不提供则自动生成）
-        
+            cancel_event: 取消信号（客户端断开时 set()，后台线程检测后停止）
+
         Yields:
             工作流事件（与现有 event_mapper 格式兼容）
         """
@@ -116,6 +118,7 @@ class WorkflowExecutor:
             for node in node_instances:
                 node.ai_call = self.ai_call
                 node.tools = self.mcp_tools or []
+                node.cancel_event = cancel_event  # 传递取消信号
                 logger.debug("   🔧 [%s] ai_call=%s tools=%d",
                              node.node_id, type(node.ai_call).__name__, len(node.tools))
 
@@ -195,6 +198,12 @@ class WorkflowExecutor:
 
             workflow_done = False
             while not workflow_done:
+                # 检查取消信号
+                if cancel_event and cancel_event.is_set():
+                    logger.info("🛑 [Workflow] 收到取消信号，停止工作流 (run_id=%s)", run_id)
+                    workflow_done = True
+                    break
+
                 try:
                     item = event_queue.get(timeout=0.3)
                 except queue.Empty:
@@ -437,11 +446,16 @@ class WorkflowExecutor:
                 "error": str(e),
             }
         finally:
+            # 设置取消信号（确保后台线程也能感知）
+            if cancel_event:
+                cancel_event.set()
             # 清除事件队列（实例级，无需类级别清理）+ 等待后台线程结束
             for node in node_instances:
                 node.set_event_queue(None)
             if worker.is_alive():
                 worker.join(timeout=5)
+                if worker.is_alive():
+                    logger.warning("⚠️ [Workflow] 后台线程未在 5s 内结束 (run_id=%s)", run_id)
     
     def _get_node_display_name(self, node_id: str) -> str:
         """获取节点显示名称"""

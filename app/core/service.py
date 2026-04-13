@@ -395,22 +395,35 @@ class HolmesService:
     def _log_loaded_resources(self):
         """输出加载的资源信息"""
         if self.ai_call:
-            # AICall 路径：输出 LangGraph 工具信息
+            # AICall 路径：输出 LangGraph 工具信息（按来源分组）
+            logger.info("=" * 50)
             logger.info("📋 [AICall] 资源概览:")
-            logger.info("   🔧 工具: %d 个", len(self.mcp_tools))
-            # DEBUG: 列出全部工具名
-            for t in self.mcp_tools:
-                logger.debug("      - %s: %s", t.name, getattr(t, 'description', '')[:80])
+            logger.info("   🔧 工具总计: %d 个", len(self.mcp_tools))
+
+            # 按来源分组：MCP 工具 vs 内置工具
+            mcp_tools = [t for t in self.mcp_tools if not getattr(t, '_is_builtin', False)]
+            builtin_tools = [t for t in self.mcp_tools if getattr(t, '_is_builtin', False)]
+
+            if mcp_tools:
+                logger.info("   📡 MCP 工具 (%d 个):", len(mcp_tools))
+                for t in mcp_tools:
+                    logger.info("      - %s", t.name)
+                    logger.debug("        描述: %s", getattr(t, 'description', '')[:120])
+            if builtin_tools:
+                logger.info("   🔧 内置工具 (%d 个):", len(builtin_tools))
+                for t in builtin_tools:
+                    logger.info("      - %s", t.name)
+
             if self.merged_catalog:
                 catalog_entries = getattr(self.merged_catalog, 'catalog', [])
                 count = len(catalog_entries) if catalog_entries else 0
                 logger.info("   📚 Runbooks: %d 个", count)
-                # DEBUG: 列出每个 runbook
                 if catalog_entries:
                     for entry in catalog_entries:
                         rb_id = getattr(entry, 'id', '') or entry.get('id', '') if isinstance(entry, dict) else getattr(entry, 'id', '')
                         rb_desc = getattr(entry, 'description', '') or (entry.get('description', '') if isinstance(entry, dict) else '')
                         logger.debug("      - [%s] %s", rb_id, rb_desc[:60])
+            logger.info("=" * 50)
         elif self.ai:
             log_loaded_resources(ai=self.ai, merged_catalog=self.merged_catalog, logger=logger)
     
@@ -556,7 +569,8 @@ class HolmesService:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         max_steps: int = 50,
-        output_format: str = "text"
+        output_format: str = "text",
+        cancel_event: Optional[Any] = None,
     ) -> Generator[str, None, None]:
         """
         执行查询并以流式方式返回结果（带耗时统计）
@@ -604,7 +618,8 @@ class HolmesService:
             logger.info("🔄 使用工作流模式执行查询")
             yield from self._execute_query_stream_workflow(
                 question=question,
-                output_format=output_format
+                output_format=output_format,
+                cancel_event=cancel_event,
             )
             return
         
@@ -626,7 +641,8 @@ class HolmesService:
     def _execute_query_stream_workflow(
         self,
         question: str,
-        output_format: str = "sse"
+        output_format: str = "sse",
+        cancel_event: Optional[Any] = None,
     ) -> Generator[str, None, None]:
         """
         使用工作流模式执行查询（新方法）
@@ -658,11 +674,11 @@ class HolmesService:
             
             # text 格式输出（终端友好）
             if output_format == "text":
-                yield from self._workflow_to_text(executor, question)
+                yield from self._workflow_to_text(executor, question, cancel_event=cancel_event)
                 return
-            
+
             # SSE 格式输出
-            for event in executor.execute_stream(question):
+            for event in executor.execute_stream(question, cancel_event=cancel_event):
                 event_type = event.get("type", "unknown")
                 payload = {k: v for k, v in event.items() if k != "type"}
                 yield create_sse_message_cn(event_type, payload)
@@ -688,7 +704,8 @@ class HolmesService:
     def _workflow_to_text(
         self,
         executor: Any,
-        question: str
+        question: str,
+        cancel_event: Optional[Any] = None,
     ) -> Generator[str, None, None]:
         """
         工作流执行结果转换为美观的文本格式
@@ -753,6 +770,7 @@ class HolmesService:
 
         final_answer = ""
         metrics_data = None
+        _token_streaming_active = False  # token 级别流式状态跟踪
         # 用于收集各节点的详细输出
         node_outputs = {
             "layer": "",
@@ -761,7 +779,7 @@ class HolmesService:
             "conclusion": ""
         }
 
-        for event in executor.execute_stream(question):
+        for event in executor.execute_stream(question, cancel_event=cancel_event):
             event_type = event.get("type", "unknown")
             
             if event_type == "run_start":
@@ -784,8 +802,22 @@ class HolmesService:
                     if preview:
                         yield emit(f"      📄 {preview[:300]}{'...' if len(preview) > 300 else ''}")
                 elif think_type == "ai_message":
-                    content = (event.get("content") or "")[:200]
-                    yield emit(f"   💭 [{node_name}] AI: {content}")
+                    # token 级别流式已逐字输出，这里只补换行
+                    if _token_streaming_active:
+                        yield "\n"
+                        _token_streaming_active = False
+                    else:
+                        # 回退：没有 token 流式时，输出完整消息
+                        content = (event.get("content") or "")[:200]
+                        yield emit(f"   💭 [{node_name}] AI: {content}")
+                elif think_type == "ai_token":
+                    # token 级别流式：逐字输出
+                    token_text = event.get("content", "")
+                    if token_text:
+                        if not _token_streaming_active:
+                            yield f"   💭 [{node_name}] "
+                            _token_streaming_active = True
+                        yield token_text
                 elif think_type == "iteration_end":
                     yield emit(f"   💭 [{node_name}] 迭代 #{event.get('iteration')} 完成")
             

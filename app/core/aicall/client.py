@@ -68,6 +68,7 @@ class AICall:
         kwargs: Dict[str, Any] = {
             "model": model_name,
             "api_key": api_key,
+            "streaming": True,  # 启用 token 级别流式输出
         }
         if base_url:
             kwargs["base_url"] = base_url
@@ -116,6 +117,7 @@ class AICall:
         max_steps: int = 10,
         stream_queue: Optional[queue.Queue] = None,
         node_id: str = "",
+        cancel_event: Optional[Any] = None,
     ) -> Tuple[AICallResult, List[Dict]]:
         """LangChain Agent loop with tool calling (create_agent)
 
@@ -126,6 +128,7 @@ class AICall:
             max_steps: 最大迭代次数（LangGraph recursion_limit）
             stream_queue: 实时事件队列（thinking 事件推送）
             node_id: 节点 ID（用于事件标记）
+            cancel_event: 取消信号（threading.Event），set() 后 agent 提前退出
 
         Returns:
             (AICallResult, thinking_events)
@@ -165,15 +168,54 @@ class AICall:
         config = {"recursion_limit": max_steps * 3 + 10}
 
         final_content = ""
+        _content_buffer = []  # 收集 token 级别的文本片段
 
         async def _run_agent():
             nonlocal final_content, iteration, tool_call_count
-            async for chunk in agent.astream(input_messages, config=config, stream_mode="updates"):
-                for node_name, update in chunk.items():
+            async for chunk in agent.astream(
+                input_messages, config=config,
+                stream_mode=["updates", "messages"],
+                version="v2",
+            ):
+                # 检查取消信号
+                if cancel_event and cancel_event.is_set():
+                    logger.info("🛑 [AICall] 收到取消信号，停止 agent (node=%s)", node_id)
+                    break
+                # v2 格式: chunk 是 dict {"type": "updates"|"messages", "data": ..., "ns": [...]}
+                # 但某些版本可能返回 tuple (stream_mode_name, data)
+                if isinstance(chunk, tuple):
+                    chunk_type, chunk_data = chunk[0], chunk[1]
+                elif isinstance(chunk, dict):
+                    chunk_type = chunk.get("type", "")
+                    chunk_data = chunk.get("data", {})
+                else:
+                    logger.debug("   ⚠️ [AICall] 未知 chunk 类型: %s", type(chunk))
+                    continue
+
+                # ── messages 模式：token 级别流式 ──
+                if chunk_type == "messages":
+                    # chunk_data 可能是 tuple (token_msg, metadata) 或 list
+                    if isinstance(chunk_data, (list, tuple)) and len(chunk_data) >= 2:
+                        token_msg, metadata = chunk_data[0], chunk_data[1]
+                    else:
+                        continue
+                    if hasattr(token_msg, 'content') and token_msg.content:
+                        langgraph_node = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
+                        if langgraph_node != "tools":
+                            _content_buffer.append(token_msg.content)
+                            push_event(stream_queue, "ai_token", node_id,
+                                       content=token_msg.content, iteration=iteration)
+                    continue
+
+                # ── updates 模式：消息/工具级别（原有逻辑） ──
+                if chunk_type != "updates":
+                    continue
+                update_data = chunk_data if isinstance(chunk_data, dict) else {}
+                for node_name, update in update_data.items():
                     messages = update.get("messages", [])
                     for msg in messages:
                         if isinstance(msg, AIMessage):
-                            # AI 文本输出
+                            # AI 完整消息（用于 final_content 和工具调用检测）
                             if msg.content:
                                 final_content = msg.content
                                 iteration += 1
