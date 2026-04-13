@@ -26,10 +26,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 确保相关模块的日志也能输出
-logging.getLogger('app.core.service').setLevel(_log_level)
-logging.getLogger('app.core.mcp.manager').setLevel(_log_level)
-logging.getLogger('app.core.holmes.call_wrapper').setLevel(_log_level)
+# 确保所有 app.* 模块的日志级别统一受控
+logging.getLogger('app').setLevel(_log_level)
+
+# 抑制第三方库的 DEBUG 噪音（它们在 DEBUG 模式下产生海量日志，淹没业务日志）
+for noisy_lib in [
+    'httpcore', 'httpx', 'openai', 'LiteLLM', 'litellm',
+    'urllib3', 'asyncio', 'charset_normalizer',
+    'langchain', 'langgraph', 'langsmith',
+    'holmes', 'supabase',
+]:
+    logging.getLogger(noisy_lib).setLevel(max(_log_level, logging.WARNING))
 
 
 @asynccontextmanager
@@ -76,32 +83,32 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("   ℹ️ 已禁用本地 MCP auto-start（默认）。将直接使用配置中的第三方 MCP URL 连接。")
     
-    # ==================== 2. 初始化 HolmesGPT ====================
+    # ==================== 2. 初始化 AIOps Copilot 服务 ====================
     logger.info("")
-    logger.info("🤖 [步骤 2/2] 初始化 HolmesGPT...")
+    logger.info("🤖 [步骤 2/2] 初始化 AIOps Copilot 服务...")
     logger.info("-" * 40)
-    
+
     try:
         service = get_service()
         init_timeout = int(os.getenv("HOLMES_INIT_TIMEOUT_SECONDS", "0"))  # 默认不超时
-        
+
         if init_timeout > 0:
             # 有超时：异步初始化，到时间就继续
             init_task = asyncio.create_task(asyncio.to_thread(service.initialize))
             done, pending = await asyncio.wait({init_task}, timeout=init_timeout)
             if pending:
                 logger.warning(
-                    "   ⚠️ HolmesGPT 初始化超时（%ss），先继续启动服务；初始化将在后台继续运行",
+                    "   ⚠️ 服务初始化超时（%ss），先继续启动；初始化将在后台继续运行",
                     init_timeout,
                 )
                 # 不取消任务，让它在后台继续
         else:
             # 无超时：同步等待初始化完成
-            logger.info("   📌 等待 HolmesGPT 完全初始化（无超时限制）...")
+            logger.info("   📌 等待服务完全初始化（无超时限制）...")
             service.initialize()
-            logger.info("   ✅ HolmesGPT 初始化完成")
+            logger.info("   ✅ AIOps Copilot 服务初始化完成")
     except Exception as e:
-        logger.error(f"   ❌ HolmesGPT 初始化失败: {e}", exc_info=True)
+        logger.error(f"   ❌ 服务初始化失败: {e}", exc_info=True)
     
     logger.info("")
     logger.info("=" * 60)

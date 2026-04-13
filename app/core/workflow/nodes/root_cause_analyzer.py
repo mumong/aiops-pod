@@ -9,8 +9,8 @@
 设计：
 - 有自己的专用 prompt
 - 支持两种 LLM 调用模式（通过 config/环境变量切换）：
-  - lite: litellm 直接调用（不带工具），避免重复 fetch_runbook/TodoWrite
-  - full: 原有 _call_llm 全工具模式
+  - lite: AICall.call_simple 直接调用（不带工具），避免重复采集
+  - full: AICall.call 全工具模式（LangChain create_agent）
 - 结合规则引擎验证结论
 """
 
@@ -86,6 +86,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
             evidence_analysis = state.get("evidence_analysis", "{}")
 
             logger.info(f"🔍 根因分析: 层级={layer}, 证据数量={len(evidence_items)}")
+            logger.debug(f"🔍 [DEBUG] RCA 输入: question={question[:100]}, "
+                        f"evidence_analysis长度={len(evidence_analysis)}, "
+                        f"layer_full_analysis长度={len(state.get('layer_full_analysis', ''))}")
 
             # 构建证据摘要（包含实际工具数据）
             evidence_summary = self._build_evidence_summary(evidence_items)
@@ -105,7 +108,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 evidence_summary += "\n\n# 工具采集的原始数据\n" + extra_data
             
             # 使用 LLM 分析
-            if self.holmes_service and self.holmes_service.ai:
+            ai_call = getattr(self, 'ai_call', None)
+            if ai_call is not None:
                 rca_result, thinking_events = self._analyze_with_llm(
                     question, layer, evidence_summary
                 )
@@ -203,7 +207,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         layer: Optional[Layer],
         evidence_summary: str
     ) -> tuple:
-        """lite 模式：直接调用 LLM（不带工具），避免重复 fetch_runbook/TodoWrite"""
+        """lite 模式：AICall.call_simple 直接调用（不带工具），避免重复采集"""
         try:
             layer_str = layer.value if layer else "L2"
             system_prompt = ROOT_CAUSE_ANALYZER_PROMPT.format(
@@ -221,51 +225,32 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
             start_time = time.time()
 
-            # Use ai_call.call_simple if available (aicall path)
             ai_call = getattr(self, 'ai_call', None)
-            if ai_call:
-                content = ai_call.call_simple(
-                    system_prompt=system_prompt,
-                    question=user_message,
-                )
-            else:
-                # Legacy litellm path
-                from litellm import completion as litellm_completion
+            if ai_call is None:
+                raise RuntimeError("[rca] ai_call 未设置，无法执行 lite 模式")
 
-                model = self.holmes_service.ai.llm.model
-                api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
-                api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
-
-                completion_kwargs = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "temperature": 0.3,
-                }
-                if api_key:
-                    completion_kwargs["api_key"] = api_key
-                if api_base:
-                    completion_kwargs["api_base"] = api_base
-
-                resp = litellm_completion(**completion_kwargs)
-                content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            logger.info("📍 [rca] AICall.call_simple lite 模式开始")
+            content = ai_call.call_simple(
+                system_prompt=system_prompt,
+                question=user_message,
+            )
 
             duration_ms = (time.time() - start_time) * 1000
 
             if self.metrics:
                 self.metrics.record_llm_call("rca", duration_ms)
 
-            logger.info(f"✅ RCA lite 模式完成 ({duration_ms:.0f}ms)")
+            logger.info("✅ [rca] lite 模式完成 (%.0fms, 输出=%d字)",
+                       duration_ms, len(content or ""))
 
             if content:
                 return self._parse_llm_response(content), []
 
+            logger.warning("⚠️ [rca] lite 模式无输出，使用规则兜底")
             return self._analyze_with_rules(question, layer, []), []
 
         except Exception as e:
-            logger.warning(f"RCA lite 模式失败，回退到规则: {e}")
+            logger.warning(f"[rca] lite 模式失败，回退到规则: {e}")
             return self._analyze_with_rules(question, layer, []), []
 
     def _analyze_with_llm_full(

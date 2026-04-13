@@ -93,23 +93,22 @@ class WorkflowNode(ABC):
 
     def _call_llm(self, question: str, system_prompt: str) -> Tuple[Any, list]:
         """
-        公共 LLM 调用 — 自动选择 aicall 或 legacy 路径
+        公共 LLM 调用 — 通过 AICall (LangChain create_agent) 执行
 
         Args:
             question: 用户问题
             system_prompt: 节点专用 system prompt
 
         Returns:
-            (response, thinking_events)
+            (AICallResult, thinking_events)
         """
-        if getattr(self, 'ai_call', None) is not None:
-            logger.debug("🔀 [%s] _call_llm → aicall 路径", self.node_id)
-            return self._call_llm_aicall(question, system_prompt)
-        logger.debug("🔀 [%s] _call_llm → legacy HolmesGPT 路径", self.node_id)
-        return self._call_llm_legacy(question, system_prompt)
+        ai_call = getattr(self, 'ai_call', None)
+        if ai_call is None:
+            raise RuntimeError(
+                f"[{self.node_id}] ai_call 未设置，无法调用 LLM。"
+                "请确保 USE_AICALL=true 且 AICall 初始化成功。"
+            )
 
-    def _call_llm_aicall(self, question: str, system_prompt: str) -> Tuple[Any, list]:
-        """LLM 调用 — aicall 路径（替代 HolmesGPT）"""
         start_time = time.time()
         max_steps = 10
         if getattr(self, 'holmes_service', None):
@@ -134,8 +133,10 @@ class WorkflowNode(ABC):
             full_prompt = catalog_text + "\n\n" + system_prompt
 
         tools = getattr(self, 'tools', []) or []
-        logger.debug("📍 [%s] aicall.call() 开始 | max_steps=%d tools=%d",
-                      self.node_id, max_steps, len(tools))
+        logger.info("📍 [%s] AICall.call() 开始 | max_steps=%d tools=%d",
+                     self.node_id, max_steps, len(tools))
+        logger.debug("📍 [%s] AICall.call() prompt长度=%d字 question长度=%d字",
+                     self.node_id, len(full_prompt), len(question))
 
         result, thinking_events = self.ai_call.call(
             system_prompt=full_prompt,
@@ -147,9 +148,10 @@ class WorkflowNode(ABC):
         )
 
         llm_duration_ms = (time.time() - start_time) * 1000
-        logger.debug("✅ [%s] aicall.call() 完成 | %.1fs | tools=%d | 输出=%d字",
-                      self.node_id, llm_duration_ms / 1000,
-                      result.tool_call_count, len(result.result or ""))
+        logger.info("✅ [%s] AICall.call() 完成 | %.1fs | iterations=%d | tools=%d | 输出=%d字",
+                     self.node_id, llm_duration_ms / 1000,
+                     result.iteration_count if hasattr(result, 'iteration_count') else 0,
+                     result.tool_call_count, len(result.result or ""))
 
         # metrics
         if getattr(self, 'metrics', None):
@@ -159,57 +161,6 @@ class WorkflowNode(ABC):
                 self.metrics.record_tool_call("llm_tool", 0, success=True)
 
         return result, thinking_events
-
-    def _call_llm_legacy(self, question: str, system_prompt: str) -> Tuple[Any, list]:
-        """LLM 调用 — legacy HolmesGPT 路径（向后兼容）"""
-        from holmes.core.prompt import build_initial_ask_messages
-
-        tool_executor = getattr(self.holmes_service.ai, "tool_executor", None)
-
-        messages = build_initial_ask_messages(
-            initial_user_prompt=question,
-            file_paths=None,
-            tool_executor=tool_executor,
-            runbooks=self.runbook_catalog,
-            system_prompt_additions=system_prompt,
-        )
-
-        start_time = time.time()
-        max_steps = self.holmes_service.get_node_max_steps(self.node_id)
-
-        if self._event_queue is not None:
-            # 实时模式：每个 intermediate_event 同时 put 到 queue
-            from app.core.holmes.call_wrapper import call_with_stream_and_queue
-
-            original = getattr(self.holmes_service.ai, 'max_steps', None)
-            try:
-                if original is not None:
-                    self.holmes_service.ai.max_steps = max_steps
-                response = call_with_stream_and_queue(
-                    self.holmes_service.ai,
-                    messages,
-                    self._event_queue,
-                    self.node_id,
-                )
-            finally:
-                if original is not None:
-                    self.holmes_service.ai.max_steps = original
-        else:
-            # 原有路径
-            response = self.holmes_service._call_with_stream_limited(messages, max_steps=max_steps)
-
-        llm_duration_ms = (time.time() - start_time) * 1000
-
-        # metrics
-        if self.metrics:
-            actual_duration = getattr(response, 'duration_ms', llm_duration_ms) or llm_duration_ms
-            self.metrics.record_llm_call(self.node_id, actual_duration)
-            tc_count = getattr(response, 'tool_call_count', 0) or len(getattr(response, 'tool_calls', []))
-            for _ in range(tc_count):
-                self.metrics.record_tool_call("llm_tool", 0, success=True)
-
-        thinking_events = getattr(response, 'intermediate_events', []) or []
-        return response, thinking_events
 
     def _save_thinking(self, state: WorkflowState, new_state: dict, thinking_events: list):
         """将 thinking_events 带 node 标记存入 state"""

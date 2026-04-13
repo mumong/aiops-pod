@@ -284,7 +284,11 @@ class WorkflowExecutor:
                             if node_summary:
                                 logger.info(f"   {node_summary}")
                             if handoff:
-                                logger.info(f"   📤 传递给下游: {handoff}")
+                                # INFO: 简洁一行摘要
+                                handoff_short = handoff[:120] + "..." if len(handoff) > 120 else handoff
+                                logger.info(f"   📤 传递给下游: {handoff_short}")
+                                # DEBUG: 完整数据
+                                logger.debug(f"   📤 [DEBUG] 完整传递数据:\n{handoff}")
 
                             yield {
                                 "type": "node_complete",

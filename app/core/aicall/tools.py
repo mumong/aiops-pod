@@ -50,18 +50,29 @@ async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
         logger.info("🔧 [MCP-Tools] 无已启用的 MCP 服务器")
         return []
 
-    # Connect and load tools
+    # 逐个 server 连接并加载工具，记录每个 server 的工具列表
     all_tools: List = []
-    try:
-        logger.info("🔄 [MCP-Tools] 连接 %d 个 MCP 服务器...", len(connections))
-        client = MultiServerMCPClient(connections)
-        all_tools = await client.get_tools()
-        tool_names = [t.name for t in all_tools]
-        logger.info("✅ [MCP-Tools] 加载 %d 个工具: %s",
-                    len(all_tools), ", ".join(tool_names[:10]))
-        if len(tool_names) > 10:
-            logger.debug("   ... 完整列表: %s", ", ".join(tool_names))
-    except Exception as e:
-        logger.error("❌ [MCP-Tools] 加载失败: %s", e, exc_info=True)
+    server_tool_map: Dict[str, List[str]] = {}
+    failed_servers: List[str] = []
+
+    for srv_name, conn_cfg in connections.items():
+        try:
+            client = MultiServerMCPClient({srv_name: conn_cfg})
+            tools = await client.get_tools()
+            tool_names = [t.name for t in tools]
+            server_tool_map[srv_name] = tool_names
+            all_tools.extend(tools)
+            logger.info("   ✅ [%s] %d 个工具: %s",
+                       srv_name, len(tools), ", ".join(tool_names))
+        except Exception as e:
+            failed_servers.append(srv_name)
+            logger.error("   ❌ [%s] 连接失败: %s", srv_name, e)
+
+    if failed_servers:
+        logger.warning("⚠️ [MCP-Tools] %d 个服务器连接失败: %s",
+                       len(failed_servers), ", ".join(failed_servers))
+
+    logger.info("✅ [MCP-Tools] 加载 %d 个工具 (来自 %d/%d 个服务器)",
+                len(all_tools), len(server_tool_map), len(connections))
 
     return all_tools
