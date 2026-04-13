@@ -92,6 +92,9 @@ class EvidenceCollectorNode(WorkflowNode):
             key_entities = state.get("key_entities", [])
 
             logger.info(f"📋 证据采集: 层级={layer}, 可能场景={possible_scenarios}")
+            logger.debug(f"📋 [DEBUG] 证据采集输入: question={question[:100]}, "
+                        f"layer_analysis长度={len(layer_full_analysis)}, "
+                        f"key_entities={key_entities}")
 
             # 1. 调用 LLM 规划证据采集计划
             evidence_plan, thinking_events, llm_result_text = self._plan_evidence_with_llm(
@@ -184,13 +187,23 @@ class EvidenceCollectorNode(WorkflowNode):
             (evidence_plan_list, intermediate_events_list, llm_result_text)
             llm_result_text: LLM 的完整输出文本（包含工具调用结果和分析）
         """
-        if not self.holmes_service or not self.holmes_service.ai:
-            logger.warning("⚠️ 无 LLM 服务，使用规则规划")
+        if getattr(self, 'ai_call', None) is None:
+            logger.warning("⚠️ [evidence] ai_call 未设置，使用规则规划")
             return self._plan_with_rules(question, layer), [], ""
 
         try:
             layer_str = layer.value if layer else "L2"
-            scenarios_str = ", ".join(possible_scenarios) if possible_scenarios else "未知"
+            # possible_scenarios 可能是 str 列表或 dict 列表（含 scenario/probability 字段）
+            if possible_scenarios:
+                parts = []
+                for s in possible_scenarios:
+                    if isinstance(s, dict):
+                        parts.append(s.get("scenario", str(s)))
+                    else:
+                        parts.append(str(s))
+                scenarios_str = ", ".join(parts)
+            else:
+                scenarios_str = "未知"
 
             # 构建 entities 信息用于 prompt
             entities_str = ""

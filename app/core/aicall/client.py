@@ -1,7 +1,7 @@
-"""AICall — 统一 LLM 调用层，基于 LangChain + LangGraph
+"""AICall — 统一 LLM 调用层，基于 LangChain Agent + LangGraph
 
 核心能力：
-- call(): LangGraph ReAct agent loop（支持 tool calling、interrupt、checkpointer）
+- call(): LangChain create_agent loop（支持 tool calling、middleware、interrupt）
 - call_simple(): LangChain ChatModel 直接调用（无工具）
 - 完全控制 system prompt，无框架注入
 
@@ -51,7 +51,7 @@ def _parse_model(model_str: str, api_base: str = "") -> Tuple[str, Optional[str]
 
 
 class AICall:
-    """LLM 调用核心类，基于 LangChain ChatModel + LangGraph ReAct Agent"""
+    """LLM 调用核心类，基于 LangChain ChatModel + LangChain Agent (create_agent)"""
 
     def __init__(self, model: str, api_key: str, api_base: str = ""):
         """
@@ -117,7 +117,7 @@ class AICall:
         stream_queue: Optional[queue.Queue] = None,
         node_id: str = "",
     ) -> Tuple[AICallResult, List[Dict]]:
-        """LangGraph ReAct agent loop with tool calling
+        """LangChain Agent loop with tool calling (create_agent)
 
         Args:
             system_prompt: 系统提示词（你写的就是全部，无框架注入）
@@ -148,13 +148,13 @@ class AICall:
             )
             return result, thinking_events
 
-        # 创建 LangGraph ReAct agent
-        from langgraph.prebuilt import create_react_agent
+        # 创建 LangChain Agent (create_agent，替代已废弃的 create_react_agent)
+        from langchain.agents import create_agent
 
-        agent = create_react_agent(
+        agent = create_agent(
             model=self.chat_model,
             tools=tools,
-            prompt=system_prompt,
+            system_prompt=system_prompt,
         )
 
         # 使用 async stream 模式（MCP 工具需要异步调用）
@@ -162,7 +162,7 @@ class AICall:
         import concurrent.futures
 
         input_messages = {"messages": [{"role": "user", "content": question}]}
-        config = {"recursion_limit": max_steps * 2 + 5}
+        config = {"recursion_limit": max_steps * 3 + 10}
 
         final_content = ""
 
@@ -177,6 +177,8 @@ class AICall:
                             if msg.content:
                                 final_content = msg.content
                                 iteration += 1
+                                logger.debug("   💬 [AICall] AI 消息 #%d:\n%s",
+                                            iteration, msg.content[:1000])
                                 evt = {"type": "ai_message",
                                        "content": msg.content[:500],
                                        "iteration": iteration}
@@ -186,6 +188,9 @@ class AICall:
                             if msg.tool_calls:
                                 for tc in msg.tool_calls:
                                     tool_call_count += 1
+                                    logger.debug("   🔧 [AICall] tool_call #%d %s | args=%s",
+                                                tool_call_count, tc["name"],
+                                                str(tc.get("args", {}))[:300])
                                     push_event(stream_queue, "tool_start", node_id,
                                                tool_name=tc["name"], iteration=iteration)
                                     self._record(thinking_events, "tool_start", node_id,
@@ -203,6 +208,9 @@ class AICall:
                             logger.info("   ✅ [AICall] tool #%d %s | %s | len=%d",
                                         tool_call_count, tool_name, status,
                                         len(tool_content))
+                            logger.debug("   📄 [AICall] tool #%d %s 完整输出:\n%s",
+                                        tool_call_count, tool_name,
+                                        tool_content[:2000])
                             evt = {
                                 "type": "tool_result",
                                 "tool_name": tool_name,

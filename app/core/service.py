@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-HolmesGPT Service
-负责 HolmesGPT 的初始化、配置和查询执行
+AIOps Copilot Service
+负责 AI 服务的初始化、配置和查询执行
+支持 AICall (LangGraph) 和 HolmesGPT (legacy) 两种路径
 """
 import os
 import logging
@@ -39,7 +40,7 @@ apply_tool_result_logging_patch()
 
 
 class HolmesService:
-    """HolmesGPT 服务类"""
+    """AIOps Copilot 服务类"""
     
     def __init__(self):
         """初始化服务"""
@@ -61,6 +62,12 @@ class HolmesService:
         self.ai_call: Optional[AICall] = None  # New aicall path (replaces HolmesGPT LLM calls)
         self.mcp_tools: list = []               # LangChain BaseTool list for aicall path
     
+    def _is_initialized(self) -> bool:
+        """检查服务是否已初始化（AICall 路径或 HolmesGPT 路径）"""
+        if self.config is None:
+            return False
+        return self.ai_call is not None or self.ai is not None
+
     def initialize(
         self,
         api_key: Optional[str] = None,
@@ -69,7 +76,10 @@ class HolmesService:
         config_file: Optional[Path] = None
     ) -> Tuple[Config, Any]:
         """
-        初始化 HolmesGPT 配置和 AI 实例
+        初始化服务配置和 AI 实例
+
+        USE_AICALL=true → AICall (LangChain create_agent)
+        USE_AICALL=false → HolmesGPT (legacy)
         
         Args:
             api_key: LLM API Key
@@ -81,19 +91,19 @@ class HolmesService:
             (config, ai_instance) 元组
         """
         # 如果已经初始化，直接返回
-        if self.config is not None and self.ai is not None:
+        if self._is_initialized():
             return self.config, self.ai
 
         with self._init_lock:
             # 可能在等待锁期间已经初始化
-            if self.config is not None and self.ai is not None:
+            if self._is_initialized():
                 return self.config, self.ai
 
             self._init_in_progress = True
             self._init_error = None
             self._init_started_at = datetime.now()
 
-            logger.info("初始化 HolmesGPT 配置...")
+            logger.info("初始化 AIOps Copilot 服务...")
 
             try:
                 # 获取项目根目录
@@ -192,26 +202,22 @@ class HolmesService:
                 self._load_runbooks()
                 logger.info(f"   ✅ Runbook 加载完成 ({time.time() - step_start:.2f}s)")
 
-                # 创建 AI 实例
-                step_start = time.time()
-                logger.info("🔄 创建 AI 实例...")
-                logger.info("   📍 调用 config.create_console_toolcalling_llm()...")
-                
-                self.ai = self.config.create_console_toolcalling_llm()
-                
-                logger.info(f"   ✅ AI 实例创建完成 ({time.time() - step_start:.2f}s)")
-
-                # 创建 AICall 实例（USE_AICALL=true 激活，默认 false 保持 HolmesGPT）
+                # 判断执行路径：AICall (LangGraph) 或 HolmesGPT (legacy)
                 use_aicall = os.getenv("USE_AICALL", "false").lower() in ("true", "1", "yes")
+
                 if use_aicall:
+                    # ── AICall 路径：LangChain create_agent ──
+                    step_start = time.time()
+                    logger.info("🔄 创建 AICall 实例 (LangGraph)...")
                     self.ai_call = AICall(
                         model=final_model,
                         api_key=final_api_key,
                         api_base=final_api_base or "",
                     )
-                    logger.info(f"   ✅ AICall 实例创建完成 (model={final_model})")
+                    logger.info("   ✅ AICall 实例创建完成 (model=%s, %.2fs)",
+                               final_model, time.time() - step_start)
 
-                    # 加载 MCP 工具为 LangChain BaseTool（aicall 路径需要）
+                    # 加载 MCP 工具为 LangChain BaseTool
                     mcp_cfg = _raw_config.get("mcp_servers", {})
                     if mcp_cfg:
                         import asyncio
@@ -220,24 +226,40 @@ class HolmesService:
                         try:
                             step_start = time.time()
                             logger.info("🔄 [AICall] 加载 MCP 工具...")
-                            # 在新线程中运行 asyncio.run()，避免与 uvicorn event loop 冲突
                             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                                 self.mcp_tools = pool.submit(
                                     lambda cfg=mcp_cfg: asyncio.run(load_mcp_tools(cfg))
                                 ).result(timeout=60)
-                            logger.info(f"   ✅ [AICall] MCP 工具加载完成: {len(self.mcp_tools)} 个 ({time.time() - step_start:.2f}s)")
-                            for t in self.mcp_tools[:5]:
-                                logger.debug(f"      📡 {t.name}")
-                            if len(self.mcp_tools) > 5:
-                                logger.debug(f"      ... 共 {len(self.mcp_tools)} 个")
+                            logger.info("   ✅ [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
+                                       len(self.mcp_tools), time.time() - step_start)
+                            # DEBUG: 输出全部工具名
+                            for t in self.mcp_tools:
+                                logger.debug("      📡 %s", t.name)
                         except Exception as e:
-                            logger.error(f"   ❌ [AICall] MCP 工具加载失败: {e}", exc_info=True)
+                            logger.error("   ❌ [AICall] MCP 工具加载失败: %s", e, exc_info=True)
                             self.mcp_tools = []
                     else:
                         self.mcp_tools = []
                         logger.info("   ℹ️ [AICall] 无 MCP 服务器配置")
+
+                    # 加载内置工具（fetch_runbook 等）
+                    from app.core.aicall.builtin_tools import get_builtin_tools
+                    builtin = get_builtin_tools()
+                    self.mcp_tools = self.mcp_tools + builtin
+                    logger.info("   🔧 [AICall] 工具总计: %d 个 (MCP %d + 内置 %d)",
+                               len(self.mcp_tools), len(self.mcp_tools) - len(builtin), len(builtin))
+
+                    # AICall 路径不需要 HolmesGPT AI 实例，但仍需 config 用于 runbook 等
+                    # 创建一个轻量 AI 实例仅用于兼容 get_node_max_steps 等方法
+                    self.ai = None
+                    logger.info("   ℹ️ [AICall] 跳过 HolmesGPT AI 实例创建")
+
                 else:
-                    logger.info("   ℹ️ AICall 未激活 (USE_AICALL != true)")
+                    # ── HolmesGPT legacy 路径（保留但不推荐） ──
+                    step_start = time.time()
+                    logger.info("🔄 创建 HolmesGPT AI 实例...")
+                    self.ai = self.config.create_console_toolcalling_llm()
+                    logger.info("   ✅ HolmesGPT AI 实例创建完成 (%.2fs)", time.time() - step_start)
 
                 # 初始化联邦协调器（如配置了 federation.enabled=true）
                 _federation_cfg = _raw_config.get("federation", {})
@@ -263,14 +285,17 @@ class HolmesService:
                 else:
                     logger.debug("[FEDERATION] federation 未启用，跳过")
 
-                # 配置自定义 runbook 搜索路径
-                step_start = time.time()
-                logger.info("🔄 配置 runbook 搜索路径...")
-                if self.runbook_manager.runbook_dir.exists():
-                    self.runbook_manager.configure_search_path(self.ai)
-                logger.info(f"   ✅ 搜索路径配置完成 ({time.time() - step_start:.2f}s)")
+                # 配置自定义 runbook 搜索路径（仅 HolmesGPT 路径需要）
+                if self.ai is not None:
+                    step_start = time.time()
+                    logger.info("🔄 配置 runbook 搜索路径...")
+                    if self.runbook_manager.runbook_dir.exists():
+                        self.runbook_manager.configure_search_path(self.ai)
+                    logger.info(f"   ✅ 搜索路径配置完成 ({time.time() - step_start:.2f}s)")
 
-                logger.info(f"✅ HolmesGPT 初始化完成，模型: {self.config.model}")
+                logger.info("✅ 服务初始化完成 | 模式=%s | 模型=%s",
+                           "AICall(LangGraph)" if self.ai_call else "HolmesGPT",
+                           self.config.model)
                 logger.info(f"📡 输出模式: {'流式输出 (stream)' if self.stream_output else '非流式输出 (invoke)'}")
 
                 # 输出加载的资源信息
@@ -290,14 +315,22 @@ class HolmesService:
                 self._init_in_progress = False
     
     def _disable_tools(self, tool_names: list):
-        """从 tool_executor 中移除指定工具（工具层面禁用）"""
-        if not self.ai or not getattr(self.ai, "tool_executor", None):
+        """从工具列表中移除指定工具"""
+        # AICall 路径：从 mcp_tools 列表中过滤
+        if self.ai_call and self.mcp_tools:
+            before = len(self.mcp_tools)
+            self.mcp_tools = [t for t in self.mcp_tools if t.name not in tool_names]
+            removed = before - len(self.mcp_tools)
+            if removed:
+                logger.info("⛔ [AICall] 已禁用 %d 个工具: %s", removed, tool_names)
             return
-        tools_by_name = self.ai.tool_executor.tools_by_name
-        for name in tool_names:
-            if name in tools_by_name:
-                del tools_by_name[name]
-                logger.info(f"⛔ 已禁用工具: {name}")
+        # HolmesGPT 路径：从 tool_executor 中删除
+        if self.ai and getattr(self.ai, "tool_executor", None):
+            tools_by_name = self.ai.tool_executor.tools_by_name
+            for name in tool_names:
+                if name in tools_by_name:
+                    del tools_by_name[name]
+                    logger.info("⛔ 已禁用工具: %s", name)
 
     def _call_with_stream(self, messages: list) -> Any:
         """兼容层：内部委托给 app.core.holmes.call_wrapper.call_with_stream"""
@@ -360,8 +393,26 @@ class HolmesService:
         )
     
     def _log_loaded_resources(self):
-        """输出加载的资源信息（工具集、MCP 服务器、工具、Runbook）"""
-        log_loaded_resources(ai=self.ai, merged_catalog=self.merged_catalog, logger=logger)
+        """输出加载的资源信息"""
+        if self.ai_call:
+            # AICall 路径：输出 LangGraph 工具信息
+            logger.info("📋 [AICall] 资源概览:")
+            logger.info("   🔧 工具: %d 个", len(self.mcp_tools))
+            # DEBUG: 列出全部工具名
+            for t in self.mcp_tools:
+                logger.debug("      - %s: %s", t.name, getattr(t, 'description', '')[:80])
+            if self.merged_catalog:
+                catalog_entries = getattr(self.merged_catalog, 'catalog', [])
+                count = len(catalog_entries) if catalog_entries else 0
+                logger.info("   📚 Runbooks: %d 个", count)
+                # DEBUG: 列出每个 runbook
+                if catalog_entries:
+                    for entry in catalog_entries:
+                        rb_id = getattr(entry, 'id', '') or entry.get('id', '') if isinstance(entry, dict) else getattr(entry, 'id', '')
+                        rb_desc = getattr(entry, 'description', '') or (entry.get('description', '') if isinstance(entry, dict) else '')
+                        logger.debug("      - [%s] %s", rb_id, rb_desc[:60])
+        elif self.ai:
+            log_loaded_resources(ai=self.ai, merged_catalog=self.merged_catalog, logger=logger)
     
     def execute_query(
         self,
@@ -391,6 +442,7 @@ class HolmesService:
             if api_key or model or max_steps != 50:
                 self.config = None
                 self.ai = None
+                self.ai_call = None
             
             # 初始化（如果还未初始化）
             self.initialize(api_key=api_key, model=model, max_steps=max_steps)
@@ -399,16 +451,16 @@ class HolmesService:
             import time
             max_wait = 60
             waited = 0
-            while (self.config is None or self.ai is None) and waited < max_wait:
+            while not self._is_initialized() and waited < max_wait:
                 if waited == 0:
-                    logger.info("⏳ 等待 HolmesGPT 初始化完成...")
+                    logger.info("⏳ 等待服务初始化完成...")
                 time.sleep(1)
                 waited += 1
-            
-            if self.config is None or self.ai is None:
+
+            if not self._is_initialized():
                 return {
                     "success": False,
-                    "error": "HolmesGPT 初始化超时或失败",
+                    "error": "服务初始化超时或失败",
                     "execution_time": (datetime.now() - start_time).total_seconds(),
                     "timestamp": datetime.now().isoformat()
                 }
@@ -524,14 +576,14 @@ class HolmesService:
         import time
         max_wait = 60
         waited = 0
-        while (self.config is None or self.ai is None) and waited < max_wait:
+        while not self._is_initialized() and waited < max_wait:
             if waited == 0:
-                logger.info("⏳ 等待 HolmesGPT 初始化完成...")
+                logger.info("⏳ 等待服务初始化完成...")
             time.sleep(1)
             waited += 1
-        
-        if self.config is None or self.ai is None:
-            error_msg = "HolmesGPT 初始化超时或失败"
+
+        if not self._is_initialized():
+            error_msg = "服务初始化超时或失败"
             logger.error(error_msg)
             if output_format == "text":
                 yield f"❌ {error_msg}\n"
@@ -878,7 +930,18 @@ class HolmesService:
     def get_tools_info(self) -> dict:
         """获取可用工具信息"""
         self.initialize()
-        
+
+        # AICall 路径
+        if self.ai_call:
+            tool_names = [t.name for t in self.mcp_tools]
+            return {
+                "success": True,
+                "total_tools": len(tool_names),
+                "tools": sorted(tool_names),
+                "toolsets": [{"name": "AICall(LangGraph)", "enabled": True, "status": "active"}],
+            }
+
+        # HolmesGPT 路径
         tools = list(self.ai.tool_executor.tools_by_name.keys())
         toolsets = [{
             "name": toolset.name,
@@ -903,6 +966,24 @@ class HolmesService:
         """
         self.initialize()
 
+        # AICall 路径
+        if self.ai_call:
+            tools_detail = []
+            for t in self.mcp_tools:
+                d = {"name": t.name}
+                desc = getattr(t, 'description', None)
+                if desc:
+                    d["description"] = desc[:200]
+                tools_detail.append(d)
+            return {
+                "success": True,
+                "mode": "AICall(LangGraph)",
+                "total_tools": len(tools_detail),
+                "tools": tools_detail,
+                "toolsets": [{"name": "AICall(LangGraph)", "tools": [t.name for t in self.mcp_tools]}],
+            }
+
+        # HolmesGPT 路径
         tool_executor = self.ai.tool_executor
         tools_by_name = tool_executor.tools_by_name
 
@@ -969,18 +1050,20 @@ class HolmesService:
     
     def health_check(self) -> dict:
         """健康检查"""
-        if self.config is not None and self.ai is not None:
+        initialized = self._is_initialized()
+        if initialized:
             return {
                 "status": "healthy",
                 "config_loaded": True,
-                "ai_initialized": True
+                "ai_initialized": True,
+                "mode": "AICall(LangGraph)" if self.ai_call else "HolmesGPT",
             }
 
         if self._init_in_progress:
             return {
                 "status": "initializing",
                 "config_loaded": self.config is not None,
-                "ai_initialized": self.ai is not None,
+                "ai_initialized": initialized,
                 "started_at": self._init_started_at.isoformat() if self._init_started_at else None,
             }
 
@@ -993,7 +1076,7 @@ class HolmesService:
         return {
             "status": "uninitialized",
             "config_loaded": self.config is not None,
-            "ai_initialized": self.ai is not None
+            "ai_initialized": initialized
         }
 
 

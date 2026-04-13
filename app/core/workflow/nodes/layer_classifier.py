@@ -69,8 +69,9 @@ class LayerClassifierNode(WorkflowNode):
         }
 
         try:
-            # 如果有 HolmesService，使用 LLM 分析
-            if self.holmes_service and self.holmes_service.ai:
+            # 如果有 AICall，使用 LLM 分析
+            ai_call = getattr(self, 'ai_call', None)
+            if ai_call is not None:
                 layer_result, thinking_events = self._analyze_with_llm(question)
             else:
                 # 回退到规则匹配
@@ -125,45 +126,50 @@ class LayerClassifierNode(WorkflowNode):
     def _analyze_with_llm(self, question: str) -> tuple:
         """使用 LLM 分析问题层级（两阶段架构）
 
-        阶段1: HolmesGPT agentic loop — 调用工具收集数据，输出自然语言分析
-        阶段2: litellm 直接调用 — 基于分析文本+工具数据，提取结构化 JSON
+        阶段1: AICall (LangChain create_agent) — 调用工具收集数据，输出自然语言分析
+        阶段2: AICall.call_simple — 基于分析文本+工具数据，提取结构化 JSON
 
         Returns:
             (layer_result_dict, intermediate_events_list)
         """
         try:
             # ── 阶段1：工具调用，收集集群状态 ──
-            logger.debug("📍 [layer] 阶段1开始 | ai_call=%s tools=%d",
-                         type(getattr(self, 'ai_call', None)).__name__,
-                         len(getattr(self, 'tools', [])))
+            logger.info("📍 [layer] 阶段1: AICall 工具调用开始 | tools=%d",
+                        len(getattr(self, 'tools', [])))
             response, thinking_events = self._call_llm(question, LAYER_CLASSIFIER_PROMPT)
 
             if not (response and response.result):
+                logger.warning("⚠️ [layer] 阶段1 无输出，使用规则匹配兜底")
                 return self._analyze_with_rules(question), thinking_events
+
+            logger.debug("📋 [layer] 阶段1 输出: %s", response.result[:200])
 
             # 尝试从 response.result 直接解析 JSON（偶尔 LLM 会直接输出 JSON）
             result = self._try_parse_json(response.result)
             if result and result.get("possible_scenarios") and result.get("confidence", 0) > 0.6:
-                logger.info(f"✅ 阶段1直接输出了合法 JSON: layer={result.get('layer')}")
+                logger.info("✅ [layer] 阶段1直接输出合法 JSON: layer=%s, confidence=%.2f",
+                           result.get('layer'), result.get('confidence', 0))
                 return result, thinking_events
 
             # ── 阶段2：结构化提取（始终执行） ──
-            logger.info("📋 阶段2: 使用 litellm 从分析文本中提取结构化分类")
+            logger.info("📋 [layer] 阶段2: AICall.call_simple 提取结构化分类")
             enriched_text = self._build_extraction_input(response.result, thinking_events)
-            extracted = self._extract_classification_with_litellm(enriched_text)
+            extracted = self._extract_classification(enriched_text)
             if extracted:
                 # 关键：把阶段1的完整分析文本注入结果，供下游 evidence/rca 使用
                 extracted["full_analysis"] = enriched_text
+                logger.info("✅ [layer] 阶段2提取成功: layer=%s, confidence=%.2f",
+                           extracted.get('layer'), extracted.get('confidence', 0))
                 return extracted, thinking_events
 
             # 阶段2 也失败 → 最终兜底
-            logger.warning("⚠️ 阶段2 litellm 提取失败，使用层级关键词兜底")
+            logger.warning("⚠️ [layer] 阶段2提取失败，使用层级关键词兜底")
             fallback = self._extract_from_text(response.result)
             fallback["full_analysis"] = enriched_text
             return fallback, thinking_events
 
         except Exception as e:
-            logger.warning(f"LLM 分析失败，回退到规则: {e}")
+            logger.warning(f"[layer] LLM 分析失败，回退到规则: {e}")
             return self._analyze_with_rules(question), []
 
     @staticmethod
@@ -198,57 +204,36 @@ class LayerClassifierNode(WorkflowNode):
 
         return "\n".join(parts)
 
-    def _extract_classification_with_litellm(self, analysis_text: str) -> Optional[Dict]:
-        """用 litellm 从工具调用后的分析文本中提取结构化 JSON 分类"""
+    def _extract_classification(self, analysis_text: str) -> Optional[Dict]:
+        """用 AICall.call_simple 从分析文本中提取结构化 JSON 分类"""
         try:
-            # Use ai_call.call_simple if available (aicall path)
             ai_call = getattr(self, 'ai_call', None)
-            if ai_call:
-                content = ai_call.call_simple(
-                    system_prompt=LAYER_EXTRACT_PROMPT,
-                    question=analysis_text,
-                )
-            else:
-                # Legacy litellm path
-                from litellm import completion
+            if ai_call is None:
+                raise RuntimeError("[layer] ai_call 未设置，无法执行阶段2提取")
 
-                model = self.holmes_service.ai.llm.model
-                api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
-                api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
-
-                completion_kwargs = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": LAYER_EXTRACT_PROMPT},
-                        {"role": "user", "content": analysis_text},
-                    ],
-                    "temperature": 0.1,
-                }
-                if api_key:
-                    completion_kwargs["api_key"] = api_key
-                if api_base:
-                    completion_kwargs["api_base"] = api_base
-
-                resp = completion(**completion_kwargs)
-                content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            content = ai_call.call_simple(
+                system_prompt=LAYER_EXTRACT_PROMPT,
+                question=analysis_text,
+            )
 
             if content:
                 result = self._try_parse_json(content)
                 if result and result.get("layer") and result.get("confidence", 0) > 0.5:
-                    logger.info(f"✅ litellm 提取分类成功: layer={result['layer']}, confidence={result.get('confidence')}")
+                    logger.info("✅ [layer] 分类提取成功: layer=%s, confidence=%.2f",
+                               result['layer'], result.get('confidence', 0))
                     return result
-                elif content:
-                    logger.warning(f"litellm 返回内容无法解析为 JSON: {content[:200]}")
+                else:
+                    logger.warning("[layer] 提取返回内容无法解析为有效 JSON: %s", content[:200])
 
         except Exception as e:
-            logger.warning(f"litellm 提取分类失败: {e}")
+            logger.warning(f"[layer] 分类提取失败: {e}")
         return None
 
 
     def _extract_from_text(self, text: str) -> Dict:
         """从非 JSON 文本中提取层级信息（最终兜底，仅匹配 L0-L4）
 
-        注意：HEALTHY/QUERY 的判断完全交给 _extract_classification_with_litellm，
+        注意：HEALTHY/QUERY 的判断完全交给 _extract_classification，
         这里不做 HEALTHY/QUERY 的硬编码判断，避免误判。
         """
         result = {
