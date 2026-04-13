@@ -1,5 +1,6 @@
 # Runbook 知识库 ConfigMap
-# 简化版 - 仅包含 L0-L4 核心故障场景
+# K8s AIOps Copilot 诊断手册 — 聚焦诊断取证，不含修复操作
+# 修复操作由 AUTO_REMEDIATE 环境变量控制，独立于 Runbook 内容
 
 apiVersion: v1
 kind: ConfigMap
@@ -11,58 +12,58 @@ data:
     {
       "catalog": [
         {
-          "id": "l0-diskfull-logfile",
+          "id": "l0-volume-limit",
           "type": "procedure",
           "layer": "L0",
-          "update_date": "2026-01-22",
-          "description": "【L0】当pod表现为 异常状态是参考这个runbooks，其中Pod存储卷超限被驱逐 - EmptyDir/HostPath Volume 超过 SizeLimit 30Mi，kubelet 驱逐 (Evicted)，证据链：Pod状态+Events+Describe+Volume Limits+磁盘使用率",
+          "update_date": "2026-04-13",
+          "description": "【L0】Pod 存储卷超限被驱逐 (Volume Limit Exceeded) — EmptyDir/HostPath 超过 SizeLimit，kubelet 驱逐 Pod (Evicted)。关键证据：Pod Status=Evicted, Events Message 含 'exceeds the limit'/'ephemeral-storage', kubectl describe 显示 Reason: Evicted",
           "link": "l0-volume-limit.md",
-          "operations": ["诊断", "排查", "修复"]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l1-taint-node",
           "type": "procedure",
           "layer": "L1",
-          "update_date": "2026-01-30",
-          "description": "【L1】当发现node节点出现异常时，Node NotReady (Taint导致) - 节点被标记为不可调度 (NoSchedule taint)，AI Agent 通过 kubectl get nodes 直接看到异常，证据链：Node STATUS+Taints+Ready condition",
+          "update_date": "2026-04-13",
+          "description": "【L1】Node NotReady / Taint 导致不可调度 — 节点 STATUS 为 NotReady/Unknown，或被标记 NoSchedule taint，Pod 无法调度。关键证据：kubectl get nodes 显示 NotReady, kubectl describe node 显示 Taints/Conditions 异常",
           "link": "l1-taint-node.md",
-          "operations": ["诊断", "排查", "修复"]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l2-oomkilled",
           "type": "procedure",
           "layer": "L2",
-          "update_date": "2026-01-22",
-          "description": "【L2】Pod OOMKilled (ExitCode=137) - 容器内存超限被 cgroup OOM Killer 终止 (SIGKILL)，Pod 自动重启，证据链：Exit Code 137+OOMKilled Reason+Memory Limit+Previous Logs+Resource Limits",
+          "update_date": "2026-04-13",
+          "description": "【L2】Pod OOMKilled (Exit Code 137) — 容器内存超过 cgroup limits 被 OOM Killer 终止 (SIGKILL)。关键证据：terminated.reason=OOMKilled, exitCode=137, kubectl describe 显示 Last State: OOMKilled",
           "link": "l2-oomkilled.md",
-          "operations": ["诊断", "排查", "修复"]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l3-imagepull-failed",
           "type": "procedure",
           "layer": "L3",
-          "update_date": "2026-02-02",
-          "description": "【L3】镜像拉取失败 (ImagePullBackOff) - 镜像仓库网络不可达，Pod 无法拉取镜像导致异常状态，证据链：Pod ImagePullBackOff状态+Events+网络连通性+iptables规则",
+          "update_date": "2026-04-13",
+          "description": "【L3】镜像拉取失败 (ImagePullBackOff/ErrImagePull) — Pod 无法拉取容器镜像，可能原因：仓库不可达、镜像不存在、认证失败。关键证据：Pod STATUS=ImagePullBackOff, Events 含 'Failed to pull image'",
           "link": "l3-imagepull-failed.md",
-          "operations": ["诊断", "排查", "修复"]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l4-dependency-503",
           "type": "procedure",
           "layer": "L4",
-          "update_date": "2026-02-04",
-          "description": "【L4】依赖服务固定返回503 (Dependency 503) - 应用调用上游依赖服务收到 503 响应，典型表现：应用日志显示 'received_upstream_status 503' / 'dependency_error'，或测试环境中的 'L4_DEPENDENCY_FAULT' / 'L4_UPSTREAM_HTTP_CODE: 503' 标记，curl 依赖服务返回 503，应用自身返回 5xx。证据链：应用日志(upstream 503/L4_DEPENDENCY_*)+依赖服务curl测试(503)+依赖服务Endpoints状态",
+          "update_date": "2026-04-13",
+          "description": "【L4】依赖服务返回 503 (Service Unavailable) — 应用调用上游服务收到 503，应用日志含 'upstream 503'/'service unavailable'。关键证据：应用日志 grep 503/upstream, curl 依赖服务返回 503, Endpoints 状态",
           "link": "l4-dependency-503.md",
-          "operations": ["诊断", "排查", "修复"]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l4-app-health-fail",
           "type": "procedure",
           "layer": "L4",
-          "update_date": "2026-02-27",
-          "description": "【L4】应用健康检查失败 (AppHealthFail) - 应用自身健康逻辑返回 503，日志含 L4_APP_HEALTH_FAIL、L4_LAYER_APPLICATION，或 Label l4-scenario=app-health-fail。证据链：kubectl logs 命中 L4_APP_HEALTH_FAIL",
+          "update_date": "2026-04-13",
+          "description": "【L4】应用健康检查失败 — 应用自身 readiness/liveness probe 失败，Pod 被标记为 NotReady 或被重启。关键证据：Events 含 'Unhealthy'/'probe failed', 应用日志含错误信息",
           "link": "l4-app-health-fail.md",
-          "operations": ["诊断", "排查", "修复"]
+          "operations": ["诊断", "排查"]
         }
       ]
     }
@@ -71,513 +72,373 @@ data:
   # L0: Pod 存储卷超限被驱逐 (Volume Limit Exceeded)
   # ==========================================================================
   l0-volume-limit.md: |
-    # L0 Pod 存储卷超限被驱逐 (Volume Limit Exceeded)
+    # L0 Pod 存储卷超限被驱逐
 
-    > **层级**: L0 - 基础设施层 | **类型**: procedure | **场景ID**: L0-VolumeLimit
+    > 层级: L0 - 基础设施层 | 场景: Volume Limit Exceeded / Disk Pressure Eviction
 
-    ---
+    ## 场景识别
 
-    ## 1. 场景识别特征
+    | 信号 | 关键特征 |
+    |------|----------|
+    | Pod 状态 | STATUS=Evicted, Error, 或 Pending |
+    | Events | `The node was low on resource: ephemeral-storage` / `exceeds the limit` |
+    | Describe | Reason: Evicted, Message 含 sizeLimit / emptyDir / ephemeral-storage |
+    | 节点级 | `df -h` 显示 Use% >= 95%, 或 `ENOSPC` 错误 |
 
-    ### 1.1 触发关键词
-    | 类别 | 关键词 |
-    |------|--------|
-    | 中文 | 磁盘满、磁盘空间不足、写入失败、空间耗尽 |
-    | 英文 | disk full, no space left, ENOSPC, disk pressure |
-    | 指标 | node_disk_utilization > 95%, Use% >= 95 |
+    ## 诊断流程
 
-    ### 1.2 快速判定
-    ```
-    IF (df -h 显示 Use% >= 95%) OR (日志包含 ENOSPC):
-        场景 = L0-DiskFull, 置信度 = 高
-    ```
-
-    ## 2. 证据清单
-
-    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
-    |---|--------|------|----------|----------|
-    | E1 | 磁盘使用率 | Critical | `df -h` | Use% >= 95% |
-    | E2 | Inode 使用率 | Critical | `df -i` | IUse% >= 95% |
-    | E3 | Top 占用目录 | Important | `du -sh /var/log/* | sort -hr | head` | 定位写满点 |
-    | E4 | Top 大文件 | Important | `find /var/log -size +100M` | 定位具体文件 |
-    | E5 | 删未释放 | Optional | `lsof +L1 | grep deleted` | 句柄泄漏 |
-
-    ## 3. 固定取证流程
-
+    ### Step 1: 定位异常 Pod
     ```bash
-    # Step 1: 确认磁盘状态
-    df -h && df -i
-
-    # Step 2: 定位 Top 占用目录
-    du -sh /var/log/* 2>/dev/null | sort -hr | head -20
-
-    # Step 3: 定位大文件
-    find /var/log -type f -size +100M -exec ls -lh {} \; 2>/dev/null | head -20
-
-    # Step 4: 检查删未释放
-    lsof +L1 2>/dev/null | grep deleted | head -30
+    kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded | grep -v Completed
     ```
 
-    ## 4. 判定规则
-
-    | 规则ID | 条件 | 结论 | 置信度 |
-    |--------|------|------|--------|
-    | R-L0-DISK-1 | Use% >= 95% 或 ENOSPC | DiskFull(Block) | 高 |
-    | R-L0-DISK-2 | IUse% >= 95% 且 Use% 正常 | DiskFull(Inode) | 高 |
-    | R-L0-DISK-3 | lsof 显示大 deleted 文件 | 句柄泄漏 | 中 |
-
-    ## 5. 修复方案
-
-    ### 立即止血
+    ### Step 2: 确认驱逐原因（关键步骤）
     ```bash
-    truncate -s 0 /var/log/xxx.log  # 优先 truncate，保留句柄
-    df -h  # 确认释放
+    kubectl describe pod <pod-name> -n <namespace>
+    ```
+    重点关注:
+    - `Status`: Evicted / Failed
+    - `Reason`: Evicted
+    - `Message`: 包含 `exceeds the limit` 或 `ephemeral-storage`
+    - `Containers.*.Limits`: ephemeral-storage 的限制值
+
+    ### Step 3: 检查节点磁盘状态
+    ```bash
+    kubectl get nodes -o wide
+    kubectl describe node <node-name> | grep -A5 "Conditions" | grep -E "DiskPressure|MemoryPressure"
     ```
 
-    ### 根治（需审批）
-    - 配置 logrotate 日志轮转
-    - 重启占用 deleted 文件的进程
+    ### Step 4: 检查 Volume 配置
+    ```bash
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.volumes}' | python3 -m json.tool
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}'
+    ```
 
-    ### 禁止操作
-    - ❌ `rm -rf /var/log/*`
-    - ❌ `rm -rf /var/lib/docker/*`
+    ### Step 5: 检查节点级磁盘使用（如有节点访问权限）
+    ```bash
+    df -h
+    du -sh /var/lib/kubelet/pods/ 2>/dev/null | sort -hr | head -10
+    ```
+
+    ## 判定规则
+
+    | 条件 | 结论 | 置信度 |
+    |------|------|--------|
+    | Reason=Evicted + Message 含 ephemeral-storage/sizeLimit | Volume 超限驱逐 | 高 |
+    | Reason=Evicted + Message 含 disk pressure | 节点磁盘压力驱逐 | 高 |
+    | df 显示 Use% >= 95% + ENOSPC 错误 | 节点磁盘空间耗尽 | 高 |
+    | Inode 使用率 >= 95% | Inode 耗尽 | 高 |
 
   # ==========================================================================
   # L2: Pod OOMKilled (Exit Code 137)
   # ==========================================================================
   l2-oomkilled.md: |
-    # L2 OOMKilled（Exit Code 137）
+    # L2 Pod OOMKilled (Exit Code 137)
 
-    > **层级**: L2 - 工作负载层 | **类型**: procedure | **场景ID**: L2-OOMKilled
+    > 层级: L2 - 工作负载层 | 场景: 容器内存超限被 OOM Killer 终止
 
-    ---
+    ## 场景识别
 
-    ## 1. 场景识别特征
+    | 信号 | 关键特征 |
+    |------|----------|
+    | Pod 状态 | CrashLoopBackOff / Error / 频繁重启 |
+    | Describe | terminated.reason=OOMKilled, exitCode=137 |
+    | Last State | OOMKilled |
+    | 区分 L0 | 如果 Reason=Evicted 则是 L0 而非 L2，必须用 describe 确认 |
 
-    ### 1.1 触发关键词
-    | 类别 | 关键词 |
-    |------|--------|
-    | 中文 | 内存超限、OOM、被杀、重启、ExitCode=137 |
-    | 英文 | OOMKilled, out of memory, exit code 137 |
+    ## 诊断流程
 
-    ### 1.2 快速判定
-    ```
-    IF (terminated.reason == OOMKilled) OR (exitCode == 137):
-        场景 = L2-OOMKilled, 置信度 = 高
-    ```
-
-    ## 2. 证据清单
-
-    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
-    |---|--------|------|----------|----------|
-    | E1 | Pod 状态 | Critical | `kubectl get pod -o json` | terminated.reason |
-    | E2 | Exit Code | Critical | `kubectl describe pod` | exitCode=137 |
-    | E3 | 崩溃前日志 | Important | `kubectl logs --previous` | 内存错误 |
-    | E4 | 资源限制 | Important | `kubectl get pod -o yaml` | limits.memory |
-
-    ## 3. 固定取证流程
-
+    ### Step 1: 确认 Pod 状态和重启次数
     ```bash
-    # Step 1: 确认 Pod 状态
-    kubectl get pod <pod> -n <ns> -o json | jq '.status.containerStatuses'
-
-    # Step 2: 获取事件和描述
-    kubectl describe pod <pod> -n <ns>
-
-    # Step 3: 获取崩溃前日志
-    kubectl logs <pod> -n <ns> --previous --tail=200
-
-    # Step 4: 检查资源配置
-    kubectl get pod <pod> -n <ns> -o jsonpath='{.spec.containers[*].resources}'
+    kubectl get pod <pod-name> -n <namespace> -o wide
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.status.containerStatuses[*].restartCount}'
     ```
 
-    ## 4. 判定规则
-
-    | 规则ID | 条件 | 结论 | 置信度 |
-    |--------|------|------|--------|
-    | R-L2-OOM-1 | terminated.reason=OOMKilled 或 exitCode=137 | OOMKilled | 高 |
-    | R-L2-OOM-2 | 日志包含 "Cannot allocate memory" | OOMKilled | 高 |
-    | R-L2-OOM-3 | exitCode=1/127 且无 OOM 标记 | 非 OOM | 中 |
-
-    ## 5. 修复方案
-
-    ### 立即止血（需审批）
+    ### Step 2: 确认 OOMKilled（关键步骤）
     ```bash
-    kubectl patch deploy <name> -n <ns> -p \
-      '{"spec":{"template":{"spec":{"containers":[{"name":"<c>","resources":{"limits":{"memory":"1Gi"}}}]}}}}'
+    kubectl describe pod <pod-name> -n <namespace>
+    ```
+    重点关注:
+    - `Last State`: Terminated, Reason: OOMKilled, Exit Code: 137
+    - `State`: Waiting, Reason: CrashLoopBackOff
+    - 区分: 如果 Reason 是 Evicted 而非 OOMKilled，则属于 L0
+
+    ### Step 3: 获取崩溃前日志
+    ```bash
+    kubectl logs <pod-name> -n <namespace> --previous --tail=200
+    ```
+    关注: 内存分配失败、Java heap space、Cannot allocate memory 等错误
+
+    ### Step 4: 检查资源配置
+    ```bash
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].resources}' | python3 -m json.tool
+    ```
+    关注: limits.memory 的值是否合理
+
+    ### Step 5: 检查 Events 时间线
+    ```bash
+    kubectl get events -n <namespace> --field-selector involvedObject.name=<pod-name> --sort-by='.lastTimestamp'
     ```
 
-    ### 根治
-    - 分析日志确定内存消耗来源
-    - 若为泄漏：修复代码
-    - 建立 memory 使用率告警
+    ## 判定规则
+
+    | 条件 | 结论 | 置信度 |
+    |------|------|--------|
+    | terminated.reason=OOMKilled 或 exitCode=137 + 非 Evicted | OOMKilled | 高 |
+    | 日志含 "Cannot allocate memory" / "Java heap space" | 内存不足 | 高 |
+    | exitCode=137 + Reason=Evicted | 非 OOM，属于 L0 | 高 |
+    | exitCode=1/127 且无 OOM 标记 | 非 OOM，应用错误 | 中 |
 
   # ==========================================================================
   # L3: 镜像拉取失败 (ImagePullBackOff)
   # ==========================================================================
   l3-imagepull-failed.md: |
-    # 镜像拉取失败 (ImagePullBackOff) 诊断手册
+    # L3 镜像拉取失败 (ImagePullBackOff)
 
-    > **层级**: L3 - 网络层 | **类型**: procedure | **场景ID**: L3-ImagePullBackOff
+    > 层级: L3 - 服务网络层 | 场景: 容器镜像拉取失败
 
-    ## 故障特征
+    ## 场景识别
 
-    **状态关键词**: `ImagePullBackOff`、`ErrImagePull`、`ImageInspectError`
+    | 信号 | 关键特征 |
+    |------|----------|
+    | Pod 状态 | ImagePullBackOff / ErrImagePull / ImageInspectError |
+    | Events | `Failed to pull image`, `connection refused`, `timeout`, `manifest unknown` |
+    | 常见原因 | 仓库不可达、镜像不存在、认证失败、DNS 解析失败 |
 
-    **典型事件**:
-    - `Failed to pull image`
-    - `connection refused` / `timeout`
-    - `manifest unknown`
+    ## 诊断流程
 
-    ## 诊断命令
-
+    ### Step 1: 确认 Pod 状态
     ```bash
-    # 查看 Pod 事件（获取具体错误信息）
-    kubectl describe pod <pod-name> -n <namespace> | grep -A 10 Events
+    kubectl get pod <pod-name> -n <namespace> -o wide
+    ```
 
-    # 查看 Pod 使用的镜像
+    ### Step 2: 获取详细事件（关键步骤）
+    ```bash
+    kubectl describe pod <pod-name> -n <namespace>
+    ```
+    重点关注 Events 部分:
+    - `Failed to pull image "xxx"`: 具体镜像地址
+    - `connection canceled/refused/timeout`: 网络不可达
+    - `manifest unknown/not found`: 镜像或 tag 不存在
+    - `unauthorized/no basic auth`: 认证失败
+
+    ### Step 3: 检查镜像地址和 Pull Secret
+    ```bash
     kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].image}'
-
-    # 查看 imagePullSecrets 配置
     kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.imagePullSecrets}'
     ```
 
-    ## 常见场景与解决方案
-
-    ### 场景 1: 镜像仓库网络不可达
-
-    **事件**: `connection canceled`、`timeout`
-
-    **根因**: 节点无法访问镜像仓库（可能被 iptables 阻断）
-
-    **诊断**:
+    ### Step 4: 测试镜像仓库连通性
     ```bash
-    # 检查 iptables 规则
-    iptables -L -n | grep -i reject
-
-    # 在节点上测试网络连通性
-    curl -v https://registry-1.docker.io/v2/
-
-    # 检查 DNS 解析
-    nslookup registry-1.docker.io
+    kubectl run curl-test --rm -it --image=curlimages/curl --restart=Never -- \
+      curl -sI https://<registry-host>/v2/ --connect-timeout 5
     ```
 
-    **修复**:
+    ### Step 5: 检查 DNS 解析（如怀疑 DNS 问题）
     ```bash
-    # 移除 iptables REJECT 规则（如被阻断）
-    iptables -D OUTPUT -d registry-1.docker.io -j REJECT
-    iptables -D INPUT -s registry-1.docker.io -j REJECT
-
-    # 删除 Pod 触发重试
-    kubectl delete pod <pod-name> -n <namespace>
+    kubectl run dns-test --rm -it --image=busybox --restart=Never -- \
+      nslookup <registry-host>
     ```
 
-    ### 场景 2: 镜像地址错误
+    ## 判定规则
 
-    **事件**: `manifest unknown`、`not found`
-
-    **根因**: 镜像名称或标签（tag）不存在
-
-    **修复**:
-    - 确认镜像名称和标签拼写正确
-    - 确认镜像已推送到仓库
-
-    ### 场景 3: 认证失败（私有仓库）
-
-    **事件**: `unauthorized: authentication required`、`no basic auth credentials`
-
-    **修复**:
-    ```bash
-    kubectl create secret docker-registry <secret-name> \
-      --docker-server=<registry-url> \
-      --docker-username=<username> \
-      --docker-password=<password> \
-      -n <namespace>
-    ```
-
-    ## 证据链
-
-    | 步骤 | 命令/工具 | 原始数据 | 分析结论 |
-    |-------|------------|----------|-----------|
-    | 1 | kubectl get pod | STATUS=ImagePullBackOff | Pod 异常状态 |
-    | 2 | kubectl describe pod | Events: Failed to pull image, connection canceled | 镜像拉取失败 |
-    | 3 | iptables -L | registry-1.docker.io REJECT 规则存在 | 网络层被阻断 |
-    | 4 | curl -v registry | timeout/connection refused | 镜像仓库不可达 |
+    | 条件 | 结论 | 置信度 |
+    |------|------|--------|
+    | Events 含 connection refused/timeout | 镜像仓库网络不可达 | 高 |
+    | Events 含 manifest unknown/not found | 镜像或 tag 不存在 | 高 |
+    | Events 含 unauthorized/no basic auth | 认证失败（缺少或错误的 imagePullSecret） | 高 |
+    | DNS 解析失败 | DNS 问题导致仓库不可达 | 高 |
 
   # ==========================================================================
   # L4: 依赖服务固定返回 503
   # ==========================================================================
   l4-dependency-503.md: |
-    # L4 依赖服务固定返回 503
+    # L4 依赖服务返回 503 (Service Unavailable)
 
-    > **层级**: L4 - 应用层 | **类型**: procedure | **场景ID**: L4-Dependency503
+    > 层级: L4 - 应用层 | 场景: 上游/依赖服务不可用导致应用 5xx
 
-    ---
+    ## 场景识别
 
-    ## 1. 场景识别特征
+    | 信号 | 关键特征 |
+    |------|----------|
+    | 应用日志 | 含 `upstream 503`、`service unavailable`、`connection refused` |
+    | HTTP 状态码 | 应用返回 502/503/504，依赖服务直接返回 503 |
+    | Endpoints | 依赖 Service 的 Endpoints 可能为空或 NotReady |
+    | 区分 L3 | 如果 Endpoints 为空，问题在 L3（Service/网络层），非 L4 |
 
-    ### 1.1 触发关键词
-    | 类别 | 关键词 |
-    |------|--------|
-    | 中文 | 依赖异常、上游 503、5xx 激增、Service Unavailable |
-    | 英文 | upstream 503, service unavailable, 5xx |
-    | 状态 | HTTP 503 (Service Unavailable) |
-    | 特定标记 | 日志中出现 `L4_DEPENDENCY_FAULT`, `L4_UPSTREAM_HTTP_CODE: 503`，或资源带有 `l4-scenario=dependency-503` Label |
+    ## 诊断流程
 
-    ### 1.2 快速判定
-    ```
-    IF (curl 依赖返回 503) AND (应用日志有 upstream 503 或 L4_DEPENDENCY_FAULT/L4_UPSTREAM_HTTP_CODE:503 等标记):
-        场景 = L4-Dependency503, 置信度 = 高
-    ```
-
-    ## 2. 证据清单
-
-    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
-    |---|--------|------|----------|----------|
-    | E1 | 应用 5xx 统计 | Critical | `kubectl logs | grep -c 5xx` | 有 5xx |
-    | E2 | 应用日志上游错误 | Critical | `kubectl logs | grep -E "upstream 503|L4_DEPENDENCY_FAULT|L4_UPSTREAM_HTTP_CODE"` | upstream 503 或 L4 依赖故障标记 |
-    | E3 | 依赖服务返回码 | Critical | `curl -w "%{http_code}"` | 503 |
-    | E4 | 依赖 Endpoints | Important | `kubectl get endpoints` | 有后端 |
-
-    ## 3. 固定取证流程
-
+    ### Step 1: 量化应用 5xx 错误
     ```bash
-    # Step 1: 量化应用 5xx
-    kubectl logs -n <ns> deploy/<app> --tail=500 | grep -c " 5[0-9][0-9]"
-
-    # Step 2: 从应用日志证明 upstream=503
-    kubectl logs -n <ns> deploy/<app> --tail=500 | grep -i "upstream\|503" | tail -30
-
-    # Step 3: 直接验证依赖返回码
-    kubectl run curl-test --rm -it --image=curlimages/curl -- \
-      curl -s -o /dev/null -w "http_code=%{http_code}\n" http://<dep-svc>:<port>/
-
-    # Step 4: 检查依赖 Endpoints
-    kubectl get endpoints <dep-svc> -n <ns> -o wide
+    kubectl logs -n <namespace> deploy/<app-name> --tail=500 | grep -c " 5[0-9][0-9]"
     ```
 
-    ## 4. 判定规则
-
-    | 规则ID | 条件 | 结论 | 置信度 |
-    |--------|------|------|--------|
-    | R-L4-DEP-1 | 依赖 curl=503 + 应用日志有 upstream 503 | Dependency503 | 高 |
-    | R-L4-DEP-2 | 依赖 curl=200 但应用仍 5xx | 非依赖原因 | 中 |
-    | R-L4-DEP-3 | Endpoints 为空 | L3 问题 | 高 |
-
-    ## 5. 修复方案
-
-    ### 立即止血
+    ### Step 2: 确认上游 503（关键步骤）
     ```bash
-    kubectl rollout undo deploy/<dep> -n <ns>  # 回滚
-    kubectl rollout restart deploy/<dep> -n <ns>  # 或重启
-    curl http://<dep-svc>:<port>/health  # 确认恢复
+    kubectl logs -n <namespace> deploy/<app-name> --tail=500 | grep -iE "upstream|503|service.unavailable" | tail -30
+    ```
+    重点关注:
+    - `upstream connect error or disconnect/reset before headers`
+    - `503 Service Temporarily Unavailable`
+    - 具体的依赖服务地址和端口
+
+    ### Step 3: 直接验证依赖服务状态
+    ```bash
+    kubectl run curl-test --rm -it --image=curlimages/curl --restart=Never -- \
+      curl -s -o /dev/null -w "http_code=%{http_code}\n" http://<dep-svc>.<namespace>:<port>/
     ```
 
-    ### 根治
-    - 依赖侧：健康检查 + 灰度发布
-    - 应用侧：熔断 + 降级 + 重试策略
+    ### Step 4: 检查依赖 Service 的 Endpoints
+    ```bash
+    kubectl get endpoints <dep-svc> -n <namespace> -o wide
+    kubectl get pods -n <namespace> -l app=<dep-app> -o wide
+    ```
+    关注: Endpoints 是否为空、后端 Pod 是否 Running/Ready
+
+    ### Step 5: 检查依赖 Pod 状态和日志
+    ```bash
+    kubectl get pods -n <namespace> -l app=<dep-app>
+    kubectl logs -n <namespace> deploy/<dep-app> --tail=100
+    ```
+
+    ## 判定规则
+
+    | 条件 | 结论 | 置信度 |
+    |------|------|--------|
+    | 依赖 curl=503 + 应用日志有 upstream 503 | 依赖服务不可用 (L4) | 高 |
+    | 依赖 curl=200 但应用仍 5xx | 非依赖原因，需检查应用自身 | 中 |
+    | Endpoints 为空 | Service 层问题 (L3)，非 L4 | 高 |
+    | 依赖 Pod CrashLoopBackOff | 依赖服务崩溃导致 503 | 高 |
 
   # ==========================================================================
   # L4: 应用健康检查失败 (AppHealthFail)
   # ==========================================================================
   l4-app-health-fail.md: |
-    # L4 应用健康检查失败 (AppHealthFail)
+    # L4 应用健康检查失败 (Readiness/Liveness Probe Failure)
 
-    > **层级**: L4 - 应用层 | **类型**: procedure | **场景ID**: L4-AppHealthFail
+    > 层级: L4 - 应用层 | 场景: 应用 Probe 失败导致 Pod NotReady 或频繁重启
 
-    ---
+    ## 场景识别
 
-    ## 1. 场景识别特征
+    | 信号 | 关键特征 |
+    |------|----------|
+    | Pod 状态 | Running 但 READY=0/1，或频繁重启 |
+    | Events | `Unhealthy`、`Liveness probe failed`、`Readiness probe failed` |
+    | Describe | readinessProbe/livenessProbe 配置 + 失败记录 |
+    | 区分 L2 | 如果 exitCode=137 且 reason=OOMKilled，属于 L2 而非 L4 |
 
-    ### 1.1 触发关键词
-    | 类别 | 关键词 |
-    |------|--------|
-    | 日志标记 | `L4_APP_HEALTH_FAIL`、`L4_LAYER_APPLICATION`、`L4_SCENARIO: app-health-fail` |
-    | 资源 Label | `l4-scenario=app-health-fail` |
+    ## 诊断流程
 
-    ### 1.2 快速判定
-    ```
-    IF 日志有 L4_APP_HEALTH_FAIL OR L4_LAYER_APPLICATION:
-        场景 = L4-AppHealthFail, 置信度 = 高
-    ```
-
-    ## 2. 证据清单
-
-    | # | 证据项 | 级别 | 采集命令 | 判定依据 |
-    |---|--------|------|----------|----------|
-    | E1 | 应用日志 L4 标记 | Critical | `kubectl logs -n <ns> deploy/<app> --tail=100 \| grep -E "L4_APP_HEALTH_FAIL\|L4_LAYER_APPLICATION"` | 命中 L4_APP_HEALTH_FAIL 或 L4_LAYER_APPLICATION |
-    | E2 | Pod Label | Important | `kubectl get pods -n <ns> -l l4-scenario=app-health-fail` | 有 l4-scenario=app-health-fail 的 Pod |
-
-    ## 3. 固定取证流程
-
+    ### Step 1: 确认 Pod 状态和 Ready 情况
     ```bash
-    # Step 1: 从应用日志证明 L4 应用层健康失败
-    kubectl logs -n aiops-e2e deploy/apphealth --tail=100 | grep -E "L4_APP_HEALTH_FAIL|L4_LAYER_APPLICATION"
-
-    # Step 2: 确认 Pod Label（可选）
-    kubectl get pods -n aiops-e2e -l l4-scenario=app-health-fail -o wide
+    kubectl get pods -n <namespace> -l app=<app-name> -o wide
     ```
+    关注: READY 列是否为 0/N，RESTARTS 次数
 
-    ## 4. 判定规则
-
-    | 规则ID | 条件 | 结论 | 置信度 |
-    |--------|------|------|--------|
-    | R-L4-APP-1 | 日志含 L4_APP_HEALTH_FAIL | AppHealthFail | 高 |
-    | R-L4-APP-2 | 日志含 L4_LAYER_APPLICATION | AppHealthFail | 高 |
-    | R-L4-APP-3 | Pod 有 l4-scenario=app-health-fail Label | 辅助确认 | 中 |
-
-    ## 5. 修复方案
-
-    ### 立即止血
+    ### Step 2: 检查 Events 中的 Probe 失败（关键步骤）
     ```bash
-    kubectl rollout restart deploy/<app> -n <ns>  # 重启应用
-    kubectl logs -n <ns> deploy/<app> --tail=20   # 确认日志恢复正常
+    kubectl describe pod <pod-name> -n <namespace>
+    ```
+    重点关注:
+    - Events 中 `Unhealthy` 类型事件
+    - `Liveness probe failed: ...` 具体错误信息
+    - `Readiness probe failed: ...` 具体错误信息
+    - Probe 配置: path, port, initialDelaySeconds, periodSeconds
+
+    ### Step 3: 手动测试健康端点
+    ```bash
+    kubectl exec <pod-name> -n <namespace> -- curl -s http://localhost:<port>/<health-path>
+    ```
+    或从集群内部测试:
+    ```bash
+    kubectl run curl-test --rm -it --image=curlimages/curl --restart=Never -- \
+      curl -s -w "\nhttp_code=%{http_code}\n" http://<pod-ip>:<port>/<health-path>
     ```
 
-    ### 根治
-    - 检查应用健康检查逻辑与依赖
-    - 确认应用配置（环境变量、ConfigMap）正确
-    - 监控应用健康端点
+    ### Step 4: 检查应用日志
+    ```bash
+    kubectl logs <pod-name> -n <namespace> --tail=200
+    kubectl logs <pod-name> -n <namespace> --previous --tail=100
+    ```
+    关注: 启动失败、依赖连接错误、配置加载异常、端口绑定失败
+
+    ### Step 5: 检查 Probe 配置合理性
+    ```bash
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].readinessProbe}' | python3 -m json.tool
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].livenessProbe}' | python3 -m json.tool
+    ```
+
+    ## 判定规则
+
+    | 条件 | 结论 | 置信度 |
+    |------|------|--------|
+    | Events 含 Liveness probe failed + Pod 频繁重启 | Liveness 探针失败导致重启 | 高 |
+    | Events 含 Readiness probe failed + READY=0/N | Readiness 探针失败，流量未接入 | 高 |
+    | 手动 curl 健康端点返回非 200 | 应用健康检查逻辑异常 | 高 |
+    | 应用日志含启动错误/依赖连接失败 | 应用自身问题导致 Probe 失败 | 高 |
+    | Probe initialDelaySeconds 过短 + 应用启动慢 | Probe 配置不合理 | 中 |
 
   # ==========================================================================
   # L1: Node NotReady (Taint 导致)
   # ==========================================================================
   l1-taint-node.md: |
-    # L1 Kubelet 通信故障 - Node NotReady 诊断手册
-    # 场景：节点被标记为不可调度 (NoSchedule taint)，AI Agent 通过 kubectl get nodes 直接看到异常
+    # L1 Node NotReady / Taint 导致不可调度
 
-    ---
+    > 层级: L1 - 集群与节点层 | 场景: 节点 NotReady 或被 Taint 标记为不可调度
 
-    ## 场景识别特征
+    ## 场景识别
 
-    | 类别 | 关键词 | 典型表现 |
-    |------|--------|----------|
-    | Taint 标签 | aiops-test-scenario=l1-node-issue | 故障注入标记 |
-    | 节点状态 | NotReady, Unknown, NoSchedule | kubectl get nodes 显示节点异常 |
-    | 调度状态 | Unschedulable | 节点标记为不可调度 |
+    | 信号 | 关键特征 |
+    |------|----------|
+    | 节点状态 | `kubectl get nodes` 显示 STATUS=NotReady 或 Unknown |
+    | Taint | 节点被标记 NoSchedule/NoExecute taint |
+    | Pod 调度 | 新 Pod 处于 Pending，Events 含 `node(s) had taint` |
+    | 区分 L0 | L0 是 Pod 级别（Evicted/磁盘），L1 是节点级别（NotReady/Taint） |
 
-    ---
+    ## 诊断流程
 
-    ## 1. 诊断步骤
-
-    ### 1.1 检查节点状态
-
+    ### Step 1: 检查节点状态
     ```bash
     kubectl get nodes -o wide
     ```
+    关注: STATUS 列是否有 NotReady/Unknown，AGE 判断是否新节点
 
-    **预期结果**：
-    - `STATUS` 列显示 `NotReady` 或 `Unknown`
-    - `ROLES` 列显示节点角色
-    - `VERSION` 列显示 kubelet 版本
-
-    ---
-
-    ### 1.2 检查节点条件
-
-    ```bash
-    kubectl get node <node-name> -o jsonpath='{.status.conditions[?(@.type=="Ready")]}'
-    ```
-
-    **预期结果**：
-    - `status` 字段为 `False`
-    - `reason` 可能显示 `NodeTaintUnschedulable`
-    - `message` 显示具体原因
-
-    ---
-
-    ### 1.3 检查节点 Taint
-
+    ### Step 2: 检查异常节点详情（关键步骤）
     ```bash
     kubectl describe node <node-name>
     ```
+    重点关注:
+    - `Conditions` 部分: Ready=False/Unknown 的 reason 和 message
+    - `Taints` 部分: 是否有 NoSchedule/NoExecute taint
+    - `Allocatable` vs `Capacity`: 资源是否耗尽
+    - `Non-terminated Pods`: 节点上运行的 Pod 数量
 
-    **预期结果**：
-    - `Taints` 部分显示 taint 信息
-
-    ---
-
-    ## 2. 排查步骤
-
-    ### 2.1 检查 kubelet 日志
-
+    ### Step 3: 检查 Ready 条件详情
     ```bash
-    journalctl -u kubelet --since "60 min ago" | tail -100
+    kubectl get node <node-name> -o jsonpath='{.status.conditions[?(@.type=="Ready")]}' | python3 -m json.tool
     ```
+    关注: status, reason, message, lastHeartbeatTime
 
-    **关注信息**：
-    - x509 证书错误
-    - TLS 握手失败
-    - API Server 连接失败
-
-    ---
-
-    ### 2.2 检查节点事件
-
+    ### Step 4: 检查节点事件
     ```bash
     kubectl get events -A --field-selector involvedObject.kind=Node,involvedObject.name=<node-name> --sort-by='.lastTimestamp'
     ```
+    关注: NodeNotReady、NodeNotSchedulable、PLEG unhealthy 等事件
 
-    **关注信息**：
-    - NodeReady 状态变化事件
-    - Taint 相关事件
-    - FailedMount, PLEG unhealthy 相关事件
-
-    ---
-
-    ## 3. 证据链
-
-    | 步骤 | 命令/工具 | 原始数据 | 分析结论 |
-    |-------|------------|----------|-----------|
-    | 1 | kubectl get nodes | STATUS=NotReady, Taints 存在 | 节点被标记为不可用 |
-    | 2 | kubectl get node ...jsonpath | status=False | Ready 条件未满足 |
-    | 3 | kubectl describe node | Taints 包含故障标记 | 存在故障注入 |
-    | 4 | kubectl get events | NodeNotReady 相关事件 | 集群记录节点异常 |
-
-    ---
-
-    ## 4. 根因分析
-
-    ### 4.1 层级判定
-
-    **层级**: L1 - 集群与节点层
-
-    **判定理由**：
-    - 异常发生在节点级别（Node NotReady）
-    - Taint 标记导致调度器不再调度 Pod
-    - 这是典型的 **L1 层节点问题**
-    - 你需要进行对比验证。得到结论的时候要利用 工具命令来验证对比，二次确认！ -
-
-    ---
-
-    ### 4.2 可能原因
-
-    | 可能性 | 原因 | 置信度 | 说明 |
-    |---------|------|--------|------|
-    | 高 | Taint 导致节点被标记为不可调度 | 90% | 预期的故障注入 |
-    | 中 | kubelet 证书问题 | 70% | 需要检查证书有效性 |
-    | 低 | 网络分区 | 50% | 可能导致 API Server 不可达 |
-
-    ---
-
-    ## 5. 快速命令参考
-
+    ### Step 5: 检查受影响的 Pod
     ```bash
-    # 诊断
-    alias diag-node='kubectl get nodes && kubectl describe node && kubectl get events -A --field-selector involvedObject.kind=Node'
-
-    # 快速检查 Ready 节点
-    kubectl get nodes --no-headers | grep Ready | grep -v NotReady
-
-    # 检查特定节点的所有条件
-    kubectl get node <node-name> -o jsonpath='{.status.conditions[*]}'
-
-    # 清理 taint
-    kubectl taint nodes <node-name> <taint-key>-
-
-    # 查看 kubelet 日志
-    journalctl -u kubelet --tail=50
+    kubectl get pods -A --field-selector spec.nodeName=<node-name> -o wide
+    kubectl get pods -A --field-selector status.phase=Pending | head -20
     ```
+
+    ## 判定规则
+
+    | 条件 | 结论 | 置信度 |
+    |------|------|--------|
+    | Ready=False + Taint NoSchedule 存在 | 节点不可调度，新 Pod 无法分配 | 高 |
+    | Ready=Unknown + lastHeartbeatTime 超时 | kubelet 与 API Server 通信中断 | 高 |
+    | Ready=False + Conditions 含 DiskPressure/MemoryPressure | 节点资源压力导致 NotReady | 高 |
+    | Taint 存在但 Ready=True | 人为标记不可调度（维护模式） | 中 |
 
   # ==========================================================================
   # QUERY: 快速查询参考手册

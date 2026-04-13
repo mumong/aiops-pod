@@ -59,7 +59,7 @@ RUN pip install --no-cache-dir -r requirements.lock.txt
 # 复制应用代码
 COPY app/ ./app/
 COPY config/ ./config/
-COPY knowledge_base/ ./knowledge_base/
+# COPY knowledge_base/ ./knowledge_base/
 COPY run.py .
 COPY VERSION .
 

@@ -38,21 +38,33 @@ class FetchRunbookTool(BaseTool):
         safe_id = os.path.basename(runbook_id)
         logger.debug("📚 [fetch_runbook] 查找: %s", safe_id)
 
+        auto_remediate = os.getenv("AUTO_REMEDIATE", "false").lower() in ("true", "1", "yes")
+
         for d in self.runbook_dirs:
             path = os.path.join(d, safe_id)
             if os.path.isfile(path):
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
                 logger.info("📚 [fetch_runbook] 找到: %s (%d 字符)", path, len(content))
-                return (
-                    f"<runbook>\n{content}\n</runbook>\n"
-                    "Note: the above are DIRECTIONS not ACTUAL RESULTS. "
-                    "You now need to follow the steps outlined in the runbook "
-                    "yourself USING TOOLS. "
-                    "Anything that looks like an actual result in the above "
-                    "<runbook> is just an EXAMPLE. "
-                    "Now follow those steps and report back what you find."
-                )
+
+                if auto_remediate:
+                    suffix = (
+                        "Note: the above are DIRECTIONS not ACTUAL RESULTS. "
+                        "You now need to follow the steps outlined in the runbook "
+                        "yourself USING TOOLS. "
+                        "Anything that looks like an actual result in the above "
+                        "<runbook> is just an EXAMPLE. "
+                        "Now follow those steps and report back what you find."
+                    )
+                else:
+                    suffix = (
+                        "Note: the above runbook is for DIAGNOSTIC REFERENCE ONLY. "
+                        "Follow the DIAGNOSTIC steps to gather evidence using tools, "
+                        "but DO NOT execute any remediation/fix commands. "
+                        "Report your findings and suggest fixes in your analysis."
+                    )
+
+                return f"<runbook>\n{content}\n</runbook>\n{suffix}"
 
         searched = ", ".join(self.runbook_dirs)
         logger.warning("⚠️ [fetch_runbook] 未找到: %s (搜索路径: %s)", safe_id, searched)
@@ -76,5 +88,8 @@ def get_builtin_tools(runbook_dirs: Optional[list] = None) -> list:
     tools = [
         FetchRunbookTool(runbook_dirs=dirs),
     ]
+    # 标记为内置工具，方便 _log_loaded_resources 分组显示
+    for t in tools:
+        t._is_builtin = True
     logger.info("🔧 [内置工具] 加载 %d 个: %s", len(tools), ", ".join(t.name for t in tools))
     return tools

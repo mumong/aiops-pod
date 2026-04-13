@@ -9,6 +9,7 @@
 """
 
 import logging
+import os
 import queue
 import time
 from abc import ABC, abstractmethod
@@ -29,6 +30,9 @@ class WorkflowNode(ABC):
     # 实例级事件队列：当不为 None 时，_call_llm 使用 call_with_stream_and_queue
     # 以便 executor 实时读取 thinking 事件（每个请求独立）
     _event_queue: Optional[queue.Queue] = None
+
+    # 取消信号：客户端断开时 executor 会 set()，节点/AICall 检测后提前退出
+    cancel_event: Optional[Any] = None
 
     def set_event_queue(self, q: Optional[queue.Queue]):
         """设置实例级事件队列（executor 在启动 workflow 前调用）"""
@@ -132,6 +136,24 @@ class WorkflowNode(ABC):
         if catalog_text:
             full_prompt = catalog_text + "\n\n" + system_prompt
 
+        # 注入修复控制指令（AUTO_REMEDIATE 环境变量控制）
+        auto_remediate = os.getenv("AUTO_REMEDIATE", "false").lower() in ("true", "1", "yes")
+        if not auto_remediate:
+            full_prompt += (
+                "\n\n# ⛔ 修复操作限制\n"
+                "你只负责**诊断和分析**，**禁止执行任何修复操作**。\n"
+                "- 禁止执行 kubectl apply/patch/delete/rollout/taint/scale 等写操作\n"
+                "- 禁止执行 iptables 修改、文件删除、进程重启等变更操作\n"
+                "- 可以在报告中**建议**修复方案，但不要自行执行\n"
+                "- Runbook 中的修复步骤仅供参考，不要执行\n"
+            )
+        else:
+            full_prompt += (
+                "\n\n# ✅ 修复操作已授权\n"
+                "诊断完成后，如果发现明确的问题且修复方案风险可控，"
+                "你可以执行修复操作。执行前在输出中说明即将执行的操作和预期效果。\n"
+            )
+
         tools = getattr(self, 'tools', []) or []
         logger.info("📍 [%s] AICall.call() 开始 | max_steps=%d tools=%d",
                      self.node_id, max_steps, len(tools))
@@ -145,6 +167,7 @@ class WorkflowNode(ABC):
             max_steps=max_steps,
             stream_queue=self._event_queue,
             node_id=self.node_id,
+            cancel_event=self.cancel_event,
         )
 
         llm_duration_ms = (time.time() - start_time) * 1000
