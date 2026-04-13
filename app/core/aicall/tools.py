@@ -72,7 +72,17 @@ async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
         logger.warning("⚠️ [MCP-Tools] %d 个服务器连接失败: %s",
                        len(failed_servers), ", ".join(failed_servers))
 
-    logger.info("✅ [MCP-Tools] 加载 %d 个工具 (来自 %d/%d 个服务器)",
+    # 汇总输出：按 server 分组的工具清单
+    logger.info("=" * 50)
+    logger.info("📋 [MCP-Tools] 工具加载汇总: %d 个工具 (来自 %d/%d 个服务器)",
                 len(all_tools), len(server_tool_map), len(connections))
+    logger.info("-" * 50)
+    for srv_name, tool_names in server_tool_map.items():
+        logger.info("   📡 [%s] %d 个工具:", srv_name, len(tool_names))
+        for tn in tool_names:
+            logger.info("      - %s", tn)
+    if failed_servers:
+        logger.info("   ❌ 连接失败: %s", ", ".join(failed_servers))
+    logger.info("=" * 50)
 
     return all_tools

@@ -496,19 +496,29 @@ def register_routes(app):
         )
 
     def _stream_response(question: str, output_format: str, max_steps: int):
-        """生成流式响应"""
-        
+        """生成流式响应（支持客户端断开时取消后台工作流）"""
+        import threading
+        cancel_event = threading.Event()
+
         def generate() -> Generator[str, None, None]:
             try:
                 service = get_service()
                 yield from service.execute_query_stream(
                     question=question,
                     max_steps=max_steps,
-                    output_format=output_format
+                    output_format=output_format,
+                    cancel_event=cancel_event,
                 )
+            except GeneratorExit:
+                # 客户端断开连接（curl Ctrl+C）
+                logger.info("🛑 客户端断开连接，触发取消信号")
+                cancel_event.set()
             except Exception as e:
                 logger.error(f"流式查询出错: {e}", exc_info=True)
                 yield f"\n❌ 错误: {str(e)}\n"
+            finally:
+                # 确保取消信号被设置（无论正常结束还是异常）
+                cancel_event.set()
         
         media_type = "text/event-stream" if output_format == "sse" else "text/plain; charset=utf-8"
         

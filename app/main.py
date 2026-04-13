@@ -174,6 +174,8 @@ def main():
     logger.info(f"   API 文档: http://{host}:{port}/docs")
     logger.info(f"   健康检查: http://{host}:{port}/health")
     
+    # uvicorn log_config 必须使用与 _log_level 一致的级别，否则会覆盖 basicConfig
+    _level_name = logging.getLevelName(_log_level)  # e.g. "DEBUG", "INFO"
     log_config = {
         "version": 1,
         "disable_existing_loggers": False,
@@ -210,16 +212,16 @@ def main():
             },
         },
         "root": {
-            "level": "INFO",
+            "level": _level_name,
             "handlers": ["default"],
         },
     }
-    
+
     config = uvicorn.Config(
         app,
         host=host,
         port=port,
-        log_level="info",
+        log_level=_level_name.lower(),
         log_config=log_config,
         use_colors=True
     )
