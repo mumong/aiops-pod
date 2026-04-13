@@ -9,7 +9,7 @@
 设计：
 - 有自己的专用 prompt
 - 基于前3个节点的输出进行总结和扩展
-- 使用和 HolmesService 相同的调用方式，支持 runbooks 和 tools
+- 使用 AICall.call_simple（LangChain ChatOpenAI）生成报告
 - 输出符合标准模板的完整报告
 """
 
@@ -22,7 +22,6 @@ from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem, Confidence
 from app.core.prompts import CONCLUSION_FORMATTER_PROMPT
-from holmes.core.prompt import build_initial_ask_messages
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +99,8 @@ class ConclusionFormatterNode(WorkflowNode):
             causal_chain = state.get("causal_chain", {})
             
             # 使用 LLM 生成最终报告
-            if self.holmes_service and self.holmes_service.ai:
+            ai_call = getattr(self, 'ai_call', None)
+            if ai_call is not None:
                 # 从 thinking_events 提取工具真实数据，补充给 conclusion LLM
                 tool_data_text = self._build_tool_data_section(
                     state.get("thinking_events", [])
@@ -166,10 +166,9 @@ class ConclusionFormatterNode(WorkflowNode):
         tool_data_text: str = "",
     ) -> str:
         """
-        使用 litellm 直接调用生成最终报告（纯文本生成，不带工具）。
+        使用 AICall.call_simple 生成最终报告（纯文本生成，不带工具）。
 
         conclusion 节点不需要调工具，只需要基于前面节点的数据生成报告。
-        如果带工具，LLM 会去调 fetch_runbook/TodoWrite 浪费时间且不生成报告。
         """
         import time
 
@@ -219,38 +218,16 @@ class ConclusionFormatterNode(WorkflowNode):
 
         start_time = time.time()
 
-        # Use ai_call.call_simple if available (aicall path)
         ai_call = getattr(self, 'ai_call', None)
-        if ai_call:
-            content = ai_call.call_simple(
-                system_prompt=CONCLUSION_FORMATTER_PROMPT,
-                question=user_message,
-                max_tokens=max_tokens,
-            )
-        else:
-            # Legacy litellm path
-            from litellm import completion
+        if ai_call is None:
+            raise RuntimeError("[conclusion] ai_call 未设置，无法生成报告")
 
-            model = self.holmes_service.ai.llm.model
-            api_key = getattr(self.holmes_service.ai.llm, 'api_key', None)
-            api_base = getattr(self.holmes_service.ai.llm, 'api_base', None)
-
-            completion_kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": CONCLUSION_FORMATTER_PROMPT},
-                    {"role": "user", "content": user_message},
-                ],
-                "temperature": 0.3,
-                "max_tokens": max_tokens,
-            }
-            if api_key:
-                completion_kwargs["api_key"] = api_key
-            if api_base:
-                completion_kwargs["api_base"] = api_base
-
-            resp = completion(**completion_kwargs)
-            content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+        logger.info("📍 [conclusion] AICall.call_simple 开始 | max_tokens=%d", max_tokens)
+        content = ai_call.call_simple(
+            system_prompt=CONCLUSION_FORMATTER_PROMPT,
+            question=user_message,
+            max_tokens=max_tokens,
+        )
 
         llm_duration_ms = (time.time() - start_time) * 1000
 
