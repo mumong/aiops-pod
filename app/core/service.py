@@ -319,8 +319,6 @@ class HolmesService:
                     logger.info("      - [%s] %s", rb_id, rb_desc[:60])
         logger.info("=" * 50)
 
-    # PLACEHOLDER_EXECUTE_METHODS
-
     def execute_query(
         self,
         question: str,
@@ -421,8 +419,6 @@ class HolmesService:
             cancel_event=cancel_event,
         )
 
-    # PLACEHOLDER_WORKFLOW_METHODS
-
     def _execute_query_stream_workflow(
         self,
         question: str,
@@ -465,8 +461,6 @@ class HolmesService:
                 yield create_sse_message_cn("error", {
                     "error": f"工作流执行失败: {str(e)}"
                 })
-
-    # PLACEHOLDER_TEXT_AND_TOOLS
 
     def _workflow_to_text(
         self,
@@ -659,244 +653,6 @@ class HolmesService:
                 yield emit(f"❌ 错误: {error}")
                 yield emit("")
 
-        if final_answer:
-            yield emit("=" * 70)
-            yield emit("🎯 诊断报告")
-            yield emit("=" * 70)
-            yield emit("")
-            if node_outputs["conclusion"]:
-                yield emit("## 📋 节点四：汇总总结")
-                yield emit("-" * 70)
-                yield emit(node_outputs["conclusion"])
-                yield emit("")
-
-        yield emit("=" * 70)
-        yield emit("✅ 诊断完成!")
-        yield emit("=" * 70)
-
-    def get_tools_info(self) -> dict:
-        """获取可用工具信息"""
-        self.initialize()
-        tool_names = [t.name for t in self.mcp_tools]
-        return {
-            "success": True,
-            "total_tools": len(tool_names),
-            "tools": sorted(tool_names),
-            "toolsets": [{"name": "AICall(LangGraph)", "enabled": True, "status": "active"}],
-        }
-
-    def get_tools_detail(self) -> dict:
-        """获取更详细的工具信息（面向排障/二次开发）"""
-        self.initialize()
-        tools_detail = []
-        for t in self.mcp_tools:
-            d = {"name": t.name}
-            desc = getattr(t, 'description', None)
-            if desc:
-                d["description"] = desc[:200]
-            tools_detail.append(d)
-        return {
-            "success": True,
-            "mode": "AICall(LangGraph)",
-            "total_tools": len(tools_detail),
-            "tools": tools_detail,
-            "toolsets": [{"name": "AICall(LangGraph)", "tools": [t.name for t in self.mcp_tools]}],
-        }
-
-    def health_check(self) -> dict:
-        """健康检查"""
-        initialized = self._is_initialized()
-        if initialized:
-            return {
-                "status": "healthy",
-                "config_loaded": True,
-                "ai_initialized": True,
-                "mode": "AICall(LangGraph)",
-            }
-        if self._init_in_progress:
-            return {
-                "status": "initializing",
-                "config_loaded": self.config is not None,
-                "ai_initialized": initialized,
-                "started_at": self._init_started_at.isoformat() if self._init_started_at else None,
-            }
-        if self._init_error:
-            return {
-                "status": "unhealthy",
-                "error": self._init_error
-            }
-        return {
-            "status": "uninitialized",
-            "config_loaded": self.config is not None,
-            "ai_initialized": initialized
-        }
-
-
-# 全局服务实例（单例模式）
-_global_service: Optional[HolmesService] = None
-
-
-def get_service() -> HolmesService:
-    """获取全局服务实例"""
-    global _global_service
-    if _global_service is None:
-        _global_service = HolmesService()
-    return _global_service
-
-    def _workflow_to_text(
-        self,
-        executor: Any,
-        question: str,
-        cancel_event: Optional[Any] = None,
-    ) -> Generator[str, None, None]:
-        """工作流执行结果转换为美观的文本格式（终端 curl 优化）"""
-        import json
-
-        def emit(text: str) -> str:
-            return text + "\n"
-
-        yield emit("=" * 70)
-        yield emit("🔄 K8s AIOps Copilot - 工作流诊断模式")
-        yield emit("=" * 70)
-        yield emit("")
-        question_display = question[:100] if len(question) > 100 else question
-        yield emit(f"📝 问题: {question_display}")
-        yield emit("")
-        yield emit("-" * 70)
-
-        final_answer = ""
-        _token_streaming_active = False
-        node_outputs = {"layer": "", "evidence": "", "rca": "", "conclusion": ""}
-
-        for event in executor.execute_stream(question, cancel_event=cancel_event):
-            event_type = event.get("type", "unknown")
-
-            if event_type == "run_start":
-                yield emit(f"🚀 开始诊断 [run_id: {event.get('run_id', '?')}]")
-                yield emit("")
-
-            elif event_type == "node_start":
-                node_name = event.get("node_name", event.get("node", "?"))
-                yield emit(f"📍 [{node_name}] 执行中...")
-
-            elif event_type == "thinking":
-                node_name = event.get("node_name", "?")
-                think_type = event.get("thinking_type", event.get("type", ""))
-                if think_type == "tool_start":
-                    yield emit(f"   💭 [{node_name}] 调用工具: {event.get('tool_name')}")
-                elif think_type == "tool_result":
-                    yield emit(f"   💭 [{node_name}] 工具结果: {event.get('tool_name')} ({event.get('status')})")
-                    preview = event.get("result_preview", "")
-                    if preview:
-                        yield emit(f"      📄 {preview[:300]}{'...' if len(preview) > 300 else ''}")
-                elif think_type == "ai_message":
-                    if _token_streaming_active:
-                        yield "\n"
-                        _token_streaming_active = False
-                    else:
-                        content = (event.get("content") or "")[:200]
-                        yield emit(f"   💭 [{node_name}] AI: {content}")
-                elif think_type == "ai_token":
-                    token_text = event.get("content", "")
-                    if token_text:
-                        if not _token_streaming_active:
-                            yield f"   💭 [{node_name}] "
-                            _token_streaming_active = True
-                        yield token_text
-                elif think_type == "iteration_end":
-                    yield emit(f"   💭 [{node_name}] 迭代 #{event.get('iteration')} 完成")
-
-            elif event_type == "node_complete":
-                node_name = event.get("node_name", event.get("node", "?"))
-                duration = event.get("duration_seconds", 0)
-                snapshot = event.get("state_snapshot", {})
-                yield emit(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
-                handoff = event.get("handoff_summary", "")
-                if handoff:
-                    yield emit(f"   📤 → 下游数据: {handoff}")
-                yield emit("")
-
-                node_id = event.get("node", "")
-                if node_id == "layer":
-                    yield emit("   ┌──────────────────────────────────────────┐")
-                    yield emit("   │ 📊 问题定位结果                              │")
-                    yield emit("   └──────────────────────────────────────────┘")
-                    yield emit("")
-                    layer = snapshot.get("layer", "?")
-                    layers = snapshot.get("layers", [])
-                    conf = snapshot.get("layer_confidence", 0) or 0
-                    if layers and len(layers) > 1:
-                        yield emit(f"   层级: {' + '.join(layers)}（主层级: {layer}）")
-                    else:
-                        yield emit(f"   层级: {layer}")
-                    yield emit(f"   置信度: {conf:.0%}")
-                    node_outputs["layer"] = snapshot.get("layer_analysis", "")
-                # PLACEHOLDER_NODE_COMPLETE_REST
-
-                elif node_id == "evidence":
-                    yield emit("   ┌──────────────────────────────────────────┐")
-                    yield emit("   │ 🔍 证据采集结果                              │")
-                    yield emit("   └──────────────────────────────────────────┘")
-                    yield emit("")
-                    count = snapshot.get("evidence_count", 0)
-                    collected = snapshot.get("collected_count", 0)
-                    completeness = snapshot.get("completeness", 0) or 0
-                    yield emit(f"   证据: {collected}/{count} 项, 完整度: {completeness:.0%}")
-                    node_outputs["evidence"] = snapshot.get("evidence_analysis", "")
-
-                elif node_id == "rca":
-                    yield emit("   ┌──────────────────────────────────────────┐")
-                    yield emit("   │ 🎯 根因分析结果                              │")
-                    yield emit("   └──────────────────────────────────────────┘")
-                    yield emit("")
-                    root_cause = snapshot.get("root_cause", "")
-                    conf = snapshot.get("confidence")
-                    conf_str = f"{conf:.0%}" if conf else "?"
-                    if root_cause:
-                        rc_display = root_cause[:150]
-                        if len(root_cause) > 150:
-                            rc_display += "..."
-                        yield emit(f"   根因: {rc_display}")
-                    yield emit(f"   置信度: {conf_str}")
-                    causal_chain = snapshot.get("causal_chain", {})
-                    if causal_chain:
-                        yield emit("   🔗 因果链:")
-                        trigger = causal_chain.get("trigger") or causal_chain.get("root_cause", "")
-                        mechanism = causal_chain.get("mechanism") or causal_chain.get("propagation", "")
-                        manifestation = causal_chain.get("manifestation", "")
-                        if trigger:
-                            yield emit(f"     根本原因: {trigger}")
-                        if mechanism:
-                            yield emit(f"     传导机制: {mechanism}")
-                        if manifestation:
-                            yield emit(f"     最终表现: {manifestation}")
-                        yield emit("")
-                    node_outputs["rca"] = snapshot.get("rca_analysis", "")
-
-                elif node_id == "conclusion":
-                    yield emit("   ┌──────────────────────────────────────────┐")
-                    yield emit("   │ 📋 汇总总结结果                              │")
-                    yield emit("   └──────────────────────────────────────────┘")
-                    yield emit("")
-                    length = snapshot.get("conclusion_length", 0)
-                    yield emit(f"   报告长度: {length} 字符")
-
-                yield emit("")
-
-            elif event_type == "final":
-                final_answer = event.get("answer", "")
-                elapsed = event.get("elapsed_seconds", 0)
-                node_outputs["conclusion"] = final_answer or "（汇总节点生成最终报告）"
-                yield emit("-" * 70)
-                yield emit(f"📊 诊断完成! 总耗时: {format_duration(elapsed)}")
-                yield emit("-" * 70)
-                yield emit("")
-
-            elif event_type == "error":
-                yield emit(f"❌ 错误: {event.get('error', '未知错误')}")
-                yield emit("")
-
-        # 输出最终报告
         if final_answer:
             yield emit("=" * 70)
             yield emit("🎯 诊断报告")

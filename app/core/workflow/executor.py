@@ -220,6 +220,38 @@ class WorkflowExecutor:
 
                     # 如果该节点还没有 node_start，先补发 node_start
                     if node_id and node_id not in node_start_times:
+                        # ── 先 finish 上一个活跃节点（修复计时重叠） ──
+                        now = time.time()
+                        for prev_node in list(current_nodes):
+                            if prev_node not in completed_nodes:
+                                metrics.finish_node(prev_node, success=True, end_ts=now)
+                                completed_nodes.add(prev_node)
+                                prev_dur = now - node_start_times.get(prev_node, now)
+                                snapshot = self._extract_state_snapshot(final_state, prev_node)
+                                node_summary = self._format_node_summary(prev_node, final_state, snapshot)
+                                handoff = self._format_handoff_summary(prev_node, final_state)
+                                logger.info(f"✅ [{prev_node}] 完成 ({prev_dur:.1f}s)")
+                                if node_summary:
+                                    logger.info(f"   {node_summary}")
+                                if handoff:
+                                    handoff_short = handoff[:120] + "..." if len(handoff) > 120 else handoff
+                                    logger.info(f"   📤 传递给下游: {handoff_short}")
+                                    logger.debug(f"   📤 [DEBUG] 完整传递数据:\n{handoff}")
+                                yield {
+                                    "type": "node_complete",
+                                    "id": f"{run_id}-node_complete-{prev_node}",
+                                    "run_id": run_id,
+                                    "seq": seq,
+                                    "ts_ms": int(now * 1000),
+                                    "node": prev_node,
+                                    "node_name": self._get_node_display_name(prev_node),
+                                    "duration_seconds": round(prev_dur, 3),
+                                    "state_snapshot": snapshot,
+                                    "handoff_summary": handoff,
+                                }
+                                seq += 1
+                        current_nodes = set()
+
                         node_start_times[node_id] = time.time()
                         metrics.start_node(node_id, self._get_node_display_name(node_id))
                         logger.info(f"📍 [{node_id}] {self._get_node_display_name(node_id)} 开始...")
@@ -278,9 +310,9 @@ class WorkflowExecutor:
                     # 更新最终状态
                     final_state.update(updated_state)
 
-                    # 检查是否有节点完成
+                    # 检查是否有节点完成（跳过已被 thinking 分支 finish 的节点）
                     for node_name in current_nodes:
-                        if node_name not in new_nodes_in_this_event:
+                        if node_name not in new_nodes_in_this_event and node_name not in completed_nodes:
                             node_duration = time.time() - node_start_times.get(node_name, time.time())
                             metrics.finish_node(node_name, success=True)
                             completed_nodes.add(node_name)
@@ -293,10 +325,8 @@ class WorkflowExecutor:
                             if node_summary:
                                 logger.info(f"   {node_summary}")
                             if handoff:
-                                # INFO: 简洁一行摘要
                                 handoff_short = handoff[:120] + "..." if len(handoff) > 120 else handoff
                                 logger.info(f"   📤 传递给下游: {handoff_short}")
-                                # DEBUG: 完整数据
                                 logger.debug(f"   📤 [DEBUG] 完整传递数据:\n{handoff}")
 
                             yield {

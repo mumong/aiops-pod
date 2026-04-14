@@ -151,10 +151,7 @@ LAYER_EXTRACT_PROMPT = """你是 K8s 问题分层专家。根据以下分析文�
 不要调用任何工具，只根据文本内容分析并输出 JSON。
 
 # 核心规则：定位根因，不是表象
-Exit Code 137 有多种根因，必须看 describe 中的 Reason：
-- Reason: Evicted + Message 含 "exceeds the limit" → L0（存储卷超限）
-- Reason: OOMKilled → L2（容器内存超限）
-- 没有 describe 信息时，看是否有 emptyDir/sizeLimit/Evicted 关键词 → L0
+
 
 # 五层模型
 | 层级 | 根因特征 |
@@ -165,9 +162,10 @@ Exit Code 137 有多种根因，必须看 describe 中的 Reason：
 | L3 | ImagePullBackOff, DNS, network, timeout, 502, 503 |
 | L4 | application error, dependency 503, config error |
 
-多层级匹配时选根因最底层（L0 最底层）。
+多层级匹配时选根因最底层并且将匹配层都列出。
+如果是数据查询如查询prometheus指标，查询cpu,memory利用率等这些数据查询而非故障诊断，layer 设为 QUERY。
 如果分析文本中没有发现任何实际异常（所有 Pod Running、节点 Ready），layer 设为 HEALTHY。
-如果是数据查询而非故障诊断，layer 设为 QUERY。
+
 
 只输出 JSON，不要其他文字：
 ```json
