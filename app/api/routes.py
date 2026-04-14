@@ -148,37 +148,6 @@ def register_routes(app):
             return await _sync_response(question, max_steps)
     
     # =========================================================================
-    # 兼容旧 API（保持向后兼容）
-    # =========================================================================
-    
-    @app.post("/api/v1/query/stream")
-    async def legacy_query_stream(request: dict):
-        """
-        [兼容] 旧版流式查询 API
-        
-        保留向后兼容，推荐使用 /ask
-        """
-        question = fix_double_encoding(request.get("question", ""))
-        output_format = request.get("output_format", "text")
-        max_steps = request.get("max_steps", 20)
-
-        logger.info(f"📝 收到查询 (旧API): {question[:80]}...")
-        return _stream_response(question, output_format, max_steps)
-    
-    @app.post("/api/v1/query")
-    async def legacy_query(request: dict):
-        """
-        [兼容] 旧版同步查询 API
-        
-        保留向后兼容，推荐使用 /ask?stream=false
-        """
-        question = fix_double_encoding(request.get("question", ""))
-        max_steps = request.get("max_steps", 20)
-
-        logger.info(f"📝 收到查询 (旧API): {question[:80]}...")
-        return await _sync_response(question, max_steps)
-    
-    # =========================================================================
     # 辅助端点
     # =========================================================================
     

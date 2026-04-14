@@ -73,12 +73,16 @@ class NodeMetrics:
     success: bool = True
     error: Optional[str] = None
 
-    def finish(self):
-        """标记节点完成，计算耗时（只执行一次）"""
+    def finish(self, end_ts: float = 0.0):
+        """标记节点完成，计算耗时（只执行一次）
+
+        Args:
+            end_ts: 精确结束时间戳（0 则用 time.time()）
+        """
         if self._finished:
             return  # 已完成，跳过
 
-        self.end_time = time.time()
+        self.end_time = end_ts if end_ts > 0 else time.time()
         self.duration_ms = (self.end_time - self.start_time) * 1000
         self._finished = True
 
@@ -141,13 +145,17 @@ class WorkflowMetrics:
         self.nodes[node_id] = node
         return node
     
-    def finish_node(self, node_id: str, success: bool = True, error: str = None):
-        """完成节点执行记录（只处理未完成的节点）"""
+    def finish_node(self, node_id: str, success: bool = True, error: str = None, end_ts: float = 0.0):
+        """完成节点执行记录（只处理未完成的节点）
+
+        Args:
+            end_ts: 精确结束时间戳（0 则由 NodeMetrics.finish() 自动取 time.time()）
+        """
         if node_id in self.nodes:
             node = self.nodes[node_id]
             # 只处理未完成的节点，避免重复
             if not node._finished:
-                node.finish()
+                node.finish(end_ts=end_ts)
                 node.success = success
                 node.error = error
                 if not success and error:
