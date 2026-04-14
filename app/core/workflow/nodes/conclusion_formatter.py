@@ -202,6 +202,35 @@ class ConclusionFormatterNode(WorkflowNode):
         if tool_data_text:
             tool_section = f"\n# 工具采集的原始数据（重要！必须引用这些真实数据）\n{tool_data_text}\n"
 
+        # 从 evidence_analysis JSON 提取真实证据统计，直接注入给 LLM
+        evidence_stats_section = ""
+        try:
+            ea = json.loads(evidence_analysis) if evidence_analysis else {}
+            cs = ea.get("collection_summary", "")
+            inv = ea.get("evidence_inventory", [])
+            mr = ea.get("missing_reasons", [])
+            if cs or inv:
+                parts = ["\n# ⚠️ 证据采集统计（系统数据，必须原样引用，禁止自行计算）"]
+                if cs:
+                    parts.append(f"collection_summary: {cs}")
+                if inv:
+                    collected_items = [i for i in inv if i.get("collected")]
+                    missing_items = [i for i in inv if not i.get("collected")]
+                    parts.append(f"已采集 ({len(collected_items)} 项):")
+                    for i in collected_items:
+                        parts.append(f"  ✅ {i['id']}: {i['description']}")
+                    if missing_items:
+                        parts.append(f"未采集 ({len(missing_items)} 项):")
+                        for i in missing_items:
+                            parts.append(f"  ❌ {i['id']}: {i['description']}")
+                if mr:
+                    parts.append("未采集原因:")
+                    for r in mr:
+                        parts.append(f"  - {r}")
+                evidence_stats_section = "\n".join(parts) + "\n"
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         user_message = f"""# 用户问题
 {question}
 
@@ -213,7 +242,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
 # 阶段3：根因分析
 {rca_analysis}
-{tool_section}
+{evidence_stats_section}{tool_section}
 {instruction}"""
 
         start_time = time.time()
@@ -235,6 +264,10 @@ class ConclusionFormatterNode(WorkflowNode):
             self.metrics.record_llm_call("conclusion", llm_duration_ms)
 
         logger.info(f"LLM 报告生成完成 (耗时 {llm_duration_ms:.0f}ms, 长度: {len(content)})")
+
+        # 后处理：强制替换 LLM 可能篡改的证据统计数据
+        if content:
+            content = self._enforce_evidence_stats(content, evidence_analysis)
 
         # conclusion 不走 _call_llm，没有 thinking_events
         self._conclusion_thinking = []
@@ -689,3 +722,65 @@ class ConclusionFormatterNode(WorkflowNode):
         if not parts:
             return ""
         return "\n".join(parts[:20])  # 最多 20 条，避免超长
+
+    def _enforce_evidence_stats(self, content: str, evidence_analysis: str) -> str:
+        """
+        后处理：强制替换 LLM 输出中的证据统计数据为真实值。
+
+        LLM 经常忽略注入的统计数据或自行计算错误的数字。
+        此方法用正则匹配报告中的证据完整度行，替换为 evidence_analysis 中的真实数据。
+        """
+        import re
+
+        try:
+            ea = json.loads(evidence_analysis) if evidence_analysis else {}
+        except (json.JSONDecodeError, TypeError):
+            return content
+
+        cs = ea.get("collection_summary", "")
+        inv = ea.get("evidence_inventory", [])
+        if not cs and not inv:
+            return content
+
+        # 从 collection_summary 提取真实数据: "计划 X 项，实际采集 Y 项，未采集 Z 项，完整度 N%"
+        total = len(inv) if inv else 0
+        collected = sum(1 for i in inv if i.get("collected")) if inv else 0
+        completeness_pct = f"{collected / max(total, 1):.0%}"
+
+        real_stat = f"{collected}/{total} ({completeness_pct})"
+
+        replaced = False
+
+        # 模式1: Markdown 表格行 | **证据完整度** | ... |
+        pattern1 = re.compile(
+            r'(\|\s*\*{0,2}证据完整度\*{0,2}\s*\|)\s*[^|]+(\|)',
+            re.IGNORECASE
+        )
+        if pattern1.search(content):
+            content = pattern1.sub(rf'\1 {real_stat} \2', content)
+            replaced = True
+
+        # 模式2: **证据完整度**: ... 或 证据完整度: ...
+        pattern2 = re.compile(
+            r'(\*{0,2}证据完整度\*{0,2}\s*[:：])\s*\S+.*',
+            re.IGNORECASE
+        )
+        if pattern2.search(content):
+            content = pattern2.sub(rf'\1 {real_stat}', content)
+            replaced = True
+
+        # 模式3: 证据: X/Y 项 或 证据采集: X/Y
+        pattern3 = re.compile(
+            r'(证据(?:采集)?\s*[:：])\s*\d+\s*/\s*\d+\s*(?:项)?(?:\s*,\s*完整度\s*[:：]?\s*\d+%)?',
+            re.IGNORECASE
+        )
+        if pattern3.search(content):
+            content = pattern3.sub(rf'\1 {collected}/{total} 项, 完整度: {completeness_pct}', content)
+            replaced = True
+
+        if replaced:
+            logger.info("📊 [conclusion] 后处理: 证据统计已强制替换为真实数据 %s", real_stat)
+        else:
+            logger.debug("📊 [conclusion] 后处理: 未匹配到需要替换的证据统计模式")
+
+        return content

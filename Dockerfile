@@ -58,10 +58,12 @@ RUN pip install --no-cache-dir -r requirements.lock.txt
 
 # 复制应用代码
 COPY app/ ./app/
-COPY config/ ./config/
 # COPY knowledge_base/ ./knowledge_base/
 COPY run.py .
 COPY VERSION .
+
+# 创建配置目录（运行时由 K8s ConfigMap 挂载）
+RUN mkdir -p /app/config
 
 # 创建非 root 用户
 RUN useradd -m -u 1000 appuser && \
