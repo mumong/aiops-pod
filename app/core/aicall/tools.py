@@ -61,6 +61,9 @@ async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
             tools = await client.get_tools()
             tool_names = [t.name for t in tools]
             server_tool_map[srv_name] = tool_names
+            # 给每个工具打上 server_name 标签，供 _log_loaded_resources 按 server 分组
+            for t in tools:
+                t.metadata = {**(t.metadata or {}), "server_name": srv_name}
             all_tools.extend(tools)
             logger.info("   ✅ [%s] %d 个工具: %s",
                        srv_name, len(tools), ", ".join(tool_names))

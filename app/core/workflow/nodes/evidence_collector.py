@@ -105,21 +105,15 @@ class EvidenceCollectorNode(WorkflowNode):
                 layer_analysis=layer_full_analysis
             )
 
-            # 2. 根据规划调用工具采集证据
-            tool_results, collected_evidence = self._collect_evidence_by_tools(
-                question=question,
-                layer=layer,
+            # 2. 构建证据项列表（基于 thinking_events 中 AICall 真实工具调用）
+            #    废弃 subprocess 路径：LLM 已通过 AICall agent loop 调用 MCP 工具
+            tool_results = []  # subprocess 不再执行
+            evidence_items = self._build_evidence_items_from_thinking(
                 evidence_plan=evidence_plan,
-                key_entities=key_entities
+                thinking_events=thinking_events,
             )
 
-            # 3. 构建证据项列表（基于规划 + 实际采集结果）
-            evidence_items = self._build_evidence_items(
-                evidence_plan=evidence_plan,
-                tool_results=tool_results
-            )
-
-            # 3.5 与 EVIDENCE_SPECS 基准合并：补充 LLM 未覆盖的证据项
+            # 3. 与 EVIDENCE_SPECS 基准合并：补充 LLM 未覆盖的证据项
             evidence_items = self._merge_with_baseline(
                 evidence_items=evidence_items,
                 layer=layer,
@@ -137,6 +131,32 @@ class EvidenceCollectorNode(WorkflowNode):
             # 6. 从 thinking_events 提取 MCP 工具的真实输出数据
             tool_data_from_llm = self._extract_tool_data_from_thinking(thinking_events)
 
+            # 7. 构建证据清单（合并后的真实数据，供 conclusion LLM 引用）
+            collected = sum(1 for e in evidence_items if e.collected)
+            total = len(evidence_items)
+            not_collected = [e for e in evidence_items if not e.collected]
+
+            evidence_inventory = []
+            for e in evidence_items:
+                evidence_inventory.append({
+                    "id": e.id,
+                    "description": e.description,
+                    "level": e.level.value if hasattr(e.level, 'value') else str(e.level),
+                    "collected": e.collected,
+                    "source": getattr(e, 'source', ''),
+                })
+
+            # 未采集原因说明
+            missing_reasons = []
+            for e in not_collected:
+                source = getattr(e, 'source', '')
+                if source == "baseline_missing":
+                    missing_reasons.append(f"{e.id}({e.description}): 基准要求但 LLM 未规划采集")
+                elif source == "planned":
+                    missing_reasons.append(f"{e.id}({e.description}): 已规划但工具执行失败或无匹配结果")
+                else:
+                    missing_reasons.append(f"{e.id}({e.description}): 未采集")
+
             new_state.update({
                 "evidence_items": evidence_items,
                 "evidence_analysis": json.dumps({
@@ -144,14 +164,19 @@ class EvidenceCollectorNode(WorkflowNode):
                     "tool_results": [r.get("summary", "") for r in tool_results],
                     "tool_data": tool_data_from_llm,
                     "llm_analysis": llm_result_text[:3000] if llm_result_text else "",
-                    "collection_summary": f"计划 {len(evidence_plan)} 项，实际采集 {sum(1 for e in evidence_items if e.collected)} 项"
+                    "collection_summary": f"计划 {total} 项，实际采集 {collected} 项，未采集 {total - collected} 项，完整度 {completeness:.0%}",
+                    "evidence_inventory": evidence_inventory,
+                    "missing_reasons": missing_reasons,
                 }, ensure_ascii=False),
                 "evidence_completeness": completeness,
                 "tool_results": tool_results,
             })
 
-            collected = sum(1 for e in evidence_items if e.collected)
-            logger.info(f"✅ 证据采集完成: {collected}/{len(evidence_items)} 项, 完整度 {completeness:.0%}")
+            logger.info(f"✅ 证据采集完成: {collected}/{total} 项, 完整度 {completeness:.0%}")
+            if missing_reasons:
+                logger.info(f"   未采集证据 ({len(missing_reasons)} 项):")
+                for reason in missing_reasons:
+                    logger.info(f"     - {reason}")
             logger.info(f"   LLM 调用: 1 次, 工具调用: {len(tool_results)} 次")
 
             # 存入 thinking_events（带 node 标记）
@@ -558,6 +583,98 @@ class EvidenceCollectorNode(WorkflowNode):
         except Exception as e:
             logger.error(f"命令执行失败: {cmd}: {e}")
             return None
+
+    def _build_evidence_items_from_thinking(
+        self,
+        evidence_plan: List[Dict],
+        thinking_events: list,
+    ) -> List[EvidenceItem]:
+        """
+        从 thinking_events（AICall agent loop 真实工具调用）构建证据项列表。
+
+        替代旧的 _build_evidence_items（基于 subprocess tool_results），
+        因为 AICall 路径下 LLM 已通过 MCP 工具采集了数据，不需要 subprocess 重复执行。
+
+        匹配逻辑：
+        1. 对每个 evidence_plan item，检查 thinking_events 中是否有匹配的工具调用
+        2. 匹配方式：plan.tool 名称 ⊂ event.tool_name，或 plan.command 中的关键词匹配
+        3. 未匹配到 plan 的成功工具调用作为「额外采集」加入
+        """
+        evidence_items = []
+
+        # 从 thinking_events 提取成功的工具调用
+        successful_tools = []
+        for ev in thinking_events:
+            if ev.get("type") == "tool_result" and ev.get("status") == "success":
+                successful_tools.append({
+                    "tool_name": ev.get("tool_name", ""),
+                    "result": ev.get("result", ev.get("result_preview", "")),
+                })
+
+        matched_tool_indices = set()
+
+        # 对每个 plan item，尝试匹配 thinking_events 中的工具调用
+        for plan_item in evidence_plan:
+            plan_tool = (plan_item.get("tool") or "").lower()
+            plan_cmd = (plan_item.get("command") or "").lower()
+            plan_desc = (plan_item.get("description") or "").lower()
+            item_id = plan_item.get("id", f"ev_{len(evidence_items)}")
+
+            # 确定证据级别
+            level_str = plan_item.get("level", "important")
+            level = EvidenceLevel.IMPORTANT
+            if level_str == "critical":
+                level = EvidenceLevel.CRITICAL
+            elif level_str == "optional":
+                level = EvidenceLevel.OPTIONAL
+
+            # 尝试匹配
+            matched = False
+            matched_result = None
+            for ti, tool in enumerate(successful_tools):
+                if ti in matched_tool_indices:
+                    continue
+                tn = tool["tool_name"].lower()
+                # 匹配策略：工具名包含 plan 中的 tool 名，或 plan command 中包含工具名
+                if (plan_tool and plan_tool in tn) or \
+                   (plan_tool and tn in plan_tool) or \
+                   (plan_cmd and tn in plan_cmd) or \
+                   (plan_cmd and any(kw in tn for kw in plan_cmd.split()[:3])):
+                    matched = True
+                    matched_result = tool["result"]
+                    matched_tool_indices.add(ti)
+                    break
+
+            evidence_items.append(EvidenceItem(
+                id=item_id,
+                description=plan_item.get("description", "未知证据"),
+                level=level,
+                weight=0.2,
+                collected=matched,
+                value=matched_result,
+                source="thinking_match" if matched else "planned",
+            ))
+
+        # 未匹配到 plan 的成功工具调用作为「额外采集」
+        for ti, tool in enumerate(successful_tools):
+            if ti in matched_tool_indices:
+                continue
+            evidence_items.append(EvidenceItem(
+                id=f"extra_{ti}",
+                description=f"工具采集: {tool['tool_name']}",
+                level=EvidenceLevel.IMPORTANT,
+                weight=0.15,
+                collected=True,
+                value=tool["result"][:500] if tool["result"] else None,
+                source="thinking_extra",
+            ))
+
+        logger.info(f"📊 [evidence] 证据统计: plan={len(evidence_plan)} 项, "
+                    f"thinking_tools={len(successful_tools)} 个成功调用, "
+                    f"matched={len(matched_tool_indices)}, "
+                    f"extra={len(successful_tools) - len(matched_tool_indices)}")
+
+        return evidence_items
 
     def _build_evidence_items(
         self,

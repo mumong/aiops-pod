@@ -163,8 +163,9 @@ def main():
     port = int(os.getenv("API_PORT", "8000"))
     host = os.getenv("API_HOST", "0.0.0.0")
     
-    logger.info(f"🚀 启动 AIOps Copilot API 服务器")
+    logger.info("🚀 启动 AIOps Copilot API 服务器")
     logger.info(f"   地址: http://{host}:{port}")
+    logger.info(f"   日志级别: {logging.getLevelName(_log_level)}")
     logger.info(f"")
     logger.info(f"   📖 使用方式:")
     logger.info(f"   curl -G 'http://{host}:{port}/ask' --data-urlencode 'q=你的问题'")
@@ -208,6 +209,12 @@ def main():
             "uvicorn.access": {
                 "handlers": ["access"],
                 "level": "INFO",
+                "propagate": False,
+            },
+            # 确保 app.* logger 在 uvicorn dictConfig 后仍保持用户设定的级别
+            "app": {
+                "handlers": ["default"],
+                "level": _level_name,
                 "propagate": False,
             },
         },
