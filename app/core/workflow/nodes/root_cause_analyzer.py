@@ -28,7 +28,6 @@ from app.core.skills.models import (
     EvidenceLevel, Confidence
 )
 from app.core.skills.engine import get_engine
-from app.core.skills.gate import apply_gate
 from app.core.prompts import ROOT_CAUSE_ANALYZER_PROMPT
 from app.core.text_helpers import truncate_question
 
