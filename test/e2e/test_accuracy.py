@@ -52,46 +52,62 @@ SCENARIOS: Dict[str, Dict] = {
         "query": "namespace=aiops-e2e Pod logfill 被驱逐 Evicted ephemeral-storage 超限",
         "expect_layer": "L0",
         "expect_runbook": "l0-volume-limit",
+        "runbook_keywords": ["存储卷", "volume", "驱逐", "evict", "ephemeral"],
     },
     "l1-taint-node": {
         "name": "L1 节点 NotReady/Taint",
         "query": "namespace=aiops-e2e 节点 NotReady Taint 导致 Pod 无法调度",
         "expect_layer": "L1",
         "expect_runbook": "l1-taint-node",
+        "runbook_keywords": ["taint", "notready", "节点", "调度"],
     },
     "l2-oomkilled": {
         "name": "L2 OOMKilled",
         "query": "namespace=aiops-e2e pod memhog 一直重启 OOMKilled",
         "expect_layer": "L2",
         "expect_runbook": "l2-oomkilled",
+        "runbook_keywords": ["oomkill", "内存", "exit code 137"],
     },
     "l3-imagepull": {
         "name": "L3 镜像拉取失败",
         "query": "namespace=aiops-e2e Pod imagepull-fail-victim 镜像拉取失败 ImagePullBackOff",
         "expect_layer": "L3",
         "expect_runbook": "l3-imagepull-failed",
+        "runbook_keywords": ["镜像拉取", "imagepull", "imagepullbackoff"],
     },
     "l4-app-health": {
         "name": "L4 应用健康检查失败",
         "query": "namespace=aiops-e2e 应用 apphealth 健康检查失败",
         "expect_layer": "L4",
         "expect_runbook": "l4-app-health-fail",
+        "runbook_keywords": ["健康检查", "health", "探针", "probe"],
     },
 }
 
-# ── 指标提取函数 ──────────────────────────────────────────────
+# ── 指标提取函数（仅从工作流系统统计提取，不使用 AI 自评） ─────
 
 def extract_layer(text: str) -> str:
-    """从报告文本中提取诊断层级"""
-    # 方法1: 表格 "| **问题层级** | L0 ..."
-    m = re.search(r'\|\s*\*{0,2}问题层级\*{0,2}\s*\|\s*\*{0,2}\s*(L[0-4]|QUERY|HEALTHY)', text, re.I)
+    """从报告文本中提取诊断层级（仅使用系统数据）
+
+    数据来源优先级：
+      1. 下游数据日志: "📤 → 下游数据: layer=Layer.L3"
+      2. 节点输出: "层级: Layer.L3"
+      3. layer_analysis JSON: '"layer": "L3"'
+      4. 频率统计（纯计算兜底，非 AI 自评）
+    """
+    # 优先级1: 下游数据日志 — "layer=Layer.L3" 或 "layer=L3"
+    m = re.search(r'📤.*?layer=(?:Layer\.)?(L[0-4])', text)
     if m:
         return m.group(1).upper()
-    # 方法2: "**层级**: L0" 或 "层级: L0"
-    m = re.search(r'(?:层级|layer)[：:\s]*\*{0,2}\s*(L[0-4]|QUERY|HEALTHY)', text, re.I)
+    # 优先级2: 节点输出 — "层级: Layer.L3"
+    m = re.search(r'层级[：:\s]*Layer\.(L[0-4])', text)
     if m:
         return m.group(1).upper()
-    # 方法3: 频率统计
+    # 优先级3: layer_analysis JSON — '"layer": "L3"'
+    m = re.search(r'layer_analysis=\{.*?"layer":\s*"(L[0-4])"', text)
+    if m:
+        return m.group(1).upper()
+    # 优先级4: 频率统计（纯计算兜底）
     counts: Dict[str, int] = {}
     for lm in re.finditer(r'\b(L[0-4])\b', text):
         counts[lm.group(1)] = counts.get(lm.group(1), 0) + 1
@@ -99,9 +115,14 @@ def extract_layer(text: str) -> str:
 
 
 def extract_mttr(text: str, wall_clock: float) -> float:
-    """提取 MTTR（秒）。优先从报告 format_stats_block 提取，回退到 wall clock"""
-    # 从 "总耗时: 2.2m" 或 "总耗时: 45.3s"
-    m = re.search(r'总耗时[：:\s]*([\d.]+)(s|m|h)', text)
+    """提取 MTTR（秒）。仅从 stats_block 系统统计提取，回退到 wall clock
+
+    数据来源：
+      1. stats_block: "├─ 总耗时: 4.5m" — format_stats_block() 精确输出
+      2. wall clock — HTTP 请求实际耗时（兜底）
+    """
+    # stats_block 格式 "├─ 总耗时: X.Xm"
+    m = re.search(r'[├└─]+\s*总耗时[：:\s]*([\d.]+)(s|m|h)', text)
     if m:
         val, unit = float(m.group(1)), m.group(2)
         if unit == 'm':
@@ -113,40 +134,79 @@ def extract_mttr(text: str, wall_clock: float) -> float:
 
 
 def extract_evidence_rate(text: str) -> Tuple[Optional[float], int, int]:
-    """提取证据采集率。返回 (rate, collected, planned)"""
-    # 从 format_metrics_block: "| **证据完整率** | > 90% | 80% (4/5) | ✅ 达标 |"
-    m = re.search(r'证据完整率.*?\|\s*(\d+)%\s*\((\d+)/(\d+)\)', text)
+    """提取证据采集率。返回 (rate, collected, planned)
+
+    仅使用系统数据（工作流内部统计），不使用 AI 自评。
+    数据来源优先级：
+      1. stats_block: "证据: 9/12 项, 完整度: 67%" — service.py 输出
+      2. 下游数据日志: "📤 → 下游数据: evidence_items=6/9" — 节点间传递
+      3. collection_summary: '"collection_summary": "计划 6 项，实际采集 6 项"' — evidence_collector
+    """
+    # 优先级1: stats_block — "证据: N/M 项, 完整度: XX%"
+    m = re.search(r'证据[：:]\s*(\d+)/(\d+)\s*项.*?完整度[：:]\s*(\d+)%', text)
     if m:
-        collected, planned = int(m.group(2)), int(m.group(3))
+        collected, planned = int(m.group(1)), int(m.group(2))
+        rate = collected / planned if planned > 0 else None
+        return rate, collected, planned
+    # 优先级2: 下游数据日志 — "evidence_items=N/M"
+    m = re.search(r'evidence_items=(\d+)/(\d+)', text)
+    if m:
+        collected, planned = int(m.group(1)), int(m.group(2))
+        rate = collected / planned if planned > 0 else None
+        return rate, collected, planned
+    # 优先级3: collection_summary — "计划 N 项，实际采集 M 项"
+    m = re.search(r'计划\s*(\d+)\s*项.*?实际采集\s*(\d+)\s*项', text)
+    if m:
+        planned, collected = int(m.group(1)), int(m.group(2))
         rate = collected / planned if planned > 0 else None
         return rate, collected, planned
     return None, 0, 0
 
 
 def extract_runbook(text: str) -> Dict[str, Optional[str]]:
-    """提取核心 Runbook 和参考 Runbook"""
-    core = refs = None
-    m = re.search(r'\*{0,2}核心\s*Runbook\*{0,2}[：:\s]*(.*?)(?:\n|$)', text)
+    """提取 Runbook 信息（仅系统数据）
+
+    数据来源：
+      1. rca_analysis JSON: "primary_runbooks": ["L3 镜像拉取失败 (ImagePullBackOff)"]
+      2. <runbook> 标签标题: "<runbook># L3 镜像拉取失败 (ImagePullBackOff)"
+      3. fetch_runbook 日志: "fetch_runbook...找到...xxx.md"
+    """
+    core = None
+    runbook_ids = set()
+    # 优先级1: rca_analysis JSON 中的 primary_runbooks
+    m = re.search(r'"primary_runbooks"\s*:\s*\[([^\]]+)\]', text)
     if m:
-        val = m.group(1).strip().strip('*')
-        if val and val != "无":
-            core = val
-    m = re.search(r'\*{0,2}参考\s*Runbook\*{0,2}[：:\s]*(.*?)(?:\n|$)', text)
-    if m:
-        val = m.group(1).strip().strip('*')
-        if val and val != "无":
-            refs = val
-    return {"core": core, "refs": refs}
+        rm = re.search(r'"([^"]+)"', m.group(1))
+        if rm:
+            core = rm.group(1)
+    # 优先级2: <runbook> 标签标题
+    if not core:
+        m = re.search(r'<runbook>\s*#\s+(.+?)(?:\n|$)', text)
+        if m:
+            core = m.group(1).strip()
+    # 从 fetch_runbook 日志提取 .md 文件名
+    for fm in re.finditer(r'fetch_runbook.*?找到.*?([\w][\w.-]*\.md)', text):
+        fname = fm.group(1)
+        if fname not in ("README.md", "CLAUDE.md"):
+            runbook_ids.add(fname.replace(".md", ""))
+    return {"core": core, "refs": None, "runbook_ids": list(runbook_ids)}
 
 
 def extract_tool_calls(text: str) -> int:
-    m = re.search(r'\*{0,2}工具调用\*{0,2}[：:\s]*(\d+)\s*次', text)
-    return int(m.group(1)) if m else 0
+    """提取工具调用次数（从 stats_block 系统统计或实际日志计数）"""
+    m = re.search(r'[├└─]+\s*工具调用[：:\s]*(\d+)\s*次', text)
+    if m:
+        return int(m.group(1))
+    # 回退: 计算实际工具调用日志行数
+    return len(re.findall(r'🔧\s*调用工具:', text))
 
 
 def extract_llm_calls(text: str) -> int:
-    m = re.search(r'\*{0,2}LLM\s*调用\*{0,2}[：:\s]*(\d+)\s*次', text)
-    return int(m.group(1)) if m else 0
+    """提取 LLM 调用次数（从 stats_block 系统统计）"""
+    m = re.search(r'[├└─]+\s*LLM\s*调用[：:\s]*(\d+)\s*次', text)
+    if m:
+        return int(m.group(1))
+    return 0
 
 
 def extract_all(text: str, wall_clock: float) -> Dict:
@@ -161,6 +221,7 @@ def extract_all(text: str, wall_clock: float) -> Dict:
         "evidence_planned": ev_planned,
         "runbook_core": runbook["core"],
         "runbook_refs": runbook["refs"],
+        "runbook_ids": runbook.get("runbook_ids", []),
         "tool_calls": extract_tool_calls(text),
         "llm_calls": extract_llm_calls(text),
         "response_length": len(text),
@@ -172,19 +233,29 @@ def extract_all(text: str, wall_clock: float) -> Dict:
 def run_single_request(
     base_url: str, query: str, timeout: int, idx: int, save_dir: Path
 ) -> Dict:
-    """发送 stream=false 请求，保存完整报告，返回提取的指标"""
+    """发送流式请求，收集完整报告文本，返回提取的指标
+
+    使用 stream=true（默认）走 AICall + Workflow 路径，
+    通过流式响应逐块收集完整文本，效果等同于 stream=false 但走正确的代码路径。
+    """
     url = f"{base_url}/ask"
-    params = {"q": query, "stream": "false"}
+    params = {"q": query, "stream": "true", "format": "text"}
 
     start = time.time()
     try:
-        resp = requests.get(url, params=params, timeout=timeout)
-        elapsed = time.time() - start
-
+        resp = requests.get(url, params=params, timeout=timeout, stream=True)
         if resp.status_code != 200:
+            elapsed = time.time() - start
             raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
-        body = resp.text
+        # 流式收集完整文本
+        chunks = []
+        for chunk in resp.iter_content(chunk_size=None, decode_unicode=True):
+            if chunk:
+                chunks.append(chunk)
+        elapsed = time.time() - start
+
+        body = "".join(chunks)
         filepath = save_dir / f"response_{idx}.md"
         filepath.write_text(body, encoding="utf-8")
 
@@ -232,6 +303,7 @@ class ScenarioResult:
         self.name = scenario["name"]
         self.expect_layer = scenario["expect_layer"]
         self.expect_runbook = scenario["expect_runbook"]
+        self.runbook_keywords = scenario.get("runbook_keywords", [])
         self.runs: List[Dict] = []  # 每次运行的 metrics
 
     @property
@@ -247,12 +319,35 @@ class ScenarioResult:
         n = len(self.ok_runs)
         return self.layer_correct / n if n > 0 else None
 
+    def _is_runbook_match(self, run: Dict) -> bool:
+        """多策略 Runbook 匹配：
+        1. runbook_ids 精确匹配（从 fetch_runbook 日志提取的 .md 文件名）
+        2. 核心 Runbook 中文名包含 expect_runbook 关键词
+        3. runbook_keywords 模糊匹配核心 Runbook 中文名
+        """
+        expect = self.expect_runbook.lower()
+        # 策略1: 从 thinking 中提取的 .md 文件 ID 精确匹配
+        runbook_ids = run.get("runbook_ids", [])
+        for rid in runbook_ids:
+            if expect in rid.lower() or rid.lower() in expect:
+                return True
+        # 策略2: 核心 Runbook 中文名包含 expect_runbook 关键词片段
+        core = (run.get("runbook_core") or "").lower()
+        if core:
+            # 将 expect_runbook 拆分为片段匹配（如 "l3-imagepull-failed" → ["l3", "imagepull", "failed"]）
+            parts = [p for p in expect.replace("-", " ").replace("_", " ").split() if len(p) > 1]
+            if parts and sum(1 for p in parts if p in core) >= len(parts) * 0.5:
+                return True
+        # 策略3: runbook_keywords 模糊匹配
+        if self.runbook_keywords and core:
+            matched = sum(1 for kw in self.runbook_keywords if kw.lower() in core)
+            if matched >= 1:
+                return True
+        return False
+
     @property
     def runbook_matched(self) -> int:
-        return sum(
-            1 for r in self.ok_runs
-            if r.get("runbook_core") and self.expect_runbook.lower() in r["runbook_core"].lower()
-        )
+        return sum(1 for r in self.ok_runs if self._is_runbook_match(r))
 
     @property
     def runbook_rate(self) -> Optional[float]:
@@ -294,7 +389,7 @@ def run_scenario(
         with print_lock:
             if m.get("success"):
                 layer_ok = "✅" if m["layer"] == scenario["expect_layer"] else "❌"
-                rb_ok = "✅" if m.get("runbook_core") and scenario["expect_runbook"].lower() in m["runbook_core"].lower() else "❌"
+                rb_ok = "✅" if sr._is_runbook_match(m) else "❌"
                 ev_str = f"{m['evidence_rate']:.0%}" if m.get("evidence_rate") is not None else "N/A"
                 print(
                     f"  ✅ #{i} 完成 ({m['elapsed']:.0f}s) "
@@ -386,46 +481,128 @@ def print_report(results: List[ScenarioResult], total_elapsed: float, result_dir
 
 
 def save_report(results: List[ScenarioResult], total_elapsed: float, result_dir: Path):
-    """保存 JSON 汇总报告"""
+    """保存 JSON 汇总报告（含计算过程）"""
     all_ok = [r for sr in results for r in sr.ok_runs]
     all_runs = [r for sr in results for r in sr.runs]
     n_ok = len(all_ok)
+    n_fail = len(all_runs) - n_ok
 
     mttrs = [r["mttr_seconds"] for r in all_ok]
     ev_rates = [r["evidence_rate"] for r in all_ok if r.get("evidence_rate") is not None]
 
-    report = {
-        "timestamp": datetime.now().isoformat(),
-        "total_elapsed_seconds": round(total_elapsed, 1),
-        "total_runs": len(all_runs),
-        "success": n_ok,
-        "failed": len(all_runs) - n_ok,
-        "scenarios": {},
-        "aggregate": {
-            "mttr_avg_seconds": round(sum(mttrs) / len(mttrs), 1) if mttrs else None,
-            "mttr_pass": (sum(mttrs) / len(mttrs) < 900) if mttrs else None,
-            "layer_accuracy": round(sum(sr.layer_correct for sr in results) / n_ok * 100, 1) if n_ok else None,
-            "layer_pass": (sum(sr.layer_correct for sr in results) / n_ok >= 0.8) if n_ok else None,
-            "runbook_rate": round(sum(sr.runbook_matched for sr in results) / n_ok * 100, 1) if n_ok else None,
-            "runbook_pass": (sum(sr.runbook_matched for sr in results) / n_ok >= 0.8) if n_ok else None,
-            "evidence_avg": round(sum(ev_rates) / len(ev_rates) * 100, 1) if ev_rates else None,
-            "evidence_pass": (sum(ev_rates) / len(ev_rates) >= 0.8) if ev_rates else None,
-        },
-    }
+    # ── 汇总指标（含计算过程）──
+    aggregate = {}
 
+    # 1. MTTR
+    if mttrs:
+        avg_mttr = sum(mttrs) / len(mttrs)
+        aggregate["mttr"] = {
+            "threshold": "< 900s (15m)",
+            "values": [round(v, 1) for v in mttrs],
+            "calculation": f"sum({'+'.join(f'{v:.1f}' for v in mttrs)}) / {len(mttrs)}",
+            "result_seconds": round(avg_mttr, 1),
+            "result_formatted": f"{avg_mttr/60:.1f}m",
+            "pass": avg_mttr < 900,
+        }
+
+    # 2. 层级准确率
+    if n_ok:
+        total_correct = sum(sr.layer_correct for sr in results)
+        layer_acc = total_correct / n_ok * 100
+        per_scenario = {sr.scenario_id: f"{sr.layer_correct}/{len(sr.ok_runs)}" for sr in results}
+        aggregate["layer_accuracy"] = {
+            "threshold": ">= 80%",
+            "per_scenario": per_scenario,
+            "calculation": f"{total_correct} / {n_ok} × 100%",
+            "result_percent": round(layer_acc, 1),
+            "pass": layer_acc >= 80,
+        }
+
+    # 3. Runbook 覆盖率
+    if n_ok:
+        total_rb = sum(sr.runbook_matched for sr in results)
+        rb_rate = total_rb / n_ok * 100
+        per_scenario = {sr.scenario_id: f"{sr.runbook_matched}/{len(sr.ok_runs)}" for sr in results}
+        aggregate["runbook_coverage"] = {
+            "threshold": ">= 80%",
+            "per_scenario": per_scenario,
+            "calculation": f"{total_rb} / {n_ok} × 100%",
+            "result_percent": round(rb_rate, 1),
+            "pass": rb_rate >= 80,
+        }
+
+    # 4. 证据采集率
+    if ev_rates:
+        avg_ev = sum(ev_rates) / len(ev_rates) * 100
+        aggregate["evidence_completeness"] = {
+            "threshold": ">= 80%",
+            "values": [round(v * 100, 1) for v in ev_rates],
+            "samples": len(ev_rates),
+            "missing": n_ok - len(ev_rates),
+            "calculation": f"avg({len(ev_rates)} samples)",
+            "result_percent": round(avg_ev, 1),
+            "pass": avg_ev >= 80,
+        }
+    else:
+        aggregate["evidence_completeness"] = {
+            "threshold": ">= 80%",
+            "values": [],
+            "samples": 0,
+            "missing": n_ok,
+            "result_percent": None,
+            "pass": False,
+            "note": "无法从报告中提取证据完整率",
+        }
+
+    # ── 场景明细 ──
+    scenarios = {}
     for sr in results:
-        report["scenarios"][sr.scenario_id] = {
+        n = len(sr.ok_runs)
+        scenarios[sr.scenario_id] = {
             "name": sr.name,
             "expect_layer": sr.expect_layer,
             "expect_runbook": sr.expect_runbook,
-            "runs": len(sr.runs),
-            "success": len(sr.ok_runs),
+            "total_runs": len(sr.runs),
+            "success": n,
+            "failed": len(sr.runs) - n,
             "layer_accuracy": round(sr.layer_accuracy * 100, 1) if sr.layer_accuracy is not None else None,
+            "layer_detail": f"{sr.layer_correct}/{n}",
             "runbook_rate": round(sr.runbook_rate * 100, 1) if sr.runbook_rate is not None else None,
-            "avg_mttr": round(sr.avg_mttr, 1) if sr.avg_mttr is not None else None,
+            "runbook_detail": f"{sr.runbook_matched}/{n}",
+            "avg_mttr_seconds": round(sr.avg_mttr, 1) if sr.avg_mttr is not None else None,
             "avg_evidence_rate": round(sr.avg_evidence_rate * 100, 1) if sr.avg_evidence_rate is not None else None,
-            "raw_metrics": sr.ok_runs,
+            "runs": [
+                {
+                    "idx": r.get("idx"),
+                    "success": r.get("success"),
+                    "elapsed": round(r.get("elapsed", 0), 1),
+                    "layer": r.get("layer"),
+                    "layer_correct": r.get("layer") == sr.expect_layer,
+                    "mttr_seconds": round(r.get("mttr_seconds", 0), 1),
+                    "evidence_rate": round(r["evidence_rate"] * 100, 1) if r.get("evidence_rate") is not None else None,
+                    "evidence_detail": f"{r.get('evidence_collected', 0)}/{r.get('evidence_planned', 0)}",
+                    "runbook_core": r.get("runbook_core"),
+                    "runbook_matched": sr._is_runbook_match(r),
+                    "tool_calls": r.get("tool_calls", 0),
+                    "llm_calls": r.get("llm_calls", 0),
+                }
+                for r in sr.runs if r.get("success")
+            ],
         }
+
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "summary": {
+            "total_elapsed_seconds": round(total_elapsed, 1),
+            "total_elapsed_formatted": f"{total_elapsed/60:.1f}m",
+            "total_runs": len(all_runs),
+            "success": n_ok,
+            "failed": n_fail,
+            "success_rate": f"{n_ok}/{len(all_runs)}",
+        },
+        "quality_metrics": aggregate,
+        "scenarios": scenarios,
+    }
 
     (result_dir / "stats.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8"

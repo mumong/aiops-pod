@@ -2,7 +2,7 @@
 """
 AIOps Copilot Service
 负责 AI 服务的初始化、配置和查询执行
-支持 AICall (LangGraph) 和 HolmesGPT (legacy) 两种路径
+唯一模式：AICall (LangGraph) + Workflow
 """
 import os
 import logging
@@ -11,21 +11,14 @@ from pathlib import Path
 from typing import Optional, Tuple, Any, Generator, Dict
 from datetime import datetime
 
-from rich.console import Console
-
 from holmes.config import Config
-from holmes.core.prompt import build_initial_ask_messages
 from holmes.plugins.runbooks import RunbookCatalog
 
 from app.core.runbook import RunbookManager
 from app.core.paths import get_project_root
-from app.core.prompts import SYSTEM_PROMPT
-from app.core.environment import get_config_file_path, log_environment_info, get_environment
+from app.core.environment import get_config_file_path
 from app.core.holmes.streaming import create_sse_message_cn, format_duration
-from app.core.holmes.introspection import log_loaded_resources
-from app.core.holmes.query_stream import execute_query_stream_sse, execute_query_stream_text
-from app.core.holmes.config_loader import load_stream_output_flag, load_holmes_config_from_yaml
-from app.core.holmes.call_wrapper import call_with_stream
+from app.core.holmes.config_loader import load_holmes_config_from_yaml
 from app.core.mcp.mcp_patch import patch_mcp_toolset
 from app.core.holmes.tool_logging_patch import apply_tool_result_logging_patch
 from app.core.federation import get_federation_coordinator, FederationCoordinator, get_federation_agent, FederationAgent
@@ -40,16 +33,13 @@ apply_tool_result_logging_patch()
 
 
 class HolmesService:
-    """AIOps Copilot 服务类"""
-    
+    """AIOps Copilot 服务类（唯一模式：AICall + Workflow）"""
+
     def __init__(self):
         """初始化服务"""
         self.config: Optional[Config] = None
-        self.ai: Any = None
-        self.console = Console()
         self.runbook_manager = RunbookManager()
         self.merged_catalog: Optional[RunbookCatalog] = None
-        self.stream_output: bool = False  # 流式输出配置
         self.federation_coordinator: Optional[FederationCoordinator] = None
         self.federation_agent: Optional[FederationAgent] = None
         self._init_lock = threading.Lock()
@@ -59,14 +49,12 @@ class HolmesService:
         self.workflow_config: Dict = {}  # 工作流配置（max_steps 等）
         self.metrics_config: Dict = {}   # 质量指标配置
         self.raw_config: Dict = {}       # 完整原始配置
-        self.ai_call: Optional[AICall] = None  # New aicall path (replaces HolmesGPT LLM calls)
-        self.mcp_tools: list = []               # LangChain BaseTool list for aicall path
-    
+        self.ai_call: Optional[AICall] = None
+        self.mcp_tools: list = []
+
     def _is_initialized(self) -> bool:
-        """检查服务是否已初始化（AICall 路径或 HolmesGPT 路径）"""
-        if self.config is None:
-            return False
-        return self.ai_call is not None or self.ai is not None
+        """检查服务是否已初始化"""
+        return self.config is not None and self.ai_call is not None
 
     def initialize(
         self,
@@ -75,29 +63,13 @@ class HolmesService:
         max_steps: int = 50,
         config_file: Optional[Path] = None
     ) -> Tuple[Config, Any]:
-        """
-        初始化服务配置和 AI 实例
-
-        USE_AICALL=true → AICall (LangChain create_agent)
-        USE_AICALL=false → HolmesGPT (legacy)
-        
-        Args:
-            api_key: LLM API Key
-            model: 使用的模型
-            max_steps: 最大执行步数
-            config_file: 配置文件路径，如果为 None 则使用默认路径
-        
-        Returns:
-            (config, ai_instance) 元组
-        """
-        # 如果已经初始化，直接返回
+        """初始化服务配置和 AICall 实例"""
         if self._is_initialized():
-            return self.config, self.ai
+            return self.config, self.ai_call
 
         with self._init_lock:
-            # 可能在等待锁期间已经初始化
             if self._is_initialized():
-                return self.config, self.ai
+                return self.config, self.ai_call
 
             self._init_in_progress = True
             self._init_error = None
@@ -106,45 +78,32 @@ class HolmesService:
             logger.info("初始化 AIOps Copilot 服务...")
 
             try:
-                # 获取项目根目录
                 project_root = get_project_root()
 
-                # 获取配置文件路径（自动检测环境）
                 if config_file is None:
                     config_file, env_name = get_config_file_path(project_root)
                     logger.info(f"🔧 运行环境: {env_name}")
 
-                # 先读取流式输出配置（在 Config.load_from_file 之前，避免验证错误）
-                if config_file.exists():
-                    self.stream_output = load_stream_output_flag(config_file, logger)
-                else:
-                    self.stream_output = False
-
-                # 读取原始 YAML 用于联邦配置和 LLM 配置（在 holmes.Config 加载之前）
+                # 读取原始 YAML
                 _raw_config: dict = {}
                 if config_file.exists():
                     import yaml as _yaml
                     with open(config_file, "r", encoding="utf-8") as _f:
                         _raw_config = _yaml.safe_load(_f) or {}
 
-                # 对原始配置做环境变量替换（处理 ${VAR:-default} 语法）
+                # 环境变量替换
                 from app.core.holmes.config_loader import substitute_env_vars
                 _raw_config = substitute_env_vars(_raw_config, logger)
 
-                # 从 config.yaml 读取 llm 配置块
                 _llm_config = _raw_config.get("llm", {}) or {}
-
-                # 从 config.yaml 读取 workflow 配置块
                 self.workflow_config = _raw_config.get("workflow", {}) or {}
-
-                # 从 config.yaml 读取 metrics 配置块并加载阈值
                 self.metrics_config = _raw_config.get("metrics", {}) or {}
-                self.raw_config = _raw_config  # 保存完整配置供 QualityScorer 使用
+                self.raw_config = _raw_config
+
                 from app.core.workflow.metrics import load_metrics_config
                 load_metrics_config(self.metrics_config)
 
-                # 确定使用的 API Key
-                # 优先级: 参数 > LLM_API_KEY 环境变量 > config llm.api_key > 默认值
+                # API Key 优先级: 参数 > 环境变量 > config
                 final_api_key = (
                     api_key
                     or os.getenv("LLM_API_KEY")
@@ -157,26 +116,20 @@ class HolmesService:
                         "未提供 API Key，请通过 Secret LLM_API_KEY 或 config.yaml llm.api_key 设置"
                     )
 
-                # 确定使用的模型
-                # 优先级: 参数 > LLM_MODEL 环境变量 > config llm.model > 默认值
                 final_model = (
                     model
                     or os.getenv("LLM_MODEL")
                     or _llm_config.get("model")
                     or "deepseek/deepseek-chat"
                 )
-                # 过滤空字符串（环境变量设为空时回退到下一个优先级）
                 if not final_model.strip():
                     final_model = _llm_config.get("model") or "deepseek/deepseek-chat"
 
-                # 确定 api_base（可选，用于代理或兼容端点）
-                # 优先级: LLM_API_BASE 环境变量 > config llm.api_base
                 final_api_base = os.getenv("LLM_API_BASE") or _llm_config.get("api_base") or None
-                # 空字符串视为无
                 if final_api_base is not None and not final_api_base.strip():
                     final_api_base = None
 
-                # 加载配置（需要先创建一个临时配置文件，移除 stream_output 字段）
+                # 加载 Holmes Config（仍需用于 runbook catalog）
                 if config_file.exists():
                     logger.info(f"从配置文件加载: {config_file}")
                     self.config = load_holmes_config_from_yaml(
@@ -195,73 +148,56 @@ class HolmesService:
                         max_steps=max_steps
                     )
 
-                # 加载和合并 runbook catalogs
+                # 加载 runbooks
                 import time
                 step_start = time.time()
                 logger.info("🔄 加载 runbook catalogs...")
                 self._load_runbooks()
                 logger.info(f"   ✅ Runbook 加载完成 ({time.time() - step_start:.2f}s)")
 
-                # 判断执行路径：AICall (LangGraph) 或 HolmesGPT (legacy)
-                use_aicall = os.getenv("USE_AICALL", "false").lower() in ("true", "1", "yes")
+                # 创建 AICall 实例
+                step_start = time.time()
+                logger.info("🔄 创建 AICall 实例 (LangGraph)...")
+                self.ai_call = AICall(
+                    model=final_model,
+                    api_key=final_api_key,
+                    api_base=final_api_base or "",
+                )
+                logger.info("   ✅ AICall 实例创建完成 (model=%s, %.2fs)",
+                           final_model, time.time() - step_start)
 
-                if use_aicall:
-                    # ── AICall 路径：LangChain create_agent ──
-                    step_start = time.time()
-                    logger.info("🔄 创建 AICall 实例 (LangGraph)...")
-                    self.ai_call = AICall(
-                        model=final_model,
-                        api_key=final_api_key,
-                        api_base=final_api_base or "",
-                    )
-                    logger.info("   ✅ AICall 实例创建完成 (model=%s, %.2fs)",
-                               final_model, time.time() - step_start)
-
-                    # 加载 MCP 工具为 LangChain BaseTool
-                    mcp_cfg = _raw_config.get("mcp_servers", {})
-                    if mcp_cfg:
-                        import asyncio
-                        import concurrent.futures
-                        from app.core.aicall.tools import load_mcp_tools
-                        try:
-                            step_start = time.time()
-                            logger.info("🔄 [AICall] 加载 MCP 工具...")
-                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                                self.mcp_tools = pool.submit(
-                                    lambda cfg=mcp_cfg: asyncio.run(load_mcp_tools(cfg))
-                                ).result(timeout=60)
-                            logger.info("   ✅ [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
-                                       len(self.mcp_tools), time.time() - step_start)
-                            # DEBUG: 输出全部工具名
-                            for t in self.mcp_tools:
-                                logger.debug("      📡 %s", t.name)
-                        except Exception as e:
-                            logger.error("   ❌ [AICall] MCP 工具加载失败: %s", e, exc_info=True)
-                            self.mcp_tools = []
-                    else:
+                # 加载 MCP 工具
+                mcp_cfg = _raw_config.get("mcp_servers", {})
+                if mcp_cfg:
+                    import asyncio
+                    import concurrent.futures
+                    from app.core.aicall.tools import load_mcp_tools
+                    try:
+                        step_start = time.time()
+                        logger.info("🔄 [AICall] 加载 MCP 工具...")
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            self.mcp_tools = pool.submit(
+                                lambda cfg=mcp_cfg: asyncio.run(load_mcp_tools(cfg))
+                            ).result(timeout=60)
+                        logger.info("   ✅ [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
+                                   len(self.mcp_tools), time.time() - step_start)
+                        for t in self.mcp_tools:
+                            logger.debug("      📡 %s", t.name)
+                    except Exception as e:
+                        logger.error("   ❌ [AICall] MCP 工具加载失败: %s", e, exc_info=True)
                         self.mcp_tools = []
-                        logger.info("   ℹ️ [AICall] 无 MCP 服务器配置")
-
-                    # 加载内置工具（fetch_runbook 等）
-                    from app.core.aicall.builtin_tools import get_builtin_tools
-                    builtin = get_builtin_tools()
-                    self.mcp_tools = self.mcp_tools + builtin
-                    logger.info("   🔧 [AICall] 工具总计: %d 个 (MCP %d + 内置 %d)",
-                               len(self.mcp_tools), len(self.mcp_tools) - len(builtin), len(builtin))
-
-                    # AICall 路径不需要 HolmesGPT AI 实例，但仍需 config 用于 runbook 等
-                    # 创建一个轻量 AI 实例仅用于兼容 get_node_max_steps 等方法
-                    self.ai = None
-                    logger.info("   ℹ️ [AICall] 跳过 HolmesGPT AI 实例创建")
-
                 else:
-                    # ── HolmesGPT legacy 路径（保留但不推荐） ──
-                    step_start = time.time()
-                    logger.info("🔄 创建 HolmesGPT AI 实例...")
-                    self.ai = self.config.create_console_toolcalling_llm()
-                    logger.info("   ✅ HolmesGPT AI 实例创建完成 (%.2fs)", time.time() - step_start)
+                    self.mcp_tools = []
+                    logger.info("   ℹ️ [AICall] 无 MCP 服务器配置")
 
-                # 初始化联邦协调器（如配置了 federation.enabled=true）
+                # 加载内置工具
+                from app.core.aicall.builtin_tools import get_builtin_tools
+                builtin = get_builtin_tools()
+                self.mcp_tools = self.mcp_tools + builtin
+                logger.info("   🔧 [AICall] 工具总计: %d 个 (MCP %d + 内置 %d)",
+                           len(self.mcp_tools), len(self.mcp_tools) - len(builtin), len(builtin))
+
+                # 初始化联邦协调器
                 _federation_cfg = _raw_config.get("federation", {})
                 if _federation_cfg.get("enabled", False):
                     self.federation_coordinator = get_federation_coordinator(
@@ -272,8 +208,6 @@ class HolmesService:
                     )
                     if self.federation_coordinator:
                         logger.info("[FEDERATION] 联邦协调器初始化完成")
-
-                    # 初始化 FederationAgent（真正的 Agent-to-Agent）
                     self.federation_agent = get_federation_agent(
                         federation_config=_federation_cfg,
                         model=final_model,
@@ -281,152 +215,112 @@ class HolmesService:
                         api_base=final_api_base,
                     )
                     if self.federation_agent:
-                        logger.info("[FEDERATION] FederationAgent 初始化完成（真正的 Agent-to-Agent）")
+                        logger.info("[FEDERATION] FederationAgent 初始化完成")
                 else:
                     logger.debug("[FEDERATION] federation 未启用，跳过")
 
-                # 配置自定义 runbook 搜索路径（仅 HolmesGPT 路径需要）
-                if self.ai is not None:
-                    step_start = time.time()
-                    logger.info("🔄 配置 runbook 搜索路径...")
-                    if self.runbook_manager.runbook_dir.exists():
-                        self.runbook_manager.configure_search_path(self.ai)
-                    logger.info(f"   ✅ 搜索路径配置完成 ({time.time() - step_start:.2f}s)")
-
-                logger.info("✅ 服务初始化完成 | 模式=%s | 模型=%s",
-                           "AICall(LangGraph)" if self.ai_call else "HolmesGPT",
+                logger.info("✅ 服务初始化完成 | 模式=AICall(LangGraph) | 模型=%s",
                            self.config.model)
-                logger.info(f"📡 输出模式: {'流式输出 (stream)' if self.stream_output else '非流式输出 (invoke)'}")
 
-                # 输出加载的资源信息
+                # 输出资源信息
                 step_start = time.time()
-                logger.info("🔄 输出资源信息...")
                 self._log_loaded_resources()
                 logger.info(f"   ✅ 资源信息输出完成 ({time.time() - step_start:.2f}s)")
 
-                # 从工具列表中移除 kubectl_top（Metrics API 不可用）
+                # 禁用不可用的工具
                 self._disable_tools(["kubectl_top_nodes", "kubectl_top_pods"])
 
-                return self.config, self.ai
+                return self.config, self.ai_call
             except Exception as e:
                 self._init_error = str(e)
                 raise
             finally:
                 self._init_in_progress = False
-    
+
     def _disable_tools(self, tool_names: list):
         """从工具列表中移除指定工具"""
-        # AICall 路径：从 mcp_tools 列表中过滤
         if self.ai_call and self.mcp_tools:
             before = len(self.mcp_tools)
             self.mcp_tools = [t for t in self.mcp_tools if t.name not in tool_names]
             removed = before - len(self.mcp_tools)
             if removed:
                 logger.info("⛔ [AICall] 已禁用 %d 个工具: %s", removed, tool_names)
-            return
-        # HolmesGPT 路径：从 tool_executor 中删除
-        if self.ai and getattr(self.ai, "tool_executor", None):
-            tools_by_name = self.ai.tool_executor.tools_by_name
-            for name in tool_names:
-                if name in tools_by_name:
-                    del tools_by_name[name]
-                    logger.info("⛔ 已禁用工具: %s", name)
-
-    def _call_with_stream(self, messages: list) -> Any:
-        """兼容层：内部委托给 app.core.holmes.call_wrapper.call_with_stream"""
-        return call_with_stream(self.ai, messages, logger_override=logger)
-
-    def _call_with_stream_limited(self, messages: list, max_steps: int = 10) -> Any:
-        """
-        带 max_steps 限制的 LLM 调用
-
-        临时修改 ai.max_steps，调用后恢复原值。
-        用于节点级控制，避免 LLM 发散导致过多迭代。
-
-        Args:
-            messages: 消息列表
-            max_steps: 本次调用的最大迭代步数
-        """
-        original = getattr(self.ai, 'max_steps', None)
-        try:
-            if original is not None:
-                self.ai.max_steps = max_steps
-            return call_with_stream(self.ai, messages, logger_override=logger)
-        finally:
-            if original is not None:
-                self.ai.max_steps = original
 
     def get_node_max_steps(self, node_id: str) -> int:
-        """
-        获取节点 max_steps，优先级: 环境变量 > config.yaml > 默认值
-
-        Args:
-            node_id: 节点 ID（layer, evidence, rca, conclusion）
-
-        Returns:
-            该节点的 max_steps 值
-        """
+        """获取节点 max_steps，优先级: 环境变量 > config.yaml > 默认值"""
         defaults = {"layer": 3, "evidence": 10, "rca": 8, "conclusion": 3}
-        # 1. 环境变量
         env_key = f"WORKFLOW_MAX_STEPS_{node_id.upper()}"
         env_val = os.getenv(env_key)
         if env_val and env_val.isdigit():
             return int(env_val)
-        # 2. config.yaml
         config_val = self.workflow_config.get("max_steps", {}).get(node_id)
         if config_val is not None:
             return int(config_val)
-        # 3. 默认值
         return defaults.get(node_id, 10)
-    
+
     def _load_runbooks(self):
         """加载和合并 runbook catalogs"""
-        # 加载自定义 runbook catalog
         custom_catalog = self.runbook_manager.load_custom_catalog()
-        
-        # 获取内置 runbook catalog
         base_catalog = self.config.get_runbook_catalog()
-        
-        # 合并 catalogs
         self.merged_catalog = self.runbook_manager.merge_catalogs(
             base_catalog, custom_catalog
         )
-    
+
     def _log_loaded_resources(self):
-        """输出加载的资源信息"""
-        if self.ai_call:
-            # AICall 路径：输出 LangGraph 工具信息（按来源分组）
-            logger.info("=" * 50)
-            logger.info("📋 [AICall] 资源概览:")
-            logger.info("   🔧 工具总计: %d 个", len(self.mcp_tools))
+        """输出加载的资源信息（按 MCP Server 分组，INFO 级别可见）"""
+        logger.info("=" * 50)
+        logger.info("📋 [AICall] 资源概览")
+        logger.info("=" * 50)
 
-            # 按来源分组：MCP 工具 vs 内置工具
-            mcp_tools = [t for t in self.mcp_tools if not getattr(t, '_is_builtin', False)]
-            builtin_tools = [t for t in self.mcp_tools if getattr(t, '_is_builtin', False)]
+        mcp_tools = [t for t in self.mcp_tools if not getattr(t, '_is_builtin', False)]
+        builtin_tools = [t for t in self.mcp_tools if getattr(t, '_is_builtin', False)]
 
-            if mcp_tools:
-                logger.info("   📡 MCP 工具 (%d 个):", len(mcp_tools))
-                for t in mcp_tools:
+        # 按 MCP Server 分组
+        server_groups: dict = {}
+        ungrouped = []
+        for t in mcp_tools:
+            srv = (getattr(t, 'server_name', None)
+                   or (getattr(t, 'metadata', {}) or {}).get('server_name')
+                   or (getattr(t, 'metadata', {}) or {}).get('server'))
+            if srv:
+                server_groups.setdefault(srv, []).append(t)
+            else:
+                ungrouped.append(t)
+
+        logger.info("   🔧 工具总计: %d 个 (MCP %d + 内置 %d)",
+                    len(self.mcp_tools), len(mcp_tools), len(builtin_tools))
+        logger.info("-" * 50)
+
+        if server_groups:
+            for srv_name, tools in server_groups.items():
+                logger.info("   📡 [%s] %d 个工具:", srv_name, len(tools))
+                for t in tools:
                     logger.info("      - %s", t.name)
                     logger.debug("        描述: %s", getattr(t, 'description', '')[:120])
-            if builtin_tools:
-                logger.info("   🔧 内置工具 (%d 个):", len(builtin_tools))
-                for t in builtin_tools:
-                    logger.info("      - %s", t.name)
+        if ungrouped:
+            logger.info("   📡 [MCP] %d 个工具:", len(ungrouped))
+            for t in ungrouped:
+                logger.info("      - %s", t.name)
+                logger.debug("        描述: %s", getattr(t, 'description', '')[:120])
 
-            if self.merged_catalog:
-                catalog_entries = getattr(self.merged_catalog, 'catalog', [])
-                count = len(catalog_entries) if catalog_entries else 0
-                logger.info("   📚 Runbooks: %d 个", count)
-                if catalog_entries:
-                    for entry in catalog_entries:
-                        rb_id = getattr(entry, 'id', '') or entry.get('id', '') if isinstance(entry, dict) else getattr(entry, 'id', '')
-                        rb_desc = getattr(entry, 'description', '') or (entry.get('description', '') if isinstance(entry, dict) else '')
-                        logger.debug("      - [%s] %s", rb_id, rb_desc[:60])
-            logger.info("=" * 50)
-        elif self.ai:
-            log_loaded_resources(ai=self.ai, merged_catalog=self.merged_catalog, logger=logger)
-    
+        if builtin_tools:
+            logger.info("   🔧 [内置] %d 个工具:", len(builtin_tools))
+            for t in builtin_tools:
+                logger.info("      - %s", t.name)
+
+        if self.merged_catalog:
+            catalog_entries = getattr(self.merged_catalog, 'catalog', [])
+            count = len(catalog_entries) if catalog_entries else 0
+            logger.info("   📚 Runbooks: %d 个", count)
+            if catalog_entries:
+                for entry in catalog_entries:
+                    rb_id = getattr(entry, 'id', '') or entry.get('id', '') if isinstance(entry, dict) else getattr(entry, 'id', '')
+                    rb_desc = getattr(entry, 'description', '') or (entry.get('description', '') if isinstance(entry, dict) else '')
+                    logger.info("      - [%s] %s", rb_id, rb_desc[:60])
+        logger.info("=" * 50)
+
+    # PLACEHOLDER_EXECUTE_METHODS
+
     def execute_query(
         self,
         question: str,
@@ -435,32 +329,14 @@ class HolmesService:
         model: Optional[str] = None,
         max_steps: int = 50
     ) -> dict:
-        """
-        执行查询并返回结果
-        
-        Args:
-            question: 用户问题
-            system_prompt: 自定义系统提示词
-            api_key: LLM API Key
-            model: 使用的模型
-            max_steps: 最大执行步数
-        
-        Returns:
-            包含查询结果的字典
-        """
+        """执行查询并返回结果（收集流式工作流输出为完整文本）"""
         start_time = datetime.now()
-        
         try:
-            # 如果参数变化，重新初始化
             if api_key or model or max_steps != 50:
                 self.config = None
-                self.ai = None
                 self.ai_call = None
-            
-            # 初始化（如果还未初始化）
             self.initialize(api_key=api_key, model=model, max_steps=max_steps)
-            
-            # 等待初始化完成（最多60秒）
+
             import time
             max_wait = 60
             waited = 0
@@ -477,81 +353,25 @@ class HolmesService:
                     "execution_time": (datetime.now() - start_time).total_seconds(),
                     "timestamp": datetime.now().isoformat()
                 }
-            
+
             if waited > 0:
                 logger.info(f"✅ 初始化完成（等待了 {waited}s）")
-            
-            # 使用系统提示词
-            final_system_prompt = system_prompt or SYSTEM_PROMPT
-            
+
             logger.info(f"执行查询: {question[:100]}...")
-            
-            # 使用合并后的 runbook catalog
-            runbook_catalog = (
-                self.merged_catalog if self.merged_catalog 
-                else self.config.get_runbook_catalog()
-            )
-            
-            # 构建消息
-            messages = build_initial_ask_messages(
-                initial_user_prompt=question,
-                file_paths=None,
-                tool_executor=self.ai.tool_executor,
-                runbooks=runbook_catalog,
-                system_prompt_additions=final_system_prompt if final_system_prompt else None
-            )
-            
-            # 根据配置选择调用方式
-            if self.stream_output:
-                response = self._call_with_stream(messages)
-            else:
-                response = self.ai.call(messages)
-            
-            # 提取工具调用信息，并输出调试日志（便于排障）
-            tool_calls = []
-            if response and hasattr(response, "tool_calls") and response.tool_calls:
-                raw_tool_calls = response.tool_calls
-                if isinstance(raw_tool_calls, list) and raw_tool_calls:
-                    if isinstance(raw_tool_calls[0], dict):
-                        tool_calls = raw_tool_calls  # 已经是 dict 列表
-                    else:
-                        for tool in raw_tool_calls:
-                            tool_calls.append(
-                                {
-                                    "tool_name": getattr(tool, "tool_name", getattr(tool, "name", None)),
-                                    "result": str(getattr(tool, "result", None)) if hasattr(tool, "result") else None,
-                                    "error": str(getattr(tool, "error", None))
-                                    if hasattr(tool, "error") and getattr(tool, "error", None)
-                                    else None,
-                                }
-                            )
 
-            # 日志中打印每一次工具调用的结果预览和错误，方便排障
-            if tool_calls:
-                logger.info(f"🔧 本次查询共调用 {len(tool_calls)} 个工具（同步模式）:")
-                for idx, tc in enumerate(tool_calls, start=1):
-                    name = tc.get("tool_name") or tc.get("name") or f"tool_{idx}"
-                    result_text = tc.get("result") or ""
-                    error_text = tc.get("error") or ""
-
-                    preview = result_text[:500].replace("\n", " ") if result_text else ""
-                    logger.info(f"   #{idx} 工具: {name}")
-                    if preview:
-                        logger.info(f"      📄 结果预览: {preview}{'... (已截断)' if len(result_text) > 500 else ''}")
-                    else:
-                        logger.info("      📄 结果预览: <空结果>")
-
-                    if error_text:
-                        logger.error(f"      ⚠️ 错误: {error_text}")
-            
-            execution_time = (datetime.now() - start_time).total_seconds()
-            
+            chunks = []
+            for chunk in self.execute_query_stream(
+                question=question,
+                max_steps=max_steps,
+                output_format="text",
+            ):
+                chunks.append(chunk)
+            full_text = "".join(chunks)
             return {
                 "success": True,
-                "result": response.result if response else None,
-                "tool_calls": tool_calls,
+                "result": full_text,
+                "tool_calls": [],
             }
-            
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             logger.error(f"执行查询时出错: {e}", exc_info=True)
@@ -561,7 +381,7 @@ class HolmesService:
                 "execution_time": execution_time,
                 "timestamp": datetime.now().isoformat()
             }
-    
+
     def execute_query_stream(
         self,
         question: str,
@@ -572,21 +392,7 @@ class HolmesService:
         output_format: str = "text",
         cancel_event: Optional[Any] = None,
     ) -> Generator[str, None, None]:
-        """
-        执行查询并以流式方式返回结果（带耗时统计）
-        
-        Args:
-            question: 用户问题
-            system_prompt: 自定义系统提示词
-            api_key: LLM API Key
-            model: 使用的模型
-            max_steps: 最大执行步数
-            output_format: 输出格式 - "text"=易读纯文本, "sse"=JSON格式SSE事件
-        
-        Yields:
-            根据 output_format 返回纯文本或 SSE 格式的事件字符串
-        """
-        # 等待初始化完成（最多60秒）
+        """执行查询并以流式方式返回结果"""
         import time
         max_wait = 60
         waited = 0
@@ -602,77 +408,36 @@ class HolmesService:
             if output_format == "text":
                 yield f"❌ {error_msg}\n"
             else:
-                from app.core.holmes.streaming import create_sse_message_cn
                 yield create_sse_message_cn("error", {"error": error_msg})
             return
-        
+
         if waited > 0:
             logger.info(f"✅ 初始化完成（等待了 {waited}s）")
-        
-        # 检查是否启用工作流模式
-        # 配置方式: 在 deploy/secrets/core.yaml 中设置 USE_WORKFLOW: "true"
-        use_workflow = os.getenv("USE_WORKFLOW", "false").lower() in ("true", "1", "yes")
-        
-        if use_workflow:
-            # 工作流模式（POC）
-            logger.info("🔄 使用工作流模式执行查询")
-            yield from self._execute_query_stream_workflow(
-                question=question,
-                output_format=output_format,
-                cancel_event=cancel_event,
-            )
-            return
-        
-        # 原有模式（HolmesGPT agentic loop）
-        if output_format == "text":
-            yield from execute_query_stream_text(self, question, system_prompt, api_key, model, max_steps)
-            return
 
-        yield from execute_query_stream_sse(
-            self,
-            question,
-            system_prompt=system_prompt,
-            api_key=api_key,
-            model=model,
-            max_steps=max_steps,
+        logger.info("🔄 使用工作流模式执行查询")
+        yield from self._execute_query_stream_workflow(
+            question=question,
             output_format=output_format,
+            cancel_event=cancel_event,
         )
-    
+
+    # PLACEHOLDER_WORKFLOW_METHODS
+
     def _execute_query_stream_workflow(
         self,
         question: str,
         output_format: str = "sse",
         cancel_event: Optional[Any] = None,
     ) -> Generator[str, None, None]:
-        """
-        使用工作流模式执行查询（新方法）
-        
-        设计：
-        - 与现有 execute_query_stream 并行存在
-        - 可通过配置开关选择使用哪种模式
-        - 支持 text 和 sse 两种输出格式
-        
-        Args:
-            question: 用户问题
-            output_format: 输出格式 ("text" 或 "sse")
-        
-        Yields:
-            格式化的事件字符串
-        """
+        """使用工作流模式执行查询，支持 text 和 sse 两种输出格式"""
         try:
             from app.core.workflow.executor import WorkflowExecutor
-            from app.core.holmes.streaming import create_sse_message_cn, format_duration
-            
-            # 创建执行器
-            executor = WorkflowExecutor(holmes_service=self)
 
-            # Activate aicall path on executor
-            if self.ai_call:
-                executor.ai_call = self.ai_call
-                executor.mcp_tools = self.mcp_tools or []
-                logger.debug("🔀 [Workflow] aicall 路径激活 | tools=%d", len(executor.mcp_tools))
-            
-            # text 格式输出（终端友好）
+            executor = WorkflowExecutor(holmes_service=self)
+            executor.ai_call = self.ai_call
+            executor.mcp_tools = self.mcp_tools or []
+            logger.debug("🔀 [Workflow] aicall 路径激活 | tools=%d", len(executor.mcp_tools))
+
             if output_format == "text":
                 yield from self._workflow_to_text(executor, question, cancel_event=cancel_event)
                 return
@@ -682,7 +447,7 @@ class HolmesService:
                 event_type = event.get("type", "unknown")
                 payload = {k: v for k, v in event.items() if k != "type"}
                 yield create_sse_message_cn(event_type, payload)
-        
+
         except ImportError as e:
             logger.error(f"工作流模块导入失败: {e}")
             if output_format == "text":
@@ -700,61 +465,49 @@ class HolmesService:
                 yield create_sse_message_cn("error", {
                     "error": f"工作流执行失败: {str(e)}"
                 })
-    
+
+    # PLACEHOLDER_TEXT_AND_TOOLS
+
     def _workflow_to_text(
         self,
         executor: Any,
         question: str,
         cancel_event: Optional[Any] = None,
     ) -> Generator[str, None, None]:
-        """
-        工作流执行结果转换为美观的文本格式
-        专为终端 curl 等命令行工具优化
-        """
-        from app.core.holmes.streaming import format_duration
+        """工作流执行结果转换为美观的文本格式，专为终端 curl 优化"""
         import json
 
         def emit(text: str) -> str:
             return text + "\n"
 
-        # 节点输出格式化函数（局部函数，不需要 self）
         def format_layer_node_output(snapshot: dict) -> str:
-            """格式化问题定位节点的输出"""
             lines = []
             layer = snapshot.get("layer", "?")
             conf = snapshot.get("layer_confidence", 0) or 0
             layer_reasoning = snapshot.get("layer_reasoning", "")
-
             lines.append(f"**层级**: {layer}")
             lines.append(f"**置信度**: {conf:.0%}")
             if layer_reasoning:
                 lines.append(f"**判定理由**: {layer_reasoning}")
-
             return "\n".join(lines)
 
         def format_evidence_node_output(snapshot: dict) -> str:
-            """格式化证据采集节点的输出"""
             lines = []
             count = snapshot.get("evidence_count", 0)
             collected = snapshot.get("collected_count", 0)
             completeness = snapshot.get("completeness", 0) or 0
-
             lines.append(f"**证据数量**: {count}")
             lines.append(f"**已采集**: {collected}")
             lines.append(f"**完整度**: {completeness:.0%}")
-
             return "\n".join(lines)
 
         def format_rca_node_output(snapshot: dict) -> str:
-            """格式化根因分析节点的输出"""
             lines = []
             root_cause = snapshot.get("root_cause", "")
             conf = snapshot.get("confidence")
             conf_str = f"{conf:.0%}" if conf else "?"
-
             lines.append(f"**根因**: {root_cause}")
             lines.append(f"**置信度**: {conf_str}")
-
             return "\n".join(lines)
 
         yield emit("=" * 70)
@@ -762,7 +515,6 @@ class HolmesService:
         yield emit("=" * 70)
         yield emit("")
 
-        # 安全截断问题文本（避免在多字节字符中间截断）
         question_display = question[:100] if len(question) > 100 else question
         yield emit(f"📝 问题: {question_display}")
         yield emit("")
@@ -770,23 +522,17 @@ class HolmesService:
 
         final_answer = ""
         metrics_data = None
-        _token_streaming_active = False  # token 级别流式状态跟踪
-        # 用于收集各节点的详细输出
-        node_outputs = {
-            "layer": "",
-            "evidence": "",
-            "rca": "",
-            "conclusion": ""
-        }
+        _token_streaming_active = False
+        node_outputs = {"layer": "", "evidence": "", "rca": "", "conclusion": ""}
 
         for event in executor.execute_stream(question, cancel_event=cancel_event):
             event_type = event.get("type", "unknown")
-            
+
             if event_type == "run_start":
                 run_id = event.get("run_id", "?")
                 yield emit(f"🚀 开始诊断 [run_id: {run_id}]")
                 yield emit("")
-            
+
             elif event_type == "node_start":
                 node_name = event.get("node_name", event.get("node", "?"))
                 yield emit(f"📍 [{node_name}] 执行中...")
@@ -802,16 +548,13 @@ class HolmesService:
                     if preview:
                         yield emit(f"      📄 {preview[:300]}{'...' if len(preview) > 300 else ''}")
                 elif think_type == "ai_message":
-                    # token 级别流式已逐字输出，这里只补换行
                     if _token_streaming_active:
                         yield "\n"
                         _token_streaming_active = False
                     else:
-                        # 回退：没有 token 流式时，输出完整消息
                         content = (event.get("content") or "")[:200]
                         yield emit(f"   💭 [{node_name}] AI: {content}")
                 elif think_type == "ai_token":
-                    # token 级别流式：逐字输出
                     token_text = event.get("content", "")
                     if token_text:
                         if not _token_streaming_active:
@@ -820,7 +563,7 @@ class HolmesService:
                         yield token_text
                 elif think_type == "iteration_end":
                     yield emit(f"   💭 [{node_name}] 迭代 #{event.get('iteration')} 完成")
-            
+
             elif event_type == "node_complete":
                 node_name = event.get("node_name", event.get("node", "?"))
                 duration = event.get("duration_seconds", 0)
@@ -828,13 +571,11 @@ class HolmesService:
 
                 yield emit(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
 
-                # 输出节点间数据传递摘要
                 handoff = event.get("handoff_summary", "")
                 if handoff:
                     yield emit(f"   📤 → 下游数据: {handoff}")
                 yield emit("")
 
-                # 输出节点详细内容
                 node_id = event.get("node", "")
                 if node_id == "layer":
                     yield emit("   ┌──────────────────────────────────────────┐")
@@ -849,7 +590,6 @@ class HolmesService:
                     else:
                         yield emit(f"   层级: {layer}")
                     yield emit(f"   置信度: {conf:.0%}")
-                    # 保存节点分析用于最终答案（不在节点完成时显示完整分析）
                     node_outputs["layer"] = snapshot.get("layer_analysis", "") or format_layer_node_output(snapshot)
 
                 elif node_id == "evidence":
@@ -861,7 +601,6 @@ class HolmesService:
                     collected = snapshot.get("collected_count", 0)
                     completeness = snapshot.get("completeness", 0) or 0
                     yield emit(f"   证据: {collected}/{count} 项, 完整度: {completeness:.0%}")
-                    # 保存节点分析用于最终答案（不在节点完成时显示完整分析）
                     node_outputs["evidence"] = snapshot.get("evidence_analysis", "") or format_evidence_node_output(snapshot)
 
                 elif node_id == "rca":
@@ -873,14 +612,12 @@ class HolmesService:
                     conf = snapshot.get("confidence")
                     conf_str = f"{conf:.0%}" if conf else "?"
                     if root_cause:
-                        # 截断过长的根因文本（避免显示 LLM 对话过程）
                         rc_display = root_cause[:150]
                         if len(root_cause) > 150:
                             rc_display += "..."
                         yield emit(f"   根因: {rc_display}")
                     yield emit(f"   置信度: {conf_str}")
 
-                    # 显示因果链
                     causal_chain = snapshot.get("causal_chain", {})
                     if causal_chain:
                         yield emit("   🔗 因果链:")
@@ -895,7 +632,6 @@ class HolmesService:
                             yield emit(f"     最终表现: {manifestation}")
                         yield emit("")
 
-                    # 保存节点分析用于最终答案（不在节点完成时显示完整分析）
                     node_outputs["rca"] = snapshot.get("rca_analysis", "") or format_rca_node_output(snapshot)
 
                 elif node_id == "conclusion":
@@ -905,181 +641,68 @@ class HolmesService:
                     yield emit("")
                     length = snapshot.get("conclusion_length", 0)
                     yield emit(f"   报告长度: {length} 字符")
-                    # 节点输出将在 final 事件中保存
 
                 yield emit("")
-            
+
             elif event_type == "final":
                 final_answer = event.get("answer", "")
                 metrics_data = event.get("metrics", {})
                 elapsed = event.get("elapsed_seconds", 0)
-                # 保存结论节点输出
                 node_outputs["conclusion"] = final_answer or "（汇总节点生成最终报告）"
                 yield emit("-" * 70)
                 yield emit(f"📊 诊断完成! 总耗时: {format_duration(elapsed)}")
                 yield emit("-" * 70)
                 yield emit("")
-            
+
             elif event_type == "error":
                 error = event.get("error", "未知错误")
                 yield emit(f"❌ 错误: {error}")
                 yield emit("")
-        
-        # 输出最终报告（只输出节点4的完整 Markdown 报告）
+
         if final_answer:
             yield emit("=" * 70)
             yield emit("🎯 诊断报告")
             yield emit("=" * 70)
             yield emit("")
-
-            # 只输出节点4（汇总总结）的完整 Markdown 报告
             if node_outputs["conclusion"]:
                 yield emit("## 📋 节点四：汇总总结")
                 yield emit("-" * 70)
                 yield emit(node_outputs["conclusion"])
                 yield emit("")
-        
-        # 指标摘要已包含在 final_answer（format_metrics_block）中，不再重复输出
 
         yield emit("=" * 70)
         yield emit("✅ 诊断完成!")
         yield emit("=" * 70)
-    
-    def _execute_query_stream_text(
-        self,
-        question: str,
-        system_prompt: Optional[str] = None,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        max_steps: int = 50
-    ) -> Generator[str, None, None]:
-        """
-        执行查询并以易读的纯文本格式流式返回结果
-        专为 curl 等命令行工具优化
-        """
-        yield from execute_query_stream_text(self, question, system_prompt, api_key, model, max_steps)
-    
+
     def get_tools_info(self) -> dict:
         """获取可用工具信息"""
         self.initialize()
-
-        # AICall 路径
-        if self.ai_call:
-            tool_names = [t.name for t in self.mcp_tools]
-            return {
-                "success": True,
-                "total_tools": len(tool_names),
-                "tools": sorted(tool_names),
-                "toolsets": [{"name": "AICall(LangGraph)", "enabled": True, "status": "active"}],
-            }
-
-        # HolmesGPT 路径
-        tools = list(self.ai.tool_executor.tools_by_name.keys())
-        toolsets = [{
-            "name": toolset.name,
-            "enabled": toolset.enabled,
-            "status": toolset.status.value if hasattr(toolset.status, 'value') else str(toolset.status)
-        } for toolset in self.ai.tool_executor.toolsets]
-        
+        tool_names = [t.name for t in self.mcp_tools]
         return {
             "success": True,
-            "total_tools": len(tools),
-            "tools": sorted(tools),
-            "toolsets": toolsets
+            "total_tools": len(tool_names),
+            "tools": sorted(tool_names),
+            "toolsets": [{"name": "AICall(LangGraph)", "enabled": True, "status": "active"}],
         }
 
     def get_tools_detail(self) -> dict:
-        """
-        获取更详细的工具信息（面向排障/二次开发）
-
-        目标：
-        - 看清楚每个 toolset 下有哪些 tools（例如 bash/kubernetes/helm）
-        - 尽量输出每个 tool 的描述与参数结构（不同版本 holmesgpt/工具对象字段可能不同，因此做兼容探测）
-        """
+        """获取更详细的工具信息（面向排障/二次开发）"""
         self.initialize()
-
-        # AICall 路径
-        if self.ai_call:
-            tools_detail = []
-            for t in self.mcp_tools:
-                d = {"name": t.name}
-                desc = getattr(t, 'description', None)
-                if desc:
-                    d["description"] = desc[:200]
-                tools_detail.append(d)
-            return {
-                "success": True,
-                "mode": "AICall(LangGraph)",
-                "total_tools": len(tools_detail),
-                "tools": tools_detail,
-                "toolsets": [{"name": "AICall(LangGraph)", "tools": [t.name for t in self.mcp_tools]}],
-            }
-
-        # HolmesGPT 路径
-        tool_executor = self.ai.tool_executor
-        tools_by_name = tool_executor.tools_by_name
-
-        def _tool_to_dict(tool_obj: Any) -> Dict[str, Any]:
-            # 兼容不同 tool 实现
-            d: Dict[str, Any] = {"name": getattr(tool_obj, "name", None) or str(tool_obj)}
-            for attr in ("description", "doc", "help", "llm_instructions"):
-                v = getattr(tool_obj, attr, None)
-                if isinstance(v, str) and v.strip():
-                    d["description"] = v.strip()
-                    break
-
-            # 参数 schema：常见字段尝试
-            schema = None
-            for attr in ("args_schema", "parameters", "input_schema", "schema"):
-                v = getattr(tool_obj, attr, None)
-                if v is None:
-                    continue
-                # pydantic model / dict / callable
-                try:
-                    if hasattr(v, "model_json_schema"):
-                        schema = v.model_json_schema()
-                    elif isinstance(v, dict):
-                        schema = v
-                    elif hasattr(v, "schema"):
-                        schema = v.schema()
-                except Exception:
-                    schema = None
-                if schema:
-                    break
-            if schema:
-                d["schema"] = schema
-            return d
-            # 注释掉 schema 输出（避免终端 JSON 解析错误）
-            # d["schema"] = schema  # 暂时禁用，避免终端误解析
-
-        toolsets_detail = []
-        for toolset in tool_executor.toolsets:
-            ts_tools = []
-            if hasattr(toolset, "tools") and toolset.tools:
-                for t in toolset.tools:
-                    name = getattr(t, "name", None)
-                    if name and name in tools_by_name:
-                        ts_tools.append(_tool_to_dict(tools_by_name[name]))
-
-            toolsets_detail.append(
-                {
-                    "name": getattr(toolset, "name", str(toolset)),
-                    "type": toolset.__class__.__name__,
-                    "enabled": bool(getattr(toolset, "enabled", False)),
-                    "status": getattr(getattr(toolset, "status", None), "value", None)
-                    or str(getattr(toolset, "status", "")),
-                    "error": str(getattr(toolset, "error", ""))[:500] if getattr(toolset, "error", None) else None,
-                    "tools_count": len(ts_tools),
-                    "tools": ts_tools,
-                }
-            )
-
+        tools_detail = []
+        for t in self.mcp_tools:
+            d = {"name": t.name}
+            desc = getattr(t, 'description', None)
+            if desc:
+                d["description"] = desc[:200]
+            tools_detail.append(d)
         return {
             "success": True,
-            "total_registered_tools": len(tools_by_name),
-            "toolsets": toolsets_detail,
+            "mode": "AICall(LangGraph)",
+            "total_tools": len(tools_detail),
+            "tools": tools_detail,
+            "toolsets": [{"name": "AICall(LangGraph)", "tools": [t.name for t in self.mcp_tools]}],
         }
-    
+
     def health_check(self) -> dict:
         """健康检查"""
         initialized = self._is_initialized()
@@ -1088,9 +711,8 @@ class HolmesService:
                 "status": "healthy",
                 "config_loaded": True,
                 "ai_initialized": True,
-                "mode": "AICall(LangGraph)" if self.ai_call else "HolmesGPT",
+                "mode": "AICall(LangGraph)",
             }
-
         if self._init_in_progress:
             return {
                 "status": "initializing",
@@ -1098,13 +720,11 @@ class HolmesService:
                 "ai_initialized": initialized,
                 "started_at": self._init_started_at.isoformat() if self._init_started_at else None,
             }
-
         if self._init_error:
             return {
                 "status": "unhealthy",
                 "error": self._init_error
             }
-
         return {
             "status": "uninitialized",
             "config_loaded": self.config is not None,
@@ -1123,3 +743,240 @@ def get_service() -> HolmesService:
         _global_service = HolmesService()
     return _global_service
 
+    def _workflow_to_text(
+        self,
+        executor: Any,
+        question: str,
+        cancel_event: Optional[Any] = None,
+    ) -> Generator[str, None, None]:
+        """工作流执行结果转换为美观的文本格式（终端 curl 优化）"""
+        import json
+
+        def emit(text: str) -> str:
+            return text + "\n"
+
+        yield emit("=" * 70)
+        yield emit("🔄 K8s AIOps Copilot - 工作流诊断模式")
+        yield emit("=" * 70)
+        yield emit("")
+        question_display = question[:100] if len(question) > 100 else question
+        yield emit(f"📝 问题: {question_display}")
+        yield emit("")
+        yield emit("-" * 70)
+
+        final_answer = ""
+        _token_streaming_active = False
+        node_outputs = {"layer": "", "evidence": "", "rca": "", "conclusion": ""}
+
+        for event in executor.execute_stream(question, cancel_event=cancel_event):
+            event_type = event.get("type", "unknown")
+
+            if event_type == "run_start":
+                yield emit(f"🚀 开始诊断 [run_id: {event.get('run_id', '?')}]")
+                yield emit("")
+
+            elif event_type == "node_start":
+                node_name = event.get("node_name", event.get("node", "?"))
+                yield emit(f"📍 [{node_name}] 执行中...")
+
+            elif event_type == "thinking":
+                node_name = event.get("node_name", "?")
+                think_type = event.get("thinking_type", event.get("type", ""))
+                if think_type == "tool_start":
+                    yield emit(f"   💭 [{node_name}] 调用工具: {event.get('tool_name')}")
+                elif think_type == "tool_result":
+                    yield emit(f"   💭 [{node_name}] 工具结果: {event.get('tool_name')} ({event.get('status')})")
+                    preview = event.get("result_preview", "")
+                    if preview:
+                        yield emit(f"      📄 {preview[:300]}{'...' if len(preview) > 300 else ''}")
+                elif think_type == "ai_message":
+                    if _token_streaming_active:
+                        yield "\n"
+                        _token_streaming_active = False
+                    else:
+                        content = (event.get("content") or "")[:200]
+                        yield emit(f"   💭 [{node_name}] AI: {content}")
+                elif think_type == "ai_token":
+                    token_text = event.get("content", "")
+                    if token_text:
+                        if not _token_streaming_active:
+                            yield f"   💭 [{node_name}] "
+                            _token_streaming_active = True
+                        yield token_text
+                elif think_type == "iteration_end":
+                    yield emit(f"   💭 [{node_name}] 迭代 #{event.get('iteration')} 完成")
+
+            elif event_type == "node_complete":
+                node_name = event.get("node_name", event.get("node", "?"))
+                duration = event.get("duration_seconds", 0)
+                snapshot = event.get("state_snapshot", {})
+                yield emit(f"   ✅ [{node_name}] 完成 ({format_duration(duration)})")
+                handoff = event.get("handoff_summary", "")
+                if handoff:
+                    yield emit(f"   📤 → 下游数据: {handoff}")
+                yield emit("")
+
+                node_id = event.get("node", "")
+                if node_id == "layer":
+                    yield emit("   ┌──────────────────────────────────────────┐")
+                    yield emit("   │ 📊 问题定位结果                              │")
+                    yield emit("   └──────────────────────────────────────────┘")
+                    yield emit("")
+                    layer = snapshot.get("layer", "?")
+                    layers = snapshot.get("layers", [])
+                    conf = snapshot.get("layer_confidence", 0) or 0
+                    if layers and len(layers) > 1:
+                        yield emit(f"   层级: {' + '.join(layers)}（主层级: {layer}）")
+                    else:
+                        yield emit(f"   层级: {layer}")
+                    yield emit(f"   置信度: {conf:.0%}")
+                    node_outputs["layer"] = snapshot.get("layer_analysis", "")
+                # PLACEHOLDER_NODE_COMPLETE_REST
+
+                elif node_id == "evidence":
+                    yield emit("   ┌──────────────────────────────────────────┐")
+                    yield emit("   │ 🔍 证据采集结果                              │")
+                    yield emit("   └──────────────────────────────────────────┘")
+                    yield emit("")
+                    count = snapshot.get("evidence_count", 0)
+                    collected = snapshot.get("collected_count", 0)
+                    completeness = snapshot.get("completeness", 0) or 0
+                    yield emit(f"   证据: {collected}/{count} 项, 完整度: {completeness:.0%}")
+                    node_outputs["evidence"] = snapshot.get("evidence_analysis", "")
+
+                elif node_id == "rca":
+                    yield emit("   ┌──────────────────────────────────────────┐")
+                    yield emit("   │ 🎯 根因分析结果                              │")
+                    yield emit("   └──────────────────────────────────────────┘")
+                    yield emit("")
+                    root_cause = snapshot.get("root_cause", "")
+                    conf = snapshot.get("confidence")
+                    conf_str = f"{conf:.0%}" if conf else "?"
+                    if root_cause:
+                        rc_display = root_cause[:150]
+                        if len(root_cause) > 150:
+                            rc_display += "..."
+                        yield emit(f"   根因: {rc_display}")
+                    yield emit(f"   置信度: {conf_str}")
+                    causal_chain = snapshot.get("causal_chain", {})
+                    if causal_chain:
+                        yield emit("   🔗 因果链:")
+                        trigger = causal_chain.get("trigger") or causal_chain.get("root_cause", "")
+                        mechanism = causal_chain.get("mechanism") or causal_chain.get("propagation", "")
+                        manifestation = causal_chain.get("manifestation", "")
+                        if trigger:
+                            yield emit(f"     根本原因: {trigger}")
+                        if mechanism:
+                            yield emit(f"     传导机制: {mechanism}")
+                        if manifestation:
+                            yield emit(f"     最终表现: {manifestation}")
+                        yield emit("")
+                    node_outputs["rca"] = snapshot.get("rca_analysis", "")
+
+                elif node_id == "conclusion":
+                    yield emit("   ┌──────────────────────────────────────────┐")
+                    yield emit("   │ 📋 汇总总结结果                              │")
+                    yield emit("   └──────────────────────────────────────────┘")
+                    yield emit("")
+                    length = snapshot.get("conclusion_length", 0)
+                    yield emit(f"   报告长度: {length} 字符")
+
+                yield emit("")
+
+            elif event_type == "final":
+                final_answer = event.get("answer", "")
+                elapsed = event.get("elapsed_seconds", 0)
+                node_outputs["conclusion"] = final_answer or "（汇总节点生成最终报告）"
+                yield emit("-" * 70)
+                yield emit(f"📊 诊断完成! 总耗时: {format_duration(elapsed)}")
+                yield emit("-" * 70)
+                yield emit("")
+
+            elif event_type == "error":
+                yield emit(f"❌ 错误: {event.get('error', '未知错误')}")
+                yield emit("")
+
+        # 输出最终报告
+        if final_answer:
+            yield emit("=" * 70)
+            yield emit("🎯 诊断报告")
+            yield emit("=" * 70)
+            yield emit("")
+            if node_outputs["conclusion"]:
+                yield emit("## 📋 节点四：汇总总结")
+                yield emit("-" * 70)
+                yield emit(node_outputs["conclusion"])
+                yield emit("")
+
+        yield emit("=" * 70)
+        yield emit("✅ 诊断完成!")
+        yield emit("=" * 70)
+
+    def get_tools_info(self) -> dict:
+        """获取可用工具信息"""
+        self.initialize()
+        tool_names = [t.name for t in self.mcp_tools]
+        return {
+            "success": True,
+            "total_tools": len(tool_names),
+            "tools": sorted(tool_names),
+            "toolsets": [{"name": "AICall(LangGraph)", "enabled": True, "status": "active"}],
+        }
+
+    def get_tools_detail(self) -> dict:
+        """获取更详细的工具信息（面向排障/二次开发）"""
+        self.initialize()
+        tools_detail = []
+        for t in self.mcp_tools:
+            d = {"name": t.name}
+            desc = getattr(t, 'description', None)
+            if desc:
+                d["description"] = desc[:200]
+            tools_detail.append(d)
+        return {
+            "success": True,
+            "mode": "AICall(LangGraph)",
+            "total_tools": len(tools_detail),
+            "tools": tools_detail,
+            "toolsets": [{"name": "AICall(LangGraph)", "tools": [t.name for t in self.mcp_tools]}],
+        }
+
+    def health_check(self) -> dict:
+        """健康检查"""
+        initialized = self._is_initialized()
+        if initialized:
+            return {
+                "status": "healthy",
+                "config_loaded": True,
+                "ai_initialized": True,
+                "mode": "AICall(LangGraph)",
+            }
+        if self._init_in_progress:
+            return {
+                "status": "initializing",
+                "config_loaded": self.config is not None,
+                "ai_initialized": initialized,
+                "started_at": self._init_started_at.isoformat() if self._init_started_at else None,
+            }
+        if self._init_error:
+            return {
+                "status": "unhealthy",
+                "error": self._init_error
+            }
+        return {
+            "status": "uninitialized",
+            "config_loaded": self.config is not None,
+            "ai_initialized": initialized
+        }
+
+
+# 全局服务实例（单例模式）
+_global_service: Optional[HolmesService] = None
+
+
+def get_service() -> HolmesService:
+    """获取全局服务实例"""
+    global _global_service
+    if _global_service is None:
+        _global_service = HolmesService()
+    return _global_service

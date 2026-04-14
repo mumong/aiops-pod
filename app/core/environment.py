@@ -49,53 +49,41 @@ def get_environment() -> str:
 
 def get_config_file_path(project_root: Path) -> Tuple[Path, str]:
     """
-    根据环境自动选择配置文件
-    
+    获取配置文件路径
+
+    唯一配置源：deploy/configmap/config.yaml（通过 K8s ConfigMap 挂载）
+
     优先级：
-    1. 环境变量 CONFIG_FILE 指定的路径
-    2. Kubernetes 环境: config/config.k8s.yaml
-    3. 本地环境: config/config.yaml
-    
+    1. 环境变量 CONFIG_FILE 指定的路径（K8s 部署时设为 /app/config-override/config.yaml）
+    2. 回退到 config/config.yaml（兼容本地开发，需手动放置）
+
     Args:
         project_root: 项目根目录
-    
+
     Returns:
         (配置文件路径, 环境名称) 元组
     """
-    config_dir = project_root / "config"
-    
-    # 1. 检查环境变量
+    # 1. 环境变量 CONFIG_FILE（K8s 部署时由 Deployment 设置）
     env_config = os.getenv("CONFIG_FILE")
     if env_config:
         config_path = Path(env_config)
-        if config_path.is_absolute():
-            if config_path.exists():
-                logger.info(f"📄 使用环境变量指定的配置: {config_path}")
-                return config_path, "custom"
-        else:
-            # 相对路径，相对于项目根目录
+        if not config_path.is_absolute():
             config_path = project_root / env_config
-            if config_path.exists():
-                logger.info(f"📄 使用环境变量指定的配置: {config_path}")
-                return config_path, "custom"
-        logger.warning(f"环境变量 CONFIG_FILE 指定的文件不存在: {env_config}")
-    
-    # 2. 检测运行环境
-    environment = get_environment()
-    
-    if environment == "kubernetes":
-        # Kubernetes 环境优先使用 k8s 配置
-        k8s_config = config_dir / "config.k8s.yaml"
-        if k8s_config.exists():
-            logger.info(f"🐳 检测到 Kubernetes 环境，使用集群内配置: {k8s_config}")
-            return k8s_config, "kubernetes"
-        else:
-            logger.warning(f"Kubernetes 环境但 config.k8s.yaml 不存在，使用默认配置")
-    
-    # 3. 默认使用本地配置
-    local_config = config_dir / "config.yaml"
-    logger.info(f"💻 使用本地配置: {local_config}")
-    return local_config, "local"
+        if config_path.exists():
+            env_name = "kubernetes" if is_running_in_kubernetes() else "custom"
+            logger.info(f"📄 使用 CONFIG_FILE 指定的配置: {config_path} ({env_name})")
+            return config_path, env_name
+        logger.warning(f"CONFIG_FILE 指定的文件不存在: {env_config}")
+
+    # 2. 回退：config/config.yaml（本地开发用，内容应与 deploy/configmap 保持一致）
+    fallback = project_root / "config" / "config.yaml"
+    if fallback.exists():
+        logger.info(f"💻 使用回退配置: {fallback}")
+        return fallback, "local"
+
+    # 3. 无配置文件
+    logger.warning("⚠️ 未找到配置文件，将使用默认配置")
+    return fallback, "local"
 
 
 def log_environment_info():

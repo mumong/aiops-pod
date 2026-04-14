@@ -165,7 +165,9 @@ class AICall:
         import concurrent.futures
 
         input_messages = {"messages": [{"role": "user", "content": question}]}
-        config = {"recursion_limit": max_steps * 3 + 10}
+        # recursion_limit 直接使用 config 传入的 max_steps，不做任何公式转换
+        config = {"recursion_limit": max_steps}
+        logger.info("📍 [AICall] node=%s | max_steps(recursion_limit)=%d", node_id or "?", max_steps)
 
         final_content = ""
         _content_buffer = []  # 收集 token 级别的文本片段
