@@ -489,3 +489,20 @@ QUERY   数据查询    状态查看、使用率统计（非故障，走快速�
 
 ---
 
+  43 个活跃文件的核心调用链：
+  main.py
+    → routes.py → service.py
+      → executor.py → graph.py → state.py
+        → base.py (节点基类)
+          → layer_classifier.py
+          → evidence_collector.py → evidence.py + models.py
+          → root_cause_analyzer.py
+          → conclusion_formatter.py → reporter.py + quality_scorer.py
+        → metrics.py
+      → aicall/client.py → tools.py → builtin_tools.py → types.py
+      → mcp/manager.py → mcp_patch.py
+      → runbook/catalog.py → manager.py
+      → prompts.py, constants.py, environment.py, paths.py
+      → skills/engine.py → gate.py → models.py
+      → federation/* (6个，联邦模式)
+      → holmes/artifacts.py, config_loader.py, log_listener.py, streaming.py, tool_logging_patch.py
