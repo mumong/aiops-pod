@@ -245,6 +245,55 @@ class ConclusionFormatterNode(WorkflowNode):
 {evidence_stats_section}{tool_section}
 {instruction}"""
 
+        # ── Token 预算控制：防止超过模型上下文限制 ──
+        token_budget = int(os.getenv("CONCLUSION_TOKEN_BUDGET", "100000"))
+        system_prompt_text = CONCLUSION_FORMATTER_PROMPT
+        total_text = system_prompt_text + user_message
+        estimated_tokens = self._estimate_tokens(total_text)
+
+        if estimated_tokens > token_budget:
+            logger.warning(
+                "⚠️ [conclusion] 上下文预估 %d tokens > 预算 %d，执行智能压缩",
+                estimated_tokens, token_budget
+            )
+            # 按大小排序，优先压缩最大的段
+            sections = {
+                "layer_analysis": layer_analysis,
+                "evidence_analysis": evidence_analysis,
+                "rca_analysis": rca_analysis,
+            }
+            sorted_sections = sorted(sections.items(), key=lambda x: len(x[1]), reverse=True)
+
+            for name, content in sorted_sections:
+                if len(content) > 10000:
+                    compressed = self._compact_context(content, max_chars=8000)
+                    if name == "layer_analysis":
+                        layer_analysis = compressed
+                    elif name == "evidence_analysis":
+                        evidence_analysis = compressed
+                    elif name == "rca_analysis":
+                        rca_analysis = compressed
+
+                    # 重新拼接并估算
+                    user_message = f"""# 用户问题
+{question}
+
+# 阶段1：问题定位分析
+{layer_analysis}
+
+# 阶段2：证据采集分析
+{evidence_analysis}
+
+# 阶段3：根因分析
+{rca_analysis}
+{evidence_stats_section}
+{instruction}"""
+                    # 压缩后丢弃 tool_section（已在各段摘要中）
+                    estimated_tokens = self._estimate_tokens(system_prompt_text + user_message)
+                    logger.info("📦 [conclusion] 压缩 %s 后预估 %d tokens", name, estimated_tokens)
+                    if estimated_tokens <= token_budget:
+                        break
+
         start_time = time.time()
 
         ai_call = getattr(self, 'ai_call', None)
@@ -708,7 +757,7 @@ class ConclusionFormatterNode(WorkflowNode):
             if ev.get("status") != "success":
                 continue
             tool_name = ev.get("tool_name", "unknown")
-            preview = ev.get("result_preview", "")
+            preview = ev.get("result_preview", "")[:300]  # 限制 preview 长度
             if not preview:
                 continue
             # 去重（同一工具同一数据不重复）
@@ -784,3 +833,13 @@ class ConclusionFormatterNode(WorkflowNode):
             logger.debug("📊 [conclusion] 后处理: 未匹配到需要替换的证据统计模式")
 
         return content
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """粗估 token 数（混合中英文 ~2 chars/token）。
+
+        不需要精确——只用于判断是否需要压缩。
+        DeepSeek tokenizer 中文约 1.5 chars/token，英文约 4 chars/token，
+        混合取 2 是保守估计，宁可多压缩也不要超限。
+        """
+        return len(text) // 2

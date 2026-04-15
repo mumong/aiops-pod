@@ -225,6 +225,7 @@ class AICall:
                                             iteration, msg.content[:1000])
                                 evt = {"type": "ai_message",
                                        "content": msg.content[:500],
+                                       "full_content": msg.content,
                                        "iteration": iteration}
                                 self._push(stream_queue, node_id, thinking_events, **evt)
 

@@ -25,11 +25,12 @@
 
 ```
 layer（问题定位） → [条件路由] → evidence（证据采集） → rca（根因分析） → conclusion（汇总总结）
-                       ↘ QUERY 模式 ──────────────────────────────────────→ conclusion
+                       ↘ HEALTHY 模式 ────────────────────────────────────→ conclusion
 ```
 
 - 每个节点独立，有自己的 prompt 和 LLM 调用
-- QUERY 模式（非故障查询）跳过 evidence + rca，直接到 conclusion
+- QUERY 模式（非故障查询）走 `layer → evidence → conclusion`
+- HEALTHY 模式（集群健康）走 `layer → conclusion`
 - 诊断模式（L0-L4）走完整流程
 
 ### SSE 事件流
@@ -175,7 +176,7 @@ def _analyze_with_llm(self, ...) -> tuple:
 | 日期 | 决策 | 说明 |
 |------|------|------|
 | 2025-xx | 工作流模式 POC | 4 节点 LangGraph，与原有模式并行 |
-| 2025-xx | QUERY 条件路由 | 非故障查询跳过 evidence + rca |
+| 2025-xx | QUERY 条件路由 | 非故障查询走 evidence 取数后再 conclusion，HEALTHY 直接到 conclusion |
 | 2025-xx | 节点级 max_steps | 每个节点独立控制 LLM 迭代上限 |
 | 2026-03-23 | max_steps 可配置化 | 环境变量 > config.yaml > 默认值 |
 | 2026-03-23 | thinking 实时展示 | SSE thinking 事件 + text 💭 模式 |

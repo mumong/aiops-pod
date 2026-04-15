@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-AIOps Copilot E2E 场景准确率测试
+AIOps Copilot E2E 场景准确率测试（盲测模式）
 
-内置 L0-L4 场景矩阵，每个场景有预定义的 query、期望层级、期望 Runbook。
-使用 stream=false 纯文本 API，保存完整可读 Markdown 报告供人工排查。
+所有场景使用统一问题（默认 "我的集群有什么问题"），不向 LLM 泄露故障提示。
+--scenario 仅提供期望值（层级、Runbook）用于结果比对。
 
 四项质量指标：
   1. MTTR（平均修复时间）— < 15 分钟
@@ -21,8 +21,8 @@ AIOps Copilot E2E 场景准确率测试
     # 单场景重复 N 次，5 并发（稳定性/压力测试）
     python test_accuracy.py --scenario l3-imagepull -n 50 -c 5
 
-    # 自定义问题（不使用内置场景）
-    python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" --expect-layer L2 --expect-runbook l2-oomkilled
+    # 自定义问题覆盖默认
+    python test_accuracy.py --scenario l3-imagepull -q "查看集群 CPU 和内存使用情况"
 """
 
 import argparse
@@ -44,40 +44,38 @@ except ImportError:
     sys.exit(1)
 
 
-# ── 内置场景矩阵 ──────────────────────────────────────────────
+# ── 盲测默认问题（不含任何故障提示） ─────────────────────────
+DEFAULT_QUESTION = "我的集群有什么问题"
+
+# ── 内置场景矩阵（仅期望值，不含 query） ─────────────────────
 
 SCENARIOS: Dict[str, Dict] = {
     "l0-volume-limit": {
         "name": "L0 存储卷超限驱逐",
-        "query": "namespace=aiops-e2e Pod logfill 被驱逐 Evicted ephemeral-storage 超限",
         "expect_layer": "L0",
         "expect_runbook": "l0-volume-limit",
         "runbook_keywords": ["存储卷", "volume", "驱逐", "evict", "ephemeral"],
     },
     "l1-taint-node": {
         "name": "L1 节点 NotReady/Taint",
-        "query": "namespace=aiops-e2e 节点 NotReady Taint 导致 Pod 无法调度",
         "expect_layer": "L1",
         "expect_runbook": "l1-taint-node",
         "runbook_keywords": ["taint", "notready", "节点", "调度"],
     },
     "l2-oomkilled": {
         "name": "L2 OOMKilled",
-        "query": "namespace=aiops-e2e pod memhog 一直重启 OOMKilled",
         "expect_layer": "L2",
         "expect_runbook": "l2-oomkilled",
         "runbook_keywords": ["oomkill", "内存", "exit code 137"],
     },
     "l3-imagepull": {
         "name": "L3 镜像拉取失败",
-        "query": "namespace=aiops-e2e Pod imagepull-fail-victim 镜像拉取失败 ImagePullBackOff",
         "expect_layer": "L3",
         "expect_runbook": "l3-imagepull-failed",
         "runbook_keywords": ["镜像拉取", "imagepull", "imagepullbackoff"],
     },
     "l4-app-health": {
         "name": "L4 应用健康检查失败",
-        "query": "namespace=aiops-e2e 应用 apphealth 健康检查失败",
         "expect_layer": "L4",
         "expect_runbook": "l4-app-health-fail",
         "runbook_keywords": ["健康检查", "health", "探针", "probe"],
@@ -367,15 +365,17 @@ class ScenarioResult:
 
 def run_scenario(
     base_url: str, scenario_id: str, scenario: Dict,
-    repeat: int, concurrency: int, timeout: int, result_dir: Path
+    repeat: int, concurrency: int, timeout: int, result_dir: Path,
+    question: str = DEFAULT_QUESTION,
 ) -> ScenarioResult:
-    """运行单个场景 N 次（支持并发）"""
+    """运行单个场景 N 次（支持并发）。question 为统一盲测问题。"""
     sr = ScenarioResult(scenario_id, scenario)
     save_dir = result_dir / scenario_id
     save_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'─' * 60}")
     print(f"  场景: {scenario['name']} ({scenario_id})")
+    print(f"  问题: {question}")
     print(f"  期望: 层级={scenario['expect_layer']} | Runbook={scenario['expect_runbook']}")
     print(f"  运行: {repeat} 次 | 并发: {concurrency}")
     print(f"{'─' * 60}")
@@ -385,7 +385,7 @@ def run_scenario(
     def _run_one(i: int) -> Dict:
         with print_lock:
             print(f"  🚀 #{i}/{repeat} 请求中...")
-        m = run_single_request(base_url, scenario["query"], timeout, i, save_dir)
+        m = run_single_request(base_url, question, timeout, i, save_dir)
         with print_lock:
             if m.get("success"):
                 layer_ok = "✅" if m["layer"] == scenario["expect_layer"] else "❌"
@@ -409,15 +409,15 @@ def run_scenario(
 
 
 def print_report(results: List[ScenarioResult], total_elapsed: float, result_dir: Path):
-    """打印汇总报告"""
+    """打印汇总报告（含每次运行明细）"""
     all_ok = [r for sr in results for r in sr.ok_runs]
     all_runs = [r for sr in results for r in sr.runs]
     n_ok = len(all_ok)
     n_fail = len(all_runs) - n_ok
 
-    print(f"\n{'=' * 60}")
-    print(f"  AIOps Copilot E2E 准确率报告")
-    print(f"{'=' * 60}")
+    print(f"\n{'=' * 70}")
+    print(f"  AIOps Copilot E2E 准确率报告（盲测模式）")
+    print(f"{'=' * 70}")
     print(f"场景数: {len(results)} | 总运行: {len(all_runs)} | 成功: {n_ok} | 失败: {n_fail}")
     print(f"总耗时: {total_elapsed:.0f}s ({total_elapsed/60:.1f}m)")
     print()
@@ -426,10 +426,28 @@ def print_report(results: List[ScenarioResult], total_elapsed: float, result_dir
         print("❌ 无成功请求，无法计算指标")
         return
 
-    # ── 每场景明细 ──
-    print(f"{'─' * 60}")
-    print(f"  场景明细")
-    print(f"{'─' * 60}")
+    # ── 每次运行明细 ──
+    print(f"{'─' * 70}")
+    print(f"  运行明细")
+    print(f"{'─' * 70}")
+    print(f"| {'场景':<18} | {'#':<3} | {'层级':<6} | {'期望':<6} | {'Runbook':<5} | {'MTTR':<7} | {'证据':<7} | {'耗时':<7} |")
+    print(f"|{'-'*20}|{'-'*5}|{'-'*8}|{'-'*8}|{'-'*7}|{'-'*9}|{'-'*9}|{'-'*9}|")
+
+    for sr in results:
+        for r in sr.runs:
+            if not r.get("success"):
+                print(f"| {sr.name[:18]:<18} | {r.get('idx',0):<3} | {'FAIL':<6} | {sr.expect_layer:<6} | {'—':<5} | {'—':<7} | {'—':<7} | {r.get('elapsed',0):.0f}s{'':<3} |")
+                continue
+            layer_mark = "✅" if r["layer"] == sr.expect_layer else "❌"
+            rb_mark = "✅" if sr._is_runbook_match(r) else "❌"
+            ev_str = f"{r['evidence_rate']:.0%}" if r.get("evidence_rate") is not None else "N/A"
+            print(f"| {sr.name[:18]:<18} | {r.get('idx',0):<3} | {r['layer']:<4}{layer_mark} | {sr.expect_layer:<6} | {rb_mark:<5} | {r['mttr_seconds']:.0f}s{'':<4} | {ev_str:<7} | {r['elapsed']:.0f}s{'':<4} |")
+    print()
+
+    # ── 每场景汇总 ──
+    print(f"{'─' * 70}")
+    print(f"  场景汇总")
+    print(f"{'─' * 70}")
     print(f"| {'场景':<22} | {'层级准确':<10} | {'Runbook':<10} | {'MTTR':<10} | {'证据率':<10} |")
     print(f"|{'-'*24}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*12}|")
 
@@ -611,7 +629,7 @@ def save_report(results: List[ScenarioResult], total_elapsed: float, result_dir:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="AIOps Copilot E2E 场景准确率测试",
+        description="AIOps Copilot E2E 场景准确率测试（盲测模式）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 内置场景:
@@ -622,9 +640,14 @@ def main():
   l4-app-health     L4 应用健康检查失败
   all               运行所有场景
 
+盲测说明:
+  所有场景使用统一问题，不向 LLM 泄露故障提示。
+  --scenario 仅提供期望值用于结果比对。
+
 示例:
   python test_accuracy.py --scenario l2-oomkilled
   python test_accuracy.py --scenario all -n 3 -c 2
+  python test_accuracy.py --scenario l3-imagepull -q "查询我集群的cpu和memory"
   python test_accuracy.py -q "自定义问题" --expect-layer L3 --expect-runbook l3-imagepull-failed
         """,
     )
@@ -634,12 +657,12 @@ def main():
                         help="每个场景重复次数（默认 1）")
     parser.add_argument("-c", "--concurrency", type=int, default=1,
                         help="并发数（默认 1，串行执行）")
-    parser.add_argument("-q", "--question", default=None,
-                        help="自定义问题（不使用内置场景时）")
+    parser.add_argument("-q", "--question", default=DEFAULT_QUESTION,
+                        help=f"盲测问题（默认: '{DEFAULT_QUESTION}'）")
     parser.add_argument("--expect-layer", default=None,
-                        help="期望层级（自定义问题时使用）")
+                        help="期望层级（无 --scenario 时用于自定义比对）")
     parser.add_argument("--expect-runbook", default=None,
-                        help="期望 Runbook ID（自定义问题时使用）")
+                        help="期望 Runbook ID（无 --scenario 时用于自定义比对）")
     parser.add_argument("--url", default="http://10.2.0.48:30800",
                         help="服务地址（默认 http://10.2.0.48:30800）")
     parser.add_argument("--timeout", type=int, default=900,
@@ -648,6 +671,7 @@ def main():
 
     # 确定要运行的场景列表
     scenarios_to_run: List[Tuple[str, Dict]] = []
+    question = args.question  # 盲测问题（默认或 -q 覆盖）
 
     if args.scenario:
         if args.scenario == "all":
@@ -658,19 +682,22 @@ def main():
             print(f"❌ 未知场景: {args.scenario}")
             print(f"可用场景: {', '.join(SCENARIOS.keys())}, all")
             sys.exit(1)
-    elif args.question:
-        # 自定义问题模式
+    elif args.expect_layer or args.expect_runbook:
+        # 无 --scenario 但有期望值：自定义比对模式
         custom = {
             "name": "自定义场景",
-            "query": args.question,
             "expect_layer": args.expect_layer or "UNKNOWN",
             "expect_runbook": args.expect_runbook or "",
         }
         scenarios_to_run = [("custom", custom)]
     else:
-        parser.print_help()
-        print("\n❌ 请指定 --scenario 或 -q 参数")
-        sys.exit(1)
+        # 纯盲测：无场景、无期望值，只发问题看结果
+        custom = {
+            "name": "自由盲测",
+            "expect_layer": "UNKNOWN",
+            "expect_runbook": "",
+        }
+        scenarios_to_run = [("freeform", custom)]
 
     # 创建结果目录
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -679,9 +706,10 @@ def main():
 
     # 打印配置
     print("=" * 60)
-    print("  AIOps Copilot E2E 准确率测试")
+    print("  AIOps Copilot E2E 准确率测试（盲测模式）")
     print("=" * 60)
     print(f"服务:   {args.url}")
+    print(f"问题:   {question}")
     print(f"场景:   {', '.join(s[0] for s in scenarios_to_run)}")
     print(f"重复:   {args.repeat} 次/场景 | 并发: {args.concurrency}")
     print(f"超时:   {args.timeout}s")
@@ -694,7 +722,10 @@ def main():
     start = time.time()
     results: List[ScenarioResult] = []
     for sid, scenario in scenarios_to_run:
-        sr = run_scenario(args.url, sid, scenario, args.repeat, args.concurrency, args.timeout, result_dir)
+        sr = run_scenario(
+            args.url, sid, scenario, args.repeat, args.concurrency,
+            args.timeout, result_dir, question=question,
+        )
         results.append(sr)
 
     total_elapsed = time.time() - start
