@@ -135,12 +135,12 @@ class WorkflowMetrics:
     success: bool = True
     errors: List[str] = field(default_factory=list)
     
-    def start_node(self, node_id: str, node_name: str) -> NodeMetrics:
+    def start_node(self, node_id: str, node_name: str, start_ts: float = 0.0) -> NodeMetrics:
         """开始记录节点执行"""
         node = NodeMetrics(
             node_id=node_id,
             node_name=node_name,
-            start_time=time.time()
+            start_time=start_ts if start_ts > 0 else time.time()
         )
         self.nodes[node_id] = node
         return node

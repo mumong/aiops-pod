@@ -97,10 +97,35 @@ class ConclusionFormatterNode(WorkflowNode):
             decision = state.get("deterministic_decision")
             root_cause = state.get("root_cause", "")
             causal_chain = state.get("causal_chain", {})
+
+            if layer == Layer.QUERY and getattr(self, 'ai_call', None) is not None:
+                tool_data_text = self._build_tool_data_section(
+                    state.get("thinking_events", [])
+                )
+                conclusion = self._generate_with_llm(
+                    question=question,
+                    layer_analysis=layer_analysis,
+                    evidence_analysis=evidence_analysis,
+                    rca_analysis=rca_analysis,
+                    conclusion_max_tokens=state.get("conclusion_max_tokens"),
+                    layer=layer,
+                    tool_data_text=tool_data_text,
+                )
+            elif layer == Layer.QUERY:
+                conclusion = self._format_query_fast_path(
+                    question=question,
+                    evidence_analysis=evidence_analysis,
+                    thinking_events=state.get("thinking_events", []),
+                )
+            elif layer == Layer.HEALTHY:
+                conclusion = self._format_healthy_fast_path(
+                    question=question,
+                    layer_analysis=layer_analysis,
+                    thinking_events=state.get("thinking_events", []),
+                )
             
             # 使用 LLM 生成最终报告
-            ai_call = getattr(self, 'ai_call', None)
-            if ai_call is not None:
+            elif getattr(self, 'ai_call', None) is not None:
                 # 从 thinking_events 提取工具真实数据，补充给 conclusion LLM
                 tool_data_text = self._build_tool_data_section(
                     state.get("thinking_events", [])
@@ -184,9 +209,36 @@ class ConclusionFormatterNode(WorkflowNode):
 请输出一份简洁的健康报告，列出检查过的项目和结果（节点状态、Pod 状态、事件等），
 明确告诉用户"集群当前运行正常，未发现异常"。不要套诊断报告模板。"""
         elif is_query:
-            instruction = """请基于以上各阶段的分析结果，直接回答用户的查询。
-严格按照 system prompt 中的「查询模板」格式输出。
-引用实际采集到的数据，不要套诊断报告模板。"""
+            instruction = f"""请基于以上各阶段的分析结果，直接回答用户的查询「{question}」。
+
+必须输出结构化、易读的 Markdown，不要输出原始 JSON，不要把 evidence_plan 或 llm_analysis 原样贴给用户。
+优先展示真实采集到的数据表格，字段名要人类可读。
+如果有多个节点/实例/对象，必须逐条展示，不能只给工具摘要。
+如果有个别查询项未采集成功，要明确写出“未获取到”，不要用工具原始报错替代总结。
+不要套诊断模板，不要写因果链，不要写修复建议，除非用户明确要求。
+
+严格使用下面的模板：
+
+## 📊 查询结果
+
+- **查询目标**: [一句话复述用户问题]
+- **模式**: QUERY 结构化回复
+- **采集情况**: [直接引用真实采集情况]
+
+## 📈 数据摘要
+| 对象 | 指标 | 数值 | 状态 | 数据来源 |
+|------|------|------|------|----------|
+| node1 | CPU 使用率 | 26.24% | 正常 | Prometheus |
+
+## 🔎 补充说明
+- [仅补充必要说明，例如某项未获取到、某节点磁盘偏高等]
+
+要求：
+1. 优先从真实 tool_data 中提取数值并落表
+2. CPU、内存、磁盘等指标分开展示，不要把原始 JSON 塞进表格
+3. 如果能识别节点名/IP/角色，尽量在表格或说明中体现
+4. 最终输出必须让人直接读懂，不需要再看原始工具结果
+"""
         else:
             instruction = f"""请基于以上三个阶段的分析结果，生成一份详尽、完整的诊断报告。
 
@@ -325,6 +377,112 @@ class ConclusionFormatterNode(WorkflowNode):
             return content
 
         return f"报告生成失败：LLM 未返回有效内容。\n\n原始数据：\n{tool_data_text[:1000] if tool_data_text else '无'}"
+
+    def _format_query_fast_path(
+        self,
+        question: str,
+        evidence_analysis: str,
+        thinking_events: list,
+    ) -> str:
+        """QUERY 模式快速路径：直接基于已采集数据做简要回复，不再调用 LLM。"""
+        tool_rows = []
+        summary_lines = []
+
+        try:
+            data = json.loads(evidence_analysis) if evidence_analysis else {}
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+
+        for item in data.get("tool_data", [])[:8]:
+            tool = item.get("tool", "unknown")
+            raw = (item.get("data", "") or "").strip()
+            snippet = self._summarize_snippet(raw)
+            tool_rows.append((tool, snippet))
+
+        llm_analysis = (data.get("llm_analysis", "") or "").strip()
+        collection_summary = (data.get("collection_summary", "") or "").strip()
+
+        if collection_summary:
+            summary_lines.append(f"- **采集情况**: {collection_summary}")
+        if llm_analysis:
+            summary_lines.append(f"- **简要说明**: {self._summarize_snippet(llm_analysis, limit=180)}")
+
+        if not tool_rows:
+            tool_text = self._build_tool_data_section(thinking_events)
+            if tool_text:
+                summary_lines.append(f"- **工具摘要**: {self._summarize_snippet(tool_text, limit=220)}")
+
+        lines = [
+            "## 📊 查询结果",
+            "",
+            f"- **查询目标**: {question}",
+            f"- **模式**: QUERY 快速回复",
+        ]
+        lines.extend(summary_lines)
+        lines.append("")
+
+        if tool_rows:
+            lines.extend([
+                "## 🔎 已采集数据",
+                "",
+                "| 工具 | 结果摘要 |",
+                "|------|----------|",
+            ])
+            for tool, snippet in tool_rows:
+                lines.append(f"| {tool} | {snippet} |")
+            lines.append("")
+
+        if llm_analysis and not tool_rows:
+            lines.extend([
+                "## 🔎 数据摘要",
+                "",
+                llm_analysis[:600],
+                "",
+            ])
+
+        return "\n".join(lines)
+
+    def _format_healthy_fast_path(
+        self,
+        question: str,
+        layer_analysis: str,
+        thinking_events: list,
+    ) -> str:
+        """HEALTHY 模式快速路径：直接返回简洁健康摘要，不再调用 LLM。"""
+        checks = []
+
+        if layer_analysis:
+            checks.append(self._summarize_snippet(layer_analysis, limit=220))
+
+        tool_text = self._build_tool_data_section(thinking_events)
+        if tool_text:
+            checks.append(self._summarize_snippet(tool_text, limit=220))
+
+        lines = [
+            "## ✅ 健康检查结果",
+            "",
+            f"- **用户问题**: {question}",
+            "- **结论**: 当前集群运行正常，未发现异常",
+            "- **模式**: HEALTHY 快速回复",
+            "",
+        ]
+
+        if checks:
+            lines.append("## 🔎 检查摘要")
+            lines.append("")
+            for item in checks[:3]:
+                lines.append(f"- {item}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summarize_snippet(text: str, limit: int = 120) -> str:
+        """将多行工具输出压成单行摘要，便于快速回复。"""
+        compact = " ".join((text or "").split())
+        if not compact:
+            return "-"
+        return compact[:limit] + ("..." if len(compact) > limit else "")
     
     def _format_fallback(
         self,

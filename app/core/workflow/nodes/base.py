@@ -13,7 +13,7 @@ import os
 import queue
 import time
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from app.core.workflow.state import WorkflowState
 
@@ -95,7 +95,12 @@ class WorkflowNode(ABC):
         """
         return []
 
-    def _call_llm(self, question: str, system_prompt: str) -> Tuple[Any, list]:
+    def _call_llm(
+        self,
+        question: str,
+        system_prompt: str,
+        stop_checker: Optional[Callable[[list], bool]] = None,
+    ) -> Tuple[Any, list]:
         """
         公共 LLM 调用 — 通过 AICall (LangChain create_agent) 执行
 
@@ -168,6 +173,7 @@ class WorkflowNode(ABC):
             stream_queue=self._event_queue,
             node_id=self.node_id,
             cancel_event=self.cancel_event,
+            stop_checker=stop_checker,
         )
 
         llm_duration_ms = (time.time() - start_time) * 1000
