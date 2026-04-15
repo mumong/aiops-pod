@@ -18,16 +18,12 @@
 import json
 import logging
 import re
-import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
-from app.core.skills.evidence import EVIDENCE_SPECS
 from app.core.prompts import EVIDENCE_COLLECTOR_PROMPT
-from app.core.constants import DEFAULT_COMMAND_TIMEOUT
-from app.core.text_helpers import truncate_preview
 
 logger = logging.getLogger(__name__)
 
@@ -106,32 +102,46 @@ class EvidenceCollectorNode(WorkflowNode):
             )
 
             # 2. 构建证据项列表（基于 thinking_events 中 AICall 真实工具调用）
-            #    废弃 subprocess 路径：LLM 已通过 AICall agent loop 调用 MCP 工具
-            tool_results = []  # subprocess 不再执行
+            tool_results = []
             evidence_items = self._build_evidence_items_from_thinking(
                 evidence_plan=evidence_plan,
                 thinking_events=thinking_events,
             )
 
-            # 3. 与 EVIDENCE_SPECS 基准合并：补充 LLM 未覆盖的证据项
-            evidence_items = self._merge_with_baseline(
-                evidence_items=evidence_items,
-                layer=layer,
-                question=question,
-                thinking_events=thinking_events,
-                llm_result_text=llm_result_text
-            )
+            # 2.1 回退：evidence 节点没采集到证据时，从 layer 阶段的 thinking_events 统计
+            if not evidence_items:
+                layer_thinking = state.get("thinking_events", [])
+                layer_tool_events = [
+                    ev for ev in layer_thinking
+                    if ev.get("type") == "tool_result"
+                    and ev.get("status") == "success"
+                    and ev.get("node") == "layer"
+                    and ev.get("tool_name", "").lower() not in self._NON_EVIDENCE_TOOLS
+                ]
+                if layer_tool_events:
+                    logger.info("📊 [evidence] evidence 节点未采集新证据，"
+                                "回退到 layer 阶段的 %d 个工具调用", len(layer_tool_events))
+                    for ti, ev in enumerate(layer_tool_events):
+                        evidence_items.append(EvidenceItem(
+                            id=f"layer_{ti}",
+                            description=f"上游采集: {ev.get('tool_name', '')}",
+                            level=EvidenceLevel.IMPORTANT,
+                            weight=0.2,
+                            collected=True,
+                            value=(ev.get("result", "") or ev.get("result_preview", ""))[:500],
+                            source="layer_fallback",
+                        ))
 
-            # 4. 计算完整度
+            # 3. 计算完整度
             completeness = self._calculate_completeness(evidence_items)
 
-            # 5. 更新 metrics（记录 LLM 调用和工具调用次数）
+            # 4. 更新 metrics（记录 LLM 调用和工具调用次数）
             self._update_metrics(evidence_plan, tool_results)
 
-            # 6. 从 thinking_events 提取 MCP 工具的真实输出数据
+            # 5. 从 thinking_events 提取 MCP 工具的真实输出数据
             tool_data_from_llm = self._extract_tool_data_from_thinking(thinking_events)
 
-            # 7. 构建证据清单（合并后的真实数据，供 conclusion LLM 引用）
+            # 6. 构建证据清单（真实数据，供 conclusion LLM 引用）
             collected = sum(1 for e in evidence_items if e.collected)
             total = len(evidence_items)
             not_collected = [e for e in evidence_items if not e.collected]
@@ -150,9 +160,7 @@ class EvidenceCollectorNode(WorkflowNode):
             missing_reasons = []
             for e in not_collected:
                 source = getattr(e, 'source', '')
-                if source == "baseline_missing":
-                    missing_reasons.append(f"{e.id}({e.description}): 基准要求但 LLM 未规划采集")
-                elif source == "planned":
+                if source == "planned":
                     missing_reasons.append(f"{e.id}({e.description}): 已规划但工具执行失败或无匹配结果")
                 else:
                     missing_reasons.append(f"{e.id}({e.description}): 未采集")
@@ -214,8 +222,7 @@ class EvidenceCollectorNode(WorkflowNode):
         """
         if getattr(self, 'ai_call', None) is None:
             logger.warning("⚠️ [evidence] ai_call 未设置，使用规则规划")
-            return self._plan_with_rules(question, layer), [], ""
-
+            return [], [], ""
         try:
             layer_str = layer.value if layer else "L2"
             # possible_scenarios 可能是 str 列表或 dict 列表（含 scenario/probability 字段）
@@ -257,16 +264,43 @@ class EvidenceCollectorNode(WorkflowNode):
 
             llm_text = (response.result or "") if response else ""
 
-            if response and response.result:
-                logger.debug(f"LLM 规划响应: {truncate_preview(response.result)}...")
-                return self._parse_llm_evidence_plan(response.result), thinking_events, llm_text
+            # 从 thinking_events 的 ai_message full_content 中搜索 JSON 证据计划
+            # response.result 是最后一条 AI 消息（通常是总结），JSON 计划在早期消息中
+            evidence_plan = self._extract_plan_from_thinking(thinking_events)
+            if not evidence_plan:
+                # 回退：尝试从 response.result 解析
+                if response and response.result:
+                    evidence_plan = self._parse_llm_evidence_plan(response.result)
 
-            logger.warning("LLM 未返回有效响应，使用规则规划")
-            return self._plan_with_rules(question, layer), thinking_events, llm_text
+            if evidence_plan:
+                logger.info(f"📋 [evidence] 从 LLM 输出解析到 {len(evidence_plan)} 项证据计划")
+                return evidence_plan, thinking_events, llm_text
+
+            logger.warning("LLM 未返回有效证据计划，使用规则规划")
+            return [], thinking_events, llm_text
 
         except Exception as e:
             logger.warning(f"LLM 规划失败，回退到规则: {e}")
-            return self._plan_with_rules(question, layer), [], ""
+            return [], [], ""
+    def _extract_plan_from_thinking(self, thinking_events: list) -> List[Dict]:
+        """
+        从 thinking_events 的 ai_message 中提取 JSON 证据计划。
+
+        LLM 在 agent loop 中先输出 JSON 计划，再调用工具执行。
+        JSON 计划在早期的 ai_message 中，而 response.result 是最后一条消息。
+        """
+        for ev in thinking_events:
+            if ev.get("type") != "ai_message":
+                continue
+            # 优先用 full_content（完整文本），回退到 content（截断到 500 字）
+            text = ev.get("full_content") or ev.get("content") or ""
+            if not text or "evidence_plan" not in text:
+                continue
+            plan = self._parse_llm_evidence_plan(text)
+            if plan and len(plan) > 0:
+                logger.debug(f"📋 [evidence] 从 thinking ai_message 解析到 {len(plan)} 项计划")
+                return plan
+        return []
 
     def _parse_llm_evidence_plan(self, response_text: str) -> List[Dict]:
         """
@@ -315,274 +349,8 @@ class EvidenceCollectorNode(WorkflowNode):
             })
         return commands
 
-    def _plan_with_rules(
-        self,
-        question: str,
-        layer: Optional[Layer]
-    ) -> List[Dict]:
-        """使用规则规划证据（回退方案）"""
-        scenario = self._layer_to_scenario(layer, question)
-        specs = EVIDENCE_SPECS.get(scenario, [])
-
-        evidence_plan = []
-        for spec in specs:
-            evidence_plan.append({
-                "id": spec.id,
-                "description": spec.description,
-                "level": spec.level.value,
-                "command": self._get_command_for_evidence(spec, question),
-                "tool": "kubectl",
-                "purpose": spec.description
-            })
-
-        return evidence_plan
-
-    def _get_command_for_evidence(self, spec, question: str) -> str:
-        """
-        根据证据规格生成对应的 kubectl 命令
-
-        Args:
-            spec: EvidenceSpec
-            question: 用户问题
-
-        Returns:
-            kubectl 命令
-        """
-        # 基于证据 ID 生成命令
-        command_map = {
-            # L0-DiskFull
-            "disk_usage": "df -h",
-            "enospc_error": "kubectl get events -A --field-selector='reason=FreeDiskSpaceFailed' --sort-by='.lastTimestamp'",
-            "top_directories": "du -sh /var/log /var/lib 2>/dev/null | head -20",
-            # L1-KubeletCert
-            "node_status": "kubectl get nodes -o wide",
-            "cert_error": "kubectl get events -A --field-selector='reason.*certificate' --sort-by='.lastTimestamp'",
-            "kubelet_logs": "journalctl -u kubelet -n 50 --no-pager",
-            # L2-OOMKilled
-            "oom_reason": "kubectl get pods -A --field-selector='status.phase!=Running' --sort-by='.metadata.creationTimestamp'",
-            "exit_code_137": "kubectl get pods -A -o jsonpath='{.items[*].status.containerStatuses[*].state.terminated.exitCode}' | grep -v 'null'",
-            "previous_logs": "kubectl logs --previous --tail=100 --all-containers 2>/dev/null || echo 'No previous logs'",
-            "memory_limit": "kubectl get pods -A -o jsonpath='{.items[*].spec.containers[*].resources.limits}'",
-            # L2-VolumeLimitExceeded
-            "evicted_reason": "kubectl get events -A --field-selector='reason=Evicted' --sort-by='.lastTimestamp'",
-            "volume_limit_exceeded": "kubectl get events -A --field-selector='reason.*volume' --sort-by='.lastTimestamp'",
-            "pod_events": "kubectl get events -A --sort-by='.lastTimestamp' | head -50",
-            # L3-DNSLatency
-            "dns_lookup_time": "kubectl get pods -n kube-system -l k8s-app=kube-dns",
-            "coredns_status": "kubectl get pods -n kube-system | grep coredns",
-            # L4-Dependency503
-            "upstream_503": "kubectl get pods -A --field-selector='status.phase!=Running'",
-            "app_5xx_logs": "kubectl logs --all-containers --tail=50 2>/dev/null || echo 'No logs available'",
-            "dependency_check": "kubectl get svc -A",
-        }
-
-        return command_map.get(spec.id, "kubectl get pods -A")
-
-    def _layer_to_scenario(self, layer: Optional[Layer], question: str) -> str:
-        """根据层级和问题确定场景"""
-        q_lower = question.lower()
-
-        scenario_keywords = {
-            "L0-DiskFull": ["disk", "磁盘", "enospc", "no space", "df"],
-            "L1-KubeletCert": ["kubelet", "证书", "certificate", "notready", "node"],
-            "L2-OOMKilled": ["oom", "137", "内存", "memory", "重启", "evicted"],
-            "L2-VolumeLimitExceeded": ["volume", "存储", "evicted", "limit"],
-            "L3-DNSLatency": ["dns", "coredns", "网络", "network", "connect"],
-            "L4-Dependency503": ["503", "依赖", "upstream", "service", "pod"],
-        }
-
-        for scenario, keywords in scenario_keywords.items():
-            if any(kw in q_lower for kw in keywords):
-                return scenario
-
-        layer_default = {
-            Layer.QUERY: "QUERY",
-            Layer.L0: "L0-DiskFull",
-            Layer.L1: "L1-KubeletCert",
-            Layer.L2: "L2-OOMKilled",
-            Layer.L3: "L3-DNSLatency",
-            Layer.L4: "L4-Dependency503",
-        }
-        return layer_default.get(layer, "L2-OOMKilled")
-
-    def _collect_evidence_by_tools(
-        self,
-        question: str,
-        layer: Optional[Layer],
-        evidence_plan: List[Dict],
-        key_entities: List[Dict]
-    ) -> Tuple[List[Dict], Dict[str, str]]:
-        """
-        根据规划调用工具采集证据
-
-        Args:
-            question: 用户问题
-            layer: 判定的层级
-            evidence_plan: 证据采集计划
-            key_entities: 关键实体
-
-        Returns:
-            (工具调用结果, 已采集证据的映射)
-        """
-        tool_results = []
-        collected_evidence = {}
-
-        # 提取关键实体（用于动态生成命令）
-        pod_names = [e.get("value", "") for e in key_entities if e.get("type") == "Pod"]
-        node_names = [e.get("value", "") for e in key_entities if e.get("type") == "Node"]
-        namespaces = [e.get("value", "") for e in key_entities if e.get("type") == "Namespace"]
-
-        # 从 evidence_plan 生成默认命令
-        default_commands = []
-        for item in evidence_plan:
-            cmd = item.get("command", "")
-            if cmd and cmd not in default_commands:
-                default_commands.append(cmd)
-
-        # 如果没有命令，使用默认命令集
-        if not default_commands:
-            default_commands = self._get_default_commands(layer, question)
-
-        # 执行命令采集证据
-        for cmd in default_commands:
-            try:
-                start_time = time.time()
-                result = self._execute_command(cmd, question, pod_names, node_names, namespaces)
-                duration_ms = (time.time() - start_time) * 1000
-
-                # 记录工具调用
-                if self.metrics:
-                    self.metrics.record_tool_call(
-                        tool_name="kubectl",
-                        duration_ms=duration_ms,
-                        success=result is not None
-                    )
-
-                if result:
-                    tool_results.append({
-                        "tool": "kubectl",
-                        "command": cmd,
-                        "result": truncate_preview(result, 500),
-                        "success": True,
-                        "duration_ms": duration_ms,
-                        "summary": f"✅ {cmd[:40]}... (成功, {duration_ms/1000:.1f}s)"
-                    })
-                    # 标记对应的证据为已采集
-                    collected_evidence[cmd] = result
-                else:
-                    tool_results.append({
-                        "tool": "kubectl",
-                        "command": cmd,
-                        "result": "命令执行失败或超时",
-                        "success": False,
-                        "duration_ms": duration_ms,
-                        "summary": f"❌ {cmd[:40]}... (失败, {duration_ms/1000:.1f}s)"
-                    })
-
-            except Exception as e:
-                logger.error(f"命令执行失败: {cmd}: {e}")
-                tool_results.append({
-                    "tool": "kubectl",
-                    "command": cmd,
-                    "result": str(e)[:200],
-                    "success": False,
-                    "summary": f"❌ {cmd[:40]}... (错误: {str(e)[:50]})"
-                })
-
-        return tool_results, collected_evidence
-
-    def _get_default_commands(
-        self,
-        layer: Optional[Layer],
-        question: str
-    ) -> List[str]:
-        """获取默认命令列表"""
-        # 基于层级的默认命令集
-        layer_commands = {
-            Layer.QUERY: [
-                # 直接查询不需要诊断命令，由 LLM 根据 prompt 决定
-            ],
-            Layer.L0: [
-                "df -h",
-                "kubectl get events -A --sort-by='.lastTimestamp' | head -20",
-                "kubectl get nodes -o wide",
-            ],
-            Layer.L1: [
-                "kubectl get nodes -o wide",
-                "kubectl get events -A --sort-by='.lastTimestamp' | head -30",
-                "journalctl -u kubelet -n 30 --no-pager",
-            ],
-            Layer.L2: [
-                "kubectl get pods -A -o wide",
-                "kubectl get events -A --sort-by='.lastTimestamp' | head -50",
-                "kubectl get pods -A -o jsonpath='{.items[*].status.containerStatuses[*].state}'",
-            ],
-            Layer.L3: [
-                "kubectl get svc -A",
-                "kubectl get endpoints -A",
-                "kubectl get pods -n kube-system -l k8s-app=kube-dns",
-                "kubectl get events -A --sort-by='.lastTimestamp' | head -30",
-            ],
-            Layer.L4: [
-                "kubectl get pods -A -o wide",
-                "kubectl get svc -A",
-                "kubectl get events -A --sort-by='.lastTimestamp' | head -50",
-            ],
-        }
-
-        return layer_commands.get(layer, layer_commands[Layer.L2])
-
-    def _execute_command(
-        self,
-        cmd: str,
-        question: str,
-        pod_names: List[str],
-        node_names: List[str],
-        namespaces: List[str]
-    ) -> Optional[str]:
-        """
-        执行 kubectl 命令
-
-        Args:
-            cmd: 要执行的命令
-            question: 用户问题
-            pod_names: Pod 名称列表
-            node_names: Node 名称列表
-            namespaces: Namespace 列表
-
-        Returns:
-            命令输出
-        """
-        import subprocess
-
-        logger.debug(f"执行命令: {cmd}")
-
-        try:
-            # 超时 DEFAULT_COMMAND_TIMEOUT 秒（证据采集需要更长超时）
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=DEFAULT_COMMAND_TIMEOUT,
-                encoding='utf-8',
-                errors='replace'
-            )
-
-            if result.returncode == 0:
-                return result.stdout
-            else:
-                stderr = result.stderr or ""
-                if stderr:
-                    logger.debug(f"命令返回错误: {stderr[:200]}")
-                return result.stdout + "\n" + stderr
-
-        except subprocess.TimeoutExpired:
-            logger.warning(f"命令超时: {cmd}")
-            return "命令超时（15秒）"
-        except Exception as e:
-            logger.error(f"命令执行失败: {cmd}: {e}")
-            return None
+    # 非证据类工具（LLM 自用的辅助工具），不计入证据统计
+    _NON_EVIDENCE_TOOLS = {"todowrite", "todo_write", "todo"}
 
     def _build_evidence_items_from_thinking(
         self,
@@ -592,13 +360,10 @@ class EvidenceCollectorNode(WorkflowNode):
         """
         从 thinking_events（AICall agent loop 真实工具调用）构建证据项列表。
 
-        替代旧的 _build_evidence_items（基于 subprocess tool_results），
-        因为 AICall 路径下 LLM 已通过 MCP 工具采集了数据，不需要 subprocess 重复执行。
-
         匹配逻辑：
-        1. 对每个 evidence_plan item，检查 thinking_events 中是否有匹配的工具调用
-        2. 匹配方式：plan.tool 名称 ⊂ event.tool_name，或 plan.command 中的关键词匹配
-        3. 未匹配到 plan 的成功工具调用作为「额外采集」加入
+        1. 有 plan 时：plan item 与工具调用匹配，未匹配的工具作为额外采集
+        2. 无 plan 但有工具调用时：从工具调用反向构建证据项（过滤非证据工具）
+        3. 无 plan 且无工具调用时：返回空列表（completeness 由 _calculate_completeness 处理）
         """
         evidence_items = []
 
@@ -611,16 +376,41 @@ class EvidenceCollectorNode(WorkflowNode):
                     "result": ev.get("result", ev.get("result_preview", "")),
                 })
 
+        # ── 无 plan 时：从工具调用反向构建证据项 ──
+        if not evidence_plan and successful_tools:
+            real_tools = [
+                t for t in successful_tools
+                if t["tool_name"].lower() not in self._NON_EVIDENCE_TOOLS
+            ]
+            skipped = len(successful_tools) - len(real_tools)
+            if skipped:
+                logger.debug("📊 [evidence] 过滤 %d 个非证据工具 (TodoWrite 等)", skipped)
+
+            for ti, tool in enumerate(real_tools):
+                evidence_items.append(EvidenceItem(
+                    id=f"auto_{ti}",
+                    description=f"工具采集: {tool['tool_name']}",
+                    level=EvidenceLevel.IMPORTANT,
+                    weight=0.2,
+                    collected=True,
+                    value=tool["result"][:500] if tool["result"] else None,
+                    source="thinking_auto",
+                ))
+
+            logger.info("📊 [evidence] 证据统计(无plan模式): "
+                        "thinking_tools=%d 个成功调用, 有效证据=%d, 过滤=%d",
+                        len(successful_tools), len(real_tools), skipped)
+            return evidence_items
+
+        # ── 有 plan 时：正常匹配流程 ──
         matched_tool_indices = set()
 
-        # 对每个 plan item，尝试匹配 thinking_events 中的工具调用
         for plan_item in evidence_plan:
             plan_tool = (plan_item.get("tool") or "").lower()
             plan_cmd = (plan_item.get("command") or "").lower()
             plan_desc = (plan_item.get("description") or "").lower()
             item_id = plan_item.get("id", f"ev_{len(evidence_items)}")
 
-            # 确定证据级别
             level_str = plan_item.get("level", "important")
             level = EvidenceLevel.IMPORTANT
             if level_str == "critical":
@@ -628,18 +418,18 @@ class EvidenceCollectorNode(WorkflowNode):
             elif level_str == "optional":
                 level = EvidenceLevel.OPTIONAL
 
-            # 尝试匹配
             matched = False
             matched_result = None
             for ti, tool in enumerate(successful_tools):
                 if ti in matched_tool_indices:
                     continue
                 tn = tool["tool_name"].lower()
-                # 匹配策略：工具名包含 plan 中的 tool 名，或 plan command 中包含工具名
-                if (plan_tool and plan_tool in tn) or \
+                if (plan_tool and plan_tool == tn) or \
+                   (plan_tool and plan_tool in tn) or \
                    (plan_tool and tn in plan_tool) or \
                    (plan_cmd and tn in plan_cmd) or \
-                   (plan_cmd and any(kw in tn for kw in plan_cmd.split()[:3])):
+                   (plan_cmd and any(kw in tn for kw in plan_cmd.split()[:3])) or \
+                   (plan_tool and plan_tool.replace("_", "") == tn.replace("_", "")):
                     matched = True
                     matched_result = tool["result"]
                     matched_tool_indices.add(ti)
@@ -655,9 +445,11 @@ class EvidenceCollectorNode(WorkflowNode):
                 source="thinking_match" if matched else "planned",
             ))
 
-        # 未匹配到 plan 的成功工具调用作为「额外采集」
+        # 未匹配到 plan 的成功工具调用作为额外采集（过滤非证据工具）
         for ti, tool in enumerate(successful_tools):
             if ti in matched_tool_indices:
+                continue
+            if tool["tool_name"].lower() in self._NON_EVIDENCE_TOOLS:
                 continue
             evidence_items.append(EvidenceItem(
                 id=f"extra_{ti}",
@@ -669,128 +461,24 @@ class EvidenceCollectorNode(WorkflowNode):
                 source="thinking_extra",
             ))
 
-        logger.info(f"📊 [evidence] 证据统计: plan={len(evidence_plan)} 项, "
-                    f"thinking_tools={len(successful_tools)} 个成功调用, "
-                    f"matched={len(matched_tool_indices)}, "
-                    f"extra={len(successful_tools) - len(matched_tool_indices)}")
-
-        return evidence_items
-
-    def _build_evidence_items(
-        self,
-        evidence_plan: List[Dict],
-        tool_results: List[Dict]
-    ) -> List[EvidenceItem]:
-        """
-        构建证据项列表
-
-        Args:
-            evidence_plan: 证据采集计划
-            tool_results: 工具调用结果
-
-        Returns:
-            EvidenceItem 列表
-        """
-        evidence_items = []
-
-        # 跟踪已匹配的 tool_result 索引，避免重复匹配
-        matched_tool_indices = set()
-
-        # 合并规划项和实际采集结果
-        for idx, plan_item in enumerate(evidence_plan):
-            item_id = plan_item.get("id", f"ev_{len(evidence_items)}")
-
-            # 检查是否有对应的工具结果
-            has_result = False
-            result_value = None
-
-            for ti, tool_result in enumerate(tool_results):
-                if ti in matched_tool_indices:
-                    continue
-
-                tool_cmd = tool_result.get("command", "")
-                plan_cmd = plan_item.get("command", "")
-                tool_success = tool_result.get("success", False)
-
-                # 命令匹配：双向子串匹配或索引对齐
-                cmd_match = (
-                    (plan_cmd and tool_cmd and (plan_cmd in tool_cmd or tool_cmd in plan_cmd))
-                    or (not plan_cmd and idx == ti)  # 无命令时按索引对齐
-                )
-
-                if cmd_match and tool_success:
-                    has_result = True
-                    result_value = tool_result.get("result", "")
-                    matched_tool_indices.add(ti)
-                    break
-
-            # 确定证据级别
-            level_str = plan_item.get("level", "important")
-            level = EvidenceLevel.IMPORTANT
-            if level_str == "critical":
-                level = EvidenceLevel.CRITICAL
-            elif level_str == "optional":
-                level = EvidenceLevel.OPTIONAL
-
-            evidence_items.append(EvidenceItem(
-                id=item_id,
-                description=plan_item.get("description", "未知证据"),
-                level=level,
-                weight=0.2,
-                collected=has_result,
-                value=result_value,
-                source="tool_result" if has_result else "planned"
-            ))
-
-        # 关键修复：如果 evidence_plan 为空但 tool_results 不为空，
-        # 从 tool_results 反向生成 evidence_items
-        if not evidence_plan and tool_results:
-            for ti, tool_result in enumerate(tool_results):
-                if ti in matched_tool_indices:
-                    continue
-                tool_success = tool_result.get("success", False)
-                cmd = tool_result.get("command", f"tool_call_{ti}")
-                evidence_items.append(EvidenceItem(
-                    id=f"auto_{ti}",
-                    description=f"工具采集: {cmd[:60]}",
-                    level=EvidenceLevel.IMPORTANT,
-                    weight=0.2,
-                    collected=tool_success,
-                    value=tool_result.get("result", "") if tool_success else None,
-                    source="tool_result" if tool_success else "tool_failed"
-                ))
-                matched_tool_indices.add(ti)
-
-        # 补充：将未匹配的成功 tool_result 也加入证据列表
-        for ti, tool_result in enumerate(tool_results):
-            if ti in matched_tool_indices:
-                continue
-            if tool_result.get("success", False):
-                cmd = tool_result.get("command", f"tool_call_{ti}")
-                evidence_items.append(EvidenceItem(
-                    id=f"extra_{ti}",
-                    description=f"额外采集: {cmd[:60]}",
-                    level=EvidenceLevel.OPTIONAL,
-                    weight=0.1,
-                    collected=True,
-                    value=tool_result.get("result", ""),
-                    source="tool_result"
-                ))
+        logger.info("📊 [evidence] 证据统计: plan=%d 项, "
+                    "thinking_tools=%d 个成功调用, "
+                    "matched=%d, extra=%d",
+                    len(evidence_plan), len(successful_tools),
+                    len(matched_tool_indices),
+                    sum(1 for e in evidence_items if getattr(e, 'source', '') == 'thinking_extra'))
 
         return evidence_items
 
     def _calculate_completeness(self, evidence_items: List[EvidenceItem]) -> float:
-        """计算证据完整度"""
+        """计算证据采集率：已采集数 / 总数（计划 + 额外）"""
         if not evidence_items:
             return 0.0
 
-        total_weight = sum(e.weight for e in evidence_items)
-        collected_weight = sum(e.weight for e in evidence_items if e.collected)
+        total = len(evidence_items)
+        collected = sum(1 for e in evidence_items if e.collected)
 
-        if total_weight == 0:
-            return 0.0
-
-        return collected_weight / total_weight
+        return collected / total
 
     def _update_metrics(
         self,
@@ -834,57 +522,3 @@ class EvidenceCollectorNode(WorkflowNode):
                         "duration_s": ev.get("duration_seconds", 0),
                     })
         return tool_data
-
-    def _merge_with_baseline(
-        self,
-        evidence_items: List[EvidenceItem],
-        layer: Optional[Layer],
-        question: str,
-        thinking_events: list,
-        llm_result_text: str
-    ) -> List[EvidenceItem]:
-        """
-        将 LLM 采集的证据与 EVIDENCE_SPECS 基准合并。
-
-        逻辑：
-        1. 确定当前场景对应的 EVIDENCE_SPECS 基准清单
-        2. 将所有 thinking_events 工具输出 + llm_result_text 合并为全文
-        3. 用 EvidenceExtractor.check_evidence 检查基准中每项证据是否在全文中存在
-        4. 已存在于 evidence_items 中的不重复添加
-        5. 基准中未被 LLM 覆盖的项追加到列表（标记为已采集或未采集）
-        """
-        from app.core.skills.evidence import EVIDENCE_SPECS, EvidenceExtractor
-
-        scenario = self._layer_to_scenario(layer, question)
-        baseline_specs = EVIDENCE_SPECS.get(scenario, [])
-        if not baseline_specs:
-            return evidence_items
-
-        # 合并所有文本用于证据检测
-        all_text_parts = [llm_result_text or ""]
-        for ev in thinking_events:
-            if ev.get("type") == "tool_result":
-                preview = ev.get("result_preview", "") or ev.get("result", "")
-                if preview:
-                    all_text_parts.append(preview)
-        full_text = "\n".join(all_text_parts)
-
-        # 已有证据的 id 集合
-        existing_ids = {e.id for e in evidence_items}
-
-        for spec in baseline_specs:
-            if spec.id in existing_ids:
-                continue
-            # 检查全文中是否包含该证据
-            exists, value = EvidenceExtractor.check_evidence(full_text, spec)
-            evidence_items.append(EvidenceItem(
-                id=spec.id,
-                description=spec.description,
-                level=spec.level,
-                weight=spec.weight,
-                collected=exists,
-                value=value,
-                source="baseline_match" if exists else "baseline_missing"
-            ))
-
-        return evidence_items

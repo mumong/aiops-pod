@@ -4,7 +4,8 @@
 设计原则：
 - 节点顺序：layer → evidence → rca → conclusion
 - 节点可通过 config.yaml 的 workflow.nodes 启用/禁用
-- QUERY 模式走简化路径（跳过 evidence + rca）
+- QUERY 模式走简化路径（保留 evidence，跳过 rca）
+- HEALTHY 模式直接到 conclusion
 - conclusion 始终保留（最终输出节点）
 - 每个节点独立，易于替换/扩展
 """
@@ -89,7 +90,7 @@ def build_diagnosis_workflow(
         next_node = enabled[i + 1]
 
         if node_id == "layer" and layer_enabled:
-            # layer 节点有条件路由：QUERY 跳到 conclusion
+            # layer 节点有条件路由：HEALTHY 直达 conclusion，QUERY 进入 evidence
             workflow.add_conditional_edges(
                 "layer",
                 _make_layer_router(enabled),
@@ -108,9 +109,14 @@ def _make_layer_router(enabled: list):
     """创建 layer 节点的条件路由函数"""
     def router(state: WorkflowState) -> str:
         layer = state.get("layer")
-        if layer in (Layer.QUERY, Layer.HEALTHY):
-            logger.info(f"🚀 {layer.value} 模式：直接到 conclusion")
+        if layer == Layer.HEALTHY:
+            logger.info("🚀 HEALTHY 模式：直接到 conclusion")
             return "conclusion"
+        if layer == Layer.QUERY:
+            idx = enabled.index("layer")
+            next_node = enabled[idx + 1] if idx + 1 < len(enabled) else "conclusion"
+            logger.info("🚀 QUERY 模式：进入 %s", next_node)
+            return next_node
         # 找 layer 之后的下一个节点
         idx = enabled.index("layer")
         return enabled[idx + 1] if idx + 1 < len(enabled) else "conclusion"
