@@ -144,15 +144,6 @@ class LayerClassifierNode(WorkflowNode):
 
             logger.debug("📋 [layer] 阶段1 输出: %s", response.result[:200])
 
-            # 尝试从 response.result 直接解析 JSON（偶尔 LLM 会直接输出 JSON）
-            result = self._try_parse_json(response.result)
-            if result and result.get("possible_scenarios") and result.get("confidence", 0) > 0.6:
-                logger.info("✅ [layer] 阶段1直接输出合法 JSON: layer=%s, confidence=%.2f",
-                           result.get('layer'), result.get('confidence', 0))
-                return result, thinking_events
-
-            # ── 阶段2：结构化提取（始终执行） ──
-            logger.info("📋 [layer] 阶段2: AICall.call_simple 提取结构化分类")
             enriched_text = self._build_extraction_input(response.result, thinking_events)
 
             # 压缩 enriched_text（可能含大量工具原始输出，50-100K chars）
@@ -166,6 +157,17 @@ class LayerClassifierNode(WorkflowNode):
                 )
             else:
                 enriched_text_for_downstream = enriched_text
+
+            # 尝试从 response.result 直接解析 JSON（阶段1已结构化时跳过阶段2）
+            result = self._try_parse_json(response.result)
+            if self._is_structured_layer_result(result):
+                logger.info("✅ [layer] 阶段1直接输出合法 JSON: layer=%s, confidence=%.2f",
+                           result.get('layer'), result.get('confidence', 0))
+                result["full_analysis"] = enriched_text_for_downstream
+                return result, thinking_events
+
+            # ── 阶段2：结构化提取（仅在阶段1非结构化时执行） ──
+            logger.info("📋 [layer] 阶段2: AICall.call_simple 提取结构化分类")
 
             extracted = self._extract_classification(enriched_text)
             if extracted:
@@ -195,6 +197,25 @@ class LayerClassifierNode(WorkflowNode):
             return json.loads(text)
         except (json.JSONDecodeError, TypeError):
             return None
+
+    @staticmethod
+    def _is_structured_layer_result(result: Optional[Dict]) -> bool:
+        """判断阶段1输出是否已是可用的结构化定层结果。"""
+        if not isinstance(result, dict):
+            return False
+
+        layer = result.get("layer")
+        confidence = result.get("confidence")
+        reasoning = result.get("reasoning")
+
+        if not isinstance(layer, str) or not layer.strip():
+            return False
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            return False
+        if not isinstance(confidence, (int, float)):
+            return False
+
+        return True
 
     @staticmethod
     def _build_extraction_input(llm_text: str, thinking_events: list) -> str:

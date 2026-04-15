@@ -51,6 +51,11 @@ class EvidenceCollectorNode(WorkflowNode):
         self.holmes_service = holmes_service
         self.metrics = metrics
         self.runbook_catalog = runbook_catalog
+        self._early_stop_state = {
+            "triggered": False,
+            "reason": "",
+            "required_levels": ["critical", "important"],
+        }
 
     @property
     def node_id(self) -> str:
@@ -91,6 +96,11 @@ class EvidenceCollectorNode(WorkflowNode):
             logger.debug(f"📋 [DEBUG] 证据采集输入: question={question[:100]}, "
                         f"layer_analysis长度={len(layer_full_analysis)}, "
                         f"key_entities={key_entities}")
+            self._early_stop_state = {
+                "triggered": False,
+                "reason": "",
+                "required_levels": ["critical", "important"],
+            }
 
             # 1. 调用 LLM 规划证据采集计划
             evidence_plan, thinking_events, llm_result_text = self._plan_evidence_with_llm(
@@ -107,6 +117,8 @@ class EvidenceCollectorNode(WorkflowNode):
                 evidence_plan=evidence_plan,
                 thinking_events=thinking_events,
             )
+            if not self._early_stop_state.get("triggered"):
+                self._early_stop_state = self._derive_early_stop_state(evidence_plan, evidence_items)
 
             # 2.1 回退：evidence 节点没采集到证据时，从 layer 阶段的 thinking_events 统计
             if not evidence_items:
@@ -175,12 +187,16 @@ class EvidenceCollectorNode(WorkflowNode):
                     "collection_summary": f"计划 {total} 项，实际采集 {collected} 项，未采集 {total - collected} 项，完整度 {completeness:.0%}",
                     "evidence_inventory": evidence_inventory,
                     "missing_reasons": missing_reasons,
+                    "early_stop": dict(self._early_stop_state),
                 }, ensure_ascii=False),
                 "evidence_completeness": completeness,
                 "tool_results": tool_results,
             })
 
             logger.info(f"✅ 证据采集完成: {collected}/{total} 项, 完整度 {completeness:.0%}")
+            if self._early_stop_state.get("triggered"):
+                logger.info("🛑 [evidence] 动态提前停止: %s",
+                            self._early_stop_state.get("reason", "critical 和 important 级证据均已满足"))
             if missing_reasons:
                 logger.info(f"   未采集证据 ({len(missing_reasons)} 项):")
                 for reason in missing_reasons:
@@ -260,7 +276,11 @@ class EvidenceCollectorNode(WorkflowNode):
             if entities_str:
                 system_prompt += f"\n\n# 已提取的关键实体\n{entities_str}\n"
 
-            response, thinking_events = self._call_llm(question, system_prompt)
+            response, thinking_events = self._call_llm(
+                question,
+                system_prompt,
+                stop_checker=self._should_stop_collection_early,
+            )
 
             llm_text = (response.result or "") if response else ""
 
@@ -348,6 +368,82 @@ class EvidenceCollectorNode(WorkflowNode):
                 "purpose": "获取集群状态或资源信息"
             })
         return commands
+
+    def _should_stop_collection_early(self, thinking_events: list) -> bool:
+        """
+        动态采证提前停止条件：
+        - 已解析到 evidence_plan
+        - 至少已有一次成功工具调用
+        - 所有 critical + important 级计划证据都已被当前工具结果满足
+        或者
+        - 没有 critical/important 项时，全部计划项都已满足
+        """
+        evidence_plan = self._extract_plan_from_thinking(thinking_events)
+        if not evidence_plan:
+            return False
+
+        successful_tools = [
+            ev for ev in thinking_events
+            if ev.get("type") == "tool_result" and ev.get("status") == "success"
+        ]
+        if not successful_tools:
+            return False
+
+        evidence_items = self._build_evidence_items_from_thinking(evidence_plan, thinking_events)
+        planned_items = [e for e in evidence_items if getattr(e, "source", "") in ("thinking_match", "planned")]
+        required_items = [
+            e for e in planned_items
+            if e.level in (EvidenceLevel.CRITICAL, EvidenceLevel.IMPORTANT)
+        ]
+
+        if required_items:
+            missing_required = [e.description for e in required_items if not e.collected]
+            if missing_required:
+                return False
+
+            self._early_stop_state = {
+                "triggered": True,
+                "reason": "critical 和 important 级证据均已满足，提前停止后续采集",
+                "required_levels": ["critical", "important"],
+            }
+            return True
+
+        all_collected = bool(planned_items) and all(e.collected for e in planned_items)
+        if all_collected:
+            self._early_stop_state = {
+                "triggered": True,
+                "reason": "计划中的证据已全部满足，提前停止后续采集",
+                "required_levels": ["critical", "important"],
+            }
+        return all_collected
+
+    def _derive_early_stop_state(self, evidence_plan: List[Dict], evidence_items: List[EvidenceItem]) -> Dict[str, Any]:
+        """根据计划和采集结果后验推导提前停止状态，保证输出字段稳定。"""
+        planned_items = [e for e in evidence_items if getattr(e, "source", "") in ("thinking_match", "planned")]
+        required_items = [
+            e for e in planned_items
+            if e.level in (EvidenceLevel.CRITICAL, EvidenceLevel.IMPORTANT)
+        ]
+
+        if required_items and all(e.collected for e in required_items):
+            return {
+                "triggered": True,
+                "reason": "critical 和 important 级证据均已满足，提前停止后续采集",
+                "required_levels": ["critical", "important"],
+            }
+
+        if planned_items and all(e.collected for e in planned_items):
+            return {
+                "triggered": True,
+                "reason": "计划中的证据已全部满足，提前停止后续采集",
+                "required_levels": ["critical", "important"],
+            }
+
+        return {
+            "triggered": False,
+            "reason": "",
+            "required_levels": ["critical", "important"],
+        }
 
     # 非证据类工具（LLM 自用的辅助工具），不计入证据统计
     _NON_EVIDENCE_TOOLS = {"todowrite", "todo_write", "todo"}
