@@ -35,7 +35,7 @@
 **修改文件**: `app/core/workflow/graph.py`
 
 在 `build_diagnosis_workflow` 中添加条件路由：
-- layer 节点判断意图后，如果 `layer == QUERY`，跳过 evidence + rca，直接到 conclusion
+- layer 节点判断意图后，如果 `layer == QUERY`，跳过 rca，保留 evidence 做取数，然后进入 conclusion
 - 如果 `layer == L0-L4`，走完整 4 节点诊断流程
 
 ```python
@@ -77,7 +77,7 @@ workflow.add_conditional_edges("layer", _route_after_layer, {
 
 | 文件 | 说明 |
 |------|------|
-| `app/core/workflow/graph.py` | QUERY 条件路由（跳过 evidence+rca） |
+| `app/core/workflow/graph.py` | QUERY 条件路由（保留 evidence，跳过 rca） |
 | `app/core/service.py` | 新增 `_call_with_stream_limited()` |
 | `app/core/workflow/nodes/layer_classifier.py` | max_steps=3, 修复统计 |
 | `app/core/workflow/nodes/evidence_collector.py` | max_steps=10, 修复统计，移除硬编码 llm_calls |

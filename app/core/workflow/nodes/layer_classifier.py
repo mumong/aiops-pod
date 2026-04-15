@@ -154,10 +154,23 @@ class LayerClassifierNode(WorkflowNode):
             # ── 阶段2：结构化提取（始终执行） ──
             logger.info("📋 [layer] 阶段2: AICall.call_simple 提取结构化分类")
             enriched_text = self._build_extraction_input(response.result, thinking_events)
+
+            # 压缩 enriched_text（可能含大量工具原始输出，50-100K chars）
+            # 压缩后传给下游 evidence/rca/conclusion，避免 token overflow
+            compact_threshold = 30000
+            if len(enriched_text) > compact_threshold:
+                logger.info("📦 [layer] enriched_text 过大 (%d chars)，执行 LLM 压缩",
+                            len(enriched_text))
+                enriched_text_for_downstream = self._compact_context(
+                    enriched_text, max_chars=compact_threshold
+                )
+            else:
+                enriched_text_for_downstream = enriched_text
+
             extracted = self._extract_classification(enriched_text)
             if extracted:
-                # 关键：把阶段1的完整分析文本注入结果，供下游 evidence/rca 使用
-                extracted["full_analysis"] = enriched_text
+                # 关键：把压缩后的分析文本注入结果，供下游 evidence/rca 使用
+                extracted["full_analysis"] = enriched_text_for_downstream
                 logger.info("✅ [layer] 阶段2提取成功: layer=%s, confidence=%.2f",
                            extracted.get('layer'), extracted.get('confidence', 0))
                 return extracted, thinking_events
@@ -165,7 +178,7 @@ class LayerClassifierNode(WorkflowNode):
             # 阶段2 也失败 → 最终兜底
             logger.warning("⚠️ [layer] 阶段2提取失败，使用层级关键词兜底")
             fallback = self._extract_from_text(response.result)
-            fallback["full_analysis"] = enriched_text
+            fallback["full_analysis"] = enriched_text_for_downstream
             return fallback, thinking_events
 
         except Exception as e:

@@ -185,6 +185,50 @@ class WorkflowNode(ABC):
 
         return result, thinking_events
 
+    def _compact_context(self, text: str, max_chars: int = 30000) -> str:
+        """用 LLM 压缩大段上下文，保留关键信息（类似 Claude compact）。
+
+        仅当 text 超过 max_chars 时触发压缩，否则原样返回。
+        压缩由 LLM 完成：提取工具调用记录、异常发现、关键实体和数值，
+        删除冗余的正常状态数据和重复信息。
+        """
+        if len(text) <= max_chars:
+            return text
+
+        ai_call = getattr(self, 'ai_call', None)
+        if ai_call is None:
+            logger.warning("📦 [%s] _compact_context: 无 ai_call，硬截断到 %d chars", self.node_id, max_chars)
+            return text[:max_chars] + f"\n... (截断，原始 {len(text)} 字符)"
+
+        compress_prompt = (
+            "你是一个信息压缩专家。将以下内容压缩为精炼摘要。\n\n"
+            "规则：\n"
+            "1. 保留所有工具调用记录：工具名 + 关键结果（具体数值、状态、错误信息）\n"
+            "2. 保留所有异常发现（Pod 状态异常、错误码、资源超限等）\n"
+            "3. 保留关键实体（Pod 名、Node 名、Namespace、IP 地址）\n"
+            "4. 删除重复信息和冗余的正常状态数据（如大量 Running 的 Pod 列表只保留异常的）\n"
+            "5. 用结构化格式输出，便于下游分析\n"
+            "6. 输出必须是中文"
+        )
+
+        try:
+            logger.info("📦 [%s] 执行 LLM 压缩: %d chars → 目标 %d chars",
+                        self.node_id, len(text), max_chars)
+            compressed = ai_call.call_simple(
+                system_prompt=compress_prompt,
+                question=f"请压缩以下内容（原始 {len(text)} 字符，目标 {max_chars} 字符以内）：\n\n{text}",
+                max_tokens=4096,
+            )
+            if compressed and len(compressed) < len(text):
+                logger.info("📦 [%s] LLM 压缩完成: %d → %d chars (%.0f%%)",
+                            self.node_id, len(text), len(compressed),
+                            len(compressed) / len(text) * 100)
+                return compressed
+        except Exception as e:
+            logger.warning("📦 [%s] LLM 压缩失败，硬截断: %s", self.node_id, e)
+
+        return text[:max_chars] + f"\n... (截断，原始 {len(text)} 字符)"
+
     def _save_thinking(self, state: WorkflowState, new_state: dict, thinking_events: list):
         """将 thinking_events 带 node 标记存入 state"""
         prev = state.get("thinking_events", [])
