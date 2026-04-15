@@ -13,7 +13,7 @@
 import logging
 import queue
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -118,6 +118,7 @@ class AICall:
         stream_queue: Optional[queue.Queue] = None,
         node_id: str = "",
         cancel_event: Optional[Any] = None,
+        stop_checker: Optional[Callable[[List[Dict]], bool]] = None,
     ) -> Tuple[AICallResult, List[Dict]]:
         """LangChain Agent loop with tool calling (create_agent)
 
@@ -266,6 +267,14 @@ class AICall:
                             }
                             push_event(stream_queue, "tool_result", node_id, **evt)
                             self._record(thinking_events, "tool_result", node_id, **evt)
+
+                            if stop_checker:
+                                try:
+                                    if stop_checker(thinking_events):
+                                        logger.info("🛑 [AICall] stop_checker 触发，提前结束 agent (node=%s)", node_id)
+                                        return
+                                except Exception as exc:
+                                    logger.warning("⚠️ [AICall] stop_checker 执行失败: %s", exc)
 
         # 在新线程中运行异步 agent（避免与 uvicorn event loop 冲突）
         try:

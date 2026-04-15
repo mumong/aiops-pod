@@ -11,6 +11,7 @@
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional
 from langgraph.graph import StateGraph, END
 from app.core.workflow.state import WorkflowState
@@ -32,6 +33,59 @@ NODE_REGISTRY = {
 
 # 默认节点执行顺序
 DEFAULT_NODE_ORDER = ["layer", "evidence", "rca", "conclusion"]
+
+
+def _wrap_node_execute(node: Any):
+    """为节点执行注入生命周期事件，便于 executor 做精确计时。"""
+    def execute_with_lifecycle(state: WorkflowState):
+        event_queue = getattr(node, "_event_queue", None)
+        start_ts = time.time()
+
+        if event_queue is not None:
+            event_queue.put((
+                "node_lifecycle",
+                {
+                    "phase": "start",
+                    "node": node.node_id,
+                    "node_name": node.node_name,
+                    "ts": start_ts,
+                },
+            ))
+
+        try:
+            new_state = node.execute(state)
+        except Exception as exc:
+            if event_queue is not None:
+                event_queue.put((
+                    "node_lifecycle",
+                    {
+                        "phase": "end",
+                        "node": node.node_id,
+                        "node_name": node.node_name,
+                        "ts": time.time(),
+                        "success": False,
+                        "error": str(exc),
+                        "state_update": {},
+                    },
+                ))
+            raise
+
+        if event_queue is not None:
+            event_queue.put((
+                "node_lifecycle",
+                {
+                    "phase": "end",
+                    "node": node.node_id,
+                    "node_name": node.node_name,
+                    "ts": time.time(),
+                    "success": True,
+                    "state_update": new_state,
+                },
+            ))
+
+        return new_state
+
+    return execute_with_lifecycle
 
 
 def _get_enabled_nodes(node_config: Optional[Dict[str, bool]] = None) -> list:
@@ -79,7 +133,7 @@ def build_diagnosis_workflow(
         cls, display_name = NODE_REGISTRY[node_id]
         node = cls(holmes_service, metrics, runbook_catalog)
         node_instances.append(node)
-        workflow.add_node(node_id, node.execute)
+        workflow.add_node(node_id, _wrap_node_execute(node))
 
     # 设置入口点
     workflow.set_entry_point(enabled[0])

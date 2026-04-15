@@ -214,7 +214,70 @@ class WorkflowExecutor:
 
                 tag, data = item
 
-                if tag == "thinking":
+                if tag == "node_lifecycle":
+                    node_id = data.get("node", "")
+                    node_name = data.get("node_name", self._get_node_display_name(node_id))
+                    ts = data.get("ts", time.time())
+
+                    if data.get("phase") == "start":
+                        if node_id and node_id not in node_start_times:
+                            node_start_times[node_id] = ts
+                            metrics.start_node(node_id, node_name, start_ts=ts)
+                            current_nodes.add(node_id)
+                            logger.info(f"📍 [{node_id}] {node_name} 开始...")
+                            yield {
+                                "type": "node_start",
+                                "id": f"{run_id}-node_start-{node_id}",
+                                "run_id": run_id,
+                                "seq": seq,
+                                "ts_ms": int(ts * 1000),
+                                "node": node_id,
+                                "node_name": node_name,
+                            }
+                            seq += 1
+
+                    elif data.get("phase") == "end" and node_id and node_id not in completed_nodes:
+                        state_update = data.get("state_update") or {}
+                        if state_update:
+                            final_state.update(state_update)
+
+                        metrics.finish_node(
+                            node_id,
+                            success=data.get("success", True),
+                            error=data.get("error"),
+                            end_ts=ts,
+                        )
+                        completed_nodes.add(node_id)
+                        current_nodes.discard(node_id)
+
+                        snapshot = self._extract_state_snapshot(final_state, node_id)
+                        node_summary = self._format_node_summary(node_id, final_state, snapshot)
+                        handoff = self._format_handoff_summary(node_id, final_state)
+                        duration_s = metrics.nodes.get(node_id).duration_ms / 1000 if node_id in metrics.nodes else 0
+
+                        logger.info(f"✅ [{node_id}] 完成 ({duration_s:.1f}s)")
+                        if node_summary:
+                            logger.info(f"   {node_summary}")
+                        if handoff:
+                            handoff_short = handoff[:120] + "..." if len(handoff) > 120 else handoff
+                            logger.info(f"   📤 传递给下游: {handoff_short}")
+                            logger.debug(f"   📤 [DEBUG] 完整传递数据:\n{handoff}")
+
+                        yield {
+                            "type": "node_complete",
+                            "id": f"{run_id}-node_complete-{node_id}",
+                            "run_id": run_id,
+                            "seq": seq,
+                            "ts_ms": int(ts * 1000),
+                            "node": node_id,
+                            "node_name": node_name,
+                            "duration_seconds": round(duration_s, 3),
+                            "state_snapshot": snapshot,
+                            "handoff_summary": handoff,
+                        }
+                        seq += 1
+
+                elif tag == "thinking":
                     # 实时 thinking 事件 — 立刻 yield
                     node_id = data.get("node", "")
 
@@ -254,6 +317,7 @@ class WorkflowExecutor:
 
                         node_start_times[node_id] = time.time()
                         metrics.start_node(node_id, self._get_node_display_name(node_id))
+                        current_nodes.add(node_id)
                         logger.info(f"📍 [{node_id}] {self._get_node_display_name(node_id)} 开始...")
                         yield {
                             "type": "node_start",
@@ -289,11 +353,13 @@ class WorkflowExecutor:
 
                     for node_name, updated_state in lg_event.items():
                         new_nodes_in_this_event.add(node_name)
+                        final_state.update(updated_state)
 
                         # 节点开始（只记录一次）
                         if node_name not in node_start_times:
                             node_start_times[node_name] = time.time()
                             metrics.start_node(node_name, self._get_node_display_name(node_name))
+                            current_nodes.add(node_name)
                             logger.info(f"📍 [{node_name}] {self._get_node_display_name(node_name)} 开始...")
 
                             yield {
@@ -306,9 +372,6 @@ class WorkflowExecutor:
                                 "node_name": self._get_node_display_name(node_name),
                             }
                             seq += 1
-
-                    # 更新最终状态
-                    final_state.update(updated_state)
 
                     # 检查是否有节点完成（跳过已被 thinking 分支 finish 的节点）
                     for node_name in current_nodes:
