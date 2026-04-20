@@ -28,7 +28,7 @@ from app.core.skills.models import (
     EvidenceLevel, Confidence
 )
 from app.core.skills.engine import get_engine
-from app.core.prompts import ROOT_CAUSE_ANALYZER_PROMPT
+from app.core.prompts import get_workflow_prompt
 from app.core.text_helpers import truncate_question
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,14 @@ class RootCauseAnalyzerNode(WorkflowNode):
     @property
     def node_name(self) -> str:
         return "根因分析"
+
+    def _get_prompt_language(self) -> str:
+        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
+            return self.holmes_service.get_prompt_language()
+        return "zh"
+
+    def _get_rca_prompt(self) -> str:
+        return get_workflow_prompt("rca", prompt_language=self._get_prompt_language())
     
     def get_required_fields(self) -> List[str]:
         return ["question", "layer", "evidence_items"]
@@ -209,7 +217,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         """lite 模式：AICall.call_simple 直接调用（不带工具），避免重复采集"""
         try:
             layer_str = layer.value if layer else "L2"
-            system_prompt = ROOT_CAUSE_ANALYZER_PROMPT.format(
+            system_prompt = self._get_rca_prompt().format(
                 layer=layer_str,
                 evidence_summary=evidence_summary
             )
@@ -262,7 +270,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         try:
             layer_str = layer.value if layer else "L2"
 
-            system_prompt = ROOT_CAUSE_ANALYZER_PROMPT.format(
+            system_prompt = self._get_rca_prompt().format(
                 layer=layer_str,
                 evidence_summary=evidence_summary
             )

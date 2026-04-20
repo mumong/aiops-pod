@@ -48,6 +48,7 @@ class HolmesService:
         self._init_started_at: Optional[datetime] = None
         self.workflow_config: Dict = {}  # 工作流配置（max_steps 等）
         self.metrics_config: Dict = {}   # 质量指标配置
+        self.i18n_config: Dict = {}      # i18n 配置（prompt/response language）
         self.raw_config: Dict = {}       # 完整原始配置
         self.ai_call: Optional[AICall] = None
         self.mcp_tools: list = []
@@ -98,6 +99,7 @@ class HolmesService:
                 _llm_config = _raw_config.get("llm", {}) or {}
                 self.workflow_config = _raw_config.get("workflow", {}) or {}
                 self.metrics_config = _raw_config.get("metrics", {}) or {}
+                self.i18n_config = _raw_config.get("i18n", {}) or {}
                 self.raw_config = _raw_config
 
                 from app.core.workflow.metrics import load_metrics_config
@@ -257,6 +259,30 @@ class HolmesService:
         if config_val is not None:
             return int(config_val)
         return defaults.get(node_id, 10)
+
+    @staticmethod
+    def _normalize_language(language: Optional[str], default: str = "zh") -> str:
+        """标准化语言标识，仅支持 zh / en。"""
+        value = str(language or default or "zh").strip().lower()
+        if value.startswith("en"):
+            return "en"
+        if value.startswith("zh"):
+            return "zh"
+        return default
+
+    def get_prompt_language(self) -> str:
+        """获取 workflow prompt 语言，优先级: 环境变量 > config.yaml > 默认值 zh"""
+        env_val = os.getenv("PROMPT_LANGUAGE")
+        if env_val:
+            return self._normalize_language(env_val)
+        return self._normalize_language(self.i18n_config.get("prompt_language"), default="zh")
+
+    def get_response_language(self) -> str:
+        """获取最终报告语言，优先级: 环境变量 > config.yaml > 默认值 zh"""
+        env_val = os.getenv("RESPONSE_LANGUAGE")
+        if env_val:
+            return self._normalize_language(env_val)
+        return self._normalize_language(self.i18n_config.get("response_language"), default="zh")
 
     def _load_runbooks(self):
         """加载和合并 runbook catalogs"""
@@ -557,6 +583,10 @@ class HolmesService:
                         yield token_text
                 elif think_type == "iteration_end":
                     yield emit(f"   💭 [{node_name}] 迭代 #{event.get('iteration')} 完成")
+
+            elif event_type == "heartbeat":
+                node_name = event.get("node_name", event.get("node", "?"))
+                yield emit(f"   ⏳ [{node_name}] 仍在处理，等待工具或模型返回...")
 
             elif event_type == "node_complete":
                 node_name = event.get("node_name", event.get("node", "?"))

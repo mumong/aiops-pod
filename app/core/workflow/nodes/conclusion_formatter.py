@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem, Confidence
-from app.core.prompts import CONCLUSION_FORMATTER_PROMPT
+from app.core.prompts import get_workflow_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,23 @@ class ConclusionFormatterNode(WorkflowNode):
     @property
     def node_name(self) -> str:
         return "汇总总结"
+
+    def _get_prompt_language(self) -> str:
+        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
+            return self.holmes_service.get_prompt_language()
+        return "zh"
+
+    def _get_response_language(self) -> str:
+        if self.holmes_service and hasattr(self.holmes_service, "get_response_language"):
+            return self.holmes_service.get_response_language()
+        return "zh"
+
+    def _get_conclusion_prompt(self) -> str:
+        return get_workflow_prompt(
+            "conclusion",
+            prompt_language=self._get_prompt_language(),
+            response_language=self._get_response_language(),
+        )
     
     def get_required_fields(self) -> List[str]:
         return ["question", "layer"]
@@ -299,7 +316,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
         # ── Token 预算控制：防止超过模型上下文限制 ──
         token_budget = int(os.getenv("CONCLUSION_TOKEN_BUDGET", "100000"))
-        system_prompt_text = CONCLUSION_FORMATTER_PROMPT
+        system_prompt_text = self._get_conclusion_prompt()
         total_text = system_prompt_text + user_message
         estimated_tokens = self._estimate_tokens(total_text)
 
@@ -354,7 +371,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
         logger.info("📍 [conclusion] AICall.call_simple 开始 | max_tokens=%d", max_tokens)
         content = ai_call.call_simple(
-            system_prompt=CONCLUSION_FORMATTER_PROMPT,
+            system_prompt=system_prompt_text,
             question=user_message,
             max_tokens=max_tokens,
         )

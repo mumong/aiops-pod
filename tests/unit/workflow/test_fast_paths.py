@@ -4,10 +4,12 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
+from app.core.service import HolmesService
 from app.core.prompts import (
     EVIDENCE_COLLECTOR_PROMPT,
     LAYER_CLASSIFIER_PROMPT,
     LAYER_EXTRACT_PROMPT,
+    get_workflow_prompt,
 )
 from app.core.skills.models import Layer
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
@@ -165,3 +167,33 @@ def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
     for phrase in expected_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
         assert phrase in LAYER_EXTRACT_PROMPT
+
+
+def test_workflow_prompts_default_to_chinese_and_support_english_switch():
+    zh_prompt = get_workflow_prompt("layer")
+    en_prompt = get_workflow_prompt("layer", prompt_language="en")
+
+    assert "角色：K8s 问题分层专家" in zh_prompt
+    assert "Role: Kubernetes issue layer classifier" in en_prompt
+    assert "先判断用户意图" not in en_prompt
+
+
+def test_conclusion_prompt_supports_independent_response_language():
+    prompt = get_workflow_prompt(
+        "conclusion",
+        prompt_language="en",
+        response_language="en",
+    )
+
+    assert "You are a senior Kubernetes diagnostic report expert." in prompt
+    assert "All user-facing final report text must be in English." in prompt
+
+
+def test_holmes_service_i18n_getters_preserve_default_behavior_and_allow_override():
+    service = HolmesService()
+    assert service.get_prompt_language() == "zh"
+    assert service.get_response_language() == "zh"
+
+    service.i18n_config = {"prompt_language": "en", "response_language": "en"}
+    assert service.get_prompt_language() == "en"
+    assert service.get_response_language() == "en"

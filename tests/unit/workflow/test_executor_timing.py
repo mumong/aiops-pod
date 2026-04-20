@@ -4,6 +4,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
+from app.core.service import HolmesService
 from app.core.workflow.executor import WorkflowExecutor
 
 
@@ -103,3 +104,89 @@ def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
     assert 15 <= node_metrics["rca"]["duration_ms"] <= 40
     assert node_metrics["conclusion"]["duration_ms"] >= 25
     assert node_metrics["conclusion"]["duration_ms"] > node_metrics["rca"]["duration_ms"]
+
+
+class _SlowNode:
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+        self.node_name = f"{node_id}-name"
+        self._event_queue = None
+
+    def set_event_queue(self, q):
+        self._event_queue = q
+
+
+class _SlowWorkflow:
+    def __init__(self, node):
+        self._node = node
+
+    def stream(self, initial_state):
+        self._node._event_queue.put((
+            "node_lifecycle",
+            {
+                "phase": "start",
+                "node": self._node.node_id,
+                "node_name": self._node.node_name,
+                "ts": time.time(),
+            },
+        ))
+        time.sleep(0.45)
+        self._node._event_queue.put((
+            "node_lifecycle",
+            {
+                "phase": "end",
+                "node": self._node.node_id,
+                "node_name": self._node.node_name,
+                "ts": time.time(),
+                "success": True,
+                "state_update": {
+                    "conclusion": "done",
+                    "conclusion_formatted": "done",
+                },
+            },
+        ))
+        yield {"conclusion": {"conclusion": "done"}}
+
+
+def test_executor_emits_heartbeat_when_workflow_is_idle(monkeypatch):
+    node = _SlowNode("conclusion")
+
+    monkeypatch.setenv("WORKFLOW_STREAM_HEARTBEAT_SECONDS", "0.02")
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow",
+        lambda holmes_service, metrics, runbook_catalog, node_config: (
+            _SlowWorkflow(node),
+            [node],
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.workflow.executor.create_log_listener",
+        lambda: _DummyLogListener(),
+    )
+    monkeypatch.setattr(
+        WorkflowExecutor,
+        "_save_report",
+        lambda self, layer, question, full_answer: None,
+    )
+
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    events = list(executor.execute_stream("heartbeat test"))
+
+    heartbeat = next(event for event in events if event.get("type") == "heartbeat")
+    assert heartbeat["node"] == "conclusion"
+    assert heartbeat["node_name"] == "汇总总结"
+
+
+def test_workflow_to_text_renders_heartbeat_lines():
+    class _Executor:
+        def execute_stream(self, question, cancel_event=None):
+            yield {"type": "run_start", "run_id": "hbtest"}
+            yield {"type": "node_start", "node": "conclusion", "node_name": "汇总总结"}
+            yield {"type": "heartbeat", "node": "conclusion", "node_name": "汇总总结"}
+            yield {"type": "final", "answer": "done", "metrics": {}, "elapsed_seconds": 1.0}
+
+    service = HolmesService()
+    output = "".join(service._workflow_to_text(_Executor(), "heartbeat test"))
+
+    assert "仍在处理" in output
+    assert "汇总总结" in output

@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
-from app.core.prompts import EVIDENCE_COLLECTOR_PROMPT
+from app.core.prompts import get_workflow_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,11 @@ class EvidenceCollectorNode(WorkflowNode):
     @property
     def node_name(self) -> str:
         return "证据链采集"
+
+    def _get_prompt_language(self) -> str:
+        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
+            return self.holmes_service.get_prompt_language()
+        return "zh"
 
     def get_required_fields(self) -> List[str]:
         return ["question", "layer"]
@@ -262,7 +267,10 @@ class EvidenceCollectorNode(WorkflowNode):
                 ])
 
             # 构建完整的 system prompt
-            system_prompt = EVIDENCE_COLLECTOR_PROMPT.format(
+            system_prompt = get_workflow_prompt(
+                "evidence",
+                prompt_language=self._get_prompt_language(),
+            ).format(
                 layer=layer_str,
                 possible_scenarios=scenarios_str
             )

@@ -1,1 +1,0 @@
-ERROR: HTTPConnectionPool(host='10.2.0.48', port=30800): Max retries exceeded with url: /ask?q=%E6%88%91%E7%9A%84%E9%9B%86%E7%BE%A4%E6%9C%89%E4%BB%80%E4%B9%88%E9%97%AE%E9%A2%98&stream=true&format=text (Caused by NewConnectionError("HTTPConnection(host='10.2.0.48', port=30800): Failed to establish a new connection: [Errno 111] Connection refused"))
