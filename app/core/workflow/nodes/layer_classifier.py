@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
-from app.core.prompts import LAYER_CLASSIFIER_PROMPT, LAYER_EXTRACT_PROMPT
+from app.core.prompts import get_workflow_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,17 @@ class LayerClassifierNode(WorkflowNode):
     @property
     def node_name(self) -> str:
         return "问题定位"
+
+    def _get_prompt_language(self) -> str:
+        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
+            return self.holmes_service.get_prompt_language()
+        return "zh"
+
+    def _get_layer_prompt(self) -> str:
+        return get_workflow_prompt("layer", prompt_language=self._get_prompt_language())
+
+    def _get_layer_extract_prompt(self) -> str:
+        return get_workflow_prompt("layer_extract", prompt_language=self._get_prompt_language())
     
     def execute(self, state: WorkflowState) -> WorkflowState:
         """
@@ -136,7 +147,7 @@ class LayerClassifierNode(WorkflowNode):
             # ── 阶段1：工具调用，收集集群状态 ──
             logger.info("📍 [layer] 阶段1: AICall 工具调用开始 | tools=%d",
                         len(getattr(self, 'tools', [])))
-            response, thinking_events = self._call_llm(question, LAYER_CLASSIFIER_PROMPT)
+            response, thinking_events = self._call_llm(question, self._get_layer_prompt())
 
             if not (response and response.result):
                 logger.warning("⚠️ [layer] 阶段1 无输出，使用规则匹配兜底")
@@ -246,7 +257,7 @@ class LayerClassifierNode(WorkflowNode):
                 raise RuntimeError("[layer] ai_call 未设置，无法执行阶段2提取")
 
             content = ai_call.call_simple(
-                system_prompt=LAYER_EXTRACT_PROMPT,
+                system_prompt=self._get_layer_extract_prompt(),
                 question=analysis_text,
             )
 

@@ -238,6 +238,8 @@ def run_single_request(
     """
     url = f"{base_url}/ask"
     params = {"q": query, "stream": "true", "format": "text"}
+    chunks = []
+    filepath = save_dir / f"response_{idx}.md"
 
     start = time.time()
     try:
@@ -247,14 +249,12 @@ def run_single_request(
             raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
         # 流式收集完整文本
-        chunks = []
         for chunk in resp.iter_content(chunk_size=None, decode_unicode=True):
             if chunk:
                 chunks.append(chunk)
         elapsed = time.time() - start
 
         body = "".join(chunks)
-        filepath = save_dir / f"response_{idx}.md"
         filepath.write_text(body, encoding="utf-8")
 
         if len(body) < 50:
@@ -268,17 +268,20 @@ def run_single_request(
 
     except requests.Timeout:
         elapsed = time.time() - start
-        (save_dir / f"response_{idx}.md").write_text(
-            f"TIMEOUT after {elapsed:.0f}s", encoding="utf-8"
-        )
+        partial = "".join(chunks)
+        timeout_note = f"\n\nTIMEOUT after {elapsed:.0f}s"
+        filepath.write_text((partial + timeout_note).lstrip("\n"), encoding="utf-8")
         return {"idx": idx, "success": False, "error": f"超时 ({elapsed:.0f}s)", "elapsed": elapsed}
 
     except Exception as e:
         elapsed = time.time() - start
-        (save_dir / f"response_{idx}.md").write_text(
-            f"ERROR: {e}", encoding="utf-8"
-        )
-        return {"idx": idx, "success": False, "error": str(e), "elapsed": elapsed}
+        partial = "".join(chunks)
+        error_text = str(e)
+        is_read_timeout = "read timed out" in error_text.lower()
+        error_prefix = f"超时 ({elapsed:.0f}s)" if is_read_timeout else error_text
+        error_note = f"\n\nERROR: {error_text}"
+        filepath.write_text((partial + error_note).lstrip("\n"), encoding="utf-8")
+        return {"idx": idx, "success": False, "error": error_prefix, "elapsed": elapsed}
 
 
 def check_health(base_url: str):

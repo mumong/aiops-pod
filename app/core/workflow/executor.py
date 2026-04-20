@@ -65,6 +65,15 @@ class WorkflowExecutor:
     # 报告保存目录（固定路径，不随工作目录变化）
     REPORTS_DIR = os.environ.get("REPORTS_DIR", "/tmp/aiops/reports")
 
+    @staticmethod
+    def _get_heartbeat_interval_seconds() -> float:
+        """获取流式保活间隔；<=0 表示禁用。"""
+        raw = os.environ.get("WORKFLOW_STREAM_HEARTBEAT_SECONDS", "15")
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 15.0
+
     def _save_report(self, layer, question: str, full_answer: str):
         """保存诊断报告到固定目录"""
         _save_report_fn(self.REPORTS_DIR, layer, question, full_answer)
@@ -174,6 +183,8 @@ class WorkflowExecutor:
         node_start_times = {}
         seq = 0
         final_state = initial_state.copy()
+        heartbeat_interval_s = self._get_heartbeat_interval_seconds()
+        last_stream_event_ts = time.time()
 
         # 创建共享事件队列
         event_queue: queue.Queue = queue.Queue(maxsize=500)
@@ -207,6 +218,25 @@ class WorkflowExecutor:
                 try:
                     item = event_queue.get(timeout=0.3)
                 except queue.Empty:
+                    now = time.time()
+                    if (
+                        heartbeat_interval_s > 0
+                        and current_nodes
+                        and worker.is_alive()
+                        and now - last_stream_event_ts >= heartbeat_interval_s
+                    ):
+                        heartbeat_node_id = sorted(current_nodes)[0]
+                        yield {
+                            "type": "heartbeat",
+                            "id": f"{run_id}-heartbeat-{seq}",
+                            "run_id": run_id,
+                            "seq": seq,
+                            "ts_ms": int(now * 1000),
+                            "node": heartbeat_node_id,
+                            "node_name": self._get_node_display_name(heartbeat_node_id),
+                        }
+                        seq += 1
+                        last_stream_event_ts = now
                     # 检查线程是否还活着
                     if not worker.is_alive():
                         workflow_done = True
@@ -235,6 +265,7 @@ class WorkflowExecutor:
                                 "node_name": node_name,
                             }
                             seq += 1
+                            last_stream_event_ts = time.time()
 
                     elif data.get("phase") == "end" and node_id and node_id not in completed_nodes:
                         state_update = data.get("state_update") or {}
@@ -276,6 +307,7 @@ class WorkflowExecutor:
                             "handoff_summary": handoff,
                         }
                         seq += 1
+                        last_stream_event_ts = time.time()
 
                 elif tag == "thinking":
                     # 实时 thinking 事件 — 立刻 yield
@@ -313,6 +345,7 @@ class WorkflowExecutor:
                                     "handoff_summary": handoff,
                                 }
                                 seq += 1
+                                last_stream_event_ts = time.time()
                         current_nodes = set()
 
                         node_start_times[node_id] = time.time()
@@ -329,6 +362,7 @@ class WorkflowExecutor:
                             "node_name": self._get_node_display_name(node_id),
                         }
                         seq += 1
+                        last_stream_event_ts = time.time()
 
                     yield {
                         "type": "thinking",
@@ -346,6 +380,7 @@ class WorkflowExecutor:
                         "ts_ms": data.get("ts_ms", int(time.time() * 1000)),
                     }
                     seq += 1
+                    last_stream_event_ts = time.time()
 
                 elif tag == "langgraph_event":
                     lg_event = data
@@ -372,6 +407,7 @@ class WorkflowExecutor:
                                 "node_name": self._get_node_display_name(node_name),
                             }
                             seq += 1
+                            last_stream_event_ts = time.time()
 
                     # 检查是否有节点完成（跳过已被 thinking 分支 finish 的节点）
                     for node_name in current_nodes:
@@ -405,6 +441,7 @@ class WorkflowExecutor:
                                 "handoff_summary": handoff,
                             }
                             seq += 1
+                            last_stream_event_ts = time.time()
 
                     current_nodes = new_nodes_in_this_event
 
@@ -443,6 +480,7 @@ class WorkflowExecutor:
                         "state_snapshot": snapshot,
                     }
                     seq += 1
+                    last_stream_event_ts = time.time()
             
             # 更新指标
             self._update_metrics_from_state(metrics, final_state)
@@ -506,6 +544,7 @@ class WorkflowExecutor:
                 "elapsed_seconds": round(time.time() - total_start, 3),
                 "metrics": metrics.get_summary(),
             }
+            last_stream_event_ts = time.time()
             
             # 发出结束事件
             seq += 1
@@ -517,6 +556,7 @@ class WorkflowExecutor:
                 "ts_ms": int(time.time() * 1000),
                 "elapsed_seconds": round(time.time() - total_start, 3),
             }
+            last_stream_event_ts = time.time()
         
         except Exception as e:
             # 分离日志监听器
@@ -538,6 +578,7 @@ class WorkflowExecutor:
                 "ts_ms": int(time.time() * 1000),
                 "error": str(e),
             }
+            last_stream_event_ts = time.time()
         finally:
             # 设置取消信号（确保后台线程也能感知）
             if cancel_event:
