@@ -152,6 +152,7 @@ class WorkflowExecutor:
             "tool_results": [],
             "evidence_completeness": None,
             "evidence_analysis": None,
+            "query_result": None,
             "deterministic_decision": None,
             "root_cause": None,
             "causal_chain": None,

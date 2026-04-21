@@ -10,11 +10,14 @@
     result, events = ai.call(system_prompt, question, tools=tools, max_steps=10)
     text = ai.call_simple(system_prompt, question)
 """
+import json
 import logging
 import queue
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from langgraph.errors import GraphRecursionError
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
@@ -60,22 +63,26 @@ class AICall:
             api_key: API Key
             api_base: 可选代理地址（覆盖默认 endpoint）
         """
+        self.model = model
         self.model_str = model
         self.api_key = api_key
         self.api_base = api_base
 
         model_name, base_url = _parse_model(model, api_base)
-        kwargs: Dict[str, Any] = {
+        self._chat_model_kwargs: Dict[str, Any] = {
             "model": model_name,
             "api_key": api_key,
             "streaming": True,  # 启用 token 级别流式输出
         }
         if base_url:
-            kwargs["base_url"] = base_url
+            self._chat_model_kwargs["base_url"] = base_url
 
-        self.chat_model = ChatOpenAI(**kwargs)
         logger.info("🔧 [AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
-                     model_name, base_url or "(default)")
+                    model_name, base_url or "(default)")
+
+    def _create_chat_model(self):
+        """按次创建 ChatOpenAI，避免跨 asyncio event loop 复用底层 async client。"""
+        return ChatOpenAI(**self._chat_model_kwargs)
 
     # ------------------------------------------------------------------
     # Public API
@@ -99,7 +106,7 @@ class AICall:
         messages.append(HumanMessage(content=question))
 
         # 透传 kwargs（如 max_tokens）到 model.invoke
-        model = self.chat_model
+        model = self._create_chat_model()
         if kwargs:
             model = model.bind(**kwargs)
 
@@ -108,6 +115,20 @@ class AICall:
         logger.debug("✅ [AICall] call_simple 完成 | %.1fs | 输出=%d字",
                       time.time() - start, len(content))
         return content
+
+    def call_simple_json(
+        self,
+        system_prompt: str,
+        question: str,
+        validator: Optional[Callable[[Any], bool]] = None,
+        **kwargs,
+    ) -> Tuple[Optional[Any], str]:
+        """直接调用 LLM 并尽最大可能稳定获取 JSON。"""
+        raw = self.call_simple(system_prompt, question, **kwargs)
+        parsed = self.extract_json_payload(raw)
+        if parsed is not None and validator is not None and not validator(parsed):
+            parsed = None
+        return parsed, raw
 
     def call(
         self,
@@ -119,6 +140,8 @@ class AICall:
         node_id: str = "",
         cancel_event: Optional[Any] = None,
         stop_checker: Optional[Callable[[List[Dict]], bool]] = None,
+        expect_json: bool = False,
+        json_validator: Optional[Callable[[Any], bool]] = None,
     ) -> Tuple[AICallResult, List[Dict]]:
         """LangChain Agent loop with tool calling (create_agent)
 
@@ -140,8 +163,8 @@ class AICall:
         tool_call_count = 0
         iteration = 0
 
-        logger.debug("📍 [AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字",
-                      node_id or "?", max_steps, len(tools or []), len(system_prompt))
+        logger.debug("📍 [AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字 expect_json=%s",
+                      node_id or "?", max_steps, len(tools or []), len(system_prompt), expect_json)
 
         # 无工具时直接调用 call_simple
         if not tools:
@@ -156,7 +179,7 @@ class AICall:
         from langchain.agents import create_agent
 
         agent = create_agent(
-            model=self.chat_model,
+            model=self._create_chat_model(),
             tools=tools,
             system_prompt=system_prompt,
         )
@@ -230,6 +253,15 @@ class AICall:
                                        "iteration": iteration}
                                 self._push(stream_queue, node_id, thinking_events, **evt)
 
+                                if expect_json and not msg.tool_calls:
+                                    parsed = self.extract_json_payload(msg.content)
+                                    if parsed is not None and (
+                                        json_validator is None or json_validator(parsed)
+                                    ):
+                                        final_content = json.dumps(parsed, ensure_ascii=False)
+                                        logger.info("🛑 [AICall] JSON middleware 捕获到有效结构化输出，提前结束 agent (node=%s)", node_id)
+                                        return
+
                             # AI 工具调用
                             if msg.tool_calls:
                                 for tc in msg.tool_calls:
@@ -284,6 +316,11 @@ class AICall:
             logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
             if not final_content:
                 final_content = "Agent 执行超时"
+        except GraphRecursionError as e:
+            recursion_msg = str(e).splitlines()[0].strip()
+            logger.warning("⚠️ [AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
+            if not final_content:
+                final_content = f"达到最大工具执行步数限制: {recursion_msg}"
         except Exception as e:
             logger.error("❌ [AICall] agent 执行异常: %s", e, exc_info=True)
             if not final_content:
@@ -318,3 +355,67 @@ class AICall:
     def _record(events: List[Dict], event_type: str, node_id: str, **data):
         """Record event locally (no queue push)."""
         events.append({"type": event_type, "node": node_id, "timestamp": time.time(), **data})
+
+    @staticmethod
+    def extract_json_payload(text: str) -> Optional[Any]:
+        """从模型文本中稳定提取第一个 JSON 对象/数组。"""
+        if not isinstance(text, str) or not text.strip():
+            return None
+
+        candidates: List[str] = []
+
+        fenced = re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+        candidates.extend(fenced)
+        candidates.append(text.strip())
+
+        balanced = AICall._extract_balanced_json_substring(text)
+        if balanced:
+            candidates.append(balanced)
+
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return None
+
+    @staticmethod
+    def _extract_balanced_json_substring(text: str) -> Optional[str]:
+        """提取文本中的第一个平衡 JSON 对象/数组。"""
+        start = None
+        opening = None
+        closing = None
+        depth = 0
+        in_string = False
+        escape = False
+
+        for idx, ch in enumerate(text):
+            if start is None and ch in "{[":
+                start = idx
+                opening = ch
+                closing = "}" if ch == "{" else "]"
+                depth = 1
+                continue
+
+            if start is None:
+                continue
+
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch == opening:
+                depth += 1
+            elif ch == closing:
+                depth -= 1
+                if depth == 0:
+                    return text[start:idx + 1]
+
+        return None

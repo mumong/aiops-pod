@@ -42,7 +42,8 @@ class WorkflowState(TypedDict, total=False):
     tool_results: List[Dict]             # 工具调用结果
     evidence_completeness: Optional[float]  # 证据完整度 [0, 1]
     evidence_analysis: Optional[str]     # LLM 完整分析（JSON 字符串）
-    
+    query_result: Optional[Dict[str, Any]]  # QUERY 模式下的结构化查询结果
+
     # ========== 节点3 输出：根因分析 ==========
     deterministic_decision: Optional[DeterministicDecision]  # 决策对象
     root_cause: Optional[str]            # 根因结论

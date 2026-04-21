@@ -187,8 +187,10 @@ Exit Code 137 有多种根因，**必须用 kubectl describe 确认 Reason**：
 - QUERY 只表示“当前请求类型是查询”，不表示“集群完全健康”
 
 # 最终输出要求
-完成检查后，**优先直接输出 JSON**，不要输出长篇自然语言解释。
-如果必须先做简短说明，最后也必须附上一个可解析的 ```json 代码块，字段如下：
+完成检查后，**必须直接输出一个可解析的 JSON 结果**，不要依赖下游再做二次结构化提取。
+禁止先输出大段自然语言分析再交给别的节点提取；本阶段自己就要给出最终结构化分类。
+如果无法完全确定，也必须输出 JSON，并在 `reasoning` 中说明不确定性；不要输出非 JSON 作为主结果。
+字段如下：
 
 ```json
 {
@@ -333,6 +335,8 @@ critical=必需 important=提高准确性 optional=辅助确认
 - layer=QUERY：你负责真实数据采集和返回查询结果所需的数据
 - layer=QUERY：直接调工具取数据返回，不套故障模板
 - layer=QUERY：不要把 QUERY 请求再退回给 layer 节点处理
+- layer=QUERY：在本节点内完成查询语义归一化，输出给下游可直接渲染的结构化结果
+- layer=QUERY：只保留用户明确询问的对象、维度和指标，不扩展无关指标
 - layer=L0~L4：按层级制定证据计划，深入采集
 
 # 数据验证
@@ -600,7 +604,8 @@ LAYER_CLASSIFIER_PROMPT_EN = """
 - QUERY reasoning must explain what data the user requested, not incidental anomalies.
 
 # Output requirement
-Return JSON directly whenever possible. If you add short prose, still end with a parseable ```json block using:
+You must directly return one parseable JSON result. Do not rely on a downstream second-pass extractor.
+Do not output long free-form analysis as the primary result. If uncertain, still return JSON and explain uncertainty in the reasoning field:
 {
   "layer": "HEALTHY/L0/L1/L2/L3/L4/QUERY",
   "layers": ["L0", "L1"],
@@ -755,6 +760,166 @@ Results from the previous three stages: layer classification, evidence collectio
 - Output Markdown
 - Start by directly answering the user's core question
 - Prefer structured tables over raw JSON dumps
+"""
+
+
+QUERY_CONCLUSION_INSTRUCTION_ZH = """
+请基于以上各阶段的分析结果，直接回答用户的查询「{question}」。
+
+必须输出结构化、易读的 Markdown，不要输出原始 JSON，不要把 evidence_plan 或 llm_analysis 原样贴给用户。
+优先展示真实采集到的数据表格，字段名要人类可读。最好加上你查询用的原始语句和命令方便用户自己重新验证。
+如果有多个节点/实例/对象，必须逐条展示，不能只给工具摘要。
+如果有个别查询项未采集成功，要明确写出“未获取到”，不要用工具原始报错替代总结。
+只回答用户明确询问的对象、维度和指标；不要擅自补充用户未问到的指标或延伸结论。
+绝对不要猜测、补算、脑补缺失值；凡是工具没有返回或证据不完整的数据，一律明确写“未获取到”或“证据不足以确认”。
+不要套诊断模板，不要写因果链，不要写修复建议，除非用户明确要求。
+
+严格使用下面的模板：
+
+## 📊 查询结果
+
+- **查询目标**: [一句话复述用户问题]
+- **模式**: QUERY 结构化回复
+- **采集情况**: [直接引用真实采集情况]
+
+## 📈 数据摘要
+| 对象 | 指标 | 数值 | 状态 | 数据来源 |
+|------|------|------|------|----------|
+| node1 | CPU 使用率 | 26.24% | 正常 | Prometheus |
+
+## 🔎 补充说明
+- [仅补充必要说明，例如某项未获取到、某节点磁盘偏高等]
+
+要求：
+1. 优先从真实 tool_data 中提取数值并落表
+2. 不要把原始 JSON 塞进表格
+3. 如果能识别节点名/IP/角色，尽量在表格或说明中体现
+4. 最终输出必须让人直接读懂，不需要再看原始工具结果
+5. 如果 evidence_plan 或工具执行里出现了超出用户问题范围的附带查询，只能在“补充说明”里简短注明，默认不要进主表
+6. 如果引用查询语句、PromQL 或命令，必须只引用工具真实执行过的内容，不能自行编造
+"""
+
+
+QUERY_CONCLUSION_INSTRUCTION_EN = """
+Based on the prior workflow stages, answer the user's query "{question}" directly.
+
+You must output structured, readable Markdown. Do not dump raw JSON, and do not paste evidence_plan or llm_analysis directly to the user.
+Prefer tables with real collected data and human-readable field names. Include the actual query statements or commands used when available so the user can verify the result.
+If there are multiple nodes, instances, or objects, show them one by one instead of only giving tool summaries.
+If some requested data was not collected successfully, explicitly say "Not retrieved" instead of surfacing raw tool errors as the answer.
+Only answer the objects, dimensions, and metrics the user explicitly asked for. Do not add extra metrics or inferred conclusions that were not requested.
+Never guess, backfill, infer, or fabricate missing values. If the tools did not return it or the evidence is incomplete, explicitly say "Not retrieved" or "Insufficient evidence to confirm".
+Do not use the diagnosis template, do not provide a causal chain, and do not provide remediation unless the user explicitly asks for it.
+
+Use this template strictly:
+
+## 📊 Query Result
+
+- **Target**: [one-line restatement of the user's query]
+- **Mode**: QUERY structured response
+- **Collection Status**: [quote the real collection summary]
+
+## 📈 Data Summary
+| Object | Metric | Value | Status | Source |
+|--------|--------|-------|--------|--------|
+| node1 | CPU usage | 26.24% | Normal | Prometheus |
+
+## 🔎 Notes
+- [only necessary notes, such as a missing field or an unusually high disk metric]
+
+Requirements:
+1. Prefer extracting values from real tool_data into tables
+2. Do not put raw JSON into tables
+3. If you can identify node names, IPs, or roles, include them where useful
+4. The final answer must be directly readable without checking raw tool output
+5. If evidence_plan or tool execution includes extra queries outside the user's scope, keep them brief in Notes and out of the main table by default
+6. If you quote a query, PromQL, or command, it must come from actually executed tools rather than model invention
+"""
+
+
+HEALTHY_CONCLUSION_INSTRUCTION_ZH = """
+用户问了「{question}」，经过检查集群状态正常，没有发现异常。
+请输出一份简洁的健康报告，列出检查过的项目和结果（节点状态、Pod 状态、事件等），
+明确告诉用户“集群当前运行正常，未发现异常”。
+不要套诊断报告模板，不要编造异常，不要把正常结果描述成潜在故障。
+如果有检查项未获取到，明确写“未获取到”，不要猜测。
+"""
+
+
+HEALTHY_CONCLUSION_INSTRUCTION_EN = """
+The user asked "{question}". The checks indicate the cluster is healthy and no anomaly was found.
+Output a concise health report listing the checked items and results such as node status, Pod status, and events.
+State clearly that the cluster is currently healthy and no anomaly was found.
+Do not use the diagnosis template, do not invent issues, and do not frame healthy results as latent incidents.
+If a check was not retrieved, explicitly say "Not retrieved" instead of guessing.
+"""
+
+
+QUERY_EVIDENCE_NORMALIZATION_PROMPT_ZH = """
+# 角色
+你是查询结果结构化专家。
+
+# 职责
+基于已经真实采集到的工具结果，把 QUERY 请求整理成一个稳定的结构化 JSON。
+你不负责重新查询，不负责诊断，不负责根因分析，只负责把真实结果归一化。
+
+# 规则
+1. 只基于输入中的真实工具结果整理，绝对不要猜测、补算、脑补不存在的数据
+2. 只保留用户明确询问的对象、维度和指标
+3. 如果某项未获取到，放到 `missing` 或 `notes`，不要伪造数值
+4. 如果有多条对象结果，必须逐条保留，不能合并丢失
+5. 输出必须是可解析 JSON，不要输出 Markdown，不要输出解释性前言
+
+# 输出 JSON 结构
+{
+  "query_target": "用户原问题",
+  "collection_summary": "直接引用真实采集情况",
+  "columns": [{"key": "field_key", "label": "列名"}],
+  "rows": [{"field_key": "value"}],
+  "notes": ["补充说明"],
+  "missing": [{"field": "字段名", "reason": "未获取到原因"}],
+  "sources": [{"tool": "工具名", "query": "实际执行的命令/PromQL/查询语句"}]
+}
+
+# 要求
+- `columns` 和 `rows` 必须匹配
+- `rows` 必须是面向人类查询结果的主数据表
+- `sources` 只能引用输入里真实出现过的工具和查询
+- 如果无法整理成更细粒度表格，也必须返回最小可用表结构，不能返回空字符串
+"""
+
+
+QUERY_EVIDENCE_NORMALIZATION_PROMPT_EN = """
+# Role
+You are a query result normalization expert.
+
+# Responsibility
+Using only the real collected tool results, normalize a QUERY request into stable structured JSON.
+Do not re-query, do not diagnose, and do not do root cause analysis. Only normalize the collected results.
+
+# Rules
+1. Use only the real tool results from the input. Never guess, backfill, infer, or fabricate data.
+2. Keep only the objects, dimensions, and metrics explicitly requested by the user.
+3. If a field was not retrieved, put it into `missing` or `notes` instead of inventing a value.
+4. If multiple result objects exist, preserve them item by item.
+5. Output valid JSON only. Do not output Markdown or explanatory prose.
+
+# Output JSON shape
+{
+  "query_target": "original user question",
+  "collection_summary": "real collection summary",
+  "columns": [{"key": "field_key", "label": "column label"}],
+  "rows": [{"field_key": "value"}],
+  "notes": ["notes"],
+  "missing": [{"field": "field name", "reason": "reason"}],
+  "sources": [{"tool": "tool name", "query": "actual command/PromQL/query"}]
+}
+
+# Requirements
+- `columns` and `rows` must match
+- `rows` must represent the main human-readable result table
+- `sources` may only cite tools and queries that actually appear in the input
+- If a more detailed table cannot be built, still return a minimal usable table structure rather than empty output
 """
 
 
@@ -925,6 +1090,38 @@ def _get_conclusion_response_directive(response_language: str) -> str:
     if language == "en":
         return "All user-facing final report text must be in English."
     return ""
+
+
+def get_conclusion_mode_instruction(
+    mode: str,
+    question: str,
+    prompt_language: str = "zh",
+) -> str:
+    """获取 conclusion 节点的模式级指令，避免在节点代码里散落内联提示词。"""
+    language = _normalize_language(prompt_language)
+    normalized_mode = (mode or "").strip().lower()
+
+    templates = {
+        "zh": {
+            "query": QUERY_CONCLUSION_INSTRUCTION_ZH,
+            "healthy": HEALTHY_CONCLUSION_INSTRUCTION_ZH,
+        },
+        "en": {
+            "query": QUERY_CONCLUSION_INSTRUCTION_EN,
+            "healthy": HEALTHY_CONCLUSION_INSTRUCTION_EN,
+        },
+    }
+
+    template = templates.get(language, templates["zh"]).get(normalized_mode, "")
+    return template.format(question=question) if template else ""
+
+
+def get_query_evidence_normalization_prompt(prompt_language: str = "zh") -> str:
+    """获取 QUERY 模式 evidence 归一化 prompt。"""
+    language = _normalize_language(prompt_language)
+    if language == "en":
+        return QUERY_EVIDENCE_NORMALIZATION_PROMPT_EN
+    return QUERY_EVIDENCE_NORMALIZATION_PROMPT_ZH
 
 
 def get_workflow_prompt(

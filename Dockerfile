@@ -11,9 +11,14 @@ ARG VERSION=1.0.0
 ARG COMMIT_HASH=unknown
 ARG BUILD_TIME=unknown
 ARG KUBECTL_VERSION=v1.29.0
+ARG HELM_VERSION=v3.14.0
 
 # 设置工作目录
 WORKDIR /app
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
 
 # 安装系统依赖和诊断工具
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -34,40 +39,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 kubectl
-RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
-    && chmod +x kubectl \
-    && mv kubectl /usr/local/bin/ \
-    && kubectl version --client
+RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 \
+        -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl
 
 
-# 安装 Helm 并预配置常用仓库
-RUN curl -fsSL https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz | tar -xzf - \
+# 安装 Helm（二进制本体即可，repo 初始化放到运行时按需执行）
+RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar -xzf - \
     && mv linux-amd64/helm /usr/local/bin/helm \
-    && rm -rf linux-amd64 \
-    && helm version --short \
-    && helm repo add bitnami https://charts.bitnami.com/bitnami \
-    && helm repo add stable https://charts.helm.sh/stable \
-    && helm repo update
+    && rm -rf linux-amd64
     
 # 复制依赖文件
+COPY requirements.runtime.txt .
 
-COPY requirements.lock.txt .
-
-# 安装 Python 依赖（使用锁定版本）
-RUN pip install --no-cache-dir -r requirements.lock.txt
-
-# 复制应用代码
-COPY app/ ./app/
-# COPY knowledge_base/ ./knowledge_base/
-COPY run.py .
-COPY VERSION .
-
-# 创建配置目录（运行时由 K8s ConfigMap 挂载）
-RUN mkdir -p /app/config
+# 安装运行时依赖。
+# holmesgpt 使用 --no-deps，避免把未使用的多云/数据库 toolset 依赖整体带入镜像。
+RUN pip install --no-cache-dir --no-compile --no-deps holmesgpt==0.21.0 \
+    && pip install --no-cache-dir --no-compile -r requirements.runtime.txt \
+    && find /usr/local/lib/python3.12/site-packages \
+        \( -type d \( -name tests -o -name test -o -name __pycache__ \) \
+        -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -exec rm -rf '{}' + \
+    && rm -rf /root/.cache /tmp/*
 
 # 创建非 root 用户
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p /app/config \
+    && chown appuser:appuser /app /app/config
+
+# 复制应用代码
+COPY --chown=appuser:appuser app/ ./app/
+COPY --chown=appuser:appuser run.py .
+COPY --chown=appuser:appuser VERSION .
+
 USER appuser
 
 # 暴露端口

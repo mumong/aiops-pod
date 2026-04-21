@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import json
 
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
-from app.core.skills.models import Layer
+from app.core.skills.models import EvidenceItem, EvidenceLevel, Layer
 
 
 def test_evidence_should_continue_when_important_item_is_still_missing():

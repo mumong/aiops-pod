@@ -5,19 +5,19 @@ Holmes 配置加载（从 HolmesService.initialize 中抽离）
 保持行为不变：
 - 读取 YAML
 - 进行 ${VAR} / ${VAR:-default} 环境变量替换
-- 为了兼容 holmes.Config 的校验：移除顶级非 Holmes 字段后写入临时文件再加载
+- 返回本项目的轻量配置对象，避免引入 Holmes 全量 toolset 依赖
 """
 
 from __future__ import annotations
 
 import os
 import re
-import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import yaml
-from holmes.config import Config
+
+from app.core.config import AppConfig, ConfigLoader
 
 
 def load_stream_output_flag(config_file: Path, logger) -> bool:
@@ -82,36 +82,15 @@ def load_holmes_config_from_yaml(
     max_steps: int,
     api_base: str = None,
     logger,
-) -> Config:
+) -> AppConfig:
     """
-    从 YAML 文件加载 Holmes Config
-    移除非 Holmes 字段（stream_output, sub_agents, federation, llm）后写入临时文件再加载
+    从 YAML 文件加载轻量配置对象
     """
-    with open(config_file, "r", encoding="utf-8") as f:
-        config_dict = yaml.safe_load(f) or {}
-
-    config_dict = substitute_env_vars(config_dict, logger)
     logger.info("✅ 环境变量替换完成")
-
-    _excluded_keys = {"stream_output", "sub_agents", "federation", "llm", "workflow", "metrics", "i18n"}
-    temp_config_dict = {k: v for k, v in config_dict.items() if k not in _excluded_keys}
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as temp_file:
-        yaml.dump(temp_config_dict, temp_file, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        temp_config_path = Path(temp_file.name)
-
-    try:
-        kwargs = dict(
-            config_file=temp_config_path,
-            api_key=api_key,
-            model=model,
-            max_steps=max_steps,
-        )
-        if api_base:
-            kwargs["api_base"] = api_base
-        return Config.load_from_file(**kwargs)
-    finally:
-        try:
-            temp_config_path.unlink()
-        except Exception:
-            pass
+    return ConfigLoader.load(
+        config_file,
+        api_key=api_key,
+        model=model,
+        max_steps=max_steps,
+        api_base=api_base,
+    )
