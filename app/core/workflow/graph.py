@@ -4,7 +4,7 @@
 设计原则：
 - 节点顺序：layer → evidence → rca → conclusion
 - 节点可通过 config.yaml 的 workflow.nodes 启用/禁用
-- QUERY 模式走简化路径（保留 evidence，跳过 rca）
+- QUERY 模式走轻量查询路径（layer 轻量路由 → evidence 归一化 → conclusion 渲染）
 - HEALTHY 模式直接到 conclusion
 - conclusion 始终保留（最终输出节点）
 - 每个节点独立，易于替换/扩展
@@ -140,15 +140,23 @@ def build_diagnosis_workflow(
 
     # 构建边
     layer_enabled = "layer" in enabled
+    evidence_enabled = "evidence" in enabled
     for i, node_id in enumerate(enabled[:-1]):
         next_node = enabled[i + 1]
 
         if node_id == "layer" and layer_enabled:
-            # layer 节点有条件路由：HEALTHY 直达 conclusion，QUERY 进入 evidence
+            # layer 节点有条件路由：HEALTHY 直达 conclusion，其余进入 evidence
             workflow.add_conditional_edges(
                 "layer",
                 _make_layer_router(enabled),
                 _make_layer_route_map(enabled),
+            )
+        elif node_id == "evidence" and evidence_enabled:
+            # evidence 节点有条件路由：QUERY 直达 conclusion，其余进入下一个分析节点
+            workflow.add_conditional_edges(
+                "evidence",
+                _make_evidence_router(enabled),
+                _make_evidence_route_map(enabled),
             )
         else:
             workflow.add_edge(node_id, next_node)
@@ -181,6 +189,25 @@ def _make_layer_route_map(enabled: list) -> dict:
     """创建 layer 路由的目标映射"""
     route_map = {"conclusion": "conclusion"}
     idx = enabled.index("layer")
+    if idx + 1 < len(enabled):
+        next_node = enabled[idx + 1]
+        route_map[next_node] = next_node
+    return route_map
+
+
+def _make_evidence_router(enabled: list):
+    """创建 evidence 节点的条件路由函数"""
+    def router(state: WorkflowState) -> str:
+        idx = enabled.index("evidence")
+        return enabled[idx + 1] if idx + 1 < len(enabled) else "conclusion"
+
+    return router
+
+
+def _make_evidence_route_map(enabled: list) -> dict:
+    """创建 evidence 路由的目标映射"""
+    route_map = {"conclusion": "conclusion"}
+    idx = enabled.index("evidence")
     if idx + 1 < len(enabled):
         next_node = enabled[idx + 1]
         route_map[next_node] = next_node

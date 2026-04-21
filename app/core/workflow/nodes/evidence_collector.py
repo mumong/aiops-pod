@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
-from app.core.prompts import get_workflow_prompt
+from app.core.prompts import get_workflow_prompt, get_query_evidence_normalization_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,15 @@ class EvidenceCollectorNode(WorkflowNode):
                 }, ensure_ascii=False),
                 "evidence_completeness": completeness,
                 "tool_results": tool_results,
+                "query_result": self._build_query_result(
+                    question=question,
+                    layer=layer,
+                    evidence_plan=evidence_plan,
+                    evidence_inventory=evidence_inventory,
+                    tool_data=tool_data_from_llm,
+                    collection_summary=f"计划 {total} 项，实际采集 {collected} 项，未采集 {total - collected} 项，完整度 {completeness:.0%}",
+                    missing_reasons=missing_reasons,
+                ) if layer == Layer.QUERY else None,
             })
 
             logger.info(f"✅ 证据采集完成: {collected}/{total} 项, 完整度 {completeness:.0%}")
@@ -225,6 +234,97 @@ class EvidenceCollectorNode(WorkflowNode):
             self._save_thinking(state, new_state, [])
 
         return new_state
+
+    def _build_query_result(
+        self,
+        question: str,
+        layer: Optional[Layer],
+        evidence_plan: List[Dict[str, Any]],
+        evidence_inventory: List[Dict[str, Any]],
+        tool_data: List[Dict[str, Any]],
+        collection_summary: str,
+        missing_reasons: List[str],
+    ) -> Dict[str, Any]:
+        """QUERY 模式下将真实工具结果归一化为结构化 JSON，供 conclusion 纯渲染。"""
+        if layer != Layer.QUERY:
+            return {}
+
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is None:
+            return self._build_query_result_fallback(question, tool_data, collection_summary, missing_reasons)
+
+        prompt = get_query_evidence_normalization_prompt(self._get_prompt_language())
+        payload = {
+            "question": question,
+            "collection_summary": collection_summary,
+            "evidence_plan": evidence_plan,
+            "evidence_inventory": evidence_inventory,
+            "tool_data": tool_data,
+            "missing_reasons": missing_reasons,
+        }
+
+        try:
+            normalized, _ = ai_call.call_simple_json(
+                system_prompt=prompt,
+                question=json.dumps(payload, ensure_ascii=False),
+                validator=lambda data: isinstance(data, dict),
+            )
+            if normalized:
+                normalized.setdefault("query_target", question)
+                normalized.setdefault("collection_summary", collection_summary)
+                normalized.setdefault("notes", [])
+                normalized.setdefault("missing", [])
+                normalized.setdefault("sources", [])
+                normalized.setdefault("columns", [])
+                normalized.setdefault("rows", [])
+                return normalized
+        except Exception as exc:
+            logger.warning("⚠️ [evidence] QUERY 结果归一化失败，使用通用回退: %s", exc)
+
+        return self._build_query_result_fallback(question, tool_data, collection_summary, missing_reasons)
+
+    @staticmethod
+    def _parse_query_result(text: str) -> Optional[Dict[str, Any]]:
+        try:
+            json_match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group(1))
+            else:
+                parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    @staticmethod
+    def _build_query_result_fallback(
+        question: str,
+        tool_data: List[Dict[str, Any]],
+        collection_summary: str,
+        missing_reasons: List[str],
+    ) -> Dict[str, Any]:
+        rows = []
+        for item in tool_data[:10]:
+            rows.append({
+                "tool": item.get("tool", "unknown"),
+                "result": item.get("data", "")[:200] or "未获取到",
+            })
+
+        notes = list(missing_reasons[:5])
+        if not rows:
+            notes.append("未能从工具结果中归一化出更细粒度的数据表。")
+
+        return {
+            "query_target": question,
+            "collection_summary": collection_summary,
+            "columns": [
+                {"key": "tool", "label": "工具"},
+                {"key": "result", "label": "结果摘要"},
+            ],
+            "rows": rows,
+            "notes": notes,
+            "missing": [{"field": "result", "reason": reason} for reason in missing_reasons[:5]],
+            "sources": [],
+        }
 
     def _plan_evidence_with_llm(
         self,
@@ -617,12 +717,12 @@ class EvidenceCollectorNode(WorkflowNode):
         for ev in thinking_events:
             if ev.get("type") == "tool_result":
                 tool_name = ev.get("tool_name", "")
-                preview = ev.get("result_preview", "")
+                result_text = ev.get("result", "") or ev.get("result_preview", "")
                 status = ev.get("status", "")
-                if preview and status == "success":
+                if result_text and status == "success":
                     tool_data.append({
                         "tool": tool_name,
-                        "data": preview,
+                        "data": result_text,
                         "duration_s": ev.get("duration_seconds", 0),
                     })
         return tool_data

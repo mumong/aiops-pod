@@ -27,7 +27,6 @@ from app.core.skills.models import (
     Layer, DeterministicDecision, EvidenceItem,
     EvidenceLevel, Confidence
 )
-from app.core.skills.engine import get_engine
 from app.core.prompts import get_workflow_prompt
 from app.core.text_helpers import truncate_question
 
@@ -53,7 +52,6 @@ class RootCauseAnalyzerNode(WorkflowNode):
         self.holmes_service = holmes_service
         self.metrics = metrics
         self.runbook_catalog = runbook_catalog
-        self.engine = get_engine()
     
     @property
     def node_id(self) -> str:
@@ -121,10 +119,12 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     question, layer, evidence_summary
                 )
             else:
-                # 回退到规则引擎
-                logger.info("⚠️ 无 LLM 服务，使用规则引擎")
-                rca_result = self._analyze_with_rules(
-                    question, layer, evidence_items
+                # 无 LLM 时仅保留通用低置信度兜底
+                logger.info("⚠️ 无 LLM 服务，使用通用低置信度兜底")
+                rca_result = self._build_llm_fallback(
+                    question=question,
+                    layer=layer,
+                    reason="LLM 不可用，无法完成可靠根因分析",
                 )
                 thinking_events = []
             
@@ -237,9 +237,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 raise RuntimeError("[rca] ai_call 未设置，无法执行 lite 模式")
 
             logger.info("📍 [rca] AICall.call_simple lite 模式开始")
-            content = ai_call.call_simple(
+            parsed, content = ai_call.call_simple_json(
                 system_prompt=system_prompt,
                 question=user_message,
+                validator=lambda data: isinstance(data, dict),
             )
 
             duration_ms = (time.time() - start_time) * 1000
@@ -250,15 +251,26 @@ class RootCauseAnalyzerNode(WorkflowNode):
             logger.info("✅ [rca] lite 模式完成 (%.0fms, 输出=%d字)",
                        duration_ms, len(content or ""))
 
+            if parsed:
+                return parsed, []
+
             if content:
                 return self._parse_llm_response(content), []
 
-            logger.warning("⚠️ [rca] lite 模式无输出，使用规则兜底")
-            return self._analyze_with_rules(question, layer, []), []
+            logger.warning("⚠️ [rca] lite 模式无输出，使用通用低置信度兜底")
+            return self._build_llm_fallback(
+                question=question,
+                layer=layer,
+                reason="LLM 未返回有效结果，无法完成可靠根因分析",
+            ), []
 
         except Exception as e:
-            logger.warning(f"[rca] lite 模式失败，回退到规则: {e}")
-            return self._analyze_with_rules(question, layer, []), []
+            logger.warning(f"[rca] lite 模式失败，使用通用低置信度兜底: {e}")
+            return self._build_llm_fallback(
+                question=question,
+                layer=layer,
+                reason=f"LLM 根因分析失败: {str(e)}",
+            ), []
 
     def _analyze_with_llm_full(
         self,
@@ -283,16 +295,29 @@ class RootCauseAnalyzerNode(WorkflowNode):
 请直接基于这些数据进行分析，**不要重新调用工具采集数据**。
 如果数据不足，在 limitations 中说明即可。"""
 
-            response, thinking_events = self._call_llm(question, system_prompt)
+            response, thinking_events = self._call_llm(
+                question,
+                system_prompt,
+                expect_json=True,
+                json_validator=lambda data: isinstance(data, dict),
+            )
 
             if response and response.result:
                 return self._parse_llm_response(response.result), thinking_events
 
-            return self._analyze_with_rules(question, layer, []), thinking_events
+            return self._build_llm_fallback(
+                question=question,
+                layer=layer,
+                reason="LLM 未返回有效结果，无法完成可靠根因分析",
+            ), thinking_events
 
         except Exception as e:
-            logger.warning(f"LLM 分析失败，回退到规则: {e}")
-            return self._analyze_with_rules(question, layer, []), []
+            logger.warning(f"LLM 分析失败，使用通用低置信度兜底: {e}")
+            return self._build_llm_fallback(
+                question=question,
+                layer=layer,
+                reason=f"LLM 根因分析失败: {str(e)}",
+            ), []
     
     def _parse_llm_response(self, response_text: str) -> Dict:
         """解析 LLM 的 JSON 响应"""
@@ -315,44 +340,26 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "alternative_causes": []
             }
     
-    def _analyze_with_rules(
+    def _build_llm_fallback(
         self,
         question: str,
         layer: Optional[Layer],
-        evidence_items: List[EvidenceItem]
+        reason: str,
     ) -> Dict:
-        """使用规则引擎分析（回退方案）"""
-        evidence_text = self._build_evidence_summary(evidence_items)
-        combined_text = f"{question}\n{evidence_text}"
-        
-        # 尝试规则引擎
-        decision = self.engine.evaluate(question, combined_text)
-        
-        if decision:
-            return {
-                "phenomenon": decision.issue_summary,
-                "evidence_analysis": [],
-                "causal_chain": decision.causal_chain,
-                "root_cause": decision.causal_chain.get("root_cause", decision.issue_summary),
-                "confidence": decision.confidence_score,
-                "confidence_reason": f"规则匹配: {decision.matched_rules}",
-                "alternative_causes": []
-            }
-        
-        # 通用回退
+        """LLM 不可用或未返回有效结构化结果时的通用低置信度回退。"""
         layer_str = layer.value if layer else "L2"
         question_short = truncate_question(question)
         return {
             "phenomenon": question_short,
             "evidence_analysis": [],
             "causal_chain": {
-                "trigger": "待进一步分析",
-                "mechanism": "待进一步分析",
+                "trigger": "LLM 未生成可靠因果链",
+                "mechanism": "缺少可用的结构化根因分析结果",
                 "manifestation": question_short
             },
-            "root_cause": f"[{layer_str}层] 需要更多证据才能确定根本原因",
-            "confidence": 0.3,
-            "confidence_reason": "证据不足",
+            "root_cause": f"[{layer_str}层] 当前无法基于 LLM 输出确定根本原因",
+            "confidence": 0.1,
+            "confidence_reason": reason,
             "alternative_causes": []
         }
     
@@ -375,7 +382,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         return DeterministicDecision(
             layer=layer or Layer.L2,
             scenario=rca_result.get("phenomenon", "")[:50],
-            category="DataQuery" if is_query else ("LLMAnalysis" if self.holmes_service else "RuleAnalysis"),
+            category="DataQuery" if is_query else "LLMAnalysis",
             confidence=confidence,
             confidence_score=confidence_score,
             issue_found=not is_query,
