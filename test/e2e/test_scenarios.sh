@@ -174,16 +174,16 @@ run_all_tests() {
     fi
     
     # --------------------------------
-    # L4: App Health Fail
+    # L4: Config Bootstrap Fail
     # --------------------------------
-    if kubectl -n "${NS}" get deploy apphealth &>/dev/null; then
+    if kubectl -n "${NS}" get deploy appconfigfail &>/dev/null; then
         validate_scenario \
-            "L4-AppHealthFail" \
-            "namespace=${NS} 应用 apphealth 健康检查失败 日志有 L4_APP_HEALTH_FAIL" \
+            "L4-ConfigBootstrapFail" \
+            "namespace=${NS} 应用 appconfigfail CrashLoopBackOff 日志有 L4_CONFIG_BOOTSTRAP_FAIL 和 missing required APP_BOOT_MODE" \
             "L4" \
-            "AppHealthFail"
+            "ConfigBootstrapFail"
     else
-        log_warn "跳过 L4 测试：apphealth Deployment 不存在"
+        log_warn "跳过 L4 测试：appconfigfail Deployment 不存在"
     fi
 
     # --------------------------------
@@ -272,7 +272,7 @@ case "${1:-all}" in
         validate_scenario "L3-ImagePullFailed" "镜像拉取失败 ImagePullBackOff" "L3" "ImagePull"
         ;;
     l4)
-        validate_scenario "L4-AppHealthFail" "应用健康检查失败 L4_APP_HEALTH_FAIL" "L4" "AppHealthFail"
+        validate_scenario "L4-ConfigBootstrapFail" "应用启动配置校验失败 CrashLoopBackOff L4_CONFIG_BOOTSTRAP_FAIL" "L4" "ConfigBootstrapFail"
         ;;
     *)
         echo "Usage: $0 [all|l0|l1|l2|l3|l4]"

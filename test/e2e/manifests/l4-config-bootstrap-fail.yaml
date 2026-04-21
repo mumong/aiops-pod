@@ -1,0 +1,39 @@
+# L4-ConfigBootstrapFail E2E 场景
+# 单 Pod 启动期配置校验失败，容器打印应用层错误后退出，形成 CrashLoopBackOff
+# 部署: kubectl apply -f test/e2e/manifests/l4-config-bootstrap-fail.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appconfigfail
+  namespace: aiops-e2e
+  labels:
+    l4-scenario: config-bootstrap-fail
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: appconfigfail
+  template:
+    metadata:
+      labels:
+        app: appconfigfail
+        l4-scenario: config-bootstrap-fail
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          imagePullPolicy: Never
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "L4_CONFIG_BOOTSTRAP_FAIL: application bootstrap aborted due to invalid business config"
+              echo "L4_LAYER_APPLICATION: true"
+              echo "L4_SCENARIO: config-bootstrap-fail"
+              echo "L4_ERROR_TYPE: application-config-validation"
+              if [ -z "${APP_BOOT_MODE:-}" ]; then
+                echo "FATAL: missing required APP_BOOT_MODE"
+                echo "FATAL: business config validation failed before server startup"
+                exit 42
+              fi
+              echo "unexpected success"
+              exit 1

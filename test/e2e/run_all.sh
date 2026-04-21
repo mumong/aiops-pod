@@ -20,12 +20,13 @@ kubectl apply -f "${ROOT}/manifests/l0-logfill-enospc.yaml"
 kubectl apply -f "${ROOT}/manifests/l1-taint-node.yaml"
 kubectl apply -f "${ROOT}/manifests/l2-oomkilled.yaml"
 kubectl apply -f "${ROOT}/manifests/l3-imagepull-fail-victim.yaml"
-kubectl apply -f "${ROOT}/manifests/l4-app-health-fail.yaml"
+kubectl apply -f "${ROOT}/manifests/l4-config-bootstrap-fail.yaml"
 
 echo "[3/3] 等待工作负载就绪"
 kubectl -n "${NS}" rollout status deploy/logfill --timeout=60s 2>/dev/null || true
 kubectl -n "${NS}" rollout status deploy/memhog --timeout=60s 2>/dev/null || true
-kubectl -n "${NS}" rollout status deploy/apphealth --timeout=60s 2>/dev/null || true
+# L4 场景预期进入 CrashLoopBackOff，不等待 rollout 成功
+kubectl -n "${NS}" get pod -l app=appconfigfail >/dev/null 2>&1 || true
 
 echo ""
 echo "✅ 部署完成。可用场景："
@@ -33,7 +34,7 @@ echo "  L0: logfill (EmptyDir 超限驱逐)"
 echo "  L1: l1-test-nginx (Node Taint)"
 echo "  L2: memhog (OOMKilled)"
 echo "  L3: imagepull-fail-victim (ImagePullBackOff)"
-echo "  L4: apphealth (应用健康检查失败)"
+echo "  L4: appconfigfail (应用启动配置校验失败)"
 echo ""
 echo "运行验收测试："
 echo "  ./test_scenarios.sh"

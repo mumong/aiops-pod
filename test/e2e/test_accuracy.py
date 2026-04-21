@@ -74,11 +74,11 @@ SCENARIOS: Dict[str, Dict] = {
         "expect_runbook": "l3-imagepull-failed",
         "runbook_keywords": ["镜像拉取", "imagepull", "imagepullbackoff"],
     },
-    "l4-app-health": {
-        "name": "L4 应用健康检查失败",
+    "l4-config-bootstrap": {
+        "name": "L4 应用启动配置校验失败",
         "expect_layer": "L4",
-        "expect_runbook": "l4-app-health-fail",
-        "runbook_keywords": ["健康检查", "health", "探针", "probe"],
+        "expect_runbook": "l4-config-bootstrap-fail",
+        "runbook_keywords": ["配置", "bootstrap", "crashloop", "config"],
     },
 }
 
@@ -640,7 +640,7 @@ def main():
   l1-taint-node     L1 节点 NotReady/Taint
   l2-oomkilled      L2 OOMKilled
   l3-imagepull      L3 镜像拉取失败
-  l4-app-health     L4 应用健康检查失败
+  l4-config-bootstrap L4 应用启动配置校验失败
   all               运行所有场景
 
 盲测说明:
