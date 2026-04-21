@@ -127,13 +127,16 @@ Agent将扮演 K8s 问题分层专家。
 2. QUERY 模式处理
    - 提取用户查询的对象、指标、命名空间、时间范围等关键实体。
    - 不进行全局异常扫描，不做根因判断。
-   - 直接准备输出 QUERY。
+   - 直接准备输出 QUERY。然后退出，终止调用任何工具进入下一个节点。
 
 3. DIAGNOSIS / HEALTHY 模式处理（仅当非 QUERY 时执行）
    - 执行 `kubectl get pods -A` 查看全局 Pod 状态。
    - 对非 Running/Completed 的 Pod 执行 `kubectl describe pod <name> -n <ns>` 并提取 Reason/Message。
    - 如有明显匹配的 runbook，调用 fetch_runbook 获取参考。
    - 根据五层模型判断根因所在的最底层级（L0 为最底层）。
+   - events 只能作为辅助证据，不能单独作为当前故障的判定依据。
+   - 如果 Warning 事件指向某个 Pod/Node/Workload，必须再用当前状态查询确认该对象仍然存在且当前仍异常。
+   - 如果事件对应对象已经不存在，或当前状态已恢复正常，则该事件视为历史噪音，不得据此判定当前存在故障。
 
 4. 层级自查（必须执行）
    - 用户意图是否被正确识别？（QUERY 优先）
@@ -225,7 +228,7 @@ K8s 问题分层专家的最终输出必须严格是以下 JSON 格式，且是�
 - 永远优先用户意图，而不是集群当前最严重的问题。
 - 如果不确定层级，在 reasoning 中说明不确定性，但仍必须给出最可能的 layer。
 - 多层级匹配时选根因所在的最底层（L0 最底层）。
-- 如果检查后没有发现任何实际问题（所有 Pod Running、节点 Ready、无 Warning 事件），输出 HEALTHY。
+- 如果检查后没有发现任何实际问题（所有 Pod Running、节点 Ready、无当前活跃异常对象），输出 HEALTHY。
 ```
 """
 
@@ -274,6 +277,9 @@ K8s 问题分层专家的最终输出必须严格是以下 JSON 格式，且是�
 #    - 执行 `kubectl get pods -A` 查看全局 Pod 状态
 #    - 如果发现异常 Pod（非 Running/Completed），对其执行 `kubectl describe pod <name> -n <ns>` 确认 Reason
 #    - 如果有相关 runbook，调用 fetch_runbook 获取参考
+#    - events 只能作为辅助证据，不能单独作为当前故障判定依据
+#    - 如果 Warning 事件指向某个 Pod/Node/Workload，必须再确认该对象当前仍存在且当前仍异常
+#    - 如果事件对象已不存在，或当前状态已恢复正常，则该事件视为历史噪音
 # 3. 基于用户问题和已获取信息判断问题层级
 
 # # 重要原则！
@@ -308,7 +314,7 @@ K8s 问题分层专家的最终输出必须严格是以下 JSON 格式，且是�
 # | L4 | 应用层 | 应用日志报错, 依赖服务 503, 健康检查失败, 配置错误 |
 
 # 多层级匹配时选**根因所在的最底层**（L0 最底层）。
-# 如果检查后没有发现任何实际问题（所有 Pod Running、节点 Ready、无 Warning 事件），说明集群健康。
+# 如果检查后没有发现任何实际问题（所有 Pod Running、节点 Ready、无当前活跃异常对象），说明集群健康。
 
 # # QUERY 判定规则（优先级高于五层模型）
 # - 只要用户核心诉求是“查询数据/状态/使用率/列表”，即使集群里同时存在异常 Pod，也应优先输出 QUERY
@@ -712,6 +718,9 @@ LAYER_CLASSIFIER_PROMPT_EN = """
    - Run `kubectl get pods -A`
    - If abnormal Pods exist, run `kubectl describe pod <name> -n <ns>` to confirm the reason
    - If relevant, call fetch_runbook
+   - Treat `events` as auxiliary evidence only; they are not sufficient by themselves to prove a current incident
+   - If a Warning event points to a Pod/Node/Workload, verify that the object still exists and is still abnormal in the current state
+   - If the referenced object no longer exists or the current state is already healthy, treat the event as historical noise
 3. Decide the layer from the user question plus collected signals.
 
 # Prohibitions
@@ -727,7 +736,7 @@ LAYER_CLASSIFIER_PROMPT_EN = """
 - L2: workload
 - L3: service/network
 - L4: application
-- If everything is normal and the user is asking about health, classify as HEALTHY.
+- If everything is normal and there is no active abnormal object in the current state, classify as HEALTHY.
 
 # QUERY precedence
 - If the core user request is data/status/list/usage lookup, classify as QUERY even when unrelated abnormalities exist.
@@ -771,6 +780,9 @@ Read the analysis text and output only JSON. Do not call tools.
 - L2: OOMKilled (not Evicted), CrashLoopBackOff plus resource limits
 - L3: ImagePullBackOff, DNS, network, timeout, 502, 503
 - L4: application error, dependency 503, config error
+
+- Treat events as auxiliary only. A Warning event must be confirmed against the current object state before it can count as a current issue.
+- If an event references an object that no longer exists, or the object is now healthy, treat that event as historical noise.
 
 - If no real abnormality is found and the user is asking whether the cluster is healthy, classify as HEALTHY.
 

@@ -61,6 +61,9 @@ class LayerClassifierNode(WorkflowNode):
 
     def _get_layer_prompt(self) -> str:
         return get_workflow_prompt("layer", prompt_language=self._get_prompt_language())
+
+    def _get_layer_extract_prompt(self) -> str:
+        return get_workflow_prompt("layer_extract", prompt_language=self._get_prompt_language())
     
     def execute(self, state: WorkflowState) -> WorkflowState:
         """
@@ -86,6 +89,8 @@ class LayerClassifierNode(WorkflowNode):
                 logger.info("⚠️ 无 LLM 服务，使用低置信度兜底分类")
                 layer_result = self._analyze_with_rules(question)
                 thinking_events = []
+
+            layer_result = self._normalize_result_from_runtime_signals(layer_result, thinking_events)
 
             # 解析层级
             layer = self._parse_layer(layer_result.get("layer", "L2"))
@@ -120,12 +125,28 @@ class LayerClassifierNode(WorkflowNode):
             new_state.setdefault("errors", []).append(
                 f"节点 {self.node_id} 执行失败: {str(e)}"
             )
-            # 失败时使用默认值
+            rescue_result = self._extract_with_lite_llm(
+                question=question,
+                full_analysis_text=f"# layer 节点执行异常\n{str(e)}",
+                failure_reason=f"layer 节点执行异常: {str(e)}",
+            )
+            if rescue_result is None:
+                raise
+
+            layer = self._parse_layer(rescue_result.get("layer", "HEALTHY"))
+            raw_layers = rescue_result.get("layers", [])
+            layers = [self._parse_layer(l) for l in raw_layers if l] if raw_layers else [layer]
+            full_analysis = rescue_result.pop("full_analysis", "")
+
             new_state.update({
-                "layer": Layer.L2,
-                "layer_confidence": 0.3,
-                "layer_reasoning": f"定层失败，使用默认值（错误: {str(e)}）",
-                "layer_analysis": "{}",
+                "layer": layer,
+                "layers": layers,
+                "layer_confidence": rescue_result.get("confidence", 0.5),
+                "layer_reasoning": rescue_result.get("reasoning", ""),
+                "layer_analysis": json.dumps(rescue_result, ensure_ascii=False),
+                "layer_full_analysis": full_analysis,
+                "key_entities": rescue_result.get("key_entities", []),
+                "possible_scenarios": rescue_result.get("possible_scenarios", []),
             })
             self._save_thinking(state, new_state, [])
 
@@ -139,6 +160,7 @@ class LayerClassifierNode(WorkflowNode):
         Returns:
             (layer_result_dict, intermediate_events_list)
         """
+        thinking_events = []
         try:
             # ── 阶段1：工具调用，收集集群状态 ──
             logger.info("📍 [layer] 阶段1: AICall 工具调用开始 | tools=%d",
@@ -151,10 +173,16 @@ class LayerClassifierNode(WorkflowNode):
             )
 
             if not (response and response.result):
-                logger.warning("⚠️ [layer] 阶段1 无输出，使用通用低置信度兜底")
-                return self._build_llm_fallback(
-                    reason="LLM 未返回有效结果，无法完成可靠定层",
-                ), thinking_events
+                logger.warning("⚠️ [layer] 阶段1 无输出，转入 lite 提取")
+                full_analysis_text = self._build_full_analysis("", thinking_events)
+                extracted = self._extract_with_lite_llm(
+                    question=question,
+                    full_analysis_text=full_analysis_text,
+                    failure_reason="LLM 未返回有效结果，转入无工具结构化提取",
+                )
+                if extracted is None:
+                    raise RuntimeError("layer_extract 未能从现有分析文本中生成合法 JSON")
+                return extracted, thinking_events
 
             logger.debug("📋 [layer] 阶段1 输出: %s", response.result[:200])
 
@@ -180,19 +208,61 @@ class LayerClassifierNode(WorkflowNode):
                 result["full_analysis"] = enriched_text_for_downstream
                 return result, thinking_events
 
-            # 阶段1失败 → 使用通用低置信度兜底，不再做规则/正则提层
-            logger.warning("⚠️ [layer] 阶段1未返回合法 JSON，使用通用低置信度兜底")
-            fallback = self._build_llm_fallback(
-                reason="LLM 未返回合法 JSON，无法完成可靠定层",
-                full_analysis=enriched_text_for_downstream,
+            # 阶段1失败 → 使用无工具 lite 提取基于已收集上下文做结构化分类
+            logger.warning("⚠️ [layer] 阶段1未返回合法 JSON，转入 lite 提取")
+            extracted = self._extract_with_lite_llm(
+                question=question,
+                full_analysis_text=enriched_text_for_downstream,
+                failure_reason="LLM 未返回合法 JSON，转入无工具结构化提取",
             )
-            return fallback, thinking_events
+            if extracted is None:
+                raise RuntimeError("layer_extract 未能从现有分析文本中生成合法 JSON")
+            return extracted, thinking_events
 
         except Exception as e:
-            logger.warning(f"[layer] LLM 分析失败，使用通用低置信度兜底: {e}")
-            return self._build_llm_fallback(
-                reason=f"LLM 定层失败: {str(e)}",
-            ), []
+            logger.warning(f"[layer] LLM 分析失败，转入 lite 提取: {e}")
+            full_analysis_text = self._build_full_analysis("", thinking_events)
+            extracted = self._extract_with_lite_llm(
+                question=question,
+                full_analysis_text=full_analysis_text or f"# layer 阶段1异常\n{str(e)}",
+                failure_reason=f"LLM 定层失败，转入无工具结构化提取: {str(e)}",
+            )
+            if extracted is None:
+                raise
+            return extracted, thinking_events
+
+    def _extract_with_lite_llm(
+        self,
+        question: str,
+        full_analysis_text: str,
+        failure_reason: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """当 agent 未直接产出合法 JSON 时，基于已收集内容再做一次无工具结构化提取。"""
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is None:
+            logger.warning("⚠️ [layer] 无 ai_call，无法执行 lite 提取")
+            return None
+
+        extract_prompt = self._get_layer_extract_prompt()
+        extract_input = (
+            f"# 用户问题\n{question}\n\n"
+            f"# 失败原因\n{failure_reason or '未提供'}\n\n"
+            f"# 分析文本\n{full_analysis_text or '无'}"
+        )
+        parsed, raw = ai_call.call_simple_json(
+            extract_prompt,
+            extract_input,
+            validator=self._is_structured_layer_result,
+            max_tokens=2048,
+        )
+        if parsed is None:
+            logger.warning("⚠️ [layer] lite 提取仍未返回合法 JSON | raw=%s", (raw or "")[:500])
+            return None
+
+        parsed["full_analysis"] = full_analysis_text
+        logger.info("✅ [layer] lite 提取成功: layer=%s confidence=%.2f",
+                    parsed.get("layer"), parsed.get("confidence", 0.0))
+        return parsed
 
     @staticmethod
     def _try_parse_json(text: str) -> Optional[Dict]:
@@ -245,6 +315,88 @@ class LayerClassifierNode(WorkflowNode):
 
         return "\n".join(parts)
 
+    def _is_event_like_output(tool_name: str, text: str) -> bool:
+        tool_lower = (tool_name or "").lower()
+        if "event" in tool_lower:
+            return True
+        if re.search(r"\bWarning\b", text) and re.search(r"\b(Pod|Node|Service|Deployment|ReplicaSet|StatefulSet|DaemonSet)/", text):
+            return True
+        if "LAST SEEN" in text and "REASON" in text and "MESSAGE" in text:
+            return True
+        return False
+
+    @classmethod
+    def _contains_event_anomaly_signal(cls, tool_name: str, text: str) -> bool:
+        if not cls._is_event_like_output(tool_name, text):
+            return False
+        return bool(re.search(
+            r"\b(Warning|BackOff|Failed|Unhealthy|FailedScheduling|FailedMount|Evicted|Killing)\b",
+            text,
+            re.IGNORECASE,
+        ))
+
+    @classmethod
+    def _contains_current_abnormal_signal(cls, tool_name: str, text: str) -> bool:
+        if cls._is_event_like_output(tool_name, text):
+            return False
+        return bool(re.search(
+            r"\b(CrashLoopBackOff|ImagePullBackOff|ErrImagePull|OOMKilled|Evicted|"
+            r"CreateContainerConfigError|CreateContainerError|RunContainerError|"
+            r"ContainerStatusUnknown|NotReady|Pending|Failed)\b",
+            text,
+            re.IGNORECASE,
+        ))
+
+    @classmethod
+    def _has_only_historical_event_anomalies(cls, thinking_events: list) -> bool:
+        saw_event_anomaly = False
+        saw_live_anomaly = False
+
+        for ev in thinking_events:
+            if ev.get("type") != "tool_result" or ev.get("status") != "success":
+                continue
+            tool_name = ev.get("tool_name", "")
+            text = ev.get("result", "") or ev.get("result_preview", "") or ""
+            if not text:
+                continue
+
+            if cls._contains_current_abnormal_signal(tool_name, text):
+                saw_live_anomaly = True
+
+            if cls._contains_event_anomaly_signal(tool_name, text):
+                saw_event_anomaly = True
+
+        return saw_event_anomaly and not saw_live_anomaly
+
+    def _normalize_result_from_runtime_signals(self, result: Dict[str, Any], thinking_events: list) -> Dict[str, Any]:
+        """当前状态优先：若仅有历史事件异常而无任何活跃异常对象，则收敛为 HEALTHY。"""
+        if not isinstance(result, dict):
+            return result
+
+        layer = str(result.get("layer", "")).upper()
+        if layer in {"", "QUERY", "HEALTHY"}:
+            return result
+
+        if not self._has_only_historical_event_anomalies(thinking_events):
+            return result
+
+        normalized = dict(result)
+        original_reasoning = str(normalized.get("reasoning", "")).strip()
+        normalized.update({
+            "layer": "HEALTHY",
+            "layers": ["HEALTHY"],
+            "layer_name": "集群健康",
+            "confidence": min(float(normalized.get("confidence", 0.5)), 0.4),
+            "reasoning": (
+                "当前状态检查未发现活跃异常对象；仅发现无法被当前状态再次确认的历史事件，"
+                "这些历史事件不能作为当前故障依据，因此收敛为 HEALTHY。"
+                + (f" 原始判定依据: {original_reasoning}" if original_reasoning else "")
+            ),
+            "possible_scenarios": [],
+        })
+        logger.info("🧹 [layer] 仅检测到历史事件异常、未发现当前活跃异常对象，结果收敛为 HEALTHY")
+        return normalized
+
 
     def _analyze_with_rules(self, question: str) -> Dict:
         """无 LLM 时的低置信度兜底分类，避免使用人工关键词规则主导分类。"""
@@ -257,22 +409,6 @@ class LayerClassifierNode(WorkflowNode):
             "possible_scenarios": []
         }
 
-    @staticmethod
-    def _build_llm_fallback(reason: str, full_analysis: str = "") -> Dict:
-        """LLM 不可用或未返回结构化结果时的通用低置信度回退。"""
-        result = {
-            "layer": "L2",
-            "layers": ["L2"],
-            "layer_name": "工作负载层",
-            "confidence": 0.1,
-            "reasoning": reason,
-            "key_entities": [],
-            "possible_scenarios": [],
-        }
-        if full_analysis:
-            result["full_analysis"] = full_analysis
-        return result
-    
     def _parse_layer(self, layer_str: str) -> Layer:
         """解析层级字符串为 Layer 枚举"""
         layer_map = {
