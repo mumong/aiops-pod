@@ -57,12 +57,12 @@ data:
           "operations": ["诊断", "排查"]
         },
         {
-          "id": "l4-app-health-fail",
+          "id": "l4-config-bootstrap-fail",
           "type": "procedure",
           "layer": "L4",
-          "update_date": "2026-04-13",
-          "description": "【L4】应用健康检查失败 — 应用自身 readiness/liveness probe 失败，Pod 被标记为 NotReady 或被重启。关键证据：Events 含 'Unhealthy'/'probe failed', 应用日志含错误信息",
-          "link": "l4-app-health-fail.md",
+          "update_date": "2026-04-21",
+          "description": "【L4】应用启动配置校验失败 — 应用在 bootstrap 阶段因业务配置缺失/非法主动退出，Pod 进入 CrashLoopBackOff。关键证据：容器日志含配置校验失败、缺少必填配置、业务参数非法；无 OOMKilled / Evicted / ImagePullBackOff。",
+          "link": "l4-config-bootstrap-fail.md",
           "operations": ["诊断", "排查"]
         }
       ]
@@ -307,72 +307,82 @@ data:
     | 依赖 Pod CrashLoopBackOff | 依赖服务崩溃导致 503 | 高 |
 
   # ==========================================================================
-  # L4: 应用健康检查失败 (AppHealthFail)
+  # L4: 应用启动配置校验失败 (ConfigBootstrapFail)
   # ==========================================================================
-  l4-app-health-fail.md: |
-    # L4 应用健康检查失败 (Readiness/Liveness Probe Failure)
+  l4-config-bootstrap-fail.md: |
+    # L4 应用启动配置校验失败 (Config Bootstrap Fail)
 
-    > 层级: L4 - 应用层 | 场景: 应用 Probe 失败导致 Pod NotReady 或频繁重启
+    > 层级: L4 - 应用层 | 场景: 应用在启动阶段因业务配置缺失或非法而主动退出
 
     ## 场景识别
 
     | 信号 | 关键特征 |
     |------|----------|
-    | Pod 状态 | Running 但 READY=0/1，或频繁重启 |
-    | Events | `Unhealthy`、`Liveness probe failed`、`Readiness probe failed` |
-    | Describe | readinessProbe/livenessProbe 配置 + 失败记录 |
-    | 区分 L2 | 如果 exitCode=137 且 reason=OOMKilled，属于 L2 而非 L4 |
+    | Pod 状态 | `CrashLoopBackOff` / `Error`，重启次数持续增加 |
+    | 容器日志 | 含 `L4_CONFIG_BOOTSTRAP_FAIL`、`missing required APP_BOOT_MODE`、`config validation failed` |
+    | Describe | `Last State: Terminated`，`Exit Code: 42` 或其他业务退出码 |
+    | 区分 L2 | 无 `OOMKilled`、无 `Exit Code 137` |
+    | 区分 L3 | 无 `ImagePullBackOff`、容器实际已启动并输出业务日志 |
+    | 区分 L0 | 无 `Evicted`、无 `disk pressure`、无 `ENOSPC` |
 
     ## 诊断流程
 
-    ### Step 1: 确认 Pod 状态和 Ready 情况
+    ### Step 1: 确认 Pod 是否处于 CrashLoopBackOff
     ```bash
     kubectl get pods -n <namespace> -l app=<app-name> -o wide
     ```
-    关注: READY 列是否为 0/N，RESTARTS 次数
+    关注:
+    - `STATUS` 是否为 `CrashLoopBackOff`
+    - `RESTARTS` 是否持续增长
 
-    ### Step 2: 检查 Events 中的 Probe 失败（关键步骤）
+    ### Step 2: 查看 describe 中的退出状态（关键步骤）
     ```bash
     kubectl describe pod <pod-name> -n <namespace>
     ```
     重点关注:
-    - Events 中 `Unhealthy` 类型事件
-    - `Liveness probe failed: ...` 具体错误信息
-    - `Readiness probe failed: ...` 具体错误信息
-    - Probe 配置: path, port, initialDelaySeconds, periodSeconds
+    - `State: Waiting, Reason: CrashLoopBackOff`
+    - `Last State: Terminated`
+    - `Reason: Error`
+    - `Exit Code: 42` 或其他非 137 业务退出码
 
-    ### Step 3: 手动测试健康端点
+    ### Step 3: 获取上一次崩溃前日志（关键步骤）
     ```bash
-    kubectl exec <pod-name> -n <namespace> -- curl -s http://localhost:<port>/<health-path>
+    kubectl logs <pod-name> -n <namespace> --previous --tail=200
     ```
-    或从集群内部测试:
-    ```bash
-    kubectl run curl-test --rm -it --image=curlimages/curl --restart=Never -- \
-      curl -s -w "\nhttp_code=%{http_code}\n" http://<pod-ip>:<port>/<health-path>
-    ```
+    重点关注:
+    - `L4_CONFIG_BOOTSTRAP_FAIL`
+    - `missing required APP_BOOT_MODE`
+    - `business config validation failed before server startup`
 
-    ### Step 4: 检查应用日志
+    ### Step 4: 回溯配置来源
     ```bash
-    kubectl logs <pod-name> -n <namespace> --tail=200
-    kubectl logs <pod-name> -n <namespace> --previous --tail=100
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].env}' | python3 -m json.tool
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].envFrom}' | python3 -m json.tool
+    kubectl get configmap -n <namespace>
+    kubectl get secret -n <namespace>
     ```
-    关注: 启动失败、依赖连接错误、配置加载异常、端口绑定失败
+    关注:
+    - 必填环境变量是否缺失
+    - ConfigMap/Secret 键名是否拼错
+    - 配置值是否不符合应用约束
 
-    ### Step 5: 检查 Probe 配置合理性
+    ### Step 5: 结合应用启动逻辑确认根因
     ```bash
-    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].readinessProbe}' | python3 -m json.tool
-    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].livenessProbe}' | python3 -m json.tool
+    kubectl logs <pod-name> -n <namespace> --previous --tail=200 | grep -iE "config|bootstrap|missing|required|validation"
     ```
+    关注:
+    - 启动前配置解析失败
+    - 业务模式、端口、租户等必填配置缺失
 
     ## 判定规则
 
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
-    | Events 含 Liveness probe failed + Pod 频繁重启 | Liveness 探针失败导致重启 | 高 |
-    | Events 含 Readiness probe failed + READY=0/N | Readiness 探针失败，流量未接入 | 高 |
-    | 手动 curl 健康端点返回非 200 | 应用健康检查逻辑异常 | 高 |
-    | 应用日志含启动错误/依赖连接失败 | 应用自身问题导致 Probe 失败 | 高 |
-    | Probe initialDelaySeconds 过短 + 应用启动慢 | Probe 配置不合理 | 中 |
+    | CrashLoopBackOff + 日志含配置校验失败/缺参 | 应用启动配置错误 (L4) | 高 |
+    | Exit Code 非 137 + 无 OOMKilled + 日志为业务错误 | 应用层启动失败 (L4) | 高 |
+    | Last State=OOMKilled 或 Exit Code=137 | 属于 L2，非本场景 | 高 |
+    | STATUS=ImagePullBackOff / ErrImagePull | 属于 L3，非本场景 | 高 |
+    | Reason=Evicted 或 Message 含 disk pressure/ENOSPC | 属于 L0，非本场景 | 高 |
 
   # ==========================================================================
   # L1: Node NotReady (Taint 导致)
