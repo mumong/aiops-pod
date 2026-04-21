@@ -21,6 +21,70 @@ from app.core.workflow.state import WorkflowState
 logger = logging.getLogger(__name__)
 
 
+def _normalize_runbook_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = text.strip().lower()
+    normalized = re.sub(r"\.md$", "", normalized)
+    normalized = re.sub(r"^[#\s]+", "", normalized)
+    normalized = re.sub(r"[`*_\-\(\)\[\]{}:：,，。.!！？/\\|【】<>\"'“”‘’]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _extract_catalog_title(description: str) -> str:
+    if not description:
+        return ""
+    title = re.sub(r"^【[^】]+】", "", description).strip()
+    if "—" in title:
+        title = title.split("—", 1)[0].strip()
+    return title
+
+
+def _build_runbook_lookup(runbook_catalog: Any) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    if not runbook_catalog or not hasattr(runbook_catalog, "catalog"):
+        return lookup
+
+    for entry in getattr(runbook_catalog, "catalog", []) or []:
+        canonical_id = (getattr(entry, "id", "") or "").strip()
+        if not canonical_id:
+            continue
+
+        candidates = [
+            canonical_id,
+            getattr(entry, "link", "") or "",
+            getattr(entry, "description", "") or "",
+            _extract_catalog_title(getattr(entry, "description", "") or ""),
+        ]
+        for candidate in candidates:
+            key = _normalize_runbook_text(candidate)
+            if key:
+                lookup[key] = canonical_id
+
+    return lookup
+
+
+def _canonicalize_runbook_name(name: str, lookup: Dict[str, str]) -> Optional[str]:
+    if not name:
+        return None
+    if not lookup:
+        return name.strip() or None
+
+    key = _normalize_runbook_text(name)
+    if not key:
+        return None
+
+    if key in lookup:
+        return lookup[key]
+
+    for candidate_key, canonical_id in lookup.items():
+        if key and (key in candidate_key or candidate_key in key):
+            return canonical_id
+
+    return None
+
+
 def save_report(reports_dir: str, layer: Any, question: str, full_answer: str) -> None:
     """保存诊断报告到固定目录"""
     try:
@@ -119,6 +183,7 @@ def update_metrics_from_state(
     # ================================================================
     # Runbook 提取（从所有文本内容中搜索，不再依赖 tool_call_details）
     # ================================================================
+    runbook_lookup = _build_runbook_lookup(runbook_catalog)
     runbook_ids: Set[str] = set()
     runbook_names: List[str] = []
 
@@ -184,9 +249,9 @@ def update_metrics_from_state(
         state_primary = state.get("primary_runbook_id")
         if state_primary:
             for rb in state_primary.split(", "):
-                rb = rb.strip()
-                if rb and rb not in primary_runbooks:
-                    primary_runbooks.append(rb)
+                canonical = _canonicalize_runbook_name(rb.strip(), runbook_lookup)
+                if canonical and canonical not in primary_runbooks:
+                    primary_runbooks.append(canonical)
 
         # 方法2: 从 rca_analysis JSON 提取 primary_runbooks 字段
         if not primary_runbooks and rca_analysis_raw:
@@ -196,35 +261,42 @@ def update_metrics_from_state(
                     ai_primary = rca_data.get("primary_runbooks", [])
                     if isinstance(ai_primary, list):
                         for rb in ai_primary:
-                            if isinstance(rb, str) and rb.strip() and rb.strip() not in primary_runbooks:
-                                primary_runbooks.append(rb.strip())
+                            canonical = _canonicalize_runbook_name(rb.strip(), runbook_lookup) if isinstance(rb, str) else None
+                            if canonical and canonical not in primary_runbooks:
+                                primary_runbooks.append(canonical)
                     # 方法2b: JSON 解析失败时从 llm_raw_analysis 提取
                     if not primary_runbooks:
                         raw = rca_data.get("llm_raw_analysis", "")
                         if raw:
                             for m in re.finditer(r'found a runbook named \*\*(.+?)\*\*', raw):
                                 name = m.group(1).strip()
-                                if name not in primary_runbooks:
-                                    primary_runbooks.append(name)
+                                canonical = _canonicalize_runbook_name(name, runbook_lookup)
+                                if canonical and canonical not in primary_runbooks:
+                                    primary_runbooks.append(canonical)
             except (ValueError, TypeError):
                 pass
 
-        # 方法3: 从 thinking_events 中提取 AI 实际 fetch 并使用的 runbook 标题
-        if not primary_runbooks and runbook_names:
-            for name in runbook_names:
-                if name.lower() in conclusion.lower():
-                    if name not in primary_runbooks:
-                        primary_runbooks.append(name)
-                        break  # 只取第一个匹配的
+        canonical_refs: List[str] = []
+        for rb in sorted(runbook_ids):
+            canonical = _canonicalize_runbook_name(rb, runbook_lookup)
+            if canonical and canonical not in canonical_refs:
+                canonical_refs.append(canonical)
+        for name in runbook_names:
+            canonical = _canonicalize_runbook_name(name, runbook_lookup)
+            if canonical and canonical not in canonical_refs:
+                canonical_refs.append(canonical)
+
+        # 方法3: 如果 AI 没给出合法核心 runbook，则在唯一合法参考 runbook 场景下回退为该 runbook
+        if not primary_runbooks and len(canonical_refs) == 1:
+            primary_runbooks.append(canonical_refs[0])
 
         metrics.primary_runbook = ', '.join(primary_runbooks) if primary_runbooks else None
 
-        # 参考 Runbook：展示所有 AI 调用过的 runbook（完整列表）
-        # 确保核心 Runbook 也在参考列表中
-        all_ref_names = list(runbook_names)  # 从 thinking_events 提取的
-        for pr in primary_runbooks:
-            if pr not in all_ref_names:
-                all_ref_names.insert(0, pr)
+        # 参考 Runbook：仅展示 catalog 中存在的 canonical runbook id
+        all_ref_names = list(primary_runbooks)
+        for ref in canonical_refs:
+            if ref not in all_ref_names:
+                all_ref_names.append(ref)
 
         # 过滤掉 QUERY 参考手册（非 QUERY 模式下不应出现）
         layer = state.get("layer")
@@ -234,8 +306,6 @@ def update_metrics_from_state(
 
         if all_ref_names:
             metrics.runbook_id = ', '.join(all_ref_names)
-        elif runbook_ids:
-            metrics.runbook_id = ', '.join(sorted(runbook_ids))
         else:
             metrics.runbook_id = None
 

@@ -49,7 +49,7 @@ class RunbookCatalog:
         if not self.catalog:
             return ""
         lines = ["# Available Runbooks",
-                 "If a runbook matches the issue, use the fetch_runbook tool to get detailed steps.", ""]
+                 "If one or more runbooks match the issue, use the fetch_runbook tool to get detailed steps for each relevant runbook.", ""]
         for e in self.catalog:
             lines.append(f"- **{e.id}** ({e.link}): {e.description}")
         return "\n".join(lines)

@@ -64,6 +64,15 @@ data:
           "description": "【L4】应用启动配置校验失败 — 应用在 bootstrap 阶段因业务配置缺失/非法主动退出，Pod 进入 CrashLoopBackOff。关键证据：容器日志含配置校验失败、缺少必填配置、业务参数非法；无 OOMKilled / Evicted / ImagePullBackOff。",
           "link": "l4-config-bootstrap-fail.md",
           "operations": ["诊断", "排查"]
+        },
+        {
+          "id": "private-k8s-health-reference",
+          "type": "reference",
+          "layer": "GENERAL",
+          "update_date": "2026-04-21",
+          "description": "【通用】私有化 Kubernetes 环境健康与高效排查参考手册 — 适用于 Calico + NFS + containerd 环境。强调当前状态优先、最小必要探测、按证据扩展，而不是每次做全量扫描。关键知识：Pod Running 不等于集群健康；Service/Endpoints、Node Conditions、PVC/NFS、CoreDNS/Calico、containerd/kubelet 都可能是当前故障来源。",
+          "link": "private-k8s-health-reference.md",
+          "operations": ["诊断", "排查", "健康检查"]
         }
       ]
     }
@@ -516,3 +525,293 @@ data:
     nproc        # CPU 核心数
     df -h        # 磁盘验证
     ```
+
+  # ==========================================================================
+  # 通用: 私有化 Kubernetes 环境健康与高效排查参考
+  # ==========================================================================
+  private-k8s-health-reference.md: |
+    # 私有化 Kubernetes 环境健康与高效排查参考手册
+
+    > 类型: reference | 适用: 私有化 Kubernetes 环境 | 环境特征: Calico + NFS + containerd
+
+    ## 目的
+
+    本手册不是某个具体故障的处理步骤，而是一个**额外知识参考**：
+    - 帮助理解在私有化 Kubernetes 环境中，健康检查应重点关注哪些资源与信号
+    - 帮助在诊断时兼顾**效率**和**完整性**
+    - 强调**当前状态优先**、**最小必要探测**、**按证据扩展**
+    - 参考完后如果有其他合适的场景的runbooks作为更加细致和详细的参考你也应该去引用和查看！
+
+    ## 核心原则
+
+    ### 原则 1: 健康检查不等于 Pod 全部 Running
+    以下情况都可能导致“Pod 看起来正常，但环境实际上不健康”：
+    - Pod Running，但 `Service` 没有 `Endpoints`
+    - Pod Running，但 `readinessProbe` 失败或 `availableReplicas < desiredReplicas`
+    - Node `Ready=True`，但存在 `MemoryPressure` / `DiskPressure`
+    - PVC 未绑定、NFS 挂载异常、CSI/挂载链路异常
+    - CoreDNS 正常运行，但 DNS 解析或上游转发异常
+    - Calico Pod 存活，但路由、策略或 BGP/overlay 出现异常
+
+    ### 原则 2: 当前状态优先于历史事件
+    - Events 只能作为线索，不能单独等于当前故障
+    - 只有当事件指向的对象**当前仍存在且当前仍异常**，才能作为当前故障依据
+    - 如果对象已恢复、已替换或已删除，则该事件只算历史背景
+
+    ### 原则 3: 最小必要探测，禁止默认全量扫描
+    高效排查的目标是：
+    - 先从用户问题涉及的对象与相邻资源面开始
+    - 先做**最便宜、最容易确认当前状态**的查询
+    - 已经获得足够证据后立即停止扩展
+
+    不推荐每次默认做：
+    - 所有命名空间全量 describe
+    - 所有节点日志遍历
+    - 全量 Prometheus 指标扫描
+    - 全量网络抓包
+
+    ### 原则 4: 先确认“当前是否真的异常”，再确认“异常在哪一面”
+    推荐顺序：
+    1. 用户提到的资源当前状态是否异常
+    2. 与其最相邻的资源面是否异常
+    3. 只有相邻面不能解释时，再扩大范围
+
+    ## 高效健康检查基线
+
+    当用户问“我的集群有什么问题”“现在健康吗”“这个服务为什么不通”时，优先覆盖以下检查面，但不要机械地全部展开。
+
+    ### 1. 节点面
+    关键对象:
+    - `Node`
+    - `Node Conditions`
+    - `kubelet`
+    - `containerd`
+
+    优先关注:
+    - `Ready`
+    - `MemoryPressure`
+    - `DiskPressure`
+    - `PIDPressure`
+    - 节点是否频繁切换 `Ready/NotReady`
+
+    最小检查:
+    ```bash
+    kubectl get nodes -o wide
+    kubectl describe node <node-name>
+    ```
+
+    何时继续深入:
+    - 只有当节点状态异常、条件异常、或大量 Pod 都集中在同一节点异常时
+    - 再去看 `journalctl -u kubelet`、`journalctl -u containerd`
+
+    ### 2. 工作负载面
+    关键对象:
+    - `Pod`
+    - `Deployment`
+    - `StatefulSet`
+    - `DaemonSet`
+    - `Job/CronJob`
+
+    优先关注:
+    - `CrashLoopBackOff`
+    - `OOMKilled`
+    - `Pending`
+    - `ContainerCreating`
+    - `Terminating`
+    - `readyReplicas` / `availableReplicas`
+
+    最小检查:
+    ```bash
+    kubectl get pods -A -o wide
+    kubectl get deploy,statefulset,daemonset -A
+    ```
+
+    何时继续深入:
+    - 只有当某个工作负载当前异常时，再对该对象执行 `describe` / `logs --previous`
+
+    ### 3. Service 与流量面
+    关键对象:
+    - `Service`
+    - `Endpoints`
+    - `EndpointSlice`
+    - `Ingress`
+    - CoreDNS
+    - Calico 相关组件
+
+    优先关注:
+    - `Service` 是否有 `Endpoints`
+    - selector 是否匹配到正确 Pod
+    - Pod 是否 `Ready`
+    - DNS 是否可解析
+    - Calico 网络插件是否正常
+
+    最小检查:
+    ```bash
+    kubectl get svc,endpoints,endpointslices -A
+    kubectl get pods -n kube-system -l k8s-app=kube-dns
+    kubectl get pods -n kube-system -l k8s-app=calico-node
+    ```
+
+    何时继续深入:
+    - 只有当“服务不可用、访问失败、DNS 异常、跨节点不通”时
+    - 再扩展到 `kubectl describe svc`、`iptables`、`tcpdump`、Calico 日志
+
+    ### 4. 存储面
+    关键对象:
+    - `PVC`
+    - `PV`
+    - `StorageClass`
+    - NFS 服务端可达性与导出目录
+
+    对于 NFS 环境，优先关注:
+    - `PVC Pending`
+    - 挂载超时或权限错误
+    - NFS 服务器不可达
+    - stale file handle / access denied / mount timeout
+
+    最小检查:
+    ```bash
+    kubectl get pvc,pv -A
+    kubectl describe pvc <pvc-name> -n <namespace>
+    kubectl describe pod <pod-name> -n <namespace>
+    ```
+
+    何时继续深入:
+    - 只有当 Pod 处于 `Pending` / `ContainerCreating` / `MountVolume` 相关错误时
+    - 再检查 NFS 服务端、导出目录、节点到 NFS 的网络连通性
+
+    ### 5. 控制面与基础组件
+    关键对象:
+    - `kube-apiserver`
+    - `etcd`
+    - `scheduler`
+    - `controller-manager`
+    - CoreDNS
+    - kube-proxy
+
+    这些对象不需要每次全查。只有在以下场景优先关注:
+    - 多个业务对象同时异常
+    - 节点大面积 NotReady
+    - API 调用明显失败、状态不一致
+    - Service/DNS 大面积失效
+
+    ## 按用户问题决定优先检查哪一面
+
+    ### 如果用户问“我的集群有什么问题”
+    先做最小检查：
+    1. `kubectl get nodes`
+    2. `kubectl get pods -A`
+    3. `kubectl get deploy,statefulset,daemonset -A`
+    4. 如用户反馈是“服务不通”，再看 `svc/endpoints`
+
+    ### 如果用户问“某服务为什么访问不到”
+    优先顺序：
+    1. `Service`
+    2. `Endpoints/EndpointSlice`
+    3. 后端 Pod 是否 `Ready`
+    4. DNS / Calico / kube-proxy
+
+    不要先做：
+    - 全集群所有 Pod logs
+    - 所有节点指标查询
+
+    ### 如果用户问“某 Pod 为什么起不来”
+    优先顺序：
+    1. `kubectl get pod`
+    2. `kubectl describe pod`
+    3. `kubectl logs --previous`
+    4. 如涉及挂载/调度/镜像，再扩展到 PVC、Node、Registry
+
+    ### 如果用户问“为什么 Pending”
+    优先考虑：
+    - 调度资源不足
+    - taint / affinity / nodeSelector
+    - PVC 未绑定
+    - NFS / 存储不可用
+
+    ### 如果用户问“为什么服务有问题但 Pod 都正常”
+    优先考虑：
+    - `Service` selector 错误
+    - `Endpoints` 为空
+    - Pod 未 Ready
+    - 端口映射错误
+    - DNS 解析失败
+    - Calico / kube-proxy 转发异常
+
+    ## 私有化环境下常见异常面
+
+    ### Calico 相关
+    常见问题:
+    - Pod 跨节点不通
+    - NetworkPolicy 拦截
+    - calico-node 异常
+    - 路由/BGP/overlay 配置异常
+
+    优先证据:
+    ```bash
+    kubectl get pods -n kube-system -l k8s-app=calico-node
+    kubectl logs -n kube-system ds/calico-node --tail=100
+    ```
+
+    ### NFS 相关
+    常见问题:
+    - PVC 长时间 Pending
+    - Pod 卡在挂载阶段
+    - `mount.nfs` 超时
+    - `access denied` / 权限异常
+
+    优先证据:
+    ```bash
+    kubectl describe pvc <pvc-name> -n <namespace>
+    kubectl describe pod <pod-name> -n <namespace>
+    ```
+
+    ### containerd 相关
+    常见问题:
+    - 容器无法创建
+    - 镜像拉取异常
+    - sandbox/container runtime 创建失败
+    - CRI 层异常导致 Pod 卡住
+
+    只有在 Pod 明显卡在 runtime 阶段时，再看:
+    ```bash
+    journalctl -u containerd -l --no-pager | tail -100
+    journalctl -u kubelet -l --no-pager | tail -100
+    ```
+
+    ## 低成本判断规则
+
+    | 当前现象 | 优先怀疑面 | 不要直接下的结论 |
+    |----------|------------|------------------|
+    | Pod Running，但服务不可用 | Service / Endpoints / Ready / DNS / Calico | 不能直接判定健康 |
+    | Pod Pending | 调度 / 资源 / PVC / Taint | 不能直接判定为应用错误 |
+    | Pod CrashLoopBackOff | L2/L4 | 不能只靠 event 判断，必须看 describe/logs |
+    | Node Ready 但有 Pressure | 节点资源压力 | 不能直接判定节点健康 |
+    | PVC Bound 但 Pod 挂载失败 | NFS / 节点挂载链路 | 不能只看 PVC 状态 |
+    | 历史 Warning 事件存在 | 只算线索 | 不能直接判定当前故障 |
+
+    ## 建议的“停止扩展”时机
+
+    在以下任一条件成立时，应停止继续扩大排查范围：
+    - 已找到当前明确异常对象
+    - 已形成能解释用户问题的直接证据链
+    - 新工具调用只会重复确认已有结论
+
+    换句话说：
+    - **先定位当前异常对象，再决定是否扩展**
+    - **不是先全量扫描，再从海量信息里找问题**
+
+    ## 与经典排错资料的一致性说明
+
+    本手册吸收了 Kubernetes Handbook 排错总览中的通用思路，但针对私有化环境进行了裁剪：
+    - 保留了 `Node / Pod / Network / PV / Tools` 这些核心检查面
+    - 强化了 `Service/Endpoints`、Calico、NFS、containerd
+    - 弱化了公有云特有的云盘、云 LB、云厂商网络依赖
+
+    参考资料:
+    - Kubernetes Handbook 排错总览: https://feisky.xyz/kubernetes-handbook/troubleshooting/
+    - 集群排错: https://kubernetes.feisky.xyz/troubleshooting/cluster
+    - Pod 排错: https://feisky.xyz/kubernetes-handbook/troubleshooting/pod.html
+    - 网络排错: https://feisky.xyz/kubernetes-handbook/troubleshooting/network.html
+    - PV 排错: https://kubernetes.feisky.xyz/troubleshooting/pv
+    - 排错工具: https://kubernetes.feisky.xyz/troubleshooting/tools

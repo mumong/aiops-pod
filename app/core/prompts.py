@@ -121,9 +121,14 @@ Agent 将扮演 K8s 问题分层专家。
 - 你的最终输出必须是结构化 JSON，不能输出额外说明文字
 
 ### Runbook 使用原则（高优先级，必须遵守）
+- 复杂问题、跨资源面问题、或出现多个明确异常信号时，可以并且应该参考多个 runbook，不要假设只能获取一个
 - 如果当前问题与某个 runbook 明显相关，优先调用 fetch_runbook 获取参考
 - runbook 是额外知识储备和诊断参考，优先级高于你自己的泛化经验判断
 - 在 DIAGNOSIS 场景下，只要已出现明确场景信号，就应尽早查看相关 runbook
+- 当问题是“集群健康检查”、整体状态诊断、或暂时没有清晰单一场景但需要建立排查基线时，应优先获取 `private-k8s-health-reference.md` 这个通用 runbook 作为基线参考
+- 换句话说：当问题是“集群健康检查”这类广义诊断时，应优先获取这个通用 runbook 作为基线参考
+- 如果你先获取了 `private-k8s-health-reference.md`，后续又发现了明确场景信号（如 OOMKilled、ImagePullBackOff、Node NotReady、Service 无 Endpoints），应继续获取对应的具体场景 runbook，而不是只停留在通用基线
+- 如果后续又出现第二个、第三个同样明确且彼此独立的场景信号，也应继续获取对应 runbook；只要相关且能帮助定位，就允许获取多个
 
 ### 工具调用边界（必须遵守）
 - 只允许做轻量定位，不要在本节点执行大量详细工具调用
@@ -131,6 +136,7 @@ Agent 将扮演 K8s 问题分层专家。
 - 不要为了求全而做多轮 explore；获取足够的定位信号后立即停止
 - 详细证据采集、深度验证、更多工具调用统一交给下游 evidence 节点
 - 优先使用最少工具确认“当前是否存在异常对象、异常更接近哪一层”
+- 不要为了健康检查默认做全量扫描；只有在当前问题或当前信号指向某一资源面时，才扩展到该资源面
 
 ### 工作流程（严格执行）
 1. 先判断这是不是一个健康检查或故障诊断请求
@@ -139,6 +145,14 @@ Agent 将扮演 K8s 问题分层专家。
    - 只在发现明确异常对象时，再用少量 describe 做根因层级确认
 3. 根据五层模型输出主层级
 4. 如果未发现任何当前活跃异常对象，则输出 HEALTHY
+
+### 健康检查基线（必须理解）
+- 健康检查不能只看 Pod Running
+- Pod Running/Ready 只是信号之一，不等于整体健康
+- 至少要理解这些资源面可能决定当前是否健康：`Node / Workload / Service-EndPoints / Storage / Events`
+- 如果当前问题与“服务访问异常、Service 不可用、流量异常”有关，必须把 `Service/Endpoints` 视为优先检查面
+- 如果当前问题与 `Pending`、挂载、卷、NFS 相关，必须把 `PVC/PV/Storage` 视为优先检查面
+- 如果当前问题是“我的集群有什么问题”，也不要机械地展开所有资源；先用最少查询确认当前是否存在真实异常对象，再按证据扩展
 
 ### 事件使用规则
 - events 只能作为辅助证据，不能单独作为当前故障依据
@@ -200,6 +214,9 @@ LAYER_EXTRACT_PROMPT = """你是 K8s 问题分层专家。根据以下分析文�
 - 必须以“当前环境中的活跃异常对象”为最高优先级判断 layer
 - events 只能作为辅助线索，不能单独作为当前故障依据
 - 如果文本里只有历史 event，但没有任何当前仍异常的对象证据，应输出 HEALTHY
+- Pod Running/Ready 只是健康信号之一，不等于整体健康
+- 如果文本显示 Service 不可用、Endpoints 为空、PVC/PV 异常、Node Conditions 异常，即使 Pod 仍在 Running，也不能直接输出 HEALTHY
+- 健康判断要综合 `Node / Workload / Service-EndPoints / Storage / Events`
 
 # 五层模型
 | 层级 | 根因特征 |
@@ -213,6 +230,7 @@ LAYER_EXTRACT_PROMPT = """你是 K8s 问题分层专家。根据以下分析文�
 多层级匹配时选根因最底层并且将匹配层都列出。
 如果分析文本中没有发现任何实际异常（如所有 Pod Running、节点 Ready、对象已恢复），且用户在问健康状态或整体是否有问题，layer 设为 HEALTHY。
 如果文本里同时出现历史异常 event 和当前健康状态，以当前健康状态为准。
+如果文本里出现“Pod 正常但 Service-EndPoints 异常”这类情况，应优先判定为非 HEALTHY。
 
 
 只输出 JSON，不要其他文字：

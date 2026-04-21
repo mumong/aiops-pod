@@ -130,7 +130,7 @@ class WorkflowNode(ABC):
             entries = self.runbook_catalog.catalog
             if entries:
                 lines = ["# Available Runbooks",
-                         "If a runbook matches the issue, use the fetch_runbook tool.", ""]
+                         "If one or more runbooks match the issue, use the fetch_runbook tool for each relevant runbook.", ""]
                 for e in entries:
                     desc = getattr(e, 'description', '') or ''
                     link = getattr(e, 'link', '') or ''
