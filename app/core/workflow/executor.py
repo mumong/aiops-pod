@@ -8,6 +8,7 @@
 - 记录性能指标和质量指标
 """
 
+import copy
 import uuid
 import os
 import time
@@ -88,6 +89,7 @@ class WorkflowExecutor:
         question: str,
         run_id: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
+        workflow_overrides: Optional[Dict[str, Any]] = None,
     ) -> Generator[Dict, None, None]:
         """
         流式执行工作流（SSE 兼容）
@@ -115,11 +117,26 @@ class WorkflowExecutor:
             metrics.start_time = time.time()
 
         # 每次请求重建 workflow（并发安全，避免共享节点实例）
-        wf_config = getattr(self.holmes_service, "workflow_config", {}) or {}
+        wf_config = copy.deepcopy(getattr(self.holmes_service, "workflow_config", {}) or {})
+        if workflow_overrides:
+            for key, value in workflow_overrides.items():
+                if isinstance(value, dict) and isinstance(wf_config.get(key), dict):
+                    merged = dict(wf_config.get(key, {}))
+                    merged.update(value)
+                    wf_config[key] = merged
+                else:
+                    wf_config[key] = value
         node_config = wf_config.get("nodes", {})
+        query_mode = "full"
+        if workflow_overrides:
+            query_mode = str(workflow_overrides.get("query_mode", "full")).strip().lower() or "full"
+        wf_config.pop("query_mode", None)
+        if workflow_overrides and "query_mode" in workflow_overrides:
+            wf_config["query_mode"] = query_mode
         workflow, node_instances = build_diagnosis_workflow(
             self.holmes_service, metrics, self.runbook_catalog,
             node_config=node_config,
+            query_mode=query_mode,
         )
 
         # Propagate aicall to nodes if available
@@ -128,6 +145,7 @@ class WorkflowExecutor:
                 node.ai_call = self.ai_call
                 node.tools = self.mcp_tools or []
                 node.cancel_event = cancel_event  # 传递取消信号
+                node.workflow_config_override = wf_config
                 logger.debug("   🔧 [%s] ai_call=%s tools=%d",
                              node.node_id, type(node.ai_call).__name__, len(node.tools))
 

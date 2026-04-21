@@ -35,6 +35,11 @@ class SubAgentResult:
 class SubAgentClient:
     """异步 HTTP 客户端，调用单个子集群的 /ask 端点"""
 
+    @staticmethod
+    def _build_url(agent: SubAgentConfig, endpoint_path: str) -> str:
+        path = endpoint_path if endpoint_path.startswith("/") else f"/{endpoint_path}"
+        return f"{agent.url}{path}"
+
     async def query(
         self,
         agent: SubAgentConfig,
@@ -42,6 +47,7 @@ class SubAgentClient:
         max_steps: int = 30,
         conclusion_max_tokens: int = 8192,
         timeout: float = 300.0,
+        endpoint_path: str = "/ask",
     ) -> SubAgentResult:
         """
         向子集群发起同步（stream=false）查询请求。
@@ -56,7 +62,7 @@ class SubAgentClient:
         Returns:
             SubAgentResult
         """
-        url = f"{agent.url}/ask"
+        url = self._build_url(agent, endpoint_path)
         start = time.monotonic()
         logger.info(f"[FEDERATION] 开始查询子集群 {agent.name}: {url}")
 
@@ -150,6 +156,7 @@ class SubAgentClient:
                     q["question"],
                     q.get("max_steps", 30),
                     q.get("conclusion_max_tokens", 8192),
+                    q.get("endpoint_path", "/ask"),
                 )
                 for q in queries
             ]
@@ -162,9 +169,10 @@ class SubAgentClient:
         question: str,
         max_steps: int,
         conclusion_max_tokens: int,
+        endpoint_path: str,
     ) -> SubAgentResult:
         """使用已有的 httpx.AsyncClient 查询单个子集群"""
-        url = f"{agent.url}/ask"
+        url = self._build_url(agent, endpoint_path)
         start = time.monotonic()
         logger.info(f"[FEDERATION] 开始查询子集群 {agent.name}: {url}")
 
@@ -228,12 +236,13 @@ class SubAgentClient:
         max_steps: int = 30,
         conclusion_max_tokens: int = 8192,
         timeout: float = 1800.0,
+        endpoint_path: str = "/ask",
     ):
         """
         流式查询子集群，逐 chunk yield (cluster_name, chunk_text)。
         用于联邦查询的实时输出：主集群边收边转发给用户。
         """
-        url = f"{agent.url}/ask"
+        url = self._build_url(agent, endpoint_path)
         logger.info(f"[FEDERATION] 开始实时流式查询 {agent.name}: {url}")
 
         try:
@@ -269,6 +278,7 @@ class SubAgentClient:
         max_steps: int = 30,
         conclusion_max_tokens: int = 8192,
         timeout: float = 1800.0,
+        endpoint_path: str = "/ask",
     ) -> SubAgentResult:
         """
         向子集群发起流式（stream=true, format=text）查询请求。
@@ -287,14 +297,14 @@ class SubAgentClient:
             SubAgentResult（text 为完整的流式文本拼接）
         """
         start = time.monotonic()
-        logger.info(f"[FEDERATION] 开始流式查询子集群 {agent.name}: {agent.url}/ask")
+        logger.info(f"[FEDERATION] 开始流式查询子集群 {agent.name}: {self._build_url(agent, endpoint_path)}")
 
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(timeout, connect=10.0)
             ) as client:
                 return await self._query_stream_with_client(
-                    client, agent, question, max_steps, conclusion_max_tokens
+                    client, agent, question, max_steps, conclusion_max_tokens, endpoint_path
                 )
         except httpx.TimeoutException:
             elapsed = time.monotonic() - start
@@ -320,9 +330,10 @@ class SubAgentClient:
         question: str,
         max_steps: int,
         conclusion_max_tokens: int,
+        endpoint_path: str,
     ) -> SubAgentResult:
         """使用已有的 httpx.AsyncClient 流式查询单个子集群"""
-        url = f"{agent.url}/ask"
+        url = self._build_url(agent, endpoint_path)
         start = time.monotonic()
         # batch 场景下此方法直接被调用，需要日志
         logger.debug(f"[FEDERATION] 流式请求子集群 {agent.name}: {url}")
@@ -409,6 +420,7 @@ class SubAgentClient:
                     q["question"],
                     q.get("max_steps", 30),
                     q.get("conclusion_max_tokens", 8192),
+                    q.get("endpoint_path", "/ask"),
                 )
                 for q in queries
             ]
