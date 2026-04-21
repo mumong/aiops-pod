@@ -59,10 +59,21 @@ class LayerClassifierNode(WorkflowNode):
             return self.holmes_service.get_prompt_language()
         return "zh"
 
+    def _get_query_mode(self) -> str:
+        wf_config = getattr(self, "workflow_config_override", None) or {}
+        return str(wf_config.get("query_mode", "full")).strip().lower() or "full"
+
+    def _is_direct_query_mode(self) -> bool:
+        return self._get_query_mode() == "direct"
+
     def _get_layer_prompt(self) -> str:
+        if self._is_direct_query_mode():
+            return get_workflow_prompt("layer_query_direct", prompt_language=self._get_prompt_language())
         return get_workflow_prompt("layer", prompt_language=self._get_prompt_language())
 
     def _get_layer_extract_prompt(self) -> str:
+        if self._is_direct_query_mode():
+            return get_workflow_prompt("layer_query_direct_extract", prompt_language=self._get_prompt_language())
         return get_workflow_prompt("layer_extract", prompt_language=self._get_prompt_language())
     
     def execute(self, state: WorkflowState) -> WorkflowState:
@@ -90,8 +101,6 @@ class LayerClassifierNode(WorkflowNode):
                 layer_result = self._analyze_with_rules(question)
                 thinking_events = []
 
-            layer_result = self._normalize_result_from_runtime_signals(layer_result, thinking_events)
-
             # 解析层级
             layer = self._parse_layer(layer_result.get("layer", "L2"))
 
@@ -101,6 +110,7 @@ class LayerClassifierNode(WorkflowNode):
 
             # 提取阶段1的完整分析文本（包含工具调用数据），单独传递给下游
             full_analysis = layer_result.pop("full_analysis", "")
+            query_result = layer_result.pop("query_result", None)
 
             new_state.update({
                 "layer": layer,
@@ -114,6 +124,8 @@ class LayerClassifierNode(WorkflowNode):
                 "key_entities": layer_result.get("key_entities", []),
                 "possible_scenarios": layer_result.get("possible_scenarios", []),
             })
+            if layer == Layer.QUERY and self._is_direct_query_mode() and isinstance(query_result, dict):
+                new_state["query_result"] = query_result
 
             # 存入 thinking_events（带 node 标记）
             self._save_thinking(state, new_state, thinking_events)
@@ -137,6 +149,7 @@ class LayerClassifierNode(WorkflowNode):
             raw_layers = rescue_result.get("layers", [])
             layers = [self._parse_layer(l) for l in raw_layers if l] if raw_layers else [layer]
             full_analysis = rescue_result.pop("full_analysis", "")
+            query_result = rescue_result.pop("query_result", None)
 
             new_state.update({
                 "layer": layer,
@@ -148,6 +161,8 @@ class LayerClassifierNode(WorkflowNode):
                 "key_entities": rescue_result.get("key_entities", []),
                 "possible_scenarios": rescue_result.get("possible_scenarios", []),
             })
+            if layer == Layer.QUERY and self._is_direct_query_mode() and isinstance(query_result, dict):
+                new_state["query_result"] = query_result
             self._save_thinking(state, new_state, [])
 
         return new_state
@@ -314,89 +329,6 @@ class LayerClassifierNode(WorkflowNode):
             parts.extend(tool_data)
 
         return "\n".join(parts)
-
-    def _is_event_like_output(tool_name: str, text: str) -> bool:
-        tool_lower = (tool_name or "").lower()
-        if "event" in tool_lower:
-            return True
-        if re.search(r"\bWarning\b", text) and re.search(r"\b(Pod|Node|Service|Deployment|ReplicaSet|StatefulSet|DaemonSet)/", text):
-            return True
-        if "LAST SEEN" in text and "REASON" in text and "MESSAGE" in text:
-            return True
-        return False
-
-    @classmethod
-    def _contains_event_anomaly_signal(cls, tool_name: str, text: str) -> bool:
-        if not cls._is_event_like_output(tool_name, text):
-            return False
-        return bool(re.search(
-            r"\b(Warning|BackOff|Failed|Unhealthy|FailedScheduling|FailedMount|Evicted|Killing)\b",
-            text,
-            re.IGNORECASE,
-        ))
-
-    @classmethod
-    def _contains_current_abnormal_signal(cls, tool_name: str, text: str) -> bool:
-        if cls._is_event_like_output(tool_name, text):
-            return False
-        return bool(re.search(
-            r"\b(CrashLoopBackOff|ImagePullBackOff|ErrImagePull|OOMKilled|Evicted|"
-            r"CreateContainerConfigError|CreateContainerError|RunContainerError|"
-            r"ContainerStatusUnknown|NotReady|Pending|Failed)\b",
-            text,
-            re.IGNORECASE,
-        ))
-
-    @classmethod
-    def _has_only_historical_event_anomalies(cls, thinking_events: list) -> bool:
-        saw_event_anomaly = False
-        saw_live_anomaly = False
-
-        for ev in thinking_events:
-            if ev.get("type") != "tool_result" or ev.get("status") != "success":
-                continue
-            tool_name = ev.get("tool_name", "")
-            text = ev.get("result", "") or ev.get("result_preview", "") or ""
-            if not text:
-                continue
-
-            if cls._contains_current_abnormal_signal(tool_name, text):
-                saw_live_anomaly = True
-
-            if cls._contains_event_anomaly_signal(tool_name, text):
-                saw_event_anomaly = True
-
-        return saw_event_anomaly and not saw_live_anomaly
-
-    def _normalize_result_from_runtime_signals(self, result: Dict[str, Any], thinking_events: list) -> Dict[str, Any]:
-        """当前状态优先：若仅有历史事件异常而无任何活跃异常对象，则收敛为 HEALTHY。"""
-        if not isinstance(result, dict):
-            return result
-
-        layer = str(result.get("layer", "")).upper()
-        if layer in {"", "QUERY", "HEALTHY"}:
-            return result
-
-        if not self._has_only_historical_event_anomalies(thinking_events):
-            return result
-
-        normalized = dict(result)
-        original_reasoning = str(normalized.get("reasoning", "")).strip()
-        normalized.update({
-            "layer": "HEALTHY",
-            "layers": ["HEALTHY"],
-            "layer_name": "集群健康",
-            "confidence": min(float(normalized.get("confidence", 0.5)), 0.4),
-            "reasoning": (
-                "当前状态检查未发现活跃异常对象；仅发现无法被当前状态再次确认的历史事件，"
-                "这些历史事件不能作为当前故障依据，因此收敛为 HEALTHY。"
-                + (f" 原始判定依据: {original_reasoning}" if original_reasoning else "")
-            ),
-            "possible_scenarios": [],
-        })
-        logger.info("🧹 [layer] 仅检测到历史事件异常、未发现当前活跃异常对象，结果收敛为 HEALTHY")
-        return normalized
-
 
     def _analyze_with_rules(self, question: str) -> Dict:
         """无 LLM 时的低置信度兜底分类，避免使用人工关键词规则主导分类。"""

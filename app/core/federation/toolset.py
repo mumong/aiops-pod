@@ -71,6 +71,7 @@ class QueryClusterTool(Tool):
         question = params.get("question")
         max_steps = params.get("max_steps", 30)
         conclusion_max_tokens = params.get("conclusion_max_tokens", 8192)
+        endpoint_path = (context or {}).get("federation_endpoint_path", "/ask")
 
         if not cluster_name or not question:
             return {"error": "Missing required parameters: cluster_name and question"}
@@ -102,7 +103,8 @@ class QueryClusterTool(Tool):
                     question=question,
                     max_steps=max_steps,
                     conclusion_max_tokens=conclusion_max_tokens,
-                    timeout=1800.0
+                    timeout=1800.0,
+                    endpoint_path=endpoint_path,
                 )
             )
 
@@ -190,8 +192,9 @@ class FederationToolset(Toolset):
                 return tool
         return None
 
-    def get_context(self) -> Dict[str, Any]:
+    def get_context(self, endpoint_path: str = "/ask") -> Dict[str, Any]:
         """提供工具执行所需的上下文"""
         return {
-            "federation_registry": self._registry
+            "federation_registry": self._registry,
+            "federation_endpoint_path": endpoint_path,
         }

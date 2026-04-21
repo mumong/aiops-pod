@@ -207,7 +207,13 @@ class FederationAggregator:
         self._api_key = api_key
         self._api_base = api_base
 
-    async def query_all(self, question: str, max_steps: int, conclusion_max_tokens: int = 8192) -> List[SubAgentResult]:
+    async def query_all(
+        self,
+        question: str,
+        max_steps: int,
+        conclusion_max_tokens: int = 8192,
+        endpoint_path: str = "/ask",
+    ) -> List[SubAgentResult]:
         """并发查询所有已启用的子集群"""
         agents = self._registry.get_enabled_agents()
         if not agents:
@@ -226,6 +232,7 @@ class FederationAggregator:
                 max_steps=max_steps,
                 conclusion_max_tokens=conclusion_max_tokens,
                 timeout=self._synthesis_timeout,
+                endpoint_path=endpoint_path,
             )
             for agent in agents
         ]

@@ -362,7 +362,9 @@ class HolmesService:
         system_prompt: Optional[str] = None,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
-        max_steps: int = 50
+        max_steps: int = 50,
+        workflow_overrides: Optional[Dict[str, Any]] = None,
+        workflow_title: str = "工作流诊断模式",
     ) -> dict:
         """执行查询并返回结果（收集流式工作流输出为完整文本）"""
         start_time = datetime.now()
@@ -399,6 +401,8 @@ class HolmesService:
                 question=question,
                 max_steps=max_steps,
                 output_format="text",
+                workflow_overrides=workflow_overrides,
+                workflow_title=workflow_title,
             ):
                 chunks.append(chunk)
             full_text = "".join(chunks)
@@ -426,6 +430,8 @@ class HolmesService:
         max_steps: int = 50,
         output_format: str = "text",
         cancel_event: Optional[Any] = None,
+        workflow_overrides: Optional[Dict[str, Any]] = None,
+        workflow_title: str = "工作流诊断模式",
     ) -> Generator[str, None, None]:
         """执行查询并以流式方式返回结果"""
         import time
@@ -454,6 +460,8 @@ class HolmesService:
             question=question,
             output_format=output_format,
             cancel_event=cancel_event,
+            workflow_overrides=workflow_overrides,
+            workflow_title=workflow_title,
         )
 
     def _execute_query_stream_workflow(
@@ -461,6 +469,8 @@ class HolmesService:
         question: str,
         output_format: str = "sse",
         cancel_event: Optional[Any] = None,
+        workflow_overrides: Optional[Dict[str, Any]] = None,
+        workflow_title: str = "工作流诊断模式",
     ) -> Generator[str, None, None]:
         """使用工作流模式执行查询，支持 text 和 sse 两种输出格式"""
         try:
@@ -472,11 +482,21 @@ class HolmesService:
             logger.debug("🔀 [Workflow] aicall 路径激活 | tools=%d", len(executor.mcp_tools))
 
             if output_format == "text":
-                yield from self._workflow_to_text(executor, question, cancel_event=cancel_event)
+                yield from self._workflow_to_text(
+                    executor,
+                    question,
+                    cancel_event=cancel_event,
+                    workflow_overrides=workflow_overrides,
+                    workflow_title=workflow_title,
+                )
                 return
 
             # SSE 格式输出
-            for event in executor.execute_stream(question, cancel_event=cancel_event):
+            for event in executor.execute_stream(
+                question,
+                cancel_event=cancel_event,
+                workflow_overrides=workflow_overrides,
+            ):
                 event_type = event.get("type", "unknown")
                 payload = {k: v for k, v in event.items() if k != "type"}
                 yield create_sse_message_cn(event_type, payload)
@@ -504,6 +524,8 @@ class HolmesService:
         executor: Any,
         question: str,
         cancel_event: Optional[Any] = None,
+        workflow_overrides: Optional[Dict[str, Any]] = None,
+        workflow_title: str = "工作流诊断模式",
     ) -> Generator[str, None, None]:
         """工作流执行结果转换为美观的文本格式，专为终端 curl 优化"""
         import json
@@ -542,7 +564,7 @@ class HolmesService:
             return "\n".join(lines)
 
         yield emit("=" * 70)
-        yield emit("🔄 K8s AIOps Copilot - 工作流诊断模式")
+        yield emit(f"🔄 K8s AIOps Copilot - {workflow_title}")
         yield emit("=" * 70)
         yield emit("")
 
@@ -556,7 +578,11 @@ class HolmesService:
         _token_streaming_active = False
         node_outputs = {"layer": "", "evidence": "", "rca": "", "conclusion": ""}
 
-        for event in executor.execute_stream(question, cancel_event=cancel_event):
+        for event in executor.execute_stream(
+            question,
+            cancel_event=cancel_event,
+            workflow_overrides=workflow_overrides,
+        ):
             event_type = event.get("type", "unknown")
 
             if event_type == "run_start":

@@ -8,7 +8,7 @@ from app.core.service import HolmesService
 from app.core.prompts import (
     EVIDENCE_COLLECTOR_PROMPT,
     LAYER_CLASSIFIER_PROMPT,
-    QUERY_EVIDENCE_NORMALIZATION_PROMPT_ZH,
+    get_query_evidence_normalization_prompt,
     get_conclusion_mode_instruction,
     get_workflow_prompt,
 )
@@ -163,142 +163,82 @@ def test_layer_stage1_non_json_output_uses_lite_extraction():
     assert returned_events == thinking_events
 
 
-def test_layer_normalizes_event_only_anomalies_to_healthy():
+def test_layer_execute_keeps_llm_result_when_only_historical_events_exist():
     node = LayerClassifierNode()
-    result = {
-        "layer": "L2",
-        "layers": ["L2"],
-        "layer_name": "工作负载层",
-        "confidence": 0.72,
-        "reasoning": "发现 Warning 事件，怀疑工作负载异常",
-        "key_entities": [],
-        "possible_scenarios": [],
-    }
-    thinking_events = [
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubernetes_jq_query",
-            "result": "aiops-e2e Warning BackOff Pod/appconfigfail-123: Back-off restarting failed container app",
-        },
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubectl_get_by_kind_in_namespace",
-            "result": "No resources found in aiops-e2e namespace.",
-        },
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubectl_get_by_kind_in_cluster",
-            "result": "NAME     STATUS   ROLES\nmaster   Ready    control-plane\nnode1    Ready    <none>",
-        },
-    ]
 
-    normalized = node._normalize_result_from_runtime_signals(result, thinking_events)
+    def _fake_llm(question):
+        return (
+            {
+                "layer": "L2",
+                "layers": ["L2"],
+                "layer_name": "工作负载层",
+                "confidence": 0.72,
+                "reasoning": "发现 Warning 事件，怀疑工作负载异常",
+                "key_entities": [],
+                "possible_scenarios": [],
+            },
+            [
+                {
+                    "type": "tool_result",
+                    "status": "success",
+                    "tool_name": "kubernetes_jq_query",
+                    "result": "aiops-e2e Warning BackOff Pod/appconfigfail-123: Back-off restarting failed container app",
+                },
+                {
+                    "type": "tool_result",
+                    "status": "success",
+                    "tool_name": "kubectl_get_by_kind_in_namespace",
+                    "result": "No resources found in aiops-e2e namespace.",
+                },
+                {
+                    "type": "tool_result",
+                    "status": "success",
+                    "tool_name": "kubectl_get_by_kind_in_cluster",
+                    "result": "NAME STATUS ROLES\nmaster Ready control-plane\nnode1 Ready <none>",
+                },
+            ],
+        )
 
-    assert normalized["layer"] == "HEALTHY"
-    assert normalized["layers"] == ["HEALTHY"]
-    assert normalized["confidence"] <= 0.72
-    assert "历史事件" in normalized["reasoning"]
+    node.ai_call = object()
+    node._analyze_with_llm = _fake_llm
+
+    result = node.execute({"question": "我的集群有什么问题？"})
+
+    assert result["layer"] == Layer.L2
+    assert result["layer_reasoning"] == "发现 Warning 事件，怀疑工作负载异常"
 
 
-def test_layer_keeps_non_healthy_when_live_abnormal_signal_exists():
+def test_layer_execute_keeps_llm_result_when_live_abnormal_signal_exists():
     node = LayerClassifierNode()
-    result = {
-        "layer": "L2",
-        "layers": ["L2"],
-        "layer_name": "工作负载层",
-        "confidence": 0.88,
-        "reasoning": "发现当前存在 CrashLoopBackOff Pod",
-        "key_entities": [],
-        "possible_scenarios": [],
-    }
-    thinking_events = [
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubectl_get_by_kind_in_namespace",
-            "result": "NAME READY STATUS RESTARTS\nappconfigfail-123 0/1 CrashLoopBackOff 5",
-        }
-    ]
 
-    normalized = node._normalize_result_from_runtime_signals(result, thinking_events)
+    def _fake_llm(question):
+        return (
+            {
+                "layer": "L2",
+                "layers": ["L2"],
+                "layer_name": "工作负载层",
+                "confidence": 0.88,
+                "reasoning": "发现当前存在 CrashLoopBackOff Pod",
+                "key_entities": [],
+                "possible_scenarios": [],
+            },
+            [
+                {
+                    "type": "tool_result",
+                    "status": "success",
+                    "tool_name": "kubectl_get_by_kind_in_namespace",
+                    "result": "NAME READY STATUS RESTARTS\nappconfigfail-123 0/1 CrashLoopBackOff 5",
+                }
+            ],
+        )
 
-    assert normalized["layer"] == "L2"
-    assert normalized["reasoning"] == "发现当前存在 CrashLoopBackOff Pod"
+    node.ai_call = object()
+    node._analyze_with_llm = _fake_llm
 
+    result = node.execute({"question": "我的服务为什么异常"})
 
-def test_layer_should_stop_when_only_stale_events_remain_after_healthy_snapshots():
-    node = LayerClassifierNode()
-    thinking_events = [
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubectl_get_by_kind_in_cluster",
-            "result": "NAMESPACE NAME READY STATUS RESTARTS\ndefault app 1/1 Running 0\nkube-system coredns 1/1 Running 0",
-        },
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubectl_get_by_kind_in_cluster",
-            "result": "NAME STATUS ROLES\nmaster Ready control-plane\nnode1 Ready <none>",
-        },
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "run_bash_command",
-            "result": '{"success": true, "stdout": "NAMESPACE   LAST SEEN   TYPE      REASON    OBJECT                               MESSAGE\\naiops-e2e   48m         Warning   BackOff   pod/appconfigfail-123               Back-off restarting failed container app"}',
-        },
-    ]
-
-    assert node._should_stop_collection_early(thinking_events) is True
-
-
-def test_layer_should_not_stop_for_recent_events():
-    node = LayerClassifierNode()
-    thinking_events = [
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubectl_get_by_kind_in_cluster",
-            "result": "NAMESPACE NAME READY STATUS RESTARTS\ndefault app 1/1 Running 0",
-        },
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubectl_get_by_kind_in_cluster",
-            "result": "NAME STATUS ROLES\nmaster Ready control-plane",
-        },
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "run_bash_command",
-            "result": '{"success": true, "stdout": "NAMESPACE   LAST SEEN   TYPE      REASON    OBJECT                               MESSAGE\\naiops-e2e   2m          Warning   BackOff   pod/appconfigfail-123               Back-off restarting failed container app"}',
-        },
-    ]
-
-    assert node._should_stop_collection_early(thinking_events) is False
-
-
-def test_layer_should_not_stop_when_live_abnormal_object_exists():
-    node = LayerClassifierNode()
-    thinking_events = [
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "kubectl_get_by_kind_in_cluster",
-            "result": "NAMESPACE NAME READY STATUS RESTARTS\ndefault app 0/1 CrashLoopBackOff 3",
-        },
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "run_bash_command",
-            "result": '{"success": true, "stdout": "NAMESPACE   LAST SEEN   TYPE      REASON    OBJECT                               MESSAGE\\ndefault     48m         Warning   BackOff   pod/app               Back-off restarting failed container app"}',
-        },
-    ]
-
-    assert node._should_stop_collection_early(thinking_events) is False
+    assert result["layer"] == Layer.L2
+    assert result["layer_reasoning"] == "发现当前存在 CrashLoopBackOff Pod"
 
 
 def test_layer_uses_llm_for_clear_query_requests():
@@ -607,68 +547,67 @@ def test_rca_lite_mode_exception_uses_generic_llm_fallback_without_rules():
     assert thinking_events == []
 
 
-def test_layer_prompts_prioritize_user_intent_for_query_requests():
+def test_layer_prompt_is_diagnosis_and_healthy_only():
     expected_phrases = [
-        "先判断用户意图",
-        "如果用户明确是在查询指标/状态/列表/资源使用率，优先判定为 QUERY",
-        "QUERY 场景下，不要因为集群中存在其他异常 Pod 就自动转入故障诊断",
-        "只有当用户明确问“有什么问题 / 为什么异常 / 帮我排查 / 根因是什么”时，才进入 L0-L4 定层诊断流程",
+        "这个节点只服务于诊断类和健康检查类请求",
+        "这个节点只服务于诊断类和健康检查类请求，负责输出 `HEALTHY / L0 / L1 / L2 / L3 / L4`",
+        "你只负责“定位分析”和“定层”，不负责完整证据采集",
+        "详细证据采集、深度验证、更多工具调用统一交给下游 evidence 节点",
     ]
 
     for phrase in expected_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
+    assert "QUERY" not in LAYER_CLASSIFIER_PROMPT.split("### 输出要求")[1]
 
 
 def test_layer_prompt_requires_event_validation_against_current_state():
     expected_phrases = [
-        "events 只能作为辅助证据，不能单独作为当前故障的判定依据",
-        "如果 Warning 事件指向某个 Pod/Node/Workload，必须再用当前状态查询确认该对象仍然存在且当前仍异常",
-        "如果事件对应对象已经不存在，或当前状态已恢复正常，则该事件视为历史噪音，不得据此判定当前存在故障",
-        "对于陈旧事件，应降低优先级；如果事件时间明显早于当前诊断窗口，默认视为历史线索而非当前故障",
+        "events 只能作为辅助证据",
+        "当前环境中的活跃异常对象",
+        "如果 Warning 事件指向某个 Pod/Node/Workload",
+        "该事件视为历史噪音",
+        "不要把“曾经发生过异常”当成“当前仍有故障”",
     ]
 
     for phrase in expected_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
 
 
-def test_query_prompt_boundaries_are_explicit_between_layer_and_evidence():
-    layer_phrases = [
-        "如果当前请求是 QUERY，你的任务只是在阶段1识别查询意图、提取查询对象、指标、范围和维度",
-        "不要在 layer 节点中尝试直接回答用户问题",
-        "不要在 layer 节点中做指标计算、结果聚合、脚本拼接、jq 处理、bash 推导或资源估算",
-        "QUERY 模式下，真实数据采集统一交给 evidence 节点完成",
-    ]
-    evidence_phrases = [
-        "layer=QUERY：你负责真实数据采集和返回查询结果所需的数据",
-        "不要把 QUERY 请求再退回给 layer 节点处理",
-        "在本节点内完成查询语义归一化，输出给下游可直接渲染的结构化结果",
-        "只保留用户明确询问的对象、维度和指标，不扩展无关指标",
-    ]
-
-    for phrase in layer_phrases:
-        assert phrase in LAYER_CLASSIFIER_PROMPT
-
-    for phrase in evidence_phrases:
-        assert phrase in EVIDENCE_COLLECTOR_PROMPT
-
-
-def test_query_evidence_normalization_prompt_defines_json_only_contract():
+def test_layer_extract_prompt_is_current_state_first():
+    extract_prompt = get_workflow_prompt("layer_extract")
     expected_phrases = [
-        "把 QUERY 请求整理成一个稳定的结构化 JSON",
-        "你不负责重新查询，不负责诊断，不负责根因分析，只负责把真实结果归一化",
-        "只保留用户明确询问的对象、维度和指标",
-        "输出必须是可解析 JSON，不要输出 Markdown，不要输出解释性前言",
+        "必须以“当前环境中的活跃异常对象”为最高优先级判断 layer",
+        "events 只能作为辅助线索，不能单独作为当前故障依据",
+        "如果文本里只有历史 event，但没有任何当前仍异常的对象证据，应输出 HEALTHY",
+        "如果文本里同时出现历史异常 event 和当前健康状态，以当前健康状态为准。",
     ]
 
     for phrase in expected_phrases:
-        assert phrase in QUERY_EVIDENCE_NORMALIZATION_PROMPT_ZH
+        assert phrase in extract_prompt
+
+
+def test_query_direct_prompt_boundaries_are_explicit():
+    direct_prompt = get_workflow_prompt("layer_query_direct")
+    expected_phrases = [
+        "如果是 QUERY，你必须调用工具采集真实数据，并在最终 JSON 中直接输出 `query_result`",
+        "只采集用户明确询问的对象、维度和指标，不扩展无关指标",
+        "一旦已经获得回答用户问题所需的关键数据，立即停止采集",
+        "`query_result` 必须可直接被 conclusion 节点渲染",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in direct_prompt
+
+
+def test_query_evidence_normalization_prompt_is_disabled():
+    assert get_query_evidence_normalization_prompt("zh") == ""
 
 
 def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
     expected_phrases = [
-        "如果当前问题与某个 runbook 明显相关，优先调用 fetch_runbook 获取参考",
-        "runbook 是额外知识储备和诊断参考，优先级高于你自己的泛化经验判断",
-        "在 DIAGNOSIS 场景下，只要已出现明确场景信号，就应尽早查看相关 runbook",
+        "### Runbook 使用原则",
+        "优先调用 fetch_runbook 获取参考",
+        "runbook 是额外知识储备和诊断参考",
     ]
 
     for phrase in expected_phrases:
@@ -679,9 +618,16 @@ def test_workflow_prompts_default_to_chinese_and_support_english_switch():
     zh_prompt = get_workflow_prompt("layer")
     en_prompt = get_workflow_prompt("layer", prompt_language="en")
 
-    assert "角色：K8s 问题分层专家" in zh_prompt
-    assert "Role: Kubernetes issue layer classifier" in en_prompt
-    assert "先判断用户意图" not in en_prompt
+    assert "诊断类和健康检查类请求" in zh_prompt
+    assert en_prompt == zh_prompt
+
+
+def test_english_layer_prompt_is_diagnosis_and_healthy_only():
+    en_prompt = get_workflow_prompt("layer", prompt_language="en")
+
+    assert "诊断类和健康检查类请求" in en_prompt
+    assert "If QUERY" not in en_prompt
+    assert '"layer": "HEALTHY/L0/L1/L2/L3/L4/QUERY"' not in en_prompt
 
 
 def test_conclusion_prompt_supports_independent_response_language():
@@ -691,7 +637,7 @@ def test_conclusion_prompt_supports_independent_response_language():
         response_language="en",
     )
 
-    assert "You are a senior Kubernetes diagnostic report expert." in prompt
+    assert "你是资深 K8s 诊断报告专家" in prompt
     assert "All user-facing final report text must be in English." in prompt
 
 
@@ -702,8 +648,8 @@ def test_conclusion_mode_instructions_are_centrally_managed():
 
     assert "只回答用户明确询问的对象、维度和指标" in query_instruction
     assert "绝对不要猜测" in query_instruction
-    assert "集群当前运行正常，未发现异常" in healthy_instruction
-    assert "Never guess" in query_instruction_en
+    assert healthy_instruction == ""
+    assert "绝对不要猜测" in query_instruction_en
     assert "show CPU" in query_instruction_en
 
 
