@@ -573,6 +573,43 @@ def test_layer_prompt_requires_event_validation_against_current_state():
         assert phrase in LAYER_CLASSIFIER_PROMPT
 
 
+def test_layer_prompt_defines_health_baseline_and_efficiency_rules():
+    expected_phrases = [
+        "健康检查不能只看 Pod Running",
+        "Pod Running/Ready 只是信号之一，不等于整体健康",
+        "Node / Workload / Service-EndPoints / Storage / Events",
+        "不要为了健康检查默认做全量扫描",
+        "只有在当前问题或当前信号指向某一资源面时，才扩展到该资源面",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in LAYER_CLASSIFIER_PROMPT
+
+
+def test_layer_prompt_prioritizes_private_k8s_health_reference_runbook():
+    expected_phrases = [
+        "private-k8s-health-reference.md",
+        "当问题是“集群健康检查”",
+        "应优先获取这个通用 runbook 作为基线参考",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in LAYER_CLASSIFIER_PROMPT
+
+
+def test_layer_prompt_fetches_scene_runbook_after_baseline_when_signal_is_clear():
+    expected_phrases = [
+        "如果你先获取了 `private-k8s-health-reference.md`",
+        "后续又发现了明确场景信号",
+        "应继续获取对应的具体场景 runbook",
+        "可以并且应该参考多个 runbook",
+        "允许获取多个",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in LAYER_CLASSIFIER_PROMPT
+
+
 def test_layer_extract_prompt_is_current_state_first():
     extract_prompt = get_workflow_prompt("layer_extract")
     expected_phrases = [
@@ -580,6 +617,8 @@ def test_layer_extract_prompt_is_current_state_first():
         "events 只能作为辅助线索，不能单独作为当前故障依据",
         "如果文本里只有历史 event，但没有任何当前仍异常的对象证据，应输出 HEALTHY",
         "如果文本里同时出现历史异常 event 和当前健康状态，以当前健康状态为准。",
+        "Pod Running/Ready 只是健康信号之一，不等于整体健康",
+        "Service-EndPoints",
     ]
 
     for phrase in expected_phrases:
