@@ -100,6 +100,7 @@ class WorkflowNode(ABC):
         question: str,
         system_prompt: str,
         stop_checker: Optional[Callable[[list], bool]] = None,
+        **kwargs,
     ) -> Tuple[Any, list]:
         """
         公共 LLM 调用 — 通过 AICall (LangChain create_agent) 执行
@@ -174,6 +175,7 @@ class WorkflowNode(ABC):
             node_id=self.node_id,
             cancel_event=self.cancel_event,
             stop_checker=stop_checker,
+            **kwargs,
         )
 
         llm_duration_ms = (time.time() - start_time) * 1000

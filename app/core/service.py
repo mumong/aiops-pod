@@ -11,23 +11,20 @@ from pathlib import Path
 from typing import Optional, Tuple, Any, Generator, Dict
 from datetime import datetime
 
-from holmes.config import Config
 from holmes.plugins.runbooks import RunbookCatalog
 
+from app.core.config import AppConfig
 from app.core.runbook import RunbookManager
 from app.core.paths import get_project_root
 from app.core.environment import get_config_file_path
 from app.core.holmes.streaming import create_sse_message_cn, format_duration
 from app.core.holmes.config_loader import load_holmes_config_from_yaml
-from app.core.mcp.mcp_patch import patch_mcp_toolset
 from app.core.holmes.tool_logging_patch import apply_tool_result_logging_patch
 from app.core.federation import get_federation_coordinator, FederationCoordinator, get_federation_agent, FederationAgent
 from app.core.aicall import AICall
 
 logger = logging.getLogger(__name__)
 
-# 在导入后立即应用 MCP 补丁
-patch_mcp_toolset()
 # 使每次工具调用的输出与错误写入 app 日志，便于调试 MCP
 apply_tool_result_logging_patch()
 
@@ -37,7 +34,7 @@ class HolmesService:
 
     def __init__(self):
         """初始化服务"""
-        self.config: Optional[Config] = None
+        self.config: Optional[AppConfig] = None
         self.runbook_manager = RunbookManager()
         self.merged_catalog: Optional[RunbookCatalog] = None
         self.federation_coordinator: Optional[FederationCoordinator] = None
@@ -63,7 +60,7 @@ class HolmesService:
         model: Optional[str] = None,
         max_steps: int = 50,
         config_file: Optional[Path] = None
-    ) -> Tuple[Config, Any]:
+    ) -> Tuple[AppConfig, Any]:
         """初始化服务配置和 AICall 实例"""
         if self._is_initialized():
             return self.config, self.ai_call
@@ -144,10 +141,11 @@ class HolmesService:
                     )
                 else:
                     logger.warning(f"配置文件不存在: {config_file}，使用默认配置")
-                    self.config = Config(
-                        api_key=final_api_key,
-                        model=final_model,
-                        max_steps=max_steps
+                    self.config = AppConfig(
+                        llm_model=final_model,
+                        llm_api_key=final_api_key,
+                        llm_api_base=final_api_base,
+                        max_steps=max_steps,
                     )
 
                 # 加载 runbooks
@@ -259,6 +257,19 @@ class HolmesService:
         if config_val is not None:
             return int(config_val)
         return defaults.get(node_id, 10)
+
+    def _build_request_scoped_ai_call(self) -> Optional[AICall]:
+        """为单次 workflow 请求创建独立的 AICall 实例，避免并发共享底层 LLM 客户端。"""
+        if self.ai_call is None:
+            return None
+
+        from app.core.aicall.client import AICall
+
+        return AICall(
+            model=self.ai_call.model_str,
+            api_key=self.ai_call.api_key,
+            api_base=self.ai_call.api_base,
+        )
 
     @staticmethod
     def _normalize_language(language: Optional[str], default: str = "zh") -> str:
@@ -456,7 +467,7 @@ class HolmesService:
             from app.core.workflow.executor import WorkflowExecutor
 
             executor = WorkflowExecutor(holmes_service=self)
-            executor.ai_call = self.ai_call
+            executor.ai_call = self._build_request_scoped_ai_call()
             executor.mcp_tools = self.mcp_tools or []
             logger.debug("🔀 [Workflow] aicall 路径激活 | tools=%d", len(executor.mcp_tools))
 

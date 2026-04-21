@@ -8,17 +8,15 @@ from app.core.service import HolmesService
 from app.core.prompts import (
     EVIDENCE_COLLECTOR_PROMPT,
     LAYER_CLASSIFIER_PROMPT,
-    LAYER_EXTRACT_PROMPT,
+    QUERY_EVIDENCE_NORMALIZATION_PROMPT_ZH,
+    get_conclusion_mode_instruction,
     get_workflow_prompt,
 )
 from app.core.skills.models import Layer
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
-
-
-class _FailingAICall:
-    def call_simple(self, *args, **kwargs):
-        raise AssertionError("call_simple should not be called")
+from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
+from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
 
 
 class _RecordingAICall:
@@ -52,8 +50,10 @@ def test_query_conclusion_uses_llm_structured_summary():
         "question": "查询当前异常 Pod 列表",
         "layer": Layer.QUERY,
         "evidence_analysis": (
-            '{"tool_data": [{"tool": "kubectl_get_by_kind_in_cluster", '
-            '"data": "NAMESPACE NAME STATUS\\ndefault pod-a CrashLoopBackOff"}]}'
+            '{"collection_summary":"计划 1 项，实际采集 1 项，未采集 0 项，完整度 100%",'
+            '"tool_data": [{"tool": "kubectl_get_by_kind_in_cluster", '
+            '"data": "NAMESPACE NAME STATUS\\ndefault pod-a CrashLoopBackOff"}],'
+            '"evidence_plan": [{"tool":"kubectl_get_by_kind_in_cluster","command":"kubectl get pods -A"}]}'
         ),
         "thinking_events": [],
     }
@@ -66,9 +66,12 @@ def test_query_conclusion_uses_llm_structured_summary():
     assert "异常 Pod 数量" in result["conclusion"]
     assert "CrashLoopBackOff" in result["conclusion"]
 
-
 def test_healthy_conclusion_uses_deterministic_fast_path():
     node = ConclusionFormatterNode()
+    class _FailingAICall:
+        def call_simple(self, *args, **kwargs):
+            raise AssertionError("call_simple should not be called")
+
     node.ai_call = _FailingAICall()
 
     state = {
@@ -110,7 +113,7 @@ def test_layer_stage1_structured_output_skips_second_extraction_and_keeps_full_a
         }
     ]
 
-    node._call_llm = lambda question, prompt: (SimpleNamespace(result=structured_json), thinking_events)
+    node._call_llm = lambda question, prompt, **kwargs: (SimpleNamespace(result=structured_json), thinking_events)
     node._extract_classification = lambda analysis_text: (_ for _ in ()).throw(
         AssertionError("stage2 extraction should not run")
     )
@@ -124,6 +127,339 @@ def test_layer_stage1_structured_output_skips_second_extraction_and_keeps_full_a
     assert returned_events == thinking_events
 
 
+def test_layer_stage1_non_json_output_falls_back_without_stage2_call():
+    node = LayerClassifierNode()
+    non_json_text = "分析结果：检测到 OOMKilled，根因更接近 L2 工作负载层。"
+    thinking_events = []
+
+    node._call_llm = lambda question, prompt, **kwargs: (SimpleNamespace(result=non_json_text), thinking_events)
+
+    class _RecordingAICall:
+        def __init__(self):
+            self.calls = 0
+
+        def call_simple(self, *args, **kwargs):
+            self.calls += 1
+            return ""
+
+    node.ai_call = _RecordingAICall()
+
+    result, returned_events = node._analyze_with_llm("我的服务为什么 OOM 了")
+
+    assert result["layer"] == "L2"
+    assert "未返回合法 JSON" in result["reasoning"]
+    assert result["confidence"] <= 0.2
+    assert "full_analysis" in result
+    assert node.ai_call.calls == 0
+    assert returned_events == thinking_events
+
+
+def test_layer_uses_llm_for_clear_query_requests():
+    node = LayerClassifierNode()
+    called = {"llm": False}
+
+    def _fake_llm(question):
+        called["llm"] = True
+        return (
+            {
+                "layer": "QUERY",
+                "layers": ["QUERY"],
+                "layer_name": "直接查询",
+                "confidence": 0.95,
+                "reasoning": "LLM 判定用户在直接查询指标",
+                "key_entities": [],
+                "possible_scenarios": [],
+            },
+            [],
+        )
+
+    node.ai_call = object()
+    node._analyze_with_llm = _fake_llm
+
+    result = node.execute({"question": "查询集群每个节点 CPU 和内存使用率"})
+
+    assert called["llm"] is True
+    assert result["layer"] == Layer.QUERY
+    assert result["layer_reasoning"]
+
+
+def test_layer_does_not_lightweight_route_diagnosis_questions():
+    node = LayerClassifierNode()
+
+    called = {"llm": False}
+
+    def _fake_llm(question):
+        called["llm"] = True
+        return (
+            {
+                "layer": "L2",
+                "layers": ["L2"],
+                "layer_name": "工作负载层",
+                "confidence": 0.91,
+                "reasoning": "用户在询问集群问题原因，属于诊断请求",
+                "key_entities": [],
+                "possible_scenarios": [],
+            },
+            [],
+        )
+
+    node.ai_call = object()
+    node._analyze_with_llm = _fake_llm
+
+    result = node.execute({"question": "我的集群有什么问题？分析下原因"})
+
+    assert called["llm"] is True
+    assert result["layer"] == Layer.L2
+
+
+def test_layer_does_not_lightweight_route_cluster_status_diagnosis_wording():
+    node = LayerClassifierNode()
+
+    called = {"llm": False}
+
+    def _fake_llm(question):
+        called["llm"] = True
+        return (
+            {
+                "layer": "L1",
+                "layers": ["L1"],
+                "layer_name": "集群与节点层",
+                "confidence": 0.83,
+                "reasoning": "‘集群什么情况’属于整体状态诊断，不是明确数据查询",
+                "key_entities": [],
+                "possible_scenarios": [],
+            },
+            [],
+        )
+
+    node.ai_call = object()
+    node._analyze_with_llm = _fake_llm
+
+    result = node.execute({"question": "我的集群现在什么情况？"})
+
+    assert called["llm"] is True
+    assert result["layer"] == Layer.L1
+
+
+def test_query_conclusion_uses_llm_even_when_query_result_present():
+    node = ConclusionFormatterNode()
+
+    node.ai_call = _RecordingAICall(
+        """## 📊 查询结果
+
+- **查询目标**: 查询集群每个节点 CPU 和内存使用率
+
+## 📈 数据摘要
+| 节点 | CPU 使用率 | 内存使用率 |
+|------|------------|------------|
+| master | 13.7% | 26.2% |
+"""
+    )
+
+    state = {
+        "question": "查询集群每个节点 CPU 和内存使用率",
+        "layer": Layer.QUERY,
+        "query_result": {
+            "query_target": "查询集群每个节点 CPU 和内存使用率",
+            "collection_summary": "计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",
+            "columns": [
+                {"key": "node", "label": "节点"},
+                {"key": "cpu", "label": "CPU 使用率"},
+                {"key": "memory", "label": "内存使用率"},
+            ],
+            "rows": [
+                {"node": "master", "cpu": "13.7%", "memory": "26.2%"},
+                {"node": "node1", "cpu": "9.8%", "memory": "19.3%"},
+            ],
+            "notes": ["数据来自 Prometheus 查询。"],
+            "sources": [
+                {"tool": "execute_prometheus_instant_query", "query": "cpu_query"},
+                {"tool": "execute_prometheus_instant_query", "query": "mem_query"},
+            ],
+        },
+        "thinking_events": [],
+    }
+
+    result = node.execute(state)
+
+    assert len(node.ai_call.calls) == 1
+    assert "## 📊 查询结果" in result["conclusion"]
+    assert "master" in result["conclusion"]
+
+
+def test_query_conclusion_falls_back_to_llm_when_query_result_missing():
+    node = ConclusionFormatterNode()
+
+    node.ai_call = _RecordingAICall(
+        """## 📊 查询结果
+
+- **查询目标**: 查询集群每个节点 CPU 和内存使用率
+
+## 📈 数据摘要
+| 工具 | 结果摘要 |
+|------|----------|
+| execute_prometheus_instant_query | master=13.7%,node1=9.8% |
+"""
+    )
+
+    state = {
+        "question": "查询集群每个节点 CPU 和内存使用率",
+        "layer": Layer.QUERY,
+        "query_result": None,
+        "evidence_analysis": (
+            '{"collection_summary":"计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",'
+            '"tool_data":[{"tool":"execute_prometheus_instant_query","data":"master=13.7%,node1=9.8%"}],'
+            '"evidence_plan":[{"tool":"execute_prometheus_instant_query","command":"cpu_query"}],'
+            '"missing_reasons":[]}'
+        ),
+        "thinking_events": [],
+    }
+
+    result = node.execute(state)
+
+    assert len(node.ai_call.calls) == 1
+    assert "## 📊 查询结果" in result["conclusion"]
+    assert "execute_prometheus_instant_query" in result["conclusion"]
+
+
+def test_query_evidence_execute_builds_structured_query_result():
+    node = EvidenceCollectorNode()
+    node._save_thinking = lambda state, new_state, thinking_events: None
+    node._extract_tool_data_from_thinking = lambda events: [
+        {"tool": "execute_prometheus_instant_query", "data": '{"status":"success"}', "duration_s": 0}
+    ]
+    node._plan_evidence_with_llm = lambda **kwargs: (
+        [
+            {"id": "e1", "description": "查询 CPU", "level": "critical", "tool": "execute_prometheus_instant_query", "command": "cpu_query", "purpose": "cpu"},
+            {"id": "e2", "description": "查询内存", "level": "critical", "tool": "execute_prometheus_instant_query", "command": "mem_query", "purpose": "memory"},
+        ],
+        [
+            {"type": "tool_result", "status": "success", "tool_name": "execute_prometheus_instant_query", "result_preview": '{"status":"success"}', "result": '{"status":"success"}'},
+        ],
+        "已完成查询",
+    )
+
+    class _NormalizeAICall:
+        def __init__(self):
+            self.calls = []
+
+        def call_simple_json(self, system_prompt, question, **kwargs):
+            self.calls.append({"system_prompt": system_prompt, "question": question})
+            raw = """```json
+{
+  "query_target": "查询集群每个节点 CPU 和内存使用率",
+  "collection_summary": "计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",
+  "columns": [
+    {"key": "node", "label": "节点"},
+    {"key": "cpu", "label": "CPU 使用率"},
+    {"key": "memory", "label": "内存使用率"}
+  ],
+  "rows": [
+    {"node": "master", "cpu": "13.7%", "memory": "26.2%"}
+  ],
+  "notes": ["数据来自 Prometheus。"],
+  "sources": [
+    {"tool": "execute_prometheus_instant_query", "query": "cpu_query"}
+  ]
+}
+```"""
+            return ({
+                "query_target": "查询集群每个节点 CPU 和内存使用率",
+                "collection_summary": "计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",
+                "columns": [
+                    {"key": "node", "label": "节点"},
+                    {"key": "cpu", "label": "CPU 使用率"},
+                    {"key": "memory", "label": "内存使用率"},
+                ],
+                "rows": [
+                    {"node": "master", "cpu": "13.7%", "memory": "26.2%"},
+                ],
+                "notes": ["数据来自 Prometheus。"],
+                "sources": [
+                    {"tool": "execute_prometheus_instant_query", "query": "cpu_query"},
+                ],
+            }, raw)
+
+    node.ai_call = _NormalizeAICall()
+
+    result = node.execute({
+        "question": "查询集群每个节点 CPU 和内存使用率",
+        "layer": Layer.QUERY,
+        "layer_analysis": "{}",
+        "possible_scenarios": [],
+        "key_entities": [],
+        "thinking_events": [],
+    })
+
+    assert result["query_result"]["query_target"] == "查询集群每个节点 CPU 和内存使用率"
+    assert result["query_result"]["rows"][0]["node"] == "master"
+    assert len(node.ai_call.calls) == 1
+
+
+def test_extract_tool_data_prefers_full_result_over_preview():
+    node = EvidenceCollectorNode()
+
+    tool_data = node._extract_tool_data_from_thinking([
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_prometheus_instant_query",
+            "result_preview": '{"status":"success","data":"truncated"}',
+            "result": '{"status":"success","data":{"result":[{"metric":{"node":"master"},"value":[1,"13.7"]}]}}',
+            "duration_seconds": 1.2,
+        }
+    ])
+
+    assert tool_data == [
+        {
+            "tool": "execute_prometheus_instant_query",
+            "data": '{"status":"success","data":{"result":[{"metric":{"node":"master"},"value":[1,"13.7"]}]}}',
+            "duration_s": 1.2,
+        }
+    ]
+
+
+def test_rca_lite_mode_no_output_uses_generic_llm_fallback():
+    node = RootCauseAnalyzerNode()
+
+    class _EmptyAICall:
+        def call_simple_json(self, *args, **kwargs):
+            return None, ""
+
+    node.ai_call = _EmptyAICall()
+
+    result, thinking_events = node._analyze_with_llm_lite(
+        question="我的服务为什么异常",
+        layer=Layer.L2,
+        evidence_summary="1. [✅ 已采集] pod 重启",
+    )
+
+    assert result["confidence"] <= 0.2
+    assert "LLM 未返回有效结果" in result["confidence_reason"]
+    assert result["root_cause"]
+    assert thinking_events == []
+
+
+def test_rca_lite_mode_exception_uses_generic_llm_fallback_without_rules():
+    node = RootCauseAnalyzerNode()
+
+    class _FailingAICall:
+        def call_simple_json(self, *args, **kwargs):
+            raise RuntimeError("llm timeout")
+
+    node.ai_call = _FailingAICall()
+
+    result, thinking_events = node._analyze_with_llm_lite(
+        question="我的服务为什么异常",
+        layer=Layer.L2,
+        evidence_summary="1. [✅ 已采集] pod 重启",
+    )
+
+    assert result["confidence"] <= 0.2
+    assert "llm timeout" in result["confidence_reason"]
+    assert thinking_events == []
+
+
 def test_layer_prompts_prioritize_user_intent_for_query_requests():
     expected_phrases = [
         "先判断用户意图",
@@ -134,7 +470,6 @@ def test_layer_prompts_prioritize_user_intent_for_query_requests():
 
     for phrase in expected_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
-        assert phrase in LAYER_EXTRACT_PROMPT
 
 
 def test_query_prompt_boundaries_are_explicit_between_layer_and_evidence():
@@ -147,14 +482,27 @@ def test_query_prompt_boundaries_are_explicit_between_layer_and_evidence():
     evidence_phrases = [
         "layer=QUERY：你负责真实数据采集和返回查询结果所需的数据",
         "不要把 QUERY 请求再退回给 layer 节点处理",
+        "在本节点内完成查询语义归一化，输出给下游可直接渲染的结构化结果",
+        "只保留用户明确询问的对象、维度和指标，不扩展无关指标",
     ]
 
     for phrase in layer_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
-        assert phrase in LAYER_EXTRACT_PROMPT
 
     for phrase in evidence_phrases:
         assert phrase in EVIDENCE_COLLECTOR_PROMPT
+
+
+def test_query_evidence_normalization_prompt_defines_json_only_contract():
+    expected_phrases = [
+        "把 QUERY 请求整理成一个稳定的结构化 JSON",
+        "你不负责重新查询，不负责诊断，不负责根因分析，只负责把真实结果归一化",
+        "只保留用户明确询问的对象、维度和指标",
+        "输出必须是可解析 JSON，不要输出 Markdown，不要输出解释性前言",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in QUERY_EVIDENCE_NORMALIZATION_PROMPT_ZH
 
 
 def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
@@ -166,7 +514,6 @@ def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
 
     for phrase in expected_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
-        assert phrase in LAYER_EXTRACT_PROMPT
 
 
 def test_workflow_prompts_default_to_chinese_and_support_english_switch():
@@ -187,6 +534,18 @@ def test_conclusion_prompt_supports_independent_response_language():
 
     assert "You are a senior Kubernetes diagnostic report expert." in prompt
     assert "All user-facing final report text must be in English." in prompt
+
+
+def test_conclusion_mode_instructions_are_centrally_managed():
+    query_instruction = get_conclusion_mode_instruction("query", "查询 CPU", prompt_language="zh")
+    healthy_instruction = get_conclusion_mode_instruction("healthy", "我的集群健康吗", prompt_language="zh")
+    query_instruction_en = get_conclusion_mode_instruction("query", "show CPU", prompt_language="en")
+
+    assert "只回答用户明确询问的对象、维度和指标" in query_instruction
+    assert "绝对不要猜测" in query_instruction
+    assert "集群当前运行正常，未发现异常" in healthy_instruction
+    assert "Never guess" in query_instruction_en
+    assert "show CPU" in query_instruction_en
 
 
 def test_holmes_service_i18n_getters_preserve_default_behavior_and_allow_override():

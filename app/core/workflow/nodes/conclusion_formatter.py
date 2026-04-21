@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem, Confidence
-from app.core.prompts import get_workflow_prompt
+from app.core.prompts import get_workflow_prompt, get_conclusion_mode_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -114,27 +114,8 @@ class ConclusionFormatterNode(WorkflowNode):
             decision = state.get("deterministic_decision")
             root_cause = state.get("root_cause", "")
             causal_chain = state.get("causal_chain", {})
-
-            if layer == Layer.QUERY and getattr(self, 'ai_call', None) is not None:
-                tool_data_text = self._build_tool_data_section(
-                    state.get("thinking_events", [])
-                )
-                conclusion = self._generate_with_llm(
-                    question=question,
-                    layer_analysis=layer_analysis,
-                    evidence_analysis=evidence_analysis,
-                    rca_analysis=rca_analysis,
-                    conclusion_max_tokens=state.get("conclusion_max_tokens"),
-                    layer=layer,
-                    tool_data_text=tool_data_text,
-                )
-            elif layer == Layer.QUERY:
-                conclusion = self._format_query_fast_path(
-                    question=question,
-                    evidence_analysis=evidence_analysis,
-                    thinking_events=state.get("thinking_events", []),
-                )
-            elif layer == Layer.HEALTHY:
+            query_result = state.get("query_result")
+            if layer == Layer.HEALTHY:
                 conclusion = self._format_healthy_fast_path(
                     question=question,
                     layer_analysis=layer_analysis,
@@ -155,6 +136,7 @@ class ConclusionFormatterNode(WorkflowNode):
                     conclusion_max_tokens=state.get("conclusion_max_tokens"),
                     layer=layer,
                     tool_data_text=tool_data_text,
+                    query_result=query_result,
                 )
             else:
                 # 回退到模板格式化
@@ -206,6 +188,7 @@ class ConclusionFormatterNode(WorkflowNode):
         conclusion_max_tokens: Optional[int] = None,
         layer: Optional[Layer] = None,
         tool_data_text: str = "",
+        query_result: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         使用 AICall.call_simple 生成最终报告（纯文本生成，不带工具）。
@@ -222,40 +205,17 @@ class ConclusionFormatterNode(WorkflowNode):
         is_query = layer == Layer.QUERY
         is_healthy = layer == Layer.HEALTHY
         if is_healthy:
-            instruction = f"""用户问了「{question}」，经过检查集群状态正常，没有发现异常。
-请输出一份简洁的健康报告，列出检查过的项目和结果（节点状态、Pod 状态、事件等），
-明确告诉用户"集群当前运行正常，未发现异常"。不要套诊断报告模板。"""
+            instruction = get_conclusion_mode_instruction(
+                "healthy",
+                question,
+                prompt_language=self._get_prompt_language(),
+            )
         elif is_query:
-            instruction = f"""请基于以上各阶段的分析结果，直接回答用户的查询「{question}」。
-
-必须输出结构化、易读的 Markdown，不要输出原始 JSON，不要把 evidence_plan 或 llm_analysis 原样贴给用户。
-优先展示真实采集到的数据表格，字段名要人类可读。
-如果有多个节点/实例/对象，必须逐条展示，不能只给工具摘要。
-如果有个别查询项未采集成功，要明确写出“未获取到”，不要用工具原始报错替代总结。
-不要套诊断模板，不要写因果链，不要写修复建议，除非用户明确要求。
-
-严格使用下面的模板：
-
-## 📊 查询结果
-
-- **查询目标**: [一句话复述用户问题]
-- **模式**: QUERY 结构化回复
-- **采集情况**: [直接引用真实采集情况]
-
-## 📈 数据摘要
-| 对象 | 指标 | 数值 | 状态 | 数据来源 |
-|------|------|------|------|----------|
-| node1 | CPU 使用率 | 26.24% | 正常 | Prometheus |
-
-## 🔎 补充说明
-- [仅补充必要说明，例如某项未获取到、某节点磁盘偏高等]
-
-要求：
-1. 优先从真实 tool_data 中提取数值并落表
-2. CPU、内存、磁盘等指标分开展示，不要把原始 JSON 塞进表格
-3. 如果能识别节点名/IP/角色，尽量在表格或说明中体现
-4. 最终输出必须让人直接读懂，不需要再看原始工具结果
-"""
+            instruction = get_conclusion_mode_instruction(
+                "query",
+                question,
+                prompt_language=self._get_prompt_language(),
+            )
         else:
             instruction = f"""请基于以上三个阶段的分析结果，生成一份详尽、完整的诊断报告。
 
@@ -270,6 +230,16 @@ class ConclusionFormatterNode(WorkflowNode):
         tool_section = ""
         if tool_data_text:
             tool_section = f"\n# 工具采集的原始数据（重要！必须引用这些真实数据）\n{tool_data_text}\n"
+
+        query_result_section = ""
+        if query_result:
+            try:
+                query_result_section = (
+                    "\n# QUERY 结构化结果（上游整理，仅作参考，仍需结合证据与 RCA 交叉校验）\n"
+                    f"{json.dumps(query_result, ensure_ascii=False)}\n"
+                )
+            except Exception:
+                query_result_section = ""
 
         # 从 evidence_analysis JSON 提取真实证据统计，直接注入给 LLM
         evidence_stats_section = ""
@@ -312,6 +282,7 @@ class ConclusionFormatterNode(WorkflowNode):
 # 阶段3：根因分析
 {rca_analysis}
 {evidence_stats_section}{tool_section}
+{query_result_section}
 {instruction}"""
 
         # ── Token 预算控制：防止超过模型上下文限制 ──
@@ -395,69 +366,102 @@ class ConclusionFormatterNode(WorkflowNode):
 
         return f"报告生成失败：LLM 未返回有效内容。\n\n原始数据：\n{tool_data_text[:1000] if tool_data_text else '无'}"
 
-    def _format_query_fast_path(
-        self,
-        question: str,
-        evidence_analysis: str,
-        thinking_events: list,
-    ) -> str:
-        """QUERY 模式快速路径：直接基于已采集数据做简要回复，不再调用 LLM。"""
-        tool_rows = []
-        summary_lines = []
-
-        try:
-            data = json.loads(evidence_analysis) if evidence_analysis else {}
-        except (json.JSONDecodeError, TypeError):
-            data = {}
-
-        for item in data.get("tool_data", [])[:8]:
-            tool = item.get("tool", "unknown")
-            raw = (item.get("data", "") or "").strip()
-            snippet = self._summarize_snippet(raw)
-            tool_rows.append((tool, snippet))
-
-        llm_analysis = (data.get("llm_analysis", "") or "").strip()
-        collection_summary = (data.get("collection_summary", "") or "").strip()
-
-        if collection_summary:
-            summary_lines.append(f"- **采集情况**: {collection_summary}")
-        if llm_analysis:
-            summary_lines.append(f"- **简要说明**: {self._summarize_snippet(llm_analysis, limit=180)}")
-
-        if not tool_rows:
-            tool_text = self._build_tool_data_section(thinking_events)
-            if tool_text:
-                summary_lines.append(f"- **工具摘要**: {self._summarize_snippet(tool_text, limit=220)}")
+    def _render_query_result(self, query_result: Dict[str, Any]) -> str:
+        """QUERY 模式仅渲染结构化 JSON，不再做二次 LLM 理解。"""
+        target = query_result.get("query_target", "")
+        collection_summary = query_result.get("collection_summary", "")
+        columns = query_result.get("columns", []) or []
+        rows = query_result.get("rows", []) or []
+        notes = query_result.get("notes", []) or []
+        missing = query_result.get("missing", []) or []
+        sources = query_result.get("sources", []) or []
 
         lines = [
             "## 📊 查询结果",
             "",
-            f"- **查询目标**: {question}",
-            f"- **模式**: QUERY 快速回复",
+            f"- **查询目标**: {target}",
+            "- **模式**: QUERY 结构化回复",
         ]
-        lines.extend(summary_lines)
+        if collection_summary:
+            lines.append(f"- **采集情况**: {collection_summary}")
         lines.append("")
 
-        if tool_rows:
-            lines.extend([
-                "## 🔎 已采集数据",
-                "",
-                "| 工具 | 结果摘要 |",
-                "|------|----------|",
-            ])
-            for tool, snippet in tool_rows:
-                lines.append(f"| {tool} | {snippet} |")
+        if columns:
+            labels = [c.get("label", c.get("key", "")) for c in columns]
+            keys = [c.get("key", "") for c in columns]
+            lines.append("## 📈 数据摘要")
+            lines.append("")
+            lines.append("| " + " | ".join(labels) + " |")
+            lines.append("|" + "|".join(["------"] * len(labels)) + "|")
+            for row in rows:
+                values = [str(row.get(key, "未获取到")) for key in keys]
+                lines.append("| " + " | ".join(values) + " |")
             lines.append("")
 
-        if llm_analysis and not tool_rows:
-            lines.extend([
-                "## 🔎 数据摘要",
-                "",
-                llm_analysis[:600],
-                "",
-            ])
+        if notes or missing:
+            lines.append("## 🔎 补充说明")
+            lines.append("")
+            for note in notes:
+                lines.append(f"- {note}")
+            for item in missing:
+                lines.append(f"- **未获取到** `{item.get('field', '?')}`: {item.get('reason', '未知原因')}")
+            lines.append("")
+
+        if sources:
+            lines.append("## 🧪 查询来源")
+            lines.append("")
+            lines.append("| 工具 | 查询语句 |")
+            lines.append("|------|----------|")
+            for source in sources:
+                lines.append(f"| {source.get('tool', '-')} | {source.get('query', '-') or '-'} |")
+            lines.append("")
 
         return "\n".join(lines)
+
+    def _build_query_result_fallback(self, question: str, evidence_analysis: str) -> Dict[str, Any]:
+        """QUERY 结构化结果缺失时，基于 evidence_analysis 构造最小可用结果。"""
+        try:
+            evidence_data = json.loads(evidence_analysis) if evidence_analysis else {}
+        except (json.JSONDecodeError, TypeError):
+            evidence_data = {}
+
+        tool_data = evidence_data.get("tool_data", []) or []
+        evidence_plan = evidence_data.get("evidence_plan", []) or []
+        missing_reasons = evidence_data.get("missing_reasons", []) or []
+
+        rows = []
+        for item in tool_data[:10]:
+            rows.append({
+                "tool": item.get("tool", "unknown"),
+                "result": item.get("data", "")[:300] or "未获取到",
+            })
+
+        sources = []
+        for plan in evidence_plan[:10]:
+            sources.append({
+                "tool": plan.get("tool", "-"),
+                "query": plan.get("command", "-"),
+            })
+
+        notes = []
+        if not rows:
+            notes.append("evidence 节点未输出结构化 query_result，以下为最小可用回退结果。")
+
+        return {
+            "query_target": question,
+            "collection_summary": evidence_data.get("collection_summary", ""),
+            "columns": [
+                {"key": "tool", "label": "工具"},
+                {"key": "result", "label": "结果摘要"},
+            ],
+            "rows": rows,
+            "notes": notes,
+            "missing": [
+                {"field": "result", "reason": reason}
+                for reason in missing_reasons[:5]
+            ],
+            "sources": sources,
+        }
 
     def _format_healthy_fast_path(
         self,
