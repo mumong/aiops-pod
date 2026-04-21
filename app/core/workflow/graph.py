@@ -109,6 +109,7 @@ def build_diagnosis_workflow(
     metrics: Any = None,
     runbook_catalog: Any = None,
     node_config: Optional[Dict[str, bool]] = None,
+    query_mode: str = "full",
 ) -> tuple:
     """
     构建诊断工作流图（支持节点启用/禁用）
@@ -148,7 +149,7 @@ def build_diagnosis_workflow(
             # layer 节点有条件路由：HEALTHY 直达 conclusion，其余进入 evidence
             workflow.add_conditional_edges(
                 "layer",
-                _make_layer_router(enabled),
+                _make_layer_router(enabled, query_mode=query_mode),
                 _make_layer_route_map(enabled),
             )
         elif node_id == "evidence" and evidence_enabled:
@@ -167,7 +168,7 @@ def build_diagnosis_workflow(
     return workflow.compile(), node_instances
 
 
-def _make_layer_router(enabled: list):
+def _make_layer_router(enabled: list, query_mode: str = "full"):
     """创建 layer 节点的条件路由函数"""
     def router(state: WorkflowState) -> str:
         layer = state.get("layer")
@@ -175,6 +176,9 @@ def _make_layer_router(enabled: list):
             logger.info("🚀 HEALTHY 模式：直接到 conclusion")
             return "conclusion"
         if layer == Layer.QUERY:
+            if str(query_mode or "full").strip().lower() == "direct":
+                logger.info("🚀 QUERY direct 模式：直接到 conclusion")
+                return "conclusion"
             idx = enabled.index("layer")
             next_node = enabled[idx + 1] if idx + 1 < len(enabled) else "conclusion"
             logger.info("🚀 QUERY 模式：进入 %s", next_node)
@@ -219,4 +223,5 @@ def build_simple_workflow(holmes_service=None, metrics=None, runbook_catalog=Non
     return build_diagnosis_workflow(
         holmes_service, metrics, runbook_catalog,
         node_config={"layer": True, "evidence": False, "rca": False, "conclusion": True},
+        query_mode="direct",
     )

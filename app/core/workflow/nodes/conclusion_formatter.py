@@ -84,6 +84,10 @@ class ConclusionFormatterNode(WorkflowNode):
             prompt_language=self._get_prompt_language(),
             response_language=self._get_response_language(),
         )
+
+    def _get_query_mode(self) -> str:
+        wf_config = getattr(self, "workflow_config_override", None) or {}
+        return str(wf_config.get("query_mode", "full")).strip().lower() or "full"
     
     def get_required_fields(self) -> List[str]:
         return ["question", "layer"]
@@ -121,6 +125,8 @@ class ConclusionFormatterNode(WorkflowNode):
                     layer_analysis=layer_analysis,
                     thinking_events=state.get("thinking_events", []),
                 )
+            elif layer == Layer.QUERY and self._get_query_mode() == "direct" and query_result:
+                conclusion = self._render_query_result(query_result)
             
             # 使用 LLM 生成最终报告
             elif getattr(self, 'ai_call', None) is not None:

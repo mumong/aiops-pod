@@ -91,7 +91,7 @@ class FederationAgent:
                     logger.error(f"[FEDERATION AGENT] LLM 调用失败 (已重试{self._max_retries}次): {exc}")
         raise last_exc
 
-    def ask_stream(self, question: str) -> Generator[str, None, None]:
+    def ask_stream(self, question: str, endpoint_path: str = "/ask") -> Generator[str, None, None]:
         """
         执行联邦查询，流式返回结果。
 
@@ -148,7 +148,7 @@ class FederationAgent:
 
                     # 执行工具调用 — 实时 yield 子集群输出
                     tool_results = yield from self._execute_tools_streaming(
-                        message.tool_calls, cluster_reports
+                        message.tool_calls, cluster_reports, endpoint_path
                     )
 
                     # 添加工具结果到消息历史
@@ -173,7 +173,12 @@ class FederationAgent:
         # 达到最大步数
         yield f"\n⚠️ 达到最大步数 ({self.max_steps})，Agent 未完成任务\n"
 
-    def _execute_tools_streaming(self, tool_calls, cluster_reports: Dict[str, str]) -> Generator[str, None, List[tuple]]:
+    def _execute_tools_streaming(
+        self,
+        tool_calls,
+        cluster_reports: Dict[str, str],
+        endpoint_path: str,
+    ) -> Generator[str, None, List[tuple]]:
         """
         执行工具调用，query_cluster 时并发查询 + 实时 yield 子集群输出。
 
@@ -201,7 +206,7 @@ class FederationAgent:
         if not query_calls:
             return [results[tc.id] for tc in tool_calls]
 
-        registry = self.toolset.get_context().get("federation_registry")
+        registry = self.toolset.get_context(endpoint_path=endpoint_path).get("federation_registry")
         enabled_agents = {a.name: a for a in registry.get_enabled_agents()} if registry else {}
 
         # 并发流式查询所有子集群
@@ -236,7 +241,11 @@ class FederationAgent:
             try:
                 async def _run():
                     async for name, chunk in client.query_stream_realtime(
-                        agent_cfg, question, max_steps, conclusion_max_tokens
+                        agent_cfg,
+                        question,
+                        max_steps,
+                        conclusion_max_tokens,
+                        endpoint_path=endpoint_path,
                     ):
                         chunk_queue.put((cluster_name, chunk))
                     chunk_queue.put((cluster_name, None))  # sentinel
@@ -312,7 +321,7 @@ class FederationAgent:
 
         return [results[tc.id] for tc in tool_calls]
 
-    def _execute_tools(self, tool_calls) -> List[tuple]:
+    def _execute_tools(self, tool_calls, endpoint_path: str = "/ask") -> List[tuple]:
         """
         执行工具调用，多个 query_cluster 调用会并发执行。
 
@@ -336,7 +345,7 @@ class FederationAgent:
         # 先执行非查询工具（如 list_clusters，通常很快）
         for tc, name, args in other_calls:
             logger.info(f"[FEDERATION AGENT] 调用工具: {name}({args})")
-            result = self._execute_tool(name, args)
+            result = self._execute_tool(name, args, endpoint_path=endpoint_path)
             logger.info(f"[FEDERATION AGENT] 工具结果: {str(result)[:200]}...")
             results[tc.id] = (tc, result)
 
@@ -345,20 +354,20 @@ class FederationAgent:
             # 单个查询：直接执行，无线程开销
             tc, args = query_calls[0]
             logger.info(f"[FEDERATION AGENT] 调用工具: query_cluster({args})")
-            result = self._execute_tool("query_cluster", args)
+            result = self._execute_tool("query_cluster", args, endpoint_path=endpoint_path)
             logger.info(f"[FEDERATION AGENT] 工具结果: {str(result)[:200]}...")
             results[tc.id] = (tc, result)
 
         elif len(query_calls) > 1:
             # 多个查询：asyncio.gather 并发执行
-            batch_results = self._batch_query_clusters(query_calls)
+            batch_results = self._batch_query_clusters(query_calls, endpoint_path=endpoint_path)
             for tc, result in batch_results:
                 results[tc.id] = (tc, result)
 
         # 按原始顺序返回结果
         return [results[tc.id] for tc in tool_calls]
 
-    def _batch_query_clusters(self, query_calls: List[tuple]) -> List[tuple]:
+    def _batch_query_clusters(self, query_calls: List[tuple], endpoint_path: str = "/ask") -> List[tuple]:
         """
         批量并发执行多个 query_cluster 调用。
 
@@ -373,7 +382,7 @@ class FederationAgent:
         """
         logger.info(f"[FEDERATION AGENT] 并发执行 {len(query_calls)} 个子集群查询")
 
-        registry = self.toolset.get_context().get("federation_registry")
+        registry = self.toolset.get_context(endpoint_path=endpoint_path).get("federation_registry")
         if not registry:
             return [(tc, {"error": "Federation registry not available"}) for tc, _ in query_calls]
 
@@ -391,6 +400,7 @@ class FederationAgent:
                     "question": args.get("question", ""),
                     "max_steps": args.get("max_steps", 30),
                     "conclusion_max_tokens": args.get("conclusion_max_tokens", 8192),
+                    "endpoint_path": endpoint_path,
                 })
                 tc_map.append((tc, cluster_name, True))
             else:
@@ -577,11 +587,11 @@ class FederationAgent:
             }
         return {"type": "object", "properties": {}}
 
-    def _execute_tool(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_tool(self, tool_name: str, params: Dict[str, Any], endpoint_path: str = "/ask") -> Dict[str, Any]:
         """执行单个工具调用"""
         tool = self.toolset.get_tool_by_name(tool_name)
         if not tool:
             return {"error": f"Tool '{tool_name}' not found"}
 
-        context = self.toolset.get_context()
+        context = self.toolset.get_context(endpoint_path=endpoint_path)
         return tool._invoke(params, context)

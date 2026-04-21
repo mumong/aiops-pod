@@ -1,0 +1,87 @@
+# L3-ServiceSelectorMismatch E2E 场景
+# 目标：构造一个“Pod 正常 Running/Ready，但 Service 没有 Endpoints”的可恢复故障
+#
+# 部署:
+#   kubectl apply -f test/e2e/manifests/l3-service-selector-mismatch.yaml
+#
+# 清理:
+#   kubectl delete -f test/e2e/manifests/l3-service-selector-mismatch.yaml
+#
+# 预期现象:
+# - Deployment / Pod 正常运行
+# - Service 存在，但 selector 故意写错
+# - kubectl get endpoints -n aiops-e2e svc-selector-mismatch -> <none>
+#
+# 建议提问:
+# - aiops-e2e 里的 svc-selector-mismatch 服务为什么不可用？
+# - 我的服务为什么访问不到？
+# - 帮我看看这个 Service 有什么问题？
+#
+# 恢复方式:
+# - 直接删除本 manifest
+# - 或把 Service selector 改回 app=svc-selector-demo
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-selector-demo
+  namespace: aiops-e2e
+  labels:
+    app: svc-selector-demo
+    fault_level: "L3"
+    fault_type: "service_selector_mismatch"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: svc-selector-demo
+  template:
+    metadata:
+      labels:
+        app: svc-selector-demo
+        fault_level: "L3"
+        fault_type: "service_selector_mismatch"
+    spec:
+      containers:
+        - name: web
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              mkdir -p /www
+              echo "service selector mismatch demo" > /www/index.html
+              httpd -f -p 8080 -h /www
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-selector-mismatch
+  namespace: aiops-e2e
+  labels:
+    fault_level: "L3"
+    fault_type: "service_selector_mismatch"
+spec:
+  selector:
+    app: svc-selector-demo-wrong
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

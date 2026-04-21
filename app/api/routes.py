@@ -54,7 +54,7 @@ def register_routes(app):
     """注册所有 API 路由"""
     
     # =========================================================================
-    # 核心 API：/ask - 统一的查询入口
+    # 核心 API：/ask - 诊断入口
     # =========================================================================
     
     @app.get("/ask")
@@ -84,9 +84,26 @@ def register_routes(app):
         logger.info(f"📝 收到查询: {question[:80]}...")
         
         if stream:
-            return _stream_response(question, format, max_steps)
+            return _stream_response(
+                question,
+                format,
+                max_steps,
+                workflow_overrides={
+                    "query_mode": "full",
+                    "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
+                },
+                workflow_title="工作流诊断模式",
+            )
         else:
-            return await _sync_response(question, max_steps)
+            return await _sync_response(
+                question,
+                max_steps,
+                workflow_overrides={
+                    "query_mode": "full",
+                    "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
+                },
+                workflow_title="工作流诊断模式",
+            )
     
     @app.post("/ask")
     async def ask_post(
@@ -112,9 +129,66 @@ def register_routes(app):
         logger.info(f"📝 收到查询 (POST): {question[:80]}...")
 
         if stream:
-            return _stream_response(question, format, max_steps)
+            return _stream_response(
+                question,
+                format,
+                max_steps,
+                workflow_overrides={
+                    "query_mode": "full",
+                    "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
+                },
+                workflow_title="工作流诊断模式",
+            )
         else:
-            return await _sync_response(question, max_steps)
+            return await _sync_response(
+                question,
+                max_steps,
+                workflow_overrides={
+                    "query_mode": "full",
+                    "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
+                },
+                workflow_title="工作流诊断模式",
+            )
+
+    # =========================================================================
+    # 轻量查询 API：/query - QUERY 专用入口
+    # =========================================================================
+
+    @app.get("/query")
+    async def query_get(
+        q: str = Query(..., description="查询内容", example="集群 CPU 和内存使用率是多少"),
+        stream: bool = Query(True, description="是否流式输出"),
+        format: str = Query("text", description="输出格式: text(默认) 或 sse"),
+        max_steps: int = Query(20, description="最大执行步数", ge=1, le=100),
+    ):
+        question = fix_double_encoding(q)
+        logger.info(f"📝 收到轻量查询: {question[:80]}...")
+
+        overrides = {
+            "query_mode": "direct",
+            "nodes": {"layer": True, "evidence": False, "rca": False, "conclusion": True},
+        }
+        if stream:
+            return _stream_response(question, format, max_steps, overrides, "工作流查询模式")
+        return await _sync_response(question, max_steps, overrides, "工作流查询模式")
+
+    @app.post("/query")
+    async def query_post(
+        q: str = Form(..., description="查询内容"),
+        stream: bool = Form(True, description="是否流式输出"),
+        format: str = Form("text", description="输出格式"),
+        max_steps: int = Form(20, description="最大执行步数"),
+    ):
+        question = fix_double_encoding(q)
+        logger.info(f"📝 收到轻量查询 (POST): {question[:80]}...")
+
+        overrides = {
+            "query_mode": "direct",
+            "nodes": {"layer": True, "evidence": False, "rca": False, "conclusion": True},
+        }
+        if stream:
+            return _stream_response(question, format, max_steps, overrides, "工作流查询模式")
+        return await _sync_response(question, max_steps, overrides, "工作流查询模式")
     
     # =========================================================================
     # 便捷别名路由
@@ -159,17 +233,20 @@ def register_routes(app):
             "version": "2.0.0",
             "status": "running",
             "usage": {
-                "中文查询(推荐)": "curl -G 'http://HOST/ask' --data-urlencode 'q=你的问题'",
+                "诊断入口": "curl -G 'http://HOST/ask' --data-urlencode 'q=你的诊断问题'",
+                "轻量查询": "curl -G 'http://HOST/query' --data-urlencode 'q=你的查询问题'",
                 "POST方式": "curl -X POST 'http://HOST/ask' -d 'q=你的问题'",
-                "英文查询": "curl 'http://HOST/ask?q=your+question'",
             },
             "examples": [
                 "curl -G 'http://localhost:30800/ask' --data-urlencode 'q=Pod一直重启'",
+                "curl -G 'http://localhost:30800/query' --data-urlencode 'q=集群 CPU 和内存使用率是多少'",
                 "curl -X POST 'http://localhost:30800/ask' -d 'q=磁盘满了怎么清理'",
-                "curl 'http://localhost:30800/ask?q=check+cluster+health'",
             ],
             "endpoints": {
-                "/ask": "GET/POST - 主要查询入口",
+                "/ask": "GET/POST - 诊断入口（layer -> evidence -> rca -> conclusion）",
+                "/query": "GET/POST - 轻量查询入口（layer -> conclusion）",
+                "/federation/ask": "GET/POST - 多集群诊断广播入口",
+                "/federation/query": "GET/POST - 多集群查询广播入口",
                 "/health": "GET - 健康检查",
                 "/tools": "GET - 可用工具列表",
                 "/runbooks": "GET - 可用 Runbooks",
@@ -336,7 +413,7 @@ def register_routes(app):
         """
         question = fix_double_encoding(q)
         logger.info(f"[FEDERATION] 收到联邦查询 (GET): {question[:80]}...")
-        return _federation_stream_response(question, max_steps, conclusion_max_tokens)
+        return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path="/ask")
 
     @app.post("/federation/ask")
     async def federation_ask_post(
@@ -353,31 +430,62 @@ def register_routes(app):
         """
         question = fix_double_encoding(q)
         logger.info(f"[FEDERATION] 收到联邦查询 (POST): {question[:80]}...")
-        return _federation_stream_response(question, max_steps, conclusion_max_tokens)
+        return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path="/ask")
 
-    def _federation_stream_response(question: str, max_steps: int, conclusion_max_tokens: int):
+    # =========================================================================
+    # 联邦查询 API：/federation/query - 多集群并发查询入口
+    # =========================================================================
+
+    @app.get("/federation/query")
+    async def federation_query_get(
+        q: str = Query(..., description="查询内容"),
+        max_steps: int = Query(30, description="每个子集群最大执行步数", ge=1, le=100),
+        conclusion_max_tokens: int = Query(8192, description="子集群查询结论最大 token 数", ge=0),
+    ):
+        question = fix_double_encoding(q)
+        logger.info(f"[FEDERATION] 收到联邦查询模式请求 (GET): {question[:80]}...")
+        return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path="/query")
+
+    @app.post("/federation/query")
+    async def federation_query_post(
+        q: str = Form(..., description="查询内容"),
+        max_steps: int = Form(30, description="每个子集群最大执行步数"),
+        conclusion_max_tokens: int = Form(8192, description="子集群查询结论最大 token 数"),
+    ):
+        question = fix_double_encoding(q)
+        logger.info(f"[FEDERATION] 收到联邦查询模式请求 (POST): {question[:80]}...")
+        return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path="/query")
+
+    def _federation_stream_response(
+        question: str,
+        max_steps: int,
+        conclusion_max_tokens: int,
+        endpoint_path: str = "/ask",
+    ):
         """生成联邦查询流式响应"""
 
         def generate() -> Generator[str, None, None]:
             try:
                 service = get_service()
                 coordinator = service.federation_coordinator
+                single_cluster_endpoint = "/query" if endpoint_path == "/query" else "/ask"
                 if coordinator is None:
                     yield (
                         "❌ 联邦查询未启用。\n\n"
                         "请在主集群 config.yaml 中设置 federation.enabled: true 并配置子集群列表。\n"
-                        "若要查询单集群，请使用 /ask 端点。\n"
+                        f"若要查询单集群，请使用 {single_cluster_endpoint} 端点。\n"
                     )
                     return
                 logger.info(
                     f"[FEDERATION] 开始联邦查询, "
                     f"子集群数量: {len(coordinator._registry.get_enabled_agents())}, "
-                    f"问题: {question[:60]}..."
+                    f"端点: {endpoint_path}, 问题: {question[:60]}..."
                 )
                 yield from coordinator.ask_stream(
                     question=question,
                     max_steps=max_steps,
-                    conclusion_max_tokens=conclusion_max_tokens
+                    conclusion_max_tokens=conclusion_max_tokens,
+                    endpoint_path=endpoint_path,
                 )
             except Exception as exc:
                 logger.error(f"[FEDERATION] 联邦查询出错: {exc}", exc_info=True)
@@ -416,7 +524,7 @@ def register_routes(app):
         """
         question = fix_double_encoding(q)
         logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询 (GET): {question[:80]}...")
-        return _federation_agent_stream_response(question, max_steps)
+        return _federation_agent_stream_response(question, max_steps, endpoint_path="/ask")
 
     @app.post("/federation/ask/v2")
     async def federation_ask_v2_post(
@@ -432,24 +540,50 @@ def register_routes(app):
         """
         question = fix_double_encoding(q)
         logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询 (POST): {question[:80]}...")
-        return _federation_agent_stream_response(question, max_steps)
+        return _federation_agent_stream_response(question, max_steps, endpoint_path="/ask")
 
-    def _federation_agent_stream_response(question: str, max_steps: int):
+    @app.get("/federation/query/v2")
+    async def federation_query_v2_get(
+        q: str = Query(..., description="查询内容"),
+        max_steps: int = Query(30, description="Agent 最大执行步数", ge=1, le=100),
+    ):
+        question = fix_double_encoding(q)
+        logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (GET): {question[:80]}...")
+        return _federation_agent_stream_response(question, max_steps, endpoint_path="/query")
+
+    @app.post("/federation/query/v2")
+    async def federation_query_v2_post(
+        q: str = Form(..., description="查询内容"),
+        max_steps: int = Form(30, description="Agent 最大执行步数"),
+    ):
+        question = fix_double_encoding(q)
+        logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (POST): {question[:80]}...")
+        return _federation_agent_stream_response(question, max_steps, endpoint_path="/query")
+
+    def _federation_agent_stream_response(
+        question: str,
+        max_steps: int,
+        endpoint_path: str = "/ask",
+    ):
         """生成 Agent-to-Agent 联邦查询流式响应"""
 
         def generate() -> Generator[str, None, None]:
             try:
                 service = get_service()
                 agent = service.federation_agent
+                single_cluster_endpoint = "/query" if endpoint_path == "/query" else "/ask"
                 if agent is None:
                     yield (
                         "❌ Agent-to-Agent 联邦查询未启用。\n\n"
                         "请在主集群 config.yaml 中设置 federation.enabled: true 并配置子集群列表。\n"
-                        "若要查询单集群，请使用 /ask 端点。\n"
+                        f"若要查询单集群，请使用 {single_cluster_endpoint} 端点。\n"
                     )
                     return
-                logger.info(f"[FEDERATION A2A] 开始 Agent-to-Agent 查询, 问题: {question[:60]}...")
-                yield from agent.ask_stream(question=question)
+                logger.info(
+                    f"[FEDERATION A2A] 开始 Agent-to-Agent 查询, "
+                    f"端点: {endpoint_path}, 问题: {question[:60]}..."
+                )
+                yield from agent.ask_stream(question=question, endpoint_path=endpoint_path)
             except Exception as exc:
                 logger.error(f"[FEDERATION A2A] Agent-to-Agent 查询出错: {exc}", exc_info=True)
                 yield f"\n❌ Agent-to-Agent 查询错误: {str(exc)}\n"
@@ -464,7 +598,13 @@ def register_routes(app):
             },
         )
 
-    def _stream_response(question: str, output_format: str, max_steps: int):
+    def _stream_response(
+        question: str,
+        output_format: str,
+        max_steps: int,
+        workflow_overrides: Optional[dict] = None,
+        workflow_title: str = "工作流诊断模式",
+    ):
         """生成流式响应（支持客户端断开时取消后台工作流）"""
         import threading
         cancel_event = threading.Event()
@@ -477,6 +617,8 @@ def register_routes(app):
                     max_steps=max_steps,
                     output_format=output_format,
                     cancel_event=cancel_event,
+                    workflow_overrides=workflow_overrides,
+                    workflow_title=workflow_title,
                 )
             except GeneratorExit:
                 # 客户端断开连接（curl Ctrl+C）
@@ -501,13 +643,20 @@ def register_routes(app):
             }
         )
     
-    async def _sync_response(question: str, max_steps: int):
+    async def _sync_response(
+        question: str,
+        max_steps: int,
+        workflow_overrides: Optional[dict] = None,
+        workflow_title: str = "工作流诊断模式",
+    ):
         """生成同步响应"""
         try:
             service = get_service()
             result = service.execute_query(
                 question=question,
-                max_steps=max_steps
+                max_steps=max_steps,
+                workflow_overrides=workflow_overrides,
+                workflow_title=workflow_title,
             )
             
             if result.get("success"):
