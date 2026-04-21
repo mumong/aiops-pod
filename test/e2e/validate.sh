@@ -35,9 +35,15 @@ kubectl -n "${NS}" get pod imagepull-fail-victim -o wide 2>/dev/null || echo "  
 kubectl -n "${NS}" describe pod imagepull-fail-victim 2>/dev/null | grep -A5 "Events" || true
 echo ""
 
-echo "## L4: App Health Fail (apphealth)"
-kubectl -n "${NS}" get pod -l app=apphealth -o wide 2>/dev/null || echo "  apphealth 未部署"
-kubectl -n "${NS}" logs deploy/apphealth --tail=5 2>/dev/null || true
+echo "## L4: Config Bootstrap Fail (appconfigfail)"
+POD_L4="$(kubectl -n "${NS}" get pod -l app=appconfigfail -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo '')"
+if [[ -n "${POD_L4}" ]]; then
+    kubectl -n "${NS}" get pod "${POD_L4}" -o wide
+    kubectl -n "${NS}" describe pod "${POD_L4}" | grep -A6 "Last State" || true
+    kubectl -n "${NS}" logs "${POD_L4}" --previous --tail=10 2>/dev/null || kubectl -n "${NS}" logs "${POD_L4}" --tail=10 2>/dev/null || true
+else
+    echo "  appconfigfail 未部署"
+fi
 echo ""
 
 echo "✅ 取证完成"

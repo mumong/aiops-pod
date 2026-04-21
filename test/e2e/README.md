@@ -10,7 +10,7 @@
 | L1 | Node Taint 不可调度 | `l1-taint-node.yaml` | `l1-taint-node.md` | nodeSelector 指定节点 |
 | L2 | OOMKilled | `l2-oomkilled.yaml` | `l2-oomkilled.md` | 小内存 limit + 内存分配 |
 | L3 | ImagePullBackOff | `l3-imagepull-fail-victim.yaml` | `l3-imagepull-failed.md` | 拉取不可达镜像 |
-| L4 | 应用健康检查失败 | `l4-app-health-fail.yaml` | `l4-app-health-fail.md` | 日志输出 L4 标记 |
+| L4 | 应用启动配置校验失败 | `l4-config-bootstrap-fail.yaml` | `l4-config-bootstrap-fail.md` | 启动打印配置错误并进入 CrashLoopBackOff |
 
 ### 使用方式
 
@@ -121,7 +121,7 @@ python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" \
 | l1-taint-node | L1 | l1-taint-node |
 | l2-oomkilled | L2 | l2-oomkilled |
 | l3-imagepull | L3 | l3-imagepull-failed |
-| l4-app-health | L4 | l4-app-health-fail |
+| l4-config-bootstrap | L4 | l4-config-bootstrap-fail |
 
 **计算示例**：50 次请求，45 次成功返回，其中 40 次层级正确 → `40/45 = 88.9%` ✅
 
