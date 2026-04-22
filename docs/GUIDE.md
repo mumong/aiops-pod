@@ -1,138 +1,242 @@
-# 部署与使用指南
+# 部署与运维指南
 
----
+本文只保留当前正式部署方式，不再展开历史模式。
 
-## 一、部署
+## 1. 部署前准备
 
-### LLM 配置
+### 必要文件
 
-修改 `deploy/secrets/core.yaml`：
+- [deploy/secrets/core.yaml](/root/huhu/agent/combine-aiops-mcp/robusta/deploy/secrets/core.yaml)
+- [deploy/configmap/config.yaml](/root/huhu/agent/combine-aiops-mcp/robusta/deploy/configmap/config.yaml)
+- [deploy/configmap/runbooks.yaml](/root/huhu/agent/combine-aiops-mcp/robusta/deploy/configmap/runbooks.yaml)
+- [deploy/k8s-simple.yaml](/root/huhu/agent/combine-aiops-mcp/robusta/deploy/k8s-simple.yaml)
+- [deploy/rbac.yaml](/root/huhu/agent/combine-aiops-mcp/robusta/deploy/rbac.yaml)
 
-```yaml
-stringData:
-  LLM_API_KEY: "sk-xxx"
-  LLM_MODEL: "deepseek/deepseek-chat"     # 或 anthropic/claude-sonnet-4-6
-  LLM_API_BASE: ""                          # DeepSeek 留空，Claude 填代理地址
-  USE_WORKFLOW: "true"                      # 启用工作流模式
-```
+### 必改项
 
-### 主集群部署
+#### Secret
+
+编辑 [deploy/secrets/core.yaml](/root/huhu/agent/combine-aiops-mcp/robusta/deploy/secrets/core.yaml)：
+
+- `LLM_API_KEY`
+- `LLM_MODEL`
+- `LLM_API_BASE`
+- `AUTO_REMEDIATE`
+- `LOG_LEVEL`
+
+#### ConfigMap
+
+编辑 [deploy/configmap/config.yaml](/root/huhu/agent/combine-aiops-mcp/robusta/deploy/configmap/config.yaml)：
+
+- `i18n`
+- `mcp_servers`
+- `workflow`
+- `metrics`
+- `federation`
+
+## 2. 单集群部署
+
+### 构建与推送
 
 ```bash
-make build push deploy-master
+make build
+make push
 ```
 
-### 子集群部署
+### 部署
 
 ```bash
-make build push deploy-slave
+make deploy
 ```
 
-### 运维命令
+该命令会：
+
+1. 同步镜像版本到 [deploy/k8s-simple.yaml](/root/huhu/agent/combine-aiops-mcp/robusta/deploy/k8s-simple.yaml)
+2. 创建 `aiops` namespace
+3. 递归应用 `deploy/`
+4. 等待 `aiops-copilot` rollout 完成
+
+### 验证
 
 ```bash
-make logs        # 查看日志
-make restart     # 重启
-make delete      # 删除（保留 namespace）
+kubectl get pods -n aiops
+kubectl get svc -n aiops
+curl http://<node-ip>:30800/health
 ```
 
-### 联邦查询配置
+## 3. 联邦部署
 
-主集群 `deploy/configmap/config.yaml`：
+### 主集群
+
+```bash
+make deploy-master
+```
+
+该命令会自动把 `federation.enabled` 改为 `true`，然后执行 `make deploy`。
+
+主集群配置重点：
 
 ```yaml
 federation:
   enabled: true
   sub_agents:
     - name: "main"
-      url: "http://localhost:8000"        # 容器内端口
-      description: "主集群"
+      url: "http://localhost:8000"
       enabled: true
     - name: "cluster-24"
-      url: "http://10.2.0.24:30800"      # 子集群 NodePort
-      description: "子集群 24"
+      url: "http://10.2.0.24:30800"
       enabled: true
 ```
 
-子集群：`federation.enabled: false`
+说明：
 
----
+- 主集群自身应使用 `http://localhost:8000`
+- 其他子集群使用可被主集群访问的地址
 
-## 二、API 使用
-
-### 端点总览
-
-| 端点 | 说明 |
-|------|------|
-| `/ask` | 单集群查询（主入口） |
-| `/federation/ask` | 多集群并发查询（v1） |
-| `/federation/ask/v2` | Agent-to-Agent 智能路由（v2） |
-| `/health` | 健康检查 |
-| `/tools` | 工具列表 |
-| `/runbooks` | Runbook 列表 |
-| `/reports` | 诊断报告列表 |
-
-### `/ask` 参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `q` | string | **必填** | 问题内容 |
-| `stream` | bool | `true` | 是否流式输出 |
-| `format` | string | `"text"` | 输出格式：`text` / `sse` |
-| `max_steps` | int | `20` | LLM 最大工具调用轮数（1-100） |
-
-### `/federation/ask` 参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `q` | string | **必填** | 问题内容 |
-| `max_steps` | int | `30` | 每个子集群最大步数 |
-| `conclusion_max_tokens` | int | `8192` | 子集群结论 token 上限（0=不限） |
-
-### `/federation/ask/v2` 参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `q` | string | **必填** | 问题内容 |
-| `max_steps` | int | `30` | Agent 最大步数 |
-
-### 使用示例
+### 子集群
 
 ```bash
-# 单集群：故障诊断
-curl -G "http://HOST:30800/ask" --data-urlencode "q=Pod 为什么一直重启"
-
-# 单集群：数据查询（减少步数加速）
-curl -G "http://HOST:30800/ask" --data-urlencode "q=集群 CPU 使用率" --data-urlencode "max_steps=10"
-
-# 单集群：非流式
-curl -G "http://HOST:30800/ask" --data-urlencode "q=Pod列表" --data-urlencode "stream=false"
-
-# 联邦 v1：查询所有集群
-curl -G "http://HOST:30800/federation/ask" --data-urlencode "q=哪个集群 CPU 最高"
-
-# A2A v2：智能路由到指定集群
-curl -G "http://HOST:30800/federation/ask/v2" --data-urlencode "q=查询 cluster-24 的内存"
-
-# A2A v2：对比多个集群
-curl -G "http://HOST:30800/federation/ask/v2" --data-urlencode "q=对比 main 和 cluster-24 的 CPU"
-
-# A2A v2：不同集群不同问题
-curl -G "http://HOST:30800/federation/ask/v2" --data-urlencode "q=查询 main 的内存和 cluster-24 的 CPU"
+make deploy-slave
 ```
 
----
+该命令会自动把 `federation.enabled` 改为 `false`，然后执行 `make deploy`。
 
-## 三、常见问题
+## 4. 升级
 
-**Q: `max_steps` 设多少合适？**
-简单数据查询 `10-15`，复杂诊断 `20-30`，默认 20 适合大多数场景。
+### 升级镜像
 
-**Q: 主集群 URL 用什么？**
-必须用 `http://localhost:8000`（容器内端口），不能用 NodePort 30800。
+```bash
+echo "8.0.0" > VERSION
+make build
+make push
+make deploy
+```
 
-**Q: A2A 和并发模式的区别？**
-并发模式查询所有集群，A2A 由 LLM 智能决定查询哪些。
+### 仅修改配置
 
-**Q: 如何禁用子集群？**
-`federation.sub_agents` 中设置 `enabled: false`，重新部署。
+```bash
+kubectl apply -f deploy/configmap/ --recursive
+kubectl apply -f deploy/secrets/ --recursive
+make restart
+```
+
+### 仅修改 Runbook
+
+```bash
+kubectl apply -f deploy/configmap/runbooks.yaml
+make restart
+```
+
+## 5. 卸载
+
+### 保留 namespace 的卸载
+
+```bash
+make delete
+```
+
+该命令会删除：
+
+- `deploy/k8s-simple.yaml`
+- `deploy/rbac.yaml`
+- `deploy/secrets/*`
+- `deploy/configmap/*`
+
+不会删除：
+
+- `aiops` namespace
+
+### 完全清理
+
+```bash
+make delete
+kubectl delete namespace aiops --ignore-not-found
+```
+
+## 6. 日常运维
+
+### 查看日志
+
+```bash
+make logs
+```
+
+### 重启
+
+```bash
+make restart
+```
+
+### 查看服务
+
+```bash
+kubectl get deployment,svc,cm,secret -n aiops
+```
+
+### 查看已保存报告
+
+```bash
+curl http://<node-ip>:30800/reports
+```
+
+## 7. 常见访问方式
+
+### 诊断
+
+```bash
+curl --no-buffer -G "http://<node-ip>:30800/ask" \
+  --data-urlencode "q=我的集群有什么问题？"
+```
+
+### 查询
+
+```bash
+curl --no-buffer -G "http://<node-ip>:30800/query" \
+  --data-urlencode "q=集群 CPU 和内存使用率是多少"
+```
+
+### 联邦诊断
+
+```bash
+curl --no-buffer -G "http://<node-ip>:30800/federation/ask/v2" \
+  --data-urlencode "q=main 和 cluster-24 现在分别有什么问题？"
+```
+
+### 联邦查询
+
+```bash
+curl --no-buffer -G "http://<node-ip>:30800/federation/query/v2" \
+  --data-urlencode "q=对比 main 和 cluster-24 的 CPU 使用率"
+```
+
+## 8. 配置建议
+
+### `workflow.rca_mode`
+
+- `lite`
+  推荐默认值，避免 RCA 节点重复采集
+- `full`
+  只有在你确实需要 RCA 再调工具时才打开
+
+### `workflow.max_steps`
+
+- `layer`
+  控制定位阶段探索深度
+- `evidence`
+  对总耗时影响最大
+- `rca`
+  仅 `rca_mode=full` 时生效
+
+### `metrics.enabled`
+
+- `false`
+  输出更干净
+- `true`
+  额外展示质量指标
+
+### `AUTO_REMEDIATE`
+
+- `false`
+  仅诊断，不执行修复
+- `true`
+  允许模型执行修复动作，风险更高

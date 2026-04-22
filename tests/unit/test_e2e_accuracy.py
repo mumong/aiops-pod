@@ -48,3 +48,38 @@ def test_run_single_request_classifies_stream_read_timeout_and_keeps_partial_bod
     assert "超时" in result["error"]
     assert "prefix-chunk" in saved
     assert "Read timed out" in saved
+
+
+def test_extract_runbook_accepts_reference_runbooks_without_core():
+    test_accuracy = _load_test_accuracy_module()
+
+    text = """
+📋 诊断追踪
+
+- **参考 Runbook**: private-k8s-health-reference, l2-oomkilled
+- **工具调用**: 20 次
+- **LLM 调用**: 4 次
+"""
+
+    runbook = test_accuracy.extract_runbook(text)
+
+    assert runbook["core"] is None
+    assert runbook["refs"] == ["private-k8s-health-reference", "l2-oomkilled"]
+    assert "l2-oomkilled" in runbook["runbook_ids"]
+
+
+def test_scenario_runbook_match_uses_reference_runbooks_when_core_missing():
+    test_accuracy = _load_test_accuracy_module()
+
+    scenario = test_accuracy.ScenarioResult(
+        "l2-oomkilled",
+        test_accuracy.SCENARIOS["l2-oomkilled"],
+    )
+
+    run = {
+        "runbook_core": None,
+        "runbook_refs": ["private-k8s-health-reference", "l2-oomkilled"],
+        "runbook_ids": ["private-k8s-health-reference", "l2-oomkilled"],
+    }
+
+    assert scenario._is_runbook_match(run) is True
