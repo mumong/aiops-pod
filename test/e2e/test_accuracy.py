@@ -167,10 +167,12 @@ def extract_runbook(text: str) -> Dict[str, Optional[str]]:
     数据来源：
       1. rca_analysis JSON: "primary_runbooks": ["L3 镜像拉取失败 (ImagePullBackOff)"]
       2. <runbook> 标签标题: "<runbook># L3 镜像拉取失败 (ImagePullBackOff)"
-      3. fetch_runbook 日志: "fetch_runbook...找到...xxx.md"
+      3. 诊断追踪: "核心 Runbook: xxx" / "参考 Runbook: a, b"
+      4. fetch_runbook 日志: "fetch_runbook...找到...xxx.md"
     """
     core = None
     runbook_ids = set()
+    refs: List[str] = []
     # 优先级1: rca_analysis JSON 中的 primary_runbooks
     m = re.search(r'"primary_runbooks"\s*:\s*\[([^\]]+)\]', text)
     if m:
@@ -182,12 +184,30 @@ def extract_runbook(text: str) -> Dict[str, Optional[str]]:
         m = re.search(r'<runbook>\s*#\s+(.+?)(?:\n|$)', text)
         if m:
             core = m.group(1).strip()
+    # 优先级3: 诊断追踪中的核心/参考 Runbook
+    if not core:
+        m = re.search(r'核心\s*Runbook[^:\n]*:\s*([^\n\r]+)', text, re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip()
+            if candidate and candidate != "无":
+                core = candidate
+
+    m = re.search(r'参考\s*Runbook[^:\n]*:\s*([^\n\r]+)', text, re.IGNORECASE)
+    if m:
+        raw_refs = m.group(1).strip()
+        if raw_refs and raw_refs != "无":
+            refs = [part.strip() for part in raw_refs.split(",") if part.strip()]
+            runbook_ids.update(refs)
+
+    if core and core != "无":
+        runbook_ids.add(core)
+
     # 从 fetch_runbook 日志提取 .md 文件名
     for fm in re.finditer(r'fetch_runbook.*?找到.*?([\w][\w.-]*\.md)', text):
         fname = fm.group(1)
         if fname not in ("README.md", "CLAUDE.md"):
             runbook_ids.add(fname.replace(".md", ""))
-    return {"core": core, "refs": None, "runbook_ids": list(runbook_ids)}
+    return {"core": core, "refs": refs, "runbook_ids": list(runbook_ids)}
 
 
 def extract_tool_calls(text: str) -> int:
@@ -322,9 +342,9 @@ class ScenarioResult:
 
     def _is_runbook_match(self, run: Dict) -> bool:
         """多策略 Runbook 匹配：
-        1. runbook_ids 精确匹配（从 fetch_runbook 日志提取的 .md 文件名）
-        2. 核心 Runbook 中文名包含 expect_runbook 关键词
-        3. runbook_keywords 模糊匹配核心 Runbook 中文名
+        1. runbook_ids 精确匹配（包含参考 Runbook / fetch_runbook 日志提取的 ID）
+        2. 核心或参考 Runbook 名称包含 expect_runbook 关键词
+        3. runbook_keywords 模糊匹配核心或参考 Runbook 名称
         """
         expect = self.expect_runbook.lower()
         # 策略1: 从 thinking 中提取的 .md 文件 ID 精确匹配
@@ -332,18 +352,28 @@ class ScenarioResult:
         for rid in runbook_ids:
             if expect in rid.lower() or rid.lower() in expect:
                 return True
-        # 策略2: 核心 Runbook 中文名包含 expect_runbook 关键词片段
+
+        runbook_texts = []
         core = (run.get("runbook_core") or "").lower()
         if core:
-            # 将 expect_runbook 拆分为片段匹配（如 "l3-imagepull-failed" → ["l3", "imagepull", "failed"]）
-            parts = [p for p in expect.replace("-", " ").replace("_", " ").split() if len(p) > 1]
-            if parts and sum(1 for p in parts if p in core) >= len(parts) * 0.5:
+            runbook_texts.append(core)
+        for ref in run.get("runbook_refs") or []:
+            ref_text = str(ref).lower().strip()
+            if ref_text:
+                runbook_texts.append(ref_text)
+
+        # 策略2: 核心或参考 Runbook 名称包含 expect_runbook 关键词片段
+        parts = [p for p in expect.replace("-", " ").replace("_", " ").split() if len(p) > 1]
+        for text in runbook_texts:
+            if parts and sum(1 for p in parts if p in text) >= len(parts) * 0.5:
                 return True
+
         # 策略3: runbook_keywords 模糊匹配
-        if self.runbook_keywords and core:
-            matched = sum(1 for kw in self.runbook_keywords if kw.lower() in core)
-            if matched >= 1:
-                return True
+        if self.runbook_keywords:
+            for text in runbook_texts:
+                matched = sum(1 for kw in self.runbook_keywords if kw.lower() in text)
+                if matched >= 1:
+                    return True
         return False
 
     @property

@@ -163,9 +163,9 @@ python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" \
 |------|------|
 | **定义** | 诊断报告是否引用了与场景匹配的 Runbook |
 | **阈值** | >= 80% |
-| **数据来源** | 报告中的「核心 Runbook」字段 |
-| **提取正则** | `核心\s*Runbook[：:\s]*(.*)` |
-| **匹配逻辑** | 提取的 Runbook 名称中是否包含场景预期的 Runbook ID（大小写不敏感） |
+| **数据来源** | 报告中的「核心 Runbook」和「参考 Runbook」字段，以及 `fetch_runbook` 日志提取到的 Runbook ID |
+| **提取正则** | `核心\s*Runbook[：:\s]*(.*)` / `参考\s*Runbook[：:\s]*(.*)` |
+| **匹配逻辑** | 只要核心 Runbook、参考 Runbook 列表、或日志提取的 Runbook ID 中任意一个包含场景预期 Runbook ID（大小写不敏感），就判定为匹配 |
 | **汇总方式** | `匹配次数 / 成功请求总数 × 100%` |
 
 报告中的原始格式（由 `metrics.format_metrics_block()` 生成）：
@@ -178,7 +178,7 @@ python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" \
 - **LLM 调用**: 4 次
 ```
 
-**匹配示例**：场景 `l3-imagepull` 的 `expect_runbook = "l3-imagepull-failed"`。报告中 `核心 Runbook: l3-imagepull-failed`，`"l3-imagepull-failed" in "l3-imagepull-failed"` → 匹配成功 ✅
+**匹配示例**：场景 `l2-oomkilled` 的 `expect_runbook = "l2-oomkilled"`。即使报告中没有 `核心 Runbook`，只要 `参考 Runbook: private-k8s-health-reference, l2-oomkilled`，也会判定匹配成功 ✅
 
 **计算示例**：50 次请求，45 次成功，其中 41 次 Runbook 匹配 → `41/45 = 91.1%` ✅
 
