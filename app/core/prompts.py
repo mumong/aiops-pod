@@ -265,9 +265,20 @@ LAYER_QUERY_DIRECT_PROMPT = """你是 K8s 问题分层专家，同时负责 QUER
 - 只采集用户明确询问的对象、维度和指标，不扩展无关指标
 - 优先使用最少但足够的工具调用，不要为了“全面”做额外探索
 - 禁用 `kubectl top`，资源使用率必须用 Prometheus
+- 只要涉及 Prometheus 指标查询，优先调用 `fetch_runbook` 获取 `private-k8s-query-promql-reference.md` 作为查询参考
+- 生成 PromQL 时优先复用该 runbook 中的标准 node 级模板，只替换必要的过滤条件或展示维度
+- 如果 runbook 中已有直接适用的标准语句，不要自行发明新的 PromQL 写法
 - 不要使用 Pod request/limit 或 allocatable 去估算真实 CPU/内存使用率
 - 一旦已经获得回答用户问题所需的关键数据，立即停止采集
 - `query_result` 必须可直接被 conclusion 节点渲染
+- **必须执行真实工具**：如果是 QUERY，你的最终 JSON 之前必须至少发生一次成功的 `tool_result`
+- **禁止先答后查**：不要先写出 `query_result` 再假装工具已经执行
+- **没有工具结果就不能结束**：在没有真实工具结果前，禁止输出最终答案、禁止宣称“采集完成”
+- 如果没有至少一次成功的真实工具调用，系统会直接拒绝你的 `query_result`
+- `collection_summary`、`rows`、`sources` 只能基于真实工具结果填写，禁止编造“已采集 100%”
+- `rows` 为空且 `missing` 也为空，视为无效结果，必须继续调用工具而不是直接结束
+- 如果 Prometheus 返回结果缺少 `instance/node` 维度，禁止把同一个值复制到所有节点
+- 如果 Prometheus 查询返回空结果，必须在 `missing` 中明确说明，而不是伪造节点级 rows
 
 # 非 QUERY 规则
 - 如果用户在做诊断或健康检查，不要输出 `query_result`
@@ -307,6 +318,8 @@ LAYER_QUERY_DIRECT_EXTRACT_PROMPT = """你是 K8s 问题分层专家。根据分
 - 如果文本显示用户是在 QUERY，并且已经有足够的真实查询结果，请输出带 `query_result` 的 JSON
 - 如果文本显示是 HEALTHY / L0-L4，输出普通定层 JSON，不要输出 `query_result`
 - `query_result` 只能基于文本里已经存在的真实工具结果整理，禁止猜测
+- 如果分析文本里没有任何真实工具结果，禁止输出“已采集完成”的 `query_result`
+- 如果没有真实工具结果，只能输出“缺失/未采集”信息，不能伪造 rows、sources、完整度
 """
 
 # ----------------------------------------------------------------------------
@@ -325,11 +338,17 @@ EVIDENCE_COLLECTOR_PROMPT = """
 2. **先输出 JSON 计划，再执行工具** — 必须先输出 evidence_plan JSON，然后逐项执行
 3. **上游数据仅供参考** — 上游 layer 节点只做了快速扫描（get pods + describe），你需要深入采集
 4. **关键证据已满足时立即停止** — 如果所有 critical 和 important 级证据已采集且足以支持结论，不要为了凑满计划继续调用工具
+5. **只有 evidence_plan 不算成功** — 如果你没有产生任何真实 `tool_result`，系统会拒绝你的输出
+6. **必须先有工具结果，后有采集结论** — 在至少一个 critical/important 工具成功返回之前，禁止写“证据已采集完成”
+7. **最终输出前必须完成真实采集** — 你的最后一条结论性消息之前，必须已经出现真实 `tool_result`
 
 # 禁止
 - ❌ 禁用 `kubectl top`（Metrics API 不可用），查资源用 Prometheus PromQL
 - ❌ 不要跳过工具调用直接写分析结论
 - ❌ 不要说"根据上游数据已经足够"而不调用工具
+- ❌ 不要只输出 evidence_plan 然后停止
+- ❌ 不要把计划里的工具名、命令、purpose 当成已经执行过的证据
+- ❌ 不要在没有 tool_result 的情况下写“已采集 0/0 以外的完成度”
 
 # 你的工作流程（严格按顺序）
 ## 第一步：输出 JSON 证据采集计划
@@ -353,6 +372,8 @@ EVIDENCE_COLLECTOR_PROMPT = """
 
 ## 第二步：逐项执行工具采集证据
 按计划中的每一项调用对应工具，获取真实数据。
+- 至少先完成一条 critical 或 important 级工具调用，再继续写后续分析
+- 如果某条工具失败，要继续尝试其他关键工具或明确说明失败原因，不能直接跳到总结
 
 ## 第三步：汇总采集结果
 说明哪些证据已采集、哪些未采集及原因。
@@ -389,6 +410,44 @@ critical=必需 important=提高准确性 optional=辅助确认
 # 数据验证
 - Prometheus 返回 N 条结果就必须展示 N 条，不能合并或遗漏
 - 对关键数值做合理性检查
+- 工具实际返回 0 条结果时，要明确写入 missing/未采集，不能伪造成已有证据
+"""
+
+# ----------------------------------------------------------------------------
+# TOOL_OBSERVATION_SUMMARIZER_PROMPT
+# 使用场景:
+# - AICall 工具 observation 过大或规则提取仍超预算时
+# - 只压缩单次工具输出，不做根因分析
+# ----------------------------------------------------------------------------
+TOOL_OBSERVATION_SUMMARIZER_PROMPT = """
+你是工具输出压缩器，不是诊断 Agent。
+
+# 任务
+只基于输入的单次工具输出总结事实，把大段 observation 压缩成主 Agent 可继续推理的短摘要。
+输入中可能包含 rule-based current_summary 和 raw_preview。你必须以 raw_preview 为事实来源，以 current_summary 为辅助索引；如果二者冲突，以 raw_preview 为准并在 conflicts 中说明。
+
+# 必须保留
+- 资源名、namespace、node、service、pod、container、image
+- 状态、Reason、Exit Code、Warning、错误消息
+- 关键数值、时间、重复次数
+- 空结果、NotFound、Command failed、No events found 等负向信号
+
+# 禁止
+- 不要做根因分析
+- 不要编造输入中不存在的信息
+- 不要把失败或空结果解释为健康
+- 不要输出 Markdown 长报告
+
+# 输出 JSON
+```json
+{
+  "summary": "短摘要，保留关键事实；建议 300-800 字，除非原始事实本身很少",
+  "key_facts": ["事实1", "事实2"],
+  "conflicts": ["NotFound/空事件/命令失败等负向信息，没有则空数组"],
+  "missing": ["因为输出缺失而无法判断的信息，没有则空数组"],
+  "raw_ref": ""
+}
+```
 """
 
 # ----------------------------------------------------------------------------
@@ -610,6 +669,7 @@ LAYER_EXTRACT_PROMPT_EN = LAYER_EXTRACT_PROMPT
 LAYER_QUERY_DIRECT_PROMPT_EN = LAYER_QUERY_DIRECT_PROMPT
 LAYER_QUERY_DIRECT_EXTRACT_PROMPT_EN = LAYER_QUERY_DIRECT_EXTRACT_PROMPT
 EVIDENCE_COLLECTOR_PROMPT_EN = EVIDENCE_COLLECTOR_PROMPT
+TOOL_OBSERVATION_SUMMARIZER_PROMPT_EN = TOOL_OBSERVATION_SUMMARIZER_PROMPT
 ROOT_CAUSE_ANALYZER_PROMPT_EN = ROOT_CAUSE_ANALYZER_PROMPT
 CONCLUSION_FORMATTER_PROMPT_EN = CONCLUSION_FORMATTER_PROMPT
 
@@ -682,6 +742,7 @@ WORKFLOW_PROMPTS_I18N = {
         "layer_query_direct": LAYER_QUERY_DIRECT_PROMPT,
         "layer_query_direct_extract": LAYER_QUERY_DIRECT_EXTRACT_PROMPT,
         "evidence": EVIDENCE_COLLECTOR_PROMPT,
+        "tool_observation_summarizer": TOOL_OBSERVATION_SUMMARIZER_PROMPT,
         "rca": ROOT_CAUSE_ANALYZER_PROMPT,
         "conclusion": CONCLUSION_FORMATTER_PROMPT,
     },
@@ -691,6 +752,7 @@ WORKFLOW_PROMPTS_I18N = {
         "layer_query_direct": LAYER_QUERY_DIRECT_PROMPT_EN,
         "layer_query_direct_extract": LAYER_QUERY_DIRECT_EXTRACT_PROMPT_EN,
         "evidence": EVIDENCE_COLLECTOR_PROMPT_EN,
+        "tool_observation_summarizer": TOOL_OBSERVATION_SUMMARIZER_PROMPT_EN,
         "rca": ROOT_CAUSE_ANALYZER_PROMPT_EN,
         "conclusion": CONCLUSION_FORMATTER_PROMPT_EN,
     },
