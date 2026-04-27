@@ -44,12 +44,14 @@
 - [app/core/workflow/graph.py](/root/huhu/agent/combine-aiops-mcp/robusta/app/core/workflow/graph.py)
 - [app/core/workflow/executor.py](/root/huhu/agent/combine-aiops-mcp/robusta/app/core/workflow/executor.py)
 - [app/core/workflow/nodes/](/root/huhu/agent/combine-aiops-mcp/robusta/app/core/workflow/nodes)
+- [docs/上下文管理设计与实现.md](/root/huhu/agent/combine-aiops-mcp/robusta/docs/上下文管理设计与实现.md)
 
 职责：
 
 - 定义图结构
 - 在节点间传递 `WorkflowState`
 - 汇总 metrics 与报告
+- 管理 context archive、`layer_handoff`、tool observation summary 和 token budget 日志
 
 ### 知识与提示词层
 

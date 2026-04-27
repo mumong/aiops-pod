@@ -18,6 +18,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from app.core.context.archive import ContextArchive
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
@@ -59,6 +60,10 @@ class LayerClassifierNode(WorkflowNode):
             return self.holmes_service.get_prompt_language()
         return "zh"
 
+    def should_inject_runbook_catalog(self) -> bool:
+        # /query direct 模式下只做轻量真实取数，不注入大段 runbook catalog 干扰本地模型工具决策。
+        return not self._is_direct_query_mode()
+
     def _get_query_mode(self) -> str:
         wf_config = getattr(self, "workflow_config_override", None) or {}
         return str(wf_config.get("query_mode", "full")).strip().lower() or "full"
@@ -75,6 +80,78 @@ class LayerClassifierNode(WorkflowNode):
         if self._is_direct_query_mode():
             return get_workflow_prompt("layer_query_direct_extract", prompt_language=self._get_prompt_language())
         return get_workflow_prompt("layer_extract", prompt_language=self._get_prompt_language())
+
+    @staticmethod
+    def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
+        return any(
+            ev.get("type") == "tool_result" and ev.get("status") == "success"
+            for ev in (thinking_events or [])
+        )
+
+    def _is_usable_query_result(
+        self,
+        result: Optional[Dict[str, Any]],
+        thinking_events: List[Dict[str, Any]],
+    ) -> bool:
+        if not self._is_structured_layer_result(result):
+            return False
+
+        if result.get("layer") != "QUERY":
+            return True
+
+        query_result = result.get("query_result")
+        if not isinstance(query_result, dict):
+            return False
+
+        if not self._has_successful_tool_results(thinking_events):
+            return False
+
+        rows = query_result.get("rows", []) or []
+        missing = query_result.get("missing", []) or []
+        sources = query_result.get("sources", []) or []
+        return bool(sources) and bool(rows or missing)
+
+    def _get_query_retry_prompt(self) -> str:
+        return (
+            self._get_layer_prompt()
+            + "\n\n# 上一轮结果被系统拒绝\n"
+              "- 原因：你输出了 QUERY JSON，但没有提供足够的真实工具执行结果。\n"
+              "- 本轮必须先执行工具，再输出最终 JSON。\n"
+              "- 在出现至少一次成功的 tool_result 之前，禁止输出最终答案。\n"
+              "- 你的最后一条消息必须建立在真实工具结果之上，而不是工具计划之上。\n"
+              "- 如果没有至少一次成功的 tool_result，系统会再次拒绝你的输出。\n"
+              "- `query_result.rows` 为空且 `missing` 也为空，视为无效结果。\n"
+              "- `collection_summary`、`sources`、`rows` 只能基于真实工具结果填写，禁止编造“已采集 100%”。\n"
+        )
+
+    def _build_query_direct_failure_result(
+        self,
+        question: str,
+        full_analysis_text: str,
+        failure_reason: str,
+    ) -> Dict[str, Any]:
+        return {
+            "layer": "QUERY",
+            "layers": ["QUERY"],
+            "layer_name": "查询请求",
+            "confidence": 0.3,
+            "reasoning": failure_reason,
+            "key_entities": [],
+            "possible_scenarios": [],
+            "query_result": {
+                "query_target": question,
+                "collection_summary": "计划 0 项，实际采集 0 项，未采集 1 项，完整度 0%",
+                "columns": [
+                    {"key": "status", "label": "状态"},
+                    {"key": "reason", "label": "原因"},
+                ],
+                "rows": [],
+                "notes": ["未获得足够的真实工具结果，已拒绝模型直接生成的伪结构化答案。"],
+                "missing": [{"field": "query_result", "reason": failure_reason}],
+                "sources": [],
+            },
+            "full_analysis": full_analysis_text,
+        }
     
     def execute(self, state: WorkflowState) -> WorkflowState:
         """
@@ -108,9 +185,23 @@ class LayerClassifierNode(WorkflowNode):
             raw_layers = layer_result.get("layers", [])
             layers = [self._parse_layer(l) for l in raw_layers if l] if raw_layers else [layer]
 
-            # 提取阶段1的完整分析文本（包含工具调用数据），单独传递给下游
+            # 提取阶段1的完整分析文本（包含工具调用数据），只归档，不再作为大字段传递给下游
             full_analysis = layer_result.pop("full_analysis", "")
             query_result = layer_result.pop("query_result", None)
+            layer_handoff = self._build_layer_handoff(
+                question=question,
+                layer_result=layer_result,
+                layer=layer,
+                layers=layers,
+                thinking_events=thinking_events,
+            )
+            archive_refs = self._archive_layer_outputs(
+                run_id=state.get("run_id", ""),
+                full_analysis=full_analysis,
+                handoff=layer_handoff,
+            )
+            if archive_refs.get("full_analysis_ref"):
+                layer_handoff["archive_ref"] = archive_refs["full_analysis_ref"]
 
             new_state.update({
                 "layer": layer,
@@ -119,8 +210,11 @@ class LayerClassifierNode(WorkflowNode):
                 "layer_reasoning": layer_result.get("reasoning", ""),
                 # 保存结构化分类结果
                 "layer_analysis": json.dumps(layer_result, ensure_ascii=False),
-                # 保存阶段1完整分析文本（含工具输出），供 evidence/rca 使用
-                "layer_full_analysis": full_analysis,
+                # 大文本只落盘；下游使用 layer_handoff
+                "layer_full_analysis": None,
+                "layer_handoff": layer_handoff,
+                "layer_archive_ref": archive_refs,
+                "context_archive_ref": archive_refs.get("run_root"),
                 "key_entities": layer_result.get("key_entities", []),
                 "possible_scenarios": layer_result.get("possible_scenarios", []),
             })
@@ -150,6 +244,20 @@ class LayerClassifierNode(WorkflowNode):
             layers = [self._parse_layer(l) for l in raw_layers if l] if raw_layers else [layer]
             full_analysis = rescue_result.pop("full_analysis", "")
             query_result = rescue_result.pop("query_result", None)
+            layer_handoff = self._build_layer_handoff(
+                question=question,
+                layer_result=rescue_result,
+                layer=layer,
+                layers=layers,
+                thinking_events=[],
+            )
+            archive_refs = self._archive_layer_outputs(
+                run_id=state.get("run_id", ""),
+                full_analysis=full_analysis,
+                handoff=layer_handoff,
+            )
+            if archive_refs.get("full_analysis_ref"):
+                layer_handoff["archive_ref"] = archive_refs["full_analysis_ref"]
 
             new_state.update({
                 "layer": layer,
@@ -157,7 +265,10 @@ class LayerClassifierNode(WorkflowNode):
                 "layer_confidence": rescue_result.get("confidence", 0.5),
                 "layer_reasoning": rescue_result.get("reasoning", ""),
                 "layer_analysis": json.dumps(rescue_result, ensure_ascii=False),
-                "layer_full_analysis": full_analysis,
+                "layer_full_analysis": None,
+                "layer_handoff": layer_handoff,
+                "layer_archive_ref": archive_refs,
+                "context_archive_ref": archive_refs.get("run_root"),
                 "key_entities": rescue_result.get("key_entities", []),
                 "possible_scenarios": rescue_result.get("possible_scenarios", []),
             })
@@ -166,6 +277,116 @@ class LayerClassifierNode(WorkflowNode):
             self._save_thinking(state, new_state, [])
 
         return new_state
+
+    def _archive_layer_outputs(
+        self,
+        run_id: str,
+        full_analysis: str,
+        handoff: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Archive full layer text and compact handoff; keep only refs in state."""
+        if not run_id:
+            return {}
+        try:
+            archive = ContextArchive(run_id=run_id)
+            refs = archive.write_layer_artifacts(full_analysis or "", handoff or {})
+            refs["run_root"] = str(archive.root)
+            return refs
+        except Exception as exc:
+            logger.warning("⚠️ [layer] 写入 context archive 失败: %s", exc)
+            return {}
+
+    def _build_layer_handoff(
+        self,
+        question: str,
+        layer_result: Dict[str, Any],
+        layer: Layer,
+        layers: List[Layer],
+        thinking_events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build a compact structured handoff for downstream nodes."""
+        active_entities = self._normalize_entities(layer_result.get("key_entities", []))
+        active_signals = []
+        matched_runbooks = []
+
+        for ev in thinking_events or []:
+            if ev.get("type") != "tool_result" or ev.get("status") != "success":
+                continue
+            tool_name = ev.get("tool_name", "unknown")
+            if tool_name == "fetch_runbook":
+                rb_id = self._extract_runbook_id(ev)
+                if rb_id and rb_id not in matched_runbooks:
+                    matched_runbooks.append(rb_id)
+
+            signal = ev.get("result", "") or ev.get("result_preview", "")
+            if signal:
+                active_signals.append({
+                    "source": tool_name,
+                    "signal": self._compact_signal(signal),
+                    "raw_ref": ev.get("raw_ref"),
+                    "summary_ref": ev.get("summary_ref"),
+                })
+
+        layer_value = layer.value if hasattr(layer, "value") else str(layer)
+        return {
+            "diagnosis_scope": "current_state_only" if "之前" in question or "当前" in question or "现在" in question else "question_scope",
+            "layer": layer_value,
+            "layers": [l.value if hasattr(l, "value") else str(l) for l in layers],
+            "confidence": layer_result.get("confidence", 0.5),
+            "primary_problem": layer_result.get("reasoning", ""),
+            "active_entities": active_entities,
+            "active_signals": active_signals[:12],
+            "possible_scenarios": layer_result.get("possible_scenarios", []),
+            "matched_runbooks": matched_runbooks,
+            "must_verify": [
+                "确认 active_entities 中的对象当前仍存在于指定 namespace",
+                "确认 active_signals 仍能被真实工具结果验证",
+                "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
+            ],
+            "do_not_change": [
+                "不要把上游 namespace、Pod、Service、Node 名称改写成其他对象",
+                "不要把历史 event 当成当前故障",
+                "不要把计划或工具名当成证据，必须基于 tool_result",
+            ],
+        }
+
+    @staticmethod
+    def _normalize_entities(entities: Any) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        current_namespace = ""
+        if not isinstance(entities, list):
+            return normalized
+        for entity in entities:
+            if isinstance(entity, dict):
+                etype = entity.get("type", "")
+                value = entity.get("value") or entity.get("name") or ""
+                namespace = entity.get("namespace", "")
+                item = {"type": etype, "name": value}
+                if namespace:
+                    item["namespace"] = namespace
+                normalized.append(item)
+                if etype.lower() == "namespace" and value:
+                    current_namespace = value
+            else:
+                normalized.append({"type": "Unknown", "name": str(entity)})
+        if current_namespace:
+            for item in normalized:
+                if item.get("type", "").lower() != "namespace" and "namespace" not in item:
+                    item["namespace"] = current_namespace
+        return normalized
+
+    @staticmethod
+    def _compact_signal(text: str, limit: int = 500) -> str:
+        compact = " ".join((text or "").split())
+        return compact[:limit] + ("..." if len(compact) > limit else "")
+
+    @staticmethod
+    def _extract_runbook_id(event: Dict[str, Any]) -> str:
+        raw = (event.get("result", "") or event.get("result_preview", "") or "")
+        match = re.search(r"\[([a-z0-9][a-z0-9-]+)\]|runbook_id[:=]\s*([a-z0-9-]+)", raw, re.IGNORECASE)
+        if match:
+            return match.group(1) or match.group(2) or ""
+        return ""
 
     def _analyze_with_llm(self, question: str) -> tuple:
         """使用 LLM 分析问题层级（单阶段架构）
@@ -218,6 +439,38 @@ class LayerClassifierNode(WorkflowNode):
             # 阶段1必须直接输出结构化 JSON
             result = self._try_parse_json(response.result)
             if self._is_structured_layer_result(result):
+                if self._is_direct_query_mode() and result.get("layer") == "QUERY":
+                    if not self._is_usable_query_result(result, thinking_events):
+                        logger.warning("⚠️ [layer] QUERY direct 输出缺少真实工具结果或有效 rows，发起一次严格重试")
+                        retry_response, retry_events = self._call_llm(
+                            question,
+                            self._get_query_retry_prompt(),
+                            expect_json=True,
+                            json_validator=self._is_structured_layer_result,
+                        )
+                        thinking_events = (thinking_events or []) + (retry_events or [])
+                        retry_text = retry_response.result if retry_response else ""
+                        full_analysis_text = self._build_full_analysis(retry_text, thinking_events)
+                        if len(full_analysis_text) > compact_threshold:
+                            enriched_text_for_downstream = self._compact_context(
+                                full_analysis_text, max_chars=compact_threshold
+                            )
+                        else:
+                            enriched_text_for_downstream = full_analysis_text
+
+                        retry_result = self._try_parse_json(retry_text)
+                        if self._is_usable_query_result(retry_result, thinking_events):
+                            logger.info("✅ [layer] QUERY direct 严格重试后获得真实工具结果")
+                            retry_result["full_analysis"] = enriched_text_for_downstream
+                            return retry_result, thinking_events
+
+                        failure_reason = "QUERY 请求未获得任何可用的真实工具结果，拒绝直接返回伪结构化结果"
+                        logger.warning("⚠️ [layer] %s", failure_reason)
+                        return self._build_query_direct_failure_result(
+                            question=question,
+                            full_analysis_text=enriched_text_for_downstream,
+                            failure_reason=failure_reason,
+                        ), thinking_events
                 logger.info("✅ [layer] 阶段1直接输出合法 JSON: layer=%s, confidence=%.2f",
                            result.get('layer'), result.get('confidence', 0))
                 result["full_analysis"] = enriched_text_for_downstream

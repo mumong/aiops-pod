@@ -51,6 +51,7 @@ class EvidenceCollectorNode(WorkflowNode):
         self.holmes_service = holmes_service
         self.metrics = metrics
         self.runbook_catalog = runbook_catalog
+        self._logged_evidence_user_prompt = False
         self._early_stop_state = {
             "triggered": False,
             "reason": "",
@@ -73,6 +74,13 @@ class EvidenceCollectorNode(WorkflowNode):
     def get_required_fields(self) -> List[str]:
         return ["question", "layer"]
 
+    @staticmethod
+    def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
+        return any(
+            ev.get("type") == "tool_result" and ev.get("status") == "success"
+            for ev in (thinking_events or [])
+        )
+
     def execute(self, state: WorkflowState) -> WorkflowState:
         """
         执行证据采集逻辑
@@ -92,20 +100,20 @@ class EvidenceCollectorNode(WorkflowNode):
             question = state.get("question", "")
             layer = state.get("layer")
             layer_analysis = state.get("layer_analysis", "{}")
-            # 优先使用阶段1完整分析文本（含工具输出），回退到结构化 JSON
-            layer_full_analysis = state.get("layer_full_analysis", "") or layer_analysis
+            layer_handoff = state.get("layer_handoff") or self._parse_layer_handoff(layer_analysis)
             possible_scenarios = state.get("possible_scenarios", [])
             key_entities = state.get("key_entities", [])
 
             logger.info(f"📋 证据采集: 层级={layer}, 可能场景={possible_scenarios}")
             logger.debug(f"📋 [DEBUG] 证据采集输入: question={question[:100]}, "
-                        f"layer_analysis长度={len(layer_full_analysis)}, "
+                        f"layer_handoff长度={len(json.dumps(layer_handoff, ensure_ascii=False, default=str))}, "
                         f"key_entities={key_entities}")
             self._early_stop_state = {
                 "triggered": False,
                 "reason": "",
                 "required_levels": ["critical", "important"],
             }
+            self._logged_evidence_user_prompt = False
 
             # 1. 调用 LLM 规划证据采集计划
             evidence_plan, thinking_events, llm_result_text = self._plan_evidence_with_llm(
@@ -113,8 +121,19 @@ class EvidenceCollectorNode(WorkflowNode):
                 layer=layer,
                 possible_scenarios=possible_scenarios,
                 key_entities=key_entities,
-                layer_analysis=layer_full_analysis
+                layer_analysis=json.dumps(layer_handoff, ensure_ascii=False)
             )
+            if evidence_plan and not self._has_successful_tool_results(thinking_events):
+                logger.warning("⚠️ [evidence] 仅拿到 evidence_plan，未执行任何真实工具；发起一次严格重试")
+                evidence_plan, thinking_events, llm_result_text = self._plan_evidence_with_llm(
+                    question=question,
+                    layer=layer,
+                    possible_scenarios=possible_scenarios,
+                    key_entities=key_entities,
+                    layer_analysis=json.dumps(layer_handoff, ensure_ascii=False),
+                    strict_mode=True,
+                    failure_reason="上一轮只返回 evidence_plan，没有任何成功工具调用，系统已拒绝该结果",
+                )
 
             # 2. 构建证据项列表（基于 thinking_events 中 AICall 真实工具调用）
             tool_results = []
@@ -162,6 +181,12 @@ class EvidenceCollectorNode(WorkflowNode):
             collected = sum(1 for e in evidence_items if e.collected)
             total = len(evidence_items)
             not_collected = [e for e in evidence_items if not e.collected]
+            evidence_facts = self._build_evidence_facts(evidence_items)
+            evidence_conflicts = self._build_evidence_conflicts(tool_data_from_llm)
+            missing_evidence = [
+                {"id": e.id, "description": e.description, "level": e.level.value if hasattr(e.level, "value") else str(e.level)}
+                for e in not_collected
+            ]
 
             evidence_inventory = []
             for e in evidence_items:
@@ -196,6 +221,9 @@ class EvidenceCollectorNode(WorkflowNode):
                 }, ensure_ascii=False),
                 "evidence_completeness": completeness,
                 "tool_results": tool_results,
+                "evidence_facts": evidence_facts,
+                "evidence_conflicts": evidence_conflicts,
+                "missing_evidence": missing_evidence,
                 "query_result": self._build_query_result(
                     question=question,
                     layer=layer,
@@ -234,6 +262,50 @@ class EvidenceCollectorNode(WorkflowNode):
             self._save_thinking(state, new_state, [])
 
         return new_state
+
+    @staticmethod
+    def _parse_layer_handoff(layer_analysis: str) -> Dict[str, Any]:
+        try:
+            parsed = json.loads(layer_analysis) if layer_analysis else {}
+            if isinstance(parsed, dict):
+                return {
+                    "layer": parsed.get("layer"),
+                    "confidence": parsed.get("confidence"),
+                    "primary_problem": parsed.get("reasoning", ""),
+                    "active_entities": parsed.get("key_entities", []),
+                    "possible_scenarios": parsed.get("possible_scenarios", []),
+                    "must_verify": ["基于真实 tool_result 重新验证上游定位"],
+                }
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return {}
+
+    @staticmethod
+    def _build_evidence_facts(evidence_items: List[EvidenceItem]) -> List[Dict[str, Any]]:
+        facts = []
+        for item in evidence_items:
+            if not item.collected:
+                continue
+            facts.append({
+                "id": item.id,
+                "description": item.description,
+                "level": item.level.value if hasattr(item.level, "value") else str(item.level),
+                "value": (item.value or "")[:500],
+                "source": getattr(item, "source", ""),
+            })
+        return facts
+
+    @staticmethod
+    def _build_evidence_conflicts(tool_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        conflicts = []
+        for item in tool_data:
+            data = item.get("data", "") or ""
+            if re.search(r"no events found|no resources found|notfound|not found|command failed|error from server", data, re.IGNORECASE):
+                conflicts.append({
+                    "tool": item.get("tool", "unknown"),
+                    "reason": data[:300],
+                })
+        return conflicts
 
     def _build_query_result(
         self,
@@ -332,7 +404,9 @@ class EvidenceCollectorNode(WorkflowNode):
         layer: Optional[Layer],
         possible_scenarios: List[str],
         key_entities: List[Dict],
-        layer_analysis: str = ""
+        layer_analysis: str = "",
+        strict_mode: bool = False,
+        failure_reason: str = "",
     ) -> tuple:
         """
         调用 LLM 规划证据采集
@@ -375,17 +449,51 @@ class EvidenceCollectorNode(WorkflowNode):
                 possible_scenarios=scenarios_str
             )
 
-            # 注入上游 layer 节点的分析结果，避免 evidence 重复分析
-            if layer_analysis:
-                system_prompt += f"\n\n# 上游问题定位结果（已完成，不要重复分析或重新获取 runbook）\n{layer_analysis}\n"
-                system_prompt += "\n请直接基于以上定位结果采集证据。如果上游分析中发现的实际问题与定位层级不符（例如上游发现 Pod 被驱逐是 L0 问题但定位为 L1），应按实际问题采集证据。\n"
-
             # 添加 entities 信息到 prompt
             if entities_str:
                 system_prompt += f"\n\n# 已提取的关键实体\n{entities_str}\n"
 
+            if strict_mode:
+                system_prompt += (
+                    "\n\n# 上一轮结果被系统拒绝（必须遵守）\n"
+                    f"- 失败原因：{failure_reason or '上一轮只返回计划，没有执行工具'}\n"
+                    "- 本轮至少执行一条 critical 或 important 级工具调用后，系统才会接受你的结果。\n"
+                    "- 在出现真实 tool_result 之前，禁止输出任何“采集完成/证据充分/可以下结论”的表述。\n"
+                    "- 计划不是证据，工具名不是证据，command 字段不是证据；只有 tool_result 才是证据。\n"
+                    "- 禁止只输出 evidence_plan 就结束。\n"
+                    "- 在没有真实 tool_result 之前，不要声称“已采集完成”“完整度 100%”或“证据充分”。\n"
+                )
+
+            user_message = self._build_evidence_user_message(
+                question=question,
+                layer=layer_str,
+                layer_handoff=layer_analysis,
+                strict_mode=strict_mode,
+                failure_reason=failure_reason,
+            )
+            if not getattr(self, "_logged_evidence_user_prompt", False):
+                logger.info(
+                    "📨 [evidence] LLM user prompt | chars=%d strict=%s\n%s",
+                    len(user_message),
+                    strict_mode,
+                    user_message,
+                )
+                self._logged_evidence_user_prompt = True
+            self._archive_node_input(
+                {
+                    "node": self.node_id,
+                    "strict_mode": strict_mode,
+                    "question": question,
+                    "user_message": user_message,
+                    "layer": layer_str,
+                    "layer_handoff": layer_analysis,
+                    "system_prompt_chars": len(system_prompt),
+                    "user_message_chars": len(user_message),
+                }
+            )
+
             response, thinking_events = self._call_llm(
-                question,
+                user_message,
                 system_prompt,
                 stop_checker=self._should_stop_collection_early,
             )
@@ -410,6 +518,55 @@ class EvidenceCollectorNode(WorkflowNode):
         except Exception as e:
             logger.warning(f"LLM 规划失败，回退到规则: {e}")
             return [], [], ""
+
+    def _archive_node_input(self, payload: Dict) -> None:
+        run_id = getattr(self, "current_run_id", "")
+        if not run_id:
+            return
+        try:
+            from app.core.context.archive import ContextArchive
+
+            ContextArchive(run_id=run_id).write_node_artifacts(
+                node_id=self.node_id,
+                input_payload=payload,
+            )
+        except Exception as exc:
+            logger.warning("⚠️ [evidence] 写入 node input archive 失败: %s", exc)
+
+    @staticmethod
+    def _build_evidence_user_message(
+        question: str,
+        layer: str,
+        layer_handoff: str,
+        strict_mode: bool = False,
+        failure_reason: str = "",
+    ) -> str:
+        strict_section = ""
+        if strict_mode:
+            strict_section = f"""
+
+# 上一轮结果被系统拒绝
+- 失败原因：{failure_reason or '上一轮只返回计划，没有执行工具'}
+- 本轮必须先调用至少一个 critical 或 important 级真实工具。
+- 没有 tool_result 前禁止输出“证据充分/采集完成/完整度 100%”。
+"""
+        return f"""# 用户原始问题
+{question}
+
+# 上游定位结构化结果 layer_handoff
+{layer_handoff or '{}'}
+
+# 当前节点职责
+你是 evidence 节点。上游已定位为 {layer}，你必须基于 layer_handoff 的 active_entities、active_signals、possible_scenarios 和 must_verify 调用真实只读工具采集证据。
+
+# 强约束
+- LLM 必须自己决定并调用工具；计划不是证据。
+- 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
+- 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
+- 如果上游定位需要 runbook 补充，可以 fetch 相关 runbook，但不能只 fetch runbook 后结束，必须继续调用真实环境工具。
+{strict_section}
+# 输出
+完成必要工具调用后，输出 evidence_plan JSON 和简短证据结论。"""
     def _extract_plan_from_thinking(self, thinking_events: list) -> List[Dict]:
         """
         从 thinking_events 的 ai_message 中提取 JSON 证据计划。
@@ -447,7 +604,10 @@ class EvidenceCollectorNode(WorkflowNode):
                 parsed = json.loads(json_match.group(1))
                 if "evidence_plan" in parsed:
                     return parsed["evidence_plan"]
-            return json.loads(response_text)
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict) and "evidence_plan" in parsed:
+                return parsed["evidence_plan"]
+            return parsed if isinstance(parsed, list) else []
         except json.JSONDecodeError:
             # 如果不是 JSON，尝试提取命令列表
             return self._extract_commands_from_text(response_text)

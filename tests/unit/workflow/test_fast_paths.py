@@ -630,6 +630,7 @@ def test_query_direct_prompt_boundaries_are_explicit():
     expected_phrases = [
         "如果是 QUERY，你必须调用工具采集真实数据，并在最终 JSON 中直接输出 `query_result`",
         "只采集用户明确询问的对象、维度和指标，不扩展无关指标",
+        "优先调用 `fetch_runbook` 获取 `private-k8s-query-promql-reference.md` 作为查询参考",
         "一旦已经获得回答用户问题所需的关键数据，立即停止采集",
         "`query_result` 必须可直接被 conclusion 节点渲染",
     ]
