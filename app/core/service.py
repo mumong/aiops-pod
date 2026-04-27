@@ -29,6 +29,152 @@ logger = logging.getLogger(__name__)
 apply_tool_result_logging_patch()
 
 
+def configure_model_context_window(llm_config: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """Expose model context window as MODEL_CONTEXT_WINDOW for budget estimation.
+
+    Runtime env remains the strongest source. Config supports either
+    llm.context_window or llm.model_context_window so deployment manifests can
+    keep model identity and context capacity in one place.
+    """
+    env_value = os.getenv("MODEL_CONTEXT_WINDOW", "").strip()
+    if env_value.isdigit():
+        return int(env_value)
+
+    cfg = llm_config or {}
+    for key in ("context_window", "model_context_window", "max_context_window"):
+        value = cfg.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if not text.isdigit():
+            logger.warning("⚠️ [context_budget] 忽略无效 llm.%s=%r，必须是正整数 token 数", key, value)
+            return None
+        os.environ["MODEL_CONTEXT_WINDOW"] = text
+        logger.info("🔧 [context_budget] 从 config llm.%s 设置 MODEL_CONTEXT_WINDOW=%s", key, text)
+        return int(text)
+    return None
+
+
+def configure_token_counter(llm_config: Optional[Dict[str, Any]] = None) -> None:
+    """Expose tokenizer config as env vars used by ContextBudgetEstimator."""
+    cfg = llm_config or {}
+
+    if not os.getenv("AIOPS_TOKENIZER_JSON_PATH", "").strip():
+        value = cfg.get("tokenizer_json_path") or cfg.get("tokenizer_path")
+        if value and str(value).strip():
+            os.environ["AIOPS_TOKENIZER_JSON_PATH"] = str(value).strip()
+            logger.info("🔧 [context_budget] 从 config 设置 AIOPS_TOKENIZER_JSON_PATH")
+
+    if not os.getenv("AIOPS_TIKTOKEN_ENCODING", "").strip():
+        value = cfg.get("tiktoken_encoding")
+        if value and str(value).strip():
+            os.environ["AIOPS_TIKTOKEN_ENCODING"] = str(value).strip()
+            logger.info("🔧 [context_budget] 从 config 设置 AIOPS_TIKTOKEN_ENCODING=%s", value)
+
+
+class ThinkStreamFilter:
+    """Controls visible streaming of model `<think>` content."""
+
+    VALID_MODES = {"full", "truncated", "hidden"}
+
+    def __init__(self, mode: str = "full", max_chars: int = 1200):
+        normalized = (mode or "full").strip().lower()
+        self.mode = normalized if normalized in self.VALID_MODES else "full"
+        self.max_chars = max(0, int(max_chars or 0))
+        self._inside_think = False
+        self._think_chars = 0
+        self._truncated_current_block = False
+
+    def filter_message(self, text: str) -> str:
+        """Filter a complete AI message preview."""
+        if self.mode == "full":
+            return text or ""
+
+        import re
+
+        if self.mode == "hidden":
+            return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL | re.IGNORECASE)
+
+        def _truncate(match):
+            body = match.group(1)
+            if len(body) <= self.max_chars:
+                return match.group(0)
+            return f"<think>{body[:self.max_chars]}\n...（think 已截断）\n</think>"
+
+        return re.sub(r"<think>(.*?)</think>", _truncate, text or "", flags=re.DOTALL | re.IGNORECASE)
+
+    def filter_token(self, text: str) -> str:
+        """Filter token streaming while preserving state across chunks."""
+        if self.mode == "full":
+            return text or ""
+        if self.mode == "hidden":
+            return self._filter_hidden_token(text)
+        return self._filter_truncated_token(text)
+
+    def _filter_hidden_token(self, text: str) -> str:
+        remaining = text or ""
+        visible = []
+        while remaining:
+            if self._inside_think:
+                end = remaining.lower().find("</think>")
+                if end < 0:
+                    return "".join(visible)
+                remaining = remaining[end + len("</think>"):]
+                self._inside_think = False
+                continue
+
+            start = remaining.lower().find("<think>")
+            if start < 0:
+                visible.append(remaining)
+                break
+            visible.append(remaining[:start])
+            remaining = remaining[start + len("<think>"):]
+            self._inside_think = True
+        return "".join(visible)
+
+    def _filter_truncated_token(self, text: str) -> str:
+        remaining = text or ""
+        visible = []
+        while remaining:
+            if not self._inside_think:
+                start = remaining.lower().find("<think>")
+                if start < 0:
+                    visible.append(remaining)
+                    break
+                visible.append(remaining[: start + len("<think>")])
+                remaining = remaining[start + len("<think>"):]
+                self._inside_think = True
+                self._think_chars = 0
+                self._truncated_current_block = False
+                continue
+
+            end = remaining.lower().find("</think>")
+            think_part = remaining if end < 0 else remaining[:end]
+            remaining_after_end = "" if end < 0 else remaining[end + len("</think>"):]
+
+            if not self._truncated_current_block:
+                remaining_budget = self.max_chars - self._think_chars
+                if remaining_budget > 0:
+                    visible_part = think_part[:remaining_budget]
+                    visible.append(visible_part)
+                    self._think_chars += len(visible_part)
+                if len(think_part) > max(remaining_budget, 0):
+                    visible.append("\n...（think 已截断）\n")
+                    self._truncated_current_block = True
+
+            if end < 0:
+                break
+
+            visible.append("</think>")
+            self._inside_think = False
+            self._think_chars = 0
+            self._truncated_current_block = False
+            remaining = remaining_after_end
+        return "".join(visible)
+
+
 class HolmesService:
     """AIOps Copilot 服务类（唯一模式：AICall + Workflow）"""
 
@@ -127,6 +273,9 @@ class HolmesService:
                 final_api_base = os.getenv("LLM_API_BASE") or _llm_config.get("api_base") or None
                 if final_api_base is not None and not final_api_base.strip():
                     final_api_base = None
+
+                configure_model_context_window(_llm_config)
+                configure_token_counter(_llm_config)
 
                 # 加载 Holmes Config（仍需用于 runbook catalog）
                 if config_file.exists():
@@ -264,11 +413,14 @@ class HolmesService:
             return None
 
         from app.core.aicall.client import AICall
+        summary_mode, summary_max_chars = self.get_observation_summary_config()
 
         return AICall(
             model=self.ai_call.model_str,
             api_key=self.ai_call.api_key,
             api_base=self.ai_call.api_base,
+            observation_summary_mode=summary_mode,
+            observation_summary_max_chars=summary_max_chars,
         )
 
     @staticmethod
@@ -294,6 +446,64 @@ class HolmesService:
         if env_val:
             return self._normalize_language(env_val)
         return self._normalize_language(self.i18n_config.get("response_language"), default="zh")
+
+    def get_think_stream_config(self) -> Tuple[str, int]:
+        """获取 `<think>` 流式展示配置。
+
+        mode:
+        - full: 完整展示（默认）
+        - truncated: 只展示前 N 字符
+        - hidden: 不展示
+        """
+        think_cfg = self.workflow_config.get("think_stream", {}) if isinstance(self.workflow_config, dict) else {}
+        if not isinstance(think_cfg, dict):
+            think_cfg = {}
+        mode = (
+            os.getenv("AIOPS_THINK_STREAM_MODE")
+            or os.getenv("THINK_STREAM_MODE")
+            or think_cfg.get("mode")
+            or "full"
+        )
+        max_chars_raw = (
+            os.getenv("AIOPS_THINK_STREAM_MAX_CHARS")
+            or os.getenv("THINK_STREAM_MAX_CHARS")
+            or think_cfg.get("max_chars")
+            or 1200
+        )
+        try:
+            max_chars = int(max_chars_raw)
+        except (TypeError, ValueError):
+            max_chars = 1200
+        return str(mode), max_chars
+
+    def get_observation_summary_config(self) -> Tuple[str, int]:
+        """获取工具 observation 摘要策略。
+
+        mode:
+        - rule: 默认，规则摘要优先，超长才 LLM 兜底
+        - ai: 每次工具 observation 都强制调用 LLM summarizer
+        """
+        wf_cfg = self.workflow_config if isinstance(self.workflow_config, dict) else {}
+        obs_cfg = wf_cfg.get("observation_summary", {}) if isinstance(wf_cfg.get("observation_summary", {}), dict) else {}
+        mode = (
+            os.getenv("AIOPS_OBSERVATION_SUMMARY_MODE")
+            or obs_cfg.get("mode")
+            or "rule"
+        )
+        normalized_mode = str(mode or "rule").strip().lower()
+        if normalized_mode not in {"rule", "ai"}:
+            normalized_mode = "rule"
+
+        max_chars_raw = (
+            os.getenv("AIOPS_OBSERVATION_SUMMARY_MAX_CHARS")
+            or obs_cfg.get("max_chars")
+            or 3000
+        )
+        try:
+            max_chars = int(max_chars_raw)
+        except (TypeError, ValueError):
+            max_chars = 3000
+        return normalized_mode, max(200, max_chars)
 
     def _load_runbooks(self):
         """加载和合并 runbook catalogs"""
@@ -576,6 +786,9 @@ class HolmesService:
         final_answer = ""
         metrics_data = None
         _token_streaming_active = False
+        think_mode, think_max_chars = self.get_think_stream_config()
+        think_filter = ThinkStreamFilter(think_mode, think_max_chars)
+        logger.info("🧠 think stream mode=%s max_chars=%d", think_filter.mode, think_filter.max_chars)
         node_outputs = {"layer": "", "evidence": "", "rca": "", "conclusion": ""}
 
         for event in executor.execute_stream(
@@ -609,10 +822,11 @@ class HolmesService:
                         yield "\n"
                         _token_streaming_active = False
                     else:
-                        content = (event.get("content") or "")[:200]
-                        yield emit(f"   💭 [{node_name}] AI: {content}")
+                        content = think_filter.filter_message(event.get("content") or "")[:200].strip()
+                        if content:
+                            yield emit(f"   💭 [{node_name}] AI: {content}")
                 elif think_type == "ai_token":
-                    token_text = event.get("content", "")
+                    token_text = think_filter.filter_token(event.get("content", ""))
                     if token_text:
                         if not _token_streaming_active:
                             yield f"   💭 [{node_name}] "

@@ -73,6 +73,15 @@ data:
           "description": "【通用】私有化 Kubernetes 环境健康与高效排查参考手册 — 适用于 Calico + NFS + containerd 环境。强调当前状态优先、最小必要探测、按证据扩展，而不是每次做全量扫描。关键知识：Pod Running 不等于集群健康；Service/Endpoints、Node Conditions、PVC/NFS、CoreDNS/Calico、containerd/kubelet 都可能是当前故障来源。",
           "link": "private-k8s-health-reference.md",
           "operations": ["诊断", "排查", "健康检查"]
+        },
+        {
+          "id": "private-k8s-query-promql-reference",
+          "type": "reference",
+          "layer": "QUERY",
+          "update_date": "2026-04-23",
+          "description": "【仅 QUERY】私有化 Kubernetes 节点级 Prometheus 查询参考手册 — 仅用于 `/query` 类指标查询，帮助生成稳定的 node 级 PromQL（CPU/内存/磁盘/网络吞吐）。不适用于 `/ask` 故障诊断、健康检查或根因分析；诊断场景不要优先引用此 runbook。关键知识：优先使用 node-exporter / node_* 指标，必须保留 instance 或 node 维度，禁止把单个聚合值复制到所有节点。",
+          "link": "private-k8s-query-promql-reference.md",
+          "operations": ["查询", "指标查询", "Prometheus"]
         }
       ]
     }
@@ -678,6 +687,155 @@ data:
 
     何时继续深入:
     - 只有当 Pod 处于 `Pending` / `ContainerCreating` / `MountVolume` 相关错误时
+
+  # ==========================================================================
+  # QUERY: 私有化 Kubernetes 节点级 Prometheus 查询参考
+  # ==========================================================================
+  private-k8s-query-promql-reference.md: |
+    # 私有化 Kubernetes 节点级 Prometheus 查询参考手册
+
+    > 类型: reference | 适用: `/query` 指标查询 | 范围: node 级 CPU / memory / disk / network throughput
+
+    ## 使用边界
+
+    本手册只用于 `/query` 场景下的**指标查询**，用于帮助构造稳定、准确的 **node 级 PromQL**。
+
+    不适用于：
+    - `/ask` 故障诊断
+    - 健康检查
+    - 根因分析
+    - Pod / Deployment / Namespace 级故障排查
+
+    如果用户在问“集群有什么问题”“服务为什么异常”“现在是否健康”，不要优先引用本手册，应优先使用诊断/健康检查类 runbook。
+
+    ## 核心规则
+
+    1. 查询目标是“每个节点”时，结果里必须保留节点维度，优先使用 `instance`，再映射到节点名
+    2. 如果 PromQL 返回的 `metric` 为空，或没有 `instance/node` 标签，不能把该值复制到所有节点
+    3. 如果返回空结果，应明确说明“查询为空/指标不存在/label 不匹配”，不能伪造结果
+    4. 优先使用 node-exporter 的 `node_*` 指标；不要优先使用 pod/container 聚合指标去估算节点使用率
+    5. 除非用户明确要求，否则不要扩展额外指标
+
+    ## 常用 node 级标准查询
+
+    ### 1. 节点 CPU 使用率（百分比）
+
+    适用:
+    - 查询每个节点当前 CPU 使用率
+
+    标准 PromQL:
+    ```promql
+    (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance)) * 100
+    ```
+
+    结果维度:
+    - `instance`
+
+    说明:
+    - `instance` 通常形如 `10.2.0.48:9100`
+    - 如需展示节点名，需再查询节点名与 IP/instance 的映射关系
+
+    禁止误用:
+    - 不要用 `container_cpu_usage_seconds_total` 去估算节点 CPU 使用率
+    - 不要先 `avg()` 成单个全局值再复制给每个节点
+
+    ### 2. 节点内存使用率（百分比）
+
+    适用:
+    - 查询每个节点当前内存使用率
+
+    标准 PromQL:
+    ```promql
+    (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
+    ```
+
+    结果维度:
+    - `instance`
+
+    说明:
+    - 这是最常用、最稳妥的节点内存使用率查询
+    - 不需要再额外做 `avg by (...)`
+
+    禁止误用:
+    - 不要用 `container_memory_usage_bytes` 聚合去估算节点内存使用率
+    - 不要在没有节点维度时把同一个内存值复制给所有节点
+
+    ### 3. 节点根分区磁盘使用率（百分比）
+
+    适用:
+    - 查询每个节点根分区 `/` 的磁盘使用率
+
+    标准 PromQL:
+    ```promql
+    (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) * 100
+    ```
+
+    结果维度:
+    - `instance`
+    - `device`
+    - `mountpoint`
+
+    说明:
+    - 建议过滤掉 `tmpfs`、`overlay`
+    - 如果一个节点存在多条结果，优先保留 `mountpoint="/"` 的根分区结果
+
+    ### 4. 节点网络接收吞吐量（bits/s）
+
+    适用:
+    - 查询每个节点网络接收吞吐量
+
+    标准 PromQL:
+    ```promql
+    sum by (instance) (
+      rate(node_network_receive_bytes_total{device!~"lo|veth.*|cali.*|flannel.*|tunl.*"}[5m])
+    ) * 8
+    ```
+
+    结果维度:
+    - `instance`
+
+    说明:
+    - 优先过滤 loopback 和常见虚拟接口，只保留主要物理网卡流量
+    - 单位为 `bits/s`
+
+    ### 5. 节点网络发送吞吐量（bits/s）
+
+    适用:
+    - 查询每个节点网络发送吞吐量
+
+    标准 PromQL:
+    ```promql
+    sum by (instance) (
+      rate(node_network_transmit_bytes_total{device!~"lo|veth.*|cali.*|flannel.*|tunl.*"}[5m])
+    ) * 8
+    ```
+
+    结果维度:
+    - `instance`
+
+    ## 辅助查询
+
+    ### 节点名与 instance 映射
+
+    如果需要把 `instance` 转成 `master/node1/node2` 这类节点名，先查询：
+
+    ```promql
+    node_uname_info
+    ```
+
+    常见可用标签:
+    - `instance`
+    - `nodename`
+
+    也可以通过 Kubernetes 节点列表辅助映射：
+    - `kubectl get nodes -o wide`
+
+    ## 输出要求
+
+    当用户要求“具体到每个 node 级别”时：
+    - 最终表格中每个节点必须有独立一行
+    - 每行数值必须来自该节点对应的 Prometheus 结果
+    - 如果某个节点缺失结果，必须单独写入 missing，而不是复制其他节点的值
     - 再检查 NFS 服务端、导出目录、节点到 NFS 的网络连通性
 
     ### 5. 控制面与基础组件
@@ -808,10 +966,3 @@ data:
     - 强化了 `Service/Endpoints`、Calico、NFS、containerd
     - 弱化了公有云特有的云盘、云 LB、云厂商网络依赖
 
-    参考资料:
-    - Kubernetes Handbook 排错总览: https://feisky.xyz/kubernetes-handbook/troubleshooting/
-    - 集群排错: https://kubernetes.feisky.xyz/troubleshooting/cluster
-    - Pod 排错: https://feisky.xyz/kubernetes-handbook/troubleshooting/pod.html
-    - 网络排错: https://feisky.xyz/kubernetes-handbook/troubleshooting/network.html
-    - PV 排错: https://kubernetes.feisky.xyz/troubleshooting/pv
-    - 排错工具: https://kubernetes.feisky.xyz/troubleshooting/tools

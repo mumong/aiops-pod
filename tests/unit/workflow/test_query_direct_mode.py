@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -167,6 +168,95 @@ def test_layer_defaults_to_diagnosis_prompt_without_request_override():
     )
 
     assert node._get_layer_prompt() == get_workflow_prompt("layer")
+
+
+def test_layer_query_direct_retries_when_first_json_has_no_real_tool_results():
+    node = LayerClassifierNode(
+        holmes_service=SimpleNamespace(
+            get_prompt_language=lambda: "zh",
+        )
+    )
+    node.workflow_config_override = {"query_mode": "direct"}
+
+    calls = {"count": 0}
+
+    first_result = {
+        "layer": "QUERY",
+        "layers": ["QUERY"],
+        "layer_name": "查询请求",
+        "confidence": 0.95,
+        "reasoning": "用户明确查询 CPU 和内存使用率。",
+        "key_entities": [],
+        "possible_scenarios": [],
+        "query_result": {
+            "query_target": "每个节点的 CPU 和内存使用率",
+            "collection_summary": "计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",
+            "columns": [
+                {"key": "node", "label": "节点"},
+                {"key": "cpu_usage_percent", "label": "CPU 使用率 (%)"},
+                {"key": "memory_usage_percent", "label": "内存使用率 (%)"},
+            ],
+            "rows": [],
+            "notes": [],
+            "missing": [],
+            "sources": [
+                {"tool": "execute_prometheus_instant_query", "query": "cpu_query"},
+                {"tool": "execute_prometheus_instant_query", "query": "mem_query"},
+            ],
+        },
+    }
+
+    second_result = {
+        "layer": "QUERY",
+        "layers": ["QUERY"],
+        "layer_name": "查询请求",
+        "confidence": 0.95,
+        "reasoning": "已通过 Prometheus 获取真实节点级指标。",
+        "key_entities": [],
+        "possible_scenarios": [],
+        "query_result": {
+            "query_target": "每个节点的 CPU 和内存使用率",
+            "collection_summary": "计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",
+            "columns": [
+                {"key": "node", "label": "节点"},
+                {"key": "cpu_usage_percent", "label": "CPU 使用率 (%)"},
+                {"key": "memory_usage_percent", "label": "内存使用率 (%)"},
+            ],
+            "rows": [
+                {"node": "master", "cpu_usage_percent": "12.1", "memory_usage_percent": "27.3"},
+            ],
+            "notes": [],
+            "missing": [],
+            "sources": [
+                {"tool": "execute_prometheus_instant_query", "query": "cpu_query"},
+                {"tool": "execute_prometheus_instant_query", "query": "mem_query"},
+            ],
+        },
+    }
+
+    def _fake_call_llm(question, prompt, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(result=json.dumps(first_result, ensure_ascii=False)), []
+        return (
+            SimpleNamespace(result=json.dumps(second_result, ensure_ascii=False)),
+            [
+                {
+                    "type": "tool_result",
+                    "status": "success",
+                    "tool_name": "execute_prometheus_instant_query",
+                    "result": '{"status":"success","data":{"result":[{"metric":{"node":"master"},"value":[1,"12.1"]}]}}',
+                }
+            ],
+        )
+
+    node._call_llm = _fake_call_llm
+
+    result, thinking_events = node._analyze_with_llm("查询每个节点的 CPU 和内存使用率")
+
+    assert calls["count"] == 2
+    assert result["query_result"]["rows"][0]["node"] == "master"
+    assert len(thinking_events) == 1
 
 
 def test_executor_does_not_propagate_ambient_query_mode_to_nodes(monkeypatch):

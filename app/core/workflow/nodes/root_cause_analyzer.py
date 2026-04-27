@@ -93,24 +93,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
             logger.info(f"🔍 根因分析: 层级={layer}, 证据数量={len(evidence_items)}")
             logger.debug(f"🔍 [DEBUG] RCA 输入: question={question[:100]}, "
                         f"evidence_analysis长度={len(evidence_analysis)}, "
-                        f"layer_full_analysis长度={len(state.get('layer_full_analysis', ''))}")
+                        f"layer_handoff长度={len(json.dumps(state.get('layer_handoff') or {}, ensure_ascii=False, default=str))}")
 
-            # 构建证据摘要（包含实际工具数据）
-            evidence_summary = self._build_evidence_summary(evidence_items)
-
-            # 注入上游 layer 节点的分析结果
-            # 优先使用阶段1完整分析文本（含工具输出），回退到结构化 JSON
-            layer_analysis = state.get("layer_full_analysis", "") or state.get("layer_analysis", "")
-            if layer_analysis:
-                evidence_summary = (
-                    f"# 问题定位结果（layer 节点输出）\n{layer_analysis}\n\n"
-                    f"# 证据采集结果\n{evidence_summary}"
-                )
-
-            # 追加 evidence 节点的 LLM 分析和工具数据
-            extra_data = self._extract_tool_data_for_rca(evidence_analysis)
-            if extra_data:
-                evidence_summary += "\n\n# 工具采集的原始数据\n" + extra_data
+            evidence_summary = self._build_rca_context(state)
             
             # 使用 LLM 分析
             ai_call = getattr(self, 'ai_call', None)
@@ -168,6 +153,54 @@ class RootCauseAnalyzerNode(WorkflowNode):
             value = f"= {item.value}" if item.value else ""
             lines.append(f"{i}. [{status}] {item.description} {value}")
         return "\n".join(lines) if lines else "暂无证据"
+
+    def _build_rca_context(self, state: WorkflowState) -> str:
+        """Build compact RCA input from handoff + bounded evidence facts."""
+        evidence_items = state.get("evidence_items", [])
+        evidence_analysis = state.get("evidence_analysis", "{}")
+        layer_handoff = state.get("layer_handoff")
+        if not layer_handoff:
+            layer_handoff = self._layer_analysis_to_handoff(state.get("layer_analysis", ""))
+
+        parts = [
+            "# 问题定位结构化交接 layer_handoff",
+            json.dumps(layer_handoff or {}, ensure_ascii=False, indent=2, default=str),
+            "",
+            "# 证据采集结果",
+            self._build_evidence_summary(evidence_items),
+        ]
+
+        facts = state.get("evidence_facts") or []
+        conflicts = state.get("evidence_conflicts") or []
+        missing = state.get("missing_evidence") or []
+        if facts:
+            parts.extend(["", "# 已验证事实", json.dumps(facts, ensure_ascii=False, indent=2, default=str)])
+        if conflicts:
+            parts.extend(["", "# 冲突/负向证据", json.dumps(conflicts, ensure_ascii=False, indent=2, default=str)])
+        if missing:
+            parts.extend(["", "# 缺失证据", json.dumps(missing, ensure_ascii=False, indent=2, default=str)])
+
+        extra_data = self._extract_tool_data_for_rca(evidence_analysis)
+        if extra_data:
+            parts.extend(["", "# 工具采集摘要", extra_data])
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _layer_analysis_to_handoff(layer_analysis: str) -> Dict[str, Any]:
+        try:
+            data = json.loads(layer_analysis) if layer_analysis else {}
+            if isinstance(data, dict):
+                return {
+                    "layer": data.get("layer"),
+                    "confidence": data.get("confidence"),
+                    "primary_problem": data.get("reasoning", ""),
+                    "active_entities": data.get("key_entities", []),
+                    "possible_scenarios": data.get("possible_scenarios", []),
+                }
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return {}
     
     def _get_rca_mode(self) -> str:
         """
@@ -229,6 +262,15 @@ class RootCauseAnalyzerNode(WorkflowNode):
 {evidence_summary}
 
 请直接基于以上证据进行根因分析，输出 JSON 格式结果。"""
+            self._archive_node_input({
+                "node": self.node_id,
+                "mode": "lite",
+                "question": question,
+                "user_message": user_message,
+                "evidence_summary": evidence_summary,
+                "system_prompt_chars": len(system_prompt),
+                "user_message_chars": len(user_message),
+            })
 
             start_time = time.time()
 
@@ -241,6 +283,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 system_prompt=system_prompt,
                 question=user_message,
                 validator=lambda data: isinstance(data, dict),
+                node_id=self.node_id,
+                run_id=getattr(self, "current_run_id", ""),
             )
 
             duration_ms = (time.time() - start_time) * 1000
@@ -271,6 +315,20 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 layer=layer,
                 reason=f"LLM 根因分析失败: {str(e)}",
             ), []
+
+    def _archive_node_input(self, payload: Dict) -> None:
+        run_id = getattr(self, "current_run_id", "")
+        if not run_id:
+            return
+        try:
+            from app.core.context.archive import ContextArchive
+
+            ContextArchive(run_id=run_id).write_node_artifacts(
+                node_id=self.node_id,
+                input_payload=payload,
+            )
+        except Exception as exc:
+            logger.warning("⚠️ [rca] 写入 node input archive 失败: %s", exc)
 
     def _analyze_with_llm_full(
         self,

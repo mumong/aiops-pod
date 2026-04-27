@@ -15,6 +15,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, List, Optional, Tuple
 
+from app.core.context.archive import ContextArchive
+from app.core.context.budget import ContextBudgetEstimator, serialize_tool_schema
 from app.core.workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,10 @@ class WorkflowNode(ABC):
         """
         return []
 
+    def should_inject_runbook_catalog(self) -> bool:
+        """节点是否需要在 prompt 中注入 runbook catalog。"""
+        return True
+
     def _call_llm(
         self,
         question: str,
@@ -124,9 +130,11 @@ class WorkflowNode(ABC):
         if getattr(self, 'holmes_service', None):
             max_steps = self.holmes_service.get_node_max_steps(self.node_id)
 
+        prompt_components = []
+
         # Inject runbook catalog into system_prompt
         catalog_text = ""
-        if getattr(self, 'runbook_catalog', None) and hasattr(self.runbook_catalog, 'catalog'):
+        if self.should_inject_runbook_catalog() and getattr(self, 'runbook_catalog', None) and hasattr(self.runbook_catalog, 'catalog'):
             entries = self.runbook_catalog.catalog
             if entries:
                 lines = ["# Available Runbooks",
@@ -138,6 +146,18 @@ class WorkflowNode(ABC):
                 catalog_text = "\n".join(lines)
                 logger.debug("📚 [%s] 注入 %d 条 Runbook 到 prompt", self.node_id, len(entries))
 
+        if catalog_text:
+            prompt_components.append({
+                "name": "runbook_catalog",
+                "category": "static_input",
+                "content": catalog_text,
+            })
+        prompt_components.append({
+            "name": "node_system_prompt",
+            "category": "static_input",
+            "content": system_prompt,
+        })
+
         full_prompt = system_prompt
         if catalog_text:
             full_prompt = catalog_text + "\n\n" + system_prompt
@@ -145,7 +165,7 @@ class WorkflowNode(ABC):
         # 注入修复控制指令（AUTO_REMEDIATE 环境变量控制）
         auto_remediate = os.getenv("AUTO_REMEDIATE", "false").lower() in ("true", "1", "yes")
         if not auto_remediate:
-            full_prompt += (
+            remediation_policy = (
                 "\n\n# ⛔ 修复操作限制\n"
                 "你只负责**诊断和分析**，**禁止执行任何修复操作**。\n"
                 "- 禁止执行 kubectl apply/patch/delete/rollout/taint/scale 等写操作\n"
@@ -154,13 +174,78 @@ class WorkflowNode(ABC):
                 "- Runbook 中的修复步骤仅供参考，不要执行\n"
             )
         else:
-            full_prompt += (
+            remediation_policy = (
                 "\n\n# ✅ 修复操作已授权\n"
                 "诊断完成后，如果发现明确的问题且修复方案风险可控，"
                 "你可以执行修复操作。执行前在输出中说明即将执行的操作和预期效果。\n"
             )
+        full_prompt += remediation_policy
+        prompt_components.append({
+            "name": "remediation_policy",
+            "category": "static_input",
+            "content": remediation_policy,
+        })
+
+        language_policy = (
+            "\n\n# 语言与可见输出约束\n"
+            "- 全部可见输出必须使用中文，包括分析说明、工具调用前后的说明、JSON 字段内的解释文本。\n"
+            "- 禁止输出 `<think>`、`</think>` 或任何思考标签内容；不要暴露内部推理过程。\n"
+            "- 需要推理时只给结论性、可验证的简短说明，并优先调用工具获取事实。\n"
+        )
+        full_prompt += language_policy
+        prompt_components.append({
+            "name": "language_policy",
+            "category": "static_input",
+            "content": language_policy,
+        })
 
         tools = getattr(self, 'tools', []) or []
+        run_id = getattr(self, "current_run_id", "") or kwargs.pop("run_id", "")
+        tool_schema_payload = serialize_tool_schema(tools)
+        static_context_components = [
+            *prompt_components,
+            {
+                "name": "user_message",
+                "category": "static_input",
+                "content": question,
+            },
+            {
+                "name": "tool_schema",
+                "category": "static_input",
+                "content": tool_schema_payload,
+                "preview": ",".join(str(item.get("name", "")) for item in tool_schema_payload[:20]),
+            },
+            {
+                "name": "scratchpad_reserved",
+                "category": "reserved",
+                "tokens": 4096,
+                "preview": "reserved for reasoning/tool calls",
+            },
+            {
+                "name": "output_reserved",
+                "category": "reserved",
+                "tokens": 6000,
+                "preview": "reserved for model output",
+            },
+        ]
+        budget = ContextBudgetEstimator().estimate(
+            node_id=self.node_id,
+            model=getattr(ai_call, "model_str", getattr(ai_call, "model", "")),
+            system_prompt=full_prompt,
+            user_message=question,
+            tools=tools,
+            handoff=kwargs.pop("handoff_for_budget", None),
+            components=static_context_components,
+            api_base=getattr(ai_call, "api_base", "") or "",
+            api_key=getattr(ai_call, "api_key", "") or "",
+        )
+        ContextBudgetEstimator().log(budget)
+        if run_id:
+            try:
+                ContextArchive(run_id=run_id).write_budget(self.node_id, budget)
+            except Exception as exc:
+                logger.warning("⚠️ [%s] 写入 context budget 失败: %s", self.node_id, exc)
+
         logger.info("📍 [%s] AICall.call() 开始 | max_steps=%d tools=%d",
                      self.node_id, max_steps, len(tools))
         logger.debug("📍 [%s] AICall.call() prompt长度=%d字 question长度=%d字",
@@ -173,8 +258,10 @@ class WorkflowNode(ABC):
             max_steps=max_steps,
             stream_queue=self._event_queue,
             node_id=self.node_id,
+            run_id=run_id,
             cancel_event=self.cancel_event,
             stop_checker=stop_checker,
+            static_context_components=static_context_components,
             **kwargs,
         )
 
