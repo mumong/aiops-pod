@@ -107,8 +107,7 @@ class ConclusionFormatterNode(WorkflowNode):
         try:
             # 收集前3个节点的分析结果
             question = state.get("question", "")
-            # 优先使用完整分析文本（含工具原始输出），回退到精简 JSON
-            layer_analysis = state.get("layer_full_analysis", "") or state.get("layer_analysis", "{}")
+            layer_analysis = self._select_layer_context(state)
             evidence_analysis = state.get("evidence_analysis") or "{}"
             rca_analysis = state.get("rca_analysis") or "{}"
             
@@ -184,6 +183,21 @@ class ConclusionFormatterNode(WorkflowNode):
             self._save_thinking(state, new_state, [])
         
         return new_state
+
+    def _select_layer_context(self, state: WorkflowState) -> str:
+        """Prefer compact layer_handoff over deprecated full layer text."""
+        handoff = state.get("layer_handoff")
+        if handoff:
+            return json.dumps(handoff, ensure_ascii=False, indent=2, default=str)
+        layer_analysis = state.get("layer_analysis")
+        if layer_analysis:
+            return layer_analysis
+        # Backward compatibility for old tests/checkpoints. New workflow leaves
+        # layer_full_analysis empty and uses layer_handoff instead.
+        legacy_full = state.get("layer_full_analysis")
+        if legacy_full:
+            return self._summarize_snippet(legacy_full, limit=2000)
+        return "{}"
     
     def _generate_with_llm(
         self,
@@ -347,10 +361,26 @@ class ConclusionFormatterNode(WorkflowNode):
             raise RuntimeError("[conclusion] ai_call 未设置，无法生成报告")
 
         logger.info("📍 [conclusion] AICall.call_simple 开始 | max_tokens=%d", max_tokens)
+        self._archive_node_input({
+            "node": self.node_id,
+            "question": question,
+            "user_message": user_message,
+            "layer_analysis": layer_analysis,
+            "evidence_analysis": evidence_analysis,
+            "rca_analysis": rca_analysis,
+            "tool_data_text": tool_data_text,
+            "query_result": query_result,
+            "system_prompt_chars": len(system_prompt_text),
+            "user_message_chars": len(user_message),
+            "estimated_tokens": estimated_tokens,
+            "max_tokens": max_tokens,
+        })
         content = ai_call.call_simple(
             system_prompt=system_prompt_text,
             question=user_message,
             max_tokens=max_tokens,
+            node_id=self.node_id,
+            run_id=getattr(self, "current_run_id", ""),
         )
 
         llm_duration_ms = (time.time() - start_time) * 1000
@@ -371,6 +401,20 @@ class ConclusionFormatterNode(WorkflowNode):
             return content
 
         return f"报告生成失败：LLM 未返回有效内容。\n\n原始数据：\n{tool_data_text[:1000] if tool_data_text else '无'}"
+
+    def _archive_node_input(self, payload: Dict) -> None:
+        run_id = getattr(self, "current_run_id", "")
+        if not run_id:
+            return
+        try:
+            from app.core.context.archive import ContextArchive
+
+            ContextArchive(run_id=run_id).write_node_artifacts(
+                node_id=self.node_id,
+                input_payload=payload,
+            )
+        except Exception as exc:
+            logger.warning("⚠️ [conclusion] 写入 node input archive 失败: %s", exc)
 
     def _render_query_result(self, query_result: Dict[str, Any]) -> str:
         """QUERY 模式仅渲染结构化 JSON，不再做二次 LLM 理解。"""

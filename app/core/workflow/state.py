@@ -33,7 +33,12 @@ class WorkflowState(TypedDict, total=False):
     layer_confidence: Optional[float]    # 定层置信度 [0, 1]
     layer_reasoning: Optional[str]       # 定层理由
     layer_analysis: Optional[str]        # LLM 完整分析（JSON 字符串）
-    layer_full_analysis: Optional[str]   # 阶段1完整分析文本（含工具输出），供下游 evidence/rca 使用
+    layer_full_analysis: Optional[str]   # Deprecated: 大文本不再跨节点传递，完整内容写入 context archive
+    layer_handoff: Optional[Dict[str, Any]]  # 阶段1给下游的结构化交接信息
+    layer_archive_ref: Optional[Dict[str, Any]]  # layer 全量分析与 handoff 归档引用
+    context_archive_ref: Optional[str]   # 当前 run 的 context archive 根目录
+    context_budget: Optional[Dict[str, Any]]  # 最近一次/汇总上下文预算估算
+    tool_artifact_refs: List[Dict[str, Any]]  # 工具 raw/structured/summary 归档引用
     key_entities: List[str]              # 提取的关键实体
     possible_scenarios: List[str]        # 可能的场景
     
@@ -43,6 +48,9 @@ class WorkflowState(TypedDict, total=False):
     evidence_completeness: Optional[float]  # 证据完整度 [0, 1]
     evidence_analysis: Optional[str]     # LLM 完整分析（JSON 字符串）
     query_result: Optional[Dict[str, Any]]  # QUERY 模式下的结构化查询结果
+    evidence_facts: List[Dict[str, Any]]     # 已验证事实摘要
+    evidence_conflicts: List[Dict[str, Any]] # 负向/冲突观察
+    missing_evidence: List[Dict[str, Any]]   # 缺失证据
 
     # ========== 节点3 输出：根因分析 ==========
     deterministic_decision: Optional[DeterministicDecision]  # 决策对象

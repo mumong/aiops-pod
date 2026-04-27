@@ -12,6 +12,12 @@ data:
     # LLM 提供商配置
     llm:
       model: "deepseek/deepseek-chat"
+      # 可选：模型真实上下文窗口 token 数。优先使用 Secret/Env 的 MODEL_CONTEXT_WINDOW。
+      context_window: "${MODEL_CONTEXT_WINDOW:-}"
+      # 可选：模型服务实际 tokenizer.json 路径。配置后 token budget 使用准确 tokenizer 计数。
+      tokenizer_json_path: "${AIOPS_TOKENIZER_JSON_PATH:-}"
+      # 可选：OpenAI/tiktoken 编码名，例如 cl100k_base / o200k_base。Qwen 优先使用 tokenizer_json_path。
+      tiktoken_encoding: "${AIOPS_TIKTOKEN_ENCODING:-}"
 
     # i18n 配置 控制提示词和输出形式是中文zh还是英文en
     i18n:
@@ -35,7 +41,7 @@ data:
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8092/sse"
           mode: "sse"
-        enabled: true
+        enabled: false
 
       bash_tool:
         description: "Bash MCP - 执行 bash 命令"
@@ -63,21 +69,21 @@ data:
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8099/sse"
           mode: "sse"
-        enabled: true
+        enabled: false
 
       internete:
         description: "Internet MCP - 网页抓取"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8096/sse"
           mode: "sse"
-        enabled: true
+        enabled: false
 
       connectivity_check_tool:
         description: "TCP 连通性检查"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8097/sse"
           mode: "sse"
-        enabled: true
+        enabled: false
 
     # 工作流配置
     workflow:
@@ -97,6 +103,19 @@ data:
         evidence: 30
         rca: 0
         conclusion: 0
+
+      # 本地推理模型 `<think>` 流式展示方式:
+      # full=完整展示（默认） / truncated=只展示前 max_chars 字符 / hidden=不展示
+      think_stream:
+        mode: full
+        max_chars: 1200
+
+      # 工具 observation 回注给主 Agent 前的摘要策略:
+      # rule=默认，规则摘要优先，超长才调用 LLM 兜底,也可以设置为ai，每次都ai总结
+      # ai=每次工具返回都强制调用 LLM summarizer，再回注给主 Agent
+      observation_summary:
+        mode: ai
+        max_chars: 3000
 
     # 质量指标配置
     metrics:

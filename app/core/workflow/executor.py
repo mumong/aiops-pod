@@ -29,6 +29,7 @@ from app.core.workflow.reporter import (
     extract_layer_from_report as _extract_layer_fn,
     update_metrics_from_state as _update_metrics_fn,
 )
+from app.core.context.archive import ContextArchive
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,7 @@ class WorkflowExecutor:
                 node.ai_call = self.ai_call
                 node.tools = self.mcp_tools or []
                 node.cancel_event = cancel_event  # 传递取消信号
+                node.current_run_id = run_id
                 node.workflow_config_override = wf_config
                 logger.debug("   🔧 [%s] ai_call=%s tools=%d",
                              node.node_id, type(node.ai_call).__name__, len(node.tools))
@@ -164,6 +166,11 @@ class WorkflowExecutor:
             "layer_reasoning": None,
             "layer_analysis": None,
             "layer_full_analysis": None,
+            "layer_handoff": None,
+            "layer_archive_ref": None,
+            "context_archive_ref": None,
+            "context_budget": None,
+            "tool_artifact_refs": [],
             "key_entities": [],
             "possible_scenarios": [],
             "evidence_items": [],
@@ -171,6 +178,9 @@ class WorkflowExecutor:
             "evidence_completeness": None,
             "evidence_analysis": None,
             "query_result": None,
+            "evidence_facts": [],
+            "evidence_conflicts": [],
+            "missing_evidence": [],
             "deterministic_decision": None,
             "root_cause": None,
             "causal_chain": None,
@@ -303,6 +313,7 @@ class WorkflowExecutor:
                         snapshot = self._extract_state_snapshot(final_state, node_id)
                         node_summary = self._format_node_summary(node_id, final_state, snapshot)
                         handoff = self._format_handoff_summary(node_id, final_state)
+                        self._archive_node_transition(run_id, node_id, final_state, snapshot, handoff)
                         duration_s = metrics.nodes.get(node_id).duration_ms / 1000 if node_id in metrics.nodes else 0
 
                         logger.info(f"✅ [{node_id}] 完成 ({duration_s:.1f}s)")
@@ -344,6 +355,7 @@ class WorkflowExecutor:
                                 snapshot = self._extract_state_snapshot(final_state, prev_node)
                                 node_summary = self._format_node_summary(prev_node, final_state, snapshot)
                                 handoff = self._format_handoff_summary(prev_node, final_state)
+                                self._archive_node_transition(run_id, prev_node, final_state, snapshot, handoff)
                                 logger.info(f"✅ [{prev_node}] 完成 ({prev_dur:.1f}s)")
                                 if node_summary:
                                     logger.info(f"   {node_summary}")
@@ -438,6 +450,7 @@ class WorkflowExecutor:
                             snapshot = self._extract_state_snapshot(final_state, node_name)
                             node_summary = self._format_node_summary(node_name, final_state, snapshot)
                             handoff = self._format_handoff_summary(node_name, final_state)
+                            self._archive_node_transition(run_id, node_name, final_state, snapshot, handoff)
 
                             logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
                             if node_summary:
@@ -482,6 +495,8 @@ class WorkflowExecutor:
 
                     snapshot = self._extract_state_snapshot(final_state, node_name)
                     node_summary = self._format_node_summary(node_name, final_state, snapshot)
+                    handoff = self._format_handoff_summary(node_name, final_state)
+                    self._archive_node_transition(run_id, node_name, final_state, snapshot, handoff)
 
                     logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
                     if node_summary:
@@ -745,6 +760,36 @@ class WorkflowExecutor:
                 f"   rca_analysis={rca_analysis}"
             )
         return ""
+
+    def _archive_node_transition(
+        self,
+        run_id: str,
+        node_name: str,
+        state: WorkflowState,
+        snapshot: Dict[str, Any],
+        handoff: str,
+    ) -> None:
+        """Archive node output and node-to-node handoff for post-run debugging."""
+        if not run_id:
+            return
+        try:
+            payload = {
+                "node": node_name,
+                "snapshot": snapshot,
+                "state_keys": sorted([str(k) for k in state.keys()]),
+            }
+            handoff_payload = {
+                "from": node_name,
+                "handoff_summary": handoff,
+                "snapshot": snapshot,
+            }
+            ContextArchive(run_id=run_id).write_node_artifacts(
+                node_id=node_name,
+                output_payload=payload,
+                handoff_payload=handoff_payload if handoff else None,
+            )
+        except Exception as exc:
+            logger.warning("⚠️ [Workflow] 写入 node transition archive 失败 node=%s: %s", node_name, exc)
 
     def _update_metrics_from_state(
         self,

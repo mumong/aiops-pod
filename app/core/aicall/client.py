@@ -21,6 +21,10 @@ from langgraph.errors import GraphRecursionError
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
+from app.core.context.archive import ContextArchive
+from app.core.context.budget import ContextBudgetEstimator, serialize_tool_schema
+from app.core.context.observation import ObservationProcessor
+from app.core.prompts import get_workflow_prompt
 from .streaming import push_event
 from .types import AICallResult
 
@@ -56,7 +60,14 @@ def _parse_model(model_str: str, api_base: str = "") -> Tuple[str, Optional[str]
 class AICall:
     """LLM 调用核心类，基于 LangChain ChatModel + LangChain Agent (create_agent)"""
 
-    def __init__(self, model: str, api_key: str, api_base: str = ""):
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        api_base: str = "",
+        observation_summary_mode: str = "rule",
+        observation_summary_max_chars: int = 3000,
+    ):
         """
         Args:
             model: litellm 格式模型名，如 "deepseek/deepseek-chat"
@@ -67,6 +78,9 @@ class AICall:
         self.model_str = model
         self.api_key = api_key
         self.api_base = api_base
+        normalized_mode = (observation_summary_mode or "rule").strip().lower()
+        self.observation_summary_mode = normalized_mode if normalized_mode in {"rule", "ai"} else "rule"
+        self.observation_summary_max_chars = max(200, int(observation_summary_max_chars or 3000))
 
         model_name, base_url = _parse_model(model, api_base)
         self._chat_model_kwargs: Dict[str, Any] = {
@@ -96,8 +110,35 @@ class AICall:
             question: 用户问题
             **kwargs: 透传给 ChatModel（如 max_tokens, temperature）
         """
-        logger.debug("📍 [AICall] call_simple 开始 | prompt=%d字 question=%d字 extra=%s",
-                      len(system_prompt), len(question), list(kwargs.keys()) or "无")
+        node_id = kwargs.pop("node_id", "")
+        run_id = kwargs.pop("run_id", "")
+        static_context_components = kwargs.pop("static_context_components", None)
+        output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
+        if static_context_components is None:
+            static_context_components = [
+                {"name": "node_system_prompt", "category": "static_input", "content": system_prompt},
+                {"name": "user_message", "category": "static_input", "content": question},
+                {"name": "output_reserved", "category": "reserved", "tokens": output_reserved},
+            ]
+        budget = ContextBudgetEstimator().estimate(
+            node_id=node_id or "simple",
+            model=self.model_str,
+            system_prompt=system_prompt,
+            user_message=question,
+            tool_count=0,
+            components=static_context_components,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+        )
+        ContextBudgetEstimator().log(budget)
+        if run_id:
+            try:
+                ContextArchive(run_id=run_id).write_budget(node_id or "simple", budget)
+            except Exception as exc:
+                logger.warning("⚠️ [AICall] call_simple 写入 context budget 失败: %s", exc)
+
+        logger.debug("📍 [AICall] call_simple 开始 | node=%s prompt=%d字 question=%d字 extra=%s",
+                      node_id or "simple", len(system_prompt), len(question), list(kwargs.keys()) or "无")
         start = time.time()
 
         messages = []
@@ -112,6 +153,28 @@ class AICall:
 
         result = model.invoke(messages)
         content = result.content or ""
+        if run_id:
+            final_components = [
+                *static_context_components,
+                {
+                    "name": "final_output",
+                    "category": "dynamic_runtime",
+                    "content": content,
+                },
+            ]
+            final_budget = ContextBudgetEstimator().estimate(
+                node_id=node_id or "simple",
+                model=self.model_str,
+                system_prompt=system_prompt,
+                user_message=question,
+                components=final_components,
+                api_base=self.api_base or "",
+                api_key=self.api_key or "",
+            )
+            try:
+                ContextArchive(run_id=run_id).write_budget(node_id or "simple", final_budget)
+            except Exception as exc:
+                logger.warning("⚠️ [AICall] call_simple 写入 final context budget 失败: %s", exc)
         logger.debug("✅ [AICall] call_simple 完成 | %.1fs | 输出=%d字",
                       time.time() - start, len(content))
         return content
@@ -138,10 +201,12 @@ class AICall:
         max_steps: int = 10,
         stream_queue: Optional[queue.Queue] = None,
         node_id: str = "",
+        run_id: str = "",
         cancel_event: Optional[Any] = None,
         stop_checker: Optional[Callable[[List[Dict]], bool]] = None,
         expect_json: bool = False,
         json_validator: Optional[Callable[[Any], bool]] = None,
+        static_context_components: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[AICallResult, List[Dict]]:
         """LangChain Agent loop with tool calling (create_agent)
 
@@ -161,14 +226,39 @@ class AICall:
         thinking_events: List[Dict] = []
         all_tool_calls: List[Dict] = []
         tool_call_count = 0
+        tool_result_sequence = 0
         iteration = 0
+        observation_processor = ObservationProcessor(
+            summarizer=self._summarize_tool_observation,
+            max_observation_chars=self.observation_summary_max_chars,
+            summary_mode=self.observation_summary_mode,
+        )
+        if static_context_components is None:
+            tool_schema_payload = serialize_tool_schema(tools or [])
+            static_context_components = [
+                {"name": "node_system_prompt", "category": "static_input", "content": system_prompt},
+                {"name": "user_message", "category": "static_input", "content": question},
+                {
+                    "name": "tool_schema",
+                    "category": "static_input",
+                    "content": tool_schema_payload,
+                },
+                {"name": "scratchpad_reserved", "category": "reserved", "tokens": 4096},
+                {"name": "output_reserved", "category": "reserved", "tokens": 6000},
+            ]
 
         logger.debug("📍 [AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字 expect_json=%s",
                       node_id or "?", max_steps, len(tools or []), len(system_prompt), expect_json)
 
         # 无工具时直接调用 call_simple
         if not tools:
-            content = self.call_simple(system_prompt, question)
+            content = self.call_simple(
+                system_prompt,
+                question,
+                node_id=node_id,
+                run_id=run_id,
+                static_context_components=static_context_components,
+            )
             total_ms = (time.time() - call_start) * 1000
             result = AICallResult(
                 result=content, iterations=1, duration_ms=total_ms,
@@ -197,7 +287,7 @@ class AICall:
         _content_buffer = []  # 收集 token 级别的文本片段
 
         async def _run_agent():
-            nonlocal final_content, iteration, tool_call_count
+            nonlocal final_content, iteration, tool_call_count, tool_result_sequence
             async for chunk in agent.astream(
                 input_messages, config=config,
                 stream_mode=["updates", "messages"],
@@ -278,23 +368,51 @@ class AICall:
                             # 工具执行结果
                             tool_name = getattr(msg, 'name', '') or ''
                             tool_content = msg.content or ''
+                            tool_result_sequence += 1
+                            observation = self._process_tool_observation(
+                                processor=observation_processor,
+                                run_id=run_id,
+                                node_id=node_id,
+                                sequence=tool_result_sequence,
+                                tool_name=tool_name,
+                                tool_content=tool_content,
+                            )
+                            bounded_content = observation.get("summary", tool_content)
+                            try:
+                                msg.content = bounded_content
+                            except Exception as exc:
+                                logger.warning("⚠️ [AICall] ToolMessage 内容压缩回写失败: %s", exc)
                             status = "success"
                             all_tool_calls.append({
                                 "tool_name": tool_name,
-                                "result": tool_content,
+                                "result": bounded_content,
+                                "raw_ref": observation.get("raw_ref"),
+                                "structured_ref": observation.get("structured_ref"),
+                                "summary_ref": observation.get("summary_ref"),
+                                "raw_chars": observation.get("raw_chars", len(tool_content)),
+                                "summary_chars": observation.get("summary_chars", len(bounded_content)),
                             })
-                            logger.info("   ✅ [AICall] tool #%d %s | %s | len=%d",
+                            logger.info("   ✅ [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
                                         tool_call_count, tool_name, status,
-                                        len(tool_content))
-                            logger.debug("   📄 [AICall] tool #%d %s 完整输出:\n%s",
+                                        observation.get("raw_chars", len(tool_content)),
+                                        observation.get("summary_chars", len(bounded_content)),
+                                        observation.get("processor", "unknown"))
+                            logger.debug("   📄 [AICall] tool #%d %s 摘要输出:\n%s",
                                         tool_call_count, tool_name,
-                                        tool_content[:2000])
+                                        bounded_content[:2000])
                             evt = {
                                 "type": "tool_result",
                                 "tool_name": tool_name,
                                 "status": status,
-                                "result_preview": tool_content[:200],
-                                "result": tool_content,
+                                "result_preview": bounded_content[:200],
+                                "result": bounded_content,
+                                "raw_ref": observation.get("raw_ref"),
+                                "structured_ref": observation.get("structured_ref"),
+                                "summary_ref": observation.get("summary_ref"),
+                                "raw_chars": observation.get("raw_chars", len(tool_content)),
+                                "summary_chars": observation.get("summary_chars", len(bounded_content)),
+                                "observation_processed": observation.get("processed", False),
+                                "observation_processor": observation.get("processor", ""),
                                 "iteration": iteration,
                             }
                             push_event(stream_queue, "tool_result", node_id, **evt)
@@ -335,6 +453,15 @@ class AICall:
             duration_ms=total_ms,
             intermediate_events=thinking_events,
         )
+        self._write_final_context_budget(
+            run_id=run_id,
+            node_id=node_id or "unknown",
+            system_prompt=system_prompt,
+            question=question,
+            static_context_components=static_context_components,
+            thinking_events=thinking_events,
+            final_content=final_content,
+        )
         logger.info("✅ [AICall] call 完成 | node=%s | %.1fs | iterations=%d | tools=%d | 输出=%d字",
                     node_id or "?", total_ms / 1000, result.iterations, tool_call_count,
                     len(final_content))
@@ -355,6 +482,142 @@ class AICall:
     def _record(events: List[Dict], event_type: str, node_id: str, **data):
         """Record event locally (no queue push)."""
         events.append({"type": event_type, "node": node_id, "timestamp": time.time(), **data})
+
+    def _process_tool_observation(
+        self,
+        processor: ObservationProcessor,
+        run_id: str,
+        node_id: str,
+        sequence: int,
+        tool_name: str,
+        tool_content: str,
+    ) -> Dict[str, Any]:
+        effective_run_id = run_id or f"adhoc-{int(time.time())}"
+        try:
+            return processor.process(
+                run_id=effective_run_id,
+                node_id=node_id or "unknown",
+                sequence=sequence,
+                tool_name=tool_name or "unknown",
+                raw_content=tool_content or "",
+            )
+        except Exception as exc:
+            logger.warning("⚠️ [AICall] observation processor 失败，使用截断回退: %s", exc)
+            summary = (tool_content or "")[:3000]
+            refs: Dict[str, str] = {}
+            try:
+                refs = ContextArchive(run_id=effective_run_id).write_tool_artifact(
+                    node_id=node_id or "unknown",
+                    sequence=sequence,
+                    tool_name=tool_name or "unknown",
+                    raw=tool_content or "",
+                    structured={"status": "fallback_truncate", "error": str(exc)},
+                    summary=summary,
+                )
+            except Exception as archive_exc:
+                logger.warning("⚠️ [AICall] fallback observation 归档失败: %s", archive_exc)
+            return {
+                "tool": tool_name,
+                "status": "success",
+                "summary": summary,
+                "raw_chars": len(tool_content or ""),
+                "summary_chars": len(summary),
+                "processed": False,
+                "processor": "fallback_truncate",
+                **refs,
+            }
+
+    def _write_final_context_budget(
+        self,
+        run_id: str,
+        node_id: str,
+        system_prompt: str,
+        question: str,
+        static_context_components: List[Dict[str, Any]],
+        thinking_events: List[Dict[str, Any]],
+        final_content: str,
+    ) -> None:
+        if not run_id:
+            return
+        tool_observation_text = "\n".join(
+            ev.get("result", "") or ev.get("result_preview", "")
+            for ev in thinking_events
+            if ev.get("type") == "tool_result"
+        )
+        ai_message_text = "\n".join(
+            ev.get("full_content", "") or ev.get("content", "")
+            for ev in thinking_events
+            if ev.get("type") == "ai_message"
+        )
+        final_components = [
+            *static_context_components,
+            {
+                "name": "tool_observations",
+                "category": "dynamic_runtime",
+                "content": tool_observation_text,
+                "preview": tool_observation_text[:200],
+            },
+            {
+                "name": "ai_messages",
+                "category": "dynamic_runtime",
+                "content": ai_message_text,
+                "preview": ai_message_text[:200],
+            },
+            {
+                "name": "final_output",
+                "category": "dynamic_runtime",
+                "content": final_content or "",
+                "preview": (final_content or "")[:200],
+            },
+        ]
+        budget = ContextBudgetEstimator().estimate(
+            node_id=node_id,
+            model=self.model_str,
+            system_prompt=system_prompt,
+            user_message=question,
+            components=final_components,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+        )
+        ContextBudgetEstimator().log(budget)
+        try:
+            ContextArchive(run_id=run_id).write_budget(node_id, budget)
+        except Exception as exc:
+            logger.warning("⚠️ [AICall] 写入 final context budget 失败: %s", exc)
+
+    def _summarize_tool_observation(self, tool_name: str, raw: str, current_summary: str) -> Optional[str]:
+        if not raw:
+            return current_summary
+        try:
+            prompt = get_workflow_prompt("tool_observation_summarizer")
+            payload = {
+                "tool": tool_name,
+                "raw_chars": len(raw),
+                "current_summary": current_summary[:4000],
+                "raw_preview": raw[:12000],
+            }
+            parsed, text = self.call_simple_json(
+                system_prompt=prompt,
+                question=json.dumps(payload, ensure_ascii=False),
+                validator=lambda data: isinstance(data, dict),
+                max_tokens=2048,
+            )
+            if isinstance(parsed, dict) and parsed.get("summary"):
+                facts = parsed.get("key_facts") or []
+                conflicts = parsed.get("conflicts") or []
+                missing = parsed.get("missing") or []
+                lines = [str(parsed.get("summary", ""))]
+                if facts:
+                    lines.append("key_facts: " + json.dumps(facts, ensure_ascii=False, default=str))
+                if conflicts:
+                    lines.append("conflicts: " + json.dumps(conflicts, ensure_ascii=False, default=str))
+                if missing:
+                    lines.append("missing: " + json.dumps(missing, ensure_ascii=False, default=str))
+                return "\n".join(lines)
+            return text[:3000] if text else current_summary
+        except Exception as exc:
+            logger.warning("⚠️ [AICall] LLM observation summarizer 失败: %s", exc)
+            return current_summary
 
     @staticmethod
     def extract_json_payload(text: str) -> Optional[Any]:
