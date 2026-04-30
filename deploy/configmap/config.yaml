@@ -9,15 +9,11 @@ metadata:
   namespace: aiops
 data:
   config.yaml: |
-    # LLM 提供商配置
-    llm:
-      model: "deepseek/deepseek-chat"
-      # 可选：模型真实上下文窗口 token 数。优先使用 Secret/Env 的 MODEL_CONTEXT_WINDOW。
-      context_window: "${MODEL_CONTEXT_WINDOW:-}"
-      # 可选：模型服务实际 tokenizer.json 路径。配置后 token budget 使用准确 tokenizer 计数。
-      tokenizer_json_path: "${AIOPS_TOKENIZER_JSON_PATH:-}"
-      # 可选：OpenAI/tiktoken 编码名，例如 cl100k_base / o200k_base。Qwen 优先使用 tokenizer_json_path。
-      tiktoken_encoding: "${AIOPS_TIKTOKEN_ENCODING:-}"
+    # LLM 连接与模型容量配置只从 Secret/Env 注入：
+    # LLM_API_KEY / LLM_MODEL / LLM_API_BASE / MODEL_CONTEXT_WINDOW /
+    # AIOPS_TOKENIZER_JSON_PATH / AIOPS_TIKTOKEN_ENCODING
+    # ConfigMap 不再放默认模型，避免与 Secret 产生双配置冲突。
+    llm: {}
 
     # i18n 配置 控制提示词和输出形式是中文zh还是英文en
     i18n:
@@ -104,6 +100,17 @@ data:
         rca: 0
         conclusion: 0
 
+      # 节点动态提前停止开关:
+      # layer=true: 有效结构化 JSON 被 AICall 捕获后可提前结束本轮 agent
+      # evidence=true: critical/important 证据满足后 stop_checker 可提前结束采证
+      # 如需对比复杂场景下工具采集充分性，可临时关闭对应节点早停。
+      layer:
+        early_stop:
+          enabled: false
+      evidence:
+        early_stop:
+          enabled: false
+
       # 本地推理模型 `<think>` 流式展示方式:
       # full=完整展示（默认） / truncated=只展示前 max_chars 字符 / hidden=不展示
       think_stream:
@@ -111,10 +118,10 @@ data:
         max_chars: 1200
 
       # 工具 observation 回注给主 Agent 前的摘要策略:
-      # rule=默认，规则摘要优先，超长才调用 LLM 兜底,也可以设置为ai，每次都ai总结
+      # rule=默认，规则摘要优先，超长或上下文压力过高才调用 LLM 兜底
       # ai=每次工具返回都强制调用 LLM summarizer，再回注给主 Agent
       observation_summary:
-        mode: ai
+        mode: rule
         max_chars: 3000
 
     # 质量指标配置

@@ -1,16 +1,26 @@
 ## E2E 故障注入与验收
 
-为 L0-L4 五个典型故障场景提供可复现的故障环境与验收脚本。
+当前 `/ask` 主链已经切到“异常 Pod 状态优先”的诊断模式。
+
+这份 E2E 只覆盖会直接表现为 Pod 异常状态的主线场景，不再把 `service selector mismatch` 这类“Pod 本身正常但服务拓扑异常”的案例放进主验收矩阵。
+
+为 Pod 异常状态主线提供可复现的故障环境与验收脚本。每个主线异常类型都有一个专属 manifest，并通过 `aiops.e2e/*` annotations 标注期望状态、关联 runbook 和关键证据。
 
 ### 场景矩阵
 
-| 层级 | 场景 | Manifest | Runbook | 注入方式 |
+| Pod 异常类型 | 典型状态 | Manifest | Runbook | 注入方式 |
 |------|------|----------|---------|----------|
-| L0 | EmptyDir 超限驱逐 | `l0-logfill-enospc.yaml` | `l0-volume-limit.md` | emptyDir sizeLimit 30Mi 写满 |
-| L1 | Node Taint 不可调度 | `l1-taint-node.yaml` | `l1-taint-node.md` | nodeSelector 指定节点 |
-| L2 | OOMKilled | `l2-oomkilled.yaml` | `l2-oomkilled.md` | 小内存 limit + 内存分配 |
-| L3 | ImagePullBackOff | `l3-imagepull-fail-victim.yaml` | `l3-imagepull-failed.md` | 拉取不可达镜像 |
-| L4 | 应用启动配置校验失败 | `l4-config-bootstrap-fail.yaml` | `l4-config-bootstrap-fail.md` | 启动打印配置错误并进入 CrashLoopBackOff |
+| Evicted | Evicted | `l0-logfill-enospc.yaml` | `l0-volume-limit.md` | emptyDir sizeLimit 30Mi 写满，触发本地临时存储驱逐 |
+| VolumeMountFailed | Pending/ContainerCreating | `pod-volume-mount-failed.yaml` | `pod-volume-mount-failed.md` | 引用不存在的 ConfigMap 卷，触发 FailedMount |
+| PendingUnschedulable | Pending | `l1-taint-node.yaml` | `l1-taint-node.md` | nodeSelector 指定不存在的节点标签，触发 FailedScheduling |
+| NodeLostOrUnknown | Unknown | `pod-node-lost-unknown.yaml` | `pod-node-lost-unknown.md` | 先部署候选 Pod，再手动隔离所在节点或停止 kubelet |
+| TerminatingStuck | Terminating | `pod-terminating-stuck.yaml` | `pod-terminating-stuck.md` | Pod 带 finalizer，`run_all.sh` 自动执行 delete 使其卡住 |
+| OOMKilled | CrashLoopBackOff/Error | `l2-oomkilled.yaml` | `l2-oomkilled.md` | 小内存 limit + 持续内存分配 |
+| CrashLoopBackOffRuntime | CrashLoopBackOff | `pod-crashloop-runtime.yaml` | `pod-crashloop-runtime.md` | 容器启动后输出运行时错误并 exit 2 |
+| ImagePullFailed | ImagePullBackOff/ErrImagePull | `l3-imagepull-fail-victim.yaml` | `l3-imagepull-failed.md` | 使用 `registry.invalid` 镜像地址强制拉取失败 |
+| SandboxCreateFailed | ContainerCreating/Pending | `pod-sandbox-create-failed.yaml` | `pod-sandbox-create-failed.md` | 使用不存在的 runtimeClassName |
+| ConfigError | CrashLoopBackOff/CreateContainerConfigError/CreateContainerError | `l4-config-bootstrap-fail.yaml` | `l4-config-bootstrap-fail.md` | 启动打印配置错误并进入 CrashLoopBackOff |
+| NotReadyProbeFailed | Running 但 READY=0/1 | `pod-notready-probe-failed.yaml` | `pod-notready-probe-failed.md` | readinessProbe 固定失败 |
 
 ### 使用方式
 
@@ -27,9 +37,14 @@ cd test/e2e
 AIOPS_ENDPOINT=http://10.2.0.48:30800 ./test_scenarios.sh
 
 # 4. 单独测试某个场景
-./test_scenarios.sh l0   # L0
-./test_scenarios.sh l2   # L2
+./test_scenarios.sh l0   # 兼容分类 L0
+./test_scenarios.sh l2   # 兼容分类 L2
 ```
+
+### 特殊场景说明
+
+- `NodeLostOrUnknown` 无法只靠 Kubernetes manifest 安全、稳定地制造；manifest 会创建带标识的候选 Pod，需在测试环境中停止该 Pod 所在节点 kubelet 或隔离节点网络后再验证 Unknown 状态。
+- `TerminatingStuck` 需要删除动作触发；`run_all.sh` 会先清理旧 finalizer，再 apply manifest，最后执行 `kubectl delete pod terminating-stuck --wait=false`。
 
 ### 前置依赖
 
@@ -123,6 +138,12 @@ python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" \
 | l3-imagepull | L3 | l3-imagepull-failed |
 | l4-config-bootstrap | L4 | l4-config-bootstrap-fail |
 
+这些场景都要求 layer 节点先锁定异常 Pod，再给出：
+
+- `primary_pod`
+- `pod_status_keyword`
+- `pod_abnormal_type`
+
 **计算示例**：50 次请求，45 次成功返回，其中 40 次层级正确 → `40/45 = 88.9%` ✅
 
 #### 3. 证据完整率
@@ -178,7 +199,7 @@ python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" \
 - **LLM 调用**: 4 次
 ```
 
-**匹配示例**：场景 `l2-oomkilled` 的 `expect_runbook = "l2-oomkilled"`。即使报告中没有 `核心 Runbook`，只要 `参考 Runbook: private-k8s-health-reference, l2-oomkilled`，也会判定匹配成功 ✅
+**匹配示例**：场景 `l2-oomkilled` 的 `expect_runbook = "l2-oomkilled"`。只要报告中的 `核心 Runbook`、`参考 Runbook`、或 `fetch_runbook` 日志里出现 `l2-oomkilled`，就会判定匹配成功 ✅
 
 **计算示例**：50 次请求，45 次成功，其中 41 次 Runbook 匹配 → `41/45 = 91.1%` ✅
 

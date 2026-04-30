@@ -1,0 +1,26 @@
+# Pod TerminatingStuck E2E 场景模板
+# 说明：直接 apply 后 Pod 会 Running；执行删除后因 finalizer 存在会长时间 Terminating。
+# 触发：kubectl delete pod terminating-stuck -n aiops-e2e
+apiVersion: v1
+kind: Pod
+metadata:
+  name: terminating-stuck
+  namespace: aiops-e2e
+  annotations:
+    aiops.e2e/runbook: pod-terminating-stuck.md
+    aiops.e2e/expected-status: Terminating
+    aiops.e2e/expected-evidence: "metadata.deletionTimestamp exists and finalizers contains aiops.e2e/hold"
+    aiops.e2e/trigger-command: "kubectl delete pod terminating-stuck -n aiops-e2e --wait=false"
+  labels:
+    app: terminating-stuck
+    e2e-test: "true"
+    pod_abnormal_type: TerminatingStuck
+    expected_layer: L1
+  finalizers:
+    - aiops.e2e/hold
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      imagePullPolicy: Never
+      command: ["sh", "-c", "sleep 86400"]

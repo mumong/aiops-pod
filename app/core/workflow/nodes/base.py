@@ -97,6 +97,58 @@ class WorkflowNode(ABC):
         """
         return []
 
+    def _get_workflow_config(self) -> dict:
+        """Return workflow config visible to this node.
+
+        Tests and executor can set workflow_config_override directly on the node.
+        Production nodes read the initialized HolmesService workflow_config.
+        """
+        override = getattr(self, "workflow_config_override", None)
+        if isinstance(override, dict):
+            return override
+        service = getattr(self, "holmes_service", None)
+        config = getattr(service, "workflow_config", {}) if service is not None else {}
+        return config if isinstance(config, dict) else {}
+
+    @staticmethod
+    def _parse_bool_config(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+        return default
+
+    def _is_early_stop_enabled(self, default: bool = True) -> bool:
+        """Whether this node may use its dynamic early-stop mechanism.
+
+        Env override examples:
+        - WORKFLOW_LAYER_EARLY_STOP=false
+        - WORKFLOW_EVIDENCE_EARLY_STOP=false
+        """
+        node_key = str(self.node_id or "").upper()
+        for env_key in (
+            f"WORKFLOW_{node_key}_EARLY_STOP",
+            f"AIOPS_WORKFLOW_{node_key}_EARLY_STOP",
+        ):
+            if env_key in os.environ:
+                return self._parse_bool_config(os.getenv(env_key), default)
+
+        wf_config = self._get_workflow_config()
+        node_cfg = wf_config.get(self.node_id, {}) if isinstance(wf_config, dict) else {}
+        if isinstance(node_cfg, dict):
+            early_cfg = node_cfg.get("early_stop", {})
+            if isinstance(early_cfg, dict) and "enabled" in early_cfg:
+                return self._parse_bool_config(early_cfg.get("enabled"), default)
+            if "early_stop_enabled" in node_cfg:
+                return self._parse_bool_config(node_cfg.get("early_stop_enabled"), default)
+
+        return default
+
     def should_inject_runbook_catalog(self) -> bool:
         """节点是否需要在 prompt 中注入 runbook catalog。"""
         return True
