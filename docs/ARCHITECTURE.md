@@ -184,7 +184,10 @@ LangGraph 原生负责状态流转，但不会自动帮你做“对下一个节�
 
 - `layer`
 - `layer_analysis`
-- `layer_full_analysis`
+- `layer_handoff`
+- `primary_pod`
+- `pod_status_keyword`
+- `pod_abnormal_type`
 - `evidence_analysis`
 - `evidence_items`
 - `rca_analysis`
@@ -195,7 +198,7 @@ LangGraph 原生负责状态流转，但不会自动帮你做“对下一个节�
 
 ### 使用
 
-- runbook catalog 会注入到节点 prompt 中
+- `/ask` 主链只注入 Pod 异常主线 runbook catalog
 - 模型可调用 `fetch_runbook`
 - 允许抓取多个 runbook
 

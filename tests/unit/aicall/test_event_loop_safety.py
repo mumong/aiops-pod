@@ -1,8 +1,27 @@
+import sys
+import types
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from app.core.aicall.client import AICall
+
+
+def _install_fake_langfuse(monkeypatch):
+    calls = {"sessions": []}
+
+    @contextmanager
+    def _propagate_attributes(**kwargs):
+        calls["sessions"].append(kwargs.get("session_id"))
+        yield
+
+    fake_langfuse = types.ModuleType("langfuse")
+    fake_langfuse.propagate_attributes = _propagate_attributes
+
+    monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse)
+    return calls
 
 
 def test_call_simple_creates_fresh_chat_model_per_invocation():
@@ -23,9 +42,41 @@ def test_call_simple_creates_fresh_chat_model_per_invocation():
     assert first == "resp-0"
     assert second == "resp-1"
     assert len(model_instances) == 2
+    assert model_instances
     assert model_instances[0] is not model_instances[1]
     model_instances[0].invoke.assert_called_once()
     model_instances[1].invoke.assert_called_once()
+
+
+def test_call_simple_propagates_langfuse_session_id(monkeypatch):
+    langfuse_calls = _install_fake_langfuse(monkeypatch)
+    invoke_configs = []
+    model_instances = []
+
+    def _new_model(**kwargs):
+        model = MagicMock()
+
+        def _invoke(messages, config=None):
+            invoke_configs.append(config)
+            return MagicMock(content="ok")
+
+        model.bind.return_value = model
+        model.invoke.side_effect = _invoke
+        model_instances.append(model)
+        return model
+
+    with patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model):
+        ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
+        result = ai.call_simple("sys", "q", run_id="run-session-1", node_id="evidence")
+
+    assert result == "ok"
+    assert langfuse_calls["sessions"] == ["run-session-1"]
+    assert "metadata" not in invoke_configs[0]
+    assert "session:run-session-1" in invoke_configs[0]["tags"]
+    bound_kwargs = model_instances[0].bind.call_args.kwargs
+    assert bound_kwargs["extra_body"]["metadata"]["session_id"] == "run-session-1"
+    assert bound_kwargs["extra_body"]["metadata"]["langfuse_session_id"] == "run-session-1"
+    assert model_instances[0].bind.call_args.kwargs["user"] == "run-session-1"
 
 
 def test_call_with_tools_creates_fresh_chat_model_per_invocation():
@@ -78,6 +129,63 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
     assert create_agent_calls[0] is model_instances[0]
     assert create_agent_calls[1] is model_instances[1]
     assert create_agent_calls[0] is not create_agent_calls[1]
+
+
+def test_call_with_tools_propagates_langfuse_session_id(monkeypatch):
+    langfuse_calls = _install_fake_langfuse(monkeypatch)
+    astream_configs = []
+
+    def _new_model(**kwargs):
+        return MagicMock()
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, input_messages, config=None, **kwargs):
+            astream_configs.append(config)
+            if False:
+                yield None
+
+    def _create_agent(**kwargs):
+        return _Agent()
+
+    tool = MagicMock()
+    tool.name = "tool_a"
+    tool.description = "tool"
+    tool.args_schema = None
+
+    with patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model), \
+         patch("langchain.agents.create_agent", side_effect=_create_agent), \
+         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+        ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
+        ai.call("sys", "q", tools=[tool], run_id="run-session-2", node_id="layer", max_steps=3)
+
+    assert langfuse_calls["sessions"] == ["run-session-2"]
+    assert astream_configs[0]["recursion_limit"] == 3
+    assert "metadata" not in astream_configs[0]
+    assert "session:run-session-2" in astream_configs[0]["tags"]
+
+
+def test_langfuse_session_scope_preserves_original_exception(monkeypatch):
+    _install_fake_langfuse(monkeypatch)
+    ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
+
+    with pytest.raises(ValueError, match="original failure"):
+        with ai._langfuse_session_scope("run-session-error", "layer"):
+            raise ValueError("original failure")
 
 
 def test_call_simple_json_parses_fenced_json_output():
@@ -150,3 +258,45 @@ def test_call_with_expect_json_interrupts_on_valid_json_message():
         )
 
     assert result.result == '{"layer": "QUERY", "confidence": 0.9, "reasoning": "ok"}'
+
+
+def test_chat_model_requests_stream_usage_for_exact_context_usage():
+    created_kwargs = []
+
+    def _new_model(**kwargs):
+        created_kwargs.append(kwargs)
+        model = MagicMock()
+        model.invoke.return_value = MagicMock(content="ok")
+        return model
+
+    with patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model):
+        ai = AICall(model="openai/Qwen3-32B-AWQ", api_key="sk-test", api_base="http://llm/v1")
+        ai.call_simple("sys", "q")
+
+    assert created_kwargs[0]["streaming"] is True
+    assert created_kwargs[0]["stream_usage"] is True
+
+
+def test_extract_usage_metadata_supports_usage_metadata_and_token_usage():
+    msg = MagicMock()
+    msg.usage_metadata = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+    assert AICall._extract_usage_metadata(msg) == {
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "total_tokens": 12,
+    }
+
+    msg2 = MagicMock()
+    msg2.usage_metadata = None
+    msg2.response_metadata = {
+        "token_usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 3,
+            "total_tokens": 14,
+        }
+    }
+    assert AICall._extract_usage_metadata(msg2) == {
+        "input_tokens": 11,
+        "output_tokens": 3,
+        "total_tokens": 14,
+    }

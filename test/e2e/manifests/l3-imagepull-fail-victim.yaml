@@ -1,27 +1,22 @@
-# L3 网络层故障受害者 Pod
-# 故障原理：因为镜像仓库网络被阻断，无法拉取镜像
-# 预期结果：Pod 状态变为 ImagePullBackOff
-#
-# 前置条件：先部署 l3-registry-block.yaml 阻断镜像仓库访问
-# 预期异常：kubectl get pod 会显示 STATUS = ImagePullBackOff
+# Pod ImagePullFailed E2E 场景
+# 预期结果：Pod 状态变为 ErrImagePull/ImagePullBackOff，Events 含 Failed to pull image
 
 apiVersion: v1
 kind: Pod
 metadata:
   name: imagepull-fail-victim
   namespace: aiops-e2e
+  annotations:
+    aiops.e2e/runbook: l3-imagepull-failed.md
+    aiops.e2e/expected-status: ImagePullBackOff|ErrImagePull
+    aiops.e2e/expected-evidence: "Events contain Failed to pull image for an invalid registry host"
   labels:
     app: imagepull-fail-victim
-    fault_level: "L3"
-    fault_type: "registry_unreachable"
-    expected_state: "ImagePullBackOff"
-    # 标识这是一个测试用的受害者 Pod
-    role: "fault_injection_victim"
+    e2e-test: "true"
+    pod_abnormal_type: ImagePullFailed
 spec:
   containers:
-    - name: nginx
-      # 使用 Docker Hub 镜像，会被 registry-blocker 阻断
-      image: nginx:latest
-      # 强制重新拉取镜像（不使用本地缓存）
+    - name: app
+      image: registry.invalid/aiops/imagepull-fail:v0
       imagePullPolicy: Always
   restartPolicy: Never

@@ -108,3 +108,35 @@ def test_reporter_keeps_multiple_catalog_runbooks_when_multiple_are_fetched():
 
     assert metrics.primary_runbook == "l2-oomkilled"
     assert metrics.runbook_id == "l2-oomkilled, private-k8s-health-reference"
+
+
+def test_reporter_detects_query_runbook_from_tool_start_args_when_result_preview_is_truncated():
+    metrics = WorkflowMetrics(run_id="r4", question="每个 node 的 CPU 和内存使用率")
+    state = {
+        "layer": Layer.QUERY,
+        "conclusion": "## 查询结果",
+        "rca_analysis": "",
+        "evidence_analysis": "",
+        "thinking_events": [
+            {
+                "type": "tool_start",
+                "tool_name": "fetch_runbook",
+                "tool_call_id": "tool-1",
+                "tool_args": {"runbook_id": "private-k8s-query-promql-reference.md"},
+            },
+            {
+                "type": "tool_result",
+                "status": "success",
+                "tool_name": "fetch_runbook",
+                "tool_call_id": "tool-1",
+                "result_preview": "<runbook>\n# 私有化 Kubernetes 节点级 Prometheus 查询参考手册\n> 类型: reference | 适用: `/query` 指标查询",
+            },
+        ],
+        "evidence_items": [],
+        "tool_results": [],
+        "llm_calls": 1,
+    }
+
+    update_metrics_from_state(metrics, state, runbook_catalog=_make_catalog())
+
+    assert metrics.runbook_id == "private-k8s-query-promql-reference"

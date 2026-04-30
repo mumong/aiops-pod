@@ -508,6 +508,16 @@ Runbook 统计由 `reporter.update_metrics_from_state()` 完成。
 
 然后使用 runbook catalog 做归一化，只保留 catalog 中可识别的 runbook id。
 
+当前 `/ask` 主链的 runtime catalog 只暴露 5 个 Pod 异常 runbook：
+
+- `l0-volume-limit`
+- `l1-taint-node`
+- `l2-oomkilled`
+- `l3-imagepull-failed`
+- `l4-config-bootstrap-fail`
+
+因此当前主链的 Runbook 覆盖率默认也是围绕这 5 个 ID 统计，不再把通用健康手册或 QUERY 参考手册作为 `/ask` 主链默认覆盖目标。
+
 ### 10.2 核心 Runbook
 
 核心 Runbook 只认 AI 明确声明或唯一合法回退：
@@ -649,4 +659,3 @@ runbook_coverage_score >= 0.80
 4. `ToolMessage` 中包含 `Command failed` / `NotFound` / `No events found` 时，应在 structured artifact 中标记为 negative/conflict，并避免直接计为 collected。
 5. `kubectl_get_yaml` structured artifact 应提取 `imagePullSecrets`、`serviceAccountName`、`containerStatuses`、`events` 等高价值字段。
 6. 增加独立的“分层准确率” E2E 指标，不要混入根因置信度。
-

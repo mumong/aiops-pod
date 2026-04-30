@@ -5,19 +5,27 @@ metadata:
   namespace: aiops-e2e
   labels:
     e2e-test: "true"
+    pod_abnormal_type: PendingUnschedulable
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nginx
+      app: pending-unschedulable
   template:
     metadata:
+      annotations:
+        aiops.e2e/runbook: l1-taint-node.md
+        aiops.e2e/expected-status: Pending
+        aiops.e2e/expected-evidence: "Events contain FailedScheduling because nodeSelector cannot match any node"
       labels:
-        app: nginx
+        app: pending-unschedulable
         e2e-test: "true"
+        pod_abnormal_type: PendingUnschedulable
     spec:
       nodeSelector:
-        kubernetes.io/hostname: node2
+        aiops.e2e/nonexistent-node: "true"
       containers:
-      - name: nginx
-        image: nginx:alpine
+      - name: app
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "sleep 3600"]

@@ -1,0 +1,38 @@
+# Pod CrashLoopBackOffRuntime E2E 场景
+# 预期状态：CrashLoopBackOff，Last State exitCode 非 137，日志指向进程启动失败
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crashloop-runtime
+  namespace: aiops-e2e
+  labels:
+    app: crashloop-runtime
+    e2e-test: "true"
+    pod_abnormal_type: CrashLoopBackOffRuntime
+    expected_layer: L2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crashloop-runtime
+  template:
+    metadata:
+      annotations:
+        aiops.e2e/runbook: pod-crashloop-runtime.md
+        aiops.e2e/expected-status: CrashLoopBackOff
+        aiops.e2e/expected-evidence: "Last State exitCode is non-137 and logs contain RUNTIME_STARTUP_ERROR"
+      labels:
+        app: crashloop-runtime
+        e2e-test: "true"
+        pod_abnormal_type: CrashLoopBackOffRuntime
+        expected_layer: L2
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          imagePullPolicy: Never
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "RUNTIME_STARTUP_ERROR: command failed before serving traffic"
+              exit 2

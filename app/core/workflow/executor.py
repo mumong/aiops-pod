@@ -16,6 +16,7 @@ import logging
 import queue
 import re
 import threading
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from typing import Generator, Dict, Any, Optional
 
@@ -221,8 +222,9 @@ class WorkflowExecutor:
         def _run_workflow_in_thread():
             """在后台线程中运行 LangGraph workflow.stream()"""
             try:
-                for lg_event in workflow.stream(initial_state):
-                    event_queue.put(("langgraph_event", lg_event))
+                with self._langfuse_session_scope(run_id):
+                    for lg_event in workflow.stream(initial_state):
+                        event_queue.put(("langgraph_event", lg_event))
                 event_queue.put(("langgraph_done", None))
             except Exception as exc:
                 event_queue.put(("langgraph_error", exc))
@@ -624,6 +626,35 @@ class WorkflowExecutor:
                 worker.join(timeout=5)
                 if worker.is_alive():
                     logger.warning("⚠️ [Workflow] 后台线程未在 5s 内结束 (run_id=%s)", run_id)
+
+    @staticmethod
+    def _normalize_langfuse_session_id(run_id: str) -> Optional[str]:
+        raw = str(run_id or "").strip()
+        if not raw:
+            return None
+        ascii_text = raw.encode("ascii", errors="ignore").decode("ascii").strip()
+        if not ascii_text:
+            return None
+        return ascii_text[:199]
+
+    @contextmanager
+    def _langfuse_session_scope(self, run_id: str):
+        session_id = self._normalize_langfuse_session_id(run_id)
+        if not session_id:
+            with nullcontext():
+                yield
+            return
+
+        try:
+            from langfuse import propagate_attributes
+        except Exception as exc:
+            logger.debug("📉 [Workflow] Langfuse session propagation 不可用，直接执行: %s", exc)
+            yield
+            return
+
+        logger.debug("📈 [Workflow] Langfuse session_id=%s", session_id)
+        with propagate_attributes(session_id=session_id):
+            yield
     
     def _get_node_display_name(self, node_id: str) -> str:
         """获取节点显示名称"""
