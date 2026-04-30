@@ -81,6 +81,15 @@ class EvidenceCollectorNode(WorkflowNode):
             for ev in (thinking_events or [])
         )
 
+    @staticmethod
+    def _has_semantic_tool_success(thinking_events: List[Dict[str, Any]]) -> bool:
+        return any(
+            ev.get("type") == "tool_result"
+            and ev.get("status") == "success"
+            and ev.get("semantic_success", True) is not False
+            for ev in (thinking_events or [])
+        )
+
     def execute(self, state: WorkflowState) -> WorkflowState:
         """
         执行证据采集逻辑
@@ -121,18 +130,26 @@ class EvidenceCollectorNode(WorkflowNode):
                 layer=layer,
                 possible_scenarios=possible_scenarios,
                 key_entities=key_entities,
-                layer_analysis=json.dumps(layer_handoff, ensure_ascii=False)
+                layer_analysis=json.dumps(layer_handoff, ensure_ascii=False),
+                context_archive_ref=state.get("context_archive_ref", ""),
+                layer_archive_ref=state.get("layer_archive_ref") or {},
             )
-            if evidence_plan and not self._has_successful_tool_results(thinking_events):
-                logger.warning("⚠️ [evidence] 仅拿到 evidence_plan，未执行任何真实工具；发起一次严格重试")
+            retry_reason = self._get_plan_protocol_failure_reason(
+                evidence_plan=evidence_plan,
+                thinking_events=thinking_events,
+            )
+            if retry_reason:
+                logger.warning("⚠️ [evidence] 首轮结果违反采证协议：%s；发起一次严格重试", retry_reason)
                 evidence_plan, thinking_events, llm_result_text = self._plan_evidence_with_llm(
                     question=question,
                     layer=layer,
                     possible_scenarios=possible_scenarios,
                     key_entities=key_entities,
                     layer_analysis=json.dumps(layer_handoff, ensure_ascii=False),
+                    context_archive_ref=state.get("context_archive_ref", ""),
+                    layer_archive_ref=state.get("layer_archive_ref") or {},
                     strict_mode=True,
-                    failure_reason="上一轮只返回 evidence_plan，没有任何成功工具调用，系统已拒绝该结果",
+                    failure_reason=retry_reason,
                 )
 
             # 2. 构建证据项列表（基于 thinking_events 中 AICall 真实工具调用）
@@ -182,7 +199,7 @@ class EvidenceCollectorNode(WorkflowNode):
             total = len(evidence_items)
             not_collected = [e for e in evidence_items if not e.collected]
             evidence_facts = self._build_evidence_facts(evidence_items)
-            evidence_conflicts = self._build_evidence_conflicts(tool_data_from_llm)
+            evidence_conflicts = self._build_evidence_conflicts(tool_data_from_llm, layer_handoff)
             missing_evidence = [
                 {"id": e.id, "description": e.description, "level": e.level.value if hasattr(e.level, "value") else str(e.level)}
                 for e in not_collected
@@ -296,15 +313,38 @@ class EvidenceCollectorNode(WorkflowNode):
         return facts
 
     @staticmethod
-    def _build_evidence_conflicts(tool_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _build_evidence_conflicts(
+        tool_data: List[Dict[str, Any]],
+        layer_handoff: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         conflicts = []
+        primary_pod = (layer_handoff or {}).get("primary_pod") or {}
+        primary_name = str(primary_pod.get("name") or "")
+        primary_namespace = str(primary_pod.get("namespace") or "")
         for item in tool_data:
             data = item.get("data", "") or ""
             if re.search(r"no events found|no resources found|notfound|not found|command failed|error from server", data, re.IGNORECASE):
-                conflicts.append({
+                object_missing = bool(
+                    primary_name
+                    and re.search(r"notfound|not found|error from server", data, re.IGNORECASE)
+                    and primary_name in data
+                )
+                conflict = {
                     "tool": item.get("tool", "unknown"),
                     "reason": data[:300],
-                })
+                    "severity": "critical" if object_missing else "warning",
+                    "object_missing": object_missing,
+                }
+                if object_missing:
+                    conflict["object"] = {
+                        "kind": "Pod",
+                        "name": primary_name,
+                        "namespace": primary_namespace,
+                    }
+                    conflict["message"] = (
+                        "primary_pod 当前不存在；历史事件或归档摘要不能继续作为该 Pod 当前异常的正向证据"
+                    )
+                conflicts.append(conflict)
         return conflicts
 
     def _build_query_result(
@@ -405,6 +445,8 @@ class EvidenceCollectorNode(WorkflowNode):
         possible_scenarios: List[str],
         key_entities: List[Dict],
         layer_analysis: str = "",
+        context_archive_ref: str = "",
+        layer_archive_ref: Optional[Dict[str, Any]] = None,
         strict_mode: bool = False,
         failure_reason: str = "",
     ) -> tuple:
@@ -468,6 +510,8 @@ class EvidenceCollectorNode(WorkflowNode):
                 question=question,
                 layer=layer_str,
                 layer_handoff=layer_analysis,
+                context_archive_ref=context_archive_ref,
+                layer_archive_ref=layer_archive_ref or {},
                 strict_mode=strict_mode,
                 failure_reason=failure_reason,
             )
@@ -492,10 +536,12 @@ class EvidenceCollectorNode(WorkflowNode):
                 }
             )
 
+            early_stop_enabled = self._is_early_stop_enabled(default=True)
+            logger.info("🧭 [evidence] early_stop=%s", early_stop_enabled)
             response, thinking_events = self._call_llm(
                 user_message,
                 system_prompt,
-                stop_checker=self._should_stop_collection_early,
+                stop_checker=self._should_stop_collection_early if early_stop_enabled else None,
             )
 
             llm_text = (response.result or "") if response else ""
@@ -538,6 +584,8 @@ class EvidenceCollectorNode(WorkflowNode):
         question: str,
         layer: str,
         layer_handoff: str,
+        context_archive_ref: str = "",
+        layer_archive_ref: Optional[Dict[str, Any]] = None,
         strict_mode: bool = False,
         failure_reason: str = "",
     ) -> str:
@@ -550,23 +598,103 @@ class EvidenceCollectorNode(WorkflowNode):
 - 本轮必须先调用至少一个 critical 或 important 级真实工具。
 - 没有 tool_result 前禁止输出“证据充分/采集完成/完整度 100%”。
 """
+        archive_refs = layer_archive_ref or {}
+        archive_lines = []
+        context_root = (context_archive_ref or "").strip()
+        if context_root:
+            archive_lines.extend([
+                "# 可读取的 context archive 入口",
+                f"- context_archive_ref: {context_root}",
+                f"- 可按需读取: {context_root}/budget/layer.json",
+                f"- 可按需读取: {context_root}/budget/evidence.json",
+                f"- 可按需读取: {context_root}/handoff/layer-to-evidence.json",
+                f"- 可按需读取: {context_root}/layer/full_analysis.md",
+                f"- 可按需读取: {context_root}/layer/handoff.json",
+                f"- 可按需读取: {context_root}/node_inputs/evidence.input.json",
+                f"- 可按需读取: {context_root}/node_outputs/layer.output.json",
+                f"- 可按需读取: {context_root}/tools/ 下的 *.raw.txt / *.structured.json / *.summary.txt",
+            ])
+        if archive_refs.get("full_analysis_ref"):
+            archive_lines.append(f"- layer full_analysis_ref: {archive_refs.get('full_analysis_ref')}")
+        if archive_refs.get("handoff_ref"):
+            archive_lines.append(f"- layer handoff_ref: {archive_refs.get('handoff_ref')}")
+        archive_section = "\n".join(archive_lines).strip() if archive_lines else "无"
         return f"""# 用户原始问题
 {question}
 
 # 上游定位结构化结果 layer_handoff
 {layer_handoff or '{}'}
 
+# Runbook 语义匹配要求
+- 根据 Available Runbooks/catalog 的 description、runbook_id、状态关键字与 layer_handoff 中的 pod_status_keyword、pod_abnormal_type、primary_pod、active_signals 做语义匹配。
+- 如果某个 Pod 异常 runbook 明显匹配当前 Pod 异常状态，evidence_plan 必须包含一条 level=reference、tool=fetch_runbook 的参考步骤；多个当前异常类型可以获取多个明显匹配的 runbook。
+- 不要依赖代码注入的 runbook 推荐字段；是否调用 runbook 必须由你根据 catalog 描述和当前异常信号自主判断。
+- runbook 是参考知识，不是真实环境证据；fetch_runbook 后仍必须调用 kubectl/prometheus 等真实环境工具验证关键事实。
+- 如果你在分析中认为“应该查看/参考某个 runbook”，必须把它写入 evidence_plan 并实际调用 fetch_runbook；禁止只在思考中提到 runbook 却不调用。
+
+# 可选归档上下文
+{archive_section}
+
 # 当前节点职责
-你是 evidence 节点。上游已定位为 {layer}，你必须基于 layer_handoff 的 active_entities、active_signals、possible_scenarios 和 must_verify 调用真实只读工具采集证据。
+你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须基于 layer_handoff 的 primary_pod、pod_status_keyword、pod_abnormal_type、active_entities、active_signals、possible_scenarios 和 must_verify 调用真实只读工具采集证据。
 
 # 强约束
+- 第一条 assistant 消息必须只输出 evidence_plan JSON，不能附加解释文本。
+- 在输出 evidence_plan JSON 之前，禁止调用任何工具。
+- 输出 evidence_plan 后不能结束，必须继续调用至少一个 critical 或 important 级真实工具。
 - LLM 必须自己决定并调用工具；计划不是证据。
+- 必须优先围绕 primary_pod 验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要先做大范围集群扫描。
 - 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
 - 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
-- 如果上游定位需要 runbook 补充，可以 fetch 相关 runbook，但不能只 fetch runbook 后结束，必须继续调用真实环境工具。
+- 如果 Available Runbooks/catalog 中存在明显匹配当前 Pod 异常状态的 runbook，应先执行 fetch_runbook 参考步骤；但不能只 fetch_runbook 后结束，必须继续调用真实环境工具。reference/runbook 步骤不是证据，不计入 critical/important 完整度。
+- 如果输入里给出了 raw_ref、summary_ref、structured_ref、archive_ref、handoff_ref、input_ref、output_ref 等路径，而你需要查看其内容，必须调用 read_context_archive 工具；模型不能直接访问本地文件。
 {strict_section}
 # 输出
-完成必要工具调用后，输出 evidence_plan JSON 和简短证据结论。"""
+先输出 evidence_plan JSON，再执行必要工具调用，最后再输出简短证据结论。"""
+
+    def _get_plan_protocol_failure_reason(
+        self,
+        evidence_plan: List[Dict],
+        thinking_events: List[Dict[str, Any]],
+    ) -> str:
+        """检查 evidence 是否遵守了先 plan 后执行的协议。"""
+        timeline = self._analyze_plan_timeline(thinking_events)
+        if not timeline["has_plan"]:
+            return "上一轮没有输出有效 evidence_plan JSON，系统已拒绝该结果"
+        if timeline["tool_activity_before_plan"]:
+            return "上一轮在 evidence_plan 前就开始调用工具，违反先计划后执行约束，系统已拒绝该结果"
+        if evidence_plan and not self._has_semantic_tool_success(thinking_events):
+            return "上一轮只返回 evidence_plan，没有任何成功工具调用，系统已拒绝该结果"
+        return ""
+
+    def _analyze_plan_timeline(self, thinking_events: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """分析 plan 与 tool 调用的先后顺序。"""
+        first_plan_index = None
+        first_tool_index = None
+
+        for idx, ev in enumerate(thinking_events or []):
+            ev_type = ev.get("type")
+            if first_tool_index is None and ev_type in {"tool_start", "tool_result"}:
+                first_tool_index = idx
+            if ev_type != "ai_message":
+                continue
+            text = ev.get("full_content") or ev.get("content") or ""
+            if not text or "evidence_plan" not in text:
+                continue
+            plan = self._parse_llm_evidence_plan(text)
+            if plan:
+                first_plan_index = idx
+                break
+
+        return {
+            "has_plan": first_plan_index is not None,
+            "first_plan_index": first_plan_index,
+            "first_tool_index": first_tool_index,
+            "tool_activity_before_plan": (
+                first_tool_index is not None
+                and (first_plan_index is None or first_tool_index < first_plan_index)
+            ),
+        }
     def _extract_plan_from_thinking(self, thinking_events: list) -> List[Dict]:
         """
         从 thinking_events 的 ai_message 中提取 JSON 证据计划。
@@ -652,7 +780,9 @@ class EvidenceCollectorNode(WorkflowNode):
 
         successful_tools = [
             ev for ev in thinking_events
-            if ev.get("type") == "tool_result" and ev.get("status") == "success"
+            if ev.get("type") == "tool_result"
+            and ev.get("status") == "success"
+            and ev.get("semantic_success", True) is not False
         ]
         if not successful_tools:
             return False
@@ -714,7 +844,16 @@ class EvidenceCollectorNode(WorkflowNode):
         }
 
     # 非证据类工具（LLM 自用的辅助工具），不计入证据统计
-    _NON_EVIDENCE_TOOLS = {"todowrite", "todo_write", "todo"}
+    _NON_EVIDENCE_TOOLS = {
+        "todowrite",
+        "todo_write",
+        "todo",
+        # Archive reads are auxiliary context lookups. They can point the model
+        # to raw files, but they are not fresh cluster observations and must not
+        # become positive evidence by themselves.
+        "read_context_archive",
+        "fetch_runbook",
+    }
 
     def _build_evidence_items_from_thinking(
         self,
@@ -734,10 +873,18 @@ class EvidenceCollectorNode(WorkflowNode):
         # 从 thinking_events 提取成功的工具调用
         successful_tools = []
         for ev in thinking_events:
-            if ev.get("type") == "tool_result" and ev.get("status") == "success":
+            if (
+                ev.get("type") == "tool_result"
+                and ev.get("status") == "success"
+                and ev.get("semantic_success", True) is not False
+            ):
                 successful_tools.append({
                     "tool_name": ev.get("tool_name", ""),
                     "result": ev.get("result", ev.get("result_preview", "")),
+                    "tool_args": ev.get("tool_args") or {},
+                    "structured": ev.get("structured") or {},
+                    "raw_ref": ev.get("raw_ref"),
+                    "summary_ref": ev.get("summary_ref"),
                 })
 
         # ── 无 plan 时：从工具调用反向构建证据项 ──
@@ -779,7 +926,7 @@ class EvidenceCollectorNode(WorkflowNode):
             level = EvidenceLevel.IMPORTANT
             if level_str == "critical":
                 level = EvidenceLevel.CRITICAL
-            elif level_str == "optional":
+            elif level_str in {"optional", "reference"}:
                 level = EvidenceLevel.OPTIONAL
 
             matched = False
@@ -788,12 +935,14 @@ class EvidenceCollectorNode(WorkflowNode):
                 if ti in matched_tool_indices:
                     continue
                 tn = tool["tool_name"].lower()
-                if (plan_tool and plan_tool == tn) or \
-                   (plan_tool and plan_tool in tn) or \
-                   (plan_tool and tn in plan_tool) or \
-                   (plan_cmd and tn in plan_cmd) or \
-                   (plan_cmd and any(kw in tn for kw in plan_cmd.split()[:3])) or \
-                   (plan_tool and plan_tool.replace("_", "") == tn.replace("_", "")):
+                if self._tool_result_matches_plan(
+                    plan_tool=plan_tool,
+                    plan_cmd=plan_cmd,
+                    plan_desc=plan_desc,
+                    tool_name=tn,
+                    result=tool.get("result", ""),
+                    structured=tool.get("structured") or {},
+                ):
                     matched = True
                     matched_result = tool["result"]
                     matched_tool_indices.add(ti)
@@ -833,6 +982,54 @@ class EvidenceCollectorNode(WorkflowNode):
                     sum(1 for e in evidence_items if getattr(e, 'source', '') == 'thinking_extra'))
 
         return evidence_items
+
+    @staticmethod
+    def _tool_result_matches_plan(
+        plan_tool: str,
+        plan_cmd: str,
+        plan_desc: str,
+        tool_name: str,
+        result: str,
+        structured: Dict[str, Any],
+    ) -> bool:
+        if not result or not result.strip():
+            return False
+
+        tool_match = (
+            (plan_tool and plan_tool == tool_name)
+            or (plan_tool and plan_tool in tool_name)
+            or (plan_tool and tool_name in plan_tool)
+            or (plan_tool and plan_tool.replace("_", "") == tool_name.replace("_", ""))
+        )
+        if not tool_match:
+            return False
+
+        combined = f"{plan_cmd}\n{plan_desc}"
+        lower_result = result.lower()
+
+        if "logs" in combined or "日志" in combined:
+            return "kubectl_logs" in tool_name or not (
+                structured.get("kind") == "Pod" and "kubectl_get_yaml" in tool_name
+            )
+
+        if "configmap" in combined:
+            return structured.get("kind") == "ConfigMap" or "configmap" in lower_result
+
+        if "secret" in combined or "imagepullsecret" in combined:
+            return (
+                structured.get("resource_kind") == "Secret"
+                or structured.get("kind") == "Secret"
+                or "secret" in lower_result
+                or "dockerconfigjson" in lower_result
+            )
+
+        if "describe" in combined:
+            return "kubectl_describe" in tool_name
+
+        if "get pod" in plan_cmd or "describe pod" in plan_cmd:
+            return structured.get("kind") == "Pod" or "pod" in lower_result
+
+        return True
 
     def _calculate_completeness(self, evidence_items: List[EvidenceItem]) -> float:
         """计算证据采集率：已采集数 / 总数（计划 + 额外）"""
@@ -884,5 +1081,9 @@ class EvidenceCollectorNode(WorkflowNode):
                         "tool": tool_name,
                         "data": result_text,
                         "duration_s": ev.get("duration_seconds", 0),
+                        "semantic_success": ev.get("semantic_success", True),
+                        "raw_ref": ev.get("raw_ref"),
+                        "structured_ref": ev.get("structured_ref"),
+                        "summary_ref": ev.get("summary_ref"),
                     })
         return tool_data

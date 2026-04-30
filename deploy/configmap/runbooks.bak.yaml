@@ -1,10 +1,14 @@
+# Runbook 知识库 ConfigMap
+# K8s AIOps Copilot 诊断手册 — 聚焦诊断取证，不含修复操作
+# 修复操作由 AUTO_REMEDIATE 环境变量控制，独立于 Runbook 内容
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: aiops-runbooks
   namespace: aiops
 data:
-  catalog.json: |-
+  catalog.json: |
     {
       "catalog": [
         {
@@ -12,152 +16,123 @@ data:
           "type": "procedure",
           "layer": "L0",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=Evicted, 兼容归因=L0 — 当前 Pod STATUS=Evicted/Failed 或 describe Reason=Evicted；用于区分节点资源压力/临时存储压力驱逐。关键证据：Message 含 ephemeral-storage/DiskPressure/MemoryPressure/The node was low on resource",
+          "description": "【Pod异常/L0】Evicted — Pod 被节点资源压力或本地临时存储压力驱逐。关键证据：Pod Status=Evicted, Reason=Evicted, Message 含 ephemeral-storage/DiskPressure/MemoryPressure",
           "link": "l0-volume-limit.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "pod-volume-mount-failed",
           "type": "procedure",
           "layer": "L0",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=VolumeMountFailed, 兼容归因=L0 — 当前 Pod 卡在 Pending/ContainerCreating 且卷挂载失败；用于区分 PVC/PV/NFS/CSI/Secret/ConfigMap volume 问题。关键证据：Events 含 FailedMount/FailedAttachVolume/MountVolume.SetUp failed",
+          "description": "【Pod异常/L0】VolumeMountFailed — Pod 因 PVC/PV/NFS/CSI/Secret/ConfigMap 卷挂载失败卡在 Pending/ContainerCreating。关键证据：Events 含 FailedMount/FailedAttachVolume/MountVolume.SetUp failed",
           "link": "pod-volume-mount-failed.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l1-taint-node",
           "type": "procedure",
           "layer": "L1",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=PendingUnschedulable, 兼容归因=L1 — 当前 Pod STATUS=Pending 且调度器无法放置；用于区分资源不足、taint/toleration、nodeSelector、affinity。关键证据：Events 含 FailedScheduling/0 nodes are available",
+          "description": "【Pod异常/L1】PendingUnschedulable — Pod Pending 且调度失败，原因包括资源不足、taint/toleration、nodeSelector、affinity。关键证据：Events 含 FailedScheduling",
           "link": "l1-taint-node.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "pod-node-lost-unknown",
           "type": "procedure",
           "layer": "L1",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=NodeLostOrUnknown, 兼容归因=L1 — 当前 Pod phase/status=Unknown 或所在 Node NotReady/Unknown；用于区分 kubelet/节点心跳丢失。关键证据：Pod phase=Unknown, Node Ready=False/Unknown, node unreachable",
+          "description": "【Pod异常/L1】NodeLostOrUnknown — Pod Unknown 或所在 Node NotReady/Unknown，kubelet 不再上报状态。关键证据：Pod phase=Unknown, Node Ready=False/Unknown",
           "link": "pod-node-lost-unknown.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "pod-terminating-stuck",
           "type": "procedure",
           "layer": "L1",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=TerminatingStuck, 兼容归因=L1, runbook_id=pod-terminating-stuck.md — 当前 Pod STATUS=Terminating 或 deletionTimestamp 已存在但对象仍未删除；用于区分 finalizer 卡住、kubelet/Node 无响应、volume detach/unmount 卡住。关键证据：kubectl get pod -o yaml 中 deletionTimestamp/finalizers，describe events 中 Killing/FailedKillPod/Unmount/Detach，Pod 所在 Node Ready 状态",
+          "description": "【Pod异常/L1】TerminatingStuck — Pod 长时间 Terminating，常见原因是 finalizer、kubelet 无响应或 volume detach 卡住。关键证据：deletionTimestamp 长时间存在",
           "link": "pod-terminating-stuck.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l2-oomkilled",
           "type": "procedure",
           "layer": "L2",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=OOMKilled, 兼容归因=L2 — 当前 Pod CrashLoopBackOff/Error 且容器 Last State Reason=OOMKilled；用于区分内存 limit/cgroup OOM。关键证据：exitCode=137, reason=OOMKilled, restartCount 增加",
+          "description": "【Pod异常/L2】OOMKilled — 容器内存超过 cgroup limits 被 OOM Killer 终止。关键证据：Last State Reason=OOMKilled, exitCode=137",
           "link": "l2-oomkilled.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "pod-crashloop-runtime",
           "type": "procedure",
           "layer": "L2",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=CrashLoopBackOffRuntime, 兼容归因=L2 — 当前 Pod STATUS=CrashLoopBackOff 且不是 OOM/配置缺失；用于区分进程退出、启动命令错误、运行时异常。关键证据：Last State exitCode 非 137、BackOff、previous logs 有应用退出",
+          "description": "【Pod异常/L2】CrashLoopBackOffRuntime — 容器进程、启动命令或运行时错误导致反复退出，非 OOM、非配置缺失。关键证据：CrashLoopBackOff + Last State exitCode 非 137",
           "link": "pod-crashloop-runtime.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l3-imagepull-failed",
           "type": "procedure",
           "layer": "L3",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=ImagePullFailed, 兼容归因=L3 — 当前 Pod STATUS=ImagePullBackOff/ErrImagePull；用于区分镜像不存在、认证失败、仓库超时、DNS/TLS 问题。关键证据：Events 含 Failed to pull image、pull access denied、i/o timeout、x509",
+          "description": "【Pod异常/L3】ImagePullFailed — Pod 无法拉取镜像，原因包括镜像不存在、认证失败、仓库/DNS/网络超时、TLS 证书。关键证据：ImagePullBackOff/ErrImagePull + Failed to pull image",
           "link": "l3-imagepull-failed.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "pod-sandbox-create-failed",
           "type": "procedure",
           "layer": "L3",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=SandboxCreateFailed, 兼容归因=L3 — 当前 Pod 创建 sandbox 失败；用于区分 CNI/IPAM、RuntimeClass、container runtime、kubelet sandbox 创建异常。关键证据：Events 含 FailedCreatePodSandBox/failed to setup network",
+          "description": "【Pod异常/L3】SandboxCreateFailed — Pod sandbox 创建失败，常见原因是 CNI、容器运行时或网络插件异常。关键证据：Events 含 FailedCreatePodSandBox",
           "link": "pod-sandbox-create-failed.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "l4-config-bootstrap-fail",
           "type": "procedure",
           "layer": "L4",
           "update_date": "2026-04-21",
-          "description": "pod_abnormal_type=ConfigError, 兼容归因=L4 — 当前 Pod STATUS=CreateContainerConfigError/CreateContainerError 或 CrashLoopBackOff 由配置缺失触发；用于区分 ConfigMap/Secret/env/业务配置缺失。关键证据：configmap/secret not found、couldn't find key、bootstrap 配置校验失败；无 OOMKilled/ImagePullBackOff/Evicted",
+          "description": "【Pod异常/L4】ConfigError — CreateContainerConfigError 或应用 bootstrap 因 ConfigMap/Secret/env/业务配置缺失失败。关键证据：配置资源缺失、环境变量缺失、日志含配置校验失败；无 OOMKilled/ImagePullBackOff/Evicted。",
           "link": "l4-config-bootstrap-fail.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         },
         {
           "id": "pod-notready-probe-failed",
           "type": "procedure",
           "layer": "L4",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=NotReadyProbeFailed, 兼容归因=L4 — 当前 Pod STATUS=Running 但 READY 未满足；用于区分 readiness/liveness/startup probe 或应用健康接口异常。关键证据：READY 0/1、Events 含 probe failed、Readiness probe failed、Liveness probe failed",
+          "description": "【Pod异常/L4】NotReadyProbeFailed — Pod Running 但未 Ready，常见原因是 readiness/liveness/startup probe 失败或应用健康接口异常。关键证据：READY 0/1, Events 含 probe failed",
           "link": "pod-notready-probe-failed.md",
-          "operations": [
-            "诊断",
-            "排查"
-          ]
+          "operations": ["诊断", "排查"]
         }
       ]
     }
-  l0-volume-limit.md: |
-    # Pod Evicted / 本地临时存储或节点资源压力驱逐
 
-    > Pod异常类型: Evicted | 典型状态: Evicted / Failed | 兼容分类: resource_eviction
+  # ==========================================================================
+  # L0: Pod 存储卷超限被驱逐 (Volume Limit Exceeded)
+  # ==========================================================================
+  l0-volume-limit.md: |
+    # L0 Pod 存储卷超限被驱逐
+
+    > 层级: L0 - 基础设施层 | 场景: Volume Limit Exceeded / Disk Pressure Eviction
 
     ## 场景识别
 
     | 信号 | 关键特征 |
     |------|----------|
-    | Pod 状态 | STATUS=Evicted、Failed，或 describe 中 Reason=Evicted |
+    | Pod 状态 | STATUS=Evicted, Error, 或 Pending |
     | Events | `The node was low on resource: ephemeral-storage` / `exceeds the limit` |
     | Describe | Reason: Evicted, Message 含 sizeLimit / emptyDir / ephemeral-storage |
-    | 节点信号 | Node Conditions 含 DiskPressure/MemoryPressure/PIDPressure，或节点侧 `ENOSPC` |
+    | 节点级 | `df -h` 显示 Use% >= 95%, 或 `ENOSPC` 错误 |
 
     ## 诊断流程
 
-    ### Step 1: 定位 Evicted Pod
+    ### Step 1: 定位异常 Pod
     ```bash
     kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded | grep -v Completed
     ```
@@ -172,7 +147,7 @@ data:
     - `Message`: 包含 `exceeds the limit` 或 `ephemeral-storage`
     - `Containers.*.Limits`: ephemeral-storage 的限制值
 
-    ### Step 3: 检查 Pod 所在节点压力状态
+    ### Step 3: 检查节点磁盘状态
     ```bash
     kubectl get nodes -o wide
     kubectl describe node <node-name> | grep -A5 "Conditions" | grep -E "DiskPressure|MemoryPressure"
@@ -194,24 +169,20 @@ data:
 
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
-    | Reason=Evicted + Message 含 ephemeral-storage/sizeLimit | Pod 本地临时存储超限被驱逐 | 高 |
+    | Reason=Evicted + Message 含 ephemeral-storage/sizeLimit | Volume 超限驱逐 | 高 |
     | Reason=Evicted + Message 含 disk pressure | 节点磁盘压力驱逐 | 高 |
     | df 显示 Use% >= 95% + ENOSPC 错误 | 节点磁盘空间耗尽 | 高 |
     | Inode 使用率 >= 95% | Inode 耗尽 | 高 |
-  pod-volume-mount-failed.md: |
-    # Pod VolumeMountFailed / 卷挂载失败
 
-    > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume
+  pod-volume-mount-failed.md: |
+    # Pod VolumeMountFailed
+
+    > derived_layer: L0 | pod_abnormal_type: VolumeMountFailed | status_category: storage_volume
 
     ## 状态识别
     - Pod 常见状态: `Pending` / `ContainerCreating`
     - Events 关键字: `FailedMount` / `FailedAttachVolume` / `MountVolume.SetUp failed`
     - 相关资源: PVC / PV / StorageClass / CSI / NFS / Secret / ConfigMap volume
-
-    ## 典型原因
-    - PVC 未 Bound、StorageClass 不存在、PV nodeAffinity 不匹配。
-    - CSI/NFS 后端不可用、权限拒绝、挂载超时、stale file handle。
-    - Secret/ConfigMap 类型的 volume 引用了不存在的对象或 key。
 
     ## 必查项
     1. `kubectl describe pod <pod> -n <namespace>`: 查看 MountVolume、AttachVolume、FailedMount 事件。
@@ -220,15 +191,19 @@ data:
     4. 如果事件指向 Secret/ConfigMap not found，检查对应资源是否存在。
 
     ## 判定规则
-    | 条件 | 结论 | 置信度 |
-    |------|------|--------|
-    | FailedMount/MountVolume + PVC 未 Bound | VolumeMountFailed | 高 |
-    | NFS timeout/access denied/stale file handle | VolumeMountFailed | 高 |
-    | Secret/ConfigMap not found 且来自 volume 引用 | VolumeMountFailed 或 ConfigError，需看 Pod spec 引用位置 | 中 |
-  l2-oomkilled.md: |
-    # Pod OOMKilled (Exit Code 137)
+    | 条件 | 结论 | derived_layer |
+    |------|------|---------------|
+    | FailedMount/MountVolume + PVC 未 Bound | VolumeMountFailed | L0 |
+    | NFS timeout/access denied/stale file handle | VolumeMountFailed | L0 |
+    | Secret/ConfigMap not found | ConfigError | L4 |
 
-    > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory
+  # ==========================================================================
+  # L2: Pod OOMKilled (Exit Code 137)
+  # ==========================================================================
+  l2-oomkilled.md: |
+    # L2 Pod OOMKilled (Exit Code 137)
+
+    > 层级: L2 - 工作负载层 | 场景: 容器内存超限被 OOM Killer 终止
 
     ## 场景识别
 
@@ -237,7 +212,7 @@ data:
     | Pod 状态 | CrashLoopBackOff / Error / 频繁重启 |
     | Describe | terminated.reason=OOMKilled, exitCode=137 |
     | Last State | OOMKilled |
-    | 排除项 | 如果 Pod Reason=Evicted，应按 Evicted 处理；OOMKilled 必须来自 containerStatuses/Last State |
+    | 区分 L0 | 如果 Reason=Evicted 则是 L0 而非 L2，必须用 describe 确认 |
 
     ## 诊断流程
 
@@ -254,7 +229,7 @@ data:
     重点关注:
     - `Last State`: Terminated, Reason: OOMKilled, Exit Code: 137
     - `State`: Waiting, Reason: CrashLoopBackOff
-    - 区分: 如果 Pod Reason 是 Evicted 而非 container Last State OOMKilled，应切换到 Evicted runbook
+    - 区分: 如果 Reason 是 Evicted 而非 OOMKilled，则属于 L0
 
     ### Step 3: 获取崩溃前日志
     ```bash
@@ -279,12 +254,16 @@ data:
     |------|------|--------|
     | terminated.reason=OOMKilled 或 exitCode=137 + 非 Evicted | OOMKilled | 高 |
     | 日志含 "Cannot allocate memory" / "Java heap space" | 内存不足 | 高 |
-    | exitCode=137 + Reason=Evicted | 非容器 OOM，按 Evicted 处理 | 高 |
+    | exitCode=137 + Reason=Evicted | 非 OOM，属于 L0 | 高 |
     | exitCode=1/127 且无 OOM 标记 | 非 OOM，应用错误 | 中 |
-  l3-imagepull-failed.md: |
-    # Pod ImagePullFailed / ImagePullBackOff
 
-    > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull
+  # ==========================================================================
+  # L3: 镜像拉取失败 (ImagePullBackOff)
+  # ==========================================================================
+  l3-imagepull-failed.md: |
+    # L3 镜像拉取失败 (ImagePullBackOff)
+
+    > 层级: L3 - 服务网络层 | 场景: 容器镜像拉取失败
 
     ## 场景识别
 
@@ -292,7 +271,7 @@ data:
     |------|----------|
     | Pod 状态 | ImagePullBackOff / ErrImagePull / ImageInspectError |
     | Events | `Failed to pull image`, `connection refused`, `timeout`, `manifest unknown` |
-    | 常见原因 | 镜像不存在、tag 错误、认证失败、仓库访问超时、DNS 解析失败、TLS 证书不被信任 |
+    | 常见原因 | 仓库不可达、镜像不存在、认证失败、DNS 解析失败 |
 
     ## 诊断流程
 
@@ -317,14 +296,9 @@ data:
     kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.imagePullSecrets}'
     ```
 
-    ### Step 4: 按事件错误文本归类
-    - `manifest unknown` / `not found`: 镜像仓库中不存在该镜像或 tag。
-    - `unauthorized` / `no basic auth credentials`: imagePullSecret 缺失、未引用、类型错误或凭据错误。
-    - `x509: certificate signed by unknown authority`: 节点容器运行时不信任仓库 TLS 证书。
-    - `i/o timeout` / `connection refused`: 节点到镜像仓库访问失败，需检查仓库地址、端口、防火墙、DNS。
 
 
-
+  
 
     ## 判定规则
 
@@ -334,10 +308,75 @@ data:
     | Events 含 manifest unknown/not found | 镜像或 tag 不存在 | 高 |
     | Events 含 unauthorized/no basic auth | 认证失败（缺少或错误的 imagePullSecret） | 高 |
     | DNS 解析失败 | DNS 问题导致仓库不可达 | 高 |
-  l4-config-bootstrap-fail.md: |
-    # Pod ConfigError / 启动配置失败
 
-    > Pod异常类型: ConfigError | 典型状态: CreateContainerConfigError / CreateContainerError / CrashLoopBackOff | 兼容分类: config_bootstrap
+  # ==========================================================================
+  # L4: 依赖服务固定返回 503
+  # ==========================================================================
+  l4-dependency-503.md: |
+    # L4 依赖服务返回 503 (Service Unavailable)
+
+    > 层级: L4 - 应用层 | 场景: 上游/依赖服务不可用导致应用 5xx
+
+    ## 场景识别
+
+    | 信号 | 关键特征 |
+    |------|----------|
+    | 应用日志 | 含 `upstream 503`、`service unavailable`、`connection refused` |
+    | HTTP 状态码 | 应用返回 502/503/504，依赖服务直接返回 503 |
+    | Endpoints | 依赖 Service 的 Endpoints 可能为空或 NotReady |
+    | 区分 L3 | 如果 Endpoints 为空，问题在 L3（Service/网络层），非 L4 |
+
+    ## 诊断流程
+
+    ### Step 1: 量化应用 5xx 错误
+    ```bash
+    kubectl logs -n <namespace> deploy/<app-name> --tail=500 | grep -c " 5[0-9][0-9]"
+    ```
+
+    ### Step 2: 确认上游 503（关键步骤）
+    ```bash
+    kubectl logs -n <namespace> deploy/<app-name> --tail=500 | grep -iE "upstream|503|service.unavailable" | tail -30
+    ```
+    重点关注:
+    - `upstream connect error or disconnect/reset before headers`
+    - `503 Service Temporarily Unavailable`
+    - 具体的依赖服务地址和端口
+
+    ### Step 3: 直接验证依赖服务状态
+    ```bash
+    kubectl run curl-test --rm -it --image=curlimages/curl --restart=Never -- \
+      curl -s -o /dev/null -w "http_code=%{http_code}\n" http://<dep-svc>.<namespace>:<port>/
+    ```
+
+    ### Step 4: 检查依赖 Service 的 Endpoints
+    ```bash
+    kubectl get endpoints <dep-svc> -n <namespace> -o wide
+    kubectl get pods -n <namespace> -l app=<dep-app> -o wide
+    ```
+    关注: Endpoints 是否为空、后端 Pod 是否 Running/Ready
+
+    ### Step 5: 检查依赖 Pod 状态和日志
+    ```bash
+    kubectl get pods -n <namespace> -l app=<dep-app>
+    kubectl logs -n <namespace> deploy/<dep-app> --tail=100
+    ```
+
+    ## 判定规则
+
+    | 条件 | 结论 | 置信度 |
+    |------|------|--------|
+    | 依赖 curl=503 + 应用日志有 upstream 503 | 依赖服务不可用 (L4) | 高 |
+    | 依赖 curl=200 但应用仍 5xx | 非依赖原因，需检查应用自身 | 中 |
+    | Endpoints 为空 | Service 层问题 (L3)，非 L4 | 高 |
+    | 依赖 Pod CrashLoopBackOff | 依赖服务崩溃导致 503 | 高 |
+
+  # ==========================================================================
+  # L4: 应用启动配置校验失败 (ConfigBootstrapFail)
+  # ==========================================================================
+  l4-config-bootstrap-fail.md: |
+    # L4 应用启动配置校验失败 (Config Bootstrap Fail)
+
+    > 层级: L4 - 应用层 | 场景: 应用在启动阶段因业务配置缺失或非法而主动退出
 
     ## 场景识别
 
@@ -346,9 +385,9 @@ data:
     | Pod 状态 | `CrashLoopBackOff` / `Error`，重启次数持续增加 |
     | 容器日志 | 含 `L4_CONFIG_BOOTSTRAP_FAIL`、`missing required APP_BOOT_MODE`、`config validation failed` |
     | Describe | `Last State: Terminated`，`Exit Code: 42` 或其他业务退出码 |
-    | 排除 OOM | 无 `OOMKilled`、无 `Exit Code 137` |
-    | 排除拉镜像失败 | 无 `ImagePullBackOff`、容器实际已启动并输出业务日志 |
-    | 排除驱逐 | 无 `Evicted`、无 `disk pressure`、无 `ENOSPC` |
+    | 区分 L2 | 无 `OOMKilled`、无 `Exit Code 137` |
+    | 区分 L3 | 无 `ImagePullBackOff`、容器实际已启动并输出业务日志 |
+    | 区分 L0 | 无 `Evicted`、无 `disk pressure`、无 `ENOSPC` |
 
     ## 诊断流程
 
@@ -403,41 +442,38 @@ data:
 
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
-    | CrashLoopBackOff + 日志含配置校验失败/缺参 | 应用启动配置错误 | 高 |
-    | CreateContainerConfigError + Secret/ConfigMap/env key 缺失 | Pod 配置资源错误 | 高 |
-    | Exit Code 非 137 + 无 OOMKilled + 日志为业务配置错误 | ConfigError | 高 |
-    | Last State=OOMKilled 或 Exit Code=137 | 应切换到 OOMKilled runbook | 高 |
-    | STATUS=ImagePullBackOff / ErrImagePull | 应切换到 ImagePullFailed runbook | 高 |
-    | Reason=Evicted 或 Message 含 disk pressure/ENOSPC | 应切换到 Evicted runbook | 高 |
-  l1-taint-node.md: |
-    # Pod PendingUnschedulable / 调度失败
+    | CrashLoopBackOff + 日志含配置校验失败/缺参 | 应用启动配置错误 (L4) | 高 |
+    | Exit Code 非 137 + 无 OOMKilled + 日志为业务错误 | 应用层启动失败 (L4) | 高 |
+    | Last State=OOMKilled 或 Exit Code=137 | 属于 L2，非本场景 | 高 |
+    | STATUS=ImagePullBackOff / ErrImagePull | 属于 L3，非本场景 | 高 |
+    | Reason=Evicted 或 Message 含 disk pressure/ENOSPC | 属于 L0，非本场景 | 高 |
 
-    > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling
+  # ==========================================================================
+  # L1: Node NotReady (Taint 导致)
+  # ==========================================================================
+  l1-taint-node.md: |
+    # L1 Node NotReady / Taint 导致不可调度
+
+    > 层级: L1 - 集群与节点层 | 场景: 节点 NotReady 或被 Taint 标记为不可调度
 
     ## 场景识别
 
     | 信号 | 关键特征 |
     |------|----------|
-    | Pod 状态 | Pending，且 Events 含 `FailedScheduling` |
-    | 资源不足 | `Insufficient cpu/memory/ephemeral-storage` |
-    | 调度约束 | nodeSelector/affinity 不匹配、节点 taint 未被 toleration 容忍 |
-    | 节点状态 | 可辅助检查 Node NotReady/Unknown，但本 runbook 关注的是 Pod 无法被调度 |
+    | 节点状态 | `kubectl get nodes` 显示 STATUS=NotReady 或 Unknown |
+    | Taint | 节点被标记 NoSchedule/NoExecute taint |
+    | Pod 调度 | 新 Pod 处于 Pending，Events 含 `node(s) had taint` |
+    | 区分 L0 | L0 是 Pod 级别（Evicted/磁盘），L1 是节点级别（NotReady/Taint） |
 
     ## 诊断流程
 
-    ### Step 1: 确认 Pod 调度失败事件
-    ```bash
-    kubectl describe pod <pod-name> -n <namespace>
-    ```
-    关注 Events 中的 `FailedScheduling` 原文。
-
-    ### Step 2: 检查节点状态和可调度性
+    ### Step 1: 检查节点状态
     ```bash
     kubectl get nodes -o wide
     ```
     关注: STATUS 列是否有 NotReady/Unknown，AGE 判断是否新节点
 
-    ### Step 3: 检查候选节点详情
+    ### Step 2: 检查异常节点详情（关键步骤）
     ```bash
     kubectl describe node <node-name>
     ```
@@ -447,19 +483,19 @@ data:
     - `Allocatable` vs `Capacity`: 资源是否耗尽
     - `Non-terminated Pods`: 节点上运行的 Pod 数量
 
-    ### Step 4: 检查 Ready 条件详情
+    ### Step 3: 检查 Ready 条件详情
     ```bash
     kubectl get node <node-name> -o jsonpath='{.status.conditions[?(@.type=="Ready")]}' | python3 -m json.tool
     ```
     关注: status, reason, message, lastHeartbeatTime
 
-    ### Step 5: 检查节点事件
+    ### Step 4: 检查节点事件
     ```bash
     kubectl get events -A --field-selector involvedObject.kind=Node,involvedObject.name=<node-name> --sort-by='.lastTimestamp'
     ```
     关注: NodeNotReady、NodeNotSchedulable、PLEG unhealthy 等事件
 
-    ### Step 6: 检查受影响的 Pending Pod
+    ### Step 5: 检查受影响的 Pod
     ```bash
     kubectl get pods -A --field-selector spec.nodeName=<node-name> -o wide
     kubectl get pods -A --field-selector status.phase=Pending | head -20
@@ -469,24 +505,91 @@ data:
 
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
-    | FailedScheduling + Insufficient cpu/memory | 资源不足导致 Pod Pending | 高 |
-    | FailedScheduling + had untolerated taint | taint/toleration 不匹配 | 高 |
-    | FailedScheduling + node(s) didn't match node selector/affinity | 调度约束不匹配 | 高 |
-    | 所有候选 Node NotReady/Unschedulable | 无可用调度节点 | 高 |
-  pod-node-lost-unknown.md: |
-    # Pod NodeLostOrUnknown / Pod 状态 Unknown
+    | Ready=False + Taint NoSchedule 存在 | 节点不可调度，新 Pod 无法分配 | 高 |
+    | Ready=Unknown + lastHeartbeatTime 超时 | kubelet 与 API Server 通信中断 | 高 |
+    | Ready=False + Conditions 含 DiskPressure/MemoryPressure | 节点资源压力导致 NotReady | 高 |
+    | Taint 存在但 Ready=True | 人为标记不可调度（维护模式） | 中 |
 
-    > Pod异常类型: NodeLostOrUnknown | 典型状态: Unknown | 兼容分类: node_kubelet
+  # ==========================================================================
+  # QUERY: 快速查询参考手册
+  # ==========================================================================
+  query-reference.md: |
+    # QUERY 模式快速查询参考手册
+
+    > **类型**: reference | **适用**: 数据查询、指标获取、状态检查
+
+    ## 1. 基础：节点与 IP 映射
+
+    查询任何指标前，**必须先建立节点名称与 IP 的映射关系**：
+    ```bash
+    kubectl get nodes -o wide
+    ```
+    Prometheus 的 `instance` label 格式为 `IP:9100`，**不是节点名称**。
+
+    ## 2. PromQL Label 使用规则
+
+    **核心原则：不要假设 label 存在，先查确认。**
+    ```promql
+    # 先查原始指标，看返回了哪些 label
+    node_memory_MemTotal_bytes
+    ```
+    - ❌ `{node="master"}` — 通常不存在
+    - ❌ `{kubernetes_io_hostname="master"}` — 通常不存在
+    - ✅ `{instance="10.2.0.48:9100"}` — 用 instance label
+    - ✅ `by (instance)` — 按 instance 分组
+
+    ## 3. 常见指标查询
+
+    ### CPU
+    ```promql
+    # 集群总体
+    100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+    # 按节点
+    (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance)) * 100
+    ```
+
+    ### 内存
+    ```promql
+    # 集群总体
+    (1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)) * 100
+    # 按节点
+    (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
+    ```
+
+    ### 磁盘
+    ```promql
+    (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100
+    ```
+
+    ### 网络
+    ```promql
+    rate(node_network_receive_bytes_total{device!~"lo|veth.*|cali.*"}[5m])
+    ```
+
+    ## 4. 数据验证（Double Check）
+
+    - kubectl 显示 N 个节点 → Prometheus 按节点查询应返回 N 条结果
+    - 每个节点的数据必须独立展示，不能合并
+    - 内存总量应为 8/16/32/64/128GB 级别
+    - 使用率 0-100% 范围
+    - bytes 除以 1024^3 = GiB
+
+    ### 交叉验证
+    ```bash
+    free -h      # 内存验证
+    nproc        # CPU 核心数
+    df -h        # 磁盘验证
+    ```
+
+  pod-node-lost-unknown.md: |
+    # Pod NodeLostOrUnknown
+
+    > derived_layer: L1 | pod_abnormal_type: NodeLostOrUnknown | status_category: node_kubelet
 
     ## 状态识别
     - Pod phase/status: `Unknown`
     - Node 状态: `NotReady` / `Unknown`
     - 常见信号: kubelet 停止上报、Node unreachable、Pod 被标记 unreachable taint
-
-    ## 典型原因
-    - Pod 所在节点 kubelet 未上报，API Server 无法确认 Pod 当前状态。
-    - 节点网络隔离、节点宕机、容器运行时不可用。
-    - 节点被 `node.kubernetes.io/unreachable` 或 `not-ready` taint 标记。
 
     ## 必查项
     1. `kubectl get pod <pod> -n <namespace> -o wide`: 确认 Pod 所在节点。
@@ -495,61 +598,42 @@ data:
     4. `kubectl describe pod <pod> -n <namespace>`: 查看 NodeLost/Unreachable 相关事件。
 
     ## 判定规则
-    | 条件 | 结论 | 置信度 |
-    |------|------|--------|
-    | Pod Unknown + Node Ready=False/Unknown | NodeLostOrUnknown | 高 |
-    | Pod 事件含 node.kubernetes.io/unreachable | NodeLostOrUnknown | 高 |
-  pod-terminating-stuck.md: |
-    # Pod TerminatingStuck / 删除卡住
+    | 条件 | 结论 | derived_layer |
+    |------|------|---------------|
+    | Pod Unknown + Node Ready=False/Unknown | NodeLostOrUnknown | L1 |
+    | Pod 事件含 node.kubernetes.io/unreachable | NodeLostOrUnknown | L1 |
 
-    > runbook_id: pod-terminating-stuck.md
-    > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle
+  pod-terminating-stuck.md: |
+    # Pod TerminatingStuck
+
+    > derived_layer: L1 | pod_abnormal_type: TerminatingStuck | status_category: lifecycle
 
     ## 状态识别
     - Pod 长时间处于 `Terminating`
     - metadata.deletionTimestamp 已存在但对象未删除
     - 常见原因: finalizer 未完成、kubelet 无响应、volume detach/unmount 卡住
-    - 本 runbook 只用于“当前仍存在且处于 Terminating 的 Pod”。如果 `kubectl get pod <pod>` 返回 NotFound，说明对象已删除，不应继续按 TerminatingStuck 分析。
-
-    ## Evidence 节点推荐计划
-    1. `fetch_runbook pod-terminating-stuck.md`: 先读取本手册作为判断参考。
-    2. `kubectl get pod <pod> -n <namespace> -o yaml`: critical，确认 deletionTimestamp、finalizers、nodeName、ownerReferences。
-    3. `kubectl describe pod <pod> -n <namespace>`: critical，确认 termination、Killing、FailedKillPod、volume unmount/detach 事件。
-    4. `kubectl get node <node> -o wide`: important，确认 Pod 所在 Node 是否 Ready。
-    5. `kubectl describe node <node>`: optional，只有 Node NotReady/Unknown 或 describe pod 指向 kubelet/volume 问题时继续。
-
-    ## 典型原因
-    - Pod 或其关联资源存在 finalizer，控制器未完成清理。
-    - Pod 所在节点 NotReady/Unknown，kubelet 无法完成容器停止和状态回报。
-    - CSI/NFS 等卷卸载或 detach 卡住。
 
     ## 必查项
     1. `kubectl get pod <pod> -n <namespace> -o yaml`: 查看 deletionTimestamp、finalizers。
     2. `kubectl describe pod <pod> -n <namespace>`: 查看 termination、volume、node 事件。
     3. `kubectl get node <node>`: 确认所在节点是否 Ready。
     4. 如由控制器管理，检查 owner workload 是否正在滚动更新或删除。
-    5. 禁止把历史 Event 当成当前证据；必须以当前 `kubectl get pod` 仍能查到对象为前提。
 
     ## 判定规则
-    | 条件 | 结论 | 置信度 |
-    |------|------|--------|
-    | deletionTimestamp 长时间存在 + finalizers 非空 | finalizer 清理卡住 | 高 |
-    | Terminating + Node NotReady/Unknown | Node/kubelet 生命周期卡住 | 高 |
-    | Terminating + volume detach/unmount 事件 | 卷卸载卡住 | 高 |
-  pod-crashloop-runtime.md: |
-    # Pod CrashLoopBackOffRuntime / 容器反复退出
+    | 条件 | 结论 | derived_layer |
+    |------|------|---------------|
+    | deletionTimestamp 长时间存在 + finalizers 非空 | TerminatingStuck | L1 |
+    | Terminating + Node NotReady/Unknown | Node/kubelet 生命周期卡住 | L1 |
 
-    > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime
+  pod-crashloop-runtime.md: |
+    # Pod CrashLoopBackOffRuntime
+
+    > derived_layer: L2 | pod_abnormal_type: CrashLoopBackOffRuntime | status_category: container_runtime
 
     ## 状态识别
     - Pod 状态: `CrashLoopBackOff`
     - Last State: Terminated
     - Exit Code 非 137，且没有明确 ConfigMap/Secret/env 缺失信号
-
-    ## 典型原因
-    - command/args 错误、入口进程启动失败、二进制或脚本不存在。
-    - 应用启动后主动退出，日志中出现业务异常但不是配置缺失。
-    - 依赖服务不可用导致进程退出；如果只是不 Ready，应切换到 NotReadyProbeFailed。
 
     ## 必查项
     1. `kubectl describe pod <pod> -n <namespace>`: 查看 Last State、Exit Code、Reason、重启次数。
@@ -558,25 +642,21 @@ data:
     4. 如果日志指向配置缺失，应切换为 `ConfigError`。
 
     ## 判定规则
-    | 条件 | 结论 | 置信度 |
-    |------|------|--------|
-    | CrashLoopBackOff + Exit Code 非 137 + 命令/进程错误 | CrashLoopBackOffRuntime | 高 |
-    | CrashLoopBackOff + OOMKilled/137 | 应切换到 OOMKilled runbook | 高 |
-    | CrashLoopBackOff + 配置校验失败/缺配置 | 应切换到 ConfigError runbook | 高 |
-  pod-sandbox-create-failed.md: |
-    # Pod SandboxCreateFailed / Pod sandbox 创建失败
+    | 条件 | 结论 | derived_layer |
+    |------|------|---------------|
+    | CrashLoopBackOff + Exit Code 非 137 + 命令/进程错误 | CrashLoopBackOffRuntime | L2 |
+    | CrashLoopBackOff + OOMKilled/137 | OOMKilled | L2 |
+    | CrashLoopBackOff + 配置校验失败/缺配置 | ConfigError | L4 |
 
-    > Pod异常类型: SandboxCreateFailed | 典型状态: ContainerCreating / FailedCreatePodSandBox | 兼容分类: sandbox_runtime
+  pod-sandbox-create-failed.md: |
+    # Pod SandboxCreateFailed
+
+    > derived_layer: L3 | pod_abnormal_type: SandboxCreateFailed | status_category: network_cni_runtime
 
     ## 状态识别
     - Events 含 `FailedCreatePodSandBox`
-    - 常见原因: CNI/IPAM 配置异常、RuntimeClass 不存在或不匹配、container runtime sandbox 失败
-    - 相关组件: kubelet、containerd/CRI-O、CNI 插件、IPAM
-
-    ## 典型原因
-    - CNI 插件 Pod 异常或 CNI 配置文件缺失。
-    - IP 地址分配失败，例如 IP 池耗尽、IPAM 状态异常。
-    - RuntimeClass 指向不存在的 handler，或节点容器运行时不支持该 runtime。
+    - 常见原因: CNI 插件异常、Pod 网络创建失败、container runtime sandbox 失败
+    - 相关组件: CNI、Calico、containerd、kubelet
 
     ## 必查项
     1. `kubectl describe pod <pod> -n <namespace>`: 查看 FailedCreatePodSandBox 事件原文。
@@ -585,25 +665,20 @@ data:
     4. 如果事件指向 CNI 配置或 IPAM，继续检查网络插件日志。
 
     ## 判定规则
-    | 条件 | 结论 | 置信度 |
-    |------|------|--------|
-    | FailedCreatePodSandBox + CNI/IPAM 错误 | SandboxCreateFailed | 高 |
-    | FailedCreatePodSandBox + runtime sandbox 错误 | SandboxCreateFailed | 高 |
-    | FailedCreatePodSandBox + RuntimeClass/handler 错误 | SandboxCreateFailed | 高 |
-  pod-notready-probe-failed.md: |
-    # Pod NotReadyProbeFailed / Running 但未 Ready
+    | 条件 | 结论 | derived_layer |
+    |------|------|---------------|
+    | FailedCreatePodSandBox + CNI/IPAM 错误 | SandboxCreateFailed | L3 |
+    | FailedCreatePodSandBox + runtime sandbox 错误 | SandboxCreateFailed | L3 |
 
-    > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health
+  pod-notready-probe-failed.md: |
+    # Pod NotReadyProbeFailed
+
+    > derived_layer: L4 | pod_abnormal_type: NotReadyProbeFailed | status_category: app_health
 
     ## 状态识别
     - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
     - Events 含 readiness/liveness/startup probe failed
     - Service 可能无 Endpoints 或 EndpointSlice 中 ready=false
-
-    ## 典型原因
-    - readinessProbe 路径、端口、scheme、initialDelaySeconds 配置不匹配。
-    - 应用进程已启动但健康接口返回非 2xx/3xx 或超时。
-    - livenessProbe 反复失败导致容器重启，此时需同时检查 CrashLoopBackOffRuntime。
 
     ## 必查项
     1. `kubectl get pod <pod> -n <namespace> -o wide`: 确认 READY 列。
@@ -612,11 +687,167 @@ data:
     4. 如用户反馈服务不可用，检查 Service Endpoints 是否包含该 Pod。
 
     ## 判定规则
-    | 条件 | 结论 | 置信度 |
-    |------|------|--------|
-    | Running + READY 0/1 + readiness probe failed | NotReadyProbeFailed | 高 |
-    | startup probe failed，容器尚未完成启动 | NotReadyProbeFailed | 高 |
-    | liveness probe failed 导致重启 | NotReadyProbeFailed 或 CrashLoopBackOffRuntime，需结合 Last State | 中 |
+    | 条件 | 结论 | derived_layer |
+    |------|------|---------------|
+    | Running + READY 0/1 + readiness probe failed | NotReadyProbeFailed | L4 |
+    | liveness probe failed 导致重启 | NotReadyProbeFailed 或 CrashLoopBackOffRuntime | L4/L2 |
+
+  # ==========================================================================
+  # 通用: 私有化 Kubernetes 环境健康与高效排查参考
+  # ==========================================================================
+  private-k8s-health-reference.md: |
+    # 私有化 Kubernetes 环境健康与高效排查参考手册
+
+    > 类型: reference | 适用: 私有化 Kubernetes 环境 | 环境特征: Calico + NFS + containerd
+
+    ## 目的
+
+    本手册不是某个具体故障的处理步骤，而是一个**额外知识参考**：
+    - 帮助理解在私有化 Kubernetes 环境中，健康检查应重点关注哪些资源与信号
+    - 帮助在诊断时兼顾**效率**和**完整性**
+    - 强调**当前状态优先**、**最小必要探测**、**按证据扩展**
+    - 参考完后如果有其他合适的场景的runbooks作为更加细致和详细的参考你也应该去引用和查看！
+
+    ## 核心原则
+
+    ### 原则 1: 健康检查不等于 Pod 全部 Running
+    以下情况都可能导致“Pod 看起来正常，但环境实际上不健康”：
+    - Pod Running，但 `Service` 没有 `Endpoints`
+    - Pod Running，但 `readinessProbe` 失败或 `availableReplicas < desiredReplicas`
+    - Node `Ready=True`，但存在 `MemoryPressure` / `DiskPressure`
+    - PVC 未绑定、NFS 挂载异常、CSI/挂载链路异常
+    - CoreDNS 正常运行，但 DNS 解析或上游转发异常
+    - Calico Pod 存活，但路由、策略或 BGP/overlay 出现异常
+
+    ### 原则 2: 当前状态优先于历史事件
+    - Events 只能作为线索，不能单独等于当前故障
+    - 只有当事件指向的对象**当前仍存在且当前仍异常**，才能作为当前故障依据
+    - 如果对象已恢复、已替换或已删除，则该事件只算历史背景
+
+    ### 原则 3: 最小必要探测，禁止默认全量扫描
+    高效排查的目标是：
+    - 先从用户问题涉及的对象与相邻资源面开始
+    - 先做**最便宜、最容易确认当前状态**的查询
+    - 已经获得足够证据后立即停止扩展
+
+    不推荐每次默认做：
+    - 所有命名空间全量 describe
+    - 所有节点日志遍历
+    - 全量 Prometheus 指标扫描
+    - 全量网络抓包
+
+    ### 原则 4: 先确认“当前是否真的异常”，再确认“异常在哪一面”
+    推荐顺序：
+    1. 用户提到的资源当前状态是否异常
+    2. 与其最相邻的资源面是否异常
+    3. 只有相邻面不能解释时，再扩大范围
+
+    ## 高效健康检查基线
+
+    当用户问“我的集群有什么问题”“现在健康吗”“这个服务为什么不通”时，优先覆盖以下检查面，但不要机械地全部展开。
+
+    ### 1. 节点面
+    关键对象:
+    - `Node`
+    - `Node Conditions`
+    - `kubelet`
+    - `containerd`
+
+    优先关注:
+    - `Ready`
+    - `MemoryPressure`
+    - `DiskPressure`
+    - `PIDPressure`
+    - 节点是否频繁切换 `Ready/NotReady`
+
+    最小检查:
+    ```bash
+    kubectl get nodes -o wide
+    kubectl describe node <node-name>
+    ```
+
+    何时继续深入:
+    - 只有当节点状态异常、条件异常、或大量 Pod 都集中在同一节点异常时
+    - 再去看 `journalctl -u kubelet`、`journalctl -u containerd`
+
+    ### 2. 工作负载面
+    关键对象:
+    - `Pod`
+    - `Deployment`
+    - `StatefulSet`
+    - `DaemonSet`
+    - `Job/CronJob`
+
+    优先关注:
+    - `CrashLoopBackOff`
+    - `OOMKilled`
+    - `Pending`
+    - `ContainerCreating`
+    - `Terminating`
+    - `readyReplicas` / `availableReplicas`
+
+    最小检查:
+    ```bash
+    kubectl get pods -A -o wide
+    kubectl get deploy,statefulset,daemonset -A
+    ```
+
+    何时继续深入:
+    - 只有当某个工作负载当前异常时，再对该对象执行 `describe` / `logs --previous`
+
+    ### 3. Service 与流量面
+    关键对象:
+    - `Service`
+    - `Endpoints`
+    - `EndpointSlice`
+    - `Ingress`
+    - CoreDNS
+    - Calico 相关组件
+
+    优先关注:
+    - `Service` 是否有 `Endpoints`
+    - selector 是否匹配到正确 Pod
+    - Pod 是否 `Ready`
+    - DNS 是否可解析
+    - Calico 网络插件是否正常
+
+    最小检查:
+    ```bash
+    kubectl get svc,endpoints,endpointslices -A
+    kubectl get pods -n kube-system -l k8s-app=kube-dns
+    kubectl get pods -n kube-system -l k8s-app=calico-node
+    ```
+
+    何时继续深入:
+    - 只有当“服务不可用、访问失败、DNS 异常、跨节点不通”时
+    - 再扩展到 `kubectl describe svc`、`iptables`、`tcpdump`、Calico 日志
+
+    ### 4. 存储面
+    关键对象:
+    - `PVC`
+    - `PV`
+    - `StorageClass`
+    - NFS 服务端可达性与导出目录
+
+    对于 NFS 环境，优先关注:
+    - `PVC Pending`
+    - 挂载超时或权限错误
+    - NFS 服务器不可达
+    - stale file handle / access denied / mount timeout
+
+    最小检查:
+    ```bash
+    kubectl get pvc,pv -A
+    kubectl describe pvc <pvc-name> -n <namespace>
+    kubectl describe pod <pod-name> -n <namespace>
+    ```
+
+    何时继续深入:
+    - 只有当 Pod 处于 `Pending` / `ContainerCreating` / `MountVolume` 相关错误时
+
+  # ==========================================================================
+  # QUERY: 私有化 Kubernetes 节点级 Prometheus 查询参考
+  # ==========================================================================
   private-k8s-query-promql-reference.md: |
     # 私有化 Kubernetes 节点级 Prometheus 查询参考手册
 

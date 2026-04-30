@@ -16,6 +16,7 @@
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
@@ -393,6 +394,7 @@ class ConclusionFormatterNode(WorkflowNode):
         # 后处理：强制替换 LLM 可能篡改的证据统计数据
         if content:
             content = self._enforce_evidence_stats(content, evidence_analysis)
+            content = self._strip_think_blocks(content)
 
         # conclusion 不走 _call_llm，没有 thinking_events
         self._conclusion_thinking = []
@@ -401,6 +403,15 @@ class ConclusionFormatterNode(WorkflowNode):
             return content
 
         return f"报告生成失败：LLM 未返回有效内容。\n\n原始数据：\n{tool_data_text[:1000] if tool_data_text else '无'}"
+
+    @staticmethod
+    def _strip_think_blocks(content: str) -> str:
+        """最终报告永远不暴露模型 `<think>` 内容。"""
+        if not isinstance(content, str) or not content:
+            return content
+        cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r"^\s+", "", cleaned)
+        return cleaned
 
     def _archive_node_input(self, payload: Dict) -> None:
         run_id = getattr(self, "current_run_id", "")
@@ -573,7 +584,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
 ---
 
-## 📍 阶段一：问题定位与分层
+## 📍 阶段一：Pod异常状态定位
 
 {layer_formatted}
 
@@ -609,17 +620,32 @@ class ConclusionFormatterNode(WorkflowNode):
         
         lines = []
         
-        # 层级信息
+        # Pod 异常状态信息
         layer = data.get("layer", "未知")
+        derived_layer = data.get("derived_layer", layer)
         layer_name = data.get("layer_name", "")
         confidence = data.get("confidence", 0)
         reasoning = data.get("reasoning", "")
+        primary_pod = data.get("primary_pod") or {}
+        pod_status_keyword = data.get("pod_status_keyword", "")
+        pod_abnormal_type = data.get("pod_abnormal_type", "")
+        status_category = data.get("status_category", "")
         
-        lines.append(f"### 层级判定")
+        lines.append(f"### Pod异常状态判定")
         lines.append("")
         lines.append(f"| 项目 | 结果 |")
         lines.append(f"|------|------|")
-        lines.append(f"| **层级** | {layer} - {layer_name} |")
+        if primary_pod:
+            pod_name = primary_pod.get("name", "")
+            pod_ns = primary_pod.get("namespace", "")
+            pod_ref = f"{pod_ns}/{pod_name}" if pod_ns else pod_name
+            lines.append(f"| **Primary Pod** | `{pod_ref}` |")
+        if pod_status_keyword or pod_abnormal_type:
+            status_text = " / ".join([x for x in [pod_status_keyword, pod_abnormal_type] if x])
+            lines.append(f"| **Pod异常状态** | {status_text} |")
+        if status_category:
+            lines.append(f"| **状态类别** | {status_category} |")
+        lines.append(f"| **兼容归因层** | {derived_layer} - {layer_name} |")
         lines.append(f"| **置信度** | {confidence:.0%} |")
         lines.append("")
         
@@ -850,7 +876,17 @@ class ConclusionFormatterNode(WorkflowNode):
         report_lines.append("|------|------|")
         
         layer_name = layer_name_map.get(layer, str(layer)) if layer else "未确定"
-        report_lines.append(f"| **问题层级** | {layer_name} |")
+        try:
+            layer_data = json.loads(layer_analysis) if layer_analysis else {}
+        except Exception:
+            layer_data = {}
+        pod_status_keyword = layer_data.get("pod_status_keyword", "")
+        pod_abnormal_type = layer_data.get("pod_abnormal_type", "")
+        status_text = " / ".join([x for x in [pod_status_keyword, pod_abnormal_type] if x]) or "未确定"
+        derived_layer = layer_data.get("derived_layer") or (layer.value if hasattr(layer, "value") else str(layer) if layer else "")
+        compat_layer_text = f"{derived_layer} - {layer_name}" if derived_layer else layer_name
+        report_lines.append(f"| **Pod异常状态** | {status_text} |")
+        report_lines.append(f"| **兼容归因层** | {compat_layer_text} |")
         
         if decision:
             confidence_str = decision.confidence.value if isinstance(decision.confidence, Confidence) else str(decision.confidence)
@@ -871,8 +907,8 @@ class ConclusionFormatterNode(WorkflowNode):
         report_lines.append("---")
         report_lines.append("")
         
-        # ========== 阶段一：问题定位 ==========
-        report_lines.append("## 📍 阶段一：问题定位与分层")
+        # ========== 阶段一：Pod异常状态定位 ==========
+        report_lines.append("## 📍 阶段一：Pod异常状态定位")
         report_lines.append("")
         report_lines.append(layer_formatted)
         report_lines.append("")

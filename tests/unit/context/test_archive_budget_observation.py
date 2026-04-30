@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 
@@ -172,6 +173,115 @@ def test_context_budget_estimator_marks_actual_and_reserved_tokens(monkeypatch):
     assert budget["estimated_total"] == 33
 
 
+def test_context_budget_log_is_compact_when_token_count_exact(monkeypatch, caplog):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "1000")
+    monkeypatch.setenv("AIOPS_TIKTOKEN_ENCODING", "cl100k_base")
+    monkeypatch.delenv("AIOPS_TOKENIZER_JSON_PATH", raising=False)
+    estimator = ContextBudgetEstimator()
+    budget = estimator.estimate(
+        node_id="evidence",
+        model="openai/test",
+        system_prompt="",
+        user_message="",
+        components=[
+            {"name": "node_system_prompt", "category": "static_input", "content": "hello world"},
+            {"name": "user_message", "category": "static_input", "content": "hello"},
+            {"name": "tool_observations", "category": "dynamic_runtime", "content": "hello world hello"},
+            {"name": "scratchpad_reserved", "category": "reserved", "tokens": 10},
+            {"name": "output_reserved", "category": "reserved", "tokens": 20},
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.core.context.budget"):
+        estimator.log(budget)
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "input_tokens=6" in text
+    assert "budget_tokens=36" in text
+    assert "token=exact" in text
+    assert "[context_budget.top]" in text
+    assert "startup_prompt=" not in text
+
+
+def test_context_budget_log_marks_unknown_when_token_count_estimated(monkeypatch, caplog):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "1000")
+    monkeypatch.delenv("AIOPS_TIKTOKEN_ENCODING", raising=False)
+    monkeypatch.delenv("AIOPS_TOKENIZER_JSON_PATH", raising=False)
+    estimator = ContextBudgetEstimator()
+    budget = estimator.estimate(
+        node_id="layer",
+        model="openai/test",
+        system_prompt="",
+        user_message="",
+        components=[
+            {"name": "node_system_prompt", "category": "static_input", "content": "中文测试"},
+            {"name": "output_reserved", "category": "reserved", "tokens": 20},
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.core.context.budget"):
+        estimator.log(budget)
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "token=estimated" in text
+    assert "input_tokens=unknown" in text
+
+
+def test_context_budget_uses_provider_usage_probe_for_input_ratio(monkeypatch, caplog):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_USAGE_PROBE", "true")
+    monkeypatch.delenv("AIOPS_TIKTOKEN_ENCODING", raising=False)
+    monkeypatch.delenv("AIOPS_TOKENIZER_JSON_PATH", raising=False)
+
+    class _ProbeResult:
+        prompt_tokens = 16000
+        total_tokens = 16001
+        completion_tokens = 1
+        source = "usage_probe:/chat/completions"
+        accuracy = "exact"
+        error = ""
+
+    captured = {}
+
+    class _Probe:
+        def __init__(self, api_base, api_key="", timeout=30.0):
+            captured["api_base"] = api_base
+            captured["api_key"] = api_key
+
+        def count_prompt_tokens(self, model, messages, tools=None):
+            captured["model"] = model
+            captured["messages"] = messages
+            captured["tools"] = tools
+            return _ProbeResult()
+
+    monkeypatch.setattr("app.core.context.budget.OpenAIUsageProbe", _Probe)
+
+    estimator = ContextBudgetEstimator()
+    budget = estimator.estimate(
+        node_id="evidence",
+        model="openai/Qwen3-32B-AWQ",
+        system_prompt="系统",
+        user_message="用户",
+        api_base="http://llm.example/v1",
+        api_key="sk-test",
+    )
+
+    assert budget["provider_prompt_tokens"] == 16000
+    assert budget["provider_input_usage_ratio"] == 0.5
+    assert captured["messages"] == [
+        {"role": "system", "content": "系统"},
+        {"role": "user", "content": "用户"},
+    ]
+
+    with caplog.at_level(logging.INFO, logger="app.core.context.budget"):
+        estimator.log(budget)
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "input_tokens=16000" in text
+    assert "input_usage=50%" in text
+    assert "input_source=usage_probe:/chat/completions" in text
+
+
 def test_context_budget_estimator_reports_component_percentages(monkeypatch):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "1000")
     estimator = ContextBudgetEstimator()
@@ -249,6 +359,110 @@ Events:
     assert processed["structured"]["namespace"] == "aiops-e2e"
 
 
+def test_observation_processor_extracts_pod_yaml_image_pull_fields(tmp_path):
+    raw = """
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ham-wcc79
+  namespace: xnet
+  ownerReferences:
+  - kind: DaemonSet
+    name: ham
+spec:
+  serviceAccountName: hwaccel-manager
+  nodeName: master
+  containers:
+  - name: ham
+    image: xnet.registry.io:8443/ham/ham:v2.24
+    imagePullPolicy: IfNotPresent
+  volumes:
+  - name: config-volume
+    configMap:
+      name: ham-config
+status:
+  phase: Pending
+  containerStatuses:
+  - name: ham
+    state:
+      waiting:
+        reason: ImagePullBackOff
+        message: Back-off pulling image "xnet.registry.io:8443/ham/ham:v2.24"
+"""
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=2000)
+
+    processed = processor.process(
+        run_id="run-pod-yaml",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_get_yaml",
+        raw_content=raw,
+    )
+
+    structured = processed["structured"]
+    assert structured["kind"] == "Pod"
+    assert structured["name"] == "ham-wcc79"
+    assert structured["namespace"] == "xnet"
+    assert structured["serviceAccountName"] == "hwaccel-manager"
+    assert structured["imagePullSecrets"] == []
+    assert structured["imagePullSecrets_present"] is False
+    assert structured["containers"][0]["image"] == "xnet.registry.io:8443/ham/ham:v2.24"
+    assert structured["containerStatuses"][0]["waiting"]["reason"] == "ImagePullBackOff"
+    assert "imagePullSecrets: <absent>" in processed["summary"]
+    assert "serviceAccountName: hwaccel-manager" in processed["summary"]
+
+
+def test_observation_processor_extracts_secret_yaml_type_and_data_keys(tmp_path):
+    raw = """
+apiVersion: v1
+kind: Secret
+metadata:
+  name: xnet-bmcs
+  namespace: xnet
+type: Opaque
+data:
+  bmc.json: W10=
+"""
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
+
+    processed = processor.process(
+        run_id="run-secret-yaml",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_get_yaml",
+        raw_content=raw,
+    )
+
+    structured = processed["structured"]
+    assert structured["kind"] == "Secret"
+    assert structured["type"] == "Opaque"
+    assert structured["data_keys"] == ["bmc.json"]
+    assert structured["has_dockerconfigjson"] is False
+    assert "type: Opaque" in processed["summary"]
+    assert "data_keys: bmc.json" in processed["summary"]
+    assert "has_dockerconfigjson: False" in processed["summary"]
+
+
+def test_observation_processor_secret_table_does_not_treat_none_labels_as_abnormal(tmp_path):
+    raw = """NAME                            TYPE     DATA   AGE    LABELS
+observability-admission         Opaque   3      215d   <none>
+observability-kibana-es-token   Opaque   1      3d21h  <none>
+xnet-bmcs                       Opaque   1      214d   <none>
+"""
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
+
+    processed = processor.process(
+        run_id="run-secret-table",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_get_by_kind_in_namespace",
+        raw_content=raw,
+    )
+
+    assert processed["structured"]["abnormal_count"] == 0
+    assert "abnormal=0" in processed["summary"]
+
+
 def test_observation_processor_generic_large_output_is_bounded_and_archived(tmp_path):
     processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=300)
 
@@ -291,3 +505,66 @@ def test_observation_processor_ai_mode_forces_llm_summary_for_small_output(tmp_p
     assert calls
     assert processed["summary"] == "AI summary: pod-a OOMKilled"
     assert processed["processor"] == "k8s_describe+llm"
+
+
+def test_observation_processor_keeps_fetch_runbook_full_by_default(tmp_path):
+    raw = "<runbook>\n" + ("诊断步骤：检查 Pod 事件和状态。\n" * 200) + "</runbook>"
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=300)
+
+    processed = processor.process(
+        run_id="run-runbook",
+        node_id="evidence",
+        sequence=1,
+        tool_name="fetch_runbook",
+        raw_content=raw,
+        context_usage_ratio=0.2,
+    )
+
+    assert processed["summary"] == raw
+    assert processed["processor"] == "generic+passthrough_full"
+
+
+def test_observation_processor_compresses_fetch_runbook_under_context_pressure(tmp_path):
+    calls = []
+
+    def summarizer(tool, raw, current_summary):
+        calls.append((tool, raw, current_summary))
+        return "压缩后的 runbook: 只保留诊断步骤和禁用修复动作。"
+
+    raw = "<runbook>\n" + ("诊断步骤：检查 Pod 事件和状态。\n" * 200) + "</runbook>"
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=300,
+        summarizer=summarizer,
+    )
+
+    processed = processor.process(
+        run_id="run-runbook-pressure",
+        node_id="evidence",
+        sequence=1,
+        tool_name="fetch_runbook",
+        raw_content=raw,
+        context_usage_ratio=0.9,
+    )
+
+    assert calls
+    assert processed["summary"] == "压缩后的 runbook: 只保留诊断步骤和禁用修复动作。"
+    assert processed["processor"] == "generic+passthrough_full+llm_budget"
+
+
+def test_observation_processor_context_guard_truncates_runbook_without_summarizer(tmp_path):
+    raw = "<runbook>\n" + ("诊断步骤：检查 Pod 事件和状态。\n" * 200) + "</runbook>"
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=300)
+
+    processed = processor.process(
+        run_id="run-runbook-pressure-no-ai",
+        node_id="evidence",
+        sequence=1,
+        tool_name="fetch_runbook",
+        raw_content=raw,
+        context_usage_ratio=0.9,
+    )
+
+    assert len(processed["summary"]) <= 300
+    assert "完整内容见 raw_ref" in processed["summary"]
+    assert processed["processor"] == "generic+passthrough_full+context_guard_truncate"

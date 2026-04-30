@@ -1,0 +1,24 @@
+# Pod NodeLostOrUnknown E2E 场景模板
+# 说明：真实 NodeLost/Unknown 需要让 Pod 所在节点 NotReady/Unknown；该 manifest 固定 Pod 标签，便于手动配合节点故障注入验证。
+# 手动触发示例：在 Pod 调度后停止所在节点 kubelet 或隔离节点网络，再观察 Pod/Node Unknown。
+apiVersion: v1
+kind: Pod
+metadata:
+  name: node-lost-unknown-candidate
+  namespace: aiops-e2e
+  annotations:
+    aiops.e2e/runbook: pod-node-lost-unknown.md
+    aiops.e2e/expected-status: Unknown
+    aiops.e2e/expected-evidence: "Pod phase is Unknown and assigned Node is NotReady or Unknown"
+    aiops.e2e/manual-trigger: "after scheduling, stop kubelet or isolate the assigned node"
+  labels:
+    app: node-lost-unknown-candidate
+    e2e-test: "true"
+    pod_abnormal_type: NodeLostOrUnknown
+    expected_layer: L1
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      imagePullPolicy: Never
+      command: ["sh", "-c", "sleep 86400"]

@@ -203,14 +203,29 @@ def update_metrics_from_state(
 
     # 3. 从 thinking_events 中检测 runbook 调用
     thinking_events = state.get("thinking_events", [])
+    pending_runbook_args: Dict[str, str] = {}
+    successful_fetched_runbook_ids: Set[str] = set()
     for ev in thinking_events:
         tool_name = ev.get("tool_name", "") or ""
         if "runbook" in tool_name.lower() or "fetch_runbook" in tool_name.lower():
+            if ev.get("type") == "tool_start":
+                tool_args = ev.get("tool_args") or {}
+                runbook_arg = ""
+                if isinstance(tool_args, dict):
+                    runbook_arg = str(tool_args.get("runbook_id") or tool_args.get("id") or "").strip()
+                call_id = str(ev.get("tool_call_id") or "").strip()
+                if runbook_arg and call_id:
+                    pending_runbook_args[call_id] = runbook_arg
+                continue
             if ev.get("type") != "tool_result":
                 continue
             preview = ev.get("result_preview", "") or ""
             if not preview or ev.get("status") != "success":
                 continue
+            call_id = str(ev.get("tool_call_id") or "").strip()
+            runbook_arg = pending_runbook_args.get(call_id, "")
+            if runbook_arg:
+                successful_fetched_runbook_ids.add(runbook_arg)
             # 提取 .md 文件名
             for m in re.finditer(r'([\w][\w.-]*\.md)', preview):
                 fname = m.group(1)
@@ -283,6 +298,12 @@ def update_metrics_from_state(
                 canonical_refs.append(canonical)
         for name in runbook_names:
             canonical = _canonicalize_runbook_name(name, runbook_lookup)
+            if canonical and canonical not in canonical_refs:
+                canonical_refs.append(canonical)
+        for fetched_id in sorted(successful_fetched_runbook_ids):
+            canonical = _canonicalize_runbook_name(fetched_id, runbook_lookup)
+            if not canonical:
+                canonical = re.sub(r"\.md$", "", fetched_id.strip())
             if canonical and canonical not in canonical_refs:
                 canonical_refs.append(canonical)
 

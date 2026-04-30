@@ -96,22 +96,37 @@ class RootCauseAnalyzerNode(WorkflowNode):
                         f"layer_handoff长度={len(json.dumps(state.get('layer_handoff') or {}, ensure_ascii=False, default=str))}")
 
             evidence_summary = self._build_rca_context(state)
+            missing_primary = self._get_missing_primary_pod_conflict(state)
             
             # 使用 LLM 分析
-            ai_call = getattr(self, 'ai_call', None)
-            if ai_call is not None:
-                rca_result, thinking_events = self._analyze_with_llm(
-                    question, layer, evidence_summary
+            if missing_primary:
+                logger.warning(
+                    "⚠️ [rca] primary_pod 当前不存在，跳过常规 RCA: %s/%s",
+                    missing_primary.get("namespace", ""),
+                    missing_primary.get("name", ""),
                 )
-            else:
-                # 无 LLM 时仅保留通用低置信度兜底
-                logger.info("⚠️ 无 LLM 服务，使用通用低置信度兜底")
-                rca_result = self._build_llm_fallback(
+                rca_result = self._build_primary_pod_missing_result(
                     question=question,
                     layer=layer,
-                    reason="LLM 不可用，无法完成可靠根因分析",
+                    missing_primary=missing_primary,
+                    evidence_summary=evidence_summary,
                 )
                 thinking_events = []
+            else:
+                ai_call = getattr(self, 'ai_call', None)
+                if ai_call is not None:
+                    rca_result, thinking_events = self._analyze_with_llm(
+                        question, layer, evidence_summary
+                    )
+                else:
+                    # 无 LLM 时仅保留通用低置信度兜底
+                    logger.info("⚠️ 无 LLM 服务，使用通用低置信度兜底")
+                    rca_result = self._build_llm_fallback(
+                        question=question,
+                        layer=layer,
+                        reason="LLM 不可用，无法完成可靠根因分析",
+                    )
+                    thinking_events = []
             
             # 构建决策对象
             decision = self._build_decision(layer, evidence_items, rca_result)
@@ -144,6 +159,68 @@ class RootCauseAnalyzerNode(WorkflowNode):
             self._save_thinking(state, new_state, [])
 
         return new_state
+
+    @staticmethod
+    def _get_missing_primary_pod_conflict(state: WorkflowState) -> Optional[Dict[str, str]]:
+        layer_handoff = state.get("layer_handoff") or {}
+        primary = layer_handoff.get("primary_pod") or state.get("primary_pod") or {}
+        primary_name = str(primary.get("name") or "")
+        primary_namespace = str(primary.get("namespace") or "")
+        if not primary_name:
+            return None
+
+        for conflict in state.get("evidence_conflicts") or []:
+            if not isinstance(conflict, dict) or not conflict.get("object_missing"):
+                continue
+            obj = conflict.get("object") or {}
+            if obj.get("kind") == "Pod" and obj.get("name") == primary_name:
+                return {"name": primary_name, "namespace": obj.get("namespace") or primary_namespace}
+        return None
+
+    def _build_primary_pod_missing_result(
+        self,
+        question: str,
+        layer: Optional[Layer],
+        missing_primary: Dict[str, str],
+        evidence_summary: str,
+    ) -> Dict[str, Any]:
+        layer_str = layer.value if hasattr(layer, "value") else str(layer or "UNKNOWN")
+        pod_name = missing_primary.get("name", "")
+        namespace = missing_primary.get("namespace", "")
+        reason = (
+            f"primary_pod {namespace}/{pod_name} 当前已不存在；"
+            "上游历史 Event 或归档摘要不能证明该 Pod 仍处于异常状态"
+        )
+        return {
+            "phenomenon": f"目标 Pod {namespace}/{pod_name} 当前不存在，无法确认仍异常",
+            "evidence_inventory": [
+                {
+                    "id": "conflict_primary_pod_missing",
+                    "content": reason,
+                    "source": "evidence_conflicts",
+                    "reliability": "高",
+                }
+            ],
+            "evidence_analysis": [
+                {
+                    "evidence_id": "conflict_primary_pod_missing",
+                    "raw_data": reason,
+                    "interpretation": "当前对象不存在是硬冲突，应停止对该历史 Pod 生成 OOM/ImagePull/CrashLoop 等当前根因",
+                }
+            ],
+            "causal_chain": {
+                "root_cause": "目标 Pod 已不存在或已恢复，当前无法基于该 Pod 确认故障",
+                "propagation": "历史事件被带入诊断上下文，但当前状态验证返回 NotFound",
+                "direct_cause": "primary_pod 当前不存在",
+                "manifestation": "诊断目标与当前集群状态不一致",
+            },
+            "root_cause": f"[{layer_str}] 目标 Pod {namespace}/{pod_name} 当前不存在，不能继续诊断为当前故障",
+            "root_cause_summary": reason,
+            "confidence": 0.2,
+            "primary_runbooks": [],
+            "alternative_causes": ["历史事件残留", "Pod 已被删除", "工作负载已滚动替换为新 Pod"],
+            "limitations": "需要重新从当前异常 Pod 列表选择仍存在的对象后再做 RCA。",
+        }
     
     def _build_evidence_summary(self, evidence_items: List[EvidenceItem]) -> str:
         """构建证据摘要"""
@@ -193,10 +270,17 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if isinstance(data, dict):
                 return {
                     "layer": data.get("layer"),
+                    "derived_layer": data.get("derived_layer", data.get("layer")),
                     "confidence": data.get("confidence"),
                     "primary_problem": data.get("reasoning", ""),
+                    "primary_pod": data.get("primary_pod"),
+                    "abnormal_pods": data.get("abnormal_pods", []),
+                    "pod_status_keyword": data.get("pod_status_keyword"),
+                    "pod_abnormal_type": data.get("pod_abnormal_type"),
+                    "status_category": data.get("status_category"),
                     "active_entities": data.get("key_entities", []),
                     "possible_scenarios": data.get("possible_scenarios", []),
+                    "matched_runbooks": data.get("matched_runbooks", []),
                 }
         except (json.JSONDecodeError, TypeError):
             pass
@@ -252,7 +336,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
             layer_str = layer.value if layer else "L2"
             system_prompt = self._get_rca_prompt().format(
                 layer=layer_str,
-                evidence_summary=evidence_summary
+                evidence_summary="证据上下文只在 user message 中提供，system prompt 不承载动态证据。"
             )
 
             user_message = f"""# 用户问题
@@ -482,11 +566,18 @@ class RootCauseAnalyzerNode(WorkflowNode):
             # 2. MCP 工具的原始输出
             tool_data = data.get("tool_data", [])
             if tool_data:
-                parts.append("## 工具原始输出")
-                for i, td in enumerate(tool_data[:10], 1):
+                tool_parts = []
+                index = 1
+                for td in tool_data[:10]:
                     tool = td.get("tool", "unknown")
+                    if str(tool).lower() in {"read_context_archive", "fetch_runbook"}:
+                        continue
                     raw = td.get("data", "")[:500]
-                    parts.append(f"{i}. [{tool}]: {raw}")
+                    tool_parts.append(f"{index}. [{tool}]: {raw}")
+                    index += 1
+                if tool_parts:
+                    parts.append("## 工具原始输出")
+                    parts.extend(tool_parts)
 
             return "\n".join(parts)
         except (json.JSONDecodeError, TypeError):

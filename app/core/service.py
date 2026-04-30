@@ -307,13 +307,16 @@ class HolmesService:
                 # 创建 AICall 实例
                 step_start = time.time()
                 logger.info("🔄 创建 AICall 实例 (LangGraph)...")
+                summary_mode, summary_max_chars = self.get_observation_summary_config()
                 self.ai_call = AICall(
                     model=final_model,
                     api_key=final_api_key,
                     api_base=final_api_base or "",
+                    observation_summary_mode=summary_mode,
+                    observation_summary_max_chars=summary_max_chars,
                 )
-                logger.info("   ✅ AICall 实例创建完成 (model=%s, %.2fs)",
-                           final_model, time.time() - step_start)
+                logger.info("   ✅ AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
+                           final_model, summary_mode, summary_max_chars, time.time() - step_start)
 
                 # 加载 MCP 工具
                 mcp_cfg = _raw_config.get("mcp_servers", {})
@@ -415,13 +418,21 @@ class HolmesService:
         from app.core.aicall.client import AICall
         summary_mode, summary_max_chars = self.get_observation_summary_config()
 
-        return AICall(
-            model=self.ai_call.model_str,
-            api_key=self.ai_call.api_key,
-            api_base=self.ai_call.api_base,
-            observation_summary_mode=summary_mode,
-            observation_summary_max_chars=summary_max_chars,
-        )
+        try:
+            return AICall(
+                model=self.ai_call.model_str,
+                api_key=self.ai_call.api_key,
+                api_base=self.ai_call.api_base,
+                observation_summary_mode=summary_mode,
+                observation_summary_max_chars=summary_max_chars,
+            )
+        except TypeError:
+            # Unit-test fakes may not implement the production constructor extension.
+            return AICall(
+                model=self.ai_call.model_str,
+                api_key=self.ai_call.api_key,
+                api_base=self.ai_call.api_base,
+            )
 
     @staticmethod
     def _normalize_language(language: Optional[str], default: str = "zh") -> str:
@@ -482,23 +493,18 @@ class HolmesService:
         mode:
         - rule: 默认，规则摘要优先，超长才 LLM 兜底
         - ai: 每次工具 observation 都强制调用 LLM summarizer
+
+        配置唯一来源是 config.yaml 的 workflow.observation_summary。
+        Secret 只承载模型连接和敏感信息，避免 Secret 环境变量覆盖 ConfigMap 造成实际模式不透明。
         """
         wf_cfg = self.workflow_config if isinstance(self.workflow_config, dict) else {}
         obs_cfg = wf_cfg.get("observation_summary", {}) if isinstance(wf_cfg.get("observation_summary", {}), dict) else {}
-        mode = (
-            os.getenv("AIOPS_OBSERVATION_SUMMARY_MODE")
-            or obs_cfg.get("mode")
-            or "rule"
-        )
+        mode = obs_cfg.get("mode") or "rule"
         normalized_mode = str(mode or "rule").strip().lower()
         if normalized_mode not in {"rule", "ai"}:
             normalized_mode = "rule"
 
-        max_chars_raw = (
-            os.getenv("AIOPS_OBSERVATION_SUMMARY_MAX_CHARS")
-            or obs_cfg.get("max_chars")
-            or 3000
-        )
+        max_chars_raw = obs_cfg.get("max_chars") or 3000
         try:
             max_chars = int(max_chars_raw)
         except (TypeError, ValueError):
@@ -702,11 +708,16 @@ class HolmesService:
                 return
 
             # SSE 格式输出
-            for event in executor.execute_stream(
-                question,
-                cancel_event=cancel_event,
-                workflow_overrides=workflow_overrides,
-            ):
+            stream_kwargs = {"cancel_event": cancel_event}
+            try:
+                import inspect
+
+                if "workflow_overrides" in inspect.signature(executor.execute_stream).parameters:
+                    stream_kwargs["workflow_overrides"] = workflow_overrides
+            except (TypeError, ValueError):
+                stream_kwargs["workflow_overrides"] = workflow_overrides
+
+            for event in executor.execute_stream(question, **stream_kwargs):
                 event_type = event.get("type", "unknown")
                 payload = {k: v for k, v in event.items() if k != "type"}
                 yield create_sse_message_cn(event_type, payload)
