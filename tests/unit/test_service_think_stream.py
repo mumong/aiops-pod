@@ -94,10 +94,10 @@ def test_holmes_service_observation_summary_config_defaults_to_rule(monkeypatch)
     assert svc.get_observation_summary_config() == ("rule", 3000)
 
 
-def test_holmes_service_observation_summary_config_env_overrides(monkeypatch):
+def test_holmes_service_observation_summary_config_ignores_env(monkeypatch):
     monkeypatch.setenv("AIOPS_OBSERVATION_SUMMARY_MODE", "ai")
     monkeypatch.setenv("AIOPS_OBSERVATION_SUMMARY_MAX_CHARS", "777")
     svc = HolmesService()
     svc.workflow_config = {"observation_summary": {"mode": "rule", "max_chars": 3000}}
 
-    assert svc.get_observation_summary_config() == ("ai", 777)
+    assert svc.get_observation_summary_config() == ("rule", 3000)

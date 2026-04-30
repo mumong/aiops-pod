@@ -1,6 +1,6 @@
 # app/core/aicall/types.py
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -12,6 +12,9 @@ class AICallResult:
     tool_call_count: int = 0
     duration_ms: float = 0.0
     intermediate_events: List[Dict] = field(default_factory=list)
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
 
 
 @dataclass

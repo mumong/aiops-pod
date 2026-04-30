@@ -11,16 +11,33 @@ echo "  E2E 场景取证 (namespace: ${NS})"
 echo "============================================================"
 echo ""
 
-echo "## L0: EmptyDir 超限 (logfill)"
+echo "## Evicted: EmptyDir 超限 (logfill)"
 kubectl -n "${NS}" get pod -l app=logfill -o wide 2>/dev/null || echo "  logfill 未部署"
 kubectl -n "${NS}" logs deploy/logfill --tail=10 2>/dev/null || true
+kubectl -n "${NS}" describe pod -l app=logfill 2>/dev/null | grep -Ei "Reason:|Message:|Evicted|ephemeral-storage|sizeLimit" || true
 echo ""
 
-echo "## L1: Node Taint"
-kubectl get nodes -o custom-columns='NAME:.metadata.name,STATUS:.status.conditions[?(@.type=="Ready")].status,TAINTS:.spec.taints[*].key' 2>/dev/null || true
+echo "## VolumeMountFailed: missing ConfigMap volume"
+kubectl -n "${NS}" get pod volume-mount-failed -o wide 2>/dev/null || echo "  volume-mount-failed 未部署"
+kubectl -n "${NS}" describe pod volume-mount-failed 2>/dev/null | grep -Ei "FailedMount|MountVolume|not found|configmap" || true
 echo ""
 
-echo "## L2: OOMKilled (memhog)"
+echo "## PendingUnschedulable: impossible nodeSelector"
+kubectl -n "${NS}" get pod -l app=pending-unschedulable -o wide 2>/dev/null || echo "  pending-unschedulable 未部署"
+kubectl -n "${NS}" describe pod -l app=pending-unschedulable 2>/dev/null | grep -Ei "FailedScheduling|node selector|didn't match|Insufficient|taint" || true
+echo ""
+
+echo "## NodeLostOrUnknown: candidate Pod"
+kubectl -n "${NS}" get pod node-lost-unknown-candidate -o wide 2>/dev/null || echo "  node-lost-unknown-candidate 未部署"
+kubectl -n "${NS}" get pod node-lost-unknown-candidate -o jsonpath='{.metadata.annotations.aiops\\.e2e/manual-trigger}{"\n"}' 2>/dev/null || true
+echo ""
+
+echo "## TerminatingStuck: finalizer holds deletion"
+kubectl -n "${NS}" get pod terminating-stuck -o wide 2>/dev/null || echo "  terminating-stuck 未部署或已清理"
+kubectl -n "${NS}" get pod terminating-stuck -o jsonpath='{.metadata.deletionTimestamp}{" finalizers="}{.metadata.finalizers}{"\n"}' 2>/dev/null || true
+echo ""
+
+echo "## OOMKilled: memhog"
 POD_OOM="$(kubectl -n "${NS}" get pod -l app=memhog -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo '')"
 if [[ -n "${POD_OOM}" ]]; then
     kubectl -n "${NS}" get pod "${POD_OOM}" -o wide
@@ -30,12 +47,28 @@ else
 fi
 echo ""
 
-echo "## L3: ImagePullBackOff"
-kubectl -n "${NS}" get pod imagepull-fail-victim -o wide 2>/dev/null || echo "  imagepull-fail-victim 未部署"
-kubectl -n "${NS}" describe pod imagepull-fail-victim 2>/dev/null | grep -A5 "Events" || true
+echo "## CrashLoopBackOffRuntime: process exits with code 2"
+POD_CRASH="$(kubectl -n "${NS}" get pod -l app=crashloop-runtime -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo '')"
+if [[ -n "${POD_CRASH}" ]]; then
+    kubectl -n "${NS}" get pod "${POD_CRASH}" -o wide
+    kubectl -n "${NS}" describe pod "${POD_CRASH}" | grep -A6 "Last State" || true
+    kubectl -n "${NS}" logs "${POD_CRASH}" --previous --tail=10 2>/dev/null || true
+else
+    echo "  crashloop-runtime 未部署"
+fi
 echo ""
 
-echo "## L4: Config Bootstrap Fail (appconfigfail)"
+echo "## ImagePullFailed: invalid registry"
+kubectl -n "${NS}" get pod imagepull-fail-victim -o wide 2>/dev/null || echo "  imagepull-fail-victim 未部署"
+kubectl -n "${NS}" describe pod imagepull-fail-victim 2>/dev/null | grep -Ei "ImagePullBackOff|ErrImagePull|Failed to pull|registry.invalid" || true
+echo ""
+
+echo "## SandboxCreateFailed: missing RuntimeClass handler"
+kubectl -n "${NS}" get pod sandbox-create-failed -o wide 2>/dev/null || echo "  sandbox-create-failed 未部署"
+kubectl -n "${NS}" describe pod sandbox-create-failed 2>/dev/null | grep -Ei "FailedCreatePodSandBox|RuntimeClass|runtime|sandbox|handler" || true
+echo ""
+
+echo "## ConfigError: Config Bootstrap Fail (appconfigfail)"
 POD_L4="$(kubectl -n "${NS}" get pod -l app=appconfigfail -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo '')"
 if [[ -n "${POD_L4}" ]]; then
     kubectl -n "${NS}" get pod "${POD_L4}" -o wide
@@ -44,6 +77,11 @@ if [[ -n "${POD_L4}" ]]; then
 else
     echo "  appconfigfail 未部署"
 fi
+echo ""
+
+echo "## NotReadyProbeFailed: readiness probe always fails"
+kubectl -n "${NS}" get pod notready-probe-failed -o wide 2>/dev/null || echo "  notready-probe-failed 未部署"
+kubectl -n "${NS}" describe pod notready-probe-failed 2>/dev/null | grep -Ei "Readiness probe failed|Unhealthy|Ready" || true
 echo ""
 
 echo "✅ 取证完成"

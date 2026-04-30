@@ -36,6 +36,12 @@ class WorkflowState(TypedDict, total=False):
     layer_full_analysis: Optional[str]   # Deprecated: 大文本不再跨节点传递，完整内容写入 context archive
     layer_handoff: Optional[Dict[str, Any]]  # 阶段1给下游的结构化交接信息
     layer_archive_ref: Optional[Dict[str, Any]]  # layer 全量分析与 handoff 归档引用
+    primary_pod: Optional[Dict[str, Any]]  # 当前最需要解释的异常 Pod
+    abnormal_pods: List[Dict[str, Any]]    # 当前异常 Pod 列表（紧凑摘要）
+    pod_status_keyword: Optional[str]      # 当前 Pod 异常状态关键字，如 CrashLoopBackOff/ImagePullBackOff
+    pod_abnormal_type: Optional[str]       # 当前 Pod 异常类型，如 OOMKilled/ConfigBootstrapFail
+    derived_layer: Optional[str]           # Pod 异常状态派生出的兼容 L0-L4/HEALTHY 层级
+    status_category: Optional[str]         # Pod 异常类型的归一化类别，如 container_resource/image_registry
     context_archive_ref: Optional[str]   # 当前 run 的 context archive 根目录
     context_budget: Optional[Dict[str, Any]]  # 最近一次/汇总上下文预算估算
     tool_artifact_refs: List[Dict[str, Any]]  # 工具 raw/structured/summary 归档引用

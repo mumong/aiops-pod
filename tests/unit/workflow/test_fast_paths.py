@@ -163,6 +163,93 @@ def test_layer_stage1_non_json_output_uses_lite_extraction():
     assert returned_events == thinking_events
 
 
+def test_layer_retries_when_pod_abnormal_json_arrives_before_fetch_runbook():
+    node = LayerClassifierNode()
+    first_json = """{
+      "layer": "L1",
+      "layers": ["L1"],
+      "confidence": 0.8,
+      "reasoning": "terminating-stuck Pod Terminating",
+      "primary_pod": {"name": "terminating-stuck", "namespace": "aiops-e2e"},
+      "abnormal_pods": [{"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}],
+      "pod_status_keyword": "TerminatingStuck",
+      "pod_abnormal_type": "TerminatingStuck"
+    }"""
+    second_json = """{
+      "layer": "L1",
+      "layers": ["L1"],
+      "confidence": 0.86,
+      "reasoning": "已参考 TerminatingStuck runbook 后确认继续进入 evidence 采证",
+      "primary_pod": {"name": "terminating-stuck", "namespace": "aiops-e2e"},
+      "abnormal_pods": [{"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}],
+      "pod_status_keyword": "TerminatingStuck",
+      "pod_abnormal_type": "TerminatingStuck"
+    }"""
+    first_events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "result": "terminating-stuck Terminating",
+        }
+    ]
+    second_events = [
+        {
+            "type": "tool_start",
+            "tool_name": "fetch_runbook",
+            "tool_args": {"runbook_id": "pod-terminating-stuck.md"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "fetch_runbook",
+            "result": "<runbook># TerminatingStuck</runbook>",
+        },
+    ]
+    calls = []
+
+    def _fake_call_llm(question, prompt, **kwargs):
+        calls.append({"prompt": prompt, "kwargs": kwargs})
+        if len(calls) == 1:
+            return SimpleNamespace(result=first_json), first_events
+        return SimpleNamespace(result=second_json), second_events
+
+    node._call_llm = _fake_call_llm
+
+    result, returned_events = node._analyze_with_llm("我的集群有什么问题？")
+
+    assert len(calls) == 2
+    assert "上一轮结果被系统拒绝" in calls[1]["prompt"]
+    assert result["confidence"] == 0.86
+    assert any(ev.get("tool_name") == "fetch_runbook" for ev in returned_events)
+
+
+def test_layer_early_stop_disabled_does_not_enable_json_middleware():
+    node = LayerClassifierNode()
+    node.workflow_config_override = {"layer": {"early_stop": {"enabled": False}}}
+    structured_json = """{
+      "layer": "QUERY",
+      "layers": ["QUERY"],
+      "confidence": 0.95,
+      "reasoning": "查询请求",
+      "key_entities": [],
+      "possible_scenarios": []
+    }"""
+    calls = []
+
+    def _fake_call_llm(question, prompt, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(result=structured_json), []
+
+    node._call_llm = _fake_call_llm
+
+    result, _ = node._analyze_with_llm("查询异常 Pod")
+
+    assert result["layer"] == "QUERY"
+    assert calls[0]["expect_json"] is False
+    assert calls[0]["json_acceptance_guard"] is None
+
+
 def test_layer_execute_keeps_llm_result_when_only_historical_events_exist():
     node = LayerClassifierNode()
 
@@ -502,6 +589,10 @@ def test_extract_tool_data_prefers_full_result_over_preview():
             "tool": "execute_prometheus_instant_query",
             "data": '{"status":"success","data":{"result":[{"metric":{"node":"master"},"value":[1,"13.7"]}]}}',
             "duration_s": 1.2,
+            "semantic_success": True,
+            "raw_ref": None,
+            "structured_ref": None,
+            "summary_ref": None,
         }
     ]
 
@@ -547,6 +638,12 @@ def test_rca_lite_mode_exception_uses_generic_llm_fallback_without_rules():
     assert thinking_events == []
 
 
+def test_conclusion_strips_think_blocks_from_final_report():
+    content = "<think>内部推理不能展示</think>\n\n## 诊断概览\nPod ImagePullBackOff"
+
+    assert ConclusionFormatterNode._strip_think_blocks(content) == "## 诊断概览\nPod ImagePullBackOff"
+
+
 def test_layer_prompt_is_diagnosis_and_healthy_only():
     expected_phrases = [
         "这个节点只服务于诊断类和健康检查类请求",
@@ -567,6 +664,7 @@ def test_layer_prompt_requires_event_validation_against_current_state():
         "如果 Warning 事件指向某个 Pod/Node/Workload",
         "该事件视为历史噪音",
         "不要把“曾经发生过异常”当成“当前仍有故障”",
+        "Events 禁止向 `abnormal_pods` 添加当前 Pod 扫描中不存在的 Pod",
     ]
 
     for phrase in expected_phrases:
@@ -586,39 +684,85 @@ def test_layer_prompt_defines_health_baseline_and_efficiency_rules():
         assert phrase in LAYER_CLASSIFIER_PROMPT
 
 
-def test_layer_prompt_prioritizes_private_k8s_health_reference_runbook():
+def test_layer_prompt_is_pod_abnormal_first():
     expected_phrases = [
-        "private-k8s-health-reference.md",
-        "当问题是“集群健康检查”",
-        "应优先获取这个通用 runbook 作为基线参考",
+        "第一目标是识别当前异常 Pod 的状态关键字",
+        "primary_pod",
+        "pod_status_keyword",
+        "pod_abnormal_type",
+        "Pending / CrashLoopBackOff / ImagePullBackOff / OOMKilled / Evicted",
     ]
 
     for phrase in expected_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
 
 
-def test_layer_prompt_fetches_scene_runbook_after_baseline_when_signal_is_clear():
+def test_layer_prompt_requires_global_abnormal_pod_scan_first():
     expected_phrases = [
-        "如果你先获取了 `private-k8s-health-reference.md`",
-        "后续又发现了明确场景信号",
-        "应继续获取对应的具体场景 runbook",
-        "可以并且应该参考多个 runbook",
-        "允许获取多个",
+        "首轮必须先做全局 Pod 状态扫描",
+        "kubectl_get_by_kind_in_cluster(kind=\"Pod\")",
+        "kubectl get pods -A",
+        "排除 `STATUS=Running`、`STATUS=Completed`、`STATUS=Succeeded`",
+        "第一个真实工具调用必须优先获取全局 Pod 列表",
+        "必须先过滤掉 Running / Completed / Succeeded",
     ]
 
     for phrase in expected_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
+
+
+def test_layer_prompt_defines_pod_abnormal_type_taxonomy_and_derived_layer():
+    expected_phrases = [
+        "L0-L4 只是 Pod 异常状态的归因分类兼容字段",
+        "derived_layer",
+        "status_category",
+        "Evicted",
+        "VolumeMountFailed",
+        "PendingUnschedulable",
+        "NodeLostOrUnknown",
+        "TerminatingStuck",
+        "OOMKilled",
+        "CrashLoopBackOffRuntime",
+        "ImagePullFailed",
+        "SandboxCreateFailed",
+        "ConfigError",
+        "NotReadyProbeFailed",
+        "CrashLoopBackOff 只是状态关键字，不是最终异常类型",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in LAYER_CLASSIFIER_PROMPT
+
+
+def test_layer_extract_prompt_preserves_pod_abnormal_type_taxonomy():
+    extract_prompt = get_workflow_prompt("layer_extract")
+    expected_phrases = [
+        "Pod 异常状态优先",
+        "derived_layer",
+        "status_category",
+        "VolumeMountFailed",
+        "PendingUnschedulable",
+        "SandboxCreateFailed",
+        "NotReadyProbeFailed",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in extract_prompt
+
+
+def test_layer_prompt_does_not_rely_on_general_health_runbooks():
+    assert "private-k8s-health-reference.md" not in LAYER_CLASSIFIER_PROMPT
+    assert "l4-dependency-503" not in LAYER_CLASSIFIER_PROMPT
 
 
 def test_layer_extract_prompt_is_current_state_first():
     extract_prompt = get_workflow_prompt("layer_extract")
     expected_phrases = [
-        "必须以“当前环境中的活跃异常对象”为最高优先级判断 layer",
-        "events 只能作为辅助线索，不能单独作为当前故障依据",
-        "如果文本里只有历史 event，但没有任何当前仍异常的对象证据，应输出 HEALTHY",
-        "如果文本里同时出现历史异常 event 和当前健康状态，以当前健康状态为准。",
-        "Pod Running/Ready 只是健康信号之一，不等于整体健康",
-        "Service-EndPoints",
+        "当前仍异常的 Pod",
+        "pod_status_keyword",
+        "pod_abnormal_type",
+        "历史 event",
+        "HEALTHY",
     ]
 
     for phrase in expected_phrases:
@@ -647,11 +791,31 @@ def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
     expected_phrases = [
         "### Runbook 使用原则",
         "优先调用 fetch_runbook 获取参考",
-        "runbook 是额外知识储备和诊断参考",
+        "只允许使用与 Pod 异常状态直接相关的 runbook",
+        "runbook 选择必须按 Pod 异常类型匹配",
     ]
 
     for phrase in expected_phrases:
         assert phrase in LAYER_CLASSIFIER_PROMPT
+
+
+def test_evidence_prompt_requires_pod_abnormal_handoff_fields():
+    expected_phrases = [
+        "primary_pod",
+        "pod_status_keyword",
+        "pod_abnormal_type",
+        "核心任务",
+        "找证据",
+        "根据 Available Runbooks/catalog 的 description",
+        "明显匹配当前 Pod 异常状态",
+        "primary_pod` 返回 NotFound",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in EVIDENCE_COLLECTOR_PROMPT
+
+    assert "recommended_runbooks" not in EVIDENCE_COLLECTOR_PROMPT
+    assert "evidence_plan 第一项应为 `fetch_runbook`" not in EVIDENCE_COLLECTOR_PROMPT
 
 
 def test_workflow_prompts_default_to_chinese_and_support_english_switch():

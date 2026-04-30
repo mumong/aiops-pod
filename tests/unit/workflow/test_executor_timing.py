@@ -1,11 +1,29 @@
 import os
 import sys
 import time
+import types
+from contextlib import contextmanager
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.service import HolmesService
 from app.core.workflow.executor import WorkflowExecutor
+
+
+def _install_fake_langfuse(monkeypatch):
+    calls = {"sessions": []}
+
+    @contextmanager
+    def _propagate_attributes(**kwargs):
+        calls["sessions"].append(kwargs.get("session_id"))
+        yield
+
+    fake_langfuse = types.ModuleType("langfuse")
+    fake_langfuse.propagate_attributes = _propagate_attributes
+    monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse)
+    return calls
 
 
 class _DummyNode:
@@ -81,7 +99,7 @@ def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
 
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
-        lambda holmes_service, metrics, runbook_catalog, node_config: (
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
             _DummyWorkflow(nodes),
             nodes,
         ),
@@ -104,6 +122,43 @@ def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
     assert 15 <= node_metrics["rca"]["duration_ms"] <= 40
     assert node_metrics["conclusion"]["duration_ms"] >= 25
     assert node_metrics["conclusion"]["duration_ms"] > node_metrics["rca"]["duration_ms"]
+
+
+def test_executor_propagates_langfuse_session_at_workflow_boundary(monkeypatch):
+    langfuse_calls = _install_fake_langfuse(monkeypatch)
+    nodes = [_DummyNode("rca"), _DummyNode("conclusion")]
+
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow",
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+            _DummyWorkflow(nodes),
+            nodes,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.workflow.executor.create_log_listener",
+        lambda: _DummyLogListener(),
+    )
+    monkeypatch.setattr(
+        WorkflowExecutor,
+        "_save_report",
+        lambda self, layer, question, full_answer: None,
+    )
+
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    events = list(executor.execute_stream("timing test", run_id="workflow-session-1"))
+
+    assert any(event.get("type") == "run_start" for event in events)
+    assert langfuse_calls["sessions"] == ["workflow-session-1"]
+
+
+def test_executor_langfuse_session_scope_preserves_original_exception(monkeypatch):
+    _install_fake_langfuse(monkeypatch)
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+
+    with pytest.raises(ValueError, match="workflow failed"):
+        with executor._langfuse_session_scope("workflow-session-error"):
+            raise ValueError("workflow failed")
 
 
 class _SlowNode:
@@ -154,7 +209,7 @@ def test_executor_emits_heartbeat_when_workflow_is_idle(monkeypatch):
     monkeypatch.setenv("WORKFLOW_STREAM_HEARTBEAT_SECONDS", "0.02")
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
-        lambda holmes_service, metrics, runbook_catalog, node_config: (
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
             _SlowWorkflow(node),
             [node],
         ),
@@ -179,7 +234,7 @@ def test_executor_emits_heartbeat_when_workflow_is_idle(monkeypatch):
 
 def test_workflow_to_text_renders_heartbeat_lines():
     class _Executor:
-        def execute_stream(self, question, cancel_event=None):
+        def execute_stream(self, question, cancel_event=None, workflow_overrides=None):
             yield {"type": "run_start", "run_id": "hbtest"}
             yield {"type": "node_start", "node": "conclusion", "node_name": "汇总总结"}
             yield {"type": "heartbeat", "node": "conclusion", "node_name": "汇总总结"}

@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
+from .usage_probe import OpenAIUsageProbe
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +37,10 @@ _CONTEXT_WINDOW_KEYS = {
 
 
 _TOKENIZER_CACHE: Dict[str, Any] = {}
+
+
+def _env_truthy(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def estimate_tokens(text: Any) -> int:
@@ -308,6 +314,24 @@ def serialize_tool_schema(tools: Optional[Iterable[Any]]) -> List[Dict[str, Any]
     return serialized
 
 
+def serialize_tool_schema_for_openai(tools: Optional[Iterable[Any]]) -> List[Dict[str, Any]]:
+    """Serialize LangChain tools into a minimal OpenAI-compatible tool schema."""
+    serialized: List[Dict[str, Any]] = []
+    for item in serialize_tool_schema(tools):
+        parameters = item.get("args_schema")
+        if not isinstance(parameters, dict):
+            parameters = {"type": "object", "properties": {}}
+        serialized.append({
+            "type": "function",
+            "function": {
+                "name": item.get("name") or "unknown_tool",
+                "description": item.get("description") or "",
+                "parameters": parameters,
+            },
+        })
+    return serialized
+
+
 class ContextBudgetEstimator:
     """Builds and logs node-level context budget snapshots."""
 
@@ -329,6 +353,34 @@ class ContextBudgetEstimator:
     ) -> Dict[str, Any]:
         resolved_window = ModelContextResolver().resolve(model, api_base=api_base, api_key=api_key)
         context_window = resolved_window.get("context_window")
+        provider_prompt_tokens: Optional[int] = None
+        provider_total_tokens: Optional[int] = None
+        provider_completion_tokens: Optional[int] = None
+        provider_usage_source: Optional[str] = None
+        provider_usage_error: str = ""
+
+        if _env_truthy("AIOPS_CONTEXT_USAGE_PROBE") and api_base:
+            messages: List[Dict[str, Any]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            if user_message:
+                messages.append({"role": "user", "content": user_message})
+            if messages:
+                probe = OpenAIUsageProbe(
+                    api_base=api_base,
+                    api_key=api_key,
+                    timeout=float(os.getenv("AIOPS_CONTEXT_USAGE_PROBE_TIMEOUT", "30") or 30),
+                )
+                probed = probe.count_prompt_tokens(
+                    model=model,
+                    messages=messages,
+                    tools=serialize_tool_schema_for_openai(tools) if tools else None,
+                )
+                provider_prompt_tokens = probed.prompt_tokens
+                provider_total_tokens = probed.total_tokens
+                provider_completion_tokens = probed.completion_tokens
+                provider_usage_source = probed.source
+                provider_usage_error = probed.error or ""
 
         if components is None:
             tool_schema_payload = serialize_tool_schema(tools)
@@ -360,6 +412,11 @@ class ContextBudgetEstimator:
         normalized_components = self._normalize_components(components, model=model)
         estimated_total = sum(c["tokens"] for c in normalized_components)
         usage_ratio = (estimated_total / context_window) if context_window else None
+        provider_input_usage_ratio = (
+            provider_prompt_tokens / context_window
+            if isinstance(provider_prompt_tokens, int) and isinstance(context_window, int) and context_window > 0
+            else None
+        )
 
         static_context_tokens = sum(c["tokens"] for c in normalized_components if c["category"] == "static_input")
         dynamic_context_tokens = sum(c["tokens"] for c in normalized_components if c["category"] == "dynamic_runtime")
@@ -397,6 +454,12 @@ class ContextBudgetEstimator:
             "dynamic_context_tokens": dynamic_context_tokens,
             "actual_context_tokens": actual_context_tokens,
             "reserved_tokens": reserved_tokens,
+            "provider_prompt_tokens": provider_prompt_tokens,
+            "provider_total_tokens": provider_total_tokens,
+            "provider_completion_tokens": provider_completion_tokens,
+            "provider_usage_source": provider_usage_source,
+            "provider_usage_error": provider_usage_error,
+            "provider_input_usage_ratio": provider_input_usage_ratio,
             "token_count_accuracy": token_count_accuracy,
             "token_count_sources": token_sources,
             # Legacy flattened keys kept for current logs/tests.
@@ -459,50 +522,68 @@ class ContextBudgetEstimator:
     def log(self, budget: Dict[str, Any]) -> None:
         usage = budget.get("usage_ratio")
         usage_text = "unknown" if usage is None else f"{usage:.0%}"
+        token_accuracy = str(budget.get("token_count_accuracy") or "estimated")
+        provider_prompt_tokens = budget.get("provider_prompt_tokens")
+        provider_input_usage = budget.get("provider_input_usage_ratio")
+        has_provider_exact = isinstance(provider_prompt_tokens, int)
+        input_tokens = provider_prompt_tokens if has_provider_exact else (
+            budget.get("actual_context_tokens") if token_accuracy == "exact" else "unknown"
+        )
+        if isinstance(provider_input_usage, (int, float)):
+            input_usage = f"{provider_input_usage:.0%}"
+            input_token_source = budget.get("provider_usage_source") or "provider_usage_probe"
+        elif token_accuracy == "exact" and isinstance(budget.get("context_window"), int) and budget.get("context_window"):
+            input_usage = f"{budget.get('actual_context_tokens') / budget.get('context_window'):.0%}"
+            input_token_source = "local_tokenizer"
+        else:
+            input_usage = "unknown"
+            input_token_source = "unknown"
         level = logging.INFO
-        if isinstance(usage, (int, float)):
-            if usage >= 0.90:
+        ratio_for_level = provider_input_usage if isinstance(provider_input_usage, (int, float)) else usage
+        if isinstance(ratio_for_level, (int, float)):
+            if ratio_for_level >= 0.90:
                 level = logging.ERROR
-            elif usage >= 0.75:
+            elif ratio_for_level >= 0.75:
                 level = logging.WARNING
 
         logger.log(
             level,
-            "[context_budget] node=%s model=%s context_window=%s "
-            "source=%s accuracy=%s token_accuracy=%s token_sources=%s startup_prompt=%s user=%s "
-            "tool_schema=%s handoff=%s tool_traces=%s actual_context_tokens=%s "
-            "scratchpad_reserved=%s output_reserved=%s reserved_tokens=%s estimated_total=%s usage=%s",
+            "[context_budget] node=%s window=%s window_source=%s token=%s token_sources=%s "
+            "input_tokens=%s input_usage=%s input_source=%s reserved_tokens=%s budget_tokens=%s budget_usage=%s",
             budget.get("node"),
-            budget.get("model"),
             budget.get("context_window"),
             budget.get("context_window_source"),
-            budget.get("context_window_accuracy"),
-            budget.get("token_count_accuracy"),
+            token_accuracy,
             ",".join(budget.get("token_count_sources") or []),
-            budget.get("startup_prompt"),
-            budget.get("user"),
-            budget.get("tool_schema"),
-            budget.get("handoff"),
-            budget.get("tool_traces"),
-            budget.get("actual_context_tokens"),
-            budget.get("scratchpad_reserved"),
-            budget.get("output_reserved"),
+            input_tokens,
+            input_usage,
+            input_token_source,
             budget.get("reserved_tokens"),
             budget.get("estimated_total"),
             usage_text,
         )
-        component_parts = []
-        for component in budget.get("components", []):
+        if budget.get("provider_usage_error") and _env_truthy("AIOPS_CONTEXT_USAGE_PROBE"):
+            logger.warning(
+                "[context_budget.probe] node=%s input_usage=unknown error=%s",
+                budget.get("node"),
+                budget.get("provider_usage_error"),
+            )
+
+        top_components = [
+            c for c in budget.get("components", [])
+            if c.get("category") in {"static_input", "dynamic_runtime"}
+        ]
+        top_components.sort(key=lambda c: int(c.get("tokens") or 0), reverse=True)
+        top_parts = []
+        for component in top_components[:3]:
             ratio = component.get("window_ratio")
             ratio_text = "unknown" if ratio is None else f"{ratio:.0%}"
-            component_parts.append(f"{component.get('name')}={component.get('tokens')}({ratio_text})")
-        if component_parts:
+            token_text = component.get("tokens") if token_accuracy == "exact" else "unknown"
+            top_parts.append(f"{component.get('name')}={token_text}({ratio_text})")
+        if top_parts:
             logger.log(
                 level,
-                "[context_budget.components] node=%s static=%s dynamic=%s reserved=%s %s",
+                "[context_budget.top] node=%s %s",
                 budget.get("node"),
-                budget.get("static_context_tokens"),
-                budget.get("dynamic_context_tokens"),
-                budget.get("reserved_tokens"),
-                " ".join(component_parts),
+                " ".join(top_parts),
             )

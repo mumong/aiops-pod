@@ -27,7 +27,7 @@ spec:
               mountPath: /tmp/aiops/reports
       containers:
         - name: aiops-copilot
-          image: xnet.registry.io:8443/xnet-cloud/aiops-copilot:8.0.8
+          image: xnet.registry.io:8443/xnet-cloud/aiops-copilot:8.0.29
           imagePullPolicy: IfNotPresent # 每次都拉取最新镜像
           ports:
             - containerPort: 8000
@@ -68,6 +68,12 @@ spec:
                   name: aiops-secret
                   key: AIOPS_TIKTOKEN_ENCODING
                   optional: true
+            - name: AIOPS_CONTEXT_USAGE_PROBE
+              valueFrom:
+                secretKeyRef:
+                  name: aiops-secret
+                  key: AIOPS_CONTEXT_USAGE_PROBE
+                  optional: true
             # AI 自动修复开关（true=允许执行修复操作，false=仅诊断）
             - name: AUTO_REMEDIATE
               valueFrom:
@@ -86,30 +92,6 @@ spec:
               value: "/app/config-override/config.yaml"
             - name: AIOPS_CONTEXT_ARCHIVE_ROOT
               value: "/tmp/aiops/reports/context_archives"
-            - name: AIOPS_THINK_STREAM_MODE
-              valueFrom:
-                secretKeyRef:
-                  name: aiops-secret
-                  key: AIOPS_THINK_STREAM_MODE
-                  optional: true
-            - name: AIOPS_THINK_STREAM_MAX_CHARS
-              valueFrom:
-                secretKeyRef:
-                  name: aiops-secret
-                  key: AIOPS_THINK_STREAM_MAX_CHARS
-                  optional: true
-            - name: AIOPS_OBSERVATION_SUMMARY_MODE
-              valueFrom:
-                secretKeyRef:
-                  name: aiops-secret
-                  key: AIOPS_OBSERVATION_SUMMARY_MODE
-                  optional: true
-            - name: AIOPS_OBSERVATION_SUMMARY_MAX_CHARS
-              valueFrom:
-                secretKeyRef:
-                  name: aiops-secret
-                  key: AIOPS_OBSERVATION_SUMMARY_MAX_CHARS
-                  optional: true
           volumeMounts:
             - name: config-volume
               mountPath: /app/config-override
@@ -134,9 +116,23 @@ spec:
           configMap:
             name: aiops-runbooks
         - name: reports-volume
-          hostPath:
-            path: /tmp/aiops/reports
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: aiops-reports-pvc
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aiops-reports-pvc
+  namespace: aiops
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
 
 ---
 apiVersion: v1

@@ -15,6 +15,7 @@ import logging
 import queue
 import re
 import time
+from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from langgraph.errors import GraphRecursionError
@@ -22,7 +23,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from app.core.context.archive import ContextArchive
-from app.core.context.budget import ContextBudgetEstimator, serialize_tool_schema
+from app.core.context.budget import ContextBudgetEstimator, ModelContextResolver, serialize_tool_schema
 from app.core.context.observation import ObservationProcessor
 from app.core.prompts import get_workflow_prompt
 from .streaming import push_event
@@ -87,6 +88,7 @@ class AICall:
             "model": model_name,
             "api_key": api_key,
             "streaming": True,  # 启用 token 级别流式输出
+            "stream_usage": True,  # 让 OpenAI-compatible 网关返回 usage_metadata
         }
         if base_url:
             self._chat_model_kwargs["base_url"] = base_url
@@ -151,8 +153,14 @@ class AICall:
         if kwargs:
             model = model.bind(**kwargs)
 
-        result = model.invoke(messages)
+        session_id = self._normalize_langfuse_session_id(run_id)
+        model = self._bind_session_metadata(model, session_id)
+        invoke_config = self._build_langchain_config(session_id)
+        with self._langfuse_session_scope(session_id, node_id or "simple"):
+            result = model.invoke(messages, config=invoke_config) if invoke_config else model.invoke(messages)
         content = result.content or ""
+        usage = self._extract_usage_metadata(result)
+        self._log_provider_usage(node_id or "simple", usage, source="provider_usage:call_simple")
         if run_id:
             final_components = [
                 *static_context_components,
@@ -206,6 +214,7 @@ class AICall:
         stop_checker: Optional[Callable[[List[Dict]], bool]] = None,
         expect_json: bool = False,
         json_validator: Optional[Callable[[Any], bool]] = None,
+        json_acceptance_guard: Optional[Callable[[Any, List[Dict]], bool]] = None,
         static_context_components: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[AICallResult, List[Dict]]:
         """LangChain Agent loop with tool calling (create_agent)
@@ -228,11 +237,9 @@ class AICall:
         tool_call_count = 0
         tool_result_sequence = 0
         iteration = 0
-        observation_processor = ObservationProcessor(
-            summarizer=self._summarize_tool_observation,
-            max_observation_chars=self.observation_summary_max_chars,
-            summary_mode=self.observation_summary_mode,
-        )
+        seen_tool_call_signatures = set()
+        seen_tool_result_signatures = set()
+        observation_processor = self._build_observation_processor()
         if static_context_components is None:
             tool_schema_payload = serialize_tool_schema(tools or [])
             static_context_components = [
@@ -268,8 +275,10 @@ class AICall:
         # 创建 LangChain Agent (create_agent，替代已废弃的 create_react_agent)
         from langchain.agents import create_agent
 
+        session_id = self._normalize_langfuse_session_id(run_id)
+        agent_model = self._bind_session_metadata(self._create_chat_model(), session_id)
         agent = create_agent(
-            model=self._create_chat_model(),
+            model=agent_model,
             tools=tools,
             system_prompt=system_prompt,
         )
@@ -280,11 +289,15 @@ class AICall:
 
         input_messages = {"messages": [{"role": "user", "content": question}]}
         # recursion_limit 直接使用 config 传入的 max_steps，不做任何公式转换
+        langfuse_config = self._build_langchain_config(session_id)
         config = {"recursion_limit": max_steps}
+        if langfuse_config:
+            config.update(langfuse_config)
         logger.info("📍 [AICall] node=%s | max_steps(recursion_limit)=%d", node_id or "?", max_steps)
 
         final_content = ""
         _content_buffer = []  # 收集 token 级别的文本片段
+        tool_observation_contents: List[str] = []
 
         async def _run_agent():
             nonlocal final_content, iteration, tool_call_count, tool_result_sequence
@@ -331,8 +344,42 @@ class AICall:
                     messages = update.get("messages", [])
                     for msg in messages:
                         if isinstance(msg, AIMessage):
+                            usage = self._extract_usage_metadata(msg)
+                            if usage:
+                                self._log_provider_usage(
+                                    node_id or "agent",
+                                    usage,
+                                    source="provider_usage:agent_astream",
+                                    iteration=iteration + 1,
+                                )
+                                self._record(
+                                    thinking_events,
+                                    "ai_usage",
+                                    node_id,
+                                    usage=usage,
+                                    iteration=iteration + 1,
+                                )
+                            msg_tool_calls = list(msg.tool_calls or [])
+                            new_tool_calls = []
+                            for tc in msg_tool_calls:
+                                signature = self._tool_call_signature(tc)
+                                if signature in seen_tool_call_signatures:
+                                    logger.debug(
+                                        "   ♻️ [AICall] 跳过重复 tool_call replay | node=%s tool=%s signature=%s",
+                                        node_id or "?",
+                                        tc.get("name"),
+                                        signature,
+                                    )
+                                    continue
+                                seen_tool_call_signatures.add(signature)
+                                new_tool_calls.append(tc)
+
+                            if msg_tool_calls and not new_tool_calls and not msg.content:
+                                continue
+
                             # AI 完整消息（用于 final_content 和工具调用检测）
-                            if msg.content:
+                            should_emit_ai_message = bool(msg.content) and (not msg_tool_calls or bool(new_tool_calls))
+                            if should_emit_ai_message:
                                 final_content = msg.content
                                 iteration += 1
                                 logger.debug("   💬 [AICall] AI 消息 #%d:\n%s",
@@ -348,26 +395,48 @@ class AICall:
                                     if parsed is not None and (
                                         json_validator is None or json_validator(parsed)
                                     ):
+                                        if json_acceptance_guard is not None and not json_acceptance_guard(parsed, thinking_events):
+                                            logger.info(
+                                                "⏭️ [AICall] JSON middleware 捕获到结构化输出，但接受条件未满足，继续 agent (node=%s)",
+                                                node_id,
+                                            )
+                                            continue
                                         final_content = json.dumps(parsed, ensure_ascii=False)
                                         logger.info("🛑 [AICall] JSON middleware 捕获到有效结构化输出，提前结束 agent (node=%s)", node_id)
                                         return
 
                             # AI 工具调用
-                            if msg.tool_calls:
-                                for tc in msg.tool_calls:
+                            if new_tool_calls:
+                                for tc in new_tool_calls:
                                     tool_call_count += 1
                                     logger.debug("   🔧 [AICall] tool_call #%d %s | args=%s",
                                                 tool_call_count, tc["name"],
                                                 str(tc.get("args", {}))[:300])
                                     push_event(stream_queue, "tool_start", node_id,
-                                               tool_name=tc["name"], iteration=iteration)
+                                               tool_name=tc["name"],
+                                               tool_args=tc.get("args", {}),
+                                               tool_call_id=tc.get("id"),
+                                               iteration=iteration)
                                     self._record(thinking_events, "tool_start", node_id,
-                                                 tool_name=tc["name"], iteration=iteration)
+                                                 tool_name=tc["name"],
+                                                 tool_args=tc.get("args", {}),
+                                                 tool_call_id=tc.get("id"),
+                                                 iteration=iteration)
 
                         elif hasattr(msg, 'type') and msg.type == 'tool':
                             # 工具执行结果
                             tool_name = getattr(msg, 'name', '') or ''
                             tool_content = msg.content or ''
+                            tool_signature = self._tool_result_signature(msg, tool_name, tool_content)
+                            if tool_signature in seen_tool_result_signatures:
+                                logger.debug(
+                                    "   ♻️ [AICall] 跳过重复 tool_result replay | node=%s tool=%s signature=%s",
+                                    node_id or "?",
+                                    tool_name,
+                                    tool_signature,
+                                )
+                                continue
+                            seen_tool_result_signatures.add(tool_signature)
                             tool_result_sequence += 1
                             observation = self._process_tool_observation(
                                 processor=observation_processor,
@@ -376,8 +445,11 @@ class AICall:
                                 sequence=tool_result_sequence,
                                 tool_name=tool_name,
                                 tool_content=tool_content,
+                                static_context_components=static_context_components,
+                                prior_tool_observations=tool_observation_contents,
                             )
                             bounded_content = observation.get("summary", tool_content)
+                            tool_observation_contents.append(bounded_content)
                             try:
                                 msg.content = bounded_content
                             except Exception as exc:
@@ -391,18 +463,30 @@ class AICall:
                                 "summary_ref": observation.get("summary_ref"),
                                 "raw_chars": observation.get("raw_chars", len(tool_content)),
                                 "summary_chars": observation.get("summary_chars", len(bounded_content)),
+                                "semantic_success": observation.get("semantic_success", True),
+                                "structured": observation.get("structured"),
                             })
                             logger.info("   ✅ [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
                                         tool_call_count, tool_name, status,
                                         observation.get("raw_chars", len(tool_content)),
                                         observation.get("summary_chars", len(bounded_content)),
                                         observation.get("processor", "unknown"))
+                            context_usage_ratio = observation.get("context_usage_ratio")
+                            if isinstance(context_usage_ratio, (int, float)) and context_usage_ratio >= 0.8:
+                                logger.warning(
+                                    "   🧯 [AICall] context compression guard triggered | node=%s tool=%s usage=%.0f%% processor=%s",
+                                    node_id or "?",
+                                    tool_name,
+                                    context_usage_ratio * 100,
+                                    observation.get("processor", "unknown"),
+                                )
                             logger.debug("   📄 [AICall] tool #%d %s 摘要输出:\n%s",
                                         tool_call_count, tool_name,
                                         bounded_content[:2000])
                             evt = {
                                 "type": "tool_result",
                                 "tool_name": tool_name,
+                                "tool_call_id": getattr(msg, "tool_call_id", None),
                                 "status": status,
                                 "result_preview": bounded_content[:200],
                                 "result": bounded_content,
@@ -411,6 +495,8 @@ class AICall:
                                 "summary_ref": observation.get("summary_ref"),
                                 "raw_chars": observation.get("raw_chars", len(tool_content)),
                                 "summary_chars": observation.get("summary_chars", len(bounded_content)),
+                                "semantic_success": observation.get("semantic_success", True),
+                                "structured": observation.get("structured"),
                                 "observation_processed": observation.get("processed", False),
                                 "observation_processor": observation.get("processor", ""),
                                 "iteration": iteration,
@@ -427,9 +513,13 @@ class AICall:
                                     logger.warning("⚠️ [AICall] stop_checker 执行失败: %s", exc)
 
         # 在新线程中运行异步 agent（避免与 uvicorn event loop 冲突）
+        def _run_agent_thread():
+            with self._langfuse_session_scope(session_id, node_id or "agent"):
+                asyncio.run(_run_agent())
+
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                pool.submit(lambda: asyncio.run(_run_agent())).result(timeout=max_steps * 30)
+                pool.submit(_run_agent_thread).result(timeout=max_steps * 30)
         except concurrent.futures.TimeoutError:
             logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
             if not final_content:
@@ -445,6 +535,7 @@ class AICall:
                 final_content = f"Agent 执行异常: {e}"
 
         total_ms = (time.time() - call_start) * 1000
+        aggregate_usage = self._aggregate_usage_from_events(thinking_events)
         result = AICallResult(
             result=final_content,
             tool_calls=all_tool_calls,
@@ -452,6 +543,9 @@ class AICall:
             tool_call_count=tool_call_count,
             duration_ms=total_ms,
             intermediate_events=thinking_events,
+            input_tokens=aggregate_usage.get("input_tokens"),
+            output_tokens=aggregate_usage.get("output_tokens"),
+            total_tokens=aggregate_usage.get("total_tokens"),
         )
         self._write_final_context_budget(
             run_id=run_id,
@@ -483,6 +577,169 @@ class AICall:
         """Record event locally (no queue push)."""
         events.append({"type": event_type, "node": node_id, "timestamp": time.time(), **data})
 
+    @staticmethod
+    def _extract_usage_metadata(message: Any) -> Dict[str, int]:
+        usage = getattr(message, "usage_metadata", None) or {}
+        if not usage:
+            response_metadata = getattr(message, "response_metadata", None) or {}
+            usage = response_metadata.get("token_usage") or {}
+        if not isinstance(usage, dict):
+            return {}
+        result: Dict[str, int] = {}
+        for src, dst in (
+            ("input_tokens", "input_tokens"),
+            ("output_tokens", "output_tokens"),
+            ("total_tokens", "total_tokens"),
+            ("prompt_tokens", "input_tokens"),
+            ("completion_tokens", "output_tokens"),
+        ):
+            value = usage.get(src)
+            if value is not None and dst not in result:
+                try:
+                    result[dst] = int(value)
+                except (TypeError, ValueError):
+                    pass
+        if "total_tokens" not in result and "input_tokens" in result and "output_tokens" in result:
+            result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
+        return result
+
+    def _log_provider_usage(
+        self,
+        node_id: str,
+        usage: Dict[str, int],
+        source: str,
+        iteration: Optional[int] = None,
+    ) -> None:
+        input_tokens = usage.get("input_tokens")
+        if input_tokens is None:
+            return
+        resolved = ModelContextResolver().resolve(
+            self.model_str,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+        )
+        window = resolved.get("context_window")
+        input_usage = (
+            f"{input_tokens / window:.2%}"
+            if isinstance(window, int) and window > 0
+            else "unknown"
+        )
+        iter_part = "" if iteration is None else f" iteration={iteration}"
+        logger.info(
+            "[context_usage.actual] node=%s%s input_tokens=%s input_usage=%s "
+            "output_tokens=%s total_tokens=%s window=%s window_source=%s source=%s accuracy=exact",
+            node_id or "unknown",
+            iter_part,
+            input_tokens,
+            input_usage,
+            usage.get("output_tokens", "unknown"),
+            usage.get("total_tokens", "unknown"),
+            window or "unknown",
+            resolved.get("source"),
+            source,
+        )
+
+    @staticmethod
+    def _aggregate_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, int]:
+        usage_events = [
+            ev.get("usage") or {}
+            for ev in events
+            if ev.get("type") == "ai_usage" and isinstance(ev.get("usage"), dict)
+        ]
+        if not usage_events:
+            return {}
+        return {
+            "input_tokens": sum(int(ev.get("input_tokens") or 0) for ev in usage_events),
+            "output_tokens": sum(int(ev.get("output_tokens") or 0) for ev in usage_events),
+            "total_tokens": sum(int(ev.get("total_tokens") or 0) for ev in usage_events),
+        }
+
+    @staticmethod
+    def _normalize_langfuse_session_id(run_id: str) -> Optional[str]:
+        """Langfuse session_id must be a short US-ASCII string."""
+        raw = str(run_id or "").strip()
+        if not raw:
+            return None
+        ascii_text = raw.encode("ascii", errors="ignore").decode("ascii").strip()
+        if not ascii_text:
+            return None
+        return ascii_text[:199]
+
+    def _build_langchain_config(self, session_id: Optional[str]) -> Dict[str, Any]:
+        if not session_id:
+            return {}
+        # Keep this out of `metadata`: ChatOpenAI uses `metadata` both as a
+        # runnable config field and as an OpenAI request field, which can cause
+        # duplicate keyword errors when the model is also bound with request
+        # metadata.
+        return {
+            "tags": [f"session:{session_id}"],
+        }
+
+    def _bind_session_metadata(self, model: Any, session_id: Optional[str]) -> Any:
+        if not session_id:
+            return model
+        metadata = {
+            "session_id": session_id,
+            "langfuse_session_id": session_id,
+            "run_id": session_id,
+        }
+        try:
+            # `metadata` and `user` are OpenAI chat completion request fields.
+            # Gateways such as LiteLLM can use them to attach Langfuse sessions.
+            return model.bind(
+                extra_body={"metadata": metadata},
+                user=session_id,
+            )
+        except Exception as exc:
+            logger.debug("📉 [AICall] 绑定 session metadata 失败，继续原模型调用: %s", exc)
+            return model
+
+    @contextmanager
+    def _langfuse_session_scope(self, session_id: Optional[str], node_id: str):
+        if not session_id:
+            with nullcontext():
+                yield
+            return
+        try:
+            from langfuse import propagate_attributes
+        except Exception as exc:
+            logger.debug("📉 [AICall] Langfuse session scope 不可用，直接执行: %s", exc)
+            yield
+            return
+
+        logger.debug("📈 [AICall] Langfuse session_id=%s node=%s", session_id, node_id or "unknown")
+        with propagate_attributes(session_id=session_id):
+            yield
+
+    @staticmethod
+    def _tool_call_signature(tool_call: Dict[str, Any]) -> str:
+        name = tool_call.get("name") or "unknown"
+        call_id = tool_call.get("id")
+        if call_id:
+            return f"id:{call_id}"
+        args = tool_call.get("args", {})
+        try:
+            args_str = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:
+            args_str = str(args)
+        return f"name:{name}|args:{args_str}"
+
+    @staticmethod
+    def _tool_result_signature(msg: Any, tool_name: str, tool_content: str) -> str:
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        if tool_call_id:
+            return f"id:{tool_call_id}"
+        return f"name:{tool_name}|content:{tool_content}"
+
+    def _build_observation_processor(self) -> ObservationProcessor:
+        return ObservationProcessor(
+            summarizer=self._summarize_tool_observation,
+            max_observation_chars=self.observation_summary_max_chars,
+            summary_mode=self.observation_summary_mode,
+            context_pressure_threshold=0.8,
+        )
+
     def _process_tool_observation(
         self,
         processor: ObservationProcessor,
@@ -491,8 +748,15 @@ class AICall:
         sequence: int,
         tool_name: str,
         tool_content: str,
+        static_context_components: Optional[List[Dict[str, Any]]] = None,
+        prior_tool_observations: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         effective_run_id = run_id or f"adhoc-{int(time.time())}"
+        context_usage_ratio = self._estimate_observation_context_usage(
+            static_context_components=static_context_components or [],
+            prior_tool_observations=prior_tool_observations or [],
+            candidate_observation=tool_content or "",
+        )
         try:
             return processor.process(
                 run_id=effective_run_id,
@@ -500,6 +764,7 @@ class AICall:
                 sequence=sequence,
                 tool_name=tool_name or "unknown",
                 raw_content=tool_content or "",
+                context_usage_ratio=context_usage_ratio,
             )
         except Exception as exc:
             logger.warning("⚠️ [AICall] observation processor 失败，使用截断回退: %s", exc)
@@ -519,13 +784,47 @@ class AICall:
             return {
                 "tool": tool_name,
                 "status": "success",
+                "semantic_success": False,
                 "summary": summary,
                 "raw_chars": len(tool_content or ""),
                 "summary_chars": len(summary),
                 "processed": False,
                 "processor": "fallback_truncate",
+                "context_usage_ratio": context_usage_ratio,
                 **refs,
             }
+
+    def _estimate_observation_context_usage(
+        self,
+        static_context_components: List[Dict[str, Any]],
+        prior_tool_observations: List[str],
+        candidate_observation: str,
+    ) -> Optional[float]:
+        components = [
+            c for c in static_context_components
+            if c.get("category") != "reserved"
+        ]
+        if prior_tool_observations or candidate_observation:
+            components.append({
+                "name": "tool_observations_after_candidate",
+                "category": "dynamic_runtime",
+                "content": "\n".join([*prior_tool_observations, candidate_observation]),
+            })
+        budget = ContextBudgetEstimator().estimate(
+            node_id="observation_budget",
+            model=self.model_str,
+            system_prompt="",
+            user_message="",
+            components=components,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+            scratchpad_reserved=0,
+            output_reserved=0,
+        )
+        context_window = budget.get("context_window")
+        if not isinstance(context_window, int) or context_window <= 0:
+            return None
+        return float(budget.get("actual_context_tokens", 0)) / float(context_window)
 
     def _write_final_context_budget(
         self,

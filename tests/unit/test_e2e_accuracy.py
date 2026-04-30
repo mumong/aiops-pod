@@ -56,7 +56,7 @@ def test_extract_runbook_accepts_reference_runbooks_without_core():
     text = """
 📋 诊断追踪
 
-- **参考 Runbook**: private-k8s-health-reference, l2-oomkilled
+- **参考 Runbook**: l1-taint-node, l2-oomkilled
 - **工具调用**: 20 次
 - **LLM 调用**: 4 次
 """
@@ -64,7 +64,7 @@ def test_extract_runbook_accepts_reference_runbooks_without_core():
     runbook = test_accuracy.extract_runbook(text)
 
     assert runbook["core"] is None
-    assert runbook["refs"] == ["private-k8s-health-reference", "l2-oomkilled"]
+    assert runbook["refs"] == ["l1-taint-node", "l2-oomkilled"]
     assert "l2-oomkilled" in runbook["runbook_ids"]
 
 
@@ -78,8 +78,8 @@ def test_scenario_runbook_match_uses_reference_runbooks_when_core_missing():
 
     run = {
         "runbook_core": None,
-        "runbook_refs": ["private-k8s-health-reference", "l2-oomkilled"],
-        "runbook_ids": ["private-k8s-health-reference", "l2-oomkilled"],
+        "runbook_refs": ["l1-taint-node", "l2-oomkilled"],
+        "runbook_ids": ["l1-taint-node", "l2-oomkilled"],
     }
 
     assert scenario._is_runbook_match(run) is True

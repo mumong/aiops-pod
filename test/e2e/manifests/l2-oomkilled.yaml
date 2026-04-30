@@ -5,6 +5,7 @@ metadata:
   namespace: aiops-e2e
   labels:
     e2e-test: "true"
+    pod_abnormal_type: OOMKilled
 spec:
   replicas: 1
   selector:
@@ -12,13 +13,19 @@ spec:
       app: memhog
   template:
     metadata:
+      annotations:
+        aiops.e2e/runbook: l2-oomkilled.md
+        aiops.e2e/expected-status: CrashLoopBackOff|Error
+        aiops.e2e/expected-evidence: "container Last State reason is OOMKilled and exitCode is 137"
       labels:
         app: memhog
         e2e-test: "true"
+        pod_abnormal_type: OOMKilled
     spec:
       containers:
         - name: memhog
           image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
           command: ["python", "-c"]
           args:
             - |
@@ -34,4 +41,3 @@ spec:
             limits:
               cpu: "200m"
               memory: "40Mi"
-
