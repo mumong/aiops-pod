@@ -152,6 +152,80 @@ def test_executor_propagates_langfuse_session_at_workflow_boundary(monkeypatch):
     assert langfuse_calls["sessions"] == ["workflow-session-1"]
 
 
+def test_executor_assigns_same_run_id_to_all_four_nodes_without_ai_call(monkeypatch):
+    nodes = [_DummyNode("layer"), _DummyNode("evidence"), _DummyNode("rca"), _DummyNode("conclusion")]
+
+    class _NoopWorkflow:
+        def stream(self, initial_state):
+            return iter([])
+
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow",
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+            _NoopWorkflow(),
+            nodes,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.workflow.executor.create_log_listener",
+        lambda: _DummyLogListener(),
+    )
+    monkeypatch.setattr(
+        WorkflowExecutor,
+        "_save_report",
+        lambda self, layer, question, full_answer: None,
+    )
+
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    list(executor.execute_stream("timing test", run_id="workflow-session-4"))
+
+    assert [getattr(node, "current_run_id", None) for node in nodes] == [
+        "workflow-session-4",
+        "workflow-session-4",
+        "workflow-session-4",
+        "workflow-session-4",
+    ]
+
+
+def test_executor_assigns_same_run_id_and_ai_call_to_all_four_nodes(monkeypatch):
+    nodes = [_DummyNode("layer"), _DummyNode("evidence"), _DummyNode("rca"), _DummyNode("conclusion")]
+
+    class _NoopWorkflow:
+        def stream(self, initial_state):
+            return iter([])
+
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow",
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+            _NoopWorkflow(),
+            nodes,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.workflow.executor.create_log_listener",
+        lambda: _DummyLogListener(),
+    )
+    monkeypatch.setattr(
+        WorkflowExecutor,
+        "_save_report",
+        lambda self, layer, question, full_answer: None,
+    )
+
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    executor.ai_call = object()
+    executor.mcp_tools = ["tool-a"]
+    list(executor.execute_stream("timing test", run_id="workflow-session-5"))
+
+    assert [getattr(node, "current_run_id", None) for node in nodes] == [
+        "workflow-session-5",
+        "workflow-session-5",
+        "workflow-session-5",
+        "workflow-session-5",
+    ]
+    assert all(getattr(node, "ai_call", None) is executor.ai_call for node in nodes)
+    assert all(getattr(node, "tools", None) == ["tool-a"] for node in nodes)
+
+
 def test_executor_langfuse_session_scope_preserves_original_exception(monkeypatch):
     _install_fake_langfuse(monkeypatch)
     executor = WorkflowExecutor(holmes_service=_DummyHolmesService())

@@ -37,6 +37,16 @@ class ObservationProcessor:
         "execute_prometheus_instant_query",
         "get_prometheus_target",
     }
+    LOG_TOOLS = {
+        "kubectl_logs",
+        "kubectl_previous_logs",
+        "kubectl_logs_all_containers",
+        "kubectl_previous_logs_all_containers",
+        "kubectl_container_logs",
+        "kubectl_container_previous_logs",
+        "kubectl_logs_grep",
+        "kubectl_logs_all_containers_grep",
+    }
     FULL_PASSTHROUGH_TOOLS = {
         "kubectl_run_image",
         "run_bash_command",
@@ -135,6 +145,25 @@ class ObservationProcessor:
         }
 
     def _extract(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
+        if re.search(r"is not a valid tool|try one of \[", raw, re.IGNORECASE):
+            return {
+                "status": "invalid_tool",
+                "tool": tool,
+                "raw_preview": raw[:1000],
+            }, self._generic_summary(tool, raw), "invalid_tool"
+        if re.search(r"command failed|error from server|the server doesn't have a resource type|notfound|not found", raw, re.IGNORECASE):
+            return {
+                "status": "command_failed",
+                "tool": tool,
+                "raw_preview": raw[:1000],
+            }, self._generic_summary(tool, raw), "generic_failure"
+        if re.search(r"^\s*no resources found", raw, re.IGNORECASE):
+            return {
+                "status": "empty",
+                "tool": tool,
+                "raw_preview": raw[:1000],
+            }, "工具成功执行，但没有找到资源；这是空/负向观察，不能当作异常已被验证。", "generic_empty"
+
         if tool == "kubectl_events":
             return self._extract_events(raw)
         if tool == "kubectl_describe":
@@ -145,6 +174,8 @@ class ObservationProcessor:
             return self._extract_run_image(raw)
         if tool == "run_bash_command":
             return self._extract_command_result(tool, raw)
+        if tool in self.LOG_TOOLS:
+            return self._extract_logs(tool, raw)
         if tool in {"kubectl_get_by_kind_in_cluster", "kubectl_get_by_kind_in_namespace", "kubernetes_tabular_query"}:
             if self._looks_like_secret_table(raw):
                 return self._extract_secret_table(tool, raw)
@@ -347,6 +378,13 @@ class ObservationProcessor:
         metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
         spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
         status = doc.get("status") if isinstance(doc.get("status"), dict) else {}
+        labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+        annotations = metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {}
+        diagnostic_annotations = {
+            str(key): value
+            for key, value in annotations.items()
+            if str(key).startswith(("aiops.", "robusta.", "kubernetes.io/change-cause"))
+        }
 
         image_pull_secrets_raw = spec.get("imagePullSecrets")
         image_pull_secrets = [
@@ -408,14 +446,37 @@ class ObservationProcessor:
                     volume_info[source] = volume[source].get("name") or volume[source].get("claimName")
             volumes.append(volume_info)
 
+        conditions = []
+        for item in status.get("conditions") or []:
+            if not isinstance(item, dict):
+                continue
+            conditions.append({
+                "type": item.get("type"),
+                "status": item.get("status"),
+                "reason": item.get("reason"),
+                "message": item.get("message"),
+                "lastTransitionTime": item.get("lastTransitionTime"),
+            })
+
         structured = {
             "status": "yaml_summarized",
             "kind": "Pod",
             "name": metadata.get("name"),
             "namespace": metadata.get("namespace"),
+            "creationTimestamp": metadata.get("creationTimestamp"),
+            "deletionTimestamp": metadata.get("deletionTimestamp"),
+            "deletionGracePeriodSeconds": metadata.get("deletionGracePeriodSeconds"),
+            "finalizers": metadata.get("finalizers") if isinstance(metadata.get("finalizers"), list) else [],
+            "labels": labels,
+            "diagnostic_annotations": diagnostic_annotations,
             "ownerReferences": owner_refs,
             "serviceAccountName": spec.get("serviceAccountName"),
             "nodeName": spec.get("nodeName"),
+            "restartPolicy": spec.get("restartPolicy"),
+            "terminationGracePeriodSeconds": spec.get("terminationGracePeriodSeconds"),
+            "nodeSelector": spec.get("nodeSelector") if isinstance(spec.get("nodeSelector"), dict) else {},
+            "tolerations": spec.get("tolerations") if isinstance(spec.get("tolerations"), list) else [],
+            "affinity_present": isinstance(spec.get("affinity"), dict) and bool(spec.get("affinity")),
             "imagePullSecrets": image_pull_secrets,
             "imagePullSecrets_present": image_pull_secrets_raw is not None,
             "containers": containers,
@@ -424,6 +485,7 @@ class ObservationProcessor:
             "phase": status.get("phase"),
             "reason": status.get("reason"),
             "message": status.get("message"),
+            "conditions": conditions,
             "containerStatuses": container_statuses,
         }
 
@@ -432,21 +494,59 @@ class ObservationProcessor:
             "kind: Pod",
             f"name: {metadata.get('name')}",
             f"namespace: {metadata.get('namespace')}",
+            f"creationTimestamp: {metadata.get('creationTimestamp')}",
+            f"deletionTimestamp: {metadata.get('deletionTimestamp') or '<absent>'}",
+            f"deletionGracePeriodSeconds: {metadata.get('deletionGracePeriodSeconds')}",
+            "finalizers: " + (
+                ", ".join(str(item) for item in structured["finalizers"])
+                if structured["finalizers"] else "<none>"
+            ),
             f"serviceAccountName: {spec.get('serviceAccountName')}",
             f"nodeName: {spec.get('nodeName')}",
+            f"restartPolicy: {spec.get('restartPolicy')}",
+            f"terminationGracePeriodSeconds: {spec.get('terminationGracePeriodSeconds')}",
             "imagePullSecrets: " + (", ".join(image_pull_secrets) if image_pull_secrets else "<absent>"),
             f"phase: {status.get('phase')}",
         ]
+        if labels:
+            label_facts = {
+                key: labels.get(key)
+                for key in sorted(labels)
+                if key in {"app", "pod_abnormal_type", "expected_layer", "e2e-test"}
+                or str(key).startswith(("aiops.", "robusta."))
+            }
+            if label_facts:
+                lines.append("labels: " + ", ".join(f"{k}={v}" for k, v in label_facts.items()))
+        if diagnostic_annotations:
+            lines.append("diagnostic_annotations: " + ", ".join(
+                f"{k}={v}" for k, v in sorted(diagnostic_annotations.items())
+            ))
         if owner_refs:
             lines.append("ownerReferences: " + ", ".join(
                 f"{item.get('kind')}/{item.get('name')}" for item in owner_refs
             ))
+        if structured["nodeSelector"]:
+            lines.append("nodeSelector: " + json.dumps(structured["nodeSelector"], ensure_ascii=False))
+        if structured["tolerations"]:
+            lines.append("tolerations_count: " + str(len(structured["tolerations"])))
+        if structured["affinity_present"]:
+            lines.append("affinity_present: True")
         if containers:
             lines.append("containers:")
             lines.extend(
                 f"- {item.get('name')}: image={item.get('image')} imagePullPolicy={item.get('imagePullPolicy')}"
                 for item in containers
             )
+        if conditions:
+            lines.append("conditions:")
+            for item in conditions[:10]:
+                detail = (
+                    f"- {item.get('type')}: status={item.get('status')} "
+                    f"reason={item.get('reason')}"
+                )
+                if item.get("message"):
+                    detail += f" message={item.get('message')}"
+                lines.append(detail)
         if container_statuses:
             lines.append("containerStatuses:")
             for item in container_statuses:
@@ -454,8 +554,10 @@ class ObservationProcessor:
                 terminated = item.get("terminated") or item.get("lastTerminated") or {}
                 reason = waiting.get("reason") or terminated.get("reason")
                 message = waiting.get("message") or terminated.get("message")
+                exit_code = terminated.get("exitCode")
                 lines.append(
-                    f"- {item.get('name')}: ready={item.get('ready')} restarts={item.get('restartCount')} reason={reason}"
+                    f"- {item.get('name')}: ready={item.get('ready')} restarts={item.get('restartCount')} "
+                    f"reason={reason} exitCode={exit_code}"
                 )
                 if message:
                     lines.append(f"  message: {message}")
@@ -607,6 +709,36 @@ class ObservationProcessor:
             lines.append(f"stderr: {stderr[:1000]}")
         return structured, "\n".join(lines), "command_result"
 
+    def _extract_logs(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
+        if re.search(r"command failed|error from server|notfound|not found", raw, re.IGNORECASE):
+            return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary(tool, raw), "k8s_logs"
+
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        signal_patterns = (
+            r"error|exception|traceback|panic|fatal|critical|failed|fail|warn|warning|"
+            r"oom|killed|timeout|timed out|connection refused|permission denied|"
+            r"no such file|not found|crash|segfault"
+        )
+        signal_lines = [ln for ln in lines if re.search(signal_patterns, ln, re.IGNORECASE)]
+        selected = signal_lines[:40] or lines[-40:]
+        structured = {
+            "status": "logs_summarized",
+            "line_count": len(lines),
+            "signal_count": len(signal_lines),
+            "selected_lines": selected,
+        }
+        summary_lines = [
+            f"{tool} 日志摘要:",
+            f"lines: {len(lines)}",
+            f"signals: {len(signal_lines)}",
+        ]
+        if selected:
+            summary_lines.append("关键日志:")
+            summary_lines.extend(selected)
+        else:
+            summary_lines.append("日志为空；这是负向观察，不能证明应用无异常。")
+        return structured, "\n".join(summary_lines), "k8s_logs"
+
     def _generic_summary(self, tool: str, raw: str) -> str:
         lines = [ln for ln in raw.splitlines() if ln.strip()]
         head = "\n".join(lines[:40])
@@ -619,6 +751,7 @@ class ObservationProcessor:
             "empty",
             "command_failed",
             "yaml_parse_failed",
+            "invalid_tool",
             "run_image_result",
             "command_result",
         }:

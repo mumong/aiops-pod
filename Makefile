@@ -42,8 +42,8 @@ deploy-slave:
 	@echo "✅ Slave cluster deployed successfully!"
 
 delete:
-	@echo "Deleting (keeping namespace)..."
-	kubectl delete -f deploy/k8s-simple.yaml --ignore-not-found
+	@echo "Deleting app resources only (keeping namespace, PVC and PV)..."
+	kubectl delete deployment/aiops-copilot service/aiops-copilot -n aiops --ignore-not-found
 	kubectl delete -f deploy/rbac.yaml --ignore-not-found
 	kubectl delete -f deploy/secrets/ --recursive --ignore-not-found
 	kubectl delete -f deploy/configmap/ --recursive --ignore-not-found
