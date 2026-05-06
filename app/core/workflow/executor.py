@@ -9,6 +9,7 @@
 """
 
 import copy
+import json
 import uuid
 import os
 import time
@@ -141,14 +142,16 @@ class WorkflowExecutor:
             query_mode=query_mode,
         )
 
-        # Propagate aicall to nodes if available
-        if self.ai_call:
-            for node in node_instances:
+        # Propagate per-request metadata to every node. `current_run_id` must
+        # not depend on ai_call availability because lite/template paths can
+        # still archive artifacts or call LLM later in the node.
+        for node in node_instances:
+            node.cancel_event = cancel_event  # 传递取消信号
+            node.current_run_id = run_id
+            node.workflow_config_override = wf_config
+            if self.ai_call:
                 node.ai_call = self.ai_call
                 node.tools = self.mcp_tools or []
-                node.cancel_event = cancel_event  # 传递取消信号
-                node.current_run_id = run_id
-                node.workflow_config_override = wf_config
                 logger.debug("   🔧 [%s] ai_call=%s tools=%d",
                              node.node_id, type(node.ai_call).__name__, len(node.tools))
 
@@ -692,12 +695,21 @@ class WorkflowExecutor:
             }
         elif node_name == "evidence":
             evidence_items = state.get("evidence_items", [])
+            evidence_analysis = state.get("evidence_analysis", "")
             collected = sum(1 for e in evidence_items if getattr(e, 'collected', False))
+            count = len(evidence_items)
+            try:
+                analysis_data = json.loads(evidence_analysis) if evidence_analysis else {}
+                if isinstance(analysis_data.get("plan_total"), int):
+                    collected = int(analysis_data.get("plan_collected") or 0)
+                    count = int(analysis_data.get("plan_total") or 0)
+            except Exception:
+                pass
             snapshot = {
-                "evidence_count": len(evidence_items),
+                "evidence_count": count,
                 "collected_count": collected,
                 "completeness": state.get("evidence_completeness"),
-                "evidence_analysis": state.get("evidence_analysis", ""),
+                "evidence_analysis": evidence_analysis,
                 "evidence_items": evidence_items,
             }
         elif node_name == "rca":

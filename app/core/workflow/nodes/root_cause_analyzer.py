@@ -96,37 +96,21 @@ class RootCauseAnalyzerNode(WorkflowNode):
                         f"layer_handoff长度={len(json.dumps(state.get('layer_handoff') or {}, ensure_ascii=False, default=str))}")
 
             evidence_summary = self._build_rca_context(state)
-            missing_primary = self._get_missing_primary_pod_conflict(state)
-            
             # 使用 LLM 分析
-            if missing_primary:
-                logger.warning(
-                    "⚠️ [rca] primary_pod 当前不存在，跳过常规 RCA: %s/%s",
-                    missing_primary.get("namespace", ""),
-                    missing_primary.get("name", ""),
+            ai_call = getattr(self, 'ai_call', None)
+            if ai_call is not None:
+                rca_result, thinking_events = self._analyze_with_llm(
+                    question, layer, evidence_summary
                 )
-                rca_result = self._build_primary_pod_missing_result(
+            else:
+                # 无 LLM 时仅保留通用低置信度兜底
+                logger.info("⚠️ 无 LLM 服务，使用通用低置信度兜底")
+                rca_result = self._build_llm_fallback(
                     question=question,
                     layer=layer,
-                    missing_primary=missing_primary,
-                    evidence_summary=evidence_summary,
+                    reason="LLM 不可用，无法完成可靠根因分析",
                 )
                 thinking_events = []
-            else:
-                ai_call = getattr(self, 'ai_call', None)
-                if ai_call is not None:
-                    rca_result, thinking_events = self._analyze_with_llm(
-                        question, layer, evidence_summary
-                    )
-                else:
-                    # 无 LLM 时仅保留通用低置信度兜底
-                    logger.info("⚠️ 无 LLM 服务，使用通用低置信度兜底")
-                    rca_result = self._build_llm_fallback(
-                        question=question,
-                        layer=layer,
-                        reason="LLM 不可用，无法完成可靠根因分析",
-                    )
-                    thinking_events = []
             
             # 构建决策对象
             decision = self._build_decision(layer, evidence_items, rca_result)

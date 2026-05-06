@@ -266,13 +266,25 @@ class ConclusionFormatterNode(WorkflowNode):
         evidence_stats_section = ""
         try:
             ea = json.loads(evidence_analysis) if evidence_analysis else {}
-            cs = ea.get("collection_summary", "")
+            stats = self._extract_evidence_stats(ea)
+            cs = stats.get("collection_summary", "")
             inv = ea.get("evidence_inventory", [])
             mr = ea.get("missing_reasons", [])
             if cs or inv:
                 parts = ["\n# ⚠️ 证据采集统计（系统数据，必须原样引用，禁止自行计算）"]
                 if cs:
                     parts.append(f"collection_summary: {cs}")
+                if stats:
+                    parts.append(
+                        "plan_stats: "
+                        f"{stats.get('plan_collected', 0)}/{stats.get('plan_total', 0)} "
+                        f"({stats.get('plan_completeness_pct', '0%')})"
+                    )
+                    parts.append(
+                        "environment_evidence_stats: "
+                        f"{stats.get('environment_collected', 0)}/{stats.get('environment_total', 0)} "
+                        f"({stats.get('environment_completeness_pct', '0%')})"
+                    )
                 if inv:
                     collected_items = [i for i in inv if i.get("collected")]
                     missing_items = [i for i in inv if not i.get("collected")]
@@ -448,14 +460,19 @@ class ConclusionFormatterNode(WorkflowNode):
         lines.append("")
 
         if columns:
-            labels = [c.get("label", c.get("key", "")) for c in columns]
-            keys = [c.get("key", "") for c in columns]
+            normalized_columns = [
+                c if isinstance(c, dict) else {"key": str(c), "label": str(c)}
+                for c in columns
+            ]
+            labels = [c.get("label", c.get("key", "")) for c in normalized_columns]
+            keys = [c.get("key", "") for c in normalized_columns]
             lines.append("## 📈 数据摘要")
             lines.append("")
             lines.append("| " + " | ".join(labels) + " |")
             lines.append("|" + "|".join(["------"] * len(labels)) + "|")
             for row in rows:
-                values = [str(row.get(key, "未获取到")) for key in keys]
+                row_data = row if isinstance(row, dict) else {"value": row}
+                values = [str(row_data.get(key, "未获取到")) for key in keys]
                 lines.append("| " + " | ".join(values) + " |")
             lines.append("")
 
@@ -465,7 +482,10 @@ class ConclusionFormatterNode(WorkflowNode):
             for note in notes:
                 lines.append(f"- {note}")
             for item in missing:
-                lines.append(f"- **未获取到** `{item.get('field', '?')}`: {item.get('reason', '未知原因')}")
+                if isinstance(item, dict):
+                    lines.append(f"- **未获取到** `{item.get('field', '?')}`: {item.get('reason', '未知原因')}")
+                else:
+                    lines.append(f"- **未获取到**: {item}")
             lines.append("")
 
         if sources:
@@ -474,7 +494,10 @@ class ConclusionFormatterNode(WorkflowNode):
             lines.append("| 工具 | 查询语句 |")
             lines.append("|------|----------|")
             for source in sources:
-                lines.append(f"| {source.get('tool', '-')} | {source.get('query', '-') or '-'} |")
+                if isinstance(source, dict):
+                    lines.append(f"| {source.get('tool', '-')} | {source.get('query', '-') or '-'} |")
+                else:
+                    lines.append(f"| - | {source} |")
             lines.append("")
 
         return "\n".join(lines)
@@ -1037,6 +1060,53 @@ class ConclusionFormatterNode(WorkflowNode):
             return ""
         return "\n".join(parts[:20])  # 最多 20 条，避免超长
 
+    @staticmethod
+    def _extract_evidence_stats(evidence_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract authoritative evidence stats from structured evidence JSON."""
+        inv = evidence_data.get("evidence_inventory", []) or []
+        if isinstance(evidence_data.get("plan_total"), int):
+            plan_total = int(evidence_data.get("plan_total") or 0)
+            plan_collected = int(evidence_data.get("plan_collected") or 0)
+            plan_completeness = float(evidence_data.get("plan_completeness") or 0)
+        else:
+            plan_total = len(inv)
+            plan_collected = sum(1 for item in inv if isinstance(item, dict) and item.get("collected"))
+            plan_completeness = plan_collected / max(plan_total, 1)
+
+        if isinstance(evidence_data.get("environment_evidence_total"), int):
+            env_total = int(evidence_data.get("environment_evidence_total") or 0)
+            env_collected = int(evidence_data.get("environment_evidence_collected") or 0)
+            env_completeness = float(evidence_data.get("environment_evidence_completeness") or 0)
+        else:
+            measurable = [
+                item for item in inv
+                if isinstance(item, dict)
+                and str(item.get("level", "")).lower() not in {"optional", "reference"}
+                and str(item.get("source", "")).lower() not in {"reference", "archive"}
+                and "fetch_runbook" not in str(item.get("description", "")).lower()
+                and "read_context_archive" not in str(item.get("description", "")).lower()
+            ]
+            env_total = len(measurable)
+            env_collected = sum(1 for item in measurable if item.get("collected"))
+            env_completeness = env_collected / max(env_total, 1)
+
+        collection_summary = evidence_data.get("collection_summary") or (
+            f"计划 {plan_total} 项，实际采集 {plan_collected} 项，"
+            f"未采集 {plan_total - plan_collected} 项，完整度 {plan_completeness:.0%}；"
+            f"其中真实环境证据 {env_collected}/{env_total} 项，完整度 {env_completeness:.0%}"
+        )
+        return {
+            "collection_summary": collection_summary,
+            "plan_total": plan_total,
+            "plan_collected": plan_collected,
+            "plan_completeness": plan_completeness,
+            "plan_completeness_pct": f"{plan_completeness:.0%}",
+            "environment_total": env_total,
+            "environment_collected": env_collected,
+            "environment_completeness": env_completeness,
+            "environment_completeness_pct": f"{env_completeness:.0%}",
+        }
+
     def _enforce_evidence_stats(self, content: str, evidence_analysis: str) -> str:
         """
         后处理：强制替换 LLM 输出中的证据统计数据为真实值。
@@ -1051,15 +1121,14 @@ class ConclusionFormatterNode(WorkflowNode):
         except (json.JSONDecodeError, TypeError):
             return content
 
-        cs = ea.get("collection_summary", "")
+        stats = self._extract_evidence_stats(ea)
         inv = ea.get("evidence_inventory", [])
-        if not cs and not inv:
+        if not stats and not inv:
             return content
 
-        # 从 collection_summary 提取真实数据: "计划 X 项，实际采集 Y 项，未采集 Z 项，完整度 N%"
-        total = len(inv) if inv else 0
-        collected = sum(1 for i in inv if i.get("collected")) if inv else 0
-        completeness_pct = f"{collected / max(total, 1):.0%}"
+        total = int(stats.get("plan_total") or 0)
+        collected = int(stats.get("plan_collected") or 0)
+        completeness_pct = str(stats.get("plan_completeness_pct") or "0%")
 
         real_stat = f"{collected}/{total} ({completeness_pct})"
 
