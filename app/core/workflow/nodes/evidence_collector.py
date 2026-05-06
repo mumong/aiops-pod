@@ -195,9 +195,16 @@ class EvidenceCollectorNode(WorkflowNode):
             tool_data_from_llm = self._extract_tool_data_from_thinking(thinking_events)
 
             # 6. 构建证据清单（真实数据，供 conclusion LLM 引用）
-            collected = sum(1 for e in evidence_items if e.collected)
-            total = len(evidence_items)
-            not_collected = [e for e in evidence_items if not e.collected]
+            # plan_total 保持与模型输出的 evidence_plan 对齐；environment_total
+            # 只统计真实环境证据。报告同时展示两个口径，避免用户看到
+            # evidence_plan=4 项但“证据完整度 3/3”这种不直观结果。
+            measurable_items = self._measurable_evidence_items(evidence_items)
+            plan_collected = sum(1 for e in evidence_items if e.collected)
+            plan_total = len(evidence_items)
+            collected = sum(1 for e in measurable_items if e.collected)
+            total = len(measurable_items)
+            not_collected = [e for e in measurable_items if not e.collected]
+            plan_completeness = (plan_collected / plan_total) if plan_total else 0.0
             evidence_facts = self._build_evidence_facts(evidence_items)
             evidence_conflicts = self._build_evidence_conflicts(tool_data_from_llm, layer_handoff)
             missing_evidence = [
@@ -205,12 +212,21 @@ class EvidenceCollectorNode(WorkflowNode):
                 for e in not_collected
             ]
 
+            plan_by_id = {
+                str(item.get("id", "")): item
+                for item in evidence_plan
+                if isinstance(item, dict)
+            }
             evidence_inventory = []
             for e in evidence_items:
+                plan_item = plan_by_id.get(str(e.id), {})
                 evidence_inventory.append({
                     "id": e.id,
                     "description": e.description,
                     "level": e.level.value if hasattr(e.level, 'value') else str(e.level),
+                    "tool": plan_item.get("tool", ""),
+                    "command": plan_item.get("command", ""),
+                    "purpose": plan_item.get("purpose", ""),
                     "collected": e.collected,
                     "source": getattr(e, 'source', ''),
                 })
@@ -231,7 +247,17 @@ class EvidenceCollectorNode(WorkflowNode):
                     "tool_results": [r.get("summary", "") for r in tool_results],
                     "tool_data": tool_data_from_llm,
                     "llm_analysis": llm_result_text[:3000] if llm_result_text else "",
-                    "collection_summary": f"计划 {total} 项，实际采集 {collected} 项，未采集 {total - collected} 项，完整度 {completeness:.0%}",
+                    "collection_summary": (
+                        f"计划 {plan_total} 项，实际采集 {plan_collected} 项，"
+                        f"未采集 {plan_total - plan_collected} 项，完整度 {plan_completeness:.0%}；"
+                        f"其中真实环境证据 {collected}/{total} 项，完整度 {completeness:.0%}"
+                    ),
+                    "plan_total": plan_total,
+                    "plan_collected": plan_collected,
+                    "plan_completeness": plan_completeness,
+                    "environment_evidence_total": total,
+                    "environment_evidence_collected": collected,
+                    "environment_evidence_completeness": completeness,
                     "evidence_inventory": evidence_inventory,
                     "missing_reasons": missing_reasons,
                     "early_stop": dict(self._early_stop_state),
@@ -628,9 +654,11 @@ class EvidenceCollectorNode(WorkflowNode):
 # Runbook 语义匹配要求
 - 根据 Available Runbooks/catalog 的 description、runbook_id、状态关键字与 layer_handoff 中的 pod_status_keyword、pod_abnormal_type、primary_pod、active_signals 做语义匹配。
 - 如果某个 Pod 异常 runbook 明显匹配当前 Pod 异常状态，evidence_plan 必须包含一条 level=reference、tool=fetch_runbook 的参考步骤；多个当前异常类型可以获取多个明显匹配的 runbook。
+- 匹配到 runbook 时，fetch_runbook 必须在真实环境工具前执行。先读 runbook，再把 runbook 的关键检查点转化为 kubectl/prometheus 等真实环境验证步骤。
 - 不要依赖代码注入的 runbook 推荐字段；是否调用 runbook 必须由你根据 catalog 描述和当前异常信号自主判断。
 - runbook 是参考知识，不是真实环境证据；fetch_runbook 后仍必须调用 kubectl/prometheus 等真实环境工具验证关键事实。
 - 如果你在分析中认为“应该查看/参考某个 runbook”，必须把它写入 evidence_plan 并实际调用 fetch_runbook；禁止只在思考中提到 runbook 却不调用。
+- 只有当 catalog 中没有明显匹配项，或上游判断为 HEALTHY/QUERY，才允许不调用 fetch_runbook；这种情况下最终消息必须说明“未发现明显匹配的 Pod 异常 runbook”。
 
 # 可选归档上下文
 {archive_section}
@@ -643,10 +671,12 @@ class EvidenceCollectorNode(WorkflowNode):
 - 在输出 evidence_plan JSON 之前，禁止调用任何工具。
 - 输出 evidence_plan 后不能结束，必须继续调用至少一个 critical 或 important 级真实工具。
 - LLM 必须自己决定并调用工具；计划不是证据。
+- evidence_plan 就是本轮计划采集清单；后续工具调用必须尽量逐项完成 plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
+- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。
 - 必须优先围绕 primary_pod 验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要先做大范围集群扫描。
 - 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
 - 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
-- 如果 Available Runbooks/catalog 中存在明显匹配当前 Pod 异常状态的 runbook，应先执行 fetch_runbook 参考步骤；但不能只 fetch_runbook 后结束，必须继续调用真实环境工具。reference/runbook 步骤不是证据，不计入 critical/important 完整度。
+- 如果 Available Runbooks/catalog 中存在明显匹配当前 Pod 异常状态的 runbook，应先执行 fetch_runbook 参考步骤；但不能只 fetch_runbook 后结束，必须继续调用真实环境工具。reference/runbook 步骤不是证据，不计入 critical/important 完整度。存在明显匹配 runbook 却未调用 fetch_runbook 时，本轮采证视为不完整。
 - 如果输入里给出了 raw_ref、summary_ref、structured_ref、archive_ref、handoff_ref、input_ref、output_ref 等路径，而你需要查看其内容，必须调用 read_context_archive 工具；模型不能直接访问本地文件。
 {strict_section}
 # 输出
@@ -958,28 +988,20 @@ class EvidenceCollectorNode(WorkflowNode):
                 source="thinking_match" if matched else "planned",
             ))
 
-        # 未匹配到 plan 的成功工具调用作为额外采集（过滤非证据工具）
-        for ti, tool in enumerate(successful_tools):
-            if ti in matched_tool_indices:
-                continue
-            if tool["tool_name"].lower() in self._NON_EVIDENCE_TOOLS:
-                continue
-            evidence_items.append(EvidenceItem(
-                id=f"extra_{ti}",
-                description=f"工具采集: {tool['tool_name']}",
-                level=EvidenceLevel.IMPORTANT,
-                weight=0.15,
-                collected=True,
-                value=tool["result"][:500] if tool["result"] else None,
-                source="thinking_extra",
-            ))
-
+        # 有 plan 时，最终 evidence_items 必须与 plan 对齐。
+        # 未规划但实际执行的工具结果保留在 tool_data/thinking_events 中，不能混入
+        # evidence_items，否则前端展示的 plan 与最终完整度口径会漂移。
+        unplanned_tool_count = sum(
+            1 for ti, tool in enumerate(successful_tools)
+            if ti not in matched_tool_indices
+            and tool["tool_name"].lower() not in self._NON_EVIDENCE_TOOLS
+        )
         logger.info("📊 [evidence] 证据统计: plan=%d 项, "
                     "thinking_tools=%d 个成功调用, "
-                    "matched=%d, extra=%d",
+                    "matched=%d, unplanned=%d",
                     len(evidence_plan), len(successful_tools),
                     len(matched_tool_indices),
-                    sum(1 for e in evidence_items if getattr(e, 'source', '') == 'thinking_extra'))
+                    unplanned_tool_count)
 
         return evidence_items
 
@@ -993,6 +1015,10 @@ class EvidenceCollectorNode(WorkflowNode):
         structured: Dict[str, Any],
     ) -> bool:
         if not result or not result.strip():
+            return False
+        if (structured or {}).get("status") in {"invalid_tool", "command_failed", "extract_failed"}:
+            return False
+        if not EvidenceCollectorNode._namespace_scope_matches(plan_cmd, result):
             return False
 
         tool_match = (
@@ -1008,8 +1034,10 @@ class EvidenceCollectorNode(WorkflowNode):
         lower_result = result.lower()
 
         if "logs" in combined or "日志" in combined:
-            return "kubectl_logs" in tool_name or not (
-                structured.get("kind") == "Pod" and "kubectl_get_yaml" in tool_name
+            return (
+                "kubectl_logs" in tool_name
+                or "run_bash_command" in tool_name
+                or not (structured.get("kind") == "Pod" and "kubectl_get_yaml" in tool_name)
             )
 
         if "configmap" in combined:
@@ -1031,15 +1059,75 @@ class EvidenceCollectorNode(WorkflowNode):
 
         return True
 
+    @staticmethod
+    def _namespace_scope_matches(plan_cmd: str, result: str) -> bool:
+        """Reject obvious namespace drift for tabular outputs."""
+        match = re.search(r"(?:^|\s)(?:-n|--namespace(?:=|\s+))\s*([^\s]+)", plan_cmd or "")
+        if not match:
+            return True
+
+        expected_namespace = match.group(1).strip("'\"").lower()
+        if not expected_namespace:
+            return True
+
+        lower_result = (result or "").lower()
+        if f"namespace: {expected_namespace}" in lower_result or f"namespace={expected_namespace}" in lower_result:
+            return True
+
+        lines = [line.strip() for line in (result or "").splitlines() if line.strip()]
+        header_index = next(
+            (
+                idx for idx, line in enumerate(lines[:5])
+                if "namespace" in line.lower().split()
+            ),
+            None,
+        )
+        if header_index is None:
+            return True
+
+        columns = lines[header_index].lower().split()
+        try:
+            namespace_index = columns.index("namespace")
+        except ValueError:
+            return True
+
+        rows = lines[header_index + 1:]
+        if not rows:
+            return True
+
+        namespaces = {
+            parts[namespace_index].strip("'\"").lower()
+            for row in rows
+            if (parts := row.split()) and len(parts) > namespace_index
+        }
+        return not namespaces or expected_namespace in namespaces
+
     def _calculate_completeness(self, evidence_items: List[EvidenceItem]) -> float:
-        """计算证据采集率：已采集数 / 总数（计划 + 额外）"""
-        if not evidence_items:
+        """计算真实环境证据采集率，reference/runbook 不计入分母。"""
+        measurable_items = self._measurable_evidence_items(evidence_items)
+        if not measurable_items:
             return 0.0
 
-        total = len(evidence_items)
-        collected = sum(1 for e in evidence_items if e.collected)
+        total = len(measurable_items)
+        collected = sum(1 for e in measurable_items if e.collected)
 
         return collected / total
+
+    def _measurable_evidence_items(self, evidence_items: List[EvidenceItem]) -> List[EvidenceItem]:
+        """Return evidence items that should count toward collection completeness."""
+        measurable: List[EvidenceItem] = []
+        for item in evidence_items or []:
+            level_value = item.level.value if hasattr(item.level, "value") else str(item.level)
+            if str(level_value).lower() in {"optional", "reference"}:
+                continue
+            desc = (item.description or "").lower()
+            source = str(getattr(item, "source", "") or "").lower()
+            if source in {"reference", "archive"}:
+                continue
+            if "fetch_runbook" in desc or "read_context_archive" in desc:
+                continue
+            measurable.append(item)
+        return measurable
 
     def _update_metrics(
         self,

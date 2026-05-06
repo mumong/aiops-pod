@@ -10,17 +10,34 @@ from app.core.aicall.client import AICall
 
 
 def _install_fake_langfuse(monkeypatch):
-    calls = {"sessions": []}
+    calls = {"sessions": [], "spans": []}
 
     @contextmanager
     def _propagate_attributes(**kwargs):
         calls["sessions"].append(kwargs.get("session_id"))
         yield
 
+    class _FakeClient:
+        @contextmanager
+        def start_as_current_observation(self, **kwargs):
+            calls["spans"].append(kwargs)
+            yield
+
+    def _get_client():
+        return _FakeClient()
+
     fake_langfuse = types.ModuleType("langfuse")
     fake_langfuse.propagate_attributes = _propagate_attributes
+    fake_langfuse.get_client = _get_client
+    fake_langfuse_langchain = types.ModuleType("langfuse.langchain")
+
+    class _CallbackHandler:
+        pass
+
+    fake_langfuse_langchain.CallbackHandler = _CallbackHandler
 
     monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse)
+    monkeypatch.setitem(sys.modules, "langfuse.langchain", fake_langfuse_langchain)
     return calls
 
 
@@ -49,11 +66,15 @@ def test_call_simple_creates_fresh_chat_model_per_invocation():
 
 
 def test_call_simple_propagates_langfuse_session_id(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
     langfuse_calls = _install_fake_langfuse(monkeypatch)
     invoke_configs = []
     model_instances = []
+    created_kwargs = []
 
     def _new_model(**kwargs):
+        created_kwargs.append(kwargs)
         model = MagicMock()
 
         def _invoke(messages, config=None):
@@ -71,12 +92,28 @@ def test_call_simple_propagates_langfuse_session_id(monkeypatch):
 
     assert result == "ok"
     assert langfuse_calls["sessions"] == ["run-session-1"]
-    assert "metadata" not in invoke_configs[0]
+    assert langfuse_calls["spans"][0]["name"] == "workflow-evidence"
+    assert langfuse_calls["spans"][0]["metadata"]["session_id"] == "run-session-1"
+    assert langfuse_calls["spans"][0]["metadata"]["node_id"] == "evidence"
+    assert langfuse_calls["spans"][0]["metadata"]["trace_id"] == "run-session-1:evidence"
+    assert invoke_configs[0]["metadata"]["session_id"] == "run-session-1"
+    assert invoke_configs[0]["metadata"]["node_id"] == "evidence"
+    assert invoke_configs[0]["metadata"]["trace_id"] == "run-session-1:evidence"
+    assert len(invoke_configs[0]["callbacks"]) == 1
     assert "session:run-session-1" in invoke_configs[0]["tags"]
+    assert created_kwargs[0]["extra_body"]["metadata"]["session_id"] == "run-session-1"
+    assert created_kwargs[0]["extra_body"]["metadata"]["node_id"] == "evidence"
+    assert created_kwargs[0]["extra_body"]["metadata"]["trace_id"] == "run-session-1:evidence"
+    assert created_kwargs[0]["extra_body"]["trace_id"] == "run-session-1:evidence"
+    assert created_kwargs[0]["extra_body"]["generation_name"] == "workflow-evidence"
+    assert created_kwargs[0]["extra_body"]["user"] == "run-session-1"
     bound_kwargs = model_instances[0].bind.call_args.kwargs
     assert bound_kwargs["extra_body"]["metadata"]["session_id"] == "run-session-1"
     assert bound_kwargs["extra_body"]["metadata"]["langfuse_session_id"] == "run-session-1"
-    assert model_instances[0].bind.call_args.kwargs["user"] == "run-session-1"
+    assert bound_kwargs["extra_body"]["trace_id"] == "run-session-1:evidence"
+    assert bound_kwargs["extra_body"]["generation_name"] == "workflow-evidence"
+    assert model_instances[0].bind.call_args.kwargs["extra_body"]["user"] == "run-session-1"
+    assert bound_kwargs["extra_body"]["metadata"]["node_id"] == "evidence"
 
 
 def test_call_with_tools_creates_fresh_chat_model_per_invocation():
@@ -132,10 +169,14 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
 
 
 def test_call_with_tools_propagates_langfuse_session_id(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
     langfuse_calls = _install_fake_langfuse(monkeypatch)
     astream_configs = []
+    created_kwargs = []
 
     def _new_model(**kwargs):
+        created_kwargs.append(kwargs)
         return MagicMock()
 
     class _CompletedFuture:
@@ -174,18 +215,69 @@ def test_call_with_tools_propagates_langfuse_session_id(monkeypatch):
         ai.call("sys", "q", tools=[tool], run_id="run-session-2", node_id="layer", max_steps=3)
 
     assert langfuse_calls["sessions"] == ["run-session-2"]
+    assert langfuse_calls["spans"][0]["name"] == "workflow-layer"
+    assert langfuse_calls["spans"][0]["metadata"]["session_id"] == "run-session-2"
+    assert langfuse_calls["spans"][0]["metadata"]["node_id"] == "layer"
+    assert langfuse_calls["spans"][0]["metadata"]["trace_id"] == "run-session-2:layer"
     assert astream_configs[0]["recursion_limit"] == 3
-    assert "metadata" not in astream_configs[0]
+    assert astream_configs[0]["metadata"]["session_id"] == "run-session-2"
+    assert astream_configs[0]["metadata"]["node_id"] == "layer"
+    assert astream_configs[0]["metadata"]["trace_id"] == "run-session-2:layer"
+    assert len(astream_configs[0]["callbacks"]) == 1
     assert "session:run-session-2" in astream_configs[0]["tags"]
+    assert "node:layer" in astream_configs[0]["tags"]
+    assert created_kwargs[0]["extra_body"]["metadata"]["session_id"] == "run-session-2"
+    assert created_kwargs[0]["extra_body"]["metadata"]["node_id"] == "layer"
+    assert created_kwargs[0]["extra_body"]["metadata"]["trace_id"] == "run-session-2:layer"
+    assert created_kwargs[0]["extra_body"]["trace_id"] == "run-session-2:layer"
+    assert created_kwargs[0]["extra_body"]["generation_name"] == "workflow-layer"
+    assert created_kwargs[0]["extra_body"]["user"] == "run-session-2"
 
 
 def test_langfuse_session_scope_preserves_original_exception(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
     _install_fake_langfuse(monkeypatch)
     ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
 
     with pytest.raises(ValueError, match="original failure"):
         with ai._langfuse_session_scope("run-session-error", "layer"):
             raise ValueError("original failure")
+
+
+def test_langfuse_sdk_is_disabled_without_keys(monkeypatch):
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    langfuse_calls = _install_fake_langfuse(monkeypatch)
+    invoke_configs = []
+
+    def _new_model(**kwargs):
+        model = MagicMock()
+
+        def _invoke(messages, config=None):
+            invoke_configs.append(config)
+            return MagicMock(content="ok")
+
+        model.bind.return_value = model
+        model.invoke.side_effect = _invoke
+        return model
+
+    with patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model):
+        ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
+        ai.call_simple("sys", "q", run_id="run-session-no-sdk", node_id="layer")
+
+    assert langfuse_calls["sessions"] == []
+    assert langfuse_calls["spans"] == []
+    assert "callbacks" not in invoke_configs[0]
+    assert invoke_configs[0]["metadata"]["session_id"] == "run-session-no-sdk"
+    assert invoke_configs[0]["metadata"]["trace_id"] == "run-session-no-sdk:layer"
+
+
+def test_langfuse_trace_id_is_unique_per_workflow_node():
+    assert AICall._session_metadata("run-a", "layer")["session_id"] == "run-a"
+    assert AICall._session_metadata("run-a", "evidence")["session_id"] == "run-a"
+    assert AICall._session_metadata("run-a", "layer")["trace_id"] == "run-a:layer"
+    assert AICall._session_metadata("run-a", "evidence")["trace_id"] == "run-a:evidence"
 
 
 def test_call_simple_json_parses_fenced_json_output():
