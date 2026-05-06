@@ -235,6 +235,75 @@ def test_aicall_returns_compact_yaml_summary_under_context_threshold(tmp_path, m
     assert processed["structured"]["imagePullSecrets"] == ["xnet-bmcs"]
 
 
+def test_observation_processor_includes_pod_lifecycle_structured_facts_in_yaml_summary(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=2000)
+    raw_yaml = """
+apiVersion: v1
+kind: Pod
+metadata:
+  name: terminating-stuck
+  namespace: aiops-e2e
+  creationTimestamp: "2026-04-29T06:54:19Z"
+  deletionTimestamp: "2026-04-29T06:56:00Z"
+  deletionGracePeriodSeconds: 0
+  finalizers:
+  - aiops.e2e/hold
+  labels:
+    pod_abnormal_type: TerminatingStuck
+  annotations:
+    aiops.e2e/runbook: pod-terminating-stuck.md
+    kubectl.kubernetes.io/last-applied-configuration: "very noisy"
+spec:
+  nodeName: node1
+  terminationGracePeriodSeconds: 30
+  restartPolicy: Always
+  containers:
+  - name: app
+    image: busybox:1.36
+status:
+  phase: Running
+  conditions:
+  - type: Ready
+    status: "False"
+    reason: ContainersNotReady
+  containerStatuses:
+  - name: app
+    ready: false
+    restartCount: 0
+    state:
+      terminated:
+        exitCode: 137
+        reason: Error
+        startedAt: "2026-04-29T06:54:19Z"
+        finishedAt: "2026-04-29T06:56:30Z"
+"""
+
+    processed = processor.process(
+        run_id="run-pod-lifecycle",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_get_yaml",
+        raw_content=raw_yaml,
+    )
+
+    structured = processed["structured"]
+    summary = processed["summary"]
+
+    assert structured["deletionTimestamp"] == "2026-04-29T06:56:00Z"
+    assert structured["deletionGracePeriodSeconds"] == 0
+    assert structured["finalizers"] == ["aiops.e2e/hold"]
+    assert structured["labels"]["pod_abnormal_type"] == "TerminatingStuck"
+    assert structured["diagnostic_annotations"] == {"aiops.e2e/runbook": "pod-terminating-stuck.md"}
+    assert structured["terminationGracePeriodSeconds"] == 30
+    assert structured["restartPolicy"] == "Always"
+    assert structured["conditions"][0]["type"] == "Ready"
+    assert "deletionTimestamp: 2026-04-29T06:56:00Z" in summary
+    assert "finalizers: aiops.e2e/hold" in summary
+    assert "deletionGracePeriodSeconds: 0" in summary
+    assert "aiops.e2e/runbook=pod-terminating-stuck.md" in summary
+    assert "conditions:" in summary
+
+
 def test_aicall_summarizes_yaml_tool_when_context_threshold_exceeded(tmp_path, monkeypatch):
     ai = AICall(
         model="openai/test",
@@ -428,3 +497,74 @@ def test_observation_processor_marks_failed_describe_as_negative(tmp_path):
     assert processed["structured"]["status"] == "command_failed"
     assert processed["semantic_success"] is False
     assert "NotFound" in processed["summary"]
+
+
+def test_observation_processor_marks_invalid_tool_as_negative(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
+
+    processed = processor.process(
+        run_id="run-invalid-tool",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_logs",
+        raw_content="Error: kubectl_logs is not a valid tool, try one of [kubectl_describe, kubectl_get_yaml].",
+    )
+
+    assert processed["processor"] == "invalid_tool"
+    assert processed["structured"]["status"] == "invalid_tool"
+    assert processed["semantic_success"] is False
+    assert "not a valid tool" in processed["summary"]
+
+
+def test_observation_processor_marks_medium_empty_output_as_negative(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
+
+    processed = processor.process(
+        run_id="run-empty-medium",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_get_by_name",
+        raw_content="No resources found in aiops-e2e namespace.",
+    )
+
+    assert processed["processor"] == "generic_empty"
+    assert processed["structured"]["status"] == "empty"
+    assert processed["semantic_success"] is False
+
+
+def test_observation_processor_marks_medium_command_failure_as_negative(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
+
+    processed = processor.process(
+        run_id="run-failed-medium",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_get_by_name",
+        raw_content='Command failed (exit 1):\nkubectl get customresource -n aiops-e2e\nerror: the server doesn\'t have a resource type "customresource"',
+    )
+
+    assert processed["processor"] == "generic_failure"
+    assert processed["structured"]["status"] == "command_failed"
+    assert processed["semantic_success"] is False
+
+
+def test_observation_processor_summarizes_kubectl_logs(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
+
+    processed = processor.process(
+        run_id="run-logs",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_previous_logs",
+        raw_content="\n".join([
+            "2026-04-30T01:00:00Z INFO startup ok",
+            "2026-04-30T01:00:01Z ERROR failed to load config key DB_URL",
+            "2026-04-30T01:00:02Z Traceback most recent call last",
+        ]),
+    )
+
+    assert processed["processor"] == "k8s_logs"
+    assert processed["structured"]["status"] == "logs_summarized"
+    assert processed["structured"]["signal_count"] == 2
+    assert "failed to load config" in processed["summary"]
+    assert processed["semantic_success"] is True

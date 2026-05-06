@@ -12,10 +12,11 @@
 """
 import json
 import logging
+import os
 import queue
 import re
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from langgraph.errors import GraphRecursionError
@@ -96,9 +97,21 @@ class AICall:
         logger.info("🔧 [AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
                     model_name, base_url or "(default)")
 
-    def _create_chat_model(self):
+    def _create_chat_model(self, session_id: Optional[str] = None, node_id: str = ""):
         """按次创建 ChatOpenAI，避免跨 asyncio event loop 复用底层 async client。"""
-        return ChatOpenAI(**self._chat_model_kwargs)
+        kwargs = dict(self._chat_model_kwargs)
+        metadata = self._session_metadata(session_id, node_id)
+        if metadata:
+            # Put session metadata on the base ChatOpenAI instance so LangChain
+            # agent internals such as bind_tools keep it on actual chat
+            # completion requests.
+            kwargs["extra_body"] = {
+                "metadata": metadata,
+                "trace_id": self._trace_id(session_id, node_id),
+                "generation_name": self._generation_name(node_id),
+                "user": session_id,
+            }
+        return ChatOpenAI(**kwargs)
 
     # ------------------------------------------------------------------
     # Public API
@@ -148,14 +161,14 @@ class AICall:
             messages.append(SystemMessage(content=system_prompt))
         messages.append(HumanMessage(content=question))
 
+        session_id = self._normalize_langfuse_session_id(run_id)
         # 透传 kwargs（如 max_tokens）到 model.invoke
-        model = self._create_chat_model()
+        model = self._create_chat_model(session_id=session_id, node_id=node_id or "simple")
         if kwargs:
             model = model.bind(**kwargs)
 
-        session_id = self._normalize_langfuse_session_id(run_id)
-        model = self._bind_session_metadata(model, session_id)
-        invoke_config = self._build_langchain_config(session_id)
+        model = self._bind_session_metadata(model, session_id, node_id=node_id or "simple")
+        invoke_config = self._build_langchain_config(session_id, node_id=node_id or "simple")
         with self._langfuse_session_scope(session_id, node_id or "simple"):
             result = model.invoke(messages, config=invoke_config) if invoke_config else model.invoke(messages)
         content = result.content or ""
@@ -276,7 +289,11 @@ class AICall:
         from langchain.agents import create_agent
 
         session_id = self._normalize_langfuse_session_id(run_id)
-        agent_model = self._bind_session_metadata(self._create_chat_model(), session_id)
+        agent_model = self._bind_session_metadata(
+            self._create_chat_model(session_id=session_id, node_id=node_id or "agent"),
+            session_id,
+            node_id=node_id or "agent",
+        )
         agent = create_agent(
             model=agent_model,
             tools=tools,
@@ -289,7 +306,7 @@ class AICall:
 
         input_messages = {"messages": [{"role": "user", "content": question}]}
         # recursion_limit 直接使用 config 传入的 max_steps，不做任何公式转换
-        langfuse_config = self._build_langchain_config(session_id)
+        langfuse_config = self._build_langchain_config(session_id, node_id=node_id or "agent")
         config = {"recursion_limit": max_steps}
         if langfuse_config:
             config.update(langfuse_config)
@@ -665,35 +682,93 @@ class AICall:
             return None
         return ascii_text[:199]
 
-    def _build_langchain_config(self, session_id: Optional[str]) -> Dict[str, Any]:
+    def _build_langchain_config(self, session_id: Optional[str], node_id: str = "") -> Dict[str, Any]:
         if not session_id:
             return {}
         # Keep this out of `metadata`: ChatOpenAI uses `metadata` both as a
         # runnable config field and as an OpenAI request field, which can cause
         # duplicate keyword errors when the model is also bound with request
         # metadata.
-        return {
-            "tags": [f"session:{session_id}"],
-        }
+        tags = [f"session:{session_id}"]
+        node_text = str(node_id or "").strip()
+        if node_text:
+            tags.append(f"node:{node_text}")
+        config: Dict[str, Any] = {"tags": tags, "metadata": self._session_metadata(session_id, node_id)}
+        if self._is_langfuse_sdk_configured():
+            handler = self._create_langfuse_callback_handler()
+            if handler is not None:
+                config["callbacks"] = [handler]
+        return config
 
-    def _bind_session_metadata(self, model: Any, session_id: Optional[str]) -> Any:
+    @staticmethod
+    def _is_langfuse_sdk_configured() -> bool:
+        return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
+
+    @staticmethod
+    def _create_langfuse_callback_handler() -> Optional[Any]:
+        if not AICall._is_langfuse_sdk_configured():
+            return None
+        try:
+            from langfuse.langchain import CallbackHandler
+
+            return CallbackHandler()
+        except Exception as exc:
+            logger.debug("📉 [AICall] Langfuse CallbackHandler 不可用，跳过 callbacks: %s", exc)
+            return None
+
+    def _bind_session_metadata(self, model: Any, session_id: Optional[str], node_id: str = "") -> Any:
         if not session_id:
             return model
-        metadata = {
-            "session_id": session_id,
-            "langfuse_session_id": session_id,
-            "run_id": session_id,
-        }
+        metadata = self._session_metadata(session_id, node_id)
+        if not metadata:
+            return model
         try:
-            # `metadata` and `user` are OpenAI chat completion request fields.
-            # Gateways such as LiteLLM can use them to attach Langfuse sessions.
+            # Keep `metadata` out of top-level bind/config. LangChain passes
+            # runnable metadata internally to generate_prompt(); binding it as
+            # a model kwarg causes "multiple values for keyword argument
+            # metadata". OpenAI-compatible gateways still receive session data
+            # through extra_body.metadata and user.
             return model.bind(
-                extra_body={"metadata": metadata},
-                user=session_id,
+                extra_body={
+                    "metadata": metadata,
+                    "trace_id": self._trace_id(session_id, node_id),
+                    "generation_name": self._generation_name(node_id),
+                    "user": session_id,
+                },
             )
         except Exception as exc:
             logger.debug("📉 [AICall] 绑定 session metadata 失败，继续原模型调用: %s", exc)
             return model
+
+    @staticmethod
+    def _session_metadata(session_id: Optional[str], node_id: str = "") -> Dict[str, str]:
+        if not session_id:
+            return {}
+        trace_id = AICall._trace_id(session_id, node_id)
+        metadata: Dict[str, str] = {
+            "session_id": session_id,
+            "langfuse_session_id": session_id,
+            "run_id": session_id,
+            "trace_id": trace_id,
+        }
+        node_text = str(node_id or "").strip()
+        if node_text:
+            metadata["node_id"] = node_text
+            metadata["workflow_node"] = node_text
+            metadata["generation_name"] = AICall._generation_name(node_text)
+        return metadata
+
+    @staticmethod
+    def _trace_id(session_id: Optional[str], node_id: str = "") -> Optional[str]:
+        if not session_id:
+            return None
+        node_text = str(node_id or "unknown").strip() or "unknown"
+        return f"{session_id}:{node_text}"
+
+    @staticmethod
+    def _generation_name(node_id: str = "") -> str:
+        node_text = str(node_id or "unknown").strip() or "unknown"
+        return f"workflow-{node_text}"
 
     @contextmanager
     def _langfuse_session_scope(self, session_id: Optional[str], node_id: str):
@@ -701,16 +776,39 @@ class AICall:
             with nullcontext():
                 yield
             return
+        if not self._is_langfuse_sdk_configured():
+            yield
+            return
         try:
-            from langfuse import propagate_attributes
+            from langfuse import get_client, propagate_attributes
         except Exception as exc:
             logger.debug("📉 [AICall] Langfuse session scope 不可用，直接执行: %s", exc)
             yield
             return
 
         logger.debug("📈 [AICall] Langfuse session_id=%s node=%s", session_id, node_id or "unknown")
-        with propagate_attributes(session_id=session_id):
+        metadata = self._session_metadata(session_id, node_id)
+        stack: Optional[ExitStack] = None
+        try:
+            langfuse = get_client()
+            stack = ExitStack()
+            stack.enter_context(langfuse.start_as_current_observation(
+                as_type="span",
+                name=f"workflow-{node_id or 'unknown'}",
+                metadata=metadata,
+            ))
+            stack.enter_context(propagate_attributes(session_id=session_id))
+        except Exception as exc:
+            logger.debug("📉 [AICall] Langfuse span 创建失败，仅传播 session: %s", exc)
+            with propagate_attributes(session_id=session_id):
+                yield
+            return
+
+        try:
             yield
+        finally:
+            if stack is not None:
+                stack.close()
 
     @staticmethod
     def _tool_call_signature(tool_call: Dict[str, Any]) -> str:

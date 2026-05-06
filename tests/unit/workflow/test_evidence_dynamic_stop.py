@@ -367,8 +367,103 @@ def test_evidence_does_not_count_failed_or_wrong_intent_tool_results():
 
     items = node._build_evidence_items_from_thinking(plan, events)
 
-    assert len(items) == 3
+    assert len(items) == 2
     assert items[0].collected is False
     assert items[1].collected is False
-    assert items[2].source == "thinking_extra"
-    assert node._calculate_completeness(items) == 1 / 3
+    assert node._calculate_completeness(items) == 0
+
+
+def test_evidence_counts_logs_collected_by_run_bash_command():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "检查 Pod 日志",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "kubectl logs ham-wcc79 -n xnet --previous --tail=200",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": True,
+            "result": "run_bash_command 输出摘要:\nsuccess: True\nstdout: application started",
+            "structured": {
+                "status": "command_result",
+                "success": True,
+                "stdout_preview": "application started",
+            },
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is True
+    assert items[0].source == "thinking_match"
+    assert node._calculate_completeness(items) == 1
+
+
+def test_evidence_does_not_match_empty_controller_lookup():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取与 Pod 相关的控制器信息",
+            "level": "important",
+            "tool": "kubectl_get_by_name",
+            "command": "kubectl get deployment,replicaset,daemonset -n aiops-e2e",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_name",
+            "semantic_success": False,
+            "result": "工具成功执行，但没有找到资源；这是空/负向观察，不能当作异常已被验证。",
+            "structured": {"status": "empty"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is False
+    assert node._calculate_completeness(items) == 0
+
+
+def test_evidence_does_not_match_unrelated_resource_output_with_same_tool():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取 Pod 关联 PVC 和卷挂载信息",
+            "level": "important",
+            "tool": "kubectl_get_by_name",
+            "command": "kubectl get pvc -n aiops-e2e",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_name",
+            "semantic_success": True,
+            "result": (
+                "NAMESPACE NAME STATUS VOLUME CAPACITY AGE\n"
+                "dify upload-pvc Bound pvc-aaa 8Gi 2d\n"
+                "test data-pvc Bound pvc-bbb 8Gi 2d\n"
+            ),
+            "structured": {"status": "kept_small_output"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is False
+    assert node._calculate_completeness(items) == 0
