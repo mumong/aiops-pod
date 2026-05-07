@@ -211,15 +211,16 @@ class LayerClassifierNode(WorkflowNode):
                 # 保存结构化分类结果
                 "layer_analysis": json.dumps(layer_result, ensure_ascii=False),
                 # 大文本只落盘；下游使用 layer_handoff
-                "layer_full_analysis": None,
-                "layer_handoff": layer_handoff,
-                "layer_archive_ref": archive_refs,
-                "context_archive_ref": archive_refs.get("run_root"),
-                "primary_pod": layer_handoff.get("primary_pod"),
-                "abnormal_pods": layer_handoff.get("abnormal_pods", []),
-                "pod_status_keyword": layer_handoff.get("pod_status_keyword"),
-                "pod_abnormal_type": layer_handoff.get("pod_abnormal_type"),
-                "derived_layer": layer_handoff.get("derived_layer"),
+            "layer_full_analysis": None,
+            "layer_handoff": layer_handoff,
+            "layer_archive_ref": archive_refs,
+            "context_archive_ref": archive_refs.get("run_root"),
+            "issue_groups": layer_handoff.get("issue_groups", []),
+            "primary_pod": layer_handoff.get("primary_pod"),
+            "abnormal_pods": layer_handoff.get("abnormal_pods", []),
+            "pod_status_keyword": layer_handoff.get("pod_status_keyword"),
+            "pod_abnormal_type": layer_handoff.get("pod_abnormal_type"),
+            "derived_layer": layer_handoff.get("derived_layer"),
                 "status_category": layer_handoff.get("status_category"),
                 "key_entities": layer_result.get("key_entities", []),
                 "possible_scenarios": layer_result.get("possible_scenarios", []),
@@ -275,6 +276,7 @@ class LayerClassifierNode(WorkflowNode):
                 "layer_handoff": layer_handoff,
                 "layer_archive_ref": archive_refs,
                 "context_archive_ref": archive_refs.get("run_root"),
+                "issue_groups": layer_handoff.get("issue_groups", []),
                 "primary_pod": layer_handoff.get("primary_pod"),
                 "abnormal_pods": layer_handoff.get("abnormal_pods", []),
                 "pod_status_keyword": layer_handoff.get("pod_status_keyword"),
@@ -370,6 +372,12 @@ class LayerClassifierNode(WorkflowNode):
 
         layer_value = layer.value if hasattr(layer, "value") else str(layer)
         pod_abnormal_type = self._derive_pod_abnormal_type(layer_result)
+        issue_groups = self._build_issue_groups(
+            abnormal_pods=abnormal_pods,
+            primary_pod=primary_pod,
+            default_pod_abnormal_type=pod_abnormal_type,
+            layer_result=layer_result,
+        )
         return {
             "diagnosis_scope": "current_state_only" if "之前" in question or "当前" in question or "现在" in question else "question_scope",
             "layer": layer_value,
@@ -379,6 +387,7 @@ class LayerClassifierNode(WorkflowNode):
             "primary_problem": layer_result.get("reasoning", ""),
             "primary_pod": primary_pod,
             "abnormal_pods": abnormal_pods,
+            "issue_groups": issue_groups,
             "pod_status_keyword": self._pick_text(
                 layer_result.get("pod_status_keyword"),
                 abnormal_pods[0].get("status") if abnormal_pods else "",
@@ -403,6 +412,131 @@ class LayerClassifierNode(WorkflowNode):
                 "不要把计划或工具名当成证据，必须基于 tool_result",
             ],
         }
+
+    @classmethod
+    def _build_issue_groups(
+        cls,
+        abnormal_pods: List[Dict[str, Any]],
+        primary_pod: Optional[Dict[str, Any]],
+        default_pod_abnormal_type: str,
+        layer_result: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Group current abnormal Pods by normalized status family.
+
+        This is generic handoff structure, not a diagnostic decision tree. It
+        preserves all active anomaly families so downstream nodes do not lose
+        secondary issues when a single primary_pod is selected.
+        """
+        if not abnormal_pods:
+            return []
+
+        grouped: Dict[str, Dict[str, Any]] = {}
+        primary_key = (
+            (primary_pod or {}).get("namespace", ""),
+            (primary_pod or {}).get("name", ""),
+        )
+
+        for pod in abnormal_pods:
+            name = cls._pick_text(pod.get("name"))
+            if not name:
+                continue
+            namespace = cls._pick_text(pod.get("namespace"))
+            status = cls._pick_text(pod.get("status"), layer_result.get("pod_status_keyword"))
+            status_family = cls._normalize_status_family(status)
+            group = grouped.setdefault(
+                status_family,
+                {
+                    "status_keywords": [],
+                    "primary_entities": [],
+                },
+            )
+            if status and status not in group["status_keywords"]:
+                group["status_keywords"].append(status)
+            group["primary_entities"].append({
+                "kind": "Pod",
+                "namespace": namespace,
+                "name": name,
+            })
+
+        if not grouped:
+            return []
+
+        groups: List[Dict[str, Any]] = []
+        for index, (status_family, group) in enumerate(grouped.items(), start=1):
+            statuses = group["status_keywords"] or [status_family]
+            pod_abnormal_type = cls._derive_group_abnormal_type(
+                statuses=statuses,
+                default_pod_abnormal_type=default_pod_abnormal_type,
+                layer_result=layer_result,
+            )
+            compatible_layer = cls._compatible_layer_for_abnormal_type(pod_abnormal_type)
+            entities = group["primary_entities"]
+            is_primary = any(
+                (entity.get("namespace", ""), entity.get("name", "")) == primary_key
+                for entity in entities
+            )
+            groups.append({
+                "group_id": f"g{index}",
+                "status_keywords": statuses,
+                "pod_abnormal_type": pod_abnormal_type,
+                "compatible_layers": [compatible_layer] if compatible_layer else [],
+                "primary_entities": entities,
+                "is_primary": is_primary,
+                "evidence_plan": [],
+            })
+
+        groups.sort(key=lambda item: (not item.get("is_primary"), item.get("group_id", "")))
+        for index, group in enumerate(groups, start=1):
+            group["group_id"] = f"g{index}"
+        return groups
+
+    @classmethod
+    def _normalize_status_family(cls, status: str) -> str:
+        status_text = cls._pick_text(status)
+        if status_text in {"ImagePullBackOff", "ErrImagePull", "ImageInspectError"}:
+            return "ImagePullFailed"
+        return status_text or "Unknown"
+
+    @classmethod
+    def _derive_group_abnormal_type(
+        cls,
+        statuses: List[str],
+        default_pod_abnormal_type: str,
+        layer_result: Dict[str, Any],
+    ) -> str:
+        status_set = set(statuses or [])
+        if status_set & {"ImagePullBackOff", "ErrImagePull", "ImageInspectError"}:
+            return "ImagePullFailed"
+        if "Terminating" in status_set:
+            return "TerminatingStuck"
+        if "CrashLoopBackOff" in status_set:
+            return cls._pick_text(default_pod_abnormal_type, "CrashLoopBackOffRuntime")
+        if "Evicted" in status_set:
+            return "Evicted"
+        if "Pending" in status_set:
+            return "PendingUnschedulable"
+        if "Running" in status_set:
+            return cls._pick_text(default_pod_abnormal_type, "NotReadyProbeFailed")
+        if len(statuses or []) == 1:
+            return statuses[0]
+        return cls._pick_text(default_pod_abnormal_type, layer_result.get("pod_abnormal_type"), "Unknown")
+
+    @classmethod
+    def _compatible_layer_for_abnormal_type(cls, pod_abnormal_type: str) -> str:
+        mapping = {
+            "Evicted": "L0",
+            "VolumeMountFailed": "L0",
+            "PendingUnschedulable": "L1",
+            "NodeLostOrUnknown": "L1",
+            "TerminatingStuck": "L1",
+            "OOMKilled": "L2",
+            "CrashLoopBackOffRuntime": "L2",
+            "ImagePullFailed": "L3",
+            "SandboxCreateFailed": "L3",
+            "ConfigError": "L4",
+            "NotReadyProbeFailed": "L4",
+        }
+        return mapping.get(pod_abnormal_type, "")
 
     @classmethod
     def _extract_current_abnormal_pods_from_events(cls, thinking_events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

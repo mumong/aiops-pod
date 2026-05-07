@@ -21,6 +21,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
+from app.core.workflow.schemas import EvidenceCollectionOutput, EvidenceMatchOutput, EvidencePlanOutput
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
 from app.core.prompts import get_workflow_prompt, get_query_evidence_normalization_prompt
@@ -148,7 +149,12 @@ class EvidenceCollectorNode(WorkflowNode):
                 thinking_events=thinking_events,
             )
             if retry_reason:
-                logger.warning("⚠️ [evidence] 首轮结果违反采证协议：%s；发起一次严格重试", retry_reason)
+                retry_existing_plan = (
+                    evidence_plan
+                    if self._plan_exists_without_tool_results(retry_reason)
+                    else None
+                )
+                logger.warning("⚠️ [evidence] 首轮结果违反采证协议：%s；发起一次重试", retry_reason)
                 evidence_plan, thinking_events, llm_result_text = self._plan_evidence_with_llm(
                     question=question,
                     layer=layer,
@@ -157,8 +163,14 @@ class EvidenceCollectorNode(WorkflowNode):
                     layer_analysis=json.dumps(layer_handoff, ensure_ascii=False),
                     context_archive_ref=state.get("context_archive_ref", ""),
                     layer_archive_ref=state.get("layer_archive_ref") or {},
-                    strict_mode=True,
-                    failure_reason=retry_reason,
+                    strict_mode=retry_existing_plan is None,
+                    failure_reason=(
+                        "上一轮 evidence_plan 已有效，本轮不要重新输出 evidence_plan；"
+                        "请直接按既有计划调用至少一个 critical 或 important 级真实工具。"
+                        if retry_existing_plan
+                        else retry_reason
+                    ),
+                    existing_plan=retry_existing_plan,
                 )
 
             # 2. 构建证据项列表（基于 thinking_events 中 AICall 真实工具调用）
@@ -249,28 +261,25 @@ class EvidenceCollectorNode(WorkflowNode):
                 else:
                     missing_reasons.append(f"{e.id}({e.description}): 未采集")
 
+            collection_output = self._build_evidence_collection_output(
+                evidence_plan=evidence_plan,
+                tool_results=tool_results,
+                tool_data=tool_data_from_llm,
+                llm_result_text=llm_result_text,
+                plan_total=plan_total,
+                plan_collected=plan_collected,
+                plan_completeness=plan_completeness,
+                environment_total=total,
+                environment_collected=collected,
+                environment_completeness=completeness,
+                evidence_inventory=evidence_inventory,
+                missing_reasons=missing_reasons,
+                early_stop=dict(self._early_stop_state),
+            )
+
             new_state.update({
                 "evidence_items": evidence_items,
-                "evidence_analysis": json.dumps({
-                    "evidence_plan": evidence_plan,
-                    "tool_results": [r.get("summary", "") for r in tool_results],
-                    "tool_data": tool_data_from_llm,
-                    "llm_analysis": llm_result_text[:3000] if llm_result_text else "",
-                    "collection_summary": (
-                        f"计划 {plan_total} 项，实际采集 {plan_collected} 项，"
-                        f"未采集 {plan_total - plan_collected} 项，完整度 {plan_completeness:.0%}；"
-                        f"其中真实环境证据 {collected}/{total} 项，完整度 {completeness:.0%}"
-                    ),
-                    "plan_total": plan_total,
-                    "plan_collected": plan_collected,
-                    "plan_completeness": plan_completeness,
-                    "environment_evidence_total": total,
-                    "environment_evidence_collected": collected,
-                    "environment_evidence_completeness": completeness,
-                    "evidence_inventory": evidence_inventory,
-                    "missing_reasons": missing_reasons,
-                    "early_stop": dict(self._early_stop_state),
-                }, ensure_ascii=False),
+                "evidence_analysis": collection_output.model_dump_json(),
                 "evidence_completeness": completeness,
                 "tool_results": tool_results,
                 "evidence_facts": evidence_facts,
@@ -346,6 +355,43 @@ class EvidenceCollectorNode(WorkflowNode):
                 "source": getattr(item, "source", ""),
             })
         return facts
+
+    @staticmethod
+    def _build_evidence_collection_output(
+        evidence_plan: List[Dict[str, Any]],
+        tool_results: List[Dict[str, Any]],
+        tool_data: List[Dict[str, Any]],
+        llm_result_text: str,
+        plan_total: int,
+        plan_collected: int,
+        plan_completeness: float,
+        environment_total: int,
+        environment_collected: int,
+        environment_completeness: float,
+        evidence_inventory: List[Dict[str, Any]],
+        missing_reasons: List[str],
+        early_stop: Dict[str, Any],
+    ) -> EvidenceCollectionOutput:
+        return EvidenceCollectionOutput.model_validate({
+            "evidence_plan": evidence_plan,
+            "tool_results": [r.get("summary", "") for r in tool_results],
+            "tool_data": tool_data,
+            "llm_analysis": llm_result_text[:3000] if llm_result_text else "",
+            "collection_summary": (
+                f"计划 {plan_total} 项，实际采集 {plan_collected} 项，"
+                f"未采集 {plan_total - plan_collected} 项，完整度 {plan_completeness:.0%}；"
+                f"其中真实环境证据 {environment_collected}/{environment_total} 项，完整度 {environment_completeness:.0%}"
+            ),
+            "plan_total": plan_total,
+            "plan_collected": plan_collected,
+            "plan_completeness": plan_completeness,
+            "environment_evidence_total": environment_total,
+            "environment_evidence_collected": environment_collected,
+            "environment_evidence_completeness": environment_completeness,
+            "evidence_inventory": evidence_inventory,
+            "missing_reasons": missing_reasons,
+            "early_stop": early_stop,
+        })
 
     @staticmethod
     def _build_evidence_conflicts(
@@ -484,6 +530,7 @@ class EvidenceCollectorNode(WorkflowNode):
         layer_archive_ref: Optional[Dict[str, Any]] = None,
         strict_mode: bool = False,
         failure_reason: str = "",
+        existing_plan: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple:
         """
         调用 LLM 规划证据采集
@@ -549,6 +596,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 layer_archive_ref=layer_archive_ref or {},
                 strict_mode=strict_mode,
                 failure_reason=failure_reason,
+                existing_plan=existing_plan,
             )
             if not getattr(self, "_logged_evidence_user_prompt", False):
                 logger.info(
@@ -588,6 +636,8 @@ class EvidenceCollectorNode(WorkflowNode):
                 # 回退：尝试从 response.result 解析
                 if response and response.result:
                     evidence_plan = self._parse_llm_evidence_plan(response.result)
+            if not evidence_plan and existing_plan and self._has_semantic_tool_success(thinking_events):
+                evidence_plan = existing_plan
 
             if evidence_plan:
                 logger.info(f"📋 [evidence] 从 LLM 输出解析到 {len(evidence_plan)} 项证据计划")
@@ -623,9 +673,20 @@ class EvidenceCollectorNode(WorkflowNode):
         layer_archive_ref: Optional[Dict[str, Any]] = None,
         strict_mode: bool = False,
         failure_reason: str = "",
+        existing_plan: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         strict_section = ""
-        if strict_mode:
+        if existing_plan:
+            strict_section = f"""
+
+# 既有 evidence_plan（本轮不要重写）
+上一轮已输出有效 evidence_plan，但没有执行真实工具。本轮必须沿用下列计划，直接调用工具采证，不要重新输出 evidence_plan。
+```json
+{json.dumps({"evidence_plan": existing_plan}, ensure_ascii=False)}
+```
+- {failure_reason or '请直接按既有计划执行工具'}
+"""
+        elif strict_mode:
             strict_section = f"""
 
 # 上一轮结果被系统拒绝
@@ -638,22 +699,27 @@ class EvidenceCollectorNode(WorkflowNode):
         context_root = (context_archive_ref or "").strip()
         if context_root:
             archive_lines.extend([
-                "# 可读取的 context archive 入口",
+                "# context archive 引用",
                 f"- context_archive_ref: {context_root}",
-                f"- 可按需读取: {context_root}/budget/layer.json",
-                f"- 可按需读取: {context_root}/budget/evidence.json",
-                f"- 可按需读取: {context_root}/handoff/layer-to-evidence.json",
-                f"- 可按需读取: {context_root}/layer/full_analysis.md",
-                f"- 可按需读取: {context_root}/layer/handoff.json",
-                f"- 可按需读取: {context_root}/node_inputs/evidence.input.json",
-                f"- 可按需读取: {context_root}/node_outputs/layer.output.json",
-                f"- 可按需读取: {context_root}/tools/ 下的 *.raw.txt / *.structured.json / *.summary.txt",
+                "- 该引用仅用于人工排障和必要时追溯上游摘要；evidence 节点默认应基于 layer_handoff 与真实环境工具采证。",
+                "- 不要因为存在 archive 引用而计划读取归档；归档内容不是当前环境证据。",
             ])
-        if archive_refs.get("full_analysis_ref"):
-            archive_lines.append(f"- layer full_analysis_ref: {archive_refs.get('full_analysis_ref')}")
         if archive_refs.get("handoff_ref"):
-            archive_lines.append(f"- layer handoff_ref: {archive_refs.get('handoff_ref')}")
+            archive_lines.append("- layer handoff 已由上方 layer_handoff 注入；不要重复读取归档。")
         archive_section = "\n".join(archive_lines).strip() if archive_lines else "无"
+        if existing_plan:
+            plan_protocol = """- 本轮已有 evidence_plan，禁止重新输出 evidence_plan JSON。
+- 直接按既有 evidence_plan 调用至少一个 critical 或 important 级真实工具。
+- LLM 必须自己决定并调用工具；计划不是证据。
+- 工具调用必须尽量逐项完成既有计划，最终消息不要新增未写入 plan 的“已采集计划项”。
+- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+        else:
+            plan_protocol = """- 第一条 assistant 消息必须只输出 evidence_plan JSON，不能附加解释文本。
+- 在输出 evidence_plan JSON 之前，禁止调用任何工具。
+- 输出 evidence_plan 后不能结束，必须继续调用至少一个 critical 或 important 级真实工具。
+- LLM 必须自己决定并调用工具；计划不是证据。
+- evidence_plan 就是本轮计划采集清单；后续工具调用必须尽量逐项完成 plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
+- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
         return f"""# 用户原始问题
 {question}
 
@@ -669,27 +735,24 @@ class EvidenceCollectorNode(WorkflowNode):
 - 如果你在分析中认为“应该查看/参考某个 runbook”，必须把它写入 evidence_plan 并实际调用 fetch_runbook；禁止只在思考中提到 runbook 却不调用。
 - 只有当 catalog 中没有明显匹配项，或上游判断为 HEALTHY/QUERY，才允许不调用 fetch_runbook；这种情况下最终消息必须说明“未发现明显匹配的 Pod 异常 runbook”。
 
-# 可选归档上下文
+# 归档上下文（非采证主线）
 {archive_section}
 
 # 当前节点职责
-你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须基于 layer_handoff 的 primary_pod、pod_status_keyword、pod_abnormal_type、active_entities、active_signals、possible_scenarios 和 must_verify 调用真实只读工具采集证据。
+你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须基于 layer_handoff 的 issue_groups、primary_pod、abnormal_pods、pod_status_keyword、pod_abnormal_type、active_entities、active_signals、possible_scenarios 和 must_verify 调用真实只读工具采集证据。
 
 # 强约束
-- 第一条 assistant 消息必须只输出 evidence_plan JSON，不能附加解释文本。
-- 在输出 evidence_plan JSON 之前，禁止调用任何工具。
-- 输出 evidence_plan 后不能结束，必须继续调用至少一个 critical 或 important 级真实工具。
-- LLM 必须自己决定并调用工具；计划不是证据。
-- evidence_plan 就是本轮计划采集清单；后续工具调用必须尽量逐项完成 plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
-- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。
+{plan_protocol}
+- 如果 layer_handoff 提供 issue_groups，evidence_plan 应优先覆盖每个当前异常组的最小关键证据；不要只围绕 primary_pod 而完全忽略其他异常组。
+- 对非 primary 的 issue_group 只做最小验证：当前状态 + 一个最关键配置/事件信号即可，不要展开成长链路。
 - 必须优先围绕 primary_pod 验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要先做大范围集群扫描。
 - 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
 - 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
 - 如果 Available Runbooks/catalog 中存在明显匹配当前 Pod 异常状态的 runbook，应先执行 fetch_runbook 参考步骤；但不能只 fetch_runbook 后结束，必须继续调用真实环境工具。reference/runbook 步骤不是证据，不计入 critical/important 完整度。存在明显匹配 runbook 却未调用 fetch_runbook 时，本轮采证视为不完整。
-- 如果输入里给出了 raw_ref、summary_ref、structured_ref、archive_ref、handoff_ref、input_ref、output_ref 等路径，而你需要查看其内容，必须调用 read_context_archive 工具；模型不能直接访问本地文件。
+- 不要把 context_archive_ref、archive_ref、raw_ref、summary_ref、structured_ref 等路径当作采证任务；默认不要计划读取归档文件。
 {strict_section}
 # 输出
-先输出 evidence_plan JSON，再执行必要工具调用，最后再输出简短证据结论。"""
+{"直接执行既有 evidence_plan 中的必要工具，最后输出简短证据结论。" if existing_plan else "先输出 evidence_plan JSON，再执行必要工具调用，最后再输出简短证据结论。"}"""
 
     def _get_plan_protocol_failure_reason(
         self,
@@ -698,13 +761,18 @@ class EvidenceCollectorNode(WorkflowNode):
     ) -> str:
         """检查 evidence 是否遵守了先 plan 后执行的协议。"""
         timeline = self._analyze_plan_timeline(thinking_events)
-        if not timeline["has_plan"]:
+        has_plan = bool(evidence_plan) or bool(timeline["has_plan"])
+        if not has_plan:
             return "上一轮没有输出有效 evidence_plan JSON，系统已拒绝该结果"
         if timeline["tool_activity_before_plan"]:
             return "上一轮在 evidence_plan 前就开始调用工具，违反先计划后执行约束，系统已拒绝该结果"
         if evidence_plan and not self._has_semantic_tool_success(thinking_events):
             return "上一轮只返回 evidence_plan，没有任何成功工具调用，系统已拒绝该结果"
         return ""
+
+    @staticmethod
+    def _plan_exists_without_tool_results(reason: str) -> bool:
+        return "只返回 evidence_plan" in (reason or "")
 
     def _analyze_plan_timeline(self, thinking_events: List[Dict[str, Any]]) -> Dict[str, Any]:
         """分析 plan 与 tool 调用的先后顺序。"""
@@ -769,15 +837,34 @@ class EvidenceCollectorNode(WorkflowNode):
             json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
             if json_match:
                 parsed = json.loads(json_match.group(1))
-                if "evidence_plan" in parsed:
-                    return parsed["evidence_plan"]
+                return self._validate_evidence_plan_payload(parsed)
             parsed = json.loads(response_text)
-            if isinstance(parsed, dict) and "evidence_plan" in parsed:
-                return parsed["evidence_plan"]
-            return parsed if isinstance(parsed, list) else []
+            return self._validate_evidence_plan_payload(parsed)
         except json.JSONDecodeError:
             # 如果不是 JSON，尝试提取命令列表
             return self._extract_commands_from_text(response_text)
+
+    @staticmethod
+    def _validate_evidence_plan_payload(parsed: Any) -> List[Dict]:
+        if isinstance(parsed, dict) and "evidence_plan" in parsed:
+            try:
+                output = EvidencePlanOutput.model_validate(parsed)
+            except Exception as exc:
+                logger.warning("⚠️ [evidence] evidence_plan 结构化校验失败: %s", exc)
+                return []
+            return [item.model_dump() for item in output.evidence_plan]
+        if isinstance(parsed, list):
+            try:
+                output = EvidencePlanOutput.model_validate({
+                    "layer": "",
+                    "evidence_plan": parsed,
+                    "collection_strategy": "",
+                })
+            except Exception as exc:
+                logger.warning("⚠️ [evidence] evidence_plan 列表结构化校验失败: %s", exc)
+                return []
+            return [item.model_dump() for item in output.evidence_plan]
+        return []
 
     def _extract_commands_from_text(self, text: str) -> List[Dict]:
         """
@@ -1128,6 +1215,16 @@ class EvidenceCollectorNode(WorkflowNode):
             "evidence_plan": evidence_plan,
             "tool_candidates": tool_candidates,
         }
+        if hasattr(ai_call, "call_structured"):
+            parsed, _ = ai_call.call_structured(
+                system_prompt=prompt,
+                question=json.dumps(payload, ensure_ascii=False, default=str),
+                schema=EvidenceMatchOutput,
+                node_id="evidence_plan_match",
+                max_tokens=2048,
+            )
+            return parsed.model_dump() if parsed is not None else {}
+
         parsed, _ = ai_call.call_simple_json(
             system_prompt=prompt,
             question=json.dumps(payload, ensure_ascii=False, default=str),

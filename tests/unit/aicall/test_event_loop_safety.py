@@ -8,6 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from app.core.aicall.client import AICall
+from app.core.workflow.schemas import EvidencePlanOutput
 
 
 def _install_fake_langfuse(monkeypatch):
@@ -294,6 +295,36 @@ def test_call_simple_json_parses_fenced_json_output():
         parsed, raw = ai.call_simple_json("sys", "q")
 
     assert parsed == {"layer": "QUERY", "confidence": 0.9, "reasoning": "ok"}
+    assert "```json" in raw
+
+
+def test_call_structured_validates_pydantic_schema_from_json_fallback(monkeypatch):
+    ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
+
+    def _fake_simple(system_prompt, question, **kwargs):
+        return """```json
+{
+  "layer": "L3",
+  "evidence_plan": [
+    {
+      "id": "e1",
+      "description": "获取 Pod 事件",
+      "level": "critical",
+      "tool": "kubectl_events",
+      "command": "kubectl get events -n aaa",
+      "purpose": "确认镜像拉取失败原因"
+    }
+  ],
+  "collection_strategy": "先确认当前异常 Pod。"
+}
+```"""
+
+    monkeypatch.setattr(ai, "call_simple", _fake_simple)
+
+    parsed, raw = ai.call_structured("sys", "q", EvidencePlanOutput)
+
+    assert isinstance(parsed, EvidencePlanOutput)
+    assert parsed.evidence_plan[0].id == "e1"
     assert "```json" in raw
 
 
