@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.service import HolmesService
+from app.core.skills.models import EvidenceItem, EvidenceLevel
 from app.core.workflow.executor import WorkflowExecutor
 
 
@@ -233,6 +234,43 @@ def test_executor_langfuse_session_scope_preserves_original_exception(monkeypatc
     with pytest.raises(ValueError, match="workflow failed"):
         with executor._langfuse_session_scope("workflow-session-error"):
             raise ValueError("workflow failed")
+
+
+def test_executor_evidence_snapshot_is_json_serializable():
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    snapshot = executor._extract_state_snapshot(
+        {
+            "evidence_completeness": 0.5,
+            "evidence_analysis": '{"plan_total":2,"plan_collected":1}',
+            "evidence_items": [
+                EvidenceItem(
+                    id="e1",
+                    description="pod yaml",
+                    level=EvidenceLevel.CRITICAL,
+                    collected=True,
+                    value="ok",
+                    source="thinking_match",
+                ),
+                EvidenceItem(
+                    id="e2",
+                    description="pod events",
+                    level=EvidenceLevel.IMPORTANT,
+                    collected=False,
+                    source="planned",
+                ),
+            ],
+        },
+        "evidence",
+    )
+
+    assert snapshot["evidence_count"] == 2
+    assert snapshot["collected_count"] == 1
+    assert snapshot["evidence_items"][0]["id"] == "e1"
+    assert snapshot["evidence_items"][0]["level"] == "critical"
+    assert snapshot["evidence_items"][1]["collected"] is False
+
+    import json
+    json.dumps(snapshot, ensure_ascii=False)
 
 
 class _SlowNode:

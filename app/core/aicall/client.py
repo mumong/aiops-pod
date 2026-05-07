@@ -345,12 +345,13 @@ class AICall:
                         token_msg, metadata = chunk_data[0], chunk_data[1]
                     else:
                         continue
-                    if hasattr(token_msg, 'content') and token_msg.content:
+                    token_text = self._extract_visible_ai_text(token_msg)
+                    if token_text:
                         langgraph_node = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
                         if langgraph_node != "tools":
-                            _content_buffer.append(token_msg.content)
+                            _content_buffer.append(token_text)
                             push_event(stream_queue, "ai_token", node_id,
-                                       content=token_msg.content, iteration=iteration)
+                                       content=token_text, iteration=iteration)
                     continue
 
                 # ── updates 模式：消息/工具级别（原有逻辑） ──
@@ -395,20 +396,21 @@ class AICall:
                                 continue
 
                             # AI 完整消息（用于 final_content 和工具调用检测）
-                            should_emit_ai_message = bool(msg.content) and (not msg_tool_calls or bool(new_tool_calls))
+                            full_msg_text = self._extract_visible_ai_text(msg)
+                            should_emit_ai_message = bool(full_msg_text) and (not msg_tool_calls or bool(new_tool_calls))
                             if should_emit_ai_message:
-                                final_content = msg.content
+                                final_content = full_msg_text
                                 iteration += 1
                                 logger.debug("   💬 [AICall] AI 消息 #%d:\n%s",
-                                            iteration, msg.content[:1000])
+                                            iteration, full_msg_text[:1000])
                                 evt = {"type": "ai_message",
-                                       "content": msg.content[:500],
-                                       "full_content": msg.content,
+                                       "content": full_msg_text[:500],
+                                       "full_content": full_msg_text,
                                        "iteration": iteration}
                                 self._push(stream_queue, node_id, thinking_events, **evt)
 
                                 if expect_json and not msg.tool_calls:
-                                    parsed = self.extract_json_payload(msg.content)
+                                    parsed = self.extract_json_payload(full_msg_text)
                                     if parsed is not None and (
                                         json_validator is None or json_validator(parsed)
                                     ):
@@ -670,6 +672,30 @@ class AICall:
             "output_tokens": sum(int(ev.get("output_tokens") or 0) for ev in usage_events),
             "total_tokens": sum(int(ev.get("total_tokens") or 0) for ev in usage_events),
         }
+
+    @staticmethod
+    def _extract_visible_ai_text(message: Any) -> str:
+        """Return stream-visible AI text, including reasoning fields from compatible gateways."""
+        if message is None:
+            return ""
+
+        content = getattr(message, "content", None) or ""
+        additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+        response_metadata = getattr(message, "response_metadata", None) or {}
+
+        reasoning = (
+            additional_kwargs.get("reasoning_content")
+            or additional_kwargs.get("reasoning")
+            or response_metadata.get("reasoning_content")
+            or response_metadata.get("reasoning")
+            or ""
+        )
+
+        if reasoning and content:
+            return f"{reasoning}{content}"
+        if reasoning:
+            return str(reasoning)
+        return str(content or "")
 
     @staticmethod
     def _normalize_langfuse_session_id(run_id: str) -> Optional[str]:

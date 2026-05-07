@@ -145,6 +145,8 @@ class ObservationProcessor:
         }
 
     def _extract(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
+        if tool == "fetch_runbook":
+            return self._extract_runbook(raw)
         if re.search(r"is not a valid tool|try one of \[", raw, re.IGNORECASE):
             return {
                 "status": "invalid_tool",
@@ -186,6 +188,24 @@ class ObservationProcessor:
         if tool in self.MEDIUM_TOOLS and len(raw) <= self.max_observation_chars:
             return {"status": "kept_small_output"}, raw, "passthrough"
         return {"status": "generic_summary"}, self._generic_summary(tool, raw), "generic"
+
+    def _extract_runbook(self, raw: str) -> tuple[Dict[str, Any], str, str]:
+        if re.match(r"^\s*Error:\s*Runbook\b", raw or "", re.IGNORECASE):
+            return {
+                "status": "command_failed",
+                "tool": "fetch_runbook",
+                "raw_preview": raw[:1000],
+            }, self._generic_summary("fetch_runbook", raw), "runbook"
+
+        title = None
+        match = re.search(r"^\s*#\s+(.+)$", raw or "", re.MULTILINE)
+        if match:
+            title = match.group(1).strip()
+        return {
+            "status": "runbook_loaded",
+            "title": title,
+            "raw_chars": len(raw or ""),
+        }, raw, "runbook"
 
     def _extract_events(self, raw: str) -> tuple[Dict[str, Any], str, str]:
         if re.search(r"no events found|no resources found", raw, re.IGNORECASE):
@@ -249,17 +269,25 @@ class ObservationProcessor:
             idx for idx, column in enumerate(columns)
             if column.upper() in {"READY", "STATUS", "REASON", "PHASE"}
         }
+        pure_status_indexes = {
+            idx for idx, column in enumerate(columns)
+            if column.upper() in {"STATUS", "REASON", "PHASE"}
+        }
         endpoint_indexes = {
             idx for idx, column in enumerate(columns)
-            if column.upper() in {"ENDPOINTS", "EXTERNAL-IP"}
+            if column.upper() in {"ENDPOINTS"}
         }
         abnormal = [
             ln for ln in lines[1:]
-            if self._table_row_is_abnormal(ln, status_indexes, endpoint_indexes)
+            if self._table_row_is_abnormal(ln, status_indexes, pure_status_indexes, endpoint_indexes)
         ]
         status_counts: Dict[str, int] = {}
         for ln in lines[1:]:
-            for status in re.findall(r"\b(Running|Pending|Failed|Succeeded|CrashLoopBackOff|ImagePullBackOff|ErrImagePull|OOMKilled|Evicted|NotReady|Ready)\b", ln):
+            for status in re.findall(
+                r"\b(Running|Pending|Failed|Succeeded|CrashLoopBackOff|ImagePullBackOff|"
+                r"ErrImagePull|OOMKilled|Evicted|NotReady|Ready|Terminating|Unknown|Error)\b",
+                ln,
+            ):
                 status_counts[status] = status_counts.get(status, 0) + 1
 
         selected = abnormal[:50] if abnormal else lines[1:21]
@@ -612,6 +640,7 @@ class ObservationProcessor:
         self,
         row: str,
         status_indexes: set[int],
+        pure_status_indexes: set[int],
         endpoint_indexes: set[int],
     ) -> bool:
         cells = re.split(r"\s{2,}|\t+", row.strip())
@@ -619,11 +648,20 @@ class ObservationProcessor:
             cells[idx] for idx in status_indexes
             if idx < len(cells)
         )
+        pure_status_text = " ".join(
+            cells[idx] for idx in pure_status_indexes
+            if idx < len(cells)
+        )
         endpoint_text = " ".join(
             cells[idx] for idx in endpoint_indexes
             if idx < len(cells)
         )
         if endpoint_text and re.search(r"(^|\s)<none>($|\s)", endpoint_text, re.IGNORECASE):
+            return True
+        if pure_status_text:
+            normalized = pure_status_text.strip().lower()
+            if normalized in {"running", "completed", "succeeded", "ready", "bound", "active"}:
+                return False
             return True
         return bool(re.search(
             r"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|OOMKilled|Evicted|"
@@ -758,6 +796,8 @@ class ObservationProcessor:
             if status in {"run_image_result", "command_result"}:
                 return bool((structured or {}).get("success") is True)
             return False
+        if status == "runbook_loaded":
+            return True
         text = summary or ""
         if not text.strip():
             return False
