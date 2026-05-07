@@ -548,6 +548,33 @@ def test_observation_processor_marks_medium_command_failure_as_negative(tmp_path
     assert processed["semantic_success"] is False
 
 
+def test_observation_processor_does_not_mark_runbook_diagnostic_text_as_failure(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
+    raw = """<runbook>
+# Pod ImagePullFailed / ImagePullBackOff
+
+重点关注 Events 部分:
+- `Failed to pull image "xxx"`: 具体镜像地址
+- `manifest unknown/not found`: 镜像或 tag 不存在
+- `i/o timeout`: 节点到镜像仓库访问失败
+</runbook>
+Note: the above runbook is for DIAGNOSTIC REFERENCE ONLY.
+"""
+
+    processed = processor.process(
+        run_id="run-runbook-diagnostic-text",
+        node_id="evidence",
+        sequence=1,
+        tool_name="fetch_runbook",
+        raw_content=raw,
+    )
+
+    assert processed["processor"] == "runbook+passthrough_full"
+    assert processed["structured"]["status"] == "runbook_loaded"
+    assert processed["semantic_success"] is True
+    assert "Failed to pull image" in processed["summary"]
+
+
 def test_observation_processor_summarizes_kubectl_logs(tmp_path):
     processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
 
@@ -568,3 +595,103 @@ def test_observation_processor_summarizes_kubectl_logs(tmp_path):
     assert processed["structured"]["signal_count"] == 2
     assert "failed to load config" in processed["summary"]
     assert processed["semantic_success"] is True
+
+
+def test_observation_processor_table_marks_terminating_and_image_pull_as_abnormal(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=2000)
+    raw = """NAMESPACE     NAME                    READY   STATUS             RESTARTS   AGE
+aaa           test1-redis-master-0    0/1     ImagePullBackOff   0          24h
+aaa           test1-redis-slave-0     0/1     ErrImagePull       0          24h
+aiops-e2e     terminating-stuck       0/1     Terminating        0          7d18h
+aiops         aiops-copilot-abc       1/1     Running            0          15h
+"""
+
+    processed = processor.process(
+        run_id="run-table-terminating",
+        node_id="layer",
+        sequence=1,
+        tool_name="kubectl_get_by_kind_in_cluster",
+        raw_content=raw,
+    )
+
+    assert processed["structured"]["status"] == "table_summarized"
+    assert processed["structured"]["abnormal_count"] == 3
+    assert processed["structured"]["status_counts"]["ImagePullBackOff"] == 1
+    assert processed["structured"]["status_counts"]["ErrImagePull"] == 1
+    assert processed["structured"]["status_counts"]["Terminating"] == 1
+    assert any("terminating-stuck" in row for row in processed["structured"]["selected_rows"])
+
+
+def test_observation_processor_table_filters_running_and_completed_from_status_column(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=2000)
+    raw = """NAMESPACE     NAME                                      READY   STATUS             RESTARTS       AGE
+xnet          observability-kepler-8fhp6                1/1     Running            10 (24h ago)   9d
+xnet          observability-kibana-65d7c45f6d-7zc9l     0/1     Completed          0              12d
+aaa           test1-redis-master-0                      0/1     ImagePullBackOff   0              24h
+aiops-e2e     terminating-stuck                         0/1     Terminating        0              7d18h
+"""
+
+    processed = processor.process(
+        run_id="run-table-status-filter",
+        node_id="layer",
+        sequence=1,
+        tool_name="kubectl_get_by_kind_in_cluster",
+        raw_content=raw,
+    )
+
+    assert processed["structured"]["abnormal_count"] == 2
+    selected_rows = processed["structured"]["selected_rows"]
+    assert any("test1-redis-master-0" in row for row in selected_rows)
+    assert any("terminating-stuck" in row for row in selected_rows)
+    assert all("observability-kepler-8fhp6" not in row for row in selected_rows)
+    assert all("observability-kibana-65d7c45f6d-7zc9l" not in row for row in selected_rows)
+
+
+def test_observation_processor_table_treats_ready_bound_and_active_as_normal(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=2000)
+    raw = """NAME        STATUS   ROLES           AGE    VERSION   INTERNAL-IP   EXTERNAL-IP
+master      Ready    control-plane   223d   v1.26.8   10.2.0.48     <none>
+node1       Ready    <none>          223d   v1.26.8   10.2.0.49     <none>
+"""
+
+    processed = processor.process(
+        run_id="run-table-ready-normal",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_get_by_kind_in_cluster",
+        raw_content=raw,
+    )
+
+    assert processed["structured"]["abnormal_count"] == 0
+    assert "# 样例行" in processed["summary"]
+    assert "# 异常行" not in processed["summary"]
+
+    pvc_raw = """NAME        STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+data-0      Bound    pvc-1    8Gi        RWO            nfs-storage    20d
+data-1      Bound    pvc-2    8Gi        RWO            nfs-storage    20d
+"""
+    pvc_processed = processor.process(
+        run_id="run-table-bound-normal",
+        node_id="evidence",
+        sequence=2,
+        tool_name="kubectl_get_by_kind_in_namespace",
+        raw_content=pvc_raw,
+    )
+
+    assert pvc_processed["structured"]["abnormal_count"] == 0
+    assert "# 样例行" in pvc_processed["summary"]
+
+    namespace_raw = """NAME      STATUS   AGE
+default   Active   223d
+kube      Active   223d
+"""
+    namespace_processed = processor.process(
+        run_id="run-table-active-normal",
+        node_id="evidence",
+        sequence=3,
+        tool_name="kubectl_get_by_kind_in_cluster",
+        raw_content=namespace_raw,
+    )
+
+    assert namespace_processed["structured"]["abnormal_count"] == 0
+    assert "# 样例行" in namespace_processed["summary"]

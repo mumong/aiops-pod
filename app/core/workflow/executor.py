@@ -705,12 +705,27 @@ class WorkflowExecutor:
                     count = int(analysis_data.get("plan_total") or 0)
             except Exception:
                 pass
+            serialized_evidence_items = []
+            for item in evidence_items:
+                if hasattr(item, "to_dict") and callable(item.to_dict):
+                    serialized_evidence_items.append(item.to_dict())
+                elif isinstance(item, dict):
+                    serialized_evidence_items.append(item)
+                else:
+                    serialized_evidence_items.append({
+                        "id": getattr(item, "id", ""),
+                        "description": getattr(item, "description", ""),
+                        "level": str(getattr(getattr(item, "level", ""), "value", getattr(item, "level", ""))),
+                        "collected": bool(getattr(item, "collected", False)),
+                        "value": getattr(item, "value", None),
+                        "source": getattr(item, "source", None),
+                    })
             snapshot = {
                 "evidence_count": count,
                 "collected_count": collected,
                 "completeness": state.get("evidence_completeness"),
                 "evidence_analysis": evidence_analysis,
-                "evidence_items": evidence_items,
+                "evidence_items": serialized_evidence_items,
             }
         elif node_name == "rca":
             decision = state.get("deterministic_decision")

@@ -2,6 +2,7 @@ import sys
 import types
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
+import queue
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -367,6 +368,68 @@ def test_chat_model_requests_stream_usage_for_exact_context_usage():
 
     assert created_kwargs[0]["streaming"] is True
     assert created_kwargs[0]["stream_usage"] is True
+
+
+def test_call_surfaces_reasoning_content_in_stream_events():
+    event_queue = queue.Queue()
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield (
+                "messages",
+                (
+                    AIMessage(content="", additional_kwargs={"reasoning_content": "<think>内部推理</think>"}),
+                    {"langgraph_node": "model"},
+                ),
+            )
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(content="最终答案", additional_kwargs={"reasoning_content": "<think>内部推理</think>"})
+                        ]
+                    }
+                },
+            )
+
+    tool = MagicMock()
+    tool.name = "tool_a"
+    tool.description = "tool"
+    tool.args_schema = None
+
+    with patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()), \
+         patch("langchain.agents.create_agent", return_value=_Agent()), \
+         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+        ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
+        ai.call("sys", "q", tools=[tool], stream_queue=event_queue, node_id="layer", max_steps=3)
+
+    seen_ai_token = False
+    seen_ai_message = False
+    while not event_queue.empty():
+        _, evt = event_queue.get_nowait()
+        if evt.get("type") == "ai_token" and "内部推理" in (evt.get("content") or ""):
+            seen_ai_token = True
+        if evt.get("type") == "ai_message" and "内部推理" in (evt.get("full_content") or ""):
+            seen_ai_message = True
+
+    assert seen_ai_token is True
+    assert seen_ai_message is True
 
 
 def test_extract_usage_metadata_supports_usage_metadata_and_token_usage():

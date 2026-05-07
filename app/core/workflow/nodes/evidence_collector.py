@@ -39,7 +39,13 @@ class EvidenceCollectorNode(WorkflowNode):
     4. 计算证据完整度
     """
 
-    def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
+    def __init__(
+        self,
+        holmes_service: Any = None,
+        metrics: Any = None,
+        runbook_catalog: Any = None,
+        plan_match_adjudicator: Any = None,
+    ):
         """
         初始化节点
 
@@ -51,6 +57,8 @@ class EvidenceCollectorNode(WorkflowNode):
         self.holmes_service = holmes_service
         self.metrics = metrics
         self.runbook_catalog = runbook_catalog
+        self.plan_match_adjudicator = plan_match_adjudicator
+        self._plan_match_adjudication_enabled = True
         self._logged_evidence_user_prompt = False
         self._early_stop_state = {
             "triggered": False,
@@ -122,6 +130,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 "reason": "",
                 "required_levels": ["critical", "important"],
             }
+            self._plan_match_adjudication_enabled = layer != Layer.QUERY
             self._logged_evidence_user_prompt = False
 
             # 1. 调用 LLM 规划证据采集计划
@@ -945,6 +954,7 @@ class EvidenceCollectorNode(WorkflowNode):
 
         # ── 有 plan 时：正常匹配流程 ──
         matched_tool_indices = set()
+        adjudicated_matches = self._adjudicate_plan_tool_matches(evidence_plan, successful_tools)
 
         for plan_item in evidence_plan:
             plan_tool = (plan_item.get("tool") or "").lower()
@@ -961,22 +971,29 @@ class EvidenceCollectorNode(WorkflowNode):
 
             matched = False
             matched_result = None
-            for ti, tool in enumerate(successful_tools):
-                if ti in matched_tool_indices:
-                    continue
-                tn = tool["tool_name"].lower()
-                if self._tool_result_matches_plan(
-                    plan_tool=plan_tool,
-                    plan_cmd=plan_cmd,
-                    plan_desc=plan_desc,
-                    tool_name=tn,
-                    result=tool.get("result", ""),
-                    structured=tool.get("structured") or {},
-                ):
+            if adjudicated_matches is not None:
+                adjudicated_index = adjudicated_matches.get(str(item_id))
+                if adjudicated_index is not None and 0 <= adjudicated_index < len(successful_tools):
                     matched = True
-                    matched_result = tool["result"]
-                    matched_tool_indices.add(ti)
-                    break
+                    matched_result = successful_tools[adjudicated_index]["result"]
+                    matched_tool_indices.add(adjudicated_index)
+            else:
+                for ti, tool in enumerate(successful_tools):
+                    if ti in matched_tool_indices:
+                        continue
+                    tn = tool["tool_name"].lower()
+                    if self._tool_result_matches_plan(
+                        plan_tool=plan_tool,
+                        plan_cmd=plan_cmd,
+                        plan_desc=plan_desc,
+                        tool_name=tn,
+                        result=tool.get("result", ""),
+                        structured=tool.get("structured") or {},
+                    ):
+                        matched = True
+                        matched_result = tool["result"]
+                        matched_tool_indices.add(ti)
+                        break
 
             evidence_items.append(EvidenceItem(
                 id=item_id,
@@ -1004,6 +1021,121 @@ class EvidenceCollectorNode(WorkflowNode):
                     unplanned_tool_count)
 
         return evidence_items
+
+    def _adjudicate_plan_tool_matches(
+        self,
+        evidence_plan: List[Dict],
+        successful_tools: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, int]]:
+        if not getattr(self, "_plan_match_adjudication_enabled", True):
+            return None
+        if not evidence_plan or not successful_tools:
+            return None
+
+        candidates = []
+        for index, tool in enumerate(successful_tools):
+            if tool["tool_name"].lower() in self._NON_EVIDENCE_TOOLS:
+                continue
+            candidates.append({
+                "index": index,
+                "tool_name": tool.get("tool_name", ""),
+                "tool_args": tool.get("tool_args") or {},
+                "structured": tool.get("structured") or {},
+                "result_preview": (tool.get("result") or "")[:1200],
+                "raw_ref": tool.get("raw_ref"),
+                "summary_ref": tool.get("summary_ref"),
+            })
+
+        if not candidates:
+            return None
+
+        adjudicator = getattr(self, "plan_match_adjudicator", None)
+        try:
+            if adjudicator:
+                data = adjudicator(evidence_plan, candidates)
+            else:
+                data = self._call_plan_match_llm(evidence_plan, candidates)
+        except Exception as exc:
+            logger.warning("⚠️ [evidence] evidence_plan LLM 对齐失败，回退规则匹配: %s", exc)
+            return None
+
+        matches = data.get("matches") if isinstance(data, dict) else None
+        if not isinstance(matches, list):
+            return None
+
+        matched: Dict[str, int] = {}
+        used_tool_indices: set[int] = set()
+        for item in matches:
+            if not isinstance(item, dict) or item.get("matched") is not True:
+                continue
+            plan_id = str(item.get("plan_id") or "")
+            if not plan_id:
+                continue
+            try:
+                tool_index = int(item.get("tool_result_index"))
+            except (TypeError, ValueError):
+                continue
+            if tool_index < 0 or tool_index >= len(successful_tools) or tool_index in used_tool_indices:
+                continue
+            confidence = item.get("confidence", 0)
+            try:
+                if float(confidence) < 0.5:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            matched[plan_id] = tool_index
+            used_tool_indices.add(tool_index)
+
+        if matched:
+            logger.info("📊 [evidence] LLM plan/tool 对齐命中 %d 项", len(matched))
+        return matched
+
+    def _call_plan_match_llm(
+        self,
+        evidence_plan: List[Dict],
+        tool_candidates: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is None:
+            return {}
+
+        prompt = """你是 Kubernetes 诊断证据对齐裁判。
+任务：判断 evidence_plan 中每个计划项是否被某个真实 tool_result 满足。
+
+判定原则：
+- 不要只看 tool 名；必须同时比较对象类型、资源名、namespace、命令意图、结果内容。
+- 如果计划查 NetworkPolicy，但结果是 Secret/PVC/Node 表，必须判定不匹配。
+- 如果计划查某个 Pod/namespace，但结果属于其他对象或其他 namespace，必须判定不匹配。
+- 失败、空结果、无关资源不能作为已采集证据。
+- 一个 tool_result 最多匹配一个 plan item。
+
+只输出 JSON，不要解释。格式：
+{
+  "matches": [
+    {
+      "plan_id": "e1",
+      "tool_result_index": 0,
+      "matched": true,
+      "confidence": 0.0,
+      "reason": "简短中文原因"
+    }
+  ],
+  "unmatched_plan_ids": [],
+  "unplanned_tool_result_indexes": []
+}
+"""
+        payload = {
+            "evidence_plan": evidence_plan,
+            "tool_candidates": tool_candidates,
+        }
+        parsed, _ = ai_call.call_simple_json(
+            system_prompt=prompt,
+            question=json.dumps(payload, ensure_ascii=False, default=str),
+            validator=lambda data: isinstance(data, dict) and isinstance(data.get("matches"), list),
+            node_id="evidence_plan_match",
+            max_tokens=2048,
+        )
+        return parsed or {}
 
     @staticmethod
     def _tool_result_matches_plan(
