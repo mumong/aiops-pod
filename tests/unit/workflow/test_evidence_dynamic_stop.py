@@ -467,3 +467,111 @@ def test_evidence_does_not_match_unrelated_resource_output_with_same_tool():
     assert len(items) == 1
     assert items[0].collected is False
     assert node._calculate_completeness(items) == 0
+
+
+def test_evidence_plan_match_adjudicator_overrides_rough_tool_match():
+    def fake_adjudicator(evidence_plan, tool_candidates):
+        assert evidence_plan[0]["id"] == "e1"
+        assert tool_candidates[0]["tool_name"] == "kubectl_get_by_kind_in_namespace"
+        return {
+            "matches": [
+                {
+                    "plan_id": "e1",
+                    "tool_result_index": 0,
+                    "matched": False,
+                    "confidence": 0.93,
+                    "reason": "计划查询 NetworkPolicy，但工具结果是 Secret 表，resource kind 不一致",
+                }
+            ],
+            "unmatched_plan_ids": ["e1"],
+            "unplanned_tool_result_indexes": [0],
+        }
+
+    node = EvidenceCollectorNode(plan_match_adjudicator=fake_adjudicator)
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取所有节点的网络策略，检查是否存在防火墙或网络策略阻止镜像拉取。",
+            "level": "important",
+            "tool": "kubectl_get_by_kind_in_namespace",
+            "command": "kubectl get networkpolicy -n aaa",
+            "purpose": "检查是否存在网络策略阻止镜像拉取。",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_namespace",
+            "semantic_success": True,
+            "result": (
+                "kubectl_get_by_kind_in_namespace Secret 表摘要: rows=2 abnormal=0\n"
+                "docker_secret_count: 0\n"
+                "未发现 type 为 kubernetes.io/dockerconfigjson 或 kubernetes.io/dockercfg 的 Secret。"
+            ),
+            "structured": {
+                "status": "table_summarized",
+                "resource_kind": "Secret",
+                "docker_secret_count": 0,
+            },
+            "tool_args": {"resource_type": "Secret", "namespace": "aaa"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is False
+    assert items[0].source == "planned"
+    assert node._calculate_completeness(items) == 0
+
+
+def test_evidence_plan_match_adjudicator_accepts_semantic_match():
+    def fake_adjudicator(evidence_plan, tool_candidates):
+        return {
+            "matches": [
+                {
+                    "plan_id": "e1",
+                    "tool_result_index": 0,
+                    "matched": True,
+                    "confidence": 0.91,
+                    "reason": "计划和结果都在 aaa 命名空间查询 test1-redis-master-0 Pod 事件",
+                }
+            ],
+            "unmatched_plan_ids": [],
+            "unplanned_tool_result_indexes": [],
+        }
+
+    node = EvidenceCollectorNode(plan_match_adjudicator=fake_adjudicator)
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取镜像拉取失败的事件详细信息。",
+            "level": "critical",
+            "tool": "kubectl_events",
+            "command": "kubectl get events -n aaa --field-selector involvedObject.name=test1-redis-master-0",
+            "purpose": "查看镜像拉取失败事件，确认失败原因。",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_events",
+            "semantic_success": True,
+            "result": "Warning Failed Pod/test1-redis-master-0 Failed to pull image: i/o timeout",
+            "structured": {
+                "status": "events_found",
+                "selected_events": ["Warning Failed Pod/test1-redis-master-0 Failed to pull image: i/o timeout"],
+            },
+            "tool_args": {"namespace": "aaa", "name": "test1-redis-master-0"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is True
+    assert items[0].source == "thinking_match"
+    assert "i/o timeout" in items[0].value
+    assert node._calculate_completeness(items) == 1
