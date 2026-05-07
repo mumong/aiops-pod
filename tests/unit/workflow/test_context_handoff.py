@@ -7,6 +7,7 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.skills.models import Layer
+from app.core.workflow.schemas import RCAOutput
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
@@ -150,6 +151,64 @@ def test_rca_lite_puts_evidence_context_only_in_user_message(monkeypatch):
     assert result["root_cause"] == "image pull auth"
     assert "SECRET_CONTEXT" not in captured["system_prompt"]
     assert "SECRET_CONTEXT" in captured["question"]
+
+
+def test_rca_lite_prefers_structured_output_when_available():
+    node = RootCauseAnalyzerNode()
+    captured = {}
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            captured["system_prompt"] = system_prompt
+            captured["question"] = question
+            captured["schema"] = schema
+            return schema.model_validate({
+                "phenomenon": "Pod ImagePullBackOff",
+                "causal_chain": {
+                    "root_cause": "节点出口网络超时",
+                    "propagation": "镜像无法下载",
+                    "direct_cause": "容器无法创建",
+                    "manifestation": "Pod ImagePullBackOff",
+                },
+                "root_cause_summary": "节点出口网络超时导致镜像拉取失败",
+                "confidence": 0.84,
+                "primary_runbooks": ["l3-imagepull-failed.md"],
+            }), "{}"
+
+    node.ai_call = _StructuredAICall()
+
+    result, _events = node._analyze_with_llm_lite(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        evidence_summary="# 已验证事实\nImagePullBackOff",
+    )
+
+    assert captured["schema"] is RCAOutput
+    assert result["root_cause"] == "节点出口网络超时导致镜像拉取失败"
+    assert result["confidence"] == 0.84
+    assert result["primary_runbooks"] == ["l3-imagepull-failed.md"]
+
+
+def test_rca_lite_does_not_call_llm_twice_when_structured_validation_fails():
+    node = RootCauseAnalyzerNode()
+
+    class _StructuredAICall:
+        def call_structured(self, *args, **kwargs):
+            return None, '{"phenomenon":"Pod 异常","confidence":0.9}'
+
+        def call_simple_json(self, *args, **kwargs):
+            raise AssertionError("structured validation fallback must not issue a second LLM call")
+
+    node.ai_call = _StructuredAICall()
+
+    result, _events = node._analyze_with_llm_lite(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        evidence_summary="# 已验证事实\nPod 异常",
+    )
+
+    assert result["confidence"] <= 0.2
+    assert "不符合 RCA 结构化输出合同" in result["confidence_reason"]
 
 
 def test_evidence_prompt_uses_layer_handoff_in_user_message_not_system_prompt(monkeypatch):
@@ -302,6 +361,66 @@ def test_layer_handoff_primary_pod_must_come_from_current_abnormal_pod_scan():
     assert handoff["primary_pod"] == {"name": "terminating-stuck", "namespace": "aiops-e2e"}
     assert handoff["abnormal_pods"] == [
         {"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}
+    ]
+
+
+def test_layer_handoff_builds_issue_groups_from_current_abnormal_pods():
+    node = LayerClassifierNode()
+    layer_result = {
+        "layer": "L3",
+        "derived_layer": "L3",
+        "layers": ["L3", "L1"],
+        "confidence": 0.92,
+        "reasoning": "发现 ImagePull 和 Terminating 两类异常",
+        "primary_pod": {"name": "redis-master-0", "namespace": "aaa"},
+        "abnormal_pods": [
+            {"name": "redis-master-0", "namespace": "aaa", "status": "ImagePullBackOff"},
+            {"name": "redis-slave-0", "namespace": "aaa", "status": "ErrImagePull"},
+            {"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"},
+        ],
+        "pod_status_keyword": "ImagePullBackOff",
+        "pod_abnormal_type": "ImagePullFailed",
+        "status_category": "image_registry",
+    }
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "structured": {
+                "header": "NAMESPACE NAME READY STATUS RESTARTS AGE IP NODE LABELS",
+                "selected_rows": [
+                    "aaa redis-master-0 0/1 ImagePullBackOff 0 29h 172.16.166.186 node1 app=redis",
+                    "aaa redis-slave-0 0/1 ErrImagePull 0 29h 172.16.166.164 node1 app=redis",
+                    "aiops-e2e terminating-stuck 0/1 Terminating 0 8d <none> node1 pod_abnormal_type=TerminatingStuck,expected_layer=L1",
+                ],
+            },
+            "result": "Pod table",
+        }
+    ]
+
+    handoff = node._build_layer_handoff(
+        question="我的集群有什么问题",
+        layer_result=layer_result,
+        layer=Layer.L3,
+        layers=[Layer.L3, Layer.L1],
+        thinking_events=events,
+    )
+
+    groups = handoff["issue_groups"]
+    assert len(groups) == 2
+    assert groups[0]["primary_entities"] == [
+        {"kind": "Pod", "namespace": "aaa", "name": "redis-master-0"},
+        {"kind": "Pod", "namespace": "aaa", "name": "redis-slave-0"},
+    ]
+    assert groups[0]["pod_abnormal_type"] == "ImagePullFailed"
+    assert groups[0]["compatible_layers"] == ["L3"]
+    assert groups[0]["status_keywords"] == ["ImagePullBackOff", "ErrImagePull"]
+    terminating_group = next(group for group in groups if group["status_keywords"] == ["Terminating"])
+    assert terminating_group["pod_abnormal_type"] == "TerminatingStuck"
+    assert terminating_group["compatible_layers"] == ["L1"]
+    assert terminating_group["primary_entities"] == [
+        {"kind": "Pod", "namespace": "aiops-e2e", "name": "terminating-stuck"}
     ]
 
 
