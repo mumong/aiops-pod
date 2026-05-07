@@ -644,6 +644,77 @@ def test_conclusion_strips_think_blocks_from_final_report():
     assert ConclusionFormatterNode._strip_think_blocks(content) == "## 诊断概览\nPod ImagePullBackOff"
 
 
+def test_conclusion_llm_prompt_includes_structured_diagnosis_context():
+    node = ConclusionFormatterNode()
+    node.ai_call = _RecordingAICall("## 诊断概览\n证据完整度: 1/2 (50%)")
+
+    evidence_analysis = """{
+  "collection_summary": "计划 2 项，实际采集 1 项，未采集 1 项，完整度 50%；其中真实环境证据 1/2 项，完整度 50%",
+  "plan_total": 2,
+  "plan_collected": 1,
+  "plan_completeness": 0.5,
+  "environment_evidence_total": 2,
+  "environment_evidence_collected": 1,
+  "environment_evidence_completeness": 0.5,
+  "evidence_inventory": [
+    {
+      "id": "e1",
+      "description": "获取 Pod 事件",
+      "level": "critical",
+      "tool": "kubectl_events",
+      "command": "kubectl get events -n aaa",
+      "purpose": "确认失败原因",
+      "collected": true,
+      "source": "thinking_match"
+    },
+    {
+      "id": "e2",
+      "description": "获取 Pod YAML",
+      "level": "important",
+      "tool": "kubectl_get_yaml",
+      "command": "kubectl get pod p -n aaa -o yaml",
+      "purpose": "确认镜像配置",
+      "collected": false,
+      "source": "planned"
+    }
+  ],
+  "missing_reasons": ["e2(获取 Pod YAML): 已规划但工具执行失败或无匹配结果"]
+}"""
+    rca_analysis = """{
+  "phenomenon": "Pod ImagePullBackOff",
+  "root_cause": "节点出口网络超时导致镜像拉取失败",
+  "root_cause_summary": "节点出口网络超时导致镜像拉取失败",
+  "confidence": 0.84,
+  "causal_chain": {
+    "root_cause": "节点出口网络超时",
+    "propagation": "镜像无法下载",
+    "direct_cause": "容器无法创建",
+    "manifestation": "Pod ImagePullBackOff"
+  },
+  "primary_runbooks": ["l3-imagepull-failed.md"],
+  "limitations": "未验证节点出口网络"
+}"""
+
+    node._generate_with_llm(
+        question="我的集群有什么问题",
+        layer_analysis='{"layer":"L3"}',
+        evidence_analysis=evidence_analysis,
+        rca_analysis=rca_analysis,
+        layer=Layer.L3,
+    )
+
+    prompt = node.ai_call.calls[0]["kwargs"]["question"]
+    assert "# 结构化诊断上下文" in prompt
+    assert "evidence_plan_stats: 1/2 (50%)" in prompt
+    assert "已采集证据:" in prompt
+    assert "e1: 获取 Pod 事件" in prompt
+    assert "未采集证据:" in prompt
+    assert "e2: 获取 Pod YAML" in prompt
+    assert "rca_root_cause: 节点出口网络超时导致镜像拉取失败" in prompt
+    assert "rca_confidence: 84%" in prompt
+    assert "rca_limitations: 未验证节点出口网络" in prompt
+
+
 def test_layer_prompt_is_diagnosis_and_healthy_only():
     expected_phrases = [
         "这个节点只服务于诊断类和健康检查类请求",

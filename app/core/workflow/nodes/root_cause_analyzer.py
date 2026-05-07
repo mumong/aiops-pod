@@ -22,6 +22,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
+from app.core.workflow.schemas import RCAOutput
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import (
     Layer, DeterministicDecision, EvidenceItem,
@@ -347,13 +348,27 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 raise RuntimeError("[rca] ai_call 未设置，无法执行 lite 模式")
 
             logger.info("📍 [rca] AICall.call_simple lite 模式开始")
-            parsed, content = ai_call.call_simple_json(
-                system_prompt=system_prompt,
-                question=user_message,
-                validator=lambda data: isinstance(data, dict),
-                node_id=self.node_id,
-                run_id=getattr(self, "current_run_id", ""),
-            )
+            parsed = None
+            content = ""
+            if hasattr(ai_call, "call_structured"):
+                structured, content = ai_call.call_structured(
+                    system_prompt=system_prompt,
+                    question=user_message,
+                    schema=RCAOutput,
+                    node_id=self.node_id,
+                    run_id=getattr(self, "current_run_id", ""),
+                )
+                if structured is not None:
+                    parsed = structured.model_dump()
+            else:
+                raw_parsed, content = ai_call.call_simple_json(
+                    system_prompt=system_prompt,
+                    question=user_message,
+                    validator=lambda data: isinstance(data, dict),
+                    node_id=self.node_id,
+                    run_id=getattr(self, "current_run_id", ""),
+                )
+                parsed = self._normalize_rca_result(raw_parsed) if raw_parsed else None
 
             duration_ms = (time.time() - start_time) * 1000
 
@@ -445,13 +460,32 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 reason=f"LLM 根因分析失败: {str(e)}",
             ), []
     
+    @staticmethod
+    def _normalize_rca_result(parsed: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return None
+        try:
+            return RCAOutput.model_validate(parsed).model_dump()
+        except Exception as exc:
+            logger.warning("⚠️ [rca] RCA 结构化校验失败: %s", exc)
+            return None
+
     def _parse_llm_response(self, response_text: str) -> Dict:
         """解析 LLM 的 JSON 响应"""
         try:
             json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group(1))
-            return json.loads(response_text)
+                parsed = json.loads(json_match.group(1))
+            else:
+                parsed = json.loads(response_text)
+            normalized = self._normalize_rca_result(parsed)
+            if normalized is not None:
+                return normalized
+            return self._build_llm_fallback(
+                question="",
+                layer=None,
+                reason="LLM 返回 JSON 但不符合 RCA 结构化输出合同",
+            )
         except json.JSONDecodeError:
             # JSON 解析失败 — 把 LLM 原始文本作为分析结果保留
             # 不要把对话过程塞进 root_cause

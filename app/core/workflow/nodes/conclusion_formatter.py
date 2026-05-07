@@ -303,6 +303,11 @@ class ConclusionFormatterNode(WorkflowNode):
         except (json.JSONDecodeError, TypeError):
             pass
 
+        structured_context_section = self._build_structured_diagnosis_context(
+            evidence_analysis=evidence_analysis,
+            rca_analysis=rca_analysis,
+        )
+
         user_message = f"""# 用户问题
 {question}
 
@@ -314,7 +319,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
 # 阶段3：根因分析
 {rca_analysis}
-{evidence_stats_section}{tool_section}
+{structured_context_section}{evidence_stats_section}{tool_section}
 {query_result_section}
 {instruction}"""
 
@@ -359,7 +364,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
 # 阶段3：根因分析
 {rca_analysis}
-{evidence_stats_section}
+{structured_context_section}{evidence_stats_section}
 {instruction}"""
                     # 压缩后丢弃 tool_section（已在各段摘要中）
                     estimated_tokens = self._estimate_tokens(system_prompt_text + user_message)
@@ -1059,6 +1064,93 @@ class ConclusionFormatterNode(WorkflowNode):
         if not parts:
             return ""
         return "\n".join(parts[:20])  # 最多 20 条，避免超长
+
+    @classmethod
+    def _build_structured_diagnosis_context(cls, evidence_analysis: str, rca_analysis: str) -> str:
+        """Build a compact, generic summary from structured evidence/RCA JSON."""
+        try:
+            evidence_data = json.loads(evidence_analysis) if evidence_analysis else {}
+            if not isinstance(evidence_data, dict):
+                evidence_data = {}
+        except (json.JSONDecodeError, TypeError):
+            evidence_data = {}
+
+        try:
+            rca_data = json.loads(rca_analysis) if rca_analysis else {}
+            if not isinstance(rca_data, dict):
+                rca_data = {}
+        except (json.JSONDecodeError, TypeError):
+            rca_data = {}
+
+        stats = cls._extract_evidence_stats(evidence_data) if evidence_data else {}
+        inv = evidence_data.get("evidence_inventory", []) if evidence_data else []
+        collected = [item for item in inv if isinstance(item, dict) and item.get("collected")]
+        missing = [item for item in inv if isinstance(item, dict) and not item.get("collected")]
+
+        lines = ["\n# 结构化诊断上下文"]
+        if stats:
+            lines.append(
+                "evidence_plan_stats: "
+                f"{stats.get('plan_collected', 0)}/{stats.get('plan_total', 0)} "
+                f"({stats.get('plan_completeness_pct', '0%')})"
+            )
+            lines.append(
+                "environment_evidence_stats: "
+                f"{stats.get('environment_collected', 0)}/{stats.get('environment_total', 0)} "
+                f"({stats.get('environment_completeness_pct', '0%')})"
+            )
+
+        if collected:
+            lines.append("已采集证据:")
+            for item in collected[:12]:
+                lines.append(
+                    f"- {item.get('id', '?')}: {item.get('description', '')}"
+                    f" | level={item.get('level', '')}"
+                    f" | tool={item.get('tool', '')}"
+                    f" | source={item.get('source', '')}"
+                )
+
+        if missing:
+            lines.append("未采集证据:")
+            for item in missing[:12]:
+                lines.append(
+                    f"- {item.get('id', '?')}: {item.get('description', '')}"
+                    f" | level={item.get('level', '')}"
+                    f" | tool={item.get('tool', '')}"
+                    f" | source={item.get('source', '')}"
+                )
+
+        missing_reasons = evidence_data.get("missing_reasons", []) if evidence_data else []
+        if missing_reasons:
+            lines.append("missing_reasons:")
+            for reason in missing_reasons[:12]:
+                lines.append(f"- {reason}")
+
+        root_cause = rca_data.get("root_cause_summary") or rca_data.get("root_cause")
+        if root_cause:
+            lines.append(f"rca_root_cause: {root_cause}")
+
+        confidence = rca_data.get("confidence")
+        if isinstance(confidence, (int, float)):
+            lines.append(f"rca_confidence: {float(confidence):.0%}")
+
+        causal = rca_data.get("causal_chain")
+        if isinstance(causal, dict) and causal:
+            lines.append("rca_causal_chain:")
+            for key in ("root_cause", "trigger", "propagation", "mechanism", "direct_cause", "manifestation"):
+                value = causal.get(key)
+                if value:
+                    lines.append(f"- {key}: {value}")
+
+        runbooks = rca_data.get("primary_runbooks")
+        if isinstance(runbooks, list) and runbooks:
+            lines.append("rca_primary_runbooks: " + ", ".join(str(item) for item in runbooks))
+
+        limitations = rca_data.get("limitations")
+        if limitations:
+            lines.append(f"rca_limitations: {limitations}")
+
+        return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
     @staticmethod
     def _extract_evidence_stats(evidence_data: Dict[str, Any]) -> Dict[str, Any]:

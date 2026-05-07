@@ -19,6 +19,7 @@ import time
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from pydantic import BaseModel, ValidationError
 from langgraph.errors import GraphRecursionError
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
@@ -213,6 +214,30 @@ class AICall:
         if parsed is not None and validator is not None and not validator(parsed):
             parsed = None
         return parsed, raw
+
+    def call_structured(
+        self,
+        system_prompt: str,
+        question: str,
+        schema: type[BaseModel],
+        **kwargs,
+    ) -> Tuple[Optional[BaseModel], str]:
+        """Call the model and validate the JSON payload against a Pydantic schema."""
+        raw = self.call_simple(system_prompt, question, **kwargs)
+        parsed = self.extract_json_payload(raw)
+        if parsed is None:
+            logger.warning("⚠️ [AICall] structured output parse failed for schema=%s", schema.__name__)
+            return None, raw
+
+        try:
+            return schema.model_validate(parsed), raw
+        except ValidationError as exc:
+            logger.warning(
+                "⚠️ [AICall] structured output validation failed for schema=%s: %s",
+                schema.__name__,
+                exc,
+            )
+            return None, raw
 
     def call(
         self,
