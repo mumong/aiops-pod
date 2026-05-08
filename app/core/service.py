@@ -314,6 +314,7 @@ class HolmesService:
                     api_base=final_api_base or "",
                     observation_summary_mode=summary_mode,
                     observation_summary_max_chars=summary_max_chars,
+                    context_compaction_config=self.get_context_compaction_config(),
                 )
                 logger.info("   ✅ AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
                            final_model, summary_mode, summary_max_chars, time.time() - step_start)
@@ -425,6 +426,7 @@ class HolmesService:
                 api_base=self.ai_call.api_base,
                 observation_summary_mode=summary_mode,
                 observation_summary_max_chars=summary_max_chars,
+                context_compaction_config=self.get_context_compaction_config(),
             )
         except TypeError:
             # Unit-test fakes may not implement the production constructor extension.
@@ -510,6 +512,42 @@ class HolmesService:
         except (TypeError, ValueError):
             max_chars = 3000
         return normalized_mode, max(200, max_chars)
+
+    def get_context_compaction_config(self) -> Dict[str, Any]:
+        """获取运行时上下文压缩配置。
+
+        仅从 config.yaml 的 workflow.context_compaction 读取，避免环境变量
+        隐式改变模型上下文治理行为。
+        """
+        wf_cfg = self.workflow_config if isinstance(self.workflow_config, dict) else {}
+        cfg = wf_cfg.get("context_compaction", {}) if isinstance(wf_cfg.get("context_compaction", {}), dict) else {}
+        result: Dict[str, Any] = {
+            "enabled": bool(cfg.get("enabled", True)),
+            "nodes": cfg.get("nodes") or ["evidence"],
+            "max_context_window": cfg.get("max_context_window") or 35000,
+            "trigger_ratio": cfg.get("trigger_ratio") or 0.70,
+            "max_compactions_per_call": cfg.get("max_compactions_per_call") or 1,
+            "summary_max_tokens": cfg.get("summary_max_tokens") or 1200,
+        }
+        if isinstance(result["nodes"], str):
+            result["nodes"] = [result["nodes"]]
+        try:
+            result["max_context_window"] = int(result["max_context_window"])
+        except (TypeError, ValueError):
+            result["max_context_window"] = 35000
+        try:
+            result["trigger_ratio"] = float(result["trigger_ratio"])
+        except (TypeError, ValueError):
+            result["trigger_ratio"] = 0.70
+        try:
+            result["max_compactions_per_call"] = int(result["max_compactions_per_call"])
+        except (TypeError, ValueError):
+            result["max_compactions_per_call"] = 1
+        try:
+            result["summary_max_tokens"] = int(result["summary_max_tokens"])
+        except (TypeError, ValueError):
+            result["summary_max_tokens"] = 1200
+        return result
 
     def _load_runbooks(self):
         """加载和合并 runbook catalogs"""
