@@ -28,6 +28,7 @@ from app.core.context.archive import ContextArchive
 from app.core.context.budget import ContextBudgetEstimator, ModelContextResolver, serialize_tool_schema
 from app.core.context.observation import ObservationProcessor
 from app.core.prompts import get_workflow_prompt
+from app.core.workflow.schemas import ContextCompactionSummary
 from .streaming import push_event
 from .types import AICallResult
 
@@ -70,6 +71,7 @@ class AICall:
         api_base: str = "",
         observation_summary_mode: str = "rule",
         observation_summary_max_chars: int = 3000,
+        context_compaction_config: Optional[Dict[str, Any]] = None,
     ):
         """
         Args:
@@ -84,6 +86,7 @@ class AICall:
         normalized_mode = (observation_summary_mode or "rule").strip().lower()
         self.observation_summary_mode = normalized_mode if normalized_mode in {"rule", "ai"} else "rule"
         self.observation_summary_max_chars = max(200, int(observation_summary_max_chars or 3000))
+        self.context_compaction_config = dict(context_compaction_config or {})
 
         model_name, base_url = _parse_model(model, api_base)
         self._chat_model_kwargs: Dict[str, Any] = {
@@ -222,7 +225,16 @@ class AICall:
         schema: type[BaseModel],
         **kwargs,
     ) -> Tuple[Optional[BaseModel], str]:
-        """Call the model and validate the JSON payload against a Pydantic schema."""
+        """Call the model with Pydantic structured output, then JSON fallback."""
+        use_native = bool(kwargs.pop("use_native_structured", True))
+        if use_native:
+            native, raw = self._call_native_structured(system_prompt, question, schema, **kwargs)
+            if native is not None:
+                return native, raw
+
+        # Compatibility fallback for OpenAI-compatible gateways that do not
+        # support native structured output. The schema is still enforced by
+        # Pydantic; invalid JSON is treated as no result.
         raw = self.call_simple(system_prompt, question, **kwargs)
         parsed = self.extract_json_payload(raw)
         if parsed is None:
@@ -238,6 +250,81 @@ class AICall:
                 exc,
             )
             return None, raw
+
+    def _call_native_structured(
+        self,
+        system_prompt: str,
+        question: str,
+        schema: type[BaseModel],
+        **kwargs,
+    ) -> Tuple[Optional[BaseModel], str]:
+        node_id = kwargs.pop("node_id", "")
+        run_id = kwargs.pop("run_id", "")
+        static_context_components = kwargs.pop("static_context_components", None)
+        output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
+        if static_context_components is None:
+            static_context_components = [
+                {"name": "node_system_prompt", "category": "static_input", "content": system_prompt},
+                {"name": "user_message", "category": "static_input", "content": question},
+                {"name": "output_reserved", "category": "reserved", "tokens": output_reserved},
+            ]
+        budget = ContextBudgetEstimator().estimate(
+            node_id=node_id or "structured",
+            model=self.model_str,
+            system_prompt=system_prompt,
+            user_message=question,
+            tool_count=0,
+            components=static_context_components,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+        )
+        ContextBudgetEstimator().log(budget)
+        if run_id:
+            try:
+                ContextArchive(run_id=run_id).write_budget(node_id or "structured", budget)
+            except Exception as exc:
+                logger.warning("⚠️ [AICall] call_structured 写入 context budget 失败: %s", exc)
+
+        messages = []
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+        messages.append(HumanMessage(content=question))
+
+        session_id = self._normalize_langfuse_session_id(run_id)
+        try:
+            model = self._create_chat_model(session_id=session_id, node_id=node_id or "structured")
+            if kwargs:
+                model = model.bind(**kwargs)
+            model = self._bind_session_metadata(model, session_id, node_id=node_id or "structured")
+            if not hasattr(model, "with_structured_output"):
+                return None, ""
+            structured_model = model.with_structured_output(schema)
+            invoke_config = self._build_langchain_config(session_id, node_id=node_id or "structured")
+            with self._langfuse_session_scope(session_id, node_id or "structured"):
+                result = (
+                    structured_model.invoke(messages, config=invoke_config)
+                    if invoke_config
+                    else structured_model.invoke(messages)
+                )
+            if isinstance(result, schema):
+                raw = result.model_dump_json()
+                return result, raw
+            if isinstance(result, dict):
+                parsed = schema.model_validate(result)
+                return parsed, json.dumps(parsed.model_dump(), ensure_ascii=False, default=str)
+            logger.warning(
+                "⚠️ [AICall] native structured output returned unsupported type=%s schema=%s",
+                type(result).__name__,
+                schema.__name__,
+            )
+            return None, str(result)
+        except Exception as exc:
+            logger.warning(
+                "⚠️ [AICall] native structured output failed for schema=%s, fallback to JSON: %s",
+                schema.__name__,
+                exc,
+            )
+            return None, ""
 
     def call(
         self,
@@ -340,9 +427,12 @@ class AICall:
         final_content = ""
         _content_buffer = []  # 收集 token 级别的文本片段
         tool_observation_contents: List[str] = []
+        compaction_triggered = False
+        emitted_ai_messages: List[Tuple[Any, str]] = []
+        emitted_tool_messages: List[Tuple[Any, Dict[str, Any]]] = []
 
         async def _run_agent():
-            nonlocal final_content, iteration, tool_call_count, tool_result_sequence
+            nonlocal final_content, iteration, tool_call_count, tool_result_sequence, compaction_triggered
             async for chunk in agent.astream(
                 input_messages, config=config,
                 stream_mode=["updates", "messages"],
@@ -426,6 +516,9 @@ class AICall:
                             if should_emit_ai_message:
                                 final_content = full_msg_text
                                 iteration += 1
+                                emitted_ai_messages.append((msg, full_msg_text))
+                                if compaction_triggered:
+                                    self._compact_langgraph_ai_messages_in_place(emitted_ai_messages)
                                 logger.debug("   💬 [AICall] AI 消息 #%d:\n%s",
                                             iteration, full_msg_text[:1000])
                                 evt = {"type": "ai_message",
@@ -510,6 +603,13 @@ class AICall:
                                 "semantic_success": observation.get("semantic_success", True),
                                 "structured": observation.get("structured"),
                             })
+                            emitted_tool_messages.append((msg, {
+                                "tool_name": tool_name,
+                                "raw_ref": observation.get("raw_ref"),
+                                "structured_ref": observation.get("structured_ref"),
+                                "summary_ref": observation.get("summary_ref"),
+                                "summary_chars": observation.get("summary_chars", len(bounded_content)),
+                            }))
                             logger.info("   ✅ [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
                                         tool_call_count, tool_name, status,
                                         observation.get("raw_chars", len(tool_content)),
@@ -547,6 +647,18 @@ class AICall:
                             }
                             push_event(stream_queue, "tool_result", node_id, **evt)
                             self._record(thinking_events, "tool_result", node_id, **evt)
+
+                            if not compaction_triggered:
+                                compaction_triggered = self._maybe_compact_runtime_context(
+                                    node_id=node_id or "unknown",
+                                    run_id=run_id,
+                                    static_context_components=static_context_components,
+                                    thinking_events=thinking_events,
+                                    tool_observation_contents=tool_observation_contents,
+                                )
+                                if compaction_triggered:
+                                    self._compact_langgraph_ai_messages_in_place(emitted_ai_messages)
+                                    self._compact_langgraph_tool_messages_in_place(emitted_tool_messages)
 
                             if stop_checker:
                                 try:
@@ -975,6 +1087,281 @@ class AICall:
             return None
         return float(budget.get("actual_context_tokens", 0)) / float(context_window)
 
+    def _maybe_compact_runtime_context(
+        self,
+        node_id: str,
+        run_id: str,
+        static_context_components: List[Dict[str, Any]],
+        thinking_events: List[Dict[str, Any]],
+        tool_observation_contents: List[str],
+    ) -> bool:
+        config = self._runtime_compaction_config()
+        if not config.get("enabled"):
+            return False
+
+        node_text = str(node_id or "").strip()
+        nodes = {str(item) for item in config.get("nodes", [])}
+        if nodes and node_text not in nodes:
+            return False
+
+        resolved = ModelContextResolver().resolve(
+            self.model_str,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+        )
+        context_window = resolved.get("context_window")
+        if not isinstance(context_window, int) or context_window <= 0:
+            return False
+        max_window = int(config.get("max_context_window") or 35000)
+        if context_window > max_window:
+            return False
+
+        dynamic_components = self._runtime_dynamic_components(thinking_events)
+        budget = ContextBudgetEstimator().estimate(
+            node_id=f"{node_text or 'unknown'}_runtime_compaction_check",
+            model=self.model_str,
+            system_prompt="",
+            user_message="",
+            components=[
+                *[c for c in static_context_components if c.get("category") != "reserved"],
+                *dynamic_components,
+            ],
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+            scratchpad_reserved=0,
+            output_reserved=0,
+        )
+        actual_tokens = int(budget.get("actual_context_tokens") or 0)
+        usage_ratio = actual_tokens / context_window
+        trigger_ratio = float(config.get("trigger_ratio") or 0.7)
+        if usage_ratio < trigger_ratio:
+            return False
+
+        payload = self._build_runtime_compaction_payload(
+            node_id=node_text,
+            usage_ratio=usage_ratio,
+            context_window=context_window,
+            thinking_events=thinking_events,
+            tool_observation_contents=tool_observation_contents,
+        )
+        summary = self._compact_context_with_lite_llm(
+            payload,
+            node_id=node_text,
+            run_id=run_id,
+            max_tokens=int(config.get("summary_max_tokens") or 1200),
+        )
+        if not isinstance(summary, dict):
+            return False
+
+        compact_text = json.dumps(summary, ensure_ascii=False, default=str)
+        if not compact_text.strip():
+            return False
+
+        compact_event = {
+            "type": "context_summary",
+            "node": node_text,
+            "timestamp": time.time(),
+            "content": compact_text[:500],
+            "full_content": compact_text,
+            "iteration": "compaction",
+            "context_compacted": True,
+            "context_usage_ratio_before": usage_ratio,
+        }
+        self._compact_thinking_events_in_place(thinking_events, compact_event)
+        tool_observation_contents[:] = [compact_text]
+        logger.info(
+            "🧯 [AICall] runtime context compacted | node=%s usage=%.0f%% window=%s",
+            node_text or "unknown",
+            usage_ratio * 100,
+            context_window,
+        )
+        return True
+
+    @staticmethod
+    def _compact_thinking_events_in_place(
+        thinking_events: List[Dict[str, Any]],
+        compact_event: Dict[str, Any],
+    ) -> None:
+        """Keep event topology for downstream consumers while removing long text."""
+        compacted_events: List[Dict[str, Any]] = [compact_event]
+        for ev in thinking_events:
+            ev_type = ev.get("type")
+            if ev_type == "ai_message":
+                text = ev.get("full_content") or ev.get("content") or ""
+                if "evidence_plan" in text:
+                    compacted_events.append(ev)
+                    continue
+                compacted = dict(ev)
+                compacted["full_content"] = ""
+                compacted["content"] = f"[compacted ai_message: original_chars={len(text)}]"
+                compacted["context_compacted"] = True
+                compacted_events.append(compacted)
+                continue
+
+            if ev_type == "tool_result":
+                compacted = dict(ev)
+                result = str(compacted.get("result") or compacted.get("result_preview") or "")
+                raw_ref = compacted.get("raw_ref")
+                structured_ref = compacted.get("structured_ref")
+                summary_ref = compacted.get("summary_ref")
+                # If archive refs exist, the full payload is recoverable. Keep
+                # enough text for plan matching and human stream previews.
+                if (raw_ref or structured_ref or summary_ref) and len(result) > 1200:
+                    compacted["result"] = result[:1200] + "\n...[compacted: see raw_ref/structured_ref/summary_ref]"
+                    compacted["result_preview"] = compacted["result"][:200]
+                    compacted["context_compacted"] = True
+                compacted_events.append(compacted)
+                continue
+
+            compacted_events.append(ev)
+        thinking_events[:] = compacted_events
+
+    @staticmethod
+    def _compact_langgraph_ai_messages_in_place(messages: List[Tuple[Any, str]]) -> None:
+        """Compact already-emitted AI text while preserving evidence_plan messages."""
+        for msg, original_text in messages:
+            text = str(original_text or "")
+            if not text or "evidence_plan" in text:
+                continue
+            try:
+                msg.content = f"[compacted ai_message: original_chars={len(text)}]"
+            except Exception:
+                continue
+
+    @staticmethod
+    def _compact_langgraph_tool_messages_in_place(messages: List[Tuple[Any, Dict[str, Any]]]) -> None:
+        """Compact tool observations already stored in the agent message list."""
+        for msg, metadata in messages:
+            current = str(getattr(msg, "content", "") or "")
+            if len(current) <= 1200:
+                continue
+            raw_ref = metadata.get("raw_ref")
+            structured_ref = metadata.get("structured_ref")
+            summary_ref = metadata.get("summary_ref")
+            ref_text = ", ".join(str(v) for v in (raw_ref, structured_ref, summary_ref) if v)
+            replacement = (
+                f"[compacted tool_result: tool={metadata.get('tool_name') or 'unknown'} "
+                f"original_chars={len(current)}"
+            )
+            if ref_text:
+                replacement += f" refs={ref_text}"
+            replacement += "]"
+            try:
+                msg.content = replacement
+            except Exception:
+                continue
+
+    def _runtime_compaction_config(self) -> Dict[str, Any]:
+        defaults = {
+            "enabled": True,
+            "nodes": ["evidence"],
+            "max_context_window": 35000,
+            "trigger_ratio": 0.70,
+            "max_compactions_per_call": 1,
+            "summary_max_tokens": 1200,
+        }
+        cfg = dict(defaults)
+        user_cfg = self.context_compaction_config if isinstance(self.context_compaction_config, dict) else {}
+        cfg.update({k: v for k, v in user_cfg.items() if v is not None})
+        if isinstance(cfg.get("nodes"), str):
+            cfg["nodes"] = [cfg["nodes"]]
+        return cfg
+
+    @staticmethod
+    def _runtime_dynamic_components(thinking_events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        tool_observation_text = "\n".join(
+            ev.get("result", "") or ev.get("result_preview", "")
+            for ev in thinking_events
+            if ev.get("type") == "tool_result"
+        )
+        ai_message_text = "\n".join(
+            ev.get("full_content", "") or ev.get("content", "")
+            for ev in thinking_events
+            if ev.get("type") == "ai_message"
+        )
+        return [
+            {
+                "name": "tool_observations",
+                "category": "dynamic_runtime",
+                "content": tool_observation_text,
+                "preview": tool_observation_text[:200],
+            },
+            {
+                "name": "ai_messages",
+                "category": "dynamic_runtime",
+                "content": ai_message_text,
+                "preview": ai_message_text[:200],
+            },
+        ]
+
+    @staticmethod
+    def _build_runtime_compaction_payload(
+        node_id: str,
+        usage_ratio: float,
+        context_window: int,
+        thinking_events: List[Dict[str, Any]],
+        tool_observation_contents: List[str],
+    ) -> Dict[str, Any]:
+        ai_messages = [
+            (ev.get("full_content") or ev.get("content") or "")[:4000]
+            for ev in thinking_events
+            if ev.get("type") == "ai_message"
+        ]
+        tool_results = []
+        for ev in thinking_events:
+            if ev.get("type") != "tool_result":
+                continue
+            tool_results.append({
+                "tool_name": ev.get("tool_name"),
+                "semantic_success": ev.get("semantic_success"),
+                "result": (ev.get("result") or ev.get("result_preview") or "")[:3000],
+                "structured": ev.get("structured") or {},
+            })
+        return {
+            "node_id": node_id,
+            "usage_ratio": round(usage_ratio, 4),
+            "context_window": context_window,
+            "instruction": (
+                "压缩 evidence 运行上下文。保留关键过程、计划、已完成/未完成证据、"
+                "正向事实、负向事实、冲突和下一步焦点。若模型陷入重复工具或钻牛角尖，"
+                "请抓大放小，把重复/无关节点容量、长 JSON、重复 describe 归入 discarded_noise。"
+            ),
+            "ai_messages": ai_messages,
+            "tool_results": tool_results,
+            "tool_observation_tail": [str(item)[:2000] for item in tool_observation_contents[-5:]],
+        }
+
+    def _compact_context_with_lite_llm(
+        self,
+        payload: Dict[str, Any],
+        node_id: str,
+        run_id: str,
+        max_tokens: int = 1200,
+    ) -> Optional[Dict[str, Any]]:
+        prompt = """你是 K8s AIOps evidence 上下文压缩器。
+任务：把冗长的中间思考和工具输出压缩成结构化摘要，帮助后续模型继续诊断。
+要求：
+- 保留重要事实，不编造。
+- 体现过程顺序，用“先...随后...最后...”描述。
+- 负向结果也是事实，例如 timeout、connection reset、NotFound、空事件。
+- 如果工具调用重复、跑偏或钻牛角尖，抓大放小，把噪声放入 discarded_noise。
+"""
+        try:
+            parsed, raw = self.call_structured(
+                system_prompt=prompt,
+                question=json.dumps(payload, ensure_ascii=False, default=str),
+                schema=ContextCompactionSummary,
+                node_id=f"{node_id}_context_compaction",
+                run_id=run_id,
+                max_tokens=max_tokens,
+            )
+            if parsed is None:
+                return None
+            return parsed.model_dump()
+        except Exception as exc:
+            logger.warning("⚠️ [AICall] runtime context compaction failed: %s", exc)
+            return None
+
     def _write_final_context_budget(
         self,
         run_id: str,
@@ -997,6 +1384,11 @@ class AICall:
             for ev in thinking_events
             if ev.get("type") == "ai_message"
         )
+        context_summary_text = "\n".join(
+            ev.get("full_content", "") or ev.get("content", "")
+            for ev in thinking_events
+            if ev.get("type") == "context_summary"
+        )
         final_components = [
             *static_context_components,
             {
@@ -1010,6 +1402,12 @@ class AICall:
                 "category": "dynamic_runtime",
                 "content": ai_message_text,
                 "preview": ai_message_text[:200],
+            },
+            {
+                "name": "context_summaries",
+                "category": "dynamic_runtime",
+                "content": context_summary_text,
+                "preview": context_summary_text[:200],
             },
             {
                 "name": "final_output",

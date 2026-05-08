@@ -17,6 +17,7 @@ from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
+from app.core.workflow.schemas import LayerOutput, QueryResult
 
 
 class _RecordingAICall:
@@ -88,7 +89,7 @@ def test_healthy_conclusion_uses_deterministic_fast_path():
     assert "所有 Pod Running" in result["conclusion"]
 
 
-def test_layer_stage1_structured_output_skips_second_extraction_and_keeps_full_analysis():
+def test_layer_stage1_structured_output_is_revalidated_with_pydantic_and_keeps_full_analysis():
     node = LayerClassifierNode()
     structured_json = """
 ```json
@@ -114,9 +115,16 @@ def test_layer_stage1_structured_output_skips_second_extraction_and_keeps_full_a
     ]
 
     node._call_llm = lambda question, prompt, **kwargs: (SimpleNamespace(result=structured_json), thinking_events)
-    node._extract_classification = lambda analysis_text: (_ for _ in ()).throw(
-        AssertionError("stage2 extraction should not run")
-    )
+
+    class _StructuredAICall:
+        def __init__(self):
+            self.calls = []
+
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            self.calls.append({"system_prompt": system_prompt, "question": question, "schema": schema})
+            raise AssertionError("stage1 valid LayerOutput should not require layer_extract")
+
+    node.ai_call = _StructuredAICall()
 
     result, returned_events = node._analyze_with_llm("查询异常 Pod")
 
@@ -124,6 +132,7 @@ def test_layer_stage1_structured_output_skips_second_extraction_and_keeps_full_a
     assert "full_analysis" in result
     assert "kubectl_get_by_kind_in_cluster" in result["full_analysis"]
     assert "CrashLoopBackOff" in result["full_analysis"]
+    assert node.ai_call.calls == []
     assert returned_events == thinking_events
 
 
@@ -138,9 +147,9 @@ def test_layer_stage1_non_json_output_uses_lite_extraction():
         def __init__(self):
             self.calls = []
 
-        def call_simple_json(self, system_prompt, question, **kwargs):
+        def call_structured(self, system_prompt, question, schema, **kwargs):
             self.calls.append({"system_prompt": system_prompt, "question": question, "kwargs": kwargs})
-            return ({
+            return schema.model_validate({
                 "layer": "L2",
                 "layers": ["L2"],
                 "layer_name": "工作负载层",
@@ -148,7 +157,7 @@ def test_layer_stage1_non_json_output_uses_lite_extraction():
                 "reasoning": "基于已采集到的工具与分析文本，当前问题更符合 L2 工作负载层。",
                 "key_entities": [{"type": "Pod", "value": "nginx-1"}],
                 "possible_scenarios": [{"scenario": "OOMKilled", "probability": "高", "reason": "分析文本明确提到 OOMKilled"}],
-            }, '{"layer":"L2"}')
+            }), '{"layer":"L2"}'
 
     node.ai_call = _RecordingAICall()
 
@@ -163,23 +172,13 @@ def test_layer_stage1_non_json_output_uses_lite_extraction():
     assert returned_events == thinking_events
 
 
-def test_layer_retries_when_pod_abnormal_json_arrives_before_fetch_runbook():
+def test_layer_accepts_pod_abnormal_json_without_fetch_runbook_retry():
     node = LayerClassifierNode()
     first_json = """{
       "layer": "L1",
       "layers": ["L1"],
       "confidence": 0.8,
       "reasoning": "terminating-stuck Pod Terminating",
-      "primary_pod": {"name": "terminating-stuck", "namespace": "aiops-e2e"},
-      "abnormal_pods": [{"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}],
-      "pod_status_keyword": "TerminatingStuck",
-      "pod_abnormal_type": "TerminatingStuck"
-    }"""
-    second_json = """{
-      "layer": "L1",
-      "layers": ["L1"],
-      "confidence": 0.86,
-      "reasoning": "已参考 TerminatingStuck runbook 后确认继续进入 evidence 采证",
       "primary_pod": {"name": "terminating-stuck", "namespace": "aiops-e2e"},
       "abnormal_pods": [{"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}],
       "pod_status_keyword": "TerminatingStuck",
@@ -193,35 +192,26 @@ def test_layer_retries_when_pod_abnormal_json_arrives_before_fetch_runbook():
             "result": "terminating-stuck Terminating",
         }
     ]
-    second_events = [
-        {
-            "type": "tool_start",
-            "tool_name": "fetch_runbook",
-            "tool_args": {"runbook_id": "pod-terminating-stuck.md"},
-        },
-        {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "fetch_runbook",
-            "result": "<runbook># TerminatingStuck</runbook>",
-        },
-    ]
     calls = []
 
     def _fake_call_llm(question, prompt, **kwargs):
         calls.append({"prompt": prompt, "kwargs": kwargs})
-        if len(calls) == 1:
-            return SimpleNamespace(result=first_json), first_events
-        return SimpleNamespace(result=second_json), second_events
+        return SimpleNamespace(result=first_json), first_events
 
     node._call_llm = _fake_call_llm
 
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            raise AssertionError("valid stage1 JSON should not require layer_extract")
+
+    node.ai_call = _StructuredAICall()
+
     result, returned_events = node._analyze_with_llm("我的集群有什么问题？")
 
-    assert len(calls) == 2
-    assert "上一轮结果被系统拒绝" in calls[1]["prompt"]
-    assert result["confidence"] == 0.86
-    assert any(ev.get("tool_name") == "fetch_runbook" for ev in returned_events)
+    assert len(calls) == 1
+    assert result["confidence"] == 0.8
+    assert result["pod_abnormal_type"] == "TerminatingStuck"
+    assert returned_events == first_events
 
 
 def test_layer_early_stop_disabled_does_not_enable_json_middleware():
@@ -243,11 +233,24 @@ def test_layer_early_stop_disabled_does_not_enable_json_middleware():
 
     node._call_llm = _fake_call_llm
 
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            return schema.model_validate({
+                "layer": "QUERY",
+                "layers": ["QUERY"],
+                "confidence": 0.95,
+                "reasoning": "查询请求",
+                "key_entities": [],
+                "possible_scenarios": [],
+            }), "{}"
+
+    node.ai_call = _StructuredAICall()
+
     result, _ = node._analyze_with_llm("查询异常 Pod")
 
     assert result["layer"] == "QUERY"
     assert calls[0]["expect_json"] is False
-    assert calls[0]["json_acceptance_guard"] is None
+    assert "json_acceptance_guard" not in calls[0]
 
 
 def test_layer_execute_keeps_llm_result_when_only_historical_events_exist():
@@ -517,27 +520,10 @@ def test_query_evidence_execute_builds_structured_query_result():
         def __init__(self):
             self.calls = []
 
-        def call_simple_json(self, system_prompt, question, **kwargs):
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            assert schema is QueryResult
             self.calls.append({"system_prompt": system_prompt, "question": question})
-            raw = """```json
-{
-  "query_target": "查询集群每个节点 CPU 和内存使用率",
-  "collection_summary": "计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",
-  "columns": [
-    {"key": "node", "label": "节点"},
-    {"key": "cpu", "label": "CPU 使用率"},
-    {"key": "memory", "label": "内存使用率"}
-  ],
-  "rows": [
-    {"node": "master", "cpu": "13.7%", "memory": "26.2%"}
-  ],
-  "notes": ["数据来自 Prometheus。"],
-  "sources": [
-    {"tool": "execute_prometheus_instant_query", "query": "cpu_query"}
-  ]
-}
-```"""
-            return ({
+            payload = {
                 "query_target": "查询集群每个节点 CPU 和内存使用率",
                 "collection_summary": "计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",
                 "columns": [
@@ -552,7 +538,8 @@ def test_query_evidence_execute_builds_structured_query_result():
                 "sources": [
                     {"tool": "execute_prometheus_instant_query", "query": "cpu_query"},
                 ],
-            }, raw)
+            }
+            return schema.model_validate(payload), "{}"
 
     node.ai_call = _NormalizeAICall()
 
@@ -601,7 +588,7 @@ def test_rca_lite_mode_no_output_uses_generic_llm_fallback():
     node = RootCauseAnalyzerNode()
 
     class _EmptyAICall:
-        def call_simple_json(self, *args, **kwargs):
+        def call_structured(self, *args, **kwargs):
             return None, ""
 
     node.ai_call = _EmptyAICall()
@@ -613,7 +600,7 @@ def test_rca_lite_mode_no_output_uses_generic_llm_fallback():
     )
 
     assert result["confidence"] <= 0.2
-    assert "LLM 未返回有效结果" in result["confidence_reason"]
+    assert "不符合 RCA 结构化输出合同" in result["confidence_reason"]
     assert result["root_cause"]
     assert thinking_events == []
 
@@ -622,7 +609,7 @@ def test_rca_lite_mode_exception_uses_generic_llm_fallback_without_rules():
     node = RootCauseAnalyzerNode()
 
     class _FailingAICall:
-        def call_simple_json(self, *args, **kwargs):
+        def call_structured(self, *args, **kwargs):
             raise RuntimeError("llm timeout")
 
     node.ai_call = _FailingAICall()

@@ -328,6 +328,48 @@ def test_call_structured_validates_pydantic_schema_from_json_fallback(monkeypatc
     assert "```json" in raw
 
 
+def test_call_structured_prefers_native_pydantic_output(monkeypatch):
+    ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
+
+    class _StructuredModel:
+        def invoke(self, messages, config=None):
+            return EvidencePlanOutput(
+                layer="L3",
+                evidence_plan=[
+                    {
+                        "id": "e1",
+                        "description": "获取 Pod 事件",
+                        "level": "critical",
+                        "tool": "kubectl_events",
+                        "command": "kubectl get events -n aaa",
+                        "purpose": "确认镜像拉取失败原因",
+                    }
+                ],
+                collection_strategy="先确认当前异常 Pod。",
+            )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def with_structured_output(self, schema):
+            assert schema is EvidencePlanOutput
+            return _StructuredModel()
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+
+    def fail_simple(*args, **kwargs):
+        raise AssertionError("native structured output should avoid JSON prompt fallback")
+
+    monkeypatch.setattr(ai, "call_simple", fail_simple)
+
+    parsed, raw = ai.call_structured("sys", "q", EvidencePlanOutput)
+
+    assert isinstance(parsed, EvidencePlanOutput)
+    assert parsed.evidence_plan[0].tool == "kubectl_events"
+    assert "kubectl_events" in raw
+
+
 def test_call_with_expect_json_interrupts_on_valid_json_message():
     model_instances = []
 

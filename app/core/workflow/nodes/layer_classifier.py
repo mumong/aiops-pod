@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.context.archive import ContextArchive
 from app.core.workflow.nodes.base import WorkflowNode
+from app.core.workflow.schemas import LayerHandoff, LayerOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
 from app.core.prompts import get_workflow_prompt
@@ -195,6 +196,7 @@ class LayerClassifierNode(WorkflowNode):
                 layers=layers,
                 thinking_events=thinking_events,
             )
+            self._sync_layer_result_from_handoff(layer_result, layer_handoff)
             archive_refs = self._archive_layer_outputs(
                 run_id=state.get("run_id", ""),
                 full_analysis=full_analysis,
@@ -226,7 +228,7 @@ class LayerClassifierNode(WorkflowNode):
                 "possible_scenarios": layer_result.get("possible_scenarios", []),
             })
             if layer == Layer.QUERY and self._is_direct_query_mode() and isinstance(query_result, dict):
-                new_state["query_result"] = query_result
+                new_state["query_result"] = QueryResult.model_validate(query_result).model_dump()
 
             # 存入 thinking_events（带 node 标记）
             self._save_thinking(state, new_state, thinking_events)
@@ -258,6 +260,7 @@ class LayerClassifierNode(WorkflowNode):
                 layers=layers,
                 thinking_events=[],
             )
+            self._sync_layer_result_from_handoff(rescue_result, layer_handoff)
             archive_refs = self._archive_layer_outputs(
                 run_id=state.get("run_id", ""),
                 full_analysis=full_analysis,
@@ -287,10 +290,29 @@ class LayerClassifierNode(WorkflowNode):
                 "possible_scenarios": rescue_result.get("possible_scenarios", []),
             })
             if layer == Layer.QUERY and self._is_direct_query_mode() and isinstance(query_result, dict):
-                new_state["query_result"] = query_result
+                new_state["query_result"] = QueryResult.model_validate(query_result).model_dump()
             self._save_thinking(state, new_state, [])
 
         return new_state
+
+    @staticmethod
+    def _sync_layer_result_from_handoff(layer_result: Dict[str, Any], handoff: Dict[str, Any]) -> None:
+        """Keep observable layer_analysis aligned with the factual handoff.
+
+        Pydantic extraction may miss secondary current-state anomalies, while
+        handoff merges tool-derived abnormal rows. Persist the merged fields so
+        downstream consumers and observability see the same structured facts.
+        """
+        for key in (
+            "abnormal_pods",
+            "issue_groups",
+            "current_abnormal_summary",
+            "pod_status_keyword",
+            "pod_abnormal_type",
+            "status_category",
+        ):
+            if key in handoff:
+                layer_result[key] = handoff.get(key)
 
     def _archive_layer_outputs(
         self,
@@ -326,16 +348,9 @@ class LayerClassifierNode(WorkflowNode):
             layer_result.get("pod_status_keyword"),
         )
         current_abnormal_pods = self._extract_current_abnormal_pods_from_events(thinking_events)
+        current_abnormal_summary = self._extract_current_abnormal_summary_from_events(thinking_events)
         if current_abnormal_pods:
-            current_keys = {
-                (pod.get("namespace", ""), pod.get("name", ""))
-                for pod in current_abnormal_pods
-                if pod.get("name")
-            }
-            abnormal_pods = [
-                pod for pod in abnormal_pods
-                if (pod.get("namespace", ""), pod.get("name", "")) in current_keys
-            ] or current_abnormal_pods
+            abnormal_pods = self._merge_current_abnormal_pods(abnormal_pods, current_abnormal_pods)
         primary_pod = self._normalize_primary_pod(layer_result.get("primary_pod"), abnormal_pods, active_entities)
         if current_abnormal_pods and primary_pod:
             primary_key = (primary_pod.get("namespace", ""), primary_pod.get("name", ""))
@@ -378,7 +393,7 @@ class LayerClassifierNode(WorkflowNode):
             default_pod_abnormal_type=pod_abnormal_type,
             layer_result=layer_result,
         )
-        return {
+        handoff = {
             "diagnosis_scope": "current_state_only" if "之前" in question or "当前" in question or "现在" in question else "question_scope",
             "layer": layer_value,
             "derived_layer": self._pick_text(layer_result.get("derived_layer"), layer_value),
@@ -388,6 +403,7 @@ class LayerClassifierNode(WorkflowNode):
             "primary_pod": primary_pod,
             "abnormal_pods": abnormal_pods,
             "issue_groups": issue_groups,
+            "current_abnormal_summary": current_abnormal_summary,
             "pod_status_keyword": self._pick_text(
                 layer_result.get("pod_status_keyword"),
                 abnormal_pods[0].get("status") if abnormal_pods else "",
@@ -412,6 +428,46 @@ class LayerClassifierNode(WorkflowNode):
                 "不要把计划或工具名当成证据，必须基于 tool_result",
             ],
         }
+        return LayerHandoff.model_validate(handoff).model_dump(exclude_none=True)
+
+    @classmethod
+    def _merge_current_abnormal_pods(
+        cls,
+        llm_pods: List[Dict[str, Any]],
+        current_pods: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Merge LLM-selected Pods with current scan facts.
+
+        The LLM may omit secondary anomalies or keep stale historical Pods.
+        Current tool scan output is the factual source for active abnormal Pods,
+        so scan-only Pods must be preserved and LLM-only Pods are discarded.
+        For the same namespace/name, current scan status overrides stale values.
+        """
+        merged: Dict[tuple[str, str], Dict[str, Any]] = {}
+        order: List[tuple[str, str]] = []
+
+        def add_pod(pod: Dict[str, Any], *, prefer_existing: bool = False) -> None:
+            name = cls._pick_text(pod.get("name"))
+            if not name:
+                return
+            namespace = cls._pick_text(pod.get("namespace"))
+            key = (namespace, name)
+            if key not in merged:
+                order.append(key)
+                merged[key] = {}
+            if prefer_existing:
+                merged[key] = {**pod, **merged[key]}
+            else:
+                merged[key] = {**merged[key], **pod}
+
+        for pod in current_pods or []:
+            add_pod(pod)
+        for pod in llm_pods or []:
+            key = (cls._pick_text(pod.get("namespace")), cls._pick_text(pod.get("name")))
+            if key in merged:
+                add_pod(pod, prefer_existing=True)
+
+        return [merged[key] for key in order if merged.get(key)]
 
     @classmethod
     def _build_issue_groups(
@@ -483,12 +539,56 @@ class LayerClassifierNode(WorkflowNode):
                 "primary_entities": entities,
                 "is_primary": is_primary,
                 "evidence_plan": [],
+                "possible_scenarios": cls._default_scenarios_for_abnormal_type(pod_abnormal_type),
             })
 
         groups.sort(key=lambda item: (not item.get("is_primary"), item.get("group_id", "")))
         for index, group in enumerate(groups, start=1):
             group["group_id"] = f"g{index}"
         return groups
+
+    @staticmethod
+    def _default_scenarios_for_abnormal_type(pod_abnormal_type: str) -> List[Dict[str, str]]:
+        mapping = {
+            "ImagePullFailed": [
+                {"scenario": "镜像地址或 tag 不存在", "probability": "中", "reason": "需通过 Events/镜像地址验证"},
+                {"scenario": "imagePullSecret 缺失或认证失败", "probability": "中", "reason": "需验证 Pod spec 与 Secret"},
+                {"scenario": "节点到镜像仓库网络不可达", "probability": "中", "reason": "需验证 registry 连通性、DNS 或 TLS"},
+            ],
+            "TerminatingStuck": [
+                {"scenario": "finalizer 未清理", "probability": "中", "reason": "需验证 metadata.finalizers 与 deletionTimestamp"},
+                {"scenario": "kubelet 无响应或节点侧删除流程卡住", "probability": "中", "reason": "需验证 Pod 所在节点状态和事件"},
+                {"scenario": "卷卸载或 detach 流程卡住", "probability": "中", "reason": "需验证 volumes、PVC/PV 和相关事件"},
+            ],
+            "OOMKilled": [
+                {"scenario": "容器内存限制过低", "probability": "中", "reason": "需验证 Last State/ExitCode/resources"},
+                {"scenario": "应用内存使用异常", "probability": "中", "reason": "需验证日志和重启历史"},
+            ],
+            "CrashLoopBackOffRuntime": [
+                {"scenario": "容器启动命令或进程异常退出", "probability": "中", "reason": "需验证 describe/logs/exitCode"},
+                {"scenario": "应用启动依赖或配置异常", "probability": "中", "reason": "需验证日志和环境配置"},
+            ],
+            "PendingUnschedulable": [
+                {"scenario": "资源不足导致无法调度", "probability": "中", "reason": "需验证 FailedScheduling 事件"},
+                {"scenario": "taint/nodeSelector/affinity 不匹配", "probability": "中", "reason": "需验证 Pod spec 和 Node 条件"},
+                {"scenario": "PVC 未绑定或卷依赖未满足", "probability": "中", "reason": "需验证 PVC/PV 状态"},
+            ],
+            "Evicted": [
+                {"scenario": "节点资源压力驱逐", "probability": "中", "reason": "需验证 eviction message 和 Node pressure"},
+            ],
+            "VolumeMountFailed": [
+                {"scenario": "PVC/PV/CSI/NFS 挂载失败", "probability": "中", "reason": "需验证 FailedMount 事件和卷对象状态"},
+            ],
+            "ConfigError": [
+                {"scenario": "ConfigMap/Secret/env 配置缺失", "probability": "中", "reason": "需验证 Pod spec、事件和配置对象"},
+            ],
+            "NotReadyProbeFailed": [
+                {"scenario": "readiness/liveness/startup probe 失败", "probability": "中", "reason": "需验证 probe 配置、事件和日志"},
+            ],
+        }
+        return mapping.get(pod_abnormal_type, [
+            {"scenario": f"{pod_abnormal_type or 'Unknown'} 待验证", "probability": "低", "reason": "需基于当前状态和事件做最小验证"}
+        ])
 
     @classmethod
     def _normalize_status_family(cls, status: str) -> str:
@@ -543,7 +643,6 @@ class LayerClassifierNode(WorkflowNode):
         """Extract active abnormal Pods from the current `kubectl get pods -A` table summary."""
         pods: List[Dict[str, Any]] = []
         seen = set()
-        normal_statuses = {"running", "completed", "succeeded"}
         for ev in thinking_events or []:
             if ev.get("type") != "tool_result" or ev.get("status") != "success":
                 continue
@@ -558,7 +657,7 @@ class LayerClassifierNode(WorkflowNode):
                 if len(parts) < 4:
                     continue
                 namespace, name, ready, status = parts[0], parts[1], parts[2], parts[3]
-                if status.lower() in normal_statuses:
+                if cls._is_normal_resource_status(status):
                     continue
                 if "/" in ready:
                     current, desired = ready.split("/", 1)
@@ -570,6 +669,68 @@ class LayerClassifierNode(WorkflowNode):
                 seen.add(key)
                 pods.append({"name": name, "namespace": namespace, "status": status})
         return pods
+
+    @classmethod
+    def _extract_current_abnormal_summary_from_events(cls, thinking_events: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Extract structured abnormal status facts from current table outputs."""
+        for ev in thinking_events or []:
+            if ev.get("type") != "tool_result" or ev.get("status") != "success":
+                continue
+            if ev.get("tool_name") != "kubectl_get_by_kind_in_cluster":
+                continue
+            structured = ev.get("structured") or {}
+            header = str(structured.get("header", ""))
+            if not re.search(r"\bREADY\b.*\bSTATUS\b", header):
+                continue
+
+            status_counts = {}
+            for status, count in (structured.get("status_counts") or {}).items():
+                status_text = cls._pick_text(status)
+                if not status_text or cls._is_normal_resource_status(status_text):
+                    continue
+                try:
+                    status_counts[status_text] = int(count)
+                except (TypeError, ValueError):
+                    status_counts[status_text] = count
+
+            selected_rows = []
+            for row in structured.get("selected_rows") or []:
+                parts = str(row).split()
+                if len(parts) < 4:
+                    continue
+                status = parts[3]
+                if cls._is_normal_resource_status(status):
+                    continue
+                selected_rows.append(str(row))
+                if not structured.get("status_counts"):
+                    status_counts[status] = status_counts.get(status, 0) + 1
+
+            return {
+                "source": ev.get("tool_name", "kubectl_get_by_kind_in_cluster"),
+                "status_counts": status_counts,
+                "total_abnormal": sum(v for v in status_counts.values() if isinstance(v, int)) or len(selected_rows),
+                "selected_rows": selected_rows[:20],
+                "raw_ref": ev.get("raw_ref"),
+                "structured_ref": ev.get("structured_ref"),
+                "summary_ref": ev.get("summary_ref"),
+            }
+        return {
+            "source": "",
+            "status_counts": {},
+            "total_abnormal": 0,
+            "selected_rows": [],
+        }
+
+    @staticmethod
+    def _is_normal_resource_status(status: str) -> bool:
+        return str(status or "").strip().lower() in {
+            "running",
+            "completed",
+            "succeeded",
+            "ready",
+            "bound",
+            "active",
+        }
 
     @staticmethod
     def _normalize_entities(entities: Any) -> List[Dict[str, Any]]:
@@ -733,9 +894,11 @@ class LayerClassifierNode(WorkflowNode):
         return ""
 
     def _analyze_with_llm(self, question: str) -> tuple:
-        """使用 LLM 分析 Pod 异常状态（单阶段架构）
+        """使用 LLM 分析 Pod 异常状态。
 
-        阶段1: AICall (LangChain create_agent) — 调用工具收集数据，并直接输出结构化 JSON
+        阶段1: AICall agent 调用工具并直接输出 LayerOutput JSON。
+        仅当阶段1没有返回合法 LayerOutput 时，才使用无工具 Pydantic
+        layer_extract 作为兼容兜底。
 
         Returns:
             (layer_result_dict, intermediate_events_list)
@@ -752,24 +915,15 @@ class LayerClassifierNode(WorkflowNode):
                 self._get_layer_prompt(),
                 expect_json=early_stop_enabled,
                 json_validator=self._is_structured_layer_result,
-                json_acceptance_guard=self._json_acceptance_guard if early_stop_enabled else None,
             )
 
-            if not (response and response.result):
-                logger.warning("⚠️ [layer] 阶段1 无输出，转入 lite 提取")
-                full_analysis_text = self._build_full_analysis("", thinking_events)
-                extracted = self._extract_with_lite_llm(
-                    question=question,
-                    full_analysis_text=full_analysis_text,
-                    failure_reason="LLM 未返回有效结果，转入无工具结构化提取",
-                )
-                if extracted is None:
-                    raise RuntimeError("layer_extract 未能从现有分析文本中生成合法 JSON")
-                return extracted, thinking_events
+            stage1_text = (response.result or "") if response else ""
+            if not stage1_text:
+                logger.warning("⚠️ [layer] 阶段1 无最终文本，仅基于工具结果执行 Pydantic 提取")
+            else:
+                logger.debug("📋 [layer] 阶段1 输出: %s", stage1_text[:200])
 
-            logger.debug("📋 [layer] 阶段1 输出: %s", response.result[:200])
-
-            full_analysis_text = self._build_full_analysis(response.result, thinking_events)
+            full_analysis_text = self._build_full_analysis(stage1_text, thinking_events)
 
             # 压缩 enriched_text（可能含大量工具原始输出，50-100K chars）
             # 压缩后传给下游 evidence/rca/conclusion，避免 token overflow
@@ -783,155 +937,68 @@ class LayerClassifierNode(WorkflowNode):
             else:
                 enriched_text_for_downstream = full_analysis_text
 
-            # 阶段1必须直接输出结构化 JSON
-            result = self._try_parse_json(response.result)
-            if self._is_structured_layer_result(result):
-                if not self._json_acceptance_guard(result, thinking_events):
-                    logger.warning("⚠️ [layer] 结构化输出缺少 fetch_runbook，发起严格重试")
-                    retry_response, retry_events = self._call_llm(
-                        question,
-                        self._get_layer_runbook_retry_prompt(),
-                        expect_json=early_stop_enabled,
-                        json_validator=self._is_structured_layer_result,
-                        json_acceptance_guard=self._json_acceptance_guard if early_stop_enabled else None,
-                    )
-                    thinking_events = (thinking_events or []) + (retry_events or [])
-                    retry_text = retry_response.result if retry_response else ""
-                    full_analysis_text = self._build_full_analysis(retry_text, thinking_events)
-                    if len(full_analysis_text) > compact_threshold:
-                        enriched_text_for_downstream = self._compact_context(
-                            full_analysis_text, max_chars=compact_threshold
-                        )
-                    else:
-                        enriched_text_for_downstream = full_analysis_text
-
-                    retry_result = self._try_parse_json(retry_text)
-                    if self._is_structured_layer_result(retry_result) and self._json_acceptance_guard(retry_result, thinking_events):
-                        logger.info("✅ [layer] 严格重试后完成 runbook fetch 并输出合法 JSON")
-                        retry_result["full_analysis"] = enriched_text_for_downstream
-                        return retry_result, thinking_events
-
-                    logger.warning("⚠️ [layer] 严格重试仍未满足 runbook fetch 条件，转入 lite 提取")
-                    extracted = self._extract_with_lite_llm(
-                        question=question,
-                        full_analysis_text=enriched_text_for_downstream,
-                        failure_reason="Pod 异常已识别，但 layer 未在最终 JSON 前成功调用 fetch_runbook",
-                    )
-                    if extracted is None:
-                        raise RuntimeError("layer_extract 未能从 runbook 严格重试文本中生成合法 JSON")
-                    return extracted, thinking_events
-
-                if self._is_direct_query_mode() and result.get("layer") == "QUERY":
-                    if not self._is_usable_query_result(result, thinking_events):
-                        logger.warning("⚠️ [layer] QUERY direct 输出缺少真实工具结果或有效 rows，发起一次严格重试")
-                        retry_response, retry_events = self._call_llm(
-                            question,
-                            self._get_query_retry_prompt(),
-                            expect_json=True,
-                            json_validator=self._is_structured_layer_result,
-                        )
-                        thinking_events = (thinking_events or []) + (retry_events or [])
-                        retry_text = retry_response.result if retry_response else ""
-                        full_analysis_text = self._build_full_analysis(retry_text, thinking_events)
-                        if len(full_analysis_text) > compact_threshold:
-                            enriched_text_for_downstream = self._compact_context(
-                                full_analysis_text, max_chars=compact_threshold
-                            )
-                        else:
-                            enriched_text_for_downstream = full_analysis_text
-
-                        retry_result = self._try_parse_json(retry_text)
-                        if self._is_usable_query_result(retry_result, thinking_events):
-                            logger.info("✅ [layer] QUERY direct 严格重试后获得真实工具结果")
-                            retry_result["full_analysis"] = enriched_text_for_downstream
-                            return retry_result, thinking_events
-
-                        failure_reason = "QUERY 请求未获得任何可用的真实工具结果，拒绝直接返回伪结构化结果"
-                        logger.warning("⚠️ [layer] %s", failure_reason)
-                        return self._build_query_direct_failure_result(
-                            question=question,
-                            full_analysis_text=enriched_text_for_downstream,
-                            failure_reason=failure_reason,
-                        ), thinking_events
-                logger.info("✅ [layer] 阶段1直接输出合法 JSON: layer=%s, confidence=%.2f",
-                           result.get('layer'), result.get('confidence', 0))
-                result["full_analysis"] = enriched_text_for_downstream
-                return result, thinking_events
-
-            # 阶段1失败 → 使用无工具 lite 提取基于已收集上下文做结构化分类
-            logger.warning("⚠️ [layer] 阶段1未返回合法 JSON，转入 lite 提取")
-            extracted = self._extract_with_lite_llm(
-                question=question,
-                full_analysis_text=enriched_text_for_downstream,
-                failure_reason="LLM 未返回合法 JSON，转入无工具结构化提取",
-            )
+            extracted = self._try_parse_json(stage1_text)
             if extracted is None:
-                raise RuntimeError("layer_extract 未能从现有分析文本中生成合法 JSON")
+                logger.info("📍 [layer] 阶段1未返回合法 LayerOutput，执行 layer_extract 兼容兜底")
+                extracted = self._extract_with_lite_llm(
+                    question=question,
+                    full_analysis_text=enriched_text_for_downstream,
+                    failure_reason="基于 layer 阶段工具结果和分析文本生成 Pydantic LayerOutput",
+                )
+                if extracted is None:
+                    raise RuntimeError("layer_extract 未能从现有分析文本中生成 Pydantic LayerOutput")
+
+            if self._is_direct_query_mode() and extracted.get("layer") == "QUERY" and not self._is_usable_query_result(extracted, thinking_events):
+                logger.warning("⚠️ [layer] QUERY direct Pydantic 输出缺少真实工具结果或有效 rows，发起一次严格重试")
+                retry_response, retry_events = self._call_llm(
+                    question,
+                    self._get_query_retry_prompt(),
+                    expect_json=True,
+                    json_validator=self._is_structured_layer_result,
+                )
+                thinking_events = (thinking_events or []) + (retry_events or [])
+                retry_text = retry_response.result if retry_response else ""
+                full_analysis_text = self._build_full_analysis(retry_text, thinking_events)
+                if len(full_analysis_text) > compact_threshold:
+                    enriched_text_for_downstream = self._compact_context(
+                        full_analysis_text, max_chars=compact_threshold
+                    )
+                else:
+                    enriched_text_for_downstream = full_analysis_text
+
+                retry_result = self._extract_with_lite_llm(
+                    question=question,
+                    full_analysis_text=enriched_text_for_downstream,
+                    failure_reason="基于 QUERY direct 严格重试后的工具结果生成 Pydantic LayerOutput",
+                )
+                if self._is_usable_query_result(retry_result, thinking_events):
+                    retry_result["full_analysis"] = enriched_text_for_downstream
+                    return retry_result, thinking_events
+
+                failure_reason = "QUERY 请求未获得任何可用的真实工具结果，拒绝直接返回伪结构化结果"
+                logger.warning("⚠️ [layer] %s", failure_reason)
+                return self._build_query_direct_failure_result(
+                    question=question,
+                    full_analysis_text=enriched_text_for_downstream,
+                    failure_reason=failure_reason,
+                ), thinking_events
+
+            logger.info("✅ [layer] Pydantic LayerOutput 完成: layer=%s, confidence=%.2f",
+                        extracted.get('layer'), extracted.get('confidence', 0))
+            extracted["full_analysis"] = enriched_text_for_downstream
             return extracted, thinking_events
 
         except Exception as e:
-            logger.warning(f"[layer] LLM 分析失败，转入 lite 提取: {e}")
+            logger.warning(f"[layer] LLM 分析失败，转入 Pydantic 提取: {e}")
             full_analysis_text = self._build_full_analysis("", thinking_events)
             extracted = self._extract_with_lite_llm(
                 question=question,
                 full_analysis_text=full_analysis_text or f"# layer 阶段1异常\n{str(e)}",
-                failure_reason=f"LLM 定层失败，转入无工具结构化提取: {str(e)}",
+                failure_reason=f"LLM 定层失败，转入 Pydantic LayerOutput 提取: {str(e)}",
             )
             if extracted is None:
                 raise
             return extracted, thinking_events
-
-    def _json_acceptance_guard(self, parsed: Any, thinking_events: List[Dict[str, Any]]) -> bool:
-        """Prevent /ask layer JSON from finishing before a runbook is fetched.
-
-        This guard does not choose a runbook. It only stops the JSON middleware
-        from accepting a non-healthy Pod abnormal result when the agent has not
-        actually executed any successful fetch_runbook call yet.
-        """
-        if self._is_direct_query_mode():
-            return True
-        if not isinstance(parsed, dict):
-            return True
-
-        layer = str(parsed.get("layer") or "").upper()
-        if layer in {"", "HEALTHY", "QUERY"}:
-            return True
-
-        has_pod_abnormal_signal = bool(
-            parsed.get("pod_abnormal_type")
-            or parsed.get("pod_status_keyword")
-            or parsed.get("primary_pod")
-            or parsed.get("abnormal_pods")
-        )
-        if not has_pod_abnormal_signal:
-            return True
-
-        for ev in thinking_events or []:
-            if ev.get("type") != "tool_result":
-                continue
-            if ev.get("status") != "success":
-                continue
-            if str(ev.get("tool_name") or "").lower() == "fetch_runbook":
-                return True
-
-        logger.info(
-            "⏭️ [layer] 已识别 Pod 异常但尚未成功 fetch_runbook，拒绝提前接受 JSON: layer=%s pod_status=%s pod_type=%s",
-            parsed.get("layer"),
-            parsed.get("pod_status_keyword"),
-            parsed.get("pod_abnormal_type"),
-        )
-        return False
-
-    def _get_layer_runbook_retry_prompt(self) -> str:
-        return (
-            self._get_layer_prompt().rstrip()
-            + "\n\n# 上一轮结果被系统拒绝\n"
-            + "- 你已经识别出当前 Pod 异常状态，但在输出最终 JSON 前没有成功调用 `fetch_runbook`。\n"
-            + "- 本轮必须先根据 Available Runbooks 的 description/link 与 `pod_status_keyword` / `pod_abnormal_type` 自主匹配相关 Pod 异常 runbook。\n"
-            + "- 先实际调用 `fetch_runbook` 获取匹配 runbook；随后再输出最终结构化 JSON。\n"
-            + "- 不能只在思考中说“需要调用 runbook”，必须产生真实的 fetch_runbook tool_result。\n"
-            + "- 仍然不要使用代码推荐字段；runbook 选择必须来自 catalog 语义匹配。\n"
-        )
 
     def _extract_with_lite_llm(
         self,
@@ -941,8 +1008,8 @@ class LayerClassifierNode(WorkflowNode):
     ) -> Optional[Dict[str, Any]]:
         """当 agent 未直接产出合法 JSON 时，基于已收集内容再做一次无工具结构化提取。"""
         ai_call = getattr(self, "ai_call", None)
-        if ai_call is None:
-            logger.warning("⚠️ [layer] 无 ai_call，无法执行 lite 提取")
+        if ai_call is None or not hasattr(ai_call, "call_structured"):
+            logger.warning("⚠️ [layer] ai_call 不支持 call_structured，无法生成 Pydantic LayerOutput")
             return None
 
         extract_prompt = self._get_layer_extract_prompt()
@@ -951,12 +1018,16 @@ class LayerClassifierNode(WorkflowNode):
             f"# 失败原因\n{failure_reason or '未提供'}\n\n"
             f"# 分析文本\n{full_analysis_text or '无'}"
         )
-        parsed, raw = ai_call.call_simple_json(
-            extract_prompt,
-            extract_input,
-            validator=self._is_structured_layer_result,
+        structured, raw = ai_call.call_structured(
+            system_prompt=extract_prompt,
+            question=extract_input,
+            schema=LayerOutput,
+            node_id="layer_extract",
+            run_id=getattr(self, "current_run_id", ""),
             max_tokens=2048,
         )
+        parsed = structured.model_dump(exclude_none=True) if structured is not None else None
+
         if parsed is None:
             logger.warning("⚠️ [layer] lite 提取仍未返回合法 JSON | raw=%s", (raw or "")[:500])
             return None
@@ -970,30 +1041,22 @@ class LayerClassifierNode(WorkflowNode):
     def _try_parse_json(text: str) -> Optional[Dict]:
         """尝试从文本中提取 JSON，失败返回 None"""
         try:
-            json_match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(1))
-            return json.loads(text)
-        except (json.JSONDecodeError, TypeError):
+            from app.core.aicall.client import AICall
+
+            parsed = AICall.extract_json_payload(text)
+            if not isinstance(parsed, dict):
+                return None
+            return LayerOutput.model_validate(parsed).model_dump(exclude_none=True)
+        except Exception:
             return None
 
     @staticmethod
     def _is_structured_layer_result(result: Optional[Dict]) -> bool:
         """判断阶段1输出是否已是可用的结构化定层结果。"""
-        if not isinstance(result, dict):
+        try:
+            LayerOutput.model_validate(result)
+        except Exception:
             return False
-
-        layer = result.get("layer")
-        confidence = result.get("confidence")
-        reasoning = result.get("reasoning")
-
-        if not isinstance(layer, str) or not layer.strip():
-            return False
-        if not isinstance(reasoning, str) or not reasoning.strip():
-            return False
-        if not isinstance(confidence, (int, float)):
-            return False
-
         return True
 
     @staticmethod

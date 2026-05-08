@@ -97,9 +97,24 @@ class RootCauseAnalyzerNode(WorkflowNode):
                         f"layer_handoff长度={len(json.dumps(state.get('layer_handoff') or {}, ensure_ascii=False, default=str))}")
 
             evidence_summary = self._build_rca_context(state)
+            missing_primary = self._get_missing_primary_pod_conflict(state)
+            if missing_primary:
+                rca_result = self._build_primary_pod_missing_result(
+                    question=question,
+                    layer=layer,
+                    missing_primary=missing_primary,
+                    evidence_summary=evidence_summary,
+                )
+                thinking_events = []
+            else:
+                rca_result = None
+                thinking_events = []
+
             # 使用 LLM 分析
             ai_call = getattr(self, 'ai_call', None)
-            if ai_call is not None:
+            if rca_result is not None:
+                pass
+            elif ai_call is not None:
                 rca_result, thinking_events = self._analyze_with_llm(
                     question, layer, evidence_summary
                 )
@@ -347,28 +362,20 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if ai_call is None:
                 raise RuntimeError("[rca] ai_call 未设置，无法执行 lite 模式")
 
-            logger.info("📍 [rca] AICall.call_simple lite 模式开始")
+            logger.info("📍 [rca] Pydantic structured lite 模式开始")
             parsed = None
             content = ""
-            if hasattr(ai_call, "call_structured"):
-                structured, content = ai_call.call_structured(
-                    system_prompt=system_prompt,
-                    question=user_message,
-                    schema=RCAOutput,
-                    node_id=self.node_id,
-                    run_id=getattr(self, "current_run_id", ""),
-                )
-                if structured is not None:
-                    parsed = structured.model_dump()
-            else:
-                raw_parsed, content = ai_call.call_simple_json(
-                    system_prompt=system_prompt,
-                    question=user_message,
-                    validator=lambda data: isinstance(data, dict),
-                    node_id=self.node_id,
-                    run_id=getattr(self, "current_run_id", ""),
-                )
-                parsed = self._normalize_rca_result(raw_parsed) if raw_parsed else None
+            if not hasattr(ai_call, "call_structured"):
+                raise RuntimeError("[rca] ai_call 不支持 call_structured，无法生成 Pydantic RCAOutput")
+            structured, content = ai_call.call_structured(
+                system_prompt=system_prompt,
+                question=user_message,
+                schema=RCAOutput,
+                node_id=self.node_id,
+                run_id=getattr(self, "current_run_id", ""),
+            )
+            if structured is not None:
+                parsed = structured.model_dump()
 
             duration_ms = (time.time() - start_time) * 1000
 
@@ -381,14 +388,11 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if parsed:
                 return parsed, []
 
-            if content:
-                return self._parse_llm_response(content), []
-
-            logger.warning("⚠️ [rca] lite 模式无输出，使用通用低置信度兜底")
+            logger.warning("⚠️ [rca] lite 模式未返回合法 Pydantic RCAOutput，使用通用低置信度兜底")
             return self._build_llm_fallback(
                 question=question,
                 layer=layer,
-                reason="LLM 未返回有效结果，无法完成可靠根因分析",
+                reason="LLM 返回结果不符合 RCA 结构化输出合同",
             ), []
 
         except Exception as e:
