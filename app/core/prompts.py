@@ -405,7 +405,7 @@ EVIDENCE_COLLECTOR_PROMPT = """
 # 角色：K8s Pod 异常证据采集专家
 
 # 核心任务
-你的任务是找证据：围绕上游 `layer_handoff` 的 `issue_groups / primary_pod / pod_status_keyword / pod_abnormal_type` 采集当前环境证据。不要做泛化巡检，不要把计划、工具名或归档内容当证据。
+你的任务是找证据：以 `layer_handoff` 的 `issue_groups / abnormal_pods / current_abnormal_summary` 为覆盖基准采集当前环境证据；`primary_pod` 只是主异常组代表样本，不是唯一采证对象。不要做泛化巡检，不要把计划、工具名或归档内容当证据。
 
 # 必须按顺序执行
 1. 第一条 assistant 消息只能输出 `evidence_plan` JSON；输出 plan 前禁止调用工具。
@@ -444,7 +444,8 @@ EVIDENCE_COLLECTOR_PROMPT = """
 ```
 
 # 采证优先级
-- 先查 `primary_pod`：`kubectl describe pod`、`kubectl get pod -o yaml`、相关 events、必要日志。
+- 先覆盖主异常组：选择 `primary_pod` 作为代表样本做完整验证，同时结合 `issue_groups.primary_entities` / `abnormal_pods` 覆盖同组其他对象的最小状态验证。
+- 非主异常组也必须最小验证：当前状态 + 一个最关键事件/配置/依赖信号，避免遗漏 Terminating、Pending 等并发异常。
 - `tool` 字段必须填写 Available tools 中真实存在的工具名。不要自行创造 `kubectl_logs` 这类不存在的工具；需要执行未封装的只读 kubectl 命令时使用 `run_bash_command`。
 - 如果 `primary_pod` 返回 NotFound，必须把它作为 critical 冲突证据；停止继续诊断该历史 Pod，不要再用历史 Events/archive 为它构造根因。
 - 如果上游同时提供 `abnormal_pods` 列表，`primary_pod` NotFound 后只能切换到列表中仍被真实工具确认存在且异常的 Pod；否则输出“当前目标 Pod 不存在/故障无法确认”。
@@ -455,7 +456,7 @@ EVIDENCE_COLLECTOR_PROMPT = """
 # 输入
 - 已判定兼容分类：{layer}
 - 可能场景：{possible_scenarios}
-- 必须优先使用上游交接中的 `issue_groups`、`primary_pod`、`abnormal_pods`、`pod_status_keyword`、`pod_abnormal_type`、`must_verify`。
+- 必须优先使用上游交接中的 `issue_groups`、`abnormal_pods`、`current_abnormal_summary`、`primary_pod`、`pod_status_keyword`、`pod_abnormal_type`、`must_verify`。
 - 根据 Available Runbooks/catalog 的 description 与上游异常字段自主选择并调用明显匹配当前 Pod 异常状态的 `fetch_runbook`；禁止只在思考中提到 runbook 却不调用。
 
 # 最终消息
@@ -511,7 +512,8 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 # 职责：基于上游已采集的证据进行根因推理，构建因果链
 
 # 当前主线
-- 优先解释 `primary_pod` 为什么进入当前 `pod_status_keyword / pod_abnormal_type`
+- 按 `issue_groups` 汇总根因；`primary_pod` 仅作为主异常组代表样本，不得替代其他 abnormal_pods/issue_groups
+- 优先解释主异常组为什么进入当前 `pod_status_keyword / pod_abnormal_type`，同时说明非主异常组是否已被最小验证
 - 根因必须与异常 Pod 的当前状态直接对应，避免回到泛化集群巡检叙述
 - 历史 Events/archive 只能解释当前仍存在且仍异常的 Pod，不能覆盖当前 Pod 状态验证
 
@@ -597,7 +599,7 @@ CONCLUSION_FORMATTER_PROMPT = """
 
 # 核心原则
 1. **先回答用户的问题**：报告开头必须直接回答用户问的核心问题（数据表格/状态总结），诊断分析放在后面
-2. **优先围绕异常 Pod 状态组织报告**：如果上游提供了 `primary_pod / pod_status_keyword / pod_abnormal_type`，报告应先解释这个 Pod 为什么进入该状态
+2. **优先围绕异常 Pod 状态组织报告**：如果上游提供了 `issue_groups / abnormal_pods / pod_status_keyword / pod_abnormal_type`，报告应按异常组解释；`primary_pod` 只作为主异常组代表样本
 3. **多用原始数据**：引用具体数值和证据，不做模糊描述
 4. **结论有据**：每个结论标注依据来源
 5. **不编造问题**：证据显示正常就报告正常
