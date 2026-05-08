@@ -18,6 +18,7 @@
 import json
 import logging
 import re
+import shlex
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
@@ -887,14 +888,15 @@ class EvidenceCollectorNode(WorkflowNode):
 {archive_section}
 
 # 当前节点职责
-你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须基于 layer_handoff 的 issue_groups、primary_pod、abnormal_pods、pod_status_keyword、pod_abnormal_type、active_entities、active_signals、possible_scenarios 和 must_verify 调用真实只读工具采集证据。
+你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须以 layer_handoff 的 issue_groups、abnormal_pods、current_abnormal_summary 为覆盖基准调用真实只读工具采集证据；primary_pod 只是主异常组的代表样本，不是唯一采证对象。
 
 # 强约束
 {plan_protocol}
 - 如果 layer_handoff 提供 issue_groups，evidence_plan 应优先覆盖每个当前异常组的最小关键证据；不要只围绕 primary_pod 而完全忽略其他异常组。
+- 主异常组做完整验证；非主异常组做最小验证。primary_pod 仅用于代表主异常组，不能替代 abnormal_pods/issue_groups 的覆盖要求。
 - 对非 primary 的 issue_group 只做最小验证：当前状态 + 一个最关键配置/事件信号即可，不要展开成长链路。
 - 必须把 current_abnormal_summary.status_counts 作为审查核心；非 Running/Completed/Succeeded/Ready/Bound/Active 的状态都需要至少最小验证。
-- 必须优先围绕 primary_pod 验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要先做大范围集群扫描。
+- 必须优先围绕主异常组验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要把采证范围收缩成单个 primary_pod，也不要先做大范围无关集群扫描。
 - 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
 - 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
 - 如果 Available Runbooks/catalog 中存在明显匹配当前 Pod 异常状态的 runbook，应先执行 fetch_runbook 参考步骤；但不能只 fetch_runbook 后结束，必须继续调用真实环境工具。reference/runbook 步骤不是证据，不计入 critical/important 完整度。存在明显匹配 runbook 却未调用 fetch_runbook 时，本轮采证视为不完整。
@@ -1198,16 +1200,14 @@ class EvidenceCollectorNode(WorkflowNode):
     @staticmethod
     def _extract_plan_target(command: str) -> str:
         text = command or ""
-        namespace_match = re.search(r"(?:^|\s)(?:-n|--namespace(?:=|\s+))\s*([^\s]+)", text)
-        namespace = namespace_match.group(1).strip("'\"") if namespace_match else ""
-
-        pod_match = re.search(
-            r"\b(?:pod|po)\s+([a-z0-9]([-a-z0-9]*[a-z0-9])?)\b",
-            text,
-            re.IGNORECASE,
-        )
-        if pod_match:
-            return f"pod/{namespace}/{pod_match.group(1)}"
+        resource_target = EvidenceCollectorNode._extract_plan_resource_target(text)
+        if resource_target:
+            kind = resource_target.get("kind", "")
+            namespace = resource_target.get("namespace", "")
+            name = resource_target.get("name", "")
+            if namespace:
+                return f"{kind}/{namespace}/{name}"
+            return f"{kind}/{name}"
 
         url_match = re.search(r"https?://([^/\s:]+)", text, re.IGNORECASE)
         if url_match:
@@ -1226,6 +1226,150 @@ class EvidenceCollectorNode(WorkflowNode):
             return f"node/{node_match.group(1)}"
 
         return ""
+
+    @staticmethod
+    def _extract_plan_resource_target(command: str) -> Dict[str, str]:
+        """Extract a concrete kubectl resource target from common command forms.
+
+        Supported examples:
+        - kubectl describe pod name -n ns
+        - kubectl describe pod -n ns name
+        - kubectl get pod/name -n ns -o yaml
+        - kubectl get pod -n ns name -o yaml
+        """
+        text = command or ""
+        if "kubectl" not in text and not re.search(r"\b(get|describe)\s+", text, re.IGNORECASE):
+            return {}
+
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            tokens = text.split()
+        if not tokens:
+            return {}
+
+        namespace = ""
+        cleaned: List[str] = []
+        skip_next = False
+        for idx, token in enumerate(tokens):
+            if skip_next:
+                skip_next = False
+                continue
+            lower = token.lower()
+            if lower in {"-n", "--namespace"}:
+                if idx + 1 < len(tokens):
+                    namespace = tokens[idx + 1].strip("'\"")
+                    skip_next = True
+                continue
+            if lower.startswith("--namespace="):
+                namespace = token.split("=", 1)[1].strip("'\"")
+                continue
+            cleaned.append(token)
+
+        verbs = {"get", "describe", "logs", "events"}
+        kind_aliases = {
+            "pod": "pod",
+            "pods": "pod",
+            "po": "pod",
+            "node": "node",
+            "nodes": "node",
+            "no": "node",
+            "secret": "secret",
+            "secrets": "secret",
+            "configmap": "configmap",
+            "configmaps": "configmap",
+            "cm": "configmap",
+            "pvc": "pvc",
+            "pvcs": "pvc",
+            "persistentvolumeclaim": "pvc",
+            "persistentvolumeclaims": "pvc",
+            "service": "service",
+            "services": "service",
+            "svc": "service",
+            "deployment": "deployment",
+            "deployments": "deployment",
+            "replicaset": "replicaset",
+            "replicasets": "replicaset",
+            "rs": "replicaset",
+            "daemonset": "daemonset",
+            "daemonsets": "daemonset",
+            "ds": "daemonset",
+            "statefulset": "statefulset",
+            "statefulsets": "statefulset",
+            "sts": "statefulset",
+            "event": "event",
+            "events": "event",
+            "networkpolicy": "networkpolicy",
+            "networkpolicies": "networkpolicy",
+        }
+        value_flags = {
+            "-o",
+            "--output",
+            "-l",
+            "--selector",
+            "--field-selector",
+            "--sort-by",
+            "--container",
+            "-c",
+            "--since",
+            "--tail",
+        }
+        boolean_flags = {
+            "-A",
+            "--all-namespaces",
+            "--show-labels",
+            "--previous",
+            "--watch",
+            "-w",
+            "--ignore-not-found",
+        }
+
+        verb_index = next((i for i, token in enumerate(cleaned) if token.lower() in verbs), -1)
+        if verb_index < 0:
+            return {}
+
+        i = verb_index + 1
+        while i < len(cleaned):
+            token = cleaned[i]
+            lower = token.lower()
+            if lower in boolean_flags:
+                i += 1
+                continue
+            if lower in value_flags:
+                i += 2
+                continue
+            if lower.startswith("-"):
+                i += 1
+                continue
+            if "/" in lower:
+                kind_part, name_part = lower.split("/", 1)
+                kind = kind_aliases.get(kind_part)
+                if kind and name_part:
+                    return {"kind": kind, "namespace": namespace.lower(), "name": name_part.strip("'\"").lower()}
+            kind = kind_aliases.get(lower)
+            if kind:
+                j = i + 1
+                while j < len(cleaned):
+                    candidate = cleaned[j]
+                    candidate_lower = candidate.lower()
+                    if candidate_lower in boolean_flags:
+                        j += 1
+                        continue
+                    if candidate_lower in value_flags:
+                        j += 2
+                        continue
+                    if candidate_lower.startswith("-"):
+                        j += 1
+                        continue
+                    if candidate_lower in kind_aliases:
+                        return {"kind": kind, "namespace": namespace.lower(), "name": ""}
+                    if re.match(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", candidate_lower):
+                        return {"kind": kind, "namespace": namespace.lower(), "name": candidate_lower.strip("'\"")}
+                    break
+                return {"kind": kind, "namespace": namespace.lower(), "name": ""}
+            i += 1
+
+        return {}
 
     @staticmethod
     def _classify_plan_intent(command: str, purpose: str) -> str:
@@ -1459,6 +1603,7 @@ class EvidenceCollectorNode(WorkflowNode):
                             tool_name=tn,
                             result=tool.get("result", ""),
                             structured=tool.get("structured") or {},
+                            tool_args=tool.get("tool_args") or {},
                         ):
                             matched = True
                             matched_tool = tool
@@ -1477,6 +1622,7 @@ class EvidenceCollectorNode(WorkflowNode):
                         tool_name=tn,
                         result=tool.get("result", ""),
                         structured=tool.get("structured") or {},
+                        tool_args=tool.get("tool_args") or {},
                     ):
                         matched = True
                         matched_tool = tool
@@ -1647,6 +1793,7 @@ class EvidenceCollectorNode(WorkflowNode):
         tool_name: str,
         result: str,
         structured: Dict[str, Any],
+        tool_args: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if not result or not result.strip():
             return False
@@ -1655,24 +1802,57 @@ class EvidenceCollectorNode(WorkflowNode):
         if not EvidenceCollectorNode._namespace_scope_matches(plan_cmd, result):
             return False
 
-        tool_match = (
-            (plan_tool and plan_tool == tool_name)
-            or (plan_tool and plan_tool in tool_name)
-            or (plan_tool and tool_name in plan_tool)
-            or (plan_tool and plan_tool.replace("_", "") == tool_name.replace("_", ""))
+        combined = f"{plan_cmd}\n{plan_desc}"
+        intent = EvidenceCollectorNode._classify_plan_intent(plan_cmd, plan_desc)
+        tool_match = EvidenceCollectorNode._tool_is_compatible_with_plan(
+            plan_tool=plan_tool,
+            plan_cmd=plan_cmd,
+            intent=intent,
+            tool_name=tool_name,
         )
         if not tool_match:
             return False
 
-        combined = f"{plan_cmd}\n{plan_desc}"
         lower_result = result.lower()
+        plan_target = EvidenceCollectorNode._extract_plan_resource_target(plan_cmd)
+        if plan_target:
+            result_target = EvidenceCollectorNode._extract_result_resource_target(
+                result=result,
+                structured=structured or {},
+                tool_args=tool_args or {},
+            )
+            if not EvidenceCollectorNode._resource_target_matches(plan_target, result_target):
+                return False
 
-        if (structured or {}).get("diagnostic_negative"):
+        if (structured or {}).get("diagnostic_negative") or EvidenceCollectorNode._is_diagnostic_negative_tool_result(tool_name, result, structured or {}):
             return EvidenceCollectorNode._negative_result_answers_plan(combined, lower_result)
+
+        if "run_bash_command" in tool_name and intent in {"registry_connectivity", "dns_connectivity"}:
+            probe_markers = (
+                "curl",
+                "wget",
+                "telnet",
+                "nc ",
+                "ping",
+                "registry",
+                "docker.io",
+                "resolve",
+                "nslookup",
+                "dig ",
+                "connected",
+                "connection",
+                "timeout",
+                "timed out",
+            )
+            return any(marker in lower_result for marker in probe_markers)
+        if "run_bash_command" in tool_name and intent == "node_state":
+            node_name = plan_target.get("name", "") if plan_target.get("kind") == "node" else ""
+            return bool(node_name and node_name in lower_result and re.search(r"\bready\b|kubelet|containerd|runtime", lower_result))
 
         if "events" in combined or "事件" in combined:
             return (
                 "kubectl_events" in tool_name
+                or ("kubectl_describe" in tool_name and re.search(r"\b(status|reason|events?)\b|状态|事件", lower_result))
                 or structured.get("status") == "events_found"
                 or "last seen" in lower_result
                 or "reason" in lower_result and "object" in lower_result
@@ -1704,6 +1884,152 @@ class EvidenceCollectorNode(WorkflowNode):
         if "get pod" in plan_cmd or "describe pod" in plan_cmd:
             return structured.get("kind") == "Pod" or "pod" in lower_result
 
+        return True
+
+    @staticmethod
+    def _tool_is_compatible_with_plan(
+        plan_tool: str,
+        plan_cmd: str,
+        intent: str,
+        tool_name: str,
+    ) -> bool:
+        """Treat LLM generated `tool` as a weak hint and command intent as truth.
+
+        Smaller models often put a broad kubectl wrapper in the plan while the
+        agent executes a more specific helper, e.g. plan says
+        kubectl_get_by_kind_in_cluster but command is `kubectl describe pod`
+        and the real tool is kubectl_describe. Hard-failing that case makes
+        real evidence show as 0/N.
+        """
+        plan_tool = (plan_tool or "").lower()
+        tool_name = (tool_name or "").lower()
+        plan_cmd = (plan_cmd or "").lower()
+
+        if (
+            (plan_tool and plan_tool == tool_name)
+            or (plan_tool and plan_tool in tool_name)
+            or (plan_tool and tool_name in plan_tool)
+            or (plan_tool and plan_tool.replace("_", "") == tool_name.replace("_", ""))
+        ):
+            return True
+
+        if "kubectl" in plan_cmd:
+            if re.search(r"\bdescribe\s+", plan_cmd):
+                return "kubectl_describe" in tool_name or "run_bash_command" in tool_name
+            if re.search(r"\bget\s+", plan_cmd):
+                return (
+                    "kubectl_get" in tool_name
+                    or "kubectl_describe" in tool_name
+                    or "run_bash_command" in tool_name
+                )
+            if re.search(r"\blogs\s+", plan_cmd):
+                return "run_bash_command" in tool_name or "kubectl_logs" in tool_name
+            if re.search(r"\b(exec|curl|wget|nc|telnet|ping)\b", plan_cmd):
+                return "run_bash_command" in tool_name
+
+        if intent in {"registry_connectivity", "dns_connectivity", "pod_logs", "runtime_info"}:
+            return "run_bash_command" in tool_name or "kubectl_run_image" in tool_name
+        if intent in {"pod_events", "pod_config", "secret_config", "node_state"}:
+            return (
+                tool_name.startswith("kubectl_")
+                or "run_bash_command" in tool_name
+            )
+
+        return False
+
+    @staticmethod
+    def _extract_result_resource_target(
+        result: str,
+        structured: Dict[str, Any],
+        tool_args: Dict[str, Any],
+    ) -> Dict[str, str]:
+        kind = EvidenceCollectorNode._normalize_resource_kind(
+            structured.get("kind")
+            or structured.get("resource_kind")
+            or structured.get("resource_type")
+            or tool_args.get("kind")
+            or tool_args.get("resource_kind")
+            or tool_args.get("resource_type")
+        )
+        name = str(
+            structured.get("name")
+            or structured.get("resource_name")
+            or tool_args.get("name")
+            or tool_args.get("resource_name")
+            or ""
+        ).strip("'\"").lower()
+        namespace = str(
+            structured.get("namespace")
+            or tool_args.get("namespace")
+            or ""
+        ).strip("'\"").lower()
+
+        text = result or ""
+        if not name:
+            match = re.search(r"(?im)^\s*name:\s*([^\s]+)\s*$", text)
+            if match:
+                name = match.group(1).strip("'\"").lower()
+        if not namespace:
+            match = re.search(r"(?im)^\s*namespace:\s*([^\s]+)\s*$", text)
+            if match:
+                namespace = match.group(1).strip("'\"").lower()
+        if not kind:
+            match = re.search(r"(?im)^\s*kind:\s*([^\s]+)\s*$", text)
+            if match:
+                kind = EvidenceCollectorNode._normalize_resource_kind(match.group(1))
+        if not kind and re.search(r"\bpod/", text, re.IGNORECASE):
+            kind = "pod"
+
+        return {"kind": kind, "namespace": namespace, "name": name}
+
+    @staticmethod
+    def _normalize_resource_kind(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        aliases = {
+            "pods": "pod",
+            "po": "pod",
+            "nodes": "node",
+            "no": "node",
+            "secrets": "secret",
+            "configmaps": "configmap",
+            "cm": "configmap",
+            "persistentvolumeclaim": "pvc",
+            "persistentvolumeclaims": "pvc",
+            "pvcs": "pvc",
+            "services": "service",
+            "svc": "service",
+            "deployments": "deployment",
+            "replicasets": "replicaset",
+            "rs": "replicaset",
+            "daemonsets": "daemonset",
+            "ds": "daemonset",
+            "statefulsets": "statefulset",
+            "sts": "statefulset",
+            "events": "event",
+            "networkpolicies": "networkpolicy",
+        }
+        return aliases.get(text, text)
+
+    @staticmethod
+    def _resource_target_matches(plan_target: Dict[str, str], result_target: Dict[str, str]) -> bool:
+        plan_kind = (plan_target or {}).get("kind", "")
+        plan_name = (plan_target or {}).get("name", "")
+        plan_namespace = (plan_target or {}).get("namespace", "")
+        result_kind = (result_target or {}).get("kind", "")
+        result_name = (result_target or {}).get("name", "")
+        result_namespace = (result_target or {}).get("namespace", "")
+
+        if not result_kind and not result_name and not result_namespace:
+            return True
+
+        if plan_kind and result_kind and plan_kind != result_kind:
+            return False
+        if plan_name:
+            if result_name and plan_name != result_name:
+                return False
+        if plan_namespace:
+            if result_namespace and plan_namespace != result_namespace:
+                return False
         return True
 
     @staticmethod

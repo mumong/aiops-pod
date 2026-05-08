@@ -1237,6 +1237,284 @@ def test_evidence_rule_match_accepts_event_table_for_event_plan_by_default():
     assert items[0].source == "thinking_match"
 
 
+def test_evidence_rule_match_rejects_describe_result_for_different_pod_object():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "检查 xnet namespace 的 ImagePullBackOff Pod 当前状态和事件",
+            "level": "important",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod -n xnet test1-redis-master-0",
+            "purpose": "确认 xnet/redis-master 的当前状态和事件",
+        },
+        {
+            "id": "e2",
+            "description": "确认 terminating-stuck Pod 当前状态和 deletionTimestamp",
+            "level": "important",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod -n aiops-e2e terminating-stuck",
+            "purpose": "验证 Terminating 卡住 Pod 当前状态",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "semantic_success": True,
+            "result": (
+                "kubectl_describe 摘要:\n"
+                "name: terminating-stuck\n"
+                "namespace: aiops-e2e\n"
+                "status: Terminating (lasts 8d)"
+            ),
+            "structured": {"kind": "Pod", "name": "terminating-stuck", "namespace": "aiops-e2e"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "semantic_success": True,
+            "result": (
+                "kubectl_describe 摘要:\n"
+                "name: test1-redis-master-0\n"
+                "namespace: xnet\n"
+                "status: Pending\n"
+                "Reason: ErrImagePull"
+            ),
+            "structured": {"kind": "Pod", "name": "test1-redis-master-0", "namespace": "xnet"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert items[0].collected is True
+    assert "namespace: xnet" in items[0].value
+    assert "test1-redis-master-0" in items[0].value
+    assert items[1].collected is True
+    assert "namespace: aiops-e2e" in items[1].value
+    assert "terminating-stuck" in items[1].value
+
+
+def test_evidence_rule_match_uses_command_intent_when_model_tool_field_is_wrong():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取主异常组的详细事件，确认镜像拉取失败的具体原因",
+            "level": "critical",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl describe pod test1-redis-master-0 -n aaa",
+            "purpose": "查看 Pod 事件，确认是否因镜像地址错误、认证失败或网络问题导致镜像拉取失败",
+        },
+        {
+            "id": "e2",
+            "description": "检查主异常组的 Pod 配置，确认镜像名称和 imagePullSecrets 是否正确",
+            "level": "critical",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl get pod test1-redis-master-0 -n aaa -o jsonpath='{.spec.containers[0].image} {spec.imagePullSecrets}'",
+            "purpose": "验证镜像名称和 imagePullSecrets",
+        },
+        {
+            "id": "e3",
+            "description": "获取非主异常组（Terminating）的详细事件",
+            "level": "important",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl describe pod terminating-stuck -n aiops-e2e",
+            "purpose": "查看 Pod 事件，确认删除卡住的原因",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "semantic_success": True,
+            "result": (
+                "kubectl_describe 摘要:\n"
+                "name: test1-redis-master-0\n"
+                "namespace: aaa\n"
+                "status: Pending\n"
+                "Reason: ImagePullBackOff\n"
+                "Back-off pulling image \"docker.io/bitnami/redis:5.0.7-debian-10-r32\""
+            ),
+            "structured": {"name": "test1-redis-master-0", "namespace": "aaa", "status": "Pending"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_name",
+            "semantic_success": True,
+            "result": (
+                "NAME                   READY   STATUS             RESTARTS   AGE\n"
+                "test1-redis-master-0   0/1     ImagePullBackOff   0          2d5h"
+            ),
+            "structured": {"status": "kept_small_output"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "semantic_success": True,
+            "result": (
+                "kubectl_describe 摘要:\n"
+                "name: terminating-stuck\n"
+                "namespace: aiops-e2e\n"
+                "status: Terminating (lasts 9d)\n"
+                "Warning FailedMount object \"aiops-e2e\"/\"kube-root-ca.crt\" not registered"
+            ),
+            "structured": {"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert items[0].collected is True
+    assert items[0].source == "thinking_match"
+    assert items[1].collected is False
+    assert items[2].collected is True
+    assert "terminating-stuck" in items[2].value
+    assert node._calculate_completeness(items) == 2 / 3
+
+
+def test_evidence_rule_match_replays_ce6df_style_plan_without_fake_zero_completeness():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取主异常组的详细事件，确认镜像拉取失败的具体原因",
+            "level": "critical",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl describe pod test1-redis-master-0 -n aaa",
+            "purpose": "查看 Pod 事件，确认是否因镜像地址错误、认证失败或网络问题导致镜像拉取失败",
+        },
+        {
+            "id": "e2",
+            "description": "检查主异常组的 Pod 配置，确认镜像名称和 imagePullSecrets 是否正确",
+            "level": "critical",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl get pod test1-redis-master-0 -n aaa -o jsonpath='{.spec.containers[0].image} {spec.imagePullSecrets}'",
+            "purpose": "验证镜像名称和拉取策略是否正确，以及是否配置了正确的 imagePullSecrets",
+        },
+        {
+            "id": "e3",
+            "description": "检查主异常组 Pod 所在节点的网络连接，确认是否能够访问镜像仓库",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "kubectl exec -n aaa test1-redis-master-0 -- curl -v https://registry.example.com",
+            "purpose": "验证节点到镜像仓库的网络连通性、DNS 解析和 TLS 证书是否正常",
+        },
+        {
+            "id": "e4",
+            "description": "获取非主异常组（Terminating）的详细事件，确认删除卡住的具体原因",
+            "level": "important",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl describe pod terminating-stuck -n aiops-e2e",
+            "purpose": "查看 Pod 事件，确认删除卡住的原因，如 finalizers 未清理或节点侧删除流程卡住",
+        },
+        {
+            "id": "e5",
+            "description": "检查主异常组的镜像仓库认证信息",
+            "level": "critical",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl get secret -n aaa",
+            "purpose": "确认是否存在与镜像拉取相关的 Secret，并检查其内容是否正确",
+        },
+        {
+            "id": "e6",
+            "description": "参考 Pod ImagePullFailed / ImagePullBackOff 的 runbook",
+            "level": "reference",
+            "tool": "fetch_runbook",
+            "command": "fetch_runbook --runbook_id=PodImagePullFailed",
+            "purpose": "获取参考的 runbook，以指导镜像拉取失败的诊断流程",
+        },
+        {
+            "id": "e7",
+            "description": "检查非主异常组（Terminating）的 metadata.finalizers 和 deletionTimestamp",
+            "level": "important",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl get pod terminating-stuck -n aiops-e2e -o jsonpath='{.metadata.finalizers} {metadata.deletionTimestamp}'",
+            "purpose": "确认是否由于 finalizers 未清理或 deletionTimestamp 设置导致删除卡住",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "semantic_success": True,
+            "result": (
+                "kubectl_describe 摘要:\n"
+                "name: test1-redis-master-0\n"
+                "namespace: aaa\n"
+                "status: Pending\n"
+                "Reason: ImagePullBackOff\n"
+                "Back-off pulling image \"docker.io/bitnami/redis:5.0.7-debian-10-r32\""
+            ),
+            "structured": {"name": "test1-redis-master-0", "namespace": "aaa", "status": "Pending"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_name",
+            "semantic_success": True,
+            "result": (
+                "NAME                   READY   STATUS             RESTARTS   AGE\n"
+                "test1-redis-master-0   0/1     ImagePullBackOff   0          2d5h"
+            ),
+            "structured": {"status": "kept_small_output"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": False,
+            "result": '{"success": false, "stdout": "", "stderr": "error: unable to upgrade connection: container not found (\\"test1-redis\\")\\n", "returncode": 1}',
+            "structured": {"status": "command_failed", "raw_preview": "container not found"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "semantic_success": True,
+            "result": (
+                "kubectl_describe 摘要:\n"
+                "name: terminating-stuck\n"
+                "namespace: aiops-e2e\n"
+                "status: Terminating (lasts 9d)\n"
+                "Warning FailedMount object \"aiops-e2e\"/\"kube-root-ca.crt\" not registered"
+            ),
+            "structured": {"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_name",
+            "semantic_success": True,
+            "result": (
+                "NAME                READY   STATUS        RESTARTS   AGE\n"
+                "terminating-stuck   0/1     Terminating   0          9d"
+            ),
+            "structured": {"status": "kept_small_output"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+    collected_by_id = {item.id: item.collected for item in items}
+
+    assert collected_by_id == {
+        "e1": True,
+        "e2": False,
+        "e3": False,
+        "e4": True,
+        "e5": False,
+        "e6": False,
+        "e7": False,
+    }
+    assert node._calculate_completeness(items) == 2 / 6
+
+
 def test_evidence_plan_match_does_not_call_llm_by_default():
     class _StructuredAICall:
         def __init__(self):
