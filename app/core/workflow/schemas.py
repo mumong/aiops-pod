@@ -4,17 +4,245 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 EvidenceLevelName = Literal["critical", "important", "optional", "reference"]
+EvidenceToolName = Literal[
+    "kubectl_describe",
+    "kubectl_get_by_name",
+    "kubectl_get_by_kind_in_namespace",
+    "kubectl_get_by_kind_in_cluster",
+    "kubectl_find_resource",
+    "kubectl_get_yaml",
+    "kubectl_events",
+    "kubectl_logs",
+    "kubectl_previous_logs",
+    "kubectl_logs_all_containers",
+    "kubectl_previous_logs_all_containers",
+    "kubectl_container_logs",
+    "kubectl_container_previous_logs",
+    "kubectl_logs_grep",
+    "kubectl_logs_all_containers_grep",
+    "kubernetes_jq_query",
+    "kubernetes_tabular_query",
+    "kubernetes_count",
+    "get_prometheus_target",
+    "kubectl_lineage_children",
+    "kubectl_lineage_parents",
+    "run_bash_command",
+    "kubectl_run_image",
+    "list_prometheus_rules",
+    "get_metric_names",
+    "get_label_values",
+    "get_all_labels",
+    "get_series",
+    "get_metric_metadata",
+    "execute_prometheus_instant_query",
+    "execute_prometheus_range_query",
+    "fetch_runbook",
+]
+
+
+class PodRef(BaseModel):
+    name: str = ""
+    namespace: str = ""
+    status: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_ref(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            text = value.strip()
+            if "/" in text:
+                namespace, name = text.split("/", 1)
+                return {"namespace": namespace, "name": name}
+            return {"name": text}
+        return value
+
+    @model_validator(mode="after")
+    def normalize_empty_status(self) -> "PodRef":
+        if self.status == "":
+            self.status = None  # type: ignore[assignment]
+        return self
+
+
+class EntityRef(BaseModel):
+    type: str = ""
+    name: str = ""
+    namespace: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_entity(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"type": "Unknown", "name": value}
+        if isinstance(value, dict):
+            item = dict(value)
+            if "type" not in item and "kind" in item:
+                item["type"] = item.get("kind")
+            if "name" not in item:
+                item["name"] = item.get("value", "")
+            return item
+        return value
+
+
+class ScenarioItem(BaseModel):
+    scenario: str = ""
+    probability: str = ""
+    reason: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_scenario(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"scenario": value}
+        return value
+
+
+class PrimaryEntity(BaseModel):
+    kind: str = "Pod"
+    namespace: str = ""
+    name: str = ""
+
+
+class IssueGroup(BaseModel):
+    group_id: str = ""
+    status_keywords: list[str] = Field(default_factory=list)
+    pod_abnormal_type: str = ""
+    compatible_layers: list[str] = Field(default_factory=list)
+    primary_entities: list[PrimaryEntity] = Field(default_factory=list)
+    is_primary: bool = False
+    evidence_plan: list[dict[str, Any]] = Field(default_factory=list)
+    possible_scenarios: list[ScenarioItem] = Field(default_factory=list)
+
+
+class CurrentAbnormalSummary(BaseModel):
+    source: str = ""
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    total_abnormal: int = 0
+    selected_rows: list[str] = Field(default_factory=list)
+    raw_ref: str | None = None
+    summary_ref: str | None = None
+    structured_ref: str | None = None
+
+
+class LayerOutput(BaseModel):
+    layer: str
+    derived_layer: str = ""
+    layers: list[str] = Field(default_factory=list)
+    layer_name: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    reasoning: str
+    primary_pod: PodRef | None = None
+    abnormal_pods: list[PodRef] = Field(default_factory=list)
+    pod_status_keyword: str = ""
+    pod_abnormal_type: str = ""
+    status_category: str = ""
+    key_entities: list[EntityRef] = Field(default_factory=list)
+    possible_scenarios: list[ScenarioItem] = Field(default_factory=list)
+    query_result: dict[str, Any] | None = None
+    full_analysis: str = ""
+
+    @field_validator("layers", mode="before")
+    @classmethod
+    def normalize_layers(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value
+
+
+class LayerHandoff(BaseModel):
+    diagnosis_scope: str = "question_scope"
+    layer: str = ""
+    derived_layer: str = ""
+    layers: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    primary_problem: str = ""
+    primary_pod: PodRef | None = None
+    abnormal_pods: list[PodRef] = Field(default_factory=list)
+    issue_groups: list[IssueGroup] = Field(default_factory=list)
+    current_abnormal_summary: CurrentAbnormalSummary = Field(default_factory=CurrentAbnormalSummary)
+    pod_status_keyword: str = ""
+    pod_abnormal_type: str = ""
+    status_category: str = ""
+    active_entities: list[EntityRef] = Field(default_factory=list)
+    active_signals: list[dict[str, Any]] = Field(default_factory=list)
+    possible_scenarios: list[ScenarioItem] = Field(default_factory=list)
+    matched_runbooks: list[str] = Field(default_factory=list)
+    must_verify: list[str] = Field(default_factory=list)
+    do_not_change: list[str] = Field(default_factory=list)
+    archive_ref: str | None = None
+
+    @field_validator("layers", mode="before")
+    @classmethod
+    def normalize_layers(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value
+
+
+class QueryColumn(BaseModel):
+    key: str
+    label: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_column(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"key": value, "label": value}
+        return value
+
+    @model_validator(mode="after")
+    def default_label(self) -> "QueryColumn":
+        if not self.label:
+            self.label = self.key
+        return self
+
+
+class QueryMissingItem(BaseModel):
+    field: str = "result"
+    reason: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_missing(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"field": "result", "reason": value}
+        return value
+
+
+class QuerySource(BaseModel):
+    tool: str = "-"
+    query: str = "-"
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_source(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"tool": "-", "query": value}
+        return value
+
+
+class QueryResult(BaseModel):
+    query_target: str = ""
+    collection_summary: str = ""
+    columns: list[QueryColumn] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    missing: list[QueryMissingItem] = Field(default_factory=list)
+    sources: list[QuerySource] = Field(default_factory=list)
 
 
 class EvidencePlanItem(BaseModel):
     id: str = Field(min_length=1)
     description: str = Field(min_length=1)
     level: EvidenceLevelName = "important"
-    tool: str = Field(min_length=1)
+    tool: EvidenceToolName
     command: str = Field(min_length=1)
     purpose: str = ""
 
@@ -65,6 +293,18 @@ class EvidenceCollectionOutput(BaseModel):
     evidence_inventory: list[dict[str, Any]] = Field(default_factory=list)
     missing_reasons: list[str] = Field(default_factory=list)
     early_stop: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextCompactionSummary(BaseModel):
+    process_summary: list[str] = Field(default_factory=list)
+    evidence_plan: list[dict[str, Any]] = Field(default_factory=list)
+    completed_items: list[dict[str, Any]] = Field(default_factory=list)
+    open_items: list[dict[str, Any]] = Field(default_factory=list)
+    key_facts: list[str] = Field(default_factory=list)
+    negative_facts: list[str] = Field(default_factory=list)
+    conflicts: list[str] = Field(default_factory=list)
+    discarded_noise: list[str] = Field(default_factory=list)
+    next_focus: list[str] = Field(default_factory=list)
 
 
 class RCAOutput(BaseModel):

@@ -136,6 +136,196 @@ def test_aicall_writes_final_budget_with_dynamic_context(tmp_path, monkeypatch):
     assert budget["dynamic_context_tokens"] > 0
 
 
+def test_aicall_compacts_evidence_runtime_context_when_small_window_is_hot(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/Qwen3-32B-AWQ", api_key="sk-test")
+    ai._compact_context_with_lite_llm = lambda payload, **kwargs: {
+        "process_summary": [
+            "先输出 evidence_plan",
+            "随后连续调用多个 run_bash_command 检查 registry 网络",
+            "最后发现存在重复节点信息查询，应抓大放小",
+        ],
+        "evidence_plan": [{"id": "e1", "description": "检查 docker.io 连通性"}],
+        "completed_items": [{"id": "e1", "outcome": "negative", "fact": "curl registry 超时"}],
+        "open_items": [{"id": "e2", "reason": "镜像存在性未能独立验证"}],
+        "key_facts": ["Pod test1-redis-master-0 为 ImagePullBackOff"],
+        "negative_facts": ["curl registry-1.docker.io timed out"],
+        "conflicts": [],
+        "discarded_noise": ["重复 node capacity 查询"],
+        "next_focus": ["不要继续查询 Node capacity，优先总结网络不可达证据"],
+    }
+    static_components = [
+        {"name": "node_system_prompt", "category": "static_input", "content": "s" * 4000},
+        {"name": "user_message", "category": "static_input", "content": "u" * 4000},
+        {"name": "tool_schema", "category": "static_input", "content": "t" * 4000},
+    ]
+    plan_text = json.dumps({
+        "layer": "L3",
+        "evidence_plan": [
+            {
+                "id": "e1",
+                "description": "检查 docker.io 连通性",
+                "level": "important",
+                "tool": "run_bash_command",
+                "command": "curl https://registry-1.docker.io/v2/",
+                "purpose": "验证镜像仓库连通性",
+            }
+        ],
+        "collection_strategy": "先确认镜像拉取失败。",
+    }, ensure_ascii=False)
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": plan_text,
+            "content": plan_text[:500],
+        },
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": "第一轮分析" + ("循环思考" * 3000),
+            "content": "第一轮分析",
+        },
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "tool_name": "run_bash_command",
+            "result": '{"success": false, "stderr": "curl: (28) timed out"}',
+            "result_preview": "curl timed out",
+            "semantic_success": False,
+        },
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "tool_name": "run_bash_command",
+            "result": '{"success": true, "stdout": "node capacity noise"}' * 1000,
+            "result_preview": "node capacity noise",
+            "semantic_success": True,
+            "raw_ref": "/archive/tools/node.raw.txt",
+            "structured_ref": "/archive/tools/node.structured.json",
+            "summary_ref": "/archive/tools/node.summary.txt",
+        },
+    ]
+
+    compacted = ai._maybe_compact_runtime_context(
+        node_id="evidence",
+        run_id="run-compact",
+        static_context_components=static_components,
+        thinking_events=thinking_events,
+        tool_observation_contents=[
+            '{"success": false, "stderr": "curl: (28) timed out"}',
+            '{"success": true, "stdout": "node capacity noise"}' * 1000,
+        ],
+    )
+
+    assert compacted is True
+    assert thinking_events[0]["type"] == "context_summary"
+    assert len([ev for ev in thinking_events if ev.get("type") == "ai_message"]) == 2
+    assert len([ev for ev in thinking_events if ev.get("type") == "tool_result"]) == 2
+    assert any("evidence_plan" in (ev.get("full_content") or "") for ev in thinking_events)
+    assert any("timed out" in (ev.get("result") or "") for ev in thinking_events if ev.get("type") == "tool_result")
+    assert any(
+        "[compacted: see raw_ref/structured_ref/summary_ref]" in (ev.get("result") or "")
+        for ev in thinking_events
+        if ev.get("type") == "tool_result"
+    )
+    summary = thinking_events[0]["full_content"]
+    assert "process_summary" in summary
+    assert "curl registry 超时" in summary
+    assert "重复 node capacity 查询" in summary
+    assert all("循环思考循环思考循环思考" not in json.dumps(ev, ensure_ascii=False) for ev in thinking_events)
+
+
+def test_aicall_compaction_rewrites_non_plan_ai_messages_in_agent_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    ai = AICall(model="openai/Qwen3-32B-AWQ", api_key="sk-test")
+    ai.context_compaction_config = {
+        "enabled": True,
+        "nodes": ["evidence"],
+        "max_context_window": 35000,
+        "trigger_ratio": 0.01,
+        "summary_max_tokens": 500,
+    }
+    ai._compact_context_with_lite_llm = lambda payload, **kwargs: {
+        "process_summary": ["先输出计划，随后执行 describe。"],
+        "evidence_plan": [{"id": "e1", "description": "describe pod"}],
+        "completed_items": [{"id": "e1", "outcome": "positive"}],
+        "open_items": [],
+        "key_facts": ["Pod 异常"],
+        "negative_facts": [],
+        "conflicts": [],
+        "discarded_noise": ["长思考已压缩"],
+        "next_focus": ["停止重复 describe"],
+    }
+
+    plan_message = AIMessage(content=json.dumps({
+        "layer": "L3",
+        "evidence_plan": [
+            {
+                "id": "e1",
+                "description": "describe pod",
+                "level": "critical",
+                "tool": "kubectl_describe",
+                "command": "kubectl describe pod p -n n",
+                "purpose": "确认状态",
+            }
+        ],
+        "collection_strategy": "先 describe。",
+    }, ensure_ascii=False))
+    noisy_message = AIMessage(content="后续长思考" + ("循环分析" * 2000))
+    tool_message = ToolMessage(
+        content=json.dumps({"success": True, "stdout": "registry probe\n" + ("network noise\n" * 500)}, ensure_ascii=False),
+        tool_call_id="tc-1",
+        name="run_bash_command",
+    )
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield ("updates", {"agent": {"messages": [plan_message]}})
+            yield ("updates", {"agent": {"messages": [noisy_message]}})
+            yield ("updates", {"tools": {"messages": [tool_message]}})
+
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+
+    tool = type("T", (), {"name": "run_bash_command", "description": "run readonly shell", "args_schema": None})()
+    _, events = ai.call(
+        "s" * 2000,
+        "u" * 2000,
+        tools=[tool],
+        node_id="evidence",
+        run_id="run-compact-agent-context",
+        max_steps=3,
+        static_context_components=[
+            {"name": "node_system_prompt", "category": "static_input", "content": "s" * 2000},
+            {"name": "user_message", "category": "static_input", "content": "u" * 2000},
+            {"name": "tool_schema", "category": "static_input", "content": "t" * 2000},
+        ],
+    )
+
+    assert "evidence_plan" in plan_message.content
+    assert noisy_message.content.startswith("[compacted ai_message:")
+    assert tool_message.content.startswith("[compacted tool_result:")
+    assert events[0]["type"] == "context_summary"
+    assert any(ev.get("type") == "tool_result" for ev in events)
+
+
 def test_aicall_passes_ai_summary_mode_to_observation_processor(tmp_path, monkeypatch):
     ai = AICall(
         model="openai/test",
