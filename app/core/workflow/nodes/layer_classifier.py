@@ -415,7 +415,8 @@ class LayerClassifierNode(WorkflowNode):
             "possible_scenarios": layer_result.get("possible_scenarios", []),
             "matched_runbooks": matched_runbooks,
             "must_verify": [
-                "优先围绕 primary_pod 验证它为什么进入当前 pod_status_keyword / pod_abnormal_type",
+                "以 issue_groups、abnormal_pods、current_abnormal_summary 为覆盖基准；primary_pod 只是主异常组代表样本",
+                "主异常组完整验证，非主异常组最小验证，避免遗漏 Terminating、Pending 等次要异常状态",
                 "确认 active_entities 中的对象当前仍存在于指定 namespace",
                 "确认 active_signals 仍能被真实工具结果验证",
                 "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
