@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import json
 
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
-from app.core.workflow.schemas import EvidenceCollectionOutput
+from app.core.workflow.schemas import EvidenceCollectionOutput, EvidencePlanOutput
 from app.core.skills.models import EvidenceItem, EvidenceLevel, Layer
 
 
@@ -323,6 +323,36 @@ def test_evidence_execute_retries_when_tools_run_before_plan():
     assert result["evidence_completeness"] == 1.0
 
 
+def test_pydantic_external_plan_does_not_retry_when_execution_has_no_inband_plan():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "确认 Pod 事件",
+            "level": "critical",
+            "tool": "kubectl_events",
+            "command": "kubectl events ...",
+            "purpose": "确认镜像拉取失败原因",
+        }
+    ]
+    events = [
+        {
+            "type": "tool_start",
+            "tool_name": "kubectl_events",
+            "tool_args": {"resource_type": "pod", "resource_name": "ham-wcc79", "namespace": "xnet"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_events",
+            "result_preview": "Failed to pull image",
+            "result": "Failed to pull image",
+        },
+    ]
+
+    assert node._get_plan_protocol_failure_reason(plan, events) == ""
+
+
 def test_evidence_user_prompt_requires_first_assistant_message_to_be_plan_json():
     message = EvidenceCollectorNode._build_evidence_user_message(
         question="我的集群有什么问题",
@@ -417,6 +447,92 @@ def test_evidence_plan_parser_rejects_invalid_pydantic_plan():
     assert EvidenceCollectorNode()._parse_llm_evidence_plan(text) == []
 
 
+def test_evidence_plan_parser_does_not_fallback_to_kubectl_commands_from_analysis_text():
+    text = """已采集证据如下。
+
+```json
+{
+  "evidence_plan": {
+    "collected_evidence": [
+      {
+        "id": "e1",
+        "description": "这是最终总结，不是计划",
+        "tool": "kubectl_describe",
+        "result": {"status": "ImagePullBackOff"}
+      }
+    ]
+  }
+}
+```
+
+建议后续人工执行：
+kubectl describe pod test1-redis-master-0 -n aaa
+kubectl get secret -n aaa
+"""
+
+    assert EvidenceCollectorNode()._parse_llm_evidence_plan(text) == []
+
+
+def test_evidence_plan_parser_rejects_plain_kubectl_command_list():
+    text = """
+需要执行以下检查：
+kubectl describe pod test1-redis-master-0 -n aaa",
+kubectl describe pod test1-redis-slave-0 -n aaa",
+kubectl get secret -n aaa",
+"""
+
+    assert EvidenceCollectorNode()._parse_llm_evidence_plan(text) == []
+
+
+def test_evidence_extract_plan_keeps_first_valid_plan_when_final_message_is_malformed():
+    valid_plan = """```json
+{
+  "layer": "L3",
+  "evidence_plan": [
+    {
+      "id": "e1",
+      "description": "确认主异常组 Pod 状态",
+      "level": "critical",
+      "tool": "kubectl_describe",
+      "command": "kubectl describe pod test1-redis-master-0 -n aaa",
+      "purpose": "确认 ImagePullBackOff 当前状态"
+    },
+    {
+      "id": "g2-e1",
+      "description": "确认次要 Terminating 异常组当前状态",
+      "level": "important",
+      "tool": "kubectl_describe",
+      "command": "kubectl describe pod terminating-stuck -n aiops-e2e",
+      "purpose": "确认 TerminatingStuck 是否仍存在"
+    }
+  ],
+  "collection_strategy": "主异常组完整采集，次要异常组最小验证。"
+}
+```"""
+    malformed_final = """```json
+{
+  "evidence_plan": {
+    "collected_evidence": [
+      {"id": "e1", "tool": "kubectl_describe"}
+    ]
+  }
+}
+```
+kubectl describe pod other -n aaa
+"""
+
+    events = [
+        {"type": "ai_message", "full_content": valid_plan},
+        {"type": "tool_result", "status": "success", "tool_name": "kubectl_describe", "result": "ImagePullBackOff"},
+        {"type": "ai_message", "full_content": malformed_final},
+    ]
+
+    plan = EvidenceCollectorNode()._extract_plan_from_thinking(events)
+
+    assert [item["id"] for item in plan] == ["e1", "g2-e1"]
+    assert all(item["tool"] != "kubectl" for item in plan)
+
+
 def test_evidence_user_prompt_keeps_context_archive_reference_compact():
     message = EvidenceCollectorNode._build_evidence_user_message(
         question="我的集群有什么问题",
@@ -429,7 +545,8 @@ def test_evidence_user_prompt_keeps_context_archive_reference_compact():
         },
     )
 
-    assert "context_archive_ref: /tmp/aiops/reports/context_archives/run-1" in message
+    assert "/tmp/aiops/reports/context_archives/run-1" not in message
+    assert "context archive 已落盘" in message
     assert "/tmp/aiops/reports/context_archives/run-1/budget/layer.json" not in message
     assert "/tmp/aiops/reports/context_archives/run-1/tools/" not in message
     assert "layer full_analysis_ref:" not in message
@@ -439,7 +556,24 @@ def test_evidence_user_prompt_keeps_context_archive_reference_compact():
 def test_evidence_early_stop_disabled_does_not_pass_stop_checker():
     node = EvidenceCollectorNode()
     node.workflow_config_override = {"evidence": {"early_stop": {"enabled": False}}}
-    node.ai_call = object()
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            return schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [
+                    {
+                        "id": "e1",
+                        "description": "获取 Pod 事件",
+                        "level": "critical",
+                        "tool": "kubectl_events",
+                        "command": "kubectl get events -n aaa",
+                        "purpose": "确认异常原因",
+                    }
+                ],
+                "collection_strategy": "最小验证",
+            }), "{}"
+
+    node.ai_call = _StructuredAICall()
     calls = []
 
     def _fake_call_llm(question, system_prompt, **kwargs):
@@ -457,6 +591,237 @@ def test_evidence_early_stop_disabled_does_not_pass_stop_checker():
     )
 
     assert calls[0]["stop_checker"] is None
+
+
+def test_evidence_early_stop_enabled_by_default_passes_stop_checker():
+    node = EvidenceCollectorNode()
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            return schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [
+                    {
+                        "id": "e1",
+                        "description": "获取 Pod 事件",
+                        "level": "critical",
+                        "tool": "kubectl_events",
+                        "command": "kubectl get events -n aaa",
+                        "purpose": "确认异常原因",
+                    }
+                ],
+                "collection_strategy": "最小验证",
+            }), "{}"
+
+    node.ai_call = _StructuredAICall()
+    calls = []
+
+    def _fake_call_llm(question, system_prompt, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(result='{"evidence_plan": []}'), []
+
+    node._call_llm = _fake_call_llm
+
+    node._plan_evidence_with_llm(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis="{}",
+    )
+
+    assert calls[0]["stop_checker"] == node._should_stop_collection_early
+
+
+def test_evidence_plan_is_generated_with_structured_output_before_tool_execution():
+    node = EvidenceCollectorNode()
+    calls = []
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            calls.append({
+                "schema": schema,
+                "node_id": kwargs.get("node_id"),
+                "question": question,
+            })
+            return schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [
+                    {
+                        "id": "e1",
+                        "description": "获取 Pod 事件",
+                        "level": "critical",
+                        "tool": "kubectl_events",
+                        "command": "kubectl get events -n aaa",
+                        "purpose": "确认异常原因",
+                    }
+                ],
+                "collection_strategy": "最小验证",
+            }), "{}"
+
+    node.ai_call = _StructuredAICall()
+
+    def _fake_call_llm(question, system_prompt, **kwargs):
+        assert "既有 evidence_plan" in question
+        return SimpleNamespace(result="已执行"), [
+            {"type": "tool_result", "status": "success", "tool_name": "kubectl_events", "result": "Failed to pull image"}
+        ]
+
+    node._call_llm = _fake_call_llm
+
+    plan, events, text = node._plan_evidence_with_llm(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis="{}",
+    )
+
+    assert calls[0]["schema"] is EvidencePlanOutput
+    assert calls[0]["node_id"] == "evidence_plan"
+    assert plan[0]["id"] == "e1"
+    assert events[0]["tool_name"] == "kubectl_events"
+
+
+def test_evidence_should_stop_when_required_item_has_diagnostic_negative_result():
+    node = EvidenceCollectorNode()
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "full_content": """
+```json
+{
+  "layer": "L3",
+  "evidence_plan": [
+    {"id": "e1", "description": "检查节点到 Docker Hub 镜像仓库是否可达", "level": "critical", "tool": "run_bash_command", "command": "curl -v --connect-timeout 10 https://registry-1.docker.io/v2/", "purpose": "验证镜像仓库网络可达性"}
+  ]
+}
+```
+""",
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": False,
+            "result": '{"success": false, "stdout": "", "stderr": "命令执行超时 (60秒)", "returncode": -1}',
+            "structured": {
+                "status": "command_result",
+                "success": False,
+                "stderr_preview": "命令执行超时 (60秒)",
+                "returncode": -1,
+            },
+        },
+    ]
+
+    assert node._should_stop_collection_early(thinking_events) is True
+
+
+def test_evidence_should_stop_when_kubectl_run_image_times_out_for_registry_probe():
+    node = EvidenceCollectorNode()
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "full_content": """
+```json
+{
+  "layer": "L3",
+  "evidence_plan": [
+    {"id": "e1", "description": "运行临时 Pod 验证 redis 镜像是否可拉取", "level": "critical", "tool": "kubectl_run_image", "command": "kubectl run test-pull-redis --image=docker.io/bitnami/redis:5.0.7-debian-10-r32", "purpose": "验证镜像仓库访问和镜像拉取"}
+  ]
+}
+```
+""",
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_run_image",
+            "semantic_success": False,
+            "result": '{"success": false, "stdout": "pod \\"test-pull-redis\\" deleted", "stderr": "error: timed out waiting for the condition", "returncode": 1}',
+            "structured": {
+                "status": "run_image_result",
+                "success": False,
+                "stderr": "error: timed out waiting for the condition",
+                "signals": ["timeout"],
+            },
+        },
+    ]
+
+    assert node._should_stop_collection_early(thinking_events) is True
+
+
+def test_evidence_plan_normalization_drops_duplicate_probe_variants():
+    plan = [
+        {
+            "id": "e1",
+            "description": "使用 curl 检查 registry-1.docker.io 连通性",
+            "level": "critical",
+            "tool": "run_bash_command",
+            "command": "curl -v https://registry-1.docker.io/v2/",
+            "purpose": "验证镜像仓库网络可达性",
+        },
+        {
+            "id": "e2",
+            "description": "使用 telnet 检查 registry-1.docker.io 端口",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "telnet registry-1.docker.io 443",
+            "purpose": "验证镜像仓库网络可达性",
+        },
+        {
+            "id": "e3",
+            "description": "使用 nc 检查 registry-1.docker.io 端口",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "nc -vz registry-1.docker.io 443",
+            "purpose": "验证镜像仓库网络可达性",
+        },
+        {
+            "id": "e4",
+            "description": "获取 Pod YAML",
+            "level": "critical",
+            "tool": "kubectl_get_yaml",
+            "command": "kubectl get pod test1-redis-master-0 -n aaa -o yaml",
+            "purpose": "检查镜像和 imagePullSecrets",
+        },
+    ]
+
+    normalized = EvidenceCollectorNode._normalize_evidence_plan(plan)
+
+    assert [item["id"] for item in normalized] == ["e1", "e4"]
+
+
+def test_evidence_plan_normalization_drops_duplicate_runtime_info_grep_variants():
+    plan = [
+        {
+            "id": "e25",
+            "description": "获取节点 Docker Labels",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "kubectl exec -n aaa -it node1 -- docker info | grep 'Labels'",
+            "purpose": "确认节点上的 Docker 守护进程的标签信息",
+        },
+        {
+            "id": "e26",
+            "description": "获取节点 Docker Logging",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "kubectl exec -n aaa -it node1 -- docker info | grep 'Logging'",
+            "purpose": "确认节点上的 Docker 守护进程的日志配置",
+        },
+        {
+            "id": "e27",
+            "description": "获取节点 Docker Runtimes",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "kubectl exec -n aaa -it node1 -- docker info | grep 'Runtimes'",
+            "purpose": "确认节点上的 Docker 守护进程的运行时配置",
+        },
+    ]
+
+    normalized = EvidenceCollectorNode._normalize_evidence_plan(plan)
+
+    assert [item["id"] for item in normalized] == ["e25"]
 
 
 def test_evidence_does_not_count_failed_or_wrong_intent_tool_results():
@@ -535,6 +900,136 @@ def test_evidence_counts_logs_collected_by_run_bash_command():
     assert len(items) == 1
     assert items[0].collected is True
     assert items[0].source == "thinking_match"
+    assert node._calculate_completeness(items) == 1
+
+
+def test_evidence_counts_diagnostic_negative_connectivity_result():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取 Pod 所在节点的网络连通性信息，检查是否可以访问 docker.io",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "curl -v https://registry-1.docker.io/v2/",
+            "purpose": "验证节点到 docker.io 镜像仓库的网络连通性",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": False,
+            "result": (
+                '{"success": false, "stdout": "", '
+                '"stderr": "curl: (56) Recv failure: Connection reset by peer", '
+                '"returncode": 56}'
+            ),
+            "structured": {
+                "status": "command_result",
+                "success": False,
+                "returncode": 56,
+                "stderr_preview": "curl: (56) Recv failure: Connection reset by peer",
+            },
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is True
+    assert items[0].source == "thinking_negative_match"
+    assert items[0].outcome == "negative"
+    assert "Connection reset by peer" in items[0].value
+    assert node._calculate_completeness(items) == 1
+
+
+def test_evidence_counts_diagnostic_negative_result_when_adjudicator_misses():
+    def fake_adjudicator(evidence_plan, tool_candidates):
+        return {
+            "matches": [
+                {
+                    "plan_id": "e1",
+                    "tool_result_index": 0,
+                    "matched": False,
+                    "confidence": 0.92,
+                    "reason": "失败结果不是成功采集",
+                }
+            ],
+            "unmatched_plan_ids": ["e1"],
+            "unplanned_tool_result_indexes": [0],
+        }
+
+    node = EvidenceCollectorNode(plan_match_adjudicator=fake_adjudicator)
+    plan = [
+        {
+            "id": "e1",
+            "description": "检查节点是否可以访问 registry-1.docker.io",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "curl -v https://registry-1.docker.io/v2/",
+            "purpose": "验证镜像仓库网络可达性",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": False,
+            "result": '{"success": false, "stderr": "curl: (28) Connection timed out"}',
+            "structured": {
+                "status": "command_result",
+                "success": False,
+                "stderr_preview": "curl: (28) Connection timed out",
+            },
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is True
+    assert items[0].source == "thinking_negative_match"
+    assert items[0].outcome == "negative"
+
+
+def test_evidence_counts_chinese_curl_timeout_as_network_unreachable():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "检查节点到 Docker Hub 镜像仓库是否可达",
+            "level": "critical",
+            "tool": "run_bash_command",
+            "command": "curl -v --connect-timeout 10 https://registry-1.docker.io/v2/",
+            "purpose": "验证节点到 registry-1.docker.io:443 的 HTTPS 连通性",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": False,
+            "result": '{"success": false, "stdout": "", "stderr": "命令执行超时 (60秒)", "returncode": -1}',
+            "structured": {
+                "status": "command_result",
+                "success": False,
+                "stderr_preview": "命令执行超时 (60秒)",
+                "returncode": -1,
+            },
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is True
+    assert items[0].source == "thinking_negative_match"
+    assert items[0].outcome == "negative"
+    assert "命令执行超时" in items[0].value
     assert node._calculate_completeness(items) == 1
 
 
@@ -708,7 +1203,41 @@ def test_evidence_plan_match_adjudicator_accepts_semantic_match():
     assert node._calculate_completeness(items) == 1
 
 
-def test_evidence_plan_match_llm_uses_structured_schema():
+def test_evidence_rule_match_accepts_event_table_for_event_plan_by_default():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取 primary_pod 的相关事件",
+            "level": "critical",
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "command": "kubectl get events -n aaa --field-selector=involvedObject.name=test1-redis-master-0",
+            "purpose": "确认镜像拉取失败的事件原因",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "semantic_success": True,
+            "result": (
+                "NAMESPACE LAST SEEN TYPE REASON OBJECT MESSAGE\n"
+                "aaa 3m Normal BackOff pod/test1-redis-master-0 "
+                "Back-off pulling image docker.io/bitnami/redis:5.0.7"
+            ),
+            "structured": {"status": "table_summarized"},
+            "tool_args": {"resource_type": "Event"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert items[0].collected is True
+    assert items[0].source == "thinking_match"
+
+
+def test_evidence_plan_match_does_not_call_llm_by_default():
     class _StructuredAICall:
         def __init__(self):
             self.calls = []
@@ -758,5 +1287,5 @@ def test_evidence_plan_match_llm_uses_structured_schema():
         ],
     )
 
-    assert matched == {"e1": 0}
-    assert node.ai_call.calls[0]["schema"].__name__ == "EvidenceMatchOutput"
+    assert matched is None
+    assert node.ai_call.calls == []

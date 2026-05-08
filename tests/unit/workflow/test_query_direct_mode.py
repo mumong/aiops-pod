@@ -11,6 +11,7 @@ from app.core.workflow.executor import WorkflowExecutor
 from app.core.workflow.graph import _make_layer_router
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
+from app.core.workflow.schemas import LayerOutput
 
 
 def test_layer_router_query_direct_goes_to_conclusion():
@@ -81,6 +82,31 @@ def test_query_conclusion_direct_mode_renders_query_result_without_llm():
     assert "## 📊 查询结果" in result["conclusion"]
     assert "master" in result["conclusion"]
     assert "cpu_query" in result["conclusion"]
+
+
+def test_query_conclusion_normalizes_legacy_string_fields():
+    node = ConclusionFormatterNode(holmes_service=SimpleNamespace())
+    node.workflow_config_override = {"query_mode": "direct"}
+    node.ai_call = object()
+
+    state = {
+        "question": "查询 CPU",
+        "layer": Layer.QUERY,
+        "query_result": {
+            "query_target": "查询 CPU",
+            "collection_summary": "计划 1 项，实际采集 0 项",
+            "columns": ["node", "cpu"],
+            "rows": [{"node": "node1", "cpu": "未获取到"}],
+            "missing": ["Prometheus 返回空"],
+            "sources": ["up_query"],
+        },
+        "thinking_events": [],
+    }
+
+    result = node.execute(state)
+
+    assert "**未获取到** `result`: Prometheus 返回空" in result["conclusion"]
+    assert "| - | up_query |" in result["conclusion"]
 
 
 def test_layer_execute_persists_query_result_only_in_query_direct_mode():
@@ -251,6 +277,14 @@ def test_layer_query_direct_retries_when_first_json_has_no_real_tool_results():
         )
 
     node._call_llm = _fake_call_llm
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            assert schema is LayerOutput
+            payload = first_result if calls["count"] <= 1 else second_result
+            return schema.model_validate(payload), json.dumps(payload, ensure_ascii=False)
+
+    node.ai_call = _StructuredAICall()
 
     result, thinking_events = node._analyze_with_llm("查询每个节点的 CPU 和内存使用率")
 

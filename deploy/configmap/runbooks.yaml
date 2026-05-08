@@ -323,6 +323,17 @@ data:
     - `x509: certificate signed by unknown authority`: 节点容器运行时不信任仓库 TLS 证书。
     - `i/o timeout` / `connection refused`: 节点到镜像仓库访问失败，需检查仓库地址、端口、防火墙、DNS。
 
+    ### Step 5: 主动验证镜像仓库连通性
+    可用只读命令验证节点或集群内到镜像仓库的 HTTPS 连通性，例如：
+    ```bash
+    curl -v --connect-timeout 10 https://registry-1.docker.io/v2/
+    ```
+    判读规则：
+    - 返回 `200/401/403`：说明 HTTPS 网络可达；`401/403` 通常是认证/权限语义，不是网络不可达。
+    - `curl: (28) Operation timed out`、`Connection timed out`、`i/o timeout`、`命令执行超时`：这是诊断事实，表示镜像仓库网络不可达或链路被阻断，不应当仅视为“工具执行失败”。
+    - `Could not resolve host`：DNS 解析失败。
+    - `connection refused/reset`：目标端口不可达、被中间设备拒绝或连接被重置。
+    - `x509`：TLS 证书信任问题。
 
 
 
@@ -331,6 +342,7 @@ data:
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
     | Events 含 connection refused/timeout | 镜像仓库网络不可达 | 高 |
+    | 主动 curl/wget registry 超时或命令执行超时 | 镜像仓库网络不可达 | 高 |
     | Events 含 manifest unknown/not found | 镜像或 tag 不存在 | 高 |
     | Events 含 unauthorized/no basic auth | 认证失败（缺少或错误的 imagePullSecret） | 高 |
     | DNS 解析失败 | DNS 问题导致仓库不可达 | 高 |

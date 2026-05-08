@@ -58,6 +58,7 @@ class EvidenceItem:
     collected: bool = False
     value: Optional[Any] = None
     source: Optional[str] = None  # 来源（如 tool_result#5）
+    outcome: str = "unknown"  # positive/negative/inconclusive/failed/unknown
 
     def to_dict(self) -> Dict:
         d = asdict(self)

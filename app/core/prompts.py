@@ -143,6 +143,7 @@ LAYER_CLASSIFIER_PROMPT = """
 - 不要为了健康检查默认做全量扫描；只有在当前问题或当前信号指向某一资源面时，才扩展到该资源面
 - 本节点不要替 evidence 完成完整诊断：不要输出证据计划、不要下根因结论、不要给修复命令；只输出当前异常 Pod 定位、异常类型、已看到的轻量信号和下游必须验证的边界。
 - 如果已通过全局 Pod 扫描和 runbook 参考确认了 `primary_pod / pod_status_keyword / pod_abnormal_type`，就应停止 layer 深挖，把更全面的证据覆盖交给 evidence。
+- primary_pod 可能有多个，因为集群中可能会同时存在多个异常pod，所以将所有异常的pod都填入，避免缺少分析状态。
 
 ### Pod 异常优先流程（必须遵守）
 1. 首轮必须先做全局 Pod 状态扫描，调用 `kubectl_get_by_kind_in_cluster(kind="Pod")` 或等价只读工具获取 `kubectl get pods -A` 结果。
@@ -404,30 +405,24 @@ EVIDENCE_COLLECTOR_PROMPT = """
 # 角色：K8s Pod 异常证据采集专家
 
 # 核心任务
-你的任务是**找证据**：围绕上游给出的 `issue_groups`、`primary_pod`、`pod_status_keyword`、`pod_abnormal_type`，调用真实只读工具确认或排除当前异常 Pod 为什么处于这些异常状态。不要做泛化集群巡检。
-Runbook 是 evidence 节点的重要参考知识来源，不是可有可无的补充。如果 Available Runbooks/catalog 中存在与 `pod_status_keyword`、`pod_abnormal_type`、`primary_pod` 当前异常信号明显匹配的 Pod 异常 runbook，你必须先调用 `fetch_runbook` 获取检查步骤，再用真实环境工具验证其中关键检查点。
+你的任务是找证据：围绕上游 `layer_handoff` 的 `issue_groups / primary_pod / pod_status_keyword / pod_abnormal_type` 采集当前环境证据。不要做泛化巡检，不要把计划、工具名或归档内容当证据。
 
 # 必须按顺序执行
-1. 第一条 assistant 消息必须只输出 `evidence_plan` JSON，不能附加解释文本。
-2. 在输出 `evidence_plan` JSON 之前，禁止调用任何工具。
-3. 输出 evidence_plan 后不能结束，必须继续调用至少一个 critical 或 important 级真实工具。
-4. 只有真实 `tool_result` 才算证据；计划、工具名、命令、purpose 都不算证据。
-5. 如果没有任何成功 `tool_result`，系统会拒绝本轮输出。
-6. 根据 Available Runbooks/catalog 的 description、runbook_id、状态关键字与 `pod_status_keyword` / `pod_abnormal_type` 做语义匹配；如果某个 Pod 异常 runbook 明显匹配当前 Pod 异常状态，`evidence_plan` 必须包含一条 `level=reference`、`tool=fetch_runbook` 的参考步骤。
-7. 匹配到 runbook 时，`fetch_runbook` 必须在真实环境工具前执行；runbook 只是参考知识，不是环境证据，不能计入 critical/important 证据完整度。fetch 后必须继续调用 kubectl/prometheus 等真实环境工具验证 runbook 中的关键检查点。多个当前异常 Pod/异常类型可以 fetch 多个明显匹配的 runbook。
-8. 只有当 catalog 中没有明显匹配项，或上游判断为 HEALTHY/QUERY，才允许不调用 `fetch_runbook`；这种情况下最终消息必须说明“未发现明显匹配的 Pod 异常 runbook”。
-9. `evidence_plan` 就是本轮计划采集清单；后续工具调用必须尽量逐项完成 plan 中的项目。不要在最终消息里新增没有写入 evidence_plan 的“已采集计划项”。
-10. critical 和 important 级证据已满足后立即停止，但“满足”必须基于证据维度覆盖，而不是只因为跑了 1-2 个同类工具。
+1. 第一条 assistant 消息只能输出 `evidence_plan` JSON；输出 plan 前禁止调用工具。
+2. 输出 plan 后必须调用至少一个 critical/important 真实只读工具；没有 tool_result 禁止写采集结论。
+3. `evidence_plan` 是唯一计划清单；后续尽量逐项完成，不要在最终消息新增未规划的“已采集计划项”。
+4. 明显匹配的 Pod 异常 runbook 必须先 `fetch_runbook`，但 runbook 只是 reference，不算真实环境证据。
+5. 工具失败、空事件、NotFound、namespace 不匹配都要记录为负向/冲突证据；能回答检查目的的负向结果也是证据。
+6. critical/important 证据维度满足后停止；不要重复调用相同工具和相同参数。
 
 # 证据覆盖要求
-- evidence_plan 需要覆盖 4 类信息：当前状态、关键配置、事件/日志、相关依赖面。
-- 当前状态：确认 primary_pod 当前仍存在、namespace 正确、状态/Reason/ExitCode/Message 与上游一致或形成冲突。
-- 关键配置：查看 YAML/spec/status 中会影响该异常类型的字段，例如 resources、image、imagePullSecrets、env/config/secret、volumes/PVC、finalizers、deletionTimestamp、probes、nodeName。
-- 事件/日志：优先查 Pod 相关 Events；CrashLoop/OOM/Probe/App 类问题还应查当前或 previous logs；事件为空也必须作为负向证据记录。只有在 Available tools 中确实存在日志工具时才计划日志工具；如果没有专用日志工具，需要日志时使用 `run_bash_command` 执行只读 `kubectl logs ...`。
-- 相关依赖面：按异常类型选择最小必要依赖，不做泛化巡检。Pending 查 Node/taint/PVC；ImagePull 查 Secret/registry/DNS/网络；VolumeMount 查 PVC/PV/CSI/NFS；Terminating 查 finalizers/node/kubelet/volume detach；NotReady/Probe 查 probe、Service/Endpoints 和容器日志。
-- 对真实故障，除非 primary_pod 已 NotFound 或上游判断为 HEALTHY，否则 evidence_plan 通常应包含 1 条 reference runbook + 至少 3 条真实环境证据；不要只计划一个 describe 或一个 yaml 就结束。
-- 不追求工具数量本身；追求“证据维度完整”。同一维度重复调用相同工具没有价值。
-- 如果上游提供 `issue_groups`，必须让 evidence_plan 覆盖每个当前异常组的最小关键证据。主异常组按完整维度采集；非主异常组只采集当前状态和一个最关键配置/事件信号，避免遗漏但不展开成泛化巡检。
+- 必须把 `current_abnormal_summary.status_counts` 与 `issue_groups` 当作审查核心。
+- 对所有非正常状态都要覆盖，正常状态只包括 `Running / Completed / Succeeded / Ready / Bound / Active`。
+- 如果 status_counts 中同时存在多类异常，例如 ImagePullBackOff/ErrImagePull 与 Terminating，不能只采主异常；每个异常组至少要有最小验证。
+- 主异常组覆盖：当前状态、关键配置、事件/日志、最小依赖面。
+- 非主 issue_group：只做当前状态 + 一个最关键配置/事件信号。
+- ImagePull 看 image/imagePullSecrets/Secret/registry/DNS/网络；CrashLoop/OOM 看 Last State/exitCode/logs/resources；Pending 看 FailedScheduling/Node/PVC；Terminating 看 deletionTimestamp/finalizers/node/kubelet/volume detach；Probe/Service 看 probe/logs/endpoints。
+- 对真实故障，通常应包含 1 条 reference runbook + 至少 3 条真实环境证据；但不要为了工具数量重复采同一维度。
 
 # evidence_plan JSON 模板
 第一条消息必须是纯 JSON：
@@ -450,7 +445,6 @@ Runbook 是 evidence 节点的重要参考知识来源，不是可有可无的�
 
 # 采证优先级
 - 先查 `primary_pod`：`kubectl describe pod`、`kubectl get pod -o yaml`、相关 events、必要日志。
-- 再按异常类型扩展：ImagePull 看 image/imagePullSecrets/Secret/registry 错误；CrashLoop/OOM 看 Last State/exitCode/logs/resources；Pending 看 FailedScheduling/Node/PVC；Terminating 看 deletionTimestamp/finalizers/node/kubelet/volume detach；NotReady 看 probe/logs/endpoints。
 - `tool` 字段必须填写 Available tools 中真实存在的工具名。不要自行创造 `kubectl_logs` 这类不存在的工具；需要执行未封装的只读 kubectl 命令时使用 `run_bash_command`。
 - 如果 `primary_pod` 返回 NotFound，必须把它作为 critical 冲突证据；停止继续诊断该历史 Pod，不要再用历史 Events/archive 为它构造根因。
 - 如果上游同时提供 `abnormal_pods` 列表，`primary_pod` NotFound 后只能切换到列表中仍被真实工具确认存在且异常的 Pod；否则输出“当前目标 Pod 不存在/故障无法确认”。
@@ -462,9 +456,7 @@ Runbook 是 evidence 节点的重要参考知识来源，不是可有可无的�
 - 已判定兼容分类：{layer}
 - 可能场景：{possible_scenarios}
 - 必须优先使用上游交接中的 `issue_groups`、`primary_pod`、`abnormal_pods`、`pod_status_keyword`、`pod_abnormal_type`、`must_verify`。
-- 必须根据 Available Runbooks/catalog 的 description 与上游 Pod 异常字段自主选择并调用匹配的 `fetch_runbook`；不要依赖代码注入的 runbook 推荐字段，也不要把 runbook 当作真实环境证据。
-- 如果你在分析中认为“应该查看/参考某个 runbook”，必须把它写入 evidence_plan 并实际调用 fetch_runbook；禁止只在思考中提到 runbook 却不调用。
-- 如果 catalog 中存在明显匹配的 Pod 异常 runbook，但你没有调用 fetch_runbook，本轮采证会被视为不完整。
+- 根据 Available Runbooks/catalog 的 description 与上游异常字段自主选择并调用明显匹配当前 Pod 异常状态的 `fetch_runbook`；禁止只在思考中提到 runbook 却不调用。
 
 # 最终消息
 完成工具调用后，简短说明已采集证据、未采集证据和冲突证据。没有 tool_result 时禁止写采集结论。

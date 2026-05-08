@@ -95,8 +95,8 @@ data:
       # max_steps 直接作为 LangGraph recursion_limit，不做公式转换
       # 注意：LangGraph 每轮 model→tools 算 2 次 recursion，建议配置值 >= 预期工具调用数 * 2 + 5
       max_steps:
-        layer: 28
-        evidence: 30
+        layer: 15
+        evidence: 20
         rca: 0
         conclusion: 0
 
@@ -106,10 +106,10 @@ data:
       # 如需对比复杂场景下工具采集充分性，可临时关闭对应节点早停。
       layer:
         early_stop:
-          enabled: false
+          enabled: true
       evidence:
         early_stop:
-          enabled: false
+          enabled: true
 
       # 本地推理模型 `<think>` 
       # full=完整展示（默认） / truncated=只展示前 max_chars 字符 / hidden=不展示
@@ -124,6 +124,20 @@ data:
       observation_summary:
         mode: rule
         max_chars: 3000
+
+      # Evidence 运行时上下文压缩:
+      # enabled=true 时，仅对 context_window <= max_context_window 的模型生效。
+      # 当 evidence 当前估算上下文使用率达到 trigger_ratio 后，执行一次
+      # Pydantic structured lite 压缩，将历史 ai_messages/tool_observations
+      # 汇总为 context_summary，并保留 evidence_plan/tool_result 骨架供下游消费。
+      context_compaction:
+        enabled: true
+        nodes:
+          - evidence
+        max_context_window: 35000
+        trigger_ratio: 0.70
+        max_compactions_per_call: 1
+        summary_max_tokens: 1200
 
     # 质量指标配置
     metrics:

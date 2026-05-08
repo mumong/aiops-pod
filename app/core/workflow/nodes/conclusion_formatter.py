@@ -20,6 +20,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
+from app.core.workflow.schemas import QueryResult, RCAOutput
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem, Confidence
 from app.core.prompts import get_workflow_prompt, get_conclusion_mode_instruction
@@ -446,13 +447,14 @@ class ConclusionFormatterNode(WorkflowNode):
 
     def _render_query_result(self, query_result: Dict[str, Any]) -> str:
         """QUERY 模式仅渲染结构化 JSON，不再做二次 LLM 理解。"""
-        target = query_result.get("query_target", "")
-        collection_summary = query_result.get("collection_summary", "")
-        columns = query_result.get("columns", []) or []
-        rows = query_result.get("rows", []) or []
-        notes = query_result.get("notes", []) or []
-        missing = query_result.get("missing", []) or []
-        sources = query_result.get("sources", []) or []
+        parsed = QueryResult.model_validate(query_result or {})
+        target = parsed.query_target
+        collection_summary = parsed.collection_summary
+        columns = [item.model_dump() for item in parsed.columns]
+        rows = parsed.rows
+        notes = parsed.notes
+        missing = [item.model_dump() for item in parsed.missing]
+        sources = [item.model_dump() for item in parsed.sources]
 
         lines = [
             "## 📊 查询结果",
@@ -1081,6 +1083,11 @@ class ConclusionFormatterNode(WorkflowNode):
                 rca_data = {}
         except (json.JSONDecodeError, TypeError):
             rca_data = {}
+        if rca_data:
+            try:
+                rca_data = RCAOutput.model_validate(rca_data).model_dump()
+            except Exception:
+                logger.debug("[conclusion] RCAOutput 校验失败，使用原始 RCA dict", exc_info=True)
 
         stats = cls._extract_evidence_stats(evidence_data) if evidence_data else {}
         inv = evidence_data.get("evidence_inventory", []) if evidence_data else []

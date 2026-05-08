@@ -101,3 +101,41 @@ def test_holmes_service_observation_summary_config_ignores_env(monkeypatch):
     svc.workflow_config = {"observation_summary": {"mode": "rule", "max_chars": 3000}}
 
     assert svc.get_observation_summary_config() == ("rule", 3000)
+
+
+def test_holmes_service_context_compaction_config_defaults():
+    svc = HolmesService()
+    svc.workflow_config = {}
+
+    assert svc.get_context_compaction_config() == {
+        "enabled": True,
+        "nodes": ["evidence"],
+        "max_context_window": 35000,
+        "trigger_ratio": 0.70,
+        "max_compactions_per_call": 1,
+        "summary_max_tokens": 1200,
+    }
+
+
+def test_holmes_service_context_compaction_config_uses_workflow_config(monkeypatch):
+    monkeypatch.setenv("AIOPS_CONTEXT_COMPACTION_ENABLED", "false")
+    svc = HolmesService()
+    svc.workflow_config = {
+        "context_compaction": {
+            "enabled": False,
+            "nodes": "evidence",
+            "max_context_window": "32000",
+            "trigger_ratio": "0.65",
+            "max_compactions_per_call": "2",
+            "summary_max_tokens": "900",
+        }
+    }
+
+    assert svc.get_context_compaction_config() == {
+        "enabled": False,
+        "nodes": ["evidence"],
+        "max_context_window": 32000,
+        "trigger_ratio": 0.65,
+        "max_compactions_per_call": 2,
+        "summary_max_tokens": 900,
+    }
