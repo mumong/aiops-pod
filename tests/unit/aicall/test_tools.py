@@ -6,7 +6,7 @@ from app.core.aicall.tools import load_mcp_tools
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def test_load_mcp_tools_empty_config():
@@ -72,3 +72,54 @@ def test_load_mcp_tools_builds_correct_connections():
         assert connections["k8s"]["transport"] == "sse"
         assert connections["k8s"]["url"] == "http://localhost:8093/sse"
         assert result == mock_tools
+
+
+def test_prometheus_instant_query_removes_invalid_now_time_before_mcp_call():
+    from app.core.aicall.tools import _sanitize_mcp_tool_args
+
+    sanitized = _sanitize_mcp_tool_args(
+        "execute_prometheus_instant_query",
+        {
+            "query": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+            "time": "now()",
+        },
+    )
+
+    assert sanitized == {
+        "query": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+    }
+
+
+def test_prometheus_range_query_keeps_real_time_bounds():
+    from app.core.aicall.tools import _sanitize_mcp_tool_args
+
+    sanitized = _sanitize_mcp_tool_args(
+        "execute_prometheus_range_query",
+        {
+            "query": "up",
+            "start": "2026-05-09T10:00:00Z",
+            "end": "2026-05-09T10:05:00Z",
+            "step": "30s",
+        },
+    )
+
+    assert sanitized["start"] == "2026-05-09T10:00:00Z"
+    assert sanitized["end"] == "2026-05-09T10:05:00Z"
+
+
+def test_prometheus_wrapper_uses_content_response_format():
+    from app.core.aicall.tools import _wrap_mcp_tool_for_transport
+
+    upstream = MagicMock()
+    upstream.name = "execute_prometheus_instant_query"
+    upstream.description = "Prometheus instant query"
+    upstream.args_schema = None
+    upstream.return_direct = False
+    upstream.metadata = {"server_name": "prometheus"}
+    upstream.response_format = "content_and_artifact"
+
+    wrapped = _wrap_mcp_tool_for_transport(upstream)
+
+    assert wrapped.name == "execute_prometheus_instant_query"
+    assert wrapped.response_format == "content"
+    assert wrapped.metadata == {"server_name": "prometheus"}

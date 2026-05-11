@@ -1,0 +1,253 @@
+defaults:
+  namespace: aiops-e2e
+  question: "我的集群有什么问题？"
+  mttr_threshold_seconds: 900
+  root_cause_threshold: 0.8
+  evidence_threshold: 0.8
+  runbook_threshold: 0.8
+
+cases:
+  - id: evicted-emptydir-enospc
+    name: "Evicted: emptyDir 超限驱逐"
+    enabled: true
+    manifest: "../e2e/manifests/l0-logfill-enospc.yaml"
+    selector: "app=logfill"
+    expected_pod_abnormal_type: "Evicted"
+    expected_layer: "L0"
+    expected_status:
+      - "Evicted"
+    expected_runbooks:
+      - "l0-volume-limit"
+    root_cause_keywords:
+      - "Evicted"
+      - "emptyDir"
+      - "ephemeral-storage"
+      - "sizeLimit"
+      - "ENOSPC"
+    evidence_keywords:
+      - "Reason: Evicted"
+      - "ephemeral-storage"
+      - "sizeLimit"
+
+  - id: volume-mount-missing-configmap
+    name: "VolumeMountFailed: ConfigMap 卷不存在"
+    enabled: true
+    manifest: "../e2e/manifests/pod-volume-mount-failed.yaml"
+    pod_name: "volume-mount-failed"
+    expected_pod_abnormal_type: "VolumeMountFailed"
+    expected_layer: "L0"
+    expected_status:
+      - "Pending"
+      - "ContainerCreating"
+    expected_runbooks:
+      - "pod-volume-mount-failed"
+    root_cause_keywords:
+      - "FailedMount"
+      - "MountVolume"
+      - "configmap"
+      - "definitely-missing-configmap"
+      - "not found"
+    evidence_keywords:
+      - "FailedMount"
+      - "configmap"
+      - "not found"
+
+  - id: pending-unschedulable-nodeselector
+    name: "PendingUnschedulable: nodeSelector 无匹配节点"
+    enabled: true
+    manifest: "../e2e/manifests/l1-taint-node.yaml"
+    selector: "app=pending-unschedulable"
+    expected_pod_abnormal_type: "PendingUnschedulable"
+    expected_layer: "L1"
+    expected_status:
+      - "Pending"
+    expected_runbooks:
+      - "l1-taint-node"
+    root_cause_keywords:
+      - "FailedScheduling"
+      - "nodeSelector"
+      - "node selector"
+      - "didn't match"
+      - "调度"
+    evidence_keywords:
+      - "FailedScheduling"
+      - "nodeSelector"
+      - "didn't match"
+
+  - id: terminating-finalizer-stuck
+    name: "TerminatingStuck: finalizer 卡住删除"
+    enabled: true
+    manifest: "../e2e/manifests/pod-terminating-stuck.yaml"
+    pod_name: "terminating-stuck"
+    trigger:
+      - "kubectl -n aiops-e2e delete pod terminating-stuck --wait=false"
+    expected_pod_abnormal_type: "TerminatingStuck"
+    expected_layer: "L1"
+    expected_status:
+      - "Terminating"
+    expected_runbooks:
+      - "pod-terminating-stuck"
+    root_cause_keywords:
+      - "finalizer"
+      - "deletionTimestamp"
+      - "Terminating"
+      - "aiops.e2e/hold"
+    evidence_keywords:
+      - "deletionTimestamp"
+      - "finalizers"
+      - "aiops.e2e/hold"
+
+  - id: oomkilled-memory-limit
+    name: "OOMKilled: 内存 limit 过低"
+    enabled: true
+    manifest: "../e2e/manifests/l2-oomkilled.yaml"
+    selector: "app=memhog"
+    expected_pod_abnormal_type: "OOMKilled"
+    expected_layer: "L2"
+    expected_status:
+      - "CrashLoopBackOff"
+      - "Error"
+    expected_runbooks:
+      - "l2-oomkilled"
+    root_cause_keywords:
+      - "OOMKilled"
+      - "Exit Code: 137"
+      - "exitCode: 137"
+      - "40Mi"
+      - "内存"
+    evidence_keywords:
+      - "Last State"
+      - "OOMKilled"
+      - "Exit Code: 137"
+
+  - id: crashloop-runtime-exit2
+    name: "CrashLoopBackOffRuntime: 进程启动失败"
+    enabled: true
+    manifest: "../e2e/manifests/pod-crashloop-runtime.yaml"
+    selector: "app=crashloop-runtime"
+    expected_pod_abnormal_type: "CrashLoopBackOffRuntime"
+    expected_layer: "L2"
+    expected_status:
+      - "CrashLoopBackOff"
+    expected_runbooks:
+      - "pod-crashloop-runtime"
+    root_cause_keywords:
+      - "CrashLoopBackOff"
+      - "exit 2"
+      - "Exit Code: 2"
+      - "RUNTIME_STARTUP_ERROR"
+    evidence_keywords:
+      - "Last State"
+      - "Exit Code: 2"
+      - "RUNTIME_STARTUP_ERROR"
+
+  - id: imagepull-invalid-registry
+    name: "ImagePullFailed: 无效镜像仓库"
+    enabled: true
+    manifest: "../e2e/manifests/l3-imagepull-fail-victim.yaml"
+    pod_name: "imagepull-fail-victim"
+    expected_pod_abnormal_type: "ImagePullFailed"
+    expected_layer: "L3"
+    expected_status:
+      - "ImagePullBackOff"
+      - "ErrImagePull"
+    expected_runbooks:
+      - "l3-imagepull-failed"
+    root_cause_keywords:
+      - "ImagePullBackOff"
+      - "ErrImagePull"
+      - "Failed to pull image"
+      - "registry.invalid"
+    evidence_keywords:
+      - "Failed to pull image"
+      - "registry.invalid"
+      - "ImagePullBackOff"
+
+  - id: sandbox-missing-runtimeclass
+    name: "SandboxCreateFailed: RuntimeClass 不存在"
+    enabled: true
+    manifest: "../e2e/manifests/pod-sandbox-create-failed.yaml"
+    pod_name: "sandbox-create-failed"
+    expected_pod_abnormal_type: "SandboxCreateFailed"
+    expected_layer: "L3"
+    expected_status:
+      - "ContainerCreating"
+      - "Pending"
+    expected_runbooks:
+      - "pod-sandbox-create-failed"
+    root_cause_keywords:
+      - "FailedCreatePodSandBox"
+      - "RuntimeClass"
+      - "missing-runtime-handler"
+      - "sandbox"
+    evidence_keywords:
+      - "FailedCreatePodSandBox"
+      - "RuntimeClass"
+      - "missing-runtime-handler"
+
+  - id: config-bootstrap-missing-env
+    name: "ConfigError: 应用启动配置缺失"
+    enabled: true
+    manifest: "../e2e/manifests/l4-config-bootstrap-fail.yaml"
+    selector: "app=appconfigfail"
+    expected_pod_abnormal_type: "ConfigError"
+    expected_layer: "L4"
+    expected_status:
+      - "CrashLoopBackOff"
+      - "CreateContainerConfigError"
+      - "CreateContainerError"
+    expected_runbooks:
+      - "l4-config-bootstrap-fail"
+    root_cause_keywords:
+      - "APP_BOOT_MODE"
+      - "L4_CONFIG_BOOTSTRAP_FAIL"
+      - "missing required"
+      - "应用"
+      - "配置"
+    evidence_keywords:
+      - "previous logs"
+      - "APP_BOOT_MODE"
+      - "L4_CONFIG_BOOTSTRAP_FAIL"
+
+  - id: notready-readiness-probe
+    name: "NotReadyProbeFailed: readinessProbe 固定失败"
+    enabled: true
+    manifest: "../e2e/manifests/pod-notready-probe-failed.yaml"
+    pod_name: "notready-probe-failed"
+    expected_pod_abnormal_type: "NotReadyProbeFailed"
+    expected_layer: "L4"
+    expected_status:
+      - "Running"
+    expected_runbooks:
+      - "pod-notready-probe-failed"
+    root_cause_keywords:
+      - "Readiness probe failed"
+      - "READY=0/1"
+      - "NotReady"
+      - "readinessProbe"
+    evidence_keywords:
+      - "Readiness probe failed"
+      - "Unhealthy"
+      - "Ready"
+
+  - id: node-lost-unknown-manual
+    name: "NodeLostOrUnknown: 节点失联候选 Pod"
+    enabled: false
+    manual: true
+    manifest: "../e2e/manifests/pod-node-lost-unknown.yaml"
+    pod_name: "node-lost-unknown-candidate"
+    expected_pod_abnormal_type: "NodeLostOrUnknown"
+    expected_layer: "L1"
+    expected_status:
+      - "Unknown"
+    expected_runbooks:
+      - "pod-node-lost-unknown"
+    root_cause_keywords:
+      - "Unknown"
+      - "NodeLost"
+      - "NotReady"
+      - "kubelet"
+    evidence_keywords:
+      - "phase is Unknown"
+      - "Node"
+      - "NotReady"

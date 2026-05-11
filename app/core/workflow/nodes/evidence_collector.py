@@ -84,6 +84,30 @@ class EvidenceCollectorNode(WorkflowNode):
     def get_required_fields(self) -> List[str]:
         return ["question", "layer"]
 
+    def _use_agent_structured_output(self) -> bool:
+        runtime_enabled = self._is_structured_runtime_enabled(default=True)
+        cfg = self._get_workflow_config()
+        node_cfg = cfg.get("evidence", {}) if isinstance(cfg, dict) else {}
+        if isinstance(node_cfg, dict):
+            if "agent_structured_output" in node_cfg:
+                return self._parse_bool_config(node_cfg.get("agent_structured_output"), runtime_enabled)
+            structured_cfg = node_cfg.get("structured_output")
+            if isinstance(structured_cfg, dict) and "enabled" in structured_cfg:
+                return self._parse_bool_config(structured_cfg.get("enabled"), runtime_enabled)
+        return runtime_enabled
+
+    def _allow_plan_precall_fallback(self) -> bool:
+        runtime_fallback = self._is_structured_runtime_fallback_enabled(default=True)
+        cfg = self._get_workflow_config()
+        node_cfg = cfg.get("evidence", {}) if isinstance(cfg, dict) else {}
+        if isinstance(node_cfg, dict):
+            if "plan_precall_fallback" in node_cfg:
+                return self._parse_bool_config(node_cfg.get("plan_precall_fallback"), runtime_fallback)
+            structured_cfg = node_cfg.get("structured_output")
+            if isinstance(structured_cfg, dict) and "plan_precall_fallback" in structured_cfg:
+                return self._parse_bool_config(structured_cfg.get("plan_precall_fallback"), runtime_fallback)
+        return runtime_fallback
+
     @staticmethod
     def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
         return any(
@@ -203,11 +227,15 @@ class EvidenceCollectorNode(WorkflowNode):
                 evidence_plan=evidence_plan,
                 thinking_events=thinking_events,
             )
+            upstream_evidence_items = self._build_upstream_evidence_items(
+                evidence_plan=evidence_plan,
+                thinking_events=state.get("thinking_events", []),
+            )
             if not self._early_stop_state.get("triggered"):
                 self._early_stop_state = self._derive_early_stop_state(evidence_plan, evidence_items)
 
             # 2.1 回退：evidence 节点没采集到证据时，从 layer 阶段的 thinking_events 统计
-            if not evidence_items:
+            if not evidence_items and not upstream_evidence_items:
                 layer_thinking = state.get("thinking_events", [])
                 layer_tool_events = [
                     ev for ev in layer_thinking
@@ -231,26 +259,34 @@ class EvidenceCollectorNode(WorkflowNode):
                         ))
 
             # 3. 计算完整度
-            completeness = self._calculate_completeness(evidence_items)
+            combined_evidence_items = self._merge_evidence_items(evidence_items, upstream_evidence_items)
+            completeness = self._calculate_completeness(combined_evidence_items)
 
             # 4. 更新 metrics（记录 LLM 调用和工具调用次数）
             self._update_metrics(evidence_plan, tool_results)
 
             # 5. 从 thinking_events 提取 MCP 工具的真实输出数据
             tool_data_from_llm = self._extract_tool_data_from_thinking(thinking_events)
+            evidence_tool_stats = self._calculate_evidence_tool_stats(
+                evidence_plan=evidence_plan,
+                thinking_events=[*(state.get("thinking_events", []) or []), *(thinking_events or [])],
+                evidence_items=evidence_items,
+                upstream_evidence_items=upstream_evidence_items,
+            )
 
             # 6. 构建证据清单（真实数据，供 conclusion LLM 引用）
             # plan_total 保持与模型输出的 evidence_plan 对齐；environment_total
             # 只统计真实环境证据。报告同时展示两个口径，避免用户看到
             # evidence_plan=4 项但“证据完整度 3/3”这种不直观结果。
-            measurable_items = self._measurable_evidence_items(evidence_items)
-            plan_collected = sum(1 for e in evidence_items if e.collected)
-            plan_total = len(evidence_items)
+            measurable_items = self._measurable_evidence_items(combined_evidence_items)
+            plan_stats = self._calculate_plan_completeness(evidence_items, upstream_evidence_items)
+            plan_collected = plan_stats["plan_collected"]
+            plan_total = plan_stats["plan_total"]
             collected = sum(1 for e in measurable_items if e.collected)
             total = len(measurable_items)
             not_collected = [e for e in measurable_items if not e.collected]
-            plan_completeness = (plan_collected / plan_total) if plan_total else 0.0
-            evidence_facts = self._build_evidence_facts(evidence_items)
+            plan_completeness = plan_stats["plan_completeness"]
+            evidence_facts = self._build_evidence_facts(combined_evidence_items)
             evidence_conflicts = self._build_evidence_conflicts(tool_data_from_llm, layer_handoff)
             missing_evidence = [
                 {"id": e.id, "description": e.description, "level": e.level.value if hasattr(e.level, "value") else str(e.level)}
@@ -263,7 +299,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 if isinstance(item, dict)
             }
             evidence_inventory = []
-            for e in evidence_items:
+            for e in combined_evidence_items:
                 plan_item = plan_by_id.get(str(e.id), {})
                 evidence_inventory.append({
                     "id": e.id,
@@ -300,10 +336,13 @@ class EvidenceCollectorNode(WorkflowNode):
                 evidence_inventory=evidence_inventory,
                 missing_reasons=missing_reasons,
                 early_stop=dict(self._early_stop_state),
+                executed_tool_count=evidence_tool_stats["executed_tool_count"],
+                matched_tool_count=evidence_tool_stats["matched_tool_count"],
+                unplanned_tool_count=evidence_tool_stats["unplanned_tool_count"],
             )
 
             new_state.update({
-                "evidence_items": evidence_items,
+                "evidence_items": combined_evidence_items,
                 "evidence_analysis": collection_output.model_dump_json(),
                 "evidence_completeness": completeness,
                 "tool_results": tool_results,
@@ -396,6 +435,9 @@ class EvidenceCollectorNode(WorkflowNode):
         evidence_inventory: List[Dict[str, Any]],
         missing_reasons: List[str],
         early_stop: Dict[str, Any],
+        executed_tool_count: int = 0,
+        matched_tool_count: int = 0,
+        unplanned_tool_count: int = 0,
     ) -> EvidenceCollectionOutput:
         return EvidenceCollectionOutput.model_validate({
             "evidence_plan": evidence_plan,
@@ -405,7 +447,8 @@ class EvidenceCollectorNode(WorkflowNode):
             "collection_summary": (
                 f"计划 {plan_total} 项，实际采集 {plan_collected} 项，"
                 f"未采集 {plan_total - plan_collected} 项，完整度 {plan_completeness:.0%}；"
-                f"其中真实环境证据 {environment_collected}/{environment_total} 项，完整度 {environment_completeness:.0%}"
+                f"其中真实环境证据 {environment_collected}/{environment_total} 项，完整度 {environment_completeness:.0%}；"
+                f"实际执行工具 {executed_tool_count} 个，匹配计划 {matched_tool_count} 个，未规划证据 {unplanned_tool_count} 个"
             ),
             "plan_total": plan_total,
             "plan_collected": plan_collected,
@@ -413,6 +456,9 @@ class EvidenceCollectorNode(WorkflowNode):
             "environment_evidence_total": environment_total,
             "environment_evidence_collected": environment_collected,
             "environment_evidence_completeness": environment_completeness,
+            "executed_tool_count": executed_tool_count,
+            "matched_tool_count": matched_tool_count,
+            "unplanned_tool_count": unplanned_tool_count,
             "evidence_inventory": evidence_inventory,
             "missing_reasons": missing_reasons,
             "early_stop": early_stop,
@@ -424,13 +470,17 @@ class EvidenceCollectorNode(WorkflowNode):
         layer_handoff: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         conflicts = []
-        primary_pod = (layer_handoff or {}).get("primary_pod") or {}
-        primary_name = str(primary_pod.get("name") or "")
-        primary_namespace = str(primary_pod.get("namespace") or "")
+        abnormal_pods = (layer_handoff or {}).get("abnormal_pods") or []
+        abnormal_pod_keys = {
+            (str(pod.get("namespace") or ""), str(pod.get("name") or ""))
+            for pod in abnormal_pods
+            if isinstance(pod, dict) and pod.get("name")
+        }
         for item in tool_data:
             data = item.get("data", "") or ""
             if re.search(r"no events found|no resources found|notfound|not found|command failed|error from server", data, re.IGNORECASE):
-                object_missing = EvidenceCollectorNode._is_primary_pod_notfound(data, primary_name)
+                missing_pod = EvidenceCollectorNode._extract_missing_abnormal_pod(data, abnormal_pod_keys)
+                object_missing = bool(missing_pod)
                 conflict = {
                     "tool": item.get("tool", "unknown"),
                     "reason": data[:300],
@@ -440,25 +490,31 @@ class EvidenceCollectorNode(WorkflowNode):
                 if object_missing:
                     conflict["object"] = {
                         "kind": "Pod",
-                        "name": primary_name,
-                        "namespace": primary_namespace,
+                        "name": missing_pod[1],
+                        "namespace": missing_pod[0],
                     }
                     conflict["message"] = (
-                        "primary_pod 当前不存在；历史事件或归档摘要不能继续作为该 Pod 当前异常的正向证据"
+                        "异常 Pod 当前不存在；历史事件或归档摘要不能继续作为该 Pod 当前异常的正向证据"
                     )
                 conflicts.append(conflict)
         return conflicts
 
     @staticmethod
-    def _is_primary_pod_notfound(data: str, primary_name: str) -> bool:
-        if not primary_name:
-            return False
-        name = re.escape(primary_name)
-        patterns = (
-            rf"(?:^|:\s*)pods?\s+[\"']{name}[\"']\s+(?:not\s*found|notfound)\b",
-            rf"\bpods?/{name}\s+(?:not\s*found|notfound)\b",
-        )
-        return any(re.search(pattern, data or "", re.IGNORECASE) for pattern in patterns)
+    def _extract_missing_abnormal_pod(
+        data: str,
+        abnormal_pod_keys: set[tuple[str, str]],
+    ) -> Optional[tuple[str, str]]:
+        if not data or not abnormal_pod_keys:
+            return None
+        for namespace, pod_name in abnormal_pod_keys:
+            name = re.escape(pod_name)
+            patterns = (
+                rf"(?:^|:\s*)pods?\s+[\"']{name}[\"']\s+(?:not\s*found|notfound)\b",
+                rf"\bpods?/{name}\s+(?:not\s*found|notfound)\b",
+            )
+            if any(re.search(pattern, data or "", re.IGNORECASE) for pattern in patterns):
+                return namespace, pod_name
+        return None
 
     def _build_query_result(
         self,
@@ -470,7 +526,7 @@ class EvidenceCollectorNode(WorkflowNode):
         collection_summary: str,
         missing_reasons: List[str],
     ) -> Dict[str, Any]:
-        """QUERY 模式下将真实工具结果归一化为结构化 JSON，供 conclusion 纯渲染。"""
+        """QUERY 模式下将真实工具结果归一化为 Pydantic QueryResult，供 conclusion 纯渲染。"""
         if layer != Layer.QUERY:
             return {}
 
@@ -508,18 +564,6 @@ class EvidenceCollectorNode(WorkflowNode):
             logger.warning("⚠️ [evidence] QUERY 结果归一化失败，使用通用回退: %s", exc)
 
         return self._build_query_result_fallback(question, tool_data, collection_summary, missing_reasons)
-
-    @staticmethod
-    def _parse_query_result(text: str) -> Optional[Dict[str, Any]]:
-        try:
-            json_match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group(1))
-            else:
-                parsed = json.loads(text)
-            return parsed if isinstance(parsed, dict) else None
-        except (json.JSONDecodeError, TypeError):
-            return None
 
     @staticmethod
     def _build_query_result_fallback(
@@ -630,6 +674,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 strict_mode=strict_mode,
                 failure_reason=failure_reason,
                 existing_plan=existing_plan,
+                plan_mode="dynamic_collection",
             )
             if not getattr(self, "_logged_evidence_user_prompt", False):
                 logger.info(
@@ -653,7 +698,10 @@ class EvidenceCollectorNode(WorkflowNode):
             )
 
             if existing_plan is not None:
-                evidence_plan = self._normalize_evidence_plan(existing_plan)
+                evidence_plan = self._normalize_evidence_plan(
+                    existing_plan,
+                    layer_handoff=self._parse_handoff_json(layer_analysis),
+                )
                 if not evidence_plan:
                     logger.warning("⚠️ [evidence] 既有 evidence_plan 为空，拒绝执行自由文本采证")
                     return [], [], ""
@@ -674,7 +722,10 @@ class EvidenceCollectorNode(WorkflowNode):
                 user_message=user_message,
                 layer_str=layer_str,
             )
-            evidence_plan = self._normalize_evidence_plan(evidence_plan)
+            evidence_plan = self._normalize_evidence_plan(
+                evidence_plan,
+                layer_handoff=self._parse_handoff_json(layer_analysis),
+            )
             if not evidence_plan:
                 logger.warning("LLM 未返回有效 evidence_plan Pydantic 结构，拒绝进入工具执行")
                 return [], [], plan_raw
@@ -694,6 +745,59 @@ class EvidenceCollectorNode(WorkflowNode):
         except Exception as e:
             logger.warning(f"LLM Pydantic evidence_plan 生成或执行失败: {e}")
             return [], [], ""
+
+    def _execute_dynamic_structured_evidence_agent(
+        self,
+        question: str,
+        layer: Optional[Layer],
+        possible_scenarios: List[str],
+        key_entities: List[Dict],
+        layer_analysis: str,
+        context_archive_ref: str,
+        layer_archive_ref: Dict[str, Any],
+        system_prompt: str,
+        user_message: str,
+        layer_str: str,
+        strict_mode: bool = False,
+        failure_reason: str = "",
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
+        dynamic_message = (
+            user_message
+            + "\n\n# 动态结构化采证模式\n"
+            "- 本轮只有一次 evidence agent 调用。\n"
+            "- 你必须根据 layer_handoff 在内部形成最小采证意图。\n"
+            "- 然后直接调用必要的真实只读工具采证，不要等待下一轮。\n"
+            "- 最后输出简短自然语言采证摘要；结构化收口由后续非流式 Pydantic 调用完成。\n"
+        )
+        if strict_mode:
+            dynamic_message += (
+                "\n# 严格重试约束\n"
+                f"- 失败原因：{failure_reason or '上一轮没有有效工具证据'}\n"
+                "- 本轮至少调用一个 critical 或 important 意图的真实工具。\n"
+            )
+
+        early_stop_enabled = self._is_early_stop_enabled(default=True)
+        logger.info("🧭 [evidence] early_stop=%s", early_stop_enabled)
+        self._active_evidence_plan = []
+        try:
+            response, thinking_events = self._call_llm(
+                dynamic_message,
+                system_prompt,
+                stop_checker=self._should_stop_collection_early if early_stop_enabled else None,
+            )
+        finally:
+            self._active_evidence_plan = None
+
+        evidence_plan = []
+        llm_text = (response.result or "") if response else ""
+
+        return evidence_plan, thinking_events, llm_text
+
+    @staticmethod
+    def _structured_evidence_from_response(response: Any) -> Optional[EvidenceCollectionOutput]:
+        from app.core.workflow.structured_runtime import StructuredAgentRuntime
+
+        return StructuredAgentRuntime.extract_structured_response(response, EvidenceCollectionOutput)
 
     def _generate_structured_evidence_plan(
         self,
@@ -774,6 +878,7 @@ class EvidenceCollectorNode(WorkflowNode):
             strict_mode=False,
             failure_reason=failure_reason,
             existing_plan=evidence_plan,
+            plan_mode="preplanned_execution",
         )
 
         early_stop_enabled = self._is_early_stop_enabled(default=True)
@@ -819,16 +924,29 @@ class EvidenceCollectorNode(WorkflowNode):
         strict_mode: bool = False,
         failure_reason: str = "",
         existing_plan: Optional[List[Dict[str, Any]]] = None,
+        plan_mode: str = "dynamic_collection",
     ) -> str:
         strict_section = ""
         if existing_plan:
+            plan_lines = ["# 既有 evidence_plan（系统注入，禁止重写）"]
+            for item in existing_plan:
+                if not isinstance(item, dict):
+                    continue
+                plan_lines.append(
+                    "- {id}: level={level}, tool={tool}, command={command}, tool_args={tool_args}, purpose={purpose}".format(
+                        id=item.get("id", ""),
+                        level=item.get("level", ""),
+                        tool=item.get("tool", ""),
+                        command=item.get("command", ""),
+                        tool_args=json.dumps(item.get("tool_args") or {}, ensure_ascii=False, default=str),
+                        purpose=item.get("purpose", ""),
+                    )
+                )
             strict_section = f"""
 
 # 既有 evidence_plan（本轮不要重写）
-上一轮已输出有效 evidence_plan，但没有执行真实工具。本轮必须沿用下列计划，直接调用工具采证，不要重新输出 evidence_plan。
-```json
-{json.dumps({"evidence_plan": existing_plan}, ensure_ascii=False)}
-```
+上一轮已生成有效 Pydantic evidence_plan，但没有执行真实工具。本轮必须沿用下列计划，直接调用工具采证，不要重新输出 evidence_plan。
+{chr(10).join(plan_lines)}
 - {failure_reason or '请直接按既有计划执行工具'}
 """
         elif strict_mode:
@@ -852,17 +970,22 @@ class EvidenceCollectorNode(WorkflowNode):
             archive_lines.append("- layer handoff 已由上方 layer_handoff 注入；不要重复读取归档。")
         archive_section = "\n".join(archive_lines).strip() if archive_lines else "无"
         if existing_plan:
-            plan_protocol = """- 本轮已有 evidence_plan，禁止重新输出 evidence_plan JSON。
+            plan_protocol = """- 本轮已有 Pydantic evidence_plan，禁止重新输出或改写 evidence_plan。
 - 直接按既有 evidence_plan 调用至少一个 critical 或 important 级真实工具。
+- 如果计划项提供 tool_args，必须按 tool_args 调用 MCP 工具；不要从 command 文本重新猜 MCP 参数。
 - LLM 必须自己决定并调用工具；计划不是证据。
 - 工具调用必须尽量逐项完成既有计划，最终消息不要新增未写入 plan 的“已采集计划项”。
 - evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
-        else:
-            plan_protocol = """- 第一条 assistant 消息必须只输出 evidence_plan JSON，不能附加解释文本。
-- 在输出 evidence_plan JSON 之前，禁止调用任何工具。
-- 输出 evidence_plan 后不能结束，必须继续调用至少一个 critical 或 important 级真实工具。
+        elif plan_mode == "preplanned_execution":
+            plan_protocol = """- 采证计划已由 `EvidencePlanOutput` Pydantic schema 单独生成；执行阶段不要重写 evidence_plan。
+- 如果本轮进入工具执行，必须调用至少一个 critical 或 important 级真实工具。
 - LLM 必须自己决定并调用工具；计划不是证据。
-- evidence_plan 就是本轮计划采集清单；后续工具调用必须尽量逐项完成 plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
+- 后续工具调用必须尽量逐项完成 Pydantic plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
+- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+        else:
+            plan_protocol = """- 本轮使用普通工具 agent 采集真实证据；采证计划由 `EvidencePlanOutput` Pydantic schema 单独生成。
+- 必须先在内部形成最小采证意图，再直接调用真实工具；必须调用至少一个 critical 或 important 级真实工具。
+- LLM 必须自己决定并调用工具；计划不是证据。
 - evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
         handoff_obj = EvidenceCollectorNode._parse_handoff_json(layer_handoff)
         compact_handoff = EvidenceCollectorNode._compact_layer_handoff_for_prompt(handoff_obj, layer_handoff)
@@ -876,7 +999,7 @@ class EvidenceCollectorNode(WorkflowNode):
 {abnormal_summary_section}
 
 # Runbook 语义匹配要求
-- 根据 Available Runbooks/catalog 的 description、runbook_id、状态关键字与 layer_handoff 中的 pod_status_keyword、pod_abnormal_type、primary_pod、active_signals 做语义匹配。
+- 根据 Available Runbooks/catalog 的 description、runbook_id、状态关键字与 layer_handoff 中的 abnormal_groups、pod_status_keyword、pod_abnormal_type、active_signals 做语义匹配。
 - 如果某个 Pod 异常 runbook 明显匹配当前 Pod 异常状态，evidence_plan 必须包含一条 level=reference、tool=fetch_runbook 的参考步骤；多个当前异常类型可以获取多个明显匹配的 runbook。
 - 匹配到 runbook 时，fetch_runbook 必须在真实环境工具前执行。先读 runbook，再把 runbook 的关键检查点转化为 kubectl/prometheus 等真实环境验证步骤。
 - 不要依赖代码注入的 runbook 推荐字段；是否调用 runbook 必须由你根据 catalog 描述和当前异常信号自主判断。
@@ -888,22 +1011,22 @@ class EvidenceCollectorNode(WorkflowNode):
 {archive_section}
 
 # 当前节点职责
-你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须以 layer_handoff 的 issue_groups、abnormal_pods、current_abnormal_summary 为覆盖基准调用真实只读工具采集证据；primary_pod 只是主异常组的代表样本，不是唯一采证对象。
+你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须以 layer_handoff 的 abnormal_groups、issue_groups、abnormal_pods、current_abnormal_summary 为覆盖基准调用真实只读工具采集证据。
 
 # 强约束
 {plan_protocol}
-- 如果 layer_handoff 提供 issue_groups，evidence_plan 应优先覆盖每个当前异常组的最小关键证据；不要只围绕 primary_pod 而完全忽略其他异常组。
-- 主异常组做完整验证；非主异常组做最小验证。primary_pod 仅用于代表主异常组，不能替代 abnormal_pods/issue_groups 的覆盖要求。
-- 对非 primary 的 issue_group 只做最小验证：当前状态 + 一个最关键配置/事件信号即可，不要展开成长链路。
+- 如果 layer_handoff 提供 abnormal_groups/issue_groups，evidence_plan 应优先覆盖每个当前异常组的最小关键证据；不要只围绕单个 Pod 而完全忽略其他异常组。
+- 影响范围最大的异常组做完整验证；其他异常组做最小验证。单个 Pod 不能替代 abnormal_pods/abnormal_groups 的覆盖要求。
+- 对非主要影响面的 issue_group 只做最小验证：当前状态 + 一个最关键配置/事件信号即可，不要展开成长链路。
 - 必须把 current_abnormal_summary.status_counts 作为审查核心；非 Running/Completed/Succeeded/Ready/Bound/Active 的状态都需要至少最小验证。
-- 必须优先围绕主异常组验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要把采证范围收缩成单个 primary_pod，也不要先做大范围无关集群扫描。
+- 必须优先围绕影响范围最大的异常组验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要把采证范围收缩成单个 Pod，也不要先做大范围无关集群扫描。
 - 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
 - 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
 - 如果 Available Runbooks/catalog 中存在明显匹配当前 Pod 异常状态的 runbook，应先执行 fetch_runbook 参考步骤；但不能只 fetch_runbook 后结束，必须继续调用真实环境工具。reference/runbook 步骤不是证据，不计入 critical/important 完整度。存在明显匹配 runbook 却未调用 fetch_runbook 时，本轮采证视为不完整。
 - 不要把 context_archive_ref、archive_ref、raw_ref、summary_ref、structured_ref 等路径当作采证任务；默认不要计划读取归档文件。
 {strict_section}
 # 输出
-{"直接执行既有 evidence_plan 中的必要工具，最后输出简短证据结论。" if existing_plan else "先输出 evidence_plan JSON，再执行必要工具调用，最后再输出简短证据结论。"}"""
+{"直接执行既有 Pydantic evidence_plan 中的必要工具，最后输出简短证据结论。" if existing_plan else "调用必要真实工具后输出简短证据结论；不要手写 EvidenceCollectionOutput。"}"""
 
     @staticmethod
     def _parse_handoff_json(layer_handoff: str) -> Dict[str, Any]:
@@ -924,8 +1047,8 @@ class EvidenceCollectorNode(WorkflowNode):
             "confidence",
             "primary_problem",
             "reasoning",
-            "primary_pod",
             "abnormal_pods",
+            "abnormal_groups",
             "pod_status_keyword",
             "pod_abnormal_type",
             "status_category",
@@ -1002,7 +1125,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 statuses = ", ".join(str(s) for s in group.get("status_keywords", []) if s)
                 abnormal_type = group.get("pod_abnormal_type", "")
                 layers = ", ".join(str(l) for l in group.get("compatible_layers", []) if l)
-                entities = group.get("primary_entities") or []
+                entities = group.get("entities") or group.get("primary_entities") or []
                 entity_texts = []
                 if isinstance(entities, list):
                     for entity in entities[:5]:
@@ -1030,96 +1153,16 @@ class EvidenceCollectorNode(WorkflowNode):
         thinking_events: List[Dict[str, Any]],
     ) -> str:
         """检查 evidence 是否遵守了先 plan 后执行的协议。"""
-        timeline = self._analyze_plan_timeline(thinking_events)
         if evidence_plan:
-            # Pydantic plan is generated in a separate structured call before
-            # this agent execution. The execution turn may contain no in-band
-            # ai_message plan at all, so timeline ordering only applies to the
-            # legacy/in-band text plan path.
-            if timeline["has_plan"] and timeline["tool_activity_before_plan"]:
-                return "上一轮在 evidence_plan 前就开始调用工具，违反先计划后执行约束，系统已拒绝该结果"
             if not self._has_effective_tool_evidence(thinking_events):
                 return "上一轮只返回 evidence_plan，没有任何有效工具证据，系统已拒绝该结果"
             return ""
 
-        if not timeline["has_plan"]:
-            return "上一轮没有输出有效 evidence_plan JSON，系统已拒绝该结果"
-        if timeline["tool_activity_before_plan"]:
-            return "上一轮在 evidence_plan 前就开始调用工具，违反先计划后执行约束，系统已拒绝该结果"
-        return ""
+        return "上一轮没有可用的 Pydantic evidence_plan，系统已拒绝该结果"
 
     @staticmethod
     def _plan_exists_without_tool_results(reason: str) -> bool:
         return "只返回 evidence_plan" in (reason or "")
-
-    def _analyze_plan_timeline(self, thinking_events: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """分析 plan 与 tool 调用的先后顺序。"""
-        first_plan_index = None
-        first_tool_index = None
-
-        for idx, ev in enumerate(thinking_events or []):
-            ev_type = ev.get("type")
-            if first_tool_index is None and ev_type in {"tool_start", "tool_result"}:
-                first_tool_index = idx
-            if ev_type != "ai_message":
-                continue
-            text = ev.get("full_content") or ev.get("content") or ""
-            if not text or "evidence_plan" not in text:
-                continue
-            plan = self._parse_llm_evidence_plan(text)
-            if plan:
-                first_plan_index = idx
-                break
-
-        return {
-            "has_plan": first_plan_index is not None,
-            "first_plan_index": first_plan_index,
-            "first_tool_index": first_tool_index,
-            "tool_activity_before_plan": (
-                first_tool_index is not None
-                and (first_plan_index is None or first_tool_index < first_plan_index)
-            ),
-        }
-    def _extract_plan_from_thinking(self, thinking_events: list) -> List[Dict]:
-        """
-        从 thinking_events 的 ai_message 中提取 JSON 证据计划。
-
-        LLM 在 agent loop 中先输出 JSON 计划，再调用工具执行。
-        JSON 计划在早期的 ai_message 中，而 response.result 是最后一条消息。
-        """
-        for ev in thinking_events:
-            if ev.get("type") != "ai_message":
-                continue
-            # 优先用 full_content（完整文本），回退到 content（截断到 500 字）
-            text = ev.get("full_content") or ev.get("content") or ""
-            if not text or "evidence_plan" not in text:
-                continue
-            plan = self._parse_llm_evidence_plan(text)
-            if plan and len(plan) > 0:
-                logger.debug(f"📋 [evidence] 从 thinking ai_message 解析到 {len(plan)} 项计划")
-                return plan
-        return []
-
-    def _parse_llm_evidence_plan(self, response_text: str) -> List[Dict]:
-        """
-        解析 LLM 返回的证据计划
-
-        Args:
-            response_text: LLM 返回的文本
-
-        Returns:
-            证据计划列表
-        """
-        try:
-            # 尝试提取 JSON
-            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group(1))
-                return self._validate_evidence_plan_payload(parsed)
-            parsed = json.loads(response_text)
-            return self._validate_evidence_plan_payload(parsed)
-        except json.JSONDecodeError:
-            return []
 
     @staticmethod
     def _validate_evidence_plan_payload(parsed: Any) -> List[Dict]:
@@ -1144,7 +1187,11 @@ class EvidenceCollectorNode(WorkflowNode):
         return []
 
     @classmethod
-    def _normalize_evidence_plan(cls, evidence_plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _normalize_evidence_plan(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+        layer_handoff: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """Bound and deduplicate LLM-generated evidence plans.
 
         This keeps dynamic planning but removes repeated variants for the same
@@ -1157,6 +1204,7 @@ class EvidenceCollectorNode(WorkflowNode):
         for item in evidence_plan or []:
             if not isinstance(item, dict):
                 continue
+            item = cls._normalize_plan_tool_args(item)
             signature = cls._evidence_plan_signature(item)
             if signature in seen_signatures:
                 logger.info(
@@ -1172,7 +1220,146 @@ class EvidenceCollectorNode(WorkflowNode):
                 logger.info("✂️ [evidence] evidence_plan 超过 %d 项，已截断", max_items)
                 break
 
+        return cls._ensure_abnormal_group_plan_coverage(normalized, layer_handoff or {})
+
+    @classmethod
+    def _normalize_plan_tool_args(cls, item: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(item)
+        if isinstance(normalized.get("tool_args"), dict) and normalized["tool_args"]:
+            return normalized
+
+        tool = cls._normalize_plan_text(normalized.get("tool"))
+        command = str(normalized.get("command") or "")
+        if tool == "kubectl_events":
+            tool_args = cls._derive_kubectl_events_tool_args(command)
+            if tool_args:
+                normalized["tool_args"] = tool_args
         return normalized
+
+    @staticmethod
+    def _derive_kubectl_events_tool_args(command: str) -> Dict[str, str]:
+        text = command or ""
+        namespace = ""
+        namespace_match = re.search(r"(?:^|\s)-n\s+([^\s]+)|(?:^|\s)--namespace(?:=|\s+)([^\s]+)", text)
+        if namespace_match:
+            namespace = namespace_match.group(1) or namespace_match.group(2) or ""
+
+        resource_name = ""
+        name_match = re.search(r"involvedObject\.name=([^,\s]+)", text)
+        if name_match:
+            resource_name = name_match.group(1)
+        if not resource_name:
+            object_match = re.search(r"\b(?:pod|pods)/([A-Za-z0-9_.-]+)", text, re.IGNORECASE)
+            if object_match:
+                resource_name = object_match.group(1)
+
+        args: Dict[str, str] = {}
+        if resource_name:
+            args["resource_type"] = "pod"
+            args["resource_name"] = resource_name
+        if namespace:
+            args["namespace"] = namespace
+        return args
+
+    @classmethod
+    def _ensure_abnormal_group_plan_coverage(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+        layer_handoff: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Ensure every abnormal group has at least one countable plan intent.
+
+        The LLM can still choose the plan, but coverage is a deterministic
+        contract: if current state contains multiple abnormal groups, a plan
+        that only covers one group is incomplete and must be normalized before
+        execution.
+        """
+        groups = layer_handoff.get("abnormal_groups") or layer_handoff.get("issue_groups") or []
+        if not isinstance(groups, list) or not groups:
+            return evidence_plan
+
+        normalized = list(evidence_plan or [])
+        covered_scopes = {
+            str(item.get("target_scope") or "").strip().lower()
+            for item in normalized
+            if isinstance(item, dict)
+            and item.get("counts_for_completeness", True) is not False
+            and str(item.get("target_scope") or "").strip()
+        }
+        existing_ids = {
+            str(item.get("id") or "")
+            for item in normalized
+            if isinstance(item, dict)
+        }
+
+        for index, group in enumerate(groups, start=1):
+            if not isinstance(group, dict):
+                continue
+            group_id = str(group.get("group_id") or f"g{index}")
+            scope = f"group:{group_id}".lower()
+            if scope in covered_scopes:
+                continue
+
+            item = cls._build_minimal_group_plan_item(group=group, group_id=group_id, existing_ids=existing_ids)
+            if not item:
+                continue
+            normalized.append(item)
+            existing_ids.add(item["id"])
+            covered_scopes.add(scope)
+
+        return normalized
+
+    @classmethod
+    def _build_minimal_group_plan_item(
+        cls,
+        group: Dict[str, Any],
+        group_id: str,
+        existing_ids: set[str],
+    ) -> Dict[str, Any]:
+        entities = group.get("entities") or group.get("primary_entities") or []
+        entity = next((item for item in entities if isinstance(item, dict) and item.get("name")), {})
+        if not entity:
+            return {}
+
+        name = cls._normalize_plan_text(entity.get("name"))
+        namespace = cls._normalize_plan_text(entity.get("namespace"))
+        abnormal_type = str(group.get("pod_abnormal_type") or "")
+        statuses = ", ".join(str(s) for s in group.get("status_keywords", []) if s) or "Unknown"
+        base_id = f"auto_{group_id}_coverage"
+        item_id = base_id
+        suffix = 2
+        while item_id in existing_ids:
+            item_id = f"{base_id}_{suffix}"
+            suffix += 1
+
+        if abnormal_type == "TerminatingStuck":
+            return {
+                "id": item_id,
+                "description": f"最小验证异常组 {group_id}: {namespace}/{name} 是否仍处于 {statuses}，并检查 deletionTimestamp/finalizers",
+                "level": "important",
+                "tool": "kubectl_get_yaml",
+                "command": f"kubectl get pod {name} -n {namespace} -o yaml",
+                "tool_args": {"resource_type": "pod", "resource_name": name, "namespace": namespace},
+                "purpose": "覆盖 TerminatingStuck 异常组，确认当前状态和 finalizer 删除阻塞信号",
+                "evidence_type": "pod_lifecycle",
+                "target_scope": f"group:{group_id}",
+                "acceptable_tools": ["kubectl_get_yaml", "kubectl_describe", "kubectl_get_by_name"],
+                "counts_for_completeness": True,
+            }
+
+        return {
+            "id": item_id,
+            "description": f"最小验证异常组 {group_id}: {namespace}/{name} 的当前 {statuses} 事件/状态",
+            "level": "important",
+            "tool": "kubectl_events",
+            "command": f"kubectl get events -n {namespace} --field-selector involvedObject.name={name}",
+            "tool_args": {"resource_type": "pod", "resource_name": name, "namespace": namespace},
+            "purpose": "覆盖当前异常组，确认代表 Pod 的关键事件或当前异常状态",
+            "evidence_type": "pod_events",
+            "target_scope": f"group:{group_id}",
+            "acceptable_tools": ["kubectl_events", "kubectl_describe", "kubectl_get_by_name", "kubectl_get_by_kind_in_cluster"],
+            "counts_for_completeness": True,
+        }
 
     @classmethod
     def _evidence_plan_signature(cls, item: Dict[str, Any]) -> tuple[str, str, str]:
@@ -1401,7 +1588,7 @@ class EvidenceCollectorNode(WorkflowNode):
         或者
         - 没有 critical/important 项时，全部计划项都已满足
         """
-        evidence_plan = getattr(self, "_active_evidence_plan", None) or self._extract_plan_from_thinking(thinking_events)
+        evidence_plan = getattr(self, "_active_evidence_plan", None)
         if not evidence_plan:
             return False
 
@@ -1572,6 +1759,11 @@ class EvidenceCollectorNode(WorkflowNode):
             plan_tool = (plan_item.get("tool") or "").lower()
             plan_cmd = (plan_item.get("command") or "").lower()
             plan_desc = (plan_item.get("description") or "").lower()
+            plan_intent = str(plan_item.get("evidence_type") or "").lower()
+            acceptable_tools = [
+                str(tool or "").lower()
+                for tool in (plan_item.get("acceptable_tools") or [])
+            ]
             item_id = plan_item.get("id", f"ev_{len(evidence_items)}")
 
             level_str = plan_item.get("level", "important")
@@ -1604,6 +1796,8 @@ class EvidenceCollectorNode(WorkflowNode):
                             result=tool.get("result", ""),
                             structured=tool.get("structured") or {},
                             tool_args=tool.get("tool_args") or {},
+                            plan_intent=plan_intent,
+                            acceptable_tools=acceptable_tools,
                         ):
                             matched = True
                             matched_tool = tool
@@ -1623,6 +1817,8 @@ class EvidenceCollectorNode(WorkflowNode):
                         result=tool.get("result", ""),
                         structured=tool.get("structured") or {},
                         tool_args=tool.get("tool_args") or {},
+                        plan_intent=plan_intent,
+                        acceptable_tools=acceptable_tools,
                     ):
                         matched = True
                         matched_tool = tool
@@ -1665,6 +1861,186 @@ class EvidenceCollectorNode(WorkflowNode):
                     unplanned_tool_count)
 
         return evidence_items
+
+    def _calculate_evidence_tool_stats(
+        self,
+        evidence_plan: List[Dict],
+        thinking_events: list,
+        evidence_items: List[EvidenceItem],
+        upstream_evidence_items: List[EvidenceItem],
+    ) -> Dict[str, int]:
+        """Calculate transparent tool/evidence counts from structured objects.
+
+        Completeness is plan-item based. Tool counts are diagnostic metadata:
+        executed tools can be greater than matched plan items when the agent
+        performs extra probes, and matched can be lower than planned when some
+        Pydantic plan intents were not satisfied.
+        """
+        planned_ids = {
+            str(item.get("id", ""))
+            for item in evidence_plan or []
+            if isinstance(item, dict) and item.get("id")
+        }
+        matched_ids = {
+            str(item.id)
+            for item in [*(evidence_items or []), *(upstream_evidence_items or [])]
+            if item.collected
+            and str(item.id) in planned_ids
+            and str(getattr(item, "source", "") or "") in {
+                "thinking_match",
+                "thinking_negative_match",
+                "layer_verified",
+            }
+        }
+
+        evidence_tool_events = self._extract_evidence_tool_events(thinking_events)
+        executed_tool_count = len(evidence_tool_events)
+        matched_tool_count = len(matched_ids)
+        unplanned_tool_count = max(0, executed_tool_count - matched_tool_count)
+
+        return {
+            "executed_tool_count": executed_tool_count,
+            "matched_tool_count": matched_tool_count,
+            "unplanned_tool_count": unplanned_tool_count,
+        }
+
+    def _extract_evidence_tool_events(self, thinking_events: list) -> List[Dict[str, Any]]:
+        """Return successful/diagnostic tool observations that count as evidence attempts."""
+        evidence_events: List[Dict[str, Any]] = []
+        for ev in thinking_events or []:
+            if ev.get("type") != "tool_result" or ev.get("status") != "success":
+                continue
+            tool_name = str(ev.get("tool_name", "") or "").lower()
+            if tool_name in self._NON_EVIDENCE_TOOLS:
+                continue
+
+            result = ev.get("result", ev.get("result_preview", "")) or ""
+            structured = ev.get("structured") or {}
+            semantic_success = ev.get("semantic_success", True) is not False
+            diagnostic_negative = self._is_diagnostic_negative_tool_result(tool_name, result, structured)
+            if not semantic_success and not diagnostic_negative:
+                continue
+            evidence_events.append(ev)
+        return evidence_events
+
+    def _build_upstream_evidence_items(
+        self,
+        evidence_plan: List[Dict],
+        thinking_events: list,
+    ) -> List[EvidenceItem]:
+        """Convert upstream layer tool results into collected evidence items.
+
+        Layer observations are real environment evidence when they are scoped to
+        current abnormal objects. They should be visible and countable, but kept
+        separate from evidence-plan execution with source=layer_verified.
+        """
+        layer_events = [
+            ev for ev in thinking_events or []
+            if ev.get("type") == "tool_result"
+            and ev.get("node") == "layer"
+            and ev.get("status") == "success"
+            and str(ev.get("tool_name", "")).lower() not in self._NON_EVIDENCE_TOOLS
+            and str(ev.get("tool_name", "")).lower() not in {"fetch_runbook", "read_context_archive"}
+        ]
+        if not layer_events:
+            return []
+
+        items: List[EvidenceItem] = []
+        matched_plan_items = self._build_evidence_items_from_thinking(evidence_plan, layer_events) if evidence_plan else []
+        for item in matched_plan_items:
+            if item.collected:
+                item.source = "layer_verified"
+                items.append(item)
+
+        matched_count = len(items)
+        for index, ev in enumerate(layer_events, start=1):
+            result = ev.get("result", "") or ev.get("result_preview", "")
+            if not result:
+                continue
+            items.append(EvidenceItem(
+                id=f"layer_{index}",
+                description=f"上游已验证工具结果: {ev.get('tool_name', '')}",
+                level=EvidenceLevel.IMPORTANT,
+                weight=0.2,
+                collected=True,
+                value=result[:500],
+                source="layer_verified",
+                outcome="negative" if self._is_diagnostic_negative_tool_result(
+                    ev.get("tool_name", ""),
+                    result,
+                    ev.get("structured") or {},
+                ) else "positive",
+            ))
+
+        logger.info(
+            "📊 [evidence] 纳入上游 layer 证据: layer_tools=%d plan_matched=%d total_added=%d",
+            len(layer_events),
+            matched_count,
+            len(items),
+        )
+        return items
+
+    @staticmethod
+    def _merge_evidence_items(
+        evidence_items: List[EvidenceItem],
+        upstream_items: List[EvidenceItem],
+    ) -> List[EvidenceItem]:
+        if not upstream_items:
+            return evidence_items
+
+        merged: List[EvidenceItem] = list(evidence_items or [])
+        by_id = {str(item.id): idx for idx, item in enumerate(merged)}
+        for item in upstream_items:
+            item_id = str(item.id)
+            if item_id in by_id:
+                existing = merged[by_id[item_id]]
+                if not existing.collected and item.collected:
+                    existing.collected = True
+                    existing.value = item.value
+                    existing.source = item.source
+                    existing.outcome = getattr(item, "outcome", getattr(existing, "outcome", "positive"))
+                continue
+            merged.append(item)
+            by_id[item_id] = len(merged) - 1
+        return merged
+
+    def _calculate_plan_completeness(
+        self,
+        evidence_items: List[EvidenceItem],
+        upstream_items: List[EvidenceItem],
+    ) -> Dict[str, Any]:
+        """Calculate completeness from countable planned items only.
+
+        Extra layer_verified observations remain visible in inventory, but they
+        must not inflate plan completeness unless they satisfy a planned item by
+        id.
+        """
+        planned_items = self._measurable_evidence_items([
+            item for item in evidence_items or []
+            if str(getattr(item, "source", "") or "") in {
+                "thinking_match",
+                "thinking_negative_match",
+                "planned",
+                "layer_verified",
+            }
+            and not str(item.id).startswith("layer_")
+        ])
+        if not planned_items:
+            return {"plan_total": 0, "plan_collected": 0, "plan_completeness": 0.0}
+
+        planned_by_id = {str(item.id): item for item in planned_items}
+        for item in upstream_items or []:
+            item_id = str(item.id)
+            if item_id in planned_by_id and item.collected:
+                planned_by_id[item_id].collected = True
+
+        total = len(planned_items)
+        collected = sum(1 for item in planned_items if item.collected)
+        return {
+            "plan_total": total,
+            "plan_collected": collected,
+            "plan_completeness": collected / total if total else 0.0,
+        }
 
     def _adjudicate_plan_tool_matches(
         self,
@@ -1753,20 +2129,7 @@ class EvidenceCollectorNode(WorkflowNode):
 - 失败、空结果、无关资源不能作为已采集证据。
 - 一个 tool_result 最多匹配一个 plan item。
 
-只输出 JSON，不要解释。格式：
-{
-  "matches": [
-    {
-      "plan_id": "e1",
-      "tool_result_index": 0,
-      "matched": true,
-      "confidence": 0.0,
-      "reason": "简短中文原因"
-    }
-  ],
-  "unmatched_plan_ids": [],
-  "unplanned_tool_result_indexes": []
-}
+结构化裁判结果由 `EvidenceMatchOutput` Pydantic schema 生成和校验；不要手写结构化对象。
 """
         payload = {
             "evidence_plan": evidence_plan,
@@ -1794,28 +2157,32 @@ class EvidenceCollectorNode(WorkflowNode):
         result: str,
         structured: Dict[str, Any],
         tool_args: Optional[Dict[str, Any]] = None,
+        plan_intent: str = "",
+        acceptable_tools: Optional[List[str]] = None,
     ) -> bool:
         if not result or not result.strip():
             return False
         if (structured or {}).get("status") in {"invalid_tool", "command_failed", "extract_failed"}:
             return False
-        if not EvidenceCollectorNode._namespace_scope_matches(plan_cmd, result):
+        if not plan_intent and not EvidenceCollectorNode._namespace_scope_matches(plan_cmd, result):
             return False
 
         combined = f"{plan_cmd}\n{plan_desc}"
-        intent = EvidenceCollectorNode._classify_plan_intent(plan_cmd, plan_desc)
+        has_structured_intent = bool(plan_intent)
+        intent = plan_intent or EvidenceCollectorNode._classify_plan_intent(plan_cmd, plan_desc)
         tool_match = EvidenceCollectorNode._tool_is_compatible_with_plan(
             plan_tool=plan_tool,
             plan_cmd=plan_cmd,
             intent=intent,
             tool_name=tool_name,
+            acceptable_tools=acceptable_tools,
         )
         if not tool_match:
             return False
 
         lower_result = result.lower()
         plan_target = EvidenceCollectorNode._extract_plan_resource_target(plan_cmd)
-        if plan_target:
+        if plan_target and not plan_intent:
             result_target = EvidenceCollectorNode._extract_result_resource_target(
                 result=result,
                 structured=structured or {},
@@ -1825,8 +2192,18 @@ class EvidenceCollectorNode(WorkflowNode):
                 return False
 
         if (structured or {}).get("diagnostic_negative") or EvidenceCollectorNode._is_diagnostic_negative_tool_result(tool_name, result, structured or {}):
-            return EvidenceCollectorNode._negative_result_answers_plan(combined, lower_result)
+            return (
+                intent in {"registry_connectivity", "dns_connectivity"}
+                or EvidenceCollectorNode._negative_result_answers_plan(combined, lower_result)
+            )
 
+        if has_structured_intent:
+            if intent in {"pod_status", "pod_events"}:
+                return EvidenceCollectorNode._result_answers_pod_status(result, structured or {})
+            if intent in {"pod_spec", "pod_config", "pod_lifecycle"}:
+                return EvidenceCollectorNode._result_answers_pod_spec_or_lifecycle(result, structured or {}, intent)
+            if intent in {"secret_config"}:
+                return structured.get("resource_kind") == "Secret" or structured.get("kind") == "Secret" or "secret" in lower_result
         if "run_bash_command" in tool_name and intent in {"registry_connectivity", "dns_connectivity"}:
             probe_markers = (
                 "curl",
@@ -1892,6 +2269,7 @@ class EvidenceCollectorNode(WorkflowNode):
         plan_cmd: str,
         intent: str,
         tool_name: str,
+        acceptable_tools: Optional[List[str]] = None,
     ) -> bool:
         """Treat LLM generated `tool` as a weak hint and command intent as truth.
 
@@ -1904,6 +2282,20 @@ class EvidenceCollectorNode(WorkflowNode):
         plan_tool = (plan_tool or "").lower()
         tool_name = (tool_name or "").lower()
         plan_cmd = (plan_cmd or "").lower()
+        acceptable = {
+            str(tool or "").lower()
+            for tool in (acceptable_tools or [])
+            if str(tool or "").strip()
+        }
+
+        if acceptable:
+            return any(
+                tool_name == tool
+                or tool_name in tool
+                or tool in tool_name
+                or tool_name.replace("_", "") == tool.replace("_", "")
+                for tool in acceptable
+            )
 
         if (
             (plan_tool and plan_tool == tool_name)
@@ -1929,13 +2321,48 @@ class EvidenceCollectorNode(WorkflowNode):
 
         if intent in {"registry_connectivity", "dns_connectivity", "pod_logs", "runtime_info"}:
             return "run_bash_command" in tool_name or "kubectl_run_image" in tool_name
-        if intent in {"pod_events", "pod_config", "secret_config", "node_state"}:
+        if intent in {"pod_status", "pod_events", "pod_config", "pod_spec", "pod_lifecycle", "secret_config", "node_state"}:
             return (
                 tool_name.startswith("kubectl_")
                 or "run_bash_command" in tool_name
             )
 
         return False
+
+    @staticmethod
+    def _result_answers_pod_status(result: str, structured: Dict[str, Any]) -> bool:
+        text = (result or "").lower()
+        if structured.get("kind") == "Pod" or structured.get("resource_kind") == "Pod":
+            return True
+        if structured.get("status") in {"describe_summarized", "events_found", "kept_small_output"}:
+            return True
+        return any(
+            marker in text
+            for marker in (
+                "imagepullbackoff",
+                "errimagepull",
+                "crashloopbackoff",
+                "terminating",
+                "oomkilled",
+                "failed",
+                "reason:",
+                "status",
+                "ready",
+            )
+        )
+
+    @staticmethod
+    def _result_answers_pod_spec_or_lifecycle(
+        result: str,
+        structured: Dict[str, Any],
+        intent: str,
+    ) -> bool:
+        text = (result or "").lower()
+        if structured.get("kind") == "Pod" or structured.get("resource_kind") == "Pod":
+            return True
+        if intent == "pod_lifecycle":
+            return any(marker in text for marker in ("deletiontimestamp", "finalizers", "terminating"))
+        return any(marker in text for marker in ("kind: pod", "image:", "imagepullsecrets", "containers:"))
 
     @staticmethod
     def _extract_result_resource_target(

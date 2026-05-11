@@ -18,6 +18,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from pydantic import ValidationError
+
 from app.core.context.archive import ContextArchive
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import LayerHandoff, LayerOutput, QueryResult
@@ -82,10 +84,41 @@ class LayerClassifierNode(WorkflowNode):
             return get_workflow_prompt("layer_query_direct_extract", prompt_language=self._get_prompt_language())
         return get_workflow_prompt("layer_extract", prompt_language=self._get_prompt_language())
 
+    def _use_agent_structured_output(self) -> bool:
+        runtime_enabled = self._is_structured_runtime_enabled(default=True)
+        cfg = self._get_workflow_config()
+        node_cfg = cfg.get("layer", {}) if isinstance(cfg, dict) else {}
+        if isinstance(node_cfg, dict):
+            if "agent_structured_output" in node_cfg:
+                return self._parse_bool_config(node_cfg.get("agent_structured_output"), runtime_enabled)
+            structured_cfg = node_cfg.get("structured_output")
+            if isinstance(structured_cfg, dict) and "enabled" in structured_cfg:
+                return self._parse_bool_config(structured_cfg.get("enabled"), runtime_enabled)
+        return runtime_enabled
+
+    def _allow_layer_extract_fallback(self) -> bool:
+        runtime_fallback = self._is_structured_runtime_fallback_enabled(default=True)
+        cfg = self._get_workflow_config()
+        node_cfg = cfg.get("layer", {}) if isinstance(cfg, dict) else {}
+        if isinstance(node_cfg, dict):
+            if "extract_fallback" in node_cfg:
+                return self._parse_bool_config(node_cfg.get("extract_fallback"), runtime_fallback)
+            structured_cfg = node_cfg.get("structured_output")
+            if isinstance(structured_cfg, dict) and "extract_fallback" in structured_cfg:
+                return self._parse_bool_config(structured_cfg.get("extract_fallback"), runtime_fallback)
+        return runtime_fallback
+
     @staticmethod
     def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
         return any(
             ev.get("type") == "tool_result" and ev.get("status") == "success"
+            for ev in (thinking_events or [])
+        )
+
+    @staticmethod
+    def _has_early_stop_event(thinking_events: List[Dict[str, Any]]) -> bool:
+        return any(
+            ev.get("type") == "early_stop" and ev.get("reason") == "stop_checker"
             for ev in (thinking_events or [])
         )
 
@@ -97,7 +130,7 @@ class LayerClassifierNode(WorkflowNode):
         if not self._is_structured_layer_result(result):
             return False
 
-        if result.get("layer") != "QUERY":
+        if str(result.get("layer") or "").upper() != "QUERY":
             return True
 
         query_result = result.get("query_result")
@@ -107,23 +140,335 @@ class LayerClassifierNode(WorkflowNode):
         if not self._has_successful_tool_results(thinking_events):
             return False
 
-        rows = query_result.get("rows", []) or []
-        missing = query_result.get("missing", []) or []
-        sources = query_result.get("sources", []) or []
-        return bool(sources) and bool(rows or missing)
+        try:
+            parsed = QueryResult.model_validate(query_result)
+        except Exception:
+            return False
+
+        return bool(parsed.rows or parsed.missing)
+
+    @classmethod
+    def _normalize_query_result_sources(
+        cls,
+        result: Optional[Dict[str, Any]],
+        thinking_events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Fill QUERY source metadata from real tool events at the schema boundary.
+
+        Sources are provenance metadata, not the query payload itself. Missing or
+        blank sources should not trigger another expensive tool round when rows
+        already came from successful tool_results.
+        """
+        if not isinstance(result, dict):
+            return result
+        query_result = result.get("query_result")
+        if not isinstance(query_result, dict):
+            return result
+
+        normalized = dict(result)
+        normalized_query_result = dict(query_result)
+        current_sources = normalized_query_result.get("sources")
+        if cls._has_non_blank_query_sources(current_sources):
+            return normalized
+
+        event_sources = cls._query_sources_from_tool_events(thinking_events)
+        if event_sources:
+            normalized_query_result["sources"] = event_sources
+            normalized["query_result"] = normalized_query_result
+        return normalized
+
+    @staticmethod
+    def _has_non_blank_query_sources(sources: Any) -> bool:
+        if not isinstance(sources, list) or not sources:
+            return False
+        for source in sources:
+            if not isinstance(source, dict):
+                if str(source or "").strip() and str(source or "").strip() != "-":
+                    return True
+                continue
+            tool = str(source.get("tool") or "").strip()
+            query = str(source.get("query") or "").strip()
+            if (tool and tool != "-") or (query and query != "-"):
+                return True
+        return False
+
+    @staticmethod
+    def _query_sources_from_tool_events(thinking_events: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        sources: List[Dict[str, str]] = []
+        seen = set()
+        for ev in thinking_events or []:
+            if ev.get("type") != "tool_result" or ev.get("status") != "success":
+                continue
+            tool_name = str(ev.get("tool_name") or "").strip()
+            if not tool_name:
+                continue
+            if tool_name not in {
+                "execute_prometheus_instant_query",
+                "execute_prometheus_range_query",
+                "kubectl_top_nodes",
+                "kubectl_top_pods",
+            }:
+                continue
+            if ev.get("semantic_success", True) is False:
+                continue
+            tool_args = ev.get("tool_args") or {}
+            query = ""
+            if isinstance(tool_args, dict):
+                query = str(
+                    tool_args.get("query")
+                    or tool_args.get("promql")
+                    or tool_args.get("command")
+                    or ""
+                ).strip()
+            item = {"tool": tool_name, "query": query or "-"}
+            key = (item["tool"], item["query"])
+            if key in seen:
+                continue
+            seen.add(key)
+            sources.append(item)
+        return sources
+
+    @classmethod
+    def _query_result_from_prometheus_tool_events(
+        cls,
+        question: str,
+        thinking_events: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Build QueryResult from real Prometheus tool observations.
+
+        This is a transport/provenance adapter: it only consumes successful
+        Prometheus tool_result payloads already archived by AICall. It does not
+        infer diagnoses or fabricate query data from model prose.
+        """
+        rows_by_node: Dict[str, Dict[str, Any]] = {}
+        columns: List[Dict[str, str]] = [{"key": "node", "label": "节点"}]
+        seen_columns = {"node"}
+        sources: List[Dict[str, str]] = []
+        query_count = 0
+        empty_count = 0
+
+        for ev in thinking_events or []:
+            if ev.get("type") != "tool_result" or ev.get("status") != "success":
+                continue
+            tool_name = str(ev.get("tool_name") or "").strip()
+            if tool_name not in {"execute_prometheus_instant_query", "execute_prometheus_range_query"}:
+                continue
+            if ev.get("semantic_success", True) is False:
+                continue
+            structured = ev.get("structured") or {}
+            if isinstance(structured, dict) and str(structured.get("status") or "").lower() == "prometheus_error":
+                continue
+
+            parsed = cls._parse_prometheus_tool_result(ev.get("result") or ev.get("result_preview") or "")
+            if parsed is None:
+                continue
+            query_count += 1
+
+            tool_args = ev.get("tool_args") or {}
+            query = ""
+            if isinstance(tool_args, dict):
+                query = str(tool_args.get("query") or tool_args.get("promql") or "").strip()
+            metric_key, metric_label = cls._prometheus_query_column(query, query_count)
+            if metric_key not in seen_columns:
+                columns.append({"key": metric_key, "label": metric_label})
+                seen_columns.add(metric_key)
+            if query:
+                sources.append({"tool": tool_name, "query": query})
+
+            vector = (((parsed.get("data") or {}) if isinstance(parsed, dict) else {}).get("result") or [])
+            if not isinstance(vector, list) or not vector:
+                empty_count += 1
+                continue
+            for item in vector:
+                if not isinstance(item, dict):
+                    continue
+                node = cls._prometheus_node_key(item.get("metric") or {})
+                value = cls._prometheus_sample_value(item.get("value") or item.get("values"))
+                if not node or value is None:
+                    continue
+                row = rows_by_node.setdefault(node, {"node": node})
+                row[metric_key] = value
+
+        if not rows_by_node:
+            if query_count:
+                return QueryResult.model_validate({
+                    "query_target": question,
+                    "collection_summary": f"计划 {query_count} 项，实际采集 0 项，未采集 {query_count} 项，完整度 0%",
+                    "columns": columns,
+                    "rows": [],
+                    "notes": ["Prometheus 查询成功执行，但结果为空。"],
+                    "missing": [{"field": "result", "reason": "Prometheus 返回空 result"}],
+                    "sources": sources,
+                }).model_dump()
+            return None
+
+        rows = list(rows_by_node.values())
+        collected = sum(
+            1
+            for column in columns
+            if column["key"] != "node" and any(column["key"] in row for row in rows)
+        )
+        total = max(len(columns) - 1, query_count)
+        missing_count = max(total - collected, 0)
+        missing = []
+        if missing_count:
+            present_keys = {key for row in rows for key in row.keys()}
+            for column in columns:
+                if column["key"] != "node" and column["key"] not in present_keys:
+                    missing.append({"field": column["key"], "reason": "Prometheus 返回结果中没有该指标列"})
+        if empty_count and not missing:
+            missing.append({"field": "result", "reason": "部分 Prometheus 查询返回空 result"})
+
+        return QueryResult.model_validate({
+            "query_target": question,
+            "collection_summary": (
+                f"计划 {total} 项，实际采集 {collected} 项，"
+                f"未采集 {missing_count} 项，完整度 {int((collected / total) * 100) if total else 0}%"
+            ),
+            "columns": columns,
+            "rows": rows,
+            "notes": ["数据来自 Prometheus 工具结果；节点字段来自 Prometheus metric.instance/node。"],
+            "missing": missing,
+            "sources": sources,
+        }).model_dump()
+
+    @staticmethod
+    def _parse_prometheus_tool_result(raw: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(raw, dict):
+            return raw
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) and parsed.get("status") == "success" else None
+
+    @staticmethod
+    def _prometheus_query_column(query: str, index: int) -> tuple[str, str]:
+        lowered = (query or "").lower()
+        if "node_cpu_seconds_total" in lowered:
+            return "cpu_usage_percent", "CPU 使用率 (%)"
+        if "node_memory_memavailable_bytes" in lowered or "node_memory_memtotal_bytes" in lowered:
+            return "memory_usage_percent", "内存使用率 (%)"
+        if "node_filesystem" in lowered:
+            return "disk_usage_percent", "磁盘使用率 (%)"
+        if "node_network_receive" in lowered:
+            return "network_receive_bits_per_second", "网络接收 (bits/s)"
+        if "node_network_transmit" in lowered:
+            return "network_transmit_bits_per_second", "网络发送 (bits/s)"
+        return f"metric_{index}", f"指标 {index}"
+
+    @staticmethod
+    def _prometheus_node_key(metric: Any) -> str:
+        if not isinstance(metric, dict):
+            return ""
+        return str(metric.get("node") or metric.get("instance") or metric.get("pod") or "").strip()
+
+    @staticmethod
+    def _prometheus_sample_value(value: Any) -> Optional[float]:
+        sample = None
+        if isinstance(value, list) and len(value) >= 2:
+            sample = value[1]
+        elif isinstance(value, list) and value and isinstance(value[-1], list) and len(value[-1]) >= 2:
+            sample = value[-1][1]
+        if sample is None:
+            return None
+        try:
+            return round(float(sample), 2)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _normalize_layer_output_dict(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Normalize enum-like fields at the Pydantic boundary before routing decisions."""
+        if not isinstance(result, dict):
+            return result
+        normalized = dict(result)
+        if normalized.get("layer") is not None:
+            layer = str(normalized.get("layer") or "").upper()
+            normalized["layer"] = "QUERY" if layer == "QUERY_RESULT" else layer
+        if normalized.get("derived_layer") is not None:
+            derived_layer = str(normalized.get("derived_layer") or "").upper()
+            normalized["derived_layer"] = "QUERY" if derived_layer == "QUERY_RESULT" else derived_layer
+        layers = normalized.get("layers")
+        if isinstance(layers, list):
+            normalized["layers"] = [
+                "QUERY" if str(item).upper() == "QUERY_RESULT" else str(item).upper()
+                for item in layers
+                if item
+            ]
+        query_result = normalized.get("query_result")
+        if isinstance(query_result, dict):
+            try:
+                normalized["query_result"] = QueryResult.model_validate(query_result).model_dump()
+            except Exception:
+                pass
+        return normalized
+
+    @staticmethod
+    def _structured_layer_from_response(response: Any) -> Optional[Dict[str, Any]]:
+        from app.core.workflow.structured_runtime import StructuredAgentRuntime
+
+        parsed = StructuredAgentRuntime.extract_structured_response(response, LayerOutput)
+        if parsed is None:
+            return None
+        return parsed.model_dump(exclude_none=True)
 
     def _get_query_retry_prompt(self) -> str:
         return (
             self._get_layer_prompt()
             + "\n\n# 上一轮结果被系统拒绝\n"
-              "- 原因：你输出了 QUERY JSON，但没有提供足够的真实工具执行结果。\n"
-              "- 本轮必须先执行工具，再输出最终 JSON。\n"
+              "- 原因：你给出了 QUERY 结论，但没有提供足够的真实工具执行结果。\n"
+              "- 本轮必须先执行工具，再让 Pydantic 结构化提取生成最终 query_result。\n"
               "- 在出现至少一次成功的 tool_result 之前，禁止输出最终答案。\n"
               "- 你的最后一条消息必须建立在真实工具结果之上，而不是工具计划之上。\n"
               "- 如果没有至少一次成功的 tool_result，系统会再次拒绝你的输出。\n"
               "- `query_result.rows` 为空且 `missing` 也为空，视为无效结果。\n"
               "- `collection_summary`、`sources`、`rows` 只能基于真实工具结果填写，禁止编造“已采集 100%”。\n"
         )
+
+    def _should_stop_query_direct_early(self, thinking_events: List[Dict[str, Any]]) -> bool:
+        """Stop QUERY direct after all in-flight Prometheus queries returned.
+
+        The agent may emit multiple Prometheus tool calls in one model message
+        (for example CPU and memory). Stopping on the first result can truncate
+        sibling tool calls, so this waits until every started Prometheus call has
+        a terminal result. Pydantic extraction then consumes the real tool
+        transcript; the agent does not need to spend another minute writing a
+        natural-language collection summary.
+        """
+        prometheus_tools = {"execute_prometheus_instant_query", "execute_prometheus_range_query"}
+        started_call_ids = set()
+        result_call_ids = set()
+        terminal_results = 0
+        for ev in thinking_events or []:
+            tool_name = str(ev.get("tool_name") or "")
+            if tool_name not in prometheus_tools:
+                continue
+            call_id = str(ev.get("tool_call_id") or "")
+            if ev.get("type") == "tool_start":
+                if call_id:
+                    started_call_ids.add(call_id)
+                continue
+            if ev.get("type") != "tool_result" or ev.get("status") != "success":
+                continue
+            if call_id:
+                result_call_ids.add(call_id)
+            structured = ev.get("structured") or {}
+            status = str(structured.get("status") or "").lower()
+            if status == "prometheus_error" or ev.get("semantic_success", True) is False:
+                terminal_results += 1
+                continue
+            result = ev.get("result") or ev.get("result_preview") or ""
+            if result and re.search(r'"result"\s*:\s*\[|result_count', result, re.IGNORECASE):
+                terminal_results += 1
+        if not terminal_results:
+            return False
+        if started_call_ids:
+            return started_call_ids.issubset(result_call_ids)
+        return False
 
     def _build_query_direct_failure_result(
         self,
@@ -218,7 +563,7 @@ class LayerClassifierNode(WorkflowNode):
             "layer_archive_ref": archive_refs,
             "context_archive_ref": archive_refs.get("run_root"),
             "issue_groups": layer_handoff.get("issue_groups", []),
-            "primary_pod": layer_handoff.get("primary_pod"),
+            "abnormal_groups": layer_handoff.get("abnormal_groups", layer_handoff.get("issue_groups", [])),
             "abnormal_pods": layer_handoff.get("abnormal_pods", []),
             "pod_status_keyword": layer_handoff.get("pod_status_keyword"),
             "pod_abnormal_type": layer_handoff.get("pod_abnormal_type"),
@@ -227,8 +572,13 @@ class LayerClassifierNode(WorkflowNode):
                 "key_entities": layer_result.get("key_entities", []),
                 "possible_scenarios": layer_result.get("possible_scenarios", []),
             })
-            if layer == Layer.QUERY and self._is_direct_query_mode() and isinstance(query_result, dict):
-                new_state["query_result"] = QueryResult.model_validate(query_result).model_dump()
+            if layer == Layer.QUERY and self._is_direct_query_mode():
+                self._attach_query_result_or_failure(
+                    new_state=new_state,
+                    question=question,
+                    query_result=query_result,
+                    failure_context="QUERY direct 结果结构化校验失败",
+                )
 
             # 存入 thinking_events（带 node 标记）
             self._save_thinking(state, new_state, thinking_events)
@@ -280,7 +630,7 @@ class LayerClassifierNode(WorkflowNode):
                 "layer_archive_ref": archive_refs,
                 "context_archive_ref": archive_refs.get("run_root"),
                 "issue_groups": layer_handoff.get("issue_groups", []),
-                "primary_pod": layer_handoff.get("primary_pod"),
+                "abnormal_groups": layer_handoff.get("abnormal_groups", layer_handoff.get("issue_groups", [])),
                 "abnormal_pods": layer_handoff.get("abnormal_pods", []),
                 "pod_status_keyword": layer_handoff.get("pod_status_keyword"),
                 "pod_abnormal_type": layer_handoff.get("pod_abnormal_type"),
@@ -289,11 +639,42 @@ class LayerClassifierNode(WorkflowNode):
                 "key_entities": rescue_result.get("key_entities", []),
                 "possible_scenarios": rescue_result.get("possible_scenarios", []),
             })
-            if layer == Layer.QUERY and self._is_direct_query_mode() and isinstance(query_result, dict):
-                new_state["query_result"] = QueryResult.model_validate(query_result).model_dump()
+            if layer == Layer.QUERY and self._is_direct_query_mode():
+                self._attach_query_result_or_failure(
+                    new_state=new_state,
+                    question=question,
+                    query_result=query_result,
+                    failure_context="QUERY direct rescue 结果结构化校验失败",
+                )
             self._save_thinking(state, new_state, [])
 
         return new_state
+
+    @staticmethod
+    def _attach_query_result_or_failure(
+        new_state: WorkflowState,
+        question: str,
+        query_result: Any,
+        failure_context: str,
+    ) -> None:
+        """Persist QUERY result without allowing schema errors to become diagnosis fallback."""
+        if isinstance(query_result, dict):
+            try:
+                new_state["query_result"] = QueryResult.model_validate(query_result).model_dump()
+                return
+            except ValidationError as exc:
+                failure_reason = f"{failure_context}: {exc}"
+        else:
+            failure_reason = f"{failure_context}: query_result 缺失或不是对象"
+
+        new_state["query_result"] = QueryResult.model_validate({
+            "query_target": question,
+            "collection_summary": "查询已识别为 QUERY，但 query_result 结构化校验失败，已阻止误降级为诊断层。",
+            "columns": [],
+            "rows": [],
+            "missing": [{"field": "query_result", "reason": failure_reason}],
+            "sources": [],
+        }).model_dump()
 
     @staticmethod
     def _sync_layer_result_from_handoff(layer_result: Dict[str, Any], handoff: Dict[str, Any]) -> None:
@@ -305,6 +686,7 @@ class LayerClassifierNode(WorkflowNode):
         """
         for key in (
             "abnormal_pods",
+            "abnormal_groups",
             "issue_groups",
             "current_abnormal_summary",
             "pod_status_keyword",
@@ -313,6 +695,7 @@ class LayerClassifierNode(WorkflowNode):
         ):
             if key in handoff:
                 layer_result[key] = handoff.get(key)
+        layer_result.pop("primary_pod", None)
 
     def _archive_layer_outputs(
         self,
@@ -351,19 +734,6 @@ class LayerClassifierNode(WorkflowNode):
         current_abnormal_summary = self._extract_current_abnormal_summary_from_events(thinking_events)
         if current_abnormal_pods:
             abnormal_pods = self._merge_current_abnormal_pods(abnormal_pods, current_abnormal_pods)
-        primary_pod = self._normalize_primary_pod(layer_result.get("primary_pod"), abnormal_pods, active_entities)
-        if current_abnormal_pods and primary_pod:
-            primary_key = (primary_pod.get("namespace", ""), primary_pod.get("name", ""))
-            current_keys = {
-                (pod.get("namespace", ""), pod.get("name", ""))
-                for pod in current_abnormal_pods
-                if pod.get("name")
-            }
-            if primary_key not in current_keys:
-                primary_pod = {
-                    "name": current_abnormal_pods[0].get("name", ""),
-                    "namespace": current_abnormal_pods[0].get("namespace", ""),
-                }
         active_signals = []
         matched_runbooks = []
 
@@ -389,7 +759,6 @@ class LayerClassifierNode(WorkflowNode):
         pod_abnormal_type = self._derive_pod_abnormal_type(layer_result)
         issue_groups = self._build_issue_groups(
             abnormal_pods=abnormal_pods,
-            primary_pod=primary_pod,
             default_pod_abnormal_type=pod_abnormal_type,
             layer_result=layer_result,
         )
@@ -400,8 +769,8 @@ class LayerClassifierNode(WorkflowNode):
             "layers": [l.value if hasattr(l, "value") else str(l) for l in layers],
             "confidence": layer_result.get("confidence", 0.5),
             "primary_problem": layer_result.get("reasoning", ""),
-            "primary_pod": primary_pod,
             "abnormal_pods": abnormal_pods,
+            "abnormal_groups": issue_groups,
             "issue_groups": issue_groups,
             "current_abnormal_summary": current_abnormal_summary,
             "pod_status_keyword": self._pick_text(
@@ -415,15 +784,14 @@ class LayerClassifierNode(WorkflowNode):
             "possible_scenarios": layer_result.get("possible_scenarios", []),
             "matched_runbooks": matched_runbooks,
             "must_verify": [
-                "以 issue_groups、abnormal_pods、current_abnormal_summary 为覆盖基准；primary_pod 只是主异常组代表样本",
-                "主异常组完整验证，非主异常组最小验证，避免遗漏 Terminating、Pending 等次要异常状态",
+                "以 abnormal_groups、abnormal_pods、current_abnormal_summary 为覆盖基准",
+                "异常组完整/最小验证由 evidence 节点按 abnormal_groups 覆盖，避免遗漏 Terminating、Pending 等并发异常状态",
                 "确认 active_entities 中的对象当前仍存在于指定 namespace",
                 "确认 active_signals 仍能被真实工具结果验证",
                 "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
-                "如果 primary_pod 不在当前异常 Pod 列表中，必须把它视为历史事件噪音而不是当前故障",
+                "如果某个异常 Pod 不在当前异常 Pod 列表中，必须把它视为历史事件噪音而不是当前故障",
             ],
             "do_not_change": [
-                "不要把 primary_pod 替换成其他 Pod，除非真实工具结果证明上游对象不存在或已恢复",
                 "不要把上游 namespace、Pod、Service、Node 名称改写成其他对象",
                 "不要把历史 event 当成当前故障",
                 "不要把计划或工具名当成证据，必须基于 tool_result",
@@ -474,7 +842,6 @@ class LayerClassifierNode(WorkflowNode):
     def _build_issue_groups(
         cls,
         abnormal_pods: List[Dict[str, Any]],
-        primary_pod: Optional[Dict[str, Any]],
         default_pod_abnormal_type: str,
         layer_result: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
@@ -482,16 +849,12 @@ class LayerClassifierNode(WorkflowNode):
 
         This is generic handoff structure, not a diagnostic decision tree. It
         preserves all active anomaly families so downstream nodes do not lose
-        secondary issues when a single primary_pod is selected.
+        secondary issues when a single representative object is selected.
         """
         if not abnormal_pods:
             return []
 
         grouped: Dict[str, Dict[str, Any]] = {}
-        primary_key = (
-            (primary_pod or {}).get("namespace", ""),
-            (primary_pod or {}).get("name", ""),
-        )
 
         for pod in abnormal_pods:
             name = cls._pick_text(pod.get("name"))
@@ -504,12 +867,12 @@ class LayerClassifierNode(WorkflowNode):
                 status_family,
                 {
                     "status_keywords": [],
-                    "primary_entities": [],
+                    "entities": [],
                 },
             )
             if status and status not in group["status_keywords"]:
                 group["status_keywords"].append(status)
-            group["primary_entities"].append({
+            group["entities"].append({
                 "kind": "Pod",
                 "namespace": namespace,
                 "name": name,
@@ -527,23 +890,17 @@ class LayerClassifierNode(WorkflowNode):
                 layer_result=layer_result,
             )
             compatible_layer = cls._compatible_layer_for_abnormal_type(pod_abnormal_type)
-            entities = group["primary_entities"]
-            is_primary = any(
-                (entity.get("namespace", ""), entity.get("name", "")) == primary_key
-                for entity in entities
-            )
+            entities = group["entities"]
             groups.append({
                 "group_id": f"g{index}",
                 "status_keywords": statuses,
                 "pod_abnormal_type": pod_abnormal_type,
                 "compatible_layers": [compatible_layer] if compatible_layer else [],
-                "primary_entities": entities,
-                "is_primary": is_primary,
+                "entities": entities,
                 "evidence_plan": [],
                 "possible_scenarios": cls._default_scenarios_for_abnormal_type(pod_abnormal_type),
             })
 
-        groups.sort(key=lambda item: (not item.get("is_primary"), item.get("group_id", "")))
         for index, group in enumerate(groups, start=1):
             group["group_id"] = f"g{index}"
         return groups
@@ -759,29 +1116,6 @@ class LayerClassifierNode(WorkflowNode):
         return normalized
 
     @classmethod
-    def _normalize_primary_pod(
-        cls,
-        primary_pod: Any,
-        abnormal_pods: List[Dict[str, Any]],
-        active_entities: List[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        normalized = cls._normalize_pod_ref(primary_pod)
-        if normalized:
-            return normalized
-        if abnormal_pods:
-            return {
-                "name": abnormal_pods[0].get("name", ""),
-                "namespace": abnormal_pods[0].get("namespace", ""),
-            }
-        for entity in active_entities:
-            if str(entity.get("type", "")).lower() == "pod" and entity.get("name"):
-                return {
-                    "name": entity.get("name", ""),
-                    "namespace": entity.get("namespace", ""),
-                }
-        return None
-
-    @classmethod
     def _normalize_abnormal_pods(
         cls,
         abnormal_pods: Any,
@@ -888,6 +1222,16 @@ class LayerClassifierNode(WorkflowNode):
 
     @staticmethod
     def _extract_runbook_id(event: Dict[str, Any]) -> str:
+        tool_args = event.get("tool_args") or {}
+        if isinstance(tool_args, dict):
+            runbook_id = str(tool_args.get("runbook_id") or "").strip()
+            if runbook_id:
+                return runbook_id
+        structured = event.get("structured") or {}
+        if isinstance(structured, dict):
+            runbook_id = str(structured.get("runbook_id") or structured.get("runbook_name") or "").strip()
+            if runbook_id:
+                return runbook_id
         raw = (event.get("result", "") or event.get("result_preview", "") or "")
         match = re.search(r"\[([a-z0-9][a-z0-9-]+)\]|runbook_id[:=]\s*([a-z0-9-]+)", raw, re.IGNORECASE)
         if match:
@@ -897,9 +1241,9 @@ class LayerClassifierNode(WorkflowNode):
     def _analyze_with_llm(self, question: str) -> tuple:
         """使用 LLM 分析 Pod 异常状态。
 
-        阶段1: AICall agent 调用工具并直接输出 LayerOutput JSON。
-        仅当阶段1没有返回合法 LayerOutput 时，才使用无工具 Pydantic
-        layer_extract 作为兼容兜底。
+        正常路径: AICall agent 只负责工具调用和事实采集；
+        layer_extract 使用非流式 Pydantic structured call 从已有工具结果生成
+        LayerOutput。避免在 streaming 多工具 agent 中混用 response_format。
 
         Returns:
             (layer_result_dict, intermediate_events_list)
@@ -914,8 +1258,12 @@ class LayerClassifierNode(WorkflowNode):
             response, thinking_events = self._call_llm(
                 question,
                 self._get_layer_prompt(),
-                expect_json=early_stop_enabled,
-                json_validator=self._is_structured_layer_result,
+                expect_json=False,
+                stop_checker=(
+                    self._should_stop_query_direct_early
+                    if self._is_direct_query_mode() and early_stop_enabled
+                    else None
+                ),
             )
 
             stage1_text = (response.result or "") if response else ""
@@ -938,24 +1286,92 @@ class LayerClassifierNode(WorkflowNode):
             else:
                 enriched_text_for_downstream = full_analysis_text
 
-            extracted = self._try_parse_json(stage1_text)
+            if self._is_direct_query_mode() and self._has_early_stop_event(thinking_events):
+                tool_query_result = self._query_result_from_prometheus_tool_events(question, thinking_events)
+                if tool_query_result is not None and self._has_successful_tool_results(thinking_events):
+                    result = LayerOutput.model_validate({
+                        "layer": "QUERY",
+                        "layers": ["QUERY"],
+                        "layer_name": "查询请求",
+                        "confidence": 0.8,
+                        "reasoning": "已基于真实 Prometheus 工具结果生成 QUERY 结构化结果。",
+                        "key_entities": [],
+                        "possible_scenarios": [],
+                        "query_result": tool_query_result,
+                        "full_analysis": enriched_text_for_downstream,
+                    }).model_dump(exclude_none=True)
+                    logger.info(
+                        "✅ [layer] QUERY direct 跳过 layer_extract，从真实 Prometheus tool_result 构建 LayerOutput | rows=%d sources=%d",
+                        len((tool_query_result or {}).get("rows") or []),
+                        len((tool_query_result or {}).get("sources") or []),
+                    )
+                    return result, thinking_events
+
+            extracted = self._extract_with_lite_llm(
+                question=question,
+                full_analysis_text=enriched_text_for_downstream,
+                failure_reason="基于 layer 阶段工具结果和分析文本生成 Pydantic LayerOutput",
+            )
+            extracted = self._normalize_layer_output_dict(extracted)
+            extracted = self._normalize_query_result_sources(extracted, thinking_events)
             if extracted is None:
-                logger.info("📍 [layer] 阶段1未返回合法 LayerOutput，执行 layer_extract 兼容兜底")
-                extracted = self._extract_with_lite_llm(
+                raise RuntimeError("layer 未能生成 Pydantic LayerOutput")
+
+            if self._is_direct_query_mode() and str(extracted.get("layer") or "").upper() != "QUERY":
+                tool_query_result = self._query_result_from_prometheus_tool_events(question, thinking_events)
+                if tool_query_result is not None and self._has_successful_tool_results(thinking_events):
+                    logger.info(
+                        "✅ [layer] QUERY direct 从真实 Prometheus tool_result 构建 QueryResult | rows=%d sources=%d",
+                        len(tool_query_result.get("rows") or []),
+                        len(tool_query_result.get("sources") or []),
+                    )
+                    return {
+                        "layer": "QUERY",
+                        "layers": ["QUERY"],
+                        "layer_name": "查询请求",
+                        "confidence": max(float(extracted.get("confidence") or 0.0), 0.8),
+                        "reasoning": "已基于真实 Prometheus 工具结果生成 QUERY 结构化结果。",
+                        "key_entities": extracted.get("key_entities") or [],
+                        "possible_scenarios": extracted.get("possible_scenarios") or [],
+                        "query_result": tool_query_result,
+                        "full_analysis": enriched_text_for_downstream,
+                    }, thinking_events
+                failure_reason = "QUERY 请求未获得任何可用的真实工具结果，拒绝将查询失败误分类为故障诊断层"
+                logger.warning(
+                    "⚠️ [layer] %s | tool_events=%d prometheus_sources=%d",
+                    failure_reason,
+                    len(thinking_events or []),
+                    len(self._query_sources_from_tool_events(thinking_events)),
+                )
+                return self._build_query_direct_failure_result(
                     question=question,
                     full_analysis_text=enriched_text_for_downstream,
-                    failure_reason="基于 layer 阶段工具结果和分析文本生成 Pydantic LayerOutput",
-                )
-                if extracted is None:
-                    raise RuntimeError("layer_extract 未能从现有分析文本中生成 Pydantic LayerOutput")
+                    failure_reason=failure_reason,
+                ), thinking_events
 
-            if self._is_direct_query_mode() and extracted.get("layer") == "QUERY" and not self._is_usable_query_result(extracted, thinking_events):
+            if self._is_direct_query_mode() and str(extracted.get("layer") or "").upper() == "QUERY" and not self._is_usable_query_result(extracted, thinking_events):
+                tool_query_result = self._query_result_from_prometheus_tool_events(question, thinking_events)
+                if tool_query_result is not None:
+                    extracted["query_result"] = tool_query_result
+                    logger.info(
+                        "✅ [layer] QUERY direct Pydantic query_result 缺失，已从 Prometheus tool_result 补齐 | rows=%d sources=%d",
+                        len(tool_query_result.get("rows") or []),
+                        len(tool_query_result.get("sources") or []),
+                    )
+                    if self._is_usable_query_result(extracted, thinking_events):
+                        extracted["full_analysis"] = enriched_text_for_downstream
+                        return extracted, thinking_events
+
                 logger.warning("⚠️ [layer] QUERY direct Pydantic 输出缺少真实工具结果或有效 rows，发起一次严格重试")
                 retry_response, retry_events = self._call_llm(
                     question,
                     self._get_query_retry_prompt(),
-                    expect_json=True,
-                    json_validator=self._is_structured_layer_result,
+                    expect_json=False,
+                    stop_checker=(
+                        self._should_stop_query_direct_early
+                        if early_stop_enabled
+                        else None
+                    ),
                 )
                 thinking_events = (thinking_events or []) + (retry_events or [])
                 retry_text = retry_response.result if retry_response else ""
@@ -966,18 +1382,35 @@ class LayerClassifierNode(WorkflowNode):
                     )
                 else:
                     enriched_text_for_downstream = full_analysis_text
-
                 retry_result = self._extract_with_lite_llm(
                     question=question,
                     full_analysis_text=enriched_text_for_downstream,
                     failure_reason="基于 QUERY direct 严格重试后的工具结果生成 Pydantic LayerOutput",
                 )
+                retry_result = self._normalize_layer_output_dict(retry_result)
+                retry_result = self._normalize_query_result_sources(retry_result, thinking_events)
+                if not self._is_usable_query_result(retry_result, thinking_events):
+                    tool_query_result = self._query_result_from_prometheus_tool_events(question, thinking_events)
+                    if isinstance(retry_result, dict) and tool_query_result is not None:
+                        retry_result["layer"] = "QUERY"
+                        retry_result["layers"] = ["QUERY"]
+                        retry_result["query_result"] = tool_query_result
+                        logger.info(
+                            "✅ [layer] QUERY direct retry 后从 Prometheus tool_result 补齐 QueryResult | rows=%d sources=%d",
+                            len(tool_query_result.get("rows") or []),
+                            len(tool_query_result.get("sources") or []),
+                        )
                 if self._is_usable_query_result(retry_result, thinking_events):
                     retry_result["full_analysis"] = enriched_text_for_downstream
                     return retry_result, thinking_events
 
                 failure_reason = "QUERY 请求未获得任何可用的真实工具结果，拒绝直接返回伪结构化结果"
-                logger.warning("⚠️ [layer] %s", failure_reason)
+                logger.warning(
+                    "⚠️ [layer] %s | tool_events=%d prometheus_sources=%d",
+                    failure_reason,
+                    len(thinking_events or []),
+                    len(self._query_sources_from_tool_events(thinking_events)),
+                )
                 return self._build_query_direct_failure_result(
                     question=question,
                     full_analysis_text=enriched_text_for_downstream,
@@ -990,6 +1423,8 @@ class LayerClassifierNode(WorkflowNode):
             return extracted, thinking_events
 
         except Exception as e:
+            if not self._allow_layer_extract_fallback():
+                raise
             logger.warning(f"[layer] LLM 分析失败，转入 Pydantic 提取: {e}")
             full_analysis_text = self._build_full_analysis("", thinking_events)
             extracted = self._extract_with_lite_llm(
@@ -1007,7 +1442,7 @@ class LayerClassifierNode(WorkflowNode):
         full_analysis_text: str,
         failure_reason: str = "",
     ) -> Optional[Dict[str, Any]]:
-        """当 agent 未直接产出合法 JSON 时，基于已收集内容再做一次无工具结构化提取。"""
+        """基于已收集内容生成唯一 Pydantic LayerOutput。"""
         ai_call = getattr(self, "ai_call", None)
         if ai_call is None or not hasattr(ai_call, "call_structured"):
             logger.warning("⚠️ [layer] ai_call 不支持 call_structured，无法生成 Pydantic LayerOutput")
@@ -1030,26 +1465,14 @@ class LayerClassifierNode(WorkflowNode):
         parsed = structured.model_dump(exclude_none=True) if structured is not None else None
 
         if parsed is None:
-            logger.warning("⚠️ [layer] lite 提取仍未返回合法 JSON | raw=%s", (raw or "")[:500])
+            logger.warning("⚠️ [layer] Pydantic 提取未返回合法 LayerOutput | raw=%s", (raw or "")[:500])
             return None
 
+        parsed = self._normalize_layer_output_dict(parsed) or parsed
         parsed["full_analysis"] = full_analysis_text
         logger.info("✅ [layer] lite 提取成功: layer=%s confidence=%.2f",
                     parsed.get("layer"), parsed.get("confidence", 0.0))
         return parsed
-
-    @staticmethod
-    def _try_parse_json(text: str) -> Optional[Dict]:
-        """尝试从文本中提取 JSON，失败返回 None"""
-        try:
-            from app.core.aicall.client import AICall
-
-            parsed = AICall.extract_json_payload(text)
-            if not isinstance(parsed, dict):
-                return None
-            return LayerOutput.model_validate(parsed).model_dump(exclude_none=True)
-        except Exception:
-            return None
 
     @staticmethod
     def _is_structured_layer_result(result: Optional[Dict]) -> bool:
