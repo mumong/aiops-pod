@@ -519,6 +519,14 @@ class ContextBudgetEstimator:
     def _component_tokens(components: List[Dict[str, Any]], *names: str) -> int:
         return sum(c["tokens"] for c in components if c.get("name") in names)
 
+    @staticmethod
+    def _sum_component_tokens(components: List[Dict[str, Any]], categories: set[str]) -> int:
+        return sum(
+            int(component.get("tokens") or 0)
+            for component in components or []
+            if component.get("category") in categories
+        )
+
     def log(self, budget: Dict[str, Any]) -> None:
         usage = budget.get("usage_ratio")
         usage_text = "unknown" if usage is None else f"{usage:.0%}"
@@ -526,8 +534,14 @@ class ContextBudgetEstimator:
         provider_prompt_tokens = budget.get("provider_prompt_tokens")
         provider_input_usage = budget.get("provider_input_usage_ratio")
         has_provider_exact = isinstance(provider_prompt_tokens, int)
+        estimated_input_tokens = self._sum_component_tokens(
+            budget.get("components", []),
+            {"static_input", "dynamic_runtime"},
+        )
         input_tokens = provider_prompt_tokens if has_provider_exact else (
-            budget.get("actual_context_tokens") if token_accuracy == "exact" else "unknown"
+            budget.get("actual_context_tokens") if token_accuracy == "exact" else (
+                f"~{estimated_input_tokens}" if estimated_input_tokens else "n/a"
+            )
         )
         if isinstance(provider_input_usage, (int, float)):
             input_usage = f"{provider_input_usage:.0%}"
@@ -536,8 +550,13 @@ class ContextBudgetEstimator:
             input_usage = f"{budget.get('actual_context_tokens') / budget.get('context_window'):.0%}"
             input_token_source = "local_tokenizer"
         else:
-            input_usage = "unknown"
-            input_token_source = "unknown"
+            context_window = budget.get("context_window")
+            if isinstance(context_window, int) and context_window > 0 and estimated_input_tokens:
+                input_usage = f"{estimated_input_tokens / context_window:.0%}"
+                input_token_source = "estimated_components"
+            else:
+                input_usage = "n/a"
+                input_token_source = "n/a"
         level = logging.INFO
         ratio_for_level = provider_input_usage if isinstance(provider_input_usage, (int, float)) else usage
         if isinstance(ratio_for_level, (int, float)):
@@ -577,9 +596,11 @@ class ContextBudgetEstimator:
         top_parts = []
         for component in top_components[:3]:
             ratio = component.get("window_ratio")
-            ratio_text = "unknown" if ratio is None else f"{ratio:.0%}"
-            token_text = component.get("tokens") if token_accuracy == "exact" else "unknown"
-            top_parts.append(f"{component.get('name')}={token_text}({ratio_text})")
+            ratio_text = "n/a" if ratio is None else f"{ratio:.0%}"
+            tokens = int(component.get("tokens") or 0)
+            accuracy = str(component.get("token_accuracy") or token_accuracy or "estimated")
+            token_text = str(tokens) if accuracy == "exact" else f"~{tokens}"
+            top_parts.append(f"{component.get('name')}={token_text}({ratio_text},{accuracy})")
         if top_parts:
             logger.log(
                 level,

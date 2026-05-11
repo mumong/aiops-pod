@@ -16,6 +16,7 @@ import os
 import queue
 import re
 import time
+from copy import deepcopy
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -28,7 +29,7 @@ from app.core.context.archive import ContextArchive
 from app.core.context.budget import ContextBudgetEstimator, ModelContextResolver, serialize_tool_schema
 from app.core.context.observation import ObservationProcessor
 from app.core.prompts import get_workflow_prompt
-from app.core.workflow.schemas import ContextCompactionSummary
+from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
 from .streaming import push_event
 from .types import AICallResult
 
@@ -72,6 +73,7 @@ class AICall:
         observation_summary_mode: str = "rule",
         observation_summary_max_chars: int = 3000,
         context_compaction_config: Optional[Dict[str, Any]] = None,
+        chat_model_extra_body: Optional[Dict[str, Any]] = None,
     ):
         """
         Args:
@@ -82,11 +84,12 @@ class AICall:
         self.model = model
         self.model_str = model
         self.api_key = api_key
-        self.api_base = api_base
+        self.api_base = api_base.strip() if api_base and api_base.strip() else None
         normalized_mode = (observation_summary_mode or "rule").strip().lower()
         self.observation_summary_mode = normalized_mode if normalized_mode in {"rule", "ai"} else "rule"
         self.observation_summary_max_chars = max(200, int(observation_summary_max_chars or 3000))
         self.context_compaction_config = dict(context_compaction_config or {})
+        self.chat_model_extra_body = deepcopy(chat_model_extra_body or {})
 
         model_name, base_url = _parse_model(model, api_base)
         self._chat_model_kwargs: Dict[str, Any] = {
@@ -101,20 +104,21 @@ class AICall:
         logger.info("🔧 [AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
                     model_name, base_url or "(default)")
 
-    def _create_chat_model(self, session_id: Optional[str] = None, node_id: str = ""):
+    def _create_chat_model(
+        self,
+        session_id: Optional[str] = None,
+        node_id: str = "",
+        disable_streaming: bool = False,
+    ):
         """按次创建 ChatOpenAI，避免跨 asyncio event loop 复用底层 async client。"""
         kwargs = dict(self._chat_model_kwargs)
+        if disable_streaming:
+            kwargs["streaming"] = False
+            kwargs["disable_streaming"] = True
         metadata = self._session_metadata(session_id, node_id)
-        if metadata:
-            # Put session metadata on the base ChatOpenAI instance so LangChain
-            # agent internals such as bind_tools keep it on actual chat
-            # completion requests.
-            kwargs["extra_body"] = {
-                "metadata": metadata,
-                "trace_id": self._trace_id(session_id, node_id),
-                "generation_name": self._generation_name(node_id),
-                "user": session_id,
-            }
+        extra_body = self._build_extra_body(session_id, node_id, metadata)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         return ChatOpenAI(**kwargs)
 
     # ------------------------------------------------------------------
@@ -225,12 +229,25 @@ class AICall:
         schema: type[BaseModel],
         **kwargs,
     ) -> Tuple[Optional[BaseModel], str]:
-        """Call the model with Pydantic structured output, then JSON fallback."""
+        """Call the model with Pydantic structured output.
+
+        Native structured output is the default and the workflow boundary.
+        Text parsing fallback is disabled unless explicitly requested by a
+        legacy caller via allow_text_fallback=True.
+        """
         use_native = bool(kwargs.pop("use_native_structured", True))
+        allow_text_fallback = bool(kwargs.pop("allow_text_fallback", False))
         if use_native:
             native, raw = self._call_native_structured(system_prompt, question, schema, **kwargs)
             if native is not None:
                 return native, raw
+
+        if not allow_text_fallback:
+            logger.warning(
+                "⚠️ [AICall] native structured output unavailable for schema=%s; text fallback disabled",
+                schema.__name__,
+            )
+            return None, raw if 'raw' in locals() else ""
 
         # Compatibility fallback for OpenAI-compatible gateways that do not
         # support native structured output. The schema is still enforced by
@@ -261,6 +278,7 @@ class AICall:
         node_id = kwargs.pop("node_id", "")
         run_id = kwargs.pop("run_id", "")
         static_context_components = kwargs.pop("static_context_components", None)
+        structured_method = kwargs.pop("structured_method", "function_calling")
         output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
         if static_context_components is None:
             static_context_components = [
@@ -292,13 +310,17 @@ class AICall:
 
         session_id = self._normalize_langfuse_session_id(run_id)
         try:
-            model = self._create_chat_model(session_id=session_id, node_id=node_id or "structured")
+            model = self._create_chat_model(
+                session_id=session_id,
+                node_id=node_id or "structured",
+                disable_streaming=True,
+            )
             if kwargs:
                 model = model.bind(**kwargs)
             model = self._bind_session_metadata(model, session_id, node_id=node_id or "structured")
             if not hasattr(model, "with_structured_output"):
                 return None, ""
-            structured_model = model.with_structured_output(schema)
+            structured_model = model.with_structured_output(schema, method=structured_method)
             invoke_config = self._build_langchain_config(session_id, node_id=node_id or "structured")
             with self._langfuse_session_scope(session_id, node_id or "structured"):
                 result = (
@@ -341,6 +363,7 @@ class AICall:
         json_validator: Optional[Callable[[Any], bool]] = None,
         json_acceptance_guard: Optional[Callable[[Any, List[Dict]], bool]] = None,
         static_context_components: Optional[List[Dict[str, Any]]] = None,
+        response_schema: Optional[type[BaseModel]] = None,
     ) -> Tuple[AICallResult, List[Dict]]:
         """LangChain Agent loop with tool calling (create_agent)
 
@@ -352,6 +375,9 @@ class AICall:
             stream_queue: 实时事件队列（thinking 事件推送）
             node_id: 节点 ID（用于事件标记）
             cancel_event: 取消信号（threading.Event），set() 后 agent 提前退出
+            response_schema: 可选 Pydantic schema。传入时使用 LangChain
+                create_agent(response_format=ToolStrategy(schema))，在同一次
+                agent 工具循环内生成结构化结果。
 
         Returns:
             (AICallResult, thinking_events)
@@ -364,6 +390,7 @@ class AICall:
         iteration = 0
         seen_tool_call_signatures = set()
         seen_tool_result_signatures = set()
+        tool_args_by_call_id: Dict[str, Dict[str, Any]] = {}
         observation_processor = self._build_observation_processor()
         if static_context_components is None:
             tool_schema_payload = serialize_tool_schema(tools or [])
@@ -382,8 +409,8 @@ class AICall:
         logger.debug("📍 [AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字 expect_json=%s",
                       node_id or "?", max_steps, len(tools or []), len(system_prompt), expect_json)
 
-        # 无工具时直接调用 call_simple
-        if not tools:
+        # 无工具且不需要 agent structured_response 时直接调用 call_simple。
+        if not tools and response_schema is None:
             content = self.call_simple(
                 system_prompt,
                 question,
@@ -406,11 +433,29 @@ class AICall:
             session_id,
             node_id=node_id or "agent",
         )
-        agent = create_agent(
-            model=agent_model,
-            tools=tools,
-            system_prompt=system_prompt,
-        )
+        response_format = None
+        structured_output_tool_names = set()
+        if response_schema is not None:
+            from langchain.agents.structured_output import ToolStrategy
+
+            response_format = ToolStrategy(
+                schema=response_schema,
+                tool_message_content="结构化结果已生成。",
+            )
+            structured_output_tool_names = {
+                str(getattr(spec, "name", ""))
+                for spec in getattr(response_format, "schema_specs", [])
+                if str(getattr(spec, "name", "")).strip()
+            }
+
+        create_agent_kwargs = {
+            "model": agent_model,
+            "tools": tools,
+            "system_prompt": system_prompt,
+        }
+        if response_format is not None:
+            create_agent_kwargs["response_format"] = response_format
+        agent = create_agent(**create_agent_kwargs)
 
         # 使用 async stream 模式（MCP 工具需要异步调用）
         import asyncio
@@ -425,6 +470,7 @@ class AICall:
         logger.info("📍 [AICall] node=%s | max_steps(recursion_limit)=%d", node_id or "?", max_steps)
 
         final_content = ""
+        structured_response = None
         _content_buffer = []  # 收集 token 级别的文本片段
         tool_observation_contents: List[str] = []
         compaction_triggered = False
@@ -432,7 +478,7 @@ class AICall:
         emitted_tool_messages: List[Tuple[Any, Dict[str, Any]]] = []
 
         async def _run_agent():
-            nonlocal final_content, iteration, tool_call_count, tool_result_sequence, compaction_triggered
+            nonlocal final_content, structured_response, iteration, tool_call_count, tool_result_sequence, compaction_triggered
             async for chunk in agent.astream(
                 input_messages, config=config,
                 stream_mode=["updates", "messages"],
@@ -474,6 +520,16 @@ class AICall:
                     continue
                 update_data = chunk_data if isinstance(chunk_data, dict) else {}
                 for node_name, update in update_data.items():
+                    if isinstance(update, dict) and update.get("structured_response") is not None:
+                        structured_response = update.get("structured_response")
+                        final_content = self._serialize_structured_response(structured_response)
+                        self._record(
+                            thinking_events,
+                            "structured_response",
+                            node_id,
+                            schema=getattr(response_schema, "__name__", "") if response_schema else "",
+                            content=final_content[:1000],
+                        )
                     messages = update.get("messages", [])
                     for msg in messages:
                         if isinstance(msg, AIMessage):
@@ -545,6 +601,13 @@ class AICall:
                             # AI 工具调用
                             if new_tool_calls:
                                 for tc in new_tool_calls:
+                                    if tc.get("name") in structured_output_tool_names:
+                                        logger.info(
+                                            "🧾 [AICall] structured response emitted | node=%s schema=%s",
+                                            node_id or "?",
+                                            tc.get("name"),
+                                        )
+                                        continue
                                     tool_call_count += 1
                                     logger.debug("   🔧 [AICall] tool_call #%d %s | args=%s",
                                                 tool_call_count, tc["name"],
@@ -554,6 +617,8 @@ class AICall:
                                                tool_args=tc.get("args", {}),
                                                tool_call_id=tc.get("id"),
                                                iteration=iteration)
+                                    if tc.get("id"):
+                                        tool_args_by_call_id[str(tc.get("id"))] = dict(tc.get("args") or {})
                                     self._record(thinking_events, "tool_start", node_id,
                                                  tool_name=tc["name"],
                                                  tool_args=tc.get("args", {}),
@@ -563,6 +628,13 @@ class AICall:
                         elif hasattr(msg, 'type') and msg.type == 'tool':
                             # 工具执行结果
                             tool_name = getattr(msg, 'name', '') or ''
+                            if tool_name in structured_output_tool_names:
+                                logger.debug(
+                                    "🧾 [AICall] 跳过结构化输出 tool_result 统计 | node=%s schema=%s",
+                                    node_id or "?",
+                                    tool_name,
+                                )
+                                continue
                             tool_content = msg.content or ''
                             tool_signature = self._tool_result_signature(msg, tool_name, tool_content)
                             if tool_signature in seen_tool_result_signatures:
@@ -584,6 +656,7 @@ class AICall:
                                 tool_content=tool_content,
                                 static_context_components=static_context_components,
                                 prior_tool_observations=tool_observation_contents,
+                                tool_args=tool_args_by_call_id.get(str(getattr(msg, "tool_call_id", None)), {}),
                             )
                             bounded_content = observation.get("summary", tool_content)
                             tool_observation_contents.append(bounded_content)
@@ -592,8 +665,11 @@ class AICall:
                             except Exception as exc:
                                 logger.warning("⚠️ [AICall] ToolMessage 内容压缩回写失败: %s", exc)
                             status = "success"
+                            tool_call_id = getattr(msg, "tool_call_id", None)
+                            tool_args = tool_args_by_call_id.get(str(tool_call_id), {}) if tool_call_id else {}
                             all_tool_calls.append({
                                 "tool_name": tool_name,
+                                "tool_args": tool_args,
                                 "result": bounded_content,
                                 "raw_ref": observation.get("raw_ref"),
                                 "structured_ref": observation.get("structured_ref"),
@@ -630,7 +706,8 @@ class AICall:
                             evt = {
                                 "type": "tool_result",
                                 "tool_name": tool_name,
-                                "tool_call_id": getattr(msg, "tool_call_id", None),
+                                "tool_call_id": tool_call_id,
+                                "tool_args": tool_args,
                                 "status": status,
                                 "result_preview": bounded_content[:200],
                                 "result": bounded_content,
@@ -664,6 +741,13 @@ class AICall:
                                 try:
                                     if stop_checker(thinking_events):
                                         logger.info("🛑 [AICall] stop_checker 触发，提前结束 agent (node=%s)", node_id)
+                                        self._record(
+                                            thinking_events,
+                                            "early_stop",
+                                            node_id,
+                                            reason="stop_checker",
+                                            iteration=iteration,
+                                        )
                                         return
                                 except Exception as exc:
                                     logger.warning("⚠️ [AICall] stop_checker 执行失败: %s", exc)
@@ -702,6 +786,7 @@ class AICall:
             input_tokens=aggregate_usage.get("input_tokens"),
             output_tokens=aggregate_usage.get("output_tokens"),
             total_tokens=aggregate_usage.get("total_tokens"),
+            structured_response=structured_response,
         )
         self._write_final_context_budget(
             run_id=run_id,
@@ -835,6 +920,26 @@ class AICall:
         return str(content or "")
 
     @staticmethod
+    def _serialize_structured_response(value: Any) -> str:
+        """Serialize a LangChain structured_response without text parsing."""
+        if value is None:
+            return ""
+        if hasattr(value, "model_dump_json"):
+            try:
+                return value.model_dump_json()
+            except Exception:
+                pass
+        if hasattr(value, "model_dump"):
+            try:
+                return json.dumps(value.model_dump(), ensure_ascii=False, default=str)
+            except Exception:
+                pass
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            return str(value)
+
+    @staticmethod
     def _normalize_langfuse_session_id(run_id: str) -> Optional[str]:
         """Langfuse session_id must be a short US-ASCII string."""
         raw = str(run_id or "").strip()
@@ -892,16 +997,40 @@ class AICall:
             # metadata". OpenAI-compatible gateways still receive session data
             # through extra_body.metadata and user.
             return model.bind(
-                extra_body={
-                    "metadata": metadata,
-                    "trace_id": self._trace_id(session_id, node_id),
-                    "generation_name": self._generation_name(node_id),
-                    "user": session_id,
-                },
+                extra_body=self._build_extra_body(session_id, node_id, metadata),
             )
         except Exception as exc:
             logger.debug("📉 [AICall] 绑定 session metadata 失败，继续原模型调用: %s", exc)
             return model
+
+    def _build_extra_body(
+        self,
+        session_id: Optional[str],
+        node_id: str,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Merge model-provider options with trace metadata.
+
+        `extra_body` is also used for provider-specific controls such as local
+        Qwen chat-template options. Keep this merge centralized so tracing
+        cannot accidentally overwrite model controls, and model controls cannot
+        remove run/session provenance.
+        """
+        extra_body = deepcopy(self.chat_model_extra_body or {})
+        if not session_id:
+            return extra_body
+
+        trace_metadata = metadata or self._session_metadata(session_id, node_id)
+        existing_metadata = extra_body.get("metadata")
+        if isinstance(existing_metadata, dict):
+            merged_metadata = {**existing_metadata, **trace_metadata}
+        else:
+            merged_metadata = trace_metadata
+        extra_body["metadata"] = merged_metadata
+        extra_body["trace_id"] = self._trace_id(session_id, node_id)
+        extra_body["generation_name"] = self._generation_name(node_id)
+        extra_body["user"] = session_id
+        return extra_body
 
     @staticmethod
     def _session_metadata(session_id: Optional[str], node_id: str = "") -> Dict[str, str]:
@@ -1011,6 +1140,7 @@ class AICall:
         tool_content: str,
         static_context_components: Optional[List[Dict[str, Any]]] = None,
         prior_tool_observations: Optional[List[str]] = None,
+        tool_args: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         effective_run_id = run_id or f"adhoc-{int(time.time())}"
         context_usage_ratio = self._estimate_observation_context_usage(
@@ -1026,6 +1156,7 @@ class AICall:
                 tool_name=tool_name or "unknown",
                 raw_content=tool_content or "",
                 context_usage_ratio=context_usage_ratio,
+                tool_args=tool_args or {},
             )
         except Exception as exc:
             logger.warning("⚠️ [AICall] observation processor 失败，使用截断回退: %s", exc)
@@ -1442,17 +1573,18 @@ class AICall:
                 "current_summary": current_summary[:4000],
                 "raw_preview": raw[:12000],
             }
-            parsed, text = self.call_simple_json(
+            parsed, text = self.call_structured(
                 system_prompt=prompt,
                 question=json.dumps(payload, ensure_ascii=False),
-                validator=lambda data: isinstance(data, dict),
+                schema=ToolObservationSummary,
+                node_id="tool_observation_summarizer",
                 max_tokens=2048,
             )
-            if isinstance(parsed, dict) and parsed.get("summary"):
-                facts = parsed.get("key_facts") or []
-                conflicts = parsed.get("conflicts") or []
-                missing = parsed.get("missing") or []
-                lines = [str(parsed.get("summary", ""))]
+            if parsed is not None and parsed.summary:
+                facts = parsed.key_facts or []
+                conflicts = parsed.conflicts or []
+                missing = parsed.missing or []
+                lines = [str(parsed.summary)]
                 if facts:
                     lines.append("key_facts: " + json.dumps(facts, ensure_ascii=False, default=str))
                 if conflicts:

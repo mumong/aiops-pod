@@ -203,7 +203,7 @@ def test_context_budget_log_is_compact_when_token_count_exact(monkeypatch, caplo
     assert "startup_prompt=" not in text
 
 
-def test_context_budget_log_marks_unknown_when_token_count_estimated(monkeypatch, caplog):
+def test_context_budget_log_uses_estimated_values_without_unknown_top(monkeypatch, caplog):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "1000")
     monkeypatch.delenv("AIOPS_TIKTOKEN_ENCODING", raising=False)
     monkeypatch.delenv("AIOPS_TOKENIZER_JSON_PATH", raising=False)
@@ -224,7 +224,25 @@ def test_context_budget_log_marks_unknown_when_token_count_estimated(monkeypatch
 
     text = "\n".join(record.getMessage() for record in caplog.records)
     assert "token=estimated" in text
-    assert "input_tokens=unknown" in text
+    assert "input_tokens=~" in text
+    assert "[context_budget.top]" in text
+    assert "unknown(" not in text
+
+
+def test_fetch_runbook_structured_metadata_includes_requested_runbook_id(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path))
+
+    observation = processor.process(
+        run_id="run-rb",
+        node_id="layer",
+        sequence=1,
+        tool_name="fetch_runbook",
+        raw_content="<runbook>\n# Pod Terminating Stuck\n</runbook>",
+        tool_args={"runbook_id": "pod-terminating-stuck.md"},
+    )
+
+    assert observation["structured"]["runbook_id"] == "pod-terminating-stuck.md"
+    assert observation["structured"]["runbook_name"] == "pod-terminating-stuck"
 
 
 def test_context_budget_uses_provider_usage_probe_for_input_ratio(monkeypatch, caplog):
@@ -521,7 +539,7 @@ def test_observation_processor_keeps_fetch_runbook_full_by_default(tmp_path):
     )
 
     assert processed["summary"] == raw
-    assert processed["processor"] == "generic+passthrough_full"
+    assert processed["processor"] == "runbook+passthrough_full"
 
 
 def test_observation_processor_compresses_fetch_runbook_under_context_pressure(tmp_path):
@@ -549,7 +567,7 @@ def test_observation_processor_compresses_fetch_runbook_under_context_pressure(t
 
     assert calls
     assert processed["summary"] == "压缩后的 runbook: 只保留诊断步骤和禁用修复动作。"
-    assert processed["processor"] == "generic+passthrough_full+llm_budget"
+    assert processed["processor"] == "runbook+passthrough_full+llm_budget"
 
 
 def test_observation_processor_context_guard_truncates_runbook_without_summarizer(tmp_path):
@@ -567,4 +585,4 @@ def test_observation_processor_context_guard_truncates_runbook_without_summarize
 
     assert len(processed["summary"]) <= 300
     assert "完整内容见 raw_ref" in processed["summary"]
-    assert processed["processor"] == "generic+passthrough_full+context_guard_truncate"
+    assert processed["processor"] == "runbook+passthrough_full+context_guard_truncate"

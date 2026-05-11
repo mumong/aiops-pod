@@ -18,10 +18,11 @@ def test_workflow_request_uses_fresh_aicall_instance(monkeypatch):
     captured = []
 
     class _FreshAICall:
-        def __init__(self, model, api_key, api_base=""):
+        def __init__(self, model, api_key, api_base="", **kwargs):
             self.model_str = model
             self.api_key = api_key
             self.api_base = api_base
+            self.kwargs = kwargs
             created.append(self)
 
     class _DummyExecutor:
@@ -44,6 +45,13 @@ def test_workflow_request_uses_fresh_aicall_instance(monkeypatch):
 
     service.ai_call = _SharedAICall()
     service.mcp_tools = ["tool-a"]
+    service.raw_config = {
+        "llm": {
+            "extra_body": {
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        },
+    }
 
     list(service._execute_query_stream_workflow("q1", output_format="sse"))
     list(service._execute_query_stream_workflow("q2", output_format="sse"))
@@ -55,3 +63,7 @@ def test_workflow_request_uses_fresh_aicall_instance(monkeypatch):
     assert all(instance.model_str == service.ai_call.model_str for instance in created)
     assert all(instance.api_key == service.ai_call.api_key for instance in created)
     assert all(instance.api_base == service.ai_call.api_base for instance in created)
+    assert all(
+        instance.kwargs["chat_model_extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+        for instance in created
+    )
