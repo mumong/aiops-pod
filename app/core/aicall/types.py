@@ -1,6 +1,6 @@
 # app/core/aicall/types.py
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -15,6 +15,7 @@ class AICallResult:
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    structured_response: Optional[Any] = None
 
 
 @dataclass

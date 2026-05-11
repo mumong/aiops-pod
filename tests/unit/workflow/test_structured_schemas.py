@@ -12,10 +12,12 @@ from app.core.workflow.schemas import (
     EvidencePlanOutput,
     LayerHandoff,
     LayerOutput,
+    ConclusionOutput,
     QueryResult,
     RCAOutput,
 )
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
+from app.core.context.observation import ObservationProcessor
 
 
 def test_evidence_plan_output_validates_required_fields():
@@ -36,6 +38,52 @@ def test_evidence_plan_output_validates_required_fields():
 
     assert parsed.evidence_plan[0].id == "e1"
     assert parsed.evidence_plan[0].level == "critical"
+
+
+def test_conclusion_output_schema_accepts_report_payload():
+    parsed = ConclusionOutput.model_validate({
+        "title": "诊断报告",
+        "diagnosis_overview": {"layer": "L3"},
+        "evidence_chain": [],
+        "root_cause": "节点无法访问 Docker Hub",
+        "recommendations": ["配置镜像代理"],
+        "limitations": [],
+        "markdown_report": "## 诊断报告\n节点无法访问 Docker Hub",
+    })
+
+    assert parsed.title == "诊断报告"
+    assert parsed.markdown_report.startswith("## 诊断报告")
+
+
+def test_conclusion_output_normalizes_flattened_markdown_report():
+    parsed = ConclusionOutput.model_validate({
+        "title": "诊断报告",
+        "diagnosis_overview": {"layer": "L3"},
+        "evidence_chain": [],
+        "root_cause": "节点无法访问 Docker Hub",
+        "recommendations": ["配置镜像代理"],
+        "limitations": [],
+        "markdown_report": "---## 📊 诊断概览| 项目 | 内容 ||------|------|| **Pod异常状态** | ImagePullBackOff |",
+    })
+
+    assert parsed.markdown_report.startswith("---\n## 📊 诊断概览")
+    assert "| 项目 | 内容 |" in parsed.markdown_report
+    assert "\n|------|------|" in parsed.markdown_report
+
+
+def test_conclusion_output_repairs_flattened_adjacent_table_rows():
+    parsed = ConclusionOutput.model_validate({
+        "markdown_report": (
+            "## 📊 诊断概览 | 项目 | 内容 | |------|------| "
+            "| **Pod异常状态** | ImagePullBackOff (4), Terminating (1) | "
+            "| **兼容归因层** | L1, L3 |"
+        ),
+    })
+
+    assert "## 📊 诊断概览\n| 项目 | 内容 |" in parsed.markdown_report
+    assert "\n|------|------|" in parsed.markdown_report
+    assert "\n| **Pod异常状态** | ImagePullBackOff (4), Terminating (1) |" in parsed.markdown_report
+    assert "| |------" not in parsed.markdown_report
 
 
 def test_evidence_plan_output_rejects_unknown_tool_name():
@@ -63,7 +111,6 @@ def test_layer_output_normalizes_pods_entities_and_scenarios():
         "layers": ["L3"],
         "confidence": "0.92",
         "reasoning": "发现镜像拉取失败",
-        "primary_pod": {"name": "redis-0", "namespace": "aaa"},
         "abnormal_pods": [
             {"name": "redis-0", "namespace": "aaa", "status": "ImagePullBackOff"},
             "aiops-e2e/terminating-stuck",
@@ -85,28 +132,7 @@ def test_layer_output_normalizes_pods_entities_and_scenarios():
     assert parsed.abnormal_pods[1].namespace == "aiops-e2e"
     assert parsed.key_entities[1].type == "Namespace"
     assert parsed.possible_scenarios[0].scenario == "节点到镜像仓库网络不可达"
-
-
-def test_layer_parse_json_extracts_payload_after_think_text():
-    text = """</think>
-
-{
-  "layer": "L3",
-  "derived_layer": "L3",
-  "layers": ["L3"],
-  "confidence": 0.95,
-  "reasoning": "发现 ImagePullBackOff",
-  "primary_pod": {"name": "redis-0", "namespace": "aaa"},
-  "abnormal_pods": [{"name": "redis-0", "namespace": "aaa", "status": "ImagePullBackOff"}],
-  "pod_status_keyword": "ImagePullBackOff",
-  "pod_abnormal_type": "ImagePullFailed"
-}
-"""
-
-    parsed = LayerClassifierNode._try_parse_json(text)
-
-    assert parsed["layer"] == "L3"
-    assert parsed["primary_pod"] == {"name": "redis-0", "namespace": "aaa"}
+    assert "primary_pod" not in parsed.model_dump(exclude_none=True)
 
 
 def test_layer_lite_extract_uses_pydantic_structured_output():
@@ -122,7 +148,6 @@ def test_layer_lite_extract_uses_pydantic_structured_output():
                 "layers": ["L1"],
                 "confidence": 0.91,
                 "reasoning": "发现 Terminating 卡住",
-                "primary_pod": {"name": "terminating-stuck", "namespace": "aiops-e2e"},
                 "abnormal_pods": [
                     {"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}
                 ],
@@ -152,7 +177,6 @@ def test_layer_handoff_requires_issue_groups_and_group_scenarios():
         "layers": ["L3", "L1"],
         "confidence": 0.92,
         "primary_problem": "发现 ImagePull 和 Terminating",
-        "primary_pod": {"name": "redis-0", "namespace": "aaa"},
         "abnormal_pods": [
             {"name": "redis-0", "namespace": "aaa", "status": "ImagePullBackOff"},
             {"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"},
@@ -163,8 +187,7 @@ def test_layer_handoff_requires_issue_groups_and_group_scenarios():
                 "status_keywords": ["ImagePullBackOff"],
                 "pod_abnormal_type": "ImagePullFailed",
                 "compatible_layers": ["L3"],
-                "primary_entities": [{"kind": "Pod", "namespace": "aaa", "name": "redis-0"}],
-                "is_primary": True,
+                "entities": [{"kind": "Pod", "namespace": "aaa", "name": "redis-0"}],
                 "possible_scenarios": ["节点到镜像仓库网络不可达"],
             },
             {
@@ -172,8 +195,7 @@ def test_layer_handoff_requires_issue_groups_and_group_scenarios():
                 "status_keywords": ["Terminating"],
                 "pod_abnormal_type": "TerminatingStuck",
                 "compatible_layers": ["L1"],
-                "primary_entities": [{"kind": "Pod", "namespace": "aiops-e2e", "name": "terminating-stuck"}],
-                "is_primary": False,
+                "entities": [{"kind": "Pod", "namespace": "aiops-e2e", "name": "terminating-stuck"}],
                 "possible_scenarios": ["finalizer 未清理"],
             },
         ],
@@ -188,6 +210,10 @@ def test_layer_handoff_requires_issue_groups_and_group_scenarios():
 
     assert len(parsed.issue_groups) == 2
     assert parsed.issue_groups[1].possible_scenarios[0].scenario == "finalizer 未清理"
+    dumped = parsed.model_dump(exclude_none=True)
+    assert "primary_pod" not in dumped
+    assert "primary_entities" not in dumped["issue_groups"][0]
+    assert "is_primary" not in dumped["issue_groups"][0]
 
 
 def test_query_result_normalizes_string_missing_items():
@@ -203,6 +229,103 @@ def test_query_result_normalizes_string_missing_items():
     assert parsed.columns[0].key == "node"
     assert parsed.missing[0].field == "result"
     assert parsed.missing[0].reason == "prometheus 返回空"
+
+
+def test_query_result_normalizes_legacy_llm_shapes():
+    parsed = QueryResult.model_validate({
+        "query_target": "查询 CPU 和内存",
+        "collection_summary": {"collected": "100%", "missing": "0%"},
+        "columns": [
+            {"name": "节点", "type": "string"},
+            {"name": "CPU 使用率 (%)", "type": "float"},
+        ],
+        "rows": [{"节点": "node1", "CPU 使用率 (%)": "12.3"}],
+        "notes": "指标来自 Prometheus node exporter",
+        "missing": "没有缺失数据",
+        "sources": {"tool": "execute_prometheus_instant_query", "query": "cpu_query"},
+    })
+
+    assert parsed.collection_summary == "collected=100%; missing=0%"
+    assert parsed.columns[0].key == "节点"
+    assert parsed.notes == ["指标来自 Prometheus node exporter"]
+    assert parsed.missing[0].reason == "没有缺失数据"
+    assert parsed.sources[0].tool == "execute_prometheus_instant_query"
+
+
+def test_query_result_normalizes_source_type_to_tool():
+    parsed = QueryResult.model_validate({
+        "query_target": "查询 CPU",
+        "collection_summary": {"collected_nodes": 3, "missing_nodes": 0},
+        "columns": [{"name": "节点", "type": "string"}],
+        "rows": [{"节点": "10.2.0.48"}],
+        "sources": {
+            "type": "prometheus_instant_query",
+            "query": "cpu_query",
+            "timestamp": "2026-05-09T03:20:12Z",
+        },
+    })
+
+    assert parsed.sources[0].tool == "prometheus_instant_query"
+    assert parsed.sources[0].query == "cpu_query"
+
+
+def test_prometheus_http_error_is_semantic_failure():
+    processor = ObservationProcessor()
+
+    observation = processor.process(
+        run_id="test-prometheus-error",
+        node_id="layer",
+        sequence=1,
+        tool_name="execute_prometheus_instant_query",
+        raw_content='{"error": "400 Client Error: Bad Request for url: http://prometheus/api/v1/query?query=bad"}',
+    )
+
+    assert observation["semantic_success"] is False
+    assert observation["structured"]["status"] == "prometheus_error"
+    assert "400 Client Error" in observation["summary"]
+
+
+def test_prometheus_api_error_preserves_parse_error_and_query():
+    processor = ObservationProcessor()
+
+    observation = processor.process(
+        run_id="test-prometheus-api-error",
+        node_id="layer",
+        sequence=1,
+        tool_name="execute_prometheus_instant_query",
+        raw_content=(
+            '{"status":"error","errorType":"bad_data",'
+            '"error":"invalid parameter \\"query\\": 1:49: parse error: unexpected character inside braces: \'/\'",'
+            '"query":"1 - (node_filesystem_avail_bytes{mountpoint=\\"/\\" / node_filesystem_size_bytes{mountpoint=\\"/\\"})",'
+            '"url":"http://prometheus/api/v1/query"}'
+        ),
+    )
+
+    assert observation["semantic_success"] is False
+    assert observation["structured"]["status"] == "prometheus_error"
+    assert observation["structured"]["error_type"] == "bad_data"
+    assert "unexpected character inside braces" in observation["structured"]["error"]
+    assert "node_filesystem_avail_bytes" in observation["structured"]["query"]
+    assert "Prometheus errorType: bad_data" in observation["summary"]
+    assert "unexpected character inside braces" in observation["summary"]
+    assert "PromQL:" in observation["summary"]
+
+
+def test_prometheus_empty_vector_is_semantic_miss():
+    processor = ObservationProcessor()
+
+    observation = processor.process(
+        run_id="test-prometheus-empty",
+        node_id="layer",
+        sequence=1,
+        tool_name="execute_prometheus_instant_query",
+        raw_content='{"status":"success","data":{"resultType":"vector","result":[]}}',
+    )
+
+    assert observation["semantic_success"] is False
+    assert observation["structured"]["status"] == "prometheus_empty"
+    assert observation["structured"]["result_count"] == 0
+    assert "结果为空" in observation["summary"]
 
 
 def test_evidence_plan_output_rejects_missing_command():

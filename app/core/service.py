@@ -315,6 +315,7 @@ class HolmesService:
                     observation_summary_mode=summary_mode,
                     observation_summary_max_chars=summary_max_chars,
                     context_compaction_config=self.get_context_compaction_config(),
+                    chat_model_extra_body=self.get_chat_model_extra_body_config(_llm_config),
                 )
                 logger.info("   ✅ AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
                            final_model, summary_mode, summary_max_chars, time.time() - step_start)
@@ -427,6 +428,7 @@ class HolmesService:
                 observation_summary_mode=summary_mode,
                 observation_summary_max_chars=summary_max_chars,
                 context_compaction_config=self.get_context_compaction_config(),
+                chat_model_extra_body=self.get_chat_model_extra_body_config(),
             )
         except TypeError:
             # Unit-test fakes may not implement the production constructor extension.
@@ -548,6 +550,22 @@ class HolmesService:
         except (TypeError, ValueError):
             result["summary_max_tokens"] = 1200
         return result
+
+    def get_chat_model_extra_body_config(
+        self,
+        llm_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Return provider-specific ChatOpenAI extra_body options.
+
+        This is a transport/model-control boundary only. Workflow nodes should
+        not know provider-specific options such as local Qwen thinking controls.
+        """
+        cfg = llm_config if isinstance(llm_config, dict) else None
+        if cfg is None:
+            raw_cfg = getattr(self, "raw_config", {}) if isinstance(getattr(self, "raw_config", {}), dict) else {}
+            cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
+        extra_body = cfg.get("extra_body", {}) if isinstance(cfg.get("extra_body", {}), dict) else {}
+        return dict(extra_body)
 
     def _load_runbooks(self):
         """加载和合并 runbook catalogs"""

@@ -13,7 +13,14 @@ data:
     # LLM_API_KEY / LLM_MODEL / LLM_API_BASE / MODEL_CONTEXT_WINDOW /
     # AIOPS_TOKENIZER_JSON_PATH / AIOPS_TIKTOKEN_ENCODING
     # ConfigMap 不再放默认模型，避免与 Secret 产生双配置冲突。
-    llm: {}
+    llm:
+      # Provider-specific OpenAI-compatible request options.
+      # Qwen3 local inference can otherwise spend minutes emitting `<think>`
+      # before each tool call. This is model transport control, not workflow
+      # business logic.
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
 
     # i18n 配置 控制提示词和输出形式是中文zh还是英文en
     i18n:
@@ -100,16 +107,47 @@ data:
         rca: 0
         conclusion: 0
 
+      # 统一结构化运行时:
+      # layer/evidence/rca 通过 Pydantic 产出机器可消费结构化结果；
+      # conclusion 是面向人的最终 Markdown 报告，默认不走 Pydantic，避免模板遵循被 schema 削弱。
+      structured_runtime:
+        enabled: true
+        fallback_enabled: true
+        nodes:
+          layer: true
+          evidence: true
+          rca: true
+          conclusion: true
+
       # 节点动态提前停止开关:
       # layer=true: 有效结构化 JSON 被 AICall 捕获后可提前结束本轮 agent
       # evidence=true: critical/important 证据满足后 stop_checker 可提前结束采证
       # 如需对比复杂场景下工具采集充分性，可临时关闭对应节点早停。
       layer:
+        # 使用 LangChain create_agent(response_format=LayerOutput)：
+        # 工具调用和 LayerOutput Pydantic 结构化输出在同一次 agent loop 内完成。
+        agent_structured_output: true
+        # 仅当 OpenAI-compatible 网关不支持 agent response_format 时，降级为旧 layer_extract。
+        extract_fallback: true
         early_stop:
-          enabled: true
+          enabled: false
       evidence:
+        # 使用 LangChain create_agent(response_format=EvidenceCollectionOutput)：
+        # 计划生成、真实工具采证、结构化 evidence 输出在同一次 agent loop 内完成。
+        agent_structured_output: true
+        # 仅当 agent structured output 不可用时，降级为旧的 evidence_plan 预生成 + 执行模式。
+        plan_precall_fallback: true
         early_stop:
-          enabled: true
+          enabled: false
+
+      conclusion:
+        # diagnosis 默认使用 CONCLUSION_FORMATTER_PROMPT 纯文本 Markdown 输出。
+        # 如需回到旧 ConclusionOutput 结构化路径，可显式设置 structured_output: true。
+        structured_output: false
+        # 这里控制不同模式的输出预算：QUERY 只需要短表格摘要，诊断保留完整报告空间。
+        max_tokens:
+          query: 1024
+          diagnosis: 8192
 
       # 本地推理模型 `<think>` 
       # full=完整展示（默认） / truncated=只展示前 max_chars 字符 / hidden=不展示

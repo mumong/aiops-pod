@@ -76,6 +76,7 @@ class ObservationProcessor:
         tool_name: str,
         raw_content: str,
         context_usage_ratio: Optional[float] = None,
+        tool_args: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         raw = raw_content or ""
         tool = tool_name or "unknown"
@@ -86,11 +87,15 @@ class ObservationProcessor:
 
         if full_passthrough:
             structured, _, extracted_processor = self._extract(tool, raw)
+            if tool == "fetch_runbook":
+                self._attach_runbook_metadata(structured, tool_args or {})
             summary = raw
             processor = f"{extracted_processor}+passthrough_full"
         else:
             try:
                 structured, summary, processor = self._extract(tool, raw)
+                if tool == "fetch_runbook":
+                    self._attach_runbook_metadata(structured, tool_args or {})
             except Exception as exc:
                 structured = {"status": "extract_failed", "error": str(exc)}
                 summary = self._generic_summary(tool, raw)
@@ -176,6 +181,8 @@ class ObservationProcessor:
             return self._extract_run_image(raw)
         if tool == "run_bash_command":
             return self._extract_command_result(tool, raw)
+        if tool in {"execute_prometheus_instant_query", "execute_prometheus_range_query"}:
+            return self._extract_prometheus_result(tool, raw)
         if tool in self.LOG_TOOLS:
             return self._extract_logs(tool, raw)
         if tool in {"kubectl_get_by_kind_in_cluster", "kubectl_get_by_kind_in_namespace", "kubernetes_tabular_query"}:
@@ -206,6 +213,14 @@ class ObservationProcessor:
             "title": title,
             "raw_chars": len(raw or ""),
         }, raw, "runbook"
+
+    @staticmethod
+    def _attach_runbook_metadata(structured: Dict[str, Any], tool_args: Dict[str, Any]) -> None:
+        runbook_id = str((tool_args or {}).get("runbook_id") or "").strip()
+        if not runbook_id:
+            return
+        structured["runbook_id"] = runbook_id
+        structured["runbook_name"] = runbook_id[:-3] if runbook_id.endswith(".md") else runbook_id
 
     def _extract_events(self, raw: str) -> tuple[Dict[str, Any], str, str]:
         if re.search(r"no events found|no resources found", raw, re.IGNORECASE):
@@ -782,6 +797,52 @@ class ObservationProcessor:
         head = "\n".join(lines[:40])
         return f"{tool} 输出摘要: raw_chars={len(raw)} lines={len(lines)}\n{head}"
 
+    def _extract_prometheus_result(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
+        try:
+            payload = json.loads(raw or "{}")
+        except Exception:
+            payload = {}
+
+        error = str(payload.get("error") or "").strip()
+        error_type = str(payload.get("errorType") or "").strip()
+        query = str(payload.get("query") or "").strip()
+        url = str(payload.get("url") or "").strip()
+        status = str(payload.get("status") or "").strip().lower()
+        if error or error_type or status == "error" or re.search(r"\b(?:400|500)\s+Client Error|Bad Request", raw or "", re.IGNORECASE):
+            message = error or error_type or raw[:1000]
+            structured = {
+                "status": "prometheus_error",
+                "tool": tool,
+                "error": message,
+            }
+            summary_lines = [f"{tool} 查询失败: {message}"]
+            if error_type:
+                structured["error_type"] = error_type
+                summary_lines.append(f"Prometheus errorType: {error_type}")
+            if query:
+                structured["query"] = query
+                summary_lines.append(f"PromQL: {query}")
+            if url:
+                structured["url"] = url
+            return structured, "\n".join(summary_lines), "prometheus_error"
+
+        result = ((payload.get("data") or {}).get("result") or []) if isinstance(payload, dict) else []
+        result_count = len(result) if isinstance(result, list) else 0
+        if result_count == 0:
+            structured = {
+                "status": "prometheus_empty",
+                "tool": tool,
+                "result_count": 0,
+            }
+            return structured, f"{tool} 执行成功但结果为空；这表示查询未命中数据，不能视为已采集到指标值。", "prometheus_empty"
+
+        structured = {
+            "status": "prometheus_result",
+            "tool": tool,
+            "result_count": result_count,
+        }
+        return structured, raw, "prometheus_result"
+
     @staticmethod
     def _is_semantically_successful(structured: Dict[str, Any], summary: str) -> bool:
         status = str((structured or {}).get("status", "")).lower()
@@ -790,6 +851,8 @@ class ObservationProcessor:
             "command_failed",
             "yaml_parse_failed",
             "invalid_tool",
+            "prometheus_error",
+            "prometheus_empty",
             "run_image_result",
             "command_result",
         }:

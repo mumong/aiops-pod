@@ -2,6 +2,12 @@
 
 本文只保留当前正式部署方式，不再展开历史模式。
 
+## 相关架构文档
+
+- [架构说明](/root/huhu/agent/combine-aiops-mcp/robusta/docs/ARCHITECTURE.md)
+- [工作流上下文流转说明](/root/huhu/agent/combine-aiops-mcp/robusta/docs/工作流上下文流转说明.md)
+- [工作流结构化运行时演进说明（2026-05-09）](/root/huhu/agent/combine-aiops-mcp/robusta/docs/workflow-structured-runtime-evolution-2026-05-09.md)
+
 ## 1. 部署前准备
 
 ### 必要文件

@@ -17,6 +17,7 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import ContextBudgetEstimator, serialize_tool_schema
+from app.core.workflow.structured_runtime import StructuredAgentRuntime
 from app.core.workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,24 @@ class WorkflowNode(ABC):
 
         return default
 
+    def _is_structured_runtime_enabled(self, default: bool = True) -> bool:
+        wf_config = self._get_workflow_config()
+        runtime_cfg = wf_config.get("structured_runtime", {}) if isinstance(wf_config, dict) else {}
+        if isinstance(runtime_cfg, dict):
+            nodes = runtime_cfg.get("nodes")
+            if isinstance(nodes, dict) and self.node_id in nodes:
+                return self._parse_bool_config(nodes.get(self.node_id), default)
+            if "enabled" in runtime_cfg:
+                return self._parse_bool_config(runtime_cfg.get("enabled"), default)
+        return default
+
+    def _is_structured_runtime_fallback_enabled(self, default: bool = True) -> bool:
+        wf_config = self._get_workflow_config()
+        runtime_cfg = wf_config.get("structured_runtime", {}) if isinstance(wf_config, dict) else {}
+        if isinstance(runtime_cfg, dict) and "fallback_enabled" in runtime_cfg:
+            return self._parse_bool_config(runtime_cfg.get("fallback_enabled"), default)
+        return default
+
     def should_inject_runbook_catalog(self) -> bool:
         """节点是否需要在 prompt 中注入 runbook catalog。"""
         return True
@@ -175,9 +194,10 @@ class WorkflowNode(ABC):
             raise RuntimeError(
                 f"[{self.node_id}] ai_call 未设置，无法调用 LLM。"
                 "请确保 USE_AICALL=true 且 AICall 初始化成功。"
-            )
+        )
 
         start_time = time.time()
+        force_no_tools = bool(kwargs.pop("force_no_tools", False))
         max_steps = 10
         if getattr(self, 'holmes_service', None):
             max_steps = self.holmes_service.get_node_max_steps(self.node_id)
@@ -240,7 +260,7 @@ class WorkflowNode(ABC):
 
         language_policy = (
             "\n\n# 语言与可见输出约束\n"
-            "- 全部可见输出必须使用中文，包括分析说明、工具调用前后的说明、JSON 字段内的解释文本。\n"
+            "- 全部可见输出必须使用中文，包括分析说明、工具调用前后的说明、结构化字段内的解释文本。\n"
             "- 禁止输出 `<think>`、`</think>` 或任何思考标签内容；不要暴露内部推理过程。\n"
             "- 需要推理时只给结论性、可验证的简短说明，并优先调用工具获取事实。\n"
         )
@@ -251,7 +271,7 @@ class WorkflowNode(ABC):
             "content": language_policy,
         })
 
-        tools = getattr(self, 'tools', []) or []
+        tools = [] if force_no_tools else (getattr(self, 'tools', []) or [])
         run_id = getattr(self, "current_run_id", "") or kwargs.pop("run_id", "")
         tool_schema_payload = serialize_tool_schema(tools)
         static_context_components = [
@@ -316,6 +336,31 @@ class WorkflowNode(ABC):
             static_context_components=static_context_components,
             **kwargs,
         )
+        if self._should_retry_without_agent_response_schema(
+            result=result,
+            thinking_events=thinking_events,
+            response_schema=kwargs.get("response_schema"),
+            force_no_tools=force_no_tools,
+        ):
+            logger.warning(
+                "⚠️ [%s] agent response_format 与当前模型网关不兼容，保留 Pydantic fallback，重试无 response_schema 工具采集",
+                self.node_id,
+            )
+            retry_kwargs = dict(kwargs)
+            retry_kwargs.pop("response_schema", None)
+            result, thinking_events = self.ai_call.call(
+                system_prompt=full_prompt,
+                question=question,
+                tools=tools,
+                max_steps=max_steps,
+                stream_queue=self._event_queue,
+                node_id=self.node_id,
+                run_id=run_id,
+                cancel_event=self.cancel_event,
+                stop_checker=stop_checker,
+                static_context_components=static_context_components,
+                **retry_kwargs,
+            )
 
         llm_duration_ms = (time.time() - start_time) * 1000
         logger.info("✅ [%s] AICall.call() 完成 | %.1fs | iterations=%d | tools=%d | 输出=%d字",
@@ -331,6 +376,98 @@ class WorkflowNode(ABC):
                 self.metrics.record_tool_call("llm_tool", 0, success=True)
 
         return result, thinking_events
+
+    def _should_retry_without_agent_response_schema(
+        self,
+        result: Any,
+        thinking_events: list,
+        response_schema: Optional[type],
+        force_no_tools: bool,
+    ) -> bool:
+        """Detect OpenAI-compatible gateways that reject LangChain ToolStrategy.
+
+        The retry only removes agent response_format. Nodes still use Pydantic
+        fallback extraction/validation from the real tool transcript, so this is
+        a transport compatibility fallback, not a return to prompt JSON.
+        """
+        if response_schema is None or force_no_tools:
+            return False
+        if not self._is_structured_runtime_fallback_enabled(default=True):
+            return False
+        if any((ev or {}).get("type") == "tool_result" for ev in (thinking_events or [])):
+            return False
+        content = str(getattr(result, "result", "") or "")
+        if not content.startswith("Agent 执行异常:"):
+            return False
+        incompatible_markers = (
+            "MidStreamFallbackError",
+            "APIConnectionError",
+            "Expecting ':' delimiter",
+            "tool",
+            "response_format",
+            "structured",
+            "InternalServerError",
+            "Error code: 500",
+        )
+        return any(marker in content for marker in incompatible_markers)
+
+    def _call_structured_agent(
+        self,
+        question: str,
+        system_prompt: str,
+        schema: type,
+        use_tools: bool = True,
+        stop_checker: Optional[Callable[[list], bool]] = None,
+        **kwargs,
+    ) -> Tuple[Any, Any, list]:
+        """Finalize a node with a no-tool Pydantic structured call.
+
+        Tool-heavy nodes should collect facts with `_call_llm` first, then use
+        this helper for schema finalization. This keeps structured output away
+        from streaming multi-tool agent loops, which are fragile on local
+        OpenAI-compatible gateways.
+        """
+        if use_tools:
+            response, thinking_events = self._call_llm(
+                question,
+                system_prompt,
+                stop_checker=stop_checker,
+                response_schema=schema,
+                force_no_tools=False,
+                **kwargs,
+            )
+            parsed = StructuredAgentRuntime.extract_structured_response(response, schema)
+            return parsed, response, thinking_events
+
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is None or not hasattr(ai_call, "call_structured"):
+            raise RuntimeError(f"[{self.node_id}] ai_call 不支持 call_structured，无法生成结构化输出")
+
+        run_id = getattr(self, "current_run_id", "") or kwargs.pop("run_id", "")
+        structured, raw = ai_call.call_structured(
+            system_prompt=system_prompt,
+            question=question,
+            schema=schema,
+            node_id=self.node_id,
+            run_id=run_id,
+            **kwargs,
+        )
+        from app.core.aicall.types import AICallResult
+
+        response = AICallResult(
+            result=raw or "",
+            tool_call_count=0,
+            iterations=1,
+            structured_response=structured,
+        )
+        events = []
+        if structured is not None:
+            events.append({
+                "type": "structured_response",
+                "node": self.node_id,
+                "schema": getattr(schema, "__name__", ""),
+            })
+        return structured, response, events
 
     def _compact_context(self, text: str, max_chars: int = 30000) -> str:
         """用 LLM 压缩大段上下文，保留关键信息（类似 Claude compact）。

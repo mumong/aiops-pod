@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -100,7 +102,7 @@ class ScenarioItem(BaseModel):
         return value
 
 
-class PrimaryEntity(BaseModel):
+class GroupEntity(BaseModel):
     kind: str = "Pod"
     namespace: str = ""
     name: str = ""
@@ -111,10 +113,21 @@ class IssueGroup(BaseModel):
     status_keywords: list[str] = Field(default_factory=list)
     pod_abnormal_type: str = ""
     compatible_layers: list[str] = Field(default_factory=list)
-    primary_entities: list[PrimaryEntity] = Field(default_factory=list)
-    is_primary: bool = False
+    entities: list[GroupEntity] = Field(default_factory=list)
     evidence_plan: list[dict[str, Any]] = Field(default_factory=list)
     possible_scenarios: list[ScenarioItem] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_entities(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            item = dict(value)
+            if "entities" not in item and "primary_entities" in item:
+                item["entities"] = item.get("primary_entities") or []
+            item.pop("primary_entities", None)
+            item.pop("is_primary", None)
+            return item
+        return value
 
 
 class CurrentAbnormalSummary(BaseModel):
@@ -134,7 +147,6 @@ class LayerOutput(BaseModel):
     layer_name: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     reasoning: str
-    primary_pod: PodRef | None = None
     abnormal_pods: list[PodRef] = Field(default_factory=list)
     pod_status_keyword: str = ""
     pod_abnormal_type: str = ""
@@ -161,8 +173,8 @@ class LayerHandoff(BaseModel):
     layers: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     primary_problem: str = ""
-    primary_pod: PodRef | None = None
     abnormal_pods: list[PodRef] = Field(default_factory=list)
+    abnormal_groups: list[IssueGroup] = Field(default_factory=list)
     issue_groups: list[IssueGroup] = Field(default_factory=list)
     current_abnormal_summary: CurrentAbnormalSummary = Field(default_factory=CurrentAbnormalSummary)
     pod_status_keyword: str = ""
@@ -195,6 +207,11 @@ class QueryColumn(BaseModel):
     def normalize_column(cls, value: Any) -> Any:
         if isinstance(value, str):
             return {"key": value, "label": value}
+        if isinstance(value, dict) and "key" not in value and "name" in value:
+            item = dict(value)
+            item["key"] = str(item.get("name") or "")
+            item.setdefault("label", item["key"])
+            return item
         return value
 
     @model_validator(mode="after")
@@ -225,6 +242,11 @@ class QuerySource(BaseModel):
     def normalize_source(cls, value: Any) -> Any:
         if isinstance(value, str):
             return {"tool": "-", "query": value}
+        if isinstance(value, dict):
+            item = dict(value)
+            if "tool" not in item and "type" in item:
+                item["tool"] = str(item.get("type") or "-")
+            return item
         return value
 
 
@@ -237,6 +259,35 @@ class QueryResult(BaseModel):
     missing: list[QueryMissingItem] = Field(default_factory=list)
     sources: list[QuerySource] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_query_result(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        item = dict(value)
+
+        summary = item.get("collection_summary")
+        if isinstance(summary, dict):
+            item["collection_summary"] = "; ".join(
+                f"{key}={val}" for key, val in summary.items()
+            )
+        elif summary is not None and not isinstance(summary, str):
+            item["collection_summary"] = str(summary)
+
+        for key in ("notes", "missing", "sources"):
+            val = item.get(key)
+            if val is None or isinstance(val, list):
+                continue
+            item[key] = [val]
+
+        columns = item.get("columns")
+        if isinstance(columns, dict):
+            item["columns"] = [
+                {"key": str(key), "label": str(value)}
+                for key, value in columns.items()
+            ]
+        return item
+
 
 class EvidencePlanItem(BaseModel):
     id: str = Field(min_length=1)
@@ -244,7 +295,12 @@ class EvidencePlanItem(BaseModel):
     level: EvidenceLevelName = "important"
     tool: EvidenceToolName
     command: str = Field(min_length=1)
+    tool_args: dict[str, Any] = Field(default_factory=dict)
     purpose: str = ""
+    evidence_type: str = ""
+    target_scope: str = ""
+    acceptable_tools: list[EvidenceToolName] = Field(default_factory=list)
+    counts_for_completeness: bool = True
 
 
 class EvidencePlanOutput(BaseModel):
@@ -262,6 +318,14 @@ class ToolObservationCandidate(BaseModel):
     raw_ref: str | None = None
     summary_ref: str | None = None
     structured_ref: str | None = None
+
+
+class ToolObservationSummary(BaseModel):
+    summary: str = ""
+    key_facts: list[str] = Field(default_factory=list)
+    conflicts: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    raw_ref: str = ""
 
 
 class EvidenceMatchItem(BaseModel):
@@ -290,6 +354,9 @@ class EvidenceCollectionOutput(BaseModel):
     environment_evidence_total: int = Field(ge=0)
     environment_evidence_collected: int = Field(ge=0)
     environment_evidence_completeness: float = Field(ge=0.0, le=1.0)
+    executed_tool_count: int = Field(default=0, ge=0)
+    matched_tool_count: int = Field(default=0, ge=0)
+    unplanned_tool_count: int = Field(default=0, ge=0)
     evidence_inventory: list[dict[str, Any]] = Field(default_factory=list)
     missing_reasons: list[str] = Field(default_factory=list)
     early_stop: dict[str, Any] = Field(default_factory=dict)
@@ -337,3 +404,42 @@ class RCAOutput(BaseModel):
         if not (self.root_cause or "").strip():
             raise ValueError("RCA output requires root_cause or root_cause_summary")
         return self
+
+
+class ConclusionOutput(BaseModel):
+    title: str = ""
+    diagnosis_overview: dict[str, Any] = Field(default_factory=dict)
+    evidence_chain: list[dict[str, Any]] = Field(default_factory=list)
+    root_cause: str = ""
+    impact: str = ""
+    recommendations: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    markdown_report: str = Field(min_length=1)
+
+    @field_validator("markdown_report")
+    @classmethod
+    def validate_markdown_report_format(cls, value: str) -> str:
+        text = value.strip()
+        text = cls._normalize_flattened_markdown(text)
+        if "##" not in text:
+            raise ValueError("markdown_report must contain Markdown section headings")
+        return text
+
+    @staticmethod
+    def _normalize_flattened_markdown(text: str) -> str:
+        normalized = text
+        normalized = re.sub(r"---\s*(?=##)", "---\n", normalized)
+        normalized = re.sub(r"\s+(?=#{2,6}\s)", "\n\n", normalized)
+        normalized = re.sub(r"(?m)^(#{2,6}\s[^|\n]+?)\s+(\|)", r"\1\n\2", normalized)
+        normalized = re.sub(r"\|\s*\|(?=\s*(?:[-: ]+\|)+)", "|\n|", normalized)
+        normalized = re.sub(r"\|\s*\|(?=\s*(?:\*\*|`|[^|\s]))", "|\n|", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        normalized = re.sub(r"^---\n\n+(?=##)", "---\n", normalized)
+        return normalized.strip()
+
+
+class QueryConclusionOutput(BaseModel):
+    markdown_report: str = Field(
+        min_length=1,
+        description="面向用户的 Markdown 查询结果，只基于输入中的真实 query_result/tool_data 总结。",
+    )
