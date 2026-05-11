@@ -6,6 +6,88 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
+PROMETHEUS_QUERY_TOOLS = {
+    "execute_prometheus_instant_query",
+    "execute_prometheus_range_query",
+}
+
+INVALID_PROMETHEUS_TIME_VALUES = {
+    "",
+    "now",
+    "now()",
+    "current",
+    "latest",
+}
+
+
+def _sanitize_mcp_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize MCP transport arguments before they reach the MCP server.
+
+    Prometheus instant query uses server-side current time when `time` is
+    omitted. Literal values like `now()` are valid PromQL concepts in some
+    contexts but invalid for the HTTP API `time` parameter, so remove them at
+    the transport boundary. This does not alter diagnostic meaning.
+    """
+    sanitized = dict(args or {})
+    if tool_name not in PROMETHEUS_QUERY_TOOLS:
+        return sanitized
+
+    if "time" in sanitized:
+        raw_time = sanitized.get("time")
+        normalized_time = str(raw_time or "").strip().lower()
+        if normalized_time in INVALID_PROMETHEUS_TIME_VALUES:
+            sanitized.pop("time", None)
+
+    return sanitized
+
+
+def _log_sanitized_args(tool_name: str, original: Dict[str, Any], sanitized: Dict[str, Any]) -> None:
+    if sanitized == original:
+        return
+    removed = sorted(set(original.keys()) - set(sanitized.keys()))
+    logger.info(
+        "🧼 [MCP-Tools] sanitized args | tool=%s removed=%s sanitized=%s",
+        tool_name,
+        removed,
+        sanitized,
+    )
+
+
+def _wrap_mcp_tool_for_transport(tool: Any) -> Any:
+    """Wrap selected MCP tools with transport-safe argument normalization."""
+    tool_name = str(getattr(tool, "name", "") or "")
+    if tool_name not in PROMETHEUS_QUERY_TOOLS:
+        return tool
+
+    from langchain_core.tools import StructuredTool
+
+    async def _acoroutine(**kwargs: Any) -> Any:
+        sanitized = _sanitize_mcp_tool_args(tool_name, kwargs)
+        _log_sanitized_args(tool_name, kwargs, sanitized)
+        return await tool.ainvoke(sanitized)
+
+    def _func(**kwargs: Any) -> Any:
+        sanitized = _sanitize_mcp_tool_args(tool_name, kwargs)
+        _log_sanitized_args(tool_name, kwargs, sanitized)
+        return tool.invoke(sanitized)
+
+    wrapped = StructuredTool.from_function(
+        func=_func,
+        coroutine=_acoroutine,
+        name=tool_name,
+        description=getattr(tool, "description", "") or "",
+        args_schema=getattr(tool, "args_schema", None),
+        return_direct=getattr(tool, "return_direct", False),
+        # The wrapper returns the underlying MCP result as message content.
+        # Keeping an upstream "content_and_artifact" contract here would make
+        # LangChain expect a two-tuple from this adapter and fail before AICall
+        # can archive the actual tool output.
+        response_format="content",
+    )
+    wrapped.metadata = dict(getattr(tool, "metadata", None) or {})
+    return wrapped
+
+
 async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
     """从 MCP 配置加载所有工具为 LangChain BaseTool
 
@@ -62,9 +144,11 @@ async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
             tool_names = [t.name for t in tools]
             server_tool_map[srv_name] = tool_names
             # 给每个工具打上 server_name 标签，供 _log_loaded_resources 按 server 分组
+            wrapped_tools = []
             for t in tools:
                 t.metadata = {**(t.metadata or {}), "server_name": srv_name}
-            all_tools.extend(tools)
+                wrapped_tools.append(_wrap_mcp_tool_for_transport(t))
+            all_tools.extend(wrapped_tools)
             logger.info("   ✅ [%s] %d 个工具: %s",
                        srv_name, len(tools), ", ".join(tool_names))
         except Exception as e:

@@ -13,21 +13,11 @@ from app.core.skills.models import EvidenceItem, EvidenceLevel, Layer
 
 def test_evidence_should_continue_when_important_item_is_still_missing():
     node = EvidenceCollectorNode()
+    node._active_evidence_plan = [
+        {"id": "e1", "description": "确认驱逐原因", "level": "critical", "tool": "kubectl_describe", "command": "kubectl describe pod x", "purpose": "确认 Evicted 原因"},
+        {"id": "e2", "description": "检查 Deployment 配置", "level": "important", "tool": "kubectl_get_yaml", "command": "kubectl get deployment x -o yaml", "purpose": "确认配置"},
+    ]
     thinking_events = [
-        {
-            "type": "ai_message",
-            "full_content": """
-```json
-{
-  "layer": "L0",
-  "evidence_plan": [
-    {"id": "e1", "description": "确认驱逐原因", "level": "critical", "tool": "kubectl_describe", "command": "kubectl describe pod x", "purpose": "确认 Evicted 原因"},
-    {"id": "e2", "description": "检查 Deployment 配置", "level": "important", "tool": "kubectl_get_yaml", "command": "kubectl get deployment x -o yaml", "purpose": "确认配置"}
-  ]
-}
-```
-""",
-        },
         {
             "type": "tool_result",
             "status": "success",
@@ -41,21 +31,11 @@ def test_evidence_should_continue_when_important_item_is_still_missing():
 
 def test_evidence_should_continue_when_any_critical_item_is_missing():
     node = EvidenceCollectorNode()
+    node._active_evidence_plan = [
+        {"id": "e1", "description": "确认驱逐原因", "level": "critical", "tool": "kubectl_describe", "command": "kubectl describe pod x", "purpose": "确认 Evicted 原因"},
+        {"id": "e2", "description": "检查节点磁盘压力", "level": "critical", "tool": "kubectl_describe", "command": "kubectl describe node x", "purpose": "确认节点状态"},
+    ]
     thinking_events = [
-        {
-            "type": "ai_message",
-            "full_content": """
-```json
-{
-  "layer": "L0",
-  "evidence_plan": [
-    {"id": "e1", "description": "确认驱逐原因", "level": "critical", "tool": "kubectl_describe", "command": "kubectl describe pod x", "purpose": "确认 Evicted 原因"},
-    {"id": "e2", "description": "检查节点磁盘压力", "level": "critical", "tool": "kubectl_describe", "command": "kubectl describe node x", "purpose": "确认节点状态"}
-  ]
-}
-```
-""",
-        },
         {
             "type": "tool_result",
             "status": "success",
@@ -69,22 +49,12 @@ def test_evidence_should_continue_when_any_critical_item_is_missing():
 
 def test_evidence_should_stop_when_critical_and_important_items_are_collected():
     node = EvidenceCollectorNode()
+    node._active_evidence_plan = [
+        {"id": "e1", "description": "确认驱逐原因", "level": "critical", "tool": "kubectl_describe", "command": "kubectl describe pod x", "purpose": "确认 Evicted 原因"},
+        {"id": "e2", "description": "检查 Deployment 配置", "level": "important", "tool": "kubectl_get_yaml", "command": "kubectl get deployment x -o yaml", "purpose": "确认配置"},
+        {"id": "e3", "description": "补充日志", "level": "optional", "tool": "kubectl_logs", "command": "kubectl logs x", "purpose": "补充上下文"},
+    ]
     thinking_events = [
-        {
-            "type": "ai_message",
-            "full_content": """
-```json
-{
-  "layer": "L0",
-  "evidence_plan": [
-    {"id": "e1", "description": "确认驱逐原因", "level": "critical", "tool": "kubectl_describe", "command": "kubectl describe pod x", "purpose": "确认 Evicted 原因"},
-    {"id": "e2", "description": "检查 Deployment 配置", "level": "important", "tool": "kubectl_get_yaml", "command": "kubectl get deployment x -o yaml", "purpose": "确认配置"},
-    {"id": "e3", "description": "补充日志", "level": "optional", "tool": "kubectl_logs", "command": "kubectl logs x", "purpose": "补充上下文"}
-  ]
-}
-```
-""",
-        },
         {
             "type": "tool_result",
             "status": "success",
@@ -237,35 +207,26 @@ def test_evidence_execute_retries_when_plan_exists_but_no_tool_results():
     assert len(result["evidence_items"]) == 2
 
 
-def test_evidence_execute_retries_when_tools_run_before_plan():
+def test_evidence_execute_does_not_retry_when_pydantic_plan_has_effective_tool_result():
     node = EvidenceCollectorNode()
     calls = []
 
     first_events = [
         {
             "type": "tool_start",
-            "tool_name": "kubectl_describe",
+            "tool_name": "kubectl_events",
             "tool_args": {"resource_type": "pod", "resource_name": "ham-wcc79", "namespace": "xnet"},
         },
         {
             "type": "ai_message",
-            "full_content": """
-```json
-{
-  "layer": "L3",
-  "evidence_plan": [
-    {"id": "e1", "description": "确认 Pod 事件", "level": "critical", "tool": "kubectl_events", "command": "kubectl events ...", "purpose": "确认镜像拉取失败原因"}
-  ]
-}
-```
-""",
+            "full_content": "计划已由 Pydantic evidence_plan 生成，但工具被提前调用。",
         },
         {
             "type": "tool_result",
             "status": "success",
-            "tool_name": "kubectl_describe",
-            "result_preview": "ImagePullBackOff",
-            "result": "ImagePullBackOff",
+            "tool_name": "kubectl_events",
+            "result_preview": "Failed to pull image",
+            "result": "Failed to pull image",
         },
     ]
     second_plan = [
@@ -274,16 +235,7 @@ def test_evidence_execute_retries_when_tools_run_before_plan():
     second_events = [
         {
             "type": "ai_message",
-            "full_content": """
-```json
-{
-  "layer": "L3",
-  "evidence_plan": [
-    {"id": "e1", "description": "确认 Pod 事件", "level": "critical", "tool": "kubectl_events", "command": "kubectl events ...", "purpose": "确认镜像拉取失败原因"}
-  ]
-}
-```
-""",
+            "full_content": "沿用 Pydantic evidence_plan 后开始执行工具。",
         },
         {
             "type": "tool_start",
@@ -316,10 +268,8 @@ def test_evidence_execute_retries_when_tools_run_before_plan():
         "key_entities": [],
     })
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert calls[0]["strict_mode"] is False
-    assert calls[1]["strict_mode"] is True
-    assert "evidence_plan 前就开始调用工具" in calls[1]["failure_reason"]
     assert result["evidence_completeness"] == 1.0
 
 
@@ -353,17 +303,17 @@ def test_pydantic_external_plan_does_not_retry_when_execution_has_no_inband_plan
     assert node._get_plan_protocol_failure_reason(plan, events) == ""
 
 
-def test_evidence_user_prompt_requires_first_assistant_message_to_be_plan_json():
+def test_evidence_user_prompt_uses_pydantic_plan_contract_instead_of_in_band_json():
     message = EvidenceCollectorNode._build_evidence_user_message(
         question="我的集群有什么问题",
         layer="L3",
         layer_handoff='{"layer":"L3"}',
     )
 
-    assert "第一条 assistant 消息必须只输出 evidence_plan JSON" in message
-    assert "在输出 evidence_plan JSON 之前，禁止调用任何工具" in message
-    assert "输出 evidence_plan 后不能结束" in message
-    assert "必须继续调用至少一个 critical 或 important 级真实工具" in message
+    assert "EvidencePlanOutput" in message or "Pydantic evidence_plan" in message
+    assert "第一条 assistant 消息必须只输出 evidence_plan JSON" not in message
+    assert "在输出 evidence_plan JSON 之前，禁止调用任何工具" not in message
+    assert "必须调用至少一个 critical 或 important 级真实工具" in message
     assert "根据 Available Runbooks/catalog 的 description" in message
     assert "evidence_plan 第一项必须是 fetch_runbook" not in message
     assert "Pod 异常状态的证据" in message
@@ -392,145 +342,7 @@ def test_evidence_user_prompt_with_existing_plan_skips_replanning():
     assert "既有 evidence_plan" in message
     assert "不要重新输出 evidence_plan" in message
     assert "第一条 assistant 消息必须只输出 evidence_plan JSON" not in message
-    assert "直接执行既有 evidence_plan 中的必要工具" in message
-
-
-def test_evidence_plan_parser_validates_with_pydantic_schema():
-    text = """```json
-{
-  "layer": "L3",
-  "evidence_plan": [
-    {
-      "id": "e1",
-      "description": "获取 Pod 事件",
-      "level": "critical",
-      "tool": "kubectl_events",
-      "command": "kubectl get events -n aaa",
-      "purpose": "确认镜像拉取失败原因"
-    }
-  ],
-  "collection_strategy": "先确认当前异常 Pod。"
-}
-```"""
-
-    plan = EvidenceCollectorNode()._parse_llm_evidence_plan(text)
-
-    assert plan == [
-        {
-            "id": "e1",
-            "description": "获取 Pod 事件",
-            "level": "critical",
-            "tool": "kubectl_events",
-            "command": "kubectl get events -n aaa",
-            "purpose": "确认镜像拉取失败原因",
-        }
-    ]
-
-
-def test_evidence_plan_parser_rejects_invalid_pydantic_plan():
-    text = """```json
-{
-  "layer": "L3",
-  "evidence_plan": [
-    {
-      "id": "e1",
-      "description": "获取 Pod 事件",
-      "level": "critical",
-      "tool": "kubectl_events",
-      "purpose": "确认镜像拉取失败原因"
-    }
-  ],
-  "collection_strategy": "缺少 command，应拒绝。"
-}
-```"""
-
-    assert EvidenceCollectorNode()._parse_llm_evidence_plan(text) == []
-
-
-def test_evidence_plan_parser_does_not_fallback_to_kubectl_commands_from_analysis_text():
-    text = """已采集证据如下。
-
-```json
-{
-  "evidence_plan": {
-    "collected_evidence": [
-      {
-        "id": "e1",
-        "description": "这是最终总结，不是计划",
-        "tool": "kubectl_describe",
-        "result": {"status": "ImagePullBackOff"}
-      }
-    ]
-  }
-}
-```
-
-建议后续人工执行：
-kubectl describe pod test1-redis-master-0 -n aaa
-kubectl get secret -n aaa
-"""
-
-    assert EvidenceCollectorNode()._parse_llm_evidence_plan(text) == []
-
-
-def test_evidence_plan_parser_rejects_plain_kubectl_command_list():
-    text = """
-需要执行以下检查：
-kubectl describe pod test1-redis-master-0 -n aaa",
-kubectl describe pod test1-redis-slave-0 -n aaa",
-kubectl get secret -n aaa",
-"""
-
-    assert EvidenceCollectorNode()._parse_llm_evidence_plan(text) == []
-
-
-def test_evidence_extract_plan_keeps_first_valid_plan_when_final_message_is_malformed():
-    valid_plan = """```json
-{
-  "layer": "L3",
-  "evidence_plan": [
-    {
-      "id": "e1",
-      "description": "确认主异常组 Pod 状态",
-      "level": "critical",
-      "tool": "kubectl_describe",
-      "command": "kubectl describe pod test1-redis-master-0 -n aaa",
-      "purpose": "确认 ImagePullBackOff 当前状态"
-    },
-    {
-      "id": "g2-e1",
-      "description": "确认次要 Terminating 异常组当前状态",
-      "level": "important",
-      "tool": "kubectl_describe",
-      "command": "kubectl describe pod terminating-stuck -n aiops-e2e",
-      "purpose": "确认 TerminatingStuck 是否仍存在"
-    }
-  ],
-  "collection_strategy": "主异常组完整采集，次要异常组最小验证。"
-}
-```"""
-    malformed_final = """```json
-{
-  "evidence_plan": {
-    "collected_evidence": [
-      {"id": "e1", "tool": "kubectl_describe"}
-    ]
-  }
-}
-```
-kubectl describe pod other -n aaa
-"""
-
-    events = [
-        {"type": "ai_message", "full_content": valid_plan},
-        {"type": "tool_result", "status": "success", "tool_name": "kubectl_describe", "result": "ImagePullBackOff"},
-        {"type": "ai_message", "full_content": malformed_final},
-    ]
-
-    plan = EvidenceCollectorNode()._extract_plan_from_thinking(events)
-
-    assert [item["id"] for item in plan] == ["e1", "g2-e1"]
-    assert all(item["tool"] != "kubectl" for item in plan)
+    assert "直接执行既有 Pydantic evidence_plan 中的必要工具" in message
 
 
 def test_evidence_user_prompt_keeps_context_archive_reference_compact():
@@ -634,6 +446,7 @@ def test_evidence_early_stop_enabled_by_default_passes_stop_checker():
 
 def test_evidence_plan_is_generated_with_structured_output_before_tool_execution():
     node = EvidenceCollectorNode()
+    node.workflow_config_override = {"evidence": {"agent_structured_output": False}}
     calls = []
 
     class _StructuredAICall:
@@ -682,22 +495,69 @@ def test_evidence_plan_is_generated_with_structured_output_before_tool_execution
     assert events[0]["tool_name"] == "kubectl_events"
 
 
+def test_evidence_preplanned_execution_collects_tools_without_agent_response_schema():
+    node = EvidenceCollectorNode()
+    captured = {}
+    structured_plan = EvidencePlanOutput.model_validate({
+        "layer": "L3",
+        "evidence_plan": [
+            {
+                "id": "e1",
+                "description": "获取 Pod 事件",
+                "level": "critical",
+                "tool": "kubectl_events",
+                "command": "kubectl get events -n aaa",
+                "purpose": "确认异常原因",
+            }
+        ],
+        "collection_strategy": "先查事件",
+    })
+
+    class _PlanAICall:
+        def call_structured(self, *args, **kwargs):
+            captured["plan_schema"] = kwargs.get("schema")
+            return structured_plan, structured_plan.model_dump_json()
+
+    node.ai_call = _PlanAICall()
+
+    def _fake_call_llm(question, system_prompt, **kwargs):
+        captured["response_schema"] = kwargs.get("response_schema")
+        captured["stop_checker"] = kwargs.get("stop_checker")
+        captured["question"] = question
+        return SimpleNamespace(result="已确认镜像拉取失败"), [
+            {
+                "type": "tool_result",
+                "status": "success",
+                "tool_name": "kubectl_events",
+                "result": "Failed to pull image",
+            }
+        ]
+
+    node._call_llm = _fake_call_llm
+
+    plan, events, text = node._plan_evidence_with_llm(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis="{}",
+    )
+
+    assert captured["plan_schema"] is EvidencePlanOutput
+    assert captured["response_schema"] is None
+    assert captured["stop_checker"] == node._should_stop_collection_early
+    assert "既有 evidence_plan" in captured["question"]
+    assert plan[0]["id"] == "e1"
+    assert events[0]["tool_name"] == "kubectl_events"
+    assert text == "已确认镜像拉取失败"
+
+
 def test_evidence_should_stop_when_required_item_has_diagnostic_negative_result():
     node = EvidenceCollectorNode()
+    node._active_evidence_plan = [
+        {"id": "e1", "description": "检查节点到 Docker Hub 镜像仓库是否可达", "level": "critical", "tool": "run_bash_command", "command": "curl -v --connect-timeout 10 https://registry-1.docker.io/v2/", "purpose": "验证镜像仓库网络可达性"}
+    ]
     thinking_events = [
-        {
-            "type": "ai_message",
-            "full_content": """
-```json
-{
-  "layer": "L3",
-  "evidence_plan": [
-    {"id": "e1", "description": "检查节点到 Docker Hub 镜像仓库是否可达", "level": "critical", "tool": "run_bash_command", "command": "curl -v --connect-timeout 10 https://registry-1.docker.io/v2/", "purpose": "验证镜像仓库网络可达性"}
-  ]
-}
-```
-""",
-        },
         {
             "type": "tool_result",
             "status": "success",
@@ -718,20 +578,10 @@ def test_evidence_should_stop_when_required_item_has_diagnostic_negative_result(
 
 def test_evidence_should_stop_when_kubectl_run_image_times_out_for_registry_probe():
     node = EvidenceCollectorNode()
+    node._active_evidence_plan = [
+        {"id": "e1", "description": "运行临时 Pod 验证 redis 镜像是否可拉取", "level": "critical", "tool": "kubectl_run_image", "command": "kubectl run test-pull-redis --image=docker.io/bitnami/redis:5.0.7-debian-10-r32", "purpose": "验证镜像仓库访问和镜像拉取"}
+    ]
     thinking_events = [
-        {
-            "type": "ai_message",
-            "full_content": """
-```json
-{
-  "layer": "L3",
-  "evidence_plan": [
-    {"id": "e1", "description": "运行临时 Pod 验证 redis 镜像是否可拉取", "level": "critical", "tool": "kubectl_run_image", "command": "kubectl run test-pull-redis --image=docker.io/bitnami/redis:5.0.7-debian-10-r32", "purpose": "验证镜像仓库访问和镜像拉取"}
-  ]
-}
-```
-""",
-        },
         {
             "type": "tool_result",
             "status": "success",
@@ -822,6 +672,155 @@ def test_evidence_plan_normalization_drops_duplicate_runtime_info_grep_variants(
     normalized = EvidenceCollectorNode._normalize_evidence_plan(plan)
 
     assert [item["id"] for item in normalized] == ["e25"]
+
+
+def test_evidence_plan_normalization_adds_missing_abnormal_group_coverage():
+    layer_handoff = {
+        "abnormal_groups": [
+            {
+                "group_id": "g1",
+                "status_keywords": ["ImagePullBackOff"],
+                "pod_abnormal_type": "ImagePullFailed",
+                "entities": [
+                    {"kind": "Pod", "namespace": "aaa", "name": "redis-master-0"},
+                    {"kind": "Pod", "namespace": "xnet", "name": "redis-master-0"},
+                ],
+            },
+            {
+                "group_id": "g2",
+                "status_keywords": ["Terminating"],
+                "pod_abnormal_type": "TerminatingStuck",
+                "entities": [
+                    {"kind": "Pod", "namespace": "aiops-e2e", "name": "terminating-stuck"},
+                ],
+            },
+        ],
+        "current_abnormal_summary": {
+            "status_counts": {"ImagePullBackOff": 4, "Terminating": 1},
+            "total_abnormal": 5,
+        },
+    }
+    plan = [
+        {
+            "id": "e1",
+            "description": "验证 Terminating Pod finalizers",
+            "level": "critical",
+            "tool": "kubectl_get_yaml",
+            "command": "kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
+            "purpose": "确认 finalizer 是否阻塞删除",
+            "evidence_type": "pod_lifecycle",
+            "target_scope": "group:g2",
+            "acceptable_tools": ["kubectl_get_yaml"],
+        }
+    ]
+
+    normalized = EvidenceCollectorNode._normalize_evidence_plan(plan, layer_handoff=layer_handoff)
+
+    assert any(item["target_scope"] == "group:g1" for item in normalized)
+    assert any(item["target_scope"] == "group:g2" for item in normalized)
+    assert any(
+        item["target_scope"] == "group:g1"
+        and item["evidence_type"] == "pod_events"
+        and item["tool"] == "kubectl_events"
+        and item["tool_args"] == {
+            "resource_type": "pod",
+            "resource_name": "redis-master-0",
+            "namespace": "aaa",
+        }
+        for item in normalized
+    )
+
+
+def test_evidence_plan_normalization_derives_tool_args_for_kubectl_events_command():
+    plan = [
+        {
+            "id": "e1",
+            "description": "验证 Pod 事件",
+            "level": "critical",
+            "tool": "kubectl_events",
+            "command": "kubectl get events -n aaa --field-selector involvedObject.name=test1-redis-master-0",
+            "purpose": "确认 ImagePullBackOff 事件",
+        }
+    ]
+
+    normalized = EvidenceCollectorNode._normalize_evidence_plan(plan)
+
+    assert normalized[0]["tool_args"] == {
+        "resource_type": "pod",
+        "resource_name": "test1-redis-master-0",
+        "namespace": "aaa",
+    }
+
+
+def test_evidence_existing_plan_prompt_includes_pydantic_tool_args():
+    message = EvidenceCollectorNode._build_evidence_user_message(
+        question="我的集群有什么问题",
+        layer="L3",
+        layer_handoff="{}",
+        existing_plan=[
+            {
+                "id": "e1",
+                "level": "critical",
+                "tool": "kubectl_events",
+                "command": "kubectl get events -n aaa --field-selector involvedObject.name=test1-redis-master-0",
+                "purpose": "确认事件",
+                "tool_args": {
+                    "resource_type": "pod",
+                    "resource_name": "test1-redis-master-0",
+                    "namespace": "aaa",
+                },
+            }
+        ],
+        failure_reason="沿用计划执行",
+    )
+
+    assert "tool_args=" in message
+    assert '"resource_type": "pod"' in message
+    assert "不要从 command 文本重新猜 MCP 参数" in message
+
+
+def test_plan_completeness_uses_countable_planned_items_not_extra_layer_inventory():
+    node = EvidenceCollectorNode()
+    planned_items = [
+        EvidenceItem(
+            id="e1",
+            description="验证 ImagePull 事件",
+            level=EvidenceLevel.CRITICAL,
+            collected=True,
+            value="Failed to pull image",
+            source="thinking_match",
+        ),
+        EvidenceItem(
+            id="e2",
+            description="验证 Terminating finalizer",
+            level=EvidenceLevel.IMPORTANT,
+            collected=False,
+            value=None,
+            source="planned",
+        ),
+    ]
+    upstream_items = [
+        EvidenceItem(
+            id="layer_1",
+            description="上游已验证工具结果: kubectl_get_by_kind_in_cluster",
+            level=EvidenceLevel.IMPORTANT,
+            collected=True,
+            value="status_counts={'ImagePullBackOff': 4, 'Terminating': 1}",
+            source="layer_verified",
+        ),
+        EvidenceItem(
+            id="layer_2",
+            description="上游已验证工具结果: kubectl_events",
+            level=EvidenceLevel.IMPORTANT,
+            collected=True,
+            value="Failed to pull image",
+            source="layer_verified",
+        ),
+    ]
+
+    stats = node._calculate_plan_completeness(planned_items, upstream_items)
+
+    assert stats == {"plan_total": 2, "plan_collected": 1, "plan_completeness": 0.5}
 
 
 def test_evidence_does_not_count_failed_or_wrong_intent_tool_results():
@@ -943,6 +942,268 @@ def test_evidence_counts_diagnostic_negative_connectivity_result():
     assert items[0].outcome == "negative"
     assert "Connection reset by peer" in items[0].value
     assert node._calculate_completeness(items) == 1
+
+
+def test_evidence_merges_layer_verified_tools_into_inventory():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "获取 Pod YAML 验证镜像地址",
+            "level": "critical",
+            "tool": "kubectl_get_yaml",
+            "command": "kubectl get pod test1-redis-master-0 -n aaa -o yaml",
+            "purpose": "确认镜像地址和 imagePullSecrets",
+        },
+        {
+            "id": "e2",
+            "description": "获取 Terminating Pod 状态",
+            "level": "important",
+            "tool": "kubectl_get_by_name",
+            "command": "kubectl get pod terminating-stuck -n aiops-e2e",
+            "purpose": "确认删除卡住状态",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "node": "layer",
+            "status": "success",
+            "tool_name": "kubectl_get_yaml",
+            "semantic_success": True,
+            "result": "kubectl_get_yaml 关键字段摘要:\nkind: Pod\nname: test1-redis-master-0\nnamespace: aaa\nimage=docker.io/bitnami/redis:5.0.7",
+            "structured": {"status": "yaml_summarized", "kind": "Pod", "name": "test1-redis-master-0", "namespace": "aaa"},
+        },
+        {
+            "type": "tool_result",
+            "node": "layer",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": False,
+            "result": '{"success": false, "stderr": "curl: (35) Recv failure: Connection reset by peer"}',
+            "structured": {"status": "command_result", "success": False, "stderr_preview": "Connection reset by peer"},
+        },
+    ]
+
+    upstream = node._build_upstream_evidence_items(plan, events)
+    merged = node._merge_evidence_items(
+        node._build_evidence_items_from_thinking(plan, []),
+        upstream,
+    )
+
+    assert any(item.id == "e1" and item.collected and item.source == "layer_verified" for item in merged)
+    assert any(item.id.startswith("layer_") and item.collected for item in merged)
+    assert node._calculate_completeness(merged) >= 2 / 3
+
+
+def test_evidence_intent_matching_counts_matched_over_planned_not_always_full():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "验证镜像拉取 Pod 当前状态",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod redis-0 -n aaa",
+            "evidence_type": "pod_status",
+            "target_scope": "group:g1",
+            "acceptable_tools": ["kubectl_describe", "kubectl_get_by_name"],
+        },
+        {
+            "id": "e2",
+            "description": "验证镜像地址和 imagePullSecrets",
+            "level": "critical",
+            "tool": "kubectl_get_yaml",
+            "command": "kubectl get pod redis-0 -n aaa -o yaml",
+            "evidence_type": "pod_spec",
+            "target_scope": "group:g1",
+            "acceptable_tools": ["kubectl_get_yaml"],
+        },
+        {
+            "id": "e3",
+            "description": "验证 Terminating Pod finalizers",
+            "level": "important",
+            "tool": "kubectl_get_yaml",
+            "command": "kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
+            "evidence_type": "pod_lifecycle",
+            "target_scope": "group:g2",
+            "acceptable_tools": ["kubectl_get_yaml", "kubectl_describe"],
+        },
+        {
+            "id": "e4",
+            "description": "验证节点到镜像仓库网络",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "curl -v https://registry-1.docker.io/v2/",
+            "evidence_type": "registry_connectivity",
+            "target_scope": "group:g1",
+            "acceptable_tools": ["run_bash_command", "kubectl_run_image"],
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "semantic_success": True,
+            "result": "name: redis-0\nnamespace: aaa\nReason: ImagePullBackOff\nBack-off pulling image",
+            "structured": {"status": "describe_summarized", "kind": "Pod", "name": "redis-0", "namespace": "aaa"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": False,
+            "result": '{"success": false, "stderr": "curl: (35) Recv failure: Connection reset by peer"}',
+            "structured": {"status": "command_result", "success": False, "stderr_preview": "Connection reset by peer"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_name",
+            "semantic_success": True,
+            "result": "NAME READY STATUS\nunrelated 1/1 Running",
+            "structured": {"status": "kept_small_output"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+    measurable = node._measurable_evidence_items(items)
+
+    assert len(measurable) == 4
+    assert sum(1 for item in measurable if item.collected) == 2
+    assert node._calculate_completeness(items) == 0.5
+
+
+def test_evidence_prefers_pydantic_intent_matching_over_exact_command_parameters():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "验证异常 Pod 当前状态",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod <abnormal-pod>",
+            "evidence_type": "pod_status",
+            "target_scope": "group:g1",
+            "acceptable_tools": ["kubectl_describe", "kubectl_get_by_name"],
+        },
+        {
+            "id": "e2",
+            "description": "验证镜像仓库连通性",
+            "level": "important",
+            "tool": "run_bash_command",
+            "command": "curl <registry>",
+            "evidence_type": "registry_connectivity",
+            "target_scope": "group:g1",
+            "acceptable_tools": ["run_bash_command", "kubectl_run_image"],
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_name",
+            "semantic_success": True,
+            "result": "NAME READY STATUS\nredis-0 0/1 ImagePullBackOff",
+            "structured": {"status": "kept_small_output"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "run_bash_command",
+            "semantic_success": False,
+            "result": '{"success": false, "stderr": "curl: (28) Operation timed out"}',
+            "structured": {"status": "command_result", "success": False, "stderr_preview": "Operation timed out"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert [item.collected for item in items] == [True, True]
+    assert node._calculate_completeness(items) == 1.0
+
+
+def test_evidence_pydantic_intent_rejects_incompatible_tool_category():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "验证 Pod spec",
+            "level": "critical",
+            "tool": "kubectl_get_yaml",
+            "command": "kubectl get pod <abnormal-pod> -o yaml",
+            "evidence_type": "pod_spec",
+            "target_scope": "group:g1",
+            "acceptable_tools": ["kubectl_get_yaml"],
+        }
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_events",
+            "semantic_success": True,
+            "result": "Failed to pull image",
+            "structured": {"status": "events_found"},
+        }
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is False
+    assert node._calculate_completeness(items) == 0.0
+
+
+def test_evidence_collection_output_exposes_execution_and_match_counts():
+    output = EvidenceCollectorNode._build_evidence_collection_output(
+        evidence_plan=[
+            {
+                "id": "e1",
+                "description": "验证 Pod 状态",
+                "level": "critical",
+                "tool": "kubectl_describe",
+                "command": "kubectl describe pod redis-0 -n aaa",
+                "purpose": "",
+                "evidence_type": "pod_status",
+            },
+            {
+                "id": "e2",
+                "description": "验证 Pod 配置",
+                "level": "critical",
+                "tool": "kubectl_get_yaml",
+                "command": "kubectl get pod redis-0 -n aaa -o yaml",
+                "purpose": "",
+                "evidence_type": "pod_spec",
+            },
+        ],
+        tool_results=[],
+        tool_data=[{"tool": "kubectl_describe"}, {"tool": "run_bash_command"}],
+        llm_result_text="",
+        plan_total=2,
+        plan_collected=1,
+        plan_completeness=0.5,
+        environment_total=2,
+        environment_collected=1,
+        environment_completeness=0.5,
+        evidence_inventory=[
+            {"id": "e1", "collected": True, "source": "thinking_match"},
+            {"id": "e2", "collected": False, "source": "planned"},
+            {"id": "layer_1", "collected": True, "source": "layer_verified"},
+        ],
+        missing_reasons=["e2: 未采集"],
+        early_stop={"triggered": False},
+        executed_tool_count=2,
+        matched_tool_count=1,
+        unplanned_tool_count=1,
+    )
+
+    data = output.model_dump()
+    assert data["executed_tool_count"] == 2
+    assert data["matched_tool_count"] == 1
+    assert data["unplanned_tool_count"] == 1
+    assert "实际执行工具 2 个，匹配计划 1 个，未规划证据 1 个" in data["collection_summary"]
 
 
 def test_evidence_counts_diagnostic_negative_result_when_adjudicator_misses():

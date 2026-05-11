@@ -51,15 +51,16 @@ def test_layer_execute_archives_full_analysis_and_publishes_handoff(tmp_path, mo
     assert not result.get("layer_full_analysis")
     assert result["layer_handoff"]["layer"] == "L2"
     assert result["layer_handoff"]["primary_problem"] == "Pod app-1 OOMKilled"
-    assert result["layer_handoff"]["primary_pod"] == {"name": "app-1", "namespace": "aiops-e2e"}
+    assert "primary_pod" not in result["layer_handoff"]
     assert result["layer_handoff"]["pod_status_keyword"] == "CrashLoopBackOff"
     assert result["layer_handoff"]["pod_abnormal_type"] == "OOMKilled"
     assert result["layer_handoff"]["derived_layer"] == "L2"
     assert result["layer_handoff"]["status_category"] == "container_resource"
     assert "recommended_runbooks" not in result["layer_handoff"]
+    assert "primary_pod" not in json.loads(result["layer_analysis"])
     assert result["layer_handoff"]["abnormal_pods"][0]["name"] == "app-1"
     assert result["layer_handoff"]["active_entities"][0]["name"] == "app-1"
-    assert result["primary_pod"] == {"name": "app-1", "namespace": "aiops-e2e"}
+    assert result["abnormal_groups"]
     assert result["pod_status_keyword"] == "CrashLoopBackOff"
     assert result["pod_abnormal_type"] == "OOMKilled"
     assert "archive_ref" in result["layer_handoff"]
@@ -86,6 +87,18 @@ def test_rca_legacy_layer_analysis_to_handoff_preserves_pod_status_fields():
     assert handoff["pod_abnormal_type"] == "ImagePullFailed"
     assert handoff["status_category"] == "image_registry"
     assert "recommended_runbooks" not in handoff
+    assert "primary_pod" not in handoff
+
+
+def test_layer_extract_runbook_id_prefers_tool_args_over_text():
+    event = {
+        "tool_name": "fetch_runbook",
+        "tool_args": {"runbook_id": "pod-terminating-stuck.md"},
+        "structured": {"title": "Pod Terminating Stuck"},
+        "result": "<runbook>\n# Pod Terminating Stuck\n</runbook>",
+    }
+
+    assert LayerClassifierNode._extract_runbook_id(event) == "pod-terminating-stuck.md"
 
 
 def test_conclusion_template_reports_pod_abnormal_status_before_compat_layer():
@@ -127,25 +140,26 @@ def test_conclusion_template_reports_pod_abnormal_status_before_compat_layer():
 def test_rca_lite_puts_evidence_context_only_in_user_message(monkeypatch):
     node = RootCauseAnalyzerNode()
     captured = {}
+    parsed = RCAOutput.model_validate({
+        "phenomenon": "Pod ImagePullBackOff",
+        "causal_chain": {
+            "root_cause": "image pull auth",
+            "propagation": "镜像无法下载",
+            "direct_cause": "容器无法创建",
+            "manifestation": "Pod ImagePullBackOff",
+        },
+        "root_cause_summary": "image pull auth",
+        "confidence": 0.8,
+        "primary_runbooks": [],
+    })
 
-    class _FakeAICall:
-        def call_structured(self, system_prompt, question, schema, **kwargs):
-            captured["system_prompt"] = system_prompt
-            captured["question"] = question
-            return schema.model_validate({
-                "phenomenon": "Pod ImagePullBackOff",
-                "causal_chain": {
-                    "root_cause": "image pull auth",
-                    "propagation": "镜像无法下载",
-                    "direct_cause": "容器无法创建",
-                    "manifestation": "Pod ImagePullBackOff",
-                },
-                "root_cause_summary": "image pull auth",
-                "confidence": 0.8,
-                "primary_runbooks": [],
-            }), '{"root_cause_summary":"image pull auth"}'
+    def _fake_call_structured_agent(question, system_prompt, schema, **kwargs):
+        captured["system_prompt"] = system_prompt
+        captured["question"] = question
+        return parsed, SimpleNamespace(result=parsed.model_dump_json(), structured_response=parsed), []
 
-    node.ai_call = _FakeAICall()
+    node._call_structured_agent = _fake_call_structured_agent
+    node.ai_call = object()
     evidence_summary = "# 问题定位结构化交接 layer_handoff\nSECRET_CONTEXT"
 
     result, _events = node._analyze_with_llm_lite(
@@ -162,26 +176,27 @@ def test_rca_lite_puts_evidence_context_only_in_user_message(monkeypatch):
 def test_rca_lite_prefers_structured_output_when_available():
     node = RootCauseAnalyzerNode()
     captured = {}
+    parsed = RCAOutput.model_validate({
+        "phenomenon": "Pod ImagePullBackOff",
+        "causal_chain": {
+            "root_cause": "节点出口网络超时",
+            "propagation": "镜像无法下载",
+            "direct_cause": "容器无法创建",
+            "manifestation": "Pod ImagePullBackOff",
+        },
+        "root_cause_summary": "节点出口网络超时导致镜像拉取失败",
+        "confidence": 0.84,
+        "primary_runbooks": ["l3-imagepull-failed.md"],
+    })
 
-    class _StructuredAICall:
-        def call_structured(self, system_prompt, question, schema, **kwargs):
-            captured["system_prompt"] = system_prompt
-            captured["question"] = question
-            captured["schema"] = schema
-            return schema.model_validate({
-                "phenomenon": "Pod ImagePullBackOff",
-                "causal_chain": {
-                    "root_cause": "节点出口网络超时",
-                    "propagation": "镜像无法下载",
-                    "direct_cause": "容器无法创建",
-                    "manifestation": "Pod ImagePullBackOff",
-                },
-                "root_cause_summary": "节点出口网络超时导致镜像拉取失败",
-                "confidence": 0.84,
-                "primary_runbooks": ["l3-imagepull-failed.md"],
-            }), "{}"
+    def _fake_call_structured_agent(question, system_prompt, schema, **kwargs):
+        captured["system_prompt"] = system_prompt
+        captured["question"] = question
+        captured["schema"] = schema
+        return parsed, SimpleNamespace(result=parsed.model_dump_json(), structured_response=parsed), []
 
-    node.ai_call = _StructuredAICall()
+    node._call_structured_agent = _fake_call_structured_agent
+    node.ai_call = object()
 
     result, _events = node._analyze_with_llm_lite(
         question="我的集群有什么问题",
@@ -195,17 +210,49 @@ def test_rca_lite_prefers_structured_output_when_available():
     assert result["primary_runbooks"] == ["l3-imagepull-failed.md"]
 
 
+def test_rca_lite_uses_structured_agent_runtime():
+    node = RootCauseAnalyzerNode()
+    captured = {}
+    parsed = RCAOutput.model_validate({
+        "phenomenon": "Pod ImagePullBackOff",
+        "root_cause": "节点无法访问 Docker Hub",
+        "root_cause_summary": "镜像仓库网络不可达",
+        "confidence_score": 0.86,
+    })
+
+    class _NoDirectStructured:
+        def call_structured(self, *args, **kwargs):
+            raise AssertionError("RCA node should use _call_structured_agent, not ai_call.call_structured")
+
+    node.ai_call = _NoDirectStructured()
+
+    def _fake_call_structured_agent(question, system_prompt, schema, **kwargs):
+        captured["schema"] = schema
+        captured["use_tools"] = kwargs.get("use_tools")
+        return parsed, SimpleNamespace(result=parsed.model_dump_json(), structured_response=parsed), []
+
+    node._call_structured_agent = _fake_call_structured_agent
+
+    result, events = node._analyze_with_llm_lite(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        evidence_summary="Failed to pull image",
+    )
+
+    assert captured["schema"] is RCAOutput
+    assert captured["use_tools"] is False
+    assert result["root_cause"] == "镜像仓库网络不可达"
+    assert events == []
+
+
 def test_rca_lite_does_not_call_llm_twice_when_structured_validation_fails():
     node = RootCauseAnalyzerNode()
+    node.ai_call = object()
 
-    class _StructuredAICall:
-        def call_structured(self, *args, **kwargs):
-            return None, '{"phenomenon":"Pod 异常","confidence":0.9}'
+    def _fake_call_structured_agent(*args, **kwargs):
+        return None, SimpleNamespace(result='{"phenomenon":"Pod 异常","confidence":0.9}'), []
 
-        def call_simple_json(self, *args, **kwargs):
-            raise AssertionError("structured validation fallback must not issue a second LLM call")
-
-    node.ai_call = _StructuredAICall()
+    node._call_structured_agent = _fake_call_structured_agent
 
     result, _events = node._analyze_with_llm_lite(
         question="我的集群有什么问题",
@@ -219,6 +266,7 @@ def test_rca_lite_does_not_call_llm_twice_when_structured_validation_fails():
 
 def test_evidence_prompt_uses_layer_handoff_in_user_message_not_system_prompt(monkeypatch):
     node = EvidenceCollectorNode()
+    node.workflow_config_override = {"evidence": {"agent_structured_output": False}}
     captured = {}
 
     class _StructuredAICall:
@@ -304,7 +352,6 @@ def test_evidence_user_message_uses_semantic_runbook_matching_without_hardcoded_
 def test_evidence_user_message_highlights_current_abnormal_summary_without_archive_noise():
     layer_handoff = {
         "layer": "L3",
-        "primary_pod": {"name": "test1-redis-master-0", "namespace": "aaa"},
         "pod_status_keyword": "ImagePullBackOff",
         "pod_abnormal_type": "ImagePullFailed",
         "current_abnormal_summary": {
@@ -327,14 +374,14 @@ def test_evidence_user_message_highlights_current_abnormal_summary_without_archi
                 "status_keywords": ["ImagePullBackOff", "ErrImagePull"],
                 "pod_abnormal_type": "ImagePullFailed",
                 "compatible_layers": ["L3"],
-                "primary_entities": [{"kind": "Pod", "namespace": "aaa", "name": "test1-redis-master-0"}],
+                "entities": [{"kind": "Pod", "namespace": "aaa", "name": "test1-redis-master-0"}],
             },
             {
                 "group_id": "g2",
                 "status_keywords": ["Terminating"],
                 "pod_abnormal_type": "TerminatingStuck",
                 "compatible_layers": ["L1"],
-                "primary_entities": [{"kind": "Pod", "namespace": "aiops-e2e", "name": "terminating-stuck"}],
+                "entities": [{"kind": "Pod", "namespace": "aiops-e2e", "name": "terminating-stuck"}],
             },
         ],
         "active_signals": [
@@ -461,7 +508,7 @@ def test_layer_handoff_primary_pod_must_come_from_current_abnormal_pod_scan():
         thinking_events=events,
     )
 
-    assert handoff["primary_pod"] == {"name": "terminating-stuck", "namespace": "aiops-e2e"}
+    assert "primary_pod" not in handoff
     assert handoff["abnormal_pods"] == [
         {"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}
     ]
@@ -512,10 +559,12 @@ def test_layer_handoff_builds_issue_groups_from_current_abnormal_pods():
 
     groups = handoff["issue_groups"]
     assert len(groups) == 2
-    assert groups[0]["primary_entities"] == [
+    assert groups[0]["entities"] == [
         {"kind": "Pod", "namespace": "aaa", "name": "redis-master-0"},
         {"kind": "Pod", "namespace": "aaa", "name": "redis-slave-0"},
     ]
+    assert "primary_entities" not in groups[0]
+    assert "is_primary" not in groups[0]
     assert groups[0]["pod_abnormal_type"] == "ImagePullFailed"
     assert groups[0]["compatible_layers"] == ["L3"]
     assert groups[0]["status_keywords"] == ["ImagePullBackOff", "ErrImagePull"]
@@ -524,7 +573,7 @@ def test_layer_handoff_builds_issue_groups_from_current_abnormal_pods():
     assert terminating_group["compatible_layers"] == ["L1"]
     assert terminating_group["possible_scenarios"]
     assert any("finalizer" in item["scenario"].lower() for item in terminating_group["possible_scenarios"])
-    assert terminating_group["primary_entities"] == [
+    assert terminating_group["entities"] == [
         {"kind": "Pod", "namespace": "aiops-e2e", "name": "terminating-stuck"}
     ]
     summary = handoff["current_abnormal_summary"]
@@ -644,7 +693,7 @@ def test_layer_handoff_abnormal_summary_uses_structured_status_counts_and_filter
     ]
 
 
-def test_evidence_conflicts_mark_primary_pod_notfound_as_critical():
+def test_evidence_conflicts_mark_abnormal_pod_notfound_as_critical():
     conflicts = EvidenceCollectorNode._build_evidence_conflicts(
         [
             {
@@ -653,10 +702,12 @@ def test_evidence_conflicts_mark_primary_pod_notfound_as_critical():
             }
         ],
         {
-            "primary_pod": {
-                "name": "memhog-84859d84db-pn4l2",
-                "namespace": "aiops-e2e",
-            }
+            "abnormal_pods": [
+                {
+                    "name": "memhog-84859d84db-pn4l2",
+                    "namespace": "aiops-e2e",
+                }
+            ]
         },
     )
 
@@ -669,7 +720,7 @@ def test_evidence_conflicts_mark_primary_pod_notfound_as_critical():
     }
 
 
-def test_evidence_conflicts_do_not_mark_container_notfound_as_primary_pod_missing():
+def test_evidence_conflicts_do_not_mark_container_notfound_as_abnormal_pod_missing():
     conflicts = EvidenceCollectorNode._build_evidence_conflicts(
         [
             {
@@ -681,10 +732,12 @@ def test_evidence_conflicts_do_not_mark_container_notfound_as_primary_pod_missin
             }
         ],
         {
-            "primary_pod": {
-                "name": "test1-redis-master-0",
-                "namespace": "aaa",
-            }
+            "abnormal_pods": [
+                {
+                    "name": "test1-redis-master-0",
+                    "namespace": "aaa",
+                }
+            ]
         },
     )
 
@@ -693,13 +746,13 @@ def test_evidence_conflicts_do_not_mark_container_notfound_as_primary_pod_missin
     assert "object" not in conflicts[0]
 
 
-def test_rca_blocks_current_root_cause_when_primary_pod_is_missing():
+def test_rca_does_not_block_entire_root_cause_when_one_abnormal_pod_is_missing():
     node = RootCauseAnalyzerNode()
     state = {
         "question": "我的集群有什么问题",
         "layer": Layer.L2,
         "layer_handoff": {
-            "primary_pod": {"name": "memhog-84859d84db-pn4l2", "namespace": "aiops-e2e"},
+            "abnormal_pods": [{"name": "memhog-84859d84db-pn4l2", "namespace": "aiops-e2e"}],
             "pod_status_keyword": "CrashLoopBackOff",
             "pod_abnormal_type": "OOMKilled",
         },
@@ -720,9 +773,8 @@ def test_rca_blocks_current_root_cause_when_primary_pod_is_missing():
     result = node.execute(state)
     rca = json.loads(result["rca_analysis"])
 
-    assert "当前不存在" in result["root_cause"]
-    assert rca["confidence"] == 0.2
-    assert "OOMKilled" not in rca["root_cause"]
+    assert "当前不存在" not in result["root_cause"]
+    assert rca["confidence"] <= 0.7
 
 
 def test_evidence_does_not_count_archive_reads_as_positive_evidence():
@@ -771,6 +823,73 @@ def test_rca_context_filters_archive_and_runbook_tool_outputs():
     assert "OOM runbook" not in context
     assert "kubectl_get_yaml" in context
     assert "kind: Pod" in context
+
+
+def test_rca_context_bounds_tool_output_and_preserves_key_prefix():
+    node = RootCauseAnalyzerNode()
+    long_raw = "name: current-pod\nstatus: ImagePullBackOff\n" + ("normal pod running\n" * 200)
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {"tool": "kubectl_describe", "data": long_raw},
+        ],
+    }, ensure_ascii=False)
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "kubectl_describe" in context
+    assert "status: ImagePullBackOff" in context
+    assert "normal pod running" in context
+    assert len(context) < len(long_raw)
+    assert "截断" in context
+
+
+def test_rca_execute_sanitizes_large_evidence_fields_before_handoff():
+    node = RootCauseAnalyzerNode()
+    node.ai_call = object()
+    node._save_thinking = lambda state, new_state, thinking_events: None
+    raw_blob = "raw event line\n" * 500
+    rca_payload = {
+        "phenomenon": "Pod ImagePullBackOff",
+        "evidence_inventory": [
+            {
+                "id": "e1",
+                "description": "获取 Pod 事件",
+                "raw_data": raw_blob,
+                "data": raw_blob,
+                "collected": True,
+            }
+        ],
+        "evidence_analysis": [
+            {
+                "evidence_id": "e1",
+                "raw_data": raw_blob,
+                "interpretation": "镜像拉取失败",
+            }
+        ],
+        "causal_chain": {"root_cause": "节点出口网络超时"},
+        "root_cause": "节点出口网络超时导致镜像拉取失败",
+        "root_cause_summary": "节点出口网络超时导致镜像拉取失败",
+        "confidence": 0.86,
+        "primary_runbooks": ["l3-imagepull-failed.md"],
+        "limitations": "",
+    }
+
+    node._analyze_with_llm = lambda question, layer, evidence_summary: (rca_payload, [])
+
+    result = node.execute({
+        "question": "我的集群有什么问题",
+        "layer": Layer.L3,
+        "evidence_items": [],
+        "evidence_analysis": "{}",
+    })
+
+    serialized = result["rca_analysis"]
+    parsed = json.loads(serialized)
+    assert parsed["root_cause"] == "节点出口网络超时导致镜像拉取失败"
+    assert "raw event line\nraw event line\nraw event line" not in serialized
+    assert len(serialized) < 3000
+    assert "截断" in parsed["evidence_inventory"][0]["raw_data"]
+    assert "截断" in parsed["evidence_analysis"][0]["raw_data"]
 
 
 def test_conclusion_uses_handoff_not_full_layer_analysis():

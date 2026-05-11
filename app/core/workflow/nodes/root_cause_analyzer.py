@@ -34,6 +34,10 @@ from app.core.text_helpers import truncate_question
 logger = logging.getLogger(__name__)
 
 
+RCA_TEXT_FIELD_LIMIT = 500
+RCA_LIST_LIMIT = 12
+
+
 class RootCauseAnalyzerNode(WorkflowNode):
     """
     根因分析节点
@@ -97,18 +101,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                         f"layer_handoff长度={len(json.dumps(state.get('layer_handoff') or {}, ensure_ascii=False, default=str))}")
 
             evidence_summary = self._build_rca_context(state)
-            missing_primary = self._get_missing_primary_pod_conflict(state)
-            if missing_primary:
-                rca_result = self._build_primary_pod_missing_result(
-                    question=question,
-                    layer=layer,
-                    missing_primary=missing_primary,
-                    evidence_summary=evidence_summary,
-                )
-                thinking_events = []
-            else:
-                rca_result = None
-                thinking_events = []
+            rca_result = None
+            thinking_events = []
 
             # 使用 LLM 分析
             ai_call = getattr(self, 'ai_call', None)
@@ -127,6 +121,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     reason="LLM 不可用，无法完成可靠根因分析",
                 )
                 thinking_events = []
+
+            rca_result = self._sanitize_rca_result(rca_result or {})
             
             # 构建决策对象
             decision = self._build_decision(layer, evidence_items, rca_result)
@@ -160,68 +156,6 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
         return new_state
 
-    @staticmethod
-    def _get_missing_primary_pod_conflict(state: WorkflowState) -> Optional[Dict[str, str]]:
-        layer_handoff = state.get("layer_handoff") or {}
-        primary = layer_handoff.get("primary_pod") or state.get("primary_pod") or {}
-        primary_name = str(primary.get("name") or "")
-        primary_namespace = str(primary.get("namespace") or "")
-        if not primary_name:
-            return None
-
-        for conflict in state.get("evidence_conflicts") or []:
-            if not isinstance(conflict, dict) or not conflict.get("object_missing"):
-                continue
-            obj = conflict.get("object") or {}
-            if obj.get("kind") == "Pod" and obj.get("name") == primary_name:
-                return {"name": primary_name, "namespace": obj.get("namespace") or primary_namespace}
-        return None
-
-    def _build_primary_pod_missing_result(
-        self,
-        question: str,
-        layer: Optional[Layer],
-        missing_primary: Dict[str, str],
-        evidence_summary: str,
-    ) -> Dict[str, Any]:
-        layer_str = layer.value if hasattr(layer, "value") else str(layer or "UNKNOWN")
-        pod_name = missing_primary.get("name", "")
-        namespace = missing_primary.get("namespace", "")
-        reason = (
-            f"primary_pod {namespace}/{pod_name} 当前已不存在；"
-            "上游历史 Event 或归档摘要不能证明该 Pod 仍处于异常状态"
-        )
-        return {
-            "phenomenon": f"目标 Pod {namespace}/{pod_name} 当前不存在，无法确认仍异常",
-            "evidence_inventory": [
-                {
-                    "id": "conflict_primary_pod_missing",
-                    "content": reason,
-                    "source": "evidence_conflicts",
-                    "reliability": "高",
-                }
-            ],
-            "evidence_analysis": [
-                {
-                    "evidence_id": "conflict_primary_pod_missing",
-                    "raw_data": reason,
-                    "interpretation": "当前对象不存在是硬冲突，应停止对该历史 Pod 生成 OOM/ImagePull/CrashLoop 等当前根因",
-                }
-            ],
-            "causal_chain": {
-                "root_cause": "目标 Pod 已不存在或已恢复，当前无法基于该 Pod 确认故障",
-                "propagation": "历史事件被带入诊断上下文，但当前状态验证返回 NotFound",
-                "direct_cause": "primary_pod 当前不存在",
-                "manifestation": "诊断目标与当前集群状态不一致",
-            },
-            "root_cause": f"[{layer_str}] 目标 Pod {namespace}/{pod_name} 当前不存在，不能继续诊断为当前故障",
-            "root_cause_summary": reason,
-            "confidence": 0.2,
-            "primary_runbooks": [],
-            "alternative_causes": ["历史事件残留", "Pod 已被删除", "工作负载已滚动替换为新 Pod"],
-            "limitations": "需要重新从当前异常 Pod 列表选择仍存在的对象后再做 RCA。",
-        }
-    
     def _build_evidence_summary(self, evidence_items: List[EvidenceItem]) -> str:
         """构建证据摘要"""
         lines = []
@@ -273,8 +207,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     "derived_layer": data.get("derived_layer", data.get("layer")),
                     "confidence": data.get("confidence"),
                     "primary_problem": data.get("reasoning", ""),
-                    "primary_pod": data.get("primary_pod"),
                     "abnormal_pods": data.get("abnormal_pods", []),
+                    "abnormal_groups": data.get("abnormal_groups", data.get("issue_groups", [])),
+                    "issue_groups": data.get("issue_groups", data.get("abnormal_groups", [])),
                     "pod_status_keyword": data.get("pod_status_keyword"),
                     "pod_abnormal_type": data.get("pod_abnormal_type"),
                     "status_category": data.get("status_category"),
@@ -345,7 +280,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
 # 已采集证据
 {evidence_summary}
 
-请直接基于以上证据进行根因分析，输出 JSON 格式结果。"""
+请直接基于以上证据进行根因分析，并通过 RCAOutput Pydantic schema 生成结构化结果。"""
             self._archive_node_input({
                 "node": self.node_id,
                 "mode": "lite",
@@ -363,19 +298,14 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 raise RuntimeError("[rca] ai_call 未设置，无法执行 lite 模式")
 
             logger.info("📍 [rca] Pydantic structured lite 模式开始")
-            parsed = None
-            content = ""
-            if not hasattr(ai_call, "call_structured"):
-                raise RuntimeError("[rca] ai_call 不支持 call_structured，无法生成 Pydantic RCAOutput")
-            structured, content = ai_call.call_structured(
+            structured, response, thinking_events = self._call_structured_agent(
+                schema=RCAOutput,
                 system_prompt=system_prompt,
                 question=user_message,
-                schema=RCAOutput,
-                node_id=self.node_id,
-                run_id=getattr(self, "current_run_id", ""),
+                use_tools=False,
             )
-            if structured is not None:
-                parsed = structured.model_dump()
+            parsed = structured.model_dump() if structured is not None else None
+            content = response.result if response is not None else ""
 
             duration_ms = (time.time() - start_time) * 1000
 
@@ -386,7 +316,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                        duration_ms, len(content or ""))
 
             if parsed:
-                return parsed, []
+                return parsed, thinking_events
 
             logger.warning("⚠️ [rca] lite 模式未返回合法 Pydantic RCAOutput，使用通用低置信度兜底")
             return self._build_llm_fallback(
@@ -423,7 +353,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         layer: Optional[Layer],
         evidence_summary: str
     ) -> tuple:
-        """full 模式：原有 _call_llm 全工具调用"""
+        """full 模式：仍使用 RCAOutput Pydantic schema，不调用工具、不解析手写结构化文本。"""
         try:
             layer_str = layer.value if layer else "L2"
 
@@ -440,21 +370,27 @@ class RootCauseAnalyzerNode(WorkflowNode):
 请直接基于这些数据进行分析，**不要重新调用工具采集数据**。
 如果数据不足，在 limitations 中说明即可。"""
 
-            response, thinking_events = self._call_llm(
-                question,
-                system_prompt,
-                expect_json=True,
-                json_validator=lambda data: isinstance(data, dict),
-            )
+            user_message = f"""# 用户问题
+{question}
 
-            if response and response.result:
-                return self._parse_llm_response(response.result), thinking_events
+# 已采集证据
+{evidence_summary}
+
+请直接基于以上证据进行根因分析，并通过 RCAOutput Pydantic schema 生成结构化结果。"""
+            structured, response, thinking_events = self._call_structured_agent(
+                schema=RCAOutput,
+                system_prompt=system_prompt,
+                question=user_message,
+                use_tools=False,
+            )
+            if structured is not None:
+                return structured.model_dump(), thinking_events
 
             return self._build_llm_fallback(
                 question=question,
                 layer=layer,
-                reason="LLM 未返回有效结果，无法完成可靠根因分析",
-            ), thinking_events
+                reason=f"LLM 未返回有效 RCAOutput，无法完成可靠根因分析: {((response.result if response else '') or '')[:200]}",
+            ), []
 
         except Exception as e:
             logger.warning(f"LLM 分析失败，使用通用低置信度兜底: {e}")
@@ -474,36 +410,71 @@ class RootCauseAnalyzerNode(WorkflowNode):
             logger.warning("⚠️ [rca] RCA 结构化校验失败: %s", exc)
             return None
 
-    def _parse_llm_response(self, response_text: str) -> Dict:
-        """解析 LLM 的 JSON 响应"""
-        try:
-            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group(1))
-            else:
-                parsed = json.loads(response_text)
-            normalized = self._normalize_rca_result(parsed)
-            if normalized is not None:
-                return normalized
-            return self._build_llm_fallback(
-                question="",
-                layer=None,
-                reason="LLM 返回 JSON 但不符合 RCA 结构化输出合同",
-            )
-        except json.JSONDecodeError:
-            # JSON 解析失败 — 把 LLM 原始文本作为分析结果保留
-            # 不要把对话过程塞进 root_cause
+    @classmethod
+    def _compact_text_value(cls, value: Any, limit: int = RCA_TEXT_FIELD_LIMIT) -> Any:
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + f"\n... 截断，原始 {len(text)} 字符"
+
+    @classmethod
+    def _compact_nested_value(cls, value: Any, limit: int = RCA_TEXT_FIELD_LIMIT) -> Any:
+        if isinstance(value, str):
+            return cls._compact_text_value(value, limit=limit)
+        if isinstance(value, list):
+            compacted = [cls._compact_nested_value(item, limit=limit) for item in value[:RCA_LIST_LIMIT]]
+            if len(value) > RCA_LIST_LIMIT:
+                compacted.append(f"... 截断，原始 {len(value)} 项")
+            return compacted
+        if isinstance(value, dict):
             return {
-                "phenomenon": "",
-                "evidence_analysis": [],
-                "causal_chain": {},
-                "root_cause": "详见 LLM 原始分析",
-                "llm_raw_analysis": response_text,
-                "confidence": 0.6,
-                "confidence_reason": "LLM 未输出结构化 JSON，使用原始分析文本",
-                "alternative_causes": []
+                str(k): cls._compact_nested_value(v, limit=limit)
+                for k, v in value.items()
             }
-    
+        return value
+
+    @classmethod
+    def _sanitize_rca_result(cls, rca_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Bound RCA handoff size without changing diagnostic semantics.
+
+        RCA should hand off conclusions, causal links and concise evidence
+        references. Full raw evidence remains available in evidence archives and
+        should not be copied into rca_analysis, otherwise conclusion receives the
+        same large facts twice and loses prompt focus.
+        """
+        if not isinstance(rca_result, dict):
+            return {}
+
+        sanitized: Dict[str, Any] = {}
+        for key, value in rca_result.items():
+            if key in {"evidence_inventory", "evidence_analysis"} and isinstance(value, list):
+                sanitized[key] = [
+                    cls._compact_nested_value(item, limit=RCA_TEXT_FIELD_LIMIT)
+                    for item in value[:RCA_LIST_LIMIT]
+                ]
+                if len(value) > RCA_LIST_LIMIT:
+                    sanitized[key].append({"summary": f"... 截断，原始 {len(value)} 项"})
+            elif key == "llm_raw_analysis":
+                sanitized[key] = cls._compact_text_value(value, limit=RCA_TEXT_FIELD_LIMIT)
+            else:
+                sanitized[key] = cls._compact_nested_value(value, limit=RCA_TEXT_FIELD_LIMIT)
+
+        try:
+            original_size = len(json.dumps(rca_result, ensure_ascii=False, default=str))
+            compact_size = len(json.dumps(sanitized, ensure_ascii=False, default=str))
+            if compact_size < original_size:
+                logger.info(
+                    "📦 [rca] 输出上下文裁剪: %d → %d chars (%.0f%%)",
+                    original_size,
+                    compact_size,
+                    compact_size / max(original_size, 1) * 100,
+                )
+        except Exception:
+            pass
+        return sanitized
+
     def _build_llm_fallback(
         self,
         question: str,
@@ -594,7 +565,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     tool = td.get("tool", "unknown")
                     if str(tool).lower() in {"read_context_archive", "fetch_runbook"}:
                         continue
-                    raw = td.get("data", "")[:500]
+                    raw = self._compact_text_value(td.get("data", ""), limit=500)
                     tool_parts.append(f"{index}. [{tool}]: {raw}")
                     index += 1
                 if tool_parts:
