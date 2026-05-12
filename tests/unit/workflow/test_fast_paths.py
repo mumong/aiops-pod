@@ -172,6 +172,7 @@ def test_layer_stage1_text_is_always_revalidated_with_pydantic_and_keeps_full_an
 
 def test_layer_tool_collection_is_finalized_by_layer_extract():
     node = LayerClassifierNode()
+    node.workflow_config_override = {"layer": {"agent_structured_output": False}}
     stage1_text = "工具结果显示 aaa/redis-0 ImagePullBackOff。"
     thinking_events = [
         {
@@ -224,6 +225,46 @@ def test_layer_tool_collection_is_finalized_by_layer_extract():
     assert result["layer"] == "L3"
     assert result["abnormal_pods"][0]["status"] == "ImagePullBackOff"
     assert "kubectl_get_by_kind_in_cluster" in result["full_analysis"]
+    assert returned_events == thinking_events
+
+
+def test_layer_agent_structured_output_single_call_with_tools():
+    node = LayerClassifierNode()
+    node.workflow_config_override = {"layer": {"agent_structured_output": True}}
+    structured = LayerOutput.model_validate({
+        "layer": "L3",
+        "layers": ["L3"],
+        "layer_name": "服务网络层",
+        "confidence": 0.91,
+        "reasoning": "当前 Pod 镜像拉取失败",
+        "abnormal_pods": [{"name": "redis-0", "namespace": "aaa", "status": "ImagePullBackOff"}],
+        "pod_status_keyword": "ImagePullBackOff",
+        "pod_abnormal_type": "ImagePullFailed",
+    })
+    thinking_events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "result": "aaa redis-0 ImagePullBackOff",
+        }
+    ]
+    calls = []
+
+    def _fake_call_llm(question, prompt, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(result="", structured_response=structured), thinking_events
+
+    node._call_llm = _fake_call_llm
+    node.ai_call = object()
+
+    result, returned_events = node._analyze_with_llm("我的集群有什么问题")
+
+    assert len(calls) == 1
+    assert calls[0]["response_schema"] is LayerOutput
+    assert result["layer"] == "L3"
+    assert result["abnormal_pods"][0]["status"] == "ImagePullBackOff"
+    assert "full_analysis" in result
     assert returned_events == thinking_events
 
 
@@ -515,7 +556,7 @@ def test_layer_does_not_lightweight_route_cluster_status_diagnosis_wording():
     assert result["layer"] == Layer.L1
 
 
-def test_query_conclusion_uses_llm_even_when_query_result_present():
+def test_query_conclusion_renders_query_result_without_llm():
     node = ConclusionFormatterNode()
 
     node.ai_call = _RecordingAICall(
@@ -556,7 +597,7 @@ def test_query_conclusion_uses_llm_even_when_query_result_present():
 
     result = node.execute(state)
 
-    assert len(node.ai_call.calls) == 1
+    assert len(node.ai_call.calls) == 0
     assert "## 📊 查询结果" in result["conclusion"]
     assert "master" in result["conclusion"]
 

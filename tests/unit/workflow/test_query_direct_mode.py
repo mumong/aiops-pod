@@ -11,7 +11,7 @@ from app.core.workflow.executor import WorkflowExecutor
 from app.core.workflow.graph import _make_layer_router
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
-from app.core.workflow.schemas import ConclusionOutput, LayerOutput, QueryConclusionOutput
+from app.core.workflow.schemas import ConclusionOutput, LayerOutput
 
 
 def test_layer_router_query_direct_goes_to_conclusion():
@@ -41,30 +41,25 @@ def test_layer_router_non_query_path_is_unchanged_in_direct_mode():
     assert router({"layer": Layer.L2}) == "evidence"
 
 
-def test_query_conclusion_direct_mode_uses_structured_llm_with_query_result():
+def test_query_conclusion_direct_mode_renders_query_result_without_llm():
     node = ConclusionFormatterNode(
         holmes_service=SimpleNamespace()
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
 
-    class _StructuredAICall:
+    class _NoLLMAICall:
         def __init__(self):
             self.calls = []
 
         def call_structured(self, **kwargs):
             self.calls.append(kwargs)
-            structured = kwargs["schema"].model_validate({
-                "markdown_report": (
-                    "## 📊 查询结果\n\n"
-                    "| 节点 | CPU 使用率 | 内存使用率 |\n"
-                    "|------|------------|------------|\n"
-                    "| master | 13.7% | 26.2% |\n\n"
-                    "`cpu_query`"
-                ),
-            })
-            return structured, structured.model_dump_json()
+            raise AssertionError("query conclusion should render query_result without LLM")
 
-    node.ai_call = _StructuredAICall()
+        def call_simple(self, *args, **kwargs):
+            self.calls.append(kwargs)
+            raise AssertionError("query conclusion should not call simple LLM")
+
+    node.ai_call = _NoLLMAICall()
 
     state = {
         "question": "查询集群每个节点 CPU 和内存使用率",
@@ -92,34 +87,28 @@ def test_query_conclusion_direct_mode_uses_structured_llm_with_query_result():
 
     result = node.execute(state)
 
-    assert len(node.ai_call.calls) == 1
-    assert node.ai_call.calls[0]["schema"] is QueryConclusionOutput
-    assert node.ai_call.calls[0]["use_native_structured"] is False
-    assert node.ai_call.calls[0]["allow_text_fallback"] is True
+    assert node.ai_call.calls == []
     assert "## 📊 查询结果" in result["conclusion"]
     assert "master" in result["conclusion"]
     assert "cpu_query" in result["conclusion"]
 
 
-def test_query_conclusion_uses_query_specific_structured_output_budget():
+def test_query_conclusion_does_not_use_query_specific_llm_budget():
     node = ConclusionFormatterNode(holmes_service=SimpleNamespace())
     node.workflow_config_override = {
         "query_mode": "direct",
         "conclusion": {"max_tokens": {"query": 1024, "diagnosis": 8192}},
     }
 
-    class _StructuredAICall:
+    class _NoLLMAICall:
         def __init__(self):
             self.calls = []
 
         def call_structured(self, **kwargs):
             self.calls.append(kwargs)
-            structured = kwargs["schema"].model_validate({
-                "markdown_report": "## 📊 查询结果\n\n| 节点 | CPU |\n|------|-----|\n| node1 | 1% |",
-            })
-            return structured, structured.model_dump_json()
+            raise AssertionError("query conclusion should not call structured LLM")
 
-    node.ai_call = _StructuredAICall()
+    node.ai_call = _NoLLMAICall()
 
     node.execute({
         "question": "查询 CPU",
@@ -135,10 +124,7 @@ def test_query_conclusion_uses_query_specific_structured_output_budget():
         },
     })
 
-    assert node.ai_call.calls[0]["max_tokens"] == 1024
-    assert node.ai_call.calls[0]["schema"] is QueryConclusionOutput
-    assert node.ai_call.calls[0]["use_native_structured"] is False
-    assert node.ai_call.calls[0]["allow_text_fallback"] is True
+    assert node.ai_call.calls == []
 
 
 def test_diagnosis_conclusion_uses_plain_markdown_by_default():
@@ -182,14 +168,11 @@ def test_diagnosis_conclusion_uses_plain_markdown_by_default():
 
 def test_query_conclusion_normalizes_legacy_string_fields():
     node = ConclusionFormatterNode(holmes_service=SimpleNamespace())
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
 
     class _StructuredAICall:
         def call_structured(self, **kwargs):
-            structured = kwargs["schema"].model_validate({
-                "markdown_report": "**未获取到** `result`: Prometheus 返回空\n\n| - | up_query |",
-            })
-            return structured, structured.model_dump_json()
+            raise AssertionError("query conclusion should render query_result without LLM")
 
     node.ai_call = _StructuredAICall()
 
@@ -217,7 +200,7 @@ def test_layer_execute_persists_query_result_only_in_query_direct_mode():
     node = LayerClassifierNode(
         holmes_service=SimpleNamespace()
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
     node.ai_call = object()
     node._save_thinking = lambda state, new_state, thinking_events: None
     node._analyze_with_llm = lambda question: (
@@ -252,7 +235,7 @@ def test_layer_execute_normalizes_legacy_query_result_columns_without_fallback()
     node = LayerClassifierNode(
         holmes_service=SimpleNamespace()
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
     node.ai_call = object()
     node._save_thinking = lambda state, new_state, thinking_events: None
     node._analyze_with_llm = lambda question: (
@@ -294,7 +277,7 @@ def test_layer_execute_query_result_validation_failure_stays_query_not_diagnosis
     node = LayerClassifierNode(
         holmes_service=SimpleNamespace()
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
     node.ai_call = object()
     node._save_thinking = lambda state, new_state, thinking_events: None
     node._analyze_with_llm = lambda question: (
@@ -330,7 +313,7 @@ def test_layer_execute_does_not_persist_query_result_for_non_query_mode():
     node = LayerClassifierNode(
         holmes_service=SimpleNamespace()
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
     node.ai_call = object()
     node._save_thinking = lambda state, new_state, thinking_events: None
     node._analyze_with_llm = lambda question: (
@@ -362,7 +345,7 @@ def test_layer_direct_query_mode_uses_dedicated_prompt():
             get_prompt_language=lambda: "zh",
         )
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
 
     assert node._get_layer_prompt() == get_workflow_prompt("layer_query_direct")
 
@@ -384,7 +367,7 @@ def test_layer_query_direct_retries_when_first_json_has_no_real_tool_results():
             get_prompt_language=lambda: "zh",
         )
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
 
     calls = {"count": 0}
 
@@ -481,7 +464,7 @@ def test_layer_query_direct_returns_query_failure_when_prometheus_errors_are_not
             get_prompt_language=lambda: "zh",
         )
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
 
     events = [
         {
@@ -526,7 +509,7 @@ def test_layer_query_direct_accepts_lowercase_query_layer_with_usable_result():
             get_prompt_language=lambda: "zh",
         )
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
 
     events = [
         {
@@ -578,7 +561,7 @@ def test_layer_query_direct_does_not_retry_when_rows_exist_but_sources_are_missi
             get_prompt_language=lambda: "zh",
         )
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
 
     calls = {"count": 0}
     events = [
@@ -633,7 +616,7 @@ def test_layer_query_direct_does_not_retry_when_rows_exist_but_sources_are_missi
 
 def test_layer_query_direct_replaces_blank_sources_from_successful_tool_events():
     node = LayerClassifierNode(holmes_service=SimpleNamespace())
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
     result = {
         "layer": "QUERY",
         "layers": ["QUERY"],
@@ -792,7 +775,7 @@ def test_layer_query_direct_builds_query_result_from_successful_prometheus_tool_
             get_prompt_language=lambda: "zh",
         )
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
 
     events = [
         {
@@ -907,7 +890,7 @@ def test_layer_query_direct_skips_extract_when_prometheus_tool_result_is_usable(
             get_prompt_language=lambda: "zh",
         )
     )
-    node.workflow_config_override = {"query_mode": "direct"}
+    node.workflow_config_override = {"query_mode": "direct", "layer": {"agent_structured_output": False}}
     events = [
         {
             "type": "early_stop",

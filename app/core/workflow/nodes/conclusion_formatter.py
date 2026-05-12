@@ -193,6 +193,10 @@ class ConclusionFormatterNode(WorkflowNode):
                     layer_analysis=layer_analysis,
                     thinking_events=state.get("thinking_events", []),
                 )
+            elif layer == Layer.QUERY and query_result:
+                logger.info("📍 [conclusion] QUERY 快路径：直接渲染 query_result，不调用 LLM")
+                conclusion = self._render_query_result(query_result)
+                self._conclusion_thinking = []
             
             # 使用 LLM 生成最终报告
             elif getattr(self, 'ai_call', None) is not None:

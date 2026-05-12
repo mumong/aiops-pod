@@ -159,6 +159,7 @@ def test_evidence_builds_collection_output_with_pydantic_schema():
 
 def test_evidence_execute_retries_when_plan_exists_but_no_tool_results():
     node = EvidenceCollectorNode()
+    node.workflow_config_override = {"evidence": {"agent_structured_output": False}}
     calls = []
 
     first_plan = [
@@ -205,6 +206,34 @@ def test_evidence_execute_retries_when_plan_exists_but_no_tool_results():
     assert "不要重新输出 evidence_plan" in calls[1]["failure_reason"]
     assert result["evidence_completeness"] == 1.0
     assert len(result["evidence_items"]) == 2
+
+
+def test_evidence_agent_structured_output_execute_does_not_retry_failed_single_call():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {"evidence": {"agent_structured_output": True}}
+    calls = []
+    first_plan = [
+        {"id": "e1", "description": "确认 Pod YAML", "level": "critical", "tool": "kubectl_get_yaml", "command": "kubectl get -o yaml pod x", "purpose": "确认状态"},
+    ]
+
+    def _fake_plan(**kwargs):
+        calls.append(kwargs)
+        return first_plan, [], "只输出了结构化计划，没有执行工具"
+
+    node._plan_evidence_with_llm = _fake_plan
+    node._save_thinking = lambda state, new_state, thinking_events: None
+
+    result = node.execute({
+        "question": "我的集群有什么问题",
+        "layer": Layer.L3,
+        "layer_analysis": "{}",
+        "possible_scenarios": [],
+        "key_entities": [],
+    })
+
+    assert len(calls) == 1
+    assert result["evidence_completeness"] == 0.0
+    assert result["evidence_items"][0].collected is False
 
 
 def test_evidence_execute_does_not_retry_when_pydantic_plan_has_effective_tool_result():
@@ -495,8 +524,67 @@ def test_evidence_plan_is_generated_with_structured_output_before_tool_execution
     assert events[0]["tool_name"] == "kubectl_events"
 
 
+def test_evidence_agent_structured_output_single_call_with_tools():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {"evidence": {"agent_structured_output": True}}
+    structured = EvidenceCollectionOutput.model_validate({
+        "evidence_plan": [
+            {
+                "id": "e1",
+                "description": "获取 Pod 事件",
+                "level": "critical",
+                "tool": "kubectl_events",
+                "command": "kubectl get events -n aaa",
+                "purpose": "确认异常原因",
+            }
+        ],
+        "tool_results": [],
+        "tool_data": [{"tool": "kubectl_events", "data": "Failed to pull image"}],
+        "llm_analysis": "已确认镜像拉取失败",
+        "collection_summary": "计划 1 项，实际采集 1 项，未采集 0 项，完整度 100%",
+        "plan_total": 1,
+        "plan_collected": 1,
+        "plan_completeness": 1.0,
+        "environment_evidence_total": 1,
+        "environment_evidence_collected": 1,
+        "environment_evidence_completeness": 1.0,
+        "executed_tool_count": 1,
+        "matched_tool_count": 1,
+        "unplanned_tool_count": 0,
+        "evidence_inventory": [],
+        "missing_reasons": [],
+        "early_stop": {},
+    })
+    events = [
+        {"type": "tool_result", "status": "success", "tool_name": "kubectl_events", "result": "Failed to pull image"}
+    ]
+    calls = []
+
+    def _fake_call_llm(question, system_prompt, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(result="", structured_response=structured), events
+
+    node._call_llm = _fake_call_llm
+    node.ai_call = object()
+
+    plan, returned_events, text = node._plan_evidence_with_llm(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis="{}",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["response_schema"] is EvidenceCollectionOutput
+    assert plan[0]["id"] == "e1"
+    assert returned_events == events
+    assert "镜像拉取失败" in text
+
+
 def test_evidence_preplanned_execution_collects_tools_without_agent_response_schema():
     node = EvidenceCollectorNode()
+    node.workflow_config_override = {"evidence": {"agent_structured_output": False}}
     captured = {}
     structured_plan = EvidencePlanOutput.model_validate({
         "layer": "L3",

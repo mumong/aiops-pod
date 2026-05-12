@@ -1241,20 +1241,43 @@ class LayerClassifierNode(WorkflowNode):
     def _analyze_with_llm(self, question: str) -> tuple:
         """使用 LLM 分析 Pod 异常状态。
 
-        正常路径: AICall agent 只负责工具调用和事实采集；
-        layer_extract 使用非流式 Pydantic structured call 从已有工具结果生成
-        LayerOutput。避免在 streaming 多工具 agent 中混用 response_format。
+        正常路径: LangChain agent 在同一个 loop 内完成工具调用和
+        LayerOutput structured output。旧的 layer_extract 只作为显式兼容
+        fallback 使用。
 
         Returns:
             (layer_result_dict, intermediate_events_list)
         """
         thinking_events = []
         try:
-            # ── 阶段1：工具调用，收集集群状态 ──
-            logger.info("📍 [layer] 阶段1: AICall 工具调用开始 | tools=%d",
+            logger.info("📍 [layer] AICall agent structured output 开始 | tools=%d",
                         len(getattr(self, 'tools', [])))
             early_stop_enabled = self._is_early_stop_enabled(default=True)
             logger.info("🧭 [layer] early_stop=%s", early_stop_enabled)
+            if self._use_agent_structured_output():
+                logger.info("🧪 [layer] 使用 agent structured output 单轮模式")
+                response, thinking_events = self._call_llm(
+                    question,
+                    self._get_layer_prompt(),
+                    expect_json=False,
+                    response_schema=LayerOutput,
+                    stop_checker=(
+                        self._should_stop_query_direct_early
+                        if self._is_direct_query_mode() and early_stop_enabled
+                        else None
+                    ),
+                )
+                extracted = self._structured_layer_from_response(response)
+                if extracted is None:
+                    raise RuntimeError("layer agent structured output 未返回 LayerOutput")
+                result = self._normalize_layer_output_dict(extracted)
+                result = self._normalize_query_result_sources(result, thinking_events)
+                full_analysis_text = self._build_full_analysis(response.result if response else "", thinking_events)
+                if len(full_analysis_text) > 30000:
+                    full_analysis_text = self._compact_context(full_analysis_text, max_chars=30000)
+                result["full_analysis"] = full_analysis_text
+                return result, thinking_events
+
             response, thinking_events = self._call_llm(
                 question,
                 self._get_layer_prompt(),

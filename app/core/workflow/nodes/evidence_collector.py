@@ -205,7 +205,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 evidence_plan=evidence_plan,
                 thinking_events=thinking_events,
             )
-            if retry_reason:
+            if retry_reason and not self._use_agent_structured_output():
                 retry_existing_plan = (
                     evidence_plan
                     if self._plan_exists_without_tool_results(retry_reason)
@@ -228,6 +228,11 @@ class EvidenceCollectorNode(WorkflowNode):
                         else retry_reason
                     ),
                     existing_plan=retry_existing_plan,
+                )
+            elif retry_reason:
+                logger.warning(
+                    "⚠️ [evidence] agent structured output 单轮模式结果未满足采证协议：%s；不触发二次 LLM fallback",
+                    retry_reason,
                 )
 
             # 2. 构建证据项列表（基于 thinking_events 中 AICall 真实工具调用）
@@ -706,6 +711,22 @@ class EvidenceCollectorNode(WorkflowNode):
                 }
             )
 
+            if self._use_agent_structured_output() and existing_plan is None:
+                return self._execute_dynamic_structured_evidence_agent(
+                    question=question,
+                    layer=layer,
+                    possible_scenarios=possible_scenarios,
+                    key_entities=key_entities,
+                    layer_analysis=layer_analysis,
+                    context_archive_ref=context_archive_ref,
+                    layer_archive_ref=layer_archive_ref or {},
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    layer_str=layer_str,
+                    strict_mode=strict_mode,
+                    failure_reason=failure_reason,
+                )
+
             if existing_plan is not None:
                 evidence_plan = self._normalize_evidence_plan(
                     existing_plan,
@@ -774,9 +795,9 @@ class EvidenceCollectorNode(WorkflowNode):
             user_message
             + "\n\n# 动态结构化采证模式\n"
             "- 本轮只有一次 evidence agent 调用。\n"
-            "- 你必须根据 layer_handoff 在内部形成最小采证意图。\n"
-            "- 然后直接调用必要的真实只读工具采证，不要等待下一轮。\n"
-            "- 最后输出简短自然语言采证摘要；结构化收口由后续非流式 Pydantic 调用完成。\n"
+            "- 你必须根据 layer_handoff 形成 evidence_plan，并调用必要的真实只读工具采证。\n"
+            "- 最后必须通过 LangChain structured output 生成 EvidenceCollectionOutput。\n"
+            "- EvidenceCollectionOutput.evidence_plan 必须包含本轮计划，tool_data/collection_summary 必须基于真实 tool_result。\n"
         )
         if strict_mode:
             dynamic_message += (
@@ -792,13 +813,25 @@ class EvidenceCollectorNode(WorkflowNode):
             response, thinking_events = self._call_llm(
                 dynamic_message,
                 system_prompt,
+                response_schema=EvidenceCollectionOutput,
                 stop_checker=self._should_stop_collection_early if early_stop_enabled else None,
             )
         finally:
             self._active_evidence_plan = None
 
-        evidence_plan = []
+        structured = self._structured_evidence_from_response(response)
+        if structured is None:
+            logger.warning("⚠️ [evidence] agent structured output 未返回 EvidenceCollectionOutput")
+            return [], thinking_events, (response.result or "") if response else ""
+
+        evidence_plan = [item.model_dump() for item in structured.evidence_plan]
+        evidence_plan = self._normalize_evidence_plan(
+            evidence_plan,
+            layer_handoff=self._parse_handoff_json(layer_analysis),
+        )
         llm_text = (response.result or "") if response else ""
+        if not llm_text:
+            llm_text = structured.llm_analysis or structured.collection_summary
 
         return evidence_plan, thinking_events, llm_text
 
