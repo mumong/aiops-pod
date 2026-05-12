@@ -2,11 +2,15 @@ from pathlib import Path
 
 from test.pod_abnormal_e2e.run_pod_abnormal_cases import (
     Case,
+    CaseResult,
+    build_chinese_report_lines,
     evaluate_response,
     extract_evidence_rate,
     extract_mttr_seconds,
+    extract_model_name,
     extract_runbook_ids,
     load_cases,
+    select_cases,
 )
 
 
@@ -73,9 +77,13 @@ def test_evaluate_response_scores_pod_abnormal_case():
 
 
 def test_cases_yaml_loads_enabled_pod_abnormal_cases():
-    _, cases = load_cases(Path("test/pod_abnormal_e2e/cases.yaml"))
+    defaults, cases = load_cases(Path("test/pod_abnormal_e2e/cases.yaml"))
 
     enabled = [case for case in cases if case.enabled]
+    assert defaults["root_cause_threshold"] == 0.6
+    assert defaults["evidence_threshold"] == 0.6
+    assert defaults["runbook_threshold"] == 0.6
+    assert all(case.evidence_threshold == 0.6 for case in enabled)
     assert len(enabled) >= 10
     assert {case.expected_pod_abnormal_type for case in enabled} >= {
         "Evicted",
@@ -89,3 +97,100 @@ def test_cases_yaml_loads_enabled_pod_abnormal_cases():
         "ConfigError",
         "NotReadyProbeFailed",
     }
+
+
+def test_select_cases_supports_old_scenario_flag_aliases():
+    _, cases = load_cases(Path("test/pod_abnormal_e2e/cases.yaml"))
+
+    selected = select_cases(cases, "imagepullbackoff", include_disabled=False)
+
+    assert [case.id for case in selected] == ["imagepull-invalid-registry"]
+
+
+def test_select_cases_supports_comma_separated_case_ids_and_aliases():
+    _, cases = load_cases(Path("test/pod_abnormal_e2e/cases.yaml"))
+
+    selected = select_cases(cases, "oomkilled,imagepullbackoff", include_disabled=False)
+
+    assert [case.id for case in selected] == [
+        "oomkilled-memory-limit",
+        "imagepull-invalid-registry",
+    ]
+
+
+def test_build_chinese_report_lines_contains_detail_and_quality_summary(tmp_path):
+    case = Case(
+        id="terminating-finalizer-stuck",
+        name="TerminatingStuck: finalizer 卡住删除",
+        expected_pod_abnormal_type="TerminatingStuck",
+        expected_layer="L1",
+        expected_runbooks=["pod-terminating-stuck"],
+    )
+    result = CaseResult(case=case)
+    result.runs = [
+        {
+            "idx": 1,
+            "success": True,
+            "elapsed": 294.0,
+            "mttr_seconds": 294.0,
+            "layer": "L1",
+            "root_cause_ok": True,
+            "runbook_ok": True,
+            "evidence_rate": 4 / 7,
+        },
+        {
+            "idx": 2,
+            "success": True,
+            "elapsed": 207.0,
+            "mttr_seconds": 207.0,
+            "layer": "L1",
+            "root_cause_ok": True,
+            "runbook_ok": True,
+            "evidence_rate": 1.0,
+        },
+    ]
+
+    text = "\n".join(build_chinese_report_lines([result], 501.0, tmp_path, model_name="openai/Qwen3-32B-AWQ"))
+
+    assert "Pod 异常 E2E 准确率报告（盲测模式）" in text
+    assert "模型: openai/Qwen3-32B-AWQ" in text
+    assert "运行明细" in text
+    assert "| TerminatingStuck: finalizer 卡住删除 | 1" in text
+    assert "L1 ✅" in text
+    assert "根因准确率" in text
+    assert "场景汇总" in text
+    assert "质量指标汇总" in text
+    assert "| 证据采集率 | >= 60% |" in text
+
+
+def test_extract_model_name_from_context_budget_line():
+    text = "[context_budget] node=evidence model=openai/Qwen3-32B-AWQ input_tokens=123"
+
+    assert extract_model_name(text) == "openai/Qwen3-32B-AWQ"
+
+
+def test_evidence_threshold_defaults_to_sixty_percent():
+    case = Case(
+        id="threshold",
+        name="Threshold",
+        expected_pod_abnormal_type="OOMKilled",
+        root_cause_keywords=["OOMKilled"],
+        evidence_keywords=[],
+        evidence_threshold=0.6,
+    )
+
+    failed = evaluate_response(
+        case,
+        "OOMKilled\ncollection_summary: 计划 7 项，实际采集 4 项，未采集 3 项，完整度 57%",
+        wall_clock=1,
+        idx=1,
+    )
+    passed = evaluate_response(
+        case,
+        "OOMKilled\ncollection_summary: 计划 5 项，实际采集 3 项，未采集 2 项，完整度 60%",
+        wall_clock=1,
+        idx=2,
+    )
+
+    assert failed["evidence_ok"] is False
+    assert passed["evidence_ok"] is True

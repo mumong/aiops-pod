@@ -326,7 +326,7 @@ def test_evidence_prompt_uses_layer_handoff_in_user_message_not_system_prompt(mo
     assert events[0]["tool_name"] == "run_bash_command"
 
 
-def test_evidence_user_message_uses_semantic_runbook_matching_without_hardcoded_recommendations():
+def test_evidence_user_message_consumes_layer_matched_runbooks_without_hardcoded_recommendations():
     layer_handoff = {
         "layer": "L1",
         "primary_pod": {"name": "terminating-stuck", "namespace": "aiops-e2e"},
@@ -341,10 +341,10 @@ def test_evidence_user_message_uses_semantic_runbook_matching_without_hardcoded_
     )
 
     assert "# Runbook 语义匹配要求" in message
-    assert "根据 Available Runbooks/catalog 的 description" in message
+    assert "evidence_plan 阶段不要重新选择 runbook" in message
     assert "pod_status_keyword" in message
     assert "pod_abnormal_type" in message
-    assert "不要依赖代码注入的 runbook 推荐字段" in message
+    assert "matched_runbooks" in message
     assert "evidence_plan 第一项必须是 fetch_runbook" not in message
     assert "recommended_runbooks" not in message
 

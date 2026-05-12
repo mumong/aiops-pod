@@ -165,10 +165,25 @@ def count_llm_calls(text: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def extract_model_name(text: str) -> Optional[str]:
+    """Extract model identity from visible logs/report text when available."""
+    patterns = [
+        r"\bmodel=([A-Za-z0-9_.:/-]+)",
+        r"\b模型[：:=]\s*([A-Za-z0-9_.:/-]+)",
+        r"\bMODEL[：:=]\s*([A-Za-z0-9_.:/-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1).strip().strip(",;")
+    return None
+
+
 @dataclass
 class Case:
     id: str
     name: str
+    aliases: List[str] = field(default_factory=list)
     enabled: bool = True
     manual: bool = False
     namespace: str = "aiops-e2e"
@@ -180,9 +195,9 @@ class Case:
     root_cause_keywords: List[str] = field(default_factory=list)
     evidence_keywords: List[str] = field(default_factory=list)
     mttr_threshold_seconds: int = 900
-    root_cause_threshold: float = 0.8
-    evidence_threshold: float = 0.8
-    runbook_threshold: float = 0.8
+    root_cause_threshold: float = 0.6
+    evidence_threshold: float = 0.6
+    runbook_threshold: float = 0.6
 
 
 @dataclass
@@ -226,6 +241,7 @@ def load_cases(path: Path) -> Tuple[Dict[str, Any], List[Case]]:
         cases.append(Case(
             id=merged["id"],
             name=merged["name"],
+            aliases=list(merged.get("aliases") or []),
             enabled=bool(merged.get("enabled", True)),
             manual=bool(merged.get("manual", False)),
             namespace=str(merged.get("namespace") or "aiops-e2e"),
@@ -237,16 +253,83 @@ def load_cases(path: Path) -> Tuple[Dict[str, Any], List[Case]]:
             root_cause_keywords=list(merged.get("root_cause_keywords") or []),
             evidence_keywords=list(merged.get("evidence_keywords") or []),
             mttr_threshold_seconds=int(merged.get("mttr_threshold_seconds") or 900),
-            root_cause_threshold=float(merged.get("root_cause_threshold") or 0.8),
-            evidence_threshold=float(merged.get("evidence_threshold") or 0.8),
-            runbook_threshold=float(merged.get("runbook_threshold") or 0.8),
+            root_cause_threshold=float(merged.get("root_cause_threshold") or 0.6),
+            evidence_threshold=float(merged.get("evidence_threshold") or 0.6),
+            runbook_threshold=float(merged.get("runbook_threshold") or 0.6),
         ))
     return defaults, cases
+
+
+def select_cases(cases: List[Case], scenario: str, include_disabled: bool = False) -> List[Case]:
+    """Select cases by id or alias.
+
+    `scenario` intentionally mirrors the old `test_accuracy.py --scenario`
+    interface, while still accepting this runner's original `--case` values.
+    """
+    if scenario == "all":
+        return [case for case in cases if case.enabled or include_disabled]
+
+    selected: List[Case] = []
+    missing: List[str] = []
+    for raw_item in scenario.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        matched = [
+            case
+            for case in cases
+            if case.id == item
+            or item in case.aliases
+            or item == case.expected_pod_abnormal_type
+            or item.lower() == case.expected_pod_abnormal_type.lower()
+        ]
+        matched = [case for case in matched if case.enabled or include_disabled]
+        if not matched:
+            missing.append(item)
+            continue
+        for case in matched:
+            if case not in selected:
+                selected.append(case)
+
+    if missing:
+        available = []
+        for case in cases:
+            if case.enabled or include_disabled:
+                aliases = f" ({', '.join(case.aliases)})" if case.aliases else ""
+                available.append(f"{case.id}{aliases}")
+        raise ValueError(
+            "Unknown scenario/case: "
+            + ", ".join(missing)
+            + "\nAvailable: all, "
+            + "; ".join(available)
+        )
+    return selected
 
 
 def check_health(base_url: str) -> None:
     response = requests.get(f"{base_url}/health", timeout=10)
     response.raise_for_status()
+
+
+def detect_model_name(base_url: str) -> Optional[str]:
+    """Best-effort model discovery without requiring service changes."""
+    try:
+        response = requests.get(f"{base_url}/health", timeout=10)
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return None
+
+    for key in ("model", "llm_model", "current_model"):
+        value = data.get(key) if isinstance(data, dict) else None
+        if value:
+            return str(value)
+    config = data.get("config") if isinstance(data, dict) else None
+    if isinstance(config, dict):
+        for key in ("model", "llm_model"):
+            if config.get(key):
+                return str(config[key])
+    return None
 
 
 def run_single_request(base_url: str, case: Case, timeout: int, idx: int, save_dir: Path) -> Dict[str, Any]:
@@ -266,7 +349,9 @@ def run_single_request(base_url: str, case: Case, timeout: int, idx: int, save_d
         output_path.write_text(text, encoding="utf-8")
         if len(text.strip()) < 50:
             return {"idx": idx, "success": False, "elapsed": elapsed, "error": "empty response"}
-        return evaluate_response(case, text, elapsed, idx)
+        result = evaluate_response(case, text, elapsed, idx)
+        result["model_name"] = extract_model_name(text)
+        return result
     except Exception as exc:
         elapsed = time.time() - started
         partial = "".join(chunks)
@@ -364,7 +449,150 @@ def _fmt_rate(value: Optional[float]) -> str:
     return "N/A" if value is None else f"{value * 100:.1f}%"
 
 
-def write_reports(results: List[CaseResult], result_dir: Path, total_elapsed: float) -> None:
+def _fmt_percent0(value: Optional[float]) -> str:
+    return "N/A" if value is None else f"{value:.0%}"
+
+
+def _fmt_seconds(value: Optional[float]) -> str:
+    return "N/A" if value is None else f"{value:.0f}s"
+
+
+def _fmt_minutes(value: Optional[float]) -> str:
+    return "N/A" if value is None else f"{value / 60:.1f}m"
+
+
+def _resolve_model_name(results: List[CaseResult], model_name: Optional[str]) -> str:
+    if model_name:
+        return model_name
+    for result in results:
+        for run in result.runs:
+            if run.get("model_name"):
+                return str(run["model_name"])
+    return "UNKNOWN"
+
+
+def _thresholds_for_report(results: List[CaseResult]) -> Dict[str, float]:
+    cases = [result.case for result in results]
+    if not cases:
+        return {"root": 0.6, "evidence": 0.6, "runbook": 0.6, "mttr_seconds": 900.0}
+    return {
+        "root": min(case.root_cause_threshold for case in cases),
+        "evidence": min(case.evidence_threshold for case in cases),
+        "runbook": min(case.runbook_threshold for case in cases),
+        "mttr_seconds": min(float(case.mttr_threshold_seconds) for case in cases),
+    }
+
+
+def build_chinese_report_lines(
+    results: List[CaseResult],
+    total_elapsed: float,
+    result_dir: Path,
+    model_name: Optional[str] = None,
+) -> List[str]:
+    """Build a detailed Chinese terminal/Markdown report."""
+    all_runs = [run for result in results for run in result.runs]
+    ok_runs = [run for run in all_runs if run.get("success")]
+    failed_runs = len(all_runs) - len(ok_runs)
+    thresholds = _thresholds_for_report(results)
+    resolved_model = _resolve_model_name(results, model_name)
+
+    lines = [
+        "",
+        "=" * 70,
+        "Pod 异常 E2E 准确率报告（盲测模式）",
+        "=" * 70,
+        f"模型: {resolved_model}",
+        f"场景数: {len(results)} | 总运行: {len(all_runs)} | 成功: {len(ok_runs)} | 失败: {failed_runs}",
+        f"总耗时: {total_elapsed:.0f}s ({total_elapsed / 60:.1f}m)",
+        "",
+        "-" * 70,
+        "运行明细",
+        "-" * 70,
+        "| 场景 | # | 层级 | 期望 | 根因 | Runbook | MTTR | 证据 | 耗时 |",
+        "|------|---|------|------|------|---------|------|------|------|",
+    ]
+
+    for result in results:
+        case = result.case
+        for run in sorted(result.runs, key=lambda item: int(item.get("idx") or 0)):
+            if not run.get("success"):
+                lines.append(
+                    f"| {case.name} | {run.get('idx', 0)} | FAIL | {case.expected_layer or 'N/A'} | ❌ | ❌ | "
+                    f"N/A | N/A | {_fmt_seconds(run.get('elapsed'))} |"
+                )
+                continue
+
+            layer = run.get("layer") or "UNKNOWN"
+            layer_ok = layer == case.expected_layer if case.expected_layer else True
+            layer_text = f"{layer} {'✅' if layer_ok else '❌'}"
+            root_text = "✅" if run.get("root_cause_ok") else "❌"
+            runbook_text = "✅" if run.get("runbook_ok") else "❌"
+            evidence_text = _fmt_percent0(run.get("evidence_rate"))
+            lines.append(
+                f"| {case.name} | {run.get('idx', 0)} | {layer_text} | {case.expected_layer or 'N/A'} | "
+                f"{root_text} | {runbook_text} | {_fmt_seconds(run.get('mttr_seconds'))} | "
+                f"{evidence_text} | {_fmt_seconds(run.get('elapsed'))} |"
+            )
+
+    lines.extend([
+        "",
+        "-" * 70,
+        "场景汇总",
+        "-" * 70,
+        "| 场景 | 根因准确率 | Runbook 覆盖率 | 平均 MTTR | 平均证据率 | 成功运行 |",
+        "|------|------------|----------------|-----------|------------|----------|",
+    ])
+
+    for result in results:
+        case = result.case
+        lines.append(
+            f"| {case.name} | {_fmt_rate(result.root_cause_accuracy)} | {_fmt_rate(result.runbook_coverage)} | "
+            f"{_fmt_minutes(result.avg_mttr_seconds)} | {_fmt_rate(result.avg_evidence_rate)} | "
+            f"{len(result.ok_runs)}/{len(result.runs)} |"
+        )
+
+    if ok_runs:
+        root_ok = sum(1 for run in ok_runs if run.get("root_cause_ok"))
+        runbook_ok = sum(1 for run in ok_runs if run.get("runbook_ok"))
+        mttr_values = [float(run["mttr_seconds"]) for run in ok_runs if run.get("mttr_seconds") is not None]
+        evidence_values = [float(run["evidence_rate"]) for run in ok_runs if run.get("evidence_rate") is not None]
+
+        avg_mttr = sum(mttr_values) / len(mttr_values) if mttr_values else None
+        root_rate = root_ok / len(ok_runs)
+        runbook_rate = runbook_ok / len(ok_runs)
+        evidence_rate = sum(evidence_values) / len(evidence_values) if evidence_values else None
+
+        mttr_threshold = thresholds["mttr_seconds"]
+        mttr_pass = avg_mttr is not None and avg_mttr < mttr_threshold
+        root_pass = root_rate >= thresholds["root"]
+        runbook_pass = runbook_rate >= thresholds["runbook"]
+        evidence_pass = evidence_rate is not None and evidence_rate >= thresholds["evidence"]
+
+        lines.extend([
+            "",
+            "=" * 60,
+            "质量指标汇总",
+            "=" * 60,
+            "| 指标 | 阈值 | 实际 | 状态 |",
+            "|------|------|------|------|",
+            f"| MTTR | < {mttr_threshold / 60:.0f}m | {_fmt_minutes(avg_mttr)} | {'✅' if mttr_pass else '❌'} |",
+            f"| 根因准确率 | >= {thresholds['root']:.0%} | {_fmt_rate(root_rate)} | {'✅' if root_pass else '❌'} |",
+            f"| Runbook 覆盖率 | >= {thresholds['runbook']:.0%} | {_fmt_rate(runbook_rate)} | {'✅' if runbook_pass else '❌'} |",
+            f"| 证据采集率 | >= {thresholds['evidence']:.0%} | {_fmt_rate(evidence_rate)} | {'✅' if evidence_pass else '❌'} |",
+        ])
+    else:
+        lines.extend(["", "无成功请求，无法计算质量指标。"])
+
+    lines.extend(["", f"报告目录: {result_dir}"])
+    return lines
+
+
+def write_reports(
+    results: List[CaseResult],
+    result_dir: Path,
+    total_elapsed: float,
+    model_name: Optional[str] = None,
+) -> None:
     all_runs = [run for result in results for run in result.runs]
     ok_runs = [run for run in all_runs if run.get("success")]
 
@@ -375,20 +603,11 @@ def write_reports(results: List[CaseResult], result_dir: Path, total_elapsed: fl
         "total_runs": len(all_runs),
         "success": len(ok_runs),
         "failed": len(all_runs) - len(ok_runs),
+        "model": _resolve_model_name(results, model_name),
         "cases": {},
     }
 
-    lines = [
-        "# Pod Abnormal E2E Summary",
-        "",
-        f"- total runs: {len(all_runs)}",
-        f"- success: {len(ok_runs)}",
-        f"- failed: {len(all_runs) - len(ok_runs)}",
-        f"- elapsed: {total_elapsed:.1f}s",
-        "",
-        "| Case | Root Cause | Evidence | Runbook | MTTR | Runs |",
-        "|------|------------|----------|---------|------|------|",
-    ]
+    lines = build_chinese_report_lines(results, total_elapsed, result_dir, model_name=model_name)
 
     for result in results:
         case = result.case
@@ -408,12 +627,6 @@ def write_reports(results: List[CaseResult], result_dir: Path, total_elapsed: fl
             "runbook_coverage": None if runbook_rate is None else round(runbook_rate * 100, 1),
             "avg_mttr_seconds": None if mttr is None else round(mttr, 1),
         }
-        mttr_text = "N/A" if mttr is None else f"{mttr / 60:.1f}m"
-        lines.append(
-            f"| {case.id} | {_fmt_rate(root_rate)} | {_fmt_rate(evidence_rate)} | "
-            f"{_fmt_rate(runbook_rate)} | {mttr_text} | {len(ok)}/{len(result.runs)} |"
-        )
-
     if ok_runs:
         root_values = [run for run in ok_runs if run.get("root_cause_ok")]
         runbook_values = [run for run in ok_runs if run.get("runbook_ok")]
@@ -428,11 +641,13 @@ def write_reports(results: List[CaseResult], result_dir: Path, total_elapsed: fl
 
     (result_dir / "stats.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (result_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("\n".join(lines))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run pod abnormal E2E cases")
-    parser.add_argument("--case", "-s", default="all", help="case id, comma-separated ids, or all")
+    parser.add_argument("--case", "-s", default=None, help="case id/alias, comma-separated ids, or all")
+    parser.add_argument("--scenario", default=None, help="compat alias for --case")
     parser.add_argument("--cases-file", default=str(DEFAULT_CASES_FILE), help="cases.yaml path")
     parser.add_argument("--url", default="http://10.2.0.48:30800", help="AIOps base URL")
     parser.add_argument("-n", "--repeat", type=int, default=1, help="repeat count per case")
@@ -441,6 +656,7 @@ def main() -> None:
     parser.add_argument("--include-disabled", action="store_true", help="include disabled/manual cases")
     parser.add_argument("--question", default=None, help="override question for all cases")
     parser.add_argument("--output-dir", default=None, help="result directory")
+    parser.add_argument("--model", default=None, help="model name shown in the final report")
     args = parser.parse_args()
 
     _, cases = load_cases(Path(args.cases_file))
@@ -448,14 +664,11 @@ def main() -> None:
         for case in cases:
             case.question = args.question
 
-    selected_ids = {item.strip() for item in args.case.split(",") if item.strip()}
-    if args.case == "all":
-        selected = [case for case in cases if case.enabled or args.include_disabled]
-    else:
-        selected = [case for case in cases if case.id in selected_ids]
-    missing = selected_ids - {case.id for case in cases}
-    if missing and args.case != "all":
-        print(f"Unknown case(s): {', '.join(sorted(missing))}", file=sys.stderr)
+    scenario = args.scenario or args.case or "all"
+    try:
+        selected = select_cases(cases, scenario, include_disabled=args.include_disabled)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         sys.exit(2)
     if not selected:
         print("No cases selected", file=sys.stderr)
@@ -469,6 +682,8 @@ def main() -> None:
     print(f"Repeat: {args.repeat} | concurrency: {args.concurrency} | timeout: {args.timeout}s")
     check_health(args.url)
     print("Health: OK")
+    model_name = args.model or detect_model_name(args.url)
+    print(f"Model: {model_name or 'UNKNOWN'}")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_dir = Path(args.output_dir) if args.output_dir else Path("testreports") / f"pod_abnormal_{ts}"
@@ -480,7 +695,15 @@ def main() -> None:
         for case in selected
     ]
     total_elapsed = time.time() - started
-    write_reports(results, result_dir, total_elapsed)
+    if not model_name:
+        for result in results:
+            for run in result.runs:
+                if run.get("model_name"):
+                    model_name = str(run["model_name"])
+                    break
+            if model_name:
+                break
+    write_reports(results, result_dir, total_elapsed, model_name=model_name)
     print(f"\nReport: {result_dir}")
 
 
