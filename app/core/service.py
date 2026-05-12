@@ -7,6 +7,7 @@ AIOps Copilot Service
 import os
 import logging
 import threading
+import json
 from pathlib import Path
 from typing import Optional, Tuple, Any, Generator, Dict
 from datetime import datetime
@@ -27,6 +28,81 @@ logger = logging.getLogger(__name__)
 
 # 使每次工具调用的输出与错误写入 app 日志，便于调试 MCP
 apply_tool_result_logging_patch()
+
+
+def _short_cell(value: Any, max_chars: int = 80) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
+def format_evidence_plan_output(evidence_analysis: Any, max_items: int = 12) -> str:
+    """Render evidence_plan for visible workflow output.
+
+    The raw JSON is still archived. This function provides a compact table for
+    curl/frontend users so they can see what the evidence node planned and
+    which planned items were satisfied.
+    """
+    if not evidence_analysis:
+        return ""
+    if isinstance(evidence_analysis, str):
+        try:
+            data = json.loads(evidence_analysis)
+        except Exception:
+            return ""
+    elif isinstance(evidence_analysis, dict):
+        data = evidence_analysis
+    else:
+        return ""
+
+    plan = data.get("evidence_plan") or []
+    if not isinstance(plan, list) or not plan:
+        return ""
+
+    inventory = data.get("evidence_inventory") or []
+    collected_by_id = {
+        str(item.get("id")): bool(item.get("collected"))
+        for item in inventory
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+
+    lines = [
+        "   📋 证据采集计划",
+        "   | ID | 级别 | 状态 | 工具 | 采集目标 | 命令 |",
+        "   |----|------|------|------|----------|------|",
+    ]
+    for item in plan[:max_items]:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "?")
+        if item_id in collected_by_id:
+            status = "✅" if collected_by_id[item_id] else "❌"
+        else:
+            status = "待确认"
+        lines.append(
+            "   "
+            f"| {_short_cell(item_id, 16)} "
+            f"| {_short_cell(item.get('level'), 12)} "
+            f"| {status} "
+            f"| {_short_cell(item.get('tool'), 28)} "
+            f"| {_short_cell(item.get('description') or item.get('purpose'), 48)} "
+            f"| `{_short_cell(item.get('command'), 80)}` |"
+        )
+
+    if len(plan) > max_items:
+        lines.append(f"   ... 还有 {len(plan) - max_items} 项计划未展开")
+
+    missing_reasons = data.get("missing_reasons") or []
+    if missing_reasons:
+        lines.append("")
+        lines.append("   ⚠️ 未采集原因:")
+        for reason in missing_reasons[:5]:
+            lines.append(f"   - {_short_cell(reason, 140)}")
+        if len(missing_reasons) > 5:
+            lines.append(f"   - ... 还有 {len(missing_reasons) - 5} 条")
+
+    return "\n".join(lines)
 
 
 def configure_model_context_window(llm_config: Optional[Dict[str, Any]] = None) -> Optional[int]:
@@ -943,6 +1019,10 @@ class HolmesService:
                     collected = snapshot.get("collected_count", 0)
                     completeness = snapshot.get("completeness", 0) or 0
                     yield emit(f"   证据: {collected}/{count} 项, 完整度: {completeness:.0%}")
+                    plan_output = format_evidence_plan_output(snapshot.get("evidence_analysis", ""))
+                    if plan_output:
+                        yield emit("")
+                        yield emit(plan_output)
                     node_outputs["evidence"] = snapshot.get("evidence_analysis", "") or format_evidence_node_output(snapshot)
 
                 elif node_id == "rca":
@@ -1048,18 +1128,25 @@ class HolmesService:
     def health_check(self) -> dict:
         """健康检查"""
         initialized = self._is_initialized()
+        model_name = None
+        if self.config is not None:
+            model_name = getattr(self.config, "model", None)
+        if not model_name and self.ai_call is not None:
+            model_name = getattr(self.ai_call, "model_str", None)
         if initialized:
             return {
                 "status": "healthy",
                 "config_loaded": True,
                 "ai_initialized": True,
                 "mode": "AICall(LangGraph)",
+                "model": model_name,
             }
         if self._init_in_progress:
             return {
                 "status": "initializing",
                 "config_loaded": self.config is not None,
                 "ai_initialized": initialized,
+                "model": model_name,
                 "started_at": self._init_started_at.isoformat() if self._init_started_at else None,
             }
         if self._init_error:
@@ -1070,7 +1157,8 @@ class HolmesService:
         return {
             "status": "uninitialized",
             "config_loaded": self.config is not None,
-            "ai_initialized": initialized
+            "ai_initialized": initialized,
+            "model": model_name,
         }
 
 

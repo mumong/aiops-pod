@@ -1031,8 +1031,8 @@ def test_evidence_prompt_requires_pod_abnormal_handoff_fields():
         "pod_abnormal_type",
         "核心任务",
         "找证据",
-        "根据 Available Runbooks/catalog 的 description",
-        "明显匹配当前 Pod 异常状态",
+        "layer_handoff.matched_runbooks",
+        "不要在 evidence 阶段重新选择 runbook",
         "异常 Pod 返回 NotFound",
     ]
 

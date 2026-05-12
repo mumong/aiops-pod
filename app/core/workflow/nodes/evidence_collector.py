@@ -17,15 +17,24 @@
 
 import json
 import logging
+import os
 import re
 import shlex
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import EvidenceCollectionOutput, EvidenceMatchOutput, EvidencePlanOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
-from app.core.prompts import get_workflow_prompt, get_query_evidence_normalization_prompt
+from app.core.prompts import (
+    EVIDENCE_PLAN_PROTOCOL_DYNAMIC,
+    EVIDENCE_PLAN_PROTOCOL_EXISTING,
+    EVIDENCE_PLAN_PROTOCOL_PREPLANNED,
+    EVIDENCE_USER_MESSAGE_TEMPLATE,
+    get_workflow_prompt,
+    get_query_evidence_normalization_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -970,63 +979,29 @@ class EvidenceCollectorNode(WorkflowNode):
             archive_lines.append("- layer handoff 已由上方 layer_handoff 注入；不要重复读取归档。")
         archive_section = "\n".join(archive_lines).strip() if archive_lines else "无"
         if existing_plan:
-            plan_protocol = """- 本轮已有 Pydantic evidence_plan，禁止重新输出或改写 evidence_plan。
-- 直接按既有 evidence_plan 调用至少一个 critical 或 important 级真实工具。
-- 如果计划项提供 tool_args，必须按 tool_args 调用 MCP 工具；不要从 command 文本重新猜 MCP 参数。
-- LLM 必须自己决定并调用工具；计划不是证据。
-- 工具调用必须尽量逐项完成既有计划，最终消息不要新增未写入 plan 的“已采集计划项”。
-- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+            plan_protocol = EVIDENCE_PLAN_PROTOCOL_EXISTING
         elif plan_mode == "preplanned_execution":
-            plan_protocol = """- 采证计划已由 `EvidencePlanOutput` Pydantic schema 单独生成；执行阶段不要重写 evidence_plan。
-- 如果本轮进入工具执行，必须调用至少一个 critical 或 important 级真实工具。
-- LLM 必须自己决定并调用工具；计划不是证据。
-- 后续工具调用必须尽量逐项完成 Pydantic plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
-- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+            plan_protocol = EVIDENCE_PLAN_PROTOCOL_PREPLANNED
         else:
-            plan_protocol = """- 本轮使用普通工具 agent 采集真实证据；采证计划由 `EvidencePlanOutput` Pydantic schema 单独生成。
-- 必须先在内部形成最小采证意图，再直接调用真实工具；必须调用至少一个 critical 或 important 级真实工具。
-- LLM 必须自己决定并调用工具；计划不是证据。
-- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+            plan_protocol = EVIDENCE_PLAN_PROTOCOL_DYNAMIC
         handoff_obj = EvidenceCollectorNode._parse_handoff_json(layer_handoff)
         compact_handoff = EvidenceCollectorNode._compact_layer_handoff_for_prompt(handoff_obj, layer_handoff)
         abnormal_summary_section = EvidenceCollectorNode._format_current_abnormal_summary_for_prompt(handoff_obj)
-        return f"""# 用户原始问题
-{question}
-
-# 上游定位结构化结果 layer_handoff
-{compact_handoff}
-
-{abnormal_summary_section}
-
-# Runbook 语义匹配要求
-- 根据 Available Runbooks/catalog 的 description、runbook_id、状态关键字与 layer_handoff 中的 abnormal_groups、pod_status_keyword、pod_abnormal_type、active_signals 做语义匹配。
-- 如果某个 Pod 异常 runbook 明显匹配当前 Pod 异常状态，evidence_plan 必须包含一条 level=reference、tool=fetch_runbook 的参考步骤；多个当前异常类型可以获取多个明显匹配的 runbook。
-- 匹配到 runbook 时，fetch_runbook 必须在真实环境工具前执行。先读 runbook，再把 runbook 的关键检查点转化为 kubectl/prometheus 等真实环境验证步骤。
-- 不要依赖代码注入的 runbook 推荐字段；是否调用 runbook 必须由你根据 catalog 描述和当前异常信号自主判断。
-- runbook 是参考知识，不是真实环境证据；fetch_runbook 后仍必须调用 kubectl/prometheus 等真实环境工具验证关键事实。
-- 如果你在分析中认为“应该查看/参考某个 runbook”，必须把它写入 evidence_plan 并实际调用 fetch_runbook；禁止只在思考中提到 runbook 却不调用。
-- 只有当 catalog 中没有明显匹配项，或上游判断为 HEALTHY/QUERY，才允许不调用 fetch_runbook；这种情况下最终消息必须说明“未发现明显匹配的 Pod 异常 runbook”。
-
-# 归档上下文（非采证主线）
-{archive_section}
-
-# 当前节点职责
-你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须以 layer_handoff 的 abnormal_groups、issue_groups、abnormal_pods、current_abnormal_summary 为覆盖基准调用真实只读工具采集证据。
-
-# 强约束
-{plan_protocol}
-- 如果 layer_handoff 提供 abnormal_groups/issue_groups，evidence_plan 应优先覆盖每个当前异常组的最小关键证据；不要只围绕单个 Pod 而完全忽略其他异常组。
-- 影响范围最大的异常组做完整验证；其他异常组做最小验证。单个 Pod 不能替代 abnormal_pods/abnormal_groups 的覆盖要求。
-- 对非主要影响面的 issue_group 只做最小验证：当前状态 + 一个最关键配置/事件信号即可，不要展开成长链路。
-- 必须把 current_abnormal_summary.status_counts 作为审查核心；非 Running/Completed/Succeeded/Ready/Bound/Active 的状态都需要至少最小验证。
-- 必须优先围绕影响范围最大的异常组验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要把采证范围收缩成单个 Pod，也不要先做大范围无关集群扫描。
-- 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
-- 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
-- 如果 Available Runbooks/catalog 中存在明显匹配当前 Pod 异常状态的 runbook，应先执行 fetch_runbook 参考步骤；但不能只 fetch_runbook 后结束，必须继续调用真实环境工具。reference/runbook 步骤不是证据，不计入 critical/important 完整度。存在明显匹配 runbook 却未调用 fetch_runbook 时，本轮采证视为不完整。
-- 不要把 context_archive_ref、archive_ref、raw_ref、summary_ref、structured_ref 等路径当作采证任务；默认不要计划读取归档文件。
-{strict_section}
-# 输出
-{"直接执行既有 Pydantic evidence_plan 中的必要工具，最后输出简短证据结论。" if existing_plan else "调用必要真实工具后输出简短证据结论；不要手写 EvidenceCollectionOutput。"}"""
+        matched_runbook_context = EvidenceCollectorNode._build_matched_runbook_context_for_prompt(handoff_obj)
+        return EVIDENCE_USER_MESSAGE_TEMPLATE.format(
+            question=question,
+            compact_handoff=compact_handoff,
+            abnormal_summary_section=abnormal_summary_section,
+            matched_runbook_context=matched_runbook_context,
+            archive_section=archive_section,
+            plan_protocol=plan_protocol,
+            strict_section=strict_section,
+            output_instruction=(
+                "直接执行既有 Pydantic evidence_plan 中的必要工具，最后输出简短证据结论。"
+                if existing_plan
+                else "调用必要真实工具后输出简短证据结论；不要手写 EvidenceCollectionOutput。"
+            ),
+        )
 
     @staticmethod
     def _parse_handoff_json(layer_handoff: str) -> Dict[str, Any]:
@@ -1058,6 +1033,7 @@ class EvidenceCollectorNode(WorkflowNode):
             "must_verify",
             "issue_groups",
             "current_abnormal_summary",
+            "matched_runbooks",
         }
         compact = {
             key: EvidenceCollectorNode._strip_archive_refs(handoff[key])
@@ -1095,6 +1071,121 @@ class EvidenceCollectorNode(WorkflowNode):
         if isinstance(value, list):
             return [EvidenceCollectorNode._strip_archive_refs(item) for item in value]
         return value
+
+    @classmethod
+    def _build_matched_runbook_context_for_prompt(cls, handoff: Dict[str, Any]) -> str:
+        matched = handoff.get("matched_runbooks") if isinstance(handoff, dict) else []
+        if isinstance(matched, str):
+            matched = [matched]
+        if not isinstance(matched, list) or not matched:
+            return ""
+
+        sections = []
+        seen = set()
+        for runbook_id in matched[:5]:
+            safe_id = cls._safe_runbook_id(str(runbook_id or ""))
+            if not safe_id or safe_id in seen:
+                continue
+            seen.add(safe_id)
+            content = cls._read_runbook_content(safe_id)
+            if not content:
+                logger.info("📚 [evidence] layer matched runbook 未找到，跳过注入: %s", safe_id)
+                continue
+            summary = cls._extract_runbook_plan_context(content)
+            if summary:
+                sections.append(f"## {safe_id}\n{summary}")
+
+        if not sections:
+            return ""
+        return "# Layer 已确认 Runbook 上下文\n" + "\n\n".join(sections)
+
+    @staticmethod
+    def _safe_runbook_id(runbook_id: str) -> str:
+        text = os.path.basename((runbook_id or "").strip())
+        if not text:
+            return ""
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", text):
+            return ""
+        return text if text.endswith(".md") else f"{text}.md"
+
+    @classmethod
+    def _read_runbook_content(cls, runbook_id: str) -> str:
+        for directory in cls._candidate_runbook_dirs():
+            path = directory / runbook_id
+            try:
+                if path.is_file():
+                    return path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+        return cls._read_runbook_from_configmap(runbook_id)
+
+    @staticmethod
+    def _candidate_runbook_dirs() -> List[Path]:
+        dirs = []
+        env_dirs = os.getenv("AIOPS_RUNBOOK_DIRS", "")
+        for item in env_dirs.split(":"):
+            item = item.strip()
+            if item:
+                dirs.append(Path(item))
+        dirs.extend([
+            Path("/app/knowledge_base/runbooks"),
+            Path("knowledge_base/runbooks"),
+            Path("/etc/aiops/runbooks"),
+        ])
+        return dirs
+
+    @staticmethod
+    def _read_runbook_from_configmap(runbook_id: str) -> str:
+        for path in (Path("deploy/configmap/runbooks.yaml"), Path("deploy/configmap/runbooks.bak.yaml")):
+            try:
+                if not path.is_file():
+                    continue
+                import yaml
+
+                data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                content = ((data.get("data") or {}).get(runbook_id) or "")
+                if content:
+                    return str(content)
+            except Exception:
+                logger.debug("📚 [evidence] 读取 runbook configmap 失败: %s", path, exc_info=True)
+        return ""
+
+    @staticmethod
+    def _extract_runbook_plan_context(content: str, max_chars: int = 2500) -> str:
+        lines = (content or "").splitlines()
+        if not lines:
+            return ""
+
+        title = next((line for line in lines if line.startswith("# ")), "").strip()
+        wanted_headings = (
+            "Evidence 节点推荐计划",
+            "必查项",
+            "判定规则",
+            "状态识别",
+            "典型原因",
+        )
+        sections = [title] if title else []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            heading = line.strip().lstrip("#").strip()
+            if any(key in heading for key in wanted_headings):
+                block = [line.rstrip()]
+                i += 1
+                while i < len(lines):
+                    nxt = lines[i]
+                    if nxt.startswith("# "):
+                        break
+                    block.append(nxt.rstrip())
+                    i += 1
+                sections.append("\n".join(block).strip())
+                continue
+            i += 1
+
+        if len(sections) <= (1 if title else 0):
+            sections.append("\n".join(lines[:80]).strip())
+        text = "\n\n".join(part for part in sections if part).strip()
+        return text[:max_chars]
 
     @staticmethod
     def _format_current_abnormal_summary_for_prompt(handoff: Dict[str, Any]) -> str:
@@ -1220,7 +1311,11 @@ class EvidenceCollectorNode(WorkflowNode):
                 logger.info("✂️ [evidence] evidence_plan 超过 %d 项，已截断", max_items)
                 break
 
-        return cls._ensure_abnormal_group_plan_coverage(normalized, layer_handoff or {})
+        if layer_handoff:
+            logger.info(
+                "📋 [evidence] 不再自动补全 evidence_plan；异常组覆盖只通过 LLM Pydantic plan 与后续统计呈现"
+            )
+        return normalized
 
     @classmethod
     def _normalize_plan_tool_args(cls, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -1260,106 +1355,6 @@ class EvidenceCollectorNode(WorkflowNode):
         if namespace:
             args["namespace"] = namespace
         return args
-
-    @classmethod
-    def _ensure_abnormal_group_plan_coverage(
-        cls,
-        evidence_plan: List[Dict[str, Any]],
-        layer_handoff: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
-        """Ensure every abnormal group has at least one countable plan intent.
-
-        The LLM can still choose the plan, but coverage is a deterministic
-        contract: if current state contains multiple abnormal groups, a plan
-        that only covers one group is incomplete and must be normalized before
-        execution.
-        """
-        groups = layer_handoff.get("abnormal_groups") or layer_handoff.get("issue_groups") or []
-        if not isinstance(groups, list) or not groups:
-            return evidence_plan
-
-        normalized = list(evidence_plan or [])
-        covered_scopes = {
-            str(item.get("target_scope") or "").strip().lower()
-            for item in normalized
-            if isinstance(item, dict)
-            and item.get("counts_for_completeness", True) is not False
-            and str(item.get("target_scope") or "").strip()
-        }
-        existing_ids = {
-            str(item.get("id") or "")
-            for item in normalized
-            if isinstance(item, dict)
-        }
-
-        for index, group in enumerate(groups, start=1):
-            if not isinstance(group, dict):
-                continue
-            group_id = str(group.get("group_id") or f"g{index}")
-            scope = f"group:{group_id}".lower()
-            if scope in covered_scopes:
-                continue
-
-            item = cls._build_minimal_group_plan_item(group=group, group_id=group_id, existing_ids=existing_ids)
-            if not item:
-                continue
-            normalized.append(item)
-            existing_ids.add(item["id"])
-            covered_scopes.add(scope)
-
-        return normalized
-
-    @classmethod
-    def _build_minimal_group_plan_item(
-        cls,
-        group: Dict[str, Any],
-        group_id: str,
-        existing_ids: set[str],
-    ) -> Dict[str, Any]:
-        entities = group.get("entities") or group.get("primary_entities") or []
-        entity = next((item for item in entities if isinstance(item, dict) and item.get("name")), {})
-        if not entity:
-            return {}
-
-        name = cls._normalize_plan_text(entity.get("name"))
-        namespace = cls._normalize_plan_text(entity.get("namespace"))
-        abnormal_type = str(group.get("pod_abnormal_type") or "")
-        statuses = ", ".join(str(s) for s in group.get("status_keywords", []) if s) or "Unknown"
-        base_id = f"auto_{group_id}_coverage"
-        item_id = base_id
-        suffix = 2
-        while item_id in existing_ids:
-            item_id = f"{base_id}_{suffix}"
-            suffix += 1
-
-        if abnormal_type == "TerminatingStuck":
-            return {
-                "id": item_id,
-                "description": f"最小验证异常组 {group_id}: {namespace}/{name} 是否仍处于 {statuses}，并检查 deletionTimestamp/finalizers",
-                "level": "important",
-                "tool": "kubectl_get_yaml",
-                "command": f"kubectl get pod {name} -n {namespace} -o yaml",
-                "tool_args": {"resource_type": "pod", "resource_name": name, "namespace": namespace},
-                "purpose": "覆盖 TerminatingStuck 异常组，确认当前状态和 finalizer 删除阻塞信号",
-                "evidence_type": "pod_lifecycle",
-                "target_scope": f"group:{group_id}",
-                "acceptable_tools": ["kubectl_get_yaml", "kubectl_describe", "kubectl_get_by_name"],
-                "counts_for_completeness": True,
-            }
-
-        return {
-            "id": item_id,
-            "description": f"最小验证异常组 {group_id}: {namespace}/{name} 的当前 {statuses} 事件/状态",
-            "level": "important",
-            "tool": "kubectl_events",
-            "command": f"kubectl get events -n {namespace} --field-selector involvedObject.name={name}",
-            "tool_args": {"resource_type": "pod", "resource_name": name, "namespace": namespace},
-            "purpose": "覆盖当前异常组，确认代表 Pod 的关键事件或当前异常状态",
-            "evidence_type": "pod_events",
-            "target_scope": f"group:{group_id}",
-            "acceptable_tools": ["kubectl_events", "kubectl_describe", "kubectl_get_by_name", "kubectl_get_by_kind_in_cluster"],
-            "counts_for_completeness": True,
-        }
 
     @classmethod
     def _evidence_plan_signature(cls, item: Dict[str, Any]) -> tuple[str, str, str]:
