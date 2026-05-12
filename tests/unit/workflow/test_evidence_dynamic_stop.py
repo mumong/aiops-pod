@@ -314,7 +314,7 @@ def test_evidence_user_prompt_uses_pydantic_plan_contract_instead_of_in_band_jso
     assert "第一条 assistant 消息必须只输出 evidence_plan JSON" not in message
     assert "在输出 evidence_plan JSON 之前，禁止调用任何工具" not in message
     assert "必须调用至少一个 critical 或 important 级真实工具" in message
-    assert "根据 Available Runbooks/catalog 的 description" in message
+    assert "evidence_plan 阶段不要重新选择 runbook" in message
     assert "evidence_plan 第一项必须是 fetch_runbook" not in message
     assert "Pod 异常状态的证据" in message
 
@@ -674,7 +674,7 @@ def test_evidence_plan_normalization_drops_duplicate_runtime_info_grep_variants(
     assert [item["id"] for item in normalized] == ["e25"]
 
 
-def test_evidence_plan_normalization_adds_missing_abnormal_group_coverage():
+def test_evidence_plan_normalization_does_not_add_missing_abnormal_group_coverage():
     layer_handoff = {
         "abnormal_groups": [
             {
@@ -716,19 +716,43 @@ def test_evidence_plan_normalization_adds_missing_abnormal_group_coverage():
 
     normalized = EvidenceCollectorNode._normalize_evidence_plan(plan, layer_handoff=layer_handoff)
 
-    assert any(item["target_scope"] == "group:g1" for item in normalized)
+    assert [item["id"] for item in normalized] == ["e1"]
+    assert not any(item.get("id", "").startswith("auto_") for item in normalized)
+    assert not any(item.get("target_scope") == "group:g1" for item in normalized)
     assert any(item["target_scope"] == "group:g2" for item in normalized)
-    assert any(
-        item["target_scope"] == "group:g1"
-        and item["evidence_type"] == "pod_events"
-        and item["tool"] == "kubectl_events"
-        and item["tool_args"] == {
-            "resource_type": "pod",
-            "resource_name": "redis-master-0",
-            "namespace": "aaa",
-        }
-        for item in normalized
+
+
+def test_evidence_user_prompt_injects_layer_matched_runbook_context(tmp_path, monkeypatch):
+    runbook_dir = tmp_path / "runbooks"
+    runbook_dir.mkdir()
+    (runbook_dir / "pod-terminating-stuck.md").write_text(
+        "# Pod TerminatingStuck / 删除卡住\n\n"
+        "## Evidence 节点推荐计划\n"
+        "1. `kubectl get pod <pod> -n <namespace> -o yaml`\n"
+        "2. `kubectl describe pod <pod> -n <namespace>`\n\n"
+        "## 判定规则\n"
+        "| 条件 | 结论 |\n| deletionTimestamp + finalizers | finalizer 清理卡住 |\n",
+        encoding="utf-8",
     )
+    monkeypatch.setenv("AIOPS_RUNBOOK_DIRS", str(runbook_dir))
+    layer_handoff = {
+        "layer": "L1",
+        "matched_runbooks": ["pod-terminating-stuck.md"],
+        "pod_status_keyword": "Terminating",
+        "pod_abnormal_type": "TerminatingStuck",
+    }
+
+    message = EvidenceCollectorNode._build_evidence_user_message(
+        question="我的集群有什么问题",
+        layer="L1",
+        layer_handoff=json.dumps(layer_handoff, ensure_ascii=False),
+    )
+
+    assert "# Layer 已确认 Runbook 上下文" in message
+    assert "pod-terminating-stuck.md" in message
+    assert "Evidence 节点推荐计划" in message
+    assert "kubectl get pod <pod>" in message
+    assert "finalizer 清理卡住" in message
 
 
 def test_evidence_plan_normalization_derives_tool_args_for_kubectl_events_command():

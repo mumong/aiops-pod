@@ -333,11 +333,66 @@ EVIDENCE_COLLECTOR_PROMPT = """
 - 已判定兼容分类：{layer}
 - 可能场景：{possible_scenarios}
 - 必须优先使用上游交接中的 `abnormal_groups`、`issue_groups`、`abnormal_pods`、`current_abnormal_summary`、`pod_status_keyword`、`pod_abnormal_type`、`must_verify`。
-- 根据 Available Runbooks/catalog 的 description 与上游异常字段自主选择并调用明显匹配当前 Pod 异常状态的 `fetch_runbook`；禁止只在思考中提到 runbook 却不调用。
+- 如果上游 layer_handoff.matched_runbooks 非空，evidence_plan 必须优先使用这些已确认 runbook 的上下文；不要在 evidence 阶段重新选择 runbook。
+- 如果上游没有 matched_runbooks，直接基于当前异常组规划真实环境证据，不要臆测 runbook。
 
 # 最终消息
 完成工具调用后，简短说明已采集证据、未采集证据和冲突证据。没有 tool_result 时禁止写采集结论。
 """
+
+EVIDENCE_PLAN_PROTOCOL_DYNAMIC = """- 本轮使用普通工具 agent 采集真实证据；采证计划由 `EvidencePlanOutput` Pydantic schema 单独生成。
+- 必须先在内部形成最小采证意图，再直接调用真实工具；必须调用至少一个 critical 或 important 级真实工具。
+- LLM 必须自己决定并调用工具；计划不是证据。
+- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+
+EVIDENCE_PLAN_PROTOCOL_PREPLANNED = """- 采证计划已由 `EvidencePlanOutput` Pydantic schema 单独生成；执行阶段不要重写 evidence_plan。
+- 如果本轮进入工具执行，必须调用至少一个 critical 或 important 级真实工具。
+- LLM 必须自己决定并调用工具；计划不是证据。
+- 后续工具调用必须尽量逐项完成 Pydantic plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
+- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+
+EVIDENCE_PLAN_PROTOCOL_EXISTING = """- 本轮已有 Pydantic evidence_plan，禁止重新输出或改写 evidence_plan。
+- 直接按既有 evidence_plan 调用至少一个 critical 或 important 级真实工具。
+- 如果计划项提供 tool_args，必须按 tool_args 调用 MCP 工具；不要从 command 文本重新猜 MCP 参数。
+- LLM 必须自己决定并调用工具；计划不是证据。
+- 工具调用必须尽量逐项完成既有计划，最终消息不要新增未写入 plan 的“已采集计划项”。
+- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+
+EVIDENCE_USER_MESSAGE_TEMPLATE = """# 用户原始问题
+{question}
+
+# 上游定位结构化结果 layer_handoff
+{compact_handoff}
+
+{abnormal_summary_section}
+
+{matched_runbook_context}
+
+# Runbook 语义匹配要求
+- evidence_plan 阶段不要重新选择 runbook；只使用上游 layer 阶段真实调用并写入 matched_runbooks 的 runbook 上下文。
+- 如果上方存在“Layer 已确认 Runbook 上下文”，必须把其中关键检查点转化为 kubectl/prometheus 等真实环境验证步骤。
+- 如果上游没有 matched_runbooks，不要在 plan 阶段臆测 runbook；按 layer_handoff 的当前异常组直接规划真实环境证据。
+- runbook 是参考知识，不是真实环境证据；reference/runbook 步骤不计入 critical/important 完整度。
+
+# 归档上下文（非采证主线）
+{archive_section}
+
+# 当前节点职责
+你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须以 layer_handoff 的 abnormal_groups、issue_groups、abnormal_pods、current_abnormal_summary 为覆盖基准调用真实只读工具采集证据。
+
+# 强约束
+{plan_protocol}
+- 如果 layer_handoff 提供 abnormal_groups/issue_groups，evidence_plan 应优先覆盖每个当前异常组的最小关键证据；不要只围绕单个 Pod 而完全忽略其他异常组。
+- 影响范围最大的异常组做完整验证；其他异常组做最小验证。单个 Pod 不能替代 abnormal_pods/abnormal_groups 的覆盖要求。
+- 对非主要影响面的 issue_group 只做最小验证：当前状态 + 一个最关键配置/事件信号即可，不要展开成长链路。
+- 必须把 current_abnormal_summary.status_counts 作为审查核心；非 Running/Completed/Succeeded/Ready/Bound/Active 的状态都需要至少最小验证。
+- 必须优先围绕影响范围最大的异常组验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要把采证范围收缩成单个 Pod，也不要先做大范围无关集群扫描。
+- 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
+- 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
+- 不要把 context_archive_ref、archive_ref、raw_ref、summary_ref、structured_ref 等路径当作采证任务；默认不要计划读取归档文件。
+{strict_section}
+# 输出
+{output_instruction}"""
 
 # ----------------------------------------------------------------------------
 # TOOL_OBSERVATION_SUMMARIZER_PROMPT

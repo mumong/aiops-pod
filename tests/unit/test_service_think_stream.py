@@ -1,9 +1,16 @@
 import os
 import sys
+import json
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from app.core.service import HolmesService, ThinkStreamFilter, configure_model_context_window, configure_token_counter
+from app.core.service import (
+    HolmesService,
+    ThinkStreamFilter,
+    configure_model_context_window,
+    configure_token_counter,
+    format_evidence_plan_output,
+)
 
 
 def test_think_stream_filter_full_mode_preserves_think_tokens():
@@ -51,6 +58,56 @@ def test_holmes_service_think_stream_config_env_overrides(monkeypatch):
     svc.workflow_config = {"think_stream": {"mode": "full", "max_chars": 999}}
 
     assert svc.get_think_stream_config() == ("hidden", 321)
+
+
+def test_format_evidence_plan_output_renders_plan_and_missing_reasons():
+    evidence_analysis = {
+        "evidence_plan": [
+            {
+                "id": "e1",
+                "level": "critical",
+                "tool": "kubectl_get_yaml",
+                "command": "kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
+                "description": "获取 Pod YAML",
+                "purpose": "验证 deletionTimestamp/finalizers",
+            },
+            {
+                "id": "e2",
+                "level": "important",
+                "tool": "kubectl_find_resource",
+                "command": "kubectl get pvc -n aiops-e2e",
+                "description": "获取 PVC/PV 信息",
+                "purpose": "确认卷卸载是否卡住",
+            },
+        ],
+        "evidence_inventory": [
+            {"id": "e1", "collected": True},
+            {"id": "e2", "collected": False},
+        ],
+        "missing_reasons": [
+            "e2(获取 PVC/PV 信息): 已规划但工具执行失败或无匹配结果",
+        ],
+    }
+
+    text = format_evidence_plan_output(json.dumps(evidence_analysis, ensure_ascii=False))
+
+    assert "📋 证据采集计划" in text
+    assert "| e1 | critical | ✅ | kubectl_get_yaml |" in text
+    assert "kubectl get pod terminating-stuck" in text
+    assert "| e2 | important | ❌ | kubectl_find_resource |" in text
+    assert "未采集原因" in text
+    assert "已规划但工具执行失败或无匹配结果" in text
+
+
+def test_holmes_service_health_check_includes_model_when_initialized():
+    svc = HolmesService()
+    svc.config = type("Config", (), {"model": "openai/Qwen3-32B-AWQ"})()
+    svc.ai_call = object()
+
+    health = svc.health_check()
+
+    assert health["status"] == "healthy"
+    assert health["model"] == "openai/Qwen3-32B-AWQ"
 
 
 def test_configure_model_context_window_uses_llm_config_when_env_missing(monkeypatch):
