@@ -16,20 +16,68 @@
 ```bash
 cd test/pod_abnormal_e2e
 
-# 1. 部署旧 e2e manifests
+# 1. 手动 apply 一个 case，例如 ImagePullBackOff
+kubectl apply -f ../e2e/manifests/00-namespace.yaml
+kubectl apply -f ../e2e/manifests/l3-imagepull-fail-victim.yaml
+
+# 2. 等待 Pod 进入预期异常状态
+kubectl -n aiops-e2e get pod imagepull-fail-victim -w
+
+# 3. 使用类似旧 test_accuracy.py 的方式并发测试
+.venv/bin/python run_pod_abnormal_cases.py \
+  --scenario imagepullbackoff \
+  -n 50 -c 5 \
+  -q "我的集群有什么问题" \
+  --url http://10.2.0.48:30800
+```
+
+也可以使用 shell 包装：
+
+```bash
+./run.sh --scenario imagepullbackoff -n 50 -c 5 -q "我的集群有什么问题"
+```
+
+如果要一次部署所有默认场景，仍可复用旧部署脚本：
+
+```bash
 ../e2e/run_all.sh
-
-# 2. 确认故障注入状态
 ../e2e/validate.sh
+./run.sh --scenario all -n 1 -c 1
+```
 
-# 3. 运行单个异常 Pod 场景
-./run.sh --case oomkilled-memory-limit
+## Pod 异常状态 Case 矩阵
 
-# 4. 运行全部 enabled case
-./run.sh --case all -n 1 -c 1
+| Scenario/Alias | Pod 异常类型 | 典型状态 | Manifest | Runbook |
+|---|---|---|---|---|
+| `evicted` | `Evicted` | `Evicted` | `../e2e/manifests/l0-logfill-enospc.yaml` | `l0-volume-limit` |
+| `volumemountfailed` | `VolumeMountFailed` | `Pending` / `ContainerCreating` | `../e2e/manifests/pod-volume-mount-failed.yaml` | `pod-volume-mount-failed` |
+| `pending` / `unschedulable` | `PendingUnschedulable` | `Pending` | `../e2e/manifests/l1-taint-node.yaml` | `l1-taint-node` |
+| `terminating` | `TerminatingStuck` | `Terminating` | `../e2e/manifests/pod-terminating-stuck.yaml` | `pod-terminating-stuck` |
+| `oomkilled` | `OOMKilled` | `CrashLoopBackOff` / `Error` | `../e2e/manifests/l2-oomkilled.yaml` | `l2-oomkilled` |
+| `crashloopbackoff` | `CrashLoopBackOffRuntime` | `CrashLoopBackOff` | `../e2e/manifests/pod-crashloop-runtime.yaml` | `pod-crashloop-runtime` |
+| `imagepullbackoff` | `ImagePullFailed` | `ImagePullBackOff` / `ErrImagePull` | `../e2e/manifests/l3-imagepull-fail-victim.yaml` | `l3-imagepull-failed` |
+| `sandboxcreatefailed` | `SandboxCreateFailed` | `Pending` / `ContainerCreating` | `../e2e/manifests/pod-sandbox-create-failed.yaml` | `pod-sandbox-create-failed` |
+| `configerror` | `ConfigError` | `CrashLoopBackOff` / `CreateContainerConfigError` | `../e2e/manifests/l4-config-bootstrap-fail.yaml` | `l4-config-bootstrap-fail` |
+| `notready` | `NotReadyProbeFailed` | `Running` 且 `READY=0/1` | `../e2e/manifests/pod-notready-probe-failed.yaml` | `pod-notready-probe-failed` |
+| `unknown` | `NodeLostOrUnknown` | `Unknown` | `../e2e/manifests/pod-node-lost-unknown.yaml` | `pod-node-lost-unknown` |
 
-# 5. 多轮稳定性测试
-./run.sh --case all -n 3 -c 2 --url http://10.2.0.48:30800
+`unknown` 默认不参与 `all`，因为需要手动停止 kubelet 或隔离节点网络。
+
+## 单 Case 手动测试示例
+
+```bash
+# OOMKilled
+kubectl apply -f ../e2e/manifests/00-namespace.yaml
+kubectl apply -f ../e2e/manifests/l2-oomkilled.yaml
+kubectl -n aiops-e2e get pod -l app=memhog -w
+./run.sh --scenario oomkilled -n 50 -c 5 -q "我的集群有什么问题"
+
+# TerminatingStuck
+kubectl apply -f ../e2e/manifests/00-namespace.yaml
+kubectl apply -f ../e2e/manifests/pod-terminating-stuck.yaml
+kubectl -n aiops-e2e delete pod terminating-stuck --wait=false
+kubectl -n aiops-e2e get pod terminating-stuck -w
+./run.sh --scenario terminating -n 50 -c 5 -q "我的集群有什么问题"
 ```
 
 ## Case 文件
