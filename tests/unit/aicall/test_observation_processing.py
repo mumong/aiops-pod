@@ -689,6 +689,75 @@ def test_observation_processor_marks_failed_describe_as_negative(tmp_path):
     assert "NotFound" in processed["summary"]
 
 
+def test_observation_processor_preserves_describe_event_not_found_as_diagnostic_evidence(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1200)
+    raw = """Name:             volume-mount-failed
+Namespace:        aiops-e2e
+Status:           Pending
+Containers:
+  app:
+    State:          Waiting
+      Reason:       ContainerCreating
+Events:
+  Type     Reason       Age                  From               Message
+  ----     ------       ----                 ----               -------
+  Warning  FailedMount  68s (x45 over 76m)   kubelet            MountVolume.SetUp failed for volume "missing-config" : configmap "definitely-missing-configmap" not found
+"""
+
+    processed = processor.process(
+        run_id="run-describe-diagnostic-notfound",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_describe",
+        raw_content=raw,
+    )
+
+    assert processed["processor"] == "k8s_describe"
+    assert processed["structured"]["status"] != "command_failed"
+    assert "关键诊断行" in processed["summary"]
+    assert 'configmap "definitely-missing-configmap" not found' in processed["summary"]
+    assert any("MountVolume.SetUp failed" in line for line in processed["structured"]["key_events"])
+
+
+def test_observation_processor_preserves_kubectl_events_not_found_as_diagnostic_evidence(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1200)
+    raw = """LAST SEEN             TYPE      REASON        OBJECT                    MESSAGE
+15m (x20 over 74m)    Warning   FailedMount   Pod/volume-mount-failed   Unable to attach or mount volumes: unmounted volumes=[missing-config], unattached volumes=[missing-config kube-api-access-4nj8h]: timed out waiting for the condition
+68s (x45 over 76m)    Warning   FailedMount   Pod/volume-mount-failed   MountVolume.SetUp failed for volume "missing-config" : configmap "definitely-missing-configmap" not found
+"""
+
+    processed = processor.process(
+        run_id="run-events-diagnostic-notfound",
+        node_id="layer",
+        sequence=1,
+        tool_name="kubectl_events",
+        raw_content=raw,
+    )
+
+    assert processed["processor"] == "k8s_events"
+    assert processed["structured"]["status"] == "events_found"
+    assert "关键诊断行" in processed["summary"]
+    assert 'configmap "definitely-missing-configmap" not found' in processed["summary"]
+    assert any("MountVolume.SetUp failed" in line for line in processed["structured"]["key_events"])
+
+
+def test_observation_processor_logs_not_found_line_is_not_tool_failure(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
+
+    processed = processor.process(
+        run_id="run-log-app-notfound",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_previous_logs",
+        raw_content="ERROR failed to load config: /etc/app/config.yaml not found\n",
+    )
+
+    assert processed["processor"] == "k8s_logs"
+    assert processed["structured"]["status"] == "logs_summarized"
+    assert processed["semantic_success"] is True
+    assert "config.yaml not found" in processed["summary"]
+
+
 def test_observation_processor_marks_invalid_tool_as_negative(tmp_path):
     processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
 

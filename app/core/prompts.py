@@ -320,6 +320,10 @@ EVIDENCE_COLLECTOR_PROMPT = """
 计划项语义：id、description、level、tool、command、purpose；tool 必须是 Available tools 中真实存在的工具名。
 
 # 采证优先级
+- Pod 异常场景中，`kubectl describe pod` / `kubectl_events` / `kubectl logs --previous` 的含金量最高；它们给出的 Reason、Last State、Exit Code、Warning、FailedMount、FailedScheduling、BackOff、probe failed 原文优先级高于泛化资源列表。
+- Runbook 是分流 guide，不是全量 checklist。先用最高优先级工具读当前错误原文；一旦错误原文命中明确分支，只规划该分支的最小验证，不要把 runbook 的所有典型原因都展开。
+- VolumeMountFailed 必须先看 Pod Events 和 Pod spec 的 volume 类型；只有 Events 或 spec 指向 PVC/PV 时才查 PVC/PV/StorageClass。若 Events 已显示 `configmap/secret not found` 且来自 volume 引用，优先验证对应 ConfigMap/Secret，不要继续泛化查 PVC。
+- CrashLoop/OOM 必须优先 describe + previous logs；ImagePull 必须优先 describe events + image/imagePullSecrets；Pending 必须优先 FailedScheduling 原文；Terminating 必须优先 deletionTimestamp/finalizers；NotReady 必须优先 probe events + logs。
 - 先覆盖影响范围最大的异常组：从该组选择代表 Pod 做完整验证，同时结合 `abnormal_groups.entities` / `abnormal_pods` 覆盖同组其他对象的最小状态验证。
 - 非主异常组也必须最小验证：当前状态 + 一个最关键事件/配置/依赖信号，避免遗漏 Terminating、Pending 等并发异常。
 - `tool` 字段必须填写 Available tools 中真实存在的工具名。不要自行创造 `kubectl_logs` 这类不存在的工具；需要执行未封装的只读 kubectl 命令时使用 `run_bash_command`。
@@ -388,7 +392,7 @@ EVIDENCE_USER_MESSAGE_TEMPLATE = """# 用户原始问题
 - 必须把 current_abnormal_summary.status_counts 作为审查核心；非 Running/Completed/Succeeded/Ready/Bound/Active 的状态都需要至少最小验证。
 - 必须优先围绕影响范围最大的异常组验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要把采证范围收缩成单个 Pod，也不要先做大范围无关集群扫描。
 - 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
-- 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据，不能当作成功验证。
+- 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据；当计划目的就是验证对象是否缺失或错误是否存在时，`NotFound` / `FailedMount` / `FailedScheduling` / `ImagePullBackOff` / `OOMKilled` 等负向结果算作已采集证据。
 - 不要把 context_archive_ref、archive_ref、raw_ref、summary_ref、structured_ref 等路径当作采证任务；默认不要计划读取归档文件。
 {strict_section}
 # 输出

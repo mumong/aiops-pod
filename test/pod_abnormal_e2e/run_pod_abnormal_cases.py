@@ -275,12 +275,16 @@ def select_cases(cases: List[Case], scenario: str, include_disabled: bool = Fals
         item = raw_item.strip()
         if not item:
             continue
-        matched = [
+        exact_matched = [
             case
             for case in cases
             if case.id == item
             or item in case.aliases
-            or item == case.expected_pod_abnormal_type
+        ]
+        matched = exact_matched or [
+            case
+            for case in cases
+            if item == case.expected_pod_abnormal_type
             or item.lower() == case.expected_pod_abnormal_type.lower()
         ]
         matched = [case for case in matched if case.enabled or include_disabled]

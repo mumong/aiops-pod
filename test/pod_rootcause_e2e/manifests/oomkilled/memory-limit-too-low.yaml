@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rc-oomkilled-memory-limit
+  namespace: aiops-e2e
+  labels:
+    rootcause-e2e: "true"
+    pod_abnormal_type: OOMKilled
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rc-oomkilled-memory-limit
+  template:
+    metadata:
+      labels:
+        app: rc-oomkilled-memory-limit
+        rootcause-e2e: "true"
+        pod_abnormal_type: OOMKilled
+      annotations:
+        aiops.e2e/runbook: pod-oomkilled.md
+    spec:
+      containers:
+        - name: app
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-c"]
+          args:
+            - |
+              import time
+              data = []
+              while True:
+                data.append("x" * 1024 * 1024)
+                time.sleep(0.02)
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "20Mi"
+            limits:
+              cpu: "200m"
+              memory: "40Mi"

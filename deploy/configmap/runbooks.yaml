@@ -220,6 +220,12 @@ data:
 
     > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume
 
+    ## 使用原则（给模型）
+    - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。
+    - `kubectl describe pod` / `kubectl get events` 中的 Events 原文权重最高；先读事件原文，再按关键字选择一个最相关分支。
+    - 一旦 Events 或 Pod spec 已明确命中某个分支，应停止横向扩展到无关 PVC/PV/StorageClass/CSI/NFS 分支。
+    - 证据计划优先覆盖“当前已经出现的错误文本”，不要把典型原因列表全部变成 evidence_plan。
+
     ## 状态识别
     - Pod 常见状态: `Pending` / `ContainerCreating`
     - Events 关键字: `FailedMount` / `FailedAttachVolume` / `MountVolume.SetUp failed`
@@ -233,17 +239,67 @@ data:
     - hostPath 路径不存在、类型不匹配或节点权限不足。
     - 云盘或块存储与节点可用区/实例规格不匹配，例如 volume node affinity conflict、InvalidInstanceType.NotSupportDiskCategory。
 
-    ## 必查项
-    1. `kubectl describe pod <pod> -n <namespace>`: 查看 MountVolume、AttachVolume、FailedMount 事件。
-    2. `kubectl get pvc -n <namespace>` 和 `kubectl describe pvc <pvc> -n <namespace>`: 确认 PVC 是否 Bound。
-    3. `kubectl get storageclass` 和 `kubectl describe storageclass <sc>`: PVC Pending 时确认动态供应器是否存在。
-    4. `kubectl get pv` 和 `kubectl describe pv <pv>`: 确认后端存储、node affinity、claimRef、accessModes、reclaimPolicy。
-    5. 如果事件指向 Secret/ConfigMap not found，检查 Pod spec 的 volume/configMap/secret 引用位置和 optional 字段。
-    6. 如果事件指向 CSI/NFS，检查 kube-system 中 CSI controller/node Pod 状态和相关日志。
+    ## 证据优先级
+    1. 最高优先级: `kubectl describe pod <pod> -n <namespace>` 或 `kubectl get events ...`，读取 Events 原文。
+    2. 最高优先级: `kubectl get pod <pod> -n <namespace> -o yaml`，确认 `.spec.volumes[]` 引用的是 PVC、ConfigMap、Secret、hostPath 还是 CSI。
+    3. 分支证据: 只查询 Events 原文指向的资源类型。
+
+    ## 分支诊断流程
+
+    ### Step 1: 先读 Pod Events 原文（必须优先）
+    ```bash
+    kubectl describe pod <pod-name> -n <namespace>
+    kubectl get events -n <namespace> --field-selector involvedObject.name=<pod-name> --sort-by='.lastTimestamp'
+    ```
+    如果已看到 `configmap "<name>" not found`、`secret "<name>" not found`、`unbound immediate PersistentVolumeClaims`、`volume node affinity conflict`、`Multi-Attach error`、`NFS timeout/access denied`，直接进入对应分支。
+
+    ### Step 2: 读取 Pod spec 中的 volume 引用（必须优先）
+    ```bash
+    kubectl get pod <pod-name> -n <namespace> -o yaml
+    ```
+    关注 `.spec.volumes[]`:
+    - `configMap.name` / `secret.secretName`: 进入 ConfigMap/Secret 分支。
+    - `persistentVolumeClaim.claimName`: 进入 PVC/PV/StorageClass 分支。
+    - `hostPath`: 进入 hostPath/节点路径分支。
+    - `csi` / NFS 相关字段: 进入 CSI/NFS 分支。
+
+    ### Step 3A: ConfigMap/Secret volume 缺失分支
+    触发条件: Events 含 `configmap "<name>" not found`、`secret "<name>" not found`，且 Pod spec 中来自 `volumes[].configMap` 或 `volumes[].secret`。
+    ```bash
+    kubectl get configmap <name> -n <namespace>
+    kubectl get secret <name> -n <namespace>
+    ```
+    预期证据: `Error from server (NotFound)` 本身就是有效根因证据。此时不要再查 PVC、PV、StorageClass，除非 Pod spec 同时存在 PVC volume 且 Events 指向 PVC。
+
+    ### Step 3B: PVC/PV/StorageClass 分支
+    触发条件: Events 含 `unbound immediate PersistentVolumeClaims`、`pod has unbound`、`persistentvolumeclaim ... not found`，或 Pod spec 明确使用 `persistentVolumeClaim.claimName`。
+    ```bash
+    kubectl get pvc <pvc-name> -n <namespace>
+    kubectl describe pvc <pvc-name> -n <namespace>
+    kubectl get pv
+    kubectl get storageclass
+    ```
+    只有 PVC Pending/NotFound/ProvisioningFailed 时，才继续检查 PV 和 StorageClass。
+
+    ### Step 3C: Attach/NodeAffinity/Multi-Attach 分支
+    触发条件: Events 含 `FailedAttachVolume`、`Multi-Attach error`、`volume node affinity conflict`。
+    ```bash
+    kubectl describe pod <pod-name> -n <namespace>
+    kubectl describe pv <pv-name>
+    kubectl get pod <pod-name> -n <namespace> -o wide
+    ```
+
+    ### Step 3D: CSI/NFS/hostPath 分支
+    触发条件: Events 含 `timeout`、`access denied`、`stale file handle`、`hostPath type check failed`、CSI driver 错误。
+    ```bash
+    kubectl get pods -n kube-system -o wide
+    kubectl describe node <node-name>
+    ```
 
     ## 判定规则
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
+    | Events 含 Secret/ConfigMap not found + Pod spec 来自 volumes[].secret/configMap | volume 引用的 ConfigMap/Secret 缺失 | 高 |
     | FailedMount/MountVolume + PVC 未 Bound | VolumeMountFailed | 高 |
     | FailedScheduling + unbound immediate PersistentVolumeClaims | PVC 未绑定导致 Pending，归入 VolumeMountFailed/PVC 分支 | 高 |
     | Multi-Attach error + ReadWriteOnce | 卷访问模式与调度节点冲突 | 高 |
@@ -251,7 +307,7 @@ data:
     | volume node affinity conflict / node(s) had volume node affinity conflict | PV/云盘可用区与调度节点不匹配 | 高 |
     | InvalidInstanceType.NotSupportDiskCategory | 云盘类型不支持当前节点实例规格 | 高 |
     | NFS timeout/access denied/stale file handle | VolumeMountFailed | 高 |
-    | Secret/ConfigMap not found 且来自 volume 引用 | VolumeMountFailed；若来自 env/envFrom 则切换 ConfigError | 高 |
+    | Secret/ConfigMap not found 且来自 volume 引用 | VolumeMountFailed；若来自 env/envFrom 则切换 ConfigError；不要再扩展 PVC 分支 | 高 |
     | hostPath path/type error | 节点路径或 hostPath 类型配置错误 | 高 |
   pod-oomkilled.md: |
     # Pod OOMKilled (Exit Code 137)
@@ -1005,6 +1061,13 @@ data:
     ```
 
     ## 低成本判断规则
+
+    ### 小模型执行原则
+    - Runbook 是 guide，不是全量巡检清单；不要把每个常见原因都转成 evidence_plan。
+    - 先拿最高信息密度证据：`kubectl describe pod`、`kubectl get events`、`kubectl logs --previous`、`kubectl get pod -o yaml`。
+    - 看到明确错误原文后按分支停止扩展：例如 `configmap not found` 只验证 ConfigMap/Pod volume 引用，不再查 PVC；`FailedScheduling` 只分析调度原因，不再查镜像；`OOMKilled/exitCode=137` 只分析内存，不再泛化到配置错误。
+    - `NotFound`、空事件、命令失败不是“没证据”；如果它正好回答了检查目的，应作为负向证据纳入证据完整度。
+    - 日志和 Events 是当前根因方向的主证据，普通资源列表只是辅助证据。
 
     | 当前现象 | 优先怀疑面 | 不要直接下的结论 |
     |----------|------------|------------------|

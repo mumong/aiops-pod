@@ -12,6 +12,10 @@
 |------|------|----------|---------|----------|
 | Evicted | Evicted | `pod-evicted.yaml` | `pod-evicted.md` | emptyDir sizeLimit 30Mi 写满，触发本地临时存储驱逐 |
 | VolumeMountFailed | Pending/ContainerCreating | `pod-volume-mount-failed.yaml` | `pod-volume-mount-failed.md` | 引用不存在的 ConfigMap 卷，触发 FailedMount |
+| VolumeMountFailed | Pending/ContainerCreating | `pod-volume-mount-failed-secret.yaml` | `pod-volume-mount-failed.md` | 引用不存在的 Secret 卷，触发 secret not found |
+| VolumeMountFailed | Pending/ContainerCreating | `pod-volume-mount-failed-configmap-key.yaml` | `pod-volume-mount-failed.md` | ConfigMap 存在但指定 key 不存在，触发 couldn't find key |
+| VolumeMountFailed | Pending/ContainerCreating | `pod-volume-mount-failed-hostpath.yaml` | `pod-volume-mount-failed.md` | hostPath Directory 路径不存在，触发 hostPath type check failed |
+| VolumeMountFailed | Pending/ContainerCreating | `pod-volume-mount-failed-pvc.yaml` | `pod-volume-mount-failed.md` | 引用不存在的 PVC，触发 persistentvolumeclaim not found |
 | PendingUnschedulable | Pending | `pod-pending-unschedulable.yaml` | `pod-pending-unschedulable.md` | nodeSelector 指定不存在的节点标签，触发 FailedScheduling |
 | NodeLostOrUnknown | Unknown | `pod-node-lost-unknown.yaml` | `pod-node-lost-unknown.md` | 先部署候选 Pod，再手动隔离所在节点或停止 kubelet |
 | TerminatingStuck | Terminating | `pod-terminating-stuck.yaml` | `pod-terminating-stuck.md` | Pod 带 finalizer，`run_all.sh` 自动执行 delete 使其卡住 |
@@ -39,6 +43,29 @@ AIOPS_ENDPOINT=http://10.2.0.48:30800 ./test_scenarios.sh
 # 4. 单独测试某个场景
 ./test_scenarios.sh l0   # 兼容分类 L0
 ./test_scenarios.sh l2   # 兼容分类 L2
+```
+
+### VolumeMountFailed 变体测试
+
+这组用来验证“同样是 Pending/ContainerCreating + FailedMount，但根因不同”时，诊断是否能区分具体分支。
+
+| 测试别名 | Manifest | 期望根因关键词 |
+|----------|----------|----------------|
+| `volumemountfailed` | `pod-volume-mount-failed.yaml` | `configmap "definitely-missing-configmap" not found` |
+| `volume-secret` | `pod-volume-mount-failed-secret.yaml` | `secret "definitely-missing-secret" not found` |
+| `volume-configmap-key` | `pod-volume-mount-failed-configmap-key.yaml` | `couldn't find key "missing-key"` |
+| `volume-hostpath` | `pod-volume-mount-failed-hostpath.yaml` | `hostPath type check failed` |
+| `volume-pvc` | `pod-volume-mount-failed-pvc.yaml` | `persistentvolumeclaim "definitely-missing-pvc" not found` |
+
+```bash
+# 手动 apply 单个变体后测试
+kubectl apply -f test/e2e/manifests/00-namespace.yaml
+kubectl apply -f test/e2e/manifests/pod-volume-mount-failed-secret.yaml
+.venv/bin/python test/pod_abnormal_e2e/run_pod_abnormal_cases.py --scenario volume-secret -n 50 -c 2 --question "我的集群有什么问题" --url http://10.2.0.48:30800
+
+# 自动串行测试全部 VolumeMountFailed 变体
+printf "volume-variants\n" > test/pod_abnormal_e2e/test.txt
+.venv/bin/python test/pod_abnormal_e2e/run_pod_abnormal_suite.py --scenarios-file test/pod_abnormal_e2e/test.txt -n 50 -c 2 --question "我的集群有什么问题" --url http://10.2.0.48:30800
 ```
 
 ### 特殊场景说明
