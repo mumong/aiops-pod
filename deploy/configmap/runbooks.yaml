@@ -12,7 +12,7 @@ data:
           "type": "procedure",
           "layer": "L0",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=Evicted, 兼容归因=L0 — 当前 Pod STATUS=Evicted/Failed 或 describe Reason=Evicted；用于区分 Pod 本地临时存储/emptyDir 超限、节点 DiskPressure/MemoryPressure/PIDPressure 驱逐。关键证据：Reason=Evicted、Message 含 The node was low on resource/ephemeral-storage/sizeLimit、Node Conditions；若 container lastState=OOMKilled 切换 pod-oomkilled",
+          "description": "pod_abnormal_type=Evicted, 兼容归因=L0 — 当前 Pod STATUS=Evicted/Failed 或 describe Reason=Evicted/ContainerStatusUnknown；用于区分 Pod 本地临时存储/emptyDir 超限、节点 DiskPressure/MemoryPressure/PIDPressure、NoExecute taint 驱逐。关键证据：Reason=Evicted、Message 含 The node was low on resource/ephemeral-storage/sizeLimit、Node Conditions；若 container lastState=OOMKilled 切换 pod-oomkilled",
           "link": "pod-evicted.md",
           "operations": [
             "诊断",
@@ -24,7 +24,7 @@ data:
           "type": "procedure",
           "layer": "L0",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=VolumeMountFailed, 兼容归因=L0 — 当前 Pod 卡在 Pending/ContainerCreating 且卷挂载或绑定失败；用于区分 PVC 未 Bound、StorageClass/PV nodeAffinity、Multi-Attach、CSI/NFS/hostPath、Secret/ConfigMap volume 问题。关键证据：FailedMount/FailedAttachVolume/MountVolume.SetUp failed/unbound immediate PersistentVolumeClaims",
+          "description": "pod_abnormal_type=VolumeMountFailed, 兼容归因=L0 — 当前 Pod 卡在 Pending/ContainerCreating 且卷挂载或绑定失败；用于区分 PVC 未 Bound、StorageClass/PV nodeAffinity、Multi-Attach、CSI/NFS/hostPath、Secret/ConfigMap volume、云盘可用区/实例规格不匹配。关键证据：FailedMount/FailedAttachVolume/MountVolume.SetUp failed/unbound immediate PersistentVolumeClaims/volume node affinity conflict",
           "link": "pod-volume-mount-failed.md",
           "operations": [
             "诊断",
@@ -36,7 +36,7 @@ data:
           "type": "procedure",
           "layer": "L1",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=PendingUnschedulable, 兼容归因=L1 — 当前 Pod STATUS=Pending 且未绑定 nodeName，调度器无法放置；用于区分资源不足、Too many pods、taint/toleration、nodeSelector/affinity/topology、Node NotReady/Unschedulable。关键证据：FailedScheduling/0 nodes are available；若指向 unbound PVC 切换 pod-volume-mount-failed",
+          "description": "pod_abnormal_type=PendingUnschedulable, 兼容归因=L1 — 当前 Pod STATUS=Pending 且未绑定 nodeName，调度器无法放置；用于区分资源不足、Too many pods、hostPort 端口冲突、taint/toleration、nodeSelector/affinity/topology、Node NotReady/Unschedulable。关键证据：FailedScheduling/0 nodes are available；若指向 unbound PVC/volume node affinity 切换 pod-volume-mount-failed",
           "link": "pod-pending-unschedulable.md",
           "operations": [
             "诊断",
@@ -72,7 +72,7 @@ data:
           "type": "procedure",
           "layer": "L2",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=OOMKilled, 兼容归因=L2 — 当前 Pod CrashLoopBackOff/Error 且容器 Last State Reason=OOMKilled；用于区分 memory limit 过低、应用内存泄漏/峰值、memory-backed emptyDir、cgroup OOM。关键证据：containerStatuses.lastState.reason=OOMKilled、exitCode=137、resources.limits.memory、previous logs；若 Pod Reason=Evicted 切换 pod-evicted",
+          "description": "pod_abnormal_type=OOMKilled, 兼容归因=L2 — 当前 Pod CrashLoopBackOff/Error 且容器 Last State Reason=OOMKilled；用于区分 memory limit 过低、应用内存泄漏/峰值、memory-backed emptyDir、cgroup OOM 与节点 OS 级 OOM。关键证据：containerStatuses.lastState.reason=OOMKilled、exitCode=137、resources.limits.memory、previous logs；若 Pod Reason=Evicted 切换 pod-evicted",
           "link": "pod-oomkilled.md",
           "operations": [
             "诊断",
@@ -84,7 +84,7 @@ data:
           "type": "procedure",
           "layer": "L2",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=CrashLoopBackOffRuntime, 兼容归因=L2 — 当前 Pod STATUS=CrashLoopBackOff 且不是 OOM/配置缺失/镜像拉取；用于区分进程退出、command/args 错误、权限或 executable 缺失、依赖异常、livenessProbe 杀死容器。关键证据：Last State exitCode 非 137、BackOff、previous logs、Killing/Liveness probe failed",
+          "description": "pod_abnormal_type=CrashLoopBackOffRuntime, 兼容归因=L2 — 当前 Pod STATUS=CrashLoopBackOff 且不是 OOM/配置缺失/镜像拉取；用于区分进程退出、exit(0) 快速退出、command/args 错误、权限或 executable 缺失、磁盘满/端口冲突、依赖异常、livenessProbe 杀死容器。关键证据：Last State exitCode 非 137、BackOff、previous logs、Killing/Liveness probe failed",
           "link": "pod-crashloop-runtime.md",
           "operations": [
             "诊断",
@@ -96,7 +96,7 @@ data:
           "type": "procedure",
           "layer": "L3",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=ImagePullFailed, 兼容归因=L3 — 当前 Pod STATUS=ImagePullBackOff/ErrImagePull/ImageInspectError；用于区分镜像名/tag 错误、认证失败、权限不足、仓库超时、DNS/TLS、限流。关键证据：Failed to pull image、manifest unknown/not found、unauthorized/no basic auth、pull access denied、i/o timeout、x509、invalid reference format",
+          "description": "pod_abnormal_type=ImagePullFailed, 兼容归因=L3 — 当前 Pod STATUS=ImagePullBackOff/ErrImagePull/ImageInspectError 或长时间 Pulling；用于区分镜像名/tag 错误、认证失败、权限不足、仓库超时、DNS/TLS、限流、registryPullQPS 过低。关键证据：Failed to pull image、manifest unknown/not found、unauthorized/no basic auth、context canceled、pull access denied、i/o timeout、x509、invalid reference format",
           "link": "pod-imagepull-failed.md",
           "operations": [
             "诊断",
@@ -120,7 +120,7 @@ data:
           "type": "procedure",
           "layer": "L4",
           "update_date": "2026-04-21",
-          "description": "pod_abnormal_type=ConfigError, 兼容归因=L4 — 当前 Pod STATUS=CreateContainerConfigError/CreateContainerError 或 CrashLoopBackOff 由配置缺失触发；用于区分 ConfigMap/Secret/env/envFrom 缺失、command/args/entrypoint 错误、业务 bootstrap 配置校验失败。关键证据：configmap/secret not found、couldn't find key、missing required、config validation failed；volume 引用缺失切换 pod-volume-mount-failed",
+          "description": "pod_abnormal_type=ConfigError, 兼容归因=L4 — 当前 Pod STATUS=CreateContainerConfigError/CreateContainerError/Init:* 或 CrashLoopBackOff 由配置缺失触发；用于区分 ConfigMap/Secret/env/envFrom 缺失、Secret 内容未 Base64、command/args/entrypoint 错误、业务 bootstrap 配置校验失败。关键证据：configmap/secret not found、couldn't find key、missing required、config validation failed；volume 引用缺失切换 pod-volume-mount-failed",
           "link": "pod-config-error.md",
           "operations": [
             "诊断",
@@ -151,8 +151,9 @@ data:
     | 信号 | 关键特征 |
     |------|----------|
     | Pod 状态 | STATUS=Evicted、Failed，或 describe 中 Reason=Evicted |
-    | Describe | Reason=Evicted，Message 含 `The node was low on resource`、`ephemeral-storage`、`memory`、`pid`、`sizeLimit` |
-    | 节点信号 | Node Conditions 含 DiskPressure/MemoryPressure/PIDPressure，或节点侧 `ENOSPC` / inode 耗尽 |
+    | Describe | Reason=Evicted/ContainerStatusUnknown，Message 含 `The node was low on resource`、`ephemeral-storage`、`memory`、`pid`、`sizeLimit` |
+    | 节点信号 | Node Conditions 含 DiskPressure/MemoryPressure/PIDPressure，或节点侧 `ENOSPC` / inode 耗尽 / Node Lost |
+    | Taint 驱逐 | Pod Toleration 到期后被 NoExecute taint 驱逐，如 `node.kubernetes.io/not-ready` / `unreachable` |
     | 排除项 | 如果是 containerStatuses.lastState.reason=OOMKilled，应切换到 pod-oomkilled |
 
     ## 根因分流
@@ -160,6 +161,8 @@ data:
     - 节点磁盘或 inode 压力: Node Conditions 为 DiskPressure=True，Message 指向 nodefs/imagefs/containerfs available 或 inodesFree。
     - 节点内存压力驱逐: Message 含 memory pressure 或 Node MemoryPressure=True，但容器 Last State 不是 OOMKilled。
     - PIDPressure: Node PIDPressure=True 或 Message 指向 pid available，不要误判为应用进程退出。
+    - Node Lost / ContainerStatusUnknown: kubelet 失联导致容器状态未知，常与 Node NotReady/Unknown 同时出现；根因应转向节点/网络/kubelet。
+    - NoExecute 驱逐: 节点被 not-ready/unreachable taint 标记，Pod 未容忍或 tolerationSeconds 到期后被驱逐。
 
     ## 诊断流程
 
@@ -178,6 +181,7 @@ data:
     - `Message`: 原样引用驱逐原因，区分 memory、ephemeral-storage、disk pressure、pid
     - `Containers.*.Limits`: memory / ephemeral-storage 的限制值
     - `Volumes`: emptyDir 是否设置 sizeLimit，是否为 medium=Memory
+    - `Tolerations`: 是否容忍 not-ready/unreachable NoExecute taint 以及 tolerationSeconds
 
     ### Step 3: 检查 Pod 所在节点压力状态
     ```bash
@@ -206,6 +210,8 @@ data:
     | Reason=Evicted + DiskPressure=True 或 nodefs/imagefs/containerfs available 低 | 节点磁盘压力驱逐 | 高 |
     | Reason=Evicted + MemoryPressure=True 且无容器 OOMKilled | 节点内存压力驱逐 | 高 |
     | Reason=Evicted + PIDPressure=True | 节点 PID 压力驱逐 | 高 |
+    | Reason=ContainerStatusUnknown + Node NotReady/Unknown | 节点失联导致容器状态未知，应同时参考 NodeLostOrUnknown | 高 |
+    | Reason=Evicted + NoExecute taint not-ready/unreachable | 节点不可达或 NotReady 后的 taint 驱逐 | 高 |
     | df 显示 Use% >= 95% + ENOSPC 错误 | 节点磁盘空间耗尽 | 高 |
     | Inode 使用率 >= 95% | Inode 耗尽 | 高 |
     | container Last State=OOMKilled / exitCode=137 | 不是 Evicted 根因，应切换 OOMKilled | 高 |
@@ -225,6 +231,7 @@ data:
     - CSI/NFS/iSCSI 后端不可用、权限拒绝、挂载超时、stale file handle。
     - Secret/ConfigMap 类型的 volume 引用了不存在的对象或 key。
     - hostPath 路径不存在、类型不匹配或节点权限不足。
+    - 云盘或块存储与节点可用区/实例规格不匹配，例如 volume node affinity conflict、InvalidInstanceType.NotSupportDiskCategory。
 
     ## 必查项
     1. `kubectl describe pod <pod> -n <namespace>`: 查看 MountVolume、AttachVolume、FailedMount 事件。
@@ -241,6 +248,8 @@ data:
     | FailedScheduling + unbound immediate PersistentVolumeClaims | PVC 未绑定导致 Pending，归入 VolumeMountFailed/PVC 分支 | 高 |
     | Multi-Attach error + ReadWriteOnce | 卷访问模式与调度节点冲突 | 高 |
     | PV nodeAffinity conflict | PV 节点亲和性与 Pod 调度节点不匹配 | 高 |
+    | volume node affinity conflict / node(s) had volume node affinity conflict | PV/云盘可用区与调度节点不匹配 | 高 |
+    | InvalidInstanceType.NotSupportDiskCategory | 云盘类型不支持当前节点实例规格 | 高 |
     | NFS timeout/access denied/stale file handle | VolumeMountFailed | 高 |
     | Secret/ConfigMap not found 且来自 volume 引用 | VolumeMountFailed；若来自 env/envFrom 则切换 ConfigError | 高 |
     | hostPath path/type error | 节点路径或 hostPath 类型配置错误 | 高 |
@@ -262,6 +271,8 @@ data:
     - 内存 limit 过低: lastState.reason=OOMKilled + exitCode=137，resources.limits.memory 明显低于应用需求或近期用量。
     - 应用内存泄漏/峰值过高: 日志或历史指标显示内存持续增长、GC overhead、heap space、allocation failure。
     - memory-backed emptyDir 占用内存: volume 为 emptyDir medium=Memory，或 tmpfs 文件增长导致容器 cgroup 内存升高。
+    - cgroup 级 OOM: Pod/Container 到达 memory limit，容器 lastState=OOMKilled，通常只影响该容器。
+    - OS 级 OOM: 节点内核 OOM killer 杀进程，Node 可能有 kernel OOM/OOMKilling 事件，需检查节点内存压力；不要只凭 exitCode 137 下结论。
     - 节点内存压力驱逐: Pod Reason=Evicted 或 Node MemoryPressure=True 且没有 container OOMKilled，应切换 pod-evicted。
 
     ## 诊断流程
@@ -299,7 +310,7 @@ data:
     kubectl get node <node-name> -o wide
     kubectl describe node <node-name>
     ```
-    关注: emptyDir medium=Memory、Node MemoryPressure、节点 OOMKilling 事件。
+    关注: emptyDir medium=Memory、Node MemoryPressure、节点 OOMKilling/kernel OOM 事件。
 
     ### Step 6: 检查 Events 时间线
     ```bash
@@ -314,6 +325,8 @@ data:
     | 日志含 "Cannot allocate memory" / "Java heap space" | 内存不足 | 高 |
     | OOMKilled + limits.memory 很低或低于历史峰值 | 内存 limit 过低 | 高 |
     | OOMKilled + memory-backed emptyDir 大量写入 | tmpfs/emptyDir 占用内存导致 OOM | 中 |
+    | OOMKilled + Node 无 MemoryPressure 且容器 memory limit 明确 | cgroup 级 OOM | 高 |
+    | exitCode=137 + Node OOMKilling/kernel OOM 事件 | 节点 OS 级 OOM，需要检查节点内存压力 | 中 |
     | exitCode=137 + Reason=Evicted | 非容器 OOM，按 Evicted 处理 | 高 |
     | exitCode=1/127 且无 OOM 标记 | 非 OOM，应用错误 | 中 |
   pod-imagepull-failed.md: |
@@ -326,7 +339,7 @@ data:
     | 信号 | 关键特征 |
     |------|----------|
     | Pod 状态 | ImagePullBackOff / ErrImagePull / ImageInspectError |
-    | Events | `Failed to pull image`, `connection refused`, `timeout`, `manifest unknown` |
+    | Events | `Failed to pull image`, `connection refused`, `timeout`, `manifest unknown`, `context canceled`，或长时间停留在 `Pulling image` |
     | 常见原因 | 镜像名/tag 错误、私有仓库认证失败、仓库访问超时、DNS 解析失败、TLS 证书不被信任、镜像拉取策略导致必须远程拉取 |
 
     ## 诊断流程
@@ -362,7 +375,9 @@ data:
     - `pull access denied` / `insufficient_scope`: 仓库权限不足或镜像路径错误。
     - `x509: certificate signed by unknown authority`: 节点容器运行时不信任仓库 TLS 证书。
     - `i/o timeout` / `connection refused`: 节点到镜像仓库访问失败，需检查仓库地址、端口、防火墙、DNS。
+    - `context canceled`: 拉取过程中连接被取消，常见于网络中断、镜像仓库响应慢、kubelet/运行时超时或并发拉取拥塞。
     - `Too Many Requests` / rate limit: 镜像仓库限流，需认证、镜像缓存或私有代理仓库。
+    - 长时间只有 `Pulling image` 无后续失败事件: 关注镜像体积、节点带宽、运行时并发拉取限制、kubelet `registryPullQPS` / `registryBurst` 配置。
 
     ### Step 5: 主动验证镜像仓库连通性
     可用只读命令验证节点或集群内到镜像仓库的 HTTPS 连通性，例如：
@@ -383,6 +398,7 @@ data:
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
     | Events 含 connection refused/timeout | 镜像仓库网络不可达 | 高 |
+    | Events 含 context canceled | 镜像拉取连接被取消，优先检查网络、仓库响应、运行时超时和并发拉取 | 中 |
     | 主动 curl/wget registry 超时或命令执行超时 | 镜像仓库网络不可达 | 高 |
     | Events 含 manifest unknown/not found | 镜像或 tag 不存在 | 高 |
     | Events 含 unauthorized/no basic auth | 认证失败（缺少或错误的 imagePullSecret） | 高 |
@@ -401,6 +417,7 @@ data:
     |------|----------|
     | Pod 状态 | `CrashLoopBackOff` / `Error`，重启次数持续增加 |
     | Pod 配置错误 | `CreateContainerConfigError` / `CreateContainerError`，Events 含 ConfigMap/Secret/key not found、invalid env、executable file not found |
+    | Init 容器错误 | `Init:*`、initContainer Waiting/Terminated，先检查 initContainer 的 image/env/volume/command/logs |
     | 应用配置错误 | 容器已启动后退出，日志含 `missing required`、`config validation failed`、`bootstrap` |
     | Describe | `Last State: Terminated`，`Exit Code: 42` 或其他非 137 业务退出码 |
     | 排除 OOM | 无 `OOMKilled`、无 `Exit Code 137` |
@@ -447,6 +464,7 @@ data:
     关注:
     - 必填环境变量是否缺失
     - ConfigMap/Secret 键名是否拼错
+    - Secret data 是否为合法 Base64 编码；Secret 类型和 key 是否符合业务引用
     - 引用是否设置 optional；非 optional 的缺失对象/缺失 key 会阻止容器启动
     - 缺失对象来自 env/envFrom 还是 volume；volume 缺失优先切换 VolumeMountFailed
     - 配置值是否不符合应用约束
@@ -465,6 +483,8 @@ data:
     |------|------|--------|
     | CrashLoopBackOff + 日志含配置校验失败/缺参 | 应用启动配置错误 | 高 |
     | CreateContainerConfigError + Secret/ConfigMap/env key 缺失 | Pod 配置资源错误 | 高 |
+    | Secret data 非合法 Base64 或 key 不存在 | Secret 配置错误 | 高 |
+    | Init:* + initContainer 配置缺失或命令失败 | Init 容器配置/启动失败，应优先分析 initContainer | 高 |
     | CreateContainerError + command/args/executable file not found | 容器启动命令或镜像入口配置错误 | 高 |
     | Exit Code 非 137 + 无 OOMKilled + 日志为业务配置错误 | ConfigError | 高 |
     | Secret/ConfigMap not found 但来自 volume 引用 | 应切换到 VolumeMountFailed | 高 |
@@ -488,6 +508,7 @@ data:
 
     ## 根因分流
     - 资源不足: FailedScheduling 原文含 Insufficient cpu/memory/ephemeral-storage、Too many pods。
+    - hostPort 冲突: 原文含 `didn't have free ports for the requested pod ports`，说明目标节点端口已被占用。
     - Taint/Toleration 不匹配: 原文含 `had untolerated taint`，必须检查 Pod tolerations 和 Node taints。
     - nodeSelector / nodeAffinity / podAffinity 不匹配: 原文含 `didn't match Pod's node affinity/selector` 或 affinity/anti-affinity。
     - PVC 未绑定: 原文含 `unbound immediate PersistentVolumeClaims`，根因在存储绑定而不是调度资源。
@@ -506,7 +527,7 @@ data:
     ```bash
     kubectl get pod <pod-name> -n <namespace> -o yaml
     ```
-    关注: spec.nodeName 是否为空、nodeSelector、affinity、tolerations、topologySpreadConstraints、schedulerName、priorityClassName、resource requests。
+    关注: spec.nodeName 是否为空、nodeSelector、affinity、tolerations、topologySpreadConstraints、schedulerName、priorityClassName、resource requests、hostNetwork/hostPort。
 
     ### Step 3: 检查节点状态和可调度性
     ```bash
@@ -554,6 +575,7 @@ data:
     |------|------|--------|
     | FailedScheduling + Insufficient cpu/memory | 资源不足导致 Pod Pending | 高 |
     | FailedScheduling + Too many pods | 节点 Pod 数量上限导致 Pending | 高 |
+    | FailedScheduling + didn't have free ports for the requested pod ports | hostPort 端口冲突导致 Pending | 高 |
     | FailedScheduling + had untolerated taint | taint/toleration 不匹配 | 高 |
     | FailedScheduling + node(s) didn't match node selector/affinity | 调度约束不匹配 | 高 |
     | FailedScheduling + pod has unbound immediate PersistentVolumeClaims | PVC 未绑定，应切换 VolumeMountFailed/PVC 分支 | 高 |
@@ -642,7 +664,10 @@ data:
 
     ## 典型原因
     - command/args 错误、入口进程启动失败、二进制或脚本不存在。
+    - 进程 exit(0) 快速退出: 容器主进程完成后退出，Deployment/Pod restartPolicy 导致循环重启，常见于把一次性任务放进长期服务。
     - 应用启动后主动退出，日志中出现业务异常但不是配置缺失。
+    - 应用写文件失败导致退出，例如 `No space left on device`、权限不足、只读文件系统。
+    - 应用端口冲突，例如 `Address already in use`，需要检查容器内监听端口和 command。
     - 依赖服务不可用导致进程退出；如果进程持续运行但探针失败，应切换到 NotReadyProbeFailed。
     - livenessProbe 杀死容器造成反复重启，需要结合 Events 中 `Liveness probe failed` 和 Last State。
     - 权限问题，例如 permission denied、只读文件系统、非 root 用户无法执行。
@@ -658,7 +683,10 @@ data:
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
     | CrashLoopBackOff + Exit Code 非 137 + 命令/进程错误 | CrashLoopBackOffRuntime | 高 |
+    | CrashLoopBackOff + Exit Code 0 且主进程很快结束 | 进程正常退出但被控制器反复拉起，工作负载类型或 command 不匹配 | 高 |
     | CrashLoopBackOff + previous logs 有业务异常后进程退出 | 应用运行时异常 | 高 |
+    | CrashLoopBackOff + No space left on device | 容器/节点磁盘空间不足或日志/临时文件写满 | 高 |
+    | CrashLoopBackOff + Address already in use | 容器内端口冲突或进程重复启动 | 高 |
     | CrashLoopBackOff + Liveness probe failed + Last State 被 Killing | livenessProbe 配置或健康检查异常导致重启 | 中 |
     | CrashLoopBackOff + permission denied / executable not found | 启动命令、权限或镜像内容错误 | 高 |
     | CrashLoopBackOff + OOMKilled/137 | 应切换到 OOMKilled runbook | 高 |
