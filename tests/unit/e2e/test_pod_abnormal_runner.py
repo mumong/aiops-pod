@@ -12,6 +12,11 @@ from test.pod_abnormal_e2e.run_pod_abnormal_cases import (
     load_cases,
     select_cases,
 )
+from test.pod_abnormal_e2e.run_pod_abnormal_suite import (
+    load_cases as load_suite_cases,
+    load_requested_scenarios,
+    select_cases as select_suite_cases,
+)
 
 
 def test_extract_mttr_seconds_prefers_stats_block():
@@ -34,12 +39,12 @@ def test_extract_runbook_ids_from_trace_lines():
     ids = extract_runbook_ids(
         """
         📋 诊断追踪
-        - **核心 Runbook**: l3-imagepull-failed
-        - **参考 Runbook**: pod-volume-mount-failed, l3-imagepull-failed
+        - **核心 Runbook**: pod-imagepull-failed
+        - **参考 Runbook**: pod-volume-mount-failed, pod-imagepull-failed
         """
     )
 
-    assert "l3-imagepull-failed" in ids
+    assert "pod-imagepull-failed" in ids
     assert "pod-volume-mount-failed" in ids
 
 
@@ -49,7 +54,7 @@ def test_evaluate_response_scores_pod_abnormal_case():
         name="OOM",
         expected_pod_abnormal_type="OOMKilled",
         expected_layer="L2",
-        expected_runbooks=["l2-oomkilled"],
+        expected_runbooks=["pod-oomkilled"],
         root_cause_keywords=["OOMKilled", "Exit Code: 137", "40Mi"],
         evidence_keywords=["Last State", "OOMKilled", "Exit Code: 137"],
     )
@@ -59,7 +64,7 @@ def test_evaluate_response_scores_pod_abnormal_case():
     证据: Last State Terminated Reason OOMKilled Exit Code: 137
     collection_summary: 计划 5 项，实际采集 5 项，未采集 0 项，完整度 100%
     📋 诊断追踪
-    - **核心 Runbook**: l2-oomkilled
+    - **核心 Runbook**: pod-oomkilled
     ## 📊 性能统计
     ├─ 总耗时: 90s
     ├─ 工具调用: 8 次
@@ -194,3 +199,41 @@ def test_evidence_threshold_defaults_to_sixty_percent():
 
     assert failed["evidence_ok"] is False
     assert passed["evidence_ok"] is True
+
+
+def test_suite_scenario_file_supports_comments_commas_and_whitespace(tmp_path):
+    scenarios = tmp_path / "test.txt"
+    scenarios.write_text(
+        """
+        # nightly suite
+        evicted, volumemountfailed
+        pending，terminating
+        oomkilled
+        """,
+        encoding="utf-8",
+    )
+
+    assert load_requested_scenarios(scenarios) == [
+        "evicted",
+        "volumemountfailed",
+        "pending",
+        "terminating",
+        "oomkilled",
+    ]
+
+
+def test_suite_selects_enabled_cases_and_skips_unknown_by_default():
+    cases = load_suite_cases(Path("test/pod_abnormal_e2e/cases.yaml"))
+
+    selected = select_suite_cases(cases, ["configerror", "unknown"], include_manual=False)
+
+    assert [case.id for case in selected] == ["config-bootstrap-missing-env"]
+
+
+def test_suite_can_include_manual_unknown_when_requested():
+    cases = load_suite_cases(Path("test/pod_abnormal_e2e/cases.yaml"))
+
+    selected = select_suite_cases(cases, ["unknown"], include_manual=True)
+
+    assert [case.id for case in selected] == ["node-lost-unknown-manual"]
+    assert selected[0].manual is True

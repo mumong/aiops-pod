@@ -37,7 +37,7 @@ def test_fetch_runbook_tool_rejects_disabled_runbook(tmp_path):
 
     tool = FetchRunbookTool(
         runbook_dirs=[str(runbook_dir)],
-        allowed_runbook_ids=["l2-oomkilled", "private-k8s-query-promql-reference"],
+        allowed_runbook_ids=["pod-oomkilled", "private-k8s-query-promql-reference"],
     )
     result = tool._run("private-k8s-health-reference.md")
 

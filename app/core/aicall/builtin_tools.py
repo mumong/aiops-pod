@@ -27,16 +27,16 @@ DEFAULT_RUNBOOK_DIRS = [
 ]
 
 DEFAULT_ENABLED_RUNBOOK_IDS = [
-    "l0-volume-limit",
+    "pod-evicted",
     "pod-volume-mount-failed",
-    "l1-taint-node",
+    "pod-pending-unschedulable",
     "pod-node-lost-unknown",
     "pod-terminating-stuck",
-    "l2-oomkilled",
+    "pod-oomkilled",
     "pod-crashloop-runtime",
-    "l3-imagepull-failed",
+    "pod-imagepull-failed",
     "pod-sandbox-create-failed",
-    "l4-config-bootstrap-fail",
+    "pod-config-error",
     "pod-notready-probe-failed",
     "private-k8s-query-promql-reference",
 ]
@@ -55,12 +55,12 @@ class FetchRunbookTool(BaseTool):
     """获取 Runbook 诊断手册内容
 
     LLM 根据 catalog 中的 link 字段调用此工具，
-    传入 runbook_id（如 'l3-imagepull-failed.md'），
+    传入 runbook_id（如 'pod-imagepull-failed.md'），
     返回完整的诊断手册内容 + 执行指令。
     """
     name: str = "fetch_runbook"
     description: str = (
-        "获取 Runbook 诊断手册。传入 runbook_id（如 'l3-imagepull-failed.md'）。"
+        "获取 Runbook 诊断手册。传入 runbook_id（如 'pod-imagepull-failed.md'）。"
         "返回手册内容后，你必须按照手册中的步骤使用工具执行诊断。"
     )
     runbook_dirs: list = Field(default_factory=lambda: list(DEFAULT_RUNBOOK_DIRS))

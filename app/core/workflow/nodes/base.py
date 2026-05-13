@@ -261,7 +261,6 @@ class WorkflowNode(ABC):
         language_policy = (
             "\n\n# 语言与可见输出约束\n"
             "- 全部可见输出必须使用中文，包括分析说明、工具调用前后的说明、结构化字段内的解释文本。\n"
-            "- 禁止输出 `<think>`、`</think>` 或任何思考标签内容；不要暴露内部推理过程。\n"
             "- 需要推理时只给结论性、可验证的简短说明，并优先调用工具获取事实。\n"
         )
         full_prompt += language_policy

@@ -12,16 +12,16 @@ def test_runtime_catalog_only_exposes_pod_abnormal_mainline_runbooks():
     runbook_ids = {entry["id"] for entry in catalog["catalog"]}
 
     assert runbook_ids == {
-        "l0-volume-limit",
+        "pod-evicted",
         "pod-volume-mount-failed",
-        "l1-taint-node",
+        "pod-pending-unschedulable",
         "pod-node-lost-unknown",
         "pod-terminating-stuck",
-        "l2-oomkilled",
+        "pod-oomkilled",
         "pod-crashloop-runtime",
-        "l3-imagepull-failed",
+        "pod-imagepull-failed",
         "pod-sandbox-create-failed",
-        "l4-config-bootstrap-fail",
+        "pod-config-error",
         "pod-notready-probe-failed",
     }
 
@@ -32,16 +32,16 @@ def test_runtime_configmap_only_contains_pod_abnormal_and_query_prometheus_runbo
 
     allowed = {
         "catalog.json",
-        "l0-volume-limit.md",
+        "pod-evicted.md",
         "pod-volume-mount-failed.md",
-        "l1-taint-node.md",
+        "pod-pending-unschedulable.md",
         "pod-node-lost-unknown.md",
         "pod-terminating-stuck.md",
-        "l2-oomkilled.md",
+        "pod-oomkilled.md",
         "pod-crashloop-runtime.md",
-        "l3-imagepull-failed.md",
+        "pod-imagepull-failed.md",
         "pod-sandbox-create-failed.md",
-        "l4-config-bootstrap-fail.md",
+        "pod-config-error.md",
         "pod-notready-probe-failed.md",
         "private-k8s-query-promql-reference.md",
     }

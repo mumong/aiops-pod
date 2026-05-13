@@ -771,7 +771,7 @@ def test_conclusion_llm_prompt_includes_structured_diagnosis_context():
     "direct_cause": "容器无法创建",
     "manifestation": "Pod ImagePullBackOff"
   },
-  "primary_runbooks": ["l3-imagepull-failed.md"],
+  "primary_runbooks": ["pod-imagepull-failed.md"],
   "limitations": "未验证节点出口网络"
 }"""
 
