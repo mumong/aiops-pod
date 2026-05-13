@@ -444,14 +444,14 @@ def test_rca_output_normalizes_root_cause_from_summary():
         },
         "root_cause_summary": "节点访问 Docker Hub 超时，导致镜像拉取失败",
         "confidence": 0.86,
-        "primary_runbooks": ["l3-imagepull-failed.md"],
+        "primary_runbooks": ["pod-imagepull-failed.md"],
         "alternative_causes": [],
         "limitations": "未验证节点出口网络",
     })
 
     assert parsed.root_cause == "节点访问 Docker Hub 超时，导致镜像拉取失败"
     assert parsed.confidence == 0.86
-    assert parsed.primary_runbooks == ["l3-imagepull-failed.md"]
+    assert parsed.primary_runbooks == ["pod-imagepull-failed.md"]
 
 
 def test_rca_output_rejects_empty_root_cause():

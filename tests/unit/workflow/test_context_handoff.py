@@ -186,7 +186,7 @@ def test_rca_lite_prefers_structured_output_when_available():
         },
         "root_cause_summary": "节点出口网络超时导致镜像拉取失败",
         "confidence": 0.84,
-        "primary_runbooks": ["l3-imagepull-failed.md"],
+        "primary_runbooks": ["pod-imagepull-failed.md"],
     })
 
     def _fake_call_structured_agent(question, system_prompt, schema, **kwargs):
@@ -207,7 +207,7 @@ def test_rca_lite_prefers_structured_output_when_available():
     assert captured["schema"] is RCAOutput
     assert result["root_cause"] == "节点出口网络超时导致镜像拉取失败"
     assert result["confidence"] == 0.84
-    assert result["primary_runbooks"] == ["l3-imagepull-failed.md"]
+    assert result["primary_runbooks"] == ["pod-imagepull-failed.md"]
 
 
 def test_rca_lite_uses_structured_agent_runtime():
@@ -870,7 +870,7 @@ def test_rca_execute_sanitizes_large_evidence_fields_before_handoff():
         "root_cause": "节点出口网络超时导致镜像拉取失败",
         "root_cause_summary": "节点出口网络超时导致镜像拉取失败",
         "confidence": 0.86,
-        "primary_runbooks": ["l3-imagepull-failed.md"],
+        "primary_runbooks": ["pod-imagepull-failed.md"],
         "limitations": "",
     }
 

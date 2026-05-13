@@ -22,16 +22,16 @@ kubectl -n "${NS}" patch pod terminating-stuck --type=merge -p '{"metadata":{"fi
 kubectl -n "${NS}" delete pod terminating-stuck --ignore-not-found --wait=true >/dev/null 2>&1 || true
 
 MANIFESTS=(
-  "l0-logfill-enospc.yaml"              # Evicted
+  "pod-evicted.yaml"              # Evicted
   "pod-volume-mount-failed.yaml"        # VolumeMountFailed
-  "l1-taint-node.yaml"                  # PendingUnschedulable
+  "pod-pending-unschedulable.yaml"                  # PendingUnschedulable
   "pod-node-lost-unknown.yaml"          # NodeLostOrUnknown candidate; requires manual node fault to become Unknown
   "pod-terminating-stuck.yaml"          # TerminatingStuck; delete is triggered below
-  "l2-oomkilled.yaml"                   # OOMKilled
+  "pod-oomkilled.yaml"                   # OOMKilled
   "pod-crashloop-runtime.yaml"          # CrashLoopBackOffRuntime
-  "l3-imagepull-fail-victim.yaml"       # ImagePullFailed
+  "pod-imagepull-failed.yaml"       # ImagePullFailed
   "pod-sandbox-create-failed.yaml"      # SandboxCreateFailed
-  "l4-config-bootstrap-fail.yaml"       # ConfigError
+  "pod-config-error.yaml"       # ConfigError
   "pod-notready-probe-failed.yaml"      # NotReadyProbeFailed
 )
 
