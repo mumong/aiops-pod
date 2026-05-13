@@ -7,8 +7,8 @@ ROOT = Path("test/e2e/manifests")
 
 EXPECTED_CASES = {
     "Evicted": {
-        "manifest": "l0-logfill-enospc.yaml",
-        "runbook": "l0-volume-limit.md",
+        "manifest": "pod-evicted.yaml",
+        "runbook": "pod-evicted.md",
         "status": "Evicted",
     },
     "VolumeMountFailed": {
@@ -17,8 +17,8 @@ EXPECTED_CASES = {
         "status": "Pending|ContainerCreating",
     },
     "PendingUnschedulable": {
-        "manifest": "l1-taint-node.yaml",
-        "runbook": "l1-taint-node.md",
+        "manifest": "pod-pending-unschedulable.yaml",
+        "runbook": "pod-pending-unschedulable.md",
         "status": "Pending",
     },
     "NodeLostOrUnknown": {
@@ -32,8 +32,8 @@ EXPECTED_CASES = {
         "status": "Terminating",
     },
     "OOMKilled": {
-        "manifest": "l2-oomkilled.yaml",
-        "runbook": "l2-oomkilled.md",
+        "manifest": "pod-oomkilled.yaml",
+        "runbook": "pod-oomkilled.md",
         "status": "CrashLoopBackOff|Error",
     },
     "CrashLoopBackOffRuntime": {
@@ -42,8 +42,8 @@ EXPECTED_CASES = {
         "status": "CrashLoopBackOff",
     },
     "ImagePullFailed": {
-        "manifest": "l3-imagepull-fail-victim.yaml",
-        "runbook": "l3-imagepull-failed.md",
+        "manifest": "pod-imagepull-failed.yaml",
+        "runbook": "pod-imagepull-failed.md",
         "status": "ImagePullBackOff|ErrImagePull",
     },
     "SandboxCreateFailed": {
@@ -52,8 +52,8 @@ EXPECTED_CASES = {
         "status": "ContainerCreating|Pending",
     },
     "ConfigError": {
-        "manifest": "l4-config-bootstrap-fail.yaml",
-        "runbook": "l4-config-bootstrap-fail.md",
+        "manifest": "pod-config-error.yaml",
+        "runbook": "pod-config-error.md",
         "status": "CrashLoopBackOff|CreateContainerConfigError|CreateContainerError",
     },
     "NotReadyProbeFailed": {

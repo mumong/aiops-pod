@@ -13,16 +13,16 @@ AIOps Copilot E2E 场景准确率测试（盲测模式）
 
 用法:
     # 运行单个场景（推荐：先手动部署 manifest，再运行测试）
-    python test_accuracy.py --scenario l2-oomkilled
+    python test_accuracy.py --scenario pod-oomkilled
 
     # 运行所有场景
     python test_accuracy.py --scenario all
 
     # 单场景重复 N 次，5 并发（稳定性/压力测试）
-    python test_accuracy.py --scenario l3-imagepull -n 50 -c 5
+    python test_accuracy.py --scenario pod-imagepull-failed -n 50 -c 5
 
     # 自定义问题覆盖默认
-    python test_accuracy.py --scenario l3-imagepull -q "查看集群 CPU 和内存使用情况"
+    python test_accuracy.py --scenario pod-imagepull-failed -q "查看集群 CPU 和内存使用情况"
 """
 
 import argparse
@@ -50,36 +50,41 @@ DEFAULT_QUESTION = "我的集群有什么问题"
 # ── 内置场景矩阵（仅期望值，不含 query） ─────────────────────
 
 SCENARIOS: Dict[str, Dict] = {
-    "l0-volume-limit": {
+    "pod-evicted": {
         "name": "L0 存储卷超限驱逐",
         "expect_layer": "L0",
-        "expect_runbook": "l0-volume-limit",
+        "expect_runbook": "pod-evicted",
         "runbook_keywords": ["存储卷", "volume", "驱逐", "evict", "ephemeral"],
     },
-    "l1-taint-node": {
+    "pod-pending-unschedulable": {
         "name": "L1 节点 NotReady/Taint",
         "expect_layer": "L1",
-        "expect_runbook": "l1-taint-node",
+        "expect_runbook": "pod-pending-unschedulable",
         "runbook_keywords": ["taint", "notready", "节点", "调度"],
     },
-    "l2-oomkilled": {
+    "pod-oomkilled": {
         "name": "L2 OOMKilled",
         "expect_layer": "L2",
-        "expect_runbook": "l2-oomkilled",
+        "expect_runbook": "pod-oomkilled",
         "runbook_keywords": ["oomkill", "内存", "exit code 137"],
     },
-    "l3-imagepull": {
+    "pod-imagepull-failed": {
         "name": "L3 镜像拉取失败",
         "expect_layer": "L3",
-        "expect_runbook": "l3-imagepull-failed",
+        "expect_runbook": "pod-imagepull-failed",
         "runbook_keywords": ["镜像拉取", "imagepull", "imagepullbackoff"],
     },
-    "l4-config-bootstrap": {
+    "pod-config-error": {
         "name": "L4 应用启动配置校验失败",
         "expect_layer": "L4",
-        "expect_runbook": "l4-config-bootstrap-fail",
+        "expect_runbook": "pod-config-error",
         "runbook_keywords": ["配置", "bootstrap", "crashloop", "config"],
     },
+}
+
+SCENARIO_ALIASES = {
+    "l3-imagepull": "pod-imagepull-failed",
+    "l4-config-bootstrap": "pod-config-error",
 }
 
 # ── 指标提取函数（仅从工作流系统统计提取，不使用 AI 自评） ─────
@@ -666,11 +671,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 内置场景:
-  l0-volume-limit   L0 存储卷超限驱逐
-  l1-taint-node     L1 节点 NotReady/Taint
-  l2-oomkilled      L2 OOMKilled
-  l3-imagepull      L3 镜像拉取失败
-  l4-config-bootstrap L4 应用启动配置校验失败
+  pod-evicted   L0 存储卷超限驱逐
+  pod-pending-unschedulable     L1 节点 NotReady/Taint
+  pod-oomkilled      L2 OOMKilled
+  pod-imagepull-failed      L3 镜像拉取失败
+  pod-config-error          L4 应用启动配置校验失败
   all               运行所有场景
 
 盲测说明:
@@ -678,14 +683,14 @@ def main():
   --scenario 仅提供期望值用于结果比对。
 
 示例:
-  python test_accuracy.py --scenario l2-oomkilled
+  python test_accuracy.py --scenario pod-oomkilled
   python test_accuracy.py --scenario all -n 3 -c 2
-  python test_accuracy.py --scenario l3-imagepull -q "查询我集群的cpu和memory"
-  python test_accuracy.py -q "自定义问题" --expect-layer L3 --expect-runbook l3-imagepull-failed
+  python test_accuracy.py --scenario pod-imagepull-failed -q "查询我集群的cpu和memory"
+  python test_accuracy.py -q "自定义问题" --expect-layer L3 --expect-runbook pod-imagepull-failed
         """,
     )
     parser.add_argument("--scenario", "-s", default=None,
-                        help="场景 ID（如 l2-oomkilled）或 'all' 运行全部")
+                        help="场景 ID（如 pod-oomkilled）或 'all' 运行全部")
     parser.add_argument("-n", "--repeat", type=int, default=1,
                         help="每个场景重复次数（默认 1）")
     parser.add_argument("-c", "--concurrency", type=int, default=1,
@@ -707,13 +712,15 @@ def main():
     question = args.question  # 盲测问题（默认或 -q 覆盖）
 
     if args.scenario:
-        if args.scenario == "all":
+        scenario_arg = SCENARIO_ALIASES.get(args.scenario, args.scenario)
+        if scenario_arg == "all":
             scenarios_to_run = list(SCENARIOS.items())
-        elif args.scenario in SCENARIOS:
-            scenarios_to_run = [(args.scenario, SCENARIOS[args.scenario])]
+        elif scenario_arg in SCENARIOS:
+            scenarios_to_run = [(scenario_arg, SCENARIOS[scenario_arg])]
         else:
             print(f"❌ 未知场景: {args.scenario}")
             print(f"可用场景: {', '.join(SCENARIOS.keys())}, all")
+            print(f"兼容别名: {', '.join(SCENARIO_ALIASES.keys())}")
             sys.exit(1)
     elif args.expect_layer or args.expect_runbook:
         # 无 --scenario 但有期望值：自定义比对模式

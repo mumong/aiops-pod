@@ -190,7 +190,7 @@ run_all_tests() {
     # L1: Node Taint
     # --------------------------------
     echo "准备 L1 场景：应用 Node Taint..."
-    kubectl apply -f manifests/l1-taint-node.yaml 2>/dev/null || log_warn "L1 Taint 注入失败"
+    kubectl apply -f manifests/pod-pending-unschedulable.yaml 2>/dev/null || log_warn "L1 Taint 注入失败"
 
     # --------------------------------
     # L0: DiskFull (ENOSPC simulation)

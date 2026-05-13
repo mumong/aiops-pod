@@ -10,16 +10,16 @@
 
 | Pod 异常类型 | 典型状态 | Manifest | Runbook | 注入方式 |
 |------|------|----------|---------|----------|
-| Evicted | Evicted | `l0-logfill-enospc.yaml` | `l0-volume-limit.md` | emptyDir sizeLimit 30Mi 写满，触发本地临时存储驱逐 |
+| Evicted | Evicted | `pod-evicted.yaml` | `pod-evicted.md` | emptyDir sizeLimit 30Mi 写满，触发本地临时存储驱逐 |
 | VolumeMountFailed | Pending/ContainerCreating | `pod-volume-mount-failed.yaml` | `pod-volume-mount-failed.md` | 引用不存在的 ConfigMap 卷，触发 FailedMount |
-| PendingUnschedulable | Pending | `l1-taint-node.yaml` | `l1-taint-node.md` | nodeSelector 指定不存在的节点标签，触发 FailedScheduling |
+| PendingUnschedulable | Pending | `pod-pending-unschedulable.yaml` | `pod-pending-unschedulable.md` | nodeSelector 指定不存在的节点标签，触发 FailedScheduling |
 | NodeLostOrUnknown | Unknown | `pod-node-lost-unknown.yaml` | `pod-node-lost-unknown.md` | 先部署候选 Pod，再手动隔离所在节点或停止 kubelet |
 | TerminatingStuck | Terminating | `pod-terminating-stuck.yaml` | `pod-terminating-stuck.md` | Pod 带 finalizer，`run_all.sh` 自动执行 delete 使其卡住 |
-| OOMKilled | CrashLoopBackOff/Error | `l2-oomkilled.yaml` | `l2-oomkilled.md` | 小内存 limit + 持续内存分配 |
+| OOMKilled | CrashLoopBackOff/Error | `pod-oomkilled.yaml` | `pod-oomkilled.md` | 小内存 limit + 持续内存分配 |
 | CrashLoopBackOffRuntime | CrashLoopBackOff | `pod-crashloop-runtime.yaml` | `pod-crashloop-runtime.md` | 容器启动后输出运行时错误并 exit 2 |
-| ImagePullFailed | ImagePullBackOff/ErrImagePull | `l3-imagepull-fail-victim.yaml` | `l3-imagepull-failed.md` | 使用 `registry.invalid` 镜像地址强制拉取失败 |
+| ImagePullFailed | ImagePullBackOff/ErrImagePull | `pod-imagepull-failed.yaml` | `pod-imagepull-failed.md` | 使用 `registry.invalid` 镜像地址强制拉取失败 |
 | SandboxCreateFailed | ContainerCreating/Pending | `pod-sandbox-create-failed.yaml` | `pod-sandbox-create-failed.md` | 使用不存在的 runtimeClassName |
-| ConfigError | CrashLoopBackOff/CreateContainerConfigError/CreateContainerError | `l4-config-bootstrap-fail.yaml` | `l4-config-bootstrap-fail.md` | 启动打印配置错误并进入 CrashLoopBackOff |
+| ConfigError | CrashLoopBackOff/CreateContainerConfigError/CreateContainerError | `pod-config-error.yaml` | `pod-config-error.md` | 启动打印配置错误并进入 CrashLoopBackOff |
 | NotReadyProbeFailed | Running 但 READY=0/1 | `pod-notready-probe-failed.yaml` | `pod-notready-probe-failed.md` | readinessProbe 固定失败 |
 
 ### 使用方式
@@ -63,7 +63,7 @@ AIOPS_ENDPOINT=http://10.2.0.48:30800 ./test_scenarios.sh
 ### 测试流程
 
 ```
-1. 选择场景（如 l3-imagepull），场景包含预定义的 query + 期望层级 + 期望 Runbook
+1. 选择场景（如 pod-imagepull-failed），场景包含预定义的 query + 期望层级 + 期望 Runbook
 2. 发送 N 次 HTTP 请求（可并发）
    → GET /ask?q=<场景预定义问题>&stream=false
    → 等待完整 Markdown 报告返回
@@ -75,17 +75,17 @@ AIOPS_ENDPOINT=http://10.2.0.48:30800 ./test_scenarios.sh
 
 ```bash
 # 单场景单次
-python test_accuracy.py --scenario l3-imagepull
+python test_accuracy.py --scenario pod-imagepull-failed
 
 # 单场景 50 次，5 并发（压力/稳定性测试）
-python test_accuracy.py --scenario l3-imagepull -n 50 -c 5
+python test_accuracy.py --scenario pod-imagepull-failed -n 50 -c 5
 
 # 所有场景各 3 次，2 并发
 python test_accuracy.py --scenario all -n 3 -c 2
 
 # 自定义问题
 python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" \
-  --expect-layer L2 --expect-runbook l2-oomkilled
+  --expect-layer L2 --expect-runbook pod-oomkilled
 ```
 
 ### 四项质量指标详解
@@ -132,11 +132,11 @@ python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" \
 
 | 场景 ID | 预期层级 | 预期 Runbook |
 |---------|---------|-------------|
-| l0-volume-limit | L0 | l0-volume-limit |
-| l1-taint-node | L1 | l1-taint-node |
-| l2-oomkilled | L2 | l2-oomkilled |
-| l3-imagepull | L3 | l3-imagepull-failed |
-| l4-config-bootstrap | L4 | l4-config-bootstrap-fail |
+| pod-evicted | L0 | pod-evicted |
+| pod-pending-unschedulable | L1 | pod-pending-unschedulable |
+| pod-oomkilled | L2 | pod-oomkilled |
+| pod-imagepull-failed | L3 | pod-imagepull-failed |
+| pod-config-error | L4 | pod-config-error |
 
 这些场景都要求 layer 节点先锁定异常 Pod，再给出：
 
@@ -193,13 +193,13 @@ python test_accuracy.py -q "namespace=aiops-e2e pod xxx 异常" \
 
 ```
 📋 诊断追踪
-- **核心 Runbook**: l3-imagepull-failed
-- **参考 Runbook**: l3-imagepull-failed
+- **核心 Runbook**: pod-imagepull-failed
+- **参考 Runbook**: pod-imagepull-failed
 - **工具调用**: 7 次
 - **LLM 调用**: 4 次
 ```
 
-**匹配示例**：场景 `l2-oomkilled` 的 `expect_runbook = "l2-oomkilled"`。只要报告中的 `核心 Runbook`、`参考 Runbook`、或 `fetch_runbook` 日志里出现 `l2-oomkilled`，就会判定匹配成功 ✅
+**匹配示例**：场景 `pod-oomkilled` 的 `expect_runbook = "pod-oomkilled"`。只要报告中的 `核心 Runbook`、`参考 Runbook`、或 `fetch_runbook` 日志里出现 `pod-oomkilled`，就会判定匹配成功 ✅
 
 **计算示例**：50 次请求，45 次成功，其中 41 次 Runbook 匹配 → `41/45 = 91.1%` ✅
 

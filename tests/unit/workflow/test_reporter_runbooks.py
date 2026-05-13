@@ -13,8 +13,8 @@ def _make_catalog():
     return SimpleNamespace(
         catalog=[
             SimpleNamespace(
-                id="l2-oomkilled",
-                link="l2-oomkilled.md",
+                id="pod-oomkilled",
+                link="pod-oomkilled.md",
                 description="【L2】Pod OOMKilled (Exit Code 137) — 容器内存超过 cgroup limits 被 OOM Killer 终止",
             ),
             SimpleNamespace(
@@ -74,8 +74,8 @@ def test_reporter_normalizes_known_scene_runbook_title_to_catalog_id():
 
     update_metrics_from_state(metrics, state, runbook_catalog=_make_catalog())
 
-    assert metrics.primary_runbook == "l2-oomkilled"
-    assert metrics.runbook_id == "l2-oomkilled"
+    assert metrics.primary_runbook == "pod-oomkilled"
+    assert metrics.runbook_id == "pod-oomkilled"
 
 
 def test_reporter_keeps_multiple_catalog_runbooks_when_multiple_are_fetched():
@@ -106,8 +106,8 @@ def test_reporter_keeps_multiple_catalog_runbooks_when_multiple_are_fetched():
 
     update_metrics_from_state(metrics, state, runbook_catalog=_make_catalog())
 
-    assert metrics.primary_runbook == "l2-oomkilled"
-    assert metrics.runbook_id == "l2-oomkilled, private-k8s-health-reference"
+    assert metrics.primary_runbook == "pod-oomkilled"
+    assert metrics.runbook_id == "pod-oomkilled, private-k8s-health-reference"
 
 
 def test_reporter_detects_query_runbook_from_tool_start_args_when_result_preview_is_truncated():
