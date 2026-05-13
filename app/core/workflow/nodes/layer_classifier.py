@@ -748,9 +748,18 @@ class LayerClassifierNode(WorkflowNode):
 
             signal = ev.get("result", "") or ev.get("result_preview", "")
             if signal:
+                structured = ev.get("structured") or {}
+                key_events = []
+                if isinstance(structured, dict):
+                    key_events = [
+                        str(item)
+                        for item in (structured.get("key_events") or structured.get("signals") or [])[:5]
+                        if str(item).strip()
+                    ]
                 active_signals.append({
                     "source": tool_name,
                     "signal": self._compact_signal(signal),
+                    "key_events": key_events,
                     "raw_ref": ev.get("raw_ref"),
                     "summary_ref": ev.get("summary_ref"),
                 })
@@ -935,7 +944,9 @@ class LayerClassifierNode(WorkflowNode):
                 {"scenario": "节点资源压力驱逐", "probability": "中", "reason": "需验证 eviction message 和 Node pressure"},
             ],
             "VolumeMountFailed": [
-                {"scenario": "PVC/PV/CSI/NFS 挂载失败", "probability": "中", "reason": "需验证 FailedMount 事件和卷对象状态"},
+                {"scenario": "Secret/ConfigMap volume 引用缺失", "probability": "中", "reason": "先验证 FailedMount 事件原文和 Pod spec volumes；命中 not found 后不要泛化查 PVC"},
+                {"scenario": "PVC/PV/StorageClass 绑定或亲和性异常", "probability": "中", "reason": "仅当 Events/spec 指向 PVC/PV 时验证 PVC/PV/StorageClass"},
+                {"scenario": "CSI/NFS/hostPath 挂载链路异常", "probability": "中", "reason": "仅当 Events 指向 timeout/access denied/hostPath/CSI 时扩展"},
             ],
             "ConfigError": [
                 {"scenario": "ConfigMap/Secret/env 配置缺失", "probability": "中", "reason": "需验证 Pod spec、事件和配置对象"},

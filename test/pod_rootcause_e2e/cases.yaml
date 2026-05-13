@@ -1,0 +1,281 @@
+defaults:
+  namespace: aiops-e2e
+  question: "我的集群有什么问题？"
+  mttr_threshold_seconds: 900
+  root_cause_threshold: 0.6
+  evidence_threshold: 0.6
+  runbook_threshold: 0.6
+
+cases:
+  - id: volume-mount-missing-configmap
+    group: volumemount
+    name: "VolumeMountFailed: ConfigMap 不存在"
+    aliases: ["volume-configmap"]
+    manifest: "manifests/volumemount/missing-configmap.yaml"
+    expected_layer: L0
+    expected_pod_abnormal_type: VolumeMountFailed
+    expected_runbooks: ["pod-volume-mount-failed"]
+    root_cause_signature:
+      include_all: ["configmap", "not found"]
+      include_any: ["rc-definitely-missing-configmap", "missing-config"]
+      exclude_any: ["rc-definitely-missing-secret", "persistentvolumeclaim", "hostPath", "missing-key"]
+
+  - id: volume-mount-missing-secret
+    group: volumemount
+    name: "VolumeMountFailed: Secret 不存在"
+    aliases: ["volume-secret"]
+    manifest: "manifests/volumemount/missing-secret.yaml"
+    expected_layer: L0
+    expected_pod_abnormal_type: VolumeMountFailed
+    expected_runbooks: ["pod-volume-mount-failed"]
+    root_cause_signature:
+      include_all: ["secret", "not found"]
+      include_any: ["rc-definitely-missing-secret", "missing-secret"]
+      exclude_any: ["rc-definitely-missing-configmap", "persistentvolumeclaim", "hostPath", "missing-key"]
+
+  - id: volume-mount-configmap-missing-key
+    group: volumemount
+    name: "VolumeMountFailed: ConfigMap key 不存在"
+    aliases: ["volume-configmap-key"]
+    manifest: "manifests/volumemount/configmap-missing-key.yaml"
+    expected_layer: L0
+    expected_pod_abnormal_type: VolumeMountFailed
+    expected_runbooks: ["pod-volume-mount-failed"]
+    root_cause_signature:
+      include_all: ["configmap", "missing-key"]
+      include_any: ["couldn't find key", "rc-volume-key-config"]
+      exclude_any: ["secret not found", "persistentvolumeclaim", "hostPath", "rc-definitely-missing-configmap"]
+
+  - id: volume-mount-missing-pvc
+    group: volumemount
+    name: "VolumeMountFailed: PVC 不存在"
+    aliases: ["volume-pvc"]
+    manifest: "manifests/volumemount/missing-pvc.yaml"
+    expected_layer: L0
+    expected_pod_abnormal_type: VolumeMountFailed
+    expected_runbooks: ["pod-volume-mount-failed"]
+    root_cause_signature:
+      include_all: ["not found"]
+      include_any: ["persistentvolumeclaim", "pvc", "rc-definitely-missing-pvc"]
+      exclude_any: ["rc-definitely-missing-configmap", "rc-definitely-missing-secret", "hostPath", "missing-key"]
+
+  - id: volume-mount-hostpath-missing
+    group: volumemount
+    name: "VolumeMountFailed: hostPath 路径不存在"
+    aliases: ["volume-hostpath"]
+    manifest: "manifests/volumemount/hostpath-missing.yaml"
+    expected_layer: L0
+    expected_pod_abnormal_type: VolumeMountFailed
+    expected_runbooks: ["pod-volume-mount-failed"]
+    root_cause_signature:
+      include_all: ["hostPath"]
+      include_any: ["type check failed", "not a directory", "aiops-rootcause-definitely-missing-hostpath-dir"]
+      exclude_any: ["rc-definitely-missing-configmap", "rc-definitely-missing-secret", "persistentvolumeclaim", "pvc not found"]
+
+  - id: pending-nodeselector-mismatch
+    group: pending
+    name: "Pending: nodeSelector 无匹配节点"
+    aliases: ["pending-nodeselector"]
+    manifest: "manifests/pending/nodeselector-mismatch.yaml"
+    expected_layer: L1
+    expected_pod_abnormal_type: PendingUnschedulable
+    expected_runbooks: ["pod-pending-unschedulable"]
+    root_cause_signature:
+      include_all: ["nodeSelector"]
+      include_any: ["didn't match", "nonexistent-node-label", "node selector"]
+      exclude_any: ["Insufficient cpu", "Insufficient memory", "persistentvolumeclaim", "pvc"]
+
+  - id: pending-insufficient-cpu
+    group: pending
+    name: "Pending: CPU request 超出集群可调度容量"
+    aliases: ["pending-cpu"]
+    manifest: "manifests/pending/insufficient-cpu.yaml"
+    expected_layer: L1
+    expected_pod_abnormal_type: PendingUnschedulable
+    expected_runbooks: ["pod-pending-unschedulable"]
+    root_cause_signature:
+      include_all: ["Insufficient", "cpu"]
+      include_any: ["100000", "0/", "nodes are available"]
+      exclude_any: ["nodeSelector", "Insufficient memory", "persistentvolumeclaim", "pvc"]
+
+  - id: pending-insufficient-memory
+    group: pending
+    name: "Pending: Memory request 超出集群可调度容量"
+    aliases: ["pending-memory"]
+    manifest: "manifests/pending/insufficient-memory.yaml"
+    expected_layer: L1
+    expected_pod_abnormal_type: PendingUnschedulable
+    expected_runbooks: ["pod-pending-unschedulable"]
+    root_cause_signature:
+      include_all: ["Insufficient", "memory"]
+      include_any: ["100000Gi", "0/", "nodes are available"]
+      exclude_any: ["nodeSelector", "Insufficient cpu", "persistentvolumeclaim", "pvc"]
+
+  - id: pending-missing-pvc
+    group: pending
+    name: "Pending: PVC 不存在导致无法挂载"
+    aliases: ["pending-pvc"]
+    manifest: "manifests/pending/missing-pvc.yaml"
+    expected_layer: L1
+    expected_pod_abnormal_type: PendingUnschedulable
+    expected_runbooks: ["pod-pending-unschedulable", "pod-volume-mount-failed"]
+    root_cause_signature:
+      include_all: ["not found"]
+      include_any: ["persistentvolumeclaim", "pvc", "rc-pending-definitely-missing-pvc"]
+      exclude_any: ["nodeSelector", "Insufficient cpu", "Insufficient memory", "configmap", "secret"]
+
+  - id: imagepull-invalid-registry
+    group: imagepull
+    name: "ImagePull: 无效镜像仓库/DNS"
+    aliases: ["imagepull-invalid-registry"]
+    manifest: "manifests/imagepull/invalid-registry.yaml"
+    expected_layer: L3
+    expected_pod_abnormal_type: ImagePullFailed
+    expected_runbooks: ["pod-imagepull-failed"]
+    root_cause_signature:
+      include_all: ["registry.invalid"]
+      include_any: ["Failed to pull image", "ImagePullBackOff", "ErrImagePull"]
+      exclude_any: ["not found", "pull secret", "unauthorized", "x509"]
+
+  - id: imagepull-image-not-found
+    group: imagepull
+    name: "ImagePull: 镜像 tag 不存在"
+    aliases: ["imagepull-not-found"]
+    manifest: "manifests/imagepull/image-not-found.yaml"
+    expected_layer: L3
+    expected_pod_abnormal_type: ImagePullFailed
+    expected_runbooks: ["pod-imagepull-failed"]
+    root_cause_signature:
+      include_all: ["not found"]
+      include_any: ["definitely-not-existing-rootcause-tag", "manifest unknown", "registry.k8s.io/pause"]
+      exclude_any: ["registry.invalid", "pull secret", "unauthorized", "x509"]
+
+  - id: imagepull-missing-pull-secret
+    group: imagepull
+    name: "ImagePull: imagePullSecret 不存在"
+    aliases: ["imagepull-secret"]
+    manifest: "manifests/imagepull/missing-pull-secret.yaml"
+    expected_layer: L3
+    expected_pod_abnormal_type: ImagePullFailed
+    expected_runbooks: ["pod-imagepull-failed"]
+    root_cause_signature:
+      include_all: ["secret"]
+      include_any: ["rc-definitely-missing-pull-secret", "imagePullSecrets", "pull secret"]
+      exclude_any: ["manifest unknown", "x509"]
+
+  - id: crashloop-exit-code-nonzero
+    group: crashloop
+    name: "CrashLoopBackOff: 应用非零退出码"
+    aliases: ["crashloop-exit-code"]
+    manifest: "manifests/crashloop/exit-code-nonzero.yaml"
+    expected_layer: L2
+    expected_pod_abnormal_type: CrashLoopBackOffRuntime
+    expected_runbooks: ["pod-crashloop-runtime"]
+    root_cause_signature:
+      include_all: ["Exit Code"]
+      include_any: ["exit 2", "Exit Code: 2", "RUNTIME_STARTUP_ERROR"]
+      exclude_any: ["command not found", "config file", "OOMKilled", "APP_BOOT_MODE"]
+
+  - id: crashloop-command-not-found
+    group: crashloop
+    name: "CrashLoopBackOff: 启动命令不存在"
+    aliases: ["crashloop-command"]
+    manifest: "manifests/crashloop/command-not-found.yaml"
+    expected_layer: L2
+    expected_pod_abnormal_type: CrashLoopBackOffRuntime
+    expected_runbooks: ["pod-crashloop-runtime"]
+    root_cause_signature:
+      include_all: ["command not found"]
+      include_any: ["definitely-missing-command-for-rootcause", "not found"]
+      exclude_any: ["config file", "OOMKilled", "APP_BOOT_MODE"]
+
+  - id: crashloop-config-file-missing
+    group: crashloop
+    name: "CrashLoopBackOff: 应用配置文件缺失"
+    aliases: ["crashloop-config-file"]
+    manifest: "manifests/crashloop/config-file-missing.yaml"
+    expected_layer: L2
+    expected_pod_abnormal_type: CrashLoopBackOffRuntime
+    expected_runbooks: ["pod-crashloop-runtime"]
+    root_cause_signature:
+      include_all: ["config", "not found"]
+      include_any: ["/etc/rootcause-app/config.yaml", "config file missing"]
+      exclude_any: ["command not found", "OOMKilled", "APP_BOOT_MODE"]
+
+  - id: configerror-env-missing
+    group: configerror
+    name: "ConfigError: 应用必需环境变量缺失"
+    aliases: ["config-env"]
+    manifest: "manifests/configerror/env-missing.yaml"
+    expected_layer: L4
+    expected_pod_abnormal_type: ConfigError
+    expected_runbooks: ["pod-config-error"]
+    root_cause_signature:
+      include_all: ["APP_BOOT_MODE"]
+      include_any: ["missing required", "L4_CONFIG_BOOTSTRAP_FAIL", "exit 42"]
+      exclude_any: ["configmap", "secretKeyRef", "OOMKilled"]
+
+  - id: configerror-configmap-key-missing-env
+    group: configerror
+    name: "ConfigError: env 引用的 ConfigMap key 缺失"
+    aliases: ["config-configmap-key"]
+    manifest: "manifests/configerror/configmap-key-missing-env.yaml"
+    expected_layer: L4
+    expected_pod_abnormal_type: ConfigError
+    expected_runbooks: ["pod-config-error"]
+    root_cause_signature:
+      include_all: ["configmap", "APP_BOOT_MODE"]
+      include_any: ["couldn't find key", "rc-app-config", "CreateContainerConfigError"]
+      exclude_any: ["secret", "OOMKilled", "command not found"]
+
+  - id: configerror-secret-key-missing-env
+    group: configerror
+    name: "ConfigError: env 引用的 Secret key 缺失"
+    aliases: ["config-secret-key"]
+    manifest: "manifests/configerror/secret-key-missing-env.yaml"
+    expected_layer: L4
+    expected_pod_abnormal_type: ConfigError
+    expected_runbooks: ["pod-config-error"]
+    root_cause_signature:
+      include_all: ["secret", "APP_SECRET_TOKEN"]
+      include_any: ["couldn't find key", "rc-app-secret", "CreateContainerConfigError"]
+      exclude_any: ["configmap", "OOMKilled", "command not found"]
+
+  - id: oomkilled-memory-limit-too-low
+    group: oomkilled
+    name: "OOMKilled: memory limit 过低"
+    aliases: ["oomkilled"]
+    manifest: "manifests/oomkilled/memory-limit-too-low.yaml"
+    expected_layer: L2
+    expected_pod_abnormal_type: OOMKilled
+    expected_runbooks: ["pod-oomkilled"]
+    root_cause_signature:
+      include_all: ["OOMKilled"]
+      include_any: ["Exit Code: 137", "exitCode: 137", "memory limit", "40Mi"]
+      exclude_any: ["command not found", "ImagePullBackOff", "configmap"]
+
+  - id: notready-readiness-probe-failed
+    group: notready
+    name: "NotReady: readinessProbe 失败"
+    aliases: ["notready-readiness"]
+    manifest: "manifests/notready/readiness-probe-failed.yaml"
+    expected_layer: L4
+    expected_pod_abnormal_type: NotReadyProbeFailed
+    expected_runbooks: ["pod-notready-probe-failed"]
+    root_cause_signature:
+      include_all: ["readiness"]
+      include_any: ["Readiness probe failed", "readinessProbe", "dependency unavailable"]
+      exclude_any: ["liveness", "OOMKilled", "ImagePullBackOff"]
+
+  - id: notready-liveness-probe-failed
+    group: notready
+    name: "NotReady: livenessProbe 失败"
+    aliases: ["notready-liveness"]
+    manifest: "manifests/notready/liveness-probe-failed.yaml"
+    expected_layer: L4
+    expected_pod_abnormal_type: NotReadyProbeFailed
+    expected_runbooks: ["pod-notready-probe-failed"]
+    root_cause_signature:
+      include_all: ["liveness"]
+      include_any: ["Liveness probe failed", "livenessProbe", "endpoint failed"]
+      exclude_any: ["readiness", "OOMKilled", "ImagePullBackOff"]

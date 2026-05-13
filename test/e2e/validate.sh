@@ -22,6 +22,18 @@ kubectl -n "${NS}" get pod volume-mount-failed -o wide 2>/dev/null || echo "  vo
 kubectl -n "${NS}" describe pod volume-mount-failed 2>/dev/null | grep -Ei "FailedMount|MountVolume|not found|configmap" || true
 echo ""
 
+echo "## VolumeMountFailed variants: Secret / ConfigMap key / hostPath / PVC"
+for pod in \
+    volume-mount-missing-secret \
+    volume-mount-missing-configmap-key \
+    volume-mount-hostpath-missing \
+    volume-mount-missing-pvc
+do
+    kubectl -n "${NS}" get pod "${pod}" -o wide 2>/dev/null || echo "  ${pod} 未部署"
+    kubectl -n "${NS}" describe pod "${pod}" 2>/dev/null | grep -Ei "FailedMount|MountVolume|not found|couldn't find key|hostPath|persistentvolumeclaim|secret|configmap" || true
+done
+echo ""
+
 echo "## PendingUnschedulable: impossible nodeSelector"
 kubectl -n "${NS}" get pod -l app=pending-unschedulable -o wide 2>/dev/null || echo "  pending-unschedulable 未部署"
 kubectl -n "${NS}" describe pod -l app=pending-unschedulable 2>/dev/null | grep -Ei "FailedScheduling|node selector|didn't match|Insufficient|taint" || true
