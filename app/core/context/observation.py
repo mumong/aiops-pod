@@ -158,7 +158,19 @@ class ObservationProcessor:
                 "tool": tool,
                 "raw_preview": raw[:1000],
             }, self._generic_summary(tool, raw), "invalid_tool"
-        if re.search(r"command failed|error from server|the server doesn't have a resource type|notfound|not found", raw, re.IGNORECASE):
+
+        # Tool-specific processors must see successful describe/events/log output
+        # before generic failure detection. Kubernetes diagnostic payloads often
+        # contain strings like `configmap ... not found` inside Events; that is
+        # evidence, not a failed tool invocation.
+        if tool == "kubectl_events":
+            return self._extract_events(raw)
+        if tool == "kubectl_describe":
+            return self._extract_describe(raw)
+        if tool in self.LOG_TOOLS:
+            return self._extract_logs(tool, raw)
+
+        if self._is_command_failure(raw):
             return {
                 "status": "command_failed",
                 "tool": tool,
@@ -171,10 +183,6 @@ class ObservationProcessor:
                 "raw_preview": raw[:1000],
             }, "工具成功执行，但没有找到资源；这是空/负向观察，不能当作异常已被验证。", "generic_empty"
 
-        if tool == "kubectl_events":
-            return self._extract_events(raw)
-        if tool == "kubectl_describe":
-            return self._extract_describe(raw)
         if tool == "kubectl_get_yaml":
             return self._extract_yaml(raw)
         if tool == "kubectl_run_image":
@@ -183,8 +191,6 @@ class ObservationProcessor:
             return self._extract_command_result(tool, raw)
         if tool in {"execute_prometheus_instant_query", "execute_prometheus_range_query"}:
             return self._extract_prometheus_result(tool, raw)
-        if tool in self.LOG_TOOLS:
-            return self._extract_logs(tool, raw)
         if tool in {"kubectl_get_by_kind_in_cluster", "kubectl_get_by_kind_in_namespace", "kubernetes_tabular_query"}:
             if self._looks_like_secret_table(raw):
                 return self._extract_secret_table(tool, raw)
@@ -223,23 +229,37 @@ class ObservationProcessor:
         structured["runbook_name"] = runbook_id[:-3] if runbook_id.endswith(".md") else runbook_id
 
     def _extract_events(self, raw: str) -> tuple[Dict[str, Any], str, str]:
+        if self._is_command_failure(raw):
+            return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary("kubectl_events", raw), "k8s_events"
         if re.search(r"no events found|no resources found", raw, re.IGNORECASE):
             structured = {"status": "no_events_found", "warnings": []}
             return structured, "工具成功执行，但没有找到事件；这是空/负向观察，不能当作异常已被验证。", "k8s_events"
 
         lines = [ln for ln in raw.splitlines() if ln.strip()]
+        diagnostic_lines = self._extract_diagnostic_lines(raw, limit=20)
         warning_lines = [ln for ln in lines if re.search(r"\bWarning\b|Failed|BackOff|x509|ErrImagePull|ImagePullBackOff", ln)]
-        selected = warning_lines[:20] or lines[:20]
+        selected = diagnostic_lines or warning_lines[:20] or lines[:20]
         structured = {
             "status": "events_found",
             "warning_count": len(warning_lines),
             "selected_events": selected,
+            "key_events": diagnostic_lines,
         }
-        summary = "kubectl_events 摘要:\n" + "\n".join(selected)
+        summary_lines = ["kubectl_events 摘要:"]
+        if diagnostic_lines:
+            summary_lines.append("关键诊断行:")
+            summary_lines.extend(diagnostic_lines)
+            remaining = [ln for ln in selected if ln not in diagnostic_lines]
+            if remaining:
+                summary_lines.append("其他事件:")
+                summary_lines.extend(remaining)
+        else:
+            summary_lines.extend(selected)
+        summary = "\n".join(summary_lines)
         return structured, summary, "k8s_events"
 
     def _extract_describe(self, raw: str) -> tuple[Dict[str, Any], str, str]:
-        if re.search(r"command failed|error from server|notfound|not found", raw, re.IGNORECASE):
+        if self._is_command_failure(raw):
             return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary("kubectl_describe", raw), "k8s_describe"
 
         fields = {}
@@ -250,6 +270,8 @@ class ObservationProcessor:
 
         interesting = []
         for line in raw.splitlines():
+            if re.search(r"aiops\.e2e/expected-", line, re.IGNORECASE):
+                continue
             if re.search(
                 r"State:|Last State:|Reason:|Exit Code:|Warning|Failed|BackOff|"
                 r"ImagePullBackOff|ErrImagePull|CrashLoopBackOff|OOMKilled|"
@@ -257,18 +279,24 @@ class ObservationProcessor:
                 line,
             ):
                 interesting.append(line.rstrip())
+        diagnostic_lines = self._extract_diagnostic_lines(raw, limit=40)
+        merged_signals = self._dedupe_lines([*diagnostic_lines, *interesting])
 
         structured = {
             **fields,
-            "signals": interesting[:80],
+            "signals": merged_signals[:80],
+            "key_events": diagnostic_lines,
         }
         summary_lines = [
             "kubectl_describe 摘要:",
             *[f"{k}: {v}" for k, v in fields.items()],
         ]
+        if diagnostic_lines:
+            summary_lines.append("关键诊断行:")
+            summary_lines.extend(diagnostic_lines[:40])
         if interesting:
             summary_lines.append("关键状态/事件:")
-            summary_lines.extend(interesting[:40])
+            summary_lines.extend([ln for ln in interesting[:40] if ln not in diagnostic_lines])
         return structured, "\n".join(summary_lines), "k8s_describe"
 
     def _extract_table(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
@@ -763,7 +791,7 @@ class ObservationProcessor:
         return structured, "\n".join(lines), "command_result"
 
     def _extract_logs(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
-        if re.search(r"command failed|error from server|notfound|not found", raw, re.IGNORECASE):
+        if self._is_command_failure(raw):
             return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary(tool, raw), "k8s_logs"
 
         lines = [ln for ln in raw.splitlines() if ln.strip()]
@@ -864,7 +892,7 @@ class ObservationProcessor:
         text = summary or ""
         if not text.strip():
             return False
-        if re.search(r"command failed|error from server|notfound|not found|工具返回为空", text, re.IGNORECASE):
+        if ObservationProcessor._is_command_failure(text) or re.search(r"工具返回为空", text, re.IGNORECASE):
             return False
         return True
 
@@ -874,3 +902,79 @@ class ObservationProcessor:
         suffix = f"\n... (已压缩/截断，原始 {len(raw)} 字符，完整内容见 raw_ref)"
         limit = max(0, self.max_observation_chars - len(suffix))
         return summary[:limit] + suffix
+
+    @staticmethod
+    def _is_command_failure(raw: str) -> bool:
+        """Return true only when the tool invocation failed.
+
+        Do not treat diagnostic payload text such as Kubernetes Event
+        `configmap ... not found` or application log `file not found` as a
+        failed tool call. Those lines are often the highest-value evidence.
+        """
+        lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+        if not lines:
+            return False
+        head = "\n".join(lines[:3])
+        return bool(
+            re.search(
+                r"^(Command failed|Error from server|Error:\s|The server doesn't have a resource type)",
+                head,
+                re.IGNORECASE,
+            )
+        )
+
+    @classmethod
+    def _extract_diagnostic_lines(cls, raw: str, limit: int = 20) -> list[str]:
+        patterns = (
+            r"MountVolume\.SetUp failed|FailedMount|FailedAttachVolume|Unable to attach or mount volumes|"
+            r"configmaps? .+ not found|secrets? .+ not found|couldn.t find key|"
+            r"FailedScheduling|0/\d+ nodes are available|Insufficient|taint|didn.t match|"
+            r"OOMKilled|Exit Code:\s*137|Reason:\s*OOMKilled|"
+            r"ImagePullBackOff|ErrImagePull|Failed to pull image|pull access denied|x509|i/o timeout|"
+            r"FailedCreatePodSandBox|failed to setup network|cni|ipam|"
+            r"Readiness probe failed|Liveness probe failed|Startup probe failed|probe failed|"
+            r"Back-off|CrashLoopBackOff|Error from server|NotFound|not found|"
+            r"deletionTimestamp|finalizers?:|FailedKillPod|Killing|Unmount|Detach|"
+            r"NodeLost|NotReady|node .*unreachable|PLEG"
+        )
+        selected = []
+        for line in (raw or "").splitlines():
+            stripped = line.rstrip()
+            if not stripped or re.search(r"aiops\.e2e/expected-", stripped, re.IGNORECASE):
+                continue
+            if re.search(patterns, stripped, re.IGNORECASE):
+                selected.append(stripped)
+        return sorted(
+            cls._dedupe_lines(selected),
+            key=cls._diagnostic_line_score,
+            reverse=True,
+        )[:limit]
+
+    @staticmethod
+    def _diagnostic_line_score(line: str) -> int:
+        text = line or ""
+        score = 0
+        weighted_patterns = [
+            (r"MountVolume\.SetUp failed|configmaps? .+ not found|secrets? .+ not found", 100),
+            (r"OOMKilled|Exit Code:\s*137|FailedScheduling|FailedCreatePodSandBox|probe failed", 90),
+            (r"Failed to pull image|pull access denied|x509|i/o timeout|CrashLoopBackOff|Back-off", 80),
+            (r"FailedMount|FailedAttachVolume|Unable to attach or mount volumes", 70),
+            (r"Error from server|NotFound|not found", 60),
+            (r"Reason:|Warning|Failed|Error", 40),
+        ]
+        for pattern, weight in weighted_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                score = max(score, weight)
+        return score
+
+    @staticmethod
+    def _dedupe_lines(lines: list[str]) -> list[str]:
+        seen = set()
+        result = []
+        for line in lines:
+            key = re.sub(r"\s+", " ", str(line or "").strip())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(str(line))
+        return result

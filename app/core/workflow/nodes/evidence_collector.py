@@ -1703,18 +1703,23 @@ class EvidenceCollectorNode(WorkflowNode):
                 result = ev.get("result", ev.get("result_preview", ""))
                 structured = ev.get("structured") or {}
                 semantic_success = ev.get("semantic_success", True) is not False
-                diagnostic_negative = self._is_diagnostic_negative_tool_result(
-                    ev.get("tool_name", ""),
-                    result,
-                    structured,
+                diagnostic_negative = (
+                    not semantic_success
+                    and self._is_diagnostic_negative_tool_result(
+                        ev.get("tool_name", ""),
+                        result,
+                        structured,
+                    )
                 )
                 if not semantic_success and not diagnostic_negative:
                     continue
+                structured_for_matching = dict(structured)
+                structured_for_matching["_diagnostic_negative"] = diagnostic_negative
                 successful_tools.append({
                     "tool_name": ev.get("tool_name", ""),
                     "result": result,
                     "tool_args": ev.get("tool_args") or {},
-                    "structured": structured,
+                    "structured": structured_for_matching,
                     "raw_ref": ev.get("raw_ref"),
                     "summary_ref": ev.get("summary_ref"),
                     "diagnostic_negative": diagnostic_negative,
@@ -2157,7 +2162,11 @@ class EvidenceCollectorNode(WorkflowNode):
     ) -> bool:
         if not result or not result.strip():
             return False
-        if (structured or {}).get("status") in {"invalid_tool", "command_failed", "extract_failed"}:
+        if "_diagnostic_negative" in (structured or {}):
+            diagnostic_negative = bool((structured or {}).get("_diagnostic_negative"))
+        else:
+            diagnostic_negative = EvidenceCollectorNode._is_diagnostic_negative_tool_result(tool_name, result, structured or {})
+        if (structured or {}).get("status") in {"invalid_tool", "command_failed", "extract_failed"} and not diagnostic_negative:
             return False
         if not plan_intent and not EvidenceCollectorNode._namespace_scope_matches(plan_cmd, result):
             return False
@@ -2177,7 +2186,7 @@ class EvidenceCollectorNode(WorkflowNode):
 
         lower_result = result.lower()
         plan_target = EvidenceCollectorNode._extract_plan_resource_target(plan_cmd)
-        if plan_target and not plan_intent:
+        if plan_target and not plan_intent and intent not in {"registry_connectivity", "dns_connectivity"}:
             result_target = EvidenceCollectorNode._extract_result_resource_target(
                 result=result,
                 structured=structured or {},
@@ -2186,7 +2195,7 @@ class EvidenceCollectorNode(WorkflowNode):
             if not EvidenceCollectorNode._resource_target_matches(plan_target, result_target):
                 return False
 
-        if (structured or {}).get("diagnostic_negative") or EvidenceCollectorNode._is_diagnostic_negative_tool_result(tool_name, result, structured or {}):
+        if (structured or {}).get("diagnostic_negative") or diagnostic_negative:
             return (
                 intent in {"registry_connectivity", "dns_connectivity"}
                 or EvidenceCollectorNode._negative_result_answers_plan(combined, lower_result)
@@ -2462,9 +2471,6 @@ class EvidenceCollectorNode(WorkflowNode):
     ) -> bool:
         """Return True when a failed probe is itself useful diagnostic evidence."""
         tool = (tool_name or "").lower()
-        if not any(name in tool for name in ("run_bash_command", "kubectl_run_image")):
-            return False
-
         text = " ".join([
             str(result or ""),
             str((structured or {}).get("stderr_preview") or ""),
@@ -2473,6 +2479,35 @@ class EvidenceCollectorNode(WorkflowNode):
             str((structured or {}).get("stdout") or ""),
             " ".join(str(signal) for signal in ((structured or {}).get("signals") or [])),
         ]).lower()
+
+        if any(name in tool for name in ("kubectl_", "kubernetes_")) and "kubectl_run_image" not in tool:
+            k8s_negative_markers = (
+                "error from server (notfound)",
+                " not found",
+                "failedmount",
+                "failedattachvolume",
+                "mountvolume.setup failed",
+                "unable to attach or mount volumes",
+                "failedscheduling",
+                "0/ nodes are available",
+                "0 nodes are available",
+                "imagepullbackoff",
+                "errimagepull",
+                "failed to pull image",
+                "back-off pulling image",
+                "failedcreatepodsandbox",
+                "readiness probe failed",
+                "liveness probe failed",
+                "oomkilled",
+                "evicted",
+                "deletiontimestamp",
+                "finalizers:",
+            )
+            return any(marker in text for marker in k8s_negative_markers)
+
+        if not any(name in tool for name in ("run_bash_command", "kubectl_run_image")):
+            return False
+
         negative_markers = (
             "connection reset",
             "connection refused",
@@ -2508,6 +2543,31 @@ class EvidenceCollectorNode(WorkflowNode):
             "dns",
             "tls",
             "timeout",
+            "event",
+            "events",
+            "事件",
+            "describe",
+            "状态",
+            "reason",
+            "原因",
+            "mount",
+            "volume",
+            "卷",
+            "挂载",
+            "configmap",
+            "secret",
+            "pvc",
+            "persistentvolumeclaim",
+            "storageclass",
+            "scheduling",
+            "调度",
+            "image",
+            "镜像",
+            "probe",
+            "探针",
+            "oom",
+            "evicted",
+            "驱逐",
         )
         result_markers = (
             "connection reset",
@@ -2524,6 +2584,25 @@ class EvidenceCollectorNode(WorkflowNode):
             "curl:",
             "wget:",
             "tls handshake timeout",
+            "error from server (notfound)",
+            " not found",
+            "failedmount",
+            "failedattachvolume",
+            "mountvolume.setup failed",
+            "unable to attach or mount volumes",
+            "failedscheduling",
+            "0 nodes are available",
+            "imagepullbackoff",
+            "errimagepull",
+            "failed to pull image",
+            "back-off pulling image",
+            "failedcreatepodsandbox",
+            "readiness probe failed",
+            "liveness probe failed",
+            "oomkilled",
+            "evicted",
+            "deletiontimestamp",
+            "finalizers:",
         )
         return (
             any(marker in plan for marker in intent_markers)

@@ -887,9 +887,10 @@ def test_evidence_does_not_count_failed_or_wrong_intent_tool_results():
     items = node._build_evidence_items_from_thinking(plan, events)
 
     assert len(items) == 2
-    assert items[0].collected is False
+    assert items[0].collected is True
+    assert items[0].source == "thinking_negative_match"
     assert items[1].collected is False
-    assert node._calculate_completeness(items) == 0
+    assert node._calculate_completeness(items) == 0.5
 
 
 def test_evidence_counts_logs_collected_by_run_bash_command():
@@ -1798,6 +1799,69 @@ def test_evidence_rule_match_replays_ce6df_style_plan_without_fake_zero_complete
         "e7": False,
     }
     assert node._calculate_completeness(items) == 2 / 6
+
+
+def test_evidence_counts_k8s_negative_mount_evidence_for_volume_mount_plan():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "e1",
+            "description": "Describe Pod to check events related to volume mounting",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod volume-mount-failed -n aiops-e2e",
+            "purpose": "Verify FailedMount or MountVolume.SetUp failed events",
+            "evidence_type": "event",
+        },
+        {
+            "id": "e2",
+            "description": "Check referenced ConfigMap from volume",
+            "level": "critical",
+            "tool": "kubectl_get_by_name",
+            "command": "kubectl get configmap definitely-missing-configmap -n aiops-e2e",
+            "purpose": "Confirm whether the ConfigMap referenced by Pod volume exists",
+            "evidence_type": "resource_status",
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "semantic_success": False,
+            "result": (
+                "Name: volume-mount-failed\n"
+                "Namespace: aiops-e2e\n"
+                "State: Waiting\n"
+                "Reason: ContainerCreating\n"
+                "Events:\n"
+                "Warning FailedMount Pod/volume-mount-failed "
+                "MountVolume.SetUp failed for volume \"missing-config\" : "
+                "configmap \"definitely-missing-configmap\" not found\n"
+            ),
+            "structured": {"status": "describe_summarized", "kind": "Pod", "name": "volume-mount-failed", "namespace": "aiops-e2e"},
+            "tool_args": {"kind": "Pod", "name": "volume-mount-failed", "namespace": "aiops-e2e"},
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_name",
+            "semantic_success": False,
+            "result": (
+                "Command failed (exit 1):\n"
+                "kubectl get --show-labels -o wide configmap definitely-missing-configmap -n aiops-e2e\n"
+                "Error from server (NotFound): configmaps \"definitely-missing-configmap\" not found"
+            ),
+            "structured": {"status": "command_failed"},
+            "tool_args": {"kind": "ConfigMap", "name": "definitely-missing-configmap", "namespace": "aiops-e2e"},
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert {item.id: item.collected for item in items} == {"e1": True, "e2": True}
+    assert all(item.source == "thinking_negative_match" for item in items)
+    assert node._calculate_completeness(items) == 1.0
 
 
 def test_evidence_plan_match_does_not_call_llm_by_default():
