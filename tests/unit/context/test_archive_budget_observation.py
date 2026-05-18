@@ -377,6 +377,57 @@ Events:
     assert processed["structured"]["namespace"] == "aiops-e2e"
 
 
+def test_observation_processor_describe_preserves_pod_diagnostic_sections(tmp_path):
+    raw = """
+Name:                      rc-terminating-long-grace
+Namespace:                 aiops-e2e
+Node:                      node1/10.2.0.49
+Status:                    Terminating (lasts <invalid>)
+Termination Grace Period:  600s
+Containers:
+  app:
+    Image:         busybox:1.36
+    Command:
+      sh
+      -c
+      trap 'sleep 600' TERM; sleep 86400
+    State:          Running
+    Ready:          True
+    Restart Count:  0
+Conditions:
+  Type              Status
+  Ready             True
+Volumes:
+  kube-api-access-z74xs:
+    Type:                    Projected
+QoS Class:                   BestEffort
+Events:
+  Type    Reason          Age   From               Message
+  Normal  Killing         3m4s  kubelet            Stopping container app
+""" + ("noise\n" * 200)
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1600)
+
+    processed = processor.process(
+        run_id="run-describe-pod-sections",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_describe",
+        raw_content=raw,
+    )
+
+    summary = processed["summary"]
+    structured = processed["structured"]
+
+    assert "Termination Grace Period:  600s" in summary
+    assert "Command:" in summary
+    assert "trap 'sleep 600' TERM; sleep 86400" in summary
+    assert "Normal  Killing" in summary
+    assert structured["lifecycle"]["termination_grace_period"] == "600s"
+    assert structured["containers"][0]["name"] == "app"
+    assert "trap 'sleep 600' TERM; sleep 86400" in structured["containers"][0]["command"]
+    assert any("Killing" in event for event in structured["events"])
+
+
 def test_observation_processor_extracts_pod_yaml_image_pull_fields(tmp_path):
     raw = """
 apiVersion: v1
@@ -428,6 +479,60 @@ status:
     assert structured["containerStatuses"][0]["waiting"]["reason"] == "ImagePullBackOff"
     assert "imagePullSecrets: <absent>" in processed["summary"]
     assert "serviceAccountName: hwaccel-manager" in processed["summary"]
+
+
+def test_observation_processor_extracts_terminating_pod_lifecycle_fields(tmp_path):
+    raw = """
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rc-terminating-prestop
+  namespace: aiops-e2e
+  deletionTimestamp: "2026-05-18T01:00:00Z"
+  deletionGracePeriodSeconds: 600
+  finalizers:
+  - aiops.e2e/hold
+spec:
+  nodeName: node1
+  terminationGracePeriodSeconds: 600
+  containers:
+  - name: app
+    image: busybox:1.36
+    command:
+    - sh
+    - -c
+    args:
+    - trap 'sleep 600' TERM; sleep 86400
+    lifecycle:
+      preStop:
+        exec:
+          command:
+          - sh
+          - -c
+          - sleep 600
+status:
+  phase: Running
+"""
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=3000)
+
+    processed = processor.process(
+        run_id="run-terminating-yaml",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_get_yaml",
+        raw_content=raw,
+    )
+
+    structured = processed["structured"]
+    assert structured["deletionTimestamp"] == "2026-05-18T01:00:00Z"
+    assert structured["finalizers"] == ["aiops.e2e/hold"]
+    assert structured["terminationGracePeriodSeconds"] == 600
+    assert structured["containers"][0]["lifecycle"]["preStop"]["exec"]["command"] == ["sh", "-c", "sleep 600"]
+    assert "deletionTimestamp: 2026-05-18T01:00:00Z" in processed["summary"]
+    assert "finalizers: aiops.e2e/hold" in processed["summary"]
+    assert "terminationGracePeriodSeconds: 600" in processed["summary"]
+    assert "lifecycle:" in processed["summary"]
+    assert "preStop" in processed["summary"]
 
 
 def test_observation_processor_extracts_secret_yaml_type_and_data_keys(tmp_path):

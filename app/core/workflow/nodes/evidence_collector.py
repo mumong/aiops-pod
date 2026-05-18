@@ -1320,16 +1320,61 @@ class EvidenceCollectorNode(WorkflowNode):
     @classmethod
     def _normalize_plan_tool_args(cls, item: Dict[str, Any]) -> Dict[str, Any]:
         normalized = dict(item)
+        tool = cls._normalize_plan_text(normalized.get("tool"))
+        command = str(normalized.get("command") or "")
+
+        if cls._plan_requires_yaml(normalized):
+            if tool != "kubectl_get_yaml":
+                logger.info(
+                    "🧭 [evidence] 将 YAML 采证计划工具规范化为 kubectl_get_yaml: id=%s old_tool=%s command=%s",
+                    normalized.get("id", ""),
+                    normalized.get("tool", ""),
+                    command,
+                )
+            normalized["tool"] = "kubectl_get_yaml"
+            acceptable_tools = [
+                str(item).strip()
+                for item in (normalized.get("acceptable_tools") or [])
+                if str(item).strip()
+            ]
+            if "kubectl_get_yaml" not in acceptable_tools:
+                acceptable_tools.insert(0, "kubectl_get_yaml")
+            if "run_bash_command" not in acceptable_tools:
+                acceptable_tools.append("run_bash_command")
+            normalized["acceptable_tools"] = acceptable_tools
+            tool_args = normalized.get("tool_args")
+            if isinstance(tool_args, dict):
+                # `output_format=yaml` is a kubectl_get_by_name convention in
+                # some MCPs. Keeping it on kubectl_get_yaml can make the model
+                # copy an incompatible argument shape. The command remains the
+                # source of truth for the YAML target.
+                cleaned_args = dict(tool_args)
+                cleaned_args.pop("output_format", None)
+                normalized["tool_args"] = cleaned_args
+
         if isinstance(normalized.get("tool_args"), dict) and normalized["tool_args"]:
             return normalized
 
         tool = cls._normalize_plan_text(normalized.get("tool"))
-        command = str(normalized.get("command") or "")
         if tool == "kubectl_events":
             tool_args = cls._derive_kubectl_events_tool_args(command)
             if tool_args:
                 normalized["tool_args"] = tool_args
         return normalized
+
+    @classmethod
+    def _plan_requires_yaml(cls, item: Dict[str, Any]) -> bool:
+        command = str(item.get("command") or "")
+        evidence_type = cls._normalize_plan_text(item.get("evidence_type"), item.get("purpose"), item.get("description"))
+        tool_args = item.get("tool_args") if isinstance(item.get("tool_args"), dict) else {}
+        output_format = str((tool_args or {}).get("output_format") or "").strip().lower()
+        return (
+            output_format in {"yaml", "yml"}
+            or bool(re.search(r"(?:^|\s)(?:-o|--output)(?:=|\s+)(?:yaml|yml)\b", command, re.IGNORECASE))
+            or "pod_yaml" in evidence_type
+            or " yaml" in f" {evidence_type}"
+            or "yaml " in f"{evidence_type} "
+        )
 
     @staticmethod
     def _derive_kubectl_events_tool_args(command: str) -> Dict[str, str]:
@@ -2174,6 +2219,11 @@ class EvidenceCollectorNode(WorkflowNode):
         combined = f"{plan_cmd}\n{plan_desc}"
         has_structured_intent = bool(plan_intent)
         intent = plan_intent or EvidenceCollectorNode._classify_plan_intent(plan_cmd, plan_desc)
+        requires_yaml = EvidenceCollectorNode._plan_requires_yaml({
+            "command": plan_cmd,
+            "evidence_type": plan_intent,
+            "description": plan_desc,
+        })
         tool_match = EvidenceCollectorNode._tool_is_compatible_with_plan(
             plan_tool=plan_tool,
             plan_cmd=plan_cmd,
@@ -2183,6 +2233,11 @@ class EvidenceCollectorNode(WorkflowNode):
         )
         if not tool_match:
             return False
+
+        if requires_yaml and not EvidenceCollectorNode._result_is_yaml_evidence(tool_name, result, structured or {}):
+            return False
+        if requires_yaml:
+            diagnostic_negative = False
 
         lower_result = result.lower()
         plan_target = EvidenceCollectorNode._extract_plan_resource_target(plan_cmd)
@@ -2367,6 +2422,27 @@ class EvidenceCollectorNode(WorkflowNode):
         if intent == "pod_lifecycle":
             return any(marker in text for marker in ("deletiontimestamp", "finalizers", "terminating"))
         return any(marker in text for marker in ("kind: pod", "image:", "imagepullsecrets", "containers:"))
+
+    @staticmethod
+    def _result_is_yaml_evidence(
+        tool_name: str,
+        result: str,
+        structured: Dict[str, Any],
+    ) -> bool:
+        tool = (tool_name or "").lower()
+        text = (result or "").lower()
+        if structured.get("kind") or structured.get("resource_kind"):
+            return True
+        if "kubectl_get_yaml" in tool:
+            return True
+        if "run_bash_command" in tool and re.search(r"(?im)^\s*kind:\s+\w+", result or ""):
+            return True
+        return bool(
+            "kubectl_get_yaml 关键字段摘要" in result
+            or re.search(r"(?im)^\s*apiVersion:\s+", result or "")
+            or re.search(r"(?im)^\s*kind:\s+pod\s*$", result or "")
+            or ("deletiontimestamp:" in text and "finalizers:" in text)
+        )
 
     @staticmethod
     def _extract_result_resource_target(

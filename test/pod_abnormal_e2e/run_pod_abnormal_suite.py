@@ -31,6 +31,7 @@ REPO_ROOT = ROOT.parents[1]
 DEFAULT_CASES_FILE = ROOT / "cases.yaml"
 DEFAULT_SCENARIOS_FILE = ROOT / "test.txt"
 DEFAULT_MANIFEST_NAMESPACE = REPO_ROOT / "test/e2e/manifests/00-namespace.yaml"
+ROOTCAUSE_MANIFEST_DIR = REPO_ROOT / "test/pod_rootcause_e2e/manifests"
 
 
 @dataclass(frozen=True)
@@ -146,14 +147,45 @@ def run_command(
     return result
 
 
-def cleanup_known_resources(cases: List[SuiteCase], dry_run: bool = False) -> None:
-    namespaces = sorted({case.namespace for case in cases})
-    for namespace in namespaces:
+def cleanup_namespace(namespace: str, dry_run: bool = False) -> None:
+    """Clear aiops-e2e test resources before every injected case."""
+    run_command(
+        ["kubectl", "-n", namespace, "patch", "pod", "terminating-stuck", "-p", '{"metadata":{"finalizers":null}}', "--type=merge"],
+        dry_run=dry_run,
+        check=False,
+    )
+    for resource in [
+        "pod",
+        "deployment",
+        "replicaset",
+        "statefulset",
+        "daemonset",
+        "job",
+        "cronjob",
+        "service",
+        "configmap",
+        "secret",
+        "pvc",
+    ]:
         run_command(
-            ["kubectl", "-n", namespace, "patch", "pod", "terminating-stuck", "-p", '{"metadata":{"finalizers":null}}', "--type=merge"],
+            ["kubectl", "-n", namespace, "delete", resource, "-l", "e2e-test=true", "--ignore-not-found=true", "--wait=false"],
             dry_run=dry_run,
             check=False,
         )
+        run_command(
+            ["kubectl", "-n", namespace, "delete", resource, "-l", "rootcause-e2e=true", "--ignore-not-found=true", "--wait=false"],
+            dry_run=dry_run,
+            check=False,
+        )
+    run_command(
+        ["kubectl", "-n", namespace, "wait", "--for=delete", "pod", "--all", "--timeout=60s"],
+        dry_run=dry_run,
+        check=False,
+    )
+
+
+def cleanup_known_resources(cases: List[SuiteCase], dry_run: bool = False) -> None:
+    namespaces = sorted({case.namespace for case in cases})
 
     seen: set[Path] = set()
     for case in cases:
@@ -163,9 +195,14 @@ def cleanup_known_resources(cases: List[SuiteCase], dry_run: bool = False) -> No
         if case.manifest.exists():
             run_command(["kubectl", "delete", "-f", str(case.manifest), "--ignore-not-found=true", "--wait=false"], dry_run=dry_run, check=False)
 
+    for manifest in sorted(ROOTCAUSE_MANIFEST_DIR.glob("**/*.yaml")):
+        if manifest.name == "00-namespace.yaml" or manifest in seen:
+            continue
+        seen.add(manifest)
+        run_command(["kubectl", "delete", "-f", str(manifest), "--ignore-not-found=true", "--wait=false"], dry_run=dry_run, check=False)
+
     for namespace in namespaces:
-        run_command(["kubectl", "-n", namespace, "delete", "pod", "-l", "e2e-test=true", "--ignore-not-found=true", "--wait=false"], dry_run=dry_run, check=False)
-        run_command(["kubectl", "-n", namespace, "delete", "deployment", "-l", "e2e-test=true", "--ignore-not-found=true", "--wait=false"], dry_run=dry_run, check=False)
+        cleanup_namespace(namespace, dry_run=dry_run)
 
 
 def apply_case(case: SuiteCase, dry_run: bool = False) -> None:

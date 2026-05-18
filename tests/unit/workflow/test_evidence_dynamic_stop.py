@@ -157,6 +157,70 @@ def test_evidence_builds_collection_output_with_pydantic_schema():
     assert output.evidence_inventory[0]["collected"] is True
 
 
+def test_evidence_normalizes_yaml_plan_away_from_get_by_name():
+    plan = EvidenceCollectorNode._normalize_evidence_plan([
+        {
+            "id": "e1",
+            "description": "确认 Pod deletionTimestamp 和 finalizers",
+            "level": "critical",
+            "tool": "kubectl_get_by_name",
+            "command": "kubectl get pod rc-terminating-finalizer -n aiops-e2e -o yaml",
+            "tool_args": {
+                "name": "rc-terminating-finalizer",
+                "namespace": "aiops-e2e",
+                "output_format": "yaml",
+            },
+            "purpose": "确认 metadata.deletionTimestamp/finalizers",
+            "evidence_type": "pod_yaml",
+            "acceptable_tools": ["kubectl_get_by_name"],
+        }
+    ])
+
+    assert plan[0]["tool"] == "kubectl_get_yaml"
+    assert plan[0]["tool_args"] == {"name": "rc-terminating-finalizer", "namespace": "aiops-e2e"}
+    assert "kubectl_get_yaml" in plan[0]["acceptable_tools"]
+
+
+def test_yaml_plan_is_not_matched_by_tabular_get_by_name_output():
+    matched = EvidenceCollectorNode._tool_result_matches_plan(
+        plan_tool="kubectl_get_yaml",
+        plan_cmd="kubectl get pod rc-terminating-finalizer -n aiops-e2e -o yaml",
+        plan_desc="确认 Pod deletionTimestamp 和 finalizers",
+        tool_name="kubectl_get_by_name",
+        result=(
+            "NAME                       READY   STATUS        RESTARTS   AGE\n"
+            "rc-terminating-finalizer   0/1     Terminating   0          2m\n"
+        ),
+        structured={"status": "kept_small_output"},
+        tool_args={"name": "rc-terminating-finalizer", "namespace": "aiops-e2e"},
+        plan_intent="pod_yaml",
+    )
+
+    assert matched is False
+
+
+def test_yaml_plan_matches_real_yaml_summary():
+    matched = EvidenceCollectorNode._tool_result_matches_plan(
+        plan_tool="kubectl_get_yaml",
+        plan_cmd="kubectl get pod rc-terminating-finalizer -n aiops-e2e -o yaml",
+        plan_desc="确认 Pod deletionTimestamp 和 finalizers",
+        tool_name="kubectl_get_yaml",
+        result=(
+            "kubectl_get_yaml 关键字段摘要:\n"
+            "kind: Pod\n"
+            "name: rc-terminating-finalizer\n"
+            "namespace: aiops-e2e\n"
+            "deletionTimestamp: 2026-05-18T01:00:00Z\n"
+            "finalizers: aiops.e2e/hold\n"
+        ),
+        structured={"status": "yaml_summarized", "kind": "Pod", "name": "rc-terminating-finalizer", "namespace": "aiops-e2e"},
+        tool_args={"name": "rc-terminating-finalizer", "namespace": "aiops-e2e"},
+        plan_intent="pod_yaml",
+    )
+
+    assert matched is True
+
+
 def test_evidence_execute_retries_when_plan_exists_but_no_tool_results():
     node = EvidenceCollectorNode()
     calls = []
@@ -800,7 +864,9 @@ def test_evidence_existing_plan_prompt_includes_pydantic_tool_args():
 
     assert "tool_args=" in message
     assert '"resource_type": "pod"' in message
-    assert "不要从 command 文本重新猜 MCP 参数" in message
+    assert "应优先复用其中的 namespace/name/kind 等目标参数" in message
+    assert "选择更符合诊断意图的真实工具" in message
+    assert "kubectl_get_yaml" in message
 
 
 def test_plan_completeness_uses_countable_planned_items_not_extra_layer_inventory():

@@ -279,3 +279,81 @@ cases:
       include_all: ["liveness"]
       include_any: ["Liveness probe failed", "livenessProbe", "endpoint failed"]
       exclude_any: ["readiness", "OOMKilled", "ImagePullBackOff"]
+
+  - id: terminating-finalizer-stuck
+    group: terminating
+    name: "Terminating: finalizer 卡住删除"
+    aliases: ["terminating-finalizer"]
+    manifest: "manifests/terminating/finalizer-stuck.yaml"
+    expected_layer: L1
+    expected_pod_abnormal_type: TerminatingStuck
+    expected_runbooks: ["pod-terminating-stuck"]
+    suite_triggers:
+      - "kubectl -n aiops-e2e wait --for=condition=Ready pod/rc-terminating-finalizer --timeout=60s || true; kubectl -n aiops-e2e delete pod rc-terminating-finalizer --wait=false"
+    suite_cleanup:
+      - "kubectl -n aiops-e2e patch pod rc-terminating-finalizer -p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+      - "kubectl -n aiops-e2e delete pod rc-terminating-finalizer --force --grace-period=0 --ignore-not-found=true --wait=false"
+    root_cause_signature:
+      include_all: ["finalizer"]
+      include_any: ["aiops.e2e/rootcause-finalizer", "deletionTimestamp", "Terminating"]
+      exclude_any: ["preStop", "terminationGracePeriodSeconds", "OOMKilled", "ImagePullBackOff"]
+
+  - id: terminating-prestop-stuck
+    group: terminating
+    name: "Terminating: preStop hook 阻塞"
+    aliases: ["terminating-prestop"]
+    manifest: "manifests/terminating/prestop-stuck.yaml"
+    expected_layer: L1
+    expected_pod_abnormal_type: TerminatingStuck
+    expected_runbooks: ["pod-terminating-stuck"]
+    suite_triggers:
+      - "kubectl -n aiops-e2e wait --for=condition=Ready pod/rc-terminating-prestop --timeout=60s || true; kubectl -n aiops-e2e delete pod rc-terminating-prestop --wait=false"
+    suite_cleanup:
+      - "kubectl -n aiops-e2e delete pod rc-terminating-prestop --force --grace-period=0 --ignore-not-found=true --wait=false"
+    root_cause_signature:
+      include_all: ["preStop"]
+      include_any: ["hook", "sleep", "terminationGracePeriodSeconds", "Terminating"]
+      exclude_any: ["finalizer", "OOMKilled", "ImagePullBackOff"]
+
+  - id: terminating-long-grace-period
+    group: terminating
+    name: "Terminating: terminationGracePeriodSeconds 过长"
+    aliases: ["terminating-grace"]
+    manifest: "manifests/terminating/long-grace-period.yaml"
+    expected_layer: L1
+    expected_pod_abnormal_type: TerminatingStuck
+    expected_runbooks: ["pod-terminating-stuck"]
+    suite_triggers:
+      - "kubectl -n aiops-e2e wait --for=condition=Ready pod/rc-terminating-long-grace --timeout=60s || true; kubectl -n aiops-e2e delete pod rc-terminating-long-grace --wait=false"
+    suite_cleanup:
+      - "kubectl -n aiops-e2e delete pod rc-terminating-long-grace --force --grace-period=0 --ignore-not-found=true --wait=false"
+    root_cause_signature:
+      include_all: ["terminationGracePeriodSeconds"]
+      include_any: ["600", "grace period", "Terminating"]
+      exclude_any: ["finalizer", "preStop", "OOMKilled", "ImagePullBackOff"]
+
+  - id: sandbox-runtimeclass-invalid
+    group: sandbox
+    name: "SandboxCreateFailed: RuntimeClass 不存在"
+    aliases: ["sandbox-runtimeclass"]
+    manifest: "manifests/sandbox/runtimeclass-invalid.yaml"
+    expected_layer: L3
+    expected_pod_abnormal_type: SandboxCreateFailed
+    expected_runbooks: ["pod-sandbox-create-failed"]
+    root_cause_signature:
+      include_all: ["runtimeClass"]
+      include_any: ["rc-definitely-missing-runtimeclass", "not found", "runtime handler", "FailedCreatePodSandBox"]
+      exclude_any: ["CNI", "IPAM", "ImagePullBackOff", "OOMKilled"]
+
+  - id: evicted-ephemeral-storage
+    group: evicted
+    name: "Evicted: ephemeral-storage 超限"
+    aliases: ["evicted-storage"]
+    manifest: "manifests/evicted/ephemeral-storage.yaml"
+    expected_layer: L0
+    expected_pod_abnormal_type: Evicted
+    expected_runbooks: ["pod-evicted"]
+    root_cause_signature:
+      include_all: ["Evicted"]
+      include_any: ["ephemeral-storage", "emptyDir", "sizeLimit", "The node was low on resource"]
+      exclude_any: ["OOMKilled", "ImagePullBackOff", "runtimeClass", "finalizer"]

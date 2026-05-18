@@ -268,6 +268,7 @@ class ObservationProcessor:
             if match:
                 fields[key.lower()] = match.group(1).strip()
 
+        pod_sections = self._extract_describe_pod_sections(raw)
         interesting = []
         for line in raw.splitlines():
             if re.search(r"aiops\.e2e/expected-", line, re.IGNORECASE):
@@ -275,15 +276,25 @@ class ObservationProcessor:
             if re.search(
                 r"State:|Last State:|Reason:|Exit Code:|Warning|Failed|BackOff|"
                 r"ImagePullBackOff|ErrImagePull|CrashLoopBackOff|OOMKilled|"
-                r"FailedScheduling|MountVolume|x509|NotReady",
+                r"FailedScheduling|MountVolume|x509|NotReady|"
+                r"Termination Grace Period:|Command:|Args:|Restart Count:",
                 line,
             ):
                 interesting.append(line.rstrip())
         diagnostic_lines = self._extract_diagnostic_lines(raw, limit=40)
-        merged_signals = self._dedupe_lines([*diagnostic_lines, *interesting])
+        merged_signals = self._dedupe_lines([
+            *diagnostic_lines,
+            *interesting,
+            *pod_sections.get("signals", []),
+        ])
 
         structured = {
             **fields,
+            "lifecycle": pod_sections.get("lifecycle", {}),
+            "containers": pod_sections.get("containers", []),
+            "scheduling": pod_sections.get("scheduling", {}),
+            "volumes": pod_sections.get("volumes", []),
+            "events": pod_sections.get("events", []),
             "signals": merged_signals[:80],
             "key_events": diagnostic_lines,
         }
@@ -294,10 +305,219 @@ class ObservationProcessor:
         if diagnostic_lines:
             summary_lines.append("关键诊断行:")
             summary_lines.extend(diagnostic_lines[:40])
+        section_summary = pod_sections.get("summary_lines") or []
+        if section_summary:
+            summary_lines.append("Pod 关键区块:")
+            summary_lines.extend(section_summary[:80])
         if interesting:
             summary_lines.append("关键状态/事件:")
-            summary_lines.extend([ln for ln in interesting[:40] if ln not in diagnostic_lines])
+            section_seen = set(section_summary)
+            summary_lines.extend([
+                ln for ln in interesting[:40]
+                if ln not in diagnostic_lines and ln not in section_seen
+            ])
         return structured, "\n".join(summary_lines), "k8s_describe"
+
+    @classmethod
+    def _extract_describe_pod_sections(cls, raw: str) -> Dict[str, Any]:
+        """Extract stable high-value sections from `kubectl describe pod`.
+
+        Describe output is not YAML, but its Pod sections map closely to
+        metadata/spec/status/events. Keep only compact fields that help classify
+        root cause; raw output remains archived for full detail.
+        """
+        lifecycle: Dict[str, Any] = {}
+        scheduling: Dict[str, Any] = {}
+        signals: list[str] = []
+        summary_lines: list[str] = []
+
+        field_map = {
+            "Termination Grace Period": ("termination_grace_period", lifecycle),
+            "Controlled By": ("controlled_by", lifecycle),
+            "QoS Class": ("qos_class", lifecycle),
+            "Node-Selectors": ("node_selectors", scheduling),
+            "Tolerations": ("tolerations", scheduling),
+        }
+        for label, (key, target) in field_map.items():
+            match = re.search(rf"^{re.escape(label)}:\s*(.+)$", raw, re.MULTILINE)
+            if match:
+                value = match.group(1).strip()
+                target[key] = value
+                line = f"{label}:  {value}" if label == "Termination Grace Period" else f"{label}: {value}"
+                summary_lines.append(line)
+                signals.append(line)
+
+        containers, container_lines = cls._extract_describe_containers(raw)
+        volumes, volume_lines = cls._extract_describe_named_section(
+            raw,
+            "Volumes",
+            keep_pattern=r"^\s{2}\S.*:|^\s{4}(Type|ConfigMapName|SecretName|ClaimName|Name|Optional|Path|HostPath|Mounted By):",
+            max_lines=30,
+        )
+        events = cls._extract_describe_events(raw, max_lines=20)
+
+        if container_lines:
+            summary_lines.append("Containers:")
+            summary_lines.extend(container_lines)
+            signals.extend(container_lines)
+        if volume_lines:
+            summary_lines.append("Volumes:")
+            summary_lines.extend(volume_lines)
+            signals.extend(volume_lines)
+        if events:
+            summary_lines.append("Events:")
+            summary_lines.extend(events)
+            signals.extend(events)
+
+        return {
+            "lifecycle": lifecycle,
+            "containers": containers,
+            "scheduling": scheduling,
+            "volumes": volumes,
+            "events": events,
+            "signals": cls._dedupe_lines(signals),
+            "summary_lines": cls._dedupe_lines(summary_lines),
+        }
+
+    @classmethod
+    def _extract_describe_containers(cls, raw: str) -> tuple[list[Dict[str, Any]], list[str]]:
+        section = cls._section_lines(raw, "Containers")
+        containers: list[Dict[str, Any]] = []
+        summary: list[str] = []
+        current: Optional[Dict[str, Any]] = None
+        capture_multiline: Optional[str] = None
+        keep_keys = {
+            "Container ID",
+            "Image",
+            "Image ID",
+            "Command",
+            "Args",
+            "State",
+            "Last State",
+            "Reason",
+            "Exit Code",
+            "Started",
+            "Finished",
+            "Ready",
+            "Restart Count",
+            "Environment",
+            "Mounts",
+            "Liveness",
+            "Readiness",
+            "Startup",
+        }
+
+        for raw_line in section:
+            line = raw_line.rstrip()
+            container_match = re.match(r"^\s{2}([^:\s][^:]*):\s*$", line)
+            if container_match:
+                current = {"name": container_match.group(1).strip(), "lines": []}
+                containers.append(current)
+                summary.append(line)
+                capture_multiline = None
+                continue
+
+            key_match = re.match(r"^\s{4}([^:]+):\s*(.*)$", line)
+            if key_match:
+                key = key_match.group(1).strip()
+                value = key_match.group(2).strip()
+                capture_multiline = key if key in {"Command", "Args"} else None
+                if key not in keep_keys:
+                    continue
+                if current is not None:
+                    current["lines"].append(line)
+                    current[cls._snake_key(key)] = value
+                summary.append(line)
+                continue
+
+            if capture_multiline and re.match(r"^\s{6,}\S", line):
+                if current is not None:
+                    current["lines"].append(line)
+                    current[capture_multiline.lower()] = (
+                        (current.get(capture_multiline.lower()) or "") + " " + line.strip()
+                    ).strip()
+                summary.append(line)
+                continue
+
+            if re.search(r"\b(Reason|Exit Code|State|Ready|Restart Count):", line):
+                summary.append(line)
+
+        compact_containers = []
+        for item in containers:
+            compact = {k: v for k, v in item.items() if k != "lines"}
+            if item.get("lines"):
+                compact["signals"] = item["lines"][:40]
+            compact_containers.append(compact)
+        return compact_containers, cls._dedupe_lines(summary)[:60]
+
+    @classmethod
+    def _extract_describe_events(cls, raw: str, max_lines: int = 20) -> list[str]:
+        section = cls._section_lines(raw, "Events", stop_at_next_section=False)
+        if not section:
+            return []
+        selected = []
+        for line in section:
+            stripped = line.rstrip()
+            if not stripped:
+                continue
+            if re.search(
+                r"\b(Warning|Failed|BackOff|Killing|FailedMount|FailedScheduling|"
+                r"FailedCreatePodSandBox|Unhealthy|probe failed|OOMKilled|"
+                r"ImagePullBackOff|ErrImagePull|MountVolume|NotReady|Error)\b",
+                stripped,
+                re.IGNORECASE,
+            ):
+                selected.append(stripped)
+        if not selected:
+            selected = [line.rstrip() for line in section if line.strip()][-max_lines:]
+        return cls._dedupe_lines(selected)[-max_lines:]
+
+    @classmethod
+    def _extract_describe_named_section(
+        cls,
+        raw: str,
+        section_name: str,
+        keep_pattern: str,
+        max_lines: int,
+    ) -> tuple[list[Dict[str, Any]], list[str]]:
+        section = cls._section_lines(raw, section_name)
+        selected = []
+        current: Optional[Dict[str, Any]] = None
+        items: list[Dict[str, Any]] = []
+        for line in section:
+            if re.match(r"^\s{2}([^:\s][^:]*):\s*$", line):
+                current = {"name": line.strip().rstrip(":")}
+                items.append(current)
+            if re.search(keep_pattern, line):
+                selected.append(line.rstrip())
+                if current is not None:
+                    current.setdefault("signals", []).append(line.rstrip())
+        return items, cls._dedupe_lines(selected)[:max_lines]
+
+    @staticmethod
+    def _section_lines(raw: str, section_name: str, stop_at_next_section: bool = True) -> list[str]:
+        lines = (raw or "").splitlines()
+        start = None
+        for idx, line in enumerate(lines):
+            if re.match(rf"^{re.escape(section_name)}:\s*$", line):
+                start = idx + 1
+                break
+        if start is None:
+            return []
+        result = []
+        for line in lines[start:]:
+            if (
+                stop_at_next_section
+                and result
+                and re.match(r"^[A-Za-z][A-Za-z0-9 /()._-]*:\s*(?:\S.*)?$", line)
+            ):
+                break
+            result.append(line)
+        return result
+
+    @staticmethod
+    def _snake_key(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower()).strip("_")
 
     def _extract_table(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
         lines = [ln for ln in raw.splitlines() if ln.strip()]
@@ -472,6 +692,9 @@ class ObservationProcessor:
                 "name": container.get("name"),
                 "image": container.get("image"),
                 "imagePullPolicy": container.get("imagePullPolicy"),
+                "command": container.get("command") if isinstance(container.get("command"), list) else [],
+                "args": container.get("args") if isinstance(container.get("args"), list) else [],
+                "lifecycle": container.get("lifecycle") if isinstance(container.get("lifecycle"), dict) else {},
                 "resources": container.get("resources") or {},
             })
 
@@ -604,10 +827,20 @@ class ObservationProcessor:
             lines.append("affinity_present: True")
         if containers:
             lines.append("containers:")
-            lines.extend(
-                f"- {item.get('name')}: image={item.get('image')} imagePullPolicy={item.get('imagePullPolicy')}"
-                for item in containers
-            )
+            for item in containers:
+                lines.append(
+                    f"- {item.get('name')}: image={item.get('image')} imagePullPolicy={item.get('imagePullPolicy')}"
+                )
+                command = item.get("command") or []
+                args = item.get("args") or []
+                lifecycle = item.get("lifecycle") or {}
+                if command:
+                    lines.append("  command: " + " ".join(str(part) for part in command[:10]))
+                if args:
+                    args_text = " ".join(str(part) for part in args[:10])
+                    lines.append("  args: " + (args_text[:500] + ("..." if len(args_text) > 500 else "")))
+                if lifecycle:
+                    lines.append("  lifecycle: " + json.dumps(lifecycle, ensure_ascii=False)[:800])
         if conditions:
             lines.append("conditions:")
             for item in conditions[:10]:
@@ -673,7 +906,10 @@ class ObservationProcessor:
                 r"^kind:|^\s*name:|^\s*namespace:|^\s*image:|^\s*resources:|"
                 r"^\s*limits:|^\s*requests:|^\s*env:|^\s*envFrom:|"
                 r"^\s*volumes:|^\s*volumeMounts:|^\s*phase:|^\s*reason:|"
-                r"^\s*message:|^\s*containerStatuses:",
+                r"^\s*message:|^\s*containerStatuses:|^\s*deletionTimestamp:|"
+                r"^\s*deletionGracePeriodSeconds:|^\s*finalizers:|"
+                r"^\s*terminationGracePeriodSeconds:|^\s*lifecycle:|^\s*preStop:|"
+                r"^\s*command:|^\s*args:",
                 line,
             ):
                 keep.append(line.rstrip())
