@@ -324,6 +324,8 @@ EVIDENCE_COLLECTOR_PROMPT = """
 - Runbook 是分流 guide，不是全量 checklist。先用最高优先级工具读当前错误原文；一旦错误原文命中明确分支，只规划该分支的最小验证，不要把 runbook 的所有典型原因都展开。
 - VolumeMountFailed 必须先看 Pod Events 和 Pod spec 的 volume 类型；只有 Events 或 spec 指向 PVC/PV 时才查 PVC/PV/StorageClass。若 Events 已显示 `configmap/secret not found` 且来自 volume 引用，优先验证对应 ConfigMap/Secret，不要继续泛化查 PVC。
 - CrashLoop/OOM 必须优先 describe + previous logs；ImagePull 必须优先 describe events + image/imagePullSecrets；Pending 必须优先 FailedScheduling 原文；Terminating 必须优先 deletionTimestamp/finalizers；NotReady 必须优先 probe events + logs。
+- 如果 evidence_plan 的 command 包含 `kubectl get ... -o yaml`，或目的要求检查 `finalizers/deletionTimestamp/preStop/lifecycle/terminationGracePeriodSeconds/spec/status` 等 YAML 字段，必须优先使用 `kubectl_get_yaml` 或等价只读 YAML 命令；不要用普通 `kubectl_get_by_name` 表格输出替代 YAML 证据。
+- 如果 evidence_plan 的 `tool/tool_args` 与 `command/purpose/evidence_type` 存在冲突，优先满足诊断意图和 command 语义；`tool_args` 是建议参数，不是禁止你选择更正确工具的硬约束。
 - 先覆盖影响范围最大的异常组：从该组选择代表 Pod 做完整验证，同时结合 `abnormal_groups.entities` / `abnormal_pods` 覆盖同组其他对象的最小状态验证。
 - 非主异常组也必须最小验证：当前状态 + 一个最关键事件/配置/依赖信号，避免遗漏 Terminating、Pending 等并发异常。
 - `tool` 字段必须填写 Available tools 中真实存在的工具名。不要自行创造 `kubectl_logs` 这类不存在的工具；需要执行未封装的只读 kubectl 命令时使用 `run_bash_command`。
@@ -352,12 +354,14 @@ EVIDENCE_PLAN_PROTOCOL_DYNAMIC = """- 本轮使用普通工具 agent 采集真�
 EVIDENCE_PLAN_PROTOCOL_PREPLANNED = """- 采证计划已由 `EvidencePlanOutput` Pydantic schema 单独生成；执行阶段不要重写 evidence_plan。
 - 如果本轮进入工具执行，必须调用至少一个 critical 或 important 级真实工具。
 - LLM 必须自己决定并调用工具；计划不是证据。
+- 如果计划中的 tool/tool_args 与 command/purpose/evidence_type 冲突，优先满足 command/purpose 的诊断语义；例如 `kubectl get ... -o yaml` 应使用 `kubectl_get_yaml`，不要用表格型 `kubectl_get_by_name` 替代。
 - 后续工具调用必须尽量逐项完成 Pydantic plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
 - evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
 
 EVIDENCE_PLAN_PROTOCOL_EXISTING = """- 本轮已有 Pydantic evidence_plan，禁止重新输出或改写 evidence_plan。
 - 直接按既有 evidence_plan 调用至少一个 critical 或 important 级真实工具。
-- 如果计划项提供 tool_args，必须按 tool_args 调用 MCP 工具；不要从 command 文本重新猜 MCP 参数。
+- 如果计划项提供 tool_args，应优先复用其中的 namespace/name/kind 等目标参数；但当 tool/tool_args 与 command/purpose/evidence_type 冲突时，必须选择更符合诊断意图的真实工具。
+- 特别规则：command 含 `kubectl get ... -o yaml`，或 purpose/evidence_type 要求检查 `finalizers/deletionTimestamp/preStop/lifecycle/terminationGracePeriodSeconds/spec/status` 时，应使用 `kubectl_get_yaml` 或等价只读 YAML 命令，不要用 `kubectl_get_by_name` 表格结果替代。
 - LLM 必须自己决定并调用工具；计划不是证据。
 - 工具调用必须尽量逐项完成既有计划，最终消息不要新增未写入 plan 的“已采集计划项”。
 - evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""

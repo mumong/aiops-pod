@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rc-evicted-ephemeral-storage
+  namespace: aiops-e2e
+  labels:
+    app: rc-evicted-ephemeral-storage
+    rootcause-e2e: "true"
+    pod_abnormal_type: Evicted
+  annotations:
+    aiops.e2e/runbook: pod-evicted.md
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox:1.36
+      imagePullPolicy: Never
+      command: ["sh", "-c"]
+      args:
+        - |
+          mkdir -p /data
+          i=0
+          while true; do
+            dd if=/dev/zero of=/data/blob-$i bs=1M count=2
+            i=$((i + 1))
+            sleep 0.1
+          done
+      resources:
+        requests:
+          cpu: "10m"
+          memory: "16Mi"
+          ephemeral-storage: "4Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
+          ephemeral-storage: "8Mi"
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      emptyDir: {}

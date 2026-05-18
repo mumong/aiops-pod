@@ -1,0 +1,366 @@
+======================================================================
+🔄 K8s AIOps Copilot - 工作流诊断模式
+======================================================================
+
+📝 问题: 我的集群有什么问题
+
+----------------------------------------------------------------------
+🚀 开始诊断 [run_id: f64a42429806483c]
+
+📍 [问题定位] 执行中...
+   💭 [问题定位] 调用工具: kubectl_get_by_kind_in_cluster
+   💭 [问题定位] 工具结果: kubectl_get_by_kind_in_cluster (success)
+      📄 kubectl_get_by_kind_in_cluster 表格摘要: rows=49 abnormal=1 status_counts={'ImagePullBackOff': 1, 'Running': 46}
+NAMESPACE     NAME                                                READY   STATUS           
+   💭 [问题定位] 调用工具: fetch_runbook
+   💭 [问题定位] 工具结果: fetch_runbook (success)
+      📄 <runbook>
+# Pod ImagePullFailed / ImagePullBackOff
+
+> Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull
+
+## 场景识别
+
+| 信号 | 关键特征 |
+|------|----------
+   💭 [问题定位] 调用工具: kubectl_events
+   💭 [问题定位] 工具结果: kubectl_events (success)
+      📄 kubectl_events 摘要:
+关键诊断行:
+60s (x512 over 116m)   Normal   BackOff   Pod/rc-imagepull-missing-secret   Back-off pulling image "registry.invalid/aiops/private-rootcause:v0"
+   💭 [问题定位] 调用工具: kubectl_get_by_name
+   💭 [问题定位] 工具结果: kubectl_get_by_name (success)
+      📄 NAME                          READY   STATUS             RESTARTS   AGE    IP               NODE    NOMINATED NODE   READINESS GATES   LABELS
+rc-imagepull-missing-secret   0/1     ImagePullBackOff   0
+   💭 [问题定位] {
+  "layer": "L3",
+  "derived_layer": "L3",
+  "layers": [
+    "L3"
+  ],
+  "layer_name": "ImagePullFailed",
+  "confidence": "high",
+  "reasoning": "根据当前 Pod 状态和事件信息，Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态，并且事件中显示了 'Back-off pulling image'。这表明镜像拉取失败，具体是由于镜像地址 'registry.invalid/aiops/private-rootcause:v0' 无法访问或不存在。这种异常类型属于 L3 层次。",
+  "abnormal_pods": [
+    "rc-imagepull-missing-secret"
+  ],
+  "abnormal_groups": {
+    "ImagePullBackOff": 1
+  },
+  "pod_status_keyword": "ImagePullBackOff",
+  "pod_abnormal_type": "ImagePullFailed",
+  "status_category": "ImagePullFailed",
+  "key_entities": [
+    "Pod/rc-imagepull-missing-secret",
+    "Image/registry.invalid/aiops/private-rootcause:v0"
+  ],
+  "possible_scenarios": [
+    "镜像地址错误或不存在",
+    "私有仓库认证失败",
+    "镜像仓库网络不可达"
+  ]
+}
+   ⏳ [问题定位] 仍在处理，等待工具或模型返回...
+   ✅ [问题定位] 完成 (53.1s)
+   📤 → 下游数据: layer=Layer.L3, layers=L3
+   scenarios=[{'scenario': '镜像地址错误或不存在', 'probability': 'high', 'reason': "Events 显示 'Back-off pulling image'，表明镜像地址无效。"}, {'scenario': '私有仓库认证失败', 'probability': 'high', 'reason': '镜像地址 registry.invalid 可能需要认证，但未找到相关 imagePullSecret。'}, {'scenario': '镜像仓库网络不可达', 'probability': 'high', 'reason': 'Events 显示镜像拉取失败，可能是由于网络问题导致镜像仓库无法访问。'}]
+   entities=[{"type": "Pod", "name": "rc-imagepull-missing-secret", "namespace": "aiops-e2e"}, {"type": "Image", "name": "registry.invalid/aiops/private-rootcause:v0", "namespace": ""}]
+   reasoning=根据当前 Pod 状态和事件信息，Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态，并且事件中显示了 'Back-off pulling image'。这表明镜像拉取失败，具体是由于镜像地址 'registry.invalid/aiops/private-rootcause:v0' 无法访问或不存在。这种异常类型属于 L3 层次。
+   layer_analysis={"layer": "L3", "derived_layer": "L3", "layers": ["L3"], "layer_name": "ImagePullFailed", "confidence": 0.5, "reasoning": "根据当前 Pod 状态和事件信息，Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态，并且事件中显示了 'Back-off pulling image'。这表明镜像拉取失败，具体是由于镜像地址 'registry.invalid/aiops/private-rootcause:v0' 无法访问或不存在。这种异常类型属于 L3 层次。", "abnormal_pods": [{"name": "rc-imagepull-missing-secret", "namespace": "aiops-e2e", "status": "ImagePullBackOff"}], "pod_status_keyword": "ImagePullBackOff", "pod_abnormal_type": "ImagePullFailed", "status_category": "image_registry", "key_entities": [{"type": "Pod", "name": "rc-imagepull-missing-secret", "namespace": "aiops-e2e"}, {"type": "Image", "name": "registry.invalid/aiops/private-rootcause:v0", "namespace": ""}], "possible_scenarios": [{"scenario": "镜像地址错误或不存在", "probability": "high", "reason": "Events 显示 'Back-off pulling image'，表明镜像地址无效。"}, {"scenario": "私有仓库认证失败", "probability": "high", "reason": "镜像地址 registry.invalid 可能需要认证，但未找到相关 imagePullSecret。"}, {"scenario": "镜像仓库网络不可达", "probability": "high", "reason": "Events 显示镜像拉取失败，可能是由于网络问题导致镜像仓库无法访问。"}], "abnormal_groups": [{"group_id": "g1", "status_keywords": ["ImagePullBackOff"], "pod_abnormal_type": "ImagePullFailed", "compatible_layers": ["L3"], "entities": [{"kind": "Pod", "namespace": "aiops-e2e", "name": "rc-imagepull-missing-secret"}], "evidence_plan": [], "possible_scenarios": [{"scenario": "镜像地址或 tag 不存在", "probability": "中", "reason": "需通过 Events/镜像地址验证"}, {"scenario": "imagePullSecret 缺失或认证失败", "probability": "中", "reason": "需验证 Pod spec 与 Secret"}, {"scenario": "节点到镜像仓库网络不可达", "probability": "中", "reason": "需验证 registry 连通性、DNS 或 TLS"}]}], "issue_groups": [{"group_id": "g1", "status_keywords": ["ImagePullBackOff"], "pod_abnormal_type": "ImagePullFailed", "compatible_layers": ["L3"], "entities": [{"kind": "Pod", "namespace": "aiops-e2e", "name": "rc-imagepull-missing-secret"}], "evidence_plan": [], "possible_scenarios": [{"scenario": "镜像地址或 tag 不存在", "probability": "中", "reason": "需通过 Events/镜像地址验证"}, {"scenario": "imagePullSecret 缺失或认证失败", "probability": "中", "reason": "需验证 Pod spec 与 Secret"}, {"scenario": "节点到镜像仓库网络不可达", "probability": "中", "reason": "需验证 registry 连通性、DNS 或 TLS"}]}], "current_abnormal_summary": {"source": "kubectl_get_by_kind_in_cluster", "status_counts": {"ImagePullBackOff": 1}, "total_abnormal": 1, "selected_rows": ["aiops-e2e     rc-imagepull-missing-secret                         0/1     ImagePullBackOff   0             116m   172.16.166.166   node1    <none>           <none>            app=rc-imagepull-missing-secret,pod_abnormal_type=ImagePullFailed,rootcause-e2e=true"], "raw_ref": "/tmp/aiops/reports/context_archives/f64a42429806483c/tools/001-layer-kubectl_get_by_kind_in_cluster.raw.txt", "summary_ref": "/tmp/aiops/reports/context_archives/f64a42429806483c/tools/001-layer-kubectl_get_by_kind_in_cluster.summary.txt", "structured_ref": "/tmp/aiops/reports/context_archives/f64a42429806483c/tools/001-layer-kubectl_get_by_kind_in_cluster.structured.json"}}
+
+   ┌──────────────────────────────────────────┐
+   │ 📊 问题定位结果                              │
+   └──────────────────────────────────────────┘
+
+   层级: Layer.L3
+   置信度: 50%
+
+📍 [证据链采集] 执行中...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   💭 [证据链采集] 调用工具: kubectl_describe
+   💭 [证据链采集] 工具结果: kubectl_describe (success)
+      📄 kubectl_describe 摘要:
+name: rc-imagepull-missing-secret
+namespace: aiops-e2e
+node: node1/10.2.0.49
+status: Pending
+关键诊断行:
+  Normal  BackOff  3m39s (x512 over 118m)  kubelet  Back-off pulling image "reg
+   💭 [证据链采集] 调用工具: kubectl_events
+   ✅ [证据链采集] 完成 (1m 56.8s)
+   📤 → 下游数据: evidence_items=5/7
+   evidence_analysis={"evidence_plan":[{"id":"e1","description":"验证 Pod rc-imagepull-missing-secret 的详细状态，包括其镜像配置和 PullBackOff 信息。","level":"critical","tool":"kubectl_describe","command":"kubectl describe pod rc-imagepull-missing-secret -n aiops-e2e","tool_args":{"kind":"Pod","name":"rc-imagepull-missing-secret","namespace":"aiops-e2e"},"purpose":"确认镜像地址、imagePullSecrets 配置和 BackOff 事件细节。","evidence_type":"status_configuration","target_scope":"aiops-e2e/rc-imagepull-missing-secret","acceptable_tools":["kubectl_describe","kubectl_events","kubectl_get_by_name"],"counts_for_completeness":true},{"id":"e2","description":"检查 Pod rc-imagepull-missing-secret 的 Events，确认是否包含镜像拉取失败的详细原因，例如镜像不存在、认证失败或网络问题。","level":"critical","tool":"kubectl_events","command":"kubectl get events -n aiops-e2e --field-selector=involvedObject.name=rc-imagepull-missing-secret","tool_args":{"kind":"Event","namespace":"aiops-e2e","field_selector":"involvedObject.name=rc-imagepull-missing-secret"},"purpose":"确认镜像拉取失败的事件原因，例如 connection refused、manifest unknown、unauthorized 等。","evidence_type":"event_analysis","target_scope":"aiops-e2e/rc-imagepull-missing-secret","acceptable_tools":["kubectl_events","kubectl_describe"],"counts_for_completeness":true},{"id":"e3","description":"检查 Pod rc-imagepull-missing-secret 的镜像 registry.invalid/aiops/private-rootcause:v0 是否存在，以及是否配置了正确的 imagePullSecrets。","level":"important","tool":"kubectl_get_by_name","command":"kubectl get pod rc-imagepull-missing-secret -n aiops-e2e -o jsonpath='{.spec.containers[*].image}'","tool_args":{"kind":"Pod","name":"rc-imagepull-missing-secret","namespace":"aiops-e2e","output_format":"jsonpath='{.spec.containers[*].image}'"},"purpose":"确认镜像地址是否正确，以及是否配置了 imagePullSecrets。","evidence_type":"configuration_check","target_scope":"aiops-e2e/rc-imagepull-missing-secret","acceptable_tools":["kubectl_get_by_name","kubectl_get_yaml"],"counts_for_completeness":true},{"id":"e4","description":"检查是否存在与镜像 registry.invalid/aiops/private-rootcause:v0 关联的 imagePullSecret，并确认其内容是否正确。","level":"important","tool":"kubectl_get_by_name","command":"kubectl get secret -n aiops-e2e","tool_args":{"kind":"Secret","namespace":"aiops-e2e"},"purpose":"确认是否存在与镜像拉取相关的 Secret，并检查其是否配置正确。","evidence_type":"dependency_check","target_scope":"aiops-e2e","acceptable_tools":["kubectl_get_by_name","kubectl_get_by_kind_in_namespace"],"counts_for_completeness":true}],"tool_results":[],"tool_data":[{"tool":"kubectl_describe","data":"kubectl_describe 摘要:\nname: rc-imagepull-missing-secret\nnamespace: aiops-e2e\nnode: node1/10.2.0.49\nstatus: Pending\n关键诊断行:\n  Normal  BackOff  3m39s (x512 over 118m)  kubelet  Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\"\n      Reason:       ImagePullBackOff\n                  cni.projectcalico.org/containerID: 15f21d5a2bf23a2e830e964c48d8c66a8fd40e50e94b550106a5ce8726d9507f\n                  cni.projectcalico.org/podIP: 172.16.166.166/32\n                  cni.projectcalico.org/podIPs: 172.16.166.166/32\n                  k8s.v1.cni.cncf.io/network-status:\n                  k8s.v1.cni.cncf.io/networks-status:\n关键状态/事件:\n                  pod_abnormal_type=ImagePullFailed\n    State:          Waiting","duration_s":0,"semantic_success":true,"raw_ref":"/tmp/aiops/reports/context_archives/f64a42429806483c/tools/001-evidence-kubectl_describe.raw.txt","structured_ref":"/tmp/aiops/reports/context_archives/f64a42429806483c/tools/001-evidence-kubectl_describe.structured.json","summary_ref":"/tmp/aiops/reports/context_archives/f64a42429806483c/tools/001-evidence-kubectl_describe.summary.txt"}],"llm_analysis":"Agent 执行异常: Input validation error: 'resource_type' is a required property","collection_summary":"计划 4 项，实际采集 2 项，未采集 2 项，完整度 50%；其中真实环境证据 5/7 项，完整度 71%；实际执行工具 4 个，匹配计划 2 个，未规划证据 2 个","plan_total":4,"plan_collected":2,"plan_completeness":0.5,"environment_evidence_total":7,"environment_evidence_collected":5,"environment_evidence_completeness":0.7142857142857143,"executed_tool_count":4,"matched_tool_count":2,"unplanned_tool_count":2,"evidence_inventory":[{"id":"e1","description":"验证 Pod rc-imagepull-missing-secret 的详细状态，包括其镜像配置和 PullBackOff 信息。","level":"critical","tool":"kubectl_describe","command":"kubectl describe pod rc-imagepull-missing-secret -n aiops-e2e","purpose":"确认镜像地址、imagePullSecrets 配置和 BackOff 事件细节。","collected":true,"source":"thinking_match","outcome":"positive"},{"id":"e2","description":"检查 Pod rc-imagepull-missing-secret 的 Events，确认是否包含镜像拉取失败的详细原因，例如镜像不存在、认证失败或网络问题。","level":"critical","tool":"kubectl_events","command":"kubectl get events -n aiops-e2e --field-selector=involvedObject.name=rc-imagepull-missing-secret","purpose":"确认镜像拉取失败的事件原因，例如 connection refused、manifest unknown、unauthorized 等。","collected":false,"source":"planned","outcome":"unknown"},{"id":"e3","description":"检查 Pod rc-imagepull-missing-secret 的镜像 registry.invalid/aiops/private-rootcause:v0 是否存在，以及是否配置了正确的 imagePullSecrets。","level":"important","tool":"kubectl_get_by_name","command":"kubectl get pod rc-imagepull-missing-secret -n aiops-e2e -o jsonpath='{.spec.containers[*].image}'","purpose":"确认镜像地址是否正确，以及是否配置了 imagePullSecrets。","collected":true,"source":"layer_verified","outcome":"positive"},{"id":"e4","description":"检查是否存在与镜像 registry.invalid/aiops/private-rootcause:v0 关联的 imagePullSecret，并确认其内容是否正确。","level":"important","tool":"kubectl_get_by_name","command":"kubectl get secret -n aiops-e2e","purpose":"确认是否存在与镜像拉取相关的 Secret，并检查其是否配置正确。","collected":false,"source":"planned","outcome":"unknown"},{"id":"layer_1","description":"上游已验证工具结果: kubectl_get_by_kind_in_cluster","level":"important","tool":"","command":"","purpose":"","collected":true,"source":"layer_verified","outcome":"negative"},{"id":"layer_2","description":"上游已验证工具结果: kubectl_events","level":"important","tool":"","command":"","purpose":"","collected":true,"source":"layer_verified","outcome":"negative"},{"id":"layer_3","description":"上游已验证工具结果: kubectl_get_by_name","level":"important","tool":"","command":"","purpose":"","collected":true,"source":"layer_verified","outcome":"negative"}],"missing_reasons":["e2(检查 Pod rc-imagepull-missing-secret 的 Events，确认是否包含镜像拉取失败的详细原因，例如镜像不存在、认证失败或网络问题。): 已规划但工具执行失败或无匹配结果","e4(检查是否存在与镜像 registry.invalid/aiops/private-rootcause:v0 关联的 imagePullSecret，并确认其内容是否正确。): 已规划但工具执行失败或无匹配结果"],"early_stop":{"triggered":false,"reason":"","required_levels":["critical","important"]}}
+
+   ┌──────────────────────────────────────────┐
+   │ 🔍 证据采集结果                              │
+   └──────────────────────────────────────────┘
+
+   证据: 2/4 项, 完整度: 71%
+
+   📋 证据采集计划
+   | ID | 级别 | 状态 | 工具 | 采集目标 | 命令 |
+   |----|------|------|------|----------|------|
+   | e1 | critical | ✅ | kubectl_describe | 验证 Pod rc-imagepull-missing-secret 的详细状态，包括其镜... | `kubectl describe pod rc-imagepull-missing-secret -n aiops-e2e` |
+   | e2 | critical | ❌ | kubectl_events | 检查 Pod rc-imagepull-missing-secret 的 Events，确... | `kubectl get events -n aiops-e2e --field-selector=involvedObject.name=rc-image...` |
+   | e3 | important | ✅ | kubectl_get_by_name | 检查 Pod rc-imagepull-missing-secret 的镜像 regist... | `kubectl get pod rc-imagepull-missing-secret -n aiops-e2e -o jsonpath='{.spec....` |
+   | e4 | important | ❌ | kubectl_get_by_name | 检查是否存在与镜像 registry.invalid/aiops/private-root... | `kubectl get secret -n aiops-e2e` |
+
+   ⚠️ 未采集原因:
+   - e2(检查 Pod rc-imagepull-missing-secret 的 Events，确认是否包含镜像拉取失败的详细原因，例如镜像不存在、认证失败或网络问题。): 已规划但工具执行失败或无匹配结果
+   - e4(检查是否存在与镜像 registry.invalid/aiops/private-rootcause:v0 关联的 imagePullSecret，并确认其内容是否正确。): 已规划但工具执行失败或无匹配结果
+
+📍 [根因分析] 执行中...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ⏳ [证据链采集] 仍在处理，等待工具或模型返回...
+   ✅ [根因分析] 完成 (1m 25.2s)
+   📤 → 下游数据: root_cause=镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，导致 Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态。
+   confidence=80%
+   causal_chain={"root_cause": "镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，导致镜像拉取失败。", "intermediate_causes": [{"cause": "镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在。", "effect": "镜像拉取失败，导致 Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态。"}], "direct_causes": [{"cause": "镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在。", "effect": "Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态。"}]}
+   rca_analysis={"phenomenon": "", "evidence_inventory": [{"id": "e1", "description": "验证 Pod rc-imagepull-missing-secret 的详细状态，包括其镜像配置和 PullBackOff 信息。", "level": "critical", "value": "kubectl_describe 摘要:\nname: rc-imagepull-missing-secret\nnamespace: aiops-e2e\nnode: node1/10.2.0.49\nstatus: Pending\n关键诊断行:\n  Normal  BackOff  3m39s (x512 over 118m)  kubelet  Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\"\n      Reason:       ImagePullBackOff\n                  cni.projectcalico.org/containerID: 15f21d5a2bf23a2e830e964c48d8c66a8fd40e50e94b550106a5ce8726d9507f\n                  cni.projectcalico.org/podIP: 172.16.166.166/32\n                  cni.projectcalico.or"}, {"id": "e3", "description": "检查 Pod rc-imagepull-missing-secret 的镜像 registry.invalid/aiops/private-rootcause:v0 是否存在，以及是否配置了正确的 imagePullSecrets。", "level": "important", "value": "NAME                          READY   STATUS             RESTARTS   AGE    IP               NODE    NOMINATED NODE   READINESS GATES   LABELS\nrc-imagepull-missing-secret   0/1     ImagePullBackOff   0          116m   172.16.166.166   node1   <none>           <none>            app=rc-imagepull-missing-secret,pod_abnormal_type=ImagePullFailed,rootcause-e2e=true"}, {"id": "layer_1", "description": "上游已验证工具结果: kubectl_get_by_kind_in_cluster", "level": "important", "value": "kubectl_get_by_kind_in_cluster 表格摘要: rows=49 abnormal=1 status_counts={'ImagePullBackOff': 1, 'Running': 46}\nNAMESPACE     NAME                                                READY   STATUS             RESTARTS      AGE    IP               NODE     NOMINATED NODE   READINESS GATES   LABELS\n# 异常行\naiops-e2e     rc-imagepull-missing-secret                         0/1     ImagePullBackOff   0             116m   172.16.166.166   node1    <none>           <none>            app=rc-imagepull-missing-sec"}, {"id": "layer_2", "description": "上游已验证工具结果: kubectl_events", "level": "important", "value": "kubectl_events 摘要:\n关键诊断行:\n60s (x512 over 116m)   Normal   BackOff   Pod/rc-imagepull-missing-secret   Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\""}, {"id": "layer_3", "description": "上游已验证工具结果: kubectl_get_by_name", "level": "important", "value": "NAME                          READY   STATUS             RESTARTS   AGE    IP               NODE    NOMINATED NODE   READINESS GATES   LABELS\nrc-imagepull-missing-secret   0/1     ImagePullBackOff   0          116m   172.16.166.166   node1   <none>           <none>            app=rc-imagepull-missing-secret,pod_abnormal_type=ImagePullFailed,rootcause-e2e=true"}], "evidence_analysis": [{"id": "e1", "analysis": "Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态，表明镜像拉取失败。关键事件显示 'Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\"'，这表明镜像拉取失败可能由镜像地址错误、认证失败或网络问题引起。", "raw_data": "Normal  BackOff  3m39s (x512 over 118m)  kubelet  Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\"\n      Reason:       ImagePullBackOff"}, {"id": "e3", "analysis": "Pod rc-imagepull-missing-secret 的镜像 registry.invalid/aiops/private-rootcause:v0 无法拉取，并且没有配置正确的 imagePullSecrets，导致镜像拉取失败。", "raw_data": "0/1     ImagePullBackOff   0          116m   172.16.166.166   node1   <none>           <none>            app=rc-imagepull-missing-secret,pod_abnormal_type=ImagePullFailed,rootcause-e2e=true"}, {"id": "layer_2", "analysis": "Events 显示 'Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\"'，表明镜像拉取失败，可能是由于镜像地址错误、认证失败或网络问题引起。", "raw_data": "60s (x512 over 116m)   Normal   BackOff   Pod/rc-imagepull-missing-secret   Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\""}], "causal_chain": {"root_cause": "镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，导致镜像拉取失败。", "intermediate_causes": [{"cause": "镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在。", "effect": "镜像拉取失败，导致 Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态。"}], "direct_causes": [{"cause": "镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在。", "effect": "Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态。"}]}, "root_cause": "镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，导致 Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态。", "root_cause_summary": "镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，导致 Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态。", "confidence": 0.8, "confidence_reason": "Events 显示 'Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\"'，表明镜像拉取失败，可能是由于镜像地址错误、认证失败或网络问题引起。", "primary_runbooks": ["pod-imagepull-failed.md"], "alternative_causes": [], "limitations": "缺少 imagePullSecret 验证和镜像仓库网络连通性验证的证据。", "llm_raw_analysis": "基于提供的证据，Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态，表明镜像拉取失败。关键事件显示 'Back-off pulling image \"registry.invalid/aiops/private-rootcause:v0\"'，这表明镜像拉取失败可能由镜像地址错误、认证失败或网络问题引起。进一步的证据显示，镜像 registry.invalid/aiops/private-rootcause:v0 无法拉取，并且没有配置正确的 imagePullSecrets，导致镜像拉取失败。因此，根因可能是镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，导致镜像拉取失败。"}
+
+   ┌──────────────────────────────────────────┐
+   │ 🎯 根因分析结果                              │
+   └──────────────────────────────────────────┘
+
+   根因: 镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，导致 Pod rc-imagepull-missing-secret 处于 ImagePullBackOff 状态。
+   置信度: 80%
+   🔗 因果链:
+     根本原因: 镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，导致镜像拉取失败。
+
+
+📍 [汇总总结] 执行中...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...
+   ✅ [汇总总结] 完成 (2m 31.6s)
+
+   ┌──────────────────────────────────────────┐
+   │ 📋 汇总总结结果                              │
+   └──────────────────────────────────────────┘
+
+   报告长度: 5294 字符
+
+----------------------------------------------------------------------
+📊 诊断完成! 总耗时: 6m 46.7s
+----------------------------------------------------------------------
+
+======================================================================
+🎯 诊断报告
+======================================================================
+
+## 📋 节点四：汇总总结
+----------------------------------------------------------------------
+# 📊 诊断概览
+
+| 项目 | 内容 |
+|------|------|
+| **Pod异常状态** | ImagePullBackOff |
+| **兼容归因层** | L3 |
+| **问题分类** | ImagePullFailed |
+| **置信度** | 高 (80%) |
+| **证据完整度** | 2/4 (50%) |
+
+---
+
+## 🔍 现象描述
+
+**用户报告**：
+> 我的集群有什么问题
+
+**关键实体**：
+| 类型 | 值 |
+|------|-----|
+| Pod | rc-imagepull-missing-secret |
+| Namespace | aiops-e2e |
+| Node | node1 |
+| 错误信息 | Back-off pulling image "registry.invalid/aiops/private-rootcause:v0" |
+
+---
+
+## 🕵️ 证据链
+
+### 已采集证据
+
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 1 | Pod 状态 | `kubectl get pod` | `STATUS: ImagePullBackOff` | Pod 因镜像拉取失败而处于挂起状态 |
+| 2 | Events 信息 | `kubectl events` | `60s (x512 over 116m) Normal BackOff Pod/rc-imagepull-missing-secret Back-off pulling image "registry.invalid/aiops/private-rootcause:v0"` | 镜像拉取失败，尝试次数过多 |
+| 3 | Pod 配置 | `kubectl describe pod` | `镜像: registry.invalid/aiops/private-rootcause:v0` | 镜像地址可能无效或需要认证 |
+| 4 | 工具采集摘要 | `kubectl_get_by_kind_in_cluster` | `status_counts={'ImagePullBackOff': 1, 'Running': 46}` | 仅 1 个 Pod 出现镜像拉取问题 |
+| 5 | Runbook 匹配 | `fetch_runbook` | `典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError` | 与 ImagePullFailed 场景一致 |
+
+### 证据关联分析
+
+- **证据 #1 + #2 印证**：Pod 状态为 `ImagePullBackOff`，Events 显示 `Back-off pulling image`，表明镜像拉取失败。
+- **证据链**：镜像地址无效或认证失败 → 镜像拉取失败 → Pod 持续尝试拉取 → 进入 `ImagePullBackOff` 状态。
+
+### 缺失证据（如有）
+
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| imagePullSecret 是否存在 | critical | 无法确认是否因认证失败导致镜像拉取失败 |
+| 节点到镜像仓库的连通性 | important | 无法确认是否为网络问题导致拉取失败 |
+
+---
+
+## 🎯 根因分析
+
+### 因果链
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 根本原因                                                        │
+│ 镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，或需要认证但未配置 imagePullSecret │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 传导机制                                                        │
+│ 镜像地址无效或认证失败 → 镜像拉取失败 → 进入 ImagePullBackOff 状态 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 直接原因                                                        │
+│ Pod rc-imagepull-missing-secret 因镜像拉取失败而进入 ImagePullBackOff 状态 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 用户可见现象                                                    │
+│ Pod rc-imagepull-missing-secret 状态为 ImagePullBackOff，Events 显示 Back-off pulling image │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 根因结论
+
+**结论**：根据证据 #1 (Pod 状态为 ImagePullBackOff) 和证据 #2 (Events 显示 Back-off pulling image)，问题的根本原因是**镜像地址 registry.invalid/aiops/private-rootcause:v0 无法访问或不存在，或需要认证但未配置 imagePullSecret**。
+
+**置信度**：高 (80%)
+- ✅ Pod 状态为 ImagePullBackOff
+- ✅ Events 显示镜像拉取失败
+- ⚠️ 缺少 imagePullSecret 和网络连通性证据，无法确认具体是镜像地址错误、认证失败还是网络问题
+
+---
+
+## 🛠️ 修复建议
+
+### 立即执行（按优先级排序）
+
+**1. [优先] 检查镜像地址是否正确**
+```bash
+kubectl describe pod rc-imagepull-missing-secret -n aiops-e2e | grep -i 'image'
+```
+*依据*：确认镜像地址是否拼写错误或 tag 是否存在
+
+**2. [优先] 检查是否存在 imagePullSecret**
+```bash
+kubectl describe pod rc-imagepull-missing-secret -n aiops-e2e | grep -i 'imagepullsecrets'
+```
+*依据*：确认是否配置了正确的 imagePullSecret
+
+**3. [优先] 手动测试镜像是否可拉取**
+```bash
+docker pull registry.invalid/aiops/private-rootcause:v0
+```
+*依据*：确认镜像是否可访问或是否存在
+
+**4. [可选] 创建或更新 imagePullSecret**
+```bash
+kubectl create secret docker-registry my-secret \
+  --docker-server=registry.invalid \
+  --docker-username=<username> \
+  --docker-password=<password> \
+  --docker-email=<email> \
+  -n aiops-e2e
+```
+*依据*：如果镜像仓库需要认证，则需配置 imagePullSecret
+
+**5. [可选] 更新 Pod 配置，添加 imagePullSecret**
+```bash
+kubectl set imagepullsecrets deployment/<deployment-name> my-secret -n aiops-e2e
+```
+*依据*：确保 Pod 使用正确的 imagePullSecret
+
+### 后续优化
+
+1. **镜像仓库健康检查**：定期验证镜像仓库是否可访问
+2. **镜像拉取策略**：使用 `IfNotPresent` 避免不必要的拉取
+3. **镜像标签管理**：避免使用 `latest` 等不稳定标签
+4. **网络监控**：监控节点到镜像仓库的连通性
+
+---
+
+## 📋 验证步骤
+
+| 步骤 | 命令 | 预期结果 |
+|------|------|----------|
+| 1. 确认 Pod 状态 | `kubectl get pod rc-imagepull-missing-secret -n aiops-e2e` | STATUS: Running |
+| 2. 检查 Events | `kubectl describe pod rc-imagepull-missing-secret -n aiops-e2e` | 无 Back-off pulling image 事件 |
+| 3. 检查 imagePullSecret 是否存在 | `kubectl get secret -n aiops-e2e` | 显示 my-secret |
+| 4. 检查镜像是否可拉取 | `docker pull registry.invalid/aiops/private-rootcause:v0` | 成功拉取镜像 |
+
+---
+
+## ⚠️ 注意事项
+
+- 如果镜像仓库是私有的，请确保所有相关 Pod 都配置了正确的 imagePullSecret
+- 如果镜像仓库不可访问，可能需要检查 DNS、防火墙或 TLS 证书
+- 如果镜像不存在，请联系镜像仓库管理员或更新镜像地址
+
+--- 
+
+## 📌 附录
+
+### 证据来源说明
+
+- **证据 #1**：`kubectl get pod` 显示 Pod 状态为 `ImagePullBackOff`
+- **证据 #2**：`kubectl events` 显示 `Back-off pulling image` 事件
+- **证据 #3**：`kubectl describe pod` 显示镜像地址为 `registry.invalid/aiops/private-rootcause:v0`
+- **证据 #4**：`kubectl_get_by_kind_in_cluster` 摘要显示 1 个 Pod 出现镜像拉取失败
+- **证据 #5**：Runbook 明确指出 `ImagePullBackOff` 是镜像拉取失败的典型状态
+
+---
+
+## 📎 参考资料
+
+- [Kubernetes Pod 镜像拉取失败诊断指南](https://kubernetes.io/docs/tasks/debug/debug-application/debug-pod-restart-failure-runaway-container/)
+- [Kubernetes imagePullSecret 使用文档](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/)
+
+---
+
+## 📊 性能统计
+
+├─ 总耗时: 6.8m
+├─ 问题定位: 53.1s (13%) ✅
+├─ 证据链采集: 116.7s (29%) ✅
+├─ 根因分析: 85.2s (21%) ✅
+├─ 汇总总结: 151.6s (37%) ✅
+├─ LLM 调用: 4 次
+└─ 工具调用: 6 次
+```
+
+📋 诊断追踪
+
+- **核心 Runbook**: pod-imagepull-failed
+- **参考 Runbook**: pod-imagepull-failed
+- **工具调用**: 6 次
+- **LLM 调用**: 4 次
+
+
+======================================================================
+✅ 诊断完成!
+======================================================================

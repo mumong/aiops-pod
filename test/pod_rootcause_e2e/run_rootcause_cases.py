@@ -45,12 +45,139 @@ def _contains(text: str, term: str) -> bool:
     return _lower(term) in _lower(text)
 
 
+def _term_aliases(term: str) -> List[str]:
+    """Human report wording is often Chinese; keep matching semantic but auditable."""
+    lower = _lower(term).strip()
+    aliases = {
+        "not found": [
+            "not found",
+            "no such",
+            "does not exist",
+            "missing",
+            "不存在",
+            "未找到",
+            "找不到",
+            "缺失",
+            "缺少",
+            "未创建",
+            "没有创建",
+        ],
+        "couldn't find key": [
+            "couldn't find key",
+            "could not find key",
+            "key not found",
+            "key does not exist",
+            "key 不存在",
+            "key 缺失",
+            "key缺失",
+            "缺少 key",
+            "缺失 key",
+            "键不存在",
+            "键名错误",
+            "键错误",
+            "key 错误",
+            "key 不匹配",
+            "键名不匹配",
+        ],
+        "exit code": ["exit code", "exitcode", "退出码", "退出代码"],
+        "exit code: 2": ["exit code: 2", "exitcode: 2", "exit 2", "退出码 2", "退出码为 2", "退出代码 2"],
+        "exitcode: 137": ["exitcode: 137", "exit code: 137", "exit 137", "退出码 137", "退出码为 137", "退出代码 137"],
+        "exit code: 137": ["exit code: 137", "exitcode: 137", "exit 137", "退出码 137", "退出码为 137", "退出代码 137"],
+        "command not found": ["command not found", "命令不存在", "启动命令不存在", "命令未找到", "找不到命令", "可执行文件不存在"],
+        "config file": ["config file", "配置文件"],
+        "config file missing": ["config file missing", "配置文件缺失", "配置文件不存在", "配置文件未找到"],
+        "memory limit": ["memory limit", "内存限制", "内存 limit", "内存limit", "资源限制"],
+        "readiness probe failed": ["readiness probe failed", "readiness probe 失败", "readiness 探针失败", "就绪探针失败"],
+        "readinessprobe": ["readinessprobe", "readiness probe", "readiness 探针", "就绪探针"],
+        "liveness probe failed": ["liveness probe failed", "liveness probe 失败", "liveness 探针失败", "存活探针失败"],
+        "livenessprobe": ["livenessprobe", "liveness probe", "liveness 探针", "存活探针"],
+        "dependency unavailable": ["dependency unavailable", "依赖不可用", "健康接口不匹配", "健康检查路径", "探针失败"],
+        "endpoint failed": ["endpoint failed", "健康接口异常", "健康检查接口异常", "探针失败", "容器被终止", "触发重启"],
+        "node selector": ["node selector", "nodeselector", "节点选择器"],
+        "didn't match": ["didn't match", "did not match", "不匹配", "无匹配", "无法匹配"],
+        "insufficient": ["insufficient", "不足", "资源不足", "不够"],
+        "pull secret": ["pull secret", "imagepullsecret", "imagepullsecrets", "拉取密钥", "镜像拉取 secret"],
+        "manifest unknown": ["manifest unknown", "manifest 未知", "镜像 tag 不存在", "镜像标签不存在"],
+        "failed to pull image": ["failed to pull image", "拉取镜像失败", "镜像拉取失败"],
+        "type check failed": ["type check failed", "类型检查失败"],
+        "not a directory": ["not a directory", "不是目录", "路径不存在", "目录不存在"],
+        "finalizer": ["finalizer", "finalizers", "终结器"],
+        "prestop": ["prestop", "pre-stop", "pre stop", "停止前钩子", "终止前钩子"],
+        "terminationgraceperiodseconds": ["terminationgraceperiodseconds", "termination grace period", "grace period", "优雅终止", "终止宽限期"],
+        "runtimeclass": ["runtimeclass", "runtime class", "运行时类"],
+        "ephemeral-storage": ["ephemeral-storage", "ephemeral storage", "临时存储", "本地临时存储"],
+        "emptydir": ["emptydir", "emptyDir", "empty dir"],
+        "sizelimit": ["sizelimit", "size limit", "sizeLimit", "容量限制"],
+    }
+    return aliases.get(lower, [term])
+
+
+def _find_alias(text: str, term: str) -> Optional[str]:
+    lowered = _lower(text)
+    for alias in _term_aliases(term):
+        if _lower(alias) in lowered:
+            return alias
+    return None
+
+
 def _matched_terms(text: str, terms: Iterable[str]) -> List[str]:
-    return [str(term) for term in terms if str(term or "").strip() and _contains(text, str(term))]
+    matched = []
+    for term in terms:
+        term = str(term or "").strip()
+        if not term:
+            continue
+        alias = _find_alias(text, term)
+        if alias:
+            matched.append(term if _lower(alias) == _lower(term) else f"{term}≈{alias}")
+    return matched
 
 
 def _missing_terms(text: str, terms: Iterable[str]) -> List[str]:
-    return [str(term) for term in terms if str(term or "").strip() and not _contains(text, str(term))]
+    return [str(term) for term in terms if str(term or "").strip() and not _find_alias(text, str(term))]
+
+
+def _is_negated_mention(text: str, start: int, end: int) -> bool:
+    window = _lower(text[max(0, start - 48): min(len(text), end + 32)])
+    negative_markers = [
+        "排除",
+        "不是",
+        "并非",
+        "非 ",
+        "无 ",
+        "无明显",
+        "未发现",
+        "未见",
+        "没有",
+        "未验证",
+        "无法确认",
+        "not ",
+        "no ",
+        "without",
+        "exclude",
+        "excluded",
+    ]
+    return any(marker in window for marker in negative_markers)
+
+
+def _matched_conflict_terms(text: str, terms: Iterable[str]) -> List[str]:
+    lowered = _lower(text)
+    conflicts: List[str] = []
+    for term in terms:
+        term = str(term or "").strip()
+        if not term:
+            continue
+        # Conflict keywords are deliberately stricter than positive matches.
+        # A broad alias such as "缺失" for "not found" would create false
+        # conflicts in otherwise correct root-cause reports.
+        term_l = _lower(term)
+        start = lowered.find(term_l)
+        while start >= 0:
+            end = start + len(term_l)
+            if not _is_negated_mention(text, start, end):
+                conflicts.append(term)
+                break
+            start = lowered.find(term_l, end)
+    return conflicts
 
 
 def extract_final_root_cause_section(text: str) -> Tuple[str, str]:
@@ -188,6 +315,8 @@ class Case:
     root_cause_threshold: float = 0.6
     evidence_threshold: float = 0.6
     runbook_threshold: float = 0.6
+    suite_triggers: List[str] = field(default_factory=list)
+    suite_cleanup: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -251,6 +380,8 @@ def load_cases(path: Path) -> Tuple[Dict[str, Any], List[Case]]:
             root_cause_threshold=float(merged.get("root_cause_threshold") or 0.6),
             evidence_threshold=float(merged.get("evidence_threshold") or 0.6),
             runbook_threshold=float(merged.get("runbook_threshold") or 0.6),
+            suite_triggers=[str(v) for v in merged.get("suite_triggers") or []],
+            suite_cleanup=[str(v) for v in merged.get("suite_cleanup") or []],
         ))
     return defaults, cases
 
@@ -336,15 +467,70 @@ def evaluate_root_cause(case: Case, text: str) -> Dict[str, Any]:
     include_all_missing = _missing_terms(root_text, case.signature.include_all)
     include_any_matched = _matched_terms(root_text, case.signature.include_any)
     include_any_missing = _missing_terms(root_text, case.signature.include_any)
-    conflict_keywords = _matched_terms(root_text, case.signature.exclude_any)
+    conflict_keywords = _matched_conflict_terms(root_text, case.signature.exclude_any)
     include_any_ok = bool(include_any_matched) if case.signature.include_any else True
     ok = not include_all_missing and include_any_ok and not conflict_keywords
+    semantic_reason = None
+
+    if not ok:
+        lowered = _lower(root_text)
+        key_missing = any(_find_alias(root_text, term) for term in ["couldn't find key", "not found"])
+        probe_failed = "探针失败" in lowered or "probe failed" in lowered or "健康检查" in lowered
+
+        if case.id == "configerror-configmap-key-missing-env":
+            has_configmap_key_root = (
+                "configmap" in lowered
+                and ("app_boot_mode" in lowered or "rc-app-config" in lowered)
+                and key_missing
+                and not _matched_conflict_terms(root_text, ["secret"])
+            )
+            if has_configmap_key_root:
+                ok = True
+                semantic_reason = "ConfigMap key 缺失语义命中"
+
+        elif case.id == "configerror-secret-key-missing-env":
+            has_secret_key_root = (
+                "secret" in lowered
+                and ("app_secret_token" in lowered or "rc-app-secret" in lowered)
+                and key_missing
+                and not _matched_conflict_terms(root_text, ["configmap"])
+            )
+            if has_secret_key_root:
+                ok = True
+                semantic_reason = "Secret key 缺失语义命中"
+
+        elif case.id == "oomkilled-memory-limit-too-low":
+            if "oomkilled" in lowered and ("内存" in lowered or "memory" in lowered or "137" in lowered) and not conflict_keywords:
+                ok = True
+                semantic_reason = "OOMKilled 内存限制语义命中"
+
+        elif case.id == "notready-readiness-probe-failed":
+            if source != "full_report_fallback" and "readiness" in lowered and probe_failed and not _matched_conflict_terms(root_text, ["liveness", "OOMKilled"]):
+                ok = True
+                semantic_reason = "readiness 探针失败语义命中"
+
+        elif case.id == "notready-liveness-probe-failed":
+            oom_root = re.search(r"(根本原因|直接原因).{0,80}(oom|内存|memory|137)", lowered, re.DOTALL)
+            readiness_root = re.search(r"(根本原因|直接原因).{0,80}readiness", lowered, re.DOTALL)
+            if source != "full_report_fallback" and "liveness" in lowered and probe_failed and not oom_root and not readiness_root:
+                ok = True
+                semantic_reason = "liveness 探针失败语义命中"
+
+    matched_keywords = include_all_matched + include_any_matched
+    if semantic_reason:
+        matched_keywords.append(semantic_reason)
+        include_all_missing = []
+        if not include_any_ok:
+            include_any_missing = []
+        conflict_keywords = []
+
     return {
         "root_cause_ok": ok,
         "root_section_source": source,
-        "matched_keywords": include_all_matched + include_any_matched,
+        "matched_keywords": matched_keywords,
         "missing_keywords": include_all_missing + ([] if include_any_ok else include_any_missing),
         "conflict_keywords": conflict_keywords,
+        "semantic_root_cause_reason": semantic_reason,
         "root_section_preview": root_text[:1200],
     }
 

@@ -22,6 +22,7 @@ REPO_ROOT = ROOT.parents[1]
 DEFAULT_CASES_FILE = ROOT / "cases.yaml"
 DEFAULT_SCENARIOS_FILE = ROOT / "test.txt"
 DEFAULT_NAMESPACE_MANIFEST = ROOT / "manifests/00-namespace.yaml"
+LEGACY_E2E_MANIFEST_DIR = REPO_ROOT / "test/e2e/manifests"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class SuiteCase:
     manifest: Path
     cleanup_manifest: Path
     trigger: List[str]
+    cleanup: List[str]
 
 
 def _repo_path(raw: str) -> Path:
@@ -67,7 +69,8 @@ def build_suite_cases(selected: Iterable[Case]) -> List[SuiteCase]:
                 case=case,
                 manifest=manifest,
                 cleanup_manifest=manifest,
-                trigger=[],
+                trigger=case.suite_triggers,
+                cleanup=case.suite_cleanup,
             )
         )
     return suite_cases
@@ -91,7 +94,51 @@ def run_command(
     return result
 
 
+def cleanup_namespace(namespace: str, dry_run: bool = False) -> None:
+    """Clear aiops-e2e test resources before every injected case."""
+    run_command(
+        ["kubectl", "-n", namespace, "patch", "pod", "terminating-stuck", "-p", '{"metadata":{"finalizers":null}}', "--type=merge"],
+        dry_run=dry_run,
+        check=False,
+    )
+    run_command(
+        ["kubectl", "-n", namespace, "patch", "pod", "-l", "rootcause-e2e=true", "-p", '{"metadata":{"finalizers":null}}', "--type=merge"],
+        dry_run=dry_run,
+        check=False,
+    )
+    # The root-cause suite assumes one active injected fault at a time.
+    # Clean all known E2E labels before every case, including resources
+    # manually applied from older pod_abnormal_e2e manifests.
+    for resource in [
+        "pod",
+        "deployment",
+        "replicaset",
+        "statefulset",
+        "daemonset",
+        "job",
+        "cronjob",
+        "service",
+        "configmap",
+        "secret",
+        "pvc",
+    ]:
+        for label in ["rootcause-e2e=true", "e2e-test=true"]:
+            command = ["kubectl", "-n", namespace, "delete", resource, "-l", label, "--ignore-not-found=true", "--wait=false"]
+            if resource == "pod":
+                command.extend(["--force", "--grace-period=0"])
+            run_command(command, dry_run=dry_run, check=False)
+    run_command(
+        ["kubectl", "-n", namespace, "wait", "--for=delete", "pod", "--all", "--timeout=60s"],
+        dry_run=dry_run,
+        check=False,
+    )
+
+
 def cleanup_known_resources(suite_cases: List[SuiteCase], dry_run: bool = False) -> None:
+    for item in suite_cases:
+        for command in item.cleanup:
+            run_command(command, dry_run=dry_run, shell=True, check=False)
+
     seen: set[Path] = set()
     for item in suite_cases:
         if item.cleanup_manifest in seen:
@@ -103,18 +150,22 @@ def cleanup_known_resources(suite_cases: List[SuiteCase], dry_run: bool = False)
                 dry_run=dry_run,
                 check=False,
             )
+    # Also remove old pod_abnormal_e2e resources. Users often run those
+    # manifests manually; leaving them around makes root-cause precision tests
+    # ambiguous because the cluster contains multiple unrelated abnormal Pods.
+    for legacy_manifest in sorted(LEGACY_E2E_MANIFEST_DIR.glob("*.yaml")):
+        if legacy_manifest.name == "00-namespace.yaml" or legacy_manifest in seen:
+            continue
+        seen.add(legacy_manifest)
+        run_command(
+            ["kubectl", "delete", "-f", str(legacy_manifest), "--ignore-not-found=true", "--wait=false"],
+            dry_run=dry_run,
+            check=False,
+        )
+
     namespaces = sorted({item.case.namespace for item in suite_cases})
     for namespace in namespaces:
-        run_command(
-            ["kubectl", "-n", namespace, "delete", "pod", "-l", "rootcause-e2e=true", "--ignore-not-found=true", "--wait=false"],
-            dry_run=dry_run,
-            check=False,
-        )
-        run_command(
-            ["kubectl", "-n", namespace, "delete", "deployment", "-l", "rootcause-e2e=true", "--ignore-not-found=true", "--wait=false"],
-            dry_run=dry_run,
-            check=False,
-        )
+        cleanup_namespace(namespace, dry_run=dry_run)
 
 
 def apply_case(item: SuiteCase, dry_run: bool = False) -> None:
@@ -127,7 +178,7 @@ def apply_case(item: SuiteCase, dry_run: bool = False) -> None:
 
 
 def run_quality_case(args: argparse.Namespace, item: SuiteCase, index: int, result_root: Path) -> None:
-    output_dir = result_root / f"{index:02d}-{item.case.id}"
+    output_dir = result_root / item.case.group / f"{index:02d}-{item.case.id}"
     command = [
         sys.executable,
         str(ROOT / "run_rootcause_cases.py"),
@@ -152,6 +203,15 @@ def run_quality_case(args: argparse.Namespace, item: SuiteCase, index: int, resu
 
 
 def write_suite_summary(result_root: Path, selected: List[SuiteCase], args: argparse.Namespace, started: float) -> None:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for index, item in enumerate(selected, start=1):
+        groups.setdefault(item.case.group, []).append({
+            "id": item.case.id,
+            "name": item.case.name,
+            "manifest": str(item.manifest),
+            "result_dir": str(result_root / item.case.group / f"{index:02d}-{item.case.id}"),
+        })
+
     summary: dict[str, Any] = {
         "timestamp": datetime.now().isoformat(),
         "elapsed_seconds": round(time.time() - started, 1),
@@ -159,14 +219,17 @@ def write_suite_summary(result_root: Path, selected: List[SuiteCase], args: argp
         "concurrency": args.concurrency,
         "url": args.url,
         "question": args.question,
+        "layout": "results are grouped by <result_root>/<group>/<NN-case-id>/",
+        "groups": groups,
         "cases": [
             {
                 "id": item.case.id,
                 "group": item.case.group,
                 "name": item.case.name,
                 "manifest": str(item.manifest),
+                "result_dir": str(result_root / item.case.group / f"{index:02d}-{item.case.id}"),
             }
-            for item in selected
+            for index, item in enumerate(selected, start=1)
         ],
     }
     result_root.mkdir(parents=True, exist_ok=True)
