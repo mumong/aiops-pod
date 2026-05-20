@@ -21,7 +21,7 @@ from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
-from app.core.workflow.schemas import ConclusionOutput, LayerOutput, QueryResult
+from app.core.workflow.schemas import ConclusionOutput, LayerOutput, QueryResult, RCAOutput
 
 
 class _RecordingAICall:
@@ -698,6 +698,35 @@ def test_rca_lite_mode_no_output_uses_generic_llm_fallback():
     assert thinking_events == []
 
 
+def test_rca_lite_mode_enables_text_fallback_after_native_structured_failure():
+    node = RootCauseAnalyzerNode()
+    node.ai_call = object()
+    captured = {}
+
+    def _fake_structured_agent(*args, **kwargs):
+        captured.update(kwargs)
+        parsed = RCAOutput.model_validate({
+            "root_cause": "Pod 删除卡在 preStop hook",
+            "root_cause_summary": "Pod 删除卡在 preStop hook",
+            "causal_chain": {"root_cause": "preStop hook sleep 21600"},
+            "confidence": 0.95,
+        })
+        return parsed, SimpleNamespace(result=parsed.model_dump_json()), []
+
+    node._call_structured_agent = _fake_structured_agent
+
+    result, _thinking_events = node._analyze_with_llm_lite(
+        question="我的服务为什么异常",
+        layer=Layer.L1,
+        evidence_summary="kubectl_get_yaml: finalizers: <none>; lifecycle.preStop sleep 21600",
+    )
+
+    assert result["confidence"] == 0.95
+    assert captured["schema"] is RCAOutput
+    assert captured["use_tools"] is False
+    assert captured["allow_text_fallback"] is True
+
+
 def test_rca_lite_mode_exception_uses_generic_llm_fallback_without_rules():
     node = RootCauseAnalyzerNode()
     node.ai_call = object()
@@ -840,6 +869,83 @@ def test_conclusion_prompt_uses_compact_structured_context_without_full_raw_dupl
     assert "计划 1 项，实际采集 1 项" in prompt
 
 
+def test_conclusion_prompt_marks_authoritative_tool_facts_above_candidate_scenarios():
+    node = ConclusionFormatterNode()
+    node.ai_call = _RecordingAICall("## 诊断概览\nTerminating")
+
+    evidence_analysis = json.dumps({
+        "collection_summary": "计划 3 项，实际采集 3 项，未采集 0 项，完整度 100%",
+        "plan_total": 3,
+        "plan_collected": 3,
+        "plan_completeness": 1.0,
+        "evidence_inventory": [
+            {
+                "id": "e1",
+                "description": "获取 Pod YAML 确认 deletionTimestamp/finalizers/preStop",
+                "level": "critical",
+                "tool": "kubectl_get_yaml",
+                "command": "kubectl get pod rc-terminating-prestop -n aiops-e2e -o yaml",
+                "collected": True,
+            }
+        ],
+        "tool_data": [
+            {
+                "tool": "kubectl_get_yaml",
+                "data": "\n".join([
+                    "kind: Pod",
+                    "name: rc-terminating-prestop",
+                    "deletionTimestamp: 2026-05-19T12:09:54Z",
+                    "deletionGracePeriodSeconds: 21600",
+                    "finalizers: <none>",
+                    "terminationGracePeriodSeconds: 21600",
+                    "lifecycle: {\"preStop\": {\"exec\": {\"command\": [\"sh\", \"-c\", \"echo stuck; sleep 21600\"]}}}",
+                ]),
+            },
+            {
+                "tool": "kubectl_describe",
+                "data": "\n".join([
+                    "status: Terminating",
+                    "Termination Grace Period: 21600s",
+                    "Normal  Killing  42m  kubelet  Stopping container app",
+                ]),
+            },
+            {
+                "tool": "kubectl_get_by_name",
+                "data": "NAME    STATUS\nnode1   Ready",
+            },
+        ],
+    }, ensure_ascii=False)
+    rca_analysis = json.dumps({
+        "root_cause": "[L1层] 当前无法基于 LLM 输出确定根本原因",
+        "confidence": 0.1,
+        "confidence_reason": "LLM 返回结果不符合 RCA 结构化输出合同",
+        "causal_chain": {"trigger": "LLM 未生成可靠因果链"},
+    }, ensure_ascii=False)
+    layer_analysis = json.dumps({
+        "layer": "L1",
+        "possible_scenarios": [
+            {"scenario": "Finalizer 清理卡住", "probability": "high"},
+            {"scenario": "preStop hook 或应用退出慢", "probability": "medium"},
+        ],
+    }, ensure_ascii=False)
+
+    node._generate_with_llm(
+        question="我的集群有什么问题",
+        layer_analysis=layer_analysis,
+        evidence_analysis=evidence_analysis,
+        rca_analysis=rca_analysis,
+        layer=Layer.L1,
+    )
+
+    prompt = node.ai_call.calls[0]["kwargs"]["question"]
+    assert "# 权威工具事实（最高优先级）" in prompt
+    assert "finalizers: <none>" in prompt
+    assert "排除 finalizer 未清理根因" in prompt
+    assert "preStop hook" in prompt
+    assert "sleep 21600" in prompt
+    assert "候选场景不能覆盖权威工具事实" in prompt
+
+
 def test_conclusion_token_budget_defaults_to_model_window(monkeypatch):
     monkeypatch.delenv("CONCLUSION_TOKEN_BUDGET", raising=False)
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
@@ -977,6 +1083,23 @@ def test_layer_extract_prompt_is_current_state_first():
         assert phrase in extract_prompt
 
 
+def test_rca_prompt_includes_json_contract_for_text_fallback():
+    rca_prompt = get_workflow_prompt("rca")
+    expected_phrases = [
+        "如果 native structured output 不可用",
+        "只输出一个 JSON 对象",
+        '"root_cause_summary"',
+        '"confidence"',
+        '"primary_runbooks"',
+        '"alternative_causes"',
+        "不要输出 Markdown",
+        "不要输出代码块围栏",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in rca_prompt
+
+
 def test_query_direct_prompt_boundaries_are_explicit():
     direct_prompt = get_workflow_prompt("layer_query_direct")
     expected_phrases = [
@@ -1082,6 +1205,11 @@ def test_workflow_prompts_do_not_contain_json_output_templates():
     ]
     for name in prompt_names:
         prompt = get_workflow_prompt(name)
+        if name == "rca":
+            # RCA has an explicit JSON text-fallback contract so local
+            # OpenAI-compatible gateways can still produce Pydantic-parseable
+            # output when native structured output is unavailable.
+            continue
         for phrase in forbidden:
             assert phrase not in prompt
 

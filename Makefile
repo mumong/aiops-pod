@@ -25,7 +25,7 @@ deploy:
 	@kubectl create namespace aiops --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f deploy/ --recursive
 	@echo "Waiting for rollout to complete..."
-	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=120s
+	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s
 
 # 主集群部署：federation.enabled = true，然后 deploy
 deploy-master:
@@ -51,7 +51,7 @@ delete:
 restart:
 	@echo "Restarting pods..."
 	kubectl rollout restart deployment/aiops-copilot -n aiops
-	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=120s
+	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s
 
 logs:
 	kubectl logs -f deployment/aiops-copilot -n aiops
