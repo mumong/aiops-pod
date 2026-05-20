@@ -1352,10 +1352,18 @@ class EvidenceCollectorNode(WorkflowNode):
                 cleaned_args.pop("output_format", None)
                 normalized["tool_args"] = cleaned_args
 
+        tool = cls._normalize_plan_text(normalized.get("tool"))
+        if tool in {"kubectl_get_yaml", "kubectl_describe", "kubectl_get_by_name"}:
+            derived_args = cls._derive_kubectl_named_resource_tool_args(command)
+            if derived_args:
+                current_args = normalized.get("tool_args") if isinstance(normalized.get("tool_args"), dict) else {}
+                merged_args = dict(derived_args)
+                merged_args.update({k: v for k, v in dict(current_args).items() if v not in (None, "")})
+                normalized["tool_args"] = merged_args
+
         if isinstance(normalized.get("tool_args"), dict) and normalized["tool_args"]:
             return normalized
 
-        tool = cls._normalize_plan_text(normalized.get("tool"))
         if tool == "kubectl_events":
             tool_args = cls._derive_kubectl_events_tool_args(command)
             if tool_args:
@@ -1400,6 +1408,80 @@ class EvidenceCollectorNode(WorkflowNode):
         if namespace:
             args["namespace"] = namespace
         return args
+
+    @staticmethod
+    def _derive_kubectl_named_resource_tool_args(command: str) -> Dict[str, str]:
+        text = command or ""
+        if not text.strip():
+            return {}
+
+        namespace = ""
+        namespace_match = re.search(r"(?:^|\s)-n\s+([^\s]+)|(?:^|\s)--namespace(?:=|\s+)([^\s]+)", text)
+        if namespace_match:
+            namespace = namespace_match.group(1) or namespace_match.group(2) or ""
+
+        # Supports common forms:
+        #   kubectl get pod my-pod -n ns -o yaml
+        #   kubectl get -o yaml pod my-pod -n ns
+        #   kubectl describe node node1
+        tokens = re.findall(r"(?:'[^']*'|\"[^\"]*\"|\S+)", text)
+        tokens = [token.strip("'\"") for token in tokens]
+        if not tokens:
+            return {}
+
+        resource_kinds = {
+            "pod": "pod",
+            "pods": "pod",
+            "node": "node",
+            "nodes": "node",
+            "deployment": "deployment",
+            "deployments": "deployment",
+            "statefulset": "statefulset",
+            "statefulsets": "statefulset",
+            "daemonset": "daemonset",
+            "daemonsets": "daemonset",
+            "replicaset": "replicaset",
+            "replicasets": "replicaset",
+            "service": "service",
+            "services": "service",
+            "svc": "service",
+            "pvc": "pvc",
+            "pv": "pv",
+            "configmap": "configmap",
+            "configmaps": "configmap",
+            "secret": "secret",
+            "secrets": "secret",
+            "storageclass": "storageclass",
+            "storageclasses": "storageclass",
+        }
+        flag_with_value = {"-n", "--namespace", "-o", "--output", "-l", "--selector", "--field-selector"}
+
+        for idx, token in enumerate(tokens):
+            kind = resource_kinds.get(token.lower())
+            if not kind:
+                continue
+            name = ""
+            cursor = idx + 1
+            while cursor < len(tokens):
+                candidate = tokens[cursor]
+                if candidate in flag_with_value:
+                    cursor += 2
+                    continue
+                if any(candidate.startswith(prefix) for prefix in ("-n=", "--namespace=", "-o=", "--output=")):
+                    cursor += 1
+                    continue
+                if candidate.startswith("-"):
+                    cursor += 1
+                    continue
+                name = candidate
+                break
+            if not name:
+                continue
+            args = {"kind": kind, "name": name}
+            if namespace:
+                args["namespace"] = namespace
+            return args
+        return {}
 
     @classmethod
     def _evidence_plan_signature(cls, item: Dict[str, Any]) -> tuple[str, str, str]:

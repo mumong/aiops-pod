@@ -94,6 +94,25 @@ def run_command(
     return result
 
 
+def list_resource_names(namespace: str, resource: str, label: str, dry_run: bool = False) -> List[str]:
+    """Return resource/name strings for selector-based operations.
+
+    Some kubectl versions do not support `kubectl patch <type> -l ...`.
+    Listing first and patching concrete names is compatible and gives clearer
+    cleanup logs for stuck Terminating pods.
+    """
+    command = ["kubectl", "-n", namespace, "get", resource, "-l", label, "-o", "name"]
+    print(f"$ {' '.join(command)}")
+    if dry_run:
+        return []
+    result = subprocess.run(command, cwd=str(REPO_ROOT), text=True, capture_output=True)
+    if result.returncode != 0:
+        if result.stderr:
+            print(result.stderr.strip())
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def cleanup_namespace(namespace: str, dry_run: bool = False) -> None:
     """Clear aiops-e2e test resources before every injected case."""
     run_command(
@@ -101,11 +120,13 @@ def cleanup_namespace(namespace: str, dry_run: bool = False) -> None:
         dry_run=dry_run,
         check=False,
     )
-    run_command(
-        ["kubectl", "-n", namespace, "patch", "pod", "-l", "rootcause-e2e=true", "-p", '{"metadata":{"finalizers":null}}', "--type=merge"],
-        dry_run=dry_run,
-        check=False,
-    )
+    for label in ["rootcause-e2e=true", "e2e-test=true"]:
+        for pod_name in list_resource_names(namespace, "pod", label, dry_run=dry_run):
+            run_command(
+                ["kubectl", "-n", namespace, "patch", pod_name, "-p", '{"metadata":{"finalizers":null}}', "--type=merge"],
+                dry_run=dry_run,
+                check=False,
+            )
     # The root-cause suite assumes one active injected fault at a time.
     # Clean all known E2E labels before every case, including resources
     # manually applied from older pod_abnormal_e2e manifests.
@@ -129,6 +150,11 @@ def cleanup_namespace(namespace: str, dry_run: bool = False) -> None:
             run_command(command, dry_run=dry_run, check=False)
     run_command(
         ["kubectl", "-n", namespace, "wait", "--for=delete", "pod", "--all", "--timeout=60s"],
+        dry_run=dry_run,
+        check=False,
+    )
+    run_command(
+        ["kubectl", "delete", "runtimeclass", "-l", "rootcause-e2e=true", "--ignore-not-found=true", "--wait=false"],
         dry_run=dry_run,
         check=False,
     )
@@ -202,38 +228,170 @@ def run_quality_case(args: argparse.Namespace, item: SuiteCase, index: int, resu
     run_command(command, dry_run=args.dry_run)
 
 
-def write_suite_summary(result_root: Path, selected: List[SuiteCase], args: argparse.Namespace, started: float) -> None:
+def _fmt_rate(value: Any) -> str:
+    return "N/A" if value is None else f"{float(value):.1f}%"
+
+
+def _fmt_minutes(value: Any) -> str:
+    return "N/A" if value is None else f"{float(value) / 60:.1f}m"
+
+
+def _case_result_dir(result_root: Path, item: SuiteCase, index: int) -> Path:
+    return result_root / item.case.group / f"{index:02d}-{item.case.id}"
+
+
+def _load_child_stats(result_dir: Path, case_id: str) -> dict[str, Any] | None:
+    stats_path = result_dir / "stats.json"
+    if not stats_path.exists():
+        return None
+    try:
+        data = json.loads(stats_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"error": f"invalid stats.json: {exc}"}
+    case_stats = (data.get("cases") or {}).get(case_id) or {}
+    return {
+        "runs": data.get("total_runs", 0),
+        "success": data.get("success", 0),
+        "failed": data.get("failed", 0),
+        "root_cause_accuracy": case_stats.get("root_cause_accuracy"),
+        "runbook_coverage": case_stats.get("runbook_coverage"),
+        "evidence_completeness": case_stats.get("evidence_completeness"),
+        "avg_mttr_seconds": case_stats.get("avg_mttr_seconds"),
+    }
+
+
+def _weighted_average(rows: List[dict[str, Any]], key: str) -> float | None:
+    total_weight = 0
+    total_value = 0.0
+    for row in rows:
+        value = row.get(key)
+        weight = int(row.get("success") or row.get("runs") or 0)
+        if value is None or weight <= 0:
+            continue
+        total_weight += weight
+        total_value += float(value) * weight
+    return total_value / total_weight if total_weight else None
+
+
+def build_suite_summary_lines(rows: List[dict[str, Any]], args: argparse.Namespace, elapsed_seconds: float) -> List[str]:
+    completed_rows = [row for row in rows if row["status"] == "completed"]
+    failed_rows = [row for row in rows if row["status"] != "completed"]
+    lines = [
+        "# Pod RootCause Suite 汇总",
+        "",
+        f"- 完成 Case: {len(completed_rows)}/{len(rows)}",
+        f"- 失败/未完成 Case: {len(failed_rows)}",
+        f"- 总耗时: {_fmt_minutes(elapsed_seconds)}",
+        f"- Repeat: {args.repeat}",
+        f"- Concurrency: {args.concurrency}",
+        f"- URL: {args.url}",
+        f"- Question: {args.question}",
+        "",
+        "## Case 明细",
+        "",
+        "| Case | Group | 状态 | 成功运行 | 根因准确率 | Runbook 覆盖率 | 平均证据率 | 平均 MTTR | 错误 |",
+        "|------|-------|------|----------|------------|----------------|------------|-----------|------|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['id']} | {row['group']} | {row['status']} | {row.get('success') or 0} | "
+            f"{_fmt_rate(row.get('root_cause_accuracy'))} | {_fmt_rate(row.get('runbook_coverage'))} | "
+            f"{_fmt_rate(row.get('evidence_completeness'))} | {_fmt_minutes(row.get('avg_mttr_seconds'))} | "
+            f"{row.get('error') or '-'} |"
+        )
+
+    groups = sorted({row["group"] for row in rows})
+    lines.extend([
+        "",
+        "## Group 平均",
+        "",
+        "| Group | 完成 Case | 成功运行 | 根因准确率 | Runbook 覆盖率 | 平均证据率 | 平均 MTTR |",
+        "|-------|-----------|----------|------------|----------------|------------|-----------|",
+    ])
+    for group in groups:
+        group_rows = [row for row in completed_rows if row["group"] == group]
+        success = sum(int(row.get("success") or 0) for row in group_rows)
+        lines.append(
+            f"| {group} | {len(group_rows)} | {success} | "
+            f"{_fmt_rate(_weighted_average(group_rows, 'root_cause_accuracy'))} | "
+            f"{_fmt_rate(_weighted_average(group_rows, 'runbook_coverage'))} | "
+            f"{_fmt_rate(_weighted_average(group_rows, 'evidence_completeness'))} | "
+            f"{_fmt_minutes(_weighted_average(group_rows, 'avg_mttr_seconds'))} |"
+        )
+
+    total_success = sum(int(row.get("success") or 0) for row in completed_rows)
+    lines.extend([
+        "",
+        "## 总平均",
+        "",
+        "| Scope | 完成 Case | 成功运行 | 根因准确率 | Runbook 覆盖率 | 平均证据率 | 平均 MTTR |",
+        "|-------|-----------|----------|------------|----------------|------------|-----------|",
+        f"| TOTAL | {len(completed_rows)} | {total_success} | "
+        f"{_fmt_rate(_weighted_average(completed_rows, 'root_cause_accuracy'))} | "
+        f"{_fmt_rate(_weighted_average(completed_rows, 'runbook_coverage'))} | "
+        f"{_fmt_rate(_weighted_average(completed_rows, 'evidence_completeness'))} | "
+        f"{_fmt_minutes(_weighted_average(completed_rows, 'avg_mttr_seconds'))} |",
+        "",
+    ])
+    return lines
+
+
+def write_suite_summary(
+    result_root: Path,
+    selected: List[SuiteCase],
+    args: argparse.Namespace,
+    started: float,
+    outcomes: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    elapsed_seconds = round(time.time() - started, 1)
+    outcomes = outcomes or {}
     groups: dict[str, list[dict[str, Any]]] = {}
+    rows: List[dict[str, Any]] = []
     for index, item in enumerate(selected, start=1):
+        result_dir = _case_result_dir(result_root, item, index)
+        child_stats = _load_child_stats(result_dir, item.case.id)
+        outcome = outcomes.get(item.case.id) or {}
+        status = str(outcome.get("status") or ("completed" if child_stats and not child_stats.get("error") else "not_run"))
+        error = str(outcome.get("error") or (child_stats or {}).get("error") or "")
+        row = {
+            "id": item.case.id,
+            "group": item.case.group,
+            "name": item.case.name,
+            "status": status,
+            "manifest": str(item.manifest),
+            "result_dir": str(result_dir),
+            "error": error,
+            **(child_stats or {}),
+        }
+        rows.append(row)
         groups.setdefault(item.case.group, []).append({
             "id": item.case.id,
             "name": item.case.name,
             "manifest": str(item.manifest),
-            "result_dir": str(result_root / item.case.group / f"{index:02d}-{item.case.id}"),
+            "result_dir": str(result_dir),
+            "status": status,
         })
 
     summary: dict[str, Any] = {
         "timestamp": datetime.now().isoformat(),
-        "elapsed_seconds": round(time.time() - started, 1),
+        "elapsed_seconds": elapsed_seconds,
         "repeat": args.repeat,
         "concurrency": args.concurrency,
         "url": args.url,
         "question": args.question,
         "layout": "results are grouped by <result_root>/<group>/<NN-case-id>/",
+        "selected_cases": len(rows),
+        "completed_cases": sum(1 for row in rows if row["status"] == "completed"),
+        "failed_cases": sum(1 for row in rows if row["status"] != "completed"),
         "groups": groups,
-        "cases": [
-            {
-                "id": item.case.id,
-                "group": item.case.group,
-                "name": item.case.name,
-                "manifest": str(item.manifest),
-                "result_dir": str(result_root / item.case.group / f"{index:02d}-{item.case.id}"),
-            }
-            for index, item in enumerate(selected, start=1)
-        ],
+        "cases": rows,
     }
     result_root.mkdir(parents=True, exist_ok=True)
     (result_root / "suite_stats.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    (result_root / "suite_summary.md").write_text(
+        "\n".join(build_suite_summary_lines(rows, args, elapsed_seconds)) + "\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> None:
@@ -269,6 +427,7 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_root = Path(args.output_dir) if args.output_dir else REPO_ROOT / "testreports" / f"pod_rootcause_suite_{timestamp}"
     started = time.time()
+    outcomes: dict[str, dict[str, Any]] = {}
 
     print("=" * 72)
     print("Pod RootCause Serial Suite")
@@ -283,18 +442,26 @@ def main() -> None:
             print("\n" + "=" * 72)
             print(f"[{index}/{len(selected)}] {item.case.id} - {item.case.name}")
             print("=" * 72)
-            if not args.skip_cleanup:
-                cleanup_known_resources(selected, dry_run=args.dry_run)
-            apply_case(item, dry_run=args.dry_run)
-            print(f"等待 {args.settle_seconds}s 让异常状态稳定...")
-            if not args.dry_run and args.settle_seconds > 0:
-                time.sleep(args.settle_seconds)
-            run_quality_case(args, item, index, result_root)
-            if not args.skip_cleanup and (index < len(selected) or not args.keep_last):
-                cleanup_known_resources(selected, dry_run=args.dry_run)
+            try:
+                if not args.skip_cleanup:
+                    cleanup_known_resources(selected, dry_run=args.dry_run)
+                apply_case(item, dry_run=args.dry_run)
+                print(f"等待 {args.settle_seconds}s 让异常状态稳定...")
+                if not args.dry_run and args.settle_seconds > 0:
+                    time.sleep(args.settle_seconds)
+                run_quality_case(args, item, index, result_root)
+                outcomes[item.case.id] = {"status": "completed"}
+            except Exception as exc:
+                outcomes[item.case.id] = {"status": "failed", "error": str(exc)}
+                print(f"Case failed, continue next: {item.case.id}: {exc}", file=sys.stderr)
+            finally:
+                if not args.skip_cleanup and (index < len(selected) or not args.keep_last):
+                    cleanup_known_resources(selected, dry_run=args.dry_run)
     finally:
-        write_suite_summary(result_root, selected, args, started)
+        write_suite_summary(result_root, selected, args, started, outcomes=outcomes)
         print(f"\nSuite report: {result_root}")
+    if any(outcome.get("status") == "failed" for outcome in outcomes.values()):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

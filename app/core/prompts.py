@@ -490,6 +490,41 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 必须覆盖：phenomenon、evidence_inventory、evidence_analysis、causal_chain、root_cause_summary、confidence、primary_runbooks、alternative_causes、limitations。
 输出要服务于下游 summary，不要复制完整证据原文；完整原文保留在 evidence 节点和归档中。
 
+# JSON 输出契约（兼容小模型 text fallback）
+如果 native structured output 不可用，你必须只输出一个 JSON 对象，且必须能被 `RCAOutput` Pydantic schema 直接解析。
+不要输出 Markdown，不要输出代码块围栏，不要输出解释性前后缀。
+JSON 字段必须使用以下形状：
+{{
+  "phenomenon": "当前异常现象，包含 Pod/Namespace/状态",
+  "evidence_inventory": [
+    {{"id": "e1", "source": "kubectl_get_yaml", "content": "1-2 行证据摘要", "reliability": "高"}}
+  ],
+  "evidence_analysis": [
+    {{"evidence_id": "e1", "raw_data": "1-3 行关键原始摘录", "interpretation": "这条证据说明什么"}}
+  ],
+  "causal_chain": {{
+    "root_cause": "根本原因",
+    "propagation": "传导机制",
+    "direct_cause": "直接原因",
+    "manifestation": "用户可见现象"
+  }},
+  "root_cause": "一句话根因，必须非空",
+  "root_cause_summary": "面向下游报告的根因摘要，必须非空，引用关键证据和具体数值",
+  "confidence": 0.95,
+  "confidence_reason": "为什么是这个置信度",
+  "primary_runbooks": [],
+  "alternative_causes": [
+    {{"cause": "已排除或低概率候选", "probability": "low", "reason": "排除依据"}}
+  ],
+  "limitations": "缺失证据或适用边界；没有则写空字符串",
+  "llm_raw_analysis": ""
+}}
+硬性要求：
+- `root_cause` 和 `root_cause_summary` 至少一个必须非空；推荐两个都填。
+- `confidence` 必须是 0.0 到 1.0 的数字，不能写百分号字符串。
+- `evidence_inventory` 和 `evidence_analysis` 必须是数组；`causal_chain` 必须是对象。
+- 不确定时也要基于已有证据给出低置信度 JSON，不要输出自然语言兜底。
+
 # Runbook 关联规则
 - `primary_runbooks` 只填上游节点实际参考过的 runbook
 - 如果没有参考任何 runbook，填空数组 `[]`
@@ -526,6 +561,18 @@ CONCLUSION_FORMATTER_PROMPT = """
 4. **结论有据**：每个结论标注依据来源
 5. **不编造问题**：证据显示正常就报告正常
 6. **建议可执行**：修复命令可直接复制执行
+
+# 证据优先级（必须遵守）
+1. 最高优先级：`# 权威工具事实（最高优先级）`、`tool_data`、`kubectl_get_yaml`、`kubectl_describe`、真实命令输出。
+2. 第二优先级：evidence 节点的结构化证据分析和 collection_summary。
+3. 第三优先级：RCA 节点输出。若 RCA 写着“当前无法基于 LLM 输出确定根本原因”或“LLM 返回结果不符合 RCA 结构化输出合同”，它只是失败兜底，不能当作根因。
+4. 最低优先级：layer 的 `possible_scenarios`、runbook 候选场景、模板示例。它们只是待验证假设，不能覆盖真实工具事实。
+5. 如果真实工具事实与 RCA/layer/runbook 冲突，必须以真实工具事实为准，并在报告中说明被排除的候选原因。
+
+# TerminatingStuck 特别规则
+- 如果工具输出包含 `finalizers: <none>` 或 finalizers 为空，必须明确排除“finalizer 未清理”作为根因，禁止写“Pod 存在 finalizers 未清理”。
+- 如果工具输出包含 `preStop`/`lifecycle.preStop`、`sleep N`、`terminationGracePeriodSeconds: N` 或 `Termination Grace Period: Ns`，并且事件包含 `Killing`/`Stopping container`，应优先归因为 preStop hook 执行时间过长或 termination grace period 过长导致 Pod 在 Terminating 中等待。
+- 如果节点工具输出显示 Node `Ready`，不要把 kubelet/节点不可达作为主要根因，只能作为已排除或低概率候选。
 
 # 输入
 三个阶段的分析结果（问题定位 → 证据采集 → 根因分析）。多层级问题应全部展示。

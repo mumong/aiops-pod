@@ -1303,6 +1303,10 @@ class ConclusionFormatterNode(WorkflowNode):
             for reason in missing_reasons[:12]:
                 lines.append(f"- {reason}")
 
+        authoritative_facts = cls._build_authoritative_tool_facts(evidence_data)
+        if authoritative_facts:
+            lines.extend(["", authoritative_facts.rstrip()])
+
         root_cause = rca_data.get("root_cause_summary") or rca_data.get("root_cause")
         if root_cause:
             lines.append(f"rca_root_cause: {root_cause}")
@@ -1328,6 +1332,128 @@ class ConclusionFormatterNode(WorkflowNode):
             lines.append(f"rca_limitations: {limitations}")
 
         return "\n".join(lines) + "\n" if len(lines) > 1 else ""
+
+    @classmethod
+    def _build_authoritative_tool_facts(cls, evidence_data: Dict[str, Any]) -> str:
+        """Extract high-signal facts from real tool output for conclusion.
+
+        The conclusion LLM also receives layer hypotheses and RCA summaries. This
+        section makes raw Kubernetes facts explicit so hypotheses cannot override
+        negative evidence such as ``finalizers: <none>``.
+        """
+        tool_data = evidence_data.get("tool_data", []) if isinstance(evidence_data, dict) else []
+        if not isinstance(tool_data, list):
+            return ""
+
+        lines: List[str] = []
+        all_text_parts: List[str] = []
+        seen = set()
+        for item in tool_data[:12]:
+            if not isinstance(item, dict):
+                continue
+            tool = str(item.get("tool", "unknown"))
+            if tool.lower() in {"fetch_runbook", "read_context_archive"}:
+                continue
+            data = str(item.get("data", "") or "")
+            if not data.strip():
+                continue
+            all_text_parts.append(data)
+            for fact in cls._extract_priority_fact_lines(tool, data):
+                if fact in seen:
+                    continue
+                seen.add(fact)
+                lines.append(f"- {fact}")
+                if len(lines) >= 24:
+                    break
+            if len(lines) >= 24:
+                break
+
+        combined = "\n".join(all_text_parts)
+        conclusions = cls._derive_authoritative_conclusions(combined)
+        if not lines and not conclusions:
+            return ""
+
+        result = ["# 权威工具事实（最高优先级）"]
+        result.append("以下事实来自真实工具输出，优先级高于 RCA 兜底、layer possible_scenarios 和 runbook 候选场景；候选场景不能覆盖权威工具事实。")
+        if lines:
+            result.append("工具事实:")
+            result.extend(lines)
+        if conclusions:
+            result.append("强约束结论:")
+            result.extend(f"- {item}" for item in conclusions)
+        return "\n".join(result) + "\n"
+
+    @staticmethod
+    def _extract_priority_fact_lines(tool: str, data: str) -> List[str]:
+        """Keep only compact diagnostic lines that should guide final reporting."""
+        patterns = (
+            "deletionTimestamp",
+            "deletionGracePeriodSeconds",
+            "finalizers",
+            "terminationGracePeriodSeconds",
+            "Termination Grace Period",
+            "lifecycle",
+            "preStop",
+            "sleep ",
+            "status:",
+            "phase:",
+            "Reason:",
+            "Exit Code:",
+            "OOMKilled",
+            "FailedMount",
+            "FailedScheduling",
+            "ImagePull",
+            "ErrImagePull",
+            "BackOff",
+            "Killing",
+            "Stopping container",
+            "Ready",
+            "Node",
+        )
+        facts: List[str] = []
+        for raw_line in data.splitlines():
+            line = " ".join(raw_line.strip().split())
+            if not line:
+                continue
+            if any(pattern in line for pattern in patterns):
+                facts.append(f"{tool}: {line[:500]}")
+            if len(facts) >= 8:
+                break
+        return facts
+
+    @staticmethod
+    def _derive_authoritative_conclusions(text: str) -> List[str]:
+        normalized = " ".join((text or "").split())
+        lowered = normalized.lower()
+        conclusions: List[str] = []
+
+        if re.search(r"finalizers:\s*<none>", normalized, flags=re.IGNORECASE):
+            conclusions.append("排除 finalizer 未清理根因：工具输出明确显示 `finalizers: <none>`。")
+        elif re.search(r"finalizers:\s*(\[\s*\]|none|null)(?:\s|$)", normalized, flags=re.IGNORECASE):
+            conclusions.append("排除 finalizer 未清理根因：工具输出显示 finalizers 为空。")
+
+        sleep_match = re.search(r"sleep\s+(\d+)", normalized, flags=re.IGNORECASE)
+        grace_match = (
+            re.search(r"terminationGracePeriodSeconds:\s*(\d+)", normalized)
+            or re.search(r"Termination Grace Period:\s*(\d+)s", normalized)
+            or re.search(r"deletionGracePeriodSeconds:\s*(\d+)", normalized)
+        )
+        has_prestop = "prestop" in lowered
+        has_killing = "killing" in lowered or "stopping container" in lowered
+        if has_prestop and sleep_match:
+            conclusions.append(
+                f"正向根因事实：preStop hook 执行 `sleep {sleep_match.group(1)}`，删除流程会被 hook 阻塞。"
+            )
+        if grace_match:
+            conclusions.append(
+                f"正向根因事实：termination grace/deletion grace 为 {grace_match.group(1)} 秒，Pod 会在该宽限期内保持 Terminating。"
+            )
+        if has_killing:
+            conclusions.append("正向现象事实：kubelet 事件显示正在 `Killing/Stopping container`，说明删除流程已启动但容器终止未完成。")
+        if re.search(r"(?:NAME\s+STATUS\s+)?\bnode[\w.-]*\s+Ready\b", normalized, flags=re.IGNORECASE):
+            conclusions.append("排除节点不可达主因：节点状态输出包含 `Ready`。")
+
+        return conclusions
 
     @staticmethod
     def _extract_evidence_stats(evidence_data: Dict[str, Any]) -> Dict[str, Any]:

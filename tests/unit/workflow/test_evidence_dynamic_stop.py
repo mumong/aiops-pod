@@ -177,8 +177,46 @@ def test_evidence_normalizes_yaml_plan_away_from_get_by_name():
     ])
 
     assert plan[0]["tool"] == "kubectl_get_yaml"
-    assert plan[0]["tool_args"] == {"name": "rc-terminating-finalizer", "namespace": "aiops-e2e"}
+    assert plan[0]["tool_args"] == {"kind": "pod", "name": "rc-terminating-finalizer", "namespace": "aiops-e2e"}
     assert "kubectl_get_yaml" in plan[0]["acceptable_tools"]
+
+
+def test_evidence_normalizes_missing_kind_for_named_kubectl_tools():
+    plan = EvidenceCollectorNode._normalize_evidence_plan([
+        {
+            "id": "e1",
+            "description": "确认 Pod YAML",
+            "level": "critical",
+            "tool": "kubectl_get_yaml",
+            "command": "kubectl get pod rc-terminating-finalizer -n aiops-e2e -o yaml",
+            "tool_args": {"name": "rc-terminating-finalizer", "namespace": "aiops-e2e"},
+            "purpose": "确认 deletionTimestamp/finalizers",
+            "evidence_type": "yaml",
+        },
+        {
+            "id": "e2",
+            "description": "确认 describe",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod rc-terminating-finalizer -n aiops-e2e",
+            "tool_args": {"name": "rc-terminating-finalizer", "namespace": "aiops-e2e"},
+            "purpose": "确认 Killing 事件",
+        },
+        {
+            "id": "e3",
+            "description": "确认 Node YAML",
+            "level": "important",
+            "tool": "kubectl_get_yaml",
+            "command": "kubectl get node node1 -o yaml",
+            "tool_args": {"name": "node1"},
+            "purpose": "确认节点 Ready",
+            "evidence_type": "yaml",
+        },
+    ])
+
+    assert plan[0]["tool_args"] == {"kind": "pod", "name": "rc-terminating-finalizer", "namespace": "aiops-e2e"}
+    assert plan[1]["tool_args"] == {"kind": "pod", "name": "rc-terminating-finalizer", "namespace": "aiops-e2e"}
+    assert plan[2]["tool_args"] == {"kind": "node", "name": "node1"}
 
 
 def test_yaml_plan_is_not_matched_by_tabular_get_by_name_output():

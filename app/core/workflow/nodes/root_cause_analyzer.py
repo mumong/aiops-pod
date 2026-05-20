@@ -303,6 +303,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 system_prompt=system_prompt,
                 question=user_message,
                 use_tools=False,
+                allow_text_fallback=True,
             )
             parsed = structured.model_dump() if structured is not None else None
             content = response.result if response is not None else ""
@@ -382,6 +383,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 system_prompt=system_prompt,
                 question=user_message,
                 use_tools=False,
+                allow_text_fallback=True,
             )
             if structured is not None:
                 return structured.model_dump(), thinking_events
