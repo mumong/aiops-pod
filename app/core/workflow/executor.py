@@ -32,8 +32,36 @@ from app.core.workflow.reporter import (
     update_metrics_from_state as _update_metrics_fn,
 )
 from app.core.context.archive import ContextArchive
+from app.core.remediation.approval import approval_store
+from app.core.remediation.agent import RemediationAgentConfig, RemediationAgentExecutor
+from app.core.remediation.executor import RemediationExecutor
+from app.core.remediation.models import RemediationRuntimeConfig
+from app.core.remediation.plans import extract_remediation_plan
 
 logger = logging.getLogger(__name__)
+
+
+def _int_config(config: Dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_config(config: Dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _invalid_remediation_plan_event(run_id: str, error: Exception) -> Dict[str, Any]:
+    return {
+        "type": "remediation_finished",
+        "run_id": run_id,
+        "status": "failed",
+        "reason": f"invalid remediation plan: {error}",
+    }
 
 
 class WorkflowExecutor:
@@ -584,6 +612,108 @@ class WorkflowExecutor:
                 "metrics": metrics.get_summary(),
             }
             last_stream_event_ts = time.time()
+
+            remediation_cfg = wf_config.get("remediation", {}) if isinstance(wf_config, dict) else {}
+            remediation_enabled = False
+            if isinstance(remediation_cfg, dict):
+                remediation_enabled = bool(remediation_cfg.get("enabled", False))
+            if remediation_enabled:
+                approval_timeout = 600
+                approval_mode = "review"
+                remediation_executor_type = "deterministic"
+                runtime_config = RemediationRuntimeConfig()
+                if isinstance(remediation_cfg, dict):
+                    try:
+                        approval_timeout = int(remediation_cfg.get("approval_timeout_seconds") or 600)
+                    except (TypeError, ValueError):
+                        approval_timeout = 600
+                    approval_mode = str(remediation_cfg.get("mode") or "review").strip().lower()
+                    remediation_executor_type = str(
+                        remediation_cfg.get("executor") or remediation_cfg.get("strategy") or "deterministic"
+                    ).strip().lower()
+                    runtime_config = RemediationRuntimeConfig(
+                        executor=remediation_executor_type,
+                        max_iterations=_int_config(remediation_cfg, "max_iterations", 4),
+                        max_write_actions=_int_config(remediation_cfg, "max_write_actions", 2),
+                        max_duration_seconds=_int_config(remediation_cfg, "max_duration_seconds", 900),
+                        verify_settle_seconds=_float_config(remediation_cfg, "verify_settle_seconds", 0.0),
+                    )
+                plan = None
+                invalid_plan_event = None
+                try:
+                    plan = extract_remediation_plan(full_answer)
+                except ValueError as exc:
+                    logger.warning(
+                        "🛠️ invalid remediation plan | run_id=%s error=%s",
+                        run_id,
+                        exc,
+                    )
+                    invalid_plan_event = _invalid_remediation_plan_event(run_id, exc)
+                if plan is not None:
+                    final_state["remediation_plan"] = {
+                        "remediation_available": plan.remediation_available,
+                        "fix_type": plan.fix_type,
+                        "risk_level": plan.risk_level,
+                        "requires_human_approval": plan.requires_human_approval,
+                        "issue_groups": plan.issue_groups,
+                        "basis": plan.basis,
+                        "actions": [action.__dict__ for action in plan.actions],
+                        "stop_conditions": plan.stop_conditions,
+                    }
+                if invalid_plan_event is not None:
+                    seq += 1
+                    event = {
+                        **invalid_plan_event,
+                        "id": f"{run_id}-remediation_finished-{seq}",
+                        "seq": seq,
+                        "ts_ms": int(time.time() * 1000),
+                    }
+                    yield event
+                    final_state["remediation_result"] = invalid_plan_event
+                    last_stream_event_ts = time.time()
+                    remediation_run = None
+                elif remediation_executor_type in {"react", "agent", "llm"}:
+                    remediation_executor = RemediationAgentExecutor(
+                        approval_store=approval_store,
+                        ai_call=self.ai_call,
+                    )
+                    remediation_run = remediation_executor.run(
+                        run_id=run_id,
+                        plan=plan,
+                        report=full_answer,
+                        approval_timeout_seconds=approval_timeout,
+                        approval_mode=approval_mode,
+                        config=RemediationAgentConfig(
+                            executor="react",
+                            max_iterations=runtime_config.max_iterations,
+                            max_write_actions=runtime_config.max_write_actions,
+                            max_duration_seconds=runtime_config.max_duration_seconds,
+                            verify_settle_seconds=runtime_config.verify_settle_seconds,
+                        ),
+                    )
+                else:
+                    remediation_executor = RemediationExecutor(approval_store=approval_store)
+                    remediation_run = remediation_executor.run(
+                        run_id=run_id,
+                        plan=plan,
+                        approval_timeout_seconds=approval_timeout,
+                        approval_mode=approval_mode,
+                    )
+                last_remediation_event = None
+                if remediation_run is not None:
+                    for remediation_event in remediation_run:
+                        last_remediation_event = remediation_event
+                        seq += 1
+                        event = {
+                            **remediation_event,
+                            "id": f"{run_id}-{remediation_event.get('type', 'remediation')}-{seq}",
+                            "seq": seq,
+                            "ts_ms": int(time.time() * 1000),
+                        }
+                        yield event
+                        last_stream_event_ts = time.time()
+                    if isinstance(last_remediation_event, dict):
+                        final_state["remediation_result"] = last_remediation_event
             
             # 发出结束事件
             seq += 1
@@ -666,6 +796,7 @@ class WorkflowExecutor:
             "evidence": "证据链采集",
             "rca": "根因分析",
             "conclusion": "汇总总结",
+            "remediation": "修复执行",
         }
         return name_map.get(node_id, node_id)
     

@@ -1,0 +1,48 @@
+# DeepSeek rootcause 全量自动化测试命令
+#
+# 场景文件：
+# test/pod_rootcause_e2e/test.deepseek-full.txt
+#
+# 覆盖：
+# volumemount / pending / imagepull / crashloop / configerror / oomkilled / notready
+# terminating / sandbox / evicted
+#
+# 规模：
+# 10 group，26 case；-n 50 时共 1300 次诊断。
+
+# 1. 先确认服务健康
+curl -fsS http://10.2.0.48:30800/health
+
+# 2. 前台执行，适合先看效果
+.venv/bin/python test/pod_rootcause_e2e/run_rootcause_suite.py \
+  --scenarios-file test/pod_rootcause_e2e/test.deepseek-full.txt \
+  -n 50 -c 2 \
+  --settle-seconds 25 \
+  --timeout 1200 \
+  --model deepseek \
+  --question "我的集群有什么问题" \
+  --url http://10.2.0.48:30800
+
+# 3. 后台执行，适合夜间跑
+nohup .venv/bin/python test/pod_rootcause_e2e/run_rootcause_suite.py \
+  --scenarios-file test/pod_rootcause_e2e/test.deepseek-full.txt \
+  -n 50 -c 2 \
+  --settle-seconds 25 \
+  --timeout 1200 \
+  --model deepseek \
+  --question "我的集群有什么问题" \
+  --url http://10.2.0.48:30800 \
+  > testreports/pod_rootcause_deepseek_full.log 2>&1 &
+
+# 4. 查看后台进度
+tail -f testreports/pod_rootcause_deepseek_full.log
+
+# 5. 查看进程
+ps -ef | grep -E 'run_rootcause_suite|run_rootcause_cases' | grep -v grep
+
+# 6. 查看最新报告目录
+ls -td testreports/pod_rootcause_suite_* | head -1
+
+# 7. 查看 suite 总汇总
+latest_dir="$(ls -td testreports/pod_rootcause_suite_* | head -1)"
+sed -n '1,220p' "$latest_dir/suite_summary.md"

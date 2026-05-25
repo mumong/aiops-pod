@@ -23,6 +23,21 @@ DEFAULT_CASES_FILE = ROOT / "cases.yaml"
 DEFAULT_SCENARIOS_FILE = ROOT / "test.txt"
 DEFAULT_NAMESPACE_MANIFEST = ROOT / "manifests/00-namespace.yaml"
 LEGACY_E2E_MANIFEST_DIR = REPO_ROOT / "test/e2e/manifests"
+ABNORMAL_POD_STATUSES = {
+    "ContainerCreating",
+    "CrashLoopBackOff",
+    "CreateContainerConfigError",
+    "CreateContainerError",
+    "ErrImagePull",
+    "Error",
+    "Evicted",
+    "Failed",
+    "ImageInspectError",
+    "ImagePullBackOff",
+    "Pending",
+    "Terminating",
+    "Unknown",
+}
 
 
 @dataclass(frozen=True)
@@ -113,6 +128,67 @@ def list_resource_names(namespace: str, resource: str, label: str, dry_run: bool
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def is_abnormal_pod_status(status: str) -> bool:
+    """Return whether a `kubectl get pods -A` STATUS should be cleaned.
+
+    The root-cause suite evaluates one injected fault at a time. Ad-hoc
+    diagnostic pods created outside the test namespace can pollute global pod
+    scans even if they are unrelated to the current case.
+    """
+    if status in ABNORMAL_POD_STATUSES:
+        return True
+    return status.startswith(("Init:", "PodInitializing"))
+
+
+def list_abnormal_pods_outside_namespaces(excluded_namespaces: set[str], dry_run: bool = False) -> List[tuple[str, str, str]]:
+    command = ["kubectl", "get", "pods", "-A", "--no-headers"]
+    print(f"$ {' '.join(command)}")
+    if dry_run:
+        return []
+    result = subprocess.run(command, cwd=str(REPO_ROOT), text=True, capture_output=True)
+    if result.returncode != 0:
+        if result.stderr:
+            print(result.stderr.strip())
+        return []
+
+    pods: List[tuple[str, str, str]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split(maxsplit=4)
+        if len(parts) < 4:
+            continue
+        namespace, name, _ready, status = parts[:4]
+        if namespace in excluded_namespaces:
+            continue
+        if is_abnormal_pod_status(status):
+            pods.append((namespace, name, status))
+    return pods
+
+
+def cleanup_non_e2e_abnormal_pods(excluded_namespaces: set[str], dry_run: bool = False) -> None:
+    pods = list_abnormal_pods_outside_namespaces(excluded_namespaces, dry_run=dry_run)
+    if not pods:
+        print(f"No abnormal pods outside namespaces: {', '.join(sorted(excluded_namespaces))}")
+        return
+    for namespace, name, status in pods:
+        print(f"Cleanup non-e2e abnormal pod: {namespace}/{name} status={status}")
+        run_command(
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "delete",
+                "pod",
+                name,
+                "--ignore-not-found=true",
+                "--wait=false",
+                "--force",
+                "--grace-period=0",
+            ],
+            dry_run=dry_run,
+            check=False,
+        )
+
+
 def cleanup_namespace(namespace: str, dry_run: bool = False) -> None:
     """Clear aiops-e2e test resources before every injected case."""
     run_command(
@@ -160,7 +236,11 @@ def cleanup_namespace(namespace: str, dry_run: bool = False) -> None:
     )
 
 
-def cleanup_known_resources(suite_cases: List[SuiteCase], dry_run: bool = False) -> None:
+def cleanup_known_resources(
+    suite_cases: List[SuiteCase],
+    dry_run: bool = False,
+    cleanup_non_e2e_abnormal: bool = True,
+) -> None:
     for item in suite_cases:
         for command in item.cleanup:
             run_command(command, dry_run=dry_run, shell=True, check=False)
@@ -192,6 +272,8 @@ def cleanup_known_resources(suite_cases: List[SuiteCase], dry_run: bool = False)
     namespaces = sorted({item.case.namespace for item in suite_cases})
     for namespace in namespaces:
         cleanup_namespace(namespace, dry_run=dry_run)
+    if cleanup_non_e2e_abnormal:
+        cleanup_non_e2e_abnormal_pods(set(namespaces), dry_run=dry_run)
 
 
 def apply_case(item: SuiteCase, dry_run: bool = False) -> None:
@@ -408,6 +490,11 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="model name shown in child reports")
     parser.add_argument("--include-disabled", action="store_true", help="include disabled/manual cases")
     parser.add_argument("--skip-cleanup", action="store_true", help="do not clean resources between cases")
+    parser.add_argument(
+        "--skip-non-e2e-abnormal-cleanup",
+        action="store_true",
+        help="do not delete abnormal pods outside the selected test namespaces during cleanup",
+    )
     parser.add_argument("--keep-last", action="store_true", help="do not clean the final case after the test")
     parser.add_argument("--dry-run", action="store_true", help="print commands without executing them")
     args = parser.parse_args()
@@ -444,7 +531,11 @@ def main() -> None:
             print("=" * 72)
             try:
                 if not args.skip_cleanup:
-                    cleanup_known_resources(selected, dry_run=args.dry_run)
+                    cleanup_known_resources(
+                        selected,
+                        dry_run=args.dry_run,
+                        cleanup_non_e2e_abnormal=not args.skip_non_e2e_abnormal_cleanup,
+                    )
                 apply_case(item, dry_run=args.dry_run)
                 print(f"等待 {args.settle_seconds}s 让异常状态稳定...")
                 if not args.dry_run and args.settle_seconds > 0:
@@ -456,7 +547,11 @@ def main() -> None:
                 print(f"Case failed, continue next: {item.case.id}: {exc}", file=sys.stderr)
             finally:
                 if not args.skip_cleanup and (index < len(selected) or not args.keep_last):
-                    cleanup_known_resources(selected, dry_run=args.dry_run)
+                    cleanup_known_resources(
+                        selected,
+                        dry_run=args.dry_run,
+                        cleanup_non_e2e_abnormal=not args.skip_non_e2e_abnormal_cleanup,
+                    )
     finally:
         write_suite_summary(result_root, selected, args, started, outcomes=outcomes)
         print(f"\nSuite report: {result_root}")

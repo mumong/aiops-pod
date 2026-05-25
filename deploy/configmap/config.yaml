@@ -9,6 +9,30 @@ metadata:
   namespace: aiops
 data:
   config.yaml: |
+    # ========================================================================
+    # AIOps Copilot Runtime Config
+    # ========================================================================
+    # 常用修改入口:
+    # 1. 模型思考开关: llm.extra_body.chat_template_kwargs.enable_thinking
+    # 2. MCP 工具开关: mcp_servers.<server>.enabled
+    # 3. 诊断节点开关/步数: workflow.nodes / workflow.max_steps
+    # 4. 修复执行方式: workflow.remediation
+    # 5. 流式输出和上下文压缩: workflow.think_stream / workflow.context_compaction
+    # 6. 质量指标和联邦查询: metrics / federation
+    #
+    # 修复模式快速参考:
+    # - workflow.remediation.executor=deterministic:
+    #   按 conclusion JSON 中的 dry_run/execute/verify 命令顺序执行，速度快。
+    # - workflow.remediation.executor=react:
+    #   LLM 根据真实 observation 多轮决策，适合“命令执行后仍未恢复”的闭环修复。
+    # - workflow.remediation.mode=review:
+    #   plan 和每个写动作都需要人工 approve。
+    # - workflow.remediation.mode=auto:
+    #   自动执行，适合 e2e 或受控实验环境，生产谨慎开启。
+
+    # ------------------------------------------------------------------------
+    # 1. LLM / Model Transport
+    # ------------------------------------------------------------------------
     # LLM 连接与模型容量配置只从 Secret/Env 注入：
     # LLM_API_KEY / LLM_MODEL / LLM_API_BASE / MODEL_CONTEXT_WINDOW /
     # AIOPS_TOKENIZER_JSON_PATH / AIOPS_TIKTOKEN_ENCODING
@@ -20,14 +44,20 @@ data:
       # business logic.
       extra_body:
         chat_template_kwargs:
-          # enable_thinking: false
-          enable_thinking: true
+          enable_thinking: false
+          # enable_thinking: true
 
+    # ------------------------------------------------------------------------
+    # 2. Language / i18n
+    # ------------------------------------------------------------------------
     # i18n 配置 控制提示词和输出形式是中文zh还是英文en
     i18n:
       prompt_language: zh
       response_language: zh
 
+    # ------------------------------------------------------------------------
+    # 3. Tooling / MCP Servers
+    # ------------------------------------------------------------------------
     # 内置工具集配置（全部关闭，所有能力由 MCP Server 提供）
     toolsets: {}
 
@@ -89,6 +119,9 @@ data:
           mode: "sse"
         enabled: false
 
+    # ------------------------------------------------------------------------
+    # 4. Diagnosis Workflow
+    # ------------------------------------------------------------------------
     # 工作流配置
     workflow:
       # RCA 节点调用模式: lite(不带工具,避免重复) / full(原有全工具模式)
@@ -108,67 +141,55 @@ data:
         rca: 0
         conclusion: 0
 
-      # 统一结构化运行时:
-      # layer/evidence/rca 通过 Pydantic 产出机器可消费结构化结果；
-      # conclusion 是面向人的最终 Markdown 报告，默认不走 Pydantic，避免模板遵循被 schema 削弱。
+      # 结构化运行时: 控制 layer/evidence/rca 是否优先产出 Pydantic 结构化结果。
       structured_runtime:
         enabled: true
         fallback_enabled: true
-        nodes:
-          layer: true
-          evidence: true
-          rca: true
-          conclusion: true
 
-      # 节点动态提前停止开关:
-      # layer=true: 有效结构化 JSON 被 AICall 捕获后可提前结束本轮 agent
-      # evidence=true: critical/important 证据满足后 stop_checker 可提前结束采证
-      # 如需对比复杂场景下工具采集充分性，可临时关闭对应节点早停。
+      # 节点高级行为: 默认关闭 early_stop，避免复杂场景采证不足。
       layer:
-        # 使用 LangChain create_agent(response_format=LayerOutput)：
-        # 工具调用和 LayerOutput Pydantic 结构化输出在同一次 agent loop 内完成。
-        agent_structured_output: true
-        # 仅当 OpenAI-compatible 网关不支持 agent response_format 时，降级为旧 layer_extract。
-        extract_fallback: true
         early_stop:
           enabled: false
       evidence:
-        # 使用 LangChain create_agent(response_format=EvidenceCollectionOutput)：
-        # 计划生成、真实工具采证、结构化 evidence 输出在同一次 agent loop 内完成。
-        agent_structured_output: true
-        # 仅当 agent structured output 不可用时，降级为旧的 evidence_plan 预生成 + 执行模式。
-        plan_precall_fallback: true
         early_stop:
           enabled: false
 
       conclusion:
-        # diagnosis 默认使用 CONCLUSION_FORMATTER_PROMPT 纯文本 Markdown 输出。
-        # 如需回到旧 ConclusionOutput 结构化路径，可显式设置 structured_output: true。
-        structured_output: false
-        # 这里控制不同模式的输出预算：QUERY 只需要短表格摘要，诊断保留完整报告空间。
+        # 最终报告输出 token 上限；query 短答，diagnosis 完整报告。
         max_tokens:
           query: 1024
           diagnosis: 8192
 
-      # 本地推理模型 `<think>` 
-      # full=完整展示（默认） / truncated=只展示前 max_chars 字符 / hidden=不展示
+      # --------------------------------------------------------------------
+      # 4.1 Post-Diagnosis Remediation
+      # --------------------------------------------------------------------
+      # 修复执行: executor=deterministic 固定执行计划；executor=react 由 LLM 多轮观察后决策。
+      remediation:
+        enabled: true
+        executor: react
+        mode: review                 # review=人工审批；auto=自动执行
+        approval_timeout_seconds: 600
+        max_iterations: 10           # react 最大思考/观察轮次
+        max_write_actions: 10        # react 最多执行多少个写动作
+        max_duration_seconds: 900    # react 总耗时上限
+        verify_settle_seconds: 5   # 写动作后等待再验证单位秒
+
+      # --------------------------------------------------------------------
+      # 4.2 Streaming / Context Control
+      # --------------------------------------------------------------------
+      # `<think>` 展示: full=完整展示；truncated=截断展示；hidden=隐藏。
       think_stream:
         # mode: hidden
+        # mode: truncated
         mode: full
         max_chars: 1200
 
-      # 工具 observation 回注给主 Agent 前的摘要策略:
-      # rule=默认，规则摘要优先，超长或上下文压力过高才调用 LLM 兜底
-      # ai=每次工具返回都强制调用 LLM summarizer，再回注给主 Agent
+      # 工具输出摘要: rule=规则摘要；ai=额外 LLM 摘要，更慢。
       observation_summary:
         mode: rule
         max_chars: 3000
 
-      # Evidence 运行时上下文压缩:
-      # enabled=true 时，仅对 context_window <= max_context_window 的模型生效。
-      # 当 evidence 当前估算上下文使用率达到 trigger_ratio 后，执行一次
-      # Pydantic structured lite 压缩，将历史 ai_messages/tool_observations
-      # 汇总为 context_summary，并保留 evidence_plan/tool_result 骨架供下游消费。
+      # 上下文压缩: evidence 上下文超过 trigger_ratio 时压缩历史工具观察。
       context_compaction:
         enabled: true
         nodes:
@@ -178,6 +199,9 @@ data:
         max_compactions_per_call: 1
         summary_max_tokens: 1200
 
+    # ------------------------------------------------------------------------
+    # 5. Quality Metrics
+    # ------------------------------------------------------------------------
     # 质量指标配置
     metrics:
       enabled: false  # 是否在输出中显示质量指标（false 时只显示性能统计和诊断追踪）
@@ -213,6 +237,9 @@ data:
         with_evidence: 0.80
         with_root_cause: 0.75
 
+    # ------------------------------------------------------------------------
+    # 6. Federation
+    # ------------------------------------------------------------------------
     # 联邦查询配置
     federation:
       enabled: true

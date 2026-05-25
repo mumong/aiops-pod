@@ -12,6 +12,7 @@ from app.core.service import HolmesService
 from app.core.prompts import (
     EVIDENCE_COLLECTOR_PROMPT,
     LAYER_CLASSIFIER_PROMPT,
+    REMEDIATION_PLAN_PROMPT,
     get_query_evidence_normalization_prompt,
     get_conclusion_mode_instruction,
     get_workflow_prompt,
@@ -822,6 +823,9 @@ def test_conclusion_llm_prompt_includes_structured_diagnosis_context():
     assert "rca_root_cause: 节点出口网络超时导致镜像拉取失败" in prompt
     assert "rca_confidence: 84%" in prompt
     assert "rca_limitations: 未验证节点出口网络" in prompt
+    assert "## 🧩 结构化修复计划" in prompt
+    assert "verify_command 禁止使用当前异常 Pod 的固定名称" in prompt
+    assert "kubectl rollout status deployment/<name>" in prompt
 
 
 def test_conclusion_prompt_uses_compact_structured_context_without_full_raw_duplication():
@@ -1212,6 +1216,14 @@ def test_workflow_prompts_do_not_contain_json_output_templates():
             continue
         for phrase in forbidden:
             assert phrase not in prompt
+
+
+def test_remediation_plan_prompt_centralizes_workload_verify_rules():
+    assert "REMEDIATION_PLAN_PROMPT" not in get_workflow_prompt("conclusion")
+    assert "verify_command 禁止使用当前异常 Pod 的固定名称" in REMEDIATION_PLAN_PROMPT
+    assert "kubectl rollout status deployment/<name>" in REMEDIATION_PLAN_PROMPT
+    assert "仅因为探测命令返回某个常见名称 NotFound" in REMEDIATION_PLAN_PROMPT
+    assert "查询 workload 模板" in REMEDIATION_PLAN_PROMPT
 
 
 def test_conclusion_prompt_supports_independent_response_language():

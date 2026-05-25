@@ -7,6 +7,7 @@
 - [架构说明](/root/huhu/agent/combine-aiops-mcp/robusta/docs/ARCHITECTURE.md)
 - [工作流上下文流转说明](/root/huhu/agent/combine-aiops-mcp/robusta/docs/工作流上下文流转说明.md)
 - [工作流结构化运行时演进说明（2026-05-09）](/root/huhu/agent/combine-aiops-mcp/robusta/docs/workflow-structured-runtime-evolution-2026-05-09.md)
+- [修复执行与人工审批使用说明](/root/huhu/agent/combine-aiops-mcp/robusta/docs/remediation-usage.md)
 
 ## 1. 部署前准备
 

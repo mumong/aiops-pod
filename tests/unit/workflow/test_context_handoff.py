@@ -586,6 +586,55 @@ def test_layer_handoff_builds_issue_groups_from_current_abnormal_pods():
     assert summary["source"] == "kubectl_get_by_kind_in_cluster"
 
 
+def test_layer_guard_rejects_healthy_when_current_tool_scan_has_abnormal_pods():
+    node = LayerClassifierNode()
+    layer_result = {
+        "layer": "HEALTHY",
+        "derived_layer": "HEALTHY",
+        "layers": ["HEALTHY"],
+        "confidence": 0.5,
+        "reasoning": "模型误判为健康",
+        "abnormal_pods": [{"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}],
+        "pod_status_keyword": "Terminating",
+        "pod_abnormal_type": "TerminatingStuck",
+    }
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "structured": {
+                "header": "NAMESPACE NAME READY STATUS RESTARTS AGE IP NODE LABELS",
+                "status_counts": {"Running": 60, "Terminating": 1},
+                "selected_rows": [
+                    "aiops-e2e terminating-stuck 0/1 Terminating 0 42m 172.16.166.189 node1 pod_abnormal_type=TerminatingStuck"
+                ],
+            },
+            "result": "Pod table",
+        }
+    ]
+    handoff = node._build_layer_handoff(
+        question="我的集群有什么问题",
+        layer_result=layer_result,
+        layer=Layer.HEALTHY,
+        layers=[Layer.HEALTHY],
+        thinking_events=events,
+    )
+
+    layer, layers = node._guard_healthy_with_active_abnormalities(
+        layer_result=layer_result,
+        layer_handoff=handoff,
+        layer=Layer.HEALTHY,
+        layers=[Layer.HEALTHY],
+    )
+
+    assert layer == Layer.L1
+    assert layers == [Layer.L1]
+    assert layer_result["layer"] == "L1"
+    assert handoff["layer"] == "L1"
+    assert handoff["current_abnormal_summary"]["total_abnormal"] == 1
+
+
 def test_layer_handoff_merges_current_scan_when_lite_output_omits_secondary_issue():
     node = LayerClassifierNode()
     layer_result = {
