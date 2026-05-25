@@ -1,320 +1,429 @@
-# 小模型稳定化架构说明
+# 32B 小模型稳定化研究报告
 
-本文用于交接和复盘：从 DeepSeek structured-output 版本开始，到当前 `qwen-before-architecture` 分支，为了让 Qwen3-32B-AWQ 这类本地小模型稳定完成 K8s Pod 异常诊断，系统做了哪些架构和实现层面的优化。
+本文用于复盘从 DeepSeek 大模型/结构化输出版本切换到 Qwen3-32B-AWQ 这类本地小模型后，为了让 AIOps Copilot 稳定完成 Kubernetes Pod 异常诊断所做的体系化优化。
 
-核心结论：这轮优化不是单纯改 prompt，而是把“不稳定的模型自由发挥”收敛成一套可审计的工作流合同。模型仍然负责理解问题、选择工具和生成解释，但代码层负责限定上下文、结构化边界、证据统计、runbook 范围和测试口径。
+这不是一次简单的 prompt 调整。实际工作更接近一次“把自由生成式 Agent 改造成可审计诊断系统”的工程研究：小模型仍然负责理解用户意图、选择工具、组织解释，但系统通过工作流拆分、Pydantic 合同、上下文压缩、工具摘要、runbook 收敛、证据统计和 E2E 标注集，把模型的自由度限制在可验证、可复盘、可迭代的范围内。
 
-## 1. 历史时间线
+## 1. 研究结论
 
-| 时间点 | 提交/分支 | 主要含义 |
-|---|---|---|
-| 2026-05-12 | `bbaede4` `befor change articture` | 结构化架构改造前基线。仍存在 prompt JSON、长上下文、evidence plan 不稳定等问题。 |
-| 2026-05-12 | `fd416af` `structoutput json deepseek` / `structured-deepseek` | DeepSeek 上验证 LangChain/Pydantic structured output。核心是证明结构化输出可以被后续节点消费。 |
-| 2026-05-13 | `1040651` `qwen-before-architecture` 起点 | 为 Qwen 小模型回到更兼容的架构，并开始收敛 runbook、Pod abnormal 测试和自动 suite。 |
-| 2026-05-13 | `d22af90` | 大规模小模型稳定化：工具摘要增强、evidence prompt 强化、rootcause 精确匹配测试体系、更多 manifest case。 |
-| 2026-05-18 | `ecd6b03` | 继续补充 describe/yaml 关键字段、backlog 自动化 case、测试 README 和报告体系。 |
+### 1.1 核心结论
 
-### DeepSeek 分支做了什么
+32B 小模型在 K8s 诊断 Agent 中最主要的问题不是“完全不会诊断”，而是稳定性不足：
 
-`structured-deepseek` 的重点是确认“模型和网关支持结构化输出”：
+- 长上下文下容易注意力漂移，忘记当前 Pod、namespace、异常状态。
+- 工具调用 loop 中容易过度探索、重复调用、按 runbook 全量巡检。
+- 结构化输出容易失败，尤其是 JSON/Pydantic schema、RCAOutput、evidence_plan 这类合同。
+- 同一种 Pod 异常类型下容易只判断大类，不区分精确根因。
+- 最终报告会把次要信号写成主因，例如 Terminating 场景误写 finalizer、OOMKilled、kubelet。
 
-- `AICall.call_structured()` 使用 LangChain `with_structured_output(schema)`。
-- `LayerOutput`、`EvidencePlanOutput` 等 Pydantic schema 开始成为节点边界。
-- structured call 默认关闭 streaming，避免流式中间块破坏结构化结果。
-- 文本 JSON fallback 默认关闭，避免模型输出 fenced JSON 被误当作可靠合同。
-
-这解决的是“结构化输出能不能被后续消费”的问题。
-
-### Qwen 小模型分支做了什么
-
-Qwen 分支解决的是“推理能力、注意力、上下文容量、工具选择都更弱时，如何仍然稳定诊断”的问题。核心变化包括：
-
-- 限制模型思考模式，避免 Qwen 先生成大量 `<think>` 再工具调用。
-- 减少跨节点大文本传递，用 `layer_handoff` 代替 `layer_full_analysis`。
-- 工具原始输出落盘，回注给模型的是 bounded summary。
-- runbook 不再当大知识库灌入，而是作为 guide，由 layer 确认后 evidence 阶段按需注入。
-- evidence plan 由 Pydantic 生成和校验，不再从自由文本里猜计划。
-- 证据完整度从“工具调用成功率”改成“计划项是否被真实工具结果满足”。
-- 测试从“异常类型对不对”升级到“同一异常类型下根因是否精确匹配”。
-
-## 2. 小模型的真实问题
-
-这轮优化针对的是 Qwen3-32B-AWQ 这类本地模型的几个实际问题。
-
-| 问题 | 旧表现 | 风险 |
-|---|---|---|
-| JSON 不稳定 | prompt 要求输出 JSON，但模型可能输出自然语言、fenced JSON、截断 JSON 或字段类型漂移 | 下游无法稳定消费，或者错误消费 |
-| 注意力漂移 | 上游 layer 大段分析、runbook、工具结果全部塞给 evidence/RCA | 模型忘记当前 Pod、namespace、异常状态，开始泛化巡检 |
-| 工具输出过长 | `kubectl describe/get yaml/get pods -A` 原文进入 agent loop | 小模型有效上下文被工具噪音占满 |
-| 计划和执行脱节 | 模型先写 plan，但执行时不按 plan 或根本不调用工具 | evidence 完整度虚高或虚低 |
-| runbook 过度展开 | runbook 列了所有可能原因，模型逐个查 PVC/PV/StorageClass，即使事件已明确是 ConfigMap 缺失 | 耗时长，且容易错判根因 |
-| 负向证据误判 | `NotFound`、空 events、工具失败被当作“没采集”或普通失败 | 缺失对象类问题无法正确确认 |
-| 同类异常根因混淆 | VolumeMountFailed 只判断 L0 就算对，没区分 ConfigMap/Secret/PVC/hostPath | 根因准确率虚高 |
-
-所以优化目标不是“让 prompt 更详细”，而是让模型每一步都被结构、上下文和统计口径约束。
-
-## 3. 总体架构收敛
-
-当前 `/ask` 仍然是四节点：
+有效方法不是继续堆更长 prompt，而是把任务拆成多个硬边界：
 
 ```text
 用户问题
-  -> layer
-      识别当前异常、异常组、runbook、实体、状态分布
-  -> evidence
-      基于 layer_handoff 生成 Pydantic evidence_plan，并调用真实工具采证
-  -> rca
-      不再调工具，只基于 evidence 做因果收敛
-  -> conclusion
-      面向用户输出 Markdown 报告，证据统计以后端结构化值为准
+  -> layer：只定位当前异常对象和异常族
+  -> evidence：只围绕 layer_handoff 采集真实证据
+  -> rca：只基于 evidence 做因果收敛，不重新调用工具
+  -> conclusion：只渲染报告，关键指标以后端结构化结果为准
 ```
 
-`/query` 被切成快路径：
+最终形成的有效策略可以概括为：
+
+- 用 `layer_handoff` 替代跨节点大文本，给小模型固定注意力锚点。
+- 用 raw/structured/summary 三件套治理工具输出，让模型只看短事实，完整原文落盘。
+- 用 Pydantic schema 和 `response_format` 把关键节点从“写 JSON”改成“生成可校验对象”。
+- 用 evidence_plan + tool_result 匹配，把“计划”和“证据”分离。
+- 用 runbook guide 化，避免小模型把 runbook 当成全量 checklist。
+- 用 rootcause E2E 标注集衡量精确根因，而不是只看 layer 是否正确。
+
+### 1.2 量化结果
+
+当前 `test/pod_rootcause_e2e` 已汇总两批稳定性测试结果：
+
+| 数据集 | 覆盖 | 诊断次数 | 说明 |
+|---|---:|---:|---|
+| `testreports/pod_rootcause_suite_20260513_184055` | 7 group / 21 case | 1050 | v1-core 稳定夜间检查 |
+| `testreports/pod_rootcause_suite_20260519_162052` | 3 group / 5 case | 250 | backlog-auto：terminating/sandbox/evicted |
+| 合计 | 10 group / 26 case | 1300 | 当前自动化可复现根因套件 |
+
+整体结果：
+
+| 指标 | 当前结果 |
+|---|---:|
+| 根因准确率 | 82.2% |
+| Runbook 覆盖率 | 99.6% |
+| 平均证据率 | 90.7% |
+| 平均 MTTR | 5.4m |
+
+Group 级结果：
+
+| Group | Case | Run | 根因准确率 | Runbook 覆盖率 | 平均证据率 | 平均 MTTR |
+|---|---:|---:|---:|---:|---:|---:|
+| volumemount | 5 | 250 | 98.4% | 100.0% | 91.2% | 4.2m |
+| pending | 4 | 200 | 79.5% | 100.0% | 94.3% | 5.2m |
+| imagepull | 3 | 150 | 78.7% | 100.0% | 82.1% | 5.5m |
+| crashloop | 3 | 150 | 95.3% | 100.0% | 90.5% | 6.3m |
+| configerror | 3 | 150 | 80.7% | 100.0% | 90.6% | 4.3m |
+| oomkilled | 1 | 50 | 100.0% | 100.0% | 95.8% | 6.0m |
+| notready | 2 | 100 | 60.0% | 95.0% | 90.5% | 7.8m |
+| terminating | 3 | 150 | 56.7% | 100.0% | 95.9% | 5.5m |
+| sandbox | 1 | 50 | 96.0% | 100.0% | 93.3% | 6.6m |
+| evicted | 1 | 50 | 78.0% | 100.0% | 76.9% | 6.0m |
+
+这些数据说明：小模型在工具证据充足、状态信号清晰的场景上已经可用，例如 volumemount、crashloop、oomkilled、sandbox；但在需要区分相近生命周期原因的场景上仍然薄弱，例如 terminating、notready。
+
+## 2. 背景：为什么 32B 小模型会出问题
+
+### 2.1 大模型到小模型的能力差异
+
+DeepSeek 这类线上大模型对长上下文、多轮工具调用、隐式格式约束、复杂因果链更鲁棒。切换到 Qwen3-32B-AWQ 后，模型不是不能做，而是更容易在以下边界失稳：
+
+| 维度 | 大模型常见表现 | 32B 小模型常见表现 |
+|---|---|---|
+| 长上下文 | 能从长工具输出里抓重点 | 被 describe/yaml/events 噪声冲散 |
+| 工具选择 | 能按目标挑选关键工具 | 容易重复查、泛化查、查错资源 |
+| 结构化输出 | 更容易遵守 JSON/schema | 容易输出自然语言、字段漂移、结构缺失 |
+| 多阶段记忆 | 能记住上游意图 | 下游 evidence/RCA 可能忘记 layer 的主对象 |
+| runbook 使用 | 能选择性参考 | 容易把 runbook 每条都当 checklist |
+| 因果排序 | 更能区分主因/次因 | 容易把任何出现过的错误都当根因 |
+
+根本原因是小模型的有效注意力、指令遵循、复杂状态管理和结构化生成能力都更弱。Agent 诊断链路又天然包含长上下文、多工具、多阶段状态、多格式输出，因此小模型的问题会被放大。
+
+### 2.2 实际暴露的问题
+
+这轮优化中暴露过的典型问题包括：
+
+| 问题 | 真实表现 | 影响 |
+|---|---|---|
+| evidence_plan 不稳定 | prompt 要求先写计划，但模型直接调用工具，或计划 JSON 不可解析 | 证据完整度无法可靠计算 |
+| RCA 结构化失败 | evidence 已经采集成功，但 RCAOutput 没返回合法 Pydantic 对象 | RCA 走低置信度兜底 |
+| 工具摘要缺关键字段 | describe summary 没暴露 `preStop`、`terminationGracePeriodSeconds`、`finalizers` | Terminating 根因误判 |
+| 表格输出替代 YAML | 模型计划检查 finalizers/deletionTimestamp，却实际调用普通 get 表格 | 关键字段不可见 |
+| runbook 过度执行 | VolumeMountFailed 明明事件显示 configmap not found，模型还继续查 PVC/PV/StorageClass | 耗时增加，根因漂移 |
+| 中文语义匹配漏判 | 报告写“配置文件不存在”，自动 signature 只匹配 `not found` | 评测低估真实准确率 |
+| 次要信号盖过主因 | Terminating 场景中看到 Exit Code 137 或 Killing，就写 OOM/kubelet/finalizer | 根因准确率下降 |
+| 最终报告幻觉 | 工具输出 `finalizers: <none>`，conclusion 却写“存在 finalizers” | 用户结论错误 |
+
+这些问题说明：如果只依赖“更详细 prompt”，小模型仍会在工具选择、证据排序和结构化合同上不稳定。
+
+## 3. 研究方法
+
+### 3.1 实验对象
+
+研究对象是 `/ask` 诊断链路和 Pod rootcause E2E 套件。
+
+主链路：
 
 ```text
-用户查询
-  -> layer(query direct)
-  -> conclusion(render QueryResult)
+layer -> evidence -> rca -> conclusion
 ```
 
-这个拆分很重要。查询类问题不再进入 evidence/RCA，避免“PromQL 查询失败”被小模型误解释成集群故障。
+测试对象：
 
-## 4. 模型 transport 层优化
+- Pod 异常类型：VolumeMountFailed、Pending、ImagePull、CrashLoop、ConfigError、OOMKilled、NotReady、Terminating、Sandbox、Evicted。
+- 精确根因：ConfigMap 不存在、Secret 不存在、PVC 不存在、hostPath 错误、nodeSelector 不匹配、CPU/Memory 不足、镜像不存在、pull secret 缺失、preStop 卡住、RuntimeClass handler 无效等。
 
-配置位置：
+### 3.2 评价指标
 
-- `deploy/configmap/config.yaml`
-- `app/core/aicall/client.py`
-- `tests/unit/aicall/test_event_loop_safety.py`
+评价不再只看“有没有说对异常类型”，而是看精确根因：
 
-### 4.1 Qwen `enable_thinking=false`
-
-当前 ConfigMap 中配置：
-
-```yaml
-llm:
-  extra_body:
-    chat_template_kwargs:
-      enable_thinking: false
-      # enable_thinking: true
-```
-
-这不是“隐藏 think 输出”，而是传给 Qwen chat template 的生成策略。关闭后，模型少生成一段 reasoning token，通常会更快进入最终回答或 tool call。
-
-对诊断链路的价值：
-
-- 减少每个节点的首 token 等待。
-- 降低 `<think>` 混入 JSON/structured output 的概率。
-- 减少 agent loop 中 AI message 的累计上下文。
-- 对工具调用型任务更稳定，因为诊断依据来自真实工具结果，而不是长思考。
-
-保留注释 `enable_thinking: true` 是为了未来需要观察推理过程时能快速开启。
-
-### 4.2 结构化输出禁用 streaming
-
-`AICall._call_native_structured()` 创建模型时传 `disable_streaming=True`。
-
-原因：
-
-- structured output 要一次性拿到完整对象。
-- 流式输出中可能包含中间块、reasoning 块或不完整 JSON。
-- 小模型网关对 streaming + structured 的兼容性更差。
-
-### 4.3 文本 JSON fallback 默认关闭
-
-`AICall.call_structured()` 默认只接受原生 structured output：
-
-```python
-use_native = True
-allow_text_fallback = False
-```
-
-如果模型或网关不支持原生 structured output，就返回 `None`，而不是偷偷从自然语言里解析 JSON。
-
-这个决策牺牲了短期兼容性，但换来边界可信：
-
-- 不把模型随手写的 fenced JSON 当作合同。
-- 不让“看起来像 JSON”的文本污染后续节点。
-- 让不支持 structured output 的模型尽早暴露问题。
-
-## 5. Pydantic 结构化边界
-
-核心文件：
-
-- `app/core/workflow/schemas.py`
-- `app/core/aicall/client.py`
-- `app/core/workflow/structured_runtime.py`
-
-关键 schema：
-
-| Schema | 作用 |
+| 指标 | 含义 |
 |---|---|
-| `LayerOutput` | layer 的结构化结论，包含层级、异常 Pod、异常类型、场景、QueryResult |
-| `LayerHandoff` | 下游真正消费的紧凑交接对象 |
-| `IssueGroup` | 多异常组表达，例如 ImagePull、Terminating 同时存在 |
-| `EvidencePlanOutput` | evidence 采证计划 |
-| `EvidenceCollectionOutput` | evidence 采集结果、完整度、未采集原因 |
-| `RCAOutput` | 根因、因果链、限制项 |
-| `QueryResult` | `/query` 结果表格 |
-| `ContextCompactionSummary` | evidence 运行时上下文压缩摘要 |
+| 根因准确率 | 最终报告 root cause 是否命中 case 的 `root_cause_signature` |
+| Runbook 覆盖率 | 是否使用了期望 runbook |
+| 平均证据率 | evidence plan/tool_result 的实际覆盖情况 |
+| 平均 MTTR | 单次诊断端到端耗时 |
 
-设计原则：
+`pod_rootcause_e2e` 与旧的 `pod_abnormal_e2e` 区别：
 
-- prompt 描述语义，Pydantic 约束结构。
-- LLM 可以字段不稳定，但下游只消费 Pydantic 校验后的对象。
-- state 中保留 JSON 字符串是兼容旧前端和归档，节点内部优先用 Pydantic 对象或校验后的 dict。
+- `pod_abnormal_e2e`：判断异常大类，例如 L0 VolumeMountFailed。
+- `pod_rootcause_e2e`：判断同类异常下的具体根因，例如 ConfigMap 不存在、Secret 不存在、PVC 不存在。
 
-## 6. `layer_handoff`：小模型注意力锚点
+### 3.3 研究路径
 
-核心文件：
+这轮工作不是一次完成，而是经历了多轮探索：
 
-- `app/core/workflow/nodes/layer_classifier.py`
+| 阶段 | 探索方向 | 结果 |
+|---|---|---|
+| DeepSeek structured-output | 验证 Pydantic structured output 能不能作为节点边界 | 可行，形成 `call_structured()` 和 schema 思路 |
+| Qwen 小模型迁移 | 发现同样 prompt 在小模型下 JSON、工具调用、注意力都更不稳定 | 需要架构约束，而不是只改 prompt |
+| 上下文治理 | 去掉 `layer_full_analysis` 下游传递，改为 `layer_handoff` | 下游更稳定，实体和异常状态不易漂移 |
+| 工具摘要治理 | raw 落盘，summary 回注，structured 提取关键字段 | 大幅减少工具噪声 |
+| evidence 结构化 | 用 EvidencePlanOutput / EvidenceCollectionOutput 约束采证 | 计划、工具、证据统计可审计 |
+| runbook 收敛 | runbook 变成 guide，不再让模型全量巡检 | 工具调用减少，根因更聚焦 |
+| rootcause E2E | 用 26 个 case、1300 次诊断做量化 | 暴露 terminating/notready 等剩余薄弱点 |
 
-旧问题是 `layer_full_analysis` 太大，下游 evidence 和 RCA 会在上游长文本里漂移。现在 layer 生成完整分析后落盘，下游默认只拿 `layer_handoff`。
+## 4. 架构优化一：四节点职责拆分
 
-`layer_handoff` 重点字段：
+### 4.1 旧问题
+
+旧链路更接近“一个 Agent 自己查、自己想、自己写报告”。这对大模型还能勉强工作，但对小模型会产生几个问题：
+
+- 上游定位、证据、根因和报告混在一起，模型容易提前下结论。
+- layer 阶段拿到的大段工具结果继续传给 evidence/RCA/conclusion。
+- evidence 阶段既要规划、又要执行、又要总结，格式和工具调用互相干扰。
+- RCA 阶段如果继续调工具，会重新展开排查，甚至推翻 evidence。
+
+### 4.2 最终方案
+
+把工作流拆成四个节点：
+
+| 节点 | 只做什么 | 不做什么 |
+|---|---|---|
+| layer | 扫描当前异常 Pod、识别异常族、匹配 runbook、生成 handoff | 不做深度采证，不写最终报告 |
+| evidence | 按 handoff 和 runbook guide 采集真实证据 | 不泛化巡检，不把计划/runbook/archive 当证据 |
+| rca | 基于 evidence 做因果链和根因收敛 | 默认不再调用工具 |
+| conclusion | 渲染 Markdown 报告 | 不自行计算证据率、runbook 覆盖率 |
+
+这等于把小模型的任务从“全栈自由诊断”降解成多个局部任务。每个局部任务的输入更短、职责更窄、输出更容易校验。
+
+### 4.3 为什么有效
+
+小模型最怕同时处理多种目标。拆分后：
+
+- layer 不需要写修复建议，只要找当前异常。
+- evidence 不需要决定最终根因，只要验证事实。
+- RCA 不需要调用工具，只要基于已采证据排序。
+- conclusion 不需要重新推理指标，只负责表达。
+
+这使每一步的错误面变小，也让错误更容易定位。
+
+## 5. 架构优化二：`layer_handoff` 注意力锚点
+
+### 5.1 旧问题
+
+旧的 `layer_full_analysis` 会把 layer 阶段完整分析和工具原始输出继续传给下游。对小模型来说，这会造成注意力漂移：
+
+- evidence 忘记主 Pod，去查其他 namespace。
+- RCA 被历史 event 影响，把已恢复的对象当当前故障。
+- conclusion 把 runbook 里的典型原因当真实原因。
+
+### 5.2 最终方案
+
+`layer` 节点生成 `layer_handoff`，下游默认只消费这个紧凑结构：
 
 ```json
 {
+  "diagnosis_scope": "question_scope",
   "layer": "L1",
   "abnormal_pods": [
-    {"namespace": "aiops-e2e", "name": "rc-terminating-finalizer", "status": "Terminating"}
+    {"name": "rc-terminating-prestop", "namespace": "aiops-e2e", "status": "Terminating"}
   ],
-  "abnormal_groups": [],
-  "issue_groups": [],
   "current_abnormal_summary": {
     "status_counts": {"Terminating": 1},
     "selected_rows": []
   },
   "pod_status_keyword": "Terminating",
   "pod_abnormal_type": "TerminatingStuck",
-  "active_entities": [],
-  "active_signals": [],
   "matched_runbooks": ["pod-terminating-stuck.md"],
   "must_verify": [],
   "do_not_change": []
 }
 ```
 
-它对小模型的价值：
+关键字段：
 
-- 直接告诉模型当前有哪些异常 Pod，不让模型从长文本里找。
-- 用 `current_abnormal_summary.status_counts` 锚定“当前异常状态分布”。
-- 用 `issue_groups` 告诉 evidence：主异常组完整验证，非主异常组最小验证。
-- 用 `matched_runbooks` 告诉 evidence：只使用 layer 已确认的 runbook，不重新选择。
-- 用 `must_verify` 和 `do_not_change` 限制 namespace、Pod、Node、状态不漂移。
+| 字段 | 对小模型的作用 |
+|---|---|
+| `abnormal_pods` | 明确当前要诊断的 Pod，不让模型从长文本里找 |
+| `current_abnormal_summary.status_counts` | 固定当前异常分布，避免遗漏多异常组 |
+| `pod_status_keyword` | 锚定状态，例如 Pending、Terminating、CrashLoopBackOff |
+| `pod_abnormal_type` | 锚定异常族，例如 TerminatingStuck、VolumeMountFailed |
+| `matched_runbooks` | 告诉 evidence 使用已确认 runbook，不重新选择 |
+| `must_verify` | 明确必须验证的事实 |
+| `do_not_change` | 禁止模型替换 Pod、namespace、Node 或把历史事件当当前故障 |
 
-## 7. 工具输出治理：raw/structured/summary 三件套
+### 5.3 为什么有效
 
-核心文件：
+`layer_handoff` 的本质是把“从文本中寻找诊断目标”变成“读取固定字段”。这对小模型很重要，因为小模型在长文本检索和多实体保持上明显弱于大模型。
 
-- `app/core/context/observation.py`
-- `app/core/context/archive.py`
-- `app/core/aicall/client.py`
+## 6. 架构优化三：工具输出 raw/structured/summary 三件套
 
-每次工具调用后系统做三件事：
+### 6.1 旧问题
+
+K8s 工具输出很长：
+
+- `kubectl get pods -A` 可能几十到几百行。
+- `kubectl describe pod` 包含 annotations、conditions、events、volumes、containers。
+- `kubectl get pod -o yaml` 包含完整 spec/status。
+
+如果这些内容原样进入 Agent loop，小模型会：
+
+- 被无关字段占满上下文。
+- 忽略关键 event。
+- 把历史信息当当前事实。
+- 在后续轮次重复携带完整工具输出，越来越慢。
+
+### 6.2 最终方案
+
+每个工具结果都被 `ObservationProcessor` 处理成三类产物：
 
 ```text
-raw.txt        保存完整原始输出，供人工复盘
-structured.json 保存规则提取出的结构化事实
-summary.txt    回注给 LLM 的短摘要
+raw.txt         完整原始输出，供人工复盘
+structured.json 规则提取出的结构化事实
+summary.txt     回注给 LLM 的短摘要
 ```
 
-关键点：不是只在日志里压缩，而是把 LangChain agent loop 里的 `ToolMessage.content` 也替换成 summary。否则模型下一轮仍会看到完整 describe/yaml，注意力继续被冲散。
+关键点：不是只在日志里保存 summary，而是把 LangChain agent loop 里的 `ToolMessage.content` 也替换成 bounded summary。这样下一轮模型看到的是压缩后的事实，而不是完整工具输出。
 
-### 7.1 `kubectl describe pod` 增强
+### 6.3 重型工具处理
 
-当前 describe 摘要会提取：
+当前重点处理的重型工具包括：
 
-- `Name / Namespace / Node / Status`
+- `kubectl_get_by_kind_in_cluster`
+- `kubectl_get_by_kind_in_namespace`
+- `kubectl_get_yaml`
+- `kubectl_describe`
+- `kubectl_events`
+- `kubernetes_jq_query`
+- `kubernetes_tabular_query`
+
+处理策略：
+
+| 工具类型 | 摘要策略 |
+|---|---|
+| Pod 表格 | 提取异常行、状态统计、样例行 |
+| describe | 提取 Name、Namespace、Node、Status、Container、Volume、Events、Warning |
+| yaml | 解析 Pod metadata/spec/status 高价值字段 |
+| events | 优先保留 Warning、Failed、BackOff、x509、Killing 等诊断行 |
+| logs | 保留错误行、尾部关键日志 |
+| 空结果 | 明确标记为空/负向观察，不能当作异常已验证 |
+
+### 6.4 Terminating 场景的具体收益
+
+Terminating 场景曾经暴露出工具摘要缺字段的问题。后来针对 `describe` 和 `yaml` 做了增强：
+
+`kubectl_describe` 摘要保留：
+
 - `Termination Grace Period`
-- `Controlled By`
-- `QoS Class`
-- `Node-Selectors / Tolerations`
-- `Containers` 中的 `Image / Command / State / Reason / Exit Code / Restart Count`
-- `Volumes` 中的 `ConfigMapName / SecretName / ClaimName / HostPath`
-- `Events` 中的 Warning、Failed、Killing、BackOff、probe failed 等
+- `Command`
+- `Args`
+- `State`
+- `Last State`
+- `Reason`
+- `Exit Code`
+- `Restart Count`
+- `Events: Killing / Stopping container`
+- `Volumes`
 
-这次修复 Terminating 场景时，重点就是让 summary 不再丢失 `Termination Grace Period`、`Command`、`Exit Code`、`Events` 这些高价值字段。
-
-### 7.2 `kubectl get pod -o yaml` 增强
-
-Pod YAML 摘要会提取：
+`kubectl_get_yaml` 摘要保留：
 
 - `metadata.deletionTimestamp`
 - `metadata.finalizers`
 - `deletionGracePeriodSeconds`
 - `spec.terminationGracePeriodSeconds`
-- `spec.nodeName`
-- `spec.imagePullSecrets`
-- `spec.containers[].command/args/lifecycle/resources`
-- `spec.volumes` 中的 ConfigMap/Secret/PVC 引用
-- `status.phase/reason/message`
-- `status.conditions`
-- `containerStatuses` 中的 waiting/terminated/lastTerminated/exitCode
+- `spec.containers[].lifecycle.preStop`
+- `spec.containers[].command/args`
+- `status.containerStatuses[].waiting/terminated/lastTerminated/exitCode`
 
-这个增强是为了让模型不用读完整 YAML，也能判断：
+这使模型不用读完整 YAML，也能区分：
 
-- Terminating 是否 finalizer 卡住。
-- preStop 是否存在。
-- grace period 是否仍在正常窗口。
-- ImagePull 是否缺 secret。
-- VolumeMount 是否引用 ConfigMap/Secret/PVC。
-- OOM/CrashLoop 是否有 Last State 和 exitCode。
+- finalizer 卡住
+- preStop hook 卡住
+- terminationGracePeriodSeconds 过长
+- Node/kubelet 不可达
+- volume detach/unmount 卡住
 
-## 8. Prompt 管理和注意力控制
+## 7. 架构优化四：Pydantic 结构化合同
 
-核心文件：
+### 7.1 旧问题
 
-- `app/core/prompts.py`
-- `app/core/workflow/nodes/evidence_collector.py`
+最早的方式是 prompt 要求模型输出 JSON，例如：
 
-这轮重要调整是把 evidence 运行时拼接 prompt 收敛到 `prompts.py`，同时区分 system prompt 和 user prompt。
+```text
+请输出 JSON，包含 layer、confidence、root_cause...
+```
 
-原则：
+这对小模型不稳定，常见失败包括：
 
-- system prompt 放稳定职责、格式、安全边界。
-- 业务上下文放 user prompt，例如 `layer_handoff`、当前异常摘要、已确认 runbook 上下文。
-- 不把 archive 路径当证据。
-- 不把 runbook 当真实环境证据。
-- 不把计划或工具名当证据。
+- 输出 fenced JSON。
+- JSON 前后夹自然语言。
+- 字段名不一致。
+- list/dict 类型漂移。
+- 输出被 `<think>` 或工具调用打断。
+- RCA 阶段直接自然语言分析，没有合法 RCAOutput。
 
-### 8.1 Runbook 注入方式
+### 7.2 最终方案
 
-当前逻辑：
+关键节点使用 Pydantic schema：
 
-1. layer 阶段可以 `fetch_runbook`。
-2. layer 输出 `matched_runbooks`。
-3. evidence 阶段只读取这些已确认 runbook 的关键上下文。
-4. runbook 内容注入 evidence user prompt，而不是无限扩大 system prompt。
+| Schema | 作用 |
+|---|---|
+| `LayerOutput` | layer 结构化结果 |
+| `LayerHandoff` | layer 到下游的紧凑交接对象 |
+| `IssueGroup` | 多异常组 |
+| `EvidencePlanOutput` | evidence 采证计划 |
+| `EvidenceCollectionOutput` | evidence 采集结果 |
+| `EvidenceMatchOutput` | plan/tool 对齐裁判 |
+| `RCAOutput` | RCA 根因结果 |
+| `QueryResult` | `/query` 结果 |
+| `ContextCompactionSummary` | evidence 运行时上下文压缩 |
 
-这样避免两个问题：
+### 7.3 response_format 使用方式
 
-- 代码侧盲目注入所有 runbook，导致上下文过大。
-- evidence 阶段重新选错 runbook，导致计划偏离当前异常。
+系统里有两种结构化路径：
 
-### 8.2 Runbook 是 guide，不是 checklist
+第一种是无工具结构化调用：
 
-prompt 明确要求：
+```python
+parsed, raw = ai_call.call_structured(
+    system_prompt=prompt,
+    question=user_message,
+    schema=RCAOutput,
+    allow_text_fallback=True,
+)
+```
 
-- 先看高价值当前证据，例如 describe/events/logs/yaml。
-- 如果错误原文已经命中明确分支，就只验证该分支，不展开所有典型原因。
-- VolumeMountFailed 先看 Pod Events 和 volume 类型；只有事件或 spec 指向 PVC/PV 时才查 PVC/PV/StorageClass。
-- Terminating 优先查 `deletionTimestamp/finalizers`。
-- CrashLoop/OOM 优先 describe + previous logs。
-- Pending 优先 FailedScheduling 原文。
+第二种是 Agent 工具 loop 内的结构化输出：
 
-这解决了小模型“看到 runbook 很多方向就全部查一遍”的问题。
+```python
+create_agent(
+    model=agent_model,
+    tools=tools,
+    system_prompt=system_prompt,
+    response_format=ToolStrategy(schema=EvidenceCollectionOutput),
+)
+```
 
-## 9. Evidence plan 和证据统计口径
+这两种方式解决的问题不同：
 
-核心文件：
+| 路径 | 适合场景 | 优点 |
+|---|---|---|
+| `call_structured()` | RCA、提取、压缩等不需要工具的节点 | 输入短，合同清晰 |
+| Agent `response_format=ToolStrategy` | layer/evidence 这种需要先调用工具再产出结构化结果的节点 | 工具调用和结构化结果在同一轮 agent 内闭环 |
 
-- `app/core/workflow/nodes/evidence_collector.py`
-- `app/core/workflow/schemas.py`
-- `app/core/prompts.py`
+### 7.4 为什么 Pydantic 不是万能的
 
-当前 evidence 分成两个概念：
+Pydantic 只能保证“返回后能校验”，不能保证模型一定返回。
+
+真实 RCA 失败就是这个问题：
+
+```text
+RCA 节点 evidence 已经采集到了有效 tool_data，
+但 RCAOutput structured object 没生成合法对象，
+于是 parsed=None，
+系统进入低置信度兜底：
+当前无法基于 LLM 输出确定根本原因。
+```
+
+这不是 evidence 没有结构化，而是 RCA 是一次单独的结构化推理边界。它不再调用工具，也没有确定性规则兜底。只要这次 RCAOutput 失败，就会进入 fallback。
+
+后来 RCA 开启 `allow_text_fallback=True`，让 native structured 失败后还能尝试解析 JSON 文本，并在 prompt 中强化 RCAOutput JSON 结构。这能提高兼容性，但根因仍是：小模型/网关对结构化输出的稳定性不足。
+
+## 8. 架构优化五：Evidence plan 从“提示词愿望”变成“执行协议”
+
+### 8.1 旧问题
+
+Prompt 要求 evidence 先生成计划，但小模型可能：
+
+- 只输出计划，不调用工具。
+- 直接调用工具，不输出计划。
+- 输出计划但字段名不合规。
+- 计划检查 YAML 字段，却实际调用表格工具。
+- 计划和实际工具不匹配，证据完整度失真。
+
+### 8.2 最终方案
+
+Evidence 被拆成三个对象：
 
 ```text
 evidence_plan       模型计划要验证什么
@@ -322,263 +431,611 @@ tool_result         真实工具返回了什么
 evidence_inventory  计划项是否被真实工具满足
 ```
 
-重要原则：
+核心原则：
 
 - 计划不是证据。
 - runbook 不是证据。
 - archive 不是证据。
-- `NotFound`、空 events、命令失败如果正好回答检查目的，可以是负向证据。
-- 实际执行但没有匹配计划的工具是补充证据，不自动抬高 plan 完整度。
+- 只有真实 tool_result 才是环境证据。
+- `NotFound`、空 events、命令失败如果回答了检查目的，可以是负向证据。
+- 有 plan 时，完整度按 plan item 是否被真实工具满足计算。
 
-### 9.1 取消自动补全计划
+### 8.3 执行协议
 
-之前系统会根据 abnormal_groups 自动追加 plan item。这个策略容易让完整度变成代码猜测，而不是 LLM 真实计划。
+Evidence prompt 明确：
 
-当前改法：
+1. 采证计划由 `EvidencePlanOutput` Pydantic schema 生成。
+2. 执行阶段只按既有计划调用必要工具。
+3. 必须调用至少一个 critical/important 真实只读工具。
+4. 没有 tool_result 禁止写采集结论。
+5. 工具失败、空事件、NotFound 记录为负向/冲突证据。
+6. critical/important 证据满足后停止，不重复调用相同工具。
 
-- 不再自动补全 evidence_plan。
-- 异常组覆盖通过 prompt 强约束和后续统计呈现。
-- 如果 plan 没覆盖某异常组，报告中体现缺失，而不是代码悄悄帮模型补。
+如果模型第一轮只返回 plan，没有有效工具结果，系统会拒绝并重试：
 
-这让测试结果更真实，也能暴露小模型计划能力不足的问题。
+```text
+上一轮 evidence_plan 已有效，本轮不要重新输出 evidence_plan；
+请直接按既有计划调用至少一个 critical 或 important 级真实工具。
+```
 
-### 9.2 计划归一化，不改变诊断意图
+这解决了“小模型以为写完计划就完成采证”的问题。
 
-虽然不自动补计划，但会做必要的工具参数归一化：
+### 8.4 YAML 工具纠偏
 
-- `kubectl get ... -o yaml` 计划必须归一化为 `kubectl_get_yaml`。
+Terminating、ImagePullSecret、资源配置等场景必须看 YAML。系统增加了工具归一化：
+
+- 如果 command 包含 `kubectl get ... -o yaml`，必须使用 `kubectl_get_yaml`。
+- 如果 purpose 要检查 `finalizers/deletionTimestamp/preStop/lifecycle/terminationGracePeriodSeconds/spec/status`，必须用 YAML 工具。
 - 普通 `kubectl_get_by_name` 表格不能冒充 YAML 证据。
-- `tool_args` 和 `command/purpose/evidence_type` 冲突时，优先满足诊断意图。
-- 如果模型漏掉 MCP 必填字段，例如 `kind`，可从 command 中补齐 `kind/name/namespace`，避免 schema validation 失败。
+- `tool_args` 是建议参数，不是禁止模型选择正确工具的硬约束。
 
-这不是补计划，而是把模型已经表达出来的意图转成可执行 MCP 参数。
+这点来自真实问题：模型计划写了 `kubectl get pod -o yaml`，但实际使用表格工具，导致 finalizers、preStop、lifecycle 等字段根本不可见。
 
-### 9.3 完整度公式
+## 9. 架构优化六：Runbook 从知识库变成诊断分流 guide
 
-报告中同时保留两个口径：
+### 9.1 旧问题
 
-| 字段 | 含义 |
-|---|---|
-| `plan_total` | Pydantic evidence plan 项数 |
-| `plan_collected` | 已被真实工具结果满足的计划项 |
-| `plan_completeness` | `plan_collected / plan_total` |
-| `environment_evidence_total` | 环境证据总项，包含部分 layer_verified |
-| `environment_evidence_collected` | 已采集环境证据 |
-| `executed_tool_count` | 实际工具调用数 |
-| `matched_tool_count` | 匹配计划的工具数 |
-| `unplanned_tool_count` | 执行了但不匹配计划的工具数 |
+Runbook 内容越全，小模型越容易把它当 checklist。例如 VolumeMountFailed runbook 可能列出：
 
-这解释了为什么 `4/7 = 57%`：计划项是 7 个，真实匹配到 4 个，`4 / 7 = 0.5714`，展示为 57%。如果另外 3 个是未采集或没有匹配上，完整度就不能算 100%。
+- ConfigMap 不存在
+- Secret 不存在
+- PVC 不存在
+- StorageClass 异常
+- CSI 异常
+- NFS 权限问题
+- subPath 错误
 
-## 10. RCA 和 conclusion 收敛
+如果事件已经明确：
 
-核心文件：
+```text
+MountVolume.SetUp failed for volume ... configmap "xxx" not found
+```
 
-- `app/core/workflow/nodes/root_cause_analyzer.py`
-- `app/core/workflow/nodes/conclusion_formatter.py`
-- `app/core/prompts.py`
+小模型仍可能继续查 PVC/PV/StorageClass，甚至最终把根因写成存储问题。
 
-### 10.1 RCA lite
+### 9.2 最终方案
 
-当前默认：
+Runbook 只作为 guide：
+
+- layer 阶段根据异常类型 fetch 明显匹配的 runbook。
+- evidence 阶段优先使用 layer 已确认的 `matched_runbooks`。
+- runbook 不算真实证据。
+- 如果当前错误原文已经命中明确分支，只验证该分支，不展开所有典型原因。
+
+runbook 中也写入原则：
+
+```text
+证据计划优先覆盖“当前已经出现的错误文本”，不要把典型原因列表全部变成 evidence_plan。
+Runbook 是 guide，不是全量巡检清单。
+```
+
+### 9.3 为什么有效
+
+这相当于把 runbook 从“让模型看更多知识”改成“让模型少走弯路”。对小模型来说，知识越多不一定越好；如果没有明确优先级，长 runbook 会扩大搜索空间，降低根因精度。
+
+## 10. 架构优化七：上下文预算和运行时压缩
+
+### 10.1 旧问题
+
+Evidence 是最容易上下文膨胀的节点：
+
+- AI messages 会累计多轮思考。
+- Tool observations 会累计多次工具结果。
+- describe/yaml/events 可能重复出现。
+- 小模型上下文窗口虽然可能标称较大，但有效注意力会随着噪声下降。
+
+### 10.2 最终方案
+
+系统为每次 LLM 调用写入 context budget：
+
+- system prompt
+- user message
+- tool schema
+- tool observations
+- ai messages
+- final output
+- context summaries
+
+Evidence 节点启用运行时压缩：
+
+```yaml
+workflow:
+  context_compaction:
+    enabled: true
+    nodes:
+      - evidence
+    max_context_window: 35000
+    trigger_ratio: 0.70
+    max_compactions_per_call: 1
+    summary_max_tokens: 1200
+```
+
+触发后使用 `ContextCompactionSummary` Pydantic schema，把中间思考和工具输出压缩成：
+
+- 过程摘要
+- 已完成证据
+- 未完成证据
+- 关键事实
+- 负向事实
+- 冲突
+- 下一步焦点
+- discarded_noise
+
+同时保留原始 `evidence_plan` 消息，避免计划解析失效。
+
+### 10.3 为什么有效
+
+这解决的是“Agent 越查越糊”的问题。小模型不是单次工具不会用，而是在多轮工具返回后上下文越来越脏。压缩后，模型继续看到的是当前证据状态，而不是大量历史文本。
+
+## 11. 架构优化八：RCA lite 与兜底机制
+
+### 11.1 为什么 RCA 要 lite
+
+RCA 默认配置：
 
 ```yaml
 workflow:
   rca_mode: lite
 ```
 
-RCA 不再调工具，只消费 evidence 结构化事实。
+RCA 不再调用工具，只消费 evidence 结果。
 
-目的：
+原因：
 
-- 避免 RCA 重新展开工具调用，拖慢流程。
-- 避免 RCA 跳出 evidence 边界，重新泛化巡检。
-- 让“采证”和“推理”职责分离。
+- RCA 如果继续调工具，会重复采证，增加耗时。
+- RCA 可能跳出 evidence 边界，重新泛化巡检。
+- RCA 可能看到更多噪声后推翻已经验证的主因。
 
-### 10.2 conclusion 只负责渲染
+### 11.2 RCA 正常路径
 
-conclusion 默认输出 Markdown，不强制 Pydantic。原因是最终报告是面向人的文本，过强 schema 会削弱表达。
+正常路径是：
 
-但关键统计不让 conclusion 自己算：
+```text
+evidence 产出 evidence_items/evidence_analysis/tool_data
+  -> RCA 构建 compact evidence_summary
+  -> call_structured(schema=RCAOutput)
+  -> parsed != None
+  -> 写入 root_cause / causal_chain / rca_analysis
+  -> conclusion 使用 RCA 结果
+```
 
-- 证据完整度以后端 `EvidenceCollectionOutput` 为准。
-- runbook 覆盖率以后端 reporter 为准。
-- root cause 优先来自 RCAOutput。
+RCA 输入会包含：
 
-这样避免模型在最后报告里把 `1/3` 写成 `100%`。
+- `layer_handoff`
+- evidence item 摘要
+- `evidence_facts`
+- `evidence_conflicts`
+- `missing_evidence`
+- `tool_data` 中的真实工具摘要
 
-## 11. Runbook 体系优化
+### 11.3 RCA 兜底路径
 
-核心文件：
+如果模型没有返回合法 `RCAOutput`：
 
-- `deploy/configmap/runbooks.yaml`
-- `app/core/aicall/builtin_tools.py`
-- `tests/unit/runbook/test_runtime_catalog.py`
+```text
+parsed is None
+  -> _build_llm_fallback()
+  -> root_cause = "[Lx层] 当前无法基于 LLM 输出确定根本原因"
+  -> confidence = 0.1
+  -> causal_chain = LLM 未生成可靠因果链
+```
 
-优化方向：
+这会导致：
 
-- Pod abnormal 主线只暴露与当前支持异常相关的 runbook。
-- runbook 内容从“泛化知识库”改成“诊断分流 guide”。
-- 每个 runbook 写清楚状态识别、必查项、关键证据、判定规则。
-- 对同一状态的不同根因给出优先级，例如 VolumeMountFailed 先看 Events 原文，再决定查 ConfigMap/Secret/PVC/hostPath。
+- workflow 继续走 conclusion，不会中断。
+- 最终报告可能仍由 conclusion 根据 evidence 写出看似合理内容。
+- 但 `rca_analysis` 本身是低置信度兜底。
+- 指标上 RCA 结构化成功率会下降，根因结论更依赖 conclusion 自己理解 evidence。
 
-当前覆盖的异常族包括：
+### 11.4 真实问题说明
 
-- Evicted
-- VolumeMountFailed
-- PendingUnschedulable
-- TerminatingStuck
-- OOMKilled
-- CrashLoopBackOffRuntime
-- ImagePullFailed
-- SandboxCreateFailed
-- ConfigError
-- NotReadyProbeFailed
-- NodeLostOrUnknown
+你之前看到过这种情况：
 
-## 12. 测试体系从“层级准确”升级到“根因准确”
+```text
+evidence 已采集：
+- kubectl_get_yaml 显示 finalizers: <none>
+- lifecycle.preStop: sleep 21600
+- terminationGracePeriodSeconds: 21600
+- describe 显示 Killing / Stopping container
+- node1 Ready
 
-核心目录：
+但 RCA 节点输出：
+当前无法基于 LLM 输出确定根本原因
+原因：LLM 返回结果不符合 RCA 结构化输出合同
+```
 
-- `test/pod_abnormal_e2e`
-- `test/pod_rootcause_e2e`
+这说明 evidence 结构化成功不等于 RCA 结构化一定成功。RCA 是另一个独立的模型调用边界。Pydantic 能校验结果，但不能保证小模型一定生成合法结果。
 
-### 12.1 pod_abnormal_e2e
+后续优化方向：
 
-这个套件验证：
+- RCA `allow_text_fallback=True`，native structured 失败后解析 JSON 文本。
+- RCA prompt 明确给出 JSON 字段示例，贴合 `RCAOutput`。
+- RCA 输入中提高真实工具输出优先级，禁止 conclusion/RCA 覆盖 `finalizers: <none>` 这类事实。
+- 对高频场景补确定性 RCA 规则兜底，例如 OOMKilled、ImagePull、VolumeMount、Terminating。
 
-- 异常类型是否识别正确。
-- layer 是否正确。
-- runbook 是否覆盖。
-- evidence 完整度是否达到阈值。
+## 12. 架构优化九：Conclusion 只渲染，不重新计算事实
 
-小模型阈值已经按实际情况降到 60%，避免单次 evidence 少采一个非关键项就导致整轮失败。
+### 12.1 旧问题
 
-### 12.2 pod_rootcause_e2e
+最终报告是用户看到的内容。如果 conclusion 自己重新计算或重新解释，很容易出现：
 
-这个套件验证更细：
+- evidence 说 3/3，报告写 100%，但实际 plan 只有 2 项满足。
+- 工具输出 finalizers 为空，报告写 finalizers 未清理。
+- RCA fallback，报告却写高置信度根因。
+- runbook 覆盖率由模型口述，不等于实际引用。
 
-- 同样是 VolumeMountFailed，要区分 ConfigMap 不存在、Secret 不存在、ConfigMap key 不存在、PVC 不存在、hostPath 错误。
-- 同样是 Pending，要区分 nodeSelector、CPU 不足、Memory 不足、PVC 缺失。
-- 同样是 CrashLoop，要区分非零退出码、命令不存在、配置文件缺失。
+### 12.2 最终方案
 
-每个 case 有 `root_cause_signature`：
+Conclusion 仍然输出 Markdown，因为报告需要可读性。但关键统计以后端为准：
+
+- 证据完整度来自 `EvidenceCollectionOutput.collection_summary`。
+- root cause 优先来自 `RCAOutput.root_cause`。
+- Runbook 覆盖率由 reporter 从 thinking_events、tool_result、rca/conclusion 文本中归一化统计。
+- MTTR 由测试脚本实际测量。
+
+Prompt 中强调：
+
+- 工具输出事实优先级最高。
+- 如果 `finalizers: <none>`，禁止写 finalizer 未清理。
+- 如果 Node Ready，不要把 kubelet/节点不可达作为主因。
+- 如果存在 preStop/sleep/Termination Grace Period/Killing，应优先考虑 preStop 或 grace period。
+
+## 13. 测试体系：从“异常识别”升级到“精确根因”
+
+### 13.1 为什么要新建 rootcause E2E
+
+只测异常大类会掩盖问题。例如所有这些都可能表现为 VolumeMountFailed：
+
+- ConfigMap 不存在
+- Secret 不存在
+- ConfigMap key 缺失
+- PVC 不存在
+- hostPath 路径错误
+
+如果只判断 L0/VolumeMountFailed，模型说哪个都可能看起来“差不多对”。但真实运维需要知道具体修复什么。
+
+所以 `pod_rootcause_e2e` 用 `root_cause_signature` 做精确匹配：
 
 - `include_all`
 - `include_any`
 - `exclude_any`
 
-最终统计根因准确率时，不再只看 layer=L0/L1/L2，而是看最终报告根因部分是否命中该 case 的关键语义。
+### 13.2 人工语义修正带来的启发
 
-当前自动化覆盖 10 个 group、26 个 case。详见：
-
-- `test/pod_rootcause_e2e/README.md`
-- `test/pod_rootcause_e2e/cases.yaml`
-
-## 13. 两个具体例子
-
-### 13.1 VolumeMountFailed 缺失 ConfigMap
-
-旧行为风险：
+你发现过一个典型问题：
 
 ```text
-Pod 是 ContainerCreating/FailedMount
-runbook 里有 PVC/PV/StorageClass/NFS/CSI/Secret/ConfigMap
-小模型可能直接去查 PVC，甚至把根因说成 PVC 问题
+预期关键词：not found
+模型报告：配置文件不存在
 ```
 
-当前约束：
+自动评测没有匹配 `not found`，但语义上“文件不存在”是正确根因。
 
-- prompt 强调 describe/events 原文优先。
-- `kubectl_describe` summary 保留 `MountVolume.SetUp failed ... configmap ... not found`。
-- runbook 说明如果 Events 已命中 ConfigMap/Secret，不要继续泛化 PVC。
-- rootcause E2E 通过 signature 要求最终根因命中 `configmap` 和 `not found`，否则失败。
+这说明根因评测本身也需要工程化：
 
-### 13.2 Terminating finalizer 卡住
+- 不能只用英文关键词。
+- 要补中文同义词，例如 `不存在`、`未找到`、`缺失`。
+- 要区分根因段落与背景段落，避免全报告误命中。
+- 要保留人工复核入口，发现评测误判后回写 signature。
 
-旧行为风险：
+这不是“手工改分”，而是评测体系从关键词匹配向语义匹配迭代。
+
+### 13.3 当前覆盖状态
+
+当前自动化可复现 10 个 group、26 个 case：
+
+| Group | 覆盖场景 |
+|---|---|
+| volumemount | ConfigMap/Secret/ConfigMap key/PVC/hostPath |
+| pending | nodeSelector/CPU/Memory/PVC |
+| imagepull | invalid registry/image not found/missing pull secret |
+| crashloop | 非零退出码/命令不存在/配置文件缺失 |
+| configerror | env 缺失/ConfigMap key 缺失/Secret key 缺失 |
+| oomkilled | memory limit 过低 |
+| notready | readiness/liveness probe |
+| terminating | finalizer/preStop/long grace |
+| sandbox | RuntimeClass handler 无效 |
+| evicted | ephemeral-storage/emptyDir 驱逐 |
+
+仍不适合默认夜跑的场景：
+
+| Group | 原因 |
+|---|---|
+| unknown | 需要停 kubelet、隔离节点或制造 NodeLost |
+| sandbox 扩展 | CNI/IPAM/container runtime 故障依赖真实环境 |
+| evicted 扩展 | DiskPressure/MemoryPressure/PIDPressure 会影响节点稳定性 |
+| terminating 扩展 | Node 不可达、CSI/NFS detach/unmount 依赖破坏性故障 |
+
+## 14. 典型失败与修复案例
+
+### 14.1 VolumeMountFailed: ConfigMap 不存在
+
+失败模式：
 
 ```text
-describe 里出现 Exit Code 137
-小模型把 137/OOMKilled 当成 Terminating 根因
-忽略 finalizers/deletionTimestamp
+事件已经显示 configmap not found，
+但模型继续查 PVC/PV/StorageClass，
+最终报告泛化为存储挂载问题。
 ```
 
-当前约束：
+修复策略：
 
-- runbook 要求 Terminating 必查 `kubectl get pod -o yaml`。
-- evidence prompt 明确 `finalizers/deletionTimestamp` 必须用 `kubectl_get_yaml`，不能用表格型 `kubectl_get_by_name` 替代。
-- YAML summary 提取 `deletionTimestamp`、`deletionGracePeriodSeconds`、`finalizers`。
-- describe summary 也保留 `Termination Grace Period`、`Command`、`Events`，用于区分 preStop、grace period、kubelet 停止流程。
+- describe/events 摘要优先保留 `MountVolume.SetUp failed`。
+- runbook 明确：如果 Events 已命中 ConfigMap/Secret，不展开 PVC/PV。
+- rootcause signature 要求命中 ConfigMap + not found/不存在。
 
-仍需注意：如果 RCA 看到 `Exit Code 137` 后权重判断错误，仍可能把 OOMKilled 写得过重。这个属于证据排序和 RCA prompt/ranking 的后续优化点。
+效果：
 
-## 14. 当前仍然存在的边界
-
-这些不是部署错误，而是小模型链路仍需继续优化的地方：
-
-- 如果 OpenAI-compatible 网关不支持 `with_structured_output` 或 agent `response_format`，结构化输出仍可能失败。
-- Qwen 关闭 thinking 后速度更快，但复杂推理可能更依赖工具证据质量和 prompt 边界。
-- RCA 仍可能误用次要信号，例如 Terminating 场景中过度解释 `Exit Code 137`。
-- evidence plan 现在不自动补全，因此计划漏项会真实暴露为完整度下降。
-- 工具参数归一化只能修复已表达出的 command 意图，不能替模型创造缺失计划。
-- rootcause signature 依赖关键词/语义匹配，仍需要按实际报告迭代同义词，例如 `not found` 与 `不存在`。
-
-## 15. 重新部署前检查清单
-
-重新部署验证前建议检查：
-
-```bash
-git status --short
-.venv/bin/python -m pytest tests/unit/workflow/test_evidence_dynamic_stop.py -q
-.venv/bin/python -m py_compile app/core/workflow/nodes/evidence_collector.py app/core/context/observation.py app/core/prompts.py
+```text
+volume-mount-missing-configmap: 50/50，根因准确率 100.0%
 ```
 
-部署后确认：
+### 14.2 CrashLoop: 配置文件缺失
 
-```bash
-kubectl get pods,deploy,svc -n aiops -o wide
-kubectl logs deployment/aiops-copilot -n aiops --tail=300
+失败模式：
+
+```text
+日志里写中文“配置文件不存在”，
+自动匹配只看 not found，
+导致根因准确率被低估。
 ```
 
-重点看日志：
+修复策略：
 
-- `MODEL_CONTEXT_WINDOW` 是否正确。
-- `enable_thinking=false` 是否仍在 ConfigMap。
-- `context_budget` 是否显示 evidence 输入没有异常膨胀。
-- `kubectl_describe 摘要` 是否包含 Pod 关键区块。
-- evidence 阶段是否真正调用 `kubectl_get_yaml`，而不是用 `kubectl_get_by_name` 代替 YAML。
-- evidence 统计中 `plan_total / plan_collected / environment_evidence_total` 是否合理。
+- 扩展 signature 同义词。
+- 允许中文语义表达，例如“不存在”“缺失”“未找到”。
+- 优先抽取 root cause 段落，降低背景误判。
 
-## 16. 文件索引
+效果：
+
+```text
+crashloop-config-file-missing: 根因准确率修正后 86.0%
+crashloop group 总准确率 95.3%
+```
+
+### 14.3 Terminating: preStop 卡住
+
+失败模式：
+
+```text
+工具实际返回：
+finalizers: <none>
+lifecycle.preStop: sleep 21600
+terminationGracePeriodSeconds: 21600
+Events: Killing / Stopping container
+Node Ready
+
+但报告写：
+finalizers 未清理导致删除卡住。
+```
+
+根因：
+
+- describe/yaml 摘要曾经没有足够暴露 lifecycle/preStop/grace period。
+- conclusion 没有把 `finalizers: <none>` 作为强排除事实。
+- RCA 结构化失败时，conclusion 自己根据通用 Terminating runbook 补了 finalizer 解释。
+
+修复策略：
+
+- YAML summary 提取 `finalizers`、`lifecycle.preStop`、`terminationGracePeriodSeconds`。
+- describe summary 提取 `Termination Grace Period`、`Command`、`Events`。
+- prompt 强化：`finalizers: <none>` 必须排除 finalizer 主因。
+- evidence plan 强化：检查 Terminating 必须用 `kubectl_get_yaml`。
+
+当前结果：
+
+```text
+terminating-prestop-stuck: 66.0%
+terminating-long-grace-period: 30.0%
+terminating group: 56.7%
+```
+
+这个 group 仍是当前薄弱点，说明生命周期类场景需要更强的 RCA 排序和确定性规则兜底。
+
+### 14.4 Sandbox: RuntimeClass handler 无效
+
+失败模式：
+
+最初直接创建不存在 RuntimeClass 的 Pod，会被 API Server admission 拒绝，suite 直接 apply 失败，无法进入诊断。
+
+修复策略：
+
+- manifest 同时创建 RuntimeClass 对象。
+- RuntimeClass 存在，但 handler 指向不存在 runtime handler。
+- Pod 能被 API Server 接收，随后 kubelet sandbox 创建失败。
+
+效果：
+
+```text
+sandbox-runtimeclass-invalid: 96.0%
+```
+
+这个例子说明：E2E 场景本身也要精心设计。为了测试 Agent，需要让故障进入“可观察状态”，而不是在 apply 阶段被 Kubernetes 直接拒绝。
+
+## 15. 哪些方法最后被证明有效
+
+### 15.1 有效方法清单
+
+| 方法 | 是否有效 | 原因 |
+|---|---|---|
+| 单纯加长 prompt | 有限 | 能改善单点行为，但不能保证结构、工具和上下文稳定 |
+| 关闭/控制 thinking | 有效但需按模型选择 | 减少 `<think>` 干扰和首 token 延迟；当前配置保留开关，实际值按 Qwen/DeepSeek 实验切换 |
+| `layer_handoff` | 很有效 | 下游不再读长文本找对象 |
+| raw/structured/summary | 很有效 | 保留可审计性，同时降低模型可见噪声 |
+| Pydantic schema | 很有效但非万能 | 能校验边界，但不能保证模型一定返回 |
+| Agent `response_format` | 有效 | 工具 loop 内结构化结果更可控 |
+| evidence_plan 执行协议 | 很有效 | 防止只写计划不采证，防止计划和证据混淆 |
+| runbook guide 化 | 很有效 | 缩小搜索空间，减少泛化巡检 |
+| RCA lite | 有效但有边界 | 避免重复采证，但结构化失败时需要 fallback |
+| rootcause E2E | 很有效 | 真实暴露小模型精确根因能力，而不是只看大类 |
+
+### 15.2 最关键的方法论
+
+最终证明最有效的方法不是某一条 prompt，而是三层收敛：
+
+第一层：收敛输入。
+
+```text
+不要把所有信息都给模型。
+只给当前节点完成任务所需的最小事实。
+完整原文落盘，不进入默认 prompt。
+```
+
+第二层：收敛输出。
+
+```text
+关键节点使用 Pydantic。
+计划、证据、根因、查询结果都要有 schema。
+下游只消费校验后的对象。
+```
+
+第三层：收敛评价。
+
+```text
+用 E2E signature 测具体根因。
+不只看模型说得像不像。
+把低准确率 case 反向用于修 prompt、修工具摘要、修评测口径。
+```
+
+## 16. 当前仍然存在的问题
+
+### 16.1 RCA 结构化稳定性
+
+RCA 当前仍是单次结构化推理边界。如果小模型没有生成合法 `RCAOutput`，就会 fallback。Evidence 已经有 Pydantic 输出，并不意味着 RCA 一定成功。
+
+后续建议：
+
+- 给 RCA 增加确定性规则兜底。
+- 对高频 Pod 异常建立 rule-based RCA candidate ranking。
+- RCA prompt 中持续保留 schema 示例和禁止覆盖工具事实规则。
+
+### 16.2 Terminating / NotReady 细粒度原因
+
+这两类问题不是异常状态难识别，而是精确原因容易混淆：
+
+- Terminating: finalizer、preStop、grace period、kubelet、volume detach 都会表现为 Terminating。
+- NotReady: readiness/liveness/startupProbe、应用端口、依赖服务、容器重启可能互相影响。
+
+当前结果也证明了这一点：
+
+```text
+terminating group 根因准确率 56.7%
+notready group 根因准确率 60.0%
+```
+
+后续应重点补“主因排序规则”，而不是只补更多工具。
+
+### 16.3 评测语义匹配
+
+关键词 signature 已经可用，但仍需迭代：
+
+- 中英文同义词。
+- 否定表达。
+- 根因段落优先。
+- 排除候选原因误命中。
+- 对“已排除 finalizer”这种文本不能算命中 finalizer 根因。
+
+### 16.4 当前配置需要按实验模型切换
+
+`deploy/configmap/config.yaml` 中保留了 Qwen thinking 控制开关：
+
+```yaml
+llm:
+  extra_body:
+    chat_template_kwargs:
+      # enable_thinking: false
+      enable_thinking: true
+```
+
+对 Qwen 小模型稳定性实验，推荐关闭 thinking 以减少 `<think>` 干扰；对 DeepSeek 对比实验或需要观察推理过程时，可以临时打开。文档不能假设当前值永远是某一个，因为你正在做模型对比实验。
+
+## 17. 文件索引
 
 | 主题 | 文件 |
 |---|---|
-| 模型调用、structured output、工具 agent loop | `app/core/aicall/client.py` |
+| 模型调用、structured output、Agent tool loop | `app/core/aicall/client.py` |
 | Pydantic schema | `app/core/workflow/schemas.py` |
 | layer handoff 和异常组 | `app/core/workflow/nodes/layer_classifier.py` |
-| evidence plan、匹配、完整度 | `app/core/workflow/nodes/evidence_collector.py` |
-| RCA lite | `app/core/workflow/nodes/root_cause_analyzer.py` |
-| conclusion 后处理和证据统计强制替换 | `app/core/workflow/nodes/conclusion_formatter.py` |
+| evidence plan、执行协议、完整度统计 | `app/core/workflow/nodes/evidence_collector.py` |
+| RCA lite 和 fallback | `app/core/workflow/nodes/root_cause_analyzer.py` |
+| conclusion 报告渲染 | `app/core/workflow/nodes/conclusion_formatter.py` |
 | prompt 统一管理 | `app/core/prompts.py` |
 | 工具 raw/structured/summary | `app/core/context/observation.py` |
 | context archive | `app/core/context/archive.py` |
 | context budget | `app/core/context/budget.py` |
-| Qwen thinking 配置 | `deploy/configmap/config.yaml` |
-| Pod abnormal runbooks | `deploy/configmap/runbooks.yaml` |
-| 异常类型 E2E | `test/pod_abnormal_e2e` |
-| 精确根因 E2E | `test/pod_rootcause_e2e` |
+| 部署配置 | `deploy/configmap/config.yaml` |
+| runtime runbook | `deploy/configmap/runbooks.yaml` |
+| rootcause E2E cases | `test/pod_rootcause_e2e/cases.yaml` |
+| rootcause E2E README | `test/pod_rootcause_e2e/README.md` |
 
-## 17. 总结
+## 18. 复现和验证命令
 
-这轮小模型适配的本质是把诊断系统从“模型自己读长上下文并自由组织 JSON”改造成“模型在受控上下文中调用真实工具，代码用 Pydantic 和证据统计收口”。
+查看当前 rootcause 覆盖：
 
-具体收益：
+```bash
+sed -n '1,220p' test/pod_rootcause_e2e/README.md
+```
 
-- 小模型不用在长文本里找当前对象，`layer_handoff` 已经给出锚点。
-- 小模型不用读完整工具输出，summary 保留关键字段，raw 落盘可审计。
-- 小模型不用手写结构化 JSON，Pydantic 负责边界。
-- 小模型不会把 runbook 当事实，runbook 只是 guide。
-- 小模型的计划漏项、工具漏调、根因误判都能通过 E2E 统计暴露，而不是被自动补全掩盖。
+运行核心夜间套件：
 
-这套机制不能让小模型变成大模型，但能把它的自由度限制在可验证、可复盘、可迭代的诊断闭环里。
+```bash
+cat > /tmp/rootcause_core.txt <<'EOF'
+group:volumemount
+group:pending
+group:imagepull
+group:crashloop
+group:configerror
+group:oomkilled
+group:notready
+EOF
+
+nohup .venv/bin/python test/pod_rootcause_e2e/run_rootcause_suite.py \
+  --scenarios-file /tmp/rootcause_core.txt \
+  -n 50 -c 2 \
+  --question "我的集群有什么问题" \
+  --url http://10.2.0.48:30800 \
+  > testreports/pod_rootcause_nightly.log 2>&1 &
+```
+
+运行自动化 backlog 场景：
+
+```bash
+printf "group:terminating\ngroup:sandbox\ngroup:evicted\n" > /tmp/rootcause_backlog_auto.txt
+
+.venv/bin/python test/pod_rootcause_e2e/run_rootcause_suite.py \
+  --scenarios-file /tmp/rootcause_backlog_auto.txt \
+  -n 50 -c 2 \
+  --settle-seconds 25 \
+  --timeout 1200 \
+  --question "我的集群有什么问题" \
+  --url http://10.2.0.48:30800
+```
+
+查看最新报告：
+
+```bash
+latest_dir="$(ls -td testreports/pod_rootcause_suite_* | head -1)"
+sed -n '1,220p' "$latest_dir/suite_summary.md"
+```
+
+查看某次诊断上下文归档：
+
+```bash
+kubectl -n aiops exec deploy/aiops-copilot -- \
+  ls -R /tmp/aiops/reports/context_archives/<run_id>
+
+kubectl -n aiops exec deploy/aiops-copilot -- \
+  cat /tmp/aiops/reports/context_archives/<run_id>/handoff/evidence-to-rca.json
+```
+
+## 19. 最终总结
+
+这轮小模型稳定化的核心工作量体现在三件事：
+
+第一，重新定义了小模型 Agent 的工作边界。小模型不再被要求一次性完成“查全量上下文、理解所有 runbook、规划证据、调用工具、判断根因、写报告”的全流程，而是在四节点工作流中完成局部任务。
+
+第二，建立了可审计的数据合同。工具结果有 raw/structured/summary，节点输出有 Pydantic schema，跨节点传递有 layer_handoff，评测有 rootcause signature。这样模型的每一步都可以被复盘，而不是只看最终自然语言。
+
+第三，用真实 E2E 数据驱动迭代。1300 次诊断结果表明，工程约束能让 32B 小模型在多数 Pod 异常根因诊断中达到可用水平；同时也清楚暴露了 Terminating、NotReady、RCA 结构化稳定性这些剩余短板。
+
+所以，这项工作的本质不是“把 prompt 写得更长”，而是把小模型放进一个受控诊断系统中：让它做擅长的语义理解和解释，让代码承担结构、上下文、证据、统计和可审计性。这样才能在小模型能力有限的情况下获得稳定输出。

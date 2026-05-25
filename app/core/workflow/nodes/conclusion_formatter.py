@@ -23,7 +23,11 @@ from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import ConclusionOutput, QueryConclusionOutput, QueryResult, RCAOutput
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem, Confidence
-from app.core.prompts import get_workflow_prompt, get_conclusion_mode_instruction
+from app.core.prompts import (
+    REMEDIATION_PLAN_PROMPT,
+    get_conclusion_mode_instruction,
+    get_workflow_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +319,9 @@ class ConclusionFormatterNode(WorkflowNode):
 - 不要让诊断模板淹没用户关心的核心信息
 
 然后按照 system prompt 中的「诊断模板」格式输出（## 📊 诊断概览 → ## 🔍 现象描述 → ## 🕵️ 证据链 → ## 🎯 根因分析 → ## 🛠️ 修复建议）。
-尽可能多引用原始数据和证据，修复命令可直接复制执行。"""
+尽可能多引用原始数据和证据，修复命令可直接复制执行。
+
+{REMEDIATION_PLAN_PROMPT}"""
 
         tool_section = ""
         if tool_data_text:

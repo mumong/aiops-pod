@@ -541,6 +541,12 @@ class LayerClassifierNode(WorkflowNode):
                 layers=layers,
                 thinking_events=thinking_events,
             )
+            layer, layers = self._guard_healthy_with_active_abnormalities(
+                layer_result=layer_result,
+                layer_handoff=layer_handoff,
+                layer=layer,
+                layers=layers,
+            )
             self._sync_layer_result_from_handoff(layer_result, layer_handoff)
             archive_refs = self._archive_layer_outputs(
                 run_id=state.get("run_id", ""),
@@ -609,6 +615,12 @@ class LayerClassifierNode(WorkflowNode):
                 layer=layer,
                 layers=layers,
                 thinking_events=[],
+            )
+            layer, layers = self._guard_healthy_with_active_abnormalities(
+                layer_result=rescue_result,
+                layer_handoff=layer_handoff,
+                layer=layer,
+                layers=layers,
             )
             self._sync_layer_result_from_handoff(rescue_result, layer_handoff)
             archive_refs = self._archive_layer_outputs(
@@ -807,6 +819,81 @@ class LayerClassifierNode(WorkflowNode):
             ],
         }
         return LayerHandoff.model_validate(handoff).model_dump(exclude_none=True)
+
+    def _guard_healthy_with_active_abnormalities(
+        self,
+        layer_result: Dict[str, Any],
+        layer_handoff: Dict[str, Any],
+        layer: Layer,
+        layers: List[Layer],
+    ) -> tuple[Layer, List[Layer]]:
+        """Reject HEALTHY when current real tool output contains active abnormalities."""
+        if layer != Layer.HEALTHY:
+            return layer, layers
+        if not self._handoff_has_active_abnormalities(layer_handoff):
+            return layer, layers
+
+        corrected_layers = self._layers_from_issue_groups(layer_handoff.get("issue_groups") or [])
+        if not corrected_layers:
+            compatible = self._compatible_layer_for_abnormal_type(layer_handoff.get("pod_abnormal_type", ""))
+            if compatible:
+                corrected_layers = [self._parse_layer(compatible)]
+        if not corrected_layers:
+            corrected_layers = [Layer.L2]
+
+        corrected_layer = corrected_layers[0]
+        corrected_layer_values = [item.value for item in corrected_layers]
+        reason_suffix = (
+            "系统确定性保护：当前真实 kubectl 工具结果仍包含异常对象，"
+            f"拒绝将 layer 输出为 HEALTHY，按异常组兼容层修正为 {corrected_layer.value}。"
+        )
+        original_reason = self._pick_text(layer_result.get("reasoning"))
+
+        layer_result["layer"] = corrected_layer.value
+        layer_result["derived_layer"] = corrected_layer.value
+        layer_result["layers"] = corrected_layer_values
+        layer_result["confidence"] = max(float(layer_result.get("confidence") or 0.0), 0.8)
+        layer_result["reasoning"] = f"{original_reason}\n{reason_suffix}".strip()
+
+        layer_handoff["layer"] = corrected_layer.value
+        layer_handoff["derived_layer"] = corrected_layer.value
+        layer_handoff["layers"] = corrected_layer_values
+        layer_handoff["confidence"] = layer_result["confidence"]
+        layer_handoff["primary_problem"] = layer_result["reasoning"]
+
+        logger.warning(
+            "⚠️ [layer] HEALTHY misclassification corrected from real abnormal tool output | corrected_layer=%s issue_groups=%d total_abnormal=%s",
+            corrected_layer.value,
+            len(layer_handoff.get("issue_groups") or []),
+            (layer_handoff.get("current_abnormal_summary") or {}).get("total_abnormal"),
+        )
+        return corrected_layer, corrected_layers
+
+    @staticmethod
+    def _handoff_has_active_abnormalities(layer_handoff: Dict[str, Any]) -> bool:
+        summary = layer_handoff.get("current_abnormal_summary") or {}
+        try:
+            if int(summary.get("total_abnormal") or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        if summary.get("selected_rows"):
+            return True
+        if layer_handoff.get("abnormal_pods"):
+            return True
+        return bool(layer_handoff.get("issue_groups"))
+
+    def _layers_from_issue_groups(self, issue_groups: List[Dict[str, Any]]) -> List[Layer]:
+        result: List[Layer] = []
+        seen = set()
+        for group in issue_groups or []:
+            for value in group.get("compatible_layers") or []:
+                parsed = self._parse_layer(str(value))
+                if parsed in {Layer.HEALTHY, Layer.QUERY} or parsed.value in seen:
+                    continue
+                seen.add(parsed.value)
+                result.append(parsed)
+        return result
 
     @classmethod
     def _merge_current_abnormal_pods(

@@ -69,6 +69,8 @@ class WorkflowState(TypedDict, total=False):
     # ========== 节点4 输出：汇总总结 ==========
     conclusion: Optional[str]            # 最终报告
     conclusion_formatted: Optional[str]  # 格式化后的 Markdown
+    remediation_plan: Optional[Dict[str, Any]]  # conclusion 中提取的结构化修复计划
+    remediation_result: Optional[Dict[str, Any]]  # 修复执行结果摘要
     
     # ========== 元数据 ==========
     current_node: Optional[str]          # 当前执行节点

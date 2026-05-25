@@ -688,6 +688,77 @@ kubectl logs <pod> -n <namespace> --previous | tail -100
 
 
 # ----------------------------------------------------------------------------
+# REMEDIATION_PLAN_PROMPT
+# 使用场景:
+# - conclusion 节点生成 `## 🧩 结构化修复计划`
+# - 该计划会被 remediation executor 消费并在人工审批后执行
+# - 这里集中维护修复计划的安全边界、JSON 合同和验证命令规则
+# ----------------------------------------------------------------------------
+REMEDIATION_PLAN_PROMPT = """
+在报告末尾额外输出一个 `## 🧩 结构化修复计划` 区块，必须包含一个 JSON fenced block。
+
+要求:
+- 如果不适合修复，输出 `"remediation_available": false` 和空 actions。
+- 如果存在多个异常组（如 ImagePullBackOff + OOMKilled），`issue_groups` 必须逐组列出，每个 group 都要标明 `group_id`、`problem_type`、`target`、`auto_fixable`、`strategy`。
+- 多异常场景下不能只给一个次要异常的修复。每个可自动修复的 group 至少给一个 action；不可自动修复的 group 必须在 `issue_groups[].strategy` 和修复建议中说明人工处理原因。
+- 多异常场景下每个 action 必须包含 `group_id`，且必须匹配某个 `issue_groups[].group_id`；禁止输出无法归属到具体异常组的修复动作。
+- 如果适合修复，只允许生成资源配置类 Kubernetes 修复动作，例如 ConfigMap/Secret/PVC/imagePullSecret 缺失、workload resources/nodeSelector/toleration/probe/env 配置修正。
+- 不要生成 delete pvc/pv、修改 Node taint/label、CNI/IPAM/runtime、iptables、文件删除、进程重启等高风险动作。
+- 所有写操作必须同时给出 dry_run_command、execute_command 和 verify_command。
+- command 必须是单行 kubectl 命令，不要使用 shell 管道、重定向、here-doc 或分号。
+- command 必须能直接执行，必须使用真实工具证据中出现的 namespace、workload 名、container 名；禁止输出 `<name>`、`<namespace>`、`xxx`、`TODO`、`PLACEHOLDER` 等占位符。
+- 如果只能定位到 Pod，不能从 ownerReferences/labels/ReplicaSet 证据确认 Deployment/StatefulSet/DaemonSet 名称，则不要生成写操作，输出 `"remediation_available": false`，在修复建议中说明需要先确认上层 workload。
+- 创建 ConfigMap/Secret/PVC 只有在真实 Pod/Workload YAML 里存在对该资源的明确引用时才允许；仅因为探测命令返回某个常见名称 NotFound，不能生成 create configmap/secret/pvc 动作。
+- 如果日志显示缺少环境变量，且真实证据能确认上层 Deployment/StatefulSet/DaemonSet，优先修复 workload 的 env，例如 `kubectl set env deployment/<真实名称> -n <真实命名空间> KEY=value`。
+- 资源配置类修复优先使用 `kubectl set resources deployment/<真实名称> -n <真实命名空间> --limits=memory=...` 这类简单命令，避免复杂 JSON patch 字符串。
+- OOMKilled 修复必须尊重真实资源证据：如果当前已存在 memory limit，新 limit 必须严格大于当前值；禁止把 512Mi 改成 256Mi 这类降低或不增加内存上限的动作。
+- 如果证据显示应用逻辑会无限分配内存（例如循环 append 大对象），不要把“调小/小幅调大 limit”作为成功修复；应输出 `manual_only` 或 `"remediation_available": false`，说明需要修改应用代码、镜像或启动参数。
+- 所有 action 都必须 requires_human_approval=true，由执行器在工具前中断等待人工同意。
+
+验证命令规则:
+- 如果 execute_command 修改的是 Deployment/StatefulSet/DaemonSet 的 PodTemplate（例如 `kubectl set env deployment/...`、`kubectl set resources deployment/...`、`kubectl patch deployment/...`），verify_command 禁止使用当前异常 Pod 的固定名称，因为旧 Pod 会被滚动更新删除。
+- Workload 修改后的 verify_command 必须优先使用 `kubectl rollout status deployment/<name> -n <namespace> --timeout=60s`，或使用稳定 label selector 查询新 Pod，例如 `kubectl get pod -n <namespace> -l app=<label>`。
+- 如果需要验证 env/resources 字段，应该查询 workload 模板，例如 `kubectl get deployment <name> -n <namespace> -o jsonpath='{.spec.template.spec.containers[0].env}'`，不能查询旧 Pod 实例。
+- 只有 Pod finalizer 删除、Pod delete 这类目标就是删除当前 Pod 的修复，才允许 verify_command 查询固定 Pod 名，并将 NotFound 视为成功。
+- verify_command 的目标必须验证“业务恢复终态”：rollout 成功、Pod Running/Ready、重启不再增加，或删除类修复的 NotFound；不能只验证某个字段存在就宣称修复成功。
+
+JSON 格式:
+```json
+{
+  "remediation_available": true,
+  "fix_type": "create_missing_configmap|create_missing_secret|create_missing_pvc|patch_workload_resources|patch_workload_selector|patch_probe|patch_workload_env|manual_only",
+  "risk_level": "low|medium|high",
+  "requires_human_approval": true,
+  "issue_groups": [
+    {
+      "group_id": "g1",
+      "problem_type": "ImagePullFailed|OOMKilled|Pending|ConfigError|...",
+      "target": "namespace/kind/name 或 node/name",
+      "auto_fixable": true,
+      "strategy": "本组修复策略；如不可自动修复则说明原因"
+    }
+  ],
+  "basis": ["来自真实工具输出的修复依据"],
+  "actions": [
+    {
+      "id": "a1",
+      "type": "kubectl_apply|kubectl_patch|kubectl_set|kubectl_create|kubectl_verify",
+      "group_id": "g1",
+      "target_issue": "对应 issue_groups[].problem_type",
+      "description": "动作说明",
+      "risk": "low|medium|high",
+      "dry_run_command": "kubectl ... --dry-run=server ...",
+      "execute_command": "kubectl ...",
+      "verify_command": "kubectl ..."
+    }
+  ],
+  "stop_conditions": ["用户不认可修复方案", "dry-run 失败", "任一动作被拒绝"]
+}
+```
+"""
+
+
+# ----------------------------------------------------------------------------
 # 英文 prompt 暂时停用
 # 当前策略：如果 prompt_language=en，请直接复用中文 prompt，避免维护两套文本
 # ----------------------------------------------------------------------------
@@ -699,6 +770,7 @@ EVIDENCE_COLLECTOR_PROMPT_EN = EVIDENCE_COLLECTOR_PROMPT
 TOOL_OBSERVATION_SUMMARIZER_PROMPT_EN = TOOL_OBSERVATION_SUMMARIZER_PROMPT
 ROOT_CAUSE_ANALYZER_PROMPT_EN = ROOT_CAUSE_ANALYZER_PROMPT
 CONCLUSION_FORMATTER_PROMPT_EN = CONCLUSION_FORMATTER_PROMPT
+REMEDIATION_PLAN_PROMPT_EN = REMEDIATION_PLAN_PROMPT
 
 # ----------------------------------------------------------------------------
 # QUERY_CONCLUSION_INSTRUCTION_ZH

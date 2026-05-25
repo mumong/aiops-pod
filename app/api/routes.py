@@ -63,6 +63,7 @@ def register_routes(app):
         stream: bool = Query(True, description="是否流式输出"),
         format: str = Query("text", description="输出格式: text(默认) 或 sse"),
         max_steps: int = Query(20, description="最大执行步数", ge=1, le=100),
+        remediate: Optional[bool] = Query(None, description="是否在诊断后进入人工审批修复流程"),
     ):
         """
         🔍 智能运维查询（GET 方式）
@@ -82,26 +83,22 @@ def register_routes(app):
         """
         question = fix_double_encoding(q) # FastAPI 的 Query 已自动解码
         logger.info(f"📝 收到查询: {question[:80]}...")
+        if remediate and not stream:
+            raise HTTPException(status_code=400, detail="remediate=true requires stream=true for human approval")
         
         if stream:
             return _stream_response(
                 question,
                 format,
                 max_steps,
-                workflow_overrides={
-                    "query_mode": "full",
-                    "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
-                },
+                workflow_overrides=_diagnosis_workflow_overrides(remediate),
                 workflow_title="工作流诊断模式",
             )
         else:
             return await _sync_response(
                 question,
                 max_steps,
-                workflow_overrides={
-                    "query_mode": "full",
-                    "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
-                },
+                workflow_overrides=_diagnosis_workflow_overrides(remediate),
                 workflow_title="工作流诊断模式",
             )
     
@@ -111,6 +108,7 @@ def register_routes(app):
         stream: bool = Form(True, description="是否流式输出"),
         format: str = Form("text", description="输出格式"),
         max_steps: int = Form(20, description="最大执行步数"),
+        remediate: Optional[bool] = Form(None, description="是否在诊断后进入人工审批修复流程"),
     ):
         """
         🔍 智能运维查询（POST 表单方式）
@@ -127,26 +125,22 @@ def register_routes(app):
         """
         question = fix_double_encoding(q)
         logger.info(f"📝 收到查询 (POST): {question[:80]}...")
+        if remediate and not stream:
+            raise HTTPException(status_code=400, detail="remediate=true requires stream=true for human approval")
 
         if stream:
             return _stream_response(
                 question,
                 format,
                 max_steps,
-                workflow_overrides={
-                    "query_mode": "full",
-                    "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
-                },
+                workflow_overrides=_diagnosis_workflow_overrides(remediate),
                 workflow_title="工作流诊断模式",
             )
         else:
             return await _sync_response(
                 question,
                 max_steps,
-                workflow_overrides={
-                    "query_mode": "full",
-                    "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
-                },
+                workflow_overrides=_diagnosis_workflow_overrides(remediate),
                 workflow_title="工作流诊断模式",
             )
 
@@ -220,6 +214,47 @@ def register_routes(app):
             return _stream_response(question, format, max_steps)
         else:
             return await _sync_response(question, max_steps)
+
+    @app.post("/remediation/approve")
+    async def remediation_approve(
+        run_id: str = Form(..., description="诊断 run_id"),
+        approval_id: str = Form(..., description="审批 ID"),
+        approved: bool = Form(..., description="是否同意"),
+        reviewer: str = Form("", description="审批人"),
+        reason: str = Form("", description="审批原因"),
+    ):
+        from app.core.remediation.approval import approval_store
+
+        ok = approval_store.resolve(
+            run_id=run_id,
+            approval_id=approval_id,
+            approved=approved,
+            reviewer=reviewer,
+            reason=reason,
+        )
+        if not ok:
+            logger.warning(
+                "🛠️ remediation approval not found | run_id=%s approval_id=%s approved=%s reviewer=%s",
+                run_id,
+                approval_id,
+                approved,
+                reviewer,
+            )
+            raise HTTPException(status_code=404, detail="approval request not found")
+        logger.info(
+            "🛠️ remediation approval resolved | run_id=%s approval_id=%s approved=%s reviewer=%s reason=%s",
+            run_id,
+            approval_id,
+            approved,
+            reviewer,
+            reason,
+        )
+        return {
+            "success": True,
+            "run_id": run_id,
+            "approval_id": approval_id,
+            "approved": approved,
+        }
     
     # =========================================================================
     # 辅助端点
@@ -642,6 +677,15 @@ def register_routes(app):
                 "X-Accel-Buffering": "no",
             }
         )
+
+    def _diagnosis_workflow_overrides(remediate: Optional[bool] = None) -> dict:
+        overrides = {
+            "query_mode": "full",
+            "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
+        }
+        if remediate is not None:
+            overrides["remediation"] = {"enabled": bool(remediate)}
+        return overrides
     
     async def _sync_response(
         question: str,

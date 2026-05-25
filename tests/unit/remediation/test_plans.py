@@ -1,0 +1,169 @@
+import pytest
+
+from app.core.remediation.plans import extract_remediation_plan
+
+
+def test_extracts_remediation_plan_from_json_fence():
+    text = """
+## 🛠️ 修复计划
+
+```json
+{
+  "remediation_available": true,
+  "fix_type": "create_missing_configmap",
+  "risk_level": "medium",
+  "requires_human_approval": true,
+  "basis": ["kubectl describe 显示 configmap missing"],
+  "actions": [
+    {
+      "id": "a1",
+      "type": "kubectl_apply",
+      "description": "创建缺失 ConfigMap",
+      "risk": "medium",
+      "dry_run_command": "kubectl apply --dry-run=server -f /tmp/cm.yaml",
+      "execute_command": "kubectl apply -f /tmp/cm.yaml",
+      "verify_command": "kubectl get configmap missing -n aiops-e2e"
+    }
+  ]
+}
+```
+"""
+
+    plan = extract_remediation_plan(text)
+
+    assert plan is not None
+    assert plan.remediation_available is True
+    assert plan.fix_type == "create_missing_configmap"
+    assert plan.actions[0].id == "a1"
+    assert plan.actions[0].dry_run_command.startswith("kubectl apply")
+
+
+def test_extracts_issue_groups_and_action_group_metadata():
+    text = """
+```json
+{
+  "remediation_available": true,
+  "fix_type": "patch_workload_resources",
+  "risk_level": "medium",
+  "requires_human_approval": true,
+  "issue_groups": [
+    {
+      "group_id": "g1",
+      "problem_type": "OOMKilled",
+      "target": "aiops-e2e/deployment/memhog",
+      "auto_fixable": false,
+      "strategy": "应用持续分配内存，需要人工改代码"
+    },
+    {
+      "group_id": "g2",
+      "problem_type": "ImagePullFailed",
+      "target": "default/statefulset/test-redis",
+      "auto_fixable": false,
+      "strategy": "镜像仓库网络不可达，需要人工修复网络或代理"
+    }
+  ],
+  "basis": ["kubectl get pods 显示两个异常组"],
+  "actions": [
+    {
+      "id": "a1",
+      "type": "kubectl_verify",
+      "group_id": "g1",
+      "target_issue": "OOMKilled",
+      "description": "验证 memhog 状态",
+      "execute_command": "kubectl get pod -n aiops-e2e -l app=memhog"
+    }
+  ]
+}
+```
+"""
+
+    plan = extract_remediation_plan(text)
+
+    assert plan is not None
+    assert [group["group_id"] for group in plan.issue_groups] == ["g1", "g2"]
+    assert plan.actions[0].metadata["group_id"] == "g1"
+    assert plan.actions[0].metadata["target_issue"] == "OOMKilled"
+
+
+def test_rejects_non_kubectl_write_command():
+    text = """
+```json
+{
+  "remediation_available": true,
+  "fix_type": "unsafe",
+  "risk_level": "high",
+  "actions": [
+    {
+      "id": "a1",
+      "type": "run_shell",
+      "description": "unsafe",
+      "execute_command": "rm -rf /"
+    }
+  ]
+}
+```
+"""
+
+    with pytest.raises(ValueError, match="unsafe remediation command"):
+        extract_remediation_plan(text)
+
+
+def test_rejects_multi_issue_auto_fix_plan_without_group_action_coverage():
+    text = """
+```json
+{
+  "remediation_available": true,
+  "fix_type": "patch_workload_resources",
+  "risk_level": "medium",
+  "requires_human_approval": true,
+  "issue_groups": [
+    {"group_id": "g1", "problem_type": "OOMKilled", "auto_fixable": true},
+    {"group_id": "g2", "problem_type": "ImagePullFailed", "auto_fixable": true}
+  ],
+  "actions": [
+    {
+      "id": "a1",
+      "type": "kubectl_verify",
+      "group_id": "g1",
+      "description": "verify g1",
+      "execute_command": "kubectl get pod -n aiops-e2e -l app=memhog"
+    }
+  ]
+}
+```
+"""
+
+    with pytest.raises(ValueError, match="missing remediation actions"):
+        extract_remediation_plan(text)
+
+
+def test_rejects_multi_issue_action_without_group_id():
+    text = """
+```json
+{
+  "remediation_available": true,
+  "fix_type": "patch_workload_resources",
+  "risk_level": "medium",
+  "requires_human_approval": true,
+  "issue_groups": [
+    {"group_id": "g1", "problem_type": "OOMKilled", "auto_fixable": true},
+    {"group_id": "g2", "problem_type": "ImagePullFailed", "auto_fixable": false}
+  ],
+  "actions": [
+    {
+      "id": "a1",
+      "type": "kubectl_verify",
+      "description": "verify g1",
+      "execute_command": "kubectl get pod -n aiops-e2e -l app=memhog"
+    }
+  ]
+}
+```
+"""
+
+    with pytest.raises(ValueError, match="missing group_id"):
+        extract_remediation_plan(text)
+
+
+def test_returns_none_when_no_plan_exists():
+    assert extract_remediation_plan("## 诊断报告\n没有修复 JSON") is None

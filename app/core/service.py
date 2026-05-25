@@ -927,6 +927,7 @@ class HolmesService:
         yield emit("-" * 70)
 
         final_answer = ""
+        final_report_emitted = False
         metrics_data = None
         _token_streaming_active = False
         think_mode, think_max_chars = self.get_think_stream_config()
@@ -1076,12 +1077,55 @@ class HolmesService:
                 yield emit("-" * 70)
                 yield emit("")
 
+            elif event_type == "remediation_approval_required":
+                if final_answer and not final_report_emitted:
+                    yield emit("=" * 70)
+                    yield emit("🎯 诊断报告")
+                    yield emit("=" * 70)
+                    yield emit("")
+                    yield emit("## 📋 节点四：汇总总结")
+                    yield emit("-" * 70)
+                    yield emit(node_outputs["conclusion"])
+                    yield emit("")
+                    final_report_emitted = True
+                yield emit("=" * 70)
+                yield emit("🛠️ 修复审批中断")
+                yield emit("=" * 70)
+                yield emit(f"审批类型: {event.get('approval_kind')}")
+                yield emit(f"审批 ID: {event.get('approval_id')}")
+                yield emit(f"标题: {event.get('title')}")
+                yield emit("请调用:")
+                yield emit(
+                    "curl -X POST http://<host>/remediation/approve "
+                    f"-d run_id={event.get('run_id')} "
+                    f"-d approval_id={event.get('approval_id')} "
+                    "-d approved=true"
+                )
+                yield emit("")
+
+            elif event_type == "remediation_tool_result":
+                yield emit(
+                    f"🛠️ 修复工具结果 [{event.get('stage')}]: "
+                    f"{event.get('command')} -> {event.get('status')}"
+                )
+                preview = event.get("result_preview")
+                if preview:
+                    yield emit(str(preview)[:500])
+                yield emit("")
+
+            elif event_type == "remediation_finished":
+                yield emit(
+                    f"🛠️ 修复流程结束: {event.get('status')} "
+                    f"({event.get('reason', '')})"
+                )
+                yield emit("")
+
             elif event_type == "error":
                 error = event.get("error", "未知错误")
                 yield emit(f"❌ 错误: {error}")
                 yield emit("")
 
-        if final_answer:
+        if final_answer and not final_report_emitted:
             yield emit("=" * 70)
             yield emit("🎯 诊断报告")
             yield emit("=" * 70)
