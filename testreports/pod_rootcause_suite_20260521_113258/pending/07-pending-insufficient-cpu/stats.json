@@ -29,19 +29,15 @@
           "tool_calls": 19,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                     │\n│ 人为配置错误：Pod `rc-pending-insufficient-cpu` 的 resources.requests.cpu   │\n│ 被设置为 100k（100,000 millicores = 100 个 CPU 核）                         │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                     │\n│ 调度器评估 Pod 的资源请求（100 核 CPU）→ 遍历所有 3 个 Ready 节点            │\n│ → 每个节点可分配 CPU 仅 12 核，均无法满足 100 核请求                         │\n│ → 调度器判定 \"3 Insufficient cpu\" → 无节点可抢占                            │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                     │\n│ Pod 的 CPU request 值（100k）大于所有节点的 CPU allocatable 容量（12 核）    │\n└──────────────────────────────────────────────────────────────────────────────┘\n     "
         },
         {
@@ -556,7 +552,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                  │\n│ Pod `rc-pending-insufficient-cpu` 中 `resources.requests.cpu` 错误配置为 │\n│ \"100k\"（即 100,000 个 CPU 核心），这几乎是 Kubernetes 合法值的上限。      │\n└──────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                  │\n│ 调度器 (default-scheduler) 检查 3 个节点 → 每个节点可用 CPU < 0 核       │\n│ (因为 100k > 12) → 3 个节点均判定 `Insufficient cpu`                     │\n│ → 检查是否可通过抢占低优先级 Pod 满足 → 无受害者 (preemption victims=0)  │\n└──────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                  │\n│ 调度器无法为 Pod 找到任何可调度节点，持续报错 `FailedScheduling`。        │\n└──────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────"
         },
         {
@@ -589,7 +585,7 @@
             "nodes are available"
           ],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "误判为 imagePullPolicy=Never/本地镜像缺失",
           "root_section_preview": "### 因果链\n```\n┌────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                   │\n│ Pod 配置了 imagePullPolicy: Never，强制要求节点本地存在 busybox:1.36 镜像，│\n│ 但该镜像可能不存在于任何一个节点上，导致调度器预选阶段认为所有节点不可用。    │\n└────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                   │\n│ 调度器在预选阶段检查 “Node has the image requested by the Pod” 条件失败。   │\n│ (也可能是调度器因无法拉取镜像，而将 Pod 判定为无法调度，并统一报告为CPU不足) │\n└────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                   │\n│ 调度器判定所有节点 CPU 不足，尽管节点实际 CPU 资源非常充裕。                 │\n└────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌────────────────────────────────────────────────────────────────────────────┐\n│ 用户可见现象                              "
         },
         {
@@ -611,7 +607,7 @@
           "tool_calls": 12,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -621,11 +617,8 @@
             "nodes are available"
           ],
           "missing_keywords": [],
-          "conflict_keywords": [
-            "nodeSelector",
-            "pvc"
-          ],
-          "semantic_root_cause_reason": null,
+          "conflict_keywords": [],
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "**根因：集群 3 个节点的 CPU 资源均已不足（Insufficient cpu）**\n\n- 调度器尝试了全部 **3 个 worker 节点**，每个节点 CPU 都被现有 Pod 占用，无法容纳这个新 Pod。\n- Preemption（抢占）也未找到可牺牲的受害者 Pod（`No preemption victims found`），说明没有低优先级 Pod 可供驱逐。\n- 这是一个 E2E 测试 Pod，可能故意设置了较大的 CPU request 来模拟资源不足场景，也可能是集群真的 CPU 资源紧张。\n\n### 涉及的关键实体\n\n| 实体类型 | 名称 |\n|----------|------|\n| 异常 Pod | `aiops-e2e/rc-pending-insufficient-cpu` |\n| 集群节点数 | 3 个 worker 节点（全部 CPU 不足） |\n\n### 可能的后续排查方向（由 downstream 执行）\n\n1. 查看该 Pod 的 YAML，确认其 `resources.requests.cpu` 具体值\n2. 检查各节点的 `Allocatable cpu` 与已分配量，确认 CPU 资源的真实水位\n3. 确认该 Pod 是否为 E2E 测试场景（从标签 `rootcause-e2e=true` 看可能性很大）\n4. 如果是真实生产 Pod，考虑扩容节点或调整现有 Pod 的 resource requests\n   ✅ [问题定位] 完成 (25.9s)\n   📤 → 下游数据: layer=Layer.L1, layers=L1\n   scenarios=[{'scenario': '集群CPU资源不足，所有节点无法调度新Pod', 'probability': '高', 'reason': 'FailedScheduling事件明确显示0/3 nodes are available: 3 Insufficient cpu，且无抢占受害者Pod'}]\n   entities=[{\"type\": \"Pod\", \"name\": \"rc-pending-insufficient-cpu\", \"namespace\": \"aiops-e2e\"}, {\"type\": \"Node\", \"name\": \"3 worker nodes (all)\", \"namespace\": \"\"}]\n   reasoning=集群存在1个异常Pod：aiops-e2e/rc-pending-insufficient-cpu，状态为Pending，调度事件FailedScheduling显示0/3 nodes are available: 3 Insufficient cpu，所有3个worker节点CPU资源不足，符合L1调度资源不足特"
         },
         {
@@ -865,7 +858,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 根本原因 (Root Cause)                                                   │\n│ Pod `rc-pending-insufficient-cpu` 的 `spec.resources.requests.cpu`      │\n│ 被设置为非法值 `100k`。K8s 合法的 CPU 单位是 `m` (e.g., 100m) 或       │\n│ 整数/小数 (e.g., 1, 0.5)。`100k` 不被调度器识别。                      │\n└─────────────────────────────────────────────────────────────────────────┘\n                                  ↓\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 传导机制 (Propagation)                                                  │\n│ 调度器尝试解析 `requests.cpu='100k'` 失败 → 无法将其转换为有效的        │\n│ millicores 值 → 对所有 3 个节点均判定资源不足 → 生成                    │\n│ `'Insufficient cpu'` 错误信息。                                        │\n└─────────────────────────────────────────────────────────────────────────┘\n                                  ↓\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 直接原因 (Direct Cause)                                                 │\n│ CPU 请求格式非法，导致调度器在所有节点上的 CPU 校验都不通过。           │\n└─────────────────────────────────────────────────────────────────────────┘\n          "
         },
         {
@@ -1616,7 +1609,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n\n```\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                    │\n│ Pod 的 resources.requests.cpu 被配置为 '100k' (100,000 CPU核心)，             │\n│ 这是一个典型的人为配置错误。正确的意图应为 '100m'（0.1个CPU核心）。           │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                    │\n│ 调度器计算 Pod 需求时发现其请求 100,000 核 >> 所有节点的 12 核可分配容量，     │\n│ 判定所有节点均无法满足资源请求。                                            │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                    │\n│ 调度器因集群 CPU 资源“不足”而无法为 Pod 找到合适的节点，                       │\n│ 触发 FailedScheduling 事件。                                                │\n└──────────────────────────────────────────────────────────────────────────────┘\n                       "
         },
         {
@@ -1647,7 +1640,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "调度器事件 `FailedScheduling` 明确提示：\n\n> **0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.**\n\n所有 3 个节点 CPU 资源均不足，且没有可抢占的低优先级 Pod。该 Pod 的镜像策略为 `imagePullPolicy=Never`（使用本地镜像 `busybox:1.36`），说明这不是镜像拉取问题，而是**集群整体 CPU 资源不足**导致无法调度。"
         },
         {
@@ -2223,7 +2216,7 @@
             "nodeSelector",
             "pvc"
           ],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "误判为 rootcause-e2e 模拟场景，且把 100k 解释为 0.1 核",
           "root_section_preview": "集群中 **3 个节点的 CPU 资源均已耗尽**（Allocatable CPU 不足以满足该 Pod 的 request），并且调度器无法通过抢占（preemption）来腾出空间——所有节点上都没有可以被抢占的受害者 Pod。\n\n### Pod 基本信息\n- **镜像**: `busybox:1.36`\n- **QoS 类别**: Burstable\n- **节点选择器**: 无\n- **容忍度**: 仅容忍 not-ready 300s，无其他特殊容忍\n\n### 涉及的实体\n\n| 实体类型 | 名称 |\n|---------|------|\n| Pod | `rc-pending-insufficient-cpu` (aiops-e2e) |\n| 节点 | 集群全部 3 个节点（均 CPU 不足） |\n\n### 可能场景\n\n1. **集群 CPU 资源整体不足** — 3 个节点的 CPU Allocatable 均已用满，无法调度新的 Pod\n2. **Pod 设置的 CPU request 过大** — 该 Pod 请求的 CPU 量超过了任何一个节点的剩余资源\n3. **节点上运行了大量高 CPU 需求的 Pod** — 已有负载占满了节点 CPU\n\n### 建议方向\n- 检查各节点的 `Allocatable CPU` 和当前 CPU 使用量\n- 评估是否可以通过扩容节点来缓解资源压力\n- 检查该 Pod 的 CPU request 配置是否合理，是否需要调低\n- 查看是否有关联的低优先级 Pod 可以被驱逐来腾出空间\n   ✅ [问题定位] 完成 (25.3s)\n   📤 → 下游数据: layer=Layer.L1, layers=L1\n   scenarios=[{'scenario': '集群CPU资源整体不足', 'probability': '高', 'reason': '3个节点的CPU Allocatable均已用满，无法调度新Pod'}, {'scenario': 'Pod设置的CPU request过大', 'probability': '中', 'reason': '该Pod请求的CPU量超过了任何一个节点的剩余资源'}, {'scenario': '节点上运行了大量高CPU需求的Pod', 'probability': '中', 'reason': '已有负载占满了节点CPU'}]\n   entities=[{\"type\": \"Pod\", \"name\": \"rc-pending-insufficient-cpu\", \"namespace\": \"aiops-e2e\"}, {\"type\": \"Node\", \"name\": \"3个集群节点\", \"namespace\": \"\"}]\n   reasoning=集群中存在1个异常P"
         },
         {
@@ -2709,7 +2702,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌────────────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                               │\n│ Pod `rc-pending-insufficient-cpu` 的 `resources.requests.cpu` 被错误地配置为          │\n│ 100000m (100 core)，远超集群任何单节点的可分配CPU（12 core）。                          │\n└────────────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌────────────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                               │\n│ Scheduler 解析 Pod 的 CPU requests (100核) → 遍历所有3个节点 → 计算每个节点的          │\n│ allocatable CPU (12核) - 已分配CPU → 发现无节点能满足100核请求 → 标记 Pod 为           │\n│ Unschedulable                                                                          │\n└────────────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌────────────────────────────────────────────────────────────────────────────────────────┘\n│ 直接原因                                                                               │\n│ Scheduler 连续"
         },
         {
@@ -3405,19 +3398,15 @@
           "tool_calls": 14,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌───────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                          │\n│ Pod spec.containers[0].resources.requests.cpu 被错误配置为 '100k'（100,000 核）    │\n│ (来源: 证据 #2 - kubectl_get_yaml)                                                │\n└───────────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌───────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                          │\n│ 调度器检查所有3个候选节点的可用CPU资源。每个节点仅有12核（来源: 证据 #3），         │\n│ 远不足以满足100k核的请求。调度器在所有节点上均判定资源不足。                         │\n│ 尝试抢占调度也失败（来源: 证据 #1）。                                               │\n└───────────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌───────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                          │\n│ 调度器在所有3个节点上均发现 CPU 资源不足（Insufficient cpu），无法完成调度。        │\n│ (来源: 证据 #1 - kubectl_des"
         },
         {
@@ -3438,19 +3427,15 @@
           "tool_calls": 14,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                        │\n│ Pod 'rc-pending-insufficient-cpu' 的 resources.requests.cpu     │\n│ 被设置为 \"100k\"，Kubernetes 解析为 100,000 millicores (100核)。 │\n└─────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                        │\n│ Pod 请求 100 核 CPU -> 调度器评估所有节点 -> 发现每个节点        │\n│ 仅有 12 核容量 -> 所有节点均无法满足调度条件。                    │\n└─────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                        │\n│ 调度器报告所有节点 \"3 Insufficient cpu\"，且无低优先级的         │\n│ Pod 可被驱逐（抢占）来释放资源。                                 │\n└─────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────┐\n│ 用户可见现象                                                    │\n│ Pod 状态为 Pending，持续触发 Failed"
         },
         {
@@ -3481,7 +3466,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "调度器明确报错：\n> **`0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.`**\n\n- 集群共 **3 个 Worker 节点**，所有节点的 **CPU 资源均已耗尽**，没有足够可分配的 CPU 资源来容纳这个 Pod。\n- 抢占调度（preemption）也无法找到可以被驱逐的低优先级 Pod，说明所有节点的 CPU 都已经满负荷分配。\n\n### 可能场景\n\n1. **集群整体 CPU 资源不足** — 3 个节点的 CPU allocatable 已被现有 Pod 占满，无法再调度新的 Pod。\n2. **Pod 请求的 CPU 过大** — 该 Pod 的 CPU request 设置较高，而节点上剩余零散的 CPU 碎片不足以满足其需求。\n3. **节点规模不足** — 集群仅有 3 个节点，且已满载，需要扩容节点或减少现有 Pod 资源占用。"
         },
         {
@@ -3514,7 +3499,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                        │\n│ Pod rc-pending-insufficient-cpu 的 resources.requests.cpu 被配置为 100k          │\n│ (100,000 个 CPU 核心)，这是一个人工配置错误。                                    │\n└─────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                        │\n│ 调度器计算：Pod请求(100k) > 节点可分配CPU(12核) → 所有3个节点均不满足条件         │\n│ 调度器尝试抢占：无更低优先级Pod可被抢占来释放资源 → 调度失败                      │\n└─────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                        │\n│ 集群总计 allocatable CPU=36 core，但单个Pod请求100,000 core，超出集群容量约2777倍。 │\n└─────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────"
         },
         {
@@ -3547,7 +3532,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "是其 resources.requests.cpu 被错误设置为 '100k'（即 100,000 个 CPU），但集群 3 个节点（master、node1、node2）的 CPU 可分配量均为 12 个（证据 e3, e4）。调度器 Events 明确报告 '0/3 nodes are available: 3 Insufficient cpu'（证据 e1），PodScheduled condition=False（证据 e2）。所有节点均为 Ready 且无 Taints（证据 e5, e6），排除了节点健康或调度约束问题。这是一个 Pod 配置错误导致的资源请求溢出问题。\n   confidence=100%\n   causal_chain={\"root_cause\": \"Pod rc-pending-insufficient-cpu 的 CPU requests 被配置为 100k（100,000 个 CPU），远超集群任一节点（每个节点仅 12 个 CPU）的容量。\", \"propagation\": \"调度器尝试将 Pod 分配到节点时，逐节点检查 CPU 资源是否满足 100k 的请求，所有 3 个节点均远不达标，报告 Insufficient cpu；抢占逻辑也因无符合条件的 victim Pod 而失败。Pod 持续处于 Pending 状态。\", \"direct_cause\": \"所有 3 个节点均为 Ready 且无 Taints，但 CPU 可分配量（12）小于 Pod 请求的 CPU 数量（100k），调度器无法找到任何可用的候选节点。\", \"manifestation\": \"用户可见 Pod rc-pending-insufficient-cpu 长时间处于 Pending 状态，kubectl 输出显示 <none> 的 Node 和 IP，Events 不断重试 FailedScheduling。\"}\n   rca_analysis={\"phenomenon\": \"命名空间 aiops-e2e 中的 Pod rc-pending-insufficient-cpu 处于 Pending 状态，Events 持续报告 FailedScheduling 错误，具体原因为 '3 Insufficient cpu'，Pod 未被调度到任何节点。\", \"evidence_inventory\": [{\"id\": \"e1\", \"source\": \"kubectl_describe\", \"content\": \"Pod rc-pending-insufficient-cpu 当前状态为 Pending，Events 显示 FailedScheduling：'0/3 nodes are available: 3 Insufficient cpu'"
         },
         {
@@ -3568,7 +3553,7 @@
           "tool_calls": 25,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": true,
+          "root_cause_ok": false,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -3578,7 +3563,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "误判为现有 Pod requests 占满节点，未识别目标 Pod CPU request 异常",
           "root_section_preview": "### 因果链\n\n```\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                    │\n│ 集群 3 个节点的 CPU 资源（Allocatable CPU = 12 核/节点）已被现有的 59 个    │\n│ Running Pod 的 request 占满，导致无空闲 CPU 容量可供调度。                   │\n│ （例如：node1 的 CPU Requests 为 4610m (38%)，按 12 核计算已占用 4.6 核）   │\n└──────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                    │\n│ K8s 调度器基于 Pod 的 CPU **requests** 进行决策                              │\n│ → scheduler 遍历 3 个 node，发现每个 node 的剩余可分配 CPU（Allocatable -    │\n│   Total Requests）均为 0                                                     │\n│ → 尝试 Preemption 抢占，但无更低优先级 Pod 可驱逐                           │\n└──────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                    │\n│ 调度"
         },
         {
@@ -4150,19 +4135,15 @@
           "tool_calls": 20,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因 [配置错误]                                                          │\n│ rc-pending-insufficient-cpu 的 resources.requests.cpu 被误写为 \"100k\"        │\n│ （正确应为 \"100m\" 或其它合理值）                                             │\n└─────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                    │\n│ Pod 请求 100,000 个 CPU → kube-scheduler 计算每个节点剩余资源                │\n│ → 每个节点都 < 100,000 核 → 触发 FailedScheduling                           │\n└─────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                    │\n│ 调度器在所有 3 个节点上都发现 CPU 不满足 Pod 请求                            │\n└─────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────"
         },
         {
@@ -4183,7 +4164,7 @@
           "tool_calls": 10,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -4193,10 +4174,8 @@
             "nodes are available"
           ],
           "missing_keywords": [],
-          "conflict_keywords": [
-            "nodeSelector"
-          ],
-          "semantic_root_cause_reason": null,
+          "conflict_keywords": [],
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "Pod `rc-pending-insufficient-cpu` 的 CPU request 配置为 **`100k`（100000 核）**，这是一个明显异常的值（可能是配置笔误，将 `100m` 误写为 `100k`）。集群中每个节点仅有 12 核容量，因此调度器无法在任何节点上满足这个 CPU 请求。\n\n### 冲突证据\n- **\"集群节点 CPU 资源耗尽\"假说不成立**：Prometheus 数据显示各节点实际 CPU 使用率仅 **8%~19%**，资源非常充裕。真正的根因是 Pod 自身的 CPU request 配置错误（`100k`），而不是集群资源不足。\n\n### 建议修复\n将 Pod/Deployment 中 CPU request 从 `100k` 修正为合理的值（如 `100m`）。\n   ✅ [证据链采集] 完成 (39.0s)\n   📤 → 下游数据: evidence_items=7/7\n   evidence_analysis={\"evidence_plan\":[{\"id\":\"e1\",\"description\":\"描述 Pod rc-pending-insufficient-cpu 的完整状态、事件和调度详情\",\"level\":\"critical\",\"tool\":\"kubectl_describe\",\"command\":\"kubectl describe pod -n aiops-e2e rc-pending-insufficient-cpu\",\"tool_args\":{\"kind\":\"Pod\",\"name\":\"rc-pending-insufficient-cpu\",\"namespace\":\"aiops-e2e\"},\"purpose\":\"验证 FailedScheduling 事件原文和 Pod 配置\",\"evidence_type\":\"pod_status_and_events\",\"target_scope\":\"abnormal_pods\",\"acceptable_tools\":[],\"counts_for_completeness\":true},{\"id\":\"e2\",\"description\":\"获取 Pod 的完整 YAML 以检查资源 requests/limits、nodeSelector、affinity、tolerations 等调度配置\",\"level\":\"critical\",\"tool\":\"kubectl_get_yaml\",\"command\":\"kubectl get pod -n aiops-e2e rc-pending-insufficient-cpu -o yaml\",\"tool_args\":{\"kind\":\"Pod\",\"name\":\"rc-pending-insufficient-cpu\",\""
         },
         {
@@ -4217,19 +4196,15 @@
           "tool_calls": 11,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                                    │\n│ Pod `rc-pending-insufficient-cpu` 的 `resources.requests.cpu` 被错误地配置为 \"100k\"          │\n│ （即 100,000 millicores = 100 核），可能是 \"100m\" (100 millicores) 的笔误。                   │\n└─────────────────────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌─────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                                    │\n│ Kubernetes 调度器评估 Pod 的 CPU 请求 (100 核) → 检查集群所有 3 个节点                       │\n│ → 每个节点最多只有 12 核可分配 → 所有节点都无法满足 → 返回 \"Insufficient cpu\"                 │\n└─────────────────────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌─────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                                    │\n│ 调度器 (default-schedule"
         },
         {
@@ -4250,19 +4225,15 @@
           "tool_calls": 13,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                │\n│ Pod YAML 中 containers[0].resources.requests.cpu 被配置为 100k           │\n│ （即 100 个 CPU 核心），这是一个系统无法满足的严重异常配置。                │\n└─────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                │\n│ 100核的请求 >> 集群任意节点的最大可分配容量（12核）                         │\n│ → kube-scheduler 在所有节点上均判定资源不足（Insufficient cpu）            │\n└─────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                │\n│ Pod 被 kube-scheduler 标记为不可调度（Unschedulable）                     │\n└─────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 用户可见现象                  "
         },
         {
@@ -4283,19 +4254,15 @@
           "tool_calls": 14,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌────────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                           │\n│ Pod (rc-pending-insufficient-cpu) spec 中 resources.requests.cpu 被配置为 100k    │\n│ (100,000 核)，这是一个异常、不合理的数值。                                          │\n└────────────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌────────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                           │\n│ kube-scheduler 评估 Pod requests (100k CPU) 与各节点 allocatable CPU (12核) 不匹配。│\n│ 所有 3 个节点均无法满足，判定资源不足。                                              │\n└────────────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌────────────────────────────────────────────────────────────────────────────────────┘\n┌────────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                           │\n│ 调度器报告 '3 Insufficient cpu'，Pod 无法被"
         },
         {
@@ -4317,7 +4284,7 @@
           "tool_calls": 17,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -4327,11 +4294,8 @@
             "nodes are available"
           ],
           "missing_keywords": [],
-          "conflict_keywords": [
-            "nodeSelector",
-            "pvc"
-          ],
-          "semantic_root_cause_reason": null,
+          "conflict_keywords": [],
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "Events 明确显示调度器报错：\n> `0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.`\n\n**所有 3 个节点的 CPU 资源都已不足**，调度器无法找到可调度节点，且抢占（preemption）也未能找到可被驱逐的受害者 Pod。\n\n### 关键信息\n\n| 项目 | 内容 |\n|------|------|\n| `abnormal_pods` | `aiops-e2e/rc-pending-insufficient-cpu` |\n| `abnormal_groups` | `Pending` → `PendingUnschedulable` (CPU 不足) |\n| `pod_status_keyword` | `Pending` |\n| `pod_abnormal_type` | `PendingUnschedulable` |\n| `status_category` | `scheduling` |\n| `layer` | L1 |\n| `derived_layer` | L1 |\n| `layers` | [L1] |\n| `layer_name` | PendingUnschedulable |\n| `confidence` | 高 |\n\n### 可能的场景\n\n1. **集群 CPU 资源整体不足** — 3 个节点的 CPU 都已超卖/耗尽，导致新 Pod 无法调度\n2. **节点上运行了过多占用 CPU 的工作负载** — 需要检查各节点的 CPU 使用率和 Allocatable\n3. **Pod 请求的 CPU 量过大** — 需要查看该 Pod 的 resource requests 配置\n\n### 建议后续排查方向（由 evidence 节点负责）\n\n- 检查各节点 `kubectl describe node` 中的 `Allocatable cpu` 与已分配量\n- 查看节点上运行的 Pod 列表，确认是否存在资源占用过大的 Pod\n- 评估是否需要对现有工作负载进行资源限制或扩缩集群节点\n   ✅ [问题定位] 完成 (25.1s)\n   📤 → 下游数据: layer=Layer.L1, layers=L1\n   scenarios=[{'scenario': '集群CPU资源整体不足', 'probability': '高', 'reason': 'Events显示0/3 nodes available: 3 Insufficient cpu，所有3个节点CPU均已耗尽'}, {'scenario': '节点上运行"
         },
         {
@@ -4364,7 +4328,7 @@
             "nodes are available"
           ],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "误判为集群已有 Pod requests 占满节点，未识别目标 Pod CPU request 异常",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                  │\n│ 集群中已运行的Pod宣告了过高的CPU requests，占满了所有节点的allocatable配额。 │\n└──────────────────────────────────────────────────────────────────────────┘\n                                     ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                  │\n│ 调度器根据 Pod 声明的 CPU requests 进行资源决策 → 节点空闲资源为 0      │\n└──────────────────────────────────────────────────────────────────────────┘\n                                     ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                  │\n│ 调度器判定所有3个节点均 'Insufficient cpu'，且无Pod可被抢占释放资源。    │\n└──────────────────────────────────────────────────────────────────────────┘\n                                     ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 用户可见现象                                                              │\n│ Pod rc-pending-insufficient-cpu 持续 Pending 24分钟，持续报 FailedScheduling│\n└"
         },
         {
@@ -5114,19 +5078,15 @@
           "tool_calls": 15,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因 (Root Cause)                                                       │\n│ Pod rc-pending-insufficient-cpu 的 CPU request 被错误地设置为 100k 个核。     │\n│ 此值远超集群任一节点的 CPU 容量（12核）。                                    │\n│ (依据：证据 #2)                                                            │\n└─────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制 (Propagation)                                                      │\n│ 调度器尝试为 Pod 寻找一个满足 CPU request (100k核) 的节点。                  │\n│ master(12核)、node1(12核)、node2(12核) 均不满足，被标记为 'Insufficient cpu'。│\n│ 尝试抢占低优先级 Pod 以释放资源，但因无法找到足够资源而失败。                 │\n│ (依据：证据 #1, #3)                                                        │\n└─────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因 (Direct Cause)                                                     │\n│ Pod 始终无法找到满足其 "
         },
         {
@@ -5147,19 +5107,15 @@
           "tool_calls": 15,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                                     │\n│ Pod (rc-pending-insufficient-cpu) 的 `resources.requests.cpu` 被配置为 `100k` (100,000 核)， │\n│ 这是一个远超集群承载能力的、极不合理的配置值。                                                │\n└──────────────────────────────────────────────────────────────────────────────────────────────┘\n                                          ↓\n┌──────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                                     │\n│ Kubernetes 调度器在为 Pod 寻找合适节点时，会检查每个节点的剩余可分配资源。                     │\n│ Pod 请求 100,000 核，而集群中每个节点最多只有 12 核 CPU Allocatable。                         │\n│ 因此，没有任何节点能满足该请求。                                                             │\n└──────────────────────────────────────────────────────────────────────────────────────────────┘\n                                          ↓\n┌──────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                           "
         },
         {
@@ -5180,19 +5136,15 @@
           "tool_calls": 16,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n\n```\n┌───────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                  │\n│ Pod resources.requests.cpu 被错误配置为 100k（100,000 个 CPU 核心）        │\n│ 集群总容量仅 36 核（每节点 12 核，共 3 节点）                              │\n└───────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌───────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                  │\n│ 调度器检查所有 3 个节点，每个节点的 allocatable CPU（12 核）               │\n│ 都远小于 Pod 的 CPU request（100,000 核）→ 全部标记为 Insufficient cpu    │\n└───────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌───────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                  │\n│ 调度器无法找到任何节点满足 100k 核的 CPU 请求                              │\n│ → 所有 3 个节点均报告 3 Insufficient cpu                                  │\n└───────────────────────────────────────────────────────────────────────────┘\n                                  "
         },
         {
@@ -5213,19 +5165,15 @@
           "tool_calls": 15,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                             │\n│ 配置错误：Pod `rc-pending-insufficient-cpu` 的                        │\n│ resources.requests.cpu 被设置为 100k（100,000 个 CPU）               │\n│ （真实环境集群不可能有如此高的 CPU 资源）                             │\n└──────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                             │\n│ 调度器尝试将 Pod 绑定到节点 → 检查节点剩余 CPU (~12) →               │\n│ 请求量 (100k) > 节点剩余量 (12) → 所有 3 个节点均标注为              │\n│ `Insufficient cpu` → 触发抢占调度，但无低优先级 Pod 可被驱逐         │\n└──────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                             │\n│ 所有 3 个节点均无法满足 100k CPU 的请求，导致 Pod 无法被调度         │\n└──────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌────────────────────────────────────"
         },
         {
@@ -5246,7 +5194,7 @@
           "tool_calls": 22,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -5256,10 +5204,8 @@
             "nodes are available"
           ],
           "missing_keywords": [],
-          "conflict_keywords": [
-            "nodeSelector"
-          ],
-          "semantic_root_cause_reason": null,
+          "conflict_keywords": [],
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "**Pod resources.requests.cpu 配置为 `100k`（100000 millicores = 100 CPU 核心）**，这实际上不是一个有效的 Kubernetes CPU 单位写法。所有 3 个节点每个最多只有 12 个 CPU 核心，因此该 Pod 请求的 CPU 量远超任何节点的容量，导致 `Insufficient cpu` 调度失败。这不是真正的集群资源不足，而是 Pod 资源配置错误。\n\n### 未采集证据\n无。所有 4 项计划均已执行完毕。\n   ✅ [证据链采集] 完成 (40.2s)\n   📤 → 下游数据: evidence_items=8/8\n   evidence_analysis={\"evidence_plan\":[{\"id\":\"e1\",\"description\":\"Describe rc-pending-insufficient-cpu Pod 确认 FailedScheduling 事件原文\",\"level\":\"critical\",\"tool\":\"kubectl_describe\",\"command\":\"kubectl describe pod rc-pending-insufficient-cpu -n aiops-e2e\",\"tool_args\":{\"kind\":\"pod\",\"name\":\"rc-pending-insufficient-cpu\",\"namespace\":\"aiops-e2e\",\"resource_type\":\"pod\"},\"purpose\":\"获取 Pod 当前状态和 FailedScheduling 事件原文，验证资源不足的具体原因\",\"evidence_type\":\"current_status_and_events\",\"target_scope\":\"Pod/aiops-e2e/rc-pending-insufficient-cpu\",\"acceptable_tools\":[],\"counts_for_completeness\":true},{\"id\":\"e2\",\"description\":\"获取 Pod YAML 确认资源请求和调度约束配置\",\"level\":\"critical\",\"tool\":\"kubectl_get_yaml\",\"command\":\"kubectl get pod rc-pending-insufficient-cpu -n aiops-e2e -o yaml\",\"tool_args\":{\"kind\":\"pod\",\"name\":\"rc-pending-insufficient-cpu\",\"namespace\":\"aiops-e2e\",\"resource_type\":\"pod\"},\"purpose\":\"验证 Pod 的 CPU 资源请求量、nodeSele"
         },
         {
@@ -5768,19 +5714,15 @@
           "tool_calls": 16,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                            │\n│ Pod rc-pending-insufficient-cpu 的 CPU request 配置为 100，这是一个极高且不合理的值。│\n│ (容器的 command 为 'sleep 3600'，实际几乎零CPU消耗，但request设置了100core)          │\n└─────────────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌─────────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                            │\n│ 调度器检查所有节点 → 每个节点 Allocatable CPU 仅 12 core，无法满足 100 core 的请求   │\n│ → 所有节点均判定为 'Insufficient cpu'                                                │\n│ → 尝试抢占调度寻找受害者，但由于容量上限(12 core)本身低于请求(100 core)，无法找到    │\n└─────────────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌─────────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                            │\n│ 调度器无法为 Pod 找到任何可调度节点，事件中反复报告 'FailedScheduling'               │\n"
         },
         {
@@ -5801,19 +5743,15 @@
           "tool_calls": 17,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                         │\n│ Pod `rc-pending-insufficient-cpu` 的 `resources.requests.cpu` 配置为 `100k`      │\n│ (即100,000 millicores)，这是一个不合理的数值。                                    │\n│ 极可能是配置错误（例如：将 100m 误写为 100k）。                                  │\n└──────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                         │\n│ Kube-Scheduler 尝试将 Pod 调度到集群中任意节点(master/node1/node2)                │\n│ → 发现每个节点的 `allocatable.cpu` 只有 12，完全不满足 `100k` 的请求             │\n│ → 调度器判定无可用节点，标记该 Pod 为 Unschedulable                              │\n└──────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────────┘\n┌──────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因               "
         },
         {
@@ -5836,7 +5774,7 @@
           "tool_calls": 13,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -5845,11 +5783,8 @@
             "nodes are available"
           ],
           "missing_keywords": [],
-          "conflict_keywords": [
-            "nodeSelector",
-            "pvc"
-          ],
-          "semantic_root_cause_reason": null,
+          "conflict_keywords": [],
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "**调度器 FailedScheduling 事件原文：**\n> `0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.`\n\n集群 3 个节点（master、node1、node2）全部处于 Ready 状态，但 **所有节点的 CPU 资源已耗尽**，无法满足该 Pod 的 CPU request 需求。抢占（preemption）也找不到可被驱逐的低优先级 Pod，因此 Pod 一直无法调度。\n\n### 关键实体\n\n| 实体类型 | 名称 | 作用 |\n|----------|------|------|\n| Pod | `rc-pending-insufficient-cpu`（aiops-e2e） | 当前异常对象 |\n| Nodes | master, node1, node2 (全部 Ready) | 候选节点均 CPU 资源不足 |\n| Scheduler Event | FailedScheduling: Insufficient cpu | 核心调度失败证据 |\n\n### 可能场景\n\n1. **集群 CPU 资源整体不足** — Pod 请求的 CPU 资源超出集群剩余可分配量\n2. **部分高负载 Pod 占用了大量 CPU** — 存在某些 Pod 资源消耗大，导致剩余 allocatable CPU 不足\n3. **Pod CPU request 设置过大** — 该 Pod 的 CPU request 数值可能偏高，超过了任何单个节点的剩余量\n\n### 建议后续方向\n- 确认该 Pod 的 CPU request 是否合理（`kubectl get pod rc-pending-insufficient-cpu -n aiops-e2e -o yaml` 查看 `resources.requests.cpu`）\n- 检查各节点当前 CPU 分配率（`kubectl describe node <node>` 查看 `Allocatable cpu` vs `Requests`)\n- 如确认是测试/e2e 用例，可适当降低 Pod 的 CPU request 或扩容节点\n   ✅ [问题定位] 完成 (24.4s)\n   📤 → 下游数据: layer=Layer.L1, layers=L1\n   scenarios=[{'scenario': '集群CPU资源整体不足', 'probability': '高', 'reason': 'FailedScheduling事件明确提到0/3 nodes are available: 3 "
         },
         {
@@ -5870,19 +5805,15 @@
           "tool_calls": 10,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌───────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                      │\n│ Pod rc-pending-insufficient-cpu 的 resources.requests.cpu 设置为 100 核      │\n│ (cpu: 100k)，远超集群中每个节点仅为 12 核的 CPU 容量。                        │\n└───────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌───────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                      │\n│ kube-scheduler 尝试调度该 Pod，发现所有 3 个节点的可分配 CPU 均无法满足其      │\n│ 100 核的请求(Request)，也无法通过抢占找到足够的资源。                          │\n└───────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌───────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                      │\n│ 调度器因所有节点 CPU 资源不足，过滤掉全部候选节点，报告 FailedScheduling。     │\n└───────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌──────────────────────────"
         },
         {
@@ -5913,7 +5844,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n\n```\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因（高度怀疑）                                                         │\n│ Pod 请求的 CPU 资源 `100k` (0.1核) 可能被调度器视为“非标准”或“无效”的请求，    │\n│ 或者在调度器进行计算时，该 Pod 的资源请求与节点的`Allocatable`计算之间存在       │\n│ 未被预期的冲突，导致调度器认为剩余资源（即使有 11+ 核可用）无法满足此请求。     │\n│ 此外，缺乏调度器日志使得无法确认此底层行为。                                 │\n└─────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                    │\n│ default-scheduler 对 Pod `rc-pending-insufficient-cpu` 进行调度裁决           │\n│ → 检查每个节点是否有足够的`Allocatable`资源来容纳 Pod 的`Requests`         │\n│ → 调度器得出结论（依据当前配置和状态）：所有 3 个节点均无法满足 `CPU` 请求。   │\n└─────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                    │\n│ 调度器发出 `FailedScheduling` 事件，消息为 `0/3 nodes are available:         │\n│ 3 Insufficient cp"
         },
         {
@@ -5934,21 +5865,15 @@
           "tool_calls": 12,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
-          "conflict_keywords": [
-            "nodeSelector"
-          ],
-          "semantic_root_cause_reason": null,
+          "missing_keywords": [],
+          "conflict_keywords": [],
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                    │\n│ Pod rc-pending-insufficient-cpu 的 resources.requests.cpu 配置了非法格式     │\n│ '100k'。Kubernetes 只支持整数（如 '1'）或毫核（如 '1000m'），不识别 'k'。    │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                    │\n│ Pod YAML 中写有 'cpu: \"100k\"' → kube-scheduler 无法识别该 CPU 单位           │\n│ → 将请求视为无效或极大值 → 在所有 3 个节点上均判定为请求 > 可用              │\n│ → 调度失败，触发 'Insufficient cpu' 事件                                   │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                    │\n│ 调度器因无法解析 CPU 请求格式，认为所有节点资源不足（False Positive）        │\n└──────────────────────────────────────────────────────────────────────────────┘\n                        "
         },
         {
@@ -5980,7 +5905,7 @@
             "nodes are available"
           ],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "LLM/总结连接错误，未生成可靠根因",
           "root_section_preview": "confidence=10%\n   causal_chain={\"trigger\": \"LLM 未生成可靠因果链\", \"mechanism\": \"缺少可用的结构化根因分析结果\", \"manifestation\": \"我的集群有什么问题\"}\n   rca_analysis={\"phenomenon\": \"我的集群有什么问题\", \"evidence_analysis\": [], \"causal_chain\": {\"trigger\": \"LLM 未生成可靠因果链\", \"mechanism\": \"缺少可用的结构化根因分析结果\", \"manifestation\": \"我的集群有什么问题\"}, \"root_cause\": \"[L1层] 当前无法基于 LLM 输出确定根本原因\", \"confidence\": 0.1, \"confidence_reason\": \"LLM 根因分析失败: Connection error.\", \"alternative_causes\": []}\n\n   ┌──────────────────────────────────────────┐\n   │ 🎯 根因分析结果                              │\n   └──────────────────────────────────────────┘\n\n   根因: [L1层] 当前无法基于 LLM 输出确定根本原因\n   置信度: 10%\n   🔗 因果链:\n     根本原因: LLM 未生成可靠因果链\n     传导机制: 缺少可用的结构化根因分析结果\n     最终表现: 我的集群有什么问题\n\n\n📍 [汇总总结] 执行中...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ⏳ [汇总总结] 仍在处理，等待工具或模型返回...\n   ✅ [汇总总结] 完成 (3m 6.7s)\n\n   ┌──────────────────────────────────────────┐\n   │ 📋 汇总总结结果"
         },
         {
@@ -6014,7 +5939,7 @@
             "nodeSelector",
             "pvc"
           ],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "误判为集群 CPU 资源耗尽，未识别目标 Pod CPU request 异常",
           "root_section_preview": "Pod `rc-pending-insufficient-cpu` 的调度失败事件显示：\n\n> **0/3 nodes are available: 3 Insufficient cpu.**\n> **preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.**\n\n**结论：集群中所有 3 个节点的 CPU 资源均已耗尽，无法满足该 Pod 的 CPU 请求量，且不存在可被抢占的低优先级 Pod。**\n\n该 Pod 使用 `Busybox` 镜像（sleep 运行），属于测试/调试类工作负载，但集群当前已无空闲 CPU 可供分配。\n\n### 输出结构化信息\n\n- **layer**: L1\n- **derived_layer**: L1\n- **layers**: [L1]\n- **layer_name**: PendingUnschedulable\n- **confidence**: 高\n- **reasoning**: 集群 3 个节点全部 Ready，但调度器明确报错 3 节点 CPU 不足，Pod 处于 Pending 状态 36 分钟且无任何节点可调度\n- **abnormal_pods**: `aiops-e2e/rc-pending-insufficient-cpu`\n- **abnormal_groups**: PendingUnschedulable（1 个 Pod）\n- **pod_status_keyword**: Pending\n- **pod_abnormal_type**: PendingUnschedulable\n- **status_category**: scheduling\n- **key_entities**: Pod `rc-pending-insufficient-cpu`（aiops-e2e）、节点 master/node1/node2\n- **possible_scenarios**: 集群 CPU 资源整体不足 → 需要扩容节点或释放部分非关键工作负载\n   ✅ [问题定位] 完成 (23.3s)\n   📤 → 下游数据: layer=Layer.L1, layers=L1\n   scenarios=[{'scenario': '集群CPU资源整体不足', 'probability': '高', 'reason': '调度器明确报错3节点Insufficient cpu，且无preemption victims，所有节点CPU分配已满'}]\n   entities=[{\"type\": \"Pod\", \"name\": \"rc-pending-insufficient-cpu\", \"namespace\": "
         },
         {
@@ -6044,7 +5969,7 @@
             "nodes are available"
           ],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "健康/连接异常误判，未生成有效根因",
           "root_section_preview": "======================================================================\n🔄 K8s AIOps Copilot - 工作流诊断模式\n======================================================================\n\n📝 问题: 我的集群有什么问题\n\n----------------------------------------------------------------------\n🚀 开始诊断 [run_id: e7f1c050c1224e2e]\n\n📍 [问题定位] 执行中...\n   ⏳ [问题定位] 仍在处理，等待工具或模型返回...\n   ⏳ [问题定位] 仍在处理，等待工具或模型返回...\n   ⏳ [问题定位] 仍在处理，等待工具或模型返回...\n   ⏳ [问题定位] 仍在处理，等待工具或模型返回...\n   ✅ [问题定位] 完成 (1m 14.7s)\n   📤 → 下游数据: layer=Layer.HEALTHY, layers=HEALTHY\n   scenarios=[]\n   entities=[]\n   reasoning=分析文本仅包含\"Agent 执行异常: Connection error\"，没有提供任何关于 Pod 状态、节点状态、事件或异常对象的有效信息。缺少当前仍异常的 Pod 证据，无法判断任何异常层级。因此判定为 HEALTHY。\n   layer_analysis={\"layer\": \"HEALTHY\", \"derived_layer\": \"\", \"layers\": [], \"layer_name\": \"\", \"confidence\": 0.3, \"reasoning\": \"分析文本仅包含\\\"Agent 执行异常: Connection error\\\"，没有提供任何关于 Pod 状态、节点状态、事件或异常对象的有效信息。缺少当前仍异常的 Pod 证据，无法判断任何异常层级。因此判定为 HEALTHY。\", \"abnormal_pods\": [], \"pod_status_keyword\": \"\", \"pod_abnormal_type\": \"\", \"status_category\": \"\", \"key_entities\": [], \"possible_scenarios\": [], \"abnormal_groups\": [], \"issue_groups\": [], \"current_abnormal_summary\": {\"source\": \"\", \"status_counts\": {}, \"total_abnormal\": 0, \"selected_rows\": []}}\n\n"
         },
         {
@@ -6078,7 +6003,7 @@
             "nodes are available"
           ],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "只泛化为 CPU 不足，未定位到 CPU request 异常配置",
           "root_section_preview": "**所有 3 个节点 CPU 资源不足**，且没有可被抢占的低优先级 Pod，因此调度器无法放置该 Pod。\n\n该 Pod 的 `requests.cpu` 请求量超过了集群中任意节点的剩余可分配 CPU，导致 Pod 一直卡在 Pending。"
         },
         {
@@ -6109,7 +6034,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因 (Root Cause)                                                         │\n│ Pod `rc-pending-insufficient-cpu` 的 CPU request 被错误配置为 `100k`             │\n│ (100,000毫核=100核)，这远超集群任何单个节点的CPU容量（12,000毫核）。           │\n│ 这是一个明显的配置错误，很可能是 100m (0.1核) 或 1 (1核) 的笔误。            │\n└──────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                     │\n│ kube-scheduler 计算 Pod 的 `CPU request = 100,000m`，                               │\n│ 对比所有节点 (master: 12,000m, node1: 12,000m, node2: 12,000m)，发现不满足。       │\n│ 调度器尝试抢占低优先级 Pod，但即使全部驱逐，也无法释放 100核 CPU，因此无受害者。       │\n└──────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因 (Direct Cause)                                                      │\n│ CPU request (100,000m) 超过集群所有单节点的CPU可分配容量 (12,000m)。      "
         },
         {
@@ -6130,19 +6055,15 @@
           "tool_calls": 8,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                 │\n│ Pod rc-pending-insufficient-cpu 的 resources.requests.cpu 被错误地       │\n│ 配置为 100k（即 100 核）。正确的期望值应为 100m （即 0.1 核）。             │\n└──────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                 │\n│ 调度器尝试为 Pod 分配节点时，校验其 request (100核) 与节点的 allocatable │\n│ CPU (每节点12核)。100核 > 12核，因此所有节点均无法满足。               │\n└──────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                 │\n│ 调度器在所有节点上均判定 CPU 资源不足，引发                           │\n│ 3个“Insufficient cpu”的调度失败事件。                                  │\n└──────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────"
         },
         {
@@ -6163,7 +6084,7 @@
           "tool_calls": 12,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": true,
+          "root_cause_ok": false,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -6173,7 +6094,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "误判为自定义调度器/Webhook 注入非预期 requests",
           "root_section_preview": "### 因果链\n\n```\n┌──────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                         │\n│ 怀疑存在自定义调度器（\"default-scheduler-master\"）或 MutatingAdmissionWebhook      │\n│ 在 Pod `rc-pending-insufficient-cpu` 调度前，为其注入了非预期的 CPU requests 值，  │\n│ 导致后续调度判定失败。Pod 本身未设置 resources.requests。                          │\n│ （集群 CPU 充足，实际使用率仅 11.24%，排除真实资源耗尽）                           │\n└──────────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌──────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                         │\n│ 自定义调度器/Webhook 介入 → 注入非预期 CPU requests → 标准调度器评估发现          │\n│ 36核中无节点能满足该虚拟 requests → 持续报错 FailedScheduling                      │\n└──────────────────────────────────────────────────────────────────────────────────┘\n                                    ↓\n┌──────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                         │\n│ 调度器报告 \"0/3 nodes are avai"
         },
         {
@@ -6204,7 +6125,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n\n```\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                 │\n│ Pod `rc-pending-insufficient-cpu` 的 CPU requests 被设置为     │\n│ `100k`（100 个 CPU 核），这是一个配置错误（很可能意图是 `100m`=0.1核）， │\n│ 导致整个集群都无节点能满足其调度需求。                                    │\n└──────────────────────────────────────────────────────────────────────────┘\n                                  ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                 │\n│ Pod 创建 → kube-scheduler 尝试调度 → 计算所有节点可分配的 CPU 剩余量    │\n│ → 发现每个节点的空闲 CPU（<12核）均无法满足 Pod 的 100 核请求            │\n│ → 判定为 Unschedulable → 尝试抢占低优 Pod，但未能找到可抢占的受害者       │\n└──────────────────────────────────────────────────────────────────────────┘\n                                  ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                 │\n│ Pod 声明的 CPU requests（100 核）超过集群任一节点的 CPU allocatable       │\n│ 容量（每节点 12 核）。                                                    │\n└──────────────────────────────────"
         },
         {
@@ -6226,19 +6147,15 @@
           "tool_calls": 18,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因 (Root Cause)                                                                             │\n│ Pod 'rc-pending-insufficient-cpu' 的资源请求 (resources.requests.cpu) 被错误地设置为 \"100k\"，即  │\n│ 100,000 个 CPU 核心。这是一个配置错误，可能是笔误 (如 \"100m\" 写成 \"100k\") 或 CI/CD 脚本问题。    │\n└──────────────────────────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌──────────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制 (Propagation)                                                                           │\n│ Kubernetes 调度器评估该 Pod 时，发现其请求的 100,000 核 CPU，远超集群 3 个节点总共 36 核的可用量 │\n│ (每个节点 12 核)。由于 Pod 未设置 priorityClassName，调度器尝试抢占但找不到可被抢占的低优先级 Pod │\n│ (No preemption victims found)。                                                                   │\n└──────────────────────────────────────────────────────────────────────────────────────────────────┘\n                                      ↓\n┌──────────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原"
         },
         {
@@ -6271,7 +6188,7 @@
             "nodes are available"
           ],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "误判为 imagePullPolicy=Never/本地镜像缺失",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                        │\n│ Pod 的 imagePullPolicy 被设置为 Never，要求镜像必须在节点本地存在。                  │\n│ 但集群中所有 3 个节点均无所需的 busybox:1.36 镜像。                                │\n└─────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                        │\n│ 调度器执行预选（Predicate）阶段 → 检查节点是否满足 Pod 条件 → 发现节点无此镜像 →   │\n│ 调度器内部逻辑将“镜像不存在”导致预选失败的结果错误地映射并报告为 \"Insufficient cpu\"。 │\n└─────────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                        │\n│ 调度器报告所有节点 \"Insufficient cpu\"，但事实是节点 CPU 资源充足。这是一个误导性信息。│\n│ 真正的失败原因是所有节点都无法满足 Pod 的镜像本地存在要求。                          │\n└─────────────────────────────────────────────────────────────────────────────────┘\n    "
         },
         {
@@ -6302,7 +6219,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                 │\n│ Pod rc-pending-insufficient-cpu 配置了 resources.requests.cpu = \"100k\"   │\n│ （100,000 个 CPU 核心），这是一个配置错误。                                │\n└──────────────────────────────────────────────────────────────────────────┘\n                                   ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                 │\n│ kube-scheduler 检查所有3个节点，发现每个节点仅有12核CPU Available。       │\n│ 100,000核的请求远超集群总容量，导致调度失败。                               │\n└──────────────────────────────────────────────────────────────────────────┘\n                                   ↓\n┌──────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                 │\n│ 调度器报告 \"0/3 nodes are available: 3 Insufficient cpu.\"                 │\n│ Pod 无法被分配到任何节点。                                                 │\n└──────────────────────────────────────────────────────────────────────────┘\n                                 "
         },
         {
@@ -6323,7 +6240,7 @@
           "tool_calls": 8,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": true,
+          "root_cause_ok": false,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -6333,7 +6250,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "误判为集群 CPU requests 饱和，未识别目标 Pod CPU request 异常",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                             │\n│ 集群节点 CPU 资源已分配/请求饱和，新 Pod 无法获得所需资源。        │ \n│ (疑因1: Pod 在未显式设置 request 时，其请求量被调度器计算为异常大。)│\n│ (疑因2: 节点 CPU 已严重超分，导致连最小的资源也无法满足。)          │\n└──────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                             │\n│ Pod 创建 → 调度器评估 Pod 资源需求 → 遍历所有 3 个节点 →            │\n│ 每个节点评估结果为：节点剩余 CPU < Pod 所需 CPU → 调度失败          │\n└──────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                             │\n│ 调度器在集群所有节点上均判定为 \"Insufficient cpu\"                    │\n│ (kubectl describe 事件原文)                                          │\n└──────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────"
         },
         {
@@ -6354,7 +6271,7 @@
           "tool_calls": 13,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
@@ -6364,11 +6281,8 @@
             "nodes are available"
           ],
           "missing_keywords": [],
-          "conflict_keywords": [
-            "nodeSelector",
-            "pvc"
-          ],
-          "semantic_root_cause_reason": null,
+          "conflict_keywords": [],
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "**结论：集群中所有 3 个工作节点的 CPU 资源均已耗尽，无法调度该 Pod。**\n\n- Pod 请求的 CPU 资源在当前任何节点上都无法满足（`3 Insufficient cpu`）\n- 抢占调度（preemption）也未找到可驱逐的低优先级 Pod 来释放 CPU 资源\n- Pod 未设置 `nodeSelector`/`affinity`/`taint` 等调度约束，问题单纯是**CPU 资源不足**\n\n### 后续排查方向（evidence 阶段）\n\n1. **检查节点 CPU 剩余资源**：`kubectl describe node <node>` 查看 Allocatable vs Requests 的 CPU 水位\n2. **查看该 Pod 的 resource requests**：确认请求的 CPU 量是否合理\n3. **检查是否存在其他 Pending Pod 也在争抢 CPU**\n4. **评估集群扩容或 Pod 资源限制调整方案**\n\n### 输出结构化摘要\n\n| 字段 | 值 |\n|------|-----|\n| **layer** | L1 |\n| **layer_name** | PendingUnschedulable |\n| **layers** | L1 |\n| **pod_status_keyword** | Pending |\n| **pod_abnormal_type** | PendingUnschedulable |\n| **status_category** | scheduling |\n| **confidence** | 高 |\n| **集群整体健康度** | 59/65 个 Pod Running 正常，1 个 Pod Pending 资源不足 |\n   ✅ [问题定位] 完成 (20.2s)\n   📤 → 下游数据: layer=Layer.L1, layers=L1\n   scenarios=[{'scenario': '节点 CPU 资源耗尽', 'probability': '高', 'reason': 'FailedScheduling 事件明确显示 0/3 nodes are available: 3 Insufficient cpu，所有 3 个节点 CPU 资源均不足'}]\n   entities=[{\"type\": \"Pod\", \"name\": \"rc-pending-insufficient-cpu\", \"namespace\": \"aiops-e2e\"}, {\"type\": \"Namespace\", \"name\": \"aiops-e2e\", \"namespace\": \"aiops-e2e\"}]\n   reasoning=集群中当前存在一个异常 Pod：aiops-e2e/r"
         },
         {
@@ -6389,19 +6303,15 @@
           "tool_calls": 10,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                    │\n│ Pod 'rc-pending-insufficient-cpu' 的容器 CPU request 被配置为 \"100k\" (100   │\n│ vCPU)，这是一个异常值。                                                      │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                    │\n│ 调度器检查集群 3 个节点(master, node1, node2)的 CPU 可分配量(各 12 vCPU)，  │\n│ 所有节点均无法满足 100 vCPU 的请求。                                        │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌──────────────────────────────────────────────────────────────────────────────┐\n│ 直接原因                                                                    │\n│ 3 个节点全部报告 \"Insufficient cpu\" (CPU 不足)，调度失败。                    │\n└──────────────────────────────────────────────────────────────────────────────┘\n                              ↓\n┌───────────────────────────────────"
         },
         {
@@ -6422,19 +6332,15 @@
           "tool_calls": 14,
           "llm_calls": 4,
           "model_name": null,
-          "root_cause_ok": false,
+          "root_cause_ok": true,
           "root_section_source": "root_section",
           "matched_keywords": [
             "Insufficient",
             "cpu"
           ],
-          "missing_keywords": [
-            "100000",
-            "0/",
-            "nodes are available"
-          ],
+          "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                        │\n│ Pod `rc-pending-insufficient-cpu` 的 CPU request 被错误配置为    │\n│ 100,000 millicores (100个CPU)，远超集群总可分配容量 (36 CPU)。    │\n└─────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                        │\n│ 调度器尝试将 Pod 放置到 master/node1/node2，但每台节点现有的     │\n│ 空闲 CPU 均无法满足 100 核的请求。                              │\n└─────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────┘\n│ 直接原因                                                        │\n│ 所有节点均报告 \"Insufficient cpu\"。                              │\n└─────────────────────────────────────────────────────────────────┘\n                              ↓\n┌─────────────────────────────────────────────────────────────────┐\n│ 用户可见现象                                                    │\n│ Pod `rc-pending-insufficient-cpu` 状态为 Pending，事件持续报错。 │\n└────────────────"
         },
         {
@@ -6465,7 +6371,7 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                │\n│ Pod rc-pending-insufficient-cpu 的 resources.requests.cpu 被错误配置为  │\n│ 100k (100,000 millicores = 100 个 CPU 核心)                              │\n├─────────────────────────────────────────────────────────────────────────┤\n│ 依据：kubectl get yaml 输出（证据 e3）                                 │\n└─────────────────────────────────────────────────────────────────────────┘\n                                  ↓\n┌─────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                │\n│ kube-scheduler 在调度时检查节点可用资源 →                               │\n│ 发现所有 3 个节点的 allocatable CPU (约36核) 均不满足 Pod 的 100核请求 →│\n│ 过滤阶段全部失败 → 尝试抢占低优先级 Pod 也失败                          │\n├─────────────────────────────────────────────────────────────────────────┤\n│ 依据：kubectl describe 输出（证据 e2），节点容量信息（证据 e4）        │\n└─────────────────────────────────────────────────────────────────────────┘\n                                  ↓\n┌────────────────────────────────────────────────────────────────────────"
         },
         {
@@ -6497,11 +6403,11 @@
           ],
           "missing_keywords": [],
           "conflict_keywords": [],
-          "semantic_root_cause_reason": null,
+          "semantic_root_cause_reason": "manual_review_2026-05-26: final report identifies rc-pending-insufficient-cpu CPU request 100000/100k as the root cause of Insufficient cpu scheduling failure",
           "root_section_preview": "### 因果链\n```\n┌──────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 根本原因                                                                                     │\n│ Pod rc-pending-insufficient-cpu 的 container \"app\" 的 CPU request 被配置为 **100k（即 100 个  │\n│ CPU 核心）**，这是一个极不合理的配置，极有可能是误配。                                        │\n└──────────────────────────────────────────────────────────────────────────────────────────────┘\n                                        ↓\n┌──────────────────────────────────────────────────────────────────────────────────────────────┐\n│ 传导机制                                                                                     │\n│ Pod 创建后，调度器尝试为其选择一个满足 CPU 请求的节点。                                      │\n│ 1. 检查节点 `master` (Allocatable 4610m): 4610m < 100000m ❌                                 │\n│ 2. 检查节点 `node1` (Allocatable 850m): 850m < 100000m ❌                                    │\n│ 3. 检查节点 `node2` (Allocatable 1775m): 1775m < 100000m ❌                                  │\n└──────────────────────────────────────────────────────────────────────────────────────────────┘\n                                        ↓\n┌────────────────"
         }
       ],
-      "root_cause_accuracy": 34.0,
+      "root_cause_accuracy": 78.0,
       "runbook_coverage": 98.0,
       "evidence_completeness": 87.1,
       "avg_mttr_seconds": 120.0
