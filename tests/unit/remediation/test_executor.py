@@ -99,6 +99,24 @@ def test_executor_auto_mode_runs_without_approval():
     assert events[-1]["status"] == "success"
 
 
+def test_executor_unknown_mode_defaults_to_review_approval():
+    calls = []
+    store = ApprovalStore()
+    executor = RemediationExecutor(approval_store=store, command_runner=lambda command: calls.append(command) or "ok")
+
+    events = executor.run(run_id="run1", plan=_plan(), approval_mode="unexpected")
+
+    first = next(events)
+    assert first["type"] == "remediation_approval_required"
+    assert first["approval_kind"] == "plan"
+    assert calls == []
+    store.resolve("run1", first["approval_id"], approved=False, reviewer="tester")
+
+    remaining = list(events)
+    assert remaining[-1]["status"] == "rejected"
+    assert calls == []
+
+
 def test_executor_marks_unhealthy_verify_as_needs_followup():
     def runner(command):
         if command.startswith("kubectl get"):

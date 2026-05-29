@@ -41,3 +41,9 @@ class RemediationRuntimeConfig:
     max_write_actions: int = 2
     max_duration_seconds: int = 900
     verify_settle_seconds: float = 0.0
+
+
+def normalize_remediation_mode(value: Any) -> str:
+    """Return the canonical remediation approval mode."""
+    mode = str(value or "review").strip().lower()
+    return "auto" if mode == "auto" else "review"

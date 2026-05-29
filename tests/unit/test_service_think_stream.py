@@ -13,6 +13,16 @@ from app.core.service import (
 )
 
 
+def _render_workflow_text(events, workflow_config=None):
+    class _Executor:
+        def execute_stream(self, question, cancel_event=None, workflow_overrides=None):
+            yield from events
+
+    svc = HolmesService()
+    svc.workflow_config = workflow_config or {}
+    return "".join(svc._workflow_to_text(_Executor(), "q"))
+
+
 def test_think_stream_filter_full_mode_preserves_think_tokens():
     flt = ThinkStreamFilter(mode="full", max_chars=5)
 
@@ -58,6 +68,27 @@ def test_holmes_service_think_stream_config_env_overrides(monkeypatch):
     svc.workflow_config = {"think_stream": {"mode": "full", "max_chars": 999}}
 
     assert svc.get_think_stream_config() == ("hidden", 321)
+
+
+def test_workflow_to_text_hides_wrapped_reasoning_but_keeps_answer(monkeypatch):
+    monkeypatch.delenv("AIOPS_THINK_STREAM_MODE", raising=False)
+    monkeypatch.delenv("THINK_STREAM_MODE", raising=False)
+
+    output = _render_workflow_text(
+        [
+            {
+                "type": "thinking",
+                "node": "layer",
+                "node_name": "层级定位",
+                "thinking_type": "ai_message",
+                "content": "<think>内部推理</think>最终答案",
+            }
+        ],
+        {"think_stream": {"mode": "hidden"}},
+    )
+
+    assert "内部推理" not in output
+    assert "最终答案" in output
 
 
 def test_format_evidence_plan_output_renders_plan_and_missing_reasons():

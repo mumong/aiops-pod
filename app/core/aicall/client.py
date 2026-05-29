@@ -913,11 +913,26 @@ class AICall:
             or ""
         )
 
-        if reasoning and content:
-            return f"{reasoning}{content}"
         if reasoning:
-            return str(reasoning)
+            reasoning_text = AICall._normalize_reasoning_text(str(reasoning))
+        else:
+            reasoning_text = ""
+
+        if reasoning_text and content:
+            return f"{reasoning_text}{content}"
+        if reasoning_text:
+            return reasoning_text
         return str(content or "")
+
+    @staticmethod
+    def _normalize_reasoning_text(reasoning: str) -> str:
+        """Wrap provider reasoning as `<think>` so stream filters can apply."""
+        text = str(reasoning or "")
+        if not text.strip():
+            return ""
+        if "<think>" in text.lower() and "</think>" in text.lower():
+            return text
+        return f"<think>{text}</think>"
 
     @staticmethod
     def _serialize_structured_response(value: Any) -> str:

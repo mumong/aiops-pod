@@ -702,7 +702,9 @@ REMEDIATION_PLAN_PROMPT = """
 - 如果存在多个异常组（如 ImagePullBackOff + OOMKilled），`issue_groups` 必须逐组列出，每个 group 都要标明 `group_id`、`problem_type`、`target`、`auto_fixable`、`strategy`。
 - 多异常场景下不能只给一个次要异常的修复。每个可自动修复的 group 至少给一个 action；不可自动修复的 group 必须在 `issue_groups[].strategy` 和修复建议中说明人工处理原因。
 - 多异常场景下每个 action 必须包含 `group_id`，且必须匹配某个 `issue_groups[].group_id`；禁止输出无法归属到具体异常组的修复动作。
-- 如果适合修复，只允许生成资源配置类 Kubernetes 修复动作，例如 ConfigMap/Secret/PVC/imagePullSecret 缺失、workload resources/nodeSelector/toleration/probe/env 配置修正。
+- 如果适合修复，只允许生成标准、范围明确、可验证的 Kubernetes 修复动作，例如 ConfigMap/Secret/PVC/imagePullSecret 缺失、workload resources/nodeSelector/toleration/probe/env 配置修正，以及已确认的 Pod finalizer 清理。
+- TerminatingStuck finalizer 分支: 只有当前工具证据同时确认 `deletionTimestamp` 已长期存在且 `metadata.finalizers` 非空时，才能生成 `kubectl patch pod <pod> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge`；verify_command 使用 `kubectl get pod <pod> -n <namespace>`，NotFound 或对象不再 Terminating 视为成功。
+- TerminatingStuck 但 finalizers 为空、Pod 已 NotFound、或只存在历史事件时，必须输出 `"remediation_available": false`，不要生成 finalizer patch action。
 - 不要生成 delete pvc/pv、修改 Node taint/label、CNI/IPAM/runtime、iptables、文件删除、进程重启等高风险动作。
 - 所有写操作必须同时给出 dry_run_command、execute_command 和 verify_command。
 - command 必须是单行 kubectl 命令，不要使用 shell 管道、重定向、here-doc 或分号。
@@ -726,7 +728,7 @@ JSON 格式:
 ```json
 {
   "remediation_available": true,
-  "fix_type": "create_missing_configmap|create_missing_secret|create_missing_pvc|patch_workload_resources|patch_workload_selector|patch_probe|patch_workload_env|manual_only",
+  "fix_type": "create_missing_configmap|create_missing_secret|create_missing_pvc|patch_workload_resources|patch_workload_selector|patch_probe|patch_workload_env|remove_finalizer|manual_only",
   "risk_level": "low|medium|high",
   "requires_human_approval": true,
   "issue_groups": [

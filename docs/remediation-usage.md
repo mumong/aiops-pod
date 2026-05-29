@@ -4,14 +4,14 @@
 
 ## 1. 前置条件
 
-修复流程只在诊断接口显式开启时运行：
+修复流程由后端 `workflow.remediation` 统一控制：
 
-- 请求 `/ask` 时必须带 `remediate=true`。
-- 修复审批依赖流式输出，因此必须 `stream=true`。
 - 后端配置 `workflow.remediation.enabled` 需要为 `true`。
+- 普通 `/ask` 诊断完成后会按 `workflow.remediation.mode` 进入修复阶段，不再需要 `remediate` 请求参数。
 - 默认 `workflow.remediation.mode=review` 时，修复计划和每个写动作都需要人工审批。
+- `workflow.remediation.mode=auto` 时，安全校验通过的动作会自动执行，适合 E2E 或受控实验环境。
 
-如果只想诊断、不执行修复，不要传 `remediate=true`。
+如果只想诊断、不进入修复阶段，把 `workflow.remediation.enabled` 设置为 `false`。
 
 ## 2. 推荐方式：交互式终端审批
 
@@ -44,7 +44,7 @@ reject
 
 这个客户端做了两件事：
 
-- 保持 `/ask?stream=true&remediate=true` 的输出流，用于展示诊断和修复过程。
+- 保持 `/ask?stream=true` 的输出流，用于展示诊断和修复过程。
 - 监听终端输入，自动把 `approve/reject` 转成 `POST /remediation/approve` 请求。
 
 ## 3. 原始方式：curl 流 + 手动审批接口
@@ -59,7 +59,6 @@ curl --no-buffer \
   -G "http://10.2.0.48:30800/ask" \
   --data-urlencode "q=我的集群有什么问题？" \
   --data-urlencode "stream=true" \
-  --data-urlencode "remediate=true" \
   --data-urlencode "format=text"
 ```
 
@@ -169,7 +168,7 @@ POST /remediation/approve
 layer -> evidence -> rca -> conclusion
 ```
 
-只有在请求显式传入 `remediate=true`，并且后端配置 `workflow.remediation.enabled=true` 时，才会在 `conclusion` 之后追加修复执行阶段：
+当后端配置 `workflow.remediation.enabled=true` 时，普通 `/ask` 会在 `conclusion` 之后追加修复执行阶段：
 
 ```text
 诊断报告
@@ -392,7 +391,7 @@ RemediationExecutor/Agent
 普通 `curl --no-buffer /ask` 只能接收服务端输出，不能把你在终端输入的 `approve` 自动发送回后端。因此终端交互审批由 `tools/aiops_remediate_chat.py` 实现：
 
 ```text
-启动 /ask?stream=true&remediate=true
+启动 /ask?stream=true
   -> 持续打印服务端输出
   -> 从输出中解析 run_id 和 approval_id
   -> 等待用户输入 approve/reject
@@ -422,7 +421,7 @@ remediation:
 
 | 字段 | 含义 |
 |------|------|
-| `enabled` | 后端是否允许修复阶段。请求仍需传 `remediate=true` 才会执行。 |
+| `enabled` | 后端是否允许诊断后进入修复阶段。 |
 | `executor` | `deterministic` 固定执行计划；`react` 使用 LLM 多轮观察和决策。 |
 | `mode` | `review` 每个计划/写动作都要人工审批；`auto` 不审批直接执行。 |
 | `approval_timeout_seconds` | 每个审批点等待多久，超时后修复结束为 `timeout`。 |

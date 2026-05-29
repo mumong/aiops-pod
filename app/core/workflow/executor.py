@@ -35,7 +35,7 @@ from app.core.context.archive import ContextArchive
 from app.core.remediation.approval import approval_store
 from app.core.remediation.agent import RemediationAgentConfig, RemediationAgentExecutor
 from app.core.remediation.executor import RemediationExecutor
-from app.core.remediation.models import RemediationRuntimeConfig
+from app.core.remediation.models import RemediationRuntimeConfig, normalize_remediation_mode
 from app.core.remediation.plans import extract_remediation_plan
 
 logger = logging.getLogger(__name__)
@@ -59,9 +59,32 @@ def _invalid_remediation_plan_event(run_id: str, error: Exception) -> Dict[str, 
     return {
         "type": "remediation_finished",
         "run_id": run_id,
-        "status": "failed",
+        "status": "invalid_plan",
         "reason": f"invalid remediation plan: {error}",
     }
+
+
+def _missing_structured_actions_reason(report: str, plan: Any) -> Optional[str]:
+    """Detect report/plan mismatch without extracting commands from prose."""
+    text = report or ""
+    lower = text.lower()
+    has_write_advice = (
+        "kubectl patch" in lower
+        or "kubectl apply" in lower
+        or "kubectl delete" in lower
+        or "kubectl rollout" in lower
+        or "kubectl scale" in lower
+        or "kubectl set" in lower
+    )
+    if not has_write_advice:
+        return None
+    actions = getattr(plan, "actions", None) if plan is not None else None
+    remediation_available = bool(getattr(plan, "remediation_available", False)) if plan is not None else False
+    if plan is None:
+        return "natural-language remediation advice exists but no structured remediation plan was emitted"
+    if not remediation_available or not actions:
+        return "natural-language remediation advice exists but structured remediation actions are missing or disabled"
+    return None
 
 
 class WorkflowExecutor:
@@ -627,7 +650,7 @@ class WorkflowExecutor:
                         approval_timeout = int(remediation_cfg.get("approval_timeout_seconds") or 600)
                     except (TypeError, ValueError):
                         approval_timeout = 600
-                    approval_mode = str(remediation_cfg.get("mode") or "review").strip().lower()
+                    approval_mode = normalize_remediation_mode(remediation_cfg.get("mode"))
                     remediation_executor_type = str(
                         remediation_cfg.get("executor") or remediation_cfg.get("strategy") or "deterministic"
                     ).strip().lower()
@@ -660,6 +683,19 @@ class WorkflowExecutor:
                         "actions": [action.__dict__ for action in plan.actions],
                         "stop_conditions": plan.stop_conditions,
                     }
+                missing_actions_reason = None
+                if invalid_plan_event is None:
+                    missing_actions_reason = _missing_structured_actions_reason(full_answer, plan)
+                    if missing_actions_reason:
+                        logger.warning(
+                            "🛠️ invalid remediation plan | run_id=%s error=%s",
+                            run_id,
+                            missing_actions_reason,
+                        )
+                        invalid_plan_event = _invalid_remediation_plan_event(
+                            run_id,
+                            ValueError(missing_actions_reason),
+                        )
                 if invalid_plan_event is not None:
                     seq += 1
                     event = {

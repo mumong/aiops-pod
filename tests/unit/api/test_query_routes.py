@@ -59,7 +59,7 @@ def test_ask_route_uses_full_diagnosis_workflow(monkeypatch):
     assert "remediation" not in overrides
 
 
-def test_ask_route_can_enable_remediation(monkeypatch):
+def test_ask_route_ignores_legacy_remediate_parameter(monkeypatch):
     client, fake_service = _build_client(monkeypatch)
 
     response = client.get("/ask", params={"q": "我的集群有什么问题？", "stream": "true", "remediate": "true"})
@@ -67,15 +67,18 @@ def test_ask_route_can_enable_remediation(monkeypatch):
     assert response.status_code == 200
     assert response.text == "ok"
     overrides = fake_service.stream_calls[0]["workflow_overrides"]
-    assert overrides["remediation"] == {"enabled": True}
+    assert "remediation" not in overrides
 
 
-def test_ask_route_rejects_sync_remediation(monkeypatch):
-    client, _fake_service = _build_client(monkeypatch)
+def test_ask_route_does_not_reject_sync_with_legacy_remediate_parameter(monkeypatch):
+    client, fake_service = _build_client(monkeypatch)
 
     response = client.get("/ask", params={"q": "我的集群有什么问题？", "stream": "false", "remediate": "true"})
 
-    assert response.status_code == 400
+    assert response.status_code == 200
+    assert len(fake_service.sync_calls) == 1
+    overrides = fake_service.sync_calls[0]["workflow_overrides"]
+    assert "remediation" not in overrides
 
 
 def test_query_route_uses_direct_query_workflow(monkeypatch):
@@ -130,17 +133,11 @@ def test_remediation_approve_route_resolves_request(monkeypatch):
     assert decision.reviewer == "tester"
 
 
-def test_ui_page_contains_remediation_approval_flow(monkeypatch):
+def test_root_usage_does_not_advertise_legacy_remediate_gate(monkeypatch):
     client, _fake_service = _build_client(monkeypatch)
 
-    response = client.get("/ui")
+    response = client.get("/")
 
     assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
+    assert "remediate=true" not in response.text
     assert "/ask" in response.text
-    assert "format=sse" in response.text
-    assert "remediate=true" in response.text
-    assert "/remediation/approve" in response.text
-    assert "approval_id" in response.text
-    assert "Approve" in response.text
-    assert "Reject" in response.text

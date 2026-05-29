@@ -1224,6 +1224,10 @@ def test_remediation_plan_prompt_centralizes_workload_verify_rules():
     assert "kubectl rollout status deployment/<name>" in REMEDIATION_PLAN_PROMPT
     assert "仅因为探测命令返回某个常见名称 NotFound" in REMEDIATION_PLAN_PROMPT
     assert "查询 workload 模板" in REMEDIATION_PLAN_PROMPT
+    assert "TerminatingStuck" in REMEDIATION_PLAN_PROMPT
+    assert "kubectl patch pod <pod>" in REMEDIATION_PLAN_PROMPT
+    assert "metadata.finalizers" in REMEDIATION_PLAN_PROMPT
+    assert "remediation_available\": false" in REMEDIATION_PLAN_PROMPT
 
 
 def test_conclusion_prompt_supports_independent_response_language():

@@ -7,7 +7,7 @@ import shlex
 from typing import Callable, Dict, Generator, Optional
 
 from app.core.remediation.approval import ApprovalStore, approval_store
-from app.core.remediation.models import RemediationAction, RemediationPlan
+from app.core.remediation.models import RemediationAction, RemediationPlan, normalize_remediation_mode
 
 
 UNHEALTHY_REMEDIATION_MARKERS = (
@@ -61,7 +61,7 @@ class RemediationExecutor:
             }
             return
 
-        review_mode = str(approval_mode or "review").strip().lower() != "auto"
+        review_mode = normalize_remediation_mode(approval_mode) != "auto"
         if review_mode:
             plan_request = self.approval_store.create_request(
                 run_id=run_id,

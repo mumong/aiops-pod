@@ -930,6 +930,7 @@ class HolmesService:
         final_report_emitted = False
         metrics_data = None
         _token_streaming_active = False
+        _token_stream_buffer = ""
         think_mode, think_max_chars = self.get_think_stream_config()
         think_filter = ThinkStreamFilter(think_mode, think_max_chars)
         logger.info("🧠 think stream mode=%s max_chars=%d", think_filter.mode, think_filter.max_chars)
@@ -962,19 +963,25 @@ class HolmesService:
                     if preview:
                         yield emit(f"      📄 {preview[:300]}{'...' if len(preview) > 300 else ''}")
                 elif think_type == "ai_message":
+                    raw_content = event.get("full_content") or event.get("content") or ""
+                    content = think_filter.filter_message(raw_content).strip()
                     if _token_streaming_active:
                         yield "\n"
                         _token_streaming_active = False
-                    else:
-                        content = think_filter.filter_message(event.get("content") or "")[:200].strip()
-                        if content:
-                            yield emit(f"   💭 [{node_name}] AI: {content}")
+                        if content == _token_stream_buffer.strip():
+                            _token_stream_buffer = ""
+                            continue
+                        _token_stream_buffer = ""
+                    if content:
+                        yield emit(f"   💭 [{node_name}] AI: {content[:500]}")
                 elif think_type == "ai_token":
                     token_text = think_filter.filter_token(event.get("content", ""))
                     if token_text:
                         if not _token_streaming_active:
                             yield f"   💭 [{node_name}] "
                             _token_streaming_active = True
+                            _token_stream_buffer = ""
+                        _token_stream_buffer += token_text
                         yield token_text
                 elif think_type == "iteration_end":
                     yield emit(f"   💭 [{node_name}] 迭代 #{event.get('iteration')} 完成")

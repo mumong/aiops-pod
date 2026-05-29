@@ -28,7 +28,6 @@
 - `LLM_API_KEY`
 - `LLM_MODEL`
 - `LLM_API_BASE`
-- `AUTO_REMEDIATE`
 - `LOG_LEVEL`
 
 #### ConfigMap
@@ -241,9 +240,11 @@ curl --no-buffer -G "http://<node-ip>:30800/federation/query/v2" \
 - `true`
   额外展示质量指标
 
-### `AUTO_REMEDIATE`
+### `workflow.remediation`
 
-- `false`
-  仅诊断，不执行修复
-- `true`
-  允许模型执行修复动作，风险更高
+- `enabled: false`
+  仅诊断，不进入修复阶段。
+- `mode: review`
+  诊断后可以生成修复计划，但 plan 和每个写动作都需要人工审批。
+- `mode: auto`
+  安全校验通过的修复动作自动执行，仅建议用于 E2E 或受控实验环境。
