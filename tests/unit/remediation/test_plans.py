@@ -108,6 +108,29 @@ def test_rejects_non_kubectl_write_command():
         extract_remediation_plan(text)
 
 
+def test_rejects_unsafe_kubectl_write_command_even_for_auto_mode_plan():
+    text = """
+```json
+{
+  "remediation_available": true,
+  "fix_type": "remove_finalizer",
+  "risk_level": "medium",
+  "actions": [
+    {
+      "id": "a1",
+      "type": "kubectl",
+      "description": "unsafe chained command",
+      "execute_command": "kubectl patch pod terminating-stuck -n aiops-e2e --type=merge; kubectl delete pod other"
+    }
+  ]
+}
+```
+"""
+
+    with pytest.raises(ValueError, match="unsafe remediation command"):
+        extract_remediation_plan(text)
+
+
 def test_rejects_multi_issue_auto_fix_plan_without_group_action_coverage():
     text = """
 ```json
@@ -167,3 +190,64 @@ def test_rejects_multi_issue_action_without_group_id():
 
 def test_returns_none_when_no_plan_exists():
     assert extract_remediation_plan("## 诊断报告\n没有修复 JSON") is None
+
+
+def test_rejects_available_plan_without_actions():
+    text = """
+```json
+{
+  "remediation_available": true,
+  "fix_type": "remove_finalizer",
+  "risk_level": "medium",
+  "basis": ["deletionTimestamp exists", "finalizers non-empty"],
+  "actions": []
+}
+```
+"""
+
+    with pytest.raises(ValueError, match="remediation_available=true requires actions"):
+        extract_remediation_plan(text)
+
+
+def test_extracts_terminating_stuck_finalizer_patch_action():
+    text = """
+```json
+{
+  "remediation_available": true,
+  "fix_type": "remove_finalizer",
+  "risk_level": "medium",
+  "requires_human_approval": true,
+  "issue_groups": [
+    {
+      "group_id": "g1",
+      "problem_type": "TerminatingStuck",
+      "target": "pod/terminating-stuck",
+      "auto_fixable": true
+    }
+  ],
+  "basis": [
+    "kubectl_get_yaml shows deletionTimestamp exists",
+    "kubectl_get_yaml shows finalizers: aiops.e2e/hold"
+  ],
+  "actions": [
+    {
+      "id": "remove-finalizer-g1",
+      "type": "kubectl",
+      "group_id": "g1",
+      "description": "Remove confirmed blocking finalizer",
+      "risk": "medium",
+      "dry_run_command": "kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
+      "execute_command": "kubectl patch pod terminating-stuck -n aiops-e2e -p '{\\"metadata\\":{\\"finalizers\\":null}}' --type=merge",
+      "verify_command": "kubectl get pod terminating-stuck -n aiops-e2e"
+    }
+  ]
+}
+```
+"""
+
+    plan = extract_remediation_plan(text)
+
+    assert plan is not None
+    assert plan.remediation_available is True
+    assert plan.actions[0].execute_command.startswith("kubectl patch pod terminating-stuck")
+    assert plan.actions[0].metadata["group_id"] == "g1"

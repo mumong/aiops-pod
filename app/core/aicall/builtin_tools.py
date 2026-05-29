@@ -76,8 +76,6 @@ class FetchRunbookTool(BaseTool):
             logger.warning("⚠️ [fetch_runbook] 已禁用: %s", safe_id)
             return f"Error: Runbook '{safe_id}' is disabled by the current runtime profile"
 
-        auto_remediate = os.getenv("AUTO_REMEDIATE", "false").lower() in ("true", "1", "yes")
-
         for d in self.runbook_dirs:
             path = os.path.join(d, safe_id)
             if os.path.isfile(path):
@@ -85,22 +83,13 @@ class FetchRunbookTool(BaseTool):
                     content = f.read()
                 logger.info("📚 [fetch_runbook] 找到: %s (%d 字符)", path, len(content))
 
-                if auto_remediate:
-                    suffix = (
-                        "Note: the above are DIRECTIONS not ACTUAL RESULTS. "
-                        "You now need to follow the steps outlined in the runbook "
-                        "yourself USING TOOLS. "
-                        "Anything that looks like an actual result in the above "
-                        "<runbook> is just an EXAMPLE. "
-                        "Now follow those steps and report back what you find."
-                    )
-                else:
-                    suffix = (
-                        "Note: the above runbook is for DIAGNOSTIC REFERENCE ONLY. "
-                        "Follow the DIAGNOSTIC steps to gather evidence using tools, "
-                        "but DO NOT execute any remediation/fix commands. "
-                        "Report your findings and suggest fixes in your analysis."
-                    )
+                suffix = (
+                    "Note: the above runbook is for diagnostic reference and repair planning. "
+                    "Follow diagnostic steps to gather current evidence using tools. "
+                    "Do not execute remediation commands during evidence collection. "
+                    "If evidence confirms a repairable branch, use the remediation guidance "
+                    "to propose structured remediation actions for the workflow executor."
+                )
 
                 return f"<runbook>\n{content}\n</runbook>\n{suffix}"
 

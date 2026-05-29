@@ -60,8 +60,11 @@ def _build_plan(data: Dict[str, Any]) -> RemediationPlan:
     actions = [_build_action(item) for item in data.get("actions") or [] if isinstance(item, dict)]
     issue_groups = [item for item in data.get("issue_groups") or [] if isinstance(item, dict)]
     _validate_issue_group_coverage(issue_groups, actions)
+    remediation_available = bool(data.get("remediation_available", bool(actions)))
+    if remediation_available and not actions:
+        raise ValueError("remediation_available=true requires actions")
     return RemediationPlan(
-        remediation_available=bool(data.get("remediation_available", bool(actions))),
+        remediation_available=remediation_available,
         fix_type=str(data.get("fix_type") or "unknown"),
         risk_level=str(data.get("risk_level") or "medium"),
         requires_human_approval=bool(data.get("requires_human_approval", True)),

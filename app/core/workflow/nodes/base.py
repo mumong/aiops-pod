@@ -17,6 +17,7 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import ContextBudgetEstimator, serialize_tool_schema
+from app.core.remediation.models import normalize_remediation_mode
 from app.core.workflow.structured_runtime import StructuredAgentRuntime
 from app.core.workflow.state import WorkflowState
 
@@ -234,23 +235,22 @@ class WorkflowNode(ABC):
         if catalog_text:
             full_prompt = catalog_text + "\n\n" + system_prompt
 
-        # 注入修复控制指令（AUTO_REMEDIATE 环境变量控制）
-        auto_remediate = os.getenv("AUTO_REMEDIATE", "false").lower() in ("true", "1", "yes")
-        if not auto_remediate:
-            remediation_policy = (
-                "\n\n# ⛔ 修复操作限制\n"
-                "你只负责**诊断和分析**，**禁止执行任何修复操作**。\n"
-                "- 禁止执行 kubectl apply/patch/delete/rollout/taint/scale 等写操作\n"
-                "- 禁止执行 iptables 修改、文件删除、进程重启等变更操作\n"
-                "- 可以在报告中**建议**修复方案，但不要自行执行\n"
-                "- Runbook 中的修复步骤仅供参考，不要执行\n"
-            )
+        wf_config = self._get_workflow_config()
+        remediation_cfg = wf_config.get("remediation", {}) if isinstance(wf_config, dict) else {}
+        remediation_mode = "review"
+        if isinstance(remediation_cfg, dict):
+            remediation_mode = normalize_remediation_mode(remediation_cfg.get("mode"))
+        if remediation_mode == "auto":
+            mode_line = "当前修复模式为 auto：结构化修复计划中的安全动作可由修复执行器自动审批并执行。"
         else:
-            remediation_policy = (
-                "\n\n# ✅ 修复操作已授权\n"
-                "诊断完成后，如果发现明确的问题且修复方案风险可控，"
-                "你可以执行修复操作。执行前在输出中说明即将执行的操作和预期效果。\n"
-            )
+            mode_line = "当前修复模式为 review：结构化修复计划中的所有写动作必须先经过人工审批。"
+        remediation_policy = (
+            "\n\n# 修复计划与审批约束\n"
+            f"- {mode_line}\n"
+            "- 诊断节点不要直接执行 kubectl apply/patch/delete/rollout/scale 等写操作。\n"
+            "- 如果当前证据确认存在标准、安全、可验证的修复方式，可以在最终报告中生成结构化 remediation_plan actions。\n"
+            "- 写动作是否执行由 workflow.remediation.mode 和修复执行器控制；review 模式必须人工审批。\n"
+        )
         full_prompt += remediation_policy
         prompt_components.append({
             "name": "remediation_policy",

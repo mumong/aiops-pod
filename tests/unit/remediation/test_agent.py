@@ -379,3 +379,152 @@ def test_agent_mode_treats_verify_not_found_as_success_for_finalizer_remediation
     assert verify_event["status"] == "success"
     assert events[-1]["type"] == "remediation_finished"
     assert events[-1]["status"] == "success"
+
+
+def test_agent_review_mode_requires_plan_approval_before_finalizer_patch_action():
+    store = ApprovalStore()
+    calls = []
+    plan = RemediationPlan(
+        remediation_available=True,
+        fix_type="remove_finalizer",
+        risk_level="medium",
+        requires_human_approval=True,
+        issue_groups=[
+            {
+                "group_id": "g1",
+                "problem_type": "TerminatingStuck",
+                "target": "pod/terminating-stuck",
+                "auto_fixable": True,
+            }
+        ],
+        basis=["deletionTimestamp exists", "finalizers non-empty"],
+        actions=[
+            RemediationAction(
+                id="remove-finalizer-g1",
+                type="kubectl",
+                description="Remove confirmed blocking finalizer",
+                dry_run_command="kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
+                execute_command=(
+                    "kubectl patch pod terminating-stuck -n aiops-e2e "
+                    "-p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+                ),
+                verify_command="kubectl get pod terminating-stuck -n aiops-e2e",
+                metadata={"group_id": "g1"},
+            )
+        ],
+    )
+
+    def runner(command):
+        calls.append(command)
+        if command.startswith("kubectl get pod") and any(call.startswith("kubectl patch pod") for call in calls):
+            raise RuntimeError('Error from server (NotFound): pods "terminating-stuck" not found')
+        if command.startswith("kubectl get pod"):
+            return "finalizers: aiops.e2e/hold"
+        return "pod/terminating-stuck patched"
+
+    executor = RemediationAgentExecutor(
+        approval_store=store,
+        command_runner=runner,
+        decision_provider=lambda **_: AgentDecision(
+            decision="run_command",
+            description="Remove confirmed blocking finalizer",
+            dry_run_command="kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
+            command=(
+                "kubectl patch pod terminating-stuck -n aiops-e2e "
+                "-p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+            ),
+            verify_command="kubectl get pod terminating-stuck -n aiops-e2e",
+        ),
+    )
+
+    events = executor.run(run_id="run-review-finalizer", plan=plan, report="report", approval_mode="review")
+
+    plan_approval = next(events)
+    assert plan_approval["type"] == "remediation_approval_required"
+    assert plan_approval["approval_kind"] == "plan"
+    assert calls == []
+    store.resolve("run-review-finalizer", plan_approval["approval_id"], approved=True, reviewer="tester")
+
+    action_approval = next(events)
+    assert action_approval["type"] == "remediation_approval_required"
+    assert action_approval["approval_kind"] == "action"
+    assert calls == []
+    store.resolve("run-review-finalizer", action_approval["approval_id"], approved=True, reviewer="tester")
+
+    remaining = list(events)
+    assert any(event.get("stage") == "execute" for event in remaining)
+    assert calls[0].startswith("kubectl get pod")
+    assert calls[1].startswith("kubectl patch pod terminating-stuck")
+
+
+def test_agent_auto_mode_runs_finalizer_patch_without_approval_events():
+    calls = []
+    plan = RemediationPlan(
+        remediation_available=True,
+        fix_type="remove_finalizer",
+        risk_level="medium",
+        requires_human_approval=True,
+        issue_groups=[
+            {
+                "group_id": "g1",
+                "problem_type": "TerminatingStuck",
+                "target": "pod/terminating-stuck",
+                "auto_fixable": True,
+            }
+        ],
+        basis=["deletionTimestamp exists", "finalizers non-empty"],
+        actions=[
+            RemediationAction(
+                id="remove-finalizer-g1",
+                type="kubectl",
+                description="Remove confirmed blocking finalizer",
+                dry_run_command="kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
+                execute_command=(
+                    "kubectl patch pod terminating-stuck -n aiops-e2e "
+                    "-p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+                ),
+                verify_command="kubectl get pod terminating-stuck -n aiops-e2e",
+                metadata={"group_id": "g1"},
+            )
+        ],
+    )
+
+    def runner(command):
+        calls.append(command)
+        if command.startswith("kubectl get pod") and any(call.startswith("kubectl patch pod") for call in calls):
+            raise RuntimeError('Error from server (NotFound): pods "terminating-stuck" not found')
+        if command.startswith("kubectl get pod"):
+            return "finalizers: aiops.e2e/hold"
+        return "pod/terminating-stuck patched"
+
+    executor = RemediationAgentExecutor(
+        approval_store=ApprovalStore(),
+        command_runner=runner,
+        decision_provider=lambda **_: AgentDecision(
+            decision="run_command",
+            description="Remove confirmed blocking finalizer",
+            dry_run_command="kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
+            command=(
+                "kubectl patch pod terminating-stuck -n aiops-e2e "
+                "-p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+            ),
+            verify_command="kubectl get pod terminating-stuck -n aiops-e2e",
+        ),
+    )
+
+    events = list(
+        executor.run(
+            run_id="run-auto-finalizer",
+            plan=plan,
+            report="report",
+            approval_mode="auto",
+            config=RemediationAgentConfig(max_iterations=2, max_write_actions=1),
+        )
+    )
+
+    assert all(event["type"] != "remediation_approval_required" for event in events)
+    assert calls[0].startswith("kubectl get pod")
+    assert calls[1].startswith("kubectl patch pod terminating-stuck")
+    assert any(event.get("stage") == "verify" and event["status"] == "success" for event in events)
+    assert events[-1]["type"] == "remediation_finished"
+    assert events[-1]["status"] == "success"

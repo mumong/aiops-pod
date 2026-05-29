@@ -215,6 +215,12 @@ data:
     | df 显示 Use% >= 95% + ENOSPC 错误 | 节点磁盘空间耗尽 | 高 |
     | Inode 使用率 >= 95% | Inode 耗尽 | 高 |
     | container Last State=OOMKilled / exitCode=137 | 不是 Evicted 根因，应切换 OOMKilled | 高 |
+
+    ## 标准修复建议
+    - Pod 级 ephemeral-storage/emptyDir 超限: 优先清理应用临时文件、降低日志落盘量，或提高容器 `ephemeral-storage` limit / emptyDir `sizeLimit` 后重建 Pod；验证 `kubectl describe pod` 不再出现 Evicted Message。
+    - 节点 DiskPressure/inode 压力: 先清理无用镜像、容器日志和节点临时文件，必要时 cordon/drain 后扩容磁盘；验证 `kubectl describe node <node>` 中 DiskPressure=False 且新 Pod 可调度。
+    - MemoryPressure/PIDPressure: 优先降低节点负载、迁移工作负载或扩容节点；如果是容器级 OOMKilled，切换 OOMKilled runbook，不要按 Evicted 修复。
+    - NoExecute taint 驱逐: 修复 Node NotReady/Unreachable 根因或调整 tolerationSeconds；验证节点 Ready 且新 Pod 不再被同一 taint 驱逐。
   pod-volume-mount-failed.md: |
     # Pod VolumeMountFailed / 卷挂载失败
 
@@ -309,6 +315,13 @@ data:
     | NFS timeout/access denied/stale file handle | VolumeMountFailed | 高 |
     | Secret/ConfigMap not found 且来自 volume 引用 | VolumeMountFailed；若来自 env/envFrom 则切换 ConfigError；不要再扩展 PVC 分支 | 高 |
     | hostPath path/type error | 节点路径或 hostPath 类型配置错误 | 高 |
+
+    ## 标准修复建议
+    - ConfigMap/Secret volume 缺失: 创建缺失对象或修正 Pod/工作负载中的 volume 引用名称；验证 `kubectl describe pod` 不再出现 not found 的 FailedMount。
+    - PVC Pending/NotFound: 修正 PVC、StorageClass、PV 绑定或存储 provisioner；验证 `kubectl get pvc -n <namespace>` 为 Bound 后重建/等待 Pod。
+    - Multi-Attach/RWO 冲突: 优先等待旧节点 detach 完成，或把 Pod 调度回已挂载节点；不要直接强制 detach，除非确认旧节点和旧 Pod 已停止使用该卷。
+    - nodeAffinity/可用区冲突: 调整 Pod nodeSelector/affinity 到 PV 可用节点，或重新创建符合可用区的卷；验证 Pod 绑定节点与 PV nodeAffinity 一致。
+    - CSI/NFS/hostPath 错误: 修复后端服务、权限、路径或 CSI DaemonSet；验证 Events 不再持续产生 FailedMount/FailedAttachVolume。
   pod-oomkilled.md: |
     # Pod OOMKilled (Exit Code 137)
 
@@ -385,6 +398,12 @@ data:
     | exitCode=137 + Node OOMKilling/kernel OOM 事件 | 节点 OS 级 OOM，需要检查节点内存压力 | 中 |
     | exitCode=137 + Reason=Evicted | 非容器 OOM，按 Evicted 处理 | 高 |
     | exitCode=1/127 且无 OOM 标记 | 非 OOM，应用错误 | 中 |
+
+    ## 标准修复建议
+    - memory limit 过低: 按历史峰值和业务容量提高 `resources.requests/limits.memory`，滚动重启工作负载；验证 restartCount 不再增长且 Last State 不再是 OOMKilled。
+    - 应用内存泄漏/峰值: 优先修复泄漏、降低并发或调小批处理窗口；临时扩容内存只能作为缓解，不应掩盖泄漏根因。
+    - memory-backed emptyDir/tmpfs: 限制写入量、改用磁盘型 emptyDir/PVC，或设置合理 sizeLimit；验证容器内存曲线下降。
+    - 节点 OS 级 OOM 或 MemoryPressure: 迁移/扩容节点并检查系统级 OOM 事件；如果 Pod Reason=Evicted，切换 Evicted runbook。
   pod-imagepull-failed.md: |
     # Pod ImagePullFailed / ImagePullBackOff
 
@@ -462,6 +481,13 @@ data:
     | Events 含 invalid reference format | 镜像名称格式错误 | 高 |
     | Events 含 x509 | 节点容器运行时信任链/TLS 证书问题 | 高 |
     | DNS 解析失败 | DNS 问题导致仓库不可达 | 高 |
+
+    ## 标准修复建议
+    - manifest unknown/not found 或 invalid reference: 修正镜像仓库、路径、tag 或 digest，重新发布工作负载；验证 Events 出现 Pulling 后成功 Created/Started。
+    - unauthorized/no basic auth/pull access denied: 创建或修正同 namespace 的 `kubernetes.io/dockerconfigjson` Secret，并通过 `imagePullSecrets` 或 ServiceAccount 引用；验证 describe 不再出现认证错误。
+    - timeout/connection refused/DNS/x509: 修复节点到 registry 的网络、DNS、代理或证书信任；验证节点或诊断 Pod 能访问 registry HTTPS 端点。
+    - Too Many Requests/rate limit: 使用认证、私有镜像缓存或内部代理仓库；验证后续拉取不再被限流。
+    - 长时间 Pulling: 检查镜像体积、节点带宽和运行时并发限制；优先优化镜像或预热缓存，不要误判为配置错误。
   pod-config-error.md: |
     # Pod ConfigError / 启动配置失败
 
@@ -547,6 +573,13 @@ data:
     | Last State=OOMKilled 或 Exit Code=137 | 应切换到 OOMKilled runbook | 高 |
     | STATUS=ImagePullBackOff / ErrImagePull | 应切换到 ImagePullFailed runbook | 高 |
     | Reason=Evicted 或 Message 含 disk pressure/ENOSPC | 应切换到 Evicted runbook | 高 |
+
+    ## 标准修复建议
+    - ConfigMap/Secret/env key 缺失: 创建缺失对象或修正 key/name/envFrom 引用；验证 `kubectl describe pod` 不再出现 CreateContainerConfigError。
+    - Secret data 格式错误: 修正 Secret 类型和 base64 编码，重新触发工作负载滚动；验证容器可以进入 Running。
+    - command/args/executable 错误: 修正镜像入口、命令路径或脚本权限；验证 Last State 不再是启动命令失败。
+    - 应用启动配置校验失败: 按日志补齐业务配置或回滚错误配置；验证 `kubectl logs --previous` 中不再出现 missing/validation failed。
+    - initContainer 配置失败: 优先修复 initContainer 的镜像、命令、env 和 volume；主容器问题不要在 init 未完成前下结论。
   pod-pending-unschedulable.md: |
     # Pod PendingUnschedulable / 调度失败
 
@@ -636,6 +669,14 @@ data:
     | FailedScheduling + node(s) didn't match node selector/affinity | 调度约束不匹配 | 高 |
     | FailedScheduling + pod has unbound immediate PersistentVolumeClaims | PVC 未绑定，应切换 VolumeMountFailed/PVC 分支 | 高 |
     | 所有候选 Node NotReady/Unschedulable | 无可用调度节点 | 高 |
+
+    ## 标准修复建议
+    - Insufficient cpu/memory/ephemeral-storage 或 Too many pods: 优先扩容节点、释放资源、降低 requests 或调整副本分布；验证 FailedScheduling 不再出现资源不足。
+    - untolerated taint: 只有业务确实允许调度到该类节点时才添加 toleration；否则移除错误调度约束或修复节点 taint 根因。
+    - nodeSelector/affinity/topology 不匹配: 修正 Pod 约束或补齐节点标签；验证 `kubectl describe pod` 不再出现 selector/affinity mismatch。
+    - hostPort 冲突: 改用未占用端口、减少副本同节点分布，或使用 Service 暴露；验证调度器不再报 free ports。
+    - unbound PVC: 切换 VolumeMountFailed/PVC 分支，先修复存储绑定，不要把资源扩容当作主要修复。
+    - Node NotReady/Unschedulable: 修复节点 Ready 状态或解除 cordon；验证候选节点 Ready 且 SchedulingDisabled 消失。
   pod-node-lost-unknown.md: |
     # Pod NodeLostOrUnknown / Pod 状态 Unknown
 
@@ -666,6 +707,12 @@ data:
     | Pod Unknown + Node Ready=False/Unknown | NodeLostOrUnknown | 高 |
     | Pod 事件含 node.kubernetes.io/unreachable | NodeLostOrUnknown | 高 |
     | Node Ready=True 且 Pod 当前非 Unknown | 历史 Unknown，不应作为当前根因 | 高 |
+
+    ## 标准修复建议
+    - Node 当前 NotReady/Unknown: 优先恢复 kubelet、容器运行时、节点网络和 API Server 连通性；验证 `kubectl get node <node>` Ready=True。
+    - 节点长期不可恢复: 按运维流程 cordon/drain 或替换节点，再让控制器重建 Pod；验证新 Pod 调度到 Ready 节点。
+    - unreachable/not-ready taint 驱逐: 修复节点根因或调整容忍策略；验证相关 taint 消失或 Pod 按预期迁移。
+    - Node 已 Ready 且 Pod 当前非 Unknown: 禁止继续按 NodeLost 修复，应切换到当前 Pod 状态对应 runbook。
   pod-terminating-stuck.md: |
     # Pod TerminatingStuck / 删除卡住
 
@@ -708,6 +755,14 @@ data:
     | Terminating + volume detach/unmount 事件 | 卷卸载卡住 | 高 |
     | deletionTimestamp 存在时间小于 terminationGracePeriodSeconds | 仍处于正常优雅终止窗口 | 中 |
     | Terminating + preStop hook 仍运行/超时 | preStop 或应用退出慢 | 中 |
+
+    ## 标准修复建议
+    - finalizer 清理卡住: 只有在当前 `kubectl get pod <pod> -n <namespace> -o yaml` 确认 `deletionTimestamp` 长时间存在且 `metadata.finalizers` 非空时，才建议执行 `kubectl patch pod <pod> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge`；验证 `kubectl get pod <pod> -n <namespace>` 返回 NotFound 或对象消失。
+    - finalizers 为空时禁止按 finalizer 清理: 应继续检查 Node/kubelet、volume detach/unmount、preStop 和 terminationGracePeriodSeconds，不要建议 patch finalizers。
+    - Node NotReady/Unknown 或 kubelet 无响应: 优先恢复 kubelet/容器运行时/节点网络；节点不可恢复时按流程 cordon/drain 或替换节点，验证 Node Ready 后 Pod 删除完成。
+    - volume detach/unmount 卡住: 修复 CSI/NFS/存储后端或 kubelet volume manager 问题；不要在卷仍被使用时强制清理。
+    - 仍在 terminationGracePeriodSeconds 或 preStop 窗口内: 等待正常优雅终止，或从工作负载配置层缩短过长的 grace/preStop；验证宽限期过后状态变化。
+    - 不要先推荐 delete --force；`kubectl delete pod <pod> -n <namespace> --grace-period=0 --force` 只能作为最后应急 fallback: 必须先确认对象仍存在、无更安全分支可用，并明确风险是 API 对象可能消失但节点侧清理未完成。
   pod-crashloop-runtime.md: |
     # Pod CrashLoopBackOffRuntime / 容器反复退出
 
@@ -748,6 +803,13 @@ data:
     | CrashLoopBackOff + OOMKilled/137 | 应切换到 OOMKilled runbook | 高 |
     | CrashLoopBackOff + 配置校验失败/缺配置 | 应切换到 ConfigError runbook | 高 |
     | 容器 Running 但 READY 0/1 且无重启 | 应切换到 NotReadyProbeFailed | 高 |
+
+    ## 标准修复建议
+    - command/args、executable、permission denied: 修正镜像内容、入口命令或文件权限后滚动重启；验证 restartCount 不再增加。
+    - exitCode=0 快速退出: 如果是一次性任务，改用 Job/CronJob；如果应为常驻服务，修正主进程启动命令。
+    - 应用运行时异常: 根据 `kubectl logs --previous` 修复业务依赖、端口冲突、磁盘写入或权限问题；验证 previous logs 不再重复同一异常。
+    - livenessProbe 杀死容器: 若应用可用但探针过严，调整 path/port/timeout/failureThreshold；若应用不可用，切换 NotReadyProbeFailed 或修复应用健康。
+    - OOMKilled/配置缺失/镜像拉取失败信号明确时，切换对应 runbook，不要按普通 CrashLoop 修复。
   pod-sandbox-create-failed.md: |
     # Pod SandboxCreateFailed / Pod sandbox 创建失败
 
@@ -782,6 +844,13 @@ data:
     | FailedCreatePodSandBox + runtime sandbox 错误 | SandboxCreateFailed | 高 |
     | FailedCreatePodSandBox + RuntimeClass/handler 错误 | SandboxCreateFailed | 高 |
     | FailedCreatePodSandBox + pause image pull error | sandbox 基础镜像拉取失败，应同时参考 ImagePullFailed | 中 |
+
+    ## 标准修复建议
+    - CNI/network plugin not ready: 修复对应节点上的 CNI DaemonSet、配置文件、证书或 API Server 连通性；验证 CNI Pod Ready 且新 Pod sandbox 可创建。
+    - IPAM exhausted/no IP addresses available: 释放泄漏 IP、扩容 IP 池或修复 IPAM 状态；验证后续 Pod 获得 PodIP。
+    - RuntimeClass/handler 错误: 修正 Pod runtimeClassName 或安装/配置节点支持的 runtime handler；验证 `kubectl get runtimeclass` 与节点运行时一致。
+    - container runtime/pause image 错误: 修复 containerd/CRI-O、kubelet或 pause image 拉取；若是拉取失败，同时按 ImagePullFailed 修复 registry 访问。
+    - 修复后优先重建受影响 Pod；验证 Events 不再出现 FailedCreatePodSandBox。
   pod-notready-probe-failed.md: |
     # Pod NotReadyProbeFailed / Running 但未 Ready
 
@@ -815,6 +884,13 @@ data:
     | startup probe failed，容器尚未完成启动 | 启动慢或 startupProbe 参数过严 | 高 |
     | liveness probe failed 导致重启 | NotReadyProbeFailed 或 CrashLoopBackOffRuntime，需结合 Last State | 中 |
     | Pod READY 正常但 Service 无 Endpoints | Service selector/端口配置问题，不是 Pod NotReady | 高 |
+
+    ## 标准修复建议
+    - readinessProbe path/port/scheme/timeout 配置错误: 修正探针配置或容器监听端口；验证 READY 变为 1/1 且 readiness failed 事件停止。
+    - 应用健康接口返回 500/timeout: 修复应用依赖、启动配置或健康接口逻辑；不要只放宽探针掩盖真实不可用。
+    - startupProbe 过严或启动慢: 增大 failureThreshold/periodSeconds/initialDelaySeconds，或优化启动流程；验证容器完成启动后 readiness 通过。
+    - livenessProbe 导致重启: 先确认是否误杀健康应用；如果 Last State 持续重启，应同时参考 CrashLoopBackOffRuntime。
+    - Service 无 Endpoints 但 Pod READY 正常: 修正 Service selector/targetPort，不能按 Pod NotReady 修复。
   private-k8s-query-promql-reference.md: |
     # 私有化 Kubernetes 节点级 Prometheus 查询参考手册
 

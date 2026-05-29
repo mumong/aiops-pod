@@ -20,7 +20,12 @@ from app.core.remediation.executor import (
     run_local_command,
     unhealthy_remediation_reason,
 )
-from app.core.remediation.models import RemediationAction, RemediationPlan, RemediationRuntimeConfig
+from app.core.remediation.models import (
+    RemediationAction,
+    RemediationPlan,
+    RemediationRuntimeConfig,
+    normalize_remediation_mode,
+)
 from app.core.remediation.plans import is_read_only_kubectl_command, validate_safe_kubectl_command
 
 
@@ -71,7 +76,7 @@ class RemediationAgentExecutor:
             yield self._finished(run_id, "skipped", "no remediation plan")
             return
 
-        review_mode = str(approval_mode or "review").strip().lower() != "auto"
+        review_mode = normalize_remediation_mode(approval_mode) != "auto"
         if review_mode:
             plan_request = self.approval_store.create_request(
                 run_id=run_id,

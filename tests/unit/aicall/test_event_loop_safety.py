@@ -711,6 +711,66 @@ def test_call_surfaces_reasoning_content_in_stream_events():
     assert seen_ai_message is True
 
 
+def test_call_wraps_provider_reasoning_content_for_stream_filters():
+    event_queue = queue.Queue()
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield (
+                "messages",
+                (
+                    AIMessage(content="", additional_kwargs={"reasoning_content": "内部推理"}),
+                    {"langgraph_node": "model"},
+                ),
+            )
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(content="最终答案", additional_kwargs={"reasoning_content": "内部推理"})
+                        ]
+                    }
+                },
+            )
+
+    tool = MagicMock()
+    tool.name = "tool_a"
+    tool.description = "tool"
+    tool.args_schema = None
+
+    with patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()), \
+         patch("langchain.agents.create_agent", return_value=_Agent()), \
+         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+        ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
+        ai.call("sys", "q", tools=[tool], stream_queue=event_queue, node_id="layer", max_steps=3)
+
+    queued_events = []
+    while not event_queue.empty():
+        _, evt = event_queue.get_nowait()
+        queued_events.append(evt)
+
+    token_event = next(evt for evt in queued_events if evt.get("type") == "ai_token")
+    message_event = next(evt for evt in queued_events if evt.get("type") == "ai_message")
+    assert token_event["content"] == "<think>内部推理</think>"
+    assert message_event["full_content"].startswith("<think>内部推理</think>最终答案")
+
+
 def test_extract_usage_metadata_supports_usage_metadata_and_token_usage():
     msg = MagicMock()
     msg.usage_metadata = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
