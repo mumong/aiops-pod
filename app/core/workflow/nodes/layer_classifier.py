@@ -262,12 +262,14 @@ class LayerClassifierNode(WorkflowNode):
             parsed = cls._parse_prometheus_tool_result(ev.get("result") or ev.get("result_preview") or "")
             if parsed is None:
                 continue
-            query_count += 1
 
             tool_args = ev.get("tool_args") or {}
             query = ""
             if isinstance(tool_args, dict):
                 query = str(tool_args.get("query") or tool_args.get("promql") or "").strip()
+            if cls._is_prometheus_metadata_query(query):
+                continue
+            query_count += 1
             metric_key, metric_label = cls._prometheus_query_column(query, query_count)
             if metric_key not in seen_columns:
                 columns.append({"key": metric_key, "label": metric_label})
@@ -331,6 +333,18 @@ class LayerClassifierNode(WorkflowNode):
             "missing": missing,
             "sources": sources,
         }).model_dump()
+
+    @staticmethod
+    def _is_prometheus_metadata_query(query: str) -> bool:
+        lowered = (query or "").strip().lower()
+        if not lowered:
+            return False
+        metadata_prefixes = (
+            "node_uname_info",
+            "kube_node_info",
+            "node_boot_time_seconds",
+        )
+        return any(lowered.startswith(prefix) for prefix in metadata_prefixes)
 
     @staticmethod
     def _parse_prometheus_tool_result(raw: Any) -> Optional[Dict[str, Any]]:
@@ -1356,7 +1370,18 @@ class LayerClassifierNode(WorkflowNode):
             response, thinking_events = self._call_llm(
                 question,
                 self._get_layer_prompt(),
-                expect_json=False,
+                expect_json=self._is_direct_query_mode(),
+                json_validator=(
+                    self._is_query_direct_json_result
+                    if self._is_direct_query_mode()
+                    else None
+                ),
+                skip_remediation_policy=self._is_direct_query_mode(),
+                blocked_tool_names=(
+                    ["TodoWrite"]
+                    if self._is_direct_query_mode()
+                    else []
+                ),
                 stop_checker=(
                     self._should_stop_query_direct_early
                     if self._is_direct_query_mode() and early_stop_enabled
@@ -1366,7 +1391,7 @@ class LayerClassifierNode(WorkflowNode):
 
             stage1_text = (response.result or "") if response else ""
             if not stage1_text:
-                logger.warning("⚠️ [layer] 阶段1 无最终文本，仅基于工具结果执行 Pydantic 提取")
+                logger.warning("⚠️ [layer] 阶段1 无最终文本，仅基于工具结果执行结构化整理")
             else:
                 logger.debug("📋 [layer] 阶段1 输出: %s", stage1_text[:200])
 
@@ -1383,6 +1408,55 @@ class LayerClassifierNode(WorkflowNode):
                 )
             else:
                 enriched_text_for_downstream = full_analysis_text
+
+            if self._is_direct_query_mode():
+                extracted_json = self._try_parse_json(stage1_text)
+                extracted_json = self._normalize_layer_output_dict(extracted_json)
+                extracted_json = self._normalize_query_result_sources(extracted_json, thinking_events)
+                if isinstance(extracted_json, dict):
+                    if str(extracted_json.get("layer") or "").upper() != "QUERY":
+                        extracted_json["full_analysis"] = enriched_text_for_downstream
+                        return extracted_json, thinking_events
+                    if self._is_usable_query_result(extracted_json, thinking_events):
+                        extracted_json["full_analysis"] = enriched_text_for_downstream
+                        logger.info(
+                            "✅ [layer] QUERY direct 使用阶段1 JSON 文本结果 | rows=%d sources=%d",
+                            len(((extracted_json.get("query_result") or {}).get("rows")) or []),
+                            len(((extracted_json.get("query_result") or {}).get("sources")) or []),
+                        )
+                        return extracted_json, thinking_events
+
+                tool_query_result = self._query_result_from_prometheus_tool_events(question, thinking_events)
+                if tool_query_result is not None and self._has_successful_tool_results(thinking_events):
+                    result = {
+                        "layer": "QUERY",
+                        "layers": ["QUERY"],
+                        "layer_name": "查询请求",
+                        "confidence": 0.8,
+                        "reasoning": "已基于真实 Prometheus 工具结果生成 QUERY 结构化结果。",
+                        "key_entities": [],
+                        "possible_scenarios": [],
+                        "query_result": tool_query_result,
+                        "full_analysis": enriched_text_for_downstream,
+                    }
+                    logger.info(
+                        "✅ [layer] QUERY direct 跳过 layer_extract，从真实 Prometheus tool_result 构建 LayerOutput | rows=%d sources=%d",
+                        len((tool_query_result or {}).get("rows") or []),
+                        len((tool_query_result or {}).get("sources") or []),
+                    )
+                    return result, thinking_events
+
+                failure_reason = "QUERY direct 未获得可渲染 JSON，也未获得任何可用 Prometheus 工具结果"
+                logger.warning(
+                    "⚠️ [layer] %s | tool_events=%d",
+                    failure_reason,
+                    len(thinking_events or []),
+                )
+                return self._build_query_direct_failure_result(
+                    question=question,
+                    full_analysis_text=enriched_text_for_downstream,
+                    failure_reason=failure_reason,
+                ), thinking_events
 
             if self._is_direct_query_mode() and self._has_early_stop_event(thinking_events):
                 tool_query_result = self._query_result_from_prometheus_tool_events(question, thinking_events)
@@ -1573,12 +1647,38 @@ class LayerClassifierNode(WorkflowNode):
         return parsed
 
     @staticmethod
+    def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
+        """Parse first-round model JSON text without requiring structured LLM output."""
+        try:
+            from app.core.aicall.client import AICall
+
+            parsed = AICall.extract_json_payload(text)
+        except Exception:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    @staticmethod
     def _is_structured_layer_result(result: Optional[Dict]) -> bool:
         """判断阶段1输出是否已是可用的结构化定层结果。"""
         try:
             LayerOutput.model_validate(result)
         except Exception:
             return False
+        return True
+
+    @staticmethod
+    def _is_query_direct_json_result(result: Optional[Dict]) -> bool:
+        """Lightweight JSON-text guard for `/query` direct; no structured LLM/Pydantic call."""
+        if not isinstance(result, dict):
+            return False
+        layer = str(result.get("layer") or "").upper()
+        if layer not in {"QUERY", "HEALTHY", "L0", "L1", "L2", "L3", "L4"}:
+            return False
+        if layer == "QUERY":
+            query_result = result.get("query_result")
+            return isinstance(query_result, dict)
         return True
 
     @staticmethod

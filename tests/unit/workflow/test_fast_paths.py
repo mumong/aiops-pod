@@ -516,8 +516,9 @@ def test_layer_does_not_lightweight_route_cluster_status_diagnosis_wording():
     assert result["layer"] == Layer.L1
 
 
-def test_query_conclusion_uses_llm_even_when_query_result_present():
+def test_query_conclusion_renders_locally_when_query_result_present():
     node = ConclusionFormatterNode()
+    node.workflow_config_override = {"query_mode": "direct"}
 
     node.ai_call = _RecordingAICall(
         """## 📊 查询结果
@@ -557,7 +558,7 @@ def test_query_conclusion_uses_llm_even_when_query_result_present():
 
     result = node.execute(state)
 
-    assert len(node.ai_call.calls) == 1
+    assert len(node.ai_call.calls) == 0
     assert "## 📊 查询结果" in result["conclusion"]
     assert "master" in result["conclusion"]
 
@@ -1107,9 +1108,9 @@ def test_rca_prompt_includes_json_contract_for_text_fallback():
 def test_query_direct_prompt_boundaries_are_explicit():
     direct_prompt = get_workflow_prompt("layer_query_direct")
     expected_phrases = [
-        "如果是 QUERY，你必须调用工具采集真实数据；本轮 agent 最终只写自然语言采集摘要",
-        "禁止人工编写 `query_result`、结构化对象、Markdown 表格或最终报告",
-        "`LayerOutput.query_result` 只能由后续 Pydantic schema 提取生成",
+        "如果是 QUERY，你必须调用工具采集真实数据，并在本轮最终 JSON 中直接输出 `query_result`",
+        "最终输出必须是纯 JSON",
+        "`query_result` 必须可直接被 conclusion 节点本地渲染",
         "先把用户明确询问的查询项逐项列为采集清单",
         "每个查询项最终必须只有两种状态：已由真实 tool_result 支撑，或明确写入缺失项",
         "禁止把“已经发出的工具调用都返回了”当成“用户问题已完整回答”",
@@ -1118,7 +1119,7 @@ def test_query_direct_prompt_boundaries_are_explicit():
         "涉及 Prometheus 指标查询时，必须先调用 `fetch_runbook`",
         "禁止跳过 runbook 直接调用 Prometheus 探索或自创 PromQL",
         "runbook 中已有直接适用模板时，必须优先逐字复用标准 PromQL",
-        "只有当用户明确查询项全部已采集或已明确缺失，才允许写采集摘要",
+        "一旦已经获得回答用户问题所需的关键数据，立即停止采集并输出 JSON",
     ]
 
     for phrase in expected_phrases:
@@ -1209,10 +1210,10 @@ def test_workflow_prompts_do_not_contain_json_output_templates():
     ]
     for name in prompt_names:
         prompt = get_workflow_prompt(name)
-        if name == "rca":
-            # RCA has an explicit JSON text-fallback contract so local
-            # OpenAI-compatible gateways can still produce Pydantic-parseable
-            # output when native structured output is unavailable.
+        if name in {"rca", "layer_query_direct"}:
+            # RCA keeps a JSON text-fallback contract. `/query` direct also
+            # intentionally uses JSON text output to avoid a second Pydantic
+            # extraction call on the fast query path.
             continue
         for phrase in forbidden:
             assert phrase not in prompt

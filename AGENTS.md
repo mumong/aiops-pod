@@ -1,5 +1,5 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read:
-specs/003-remediation-approval-think-stream/plan.md
+specs/004-query-direct-render/plan.md
 <!-- SPECKIT END -->
