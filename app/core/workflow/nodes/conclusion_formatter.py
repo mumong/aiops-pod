@@ -19,6 +19,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+from app.core.remediation.plans import extract_remediation_plan
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import ConclusionOutput, QueryConclusionOutput, QueryResult, RCAOutput
 from app.core.workflow.state import WorkflowState
@@ -503,6 +504,13 @@ class ConclusionFormatterNode(WorkflowNode):
             if content:
                 content = self._enforce_evidence_stats(content, evidence_analysis)
                 content = self._strip_think_blocks(content)
+                content = self._normalize_ask_remediation_plan(
+                    content,
+                    layer_analysis=layer_analysis,
+                    evidence_analysis=evidence_analysis,
+                    rca_analysis=rca_analysis,
+                    tool_data_text=tool_data_text,
+                )
                 return content
             return f"报告生成失败：LLM 未返回有效内容。\n\n原始数据：\n{tool_data_text[:1000] if tool_data_text else '无'}"
 
@@ -558,6 +566,14 @@ class ConclusionFormatterNode(WorkflowNode):
         if content:
             content = self._enforce_evidence_stats(content, evidence_analysis)
             content = self._strip_think_blocks(content)
+            if not is_query:
+                content = self._normalize_ask_remediation_plan(
+                    content,
+                    layer_analysis=layer_analysis,
+                    evidence_analysis=evidence_analysis,
+                    rca_analysis=rca_analysis,
+                    tool_data_text=tool_data_text,
+                )
 
         self._conclusion_thinking = thinking_events or []
 
@@ -590,6 +606,230 @@ class ConclusionFormatterNode(WorkflowNode):
         cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
         cleaned = re.sub(r"^\s+", "", cleaned)
         return cleaned
+
+    def _normalize_ask_remediation_plan(
+        self,
+        content: str,
+        *,
+        layer_analysis: str,
+        evidence_analysis: str,
+        rca_analysis: str,
+        tool_data_text: str,
+    ) -> str:
+        """Repair only the final /ask remediation JSON for confirmed finalizer cases."""
+        if not content:
+            return content
+
+        parse_error: Optional[ValueError] = None
+        try:
+            plan = extract_remediation_plan(content)
+        except ValueError as exc:
+            plan = None
+            parse_error = exc
+        if plan is not None and plan.actions:
+            return content
+
+        normalized_plan = self._build_confirmed_finalizer_plan(
+            content=content,
+            layer_analysis=layer_analysis,
+            evidence_analysis=evidence_analysis,
+            rca_analysis=rca_analysis,
+            tool_data_text=tool_data_text,
+        )
+        if normalized_plan is None:
+            if parse_error is not None:
+                logger.debug("[conclusion] remediation plan invalid and not repairable: %s", parse_error)
+            return content
+
+        repaired = self._replace_or_append_remediation_json(content, normalized_plan)
+        try:
+            extract_remediation_plan(repaired)
+        except ValueError as exc:
+            logger.warning("⚠️ [conclusion] normalized remediation plan rejected: %s", exc)
+            return content
+        return repaired
+
+    def _build_confirmed_finalizer_plan(
+        self,
+        *,
+        content: str,
+        layer_analysis: str,
+        evidence_analysis: str,
+        rca_analysis: str,
+        tool_data_text: str,
+    ) -> Optional[Dict[str, Any]]:
+        evidence_context = "\n".join(
+            item for item in [layer_analysis, evidence_analysis, rca_analysis, tool_data_text] if item
+        )
+        context = "\n".join(item for item in [content, evidence_context] if item)
+        if not self._has_finalizer_patch_advice(content):
+            return None
+        if self._has_force_delete_advice_without_patch(content):
+            return None
+        if self._mentions_current_pod_not_found(evidence_context):
+            return None
+        if not self._has_current_deletion_timestamp(evidence_context):
+            return None
+        if not self._has_non_empty_finalizers(evidence_context):
+            return None
+
+        target = self._extract_pod_namespace_from_patch(content) or self._extract_pod_namespace_from_context(evidence_context)
+        if target is None:
+            return None
+        pod, namespace = target
+        if self._is_placeholder(pod) or self._is_placeholder(namespace):
+            return None
+
+        dry_run = f"kubectl get pod {pod} -n {namespace} -o yaml"
+        execute = f"kubectl patch pod {pod} -n {namespace} -p '{{\"metadata\":{{\"finalizers\":null}}}}' --type=merge"
+        verify = f"kubectl get pod {pod} -n {namespace}"
+        return {
+            "remediation_available": True,
+            "fix_type": "remove_finalizer",
+            "risk_level": "medium",
+            "requires_human_approval": True,
+            "issue_groups": [
+                {
+                    "group_id": "g1",
+                    "problem_type": "TerminatingStuck",
+                    "target": f"{namespace}/pod/{pod}",
+                    "auto_fixable": True,
+                    "strategy": "Patch confirmed blocking Pod finalizers, then verify deletion or non-Terminating state.",
+                }
+            ],
+            "basis": [
+                "Current Pod evidence confirms deletionTimestamp is present.",
+                "Current Pod evidence confirms metadata.finalizers is non-empty.",
+                f"Target Pod is {namespace}/{pod}.",
+            ],
+            "actions": [
+                {
+                    "id": "remove-finalizer-g1",
+                    "type": "kubectl_patch",
+                    "group_id": "g1",
+                    "target_issue": "TerminatingStuck",
+                    "description": "Remove confirmed blocking Pod finalizers.",
+                    "risk": "medium",
+                    "dry_run_command": dry_run,
+                    "execute_command": execute,
+                    "verify_command": verify,
+                }
+            ],
+            "stop_conditions": [
+                "User rejects approval",
+                "Pod evidence no longer shows deletionTimestamp plus non-empty finalizers",
+                "Dry-run, patch, or verification fails",
+            ],
+        }
+
+    @staticmethod
+    def _has_finalizer_patch_advice(content: str) -> bool:
+        text = content or ""
+        return bool(re.search(r"kubectl\s+patch\s+pod\b", text, flags=re.IGNORECASE)) and bool(
+            re.search(r"finalizers?", text, flags=re.IGNORECASE)
+        )
+
+    @staticmethod
+    def _has_force_delete_advice_without_patch(content: str) -> bool:
+        text = content or ""
+        has_force_delete = bool(
+            re.search(r"kubectl\s+delete\s+pod\b[^\n`]*--force", text, flags=re.IGNORECASE)
+        )
+        has_patch = bool(re.search(r"kubectl\s+patch\s+pod\b", text, flags=re.IGNORECASE))
+        return has_force_delete and not has_patch
+
+    @staticmethod
+    def _mentions_current_pod_not_found(text: str) -> bool:
+        compact = " ".join((text or "").split())
+        return bool(
+            re.search(
+                r"(kubectl\s+get\s+pod|当前|current|returned|返回|结果)[^.。\n]{0,120}(notfound|not found)",
+                compact,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _has_current_deletion_timestamp(text: str) -> bool:
+        return bool(
+            re.search(
+                r"deletionTimestamp[\"']?\s*[:=]\s*[\"']?(?!null\b|none\b|false\b|无|不存在)([0-9]{4}-|\S+)",
+                text or "",
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _has_non_empty_finalizers(text: str) -> bool:
+        source = text or ""
+        if re.search(r"finalizers\s*:\s*\n\s*-\s*[A-Za-z0-9_.:/-]+", source, flags=re.IGNORECASE):
+            return True
+        if re.search(r"finalizers\s*:\\n\s*-\s*[A-Za-z0-9_.:/-]+", source, flags=re.IGNORECASE):
+            return True
+        if re.search(r"finalizers?\s*(非空|non-empty|not empty)", source, flags=re.IGNORECASE):
+            return True
+        if re.search(
+            r"finalizers[\"']?\s*[:=]\s*(?!null\b|none\b|empty\b|\[\s*\])(\[[^\]]*[A-Za-z0-9_.:/-][^\]]*\]|[A-Za-z0-9_.:/-]+)",
+            source,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_pod_namespace_from_patch(content: str) -> Optional[tuple[str, str]]:
+        text = content or ""
+        patterns = [
+            r"kubectl\s+patch\s+pod\s+([A-Za-z0-9_.-]+)\s+-n\s+([A-Za-z0-9_.-]+)",
+            r"kubectl\s+patch\s+pod\s+-n\s+([A-Za-z0-9_.-]+)\s+([A-Za-z0-9_.-]+)",
+        ]
+        for index, pattern in enumerate(patterns):
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            first, second = match.group(1), match.group(2)
+            if index == 1:
+                return second, first
+            return first, second
+        return None
+
+    @staticmethod
+    def _extract_pod_namespace_from_context(text: str) -> Optional[tuple[str, str]]:
+        source = text or ""
+        command_match = re.search(
+            r"kubectl\s+get\s+pod\s+([A-Za-z0-9_.-]+)\s+-n\s+([A-Za-z0-9_.-]+)",
+            source,
+            flags=re.IGNORECASE,
+        )
+        if command_match:
+            return command_match.group(1), command_match.group(2)
+
+        name_match = re.search(r"\bname:\s*([A-Za-z0-9_.-]+)", source)
+        namespace_match = re.search(r"\bnamespace:\s*([A-Za-z0-9_.-]+)", source)
+        if name_match and namespace_match:
+            return name_match.group(1), namespace_match.group(1)
+        return None
+
+    @staticmethod
+    def _is_placeholder(value: str) -> bool:
+        text = (value or "").strip().lower()
+        return not text or text in {"name", "namespace", "pod", "xxx", "todo", "placeholder"} or "<" in text or ">" in text
+
+    @staticmethod
+    def _replace_or_append_remediation_json(content: str, plan: Dict[str, Any]) -> str:
+        block = (
+            "## 🧩 结构化修复计划\n"
+            "```json\n"
+            f"{json.dumps(plan, ensure_ascii=False, indent=2)}\n"
+            "```"
+        )
+        section_re = re.compile(
+            r"##\s*🧩\s*结构化修复计划\s*```(?:json)?\s*\{.*?\}\s*```",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if section_re.search(content):
+            return section_re.sub(block, content, count=1)
+        return content.rstrip() + "\n\n" + block + "\n"
 
     def _archive_node_input(self, payload: Dict) -> None:
         run_id = getattr(self, "current_run_id", "")
