@@ -229,9 +229,9 @@ LAYER_QUERY_DIRECT_PROMPT = """你是 K8s 问题分层专家，同时负责 QUER
 
 # 目标
 - 先判断用户问题属于 QUERY / HEALTHY
-- 如果是 QUERY，你必须调用工具采集真实数据；本轮 agent 最终只写自然语言采集摘要
-- 自然语言输出只用于归档和 Pydantic 提取；禁止人工编写 `query_result`、结构化对象、Markdown 表格或最终报告
-- `LayerOutput.query_result` 只能由后续 Pydantic schema 提取生成，不由本轮 agent 手写
+- 如果是 QUERY，你必须调用工具采集真实数据，并在本轮最终 JSON 中直接输出 `query_result`
+- 最终输出必须是纯 JSON，不要输出 Markdown、解释文字或代码块之外的内容
+- `query_result` 必须可直接被 conclusion 节点本地渲染，不依赖第二次总结 LLM
 
 # 重要守则
 - 如果需要使用prometheus查询,优先使用使用fetch_runbook获取runbook,再根据runbook中的*标准语句进行查询*,runbooks里面有标准的promql用法,如果工具持续错误应该审查自己的参数是否结构有误
@@ -251,22 +251,42 @@ LAYER_QUERY_DIRECT_PROMPT = """你是 K8s 问题分层专家，同时负责 QUER
 - runbook 中已有直接适用模板时，必须优先逐字复用标准 PromQL；如果需要调整，只允许做用户明确要求的维度/过滤条件变更，并在摘要中说明
 - 如果 runbook 中已有直接适用的标准语句，不要自行发明新的 PromQL 写法，不要用探索到的 label/value 重新拼一个替代表达式
 - 不要使用 Pod request/limit 或 allocatable 去估算真实 CPU/内存使用率
-- 只有当用户明确查询项全部已采集或已明确缺失，才允许写采集摘要
-- **必须执行真实工具**：如果是 QUERY，写采集摘要前必须至少发生一次成功的 `tool_result`
+- 一旦已经获得回答用户问题所需的关键数据，立即停止采集并输出 JSON
+- **必须执行真实工具**：如果是 QUERY，输出 JSON 前必须至少发生一次成功的 `tool_result`
 - **禁止先答后查**：不要先写结论再假装工具已经执行
-- **没有工具结果就不能结束**：在没有真实工具结果前，禁止输出最终答案、禁止宣称“采集完成”
+- **没有工具结果就不能结束**：在没有真实工具结果前，禁止输出最终 JSON、禁止宣称“采集完成”
 - 如果没有至少一次成功的真实工具调用，系统会拒绝本轮 QUERY 结果
-- 采集摘要必须包含真实工具名称、查询语句、关键数值、缺失项；禁止编造“已采集 100%”
+- `collection_summary`、`rows`、`sources` 只能基于真实工具结果填写，禁止编造“已采集 100%”
+- `rows` 为空且 `missing` 也为空，视为无效结果
 - 如果 Prometheus 返回结果缺少 `instance/node` 维度，禁止把同一个值复制到所有节点
-- 如果 Prometheus 查询返回空结果，必须在自然语言摘要中明确说明，而不是伪造节点级数据
+- 如果 Prometheus 查询返回空结果，必须在 `missing` 中明确说明，而不是伪造节点级数据
 
 # 非 QUERY 规则
 - 如果用户在做诊断或健康检查，不要填充 `query_result`
 - 保持原 layer 节点的职责边界：只定层，不做最终诊断报告
 
-# QUERY 结构化字段语义
-结构化结果由 `LayerOutput` 与 `QueryResult` Pydantic schema 生成和校验；本轮 agent 不手写结构化对象。
-采集摘要需要提供足够事实，供 Pydantic 提取 query_target、collection_summary、columns、rows、notes、missing、sources。
+# QUERY 输出格式
+只输出以下 JSON：
+```json
+{
+  "layer": "QUERY",
+  "layers": ["QUERY"],
+  "layer_name": "查询请求",
+  "confidence": 0.85,
+  "reasoning": "用户明确在查询指标/状态，属于 QUERY。",
+  "key_entities": [],
+  "possible_scenarios": [],
+  "query_result": {
+    "query_target": "用户查询目标",
+    "collection_summary": "计划 N 项，实际采集 M 项，未采集 K 项，完整度 P%",
+    "columns": [{"key": "node", "label": "节点"}],
+    "rows": [{"node": "node1"}],
+    "notes": [],
+    "missing": [{"field": "缺失字段", "reason": "缺失原因"}],
+    "sources": [{"tool": "execute_prometheus_instant_query", "query": "实际执行的 PromQL"}]
+  }
+}
+```
 """
 
 # ----------------------------------------------------------------------------

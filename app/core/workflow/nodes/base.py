@@ -199,6 +199,12 @@ class WorkflowNode(ABC):
 
         start_time = time.time()
         force_no_tools = bool(kwargs.pop("force_no_tools", False))
+        skip_remediation_policy = bool(kwargs.pop("skip_remediation_policy", False))
+        blocked_tool_names = {
+            str(item)
+            for item in (kwargs.pop("blocked_tool_names", []) or [])
+            if str(item).strip()
+        }
         max_steps = 10
         if getattr(self, 'holmes_service', None):
             max_steps = self.holmes_service.get_node_max_steps(self.node_id)
@@ -235,28 +241,29 @@ class WorkflowNode(ABC):
         if catalog_text:
             full_prompt = catalog_text + "\n\n" + system_prompt
 
-        wf_config = self._get_workflow_config()
-        remediation_cfg = wf_config.get("remediation", {}) if isinstance(wf_config, dict) else {}
-        remediation_mode = "review"
-        if isinstance(remediation_cfg, dict):
-            remediation_mode = normalize_remediation_mode(remediation_cfg.get("mode"))
-        if remediation_mode == "auto":
-            mode_line = "当前修复模式为 auto：结构化修复计划中的安全动作可由修复执行器自动审批并执行。"
-        else:
-            mode_line = "当前修复模式为 review：结构化修复计划中的所有写动作必须先经过人工审批。"
-        remediation_policy = (
-            "\n\n# 修复计划与审批约束\n"
-            f"- {mode_line}\n"
-            "- 诊断节点不要直接执行 kubectl apply/patch/delete/rollout/scale 等写操作。\n"
-            "- 如果当前证据确认存在标准、安全、可验证的修复方式，可以在最终报告中生成结构化 remediation_plan actions。\n"
-            "- 写动作是否执行由 workflow.remediation.mode 和修复执行器控制；review 模式必须人工审批。\n"
-        )
-        full_prompt += remediation_policy
-        prompt_components.append({
-            "name": "remediation_policy",
-            "category": "static_input",
-            "content": remediation_policy,
-        })
+        if not skip_remediation_policy:
+            wf_config = self._get_workflow_config()
+            remediation_cfg = wf_config.get("remediation", {}) if isinstance(wf_config, dict) else {}
+            remediation_mode = "review"
+            if isinstance(remediation_cfg, dict):
+                remediation_mode = normalize_remediation_mode(remediation_cfg.get("mode"))
+            if remediation_mode == "auto":
+                mode_line = "当前修复模式为 auto：结构化修复计划中的安全动作可由修复执行器自动审批并执行。"
+            else:
+                mode_line = "当前修复模式为 review：结构化修复计划中的所有写动作必须先经过人工审批。"
+            remediation_policy = (
+                "\n\n# 修复计划与审批约束\n"
+                f"- {mode_line}\n"
+                "- 诊断节点不要直接执行 kubectl apply/patch/delete/rollout/scale 等写操作。\n"
+                "- 如果当前证据确认存在标准、安全、可验证的修复方式，可以在最终报告中生成结构化 remediation_plan actions。\n"
+                "- 写动作是否执行由 workflow.remediation.mode 和修复执行器控制；review 模式必须人工审批。\n"
+            )
+            full_prompt += remediation_policy
+            prompt_components.append({
+                "name": "remediation_policy",
+                "category": "static_input",
+                "content": remediation_policy,
+            })
 
         language_policy = (
             "\n\n# 语言与可见输出约束\n"
@@ -271,6 +278,11 @@ class WorkflowNode(ABC):
         })
 
         tools = [] if force_no_tools else (getattr(self, 'tools', []) or [])
+        if blocked_tool_names:
+            tools = [
+                tool for tool in tools
+                if str(getattr(tool, "name", "") or "") not in blocked_tool_names
+            ]
         run_id = getattr(self, "current_run_id", "") or kwargs.pop("run_id", "")
         tool_schema_payload = serialize_tool_schema(tools)
         static_context_components = [

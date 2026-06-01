@@ -11,7 +11,7 @@ from app.core.workflow.executor import WorkflowExecutor
 from app.core.workflow.graph import _make_layer_router
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
-from app.core.workflow.schemas import ConclusionOutput, LayerOutput, QueryConclusionOutput
+from app.core.workflow.schemas import ConclusionOutput, LayerOutput
 
 
 def test_layer_router_query_direct_goes_to_conclusion():
@@ -41,30 +41,20 @@ def test_layer_router_non_query_path_is_unchanged_in_direct_mode():
     assert router({"layer": Layer.L2}) == "evidence"
 
 
-def test_query_conclusion_direct_mode_uses_structured_llm_with_query_result():
+def test_query_conclusion_direct_mode_renders_query_result_without_llm():
     node = ConclusionFormatterNode(
         holmes_service=SimpleNamespace()
     )
     node.workflow_config_override = {"query_mode": "direct"}
 
-    class _StructuredAICall:
-        def __init__(self):
-            self.calls = []
-
+    class _NoConclusionLLM:
         def call_structured(self, **kwargs):
-            self.calls.append(kwargs)
-            structured = kwargs["schema"].model_validate({
-                "markdown_report": (
-                    "## 📊 查询结果\n\n"
-                    "| 节点 | CPU 使用率 | 内存使用率 |\n"
-                    "|------|------------|------------|\n"
-                    "| master | 13.7% | 26.2% |\n\n"
-                    "`cpu_query`"
-                ),
-            })
-            return structured, structured.model_dump_json()
+            raise AssertionError("query direct conclusion should render locally")
 
-    node.ai_call = _StructuredAICall()
+        def call_simple(self, *args, **kwargs):
+            raise AssertionError("query direct conclusion should render locally")
+
+    node.ai_call = _NoConclusionLLM()
 
     state = {
         "question": "查询集群每个节点 CPU 和内存使用率",
@@ -92,36 +82,28 @@ def test_query_conclusion_direct_mode_uses_structured_llm_with_query_result():
 
     result = node.execute(state)
 
-    assert len(node.ai_call.calls) == 1
-    assert node.ai_call.calls[0]["schema"] is QueryConclusionOutput
-    assert node.ai_call.calls[0]["use_native_structured"] is False
-    assert node.ai_call.calls[0]["allow_text_fallback"] is True
     assert "## 📊 查询结果" in result["conclusion"]
     assert "master" in result["conclusion"]
     assert "cpu_query" in result["conclusion"]
 
 
-def test_query_conclusion_uses_query_specific_structured_output_budget():
+def test_query_conclusion_uses_query_specific_local_rendering():
     node = ConclusionFormatterNode(holmes_service=SimpleNamespace())
     node.workflow_config_override = {
         "query_mode": "direct",
         "conclusion": {"max_tokens": {"query": 1024, "diagnosis": 8192}},
     }
 
-    class _StructuredAICall:
-        def __init__(self):
-            self.calls = []
-
+    class _NoConclusionLLM:
         def call_structured(self, **kwargs):
-            self.calls.append(kwargs)
-            structured = kwargs["schema"].model_validate({
-                "markdown_report": "## 📊 查询结果\n\n| 节点 | CPU |\n|------|-----|\n| node1 | 1% |",
-            })
-            return structured, structured.model_dump_json()
+            raise AssertionError("query direct conclusion should not call structured LLM")
 
-    node.ai_call = _StructuredAICall()
+        def call_simple(self, *args, **kwargs):
+            raise AssertionError("query direct conclusion should not call simple LLM")
 
-    node.execute({
+    node.ai_call = _NoConclusionLLM()
+
+    result = node.execute({
         "question": "查询 CPU",
         "layer": Layer.QUERY,
         "query_result": {
@@ -135,10 +117,8 @@ def test_query_conclusion_uses_query_specific_structured_output_budget():
         },
     })
 
-    assert node.ai_call.calls[0]["max_tokens"] == 1024
-    assert node.ai_call.calls[0]["schema"] is QueryConclusionOutput
-    assert node.ai_call.calls[0]["use_native_structured"] is False
-    assert node.ai_call.calls[0]["allow_text_fallback"] is True
+    assert "node1" in result["conclusion"]
+    assert "| node1 | 1% |" in result["conclusion"]
 
 
 def test_diagnosis_conclusion_uses_plain_markdown_by_default():
@@ -184,14 +164,14 @@ def test_query_conclusion_normalizes_legacy_string_fields():
     node = ConclusionFormatterNode(holmes_service=SimpleNamespace())
     node.workflow_config_override = {"query_mode": "direct"}
 
-    class _StructuredAICall:
+    class _NoConclusionLLM:
         def call_structured(self, **kwargs):
-            structured = kwargs["schema"].model_validate({
-                "markdown_report": "**未获取到** `result`: Prometheus 返回空\n\n| - | up_query |",
-            })
-            return structured, structured.model_dump_json()
+            raise AssertionError("query direct conclusion should render locally")
 
-    node.ai_call = _StructuredAICall()
+        def call_simple(self, *args, **kwargs):
+            raise AssertionError("query direct conclusion should render locally")
+
+    node.ai_call = _NoConclusionLLM()
 
     state = {
         "question": "查询 CPU",
@@ -378,7 +358,7 @@ def test_layer_defaults_to_diagnosis_prompt_without_request_override():
     assert node._get_layer_prompt() == get_workflow_prompt("layer")
 
 
-def test_layer_query_direct_retries_when_first_json_has_no_real_tool_results():
+def test_layer_query_direct_returns_failure_when_first_json_has_no_real_tool_results():
     node = LayerClassifierNode(
         holmes_service=SimpleNamespace(
             get_prompt_language=lambda: "zh",
@@ -414,65 +394,75 @@ def test_layer_query_direct_retries_when_first_json_has_no_real_tool_results():
         },
     }
 
-    second_result = {
+    def _fake_call_llm(question, prompt, **kwargs):
+        calls["count"] += 1
+        return SimpleNamespace(result=json.dumps(first_result, ensure_ascii=False)), []
+
+    node._call_llm = _fake_call_llm
+
+    node.ai_call = object()
+
+    result, thinking_events = node._analyze_with_llm("查询每个节点的 CPU 和内存使用率")
+
+    assert calls["count"] == 1
+    assert result["layer"] == "QUERY"
+    assert result["query_result"]["rows"] == []
+    assert "未获得可渲染 JSON" in result["query_result"]["missing"][0]["reason"]
+    assert thinking_events == []
+
+
+def test_layer_query_direct_accepts_first_round_json_without_pydantic_extract():
+    node = LayerClassifierNode(
+        holmes_service=SimpleNamespace(
+            get_prompt_language=lambda: "zh",
+        )
+    )
+    node.workflow_config_override = {"query_mode": "direct"}
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_prometheus_instant_query",
+            "tool_args": {"query": "cpu_query"},
+            "semantic_success": True,
+            "structured": {"status": "prometheus_result", "result_count": 1},
+            "result": '{"status":"success","data":{"result":[{"metric":{"node":"master"},"value":[1,"12.1"]}]}}',
+        }
+    ]
+    first_result = {
         "layer": "QUERY",
         "layers": ["QUERY"],
         "layer_name": "查询请求",
         "confidence": 0.95,
-        "reasoning": "已通过 Prometheus 获取真实节点级指标。",
+        "reasoning": "已用 Prometheus 查询 CPU。",
         "key_entities": [],
         "possible_scenarios": [],
         "query_result": {
-            "query_target": "每个节点的 CPU 和内存使用率",
-            "collection_summary": "计划 2 项，实际采集 2 项，未采集 0 项，完整度 100%",
-            "columns": [
-                {"key": "node", "label": "节点"},
-                {"key": "cpu_usage_percent", "label": "CPU 使用率 (%)"},
-                {"key": "memory_usage_percent", "label": "内存使用率 (%)"},
-            ],
-            "rows": [
-                {"node": "master", "cpu_usage_percent": "12.1", "memory_usage_percent": "27.3"},
-            ],
-            "notes": [],
+            "query_target": "查询 CPU",
+            "collection_summary": "计划 1 项，实际采集 1 项，未采集 0 项，完整度 100%",
+            "columns": [{"key": "node", "label": "节点"}, {"key": "cpu", "label": "CPU"}],
+            "rows": [{"node": "master", "cpu": "12.1"}],
             "missing": [],
-            "sources": [
-                {"tool": "execute_prometheus_instant_query", "query": "cpu_query"},
-                {"tool": "execute_prometheus_instant_query", "query": "mem_query"},
-            ],
+            "sources": [{"tool": "execute_prometheus_instant_query", "query": "cpu_query"}],
         },
     }
 
-    def _fake_call_llm(question, prompt, **kwargs):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return SimpleNamespace(result=json.dumps(first_result, ensure_ascii=False)), []
-        return (
-            SimpleNamespace(result=json.dumps(second_result, ensure_ascii=False)),
-            [
-                {
-                    "type": "tool_result",
-                    "status": "success",
-                    "tool_name": "execute_prometheus_instant_query",
-                    "result": '{"status":"success","data":{"result":[{"metric":{"node":"master"},"value":[1,"12.1"]}]}}',
-                }
-            ],
-        )
+    node._call_llm = lambda question, prompt, **kwargs: (
+        SimpleNamespace(result=json.dumps(first_result, ensure_ascii=False)),
+        events,
+    )
 
-    node._call_llm = _fake_call_llm
+    def _fail_extract(**kwargs):
+        raise AssertionError("query direct should parse first-round JSON text without Pydantic layer_extract")
 
-    class _StructuredAICall:
-        def call_structured(self, system_prompt, question, schema, **kwargs):
-            assert schema is LayerOutput
-            payload = first_result if calls["count"] <= 1 else second_result
-            return schema.model_validate(payload), json.dumps(payload, ensure_ascii=False)
+    node._extract_with_lite_llm = _fail_extract
+    node.ai_call = object()
 
-    node.ai_call = _StructuredAICall()
+    result, thinking_events = node._analyze_with_llm("查询 CPU")
 
-    result, thinking_events = node._analyze_with_llm("查询每个节点的 CPU 和内存使用率")
-
-    assert calls["count"] == 2
-    assert result["query_result"]["rows"][0]["node"] == "master"
-    assert len(thinking_events) == 1
+    assert result["layer"] == "QUERY"
+    assert result["query_result"]["rows"] == [{"node": "master", "cpu": "12.1"}]
+    assert thinking_events == events
 
 
 def test_layer_query_direct_returns_query_failure_when_prometheus_errors_are_not_usable():
@@ -558,7 +548,10 @@ def test_layer_query_direct_accepts_lowercase_query_layer_with_usable_result():
         },
     }
 
-    node._call_llm = lambda question, prompt, **kwargs: (SimpleNamespace(result="已查询到数据"), events)
+    node._call_llm = lambda question, prompt, **kwargs: (
+        SimpleNamespace(result=json.dumps(extracted, ensure_ascii=False)),
+        events,
+    )
     node._extract_with_lite_llm = lambda **kwargs: extracted
     node.ai_call = object()
 
@@ -870,7 +863,61 @@ def test_layer_query_direct_builds_query_result_from_successful_prometheus_tool_
         {"node": "10.2.0.48:9100", "cpu_usage_percent": 15.53, "memory_usage_percent": 40.3},
     ]
     assert len(result["query_result"]["sources"]) == 2
-    assert thinking_events == events
+
+
+def test_layer_query_direct_ignores_prometheus_metadata_as_metric_column():
+    node = LayerClassifierNode(
+        holmes_service=SimpleNamespace(
+            get_prompt_language=lambda: "zh",
+        )
+    )
+    node.workflow_config_override = {"query_mode": "direct"}
+
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_prometheus_instant_query",
+            "tool_args": {"query": "(1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) by (instance)) * 100"},
+            "semantic_success": True,
+            "structured": {"status": "prometheus_result", "result_count": 1},
+            "result": json.dumps({
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {"metric": {"instance": "10.2.0.49:9100"}, "value": [1778320592.531, "4.35"]},
+                    ],
+                },
+            }),
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_prometheus_instant_query",
+            "tool_args": {"query": "node_uname_info"},
+            "semantic_success": True,
+            "structured": {"status": "prometheus_result", "result_count": 1},
+            "result": json.dumps({
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {"metric": {"instance": "10.2.0.49:9100", "nodename": "node1"}, "value": [1778320592.531, "1"]},
+                    ],
+                },
+            }),
+        },
+    ]
+
+    result = node._query_result_from_prometheus_tool_events("查询 CPU", events)
+
+    assert result["columns"] == [
+        {"key": "node", "label": "节点"},
+        {"key": "cpu_usage_percent", "label": "CPU 使用率 (%)"},
+    ]
+    assert result["rows"] == [{"node": "10.2.0.49:9100", "cpu_usage_percent": 4.35}]
+    assert result["collection_summary"] == "计划 1 项，实际采集 1 项，未采集 0 项，完整度 100%"
 
 
 def test_layer_query_direct_does_not_treat_empty_prometheus_vectors_as_collected_rows():
@@ -944,6 +991,48 @@ def test_layer_query_direct_skips_extract_when_prometheus_tool_result_is_usable(
 
     assert result["layer"] == "QUERY"
     assert result["query_result"]["rows"] == [{"node": "10.2.0.49:9100", "metric_1": 1.0}]
+    assert thinking_events == events
+
+
+def test_layer_query_direct_skips_extract_from_prometheus_events_without_early_stop():
+    node = LayerClassifierNode(
+        holmes_service=SimpleNamespace(
+            get_prompt_language=lambda: "zh",
+        )
+    )
+    node.workflow_config_override = {"query_mode": "direct"}
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_prometheus_instant_query",
+            "tool_args": {"query": "(1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) by (instance)) * 100"},
+            "semantic_success": True,
+            "structured": {"status": "prometheus_result", "result_count": 1},
+            "result": json.dumps({
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {"metric": {"instance": "10.2.0.49:9100"}, "value": [1778320592.531, "4.35"]},
+                    ],
+                },
+            }),
+        },
+    ]
+
+    node._call_llm = lambda question, prompt, **kwargs: (SimpleNamespace(result=""), events)
+
+    def _fail_extract(**kwargs):
+        raise AssertionError("layer_extract should not run when query_result can be built from Prometheus events")
+
+    node._extract_with_lite_llm = _fail_extract
+    node.ai_call = object()
+
+    result, thinking_events = node._analyze_with_llm("查询 CPU")
+
+    assert result["layer"] == "QUERY"
+    assert result["query_result"]["rows"] == [{"node": "10.2.0.49:9100", "cpu_usage_percent": 4.35}]
     assert thinking_events == events
 
 
