@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -262,6 +263,91 @@ def test_layer_stage1_non_json_output_uses_lite_extraction():
     assert len(node.ai_call.calls) == 1
     assert "分析文本" in node.ai_call.calls[0]["question"]
     assert returned_events == thinking_events
+
+
+def test_layer_lite_extraction_enables_text_json_fallback():
+    node = LayerClassifierNode()
+    node._call_llm = lambda question, prompt, **kwargs: (
+        SimpleNamespace(result="工具结果显示 aaa/redis-0 ImagePullBackOff。"),
+        [
+            {
+                "type": "tool_result",
+                "status": "success",
+                "tool_name": "kubectl_get_by_kind_in_cluster",
+                "result": "NAMESPACE NAME STATUS\naaa redis-0 ImagePullBackOff",
+            }
+        ],
+    )
+
+    class _FallbackAICall:
+        def __init__(self):
+            self.calls = []
+
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            self.calls.append(kwargs)
+            if not kwargs.get("allow_text_fallback"):
+                return None, ""
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "layers": ["L3"],
+                "layer_name": "服务网络层",
+                "confidence": 0.82,
+                "reasoning": "当前 Pod 镜像拉取失败",
+                "abnormal_pods": [{"name": "redis-0", "namespace": "aaa", "status": "ImagePullBackOff"}],
+                "pod_status_keyword": "ImagePullBackOff",
+                "pod_abnormal_type": "ImagePullFailed",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _FallbackAICall()
+
+    result, _events = node._analyze_with_llm("我的集群有什么问题？")
+
+    assert result["layer"] == "L3"
+    assert node.ai_call.calls[0]["allow_text_fallback"] is True
+
+
+def test_layer_connection_error_without_tool_evidence_fails_clear_without_extract_retry():
+    node = LayerClassifierNode()
+    node._call_llm = lambda question, prompt, **kwargs: (
+        SimpleNamespace(result="Agent 执行异常: Connection error."),
+        [],
+    )
+
+    class _UnexpectedAICall:
+        def __init__(self):
+            self.calls = 0
+
+        def call_structured(self, *args, **kwargs):
+            self.calls += 1
+            return None, ""
+
+    node.ai_call = _UnexpectedAICall()
+
+    with pytest.raises(RuntimeError, match="LLM 服务不可用"):
+        node._analyze_with_llm("我的集群有什么问题？")
+
+    assert node.ai_call.calls == 0
+
+
+def test_layer_execute_preserves_llm_unavailable_error_without_rescue_extract():
+    node = LayerClassifierNode()
+    node._analyze_with_llm = lambda question: (_ for _ in ()).throw(
+        RuntimeError("LLM 服务不可用，无法完成问题定位: Agent 执行异常: Connection error.")
+    )
+    extract_calls = []
+
+    def _unexpected_extract(*args, **kwargs):
+        extract_calls.append(kwargs)
+        return None
+
+    node._extract_with_lite_llm = _unexpected_extract
+    node.ai_call = object()
+
+    with pytest.raises(RuntimeError, match="LLM 服务不可用"):
+        node.execute({"question": "我的集群有什么问题？"})
+
+    assert extract_calls == []
 
 
 def test_layer_ignores_stage1_json_text_and_uses_pydantic_output():

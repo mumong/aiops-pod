@@ -116,6 +116,30 @@ class LayerClassifierNode(WorkflowNode):
         )
 
     @staticmethod
+    def _is_llm_unavailable_text(text: str) -> bool:
+        content = str(text or "")
+        if "LLM 服务不可用" in content:
+            return True
+        unavailable_markers = (
+            "Agent 执行异常",
+            "Connection error",
+            "Connection refused",
+            "APIConnectionError",
+            "Failed to establish a new connection",
+            "Could not connect to server",
+        )
+        return any(marker in content for marker in unavailable_markers) and (
+            "Connection" in content or "connect" in content or "连接" in content
+        )
+
+    @staticmethod
+    def _llm_unavailable_message(raw_error: str) -> str:
+        detail = " ".join(str(raw_error or "").split())
+        if detail:
+            return f"LLM 服务不可用，无法完成问题定位: {detail}"
+        return "LLM 服务不可用，无法完成问题定位"
+
+    @staticmethod
     def _has_early_stop_event(thinking_events: List[Dict[str, Any]]) -> bool:
         return any(
             ev.get("type") == "early_stop" and ev.get("reason") == "stop_checker"
@@ -610,6 +634,8 @@ class LayerClassifierNode(WorkflowNode):
             new_state.setdefault("errors", []).append(
                 f"节点 {self.node_id} 执行失败: {str(e)}"
             )
+            if self._is_llm_unavailable_text(str(e)):
+                raise RuntimeError(self._llm_unavailable_message(str(e))) from e
             rescue_result = self._extract_with_lite_llm(
                 question=question,
                 full_analysis_text=f"# layer 节点执行异常\n{str(e)}",
@@ -1395,6 +1421,9 @@ class LayerClassifierNode(WorkflowNode):
             else:
                 logger.debug("📋 [layer] 阶段1 输出: %s", stage1_text[:200])
 
+            if self._is_llm_unavailable_text(stage1_text) and not self._has_successful_tool_results(thinking_events):
+                raise RuntimeError(self._llm_unavailable_message(stage1_text))
+
             full_analysis_text = self._build_full_analysis(stage1_text, thinking_events)
 
             # 压缩 enriched_text（可能含大量工具原始输出，50-100K chars）
@@ -1595,6 +1624,8 @@ class LayerClassifierNode(WorkflowNode):
             return extracted, thinking_events
 
         except Exception as e:
+            if self._is_llm_unavailable_text(str(e)):
+                raise
             if not self._allow_layer_extract_fallback():
                 raise
             logger.warning(f"[layer] LLM 分析失败，转入 Pydantic 提取: {e}")
@@ -1633,6 +1664,7 @@ class LayerClassifierNode(WorkflowNode):
             node_id="layer_extract",
             run_id=getattr(self, "current_run_id", ""),
             max_tokens=2048,
+            allow_text_fallback=True,
         )
         parsed = structured.model_dump(exclude_none=True) if structured is not None else None
 
