@@ -53,27 +53,27 @@
 
 ### Tests for User Story 1
 
-- [ ] T014 [P] [US1] Add case fixture validation checklist in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/fixtures/pod-terminating-finalizer-stuck-001.checklist.md`
-- [ ] T015 [P] [US1] Add leakage test checklist to ensure diagnosis inputs exclude labels and expected files in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/contracts/no-ground-truth-leakage.md`
+- [x] T014 [P] [US1] Add case fixture validation checklist in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/fixtures/pod-terminating-finalizer-stuck-001.checklist.md`
+- [x] T015 [P] [US1] Add leakage test checklist to ensure diagnosis inputs exclude labels and expected files in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/contracts/no-ground-truth-leakage.md`
 
 ### Implementation for User Story 1
 
-- [ ] T016 [US1] Create case metadata in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/case.yaml`
-- [ ] T017 [P] [US1] Create topology description in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/topology.yaml`
-- [ ] T018 [P] [US1] Create Prometheus query definitions in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/metrics/prometheus_queries.yaml`
-- [ ] T019 [P] [US1] Create Elasticsearch/Filebeat query definitions in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/logs/elasticsearch_queries.yaml`
-- [ ] T020 [P] [US1] Create DeepFlow query definitions in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/traces/deepflow_queries.yaml`
-- [ ] T021 [US1] Capture Kubernetes Pod snapshot in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/k8s/pod.yaml`
-- [ ] T022 [US1] Capture Kubernetes describe output in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/k8s/describe.txt`
-- [ ] T023 [US1] Capture Kubernetes event stream in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/k8s/events.jsonl`
-- [ ] T024 [US1] Capture Prometheus range results in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/metrics/prometheus_range.jsonl`
-- [ ] T025 [US1] Capture Elasticsearch/Filebeat logs in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/logs/logs.jsonl`
-- [ ] T026 [US1] Capture DeepFlow flow results in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/traces/deepflow_flows.jsonl`
-- [ ] T027 [US1] Capture DeepFlow span results or explicit weak-signal marker in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/traces/deepflow_spans.jsonl`
-- [ ] T028 [US1] Create ground-truth labels in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/labels.yaml`
-- [ ] T029 [US1] Create expected root cause in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/expected/root_cause.json`
-- [ ] T030 [US1] Create safe remediation expectation in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/expected/remediation.json`
-- [ ] T031 [US1] Create evaluation rubric in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/evaluation/rubric.yaml`
+- [x] T016 [US1] Create case metadata in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/case.yaml`
+- [x] T017 [P] [US1] Create topology description in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/topology.yaml`
+- [x] T018 [P] [US1] Create Prometheus query definitions in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/metrics/prometheus_queries.yaml`
+- [x] T019 [P] [US1] Create Elasticsearch/Filebeat query definitions in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/logs/elasticsearch_queries.yaml`
+- [x] T020 [P] [US1] Create DeepFlow query definitions in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/traces/deepflow_queries.yaml`
+- [x] T021 [US1] Capture Kubernetes Pod snapshot in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/k8s/pod.yaml`
+- [x] T022 [US1] Capture Kubernetes describe output in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/k8s/describe.txt`
+- [x] T023 [US1] Capture Kubernetes event stream in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/k8s/events.jsonl`
+- [x] T024 [US1] Capture Prometheus range results in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/metrics/prometheus_range.jsonl`
+- [x] T025 [US1] Capture Elasticsearch/Filebeat logs in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/logs/logs.jsonl`
+- [x] T026 [US1] Capture DeepFlow flow results in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/traces/deepflow_flows.jsonl`
+- [x] T027 [US1] Capture DeepFlow span results or explicit weak-signal marker in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/traces/deepflow_spans.jsonl`
+- [x] T028 [US1] Create ground-truth labels in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/labels.yaml`
+- [x] T029 [US1] Create expected root cause in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/expected/root_cause.json`
+- [x] T030 [US1] Create safe remediation expectation in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/expected/remediation.json`
+- [x] T031 [US1] Create evaluation rubric in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/evaluation/rubric.yaml`
 
 **Checkpoint**: First case is independently reviewable and demonstrates the complete dataset shape.
 
@@ -87,16 +87,16 @@
 
 ### Tests for User Story 2
 
-- [ ] T032 [P] [US2] Add diagnosis-input contract example in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/contracts/diagnosis-input-contract.md`
-- [ ] T033 [P] [US2] Add evaluator-only contract example in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/contracts/evaluation-only-contract.md`
+- [x] T032 [P] [US2] Add diagnosis-input contract example in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/contracts/diagnosis-input-contract.md`
+- [x] T033 [P] [US2] Add evaluator-only contract example in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/contracts/evaluation-only-contract.md`
 
 ### Implementation for User Story 2
 
-- [ ] T034 [US2] Create diagnosis input manifest format in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/diagnosis-input.schema.yaml`
-- [ ] T035 [US2] Create evaluator result format in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/evaluator-result.schema.yaml`
-- [ ] T036 [US2] Document agent offline consumption flow in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/offline-agent-consumption.md`
-- [ ] T037 [US2] Document scorer flow and anti-leakage boundary in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/evaluation-flow.md`
-- [ ] T038 [US2] Add a sample diagnosis-input manifest for the TerminatingStuck case in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/diagnosis-input.yaml`
+- [x] T034 [US2] Create diagnosis input manifest format in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/diagnosis-input.schema.yaml`
+- [x] T035 [US2] Create evaluator result format in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/evaluator-result.schema.yaml`
+- [x] T036 [US2] Document agent offline consumption flow in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/offline-agent-consumption.md`
+- [x] T037 [US2] Document scorer flow and anti-leakage boundary in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/evaluation-flow.md`
+- [x] T038 [US2] Add a sample diagnosis-input manifest for the TerminatingStuck case in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/diagnosis-input.yaml`
 
 **Checkpoint**: Future agent and scorer responsibilities are separated before runtime integration work begins.
 
@@ -110,15 +110,15 @@
 
 ### Tests for User Story 3
 
-- [ ] T039 [P] [US3] Add multi-case schema consistency checklist in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/contracts/multi-case-consistency.md`
+- [x] T039 [P] [US3] Add multi-case schema consistency checklist in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tests/contracts/multi-case-consistency.md`
 
 ### Implementation for User Story 3
 
-- [ ] T040 [US3] Create ImagePullFailed case stub in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-imagepull-invalid-registry-001/case.yaml`
-- [ ] T041 [US3] Create OOMKilled case stub in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-oomkilled-memory-limit-001/case.yaml`
-- [ ] T042 [US3] Create VolumeMountFailed case stub in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-volumemount-missing-configmap-001/case.yaml`
-- [ ] T043 [US3] Document mapping from existing e2e manifests to dataset abnormal types in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/e2e-manifest-case-mapping.md`
-- [ ] T044 [US3] Update root case index in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/dataset.yaml`
+- [x] T040 [US3] Create ImagePullFailed case stub in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-imagepull-invalid-registry-001/case.yaml`
+- [x] T041 [US3] Create OOMKilled case stub in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-oomkilled-memory-limit-001/case.yaml`
+- [x] T042 [US3] Create VolumeMountFailed case stub in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-volumemount-missing-configmap-001/case.yaml`
+- [x] T043 [US3] Document mapping from existing e2e manifests to dataset abnormal types in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/e2e-manifest-case-mapping.md`
+- [x] T044 [US3] Update root case index in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/dataset.yaml`
 
 **Checkpoint**: Dataset schema supports expansion beyond the first case.
 
@@ -128,10 +128,10 @@
 
 **Purpose**: Documentation quality, safety review, and handoff readiness.
 
-- [ ] T045 [P] Review DeepFlow evidence wording in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/data-sources.md` to avoid overstating weak trace signals
-- [ ] T046 [P] Review remediation safety expectations in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/expected/remediation.json`
-- [ ] T047 [P] Add dataset contribution guide in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/CONTRIBUTING.md`
-- [ ] T048 Validate quickstart steps against `specs/007-observability-case-dataset/quickstart.md`
+- [x] T045 [P] Review DeepFlow evidence wording in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/data-sources.md` to avoid overstating weak trace signals
+- [x] T046 [P] Review remediation safety expectations in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/expected/remediation.json`
+- [x] T047 [P] Add dataset contribution guide in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/CONTRIBUTING.md`
+- [x] T048 Validate quickstart steps against `specs/007-observability-case-dataset/quickstart.md`
 - [ ] T049 Push the final dataset-spec and task commits to the agreed remote branch from `/root/huhu/agent/combine-aiops-mcp/robusta`
 
 ---
