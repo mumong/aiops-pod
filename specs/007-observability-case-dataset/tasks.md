@@ -18,11 +18,11 @@
 
 **Purpose**: Prepare the standalone dataset repository and keep the current agent repository limited to contracts/specs.
 
-- [ ] T001 Create standalone dataset repository directory at `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/README.md`
-- [ ] T002 Create dataset root manifest at `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/dataset.yaml`
-- [ ] T003 [P] Create dataset schema directory at `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/README.md`
-- [ ] T004 [P] Create case template directory at `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/templates/case/README.md`
-- [ ] T005 [P] Document data-source boundaries in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/data-sources.md`
+- [x] T001 Create standalone dataset repository directory at `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/README.md`
+- [x] T002 Create dataset root manifest at `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/dataset.yaml`
+- [x] T003 [P] Create dataset schema directory at `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/README.md`
+- [x] T004 [P] Create case template directory at `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/templates/case/README.md`
+- [x] T005 [P] Document data-source boundaries in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/data-sources.md`
 
 ---
 
@@ -32,14 +32,14 @@
 
 **CRITICAL**: No case data should be collected until these files exist, otherwise case formats will drift.
 
-- [ ] T006 Create case metadata schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/case.schema.yaml`
-- [ ] T007 [P] Create Prometheus artifact schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/metrics.schema.yaml`
-- [ ] T008 [P] Create Elasticsearch/Filebeat log artifact schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/logs.schema.yaml`
-- [ ] T009 [P] Create DeepFlow artifact schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/deepflow.schema.yaml`
-- [ ] T010 [P] Create Kubernetes snapshot schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/k8s.schema.yaml`
-- [ ] T011 Create ground-truth and evaluation schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/evaluation.schema.yaml`
-- [ ] T012 Create fixture validation design in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tools/validate_case.md`
-- [ ] T013 Mirror the consumer contract from `specs/007-observability-case-dataset/contracts/dataset-contract.md` to `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/consumer-contract.md`
+- [x] T006 Create case metadata schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/case.schema.yaml`
+- [x] T007 [P] Create Prometheus artifact schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/metrics.schema.yaml`
+- [x] T008 [P] Create Elasticsearch/Filebeat log artifact schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/logs.schema.yaml`
+- [x] T009 [P] Create DeepFlow artifact schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/deepflow.schema.yaml`
+- [x] T010 [P] Create Kubernetes snapshot schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/k8s.schema.yaml`
+- [x] T011 Create ground-truth and evaluation schema in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/schemas/evaluation.schema.yaml`
+- [x] T012 Create fixture validation design in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/tools/validate_case.md`
+- [x] T013 Mirror the consumer contract from `specs/007-observability-case-dataset/contracts/dataset-contract.md` to `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/docs/consumer-contract.md`
 
 **Checkpoint**: Schemas and contract are ready; user story work can begin independently.
 
