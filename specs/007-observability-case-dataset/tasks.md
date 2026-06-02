@@ -132,7 +132,7 @@
 - [x] T046 [P] Review remediation safety expectations in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/cases/pod-terminating-finalizer-stuck-001/expected/remediation.json`
 - [x] T047 [P] Add dataset contribution guide in `/root/huhu/agent/combine-aiops-mcp/aiops-observability-dataset/CONTRIBUTING.md`
 - [x] T048 Validate quickstart steps against `specs/007-observability-case-dataset/quickstart.md`
-- [ ] T049 Push the final dataset-spec and task commits to the agreed remote branch from `/root/huhu/agent/combine-aiops-mcp/robusta`
+- [x] T049 Push the final dataset-spec and task commits to the agreed remote branch from `/root/huhu/agent/combine-aiops-mcp/robusta`
 
 ---
 
