@@ -4,6 +4,8 @@
 
 表示一个可观测性异常 case 集合。
 
+严格数据原则：每个维度必须来自对应观测服务的真实原始记录。Prometheus 查询无 result、Elasticsearch 查询 total=0、DeepFlow 查询 count=0 都不能算该维度 present，只能记录为 absent 或 negative query。
+
 ```yaml
 dataset_id: aiops-observability-cases
 schema_version: 1.0.0
