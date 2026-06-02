@@ -24,6 +24,13 @@ evaluation/rubric.yaml
 
 允许大体量结果文件按需缺失，但必须在 `case.yaml.observability_coverage` 中声明缺失原因和证据强度。
 
+严格计数规则：
+
+- Metrics 只有在 Prometheus 返回真实非空 result 时，才能计为该 case 的 metrics 数据。
+- Logs 只有在 Elasticsearch/Filebeat 返回真实 log hit 时，才能计为该 case 的 logging 数据。
+- Tracing 只有在 DeepFlow 返回真实 flow、trace、span 或 L7 request row 时，才能计为该 case 的 tracing 数据。
+- 查询成功但返回 0 条，只能作为 absent/negative query 记录，不能计入三维完整数据集。
+
 ## 诊断输入边界
 
 Agent 诊断时 MAY 读取：
