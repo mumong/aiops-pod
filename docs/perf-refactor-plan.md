@@ -20,10 +20,19 @@
 
 ## Track B — 架构精简 / 去冗余（行为无损）
 
-前提：仅在**测试覆盖充分**处动手；纯删/纯合并，不改可观测行为。
-- [ ] B1 死代码 / 未被引用的函数、分支扫描并清理（先出证据清单）
-- [ ] B2 重复逻辑合并（同一处理散落多份）
-- [ ] B3 巨型文件职责拆分（evidence_collector 2885 / conclusion_formatter 1822 / layer_classifier 1766 / client 1677 / observation 1433），仅纯搬运、导入等价
+前提：仅在**测试覆盖充分**处动手；纯删/纯合并，不改可观测行为。全程 404→408 单测护栏。
+- [x] B1 死代码清理：grep 复验后删除 10 个 0 调用/0 测试/0 反射的私有死方法 + 1 个失引用 import（`ea4c5aa`，~246 行）
+- [x] B2 重复逻辑上移基类：`_get_prompt_language`(4→1)、`_has_successful_tool_results`(2→1) 收敛到 `WorkflowNode`（`42e0142`）
+- [ ] B3（**deferred，NEEDS-REVIEW，留作后续**，均需跨文件/涉行为需谨慎复核）：
+  - `_archive_node_input`(3 份，日志前缀不同 → 需参数化上移)、`_is_llm_unavailable_text`/单行摘要压缩/QUERY LayerOutput dict/`safe_json_loads`(十余处 try-except) 等重复逻辑合并
+  - `layer_classifier` 1497 附近确证不可达块 + `_has_early_stop_event` 传递性死代码（控制流复核后可清）
+  - 巨型文件职责拆分（纯搬运、导入等价）——风险最高，建议独立小步进行
+
+## 最终整体测试（2026-07-08）
+
+- robusta：`pytest tests/` = **408 passed**；`pytest tests/unit` = 404 passed
+- mcpstander：`unittest discover -s tests` = **28 OK**
+- app 装配冒烟：4 个节点均继承 base 的 `_get_prompt_language`/`_has_successful_tool_results`，无 local override 残留，工作流成图正常
 
 ## Track C — 完成 001（data 指引：测试 → 审查 → 开发）
 
