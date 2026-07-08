@@ -909,51 +909,6 @@ class ConclusionFormatterNode(WorkflowNode):
 
         return "\n".join(lines)
 
-    def _build_query_result_fallback(self, question: str, evidence_analysis: str) -> Dict[str, Any]:
-        """QUERY 结构化结果缺失时，基于 evidence_analysis 构造最小可用结果。"""
-        try:
-            evidence_data = json.loads(evidence_analysis) if evidence_analysis else {}
-        except (json.JSONDecodeError, TypeError):
-            evidence_data = {}
-
-        tool_data = evidence_data.get("tool_data", []) or []
-        evidence_plan = evidence_data.get("evidence_plan", []) or []
-        missing_reasons = evidence_data.get("missing_reasons", []) or []
-
-        rows = []
-        for item in tool_data[:10]:
-            rows.append({
-                "tool": item.get("tool", "unknown"),
-                "result": item.get("data", "")[:300] or "未获取到",
-            })
-
-        sources = []
-        for plan in evidence_plan[:10]:
-            sources.append({
-                "tool": plan.get("tool", "-"),
-                "query": plan.get("command", "-"),
-            })
-
-        notes = []
-        if not rows:
-            notes.append("evidence 节点未输出结构化 query_result，以下为最小可用回退结果。")
-
-        return {
-            "query_target": question,
-            "collection_summary": evidence_data.get("collection_summary", ""),
-            "columns": [
-                {"key": "tool", "label": "工具"},
-                {"key": "result", "label": "结果摘要"},
-            ],
-            "rows": rows,
-            "notes": notes,
-            "missing": [
-                {"field": "result", "reason": reason}
-                for reason in missing_reasons[:5]
-            ],
-            "sources": sources,
-        }
-
     def _format_healthy_fast_path(
         self,
         question: str,
@@ -995,51 +950,6 @@ class ConclusionFormatterNode(WorkflowNode):
         if not compact:
             return "-"
         return compact[:limit] + ("..." if len(compact) > limit else "")
-
-    def _format_fallback(
-        self,
-        question: str,
-        layer_analysis: str,
-        evidence_analysis: str,
-        rca_analysis: str
-    ) -> str:
-        """简单格式化回退 - 分层展示各阶段分析"""
-        # 解析各阶段的 JSON 分析结果，格式化展示
-        layer_formatted = self._format_layer_section(layer_analysis)
-        evidence_formatted = self._format_evidence_section(evidence_analysis)
-        rca_formatted = self._format_rca_section(rca_analysis)
-        
-        return f"""
-# 🔬 K8s 诊断报告
-
----
-
-## 📍 阶段一：Pod异常状态定位
-
-{layer_formatted}
-
----
-
-## 🔍 阶段二：证据采集与分析
-
-{evidence_formatted}
-
----
-
-## 🎯 阶段三：根因分析与因果链
-
-{rca_formatted}
-
----
-
-## 📋 综合诊断结论
-
-**用户问题**：{question}
-
-> 请根据以上三个阶段的分析，参考证据链和因果分析，制定修复方案。
-
----
-"""
 
     def _format_layer_section(self, layer_analysis: str) -> str:
         """格式化问题定位阶段的输出"""

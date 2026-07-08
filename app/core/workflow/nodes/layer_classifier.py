@@ -91,18 +91,6 @@ class LayerClassifierNode(WorkflowNode):
             return get_workflow_prompt("layer_query_direct_extract", prompt_language=self._get_prompt_language())
         return get_workflow_prompt("layer_extract", prompt_language=self._get_prompt_language())
 
-    def _use_agent_structured_output(self) -> bool:
-        runtime_enabled = self._is_structured_runtime_enabled(default=True)
-        cfg = self._get_workflow_config()
-        node_cfg = cfg.get("layer", {}) if isinstance(cfg, dict) else {}
-        if isinstance(node_cfg, dict):
-            if "agent_structured_output" in node_cfg:
-                return self._parse_bool_config(node_cfg.get("agent_structured_output"), runtime_enabled)
-            structured_cfg = node_cfg.get("structured_output")
-            if isinstance(structured_cfg, dict) and "enabled" in structured_cfg:
-                return self._parse_bool_config(structured_cfg.get("enabled"), runtime_enabled)
-        return runtime_enabled
-
     def _allow_layer_extract_fallback(self) -> bool:
         runtime_fallback = self._is_structured_runtime_fallback_enabled(default=True)
         cfg = self._get_workflow_config()
@@ -451,15 +439,6 @@ class LayerClassifierNode(WorkflowNode):
             except Exception:
                 pass
         return normalized
-
-    @staticmethod
-    def _structured_layer_from_response(response: Any) -> Optional[Dict[str, Any]]:
-        from app.core.workflow.structured_runtime import StructuredAgentRuntime
-
-        parsed = StructuredAgentRuntime.extract_structured_response(response, LayerOutput)
-        if parsed is None:
-            return None
-        return parsed.model_dump(exclude_none=True)
 
     def _get_query_retry_prompt(self) -> str:
         return (

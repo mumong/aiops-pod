@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
-from app.core.workflow.schemas import EvidenceCollectionOutput, EvidenceMatchOutput, EvidencePlanOutput, QueryResult
+from app.core.workflow.schemas import EvidenceCollectionOutput, EvidencePlanOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
 from app.core.prompts import (
@@ -92,30 +92,6 @@ class EvidenceCollectorNode(WorkflowNode):
 
     def get_required_fields(self) -> List[str]:
         return ["question", "layer"]
-
-    def _use_agent_structured_output(self) -> bool:
-        runtime_enabled = self._is_structured_runtime_enabled(default=True)
-        cfg = self._get_workflow_config()
-        node_cfg = cfg.get("evidence", {}) if isinstance(cfg, dict) else {}
-        if isinstance(node_cfg, dict):
-            if "agent_structured_output" in node_cfg:
-                return self._parse_bool_config(node_cfg.get("agent_structured_output"), runtime_enabled)
-            structured_cfg = node_cfg.get("structured_output")
-            if isinstance(structured_cfg, dict) and "enabled" in structured_cfg:
-                return self._parse_bool_config(structured_cfg.get("enabled"), runtime_enabled)
-        return runtime_enabled
-
-    def _allow_plan_precall_fallback(self) -> bool:
-        runtime_fallback = self._is_structured_runtime_fallback_enabled(default=True)
-        cfg = self._get_workflow_config()
-        node_cfg = cfg.get("evidence", {}) if isinstance(cfg, dict) else {}
-        if isinstance(node_cfg, dict):
-            if "plan_precall_fallback" in node_cfg:
-                return self._parse_bool_config(node_cfg.get("plan_precall_fallback"), runtime_fallback)
-            structured_cfg = node_cfg.get("structured_output")
-            if isinstance(structured_cfg, dict) and "plan_precall_fallback" in structured_cfg:
-                return self._parse_bool_config(structured_cfg.get("plan_precall_fallback"), runtime_fallback)
-        return runtime_fallback
 
     @staticmethod
     def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
@@ -755,59 +731,6 @@ class EvidenceCollectorNode(WorkflowNode):
             logger.warning(f"LLM Pydantic evidence_plan 生成或执行失败: {e}")
             return [], [], ""
 
-    def _execute_dynamic_structured_evidence_agent(
-        self,
-        question: str,
-        layer: Optional[Layer],
-        possible_scenarios: List[str],
-        key_entities: List[Dict],
-        layer_analysis: str,
-        context_archive_ref: str,
-        layer_archive_ref: Dict[str, Any],
-        system_prompt: str,
-        user_message: str,
-        layer_str: str,
-        strict_mode: bool = False,
-        failure_reason: str = "",
-    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
-        dynamic_message = (
-            user_message
-            + "\n\n# 动态结构化采证模式\n"
-            "- 本轮只有一次 evidence agent 调用。\n"
-            "- 你必须根据 layer_handoff 在内部形成最小采证意图。\n"
-            "- 然后直接调用必要的真实只读工具采证，不要等待下一轮。\n"
-            "- 最后输出简短自然语言采证摘要；结构化收口由后续非流式 Pydantic 调用完成。\n"
-        )
-        if strict_mode:
-            dynamic_message += (
-                "\n# 严格重试约束\n"
-                f"- 失败原因：{failure_reason or '上一轮没有有效工具证据'}\n"
-                "- 本轮至少调用一个 critical 或 important 意图的真实工具。\n"
-            )
-
-        early_stop_enabled = self._is_early_stop_enabled(default=True)
-        logger.info("🧭 [evidence] early_stop=%s", early_stop_enabled)
-        self._active_evidence_plan = []
-        try:
-            response, thinking_events = self._call_llm(
-                dynamic_message,
-                system_prompt,
-                stop_checker=self._should_stop_collection_early if early_stop_enabled else None,
-            )
-        finally:
-            self._active_evidence_plan = None
-
-        evidence_plan = []
-        llm_text = (response.result or "") if response else ""
-
-        return evidence_plan, thinking_events, llm_text
-
-    @staticmethod
-    def _structured_evidence_from_response(response: Any) -> Optional[EvidenceCollectionOutput]:
-        from app.core.workflow.structured_runtime import StructuredAgentRuntime
-
-        return StructuredAgentRuntime.extract_structured_response(response, EvidenceCollectionOutput)
-
     def _generate_structured_evidence_plan(
         self,
         system_prompt: str,
@@ -1254,28 +1177,6 @@ class EvidenceCollectorNode(WorkflowNode):
     @staticmethod
     def _plan_exists_without_tool_results(reason: str) -> bool:
         return "只返回 evidence_plan" in (reason or "")
-
-    @staticmethod
-    def _validate_evidence_plan_payload(parsed: Any) -> List[Dict]:
-        if isinstance(parsed, dict) and "evidence_plan" in parsed:
-            try:
-                output = EvidencePlanOutput.model_validate(parsed)
-            except Exception as exc:
-                logger.warning("⚠️ [evidence] evidence_plan 结构化校验失败: %s", exc)
-                return []
-            return [item.model_dump() for item in output.evidence_plan]
-        if isinstance(parsed, list):
-            try:
-                output = EvidencePlanOutput.model_validate({
-                    "layer": "",
-                    "evidence_plan": parsed,
-                    "collection_strategy": "",
-                })
-            except Exception as exc:
-                logger.warning("⚠️ [evidence] evidence_plan 列表结构化校验失败: %s", exc)
-                return []
-            return [item.model_dump() for item in output.evidence_plan]
-        return []
 
     @classmethod
     def _normalize_evidence_plan(
@@ -2236,44 +2137,6 @@ class EvidenceCollectorNode(WorkflowNode):
         if matched:
             logger.info("📊 [evidence] 扩展 plan/tool 对齐命中 %d 项", len(matched))
         return matched
-
-    def _call_plan_match_llm(
-        self,
-        evidence_plan: List[Dict],
-        tool_candidates: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        ai_call = getattr(self, "ai_call", None)
-        if ai_call is None:
-            return {}
-
-        prompt = """你是 Kubernetes 诊断证据对齐裁判。
-任务：判断 evidence_plan 中每个计划项是否被某个真实 tool_result 满足。
-
-判定原则：
-- 不要只看 tool 名；必须同时比较对象类型、资源名、namespace、命令意图、结果内容。
-- 如果计划查 NetworkPolicy，但结果是 Secret/PVC/Node 表，必须判定不匹配。
-- 如果计划查某个 Pod/namespace，但结果属于其他对象或其他 namespace，必须判定不匹配。
-- 失败、空结果、无关资源不能作为已采集证据。
-- 一个 tool_result 最多匹配一个 plan item。
-
-结构化裁判结果由 `EvidenceMatchOutput` Pydantic schema 生成和校验；不要手写结构化对象。
-"""
-        payload = {
-            "evidence_plan": evidence_plan,
-            "tool_candidates": tool_candidates,
-        }
-        if hasattr(ai_call, "call_structured"):
-            parsed, _ = ai_call.call_structured(
-                system_prompt=prompt,
-                question=json.dumps(payload, ensure_ascii=False, default=str),
-                schema=EvidenceMatchOutput,
-                node_id="evidence_plan_match",
-                max_tokens=2048,
-            )
-            return parsed.model_dump() if parsed is not None else {}
-
-        logger.warning("⚠️ [evidence] ai_call 不支持 call_structured，跳过 Pydantic 证据对齐裁判")
-        return {}
 
     @staticmethod
     def _tool_result_matches_plan(
