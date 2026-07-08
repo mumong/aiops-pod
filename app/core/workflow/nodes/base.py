@@ -13,7 +13,7 @@ import os
 import queue
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import ContextBudgetEstimator, serialize_tool_schema
@@ -90,6 +90,18 @@ class WorkflowNode(ABC):
         默认返回 True，子类可重写
         """
         return True
+
+    def _get_prompt_language(self) -> str:
+        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
+            return self.holmes_service.get_prompt_language()
+        return "zh"
+
+    @staticmethod
+    def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
+        return any(
+            ev.get("type") == "tool_result" and ev.get("status") == "success"
+            for ev in (thinking_events or [])
+        )
     
     def get_required_fields(self) -> List[str]:
         """

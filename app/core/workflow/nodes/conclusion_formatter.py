@@ -75,10 +75,6 @@ class ConclusionFormatterNode(WorkflowNode):
     def node_name(self) -> str:
         return "汇总总结"
 
-    def _get_prompt_language(self) -> str:
-        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
-            return self.holmes_service.get_prompt_language()
-        return "zh"
 
     def _get_response_language(self) -> str:
         if self.holmes_service and hasattr(self.holmes_service, "get_response_language"):

@@ -85,20 +85,10 @@ class EvidenceCollectorNode(WorkflowNode):
     def node_name(self) -> str:
         return "证据链采集"
 
-    def _get_prompt_language(self) -> str:
-        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
-            return self.holmes_service.get_prompt_language()
-        return "zh"
 
     def get_required_fields(self) -> List[str]:
         return ["question", "layer"]
 
-    @staticmethod
-    def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
-        return any(
-            ev.get("type") == "tool_result" and ev.get("status") == "success"
-            for ev in (thinking_events or [])
-        )
 
     @staticmethod
     def _has_semantic_tool_success(thinking_events: List[Dict[str, Any]]) -> bool:

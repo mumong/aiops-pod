@@ -66,10 +66,6 @@ class RootCauseAnalyzerNode(WorkflowNode):
     def node_name(self) -> str:
         return "根因分析"
 
-    def _get_prompt_language(self) -> str:
-        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
-            return self.holmes_service.get_prompt_language()
-        return "zh"
 
     def _get_rca_prompt(self) -> str:
         return get_workflow_prompt("rca", prompt_language=self._get_prompt_language())

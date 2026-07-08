@@ -65,10 +65,6 @@ class LayerClassifierNode(WorkflowNode):
     def node_name(self) -> str:
         return "问题定位"
 
-    def _get_prompt_language(self) -> str:
-        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
-            return self.holmes_service.get_prompt_language()
-        return "zh"
 
     def should_inject_runbook_catalog(self) -> bool:
         # /query direct 模式下只做轻量真实取数，不注入大段 runbook catalog 干扰本地模型工具决策。
@@ -103,12 +99,6 @@ class LayerClassifierNode(WorkflowNode):
                 return self._parse_bool_config(structured_cfg.get("extract_fallback"), runtime_fallback)
         return runtime_fallback
 
-    @staticmethod
-    def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
-        return any(
-            ev.get("type") == "tool_result" and ev.get("status") == "success"
-            for ev in (thinking_events or [])
-        )
 
     @staticmethod
     def _is_llm_unavailable_text(text: str) -> bool:
