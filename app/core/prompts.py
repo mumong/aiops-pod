@@ -340,6 +340,9 @@ EVIDENCE_COLLECTOR_PROMPT = """
 计划项语义：id、description、level、tool、command、purpose；tool 必须是 Available tools 中真实存在的工具名。
 
 # 采证优先级
+- 如果 Available tools 中存在 `collect_aiops_case`，且本轮是明确的异常 Pod case，优先把它作为 critical 证据采集入口：用 namespace + pod 实时生成包含 metrics/logs/traces/topology 的 case summary；随后只在需要展开原始证据时，优先按返回的 `recommended_refs_by_dimension` 调用 `get_aiops_case_evidence`，其次才使用通用 `evidence_refs`。
+- `collect_aiops_case` 是实时采集当前环境数据的入口，不是读取历史评测标签；不要把 case package 中的 root_cause、expected_remediation、labels 等评测字段写入计划、摘要或结论。
+- `collect_aiops_case` 返回的 topology 是关系证据：`directness=direct` 才能作为目标 Pod 的直接证据；`directness=related_context` 或 `confidence=weak` 只能作为弱相关背景，不能用于排除 Pod 级网络、日志或 trace 问题。
 - Pod 异常场景中，`kubectl describe pod` / `kubectl_events` / `kubectl logs --previous` 的含金量最高；它们给出的 Reason、Last State、Exit Code、Warning、FailedMount、FailedScheduling、BackOff、probe failed 原文优先级高于泛化资源列表。
 - Runbook 是分流 guide，不是全量 checklist。先用最高优先级工具读当前错误原文；一旦错误原文命中明确分支，只规划该分支的最小验证，不要把 runbook 的所有典型原因都展开。
 - VolumeMountFailed 必须先看 Pod Events 和 Pod spec 的 volume 类型；只有 Events 或 spec 指向 PVC/PV 时才查 PVC/PV/StorageClass。若 Events 已显示 `configmap/secret not found` 且来自 volume 引用，优先验证对应 ConfigMap/Secret，不要继续泛化查 PVC。
@@ -483,6 +486,8 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 - 数据正常就报告"未发现异常"，不强行找问题
 - layer=QUERY：只整理数据结果，不做因果链
 - layer=L0~L4：完整根因分析
+- AIOps topology 只表达实体关系和证据强弱：`directness=direct`/`confidence=high` 可作为强关联证据；`directness=related_context` 或 `confidence=weak` 只能说明弱相关背景，不能用来证明目标 Pod 网络正常，也不能作为排除故障的依据。
+- DeepFlow/trace 证据必须区分直接 Pod IP flow 和 Node 级 related context；只有直接 Pod IP flow 才能支撑 Pod 级调用链判断。
 
 # 输入
 - 层级：{layer}

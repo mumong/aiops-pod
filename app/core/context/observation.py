@@ -52,6 +52,12 @@ class ObservationProcessor:
         "run_bash_command",
         "fetch_runbook",
     }
+    AIOPS_CASE_TOOLS = {
+        "collect_aiops_case",
+        "get_aiops_case",
+        "get_aiops_case_evidence",
+        "search_aiops_cases",
+    }
 
     def __init__(
         self,
@@ -158,6 +164,8 @@ class ObservationProcessor:
                 "tool": tool,
                 "raw_preview": raw[:1000],
             }, self._generic_summary(tool, raw), "invalid_tool"
+        if tool in self.AIOPS_CASE_TOOLS:
+            return self._extract_aiops_case(tool, raw)
 
         # Tool-specific processors must see successful describe/events/log output
         # before generic failure detection. Kubernetes diagnostic payloads often
@@ -201,6 +209,213 @@ class ObservationProcessor:
         if tool in self.MEDIUM_TOOLS and len(raw) <= self.max_observation_chars:
             return {"status": "kept_small_output"}, raw, "passthrough"
         return {"status": "generic_summary"}, self._generic_summary(tool, raw), "generic"
+
+    def _extract_aiops_case(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
+        try:
+            payload = json.loads(raw or "{}")
+        except Exception:
+            return {
+                "status": "case_parse_failed",
+                "tool": tool,
+                "raw_preview": raw[:1000],
+            }, self._generic_summary(tool, raw), "aiops_case_parse_failed"
+
+        if not isinstance(payload, dict):
+            return {
+                "status": "case_parse_failed",
+                "tool": tool,
+                "raw_preview": raw[:1000],
+            }, self._generic_summary(tool, raw), "aiops_case_parse_failed"
+
+        if payload.get("ok") is False:
+            error = str(payload.get("error") or "aiops case tool returned ok=false")
+            structured = {
+                "status": "case_error",
+                "tool": tool,
+                "error": error,
+            }
+            if payload.get("case_id"):
+                structured["case_id"] = payload.get("case_id")
+            return structured, f"{tool} 采集失败: {error}", "aiops_case_error"
+
+        if tool == "search_aiops_cases":
+            cases = payload.get("cases") if isinstance(payload.get("cases"), list) else []
+            structured = {
+                "status": "case_search_result",
+                "tool": tool,
+                "total": payload.get("total", len(cases)),
+                "cases": [
+                    self._select_keys(item, ["case_id", "abnormal_type", "namespace", "pod", "package_ref"])
+                    for item in cases[:20]
+                    if isinstance(item, dict)
+                ],
+            }
+            lines = [
+                f"{tool} 摘要: total={structured['total']} returned={len(structured['cases'])}",
+            ]
+            for item in structured["cases"][:10]:
+                lines.append(
+                    "- case_id={case_id} abnormal_type={abnormal_type} pod={namespace}/{pod}".format(
+                        case_id=item.get("case_id", ""),
+                        abnormal_type=item.get("abnormal_type", ""),
+                        namespace=item.get("namespace", ""),
+                        pod=item.get("pod", ""),
+                    )
+                )
+            return structured, "\n".join(lines), "aiops_case"
+
+        if tool == "get_aiops_case_evidence":
+            structured = {
+                "status": "case_evidence_loaded",
+                "tool": tool,
+                "case_id": payload.get("case_id"),
+                "ref": payload.get("ref"),
+                "truncated": payload.get("truncated"),
+            }
+            if isinstance(payload.get("record"), dict):
+                record = payload["record"]
+                structured["record"] = self._select_keys(
+                    record,
+                    [
+                        "evidence_id",
+                        "timestamp",
+                        "source_system",
+                        "dimension",
+                        "summary",
+                        "severity",
+                        "confidence",
+                        "directness",
+                        "trace_correlation",
+                    ],
+                )
+            content = str(payload.get("content") or "").strip()
+            if content:
+                structured["content_chars"] = len(content)
+            lines = [
+                f"{tool} 摘要: case_id={structured.get('case_id')} ref={structured.get('ref')}",
+            ]
+            if structured.get("truncated") is not None:
+                lines.append(f"truncated={structured.get('truncated')}")
+            if structured.get("record"):
+                lines.append("record=" + json.dumps(structured["record"], ensure_ascii=False, default=str))
+            elif content:
+                lines.append(f"content_chars={len(content)}")
+                lines.append("content omitted from prompt; use evidence_id records or an approved evidence ref, not evaluator files.")
+            return structured, "\n".join(lines), "aiops_case"
+
+        primary = payload.get("primary_entity") if isinstance(payload.get("primary_entity"), dict) else {}
+        coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+        topology = payload.get("topology_summary") if isinstance(payload.get("topology_summary"), dict) else {}
+        evidence_refs = [
+            str(ref)
+            for ref in (payload.get("evidence_refs") or [])
+            if ref
+        ][:30]
+        signals = [
+            self._select_keys(item, ["signal_id", "dimension", "strength", "observed", "evidence_refs"])
+            for item in (payload.get("signals_summary") or [])[:12]
+            if isinstance(item, dict)
+        ]
+        timeline = [
+            self._select_keys(item, ["timestamp", "dimension", "summary", "evidence_refs"])
+            for item in (payload.get("timeline_summary") or [])[:12]
+            if isinstance(item, dict)
+        ]
+        inventory = [
+            self._select_keys(item, ["ref", "exists", "bytes", "records"])
+            for item in (payload.get("evidence_inventory") or [])[:20]
+            if isinstance(item, dict)
+        ]
+        recommended_refs = payload.get("recommended_refs_by_dimension")
+        if not isinstance(recommended_refs, dict):
+            recommended_refs = {}
+        recommended_refs = {
+            str(key): [str(ref) for ref in value[:8] if ref]
+            for key, value in recommended_refs.items()
+            if isinstance(value, list)
+        }
+        status = "case_collected" if tool == "collect_aiops_case" else "case_loaded"
+        structured = {
+            "status": status,
+            "tool": tool,
+            "case_id": payload.get("case_id"),
+            "abnormal_type": payload.get("abnormal_type"),
+            "scenario": payload.get("scenario"),
+            "primary_entity": self._select_keys(primary, ["kind", "namespace", "name", "uid", "node", "pod_ip"]),
+            "coverage": dict(coverage),
+            "signals_summary": signals,
+            "timeline_summary": timeline,
+            "topology_summary": self._select_keys(
+                topology,
+                ["entity_count", "edge_count", "entity_kinds", "relations", "directness", "confidence"],
+            ),
+            "evidence_inventory": inventory,
+            "evidence_refs": evidence_refs,
+            "recommended_refs_by_dimension": recommended_refs,
+            "package_ref": payload.get("package_ref"),
+        }
+
+        namespace = structured["primary_entity"].get("namespace") or ""
+        name = structured["primary_entity"].get("name") or ""
+        kind = structured["primary_entity"].get("kind") or "Pod"
+        coverage_text = " ".join(
+            f"{key}={value}"
+            for key, value in sorted(structured["coverage"].items())
+        ) or "-"
+        topology_text = (
+            f"entities={structured['topology_summary'].get('entity_count', 0)} "
+            f"edges={structured['topology_summary'].get('edge_count', 0)} "
+            f"relations={structured['topology_summary'].get('relations', {})} "
+            f"directness={structured['topology_summary'].get('directness', {})} "
+            f"confidence={structured['topology_summary'].get('confidence', {})}"
+        )
+        lines = [
+            f"{tool} 摘要: case_id={structured.get('case_id')} abnormal_type={structured.get('abnormal_type')}",
+            f"primary_entity={kind} {namespace}/{name}",
+            f"coverage={coverage_text}",
+            f"topology={topology_text}",
+        ]
+        if signals:
+            lines.append("signals:")
+            for item in signals[:8]:
+                lines.append(
+                    "- {signal_id} dimension={dimension} strength={strength} observed={observed} refs={refs}".format(
+                        signal_id=item.get("signal_id", ""),
+                        dimension=item.get("dimension", ""),
+                        strength=item.get("strength", ""),
+                        observed=item.get("observed", ""),
+                        refs=",".join(str(ref) for ref in (item.get("evidence_refs") or [])[:5]),
+                    )
+                )
+        if timeline:
+            lines.append("timeline:")
+            for item in timeline[:6]:
+                lines.append(
+                    "- {timestamp} {dimension}: {summary} refs={refs}".format(
+                        timestamp=item.get("timestamp", ""),
+                        dimension=item.get("dimension", ""),
+                        summary=item.get("summary", ""),
+                        refs=",".join(str(ref) for ref in (item.get("evidence_refs") or [])[:5]),
+                    )
+                )
+        if evidence_refs:
+            lines.append("evidence_refs=" + ", ".join(evidence_refs[:20]))
+        if recommended_refs:
+            lines.append("recommended_refs_by_dimension=" + json.dumps(recommended_refs, ensure_ascii=False, default=str))
+        if structured.get("package_ref"):
+            lines.append(f"package_ref={structured['package_ref']}")
+
+        return structured, "\n".join(lines), "aiops_case"
+
+    @staticmethod
+    def _select_keys(payload: Dict[str, Any], keys: list[str]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            key: payload[key]
+            for key in keys
+            if key in payload and payload.get(key) is not None
+        }
 
     def _extract_runbook(self, raw: str) -> tuple[Dict[str, Any], str, str]:
         if re.match(r"^\s*Error:\s*Runbook\b", raw or "", re.IGNORECASE):
@@ -1119,6 +1334,8 @@ class ObservationProcessor:
             "prometheus_empty",
             "run_image_result",
             "command_result",
+            "case_error",
+            "case_parse_failed",
         }:
             if status in {"run_image_result", "command_result"}:
                 return bool((structured or {}).get("success") is True)

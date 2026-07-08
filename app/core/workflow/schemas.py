@@ -43,6 +43,16 @@ EvidenceToolName = Literal[
     "execute_prometheus_instant_query",
     "execute_prometheus_range_query",
     "fetch_runbook",
+    "collect_aiops_case",
+    "get_aiops_case",
+    "get_aiops_case_evidence",
+    "search_aiops_cases",
+    "resolve_aiops_entity",
+    "query_aiops_k8s_snapshot",
+    "query_aiops_metrics",
+    "query_aiops_logs",
+    "query_aiops_deepflow_flows",
+    "build_aiops_topology",
 ]
 
 

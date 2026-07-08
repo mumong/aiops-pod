@@ -36,6 +36,13 @@ class LayerClassifierNode(WorkflowNode):
 
     每次执行都会调用 LLM 进行独立分析
     """
+    QUERY_DIRECT_BLOCKED_TOOLS = [
+        "TodoWrite",
+        "collect_aiops_case",
+        "get_aiops_case",
+        "get_aiops_case_evidence",
+        "search_aiops_cases",
+    ]
 
     def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
         """
@@ -1404,7 +1411,7 @@ class LayerClassifierNode(WorkflowNode):
                 ),
                 skip_remediation_policy=self._is_direct_query_mode(),
                 blocked_tool_names=(
-                    ["TodoWrite"]
+                    self.QUERY_DIRECT_BLOCKED_TOOLS
                     if self._is_direct_query_mode()
                     else []
                 ),

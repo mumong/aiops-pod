@@ -1221,6 +1221,23 @@ def test_deployed_workflow_disables_layer_early_stop_by_default():
     assert app_config["workflow"]["layer"]["early_stop"]["enabled"] is False
 
 
+def test_deployed_config_enables_aiops_case_coarse_and_disables_fine_mcp_server():
+    configmap = yaml.safe_load(
+        Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")
+    )
+    app_config = yaml.safe_load(configmap["data"]["config.yaml"])
+
+    coarse = app_config["mcp_servers"]["aiops-case-coarse"]
+    assert coarse["enabled"] is True
+    assert coarse["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8089/sse"
+    assert coarse["config"]["mode"] == "sse"
+
+    fine = app_config["mcp_servers"]["aiops-observability-fine"]
+    assert fine["enabled"] is False
+    assert fine["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8090/sse"
+    assert fine["config"]["mode"] == "sse"
+
+
 def test_query_evidence_normalization_prompt_is_disabled():
     assert get_query_evidence_normalization_prompt("zh") == ""
 
@@ -1248,6 +1265,9 @@ def test_evidence_prompt_requires_pod_abnormal_handoff_fields():
         "layer_handoff.matched_runbooks",
         "不要在 evidence 阶段重新选择 runbook",
         "异常 Pod 返回 NotFound",
+        "collect_aiops_case",
+        "metrics/logs/traces/topology",
+        "get_aiops_case_evidence",
     ]
 
     for phrase in expected_phrases:

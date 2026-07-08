@@ -1031,6 +1031,52 @@ def test_evidence_counts_logs_collected_by_run_bash_command():
     assert node._calculate_completeness(items) == 1
 
 
+def test_evidence_counts_collect_aiops_case_as_planned_evidence():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "case",
+            "description": "采集异常 Pod 的 metrics/logs/traces/topology case",
+            "level": "critical",
+            "tool": "collect_aiops_case",
+            "command": "collect_aiops_case namespace=aiops-temp pod=aiops-oom-business",
+            "tool_args": {"namespace": "aiops-temp", "pod": "aiops-oom-business"},
+            "purpose": "实时采集多模态可观测证据",
+            "acceptable_tools": ["collect_aiops_case"],
+        },
+    ]
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "collect_aiops_case",
+            "semantic_success": True,
+            "result": "collect_aiops_case 摘要: case_id=oom-aiops-temp-aiops-oom-business\ncoverage=metrics=observed logging=observed tracing=weak_context topology=observed",
+            "structured": {
+                "status": "case_collected",
+                "case_id": "oom-aiops-temp-aiops-oom-business",
+                "coverage": {
+                    "metrics": "observed",
+                    "logging": "observed",
+                    "tracing": "weak_context",
+                    "topology": "observed",
+                },
+                "primary_entity": {
+                    "namespace": "aiops-temp",
+                    "name": "aiops-oom-business",
+                },
+            },
+        },
+    ]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is True
+    assert items[0].source == "thinking_match"
+    assert node._calculate_completeness(items) == 1
+
+
 def test_evidence_counts_diagnostic_negative_connectivity_result():
     node = EvidenceCollectorNode()
     plan = [

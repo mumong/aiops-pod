@@ -834,6 +834,177 @@ Note: the above runbook is for DIAGNOSTIC REFERENCE ONLY.
     assert "Failed to pull image" in processed["summary"]
 
 
+def test_observation_processor_summarizes_aiops_case_without_label_leakage(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1200)
+    raw = json.dumps({
+        "ok": True,
+        "case_id": "oom-aiops-temp-aiops-oom-business",
+        "abnormal_type": "oomkilled",
+        "scenario": "oomkilled",
+        "primary_entity": {
+            "kind": "Pod",
+            "namespace": "aiops-temp",
+            "name": "aiops-oom-business",
+        },
+        "coverage": {
+            "kubernetes": "observed",
+            "metrics": "observed",
+            "logging": "observed",
+            "tracing": "weak_context",
+            "topology": "observed",
+        },
+        "signals_summary": [
+            {
+                "signal_id": "sig_status_oom",
+                "dimension": "kubernetes",
+                "strength": "critical",
+                "observed": True,
+                "evidence_refs": ["k8s.describe"],
+            },
+            {
+                "signal_id": "sig_logs_memory_growth",
+                "dimension": "logging",
+                "strength": "important",
+                "observed": True,
+                "evidence_refs": ["log.memory_growth"],
+            },
+        ],
+        "timeline_summary": [
+            {
+                "timestamp": "2026-07-06T10:00:00Z",
+                "dimension": "kubernetes",
+                "summary": "container lastState terminated reason=OOMKilled exitCode=137",
+                "evidence_refs": ["k8s.describe"],
+            }
+        ],
+        "topology_summary": {
+            "entity_count": 4,
+            "edge_count": 3,
+            "entity_kinds": {"Pod": 1, "Container": 1, "Node": 1, "Service": 1},
+            "relations": {"runs_on": 1, "contains": 1, "selects": 1},
+            "directness": {"direct": 2, "related_context": 1},
+            "confidence": {"high": 2, "weak": 1},
+        },
+        "evidence_inventory": [
+            {"ref": "evidence/k8s_describe.txt", "exists": True, "records": 80},
+            {"ref": "evidence/logs.jsonl", "exists": True, "records": 20},
+        ],
+        "evidence_refs": ["k8s.describe", "log.memory_growth", "metric.memory_limit"],
+        "recommended_refs_by_dimension": {
+            "k8s": ["k8s.describe"],
+            "metrics": ["metric.memory_limit"],
+            "tracing": ["deepflow.node_context"],
+        },
+        "package_ref": "/cases/oom-aiops-temp-aiops-oom-business",
+        "root_cause": "OOMKilled label only for evaluator",
+        "expected_remediation": "increase memory limit",
+        "labels": {"root_cause": "oom"},
+    }, ensure_ascii=False)
+
+    processed = processor.process(
+        run_id="run-aiops-case",
+        node_id="evidence",
+        sequence=1,
+        tool_name="collect_aiops_case",
+        raw_content=raw,
+    )
+
+    assert processed["processor"] == "aiops_case"
+    assert processed["semantic_success"] is True
+    assert processed["structured"]["status"] == "case_collected"
+    assert processed["structured"]["case_id"] == "oom-aiops-temp-aiops-oom-business"
+    assert processed["structured"]["coverage"]["metrics"] == "observed"
+    assert processed["structured"]["evidence_refs"] == [
+        "k8s.describe",
+        "log.memory_growth",
+        "metric.memory_limit",
+    ]
+    assert processed["structured"]["recommended_refs_by_dimension"]["metrics"] == ["metric.memory_limit"]
+    assert processed["structured"]["topology_summary"]["directness"]["related_context"] == 1
+    assert processed["structured"]["topology_summary"]["confidence"]["weak"] == 1
+    assert "collect_aiops_case 摘要" in processed["summary"]
+    assert "aiops-temp/aiops-oom-business" in processed["summary"]
+    assert "tracing=weak_context" in processed["summary"]
+    assert "recommended_refs_by_dimension" in processed["summary"]
+    assert "directness={'direct': 2, 'related_context': 1}" in processed["summary"]
+    assert "k8s.describe" in processed["summary"]
+    assert "root_cause" not in processed["summary"]
+    assert "expected_remediation" not in processed["summary"]
+
+
+def test_observation_processor_preserves_aiops_evidence_strength_fields(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1200)
+    raw = json.dumps({
+        "ok": True,
+        "case_id": "oom-aiops-temp-aiops-oom-business",
+        "ref": "deepflow.node_context",
+        "truncated": False,
+        "record": {
+            "evidence_id": "deepflow.node_context",
+            "timestamp": "2026-07-08T05:00:00Z",
+            "source_system": "deepflow",
+            "dimension": "tracing",
+            "summary": "node-level related flow only",
+            "severity": "info",
+            "confidence": "weak",
+            "directness": "related_context",
+            "trace_correlation": {"pod_ip": "10.244.0.10", "trace_ids": []},
+            "payload": {"large": "not selected"},
+        },
+    }, ensure_ascii=False)
+
+    processed = processor.process(
+        run_id="run-aiops-case-evidence",
+        node_id="evidence",
+        sequence=1,
+        tool_name="get_aiops_case_evidence",
+        raw_content=raw,
+    )
+
+    record = processed["structured"]["record"]
+    assert record["confidence"] == "weak"
+    assert record["directness"] == "related_context"
+    assert record["trace_correlation"]["pod_ip"] == "10.244.0.10"
+    assert "payload" not in record
+    assert "labels" not in processed["structured"]
+
+
+def test_observation_processor_does_not_inline_aiops_case_evaluator_file_content(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1200)
+    raw = json.dumps({
+        "ok": True,
+        "case_id": "oom-aiops-temp-aiops-oom-business",
+        "ref": "labels.yaml",
+        "truncated": False,
+        "content": (
+            "root_cause: OOMKilled\n"
+            "expected_remediation: increase memory limit\n"
+            "labels:\n"
+            "  pod_abnormal_type: OOMKilled\n"
+        ),
+    }, ensure_ascii=False)
+
+    processed = processor.process(
+        run_id="run-aiops-case-label-file",
+        node_id="evidence",
+        sequence=1,
+        tool_name="get_aiops_case_evidence",
+        raw_content=raw,
+    )
+
+    assert processed["processor"] == "aiops_case"
+    assert processed["semantic_success"] is True
+    assert processed["structured"]["status"] == "case_evidence_loaded"
+    assert processed["structured"]["ref"] == "labels.yaml"
+    assert processed["structured"]["content_chars"] > 0
+    assert "labels.yaml" in processed["summary"]
+    assert "content_chars=" in processed["summary"]
+    assert "root_cause" not in processed["summary"]
+    assert "expected_remediation" not in processed["summary"]
+    assert "pod_abnormal_type" not in processed["summary"]
+    assert "content" not in processed["structured"]
+
+
 def test_observation_processor_summarizes_kubectl_logs(tmp_path):
     processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1000)
 

@@ -40,6 +40,31 @@ def test_evidence_plan_output_validates_required_fields():
     assert parsed.evidence_plan[0].level == "critical"
 
 
+def test_evidence_plan_output_accepts_aiops_case_mcp_tools():
+    parsed = EvidencePlanOutput.model_validate({
+        "layer": "L3",
+        "evidence_plan": [
+            {
+                "id": "case-collector",
+                "description": "采集异常 Pod 的多模态可观测 case",
+                "level": "critical",
+                "tool": "collect_aiops_case",
+                "command": "collect_aiops_case namespace=aiops-temp pod=aiops-oom-business",
+                "tool_args": {"namespace": "aiops-temp", "pod": "aiops-oom-business"},
+                "purpose": "一次性采集 Kubernetes、metrics、logs、traces 和 topology 摘要",
+                "acceptable_tools": ["collect_aiops_case", "get_aiops_case_evidence"],
+            }
+        ],
+        "collection_strategy": "先采集实时 case summary，再按 evidence_ref 读取必要原始证据。",
+    })
+
+    assert parsed.evidence_plan[0].tool == "collect_aiops_case"
+    assert parsed.evidence_plan[0].acceptable_tools == [
+        "collect_aiops_case",
+        "get_aiops_case_evidence",
+    ]
+
+
 def test_conclusion_output_schema_accepts_report_payload():
     parsed = ConclusionOutput.model_validate({
         "title": "诊断报告",

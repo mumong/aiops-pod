@@ -700,6 +700,50 @@ def test_layer_query_direct_passes_stop_checker_to_agent():
     assert captured["stop_checker"] == node._should_stop_query_direct_early
 
 
+def test_layer_query_direct_blocks_aiops_case_tools_from_agent():
+    node = LayerClassifierNode(
+        holmes_service=SimpleNamespace(
+            get_prompt_language=lambda: "zh",
+        )
+    )
+    node.workflow_config_override = {"query_mode": "direct"}
+    captured = {}
+
+    def _fake_call_llm(question, system_prompt, **kwargs):
+        captured["blocked_tool_names"] = kwargs.get("blocked_tool_names")
+        return SimpleNamespace(result=""), []
+
+    node._call_llm = _fake_call_llm
+    node._extract_with_lite_llm = lambda **kwargs: {
+        "layer": "QUERY",
+        "layers": ["QUERY"],
+        "layer_name": "查询请求",
+        "confidence": 0.3,
+        "reasoning": "未采集",
+        "key_entities": [],
+        "possible_scenarios": [],
+        "query_result": {
+            "query_target": "查询 CPU",
+            "collection_summary": "计划 0 项，实际采集 0 项，未采集 1 项，完整度 0%",
+            "columns": [],
+            "rows": [],
+            "missing": [{"field": "result", "reason": "未采集"}],
+            "sources": [],
+        },
+    }
+    node.ai_call = object()
+
+    node._analyze_with_llm("查询 CPU")
+
+    assert set(captured["blocked_tool_names"]) >= {
+        "TodoWrite",
+        "collect_aiops_case",
+        "get_aiops_case",
+        "get_aiops_case_evidence",
+        "search_aiops_cases",
+    }
+
+
 def test_layer_query_direct_stop_checker_stops_on_prometheus_semantic_failure():
     node = LayerClassifierNode(holmes_service=SimpleNamespace())
     node.workflow_config_override = {"query_mode": "direct"}
