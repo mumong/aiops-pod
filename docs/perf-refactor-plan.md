@@ -23,10 +23,12 @@
 前提：仅在**测试覆盖充分**处动手；纯删/纯合并，不改可观测行为。全程 404→408 单测护栏。
 - [x] B1 死代码清理：grep 复验后删除 10 个 0 调用/0 测试/0 反射的私有死方法 + 1 个失引用 import（`ea4c5aa`，~246 行）
 - [x] B2 重复逻辑上移基类：`_get_prompt_language`(4→1)、`_has_successful_tool_results`(2→1) 收敛到 `WorkflowNode`（`42e0142`）
-- [ ] B3（**deferred，NEEDS-REVIEW，留作后续**，均需跨文件/涉行为需谨慎复核）：
-  - `_archive_node_input`(3 份，日志前缀不同 → 需参数化上移)、`_is_llm_unavailable_text`/单行摘要压缩/QUERY LayerOutput dict/`safe_json_loads`(十余处 try-except) 等重复逻辑合并
-  - `layer_classifier` 1497 附近确证不可达块 + `_has_early_stop_event` 传递性死代码（控制流复核后可清）
-  - 巨型文件职责拆分（纯搬运、导入等价）——风险最高，建议独立小步进行
+- [x] B2b `_archive_node_input`(3→1) 上移基类，前缀用 `self.node_id`（=原硬编码前缀，日志不变）（`0a2f746`）
+- [x] B2c 清除 `layer_classifier` 确证不可达的 QUERY-direct early-stop 块 + 传递性死方法 `_has_early_stop_event`（严格证明 `_is_direct_query_mode` 两点恒等后删）（`0a2f746`）
+- [~] B3（**明确不做/deferred，风险>回报**）：
+  - `safe_json_loads`（十余处 try-except）——各处 fallback 不同（`{}`/fenced/raise），合并会在差异点改行为 → **不做**，违反"零功能影响"
+  - `_is_llm_unavailable_text`/单行摘要压缩/QUERY LayerOutput dict 等重复逻辑合并——语义需逐点核对，留作独立小步
+  - 巨型文件职责拆分——风险最高，建议独立小步进行
 
 ## 最终整体测试（2026-07-08）
 
