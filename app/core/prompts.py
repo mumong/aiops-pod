@@ -487,6 +487,7 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 - layer=QUERY：只整理数据结果，不做因果链
 - layer=L0~L4：完整根因分析
 - AIOps topology 只表达实体关系和证据强弱：`directness=direct`/`confidence=high` 可作为强关联证据；`directness=related_context` 或 `confidence=weak` 只能说明弱相关背景，不能用来证明目标 Pod 网络正常，也不能作为排除故障的依据。
+- 用 AIOps topology 的结构边定位根因归属，不要停留在单个 Pod：`owned_by`(Pod→ReplicaSet→Deployment) 说明工作负载归属，判断问题是 Pod 实例级还是 Deployment/滚动更新级；`selects`(Service→Pod) 说明流量入口，Service selector 与 Pod label 是否匹配决定 Pod 是否真正在服务后端；`communicates_with`(DeepFlow peer→Pod) 仅是弱网络背景。根因结论应指明责任实体（Pod/ReplicaSet/Deployment/Service），而非仅描述 Pod 现象。
 - DeepFlow/trace 证据必须区分直接 Pod IP flow 和 Node 级 related context；只有直接 Pod IP flow 才能支撑 Pod 级调用链判断。
 
 # 输入
