@@ -629,6 +629,24 @@ CONCLUSION_FORMATTER_PROMPT = """
 | Node | xxx |
 | 错误信息 | xxx |
 ---
+## 📊 可观测性数据（三维度 + 拓扑）
+> 本节必须基于 `collect_aiops_case` 实时采集的真实结果填写；每个维度标注真实覆盖状态（present/weak/absent/error）与关键信号，缺失维度要诚实标注原因，禁止编造。
+### 三大观测维度
+| 维度 | 覆盖状态 | 关键信号（真实数据） | 证据 ref |
+|------|----------|----------------------|----------|
+| Metrics（指标） | present | `Prometheus pod metrics: series=13 metrics=4`（内存趋势逼近 limit） | metric-...-prometheus |
+| Logging（日志） | present/absent | `allocated business cache chunk=25 approx_mib=50`（应用主动增长内存）/ 或标注 ES 未接入 | log-...-current |
+| Tracing（链路/流量） | present/weak/absent | DeepFlow L7 flow 或标注未接入；node 级只能算弱相关 | deepflow-... |
+| K8s（状态事实） | present | `phase=Running restarts=2162 lastState=OOMKilled exit=137` | k8s-...-pod-yaml |
+### 拓扑关系（实体与边）
+- **实体**：Pod / Container / Node / IP /（若有）ReplicaSet→Deployment / Service，共 N 个
+- **关键边**（标注 directness/confidence）：
+  - `Pod --owned_by--> ReplicaSet --owned_by--> Deployment`（direct/high，工作负载归属）；若无 ownerReferences 要明确写“独立直投 Pod，无上层控制器”
+  - `Service --selects--> Pod`（direct/high，流量入口）；若无匹配 Service 要写“无 Service 暴露”
+  - `Pod --scheduled_on--> Node`（direct/high）
+  - DeepFlow `peer --communicates_with--> Pod` 仅 related_context/weak，不能当强因果
+- **拓扑结论**：一句话说明责任实体落在 Pod / ReplicaSet / Deployment / Service 中的哪个层级。
+---
 ## 🕵️ 证据链
 ### 已采集证据
 | # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
@@ -711,6 +729,9 @@ kubectl logs <pod> -n <namespace> --previous | tail -100
 4. **根因结论必须引用具体证据编号**
 5. **修复命令必须可直接复制执行**
 6. **如有缺失证据，必须列出并说明影响**
+7. **只要证据来自 `collect_aiops_case`，`## 📊 可观测性数据（三维度 + 拓扑）` 区块必填**：三大维度（Metrics/Logging/Tracing）+ K8s 状态各写真实覆盖状态和关键信号；拓扑区块写真实实体和边（owner 链 / Service / 调度 / DeepFlow 弱关联），并诚实标注缺失维度或“独立 Pod 无控制器/无 Service”。禁止编造未采集到的维度或拓扑关系。
+8. **逻辑必须串联**：根因分析要把「三维度信号 → 拓扑责任实体 → 因果链」连起来，例如“Metrics 显示内存增长(维度) + logs 显示 cache 无界分配(维度) + 拓扑显示为独立 Pod 无 Deployment 兜底(拓扑) → 根因落在该 Pod 的 memory limit 配置”。不要三维度与拓扑各说各话、与根因脱节。
+9. **绝不把弱/缺失当强证据**：`directness=related_context` 或 `confidence=weak`（如 DeepFlow node 级）只能作为背景，不能用于排除 Pod 级问题或支撑强因果。
 """
 
 
