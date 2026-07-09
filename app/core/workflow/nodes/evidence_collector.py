@@ -822,19 +822,6 @@ class EvidenceCollectorNode(WorkflowNode):
         logger.warning("⚠️ [evidence] Pydantic evidence_plan 已生成，但执行阶段未产生有效工具结果")
         return evidence_plan, thinking_events, llm_text
 
-    def _archive_node_input(self, payload: Dict) -> None:
-        run_id = getattr(self, "current_run_id", "")
-        if not run_id:
-            return
-        try:
-            from app.core.context.archive import ContextArchive
-
-            ContextArchive(run_id=run_id).write_node_artifacts(
-                node_id=self.node_id,
-                input_payload=payload,
-            )
-        except Exception as exc:
-            logger.warning("⚠️ [evidence] 写入 node input archive 失败: %s", exc)
 
     @staticmethod
     def _build_evidence_user_message(

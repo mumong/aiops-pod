@@ -124,13 +124,6 @@ class LayerClassifierNode(WorkflowNode):
             return f"LLM 服务不可用，无法完成问题定位: {detail}"
         return "LLM 服务不可用，无法完成问题定位"
 
-    @staticmethod
-    def _has_early_stop_event(thinking_events: List[Dict[str, Any]]) -> bool:
-        return any(
-            ev.get("type") == "early_stop" and ev.get("reason") == "stop_checker"
-            for ev in (thinking_events or [])
-        )
-
     def _is_usable_query_result(
         self,
         result: Optional[Dict[str, Any]],
@@ -1462,27 +1455,6 @@ class LayerClassifierNode(WorkflowNode):
                     full_analysis_text=enriched_text_for_downstream,
                     failure_reason=failure_reason,
                 ), thinking_events
-
-            if self._is_direct_query_mode() and self._has_early_stop_event(thinking_events):
-                tool_query_result = self._query_result_from_prometheus_tool_events(question, thinking_events)
-                if tool_query_result is not None and self._has_successful_tool_results(thinking_events):
-                    result = LayerOutput.model_validate({
-                        "layer": "QUERY",
-                        "layers": ["QUERY"],
-                        "layer_name": "查询请求",
-                        "confidence": 0.8,
-                        "reasoning": "已基于真实 Prometheus 工具结果生成 QUERY 结构化结果。",
-                        "key_entities": [],
-                        "possible_scenarios": [],
-                        "query_result": tool_query_result,
-                        "full_analysis": enriched_text_for_downstream,
-                    }).model_dump(exclude_none=True)
-                    logger.info(
-                        "✅ [layer] QUERY direct 跳过 layer_extract，从真实 Prometheus tool_result 构建 LayerOutput | rows=%d sources=%d",
-                        len((tool_query_result or {}).get("rows") or []),
-                        len((tool_query_result or {}).get("sources") or []),
-                    )
-                    return result, thinking_events
 
             extracted = self._extract_with_lite_llm(
                 question=question,

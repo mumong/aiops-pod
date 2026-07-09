@@ -827,19 +827,6 @@ class ConclusionFormatterNode(WorkflowNode):
             return section_re.sub(block, content, count=1)
         return content.rstrip() + "\n\n" + block + "\n"
 
-    def _archive_node_input(self, payload: Dict) -> None:
-        run_id = getattr(self, "current_run_id", "")
-        if not run_id:
-            return
-        try:
-            from app.core.context.archive import ContextArchive
-
-            ContextArchive(run_id=run_id).write_node_artifacts(
-                node_id=self.node_id,
-                input_payload=payload,
-            )
-        except Exception as exc:
-            logger.warning("⚠️ [conclusion] 写入 node input archive 失败: %s", exc)
 
     def _render_query_result(self, query_result: Dict[str, Any]) -> str:
         """QUERY 模式仅渲染结构化 QueryResult，不再做二次 LLM 理解。"""
