@@ -673,10 +673,12 @@ class EvidenceCollectorNode(WorkflowNode):
             )
 
             if existing_plan is not None:
+                handoff_for_existing = self._parse_handoff_json(layer_analysis)
                 evidence_plan = self._normalize_evidence_plan(
                     existing_plan,
-                    layer_handoff=self._parse_handoff_json(layer_analysis),
+                    layer_handoff=handoff_for_existing,
                 )
+                evidence_plan = self._inject_aiops_case_plan_item(evidence_plan, handoff_for_existing)
                 if not evidence_plan:
                     logger.warning("⚠️ [evidence] 既有 evidence_plan 为空，拒绝执行自由文本采证")
                     return [], [], ""
@@ -697,10 +699,12 @@ class EvidenceCollectorNode(WorkflowNode):
                 user_message=user_message,
                 layer_str=layer_str,
             )
+            handoff_for_plan = self._parse_handoff_json(layer_analysis)
             evidence_plan = self._normalize_evidence_plan(
                 evidence_plan,
-                layer_handoff=self._parse_handoff_json(layer_analysis),
+                layer_handoff=handoff_for_plan,
             )
+            evidence_plan = self._inject_aiops_case_plan_item(evidence_plan, handoff_for_plan)
             if not evidence_plan:
                 logger.warning("LLM 未返回有效 evidence_plan Pydantic 结构，拒绝进入工具执行")
                 return [], [], plan_raw
@@ -1194,6 +1198,56 @@ class EvidenceCollectorNode(WorkflowNode):
                 "📋 [evidence] 不再自动补全 evidence_plan；异常组覆盖只通过 LLM Pydantic plan 与后续统计呈现"
             )
         return normalized
+
+    def _inject_aiops_case_plan_item(
+        self,
+        evidence_plan: List[Dict[str, Any]],
+        layer_handoff: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Deterministically make `collect_aiops_case` the first critical evidence
+        step when the tool is available and an abnormal Pod (namespace+name) is
+        known.
+
+        Small models (Qwen 35B) under-select this tool despite prompt guidance and
+        keep planning raw kubectl_describe, so the aiops case + its structured
+        topology never gets collected. We inject the item programmatically instead
+        of relying on the LLM. Behavior-safe: only prepends when genuinely missing,
+        never removes existing plan items, and no-ops when the tool is absent or no
+        abnormal Pod is identified (e.g. HEALTHY/QUERY).
+        """
+        plan = list(evidence_plan or [])
+        tool_names = {getattr(t, "name", "") for t in (getattr(self, "tools", []) or [])}
+        if "collect_aiops_case" not in tool_names:
+            return plan
+        if any(
+            isinstance(it, dict) and str(it.get("tool") or "").strip() == "collect_aiops_case"
+            for it in plan
+        ):
+            return plan
+        target = None
+        for pod in (layer_handoff or {}).get("abnormal_pods") or []:
+            if isinstance(pod, dict) and pod.get("name") and pod.get("namespace"):
+                target = pod
+                break
+        if target is None:
+            return plan
+        ns = str(target.get("namespace")).strip()
+        name = str(target.get("name")).strip()
+        if not ns or not name:
+            return plan
+        injected = {
+            "id": "aiops-case-primary",
+            "description": f"实时采集异常 Pod {ns}/{name} 的 metrics/logs/traces/topology case",
+            "level": "critical",
+            "tool": "collect_aiops_case",
+            "command": f"collect_aiops_case namespace={ns} pod={name}",
+            "tool_args": {"namespace": ns, "pod": name, "scenario": "auto"},
+            "purpose": "一次性采集该异常 Pod 的真实观测证据和结构化拓扑(owner_chain/service/调度关系)，作为首要 critical 证据入口",
+            "acceptable_tools": ["collect_aiops_case"],
+            "source": "aiops_case_injection",
+        }
+        logger.info("🧭 [evidence] 注入 collect_aiops_case 为首个 critical 计划项: %s/%s", ns, name)
+        return [injected] + plan
 
     @classmethod
     def _normalize_plan_tool_args(cls, item: Dict[str, Any]) -> Dict[str, Any]:

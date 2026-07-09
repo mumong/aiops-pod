@@ -1368,3 +1368,37 @@ def test_holmes_service_i18n_getters_preserve_default_behavior_and_allow_overrid
     service.i18n_config = {"prompt_language": "en", "response_language": "en"}
     assert service.get_prompt_language() == "en"
     assert service.get_response_language() == "en"
+
+
+def test_inject_aiops_case_plan_item_deterministic_routing():
+    """collect_aiops_case must be deterministically injected as the first critical
+    plan item when available + an abnormal Pod is known (small models under-select
+    it). Behavior-safe: no-op when tool absent / no abnormal pod / already present."""
+    from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
+
+    class _Tool:
+        def __init__(self, name):
+            self.name = name
+
+    node = EvidenceCollectorNode.__new__(EvidenceCollectorNode)
+    handoff = {"abnormal_pods": [{"name": "aiops-oom-business", "namespace": "aiops-temp", "status": "CrashLoopBackOff"}]}
+    base_plan = [{"id": "g1-describe", "tool": "kubectl_describe", "level": "critical"}]
+
+    # available + abnormal pod -> injected first, original kept
+    node.tools = [_Tool("collect_aiops_case"), _Tool("kubectl_describe")]
+    out = node._inject_aiops_case_plan_item(base_plan, handoff)
+    assert out[0]["tool"] == "collect_aiops_case"
+    assert out[0]["tool_args"] == {"namespace": "aiops-temp", "pod": "aiops-oom-business", "scenario": "auto"}
+    assert len(out) == 2
+
+    # tool not available -> no-op
+    node.tools = [_Tool("kubectl_describe")]
+    assert node._inject_aiops_case_plan_item(base_plan, handoff) == base_plan
+
+    # no abnormal pod (healthy/query) -> no-op
+    node.tools = [_Tool("collect_aiops_case")]
+    assert node._inject_aiops_case_plan_item(base_plan, {"abnormal_pods": []}) == base_plan
+
+    # already present -> no duplicate
+    existing = [{"id": "x", "tool": "collect_aiops_case"}]
+    assert node._inject_aiops_case_plan_item(existing, handoff) == existing

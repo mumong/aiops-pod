@@ -340,13 +340,14 @@ EVIDENCE_COLLECTOR_PROMPT = """
 计划项语义：id、description、level、tool、command、purpose；tool 必须是 Available tools 中真实存在的工具名。
 
 # 采证优先级
-- 如果 Available tools 中存在 `collect_aiops_case`，且本轮是明确的异常 Pod case，优先把它作为 critical 证据采集入口：用 namespace + pod 实时生成包含 metrics/logs/traces/topology 的 case summary；随后只在需要展开原始证据时，优先按返回的 `recommended_refs_by_dimension` 调用 `get_aiops_case_evidence`，其次才使用通用 `evidence_refs`。
+- 【最高优先】只要 Available tools 中存在 `collect_aiops_case`，且上游已确定某个异常 Pod 的 namespace + pod，evidence_plan 的**第一条 critical 计划项必须是 `collect_aiops_case`**（tool 填 `collect_aiops_case`，tool_args 传该异常 Pod 的 namespace 和 pod）。它一次性实时采集该 Pod 的 metrics/logs/traces/topology（K8s describe/events、当前+previous logs、Prometheus metrics、DeepFlow flow 和**结构化 topology：owner_chain Pod→ReplicaSet→Deployment、Service selects、调度/网络关系**），这份 topology 是普通 kubectl 工具无法产出的关系证据。因此对已识别异常 Pod，不要用 `kubectl_describe`/`kubectl_previous_logs` 作为首选 critical 入口，而应让它们成为 `collect_aiops_case` 之后按 `recommended_refs_by_dimension` 展开的细节项（优先 `get_aiops_case_evidence`，其次通用 `evidence_refs`）。
+- 仅当 `collect_aiops_case` 不在 Available tools 中，或它对该 Pod 返回 error/absent 需要补证时，才回退到下面基于 `kubectl describe/events/previous logs` 的原始采证优先级。
 - `collect_aiops_case` 是实时采集当前环境数据的入口，不是读取历史评测标签；不要把 case package 中的 root_cause、expected_remediation、labels 等评测字段写入计划、摘要或结论。
 - `collect_aiops_case` 返回的 topology 是关系证据：`directness=direct` 才能作为目标 Pod 的直接证据；`directness=related_context` 或 `confidence=weak` 只能作为弱相关背景，不能用于排除 Pod 级网络、日志或 trace 问题。
-- Pod 异常场景中，`kubectl describe pod` / `kubectl_events` / `kubectl logs --previous` 的含金量最高；它们给出的 Reason、Last State、Exit Code、Warning、FailedMount、FailedScheduling、BackOff、probe failed 原文优先级高于泛化资源列表。
+- 当 `collect_aiops_case` 不可用而走原始 kubectl 采证时：Pod 异常场景中，`kubectl describe pod` / `kubectl_events` / `kubectl logs --previous` 的含金量最高；它们给出的 Reason、Last State、Exit Code、Warning、FailedMount、FailedScheduling、BackOff、probe failed 原文优先级高于泛化资源列表。（若已通过 `collect_aiops_case` 采集，这些原文已包含在 case 中，只在需要更多细节时按 ref 展开。）
 - Runbook 是分流 guide，不是全量 checklist。先用最高优先级工具读当前错误原文；一旦错误原文命中明确分支，只规划该分支的最小验证，不要把 runbook 的所有典型原因都展开。
 - VolumeMountFailed 必须先看 Pod Events 和 Pod spec 的 volume 类型；只有 Events 或 spec 指向 PVC/PV 时才查 PVC/PV/StorageClass。若 Events 已显示 `configmap/secret not found` 且来自 volume 引用，优先验证对应 ConfigMap/Secret，不要继续泛化查 PVC。
-- CrashLoop/OOM 必须优先 describe + previous logs；ImagePull 必须优先 describe events + image/imagePullSecrets；Pending 必须优先 FailedScheduling 原文；Terminating 必须优先 deletionTimestamp/finalizers；NotReady 必须优先 probe events + logs。
+- 若已用 `collect_aiops_case` 采集异常 Pod，上述各异常类型所需的 describe/events/previous logs/调度原文均已在 case 内，按需展开即可；仅当未使用 `collect_aiops_case` 时才按原始工具优先级采证：CrashLoop/OOM 必须优先 describe + previous logs；ImagePull 必须优先 describe events + image/imagePullSecrets；Pending 必须优先 FailedScheduling 原文；Terminating 必须优先 deletionTimestamp/finalizers；NotReady 必须优先 probe events + logs。
 - 如果 evidence_plan 的 command 包含 `kubectl get ... -o yaml`，或目的要求检查 `finalizers/deletionTimestamp/preStop/lifecycle/terminationGracePeriodSeconds/spec/status` 等 YAML 字段，必须优先使用 `kubectl_get_yaml` 或等价只读 YAML 命令；不要用普通 `kubectl_get_by_name` 表格输出替代 YAML 证据。
 - 如果 evidence_plan 的 `tool/tool_args` 与 `command/purpose/evidence_type` 存在冲突，优先满足诊断意图和 command 语义；`tool_args` 是建议参数，不是禁止你选择更正确工具的硬约束。
 - 先覆盖影响范围最大的异常组：从该组选择代表 Pod 做完整验证，同时结合 `abnormal_groups.entities` / `abnormal_pods` 覆盖同组其他对象的最小状态验证。
