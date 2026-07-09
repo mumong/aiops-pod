@@ -630,14 +630,15 @@ CONCLUSION_FORMATTER_PROMPT = """
 | 错误信息 | xxx |
 ---
 ## 📊 可观测性数据（三维度 + 拓扑）
-> 本节必须基于 `collect_aiops_case` 实时采集的真实结果填写；每个维度标注真实覆盖状态（present/weak/absent/error）与关键信号，缺失维度要诚实标注原因，禁止编造。
+> 本节必须基于 `collect_aiops_case` 实时采集的真实结果填写。**报告是给人看的**：每个维度必须写清「数据来源」和「人能直接读懂的真实原始信号」（真实的日志原文、真实的指标数值、真实的 flow 记录），不要只写 `series=13` 这种统计计数。覆盖状态只能照抄工具返回的真实 coverage（present/empty/weak/absent/error）。**绝对禁止猜测或编造未真实采集到的数据**：coverage=absent/empty/error 时，必须如实写「该维度未采集到真实数据（原因：...）」，不得虚构任何日志行、指标值或 flow。
 ### 三大观测维度
-| 维度 | 覆盖状态 | 关键信号（真实数据） | 证据 ref |
-|------|----------|----------------------|----------|
-| Metrics（指标） | present | `Prometheus pod metrics: series=13 metrics=4`（内存趋势逼近 limit） | metric-...-prometheus |
-| Logging（日志） | present/absent | `allocated business cache chunk=25 approx_mib=50`（应用主动增长内存）/ 或标注 ES 未接入 | log-...-current |
-| Tracing（链路/流量） | present/weak/absent | DeepFlow L7 flow 或标注未接入；node 级只能算弱相关 | deepflow-... |
-| K8s（状态事实） | present | `phase=Running restarts=2162 lastState=OOMKilled exit=137` | k8s-...-pod-yaml |
+| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |
+|------|----------|----------|----------------------------------|----------|
+| Metrics（指标） | Prometheus PromQL 原始输出 | present | 真实指标数值，如 `container_memory_working_set_bytes=62.3Mi（逼近 limit 64Mi）` | metric-...-prometheus |
+| Logging（日志） | Elasticsearch/Filebeat（或 K8s 容器日志） | present/empty/absent | **真实日志原文行**，如 `allocated business cache chunk=25 approx_mib=50`；若 empty/absent 写“未采集到日志（原因）” | log-...-current |
+| Tracing（链路/流量） | DeepFlow L7 flow（ClickHouse `flow_log.l7_flow_log`） | present/empty/absent | 真实 flow 记录，如 `gRPC 172.16.x→172.16.y resp=200 trace_id=...`；node 级只能算弱相关；无流量写“该 Pod 窗口内无 L7 flow” | deepflow-... |
+| K8s（状态事实） | Kubernetes API（describe/events/logs） | present | 真实状态字段，如 `phase=Running restarts=2162 lastState=OOMKilled exit=137` | k8s-...-pod-yaml |
+> 数据来源约定：Metrics=Prometheus 是指标核心原始输出；Logging=ES/Filebeat 是集中日志（或退化为 K8s 容器日志）；Tracing=DeepFlow 是网络 L7 流量/调用；K8s=集群状态事实。四类来源不可混淆，写证据时必须标明是哪一个来源真实返回的。
 ### 拓扑关系（实体与边）
 - **实体**：Pod / Container / Node / IP /（若有）ReplicaSet→Deployment / Service，共 N 个
 - **关键边**（标注 directness/confidence）：
@@ -729,7 +730,7 @@ kubectl logs <pod> -n <namespace> --previous | tail -100
 4. **根因结论必须引用具体证据编号**
 5. **修复命令必须可直接复制执行**
 6. **如有缺失证据，必须列出并说明影响**
-7. **只要证据来自 `collect_aiops_case`，`## 📊 可观测性数据（三维度 + 拓扑）` 区块必填**：三大维度（Metrics/Logging/Tracing）+ K8s 状态各写真实覆盖状态和关键信号；拓扑区块写真实实体和边（owner 链 / Service / 调度 / DeepFlow 弱关联），并诚实标注缺失维度或“独立 Pod 无控制器/无 Service”。禁止编造未采集到的维度或拓扑关系。
+7. **只要证据来自 `collect_aiops_case`，`## 📊 可观测性数据（三维度 + 拓扑）` 区块必填**：三大维度（Metrics/Logging/Tracing）+ K8s 状态各写「数据来源 + 真实覆盖状态 + 人可读的真实原始信号」；拓扑区块写真实实体和边（owner 链 / Service / 调度 / DeepFlow 弱关联），并诚实标注缺失维度或“独立 Pod 无控制器/无 Service”。**每条证据必须标明来源（Prometheus / ES-Filebeat / DeepFlow-ClickHouse / K8s-API）**，写人能读懂的原始数据而非统计计数。**若某维度真实 coverage 是 absent/empty/error，必须如实说明未采集到真实数据及原因，严禁猜测或编造该维度的任何数值/日志/flow。**
 8. **逻辑必须串联**：根因分析要把「三维度信号 → 拓扑责任实体 → 因果链」连起来，例如“Metrics 显示内存增长(维度) + logs 显示 cache 无界分配(维度) + 拓扑显示为独立 Pod 无 Deployment 兜底(拓扑) → 根因落在该 Pod 的 memory limit 配置”。不要三维度与拓扑各说各话、与根因脱节。
 9. **绝不把弱/缺失当强证据**：`directness=related_context` 或 `confidence=weak`（如 DeepFlow node 级）只能作为背景，不能用于排除 Pod 级问题或支撑强因果。
 """
