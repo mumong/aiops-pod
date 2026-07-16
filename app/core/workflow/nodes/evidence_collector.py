@@ -20,9 +20,17 @@ import logging
 import os
 import re
 import shlex
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.core.workflow.fact_contract import (
+    compact_aiops_legacy_context_json,
+    compact_fact_ledgers_json,
+    normalize_case_fact_ledger,
+    normalize_fact_ledger,
+)
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import EvidenceCollectionOutput, EvidencePlanOutput, QueryResult
 from app.core.workflow.state import WorkflowState
@@ -49,6 +57,15 @@ class EvidenceCollectorNode(WorkflowNode):
     3. 统计 LLM 调用和工具调用次数
     4. 计算证据完整度
     """
+
+    _AIOPS_DETAIL_TOOLS = {
+        "get_aiops_case_evidence",
+        "query_aiops_k8s_snapshot",
+        "query_aiops_metrics",
+        "query_aiops_logs",
+        "query_aiops_deepflow_flows",
+        "build_aiops_topology",
+    }
 
     def __init__(
         self,
@@ -207,7 +224,11 @@ class EvidenceCollectorNode(WorkflowNode):
                 thinking_events=state.get("thinking_events", []),
             )
             if not self._early_stop_state.get("triggered"):
-                self._early_stop_state = self._derive_early_stop_state(evidence_plan, evidence_items)
+                self._early_stop_state = self._derive_early_stop_state(
+                    evidence_plan,
+                    evidence_items,
+                    thinking_events=thinking_events,
+                )
 
             # 2.1 回退：evidence 节点没采集到证据时，从 layer 阶段的 thinking_events 统计
             if not evidence_items and not upstream_evidence_items:
@@ -234,8 +255,15 @@ class EvidenceCollectorNode(WorkflowNode):
                         ))
 
             # 3. 计算完整度
+            skipped_plan_ids = self._classify_sufficient_evidence_skips(
+                evidence_plan=evidence_plan,
+                evidence_items=evidence_items,
+                early_stop=self._early_stop_state,
+            )
             combined_evidence_items = self._merge_evidence_items(evidence_items, upstream_evidence_items)
-            completeness = self._calculate_completeness(combined_evidence_items)
+            # Layer observations remain visible in the inventory, but evidence
+            # completeness only measures the evidence node's deduplicated plan.
+            completeness = self._calculate_completeness(evidence_items)
 
             # 4. 更新 metrics（记录 LLM 调用和工具调用次数）
             self._update_metrics(evidence_plan, tool_results)
@@ -244,16 +272,29 @@ class EvidenceCollectorNode(WorkflowNode):
             tool_data_from_llm = self._extract_tool_data_from_thinking(thinking_events)
             evidence_tool_stats = self._calculate_evidence_tool_stats(
                 evidence_plan=evidence_plan,
-                thinking_events=[*(state.get("thinking_events", []) or []), *(thinking_events or [])],
+                thinking_events=thinking_events,
                 evidence_items=evidence_items,
                 upstream_evidence_items=upstream_evidence_items,
+            )
+            observability_target_stats = self._calculate_observability_target_coverage(
+                evidence_plan=evidence_plan,
+                thinking_events=thinking_events,
+            )
+            diagnostic_evidence_stats = self._calculate_diagnostic_evidence_coverage(
+                thinking_events
+            )
+            source_coverage = self._calculate_source_coverage(thinking_events)
+            detail_retrieval = self._calculate_detail_retrieval(thinking_events)
+            unresolved_questions = self._build_unresolved_questions(
+                thinking_events,
+                diagnostic_evidence_stats,
             )
 
             # 6. 构建证据清单（真实数据，供 conclusion LLM 引用）
             # plan_total 保持与模型输出的 evidence_plan 对齐；environment_total
             # 只统计真实环境证据。报告同时展示两个口径，避免用户看到
             # evidence_plan=4 项但“证据完整度 3/3”这种不直观结果。
-            measurable_items = self._measurable_evidence_items(combined_evidence_items)
+            measurable_items = self._measurable_evidence_items(evidence_items)
             plan_stats = self._calculate_plan_completeness(evidence_items, upstream_evidence_items)
             plan_collected = plan_stats["plan_collected"]
             plan_total = plan_stats["plan_total"]
@@ -268,11 +309,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 for e in not_collected
             ]
 
-            plan_by_id = {
-                str(item.get("id", "")): item
-                for item in evidence_plan
-                if isinstance(item, dict)
-            }
+            plan_by_id = self._index_evidence_plan_by_id(evidence_plan)
             evidence_inventory = []
             for e in combined_evidence_items:
                 plan_item = plan_by_id.get(str(e.id), {})
@@ -314,12 +351,54 @@ class EvidenceCollectorNode(WorkflowNode):
                 executed_tool_count=evidence_tool_stats["executed_tool_count"],
                 matched_tool_count=evidence_tool_stats["matched_tool_count"],
                 unplanned_tool_count=evidence_tool_stats["unplanned_tool_count"],
+                case_tool_count=evidence_tool_stats["case_tool_count"],
+                supplemental_tool_count=evidence_tool_stats["supplemental_tool_count"],
+                skipped_plan_count=len(skipped_plan_ids),
+                observability_target_total=observability_target_stats["observability_target_total"],
+                observability_target_collected=observability_target_stats["observability_target_collected"],
+                observability_target_completeness=observability_target_stats[
+                    "observability_target_completeness"
+                ],
+                diagnostic_evidence_total=diagnostic_evidence_stats[
+                    "diagnostic_evidence_total"
+                ],
+                diagnostic_evidence_collected=diagnostic_evidence_stats[
+                    "diagnostic_evidence_collected"
+                ],
+                diagnostic_evidence_completeness=diagnostic_evidence_stats[
+                    "diagnostic_evidence_completeness"
+                ],
+                diagnostic_evidence_missing=diagnostic_evidence_stats[
+                    "diagnostic_evidence_missing"
+                ],
+                dimension_coverage_total=diagnostic_evidence_stats[
+                    "dimension_coverage_total"
+                ],
+                dimension_coverage_collected=diagnostic_evidence_stats[
+                    "dimension_coverage_collected"
+                ],
+                dimension_coverage=diagnostic_evidence_stats[
+                    "dimension_coverage"
+                ],
+                diagnostic_sufficiency=diagnostic_evidence_stats[
+                    "diagnostic_sufficiency"
+                ],
+                diagnostic_sufficiency_label=diagnostic_evidence_stats[
+                    "diagnostic_sufficiency_label"
+                ],
+                source_coverage=source_coverage,
+                detail_retrieval=detail_retrieval,
+                unresolved_questions=unresolved_questions,
             )
 
             new_state.update({
                 "evidence_items": combined_evidence_items,
                 "evidence_analysis": collection_output.model_dump_json(),
-                "evidence_completeness": completeness,
+                "evidence_completeness": (
+                    diagnostic_evidence_stats["diagnostic_sufficiency"]
+                    if diagnostic_evidence_stats["diagnostic_evidence_total"]
+                    else completeness
+                ),
                 "tool_results": tool_results,
                 "evidence_facts": evidence_facts,
                 "evidence_conflicts": evidence_conflicts,
@@ -330,7 +409,7 @@ class EvidenceCollectorNode(WorkflowNode):
                     evidence_plan=evidence_plan,
                     evidence_inventory=evidence_inventory,
                     tool_data=tool_data_from_llm,
-                    collection_summary=f"计划 {total} 项，实际采集 {collected} 项，未采集 {total - collected} 项，完整度 {completeness:.0%}",
+                    collection_summary=collection_output.collection_summary,
                     missing_reasons=missing_reasons,
                 ) if layer == Layer.QUERY else None,
             })
@@ -413,17 +492,56 @@ class EvidenceCollectorNode(WorkflowNode):
         executed_tool_count: int = 0,
         matched_tool_count: int = 0,
         unplanned_tool_count: int = 0,
+        case_tool_count: int = 0,
+        supplemental_tool_count: int = 0,
+        skipped_plan_count: int = 0,
+        observability_target_total: int = 0,
+        observability_target_collected: int = 0,
+        observability_target_completeness: float = 0.0,
+        diagnostic_evidence_total: int = 0,
+        diagnostic_evidence_collected: int = 0,
+        diagnostic_evidence_completeness: float = 0.0,
+        diagnostic_evidence_missing: Optional[List[str]] = None,
+        dimension_coverage_total: int = 0,
+        dimension_coverage_collected: int = 0,
+        dimension_coverage: float = 0.0,
+        diagnostic_sufficiency: float = 0.0,
+        diagnostic_sufficiency_label: str = "",
+        source_coverage: Optional[Dict[str, Any]] = None,
+        detail_retrieval: Optional[Dict[str, Any]] = None,
+        unresolved_questions: Optional[List[str]] = None,
     ) -> EvidenceCollectionOutput:
+        observability_summary = (
+            f"Pod 可观测性覆盖 {observability_target_collected}/"
+            f"{observability_target_total}，完整度 {observability_target_completeness:.0%}"
+            if observability_target_total
+            else "Pod 可观测性覆盖不适用"
+        )
         return EvidenceCollectionOutput.model_validate({
             "evidence_plan": evidence_plan,
             "tool_results": [r.get("summary", "") for r in tool_results],
             "tool_data": tool_data,
             "llm_analysis": llm_result_text[:3000] if llm_result_text else "",
             "collection_summary": (
-                f"计划 {plan_total} 项，实际采集 {plan_collected} 项，"
+                f"{observability_summary}；"
+                f"去重后证据计划 {plan_total} 项，实际采集 {plan_collected} 项，"
                 f"未采集 {plan_total - plan_collected} 项，完整度 {plan_completeness:.0%}；"
-                f"其中真实环境证据 {environment_collected}/{environment_total} 项，完整度 {environment_completeness:.0%}；"
-                f"实际执行工具 {executed_tool_count} 个，匹配计划 {matched_tool_count} 个，未规划证据 {unplanned_tool_count} 个"
+                f"evidence 节点真实环境证据 {environment_collected}/{environment_total} 项，"
+                f"完整度 {environment_completeness:.0%}；"
+                f"决定性多维证据 {diagnostic_evidence_collected}/"
+                f"{diagnostic_evidence_total} 项，维度覆盖 "
+                f"{dimension_coverage:.0%}，诊断充分度 "
+                f"{diagnostic_sufficiency:.0%}"
+                f"（{diagnostic_sufficiency_label or '未评估'}）；"
+                + (
+                    f"补充计划 {skipped_plan_count} 项因实时 case 已完整而跳过；"
+                    if skipped_plan_count
+                    else ""
+                )
+                +
+                f"evidence 节点实际执行工具 {executed_tool_count} 个，"
+                f"其中核心 case {case_tool_count} 个、补充证据 {supplemental_tool_count} 个；"
+                f"已满足计划项 {matched_tool_count} 个，计划外补证 {unplanned_tool_count} 个"
             ),
             "plan_total": plan_total,
             "plan_collected": plan_collected,
@@ -434,6 +552,33 @@ class EvidenceCollectorNode(WorkflowNode):
             "executed_tool_count": executed_tool_count,
             "matched_tool_count": matched_tool_count,
             "unplanned_tool_count": unplanned_tool_count,
+            "case_tool_count": case_tool_count,
+            "supplemental_tool_count": supplemental_tool_count,
+            "skipped_plan_count": skipped_plan_count,
+            "observability_target_total": observability_target_total,
+            "observability_target_collected": observability_target_collected,
+            "observability_target_completeness": observability_target_completeness,
+            "diagnostic_evidence_total": diagnostic_evidence_total,
+            "diagnostic_evidence_collected": diagnostic_evidence_collected,
+            "diagnostic_evidence_completeness": diagnostic_evidence_completeness,
+            "diagnostic_evidence_missing": diagnostic_evidence_missing or [],
+            "dimension_coverage_total": dimension_coverage_total,
+            "dimension_coverage_collected": dimension_coverage_collected,
+            "dimension_coverage": dimension_coverage,
+            "diagnostic_sufficiency": diagnostic_sufficiency,
+            "diagnostic_sufficiency_label": diagnostic_sufficiency_label,
+            "source_coverage": source_coverage or {},
+            "case_target_coverage": {
+                "total": observability_target_total,
+                "collected": observability_target_collected,
+                "rate": observability_target_completeness,
+            },
+            "detail_retrieval": detail_retrieval or {},
+            "diagnostic_sufficiency_summary": {
+                "score": diagnostic_sufficiency,
+                "label": diagnostic_sufficiency_label or "未评估",
+            },
+            "unresolved_questions": unresolved_questions or [],
             "evidence_inventory": evidence_inventory,
             "missing_reasons": missing_reasons,
             "early_stop": early_stop,
@@ -674,11 +819,10 @@ class EvidenceCollectorNode(WorkflowNode):
 
             if existing_plan is not None:
                 handoff_for_existing = self._parse_handoff_json(layer_analysis)
-                evidence_plan = self._normalize_evidence_plan(
+                evidence_plan = self._prepare_evidence_plan(
                     existing_plan,
-                    layer_handoff=handoff_for_existing,
+                    handoff_for_existing,
                 )
-                evidence_plan = self._inject_aiops_case_plan_item(evidence_plan, handoff_for_existing)
                 if not evidence_plan:
                     logger.warning("⚠️ [evidence] 既有 evidence_plan 为空，拒绝执行自由文本采证")
                     return [], [], ""
@@ -700,11 +844,10 @@ class EvidenceCollectorNode(WorkflowNode):
                 layer_str=layer_str,
             )
             handoff_for_plan = self._parse_handoff_json(layer_analysis)
-            evidence_plan = self._normalize_evidence_plan(
+            evidence_plan = self._prepare_evidence_plan(
                 evidence_plan,
-                layer_handoff=handoff_for_plan,
+                handoff_for_plan,
             )
-            evidence_plan = self._inject_aiops_case_plan_item(evidence_plan, handoff_for_plan)
             if not evidence_plan:
                 logger.warning("LLM 未返回有效 evidence_plan Pydantic 结构，拒绝进入工具执行")
                 return [], [], plan_raw
@@ -743,14 +886,22 @@ class EvidenceCollectorNode(WorkflowNode):
             + "- 必须使用 Pydantic 结构化输出契约 EvidencePlanOutput。\n"
             + "- 不要输出自然语言总结，不要把工具结果当证据。\n"
         )
-        structured, raw = ai_call.call_structured(
-            system_prompt=plan_prompt,
-            question=user_message,
-            schema=EvidencePlanOutput,
-            node_id="evidence_plan",
-            run_id=getattr(self, "current_run_id", ""),
-            max_tokens=2048,
-        )
+        llm_start = time.time()
+        try:
+            structured, raw = ai_call.call_structured(
+                system_prompt=plan_prompt,
+                question=user_message,
+                schema=EvidencePlanOutput,
+                node_id="evidence_plan",
+                run_id=getattr(self, "current_run_id", ""),
+                max_tokens=2048,
+            )
+        finally:
+            if self.metrics:
+                self.metrics.record_llm_call(
+                    self.node_id,
+                    (time.time() - llm_start) * 1000,
+                )
         if structured is None:
             return [], raw
         output = structured.model_dump()
@@ -807,24 +958,605 @@ class EvidenceCollectorNode(WorkflowNode):
             plan_mode="preplanned_execution",
         )
 
-        early_stop_enabled = self._is_early_stop_enabled(default=True)
-        logger.info("🧭 [evidence] early_stop=%s", early_stop_enabled)
+        legacy_early_stop_enabled = self._is_early_stop_enabled(default=True)
+        has_mandatory_targets = bool(self._mandatory_case_targets(evidence_plan))
+        logger.info(
+            "🧭 [evidence] legacy_early_stop=%s mandatory_targets=%s",
+            legacy_early_stop_enabled,
+            has_mandatory_targets,
+        )
+        all_thinking_events: List[Dict[str, Any]] = []
+        llm_text_parts: List[str] = []
+        remaining_plan = list(evidence_plan)
+        stalled_rounds = 0
+        tool_result_sequence_start = 0
+        blocked_tool_names = self._blocked_tools_for_preplanned_execution(
+            evidence_plan
+        )
         self._active_evidence_plan = evidence_plan
         try:
-            response, thinking_events = self._call_llm(
-                user_message,
-                system_prompt,
-                stop_checker=self._should_stop_collection_early if early_stop_enabled else None,
-            )
+            while True:
+                prior_attempted = self._attempted_mandatory_case_targets(all_thinking_events)
+
+                def stop_checker(round_events: List[Dict[str, Any]]) -> bool:
+                    return self._should_stop_collection_early(
+                        [*all_thinking_events, *round_events]
+                    )
+
+                response, round_events = self._call_llm(
+                    user_message,
+                    system_prompt,
+                    stop_checker=(
+                        stop_checker
+                        if has_mandatory_targets
+                        else (
+                            self._should_stop_collection_early
+                            if legacy_early_stop_enabled
+                            else None
+                        )
+                    ),
+                    tool_result_sequence_start=tool_result_sequence_start,
+                    blocked_tool_names=blocked_tool_names,
+                )
+                all_thinking_events.extend(round_events)
+                if response and response.result:
+                    llm_text_parts.append(response.result)
+                tool_result_sequence_start = sum(
+                    1
+                    for event in all_thinking_events
+                    if event.get("type") == "tool_result"
+                )
+
+                if self._early_stop_state.get("reason") == "context_budget_stop":
+                    break
+
+                remaining_plan = self._remaining_unattempted_mandatory_items(
+                    evidence_plan,
+                    all_thinking_events,
+                )
+                if not remaining_plan:
+                    if has_mandatory_targets:
+                        refinement_response, refinement_events = (
+                            self._run_post_case_evidence_refinement(
+                                question=question,
+                                thinking_events=all_thinking_events,
+                                tool_result_sequence_start=tool_result_sequence_start,
+                            )
+                        )
+                        all_thinking_events.extend(refinement_events)
+                        if refinement_response and refinement_response.result:
+                            llm_text_parts.append(refinement_response.result)
+                        tool_result_sequence_start = sum(
+                            1
+                            for event in all_thinking_events
+                            if event.get("type") == "tool_result"
+                        )
+                        if self._max_context_usage_ratio(all_thinking_events) >= 0.8:
+                            self._early_stop_state = {
+                                "triggered": True,
+                                "reason": "context_budget_stop",
+                                "required_levels": ["mandatory_live_observability"],
+                                "context_usage_ratio": self._max_context_usage_ratio(
+                                    all_thinking_events
+                                ),
+                                "uncollected_targets": [],
+                                "detail_retrieval": self._calculate_detail_retrieval(
+                                    all_thinking_events
+                                ),
+                            }
+                            break
+
+                        reconciliation_response, reconciliation_events = (
+                            self._run_post_case_runbook_reconciliation(
+                                question=question,
+                                layer_analysis=layer_analysis,
+                                thinking_events=all_thinking_events,
+                                tool_result_sequence_start=tool_result_sequence_start,
+                            )
+                        )
+                        all_thinking_events.extend(reconciliation_events)
+                        if reconciliation_response and reconciliation_response.result:
+                            llm_text_parts.append(reconciliation_response.result)
+                        self._early_stop_state = {
+                            "triggered": True,
+                            "reason": "post_case_reconciliation_complete",
+                            "required_levels": ["mandatory_live_observability"],
+                            "uncollected_targets": [],
+                            "post_case_reconciliation": True,
+                            "runbook_reconciliation": {
+                                "evaluated": True,
+                                "fetched_runbooks": self._fetched_runbook_ids(
+                                    reconciliation_events
+                                ),
+                            },
+                            "detail_retrieval": self._calculate_detail_retrieval(
+                                all_thinking_events
+                            ),
+                        }
+                    break
+
+                current_attempted = self._attempted_mandatory_case_targets(
+                    all_thinking_events
+                )
+                if len(current_attempted) > len(prior_attempted):
+                    stalled_rounds = 0
+                else:
+                    stalled_rounds += 1
+                if stalled_rounds >= 2:
+                    self._early_stop_state = {
+                        "triggered": True,
+                        "reason": "collection_stalled",
+                        "required_levels": ["mandatory_live_observability"],
+                        "uncollected_targets": [
+                            f"{namespace}/{pod}"
+                            for namespace, pod in self._mandatory_case_targets(remaining_plan)
+                        ],
+                    }
+                    break
+
+                user_message = self._build_evidence_user_message(
+                    question=question,
+                    layer=layer_str,
+                    layer_handoff=layer_analysis,
+                    context_archive_ref=context_archive_ref,
+                    layer_archive_ref=layer_archive_ref or {},
+                    strict_mode=False,
+                    failure_reason="继续执行尚未尝试的 mandatory 实时可观测性采集项",
+                    existing_plan=remaining_plan,
+                    plan_mode="preplanned_execution",
+                )
+                completed_summary = self._format_completed_mandatory_summary(
+                    all_thinking_events
+                )
+                if completed_summary:
+                    user_message = (
+                        f"{user_message.rstrip()}\n\n"
+                        "# 已完成 mandatory 采集摘要（不要重复调用）\n"
+                        f"{completed_summary}\n"
+                    )
         finally:
             self._active_evidence_plan = None
 
-        llm_text = (response.result or "") if response else ""
-        if self._has_effective_tool_evidence(thinking_events):
+        llm_text = "\n".join(llm_text_parts)
+        if self._has_effective_tool_evidence(all_thinking_events):
             logger.info("📋 [evidence] 使用 Pydantic evidence_plan 执行采证: %d 项", len(evidence_plan))
-            return evidence_plan, thinking_events, llm_text
+            return evidence_plan, all_thinking_events, llm_text
         logger.warning("⚠️ [evidence] Pydantic evidence_plan 已生成，但执行阶段未产生有效工具结果")
-        return evidence_plan, thinking_events, llm_text
+        return evidence_plan, all_thinking_events, llm_text
+
+
+    def _run_post_case_evidence_refinement(
+        self,
+        *,
+        question: str,
+        thinking_events: List[Dict[str, Any]],
+        tool_result_sequence_start: int,
+    ) -> tuple[Any, List[Dict[str, Any]]]:
+        """Give Qwen one bounded, generic chance to expand decisive evidence."""
+        context_ratio = self._max_context_usage_ratio(thinking_events)
+        if context_ratio >= 0.8:
+            self._early_stop_state = {
+                "triggered": True,
+                "reason": "context_budget_stop",
+                "required_levels": ["mandatory_live_observability"],
+                "context_usage_ratio": context_ratio,
+                "uncollected_targets": [],
+                "detail_retrieval": {
+                    "evaluated": False,
+                    "skipped": True,
+                    "reason": "context_budget_stop",
+                    "requested": 0,
+                    "collected": 0,
+                    "refs": [],
+                },
+            }
+            return None, []
+
+        payload = self._build_post_case_refinement_payload(thinking_events)
+        eligible_cases = [
+            case
+            for case in (payload.get("cases") or [])
+            if str(case.get("case_id") or "").strip()
+        ]
+        if not eligible_cases:
+            return None, []
+        payload = {"cases": eligible_cases}
+
+        enabled_detail_tools = {
+            str(getattr(tool, "name", "") or "").strip().lower()
+            for tool in (getattr(self, "tools", []) or [])
+            if str(getattr(tool, "name", "") or "").strip().lower()
+            in self._AIOPS_DETAIL_TOOLS
+        }
+        has_ref_reader_work = (
+            "get_aiops_case_evidence" in enabled_detail_tools
+            and any(
+                case.get("case_id") and case.get("recommended_refs_by_dimension")
+                for case in payload["cases"]
+            )
+        )
+        has_live_fine_tools = bool(
+            enabled_detail_tools - {"get_aiops_case_evidence"}
+        )
+        if not has_ref_reader_work and not has_live_fine_tools:
+            self._early_stop_state["detail_retrieval"] = {
+                "evaluated": False,
+                "skipped": True,
+                "reason": "no_eligible_detail_tool_or_ref",
+                "requested": 0,
+                "collected": 0,
+                "refs": [],
+            }
+            return None, []
+
+        user_message = (
+            "action=post_case_evidence_refinement\n\n"
+            f"# 用户问题\n{question}\n\n"
+            "# 实时 Case 首屏事实与未回答问题\n"
+            f"{json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+            "# 任务\n"
+            "- 只判断当前首屏事实是否足以回答用户问题；coverage=present 仅表示数据源存在，"
+            "不等于诊断证据充分。\n"
+            "- 如关键判断缺少原文、时间序列、可关联 Trace 或责任边，调用一个或少量允许的"
+            "细粒度 AIOps 工具补证。\n"
+            "- `get_aiops_case_evidence` 只能使用上面真实给出的 case_id 与 "
+            "recommended_refs_by_dimension，不得猜测 ref。\n"
+            "- 当前证据已经决定性、没有冲突时允许零工具调用，并回答 "
+            "`detail_retrieval: current_case_sufficient`。\n"
+            "- 最多执行这一轮；禁止重新调用 collect_aiops_case、kubectl、Runbook 或修复工具。"
+        )
+        system_prompt = (
+            "你负责在实时 AIOps Case 之后做一次窄范围证据补全。"
+            "你只选择是否展开真实 evidence ref 或调用已启用的 AIOps 细粒度查询；"
+            "不得按故障类型套规则，不得生成根因或修复结论。"
+        )
+        response, events = self._call_llm(
+            user_message,
+            system_prompt,
+            tool_result_sequence_start=tool_result_sequence_start,
+            blocked_tool_names=self._blocked_tools_for_post_case_refinement(),
+            skip_remediation_policy=True,
+        )
+        self._early_stop_state["detail_retrieval"] = {
+            "evaluated": True,
+            "skipped": False,
+            **self._calculate_detail_retrieval(events),
+        }
+        return response, events
+
+
+    def _blocked_tools_for_post_case_refinement(self) -> set[str]:
+        return {
+            str(getattr(tool, "name", "") or "")
+            for tool in (getattr(self, "tools", []) or [])
+            if str(getattr(tool, "name", "") or "").strip()
+            and str(getattr(tool, "name", "") or "").strip().lower()
+            not in self._AIOPS_DETAIL_TOOLS
+        }
+
+
+    @classmethod
+    def _build_post_case_refinement_payload(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        cases: List[Dict[str, Any]] = []
+        acquired_refs = {
+            str(args.get("evidence_ref") or "").strip()
+            for event in (thinking_events or [])
+            if event.get("type") == "tool_result"
+            and str(event.get("tool_name") or "").lower()
+            == "get_aiops_case_evidence"
+            if isinstance((args := event.get("tool_args")), dict)
+            and str(args.get("evidence_ref") or "").strip()
+        }
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or event.get("status") != "success"
+                or str(event.get("tool_name") or "").lower()
+                != "collect_aiops_case"
+            ):
+                continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            if structured.get("status") != "case_collected":
+                continue
+            primary = (
+                structured.get("primary_entity")
+                if isinstance(structured.get("primary_entity"), dict)
+                else {}
+            )
+            target = (
+                f"{primary.get('namespace') or 'unknown'}/"
+                f"{primary.get('name') or 'unknown'}"
+            )
+            recommended = (
+                structured.get("recommended_refs_by_dimension")
+                if isinstance(
+                    structured.get("recommended_refs_by_dimension"),
+                    dict,
+                )
+                else {}
+            )
+            recommended = {
+                str(dimension): [
+                    str(ref)
+                    for ref in refs[:3]
+                    if str(ref).strip() and str(ref) not in acquired_refs
+                ]
+                for dimension, refs in recommended.items()
+                if isinstance(refs, list)
+            }
+            recommended = {
+                dimension: refs
+                for dimension, refs in recommended.items()
+                if refs
+            }
+            assessment = cls._calculate_diagnostic_evidence_coverage([event])
+            unresolved = list(assessment.get("diagnostic_evidence_missing") or [])
+            if (
+                assessment.get("diagnostic_evidence_total")
+                and float(assessment.get("diagnostic_sufficiency") or 0.0) < 0.85
+            ):
+                unresolved.append(
+                    f"{target}: first-screen diagnostic evidence is "
+                    f"{assessment.get('diagnostic_sufficiency_label') or 'insufficient'} "
+                    f"({float(assessment.get('diagnostic_sufficiency') or 0.0):.0%})"
+                )
+            conflicts = structured.get("conflicts")
+            if isinstance(conflicts, list):
+                unresolved.extend(
+                    str(item) for item in conflicts[:5] if str(item).strip()
+                )
+
+            details = (
+                structured.get("dimension_details")
+                if isinstance(structured.get("dimension_details"), dict)
+                else {}
+            )
+            cases.append({
+                "case_id": str(structured.get("case_id") or ""),
+                "target": target,
+                "source_coverage": dict(
+                    structured.get("coverage")
+                    if isinstance(structured.get("coverage"), dict)
+                    else {}
+                ),
+                "signals_summary": [
+                    item
+                    for item in (structured.get("signals_summary") or [])[:8]
+                    if isinstance(item, dict)
+                ],
+                "dimension_details": cls._compact_post_case_dimension_details(
+                    details
+                ),
+                "recommended_refs_by_dimension": recommended,
+                "already_acquired_refs": sorted(acquired_refs),
+                "diagnostic_sufficiency": {
+                    "score": assessment.get("diagnostic_sufficiency", 0.0),
+                    "label": assessment.get(
+                        "diagnostic_sufficiency_label",
+                        "未评估",
+                    ),
+                },
+                "unresolved_questions": list(dict.fromkeys(unresolved)),
+            })
+        return {"cases": cases}
+
+
+    @staticmethod
+    def _compact_post_case_dimension_details(
+        details: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        def select(section: str, fields: Dict[str, int]) -> Dict[str, Any]:
+            source = details.get(section)
+            if not isinstance(source, dict):
+                return {}
+            result = {
+                key: source.get(key)
+                for key in (
+                    "coverage",
+                    "deepflow_coverage",
+                    "tempo_coverage",
+                )
+                if key in source
+            }
+            for key, limit in fields.items():
+                value = source.get(key)
+                if isinstance(value, list):
+                    result[key] = [
+                        item for item in value[:limit] if isinstance(item, dict)
+                    ]
+            return result
+
+        return {
+            "metrics": select("metrics", {"highlights": 3}),
+            "logs": select("logs", {"samples": 3}),
+            "tracing": select("tracing", {"flows": 3, "spans": 3}),
+            "topology": select("topology", {"edges": 6}),
+        }
+
+
+    @staticmethod
+    def _max_context_usage_ratio(
+        thinking_events: List[Dict[str, Any]],
+    ) -> float:
+        return max(
+            (
+                float(event.get("context_usage_ratio"))
+                for event in (thinking_events or [])
+                if isinstance(event.get("context_usage_ratio"), (int, float))
+            ),
+            default=0.0,
+        )
+
+
+    def _run_post_case_runbook_reconciliation(
+        self,
+        *,
+        question: str,
+        layer_analysis: str,
+        thinking_events: List[Dict[str, Any]],
+        tool_result_sequence_start: int,
+    ) -> tuple[Any, List[Dict[str, Any]]]:
+        """Give Qwen one bounded chance to refine references after live evidence."""
+        case_summary = self._format_completed_mandatory_summary(thinking_events)
+        if not case_summary:
+            return None, []
+        detail_summary = self._format_post_case_detail_summary(thinking_events)
+
+        handoff = self._parse_handoff_json(layer_analysis)
+        matched = handoff.get("matched_runbooks") if isinstance(handoff, dict) else []
+        if isinstance(matched, str):
+            matched = [matched]
+        existing_runbooks = [
+            safe_id
+            for item in (matched or [])
+            if (safe_id := self._safe_runbook_id(str(item or "")))
+        ]
+        existing_text = (
+            "\n".join(f"- {item}" for item in dict.fromkeys(existing_runbooks))
+            or "- 无"
+        )
+        user_message = f"""action=post_case_runbook_reconciliation
+
+# 用户问题
+{question}
+
+# 上游已经实际获取的 Runbook
+{existing_text}
+
+# 实时 collect_aiops_case 决定性摘要
+{case_summary}
+
+{detail_summary}
+
+# 任务
+- 这是 evidence_plan 完成后的 Runbook 重新裁决，不得重写 evidence_plan，也不得采集新的环境证据。
+- 由你根据每个异常 Pod 的 Kubernetes 终态、决定性日志、Trace 和错误码，自主判断现有 Runbook 是否仍准确。
+- 如果实时证据把通用候选收敛成更具体异常，只调用 `fetch_runbook` 获取缺失且明显匹配的 Runbook。
+- 已在“上游已经实际获取”列表中的 Runbook 禁止重复调用；同一新 Runbook 本轮最多调用一次。
+- 不要求每个 Pod 都新增 Runbook。现有 Runbook 足够或没有可靠匹配时，不调用工具并明确回答 `runbook_reconciliation: keep_existing_or_none`。
+- Runbook 是参考知识，不是真实环境证据；不得把名称、标签或 Runbook 内容写成已证实根因。
+"""
+        system_prompt = """你负责根据实时可观测性证据重新裁决诊断 Runbook。
+只允许调用 fetch_runbook；不得调用 Kubernetes、日志、指标、Trace、case 或修复工具。
+Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。"""
+        return self._call_llm(
+            user_message,
+            system_prompt,
+            tool_result_sequence_start=tool_result_sequence_start,
+            blocked_tool_names=self._blocked_tools_for_runbook_reconciliation(),
+            skip_remediation_policy=True,
+        )
+
+
+    @staticmethod
+    def _format_post_case_detail_summary(
+        thinking_events: List[Dict[str, Any]],
+    ) -> str:
+        lines = []
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or event.get("status") != "success"
+                or str(event.get("tool_name") or "").lower()
+                not in EvidenceCollectorNode._AIOPS_DETAIL_TOOLS
+            ):
+                continue
+            args = (
+                event.get("tool_args")
+                if isinstance(event.get("tool_args"), dict)
+                else {}
+            )
+            result = " ".join(
+                str(
+                    event.get("result")
+                    or event.get("result_preview")
+                    or ""
+                ).split()
+            )[:800]
+            lines.append(
+                f"- tool={event.get('tool_name')} "
+                f"case_id={args.get('case_id') or '-'} "
+                f"evidence_ref={args.get('evidence_ref') or '-'} "
+                f"result={result}"
+            )
+        if not lines:
+            return "# 按需细粒度补证\n- 本轮未展开额外 evidence ref。"
+        return "# 按需细粒度补证\n" + "\n".join(lines)
+
+
+    def _blocked_tools_for_runbook_reconciliation(self) -> set[str]:
+        return {
+            str(getattr(tool, "name", "") or "")
+            for tool in (getattr(self, "tools", []) or [])
+            if str(getattr(tool, "name", "") or "").strip()
+            and str(getattr(tool, "name", "") or "").strip().lower()
+            != "fetch_runbook"
+        }
+
+
+    @staticmethod
+    def _fetched_runbook_ids(
+        thinking_events: List[Dict[str, Any]],
+    ) -> List[str]:
+        fetched: List[str] = []
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or event.get("status") != "success"
+                or str(event.get("tool_name") or "").casefold() != "fetch_runbook"
+            ):
+                continue
+            args = event.get("tool_args") if isinstance(event.get("tool_args"), dict) else {}
+            runbook_id = str(args.get("runbook_id") or "").strip()
+            if runbook_id and runbook_id not in fetched:
+                fetched.append(runbook_id)
+        return fetched
+
+
+    def _blocked_tools_for_preplanned_execution(
+        self,
+        evidence_plan: List[Dict[str, Any]],
+    ) -> set[str]:
+        """Limit execution to tools declared by the structured evidence plan."""
+        allowed_tools = {"fetch_runbook"}
+        if any(
+            isinstance(item, dict)
+            and (
+                item.get("source") == "mandatory_live_observability"
+                or self._normalize_plan_text(item.get("tool")) == "collect_aiops_case"
+            )
+            for item in (evidence_plan or [])
+        ):
+            allowed_tools.add("get_aiops_case_evidence")
+        for item in evidence_plan or []:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool") or "").strip().lower()
+            if tool_name:
+                allowed_tools.add(tool_name)
+            allowed_tools.update(
+                str(name or "").strip().lower()
+                for name in (item.get("acceptable_tools") or [])
+                if str(name or "").strip()
+            )
+
+        return {
+            str(getattr(tool, "name", "") or "")
+            for tool in (getattr(self, "tools", []) or [])
+            if str(getattr(tool, "name", "") or "").strip()
+            and str(getattr(tool, "name", "") or "").strip().lower()
+            not in allowed_tools
+        }
 
 
     @staticmethod
@@ -892,7 +1624,7 @@ class EvidenceCollectorNode(WorkflowNode):
         compact_handoff = EvidenceCollectorNode._compact_layer_handoff_for_prompt(handoff_obj, layer_handoff)
         abnormal_summary_section = EvidenceCollectorNode._format_current_abnormal_summary_for_prompt(handoff_obj)
         matched_runbook_context = EvidenceCollectorNode._build_matched_runbook_context_for_prompt(handoff_obj)
-        return EVIDENCE_USER_MESSAGE_TEMPLATE.format(
+        message = EVIDENCE_USER_MESSAGE_TEMPLATE.format(
             question=question,
             compact_handoff=compact_handoff,
             abnormal_summary_section=abnormal_summary_section,
@@ -905,6 +1637,261 @@ class EvidenceCollectorNode(WorkflowNode):
                 if existing_plan
                 else "调用必要真实工具后输出简短证据结论；不要手写 EvidenceCollectionOutput。"
             ),
+        )
+        if not existing_plan:
+            case_guidance = EvidenceCollectorNode._build_live_observability_plan_guidance(
+                question,
+                handoff_obj,
+            )
+            if case_guidance:
+                message = f"{message.rstrip()}\n\n{case_guidance}\n"
+        return message
+
+    @classmethod
+    def _build_live_observability_plan_guidance(
+        cls,
+        question: str,
+        handoff: Dict[str, Any],
+    ) -> str:
+        del question
+        targets = cls._collect_handoff_pod_targets(handoff)
+        if not targets:
+            return ""
+        rendered_targets = ", ".join(
+            f"{namespace}/{pod}"
+            for namespace, pod in targets[:8]
+        )
+        if len(targets) > 8:
+            rendered_targets += f" 等 {len(targets)} 个 Pod"
+        return (
+            "# 实时可观测性证据优先\n"
+            f"- 上游已确认的异常 Pod 候选：{rendered_targets}。\n"
+            "- 诊断应优先依赖当前环境工具返回的真实证据，而不是 Runbook、名称、标签或模型经验推断。\n"
+            "- 每个已确认异常 Pod 都必须优先执行其 mandatory `collect_aiops_case` 计划项；"
+            "这是 Pod 级高信息密度入口，可一次返回 Kubernetes、Metrics、Logging、Tracing 和 Topology。\n"
+            "- coarse 结果足够时避免重复采集；coverage 缺失、冲突、error、absent 或工具不可用时，"
+            "kubectl/Prometheus 等细粒度工具才作为补证和降级路径。\n"
+            "- Qwen 负责真实执行、理解 coverage 和选择必要补证，但不能跳过 mandatory coarse 项后直接推论。\n"
+            "- 上下文使用率达到 80% 后停止新增采集，明确列出未采集 Pod，不得把它们写成已验证结论。"
+        )
+
+    @staticmethod
+    def _collect_handoff_pod_targets(
+        handoff: Dict[str, Any],
+    ) -> List[tuple[str, str]]:
+        confirmed_targets: List[tuple[str, str]] = []
+        fallback_targets: List[tuple[str, str]] = []
+
+        def add_target(entity: Dict[str, Any], destination: List[tuple[str, str]]) -> None:
+            namespace = str(entity.get("namespace") or "").strip()
+            name = str(entity.get("name") or entity.get("value") or "").strip()
+            if namespace and name:
+                destination.append((namespace, name))
+
+        for entity in handoff.get("active_entities") or []:
+            if not isinstance(entity, dict):
+                continue
+            if str(entity.get("type") or "").strip().lower() != "pod":
+                continue
+            add_target(entity, fallback_targets)
+        for group_key in ("issue_groups", "abnormal_groups"):
+            groups = handoff.get(group_key) or []
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                for entity in group.get("entities") or []:
+                    if not isinstance(entity, dict):
+                        continue
+                    kind = entity.get("kind") or entity.get("type")
+                    if str(kind or "").strip().lower() != "pod":
+                        continue
+                    add_target(entity, confirmed_targets)
+        for entity in handoff.get("abnormal_pods") or []:
+            if not isinstance(entity, dict):
+                continue
+            kind = entity.get("kind") or entity.get("type") or "pod"
+            if str(kind).strip().lower() != "pod":
+                continue
+            add_target(entity, confirmed_targets)
+        if confirmed_targets:
+            confirmed_set = set(confirmed_targets)
+            targets = [
+                target for target in fallback_targets
+                if target in confirmed_set
+            ] + confirmed_targets
+        else:
+            targets = fallback_targets
+        return list(dict.fromkeys(targets))
+
+    @classmethod
+    def _bind_handoff_pod_target(
+        cls,
+        item: Dict[str, Any],
+        handoff_targets: List[tuple[str, str]],
+    ) -> Dict[str, Any]:
+        bound = dict(item)
+        if (
+            cls._normalize_plan_text(bound.get("tool")) != "collect_aiops_case"
+            or cls._extract_plan_pod_target(bound)
+            or not handoff_targets
+        ):
+            return bound
+
+        text = " ".join(
+            str(value).strip().lower()
+            for value in (
+                bound.get("command"),
+                bound.get("description"),
+                bound.get("purpose"),
+                bound.get("target_scope"),
+            )
+            if isinstance(value, str) and value.strip()
+        )
+        text = " ".join(text.split())
+        if not text:
+            return bound
+
+        def contains_identifier(value: str) -> bool:
+            return bool(re.search(
+                rf"(?<![A-Za-z0-9_.-]){re.escape(value.lower())}"
+                r"(?![A-Za-z0-9_.-])",
+                text,
+            ))
+
+        pod_matches = [
+            (namespace.lower(), pod.lower())
+            for namespace, pod in handoff_targets
+            if contains_identifier(pod)
+        ]
+        if len(pod_matches) > 1:
+            pod_matches = [
+                target
+                for target in pod_matches
+                if contains_identifier(target[0])
+            ]
+        if len(pod_matches) != 1:
+            return bound
+
+        namespace, pod = pod_matches[0]
+        args = dict(bound.get("tool_args") or {})
+        args.setdefault("namespace", namespace)
+        args.setdefault("pod", pod)
+        bound["tool_args"] = args
+        logger.info(
+            "🧭 [evidence] 依据已确认异常 Pod 绑定自然语言计划: id=%s target=%s/%s",
+            bound.get("id", ""),
+            namespace,
+            pod,
+        )
+        return bound
+
+    def _ensure_mandatory_aiops_case_plan(
+        self,
+        evidence_plan: List[Dict[str, Any]],
+        layer_handoff: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        plan = [dict(item) for item in (evidence_plan or []) if isinstance(item, dict)]
+        tool_names = {
+            str(getattr(tool, "name", "") or "")
+            for tool in (getattr(self, "tools", []) or [])
+        }
+        if "collect_aiops_case" not in tool_names:
+            return plan
+
+        targets = self._collect_handoff_pod_targets(layer_handoff or {})
+        if not targets:
+            return plan
+        normalized_targets = {
+            (namespace.lower(), pod.lower())
+            for namespace, pod in targets
+        }
+
+        existing_by_target: Dict[tuple[str, str], Dict[str, Any]] = {}
+        remaining: List[Dict[str, Any]] = []
+        preserved_extra_targets: set[tuple[str, str]] = set()
+        for item in plan:
+            if self._normalize_plan_text(item.get("tool")) != "collect_aiops_case":
+                remaining.append(item)
+                continue
+            target = self._extract_plan_pod_target(item)
+            if not target:
+                remaining.append(item)
+                continue
+            if target not in normalized_targets:
+                if target in preserved_extra_targets:
+                    logger.info(
+                        "♻️ [evidence] 跳过额外目标的重复 collect_aiops_case 计划: id=%s target=%s/%s",
+                        item.get("id", ""),
+                        target[0],
+                        target[1],
+                    )
+                    continue
+                preserved_extra_targets.add(target)
+                remaining.append(item)
+                continue
+            if target in existing_by_target:
+                logger.info(
+                    "♻️ [evidence] 跳过同目标重复 collect_aiops_case 计划: id=%s target=%s/%s",
+                    item.get("id", ""),
+                    target[0],
+                    target[1],
+                )
+                continue
+            item["level"] = "critical"
+            item["source"] = "mandatory_live_observability"
+            args = dict(item.get("tool_args") or {})
+            args.setdefault("namespace", target[0])
+            args.setdefault("pod", target[1])
+            args.setdefault("scenario", "auto")
+            item["tool_args"] = args
+            existing_by_target[target] = item
+
+        mandatory: List[Dict[str, Any]] = []
+        for index, (namespace, pod) in enumerate(targets, start=1):
+            normalized_target = (namespace.lower(), pod.lower())
+            existing = existing_by_target.get(normalized_target)
+            if existing is not None:
+                mandatory.append(existing)
+                continue
+            mandatory.append({
+                "id": f"aiops-case-{index}",
+                "description": f"实时采集异常 Pod {namespace}/{pod} 的多维可观测性 case",
+                "level": "critical",
+                "tool": "collect_aiops_case",
+                "command": f"collect_aiops_case namespace={namespace} pod={pod}",
+                "tool_args": {
+                    "namespace": namespace,
+                    "pod": pod,
+                    "scenario": "auto",
+                },
+                "purpose": "采集 Kubernetes、Metrics、Logging、Tracing 和 Topology 真实证据",
+                "acceptable_tools": ["collect_aiops_case"],
+                "source": "mandatory_live_observability",
+            })
+            logger.info(
+                "🧭 [evidence] 补入 mandatory collect_aiops_case: %s/%s",
+                namespace,
+                pod,
+            )
+
+        return mandatory + remaining
+
+    def _prepare_evidence_plan(
+        self,
+        evidence_plan: List[Dict[str, Any]],
+        layer_handoff: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        normalized = self._normalize_evidence_plan(
+            evidence_plan,
+            layer_handoff=layer_handoff,
+        )
+        with_mandatory = self._ensure_mandatory_aiops_case_plan(
+            normalized,
+            layer_handoff,
+        )
+        return self._normalize_evidence_plan(
+            with_mandatory,
+            layer_handoff=layer_handoff,
         )
 
     @staticmethod
@@ -1170,14 +2157,40 @@ class EvidenceCollectorNode(WorkflowNode):
         This keeps dynamic planning but removes repeated variants for the same
         evidence dimension, e.g. curl/telnet/nc against the same registry.
         """
+        handoff_targets = cls._collect_handoff_pod_targets(layer_handoff or {})
+        prepared = [
+            cls._bind_handoff_pod_target(
+                cls._normalize_plan_tool_args(item),
+                handoff_targets,
+            )
+            for item in (evidence_plan or [])
+            if isinstance(item, dict)
+        ]
+        coarse_targets = {
+            target
+            for item in prepared
+            if cls._normalize_plan_text(item.get("tool")) == "collect_aiops_case"
+            if (target := cls._extract_plan_pod_target(item))
+        }
+        has_coarse_case = bool(coarse_targets)
+
         normalized: List[Dict[str, Any]] = []
         seen_signatures: set[tuple[str, str, str]] = set()
         max_items = 10
 
-        for item in evidence_plan or []:
-            if not isinstance(item, dict):
+        for item in prepared:
+            if cls._is_redundant_with_coarse_case(
+                item,
+                coarse_targets=coarse_targets,
+                has_coarse_case=has_coarse_case,
+            ):
+                logger.info(
+                    "♻️ [evidence] coarse case 已覆盖同目标细粒度计划: id=%s tool=%s command=%s",
+                    item.get("id", ""),
+                    item.get("tool", ""),
+                    item.get("command", ""),
+                )
                 continue
-            item = cls._normalize_plan_tool_args(item)
             signature = cls._evidence_plan_signature(item)
             if signature in seen_signatures:
                 logger.info(
@@ -1188,10 +2201,11 @@ class EvidenceCollectorNode(WorkflowNode):
                 )
                 continue
             seen_signatures.add(signature)
-            normalized.append(item)
-            if len(normalized) >= max_items:
+            is_mandatory = item.get("source") == "mandatory_live_observability"
+            if len(normalized) >= max_items and not is_mandatory:
                 logger.info("✂️ [evidence] evidence_plan 超过 %d 项，已截断", max_items)
-                break
+                continue
+            normalized.append(item)
 
         if layer_handoff:
             logger.info(
@@ -1199,55 +2213,246 @@ class EvidenceCollectorNode(WorkflowNode):
             )
         return normalized
 
-    def _inject_aiops_case_plan_item(
-        self,
-        evidence_plan: List[Dict[str, Any]],
-        layer_handoff: Optional[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Deterministically make `collect_aiops_case` the first critical evidence
-        step when the tool is available and an abnormal Pod (namespace+name) is
-        known.
+    @classmethod
+    def _is_redundant_with_coarse_case(
+        cls,
+        item: Dict[str, Any],
+        *,
+        coarse_targets: set[tuple[str, str]],
+        has_coarse_case: bool,
+    ) -> bool:
+        tool = cls._normalize_plan_text(item.get("tool"))
+        if tool == "collect_aiops_case" or not has_coarse_case:
+            return False
+        if tool in {"fetch_runbook", "read_context_archive"}:
+            return False
+        if tool in {"get_aiops_case", "get_aiops_case_evidence"}:
+            # The case id does not exist until collect_aiops_case returns, so
+            # these cannot be useful in the same initial plan.
+            return True
 
-        Small models (Qwen 35B) under-select this tool despite prompt guidance and
-        keep planning raw kubectl_describe, so the aiops case + its structured
-        topology never gets collected. We inject the item programmatically instead
-        of relying on the LLM. Behavior-safe: only prepends when genuinely missing,
-        never removes existing plan items, and no-ops when the tool is absent or no
-        abnormal Pod is identified (e.g. HEALTHY/QUERY).
-        """
-        plan = list(evidence_plan or [])
-        tool_names = {getattr(t, "name", "") for t in (getattr(self, "tools", []) or [])}
-        if "collect_aiops_case" not in tool_names:
-            return plan
-        if any(
-            isinstance(it, dict) and str(it.get("tool") or "").strip() == "collect_aiops_case"
-            for it in plan
-        ):
-            return plan
-        target = None
-        for pod in (layer_handoff or {}).get("abnormal_pods") or []:
-            if isinstance(pod, dict) and pod.get("name") and pod.get("namespace"):
-                target = pod
-                break
-        if target is None:
-            return plan
-        ns = str(target.get("namespace")).strip()
-        name = str(target.get("name")).strip()
-        if not ns or not name:
-            return plan
-        injected = {
-            "id": "aiops-case-primary",
-            "description": f"实时采集异常 Pod {ns}/{name} 的 metrics/logs/traces/topology case",
-            "level": "critical",
-            "tool": "collect_aiops_case",
-            "command": f"collect_aiops_case namespace={ns} pod={name}",
-            "tool_args": {"namespace": ns, "pod": name, "scenario": "auto"},
-            "purpose": "一次性采集该异常 Pod 的真实观测证据和结构化拓扑(owner_chain/service/调度关系)，作为首要 critical 证据入口",
-            "acceptable_tools": ["collect_aiops_case"],
-            "source": "aiops_case_injection",
+        redundant_tools = {
+            "kubectl_describe",
+            "kubectl_get_by_name",
+            "kubectl_get_yaml",
+            "kubectl_events",
+            "kubectl_logs",
+            "kubectl_previous_logs",
+            "kubectl_logs_all_containers",
+            "kubectl_previous_logs_all_containers",
+            "kubectl_container_logs",
+            "kubectl_container_previous_logs",
+            "kubectl_logs_grep",
+            "kubectl_logs_all_containers_grep",
+            "execute_prometheus_instant_query",
+            "execute_prometheus_range_query",
+            "query_aiops_k8s_snapshot",
+            "query_aiops_metrics",
+            "query_aiops_logs",
+            "query_aiops_deepflow_flows",
+            "build_aiops_topology",
         }
-        logger.info("🧭 [evidence] 注入 collect_aiops_case 为首个 critical 计划项: %s/%s", ns, name)
-        return [injected] + plan
+        if tool not in redundant_tools:
+            return False
+        target = cls._extract_plan_pod_target(item)
+        return bool(target and target in coarse_targets)
+
+    @classmethod
+    def _extract_plan_pod_target(cls, item: Dict[str, Any]) -> Optional[tuple[str, str]]:
+        tool = cls._normalize_plan_text(item.get("tool"))
+        command = str(item.get("command") or "")
+        target_scope = str(item.get("target_scope") or "").strip()
+        args = item.get("tool_args") if isinstance(item.get("tool_args"), dict) else {}
+
+        namespace = str(
+            args.get("namespace")
+            or args.get("target_namespace")
+            or ""
+        ).strip("'\"").lower()
+        kind = cls._normalize_resource_kind(
+            args.get("kind")
+            or args.get("resource_kind")
+            or args.get("resource_type")
+            or args.get("entity_type")
+        )
+        pod_name = str(
+            args.get("pod")
+            or args.get("pod_name")
+            or args.get("target_pod")
+            or args.get("target_pod_name")
+            or ""
+        ).strip("'\"").lower()
+        if not pod_name and kind in {"", "pod"}:
+            pod_name = str(
+                args.get("entity_name")
+                or args.get("entity")
+                or args.get("name")
+                or args.get("resource_name")
+                or ""
+            ).strip("'\"").lower()
+        if not pod_name and tool in {
+            "kubectl_logs",
+            "kubectl_previous_logs",
+            "kubectl_logs_all_containers",
+            "kubectl_previous_logs_all_containers",
+            "kubectl_container_logs",
+            "kubectl_container_previous_logs",
+            "kubectl_logs_grep",
+            "kubectl_logs_all_containers_grep",
+        }:
+            pod_name = str(args.get("name") or args.get("resource_name") or "").strip("'\"").lower()
+
+        if target_scope:
+            scope = target_scope.strip("'\" /")
+            if scope.lower().startswith("pod:"):
+                scope = scope[4:].strip()
+            scope_parts = [part.strip().lower() for part in scope.split("/") if part.strip()]
+            if len(scope_parts) == 2:
+                namespace = namespace or scope_parts[0]
+                pod_name = pod_name or scope_parts[1]
+            elif len(scope_parts) == 3 and scope_parts[0] == "pod":
+                namespace = namespace or scope_parts[1]
+                pod_name = pod_name or scope_parts[2]
+
+        if tool == "collect_aiops_case":
+            entity_path_match = re.search(
+                r"\b(?:[A-Za-z_][A-Za-z0-9_]*_)?entity\s*[:=]\s*"
+                r"[\"']?pod/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)"
+                r"(?=[\"'\s,;)]|$)",
+                command,
+                re.IGNORECASE,
+            )
+            if entity_path_match:
+                namespace = namespace or entity_path_match.group(1).lower()
+                pod_name = pod_name or entity_path_match.group(2).lower()
+            bare_target_match = re.fullmatch(
+                r"\s*([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\s*",
+                command,
+            )
+            if bare_target_match:
+                namespace = namespace or bare_target_match.group(1).lower()
+                pod_name = pod_name or bare_target_match.group(2).lower()
+            prefixed_target_match = re.search(
+                r"\bfor\s+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?=\s|$|[,;)])",
+                command,
+                re.IGNORECASE,
+            )
+            if prefixed_target_match:
+                namespace = namespace or prefixed_target_match.group(1).lower()
+                pod_name = pod_name or prefixed_target_match.group(2).lower()
+            colon_target_match = re.fullmatch(
+                r"\s*pod:([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)\s*",
+                command,
+                re.IGNORECASE,
+            )
+            if colon_target_match:
+                pod_name = pod_name or colon_target_match.group(1).lower()
+                namespace = namespace or colon_target_match.group(2).lower()
+
+        namespace_match = re.search(
+            r"(?:^|\s)-n\s+([^\s]+)|(?:^|\s)--namespace(?:=|\s+)([^\s]+)",
+            command,
+            re.IGNORECASE,
+        )
+        if not namespace and namespace_match:
+            namespace = (namespace_match.group(1) or namespace_match.group(2) or "").strip("'\"").lower()
+
+        coarse_match = re.search(
+            r"\bpod(?:\s+|/)([A-Za-z0-9_.-]+)\s+"
+            r"in\s+namespace\s+([A-Za-z0-9_.-]+)",
+            command,
+            re.IGNORECASE,
+        )
+        if coarse_match:
+            pod_name = pod_name or coarse_match.group(1).lower()
+            namespace = namespace or coarse_match.group(2).lower()
+
+        pod_command_match = re.search(
+            r"(?:^|\s)pod\s+([A-Za-z0-9_.-]+)(?=\s|$)",
+            command,
+            re.IGNORECASE,
+        )
+        if pod_command_match:
+            pod_name = pod_name or pod_command_match.group(1).lower()
+
+        event_match = re.search(r"involvedObject\.name=([^,\s]+)", command, re.IGNORECASE)
+        if event_match and tool == "kubectl_events":
+            pod_name = pod_name or event_match.group(1).strip("'\"").lower()
+
+        logs_match = re.search(r"\bkubectl\s+logs\s+([A-Za-z0-9_.-]+)", command, re.IGNORECASE)
+        if logs_match:
+            pod_name = pod_name or logs_match.group(1).lower()
+
+        resource_target = cls._extract_plan_resource_target(command)
+        if resource_target.get("kind") == "pod":
+            namespace = namespace or resource_target.get("namespace", "")
+            pod_name = pod_name or resource_target.get("name", "")
+
+        if not pod_name:
+            pod_filter = re.search(
+                r"\b(?:target_)?pod(?:_name)?\s*(?:=|=~)\s*[\"']?([A-Za-z0-9_.-]+)",
+                command,
+                re.IGNORECASE,
+            )
+            if pod_filter:
+                pod_name = pod_filter.group(1).lower()
+        if (
+            not pod_name
+            and tool == "collect_aiops_case"
+            and re.search(r"\b(?:get\s+)?pod\b", command, re.IGNORECASE)
+        ):
+            name_filter = re.search(
+                r"\b(?:target_)?(?:pod_)?name\s*(?:=|=~)\s*[\"']?([A-Za-z0-9_.-]+)",
+                command,
+                re.IGNORECASE,
+            )
+            if name_filter:
+                pod_name = name_filter.group(1).lower()
+        if (
+            not pod_name
+            and tool == "collect_aiops_case"
+            and re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\(", command)
+        ):
+            name_filter = re.search(
+                r"\b(?:target_)?(?:pod_)?name\s*=\s*[\"']?"
+                r"([A-Za-z0-9_.-]+)",
+                command,
+                re.IGNORECASE,
+            )
+            if name_filter:
+                pod_name = name_filter.group(1).lower()
+        if not namespace:
+            namespace_filter = re.search(
+                r"\b(?:target_)?namespace\s*(?:=|=~)\s*[\"']?([A-Za-z0-9_.-]+)",
+                command,
+                re.IGNORECASE,
+            )
+            if namespace_filter:
+                namespace = namespace_filter.group(1).lower()
+
+        if tool == "collect_aiops_case" and (not namespace or not pod_name):
+            labelled_values = {
+                key.lower(): value.lower()
+                for key, value in re.findall(
+                    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*"
+                    r"[\"']?([A-Za-z0-9_.-]+)",
+                    command,
+                )
+            }
+            for key, value in labelled_values.items():
+                if not key.endswith("_name") or "pod" not in key:
+                    continue
+                prefix = key[:-len("_name")]
+                paired_namespace = labelled_values.get(f"{prefix}_namespace")
+                if not paired_namespace:
+                    continue
+                pod_name = pod_name or value
+                namespace = namespace or paired_namespace
+                break
+
+        if namespace and pod_name:
+            return namespace, pod_name
+        return None
 
     @classmethod
     def _normalize_plan_tool_args(cls, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -1649,6 +2854,7 @@ class EvidenceCollectorNode(WorkflowNode):
         successful_tools = [
             ev for ev in thinking_events
             if ev.get("type") == "tool_result"
+            and ev.get("deduplicated") is not True
             and ev.get("status") == "success"
             and (
                 ev.get("semantic_success", True) is not False
@@ -1660,6 +2866,52 @@ class EvidenceCollectorNode(WorkflowNode):
             )
         ]
         if not successful_tools:
+            return False
+
+        mandatory_targets = self._mandatory_case_targets(evidence_plan)
+        if mandatory_targets:
+            attempted_targets = self._attempted_mandatory_case_targets(thinking_events)
+            uncollected_targets = [
+                f"{namespace}/{pod}"
+                for namespace, pod in mandatory_targets
+                if (namespace, pod) not in attempted_targets
+            ]
+            max_context_ratio = max(
+                (
+                    float(ev.get("context_usage_ratio"))
+                    for ev in thinking_events
+                    if isinstance(ev.get("context_usage_ratio"), (int, float))
+                ),
+                default=0.0,
+            )
+            if max_context_ratio >= 0.8:
+                self._early_stop_state = {
+                    "triggered": True,
+                    "reason": "context_budget_stop",
+                    "required_levels": ["mandatory_live_observability"],
+                    "context_usage_ratio": max_context_ratio,
+                    "uncollected_targets": uncollected_targets,
+                }
+                return True
+
+            successful_targets = self._successful_mandatory_case_targets(thinking_events)
+            if all(target in successful_targets for target in mandatory_targets):
+                self._early_stop_state = {
+                    "triggered": False,
+                    "reason": "mandatory_live_observability_ready_for_reconciliation",
+                    "required_levels": ["mandatory_live_observability"],
+                    "uncollected_targets": [],
+                    "post_case_reconciliation": False,
+                }
+                return False
+            return False
+
+        if self._coarse_case_has_missing_dimensions(evidence_plan, thinking_events):
+            self._early_stop_state = {
+                "triggered": False,
+                "reason": "collect_aiops_case 存在缺失维度，继续按 coverage 补证",
+                "required_levels": ["critical", "important"],
+            }
             return False
 
         evidence_items = self._build_evidence_items_from_thinking(evidence_plan, thinking_events)
@@ -1693,8 +2945,502 @@ class EvidenceCollectorNode(WorkflowNode):
             }
         return all_collected
 
-    def _derive_early_stop_state(self, evidence_plan: List[Dict], evidence_items: List[EvidenceItem]) -> Dict[str, Any]:
+    @classmethod
+    def _mandatory_case_targets(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+    ) -> List[tuple[str, str]]:
+        targets = [
+            target
+            for item in (evidence_plan or [])
+            if isinstance(item, dict)
+            and item.get("source") == "mandatory_live_observability"
+            if (target := cls._extract_plan_pod_target(item))
+        ]
+        return list(dict.fromkeys(targets))
+
+    @classmethod
+    def _extract_tool_event_pod_target(
+        cls,
+        event: Dict[str, Any],
+        *,
+        require_consistent: bool = False,
+    ) -> Optional[tuple[str, str]]:
+        args = event.get("tool_args") if isinstance(event.get("tool_args"), dict) else {}
+        requested = cls._extract_plan_pod_target({
+            "tool": event.get("tool_name") or "collect_aiops_case",
+            "command": event.get("command") or "",
+            "target_scope": event.get("target_scope") or "",
+            "tool_args": args,
+        })
+        structured = event.get("structured") if isinstance(event.get("structured"), dict) else {}
+        primary = (
+            structured.get("primary_entity")
+            if isinstance(structured.get("primary_entity"), dict)
+            else {}
+        )
+        observed_namespace = str(primary.get("namespace") or "").strip().lower()
+        observed_pod = str(primary.get("name") or "").strip().lower()
+        observed = (
+            (observed_namespace, observed_pod)
+            if observed_namespace and observed_pod
+            else None
+        )
+        if require_consistent and requested and observed and requested != observed:
+            logger.warning(
+                "⚠️ [evidence] collect_aiops_case 请求目标与返回实体不一致: requested=%s/%s observed=%s/%s",
+                requested[0],
+                requested[1],
+                observed[0],
+                observed[1],
+            )
+            return None
+        return requested or observed
+
+    @classmethod
+    def _attempted_mandatory_case_targets(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> set[tuple[str, str]]:
+        return {
+            target
+            for event in (thinking_events or [])
+            if event.get("type") == "tool_result"
+            and event.get("deduplicated") is not True
+            and str(event.get("tool_name") or "").lower() == "collect_aiops_case"
+            if (target := cls._extract_tool_event_pod_target(event))
+        }
+
+    @classmethod
+    def _successful_mandatory_case_targets(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> set[tuple[str, str]]:
+        return {
+            target
+            for event in (thinking_events or [])
+            if event.get("type") == "tool_result"
+            and event.get("deduplicated") is not True
+            and event.get("status") == "success"
+            and str(event.get("tool_name") or "").lower() == "collect_aiops_case"
+            and isinstance(event.get("structured"), dict)
+            and event["structured"].get("status") == "case_collected"
+            if (target := cls._extract_tool_event_pod_target(
+                event,
+                require_consistent=True,
+            ))
+        }
+
+    @classmethod
+    def _calculate_observability_target_coverage(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+        thinking_events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        mandatory_targets = set(cls._mandatory_case_targets(evidence_plan))
+        successful_targets = cls._successful_mandatory_case_targets(thinking_events)
+        collected_targets = mandatory_targets & successful_targets
+        total = len(mandatory_targets)
+        collected = len(collected_targets)
+        return {
+            "observability_target_total": total,
+            "observability_target_collected": collected,
+            "observability_target_completeness": collected / total if total else 0.0,
+        }
+
+    @classmethod
+    def _calculate_source_coverage(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        cases: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or event.get("status") != "success"
+                or str(event.get("tool_name") or "").lower()
+                != "collect_aiops_case"
+            ):
+                continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            if structured.get("status") != "case_collected":
+                continue
+            target = cls._extract_tool_event_pod_target(event)
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            cases.append({
+                "target": f"{target[0]}/{target[1]}",
+                "case_id": str(structured.get("case_id") or ""),
+                "dimensions": dict(
+                    structured.get("coverage")
+                    if isinstance(structured.get("coverage"), dict)
+                    else {}
+                ),
+            })
+        return {"cases": cases}
+
+    @classmethod
+    def _calculate_detail_retrieval(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        requested = 0
+        collected = 0
+        refs: List[str] = []
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or str(event.get("tool_name") or "").lower()
+                not in cls._AIOPS_DETAIL_TOOLS
+            ):
+                continue
+            requested += 1
+            if event.get("status") == "success":
+                collected += 1
+            args = (
+                event.get("tool_args")
+                if isinstance(event.get("tool_args"), dict)
+                else {}
+            )
+            evidence_ref = str(args.get("evidence_ref") or "").strip()
+            if evidence_ref and evidence_ref not in refs:
+                refs.append(evidence_ref)
+        return {
+            "evaluated": requested > 0,
+            "requested": requested,
+            "collected": collected,
+            "refs": refs,
+        }
+
+    @classmethod
+    def _build_unresolved_questions(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+        diagnostic_stats: Dict[str, Any],
+    ) -> List[str]:
+        questions = list(
+            diagnostic_stats.get("diagnostic_evidence_missing") or []
+        )
+        for case in cls._build_post_case_refinement_payload(
+            thinking_events
+        ).get("cases", []):
+            questions.extend(case.get("unresolved_questions") or [])
+        return list(dict.fromkeys(str(item) for item in questions if str(item).strip()))
+
+    @classmethod
+    def _calculate_diagnostic_evidence_coverage(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Separate dimension presence from evidence quality and sufficiency."""
+        total = 0
+        collected = 0
+        sufficiency_points = 0.0
+        missing: List[str] = []
+
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or event.get("status") != "success"
+                or str(event.get("tool_name") or "").lower() != "collect_aiops_case"
+            ):
+                continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            if structured.get("status") != "case_collected":
+                continue
+
+            primary = (
+                structured.get("primary_entity")
+                if isinstance(structured.get("primary_entity"), dict)
+                else {}
+            )
+            target = (
+                f"{primary.get('namespace') or 'unknown'}/"
+                f"{primary.get('name') or 'unknown'}"
+            )
+            details = (
+                structured.get("dimension_details")
+                if isinstance(structured.get("dimension_details"), dict)
+                else {}
+            )
+            signals = (
+                structured.get("signals_summary")
+                if isinstance(structured.get("signals_summary"), list)
+                else []
+            )
+            metrics = details.get("metrics") if isinstance(details.get("metrics"), dict) else {}
+            logs = details.get("logs") if isinstance(details.get("logs"), dict) else {}
+            tracing = details.get("tracing") if isinstance(details.get("tracing"), dict) else {}
+            topology = details.get("topology") if isinstance(details.get("topology"), dict) else {}
+
+            checks = {
+                "k8s": any(
+                    isinstance(signal, dict)
+                    and str(signal.get("dimension") or "").lower() == "k8s"
+                    and bool(str(signal.get("observed") or "").strip())
+                    for signal in signals
+                ),
+                "metrics": bool(metrics.get("highlights")),
+                "logs": bool(logs.get("samples")),
+                "tracing": bool(tracing.get("flows") or tracing.get("spans")),
+                "topology": bool(topology.get("edges")),
+            }
+            k8s_score = 0.0
+            k8s_candidates = [
+                signal
+                for signal in signals
+                if isinstance(signal, dict)
+                and str(signal.get("dimension") or "").lower() == "k8s"
+                and bool(str(signal.get("observed") or "").strip())
+            ]
+            if k8s_candidates:
+                k8s_score = (
+                    1.0
+                    if any(
+                        str(signal.get("strength") or "").lower() == "strong"
+                        for signal in k8s_candidates
+                    )
+                    else 0.5
+                )
+
+            metric_score = 0.0
+            metric_highlights = [
+                item
+                for item in (metrics.get("highlights") or [])
+                if isinstance(item, dict)
+            ]
+            if metric_highlights:
+                metric_score = 0.5
+                if any(
+                    len(item.get("samples") or []) >= 2
+                    or any(
+                        item.get(key) is True
+                        for key in (
+                            "anomaly",
+                            "is_anomalous",
+                            "breached",
+                            "threshold_breached",
+                        )
+                    )
+                    or bool(re.search(
+                        r"anomal|breach|critical|warning|exceed",
+                        " ".join(
+                            str(item.get(key) or "")
+                            for key in ("status", "severity", "assessment")
+                        ),
+                        re.IGNORECASE,
+                    ))
+                    for item in metric_highlights
+                ):
+                    metric_score = 1.0
+
+            log_score = 0.0
+            log_samples = [
+                item
+                for item in (logs.get("samples") or [])
+                if isinstance(item, dict)
+            ]
+            if log_samples:
+                log_score = 0.5
+                decisive_log_pattern = re.compile(
+                    r"error|fatal|exception|oom|config_missing|required config|"
+                    r"missing|failed|denied|timeout|exit[_ ]?code",
+                    re.IGNORECASE,
+                )
+                if any(
+                    decisive_log_pattern.search(
+                        " ".join(
+                            str(value)
+                            for value in (
+                                item.get("message"),
+                                item.get("event"),
+                                item.get("level"),
+                                item.get("error_code"),
+                            )
+                            if value not in (None, "")
+                        )
+                    )
+                    for item in log_samples
+                ):
+                    log_score = 1.0
+
+            trace_score = 0.0
+            flows = [
+                item
+                for item in (tracing.get("flows") or [])
+                if isinstance(item, dict)
+            ]
+            spans = [
+                item
+                for item in (tracing.get("spans") or [])
+                if isinstance(item, dict)
+            ]
+            if flows or spans:
+                trace_score = 0.5
+                flow_ids = {
+                    str(item.get("trace_id"))
+                    for item in flows
+                    if item.get("trace_id")
+                }
+                span_ids = {
+                    str(item.get("trace_id"))
+                    for item in spans
+                    if item.get("trace_id")
+                }
+                has_error_semantics = any(
+                    str(item.get("response_code") or "").startswith(("4", "5"))
+                    for item in flows
+                ) or any(
+                    any(
+                        key in (item.get("attributes") or {})
+                        for key in (
+                            "error.type",
+                            "http.response.status_code",
+                            "aiops.allocated_mib.before",
+                            "aiops.allocated_mib.after",
+                        )
+                    )
+                    for item in spans
+                    if isinstance(item.get("attributes"), dict)
+                )
+                if (
+                    flows
+                    and spans
+                    and ((flow_ids and span_ids and flow_ids & span_ids) or has_error_semantics)
+                ):
+                    trace_score = 1.0
+
+            topology_score = 0.0
+            topology_edges = [
+                item
+                for item in (topology.get("edges") or [])
+                if isinstance(item, dict)
+            ]
+            if topology_edges:
+                topology_score = 0.5
+                relationships = {
+                    str(item.get("relationship") or "").lower()
+                    for item in topology_edges
+                }
+                has_traffic = any(
+                    "calls" in relationship or "selects" in relationship
+                    for relationship in relationships
+                )
+                has_ownership = any(
+                    "owned_by" in relationship for relationship in relationships
+                )
+                if has_traffic and has_ownership:
+                    topology_score = 1.0
+
+            scores = {
+                "k8s": k8s_score,
+                "metrics": metric_score,
+                "logs": log_score,
+                "tracing": trace_score,
+                "topology": topology_score,
+            }
+            total += len(checks)
+            sufficiency_points += sum(scores.values())
+            for dimension, present in checks.items():
+                if present:
+                    collected += 1
+                else:
+                    missing.append(f"{target}:{dimension}")
+
+        coverage = collected / total if total else 0.0
+        sufficiency = sufficiency_points / total if total else 0.0
+        if sufficiency >= 0.85:
+            sufficiency_label = "充分"
+        elif sufficiency >= 0.5:
+            sufficiency_label = "部分充分"
+        else:
+            sufficiency_label = "不足"
+        return {
+            "diagnostic_evidence_total": total,
+            "diagnostic_evidence_collected": collected,
+            "diagnostic_evidence_completeness": coverage,
+            "diagnostic_evidence_missing": missing,
+            "dimension_coverage_total": total,
+            "dimension_coverage_collected": collected,
+            "dimension_coverage": coverage,
+            "diagnostic_sufficiency": sufficiency,
+            "diagnostic_sufficiency_label": sufficiency_label,
+        }
+
+    @classmethod
+    def _remaining_unattempted_mandatory_items(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+        thinking_events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        attempted = cls._attempted_mandatory_case_targets(thinking_events)
+        return [
+            dict(item)
+            for item in (evidence_plan or [])
+            if isinstance(item, dict)
+            and item.get("source") == "mandatory_live_observability"
+            and (target := cls._extract_plan_pod_target(item))
+            and target not in attempted
+        ]
+
+    @classmethod
+    def _format_completed_mandatory_summary(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> str:
+        lines: List[str] = []
+        seen: set[tuple[str, str]] = set()
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or str(event.get("tool_name") or "").lower() != "collect_aiops_case"
+            ):
+                continue
+            target = cls._extract_tool_event_pod_target(event)
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            status = str(structured.get("status") or event.get("status") or "unknown")
+            result = str(event.get("result") or event.get("result_preview") or "")
+            compact_result = " ".join(result.split())[:1000]
+            lines.append(
+                f"- {target[0]}/{target[1]}: status={status}; {compact_result}"
+            )
+        return "\n".join(lines)
+
+    def _derive_early_stop_state(
+        self,
+        evidence_plan: List[Dict],
+        evidence_items: List[EvidenceItem],
+        thinking_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """根据计划和采集结果后验推导提前停止状态，保证输出字段稳定。"""
+        if self._coarse_case_has_missing_dimensions(evidence_plan, thinking_events or []):
+            return {
+                "triggered": False,
+                "reason": "collect_aiops_case 存在缺失维度，未触发提前停止",
+                "required_levels": ["critical", "important"],
+            }
+
         planned_items = [
             e for e in evidence_items
             if getattr(e, "source", "") in ("thinking_match", "thinking_negative_match", "planned")
@@ -1723,6 +3469,34 @@ class EvidenceCollectorNode(WorkflowNode):
             "reason": "",
             "required_levels": ["critical", "important"],
         }
+
+    @classmethod
+    def _coarse_case_has_missing_dimensions(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+        thinking_events: List[Dict[str, Any]],
+    ) -> bool:
+        if not any(
+            cls._normalize_plan_text(item.get("tool")) == "collect_aiops_case"
+            for item in (evidence_plan or [])
+            if isinstance(item, dict)
+        ):
+            return False
+
+        coarse_results = [
+            ev
+            for ev in (thinking_events or [])
+            if ev.get("type") == "tool_result"
+            and ev.get("status") == "success"
+            and str(ev.get("tool_name") or "").lower() == "collect_aiops_case"
+            and isinstance(ev.get("structured"), dict)
+            and ev["structured"].get("status") == "case_collected"
+        ]
+        if not coarse_results:
+            return False
+        return not cls._aiops_case_coverage_complete(
+            coarse_results[-1]["structured"].get("coverage")
+        )
 
     # 非证据类工具（LLM 自用的辅助工具），不计入证据统计
     _NON_EVIDENCE_TOOLS = {
@@ -1758,6 +3532,7 @@ class EvidenceCollectorNode(WorkflowNode):
             if (
                 ev.get("type") == "tool_result"
                 and ev.get("status") == "success"
+                and ev.get("deduplicated") is not True
             ):
                 result = ev.get("result", ev.get("result_preview", ""))
                 structured = ev.get("structured") or {}
@@ -1819,6 +3594,12 @@ class EvidenceCollectorNode(WorkflowNode):
             plan_cmd = (plan_item.get("command") or "").lower()
             plan_desc = (plan_item.get("description") or "").lower()
             plan_intent = str(plan_item.get("evidence_type") or "").lower()
+            plan_tool_args = (
+                plan_item.get("tool_args")
+                if isinstance(plan_item.get("tool_args"), dict)
+                else {}
+            )
+            plan_target_scope = str(plan_item.get("target_scope") or "")
             acceptable_tools = [
                 str(tool or "").lower()
                 for tool in (plan_item.get("acceptable_tools") or [])
@@ -1844,7 +3625,7 @@ class EvidenceCollectorNode(WorkflowNode):
                     matched_tool_indices.add(adjudicated_index)
                 else:
                     for ti, tool in enumerate(successful_tools):
-                        if ti in matched_tool_indices or not tool.get("diagnostic_negative"):
+                        if ti in matched_tool_indices:
                             continue
                         tn = tool["tool_name"].lower()
                         if self._tool_result_matches_plan(
@@ -1856,6 +3637,8 @@ class EvidenceCollectorNode(WorkflowNode):
                             structured=tool.get("structured") or {},
                             tool_args=tool.get("tool_args") or {},
                             plan_intent=plan_intent,
+                            plan_tool_args=plan_tool_args,
+                            plan_target_scope=plan_target_scope,
                             acceptable_tools=acceptable_tools,
                         ):
                             matched = True
@@ -1877,6 +3660,8 @@ class EvidenceCollectorNode(WorkflowNode):
                         structured=tool.get("structured") or {},
                         tool_args=tool.get("tool_args") or {},
                         plan_intent=plan_intent,
+                        plan_tool_args=plan_tool_args,
+                        plan_target_scope=plan_target_scope,
                         acceptable_tools=acceptable_tools,
                     ):
                         matched = True
@@ -1940,15 +3725,15 @@ class EvidenceCollectorNode(WorkflowNode):
             for item in evidence_plan or []
             if isinstance(item, dict) and item.get("id")
         }
+        del upstream_evidence_items
         matched_ids = {
             str(item.id)
-            for item in [*(evidence_items or []), *(upstream_evidence_items or [])]
+            for item in (evidence_items or [])
             if item.collected
             and str(item.id) in planned_ids
             and str(getattr(item, "source", "") or "") in {
                 "thinking_match",
                 "thinking_negative_match",
-                "layer_verified",
             }
         }
 
@@ -1956,11 +3741,20 @@ class EvidenceCollectorNode(WorkflowNode):
         executed_tool_count = len(evidence_tool_events)
         matched_tool_count = len(matched_ids)
         unplanned_tool_count = max(0, executed_tool_count - matched_tool_count)
+        case_tool_count = sum(
+            1
+            for event in evidence_tool_events
+            if str(event.get("tool_name") or "").strip().lower()
+            == "collect_aiops_case"
+        )
+        supplemental_tool_count = max(0, executed_tool_count - case_tool_count)
 
         return {
             "executed_tool_count": executed_tool_count,
             "matched_tool_count": matched_tool_count,
             "unplanned_tool_count": unplanned_tool_count,
+            "case_tool_count": case_tool_count,
+            "supplemental_tool_count": supplemental_tool_count,
         }
 
     def _extract_evidence_tool_events(self, thinking_events: list) -> List[Dict[str, Any]]:
@@ -1968,6 +3762,8 @@ class EvidenceCollectorNode(WorkflowNode):
         evidence_events: List[Dict[str, Any]] = []
         for ev in thinking_events or []:
             if ev.get("type") != "tool_result" or ev.get("status") != "success":
+                continue
+            if ev.get("deduplicated") is True:
                 continue
             tool_name = str(ev.get("tool_name", "") or "").lower()
             if tool_name in self._NON_EVIDENCE_TOOLS:
@@ -1998,6 +3794,7 @@ class EvidenceCollectorNode(WorkflowNode):
             if ev.get("type") == "tool_result"
             and ev.get("node") == "layer"
             and ev.get("status") == "success"
+            and ev.get("deduplicated") is not True
             and str(ev.get("tool_name", "")).lower() not in self._NON_EVIDENCE_TOOLS
             and str(ev.get("tool_name", "")).lower() not in {"fetch_runbook", "read_context_archive"}
         ]
@@ -2047,7 +3844,7 @@ class EvidenceCollectorNode(WorkflowNode):
         if not upstream_items:
             return evidence_items
 
-        merged: List[EvidenceItem] = list(evidence_items or [])
+        merged: List[EvidenceItem] = [replace(item) for item in (evidence_items or [])]
         by_id = {str(item.id): idx for idx, item in enumerate(merged)}
         for item in upstream_items:
             item_id = str(item.id)
@@ -2059,7 +3856,7 @@ class EvidenceCollectorNode(WorkflowNode):
                     existing.source = item.source
                     existing.outcome = getattr(item, "outcome", getattr(existing, "outcome", "positive"))
                 continue
-            merged.append(item)
+            merged.append(replace(item))
             by_id[item_id] = len(merged) - 1
         return merged
 
@@ -2087,11 +3884,7 @@ class EvidenceCollectorNode(WorkflowNode):
         if not planned_items:
             return {"plan_total": 0, "plan_collected": 0, "plan_completeness": 0.0}
 
-        planned_by_id = {str(item.id): item for item in planned_items}
-        for item in upstream_items or []:
-            item_id = str(item.id)
-            if item_id in planned_by_id and item.collected:
-                planned_by_id[item_id].collected = True
+        del upstream_items
 
         total = len(planned_items)
         collected = sum(1 for item in planned_items if item.collected)
@@ -2100,6 +3893,79 @@ class EvidenceCollectorNode(WorkflowNode):
             "plan_collected": collected,
             "plan_completeness": collected / total if total else 0.0,
         }
+
+    @classmethod
+    def _classify_sufficient_evidence_skips(
+        cls,
+        *,
+        evidence_plan: List[Dict[str, Any]],
+        evidence_items: List[EvidenceItem],
+        early_stop: Dict[str, Any],
+    ) -> List[str]:
+        """Classify optional follow-ups skipped after mandatory cases are complete."""
+        if (
+            not early_stop.get("triggered")
+            or early_stop.get("reason") not in {
+                "mandatory_live_observability_complete",
+                "post_case_reconciliation_complete",
+            }
+        ):
+            return []
+
+        plan_by_id = cls._index_evidence_plan_by_id(evidence_plan)
+        skipped: List[str] = []
+        for item in evidence_items or []:
+            if item.collected or str(getattr(item, "source", "") or "") != "planned":
+                continue
+            plan_item = plan_by_id.get(str(item.id), {})
+            item_level = item.level.value if hasattr(item.level, "value") else item.level
+            if plan_item.get("source") == "mandatory_live_observability":
+                continue
+            is_critical = (
+                cls._normalize_plan_text(item_level) == "critical"
+                or cls._normalize_plan_text(plan_item.get("level")) == "critical"
+            )
+            if is_critical:
+                continue
+            item.source = "skipped_sufficient_evidence"
+            item.outcome = "skipped"
+            skipped.append(str(item.id))
+        return skipped
+
+    @classmethod
+    def _index_evidence_plan_by_id(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Index plan items without letting lower-priority duplicates win."""
+        level_rank = {
+            "critical": 3,
+            "important": 2,
+            "optional": 1,
+            "reference": 0,
+        }
+        indexed: Dict[str, Dict[str, Any]] = {}
+        for item in evidence_plan or []:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id", ""))
+            if not item_id:
+                continue
+            current = indexed.get(item_id)
+            if current is None:
+                indexed[item_id] = item
+                continue
+            current_rank = level_rank.get(
+                cls._normalize_plan_text(current.get("level")),
+                -1,
+            )
+            candidate_rank = level_rank.get(
+                cls._normalize_plan_text(item.get("level")),
+                -1,
+            )
+            if candidate_rank > current_rank:
+                indexed[item_id] = item
+        return indexed
 
     def _adjudicate_plan_tool_matches(
         self,
@@ -2179,6 +4045,8 @@ class EvidenceCollectorNode(WorkflowNode):
         structured: Dict[str, Any],
         tool_args: Optional[Dict[str, Any]] = None,
         plan_intent: str = "",
+        plan_tool_args: Optional[Dict[str, Any]] = None,
+        plan_target_scope: str = "",
         acceptable_tools: Optional[List[str]] = None,
     ) -> bool:
         if not result or not result.strip():
@@ -2210,12 +4078,45 @@ class EvidenceCollectorNode(WorkflowNode):
         if not tool_match:
             return False
 
+        if plan_tool in {"collect_aiops_case", "get_aiops_case"}:
+            expected_status = "case_collected" if plan_tool == "collect_aiops_case" else "case_loaded"
+            if tool_name != plan_tool or structured.get("status") != expected_status:
+                return False
+            target = EvidenceCollectorNode._extract_plan_pod_target({
+                "tool": plan_tool,
+                "command": plan_cmd,
+                "target_scope": plan_target_scope,
+                "tool_args": plan_tool_args or {},
+            })
+            primary = structured.get("primary_entity") if isinstance(structured.get("primary_entity"), dict) else {}
+            if target and primary:
+                return target == (
+                    str(primary.get("namespace") or "").lower(),
+                    str(primary.get("name") or "").lower(),
+                )
+            return True
+
         if requires_yaml and not EvidenceCollectorNode._result_is_yaml_evidence(tool_name, result, structured or {}):
             return False
         if requires_yaml:
             diagnostic_negative = False
 
         lower_result = result.lower()
+        if plan_tool == "kubectl_events" and tool_name == "kubectl_events":
+            expected_args = EvidenceCollectorNode._derive_kubectl_events_tool_args(plan_cmd)
+            result_target = EvidenceCollectorNode._extract_result_resource_target(
+                result=result,
+                structured=structured or {},
+                tool_args=tool_args or {},
+            )
+            expected_namespace = str(expected_args.get("namespace") or "").lower()
+            expected_name = str(expected_args.get("resource_name") or "").lower()
+            if expected_namespace and result_target.get("namespace") and expected_namespace != result_target["namespace"]:
+                return False
+            if expected_name and result_target.get("name") and expected_name != result_target["name"]:
+                return False
+            return structured.get("status") == "events_found" or bool(result.strip())
+
         plan_target = EvidenceCollectorNode._extract_plan_resource_target(plan_cmd)
         if plan_target and not plan_intent and intent not in {"registry_connectivity", "dns_connectivity"}:
             result_target = EvidenceCollectorNode._extract_result_resource_target(
@@ -2274,7 +4175,7 @@ class EvidenceCollectorNode(WorkflowNode):
 
         if "logs" in combined or "日志" in combined:
             return (
-                "kubectl_logs" in tool_name
+                EvidenceCollectorNode._is_kubectl_log_tool(tool_name)
                 or "run_bash_command" in tool_name
                 or not (structured.get("kind") == "Pod" and "kubectl_get_yaml" in tool_name)
             )
@@ -2323,6 +4224,9 @@ class EvidenceCollectorNode(WorkflowNode):
             if str(tool or "").strip()
         }
 
+        if plan_tool in {"collect_aiops_case", "get_aiops_case", "get_aiops_case_evidence"}:
+            return tool_name == plan_tool
+
         if acceptable:
             return any(
                 tool_name == tool
@@ -2337,6 +4241,12 @@ class EvidenceCollectorNode(WorkflowNode):
             or (plan_tool and plan_tool in tool_name)
             or (plan_tool and tool_name in plan_tool)
             or (plan_tool and plan_tool.replace("_", "") == tool_name.replace("_", ""))
+        ):
+            return True
+
+        if (
+            EvidenceCollectorNode._is_kubectl_log_tool(plan_tool)
+            and EvidenceCollectorNode._is_kubectl_log_tool(tool_name)
         ):
             return True
 
@@ -2363,6 +4273,19 @@ class EvidenceCollectorNode(WorkflowNode):
             )
 
         return False
+
+    @staticmethod
+    def _is_kubectl_log_tool(tool_name: str) -> bool:
+        return (tool_name or "").lower() in {
+            "kubectl_logs",
+            "kubectl_previous_logs",
+            "kubectl_logs_all_containers",
+            "kubectl_previous_logs_all_containers",
+            "kubectl_container_logs",
+            "kubectl_container_previous_logs",
+            "kubectl_logs_grep",
+            "kubectl_logs_all_containers_grep",
+        }
 
     @staticmethod
     def _result_answers_pod_status(result: str, structured: Dict[str, Any]) -> bool:
@@ -2724,7 +4647,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 continue
             desc = (item.description or "").lower()
             source = str(getattr(item, "source", "") or "").lower()
-            if source in {"reference", "archive"}:
+            if source in {"reference", "archive", "skipped_sufficient_evidence"}:
                 continue
             if "fetch_runbook" in desc or "read_context_archive" in desc:
                 continue
@@ -2760,14 +4683,17 @@ class EvidenceCollectorNode(WorkflowNode):
         这些数据来自 LLM agentic loop 中的工具调用（kubectl, prometheus 等），
         是下游节点（rca, conclusion）生成准确报告的关键数据源。
         """
-        tool_data = []
+        case_tool_data = []
+        supplementary_tool_data = []
         for ev in thinking_events:
-            if ev.get("type") == "tool_result":
+            if ev.get("type") == "tool_result" and ev.get("deduplicated") is not True:
                 tool_name = ev.get("tool_name", "")
                 result_text = ev.get("result", "") or ev.get("result_preview", "")
                 status = ev.get("status", "")
-                if result_text and status == "success":
-                    tool_data.append({
+                structured = ev.get("structured") or {}
+                fact_ledger = normalize_case_fact_ledger(structured)
+                if (result_text or fact_ledger is not None) and status == "success":
+                    item = {
                         "tool": tool_name,
                         "data": result_text,
                         "duration_s": ev.get("duration_seconds", 0),
@@ -2775,5 +4701,406 @@ class EvidenceCollectorNode(WorkflowNode):
                         "raw_ref": ev.get("raw_ref"),
                         "structured_ref": ev.get("structured_ref"),
                         "summary_ref": ev.get("summary_ref"),
-                    })
-        return tool_data
+                    }
+                    if fact_ledger is not None:
+                        item["fact_ledger"] = fact_ledger.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        )
+                    agent_context = self._build_aiops_agent_context(
+                        tool_name=tool_name,
+                        structured=structured,
+                    )
+                    if agent_context:
+                        item["agent_context"] = agent_context
+                    agent_facts = self._build_aiops_agent_facts(
+                        tool_name=tool_name,
+                        structured=ev.get("structured") or {},
+                    )
+                    if agent_facts:
+                        item["agent_facts"] = agent_facts
+                    if fact_ledger is not None:
+                        case_tool_data.append(item)
+                    else:
+                        supplementary_tool_data.append(item)
+        return case_tool_data + supplementary_tool_data
+
+    @classmethod
+    def _build_aiops_agent_facts(cls, tool_name: str, structured: Dict[str, Any]) -> str:
+        """Render short immutable facts that small models can quote verbatim."""
+        if str(tool_name or "").lower() not in {"collect_aiops_case", "get_aiops_case"}:
+            return ""
+        if not isinstance(structured, dict):
+            return ""
+
+        lines: List[str] = []
+        max_chars = 10000
+
+        def add(prefix: str, fields: List[tuple[str, Any]]) -> None:
+            parts = [prefix]
+            for key, value in fields:
+                if value in (None, "", [], {}):
+                    continue
+                parts.append(f"{key}={cls._format_aiops_fact_value(value)}")
+            line = " ".join(parts)
+            current_chars = sum(len(item) + 1 for item in lines)
+            if current_chars + len(line) <= max_chars:
+                lines.append(line)
+
+        add("AIOPS_CASE", [
+            ("case_id", structured.get("case_id")),
+            ("status", structured.get("status")),
+            ("abnormal_type", structured.get("abnormal_type")),
+        ])
+
+        primary = structured.get("primary_entity")
+        if isinstance(primary, dict):
+            add("ENTITY", [
+                ("kind", primary.get("kind")),
+                ("namespace", primary.get("namespace")),
+                ("name", primary.get("name")),
+                ("node", primary.get("node")),
+                ("pod_ip", primary.get("pod_ip")),
+                ("uid", primary.get("uid")),
+            ])
+
+        coverage = structured.get("coverage")
+        if isinstance(coverage, dict):
+            add("COVERAGE", [(str(key), value) for key, value in coverage.items()])
+
+        signals = structured.get("signals_summary")
+        if isinstance(signals, list):
+            for item in signals:
+                if not isinstance(item, dict):
+                    continue
+                dimension = str(item.get("dimension") or "").strip().lower()
+                strength = str(item.get("strength") or "").strip().lower()
+                observed = item.get("observed")
+                if (
+                    dimension not in {"k8s", "kubernetes"}
+                    or strength not in {"strong", "critical"}
+                    or not isinstance(observed, str)
+                    or not observed.strip()
+                ):
+                    continue
+                add("K8S_SIGNAL", [
+                    ("signal_id", item.get("signal_id")),
+                    ("strength", strength),
+                    ("observed", observed.strip()),
+                    ("evidence_refs", item.get("evidence_refs")),
+                ])
+                break
+
+        details = structured.get("dimension_details")
+        if not isinstance(details, dict):
+            return "\n".join(lines)
+
+        trace_contract = cls._build_aiops_trace_contract(details)
+        if trace_contract["log_tempo_trace_ids"] or trace_contract["deepflow_trace_ids"]:
+            add("TRACE_CORRELATION", [
+                ("log_tempo_trace_ids", trace_contract["log_tempo_trace_ids"]),
+                ("deepflow_trace_ids", trace_contract["deepflow_trace_ids"]),
+                ("do_not_merge", trace_contract["do_not_merge"]),
+                ("log_trace_ids", trace_contract["log_trace_ids"]),
+                ("tempo_trace_ids", trace_contract["tempo_trace_ids"]),
+                ("shared_trace_ids", trace_contract["shared_trace_ids"]),
+            ])
+        if trace_contract["has_zero_duration"]:
+            add("DEEPFLOW_SEMANTICS", [
+                ("duration_us", 0),
+                ("is_not_failure_evidence", True),
+            ])
+        complete = cls._aiops_case_coverage_complete(structured.get("coverage"))
+        add("DIMENSION_DETAILS", [
+            ("complete", complete),
+            (
+                "action",
+                "post_case_reconciliation"
+                if complete
+                else "supplement_missing_dimensions",
+            ),
+        ])
+        add("METRIC_SCOPE", [
+            ("supporting_evidence_only", True),
+            ("k8s_termination_reason_has_priority", True),
+            ("single_or_sparse_samples_cannot_exclude_failure_mode", True),
+        ])
+        add("TOPOLOGY_SCOPE", [
+            ("relationships_only", True),
+            ("health_not_proven", True),
+            ("complete_call_chain_not_proven", True),
+        ])
+        add("EXIT_CODE_SCOPE", [
+            ("symbolic_name_requires_explicit_evidence", True),
+        ])
+        add("EVIDENCE_REFS", [
+            ("do_not_guess_evidence_refs", True),
+            ("use_only_returned_refs", True),
+        ])
+
+        metrics = details.get("metrics")
+        if isinstance(metrics, dict):
+            for item in (metrics.get("highlights") or [])[:3]:
+                if not isinstance(item, dict):
+                    continue
+                add("METRIC", [
+                    ("metric", item.get("metric")),
+                    ("pod", item.get("pod")),
+                    ("container", item.get("container")),
+                    ("start", item.get("start")),
+                    ("max", item.get("max")),
+                    ("last", item.get("last")),
+                    ("limit", item.get("limit")),
+                    ("max_limit_ratio", item.get("max_limit_ratio")),
+                    ("samples", item.get("samples")),
+                    ("evidence_ref", item.get("evidence_ref")),
+                ])
+
+        logs = details.get("logs")
+        if isinstance(logs, dict):
+            for item in (logs.get("samples") or [])[:4]:
+                if not isinstance(item, dict):
+                    continue
+                message = item.get("message")
+                parsed_message: Dict[str, Any] = {}
+                if isinstance(message, str):
+                    try:
+                        decoded = json.loads(message)
+                        if isinstance(decoded, dict):
+                            parsed_message = decoded
+                    except json.JSONDecodeError:
+                        parsed_message = {}
+                fields: List[tuple[str, Any]] = [
+                    ("role", item.get("role")),
+                    ("source_system", item.get("source_system")),
+                ]
+                if parsed_message:
+                    for key in (
+                        "event",
+                        "level",
+                        "message",
+                        "trace_id",
+                        "span_id",
+                        "parent_span_id",
+                        "path",
+                        "error_code",
+                        "missing_config",
+                        "http_status",
+                        "exit_code",
+                        "failure_count",
+                        "alloc_mib",
+                        "allocated_mib",
+                        "pod",
+                        "service",
+                    ):
+                        fields.append((key, parsed_message.get(key)))
+                else:
+                    fields.append(("message", message))
+                fields.extend([
+                    ("timestamp", item.get("timestamp")),
+                    ("evidence_ref", item.get("evidence_ref")),
+                ])
+                add("LOG", fields)
+
+        tracing = details.get("tracing")
+        if isinstance(tracing, dict):
+            for item in (tracing.get("flows") or [])[:4]:
+                if not isinstance(item, dict):
+                    continue
+                add("DEEPFLOW", [
+                    ("src", item.get("src")),
+                    ("dst", item.get("dst")),
+                    ("protocol", item.get("protocol")),
+                    ("request", item.get("request")),
+                    ("response_code", item.get("response_code")),
+                    ("duration_us", item.get("duration_us")),
+                    ("trace_id", item.get("trace_id")),
+                    ("span_id", item.get("span_id")),
+                    ("timestamp", item.get("timestamp")),
+                    ("evidence_ref", item.get("evidence_ref")),
+                ])
+            for item in (tracing.get("spans") or [])[:4]:
+                if not isinstance(item, dict):
+                    continue
+                fields = [
+                    ("trace_id", item.get("trace_id")),
+                    ("service", item.get("service")),
+                    ("span", item.get("name")),
+                    ("start", item.get("start")),
+                    ("end", item.get("end")),
+                ]
+                attributes = item.get("attributes")
+                if isinstance(attributes, dict):
+                    preferred = (
+                        "http.response.status_code",
+                        "error.type",
+                        "config.key",
+                        "config.present",
+                        "aiops.allocated_mib.before",
+                        "aiops.allocated_mib.after",
+                        "aiops.alloc_mib",
+                        "k8s.pod.name",
+                        "http.request.method",
+                        "url.path",
+                        "http.route",
+                    )
+                    for key in preferred:
+                        fields.append((key, attributes.get(key)))
+                fields.append(("evidence_ref", item.get("evidence_ref")))
+                add("TEMPO", fields)
+
+        topology = details.get("topology")
+        if isinstance(topology, dict):
+            for item in (topology.get("edges") or [])[:8]:
+                if not isinstance(item, dict):
+                    continue
+                add("TOPOLOGY", [
+                    ("relationship", item.get("relationship")),
+                    ("source", item.get("source")),
+                    ("target", item.get("target")),
+                    ("source_system", item.get("source_system")),
+                    ("directness", item.get("directness")),
+                    ("confidence", item.get("confidence")),
+                    ("evidence_refs", item.get("evidence_refs")),
+                ])
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_aiops_fact_value(value: Any) -> str:
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        text = str(value)
+        if any(char.isspace() for char in text) or "-->" in text:
+            return json.dumps(text, ensure_ascii=False)
+        return text
+
+    @staticmethod
+    def _build_aiops_trace_contract(details: Dict[str, Any]) -> Dict[str, Any]:
+        logs = details.get("logs") if isinstance(details.get("logs"), dict) else {}
+        tracing = details.get("tracing") if isinstance(details.get("tracing"), dict) else {}
+
+        log_trace_ids: set[str] = set()
+        for item in (logs.get("samples") or []):
+            if not isinstance(item, dict):
+                continue
+            message = str(item.get("message") or "")
+            try:
+                parsed = json.loads(message)
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict) and parsed.get("trace_id"):
+                log_trace_ids.add(str(parsed["trace_id"]))
+
+        tempo_trace_ids = {
+            str(item.get("trace_id"))
+            for item in (tracing.get("spans") or [])
+            if isinstance(item, dict) and item.get("trace_id")
+        }
+        deepflow_trace_ids = {
+            str(item.get("trace_id"))
+            for item in (tracing.get("flows") or [])
+            if isinstance(item, dict) and item.get("trace_id")
+        }
+        log_tempo_trace_ids = sorted(log_trace_ids & tempo_trace_ids)
+        source_trace_sets = [
+            trace_ids
+            for trace_ids in (
+                log_trace_ids,
+                tempo_trace_ids,
+                deepflow_trace_ids,
+            )
+            if trace_ids
+        ]
+        shared_trace_ids = (
+            sorted(set.intersection(*source_trace_sets))
+            if len(source_trace_sets) >= 2
+            else []
+        )
+        do_not_merge = (
+            len(source_trace_sets) >= 2
+            and any(
+                trace_ids != source_trace_sets[0]
+                for trace_ids in source_trace_sets[1:]
+            )
+        )
+        has_zero_duration = any(
+            str(item.get("duration_us") or "").strip() in {"0", "0.0"}
+            for item in (tracing.get("flows") or [])
+            if isinstance(item, dict)
+        )
+
+        return {
+            "log_trace_ids": sorted(log_trace_ids),
+            "tempo_trace_ids": sorted(tempo_trace_ids),
+            "log_tempo_trace_ids": log_tempo_trace_ids,
+            "deepflow_trace_ids": sorted(deepflow_trace_ids),
+            "shared_trace_ids": shared_trace_ids,
+            "do_not_merge": do_not_merge,
+            "has_zero_duration": has_zero_duration,
+        }
+
+    @staticmethod
+    def _aiops_case_coverage_complete(value: Any) -> bool:
+        coverage = value if isinstance(value, dict) else {}
+        present = {"present", "observed"}
+
+        def status(*keys: str) -> str:
+            for key in keys:
+                if key in coverage:
+                    return str(coverage.get(key) or "").strip().lower()
+            return ""
+
+        required_statuses = [
+            status("k8s", "kubernetes"),
+            status("metrics"),
+            status("logs", "logging"),
+            status("tracing"),
+            status("topology"),
+        ]
+        if "trace" in coverage:
+            required_statuses.append(status("trace"))
+        return bool(required_statuses) and all(item in present for item in required_statuses)
+
+    @staticmethod
+    def _build_aiops_agent_context(tool_name: str, structured: Dict[str, Any]) -> str:
+        """Keep bounded, label-free observability facts for downstream agents."""
+        if str(tool_name or "").lower() not in {
+            "collect_aiops_case",
+            "get_aiops_case",
+        }:
+            return ""
+        if not isinstance(structured, dict):
+            return ""
+
+        canonical_ledger = normalize_fact_ledger(structured.get("fact_ledger"))
+        if canonical_ledger is not None:
+            return compact_fact_ledgers_json(
+                [canonical_ledger],
+                max_chars=12000,
+            )
+
+        allowed_keys = (
+            "status",
+            "case_id",
+            "abnormal_type",
+            "primary_entity",
+            "coverage",
+            "topology_summary",
+            "dimension_details",
+            "recommended_refs_by_dimension",
+        )
+        payload = {
+            key: structured.get(key)
+            for key in allowed_keys
+            if structured.get(key) not in (None, "", [], {})
+        }
+        if not payload:
+            return ""
+
+        return compact_aiops_legacy_context_json(
+            payload,
+            max_chars=12000,
+        )

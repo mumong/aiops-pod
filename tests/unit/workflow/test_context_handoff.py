@@ -1,8 +1,11 @@
+import hashlib
 import json
 import logging
 import os
 import sys
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
@@ -12,6 +15,43 @@ from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
+
+
+def _canonical_fact_record(**overrides):
+    record = {
+        "entity_id": "k8s.pod:demo/api:uid-a",
+        "entity_kind": "Pod",
+        "namespace": "demo",
+        "entity_name": "api",
+        "dimension": "logging",
+        "fact_type": "log",
+        "attribute": "log.message",
+        "value": {"message": "request returned status 503"},
+        "source_system": "elasticsearch",
+        "directness": "direct",
+        "confidence": "high",
+        "strength": "strong",
+        "evidence_refs": ["logs:target"],
+    }
+    record.update(overrides)
+    identity = {
+        key: value
+        for key, value in record.items()
+        if key != "fact_id"
+        and value not in (None, {}, [])
+    }
+    identity["evidence_refs"] = sorted(set(identity["evidence_refs"]))
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    record["fact_id"] = (
+        "fact-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    )
+    return record
 
 
 def test_layer_execute_archives_full_analysis_and_publishes_handoff(tmp_path, monkeypatch):
@@ -137,6 +177,43 @@ def test_conclusion_template_reports_pod_abnormal_status_before_compat_layer():
     assert "阶段一：Pod异常状态定位" in report
 
 
+def test_conclusion_template_uses_pod_observability_coverage_for_completeness():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "collection_summary": (
+            "Pod 可观测性覆盖 2/2，完整度 100%；"
+            "去重后证据计划 0/0，完整度 0%"
+        ),
+        "plan_total": 0,
+        "plan_collected": 0,
+        "plan_completeness": 0.0,
+        "environment_evidence_total": 0,
+        "environment_evidence_collected": 0,
+        "environment_evidence_completeness": 0.0,
+        "observability_target_total": 2,
+        "observability_target_collected": 2,
+        "observability_target_completeness": 1.0,
+        "evidence_inventory": [],
+    }, ensure_ascii=False)
+
+    report = node._format_with_template(
+        question="我的集群有什么问题",
+        layer=Layer.L2,
+        evidence_items=[],
+        decision=None,
+        root_cause="",
+        causal_chain={},
+        layer_analysis="{}",
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+        errors=[],
+        warnings=[],
+    )
+
+    assert "| **证据完整度** | 2/2 (100%) |" in report
+    assert "| **证据完整度** | 0/0 (0%) |" not in report
+
+
 def test_rca_lite_puts_evidence_context_only_in_user_message(monkeypatch):
     node = RootCauseAnalyzerNode()
     captured = {}
@@ -150,6 +227,7 @@ def test_rca_lite_puts_evidence_context_only_in_user_message(monkeypatch):
         },
         "root_cause_summary": "image pull auth",
         "confidence": 0.8,
+        "confidence_reason": "镜像拉取事件与认证失败相互印证",
         "primary_runbooks": [],
     })
 
@@ -186,6 +264,7 @@ def test_rca_lite_prefers_structured_output_when_available():
         },
         "root_cause_summary": "节点出口网络超时导致镜像拉取失败",
         "confidence": 0.84,
+        "confidence_reason": "镜像拉取事件中的网络超时直接支持该结论",
         "primary_runbooks": ["pod-imagepull-failed.md"],
     })
 
@@ -217,7 +296,8 @@ def test_rca_lite_uses_structured_agent_runtime():
         "phenomenon": "Pod ImagePullBackOff",
         "root_cause": "节点无法访问 Docker Hub",
         "root_cause_summary": "镜像仓库网络不可达",
-        "confidence_score": 0.86,
+        "confidence": 0.86,
+        "confidence_reason": "镜像拉取事件明确报告网络不可达",
     })
 
     class _NoDirectStructured:
@@ -586,6 +666,130 @@ def test_layer_handoff_builds_issue_groups_from_current_abnormal_pods():
     assert summary["source"] == "kubectl_get_by_kind_in_cluster"
 
 
+def test_layer_handoff_includes_running_pod_marked_as_recent_restart():
+    node = LayerClassifierNode()
+    recent_row = (
+        "aiops-traced-oom trace-oom-api-598dcf-x6v6n "
+        "1/1 Running 234 (5m23s ago) 5d"
+    )
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "structured": {
+                "header": "NAMESPACE NAME READY STATUS RESTARTS AGE",
+                "status_counts": {"Running": 2},
+                "recent_restart_count": 1,
+                "recent_restart_rows": [recent_row],
+                "selected_rows": [recent_row],
+            },
+        }
+    ]
+
+    handoff = node._build_layer_handoff(
+        question="我的集群有什么问题",
+        layer_result={
+            "layer": "L2",
+            "derived_layer": "L2",
+            "confidence": 0.8,
+            "reasoning": "集群状态扫描",
+            "abnormal_pods": [],
+        },
+        layer=Layer.L2,
+        layers=[Layer.L2],
+        thinking_events=events,
+    )
+
+    assert handoff["abnormal_pods"] == [
+        {
+            "name": "trace-oom-api-598dcf-x6v6n",
+            "namespace": "aiops-traced-oom",
+            "status": "RecentRestart",
+        }
+    ]
+    assert handoff["current_abnormal_summary"]["status_counts"] == {
+        "RecentRestart": 1
+    }
+    assert handoff["current_abnormal_summary"]["total_abnormal"] == 1
+    assert handoff["current_abnormal_summary"]["selected_rows"] == [recent_row]
+    assert handoff["issue_groups"][0]["status_keywords"] == ["RecentRestart"]
+    assert handoff["issue_groups"][0]["pod_abnormal_type"] == "CrashLoopBackOffRuntime"
+    assert handoff["issue_groups"][0]["compatible_layers"] == ["L2"]
+
+
+def test_layer_handoff_explicit_pod_scope_excludes_unrelated_global_abnormalities():
+    node = LayerClassifierNode()
+    target_namespace = "aiops-traced-oom"
+    target_pod = "trace-oom-api-598dcf5996-x6v6n"
+    layer_result = {
+        "layer": "L2",
+        "derived_layer": "L2",
+        "confidence": 0.9,
+        "reasoning": "目标 Pod 反复重启",
+        "key_entities": [
+            {"type": "pod", "name": target_pod, "namespace": target_namespace},
+        ],
+        "abnormal_pods": [
+            {"name": target_pod, "namespace": target_namespace, "status": "CrashLoopBackOff"},
+        ],
+        "pod_status_keyword": "CrashLoopBackOff",
+        "pod_abnormal_type": "OOMKilled",
+    }
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "structured": {
+                "header": "NAMESPACE NAME READY STATUS RESTARTS AGE",
+                "status_counts": {
+                    "CrashLoopBackOff": 1,
+                    "Pending": 3,
+                    "Running": 60,
+                },
+                "selected_rows": [
+                    f"{target_namespace} {target_pod} 0/1 CrashLoopBackOff 9 35m",
+                    "monitor exporter-a 0/1 Pending 0 5d",
+                    "monitor exporter-b 0/1 Pending 0 5d",
+                    "monitor exporter-c 0/1 Pending 0 5d",
+                ],
+            },
+        }
+    ]
+
+    handoff = node._build_layer_handoff(
+        question=(
+            f"请诊断 namespace {target_namespace} 中 Pod {target_pod} "
+            "当前反复重启的问题"
+        ),
+        layer_result=layer_result,
+        layer=Layer.L2,
+        layers=[Layer.L2],
+        thinking_events=events,
+    )
+
+    assert handoff["diagnosis_scope"] == "explicit_pod"
+    assert handoff["abnormal_pods"] == [
+        {
+            "name": target_pod,
+            "namespace": target_namespace,
+            "status": "CrashLoopBackOff",
+        }
+    ]
+    assert len(handoff["issue_groups"]) == 1
+    assert handoff["issue_groups"][0]["entities"] == [
+        {"kind": "Pod", "namespace": target_namespace, "name": target_pod}
+    ]
+    assert handoff["current_abnormal_summary"]["status_counts"] == {
+        "CrashLoopBackOff": 1
+    }
+    assert handoff["current_abnormal_summary"]["total_abnormal"] == 1
+    assert handoff["current_abnormal_summary"]["selected_rows"] == [
+        f"{target_namespace} {target_pod} 0/1 CrashLoopBackOff 9 35m"
+    ]
+
+
 def test_layer_guard_rejects_healthy_when_current_tool_scan_has_abnormal_pods():
     node = LayerClassifierNode()
     layer_result = {
@@ -892,6 +1096,331 @@ def test_rca_context_bounds_tool_output_and_preserves_key_prefix():
     assert "截断" in context
 
 
+def test_rca_context_includes_aiops_agent_context():
+    node = RootCauseAnalyzerNode()
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "data": "compact summary",
+                "agent_context": json.dumps({
+                    "dimension_details": {
+                        "tracing": {
+                            "flows": [
+                                {
+                                    "request": "GET /allocate?mib=2&step=674",
+                                    "duration_us": "5752",
+                                    "trace_id": "42ea12f3f50fe8b2e759a221ff0f3f4a",
+                                }
+                            ],
+                            "spans": [
+                                {
+                                    "trace_id": "42ea12f3f50fe8b2e759a221ff0f3f4a",
+                                    "attributes": {
+                                        "aiops.allocated_mib.before": 60,
+                                        "aiops.allocated_mib.after": 62,
+                                    },
+                                }
+                            ],
+                        },
+                        "topology": {
+                            "edges": [
+                                {
+                                    "relationship": "Pod --calls--> Pod",
+                                    "directness": "direct",
+                                    "confidence": "high",
+                                }
+                            ]
+                        },
+                    }
+                }, ensure_ascii=False),
+            }
+        ],
+    }, ensure_ascii=False)
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "AIOps 结构化可观测性上下文" in context
+    assert "42ea12f3f50fe8b2e759a221ff0f3f4a" in context
+    assert "aiops.allocated_mib.before" in context
+    assert "Pod --calls--> Pod" in context
+
+
+def test_rca_context_prefers_deterministic_aiops_agent_facts():
+    node = RootCauseAnalyzerNode()
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "data": "compact summary",
+                "agent_context": '{"dimension_details":{"tracing":{"flows":[]}}}',
+                "agent_facts": (
+                    "K8S_SIGNAL signal_id=sig-k8s-present strength=strong "
+                    "observed=\"Last terminated state: business-api=OOMKilled exit=137\" "
+                    "evidence_refs=[\"k8s.trace-oom-api.last-terminated\"]\n"
+                    "TRACE_CORRELATION log_tempo_trace_ids=[\"369c929229004108c4066c41656d49e8\"] "
+                    "deepflow_trace_ids=[\"4faac0ec561b6b6febe9e0d73dc68a86\"] "
+                    "do_not_merge=true\n"
+                    "DEEPFLOW_SEMANTICS duration_us=0 is_not_failure_evidence=true\n"
+                    "METRIC metric=container_memory_working_set_bytes "
+                    "start=3.8Mi max=69.0Mi limit=80.0Mi\n"
+                    "DEEPFLOW src=172.16.104.8 dst=172.16.104.13 "
+                    "duration_us=0 trace_id=4faac0ec561b6b6febe9e0d73dc68a86\n"
+                    "TOPOLOGY relationship=\"Pod --calls--> Pod\" "
+                    "source=driver target=api directness=direct confidence=high"
+                ),
+            }
+        ],
+    }, ensure_ascii=False)
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "AIOps 确定性可观测事实" in context
+    assert "duration_us=0" in context
+    assert "4faac0ec561b6b6febe9e0d73dc68a86" in context
+    assert 'relationship="Pod --calls--> Pod"' in context
+    assert "do_not_merge=true" in context
+    assert "is_not_failure_evidence=true" in context
+
+
+def test_conclusion_context_includes_aiops_agent_context():
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "data": "compact summary",
+                "agent_context": json.dumps({
+                    "coverage": {
+                        "metrics": "present",
+                        "logs": "present",
+                        "tracing": "present",
+                        "topology": "present",
+                    },
+                    "dimension_details": {
+                        "tracing": {
+                            "flows": [
+                                {
+                                    "trace_id": "42ea12f3f50fe8b2e759a221ff0f3f4a",
+                                    "request": "GET /allocate?mib=2&step=674",
+                                }
+                            ]
+                        },
+                        "topology": {
+                            "edges": [
+                                {
+                                    "relationship": "ReplicaSet --owned_by--> Deployment",
+                                    "source": "trace-oom-api-rs",
+                                    "target": "trace-oom-api",
+                                    "directness": "direct",
+                                    "confidence": "high",
+                                }
+                            ]
+                        },
+                    },
+                }, ensure_ascii=False),
+            }
+        ],
+    }, ensure_ascii=False)
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+    )
+
+    assert "aiops_observability_context" in context
+    assert "42ea12f3f50fe8b2e759a221ff0f3f4a" in context
+    assert "ReplicaSet --owned_by--> Deployment" in context
+
+
+def test_conclusion_context_includes_deterministic_aiops_agent_facts():
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "data": "compact summary",
+                "agent_facts": (
+                    "K8S_SIGNAL signal_id=sig-k8s-present strength=strong "
+                    "observed=\"Last terminated state: business-api=OOMKilled exit=137\" "
+                    "evidence_refs=[\"k8s.trace-oom-api.last-terminated\"]\n"
+                    "TRACE_CORRELATION log_tempo_trace_ids=[\"369c929229004108c4066c41656d49e8\"] "
+                    "deepflow_trace_ids=[\"4faac0ec561b6b6febe9e0d73dc68a86\"] "
+                    "do_not_merge=true\n"
+                    "LOG event=allocate trace_id=369c929229004108c4066c41656d49e8 "
+                    "path=/allocate?mib=2&step=855 allocated_mib=62\n"
+                    "TEMPO trace_id=369c929229004108c4066c41656d49e8 "
+                    "span=\"GET /allocate\" aiops.allocated_mib.before=60 "
+                    "aiops.allocated_mib.after=62"
+                ),
+            }
+        ],
+    }, ensure_ascii=False)
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+    )
+
+    assert "aiops_observability_facts" in context
+    assert "Last terminated state: business-api=OOMKilled exit=137" in context
+    assert "REPORT_MUST_QUOTE_K8S_SIGNAL_VERBATIM=true" in context
+    assert "REPORT_MUST_QUOTE_OBSERVABILITY_FACTS_VERBATIM=true" in context
+    assert "IGNORE_UNSUPPORTED_LAYER_NUMERIC_FACTS=true" in context
+    assert "allocated_mib=62" in context
+    assert "aiops.allocated_mib.before=60" in context
+    assert "do_not_merge=true" in context
+
+
+def test_conclusion_context_builds_immutable_exact_topology_contract():
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "data": "compact summary",
+                "agent_context": json.dumps({
+                    "topology_summary": {
+                        "entity_count": 11,
+                        "edge_count": 10,
+                    },
+                    "dimension_details": {
+                        "topology": {
+                            "edges": [
+                                {
+                                    "relationship": "Pod --calls--> Pod",
+                                    "source": "trace-oom-driver",
+                                    "target": "trace-oom-api",
+                                    "source_system": "deepflow+kubernetes",
+                                    "directness": "direct",
+                                    "confidence": "high",
+                                }
+                            ]
+                        }
+                    },
+                }, ensure_ascii=False),
+                "agent_facts": "\n".join([
+                    (
+                        'TOPOLOGY relationship="Pod --calls--> Pod" '
+                        "source=trace-oom-driver target=trace-oom-api "
+                        "directness=direct confidence=high"
+                    ),
+                    (
+                        'TOPOLOGY relationship="Service --selects--> Pod" '
+                        "source=trace-oom-api target=trace-oom-api-pod "
+                        "directness=direct confidence=high"
+                    ),
+                    (
+                        'TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" '
+                        "source=trace-oom-api-pod target=trace-oom-api-rs "
+                        "directness=direct confidence=high"
+                    ),
+                    (
+                        'TOPOLOGY relationship="ReplicaSet --owned_by--> Deployment" '
+                        "source=trace-oom-api-rs target=trace-oom-api "
+                        "directness=direct confidence=high"
+                    ),
+                ]),
+            }
+        ],
+    }, ensure_ascii=False)
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+    )
+
+    assert "TOPOLOGY_ENTITY_COUNT value=11" in context
+    assert "TOPOLOGY_EXACT_EDGES count=4" in context
+    assert "REPORT_MUST_QUOTE_TOPOLOGY_VERBATIM=true" in context
+    assert "FORBID_RELATIONSHIP_REVERSAL=true" in context
+    assert "TOPOLOGY_SCOPE relationships_only=true" in context
+    assert "health_not_proven=true" in context
+    assert "complete_call_chain_not_proven=true" in context
+    assert "METRIC_SCOPE supporting_evidence_only=true" in context
+    assert "EXIT_CODE_SCOPE symbolic_name_requires_explicit_evidence=true" in context
+    assert (
+        'TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" '
+        "source=trace-oom-api-pod target=trace-oom-api-rs "
+        "directness=direct confidence=high"
+    ) in context
+    assert (
+        'TOPOLOGY relationship="ReplicaSet --owned_by--> Deployment" '
+        "source=trace-oom-api-rs target=trace-oom-api "
+        "directness=direct confidence=high"
+    ) in context
+
+
+def test_conclusion_context_keeps_per_case_topology_counts_for_multiple_cases():
+    def tool_item(case_id, entity_count, edge_count, pod):
+        return {
+            "tool": "collect_aiops_case",
+            "data": "compact summary",
+            "agent_context": json.dumps({
+                "case_id": case_id,
+                "topology_summary": {
+                    "entity_count": entity_count,
+                    "edge_count": edge_count,
+                },
+                "dimension_details": {
+                    "topology": {
+                        "edges": [
+                            {
+                                "relationship": "Pod --owned_by--> Deployment",
+                                "source": pod,
+                                "target": f"{pod}-deployment",
+                                "source_system": "kubernetes",
+                                "directness": "direct",
+                                "confidence": "high",
+                            }
+                        ]
+                    }
+                },
+            }, ensure_ascii=False),
+        }
+
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            tool_item("case-a", 13, 12, "pod-a"),
+            tool_item("case-b", 11, 10, "pod-b"),
+        ],
+    }, ensure_ascii=False)
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+    )
+
+    assert "TOPOLOGY_CASE_COUNT case_id=case-a entities=13 edges=12" in context
+    assert "TOPOLOGY_CASE_COUNT case_id=case-b entities=11 edges=10" in context
+    assert "TOPOLOGY_ENTITY_COUNT value=" not in context
+    assert "exact_edges_are_diagnostic_subset=true" in context
+
+
+def test_conclusion_context_marks_aiops_case_as_not_collected_without_coarse_tool():
+    evidence_analysis = json.dumps(
+        {
+            "tool_data": [
+                {
+                    "tool": "kubectl_describe",
+                    "data": "Reason: OOMKilled, Exit Code: 137",
+                },
+                {
+                    "tool": "execute_prometheus_instant_query",
+                    "data": "83886080",
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+    )
+
+    assert "aiops_observability_status: not_collected" in context
+    assert "禁止声称本轮基于 collect_aiops_case" in context
+    assert "aiops_observability_facts:" not in context
+
+
 def test_rca_execute_sanitizes_large_evidence_fields_before_handoff():
     node = RootCauseAnalyzerNode()
     node.ai_call = object()
@@ -941,6 +1470,59 @@ def test_rca_execute_sanitizes_large_evidence_fields_before_handoff():
     assert "截断" in parsed["evidence_analysis"][0]["raw_data"]
 
 
+def test_rca_context_includes_evidence_quality_contract():
+    node = RootCauseAnalyzerNode()
+    evidence_analysis = json.dumps({
+        "source_coverage": {
+            "cases": [
+                {
+                    "target": "demo/api",
+                    "case_id": "case-demo-api",
+                    "dimensions": {
+                        "k8s": "present",
+                        "metrics": "present",
+                        "logs": "present",
+                        "tracing": "present",
+                        "topology": "present",
+                    },
+                }
+            ]
+        },
+        "case_target_coverage": {
+            "total": 1,
+            "collected": 1,
+            "rate": 1.0,
+        },
+        "detail_retrieval": {
+            "evaluated": True,
+            "requested": 1,
+            "collected": 1,
+            "refs": ["logs.target.previous"],
+        },
+        "diagnostic_sufficiency_summary": {
+            "score": 0.5,
+            "label": "部分充分",
+        },
+        "unresolved_questions": [
+            "demo/api: 指标只有单点样本，无法确认异常时间窗趋势",
+        ],
+        "tool_data": [],
+    }, ensure_ascii=False)
+
+    context = node._build_rca_context({
+        "layer_analysis": "{}",
+        "evidence_items": [],
+        "evidence_analysis": evidence_analysis,
+    })
+
+    assert "# 证据质量合同" in context
+    assert '"rate": 1.0' in context
+    assert '"score": 0.5' in context
+    assert "logs.target.previous" in context
+    assert "指标只有单点样本" in context
+    assert "source_coverage" in context
+
+
 def test_conclusion_uses_handoff_not_full_layer_analysis():
     node = ConclusionFormatterNode()
     layer_analysis = node._select_layer_context(
@@ -956,3 +1538,493 @@ def test_conclusion_uses_handoff_not_full_layer_analysis():
 
     assert "ImagePullBackOff x509" in layer_analysis
     assert "SHOULD_NOT_APPEAR" not in layer_analysis
+
+
+def test_rca_context_uses_fact_ledgers_without_duplicate_aiops_representations():
+    node = RootCauseAnalyzerNode()
+    entity_id = "k8s.pod:demo/api:uid-a"
+    fact_record = _canonical_fact_record(entity_id=entity_id)
+    evidence_analysis = json.dumps({
+        "source_coverage": {
+            "cases": [{"target": "demo/api", "case_id": "case-facts"}],
+        },
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "data": "DUPLICATE COARSE SUMMARY",
+                "agent_facts": "DUPLICATE AGENT FACTS",
+                "agent_context": '{"dimension_details":{"logs":{"samples":[]}}}',
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-facts",
+                    "scope_entity_ids": [entity_id],
+                    "records": [fact_record],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+            },
+            {
+                "tool": "kubectl_describe",
+                "data": "Name: api\nStatus: Running",
+            },
+        ],
+    })
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "AIOps Fact Ledger" in context
+    assert "case-facts" in context
+    assert fact_record["fact_id"] in context
+    assert "kubectl_describe" in context
+    assert "DUPLICATE COARSE SUMMARY" not in context
+    assert "DUPLICATE AGENT FACTS" not in context
+    assert "dimension_details" not in context
+
+
+def test_rca_persisted_no_ledger_aiops_item_uses_one_representation():
+    node = RootCauseAnalyzerNode()
+    structured_context = json.dumps({
+        "status": "partial",
+        "dimension_details": {
+            "logs": {
+                "samples": [
+                    {"message": "STRUCTURED CONTEXT REPRESENTATION"}
+                ]
+            }
+        },
+    })
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "data": "RAW REPRESENTATION",
+                "agent_facts": "TEXT FACT REPRESENTATION",
+                "agent_context": structured_context,
+            }
+        ],
+    })
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "STRUCTURED CONTEXT REPRESENTATION" in context
+    assert "TEXT FACT REPRESENTATION" not in context
+    assert "RAW REPRESENTATION" not in context
+    assert context.count("STRUCTURED CONTEXT REPRESENTATION") == 1
+
+
+def test_rca_execute_validates_fact_references_before_handoff():
+    node = RootCauseAnalyzerNode()
+    node.ai_call = object()
+    node._save_thinking = lambda state, new_state, thinking_events: None
+    entity_id = "k8s.pod:demo/api:uid-a"
+    fact_record = _canonical_fact_record(entity_id=entity_id)
+    node._analyze_with_llm = lambda question, layer, evidence_summary: (
+        {
+            "diagnostic_status": "diagnosed",
+            "phenomenon": "Scoped entity is abnormal",
+            "root_cause": "Unsupported model claim",
+            "root_cause_summary": "Unsupported model claim",
+            "supporting_fact_ids": ["fact-ffffffffffff"],
+            "contradicting_fact_ids": [],
+            "unknowns": [],
+            "hypotheses": [
+                {
+                    "hypothesis_id": "hyp-a",
+                    "entity_id": entity_id,
+                    "summary": "Unsupported model claim",
+                    "supporting_fact_ids": ["fact-ffffffffffff"],
+                    "contradicting_fact_ids": [],
+                    "unknowns": [],
+                    "confidence": 0.95,
+                }
+            ],
+            "confidence": 0.95,
+            "confidence_reason": "Model asserted unsupported evidence",
+        },
+        [],
+    )
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "data": "compact summary",
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-facts",
+                    "scope_entity_ids": [entity_id],
+                    "records": [fact_record],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+            }
+        ],
+    })
+
+    result = node.execute({
+        "question": "What is wrong with the scoped entity?",
+        "layer": Layer.L2,
+        "evidence_items": [],
+        "evidence_analysis": evidence_analysis,
+        "thinking_events": [],
+    })
+    rca = json.loads(result["rca_analysis"])
+
+    assert rca["diagnostic_status"] == "inconclusive"
+    assert rca["supporting_fact_ids"] == []
+    assert rca["claim_validation"]["invalid_fact_ids"] == ["fact-ffffffffffff"]
+    assert result["root_cause"] != "Unsupported model claim"
+
+
+def test_rca_validation_preserves_cross_ledger_collision_diagnostics():
+    node = RootCauseAnalyzerNode()
+    entity_id = "k8s.pod:demo/api:uid-a"
+    first_record = _canonical_fact_record(
+        entity_id=entity_id,
+        value={"message": "first observation"},
+        evidence_refs=["logs:first"],
+    )
+    second_record = {
+        **_canonical_fact_record(
+            entity_id=entity_id,
+            value={"message": "second observation"},
+            evidence_refs=["logs:second"],
+        ),
+        "fact_id": first_record["fact_id"],
+    }
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-first",
+                    "scope_entity_ids": [entity_id],
+                    "records": [first_record],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+            },
+            {
+                "tool": "get_aiops_case",
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-second",
+                    "scope_entity_ids": [entity_id],
+                    "records": [second_record],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+            },
+        ],
+    })
+    claim = {
+        "diagnostic_status": "diagnosed",
+        "phenomenon": "Scoped entity is abnormal",
+        "root_cause": "Candidate",
+        "root_cause_summary": "Candidate",
+        "supporting_fact_ids": [first_record["fact_id"]],
+        "contradicting_fact_ids": [],
+        "unknowns": [],
+        "hypotheses": [
+            {
+                "hypothesis_id": "hyp-collision",
+                "entity_id": entity_id,
+                "summary": "Candidate",
+                "supporting_fact_ids": [first_record["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.9,
+            }
+        ],
+        "confidence": 0.9,
+        "confidence_reason": "Claimed support",
+    }
+
+    result = node._validate_rca_result_against_evidence(
+        claim,
+        evidence_analysis,
+        question="What is wrong with the scoped entity?",
+        layer=Layer.L2,
+    )
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert first_record["fact_id"] in result["claim_validation"]["invalid_fact_ids"]
+    assert any(
+        "collision" in reason
+        for reason in result["claim_validation"]["reasons"]
+    )
+
+
+def _validate_topology_record_through_rca(
+    *,
+    topology_value,
+    required_entity_id="k8s.pod:demo/api:uid-a",
+):
+    node = RootCauseAnalyzerNode()
+    owner_id = "k8s.service:demo/api"
+    record = _canonical_fact_record(
+        entity_id=owner_id,
+        entity_kind="TopologyEdge",
+        namespace="demo",
+        entity_name="api",
+        dimension="topology",
+        fact_type="relationship",
+        attribute="topology.relationship",
+        value=topology_value,
+        source_system="topology",
+        directness="direct",
+        confidence="high",
+        strength="strong",
+        evidence_refs=["topology:reviewer-probe"],
+    )
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-topology-reviewer-probe",
+                    "scope_entity_ids": [required_entity_id],
+                    "records": [record],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+            }
+        ],
+    })
+    claim = {
+        "diagnostic_status": "diagnosed",
+        "phenomenon": "Scoped entity is abnormal",
+        "root_cause": "Topology-backed candidate",
+        "root_cause_summary": "Topology-backed candidate",
+        "supporting_fact_ids": [record["fact_id"]],
+        "contradicting_fact_ids": [],
+        "unknowns": [],
+        "hypotheses": [
+            {
+                "hypothesis_id": "hyp-topology-reviewer-probe",
+                "entity_id": required_entity_id,
+                "summary": "Topology-backed candidate",
+                "supporting_fact_ids": [record["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.9,
+            }
+        ],
+        "confidence": 0.9,
+        "confidence_reason": "Claimed complete typed topology support",
+    }
+    return node._validate_rca_result_against_evidence(
+        claim,
+        evidence_analysis,
+        question="What is wrong with the scoped entity?",
+        layer=Layer.L2,
+    )
+
+
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "diagnosisReason",
+        "causalRole",
+        "causalRoleState",
+        "prefixCausalRoleSuffix",
+        "PREFIX.CAUSAL/ROLE-SUFFIX",
+        "diagnosticRole",
+        "diagnosticRoleState",
+        "prefixDiagnosticRoleSuffix",
+        "PREFIX.DIAGNOSTIC/ROLE-SUFFIX",
+    ],
+)
+def test_rca_real_entry_rejects_evaluator_role_supporting_fact(forbidden_key):
+    node = RootCauseAnalyzerNode()
+    entity_id = "k8s.pod:demo/api:uid-a"
+    contaminated = _canonical_fact_record(
+        entity_id=entity_id,
+        value={
+            "nested": [
+                {
+                    forbidden_key: "must not authorize diagnosed",
+                }
+            ]
+        },
+        evidence_refs=["logs:contaminated"],
+    )
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-contaminated",
+                    "scope_entity_ids": [entity_id],
+                    "records": [contaminated],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+            }
+        ],
+    })
+    claim = {
+        "diagnostic_status": "diagnosed",
+        "phenomenon": "Scoped entity is abnormal",
+        "root_cause": "Contaminated candidate",
+        "root_cause_summary": "Contaminated candidate",
+        "supporting_fact_ids": [contaminated["fact_id"]],
+        "contradicting_fact_ids": [],
+        "unknowns": [],
+        "hypotheses": [
+            {
+                "hypothesis_id": "hyp-contaminated",
+                "entity_id": entity_id,
+                "summary": "Contaminated candidate",
+                "supporting_fact_ids": [contaminated["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.9,
+            }
+        ],
+        "confidence": 0.9,
+        "confidence_reason": "Claimed contaminated support",
+    }
+
+    result = node._validate_rca_result_against_evidence(
+        claim,
+        evidence_analysis,
+        question="What is wrong with the scoped entity?",
+        layer=Layer.L2,
+    )
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert result["claim_validation"]["valid"] is False
+
+
+@pytest.mark.parametrize(
+    "topology_value",
+    [
+        {
+            "target_entity_id": "k8s.pod:demo/api:uid-a",
+            "relationship": "selects",
+        },
+        {
+            "source_entity_id": "k8s.pod:demo/api:uid-a",
+            "relationship": "owned_by",
+        },
+        {
+            "source_entity_id": "k8s.service:demo/api",
+            "target_entity_id": "k8s.pod:demo/api:uid-a",
+        },
+        {
+            "source": {
+                "entity_id": "k8s.service:demo/api",
+                "kind": "ConfigMap",
+            },
+            "target": {
+                "entity_id": "k8s.pod:demo/api:uid-a",
+                "kind": "Pod",
+            },
+            "relation": "selects",
+        },
+        {
+            "source_entity_id": "k8s.service:demo/api",
+            "target_entity_id": "k8s.pod:demo/api:uid-wrong",
+            "relationship": "selects",
+        },
+    ],
+)
+def test_rca_real_entry_rejects_incomplete_malformed_or_wrong_uid_topology(
+    topology_value,
+):
+    result = _validate_topology_record_through_rca(
+        topology_value=topology_value,
+    )
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert result["claim_validation"]["valid"] is False
+
+
+@pytest.mark.parametrize(
+    "topology_value",
+    [
+        {
+            "source_entity_id": "k8s.service:demo/api",
+            "target_entity_id": "k8s.pod:demo/api:uid-a",
+            "relationship": "selects",
+        },
+        {
+            "source_entity_id": "k8s.pod:demo/api:uid-a",
+            "target_entity_id": "k8s.service:demo/api",
+            "relation": "selected_by",
+        },
+    ],
+)
+def test_rca_real_entry_accepts_forward_and_reversed_complete_topology(
+    topology_value,
+):
+    result = _validate_topology_record_through_rca(
+        topology_value=topology_value,
+    )
+
+    assert result["diagnostic_status"] == "diagnosed"
+    assert result["claim_validation"]["valid"] is True
+
+
+def test_evidence_to_rca_legacy_context_preserves_mandatory_identity_under_budget():
+    evidence = EvidenceCollectorNode()
+    tool_data = evidence._extract_tool_data_from_thinking([
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "collect_aiops_case",
+            "semantic_success": True,
+            "result": "oversized legacy case",
+            "structured": {
+                "status": "case_collected",
+                "case_id": "case-identity-envelope",
+                "primary_entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                    "uid": "uid-a",
+                },
+                "dimension_details": {
+                    "custom": {
+                        f"optional-{index:04d}": "x" * 200
+                        for index in range(500)
+                    }
+                },
+            },
+        }
+    ])
+
+    agent_context = tool_data[0]["agent_context"]
+    parsed = json.loads(agent_context)
+    rca_context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+        json.dumps({"tool_data": tool_data})
+    )
+
+    assert parsed != {}
+    assert len(agent_context) <= 12000
+    assert parsed["case_id"] == "case-identity-envelope"
+    assert parsed["primary_entity"] == {
+        "kind": "Pod",
+        "namespace": "demo",
+        "name": "api",
+        "uid": "uid-a",
+    }
+    assert "case-identity-envelope" in rca_context
+    assert '"namespace":"demo"' in rca_context
+    assert '"name":"api"' in rca_context
+    assert '"uid":"uid-a"' in rca_context

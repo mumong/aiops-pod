@@ -181,7 +181,7 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
             if False:
                 yield None
 
-    def _capture_agent(model=None, tools=None, system_prompt=None):
+    def _capture_agent(model=None, tools=None, system_prompt=None, **kwargs):
         create_agent_calls.append(model)
         return _Agent()
 

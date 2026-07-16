@@ -21,6 +21,14 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from app.core.workflow.fact_contract import (
+    compact_fact_ledgers_json,
+    extract_fact_ledger_inputs_from_evidence_analysis,
+    extract_fact_ledgers_from_evidence_analysis,
+    extract_fact_ledgers_from_tool_data,
+    select_tool_data_for_rca,
+    validate_rca_claims,
+)
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import RCAOutput
 from app.core.workflow.state import WorkflowState
@@ -118,7 +126,13 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 )
                 thinking_events = []
 
-            rca_result = self._sanitize_rca_result(rca_result or {})
+            rca_result = self._validate_rca_result_against_evidence(
+                rca_result or {},
+                evidence_analysis,
+                question=question,
+                layer=layer,
+            )
+            rca_result = self._sanitize_rca_result(rca_result)
             
             # 构建决策对象
             decision = self._build_decision(layer, evidence_items, rca_result)
@@ -165,6 +179,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         """Build compact RCA input from handoff + bounded evidence facts."""
         evidence_items = state.get("evidence_items", [])
         evidence_analysis = state.get("evidence_analysis", "{}")
+        fact_ledgers = extract_fact_ledgers_from_evidence_analysis(evidence_analysis)
         layer_handoff = state.get("layer_handoff")
         if not layer_handoff:
             layer_handoff = self._layer_analysis_to_handoff(state.get("layer_analysis", ""))
@@ -172,15 +187,24 @@ class RootCauseAnalyzerNode(WorkflowNode):
         parts = [
             "# 问题定位结构化交接 layer_handoff",
             json.dumps(layer_handoff or {}, ensure_ascii=False, indent=2, default=str),
-            "",
-            "# 证据采集结果",
-            self._build_evidence_summary(evidence_items),
         ]
+        if fact_ledgers:
+            parts.extend([
+                "",
+                "# Fact Ledger 证据合同",
+                "Fact Ledger 是 AIOps 根因分析的主证据输入；只能引用当前 ledger 中的 fact_id。",
+            ])
+        else:
+            parts.extend([
+                "",
+                "# 证据采集结果",
+                self._build_evidence_summary(evidence_items),
+            ])
 
         facts = state.get("evidence_facts") or []
         conflicts = state.get("evidence_conflicts") or []
         missing = state.get("missing_evidence") or []
-        if facts:
+        if facts and not fact_ledgers:
             parts.extend(["", "# 已验证事实", json.dumps(facts, ensure_ascii=False, indent=2, default=str)])
         if conflicts:
             parts.extend(["", "# 冲突/负向证据", json.dumps(conflicts, ensure_ascii=False, indent=2, default=str)])
@@ -470,6 +494,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         layer_str = layer.value if layer else "L2"
         question_short = truncate_question(question)
         return {
+            "diagnostic_status": "inconclusive",
             "phenomenon": question_short,
             "evidence_analysis": [],
             "causal_chain": {
@@ -478,10 +503,54 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "manifestation": question_short
             },
             "root_cause": f"[{layer_str}层] 当前无法基于 LLM 输出确定根本原因",
+            "root_cause_summary": f"[{layer_str}层] 当前无法基于 LLM 输出确定根本原因",
+            "supporting_fact_ids": [],
+            "contradicting_fact_ids": [],
+            "unknowns": [reason],
+            "hypotheses": [],
             "confidence": 0.1,
             "confidence_reason": reason,
             "alternative_causes": []
         }
+
+    def _validate_rca_result_against_evidence(
+        self,
+        rca_result: Dict[str, Any],
+        evidence_analysis: Any,
+        *,
+        question: str,
+        layer: Optional[Layer],
+    ) -> Dict[str, Any]:
+        fact_ledgers = extract_fact_ledgers_from_evidence_analysis(evidence_analysis)
+        if not fact_ledgers:
+            return rca_result
+        validation_ledgers = (
+            extract_fact_ledger_inputs_from_evidence_analysis(
+                evidence_analysis
+            )
+            or fact_ledgers
+        )
+        try:
+            return validate_rca_claims(rca_result, validation_ledgers)
+        except Exception as exc:
+            logger.warning("⚠️ [rca] Fact Ledger 引用校验失败，降级为 inconclusive: %s", exc)
+            fallback = self._build_llm_fallback(
+                question=question,
+                layer=layer,
+                reason=f"RCA 结构化输出或事实引用校验失败: {exc}",
+            )
+            fallback["claim_validation"] = {
+                "valid": False,
+                "diagnostic_status": "inconclusive",
+                "valid_supporting_fact_ids": [],
+                "valid_contradicting_fact_ids": [],
+                "invalid_fact_ids": [],
+                "reasons": [str(exc)],
+                "legacy_contract": any(
+                    ledger.legacy_contract for ledger in fact_ledgers
+                ),
+            }
+            return fallback
     
     def _build_decision(
         self,
@@ -536,26 +605,135 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
             parts = []
 
+            quality_keys = (
+                "source_coverage",
+                "case_target_coverage",
+                "detail_retrieval",
+                "diagnostic_sufficiency_summary",
+                "unresolved_questions",
+            )
+            quality_contract = {
+                key: data.get(key)
+                for key in quality_keys
+                if data.get(key) not in (None, {}, [])
+            }
+            if quality_contract:
+                parts.extend([
+                    "## 证据质量合同",
+                    "source_coverage/case_target_coverage 只表示采集覆盖，"
+                    "不能替代 diagnostic_sufficiency；未回答问题必须进入结论限制。",
+                    json.dumps(
+                        quality_contract,
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    ),
+                ])
+
+            tool_data = data.get("tool_data", [])
+            if not isinstance(tool_data, list):
+                tool_data = []
+            selected_tool_data = select_tool_data_for_rca(
+                tool_data,
+                supplementary_limit=10,
+            )
+            fact_ledgers = extract_fact_ledgers_from_tool_data(
+                selected_tool_data
+            )
+
+            if fact_ledgers:
+                parts.extend([
+                    "## AIOps Fact Ledger",
+                    compact_fact_ledgers_json(
+                        fact_ledgers,
+                        max_chars=12000,
+                    ),
+                ])
+                supplementary_raw_parts = []
+                supplementary_fact_parts = []
+                supplementary_context_parts = []
+                index = 1
+                for item in selected_tool_data:
+                    if item.get("fact_ledger") is not None:
+                        continue
+                    tool = item.get("tool", "unknown")
+                    if item.get("agent_context"):
+                        context = self._compact_text_value(
+                            item.get("agent_context", ""),
+                            limit=12000,
+                        )
+                        supplementary_context_parts.append(
+                            f"[{tool}] {context}"
+                        )
+                    elif item.get("agent_facts"):
+                        facts = self._compact_text_value(
+                            item.get("agent_facts", ""),
+                            limit=10000,
+                        )
+                        supplementary_fact_parts.append(f"[{tool}]\n{facts}")
+                    else:
+                        raw = self._compact_text_value(
+                            item.get("data", ""),
+                            limit=500,
+                        )
+                        supplementary_raw_parts.append(
+                            f"{index}. [{tool}]: {raw}"
+                        )
+                    index += 1
+                if supplementary_raw_parts:
+                    parts.append("## 补充工具输出")
+                    parts.extend(supplementary_raw_parts)
+                if supplementary_fact_parts:
+                    parts.append("## AIOps 确定性可观测事实")
+                    parts.extend(supplementary_fact_parts)
+                if supplementary_context_parts:
+                    parts.append("## AIOps 结构化可观测性上下文")
+                    parts.extend(supplementary_context_parts)
+                return "\n".join(parts)
+
             # 1. LLM 的分析文本（包含工具调用结果的总结）
             llm_analysis = data.get("llm_analysis", "")
             if llm_analysis:
                 parts.append(f"## LLM 证据分析\n{llm_analysis[:2000]}")
 
             # 2. MCP 工具的原始输出
-            tool_data = data.get("tool_data", [])
-            if tool_data:
+            if selected_tool_data:
                 tool_parts = []
+                aiops_fact_parts = []
+                aiops_context_parts = []
                 index = 1
-                for td in tool_data[:10]:
+                for td in selected_tool_data:
                     tool = td.get("tool", "unknown")
-                    if str(tool).lower() in {"read_context_archive", "fetch_runbook"}:
-                        continue
-                    raw = self._compact_text_value(td.get("data", ""), limit=500)
-                    tool_parts.append(f"{index}. [{tool}]: {raw}")
+                    if td.get("agent_context"):
+                        agent_context = self._compact_text_value(
+                            td.get("agent_context", ""),
+                            limit=12000,
+                        )
+                        aiops_context_parts.append(
+                            f"[{tool}] {agent_context}"
+                        )
+                    elif td.get("agent_facts"):
+                        agent_facts = self._compact_text_value(
+                            td.get("agent_facts", ""),
+                            limit=10000,
+                        )
+                        aiops_fact_parts.append(f"[{tool}]\n{agent_facts}")
+                    else:
+                        raw = self._compact_text_value(
+                            td.get("data", ""),
+                            limit=500,
+                        )
+                        tool_parts.append(f"{index}. [{tool}]: {raw}")
                     index += 1
                 if tool_parts:
                     parts.append("## 工具原始输出")
                     parts.extend(tool_parts)
+                if aiops_fact_parts:
+                    parts.append("## AIOps 确定性可观测事实")
+                    parts.extend(aiops_fact_parts)
+                if aiops_context_parts:
+                    parts.append("## AIOps 结构化可观测性上下文")
+                    parts.extend(aiops_context_parts)
 
             return "\n".join(parts)
         except (json.JSONDecodeError, TypeError):

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.core.remediation.plans import extract_remediation_plan
@@ -36,6 +38,103 @@ def test_extracts_remediation_plan_from_json_fence():
     assert plan.fix_type == "create_missing_configmap"
     assert plan.actions[0].id == "a1"
     assert plan.actions[0].dry_run_command.startswith("kubectl apply")
+
+
+def test_canonical_fact_ledger_contract_precedes_ordinary_remediation_json():
+    ordinary_plan = {
+        "remediation_available": True,
+        "fix_type": "delete_pod",
+        "actions": [
+            {
+                "id": "delete-api",
+                "type": "kubectl_delete",
+                "execute_command": "kubectl delete pod api -n demo",
+            }
+        ],
+    }
+    canonical_plan = {
+        "remediation_contract": "fact-ledger-diagnostic-only-v1",
+        "remediation_available": False,
+        "fix_type": "manual_only",
+        "requires_human_approval": True,
+        "issue_groups": [],
+        "actions": [],
+    }
+    text = "\n\n".join(
+        [
+            "```json\n"
+            + json.dumps(ordinary_plan, ensure_ascii=False)
+            + "\n```",
+            "```json\n"
+            + json.dumps(canonical_plan, ensure_ascii=False)
+            + "\n```",
+        ]
+    )
+
+    plan = extract_remediation_plan(text)
+
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.fix_type == "manual_only"
+    assert plan.actions == []
+
+
+@pytest.mark.parametrize("separator", ["\n", "\t"])
+def test_rejects_decoded_control_whitespace_in_kubectl_commands(separator):
+    text = "```json\n" + json.dumps(
+        {
+            "remediation_available": True,
+            "fix_type": "delete_pod",
+            "actions": [
+                {
+                    "id": "delete-api",
+                    "type": "kubectl_delete",
+                    "execute_command": (
+                        f"kubectl{separator}delete pod api -n demo"
+                    ),
+                }
+            ],
+        },
+        ensure_ascii=False,
+    ) + "\n```"
+
+    with pytest.raises(ValueError, match="unsafe remediation command"):
+        extract_remediation_plan(text)
+
+
+def test_legacy_multiple_plans_keep_first_valid_plan():
+    first_plan = {
+        "remediation_available": True,
+        "fix_type": "delete_pod",
+        "actions": [
+            {
+                "id": "delete-api",
+                "type": "kubectl_delete",
+                "execute_command": "kubectl delete pod api -n demo",
+            }
+        ],
+    }
+    second_plan = {
+        "remediation_available": False,
+        "fix_type": "manual_only",
+        "actions": [],
+    }
+    text = "\n\n".join(
+        [
+            "```json\n"
+            + json.dumps(first_plan, ensure_ascii=False)
+            + "\n```",
+            "```json\n"
+            + json.dumps(second_plan, ensure_ascii=False)
+            + "\n```",
+        ]
+    )
+
+    plan = extract_remediation_plan(text)
+
+    assert plan is not None
+    assert plan.remediation_available is True
+    assert plan.fix_type == "delete_pod"
 
 
 def test_extracts_issue_groups_and_action_group_metadata():
@@ -128,6 +227,29 @@ def test_rejects_unsafe_kubectl_write_command_even_for_auto_mode_plan():
 """
 
     with pytest.raises(ValueError, match="unsafe remediation command"):
+        extract_remediation_plan(text)
+
+
+def test_rejects_placeholder_secret_value_in_remediation_command():
+    text = """
+```json
+{
+  "remediation_available": true,
+  "fix_type": "patch_workload_env",
+  "risk_level": "low",
+  "actions": [
+    {
+      "id": "a1",
+      "type": "kubectl_set",
+      "description": "set required token",
+      "execute_command": "kubectl set env deployment/api -n demo PAYMENT_GATEWAY_TOKEN=your_token_value"
+    }
+  ]
+}
+```
+"""
+
+    with pytest.raises(ValueError, match="placeholder remediation value"):
         extract_remediation_plan(text)
 
 

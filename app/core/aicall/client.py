@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from pydantic import BaseModel, ValidationError
 from langgraph.errors import GraphRecursionError
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import ContextBudgetEstimator, ModelContextResolver, serialize_tool_schema
@@ -364,6 +364,7 @@ class AICall:
         json_acceptance_guard: Optional[Callable[[Any, List[Dict]], bool]] = None,
         static_context_components: Optional[List[Dict[str, Any]]] = None,
         response_schema: Optional[type[BaseModel]] = None,
+        tool_result_sequence_start: int = 0,
     ) -> Tuple[AICallResult, List[Dict]]:
         """LangChain Agent loop with tool calling (create_agent)
 
@@ -386,11 +387,12 @@ class AICall:
         thinking_events: List[Dict] = []
         all_tool_calls: List[Dict] = []
         tool_call_count = 0
-        tool_result_sequence = 0
+        tool_result_sequence = max(0, int(tool_result_sequence_start or 0))
         iteration = 0
         seen_tool_call_signatures = set()
         seen_tool_result_signatures = set()
         tool_args_by_call_id: Dict[str, Dict[str, Any]] = {}
+        tool_sequence_by_call_id: Dict[str, int] = {}
         observation_processor = self._build_observation_processor()
         if static_context_components is None:
             tool_schema_payload = serialize_tool_schema(tools or [])
@@ -452,6 +454,7 @@ class AICall:
             "model": agent_model,
             "tools": tools,
             "system_prompt": system_prompt,
+            "middleware": [self._build_tool_dedup_middleware()],
         }
         if response_format is not None:
             create_agent_kwargs["response_format"] = response_format
@@ -479,6 +482,7 @@ class AICall:
 
         async def _run_agent():
             nonlocal final_content, structured_response, iteration, tool_call_count, tool_result_sequence, compaction_triggered
+            model_request_started_at = time.time()
             async for chunk in agent.astream(
                 input_messages, config=config,
                 stream_mode=["updates", "messages"],
@@ -535,6 +539,10 @@ class AICall:
                         if isinstance(msg, AIMessage):
                             usage = self._extract_usage_metadata(msg)
                             if usage:
+                                model_duration_ms = max(
+                                    0.0,
+                                    (time.time() - model_request_started_at) * 1000,
+                                )
                                 self._log_provider_usage(
                                     node_id or "agent",
                                     usage,
@@ -547,6 +555,7 @@ class AICall:
                                     node_id,
                                     usage=usage,
                                     iteration=iteration + 1,
+                                    model_duration_ms=model_duration_ms,
                                 )
                             msg_tool_calls = list(msg.tool_calls or [])
                             new_tool_calls = []
@@ -609,20 +618,25 @@ class AICall:
                                         )
                                         continue
                                     tool_call_count += 1
+                                    tool_sequence = tool_call_count
                                     logger.debug("   🔧 [AICall] tool_call #%d %s | args=%s",
-                                                tool_call_count, tc["name"],
+                                                tool_sequence, tc["name"],
                                                 str(tc.get("args", {}))[:300])
                                     push_event(stream_queue, "tool_start", node_id,
                                                tool_name=tc["name"],
                                                tool_args=tc.get("args", {}),
                                                tool_call_id=tc.get("id"),
+                                               tool_sequence=tool_sequence,
                                                iteration=iteration)
                                     if tc.get("id"):
-                                        tool_args_by_call_id[str(tc.get("id"))] = dict(tc.get("args") or {})
+                                        call_id = str(tc.get("id"))
+                                        tool_args_by_call_id[call_id] = dict(tc.get("args") or {})
+                                        tool_sequence_by_call_id[call_id] = tool_sequence
                                     self._record(thinking_events, "tool_start", node_id,
                                                  tool_name=tc["name"],
                                                  tool_args=tc.get("args", {}),
                                                  tool_call_id=tc.get("id"),
+                                                 tool_sequence=tool_sequence,
                                                  iteration=iteration)
 
                         elif hasattr(msg, 'type') and msg.type == 'tool':
@@ -667,6 +681,15 @@ class AICall:
                             status = "success"
                             tool_call_id = getattr(msg, "tool_call_id", None)
                             tool_args = tool_args_by_call_id.get(str(tool_call_id), {}) if tool_call_id else {}
+                            tool_sequence = tool_sequence_by_call_id.get(
+                                str(tool_call_id),
+                                tool_result_sequence,
+                            )
+                            additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+                            deduplicated = bool(additional_kwargs.get("aiops_deduplicated"))
+                            original_tool_call_id = additional_kwargs.get(
+                                "aiops_original_tool_call_id"
+                            )
                             all_tool_calls.append({
                                 "tool_name": tool_name,
                                 "tool_args": tool_args,
@@ -678,6 +701,8 @@ class AICall:
                                 "summary_chars": observation.get("summary_chars", len(bounded_content)),
                                 "semantic_success": observation.get("semantic_success", True),
                                 "structured": observation.get("structured"),
+                                "deduplicated": deduplicated,
+                                "original_tool_call_id": original_tool_call_id,
                             })
                             emitted_tool_messages.append((msg, {
                                 "tool_name": tool_name,
@@ -687,7 +712,7 @@ class AICall:
                                 "summary_chars": observation.get("summary_chars", len(bounded_content)),
                             }))
                             logger.info("   ✅ [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
-                                        tool_call_count, tool_name, status,
+                                        tool_sequence, tool_name, status,
                                         observation.get("raw_chars", len(tool_content)),
                                         observation.get("summary_chars", len(bounded_content)),
                                         observation.get("processor", "unknown"))
@@ -701,14 +726,17 @@ class AICall:
                                     observation.get("processor", "unknown"),
                                 )
                             logger.debug("   📄 [AICall] tool #%d %s 摘要输出:\n%s",
-                                        tool_call_count, tool_name,
+                                        tool_sequence, tool_name,
                                         bounded_content[:2000])
                             evt = {
                                 "type": "tool_result",
                                 "tool_name": tool_name,
                                 "tool_call_id": tool_call_id,
+                                "tool_sequence": tool_sequence,
                                 "tool_args": tool_args,
                                 "status": status,
+                                "deduplicated": deduplicated,
+                                "original_tool_call_id": original_tool_call_id,
                                 "result_preview": bounded_content[:200],
                                 "result": bounded_content,
                                 "raw_ref": observation.get("raw_ref"),
@@ -720,10 +748,12 @@ class AICall:
                                 "structured": observation.get("structured"),
                                 "observation_processed": observation.get("processed", False),
                                 "observation_processor": observation.get("processor", ""),
+                                "context_usage_ratio": observation.get("context_usage_ratio"),
                                 "iteration": iteration,
                             }
                             push_event(stream_queue, "tool_result", node_id, **evt)
                             self._record(thinking_events, "tool_result", node_id, **evt)
+                            model_request_started_at = time.time()
 
                             if not compaction_triggered:
                                 compaction_triggered = self._maybe_compact_runtime_context(
@@ -1129,6 +1159,99 @@ class AICall:
         except Exception:
             args_str = str(args)
         return f"name:{name}|args:{args_str}"
+
+    @staticmethod
+    def _tool_execution_signature(tool_call: Dict[str, Any]) -> str:
+        """Return a stable execution key independent of provider call IDs."""
+        name = str(tool_call.get("name") or "unknown")
+        args = tool_call.get("args", {})
+        try:
+            args_str = json.dumps(
+                args,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        except Exception:
+            args_str = str(args)
+        return f"name:{name}|args:{args_str}"
+
+    @staticmethod
+    def _build_tool_dedup_middleware():
+        """Deduplicate identical tool executions within one agent call."""
+        import asyncio
+        from langchain.agents.middleware import wrap_tool_call
+
+        cache: Dict[str, Tuple[ToolMessage, str]] = {}
+        in_flight: Dict[str, Tuple[Any, str]] = {}
+        lock = asyncio.Lock()
+
+        def _clone_for_call(
+            source: ToolMessage,
+            current_call_id: str,
+            original_call_id: str,
+        ) -> ToolMessage:
+            additional_kwargs = dict(source.additional_kwargs or {})
+            additional_kwargs.update({
+                "aiops_deduplicated": True,
+                "aiops_original_tool_call_id": original_call_id,
+            })
+            return source.model_copy(update={
+                "id": None,
+                "tool_call_id": current_call_id,
+                "additional_kwargs": additional_kwargs,
+            })
+
+        @wrap_tool_call
+        async def deduplicate_tool_call(request, handler):
+            tool_call = dict(request.tool_call or {})
+            signature = AICall._tool_execution_signature(tool_call)
+            current_call_id = str(tool_call.get("id") or "")
+
+            async with lock:
+                cached = cache.get(signature)
+                if cached is not None:
+                    source, original_call_id = cached
+                    return _clone_for_call(
+                        source,
+                        current_call_id,
+                        original_call_id,
+                    )
+
+                pending = in_flight.get(signature)
+                if pending is None:
+                    task = asyncio.create_task(handler(request))
+                    original_call_id = current_call_id
+                    in_flight[signature] = (task, original_call_id)
+                    owner = True
+                else:
+                    task, original_call_id = pending
+                    owner = False
+
+            try:
+                result = await task
+            finally:
+                if owner:
+                    async with lock:
+                        in_flight.pop(signature, None)
+
+            if not isinstance(result, ToolMessage):
+                return result
+
+            if owner:
+                if getattr(result, "status", "success") == "success":
+                    async with lock:
+                        cache[signature] = (result, original_call_id)
+                return result
+
+            return _clone_for_call(
+                result,
+                current_call_id,
+                original_call_id,
+            )
+
+        return deduplicate_tool_call
 
     @staticmethod
     def _tool_result_signature(msg: Any, tool_name: str, tool_content: str) -> str:

@@ -15,16 +15,34 @@
 
 import json
 import logging
+import math
 import os
 import re
+import shlex
 from typing import Any, Dict, List, Optional
 
-from app.core.remediation.plans import extract_remediation_plan
+from app.core.remediation.plans import (
+    extract_remediation_plan,
+    is_read_only_kubectl_command,
+    validate_safe_kubectl_command,
+)
+from app.core.workflow.fact_contract import (
+    extract_fact_ledgers_from_evidence_analysis,
+    validate_rca_claims,
+)
 from app.core.workflow.nodes.base import WorkflowNode
-from app.core.workflow.schemas import ConclusionOutput, QueryConclusionOutput, QueryResult, RCAOutput
+from app.core.workflow.schemas import (
+    ConclusionOutput,
+    FactLedger,
+    FactRecord,
+    QueryConclusionOutput,
+    QueryResult,
+    RCAOutput,
+)
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem, Confidence
 from app.core.prompts import (
+    FACT_LEDGER_REMEDIATION_PLAN_PROMPT,
     REMEDIATION_PLAN_PROMPT,
     get_conclusion_mode_instruction,
     get_workflow_prompt,
@@ -81,12 +99,25 @@ class ConclusionFormatterNode(WorkflowNode):
             return self.holmes_service.get_response_language()
         return "zh"
 
-    def _get_conclusion_prompt(self) -> str:
-        return get_workflow_prompt(
+    def _get_conclusion_prompt(
+        self,
+        *,
+        fact_ledger_authoritative: bool = False,
+    ) -> str:
+        prompt = get_workflow_prompt(
             "conclusion",
             prompt_language=self._get_prompt_language(),
             response_language=self._get_response_language(),
         )
+        if fact_ledger_authoritative:
+            prompt = prompt.replace(
+                "6. **建议可执行**：修复命令可直接复制执行",
+                "6. **建议只读**：只保留人工指导和允许的只读验证命令",
+            ).replace(
+                "5. **修复命令必须可直接复制执行**",
+                "5. **Fact Ledger 报告不得生成 Kubernetes 写命令**",
+            )
+        return prompt
 
     def _get_query_conclusion_prompt(self) -> str:
         return """你是 K8s 查询结果总结器。
@@ -188,6 +219,14 @@ class ConclusionFormatterNode(WorkflowNode):
             root_cause = state.get("root_cause", "")
             causal_chain = state.get("causal_chain", {})
             query_result = state.get("query_result")
+            fact_report_context = (
+                self._build_fact_report_context(
+                    evidence_analysis=evidence_analysis,
+                    rca_analysis=rca_analysis,
+                )
+                if layer not in {Layer.QUERY, Layer.HEALTHY}
+                else None
+            )
             if layer == Layer.HEALTHY:
                 conclusion = self._format_healthy_fast_path(
                     question=question,
@@ -212,6 +251,7 @@ class ConclusionFormatterNode(WorkflowNode):
                     layer=layer,
                     tool_data_text=tool_data_text,
                     query_result=query_result,
+                    fact_ledger_authoritative=fact_report_context is not None,
                 )
             else:
                 # 回退到模板格式化
@@ -229,6 +269,140 @@ class ConclusionFormatterNode(WorkflowNode):
                     errors=state.get("errors", []),
                     warnings=state.get("warnings", []),
                 )
+
+            if layer not in {Layer.QUERY, Layer.HEALTHY}:
+                validation_errors = self._diagnosis_report_validation_errors(
+                    conclusion
+                )
+                fatal_errors = {
+                    "empty_report",
+                    "internal_prompt_echo",
+                    "input_wrapper_echo",
+                    "unbalanced_code_fence",
+                }
+                if fatal_errors.intersection(validation_errors):
+                    logger.warning(
+                        "⚠️ [conclusion] LLM 报告校验失败，使用确定性模板: %s",
+                        ", ".join(validation_errors),
+                    )
+                    conclusion = self._format_with_template(
+                        question=question,
+                        layer=layer,
+                        evidence_items=evidence_items,
+                        decision=decision,
+                        root_cause=root_cause,
+                        causal_chain=causal_chain,
+                        layer_analysis=layer_analysis,
+                        evidence_analysis=evidence_analysis,
+                        rca_analysis=rca_analysis,
+                        errors=state.get("errors", []),
+                        warnings=state.get("warnings", []),
+                    )
+                elif validation_errors:
+                    logger.info(
+                        "📑 [conclusion] 补齐缺失报告章节: %s",
+                        ", ".join(validation_errors),
+                    )
+                    conclusion = self._ensure_required_diagnosis_sections(
+                        conclusion
+                    )
+
+            structured_context = (
+                ""
+                if fact_report_context is not None
+                else self._build_structured_diagnosis_context(
+                    evidence_analysis=evidence_analysis,
+                    rca_analysis=rca_analysis,
+                )
+            )
+
+            def apply_diagnosis_postprocessors(report: str) -> str:
+                if fact_report_context is not None:
+                    ledgers, validated_claim = fact_report_context
+                    return self._apply_fact_ledger_report_contract(
+                        report,
+                        ledgers=ledgers,
+                        validated_claim=validated_claim,
+                    )
+                report = self._enforce_observability_dimension_table(
+                    report,
+                    structured_context,
+                )
+                report = self._sanitize_observability_evidence_refs(
+                    report,
+                    structured_context,
+                )
+                report = self._enforce_exact_topology_section(
+                    report,
+                    structured_context,
+                )
+                report = self._enforce_metric_boundary_claims(
+                    report,
+                    structured_context,
+                )
+                report = self._enforce_evidence_scope_claims(
+                    report,
+                    structured_context,
+                )
+                report = self._enforce_entity_evidence_consistency(
+                    report,
+                    structured_context,
+                )
+                report = self._enforce_entity_identity_facts(
+                    report,
+                    layer_analysis,
+                    structured_context,
+                )
+                report = self._append_exact_k8s_signal_appendix(
+                    report,
+                    structured_context,
+                )
+                report = self._append_exact_observability_facts_appendix(
+                    report,
+                    structured_context,
+                )
+                report = self._append_exact_topology_appendix(
+                    report,
+                    structured_context,
+                )
+                if layer not in {Layer.QUERY, Layer.HEALTHY}:
+                    report = self._mark_legacy_report_contract(report)
+                return report
+
+            conclusion = apply_diagnosis_postprocessors(conclusion)
+            if layer not in {Layer.QUERY, Layer.HEALTHY}:
+                final_errors = self._diagnosis_report_validation_errors(conclusion)
+                if "invalid_remediation_json" in final_errors:
+                    conclusion = self._repair_invalid_remediation_json(conclusion)
+                    final_errors = self._diagnosis_report_validation_errors(conclusion)
+                final_fatal_errors = {
+                    "empty_report",
+                    "internal_prompt_echo",
+                    "input_wrapper_echo",
+                    "archive_path_leak",
+                    "unbalanced_code_fence",
+                    "invalid_remediation_json",
+                }
+                if final_fatal_errors.intersection(final_errors):
+                    logger.warning(
+                        "⚠️ [conclusion] 最终报告门禁失败，使用确定性模板: %s",
+                        ", ".join(final_errors),
+                    )
+                    conclusion = apply_diagnosis_postprocessors(
+                        self._format_with_template(
+                            question=question,
+                            layer=layer,
+                            evidence_items=evidence_items,
+                            decision=decision,
+                            root_cause=root_cause,
+                            causal_chain=causal_chain,
+                            layer_analysis=layer_analysis,
+                            evidence_analysis=evidence_analysis,
+                            rca_analysis=rca_analysis,
+                            errors=state.get("errors", []),
+                            warnings=state.get("warnings", []),
+                        )
+                    )
             
             new_state.update({
                 "conclusion": conclusion,
@@ -279,6 +453,7 @@ class ConclusionFormatterNode(WorkflowNode):
         layer: Optional[Layer] = None,
         tool_data_text: str = "",
         query_result: Optional[Dict[str, Any]] = None,
+        fact_ledger_authoritative: bool = False,
     ) -> str:
         """
         生成最终报告。
@@ -310,6 +485,17 @@ class ConclusionFormatterNode(WorkflowNode):
                 prompt_language=self._get_prompt_language(),
             )
         else:
+            remediation_prompt = (
+                FACT_LEDGER_REMEDIATION_PLAN_PROMPT
+                if fact_ledger_authoritative
+                else REMEDIATION_PLAN_PROMPT
+            )
+            evidence_instruction = (
+                "尽可能多引用原始数据和证据；仅保留人工指导和允许的"
+                "只读验证命令。"
+                if fact_ledger_authoritative
+                else "尽可能多引用原始数据和证据，修复命令可直接复制执行。"
+            )
             instruction = f"""请基于以上三个阶段的分析结果，生成一份详尽、完整的诊断报告。
 
 ⚠️ 最重要的规则：用户的原始问题是「{question}」，你的报告必须在开头直接回答这个问题。
@@ -318,9 +504,9 @@ class ConclusionFormatterNode(WorkflowNode):
 - 不要让诊断模板淹没用户关心的核心信息
 
 然后按照 system prompt 中的「诊断模板」格式输出（## 📊 诊断概览 → ## 🔍 现象描述 → ## 🕵️ 证据链 → ## 🎯 根因分析 → ## 🛠️ 修复建议）。
-尽可能多引用原始数据和证据，修复命令可直接复制执行。
+{evidence_instruction}
 
-{REMEDIATION_PLAN_PROMPT}"""
+{remediation_prompt}"""
 
         tool_section = ""
         if tool_data_text:
@@ -336,46 +522,7 @@ class ConclusionFormatterNode(WorkflowNode):
             except Exception:
                 query_result_section = ""
 
-        # 从 evidence_analysis JSON 提取真实证据统计，直接注入给 LLM
         evidence_stats_section = ""
-        try:
-            ea = json.loads(evidence_analysis) if evidence_analysis else {}
-            stats = self._extract_evidence_stats(ea)
-            cs = stats.get("collection_summary", "")
-            inv = ea.get("evidence_inventory", [])
-            mr = ea.get("missing_reasons", [])
-            if cs or inv:
-                parts = ["\n# ⚠️ 证据采集统计（系统数据，必须原样引用，禁止自行计算）"]
-                if cs:
-                    parts.append(f"collection_summary: {cs}")
-                if stats:
-                    parts.append(
-                        "plan_stats: "
-                        f"{stats.get('plan_collected', 0)}/{stats.get('plan_total', 0)} "
-                        f"({stats.get('plan_completeness_pct', '0%')})"
-                    )
-                    parts.append(
-                        "environment_evidence_stats: "
-                        f"{stats.get('environment_collected', 0)}/{stats.get('environment_total', 0)} "
-                        f"({stats.get('environment_completeness_pct', '0%')})"
-                    )
-                if inv:
-                    collected_items = [i for i in inv if i.get("collected")]
-                    missing_items = [i for i in inv if not i.get("collected")]
-                    parts.append(f"已采集 ({len(collected_items)} 项):")
-                    for i in collected_items:
-                        parts.append(f"  ✅ {i['id']}: {i['description']}")
-                    if missing_items:
-                        parts.append(f"未采集 ({len(missing_items)} 项):")
-                        for i in missing_items:
-                            parts.append(f"  ❌ {i['id']}: {i['description']}")
-                if mr:
-                    parts.append("未采集原因:")
-                    for r in mr:
-                        parts.append(f"  - {r}")
-                evidence_stats_section = "\n".join(parts) + "\n"
-        except (json.JSONDecodeError, TypeError):
-            pass
 
         structured_context_section = self._build_structured_diagnosis_context(
             evidence_analysis=evidence_analysis,
@@ -402,7 +549,9 @@ class ConclusionFormatterNode(WorkflowNode):
 {tool_section}
 {instruction}"""
         else:
-            system_prompt_text = self._get_conclusion_prompt()
+            system_prompt_text = self._get_conclusion_prompt(
+                fact_ledger_authoritative=fact_ledger_authoritative,
+            )
 
         # ── Token 预算控制：防止超过模型上下文限制 ──
         token_budget = self._resolve_context_token_budget(output_reserved=max_tokens)
@@ -425,7 +574,6 @@ class ConclusionFormatterNode(WorkflowNode):
             sections = {
                 "layer_analysis": layer_analysis,
                 "structured_context_section": structured_context_section,
-                "evidence_stats_section": evidence_stats_section,
                 "tool_section": tool_section,
             }
             sorted_sections = sorted(sections.items(), key=lambda x: len(x[1]), reverse=True)
@@ -437,8 +585,6 @@ class ConclusionFormatterNode(WorkflowNode):
                         layer_analysis = compressed
                     elif name == "structured_context_section":
                         structured_context_section = compressed
-                    elif name == "evidence_stats_section":
-                        evidence_stats_section = compressed
                     elif name == "tool_section":
                         tool_section = compressed
 
@@ -500,13 +646,14 @@ class ConclusionFormatterNode(WorkflowNode):
             if content:
                 content = self._enforce_evidence_stats(content, evidence_analysis)
                 content = self._strip_think_blocks(content)
-                content = self._normalize_ask_remediation_plan(
-                    content,
-                    layer_analysis=layer_analysis,
-                    evidence_analysis=evidence_analysis,
-                    rca_analysis=rca_analysis,
-                    tool_data_text=tool_data_text,
-                )
+                if not fact_ledger_authoritative:
+                    content = self._normalize_ask_remediation_plan(
+                        content,
+                        layer_analysis=layer_analysis,
+                        evidence_analysis=evidence_analysis,
+                        rca_analysis=rca_analysis,
+                        tool_data_text=tool_data_text,
+                    )
                 return content
             return f"报告生成失败：LLM 未返回有效内容。\n\n原始数据：\n{tool_data_text[:1000] if tool_data_text else '无'}"
 
@@ -562,7 +709,7 @@ class ConclusionFormatterNode(WorkflowNode):
         if content:
             content = self._enforce_evidence_stats(content, evidence_analysis)
             content = self._strip_think_blocks(content)
-            if not is_query:
+            if not is_query and not fact_ledger_authoritative:
                 content = self._normalize_ask_remediation_plan(
                     content,
                     layer_analysis=layer_analysis,
@@ -602,6 +749,3983 @@ class ConclusionFormatterNode(WorkflowNode):
         cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
         cleaned = re.sub(r"^\s+", "", cleaned)
         return cleaned
+
+    @staticmethod
+    def _diagnosis_report_validation_errors(content: str) -> List[str]:
+        """Reject prompt echoes and structurally broken diagnosis reports."""
+        if not isinstance(content, str) or not content.strip():
+            return ["empty_report"]
+
+        errors: List[str] = []
+        archive_path = "/tmp/aiops/reports/context_archives/"
+        prompt_markers = (
+            "# 阶段1：问题定位分析",
+            "# 阶段2-3：结构化诊断上下文",
+            "# 工具采集的原始数据（重要",
+            "证据采集统计（系统数据",
+            "plan_stats:",
+        )
+        if any(marker in content for marker in prompt_markers):
+            errors.append("internal_prompt_echo")
+        if archive_path in content:
+            errors.append("archive_path_leak")
+        if re.search(r"(?m)^#\s+用户问题\s*$", content):
+            errors.append("input_wrapper_echo")
+        if content.count("```") % 2:
+            errors.append("unbalanced_code_fence")
+        remediation_heading = re.search(
+            r"(?m)^##\s+[^\n]*结构化修复计划[^\n]*$",
+            content,
+        )
+        if remediation_heading:
+            section = content[remediation_heading.end():]
+            next_heading = re.search(r"(?m)^##\s+", section)
+            if next_heading:
+                section = section[:next_heading.start()]
+            json_match = re.search(
+                r"```json\s*(\{.*?\})\s*```",
+                section,
+                re.IGNORECASE | re.DOTALL,
+            )
+            remediation_valid = False
+            if json_match:
+                try:
+                    json.loads(json_match.group(1))
+                    remediation_valid = extract_remediation_plan(section) is not None
+                except (json.JSONDecodeError, ValueError):
+                    remediation_valid = False
+            if not remediation_valid:
+                errors.append("invalid_remediation_json")
+
+        required_groups = (
+            ("diagnosis_overview", ("诊断概览",)),
+            ("evidence", ("现象描述", "证据链", "可观测性数据")),
+            ("root_cause", ("根因分析",)),
+            ("remediation", ("修复建议",)),
+        )
+        for name, candidates in required_groups:
+            if not any(candidate in content for candidate in candidates):
+                errors.append(f"missing_{name}")
+        return errors
+
+    @staticmethod
+    def _ensure_required_diagnosis_sections(content: str) -> str:
+        """Add missing human-facing sections without discarding valid payloads."""
+        result = content.strip()
+        if "诊断概览" not in result:
+            result = "## 📊 诊断概览\n\n- 详见下方诊断证据与结论。\n\n" + result
+
+        remediation_match = re.search(
+            r"(?m)^##\s+[^\n]*修复建议[^\n]*$",
+            result,
+        )
+        insertion_index = remediation_match.start() if remediation_match else len(result)
+        missing_sections: List[str] = []
+        if not any(
+            marker in result
+            for marker in ("现象描述", "证据链", "可观测性数据")
+        ):
+            missing_sections.append(
+                "## 🔍 现象描述\n\n"
+                "- 当前现象与原始证据见可观测性数据及机器可核验附录。"
+            )
+        if "根因分析" not in result:
+            missing_sections.append(
+                "## 🎯 根因分析\n\n"
+                "- 根因结论以已采集的 Kubernetes、Metrics、Logging、Tracing "
+                "和 Topology 证据为边界。"
+            )
+        if missing_sections:
+            block = "\n\n".join(missing_sections) + "\n\n"
+            result = result[:insertion_index] + block + result[insertion_index:]
+        if "修复建议" not in result:
+            result += "\n\n## 🛠️ 修复建议\n\n- 暂无可安全自动执行的修复动作。"
+        return result.rstrip() + "\n"
+
+    @staticmethod
+    def _repair_invalid_remediation_json(content: str) -> str:
+        """Replace only a broken structured remediation section with a safe plan."""
+        heading = re.search(
+            r"(?m)^##\s+[^\n]*结构化修复计划[^\n]*$",
+            content,
+        )
+        if not heading:
+            return content
+        remainder = content[heading.end():]
+        next_heading = re.search(r"(?m)^##\s+", remainder)
+        section_end = (
+            heading.end() + next_heading.start()
+            if next_heading
+            else len(content)
+        )
+        safe_plan = {
+            "remediation_available": False,
+            "fix_type": "manual_only",
+            "risk_level": "medium",
+            "requires_human_approval": True,
+            "issue_groups": [],
+            "basis": [
+                "原始结构化修复计划未通过 JSON 与安全校验，已降级为人工处理。"
+            ],
+            "actions": [],
+            "stop_conditions": [
+                "需要人工根据诊断证据确认具体修复动作后再执行"
+            ],
+        }
+        replacement = (
+            heading.group(0)
+            + "\n\n```json\n"
+            + json.dumps(safe_plan, ensure_ascii=False, indent=2)
+            + "\n```\n\n"
+        )
+        return (
+            content[:heading.start()]
+            + replacement
+            + content[section_end:].lstrip("\n")
+        )
+
+    @staticmethod
+    def _sanitize_observability_evidence_refs(
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Remove model-generated aliases from the observability ref table."""
+        if not isinstance(content, str) or not content:
+            return content
+
+        ref_pattern = re.compile(
+            r"\b(?:metric|log|deepflow|tempo|k8s)-[A-Za-z0-9][A-Za-z0-9_.:/-]*\b"
+        )
+        valid_refs = set(ref_pattern.findall(str(structured_context or "")))
+        lines = content.splitlines()
+        in_ref_table = False
+
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("|") and "证据 ref" in stripped:
+                in_ref_table = True
+                continue
+            if not in_ref_table:
+                continue
+            if not stripped.startswith("|"):
+                in_ref_table = False
+                continue
+            if set(stripped.replace("|", "").strip()) <= {"-", ":", " "}:
+                continue
+
+            cells = line.split("|")
+            if len(cells) < 4:
+                continue
+            ref_cell = cells[-2]
+            candidates = ref_pattern.findall(ref_cell)
+            valid_candidates = list(dict.fromkeys(
+                ref for ref in candidates if ref in valid_refs
+            ))
+            ref_text = ref_cell.strip()
+            should_replace = (
+                (candidates and len(valid_candidates) != len(candidates))
+                or (
+                    not candidates
+                    and bool(ref_text)
+                    and ref_text != "见机器可核验附录"
+                )
+            )
+            if should_replace:
+                cells[-2] = " 见机器可核验附录 "
+                lines[index] = "|".join(cells)
+            elif valid_candidates:
+                cells[-2] = f" {'<br>'.join(valid_candidates)} "
+                lines[index] = "|".join(cells)
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _enforce_observability_dimension_table(
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Make the Tracing table row agree with exact DeepFlow/Tempo facts."""
+        if not isinstance(content, str) or not content:
+            return content
+
+        def parse_fields(line: str) -> Dict[str, str]:
+            fields: Dict[str, str] = {}
+            for key, raw_value in re.findall(
+                r"([A-Za-z0-9_.]+)=(\"[^\"]*\"|\[[^\]]*\]|\S+)",
+                line,
+            ):
+                value = raw_value
+                if value.startswith('"'):
+                    try:
+                        value = str(json.loads(value))
+                    except json.JSONDecodeError:
+                        value = value.strip('"')
+                fields[key] = value
+            return fields
+
+        coverage_present = False
+        coverage_fields: Dict[str, str] = {}
+        correlations: List[Dict[str, str]] = []
+        metric_facts: List[Dict[str, str]] = []
+        log_facts: List[Dict[str, str]] = []
+        k8s_facts: List[Dict[str, str]] = []
+        deepflow_facts: List[Dict[str, str]] = []
+        tempo_facts: List[Dict[str, str]] = []
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith("COVERAGE "):
+                fields = parse_fields(line)
+                coverage_fields.update(fields)
+                coverage_present = coverage_present or any(
+                    str(fields.get(key) or "").lower() == "present"
+                    for key in ("tracing", "trace")
+                )
+            elif line.startswith("- TRACE_CORRELATION "):
+                correlations.append(parse_fields(line))
+            elif line.startswith("- METRIC "):
+                metric_facts.append(parse_fields(line))
+            elif line.startswith("- LOG "):
+                log_facts.append(parse_fields(line))
+            elif line.startswith("- K8S_SIGNAL "):
+                k8s_facts.append(parse_fields(line))
+            elif line.startswith("- DEEPFLOW "):
+                deepflow_facts.append(parse_fields(line))
+            elif line.startswith("- TEMPO "):
+                tempo_facts.append(parse_fields(line))
+
+        if not (
+            coverage_present
+            or metric_facts
+            or log_facts
+            or k8s_facts
+            or deepflow_facts
+            or tempo_facts
+        ):
+            return content
+
+        do_not_merge = any(
+            str(item.get("do_not_merge") or "").lower() == "true"
+            for item in correlations
+        )
+        signals: List[str] = []
+        evidence_refs: List[str] = []
+
+        if do_not_merge:
+            source_ids = []
+            for item in correlations:
+                for key in (
+                    "log_trace_ids",
+                    "tempo_trace_ids",
+                    "deepflow_trace_ids",
+                    "log_tempo_trace_ids",
+                ):
+                    value = item.get(key)
+                    if value:
+                        source_ids.append(f"{key}={value}")
+            warning = "来源 Trace ID 不一致，禁止跨 ID 合并"
+            if source_ids:
+                warning += "：" + ", ".join(dict.fromkeys(source_ids))
+            signals.append(warning)
+
+        for fact in deepflow_facts:
+            parts = []
+            if fact.get("trace_id"):
+                parts.append(f"trace_id={fact['trace_id']}")
+            for key in ("request", "response_code", "duration_us"):
+                if fact.get(key):
+                    parts.append(f"{key}={fact[key]}")
+            if parts:
+                signals.append("DeepFlow " + " ".join(parts))
+            if fact.get("evidence_ref"):
+                evidence_refs.append(fact["evidence_ref"])
+
+        tempo_detail_keys = (
+            "http.response.status_code",
+            "error.type",
+            "config.key",
+            "config.present",
+            "aiops.allocated_mib.before",
+            "aiops.allocated_mib.after",
+            "aiops.alloc_mib",
+            "url.path",
+        )
+        for fact in tempo_facts:
+            parts = []
+            if fact.get("trace_id"):
+                parts.append(f"trace_id={fact['trace_id']}")
+            for key in ("service", "span"):
+                if fact.get(key):
+                    parts.append(f"{key}={fact[key]}")
+            for key in tempo_detail_keys:
+                if fact.get(key):
+                    parts.append(f"{key}={fact[key]}")
+            if parts:
+                signals.append("Tempo " + " ".join(parts))
+            if fact.get("evidence_ref"):
+                evidence_refs.append(fact["evidence_ref"])
+
+        if not signals:
+            signals.append("结构化 coverage 标记 tracing/trace=present")
+
+        def table_cell(values: List[str]) -> str:
+            return "<br>".join(
+                value.replace("|", r"\|")
+                for value in dict.fromkeys(values)
+                if value
+            )
+
+        metric_signals: List[str] = []
+        metric_refs: List[str] = []
+        metric_keys = (
+            "metric",
+            "pod",
+            "container",
+            "start",
+            "max",
+            "last",
+            "limit",
+            "max_limit_ratio",
+            "samples",
+        )
+        for fact in metric_facts:
+            parts = [f"{key}={fact[key]}" for key in metric_keys if fact.get(key)]
+            if parts:
+                metric_signals.append(" ".join(parts))
+            if fact.get("evidence_ref"):
+                metric_refs.append(fact["evidence_ref"])
+
+        log_signals: List[str] = []
+        log_refs: List[str] = []
+        log_keys = (
+            "role",
+            "event",
+            "level",
+            "message",
+            "error_code",
+            "pod",
+            "path",
+            "trace_id",
+        )
+        for fact in log_facts:
+            parts = [f"{key}={fact[key]}" for key in log_keys if fact.get(key)]
+            if parts:
+                log_signals.append(" ".join(parts))
+            if fact.get("evidence_ref"):
+                log_refs.append(fact["evidence_ref"])
+
+        k8s_signals: List[str] = []
+        k8s_refs: List[str] = []
+        for fact in k8s_facts:
+            if fact.get("observed"):
+                k8s_signals.append(fact["observed"])
+            raw_refs = fact.get("evidence_refs")
+            if raw_refs:
+                try:
+                    parsed_refs = json.loads(raw_refs)
+                except (json.JSONDecodeError, TypeError):
+                    parsed_refs = []
+                if isinstance(parsed_refs, list):
+                    k8s_refs.extend(str(ref) for ref in parsed_refs if ref)
+
+        tracing_row = (
+            "| **Tracing** | DeepFlow/Tempo | present | "
+            f"{table_cell(signals)} | "
+            f"{table_cell(evidence_refs) or '见机器可核验附录'} |"
+        )
+        exact_rows = {
+            "metrics": (
+                "| **Metrics** | Prometheus | "
+                f"{coverage_fields.get('metrics') or 'present'} | "
+                f"{table_cell(metric_signals) or '未返回可用指标样本'} | "
+                f"{table_cell(metric_refs) or '见机器可核验附录'} |"
+            ),
+            "logging": (
+                "| **Logging** | ES/Filebeat | "
+                f"{coverage_fields.get('logs') or 'present'} | "
+                f"{table_cell(log_signals) or '未返回可用日志原文'} | "
+                f"{table_cell(log_refs) or '见机器可核验附录'} |"
+            ),
+            "tracing": tracing_row,
+            "k8s": (
+                "| **K8s** | Kubernetes API | "
+                f"{coverage_fields.get('k8s') or 'present'} | "
+                f"{table_cell(k8s_signals) or '未返回可用 Kubernetes 强信号'} | "
+                f"{table_cell(k8s_refs) or '见机器可核验附录'} |"
+            ),
+        }
+        lines = content.splitlines()
+        section_start = next(
+            (
+                index for index, line in enumerate(lines)
+                if re.match(r"^###\s+三大观测维度\s*$", line.strip())
+            ),
+            None,
+        )
+        if section_start is None:
+            return content
+        section_end = next(
+            (
+                index for index in range(section_start + 1, len(lines))
+                if re.match(r"^#{1,3}\s+", lines[index].strip())
+            ),
+            len(lines),
+        )
+
+        dimension_row_pattern = re.compile(
+            r"^\|\s*\*{0,2}(?:metrics|logging|tracing|k8s)\*{0,2}\s*\|",
+            re.IGNORECASE,
+        )
+        for index in reversed(range(section_start + 1, min(section_end, len(lines)))):
+            if dimension_row_pattern.match(lines[index].strip()):
+                del lines[index]
+
+        section_end = next(
+            (
+                index for index in range(section_start + 1, len(lines))
+                if re.match(r"^#{1,3}\s+", lines[index].strip())
+            ),
+            len(lines),
+        )
+        separator_index = next(
+            (
+                index
+                for index in range(section_start + 1, section_end)
+                if lines[index].strip().startswith("|")
+                and set(lines[index].replace("|", "").strip()) <= {"-", ":", " "}
+            ),
+            None,
+        )
+        if separator_index is None:
+            return content
+        canonical_rows = [
+            exact_rows["metrics"],
+            exact_rows["logging"],
+            exact_rows["tracing"],
+            exact_rows["k8s"],
+        ]
+        lines[separator_index + 1:separator_index + 1] = canonical_rows
+
+        result = "\n".join(lines)
+        if content.endswith("\n"):
+            result += "\n"
+        return result
+
+    @staticmethod
+    def _append_exact_topology_appendix(
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Append immutable topology facts when the report boundary has them."""
+        if not isinstance(content, str) or not content:
+            return content
+        marker = "## 附录：机器可核验拓扑原始边"
+        if marker in content:
+            return content
+
+        entity_count_lines = []
+        edge_count_line = ""
+        edge_lines = []
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith(("TOPOLOGY_ENTITY_COUNT ", "TOPOLOGY_CASE_COUNT ")):
+                entity_count_lines.append(line)
+            elif line.startswith("TOPOLOGY_EXACT_EDGES "):
+                edge_count_line = line
+            elif line.startswith("- TOPOLOGY relationship="):
+                edge_lines.append(line[2:])
+
+        if not edge_lines:
+            return content
+
+        appendix = [
+            marker,
+            "> 以下内容由系统从 `collect_aiops_case` 结构化结果确定性注入，未经过 LLM 改写。",
+            "",
+            "```text",
+        ]
+        appendix.extend(entity_count_lines)
+        if edge_count_line:
+            appendix.append(edge_count_line)
+        appendix.extend(edge_lines)
+        appendix.append("```")
+        return content.rstrip() + "\n\n---\n\n" + "\n".join(appendix)
+
+    @staticmethod
+    def _enforce_exact_topology_section(
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Replace the model-written topology subsection with exact graph edges."""
+        if not isinstance(content, str) or not content:
+            return content
+
+        edge_lines = []
+        parsed_edges: List[Dict[str, str]] = []
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if not line.startswith("- TOPOLOGY relationship="):
+                continue
+            fields: Dict[str, str] = {}
+            for key in (
+                "relationship",
+                "source",
+                "target",
+                "source_system",
+                "directness",
+                "confidence",
+            ):
+                pattern = (
+                    rf'{key}=("[^"]*"|\S+)'
+                    if key == "relationship"
+                    else rf"{key}=(\S+)"
+                )
+                match = re.search(pattern, line)
+                if not match:
+                    continue
+                value = match.group(1)
+                if value.startswith('"'):
+                    try:
+                        value = json.loads(value)
+                    except json.JSONDecodeError:
+                        value = value.strip('"')
+                fields[key] = value
+            if not all(fields.get(key) for key in ("relationship", "source", "target")):
+                continue
+            annotations = []
+            strength = "/".join(
+                value
+                for value in (fields.get("directness"), fields.get("confidence"))
+                if value
+            )
+            if strength:
+                annotations.append(strength)
+            if fields.get("source_system"):
+                annotations.append(f"source_system={fields['source_system']}")
+            suffix = f" ({'; '.join(annotations)})" if annotations else ""
+            edge_lines.append(
+                f"- `{fields['relationship']}`: `{fields['source']}` -> "
+                f"`{fields['target']}`{suffix}"
+            )
+            parsed_edges.append(fields)
+
+        if not edge_lines:
+            return content
+
+        topology_explanations: List[str] = []
+        pod_to_rs: Dict[str, str] = {}
+        rs_to_deployment: Dict[str, str] = {}
+        deployments: List[str] = []
+        for edge in parsed_edges:
+            relationship = edge.get("relationship")
+            source = edge.get("source")
+            target = edge.get("target")
+            if relationship == "Pod --calls--> Pod":
+                topology_explanations.append(
+                    f"调用方 `{source}` 的流量进入目标 Pod `{target}`"
+                )
+            elif relationship == "Service --selects--> Pod":
+                topology_explanations.append(
+                    f"Service `{source}` 将流量选择到 Pod `{target}`"
+                )
+            elif relationship == "Pod --owned_by--> ReplicaSet":
+                pod_to_rs[source] = target
+            elif relationship == "ReplicaSet --owned_by--> Deployment":
+                rs_to_deployment[source] = target
+
+        for pod, replica_set in pod_to_rs.items():
+            deployment = rs_to_deployment.get(replica_set)
+            if not deployment:
+                continue
+            deployments.append(deployment)
+            topology_explanations.append(
+                f"目标 Pod `{pod}` 由 Deployment `{deployment}` 管理，"
+                f"中间控制器为 ReplicaSet `{replica_set}`"
+            )
+        for deployment in dict.fromkeys(deployments):
+            topology_explanations.append(
+                f"责任边界落在 Deployment `{deployment}` 管理的工作负载"
+            )
+
+        topology_summary = (
+            "；".join(dict.fromkeys(topology_explanations)) + "。"
+            if topology_explanations
+            else "当前原始边只足以说明实体关系，尚不能进一步确定责任工作负载。"
+        )
+        section = [
+            "### 拓扑关系（实体与边）",
+            "> 以下关系由 `collect_aiops_case` 的结构化原始边确定性生成。",
+            *edge_lines,
+            f"- **拓扑解读**：{topology_summary}",
+            "- **拓扑结论**：仅依据以上原始边判断调用、流量入口和工作负载归属。",
+            "",
+        ]
+        pattern = re.compile(
+            r"(?ms)^###\s+拓扑关系（实体与边）\s*$.*?(?=^---\s*$|^#{1,3}\s+|\Z)"
+        )
+        if not pattern.search(content):
+            return content
+        return pattern.sub("\n".join(section), content, count=1)
+
+    @staticmethod
+    def _enforce_metric_boundary_claims(
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Correct claims that an observed metric exceeded a higher configured limit."""
+        if not isinstance(content, str) or not content:
+            return content
+
+        protected_content, fenced_blocks = (
+            ConclusionFormatterNode._protect_fenced_blocks(
+                content,
+                json_only=True,
+            )
+        )
+        corrections = []
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if not line.startswith("- METRIC "):
+                continue
+            fields = {
+                key: value.strip('"')
+                for key, value in re.findall(r"(\S+)=((?:\"[^\"]*\")|\S+)", line)
+            }
+            maximum = fields.get("max")
+            limit = fields.get("limit")
+            if not maximum or not limit:
+                continue
+            max_match = re.fullmatch(r"(-?\d+(?:\.\d+)?)([KMGT]i)?", maximum)
+            limit_match = re.fullmatch(r"(-?\d+(?:\.\d+)?)([KMGT]i)?", limit)
+            if not max_match or not limit_match or max_match.group(2) != limit_match.group(2):
+                continue
+            if float(max_match.group(1)) >= float(limit_match.group(1)):
+                continue
+            pod = str(fields.get("pod") or "").strip().lower()
+            aliases = [pod] if pod else []
+            workload_match = re.fullmatch(
+                r"(.+)-[a-z0-9]{8,10}-[a-z0-9]{5}",
+                pod,
+            )
+            if workload_match:
+                aliases.append(workload_match.group(1))
+            ratio = fields.get("max_limit_ratio")
+            try:
+                ratio_pct = (
+                    f"{float(ratio) * 100:.2f}".rstrip("0").rstrip(".")
+                    if ratio
+                    else ""
+                )
+            except ValueError:
+                ratio_pct = ""
+            corrections.append({
+                "maximum": maximum,
+                "limit": limit,
+                "ratio_pct": ratio_pct,
+                "aliases": list(dict.fromkeys(alias for alias in aliases if alias)),
+            })
+
+        if not corrections:
+            return content
+
+        exceed_pattern = re.compile(
+            r"(?:并|且|已|后)?\s*(?:突破|超过|越过)\s*"
+            r"(?:(?:Kubernetes|容器|container)\s*)?"
+            r"(?:(?:内存|memory)\s*)?(?:(?:限制|limit)\s*)?"
+            r"\(?\s*\d+(?:\.\d+)?\s*[KMGT]i\s*\)?"
+            r"(?:\s*(?:[Ll]imit|限制))?(?:\s*限制)?",
+            re.IGNORECASE,
+        )
+        direct_trigger_pattern = re.compile(
+            r"\d+(?:\.\d+)?%\s*(?:的采样值)?\s*直接触发\s*"
+            r"[^，。；\n|]+",
+            re.IGNORECASE,
+        )
+        hard_limit_pattern = re.compile(
+            r"确认\s*[^，。；\n|]{0,40}\s*由(?:硬)?限制触发"
+            r"[^，。；\n|]*",
+            re.IGNORECASE,
+        )
+        operation_crossing_pattern = re.compile(
+            r"(?:且|并)?\s*(?:`[^`\n]+`|[^，。；\n|]{1,40})\s*"
+            r"(?:操作|请求)\s*导致(?:内存)?越界",
+            re.IGNORECASE,
+        )
+        sampled_ratio_crash_pattern = re.compile(
+            r"使用率(?:已)?达\s*\d+(?:\.\d+)?%\s*(?:即|就)\s*(?:发生)?崩溃",
+            re.IGNORECASE,
+        )
+        sampled_value_trigger_pattern = re.compile(
+            r"(?:工作)?内存(?:使用量)?(?:增长|上升)?至\s*"
+            r"\d+(?:\.\d+)?\s*[KMGT]i\s*[,，]\s*"
+            r"(?:直接)?触发\s*(?:cgroup\s*)?"
+            r"\d+(?:\.\d+)?\s*[KMGT]i\s*(?:硬)?限制",
+            re.IGNORECASE,
+        )
+        sampled_value_touch_pattern = re.compile(
+            r"(?:(?:内存|memory)\s*)?(?:使用量\s*)?"
+            r"(?:达到|升至|增长至)?\s*"
+            r"\*{0,2}\d+(?:\.\d+)?\s*[KMGT]i\*{0,2}\s*"
+            r"(?:并|且)?\s*(?:触及|触碰|达到)\s*"
+            r"\*{0,2}\d+(?:\.\d+)?\s*[KMGT]i\*{0,2}\s*"
+            r"(?:[Ll]imit|限制|上限)",
+            re.IGNORECASE,
+        )
+        sampled_growth_crossing_pattern = re.compile(
+            r"从\s*\d+(?:\.\d+)?\s*[KMGT]i\s*"
+            r"(?:增至|增长至|升至)\s*"
+            r"\d+(?:\.\d+)?\s*[KMGT]i\s*"
+            r"(?:后)?\s*(?:突破|超过|越过)\s*"
+            r"(?:[Ll]imit|限制|上限)",
+            re.IGNORECASE,
+        )
+        sampled_proximity_trigger_pattern = re.compile(
+            r"(?:确认\s*)?(?:应用\s*)?(?:内存(?:使用(?:量)?)?\s*)?"
+            r"逼近\s*(?:[Ll]imit|限制)(?:阈值)?\s*[,，]\s*"
+            r"(?:直接)?触发(?:了)?\s*(?P<outcome>[^，。；\n|]+)",
+            re.IGNORECASE,
+        )
+        sampled_below_limit_trigger_pattern = re.compile(
+            r"(?:Prometheus\s*)?观测峰值\s*"
+            r"\*{0,2}`?\d+(?:\.\d+)?\s*[KMGT]i`?\*{0,2}\s*[,，]\s*"
+            r"低于\s*(?:[Ll]imit|限制)\s*"
+            r"\*{0,2}`?\d+(?:\.\d+)?\s*[KMGT]i`?\*{0,2}\s*[,，]\s*"
+            r"(?:直接)?触发(?:了)?\s*(?P<outcome>[^，。；\n|]+)",
+            re.IGNORECASE,
+        )
+        sampled_growth_touch_hard_limit_pattern = re.compile(
+            r"(?:内存(?:使用量)?\s*)?(?:持续)?(?:增长|上升)"
+            r"(?:并|且)?(?:已)?(?:触及|达到)(?:了)?\s*"
+            r"(?:容器\s*)?(?:内存\s*)?(?:硬\s*)?"
+            r"(?:[Ll]imit|限制)",
+            re.IGNORECASE,
+        )
+        sampled_accumulation_touch_value_limit_pattern = re.compile(
+            r"(?:内存(?:使用量)?\s*)?(?:累积|累计|积累|增长|上升)"
+            r"(?:并|且)?(?:已)?(?:触及|达到|突破)(?:了)?\s*"
+            r"\*{0,2}`?\d+(?:\.\d+)?\s*[KMGT]i`?\*{0,2}\s*"
+            r"(?:[Ll]imit|限制|上限)",
+            re.IGNORECASE,
+        )
+        standalone_memory_limit_touch_pattern = re.compile(
+            r"(?:触及|达到|突破)(?:了)?\s*(?:容器\s*)?"
+            r"(?:(?:[Mm]emory|内存)\s*)?(?:[Ll]imit|限制|上限)\s*"
+            r"\(?\s*\d+(?:\.\d+)?\s*[KMGT]i\s*\)?",
+            re.IGNORECASE,
+        )
+        sampled_outcome_trigger_pattern = re.compile(
+            r"[,，]\s*(?:直接)?触发(?:了)?\s*(?P<outcome>[^，。；\n|]+)",
+            re.IGNORECASE,
+        )
+
+        def contains_alias(text: str, alias: str) -> bool:
+            return bool(re.search(
+                rf"(?<![A-Za-z0-9_.-]){re.escape(alias)}"
+                r"(?![A-Za-z0-9_.-])",
+                text,
+                re.IGNORECASE,
+            ))
+
+        def contains_metric_value(text: str, value: str) -> bool:
+            match = re.fullmatch(r"(-?\d+(?:\.\d+)?)([KMGT]i)?", value)
+            if not match:
+                return False
+            number = float(match.group(1))
+            unit = match.group(2) or ""
+            number_pattern = (
+                rf"{int(number)}(?:\.0+)?"
+                if number.is_integer()
+                else re.escape(match.group(1))
+            )
+            return bool(re.search(
+                rf"(?<![\w.]){number_pattern}\s*{re.escape(unit)}(?!\w)",
+                text,
+                re.IGNORECASE,
+            ))
+
+        def correction_score(
+            fact: Dict[str, Any],
+            current_line: str,
+            recent_context: str,
+        ) -> int:
+            score = 0
+            if any(contains_alias(current_line, alias) for alias in fact["aliases"]):
+                score += 8
+            if contains_metric_value(current_line, fact["limit"]):
+                score += 8
+            if contains_metric_value(current_line, fact["maximum"]):
+                score += 6
+            ratio_pct = fact["ratio_pct"]
+            if ratio_pct and re.search(
+                rf"(?<![\d.]){re.escape(ratio_pct)}\s*%",
+                current_line,
+            ):
+                score += 8
+            if any(contains_alias(recent_context, alias) for alias in fact["aliases"]):
+                score += 2
+            if contains_metric_value(recent_context, fact["limit"]):
+                score += 1
+            if contains_metric_value(recent_context, fact["maximum"]):
+                score += 1
+            return score
+
+        lines = protected_content.splitlines()
+        for index, line in enumerate(lines):
+            if not (
+                exceed_pattern.search(line)
+                or direct_trigger_pattern.search(line)
+                or hard_limit_pattern.search(line)
+                or operation_crossing_pattern.search(line)
+                or sampled_ratio_crash_pattern.search(line)
+                or sampled_value_trigger_pattern.search(line)
+                or sampled_value_touch_pattern.search(line)
+                or sampled_growth_crossing_pattern.search(line)
+                or sampled_proximity_trigger_pattern.search(line)
+                or sampled_below_limit_trigger_pattern.search(line)
+                or sampled_growth_touch_hard_limit_pattern.search(line)
+                or sampled_accumulation_touch_value_limit_pattern.search(line)
+                or standalone_memory_limit_touch_pattern.search(line)
+                or sampled_outcome_trigger_pattern.search(line)
+            ):
+                continue
+            recent_context = "\n".join(lines[max(0, index - 4):index])
+            ranked = sorted(
+                (
+                    (correction_score(fact, line, recent_context), fact)
+                    for fact in corrections
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            if ranked[0][0] <= 0:
+                if len(ranked) != 1:
+                    continue
+            elif len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+                continue
+
+            fact = ranked[0][1]
+            correction = (
+                "未由本次采样证明已突破硬限制；"
+                f"Prometheus 观测峰值 `{fact['maximum']}`，"
+                f"低于 limit `{fact['limit']}`；"
+                "实际触及硬限制的瞬间未被采样直接捕获"
+            )
+            boundary_correction = (
+                f"Prometheus 观测峰值 `{fact['maximum']}`，"
+                f"低于 limit `{fact['limit']}`；"
+                "实际触及硬限制的瞬间未被采样直接捕获；"
+                "容器终止事实应以 Kubernetes termination reason 为准"
+            )
+            accumulation_boundary_correction = (
+                "出现请求驱动的内存累积；"
+                + boundary_correction
+            )
+
+            def sampled_outcome_correction(match: re.Match[str]) -> str:
+                outcome = str(match.groupdict().get("outcome") or "").strip()
+                outcome = outcome.rstrip("。；,， ")
+                if re.search(r"\bOOMKilled\b", outcome, re.IGNORECASE):
+                    outcome = "OOMKilled"
+                outcome_clause = (
+                    f"；{outcome} 结论应以 Kubernetes termination reason 为准"
+                    if outcome
+                    else ""
+                )
+                return (
+                    f"Prometheus 观测峰值 `{fact['maximum']}`，"
+                    f"低于 limit `{fact['limit']}`；"
+                    "实际触及硬限制的瞬间未被采样直接捕获"
+                    f"{outcome_clause}"
+                )
+
+            def trailing_sampled_outcome_correction(match: re.Match[str]) -> str:
+                return f"；{sampled_outcome_correction(match)}"
+
+            line = exceed_pattern.sub(correction, line)
+            line = direct_trigger_pattern.sub(correction, line)
+            line = hard_limit_pattern.sub(correction, line)
+            line = operation_crossing_pattern.sub(correction, line)
+            line = sampled_ratio_crash_pattern.sub(correction, line)
+            line = sampled_value_trigger_pattern.sub(correction, line)
+            line = sampled_value_touch_pattern.sub(boundary_correction, line)
+            line = sampled_growth_crossing_pattern.sub(correction, line)
+            line = sampled_proximity_trigger_pattern.sub(
+                sampled_outcome_correction,
+                line,
+            )
+            line = sampled_below_limit_trigger_pattern.sub(
+                sampled_outcome_correction,
+                line,
+            )
+            line = sampled_growth_touch_hard_limit_pattern.sub(
+                boundary_correction,
+                line,
+            )
+            line = sampled_accumulation_touch_value_limit_pattern.sub(
+                accumulation_boundary_correction,
+                line,
+            )
+            line = standalone_memory_limit_touch_pattern.sub(
+                boundary_correction,
+                line,
+            )
+            line = sampled_outcome_trigger_pattern.sub(
+                trailing_sampled_outcome_correction,
+                line,
+            )
+            lines[index] = line
+
+        result = "\n".join(lines)
+        result = result.replace(
+            "因内存未由本次采样",
+            "因内存使用量未由本次采样",
+        )
+        result = re.sub(
+            r"实际触及硬限制的瞬间未被采样直接捕获"
+            r"(?:的\s*(?:[Ll]imit|限制))?\s*被\s*(?:内核\s*)?"
+            r"(?:[Kk]ill(?:ed)?|终止|杀死|杀掉)[^。；\n|]*",
+            "实际触及硬限制的瞬间未被采样直接捕获；"
+            "容器终止事实应以 Kubernetes termination reason 为准",
+            result,
+        )
+        result = re.sub(
+            r"未被采样直接捕获(?=被\s)",
+            "未被采样直接捕获；该容器随后",
+            result,
+        )
+        for fact in corrections:
+            canonical = (
+                f"Prometheus 观测峰值 `{fact['maximum']}`，"
+                f"低于 limit `{fact['limit']}`；"
+                "实际触及硬限制的瞬间未被采样直接捕获"
+            )
+            result = re.sub(
+                re.escape(canonical)
+                + r"\s*>\s*\d+(?:\.\d+)?\s*[KMGT]i\s*阈值"
+                + r"(?:；\s*" + re.escape(canonical) + r")*",
+                canonical,
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                re.escape(canonical)
+                + r"(?:；\s*" + re.escape(canonical) + r")+",
+                canonical,
+                result,
+                flags=re.IGNORECASE,
+            )
+        result = re.sub(
+            r"；\s*(?:K8s\s*)?OOM\)?\s*"
+            r"结论应以 Kubernetes termination reason 为准",
+            "；容器终止事实应以 Kubernetes termination reason 为准",
+            result,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            r"；\s*了?\s*Kubernetes\s*的内存保护机制"
+            r"\s*[（(]?\s*OOMKilled\s*[）)]?\s*"
+            r"结论应以 Kubernetes termination reason 为准",
+            "；OOMKilled 结论应以 Kubernetes termination reason 为准",
+            result,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            r"(容器终止事实应以 Kubernetes termination reason 为准)"
+            r"\s*[,，]\s*被(?:系统|内核)\s*OOMKilled",
+            r"\1",
+            result,
+            flags=re.IGNORECASE,
+        )
+        low_limit_pattern = re.compile(
+            r"(?:"
+            r"(?:(?:memory|内存)\s*)?(?:limit|限制|上限)\s*"
+            r"`?\d+(?:\.\d+)?\s*[KMGT]i`?\s*(?:过低|太低|不足)"
+            r"|内存限制不足"
+            r"|(?:证明\s*)?(?:[Ll]imit|限制)\s*(?:确实)?(?:过小|过低|太低|不足)"
+            r"|(?:memory\s+limits?|内存限制)\s*"
+            r"[（(]\s*\d+(?:\.\d+)?\s*[KMGT]i\s*[）)]\s*"
+            r"低于应用实际运行需求"
+            r"|内存配置过小"
+            r"|当前\s*(?:[Ll]imit|限制|上限)\s*"
+            r"`?\d+(?:\.\d+)?\s*[KMGT]i`?\s*"
+            r"(?:无法|不能|不足以)\s*支撑[^。；\n|]*"
+            r")",
+            re.IGNORECASE,
+        )
+        low_limit_lines = result.splitlines()
+        for index, line in enumerate(low_limit_lines):
+            if not low_limit_pattern.search(line):
+                continue
+            recent_context = "\n".join(low_limit_lines[max(0, index - 4):index])
+            ranked = sorted(
+                (
+                    (correction_score(fact, line, recent_context), fact)
+                    for fact in corrections
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            if ranked[0][0] <= 0 and len(ranked) != 1:
+                continue
+            if (
+                ranked[0][0] > 0
+                and len(ranked) > 1
+                and ranked[0][0] == ranked[1][0]
+            ):
+                continue
+            fact = ranked[0][1]
+            low_limit_correction = (
+                f"当前 limit `{fact['limit']}` 是 OOM 触发边界之一；"
+                f"Prometheus 观测峰值 `{fact['maximum']}`，"
+                f"低于 limit `{fact['limit']}`；"
+                "是否偏低仍需结合正常业务基线验证"
+            )
+            low_limit_lines[index] = low_limit_pattern.sub(
+                low_limit_correction,
+                line,
+            )
+        result = "\n".join(low_limit_lines)
+        for fact in corrections:
+            low_limit_correction = (
+                f"当前 limit `{fact['limit']}` 是 OOM 触发边界之一；"
+                f"Prometheus 观测峰值 `{fact['maximum']}`，"
+                f"低于 limit `{fact['limit']}`；"
+                "是否偏低仍需结合正常业务基线验证"
+            )
+            result = re.sub(
+                re.escape(low_limit_correction)
+                + r"(?:[。；，,\s]+"
+                + re.escape(low_limit_correction)
+                + r")+",
+                low_limit_correction,
+                result,
+            )
+        false_comparison_pattern = re.compile(
+            r"(?P<maximum>\d+(?:\.\d+)?)\s*(?P<max_unit>[KMGT]i)\s*>\s*"
+            r"(?P<limit>\d+(?:\.\d+)?)\s*(?P<limit_unit>[KMGT]i)",
+            re.IGNORECASE,
+        )
+
+        def correct_false_comparison(match: re.Match[str]) -> str:
+            if match.group("max_unit").casefold() != match.group("limit_unit").casefold():
+                return match.group(0)
+            maximum = float(match.group("maximum"))
+            limit = float(match.group("limit"))
+            if maximum >= limit:
+                return match.group(0)
+            return (
+                f"{match.group('maximum')}{match.group('max_unit')} < "
+                f"{match.group('limit')}{match.group('limit_unit')}"
+            )
+
+        result = false_comparison_pattern.sub(correct_false_comparison, result)
+
+        boundary_verb_pattern = re.compile(
+            r"(?:达到|触及|触碰|突破|超过|越过)",
+            re.IGNORECASE,
+        )
+        limit_subject_pattern = re.compile(
+            r"(?:[Ll]imit|限制|上限|阈值)",
+            re.IGNORECASE,
+        )
+        uncertainty_pattern = re.compile(
+            r"(?:是否|可能|候选|待验证|未确认|无法确认|不能证明|"
+            r"无法证明|尚未证明|未由本次采样证明|未被采样直接捕获)",
+            re.IGNORECASE,
+        )
+        below_limit_pattern = re.compile(
+            r"低于[^。；|]{0,32}(?:[Ll]imit|限制|上限|阈值)",
+            re.IGNORECASE,
+        )
+
+        def generic_boundary_correction(fact: Dict[str, Any]) -> str:
+            return (
+                f"Prometheus 观测峰值 `{fact['maximum']}`，"
+                f"低于 limit `{fact['limit']}`；"
+                "实际触及硬限制的瞬间未被采样直接捕获；"
+                "容器终止事实应以 Kubernetes termination reason 为准"
+            )
+
+        def unsupported_boundary_segment(segment: str) -> bool:
+            return bool(
+                boundary_verb_pattern.search(segment)
+                and limit_subject_pattern.search(segment)
+                and not uncertainty_pattern.search(segment)
+                and not below_limit_pattern.search(segment)
+            )
+
+        generic_lines = result.splitlines()
+        for index, line in enumerate(generic_lines):
+            parts = re.split(r"([|；。，])", line)
+            if not any(
+                unsupported_boundary_segment(part)
+                for part in parts[::2]
+            ):
+                continue
+            recent_context = "\n".join(generic_lines[max(0, index - 8):index])
+            ranked = sorted(
+                (
+                    (correction_score(fact, line, recent_context), fact)
+                    for fact in corrections
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            if ranked[0][0] <= 0:
+                if len(ranked) != 1:
+                    continue
+            elif len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+                continue
+            fact = ranked[0][1]
+            replacement = generic_boundary_correction(fact)
+            for part_index in range(0, len(parts), 2):
+                segment = parts[part_index]
+                if not unsupported_boundary_segment(segment):
+                    continue
+                alias_match = next(
+                    (
+                        re.search(
+                            re.escape(alias),
+                            segment,
+                            re.IGNORECASE,
+                        )
+                        for alias in fact["aliases"]
+                        if re.search(
+                            re.escape(alias),
+                            segment,
+                            re.IGNORECASE,
+                        )
+                    ),
+                    None,
+                )
+                prefix = segment[:alias_match.end()].rstrip() if alias_match else ""
+                leading_space = segment[:len(segment) - len(segment.lstrip())]
+                parts[part_index] = (
+                    f"{prefix}: {replacement}"
+                    if prefix
+                    else f"{leading_space}{replacement}"
+                )
+            generic_lines[index] = "".join(parts)
+        result = "\n".join(generic_lines)
+
+        if protected_content.endswith("\n"):
+            result += "\n"
+        return ConclusionFormatterNode._restore_fenced_blocks(
+            result,
+            fenced_blocks,
+        )
+
+    @classmethod
+    def _enforce_evidence_scope_claims(
+        cls,
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Keep report claims and remediation actions within collected evidence."""
+        if not isinstance(content, str) or not content:
+            return content
+
+        context = str(structured_context or "")
+        below_limit_oom = cls._below_limit_oom_fact(context)
+        missing_config = cls._missing_config_key(context)
+        has_normal_baseline = cls._has_normal_workload_baseline(context)
+        has_concrete_secret_reference = cls._has_concrete_secret_reference(context)
+        result = cls._sanitize_evidence_bound_remediation_json(
+            content,
+            below_limit_oom=below_limit_oom,
+            has_normal_baseline=has_normal_baseline,
+            missing_config=missing_config,
+            has_concrete_secret_reference=has_concrete_secret_reference,
+        )
+        result, fenced_blocks = cls._protect_fenced_blocks(
+            result,
+            json_only=True,
+        )
+
+        if "K8S_SIGNAL " in context or "AIOPS_CASE " in context:
+            result = result.replace("`kubectl_get_yaml`", "`collect_aiops_case`")
+            result = result.replace("`kubectl_get_events`", "`collect_aiops_case`")
+            result = cls._sanitize_evidence_source_table(result, context)
+
+        if (
+            "TOPOLOGY_SCOPE relationships_only=true" in context
+            or "health_not_proven=true" in context
+        ):
+            topology_health_pattern = re.compile(
+                r"(?:Service/RS/Deployment|拓扑|调用链|链路)"
+                r"[^。；\n|]{0,80}链路正常"
+                r"[^。；\n|]*(?:。|$)",
+                re.IGNORECASE,
+            )
+            result = topology_health_pattern.sub(
+                "拓扑仅确认实体关系、流量入口和工作负载归属，"
+                "不能据此证明链路健康，也不能排除网络或调度问题。",
+                result,
+            )
+
+        has_successful_oom_trace_sample = bool(
+            re.search(r"\bDEEPFLOW\b[^\n]*\bresponse_code=200\b", context)
+            and re.search(
+                r"\bTEMPO\b[^\n]*aiops\.allocated_mib\.before=\d+"
+                r"[^\n]*aiops\.allocated_mib\.after=\d+",
+                context,
+            )
+        )
+        if has_successful_oom_trace_sample:
+            trace_trigger_pattern = re.compile(
+                r"(?:Trace|Tracing|调用链)\s*(?:显示|证明|表明|确认)"
+                r"[^。；\n|]{0,100}?"
+                r"(?:`?/allocate[^`，。；\n|]*`?|该请求|该操作)"
+                r"[^。；\n|]{0,40}?(?:直接)?触发(?:了)?"
+                r"(?:\s*OOM(?:Killed)?)?",
+                re.IGNORECASE,
+            )
+            result = trace_trigger_pattern.sub(
+                "Trace 关联到一次成功的 `/allocate` 请求及单次内存分配，"
+                "未证明该请求直接触发 OOM",
+                result,
+            )
+
+        if below_limit_oom and not has_normal_baseline:
+            metric_boundary_warning = (
+                "OOMKilled 事实明确；Prometheus 采样峰值 "
+                f"`{below_limit_oom['maximum']}` 低于 limit "
+                f"`{below_limit_oom['limit']}`，资源限制是否偏低仍需正常业务基线验证。"
+            )
+            result = re.sub(
+                r"(?m)^.*根因明确为\*{0,2}内存不足\*{0,2}[^。\n]*。?\s*$",
+                f"- {metric_boundary_warning}",
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                r"(?m)^(?P<prefix>.*?)根因是\s*\*{0,2}"
+                r"(?:Memory\s+Limit|内存限制)\s*设置过低\*{0,2}"
+                r"[^\n]*$",
+                lambda match: (
+                    f"{match.group('prefix').rstrip()} {metric_boundary_warning}"
+                ).lstrip(),
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                r"(?:由)?内存限制不足(?:导致)?\s*OOMKilled",
+                "OOMKilled（已观测到请求驱动的内存累积，"
+                "资源限制是否偏低尚待正常业务基线验证）",
+                result,
+            )
+            result = result.replace(
+                "内存限制不足",
+                "资源限制是否偏低尚待正常业务基线验证",
+            )
+            result = re.sub(
+                r"(?:内存\s*)?[Ll]imit\s*\(\s*\d+(?:\.\d+)?\s*[KMGT]i\s*\)"
+                r"\s*(?:过低|太低|不足)",
+                "当前资源限制是否偏低尚待正常业务基线验证",
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                r"(?:容器)?内存限制\s*[（(]\s*[Ll]imit\s*:\s*"
+                r"\d+(?:\.\d+)?\s*[KMGT]i\s*[）)]\s*"
+                r"(?:过低|太低|不足)[^。；\n|]*",
+                "当前资源限制是否偏低尚待正常业务基线验证",
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = result.replace("(需增加)", "")
+            result = re.sub(
+                r"(修复|调整)\s+([^\n：:]*?)内存限制",
+                r"处理 \2OOMKilled",
+                result,
+            )
+            result = re.sub(
+                r"(?m)^\|\s*\*\*证据完整度\*\*\s*\|\s*([^|]+)\|$",
+                r"| **可观测性维度覆盖** | \1（不代表根因结论充分） |",
+                result,
+            )
+            result = re.sub(
+                r"(?m)^\|\s*\*\*置信度\*\*\s*\|\s*高\s*"
+                r"(?:\(\s*\d+(?:\.\d+)?%\s*\))?\s*\|$",
+                "| **分项置信度** | OOMKilled/配置缺失事实高；"
+                "OOM 资源规格归因中等（缺少正常业务基线） |",
+                result,
+            )
+            missing_rows = [
+                "| 正常业务内存基线 | 重要 | 无法判断当前 limit 是否偏低或给出目标值 |",
+                "| Node MemoryPressure / 节点 OOM 证据 | 重要 | 尚未排除节点级内存压力或内核 OOM 背景 |",
+            ]
+            if missing_config and not has_concrete_secret_reference:
+                missing_rows.append(
+                    "| Deployment env/envFrom 与 Secret 引用 | 重要 | "
+                    "无法生成安全、可执行的配置注入命令 |"
+                )
+            missing_section_pattern = re.compile(
+                r"(?ms)(^###\s+缺失证据（如有）\s*$\n"
+                r"\|\s*证据\s*\|\s*级别\s*\|\s*影响\s*\|\n"
+                r"\|[-|\s]+\|\n)"
+                r"\|\s*无\s*\|\s*-\s*\|[^|\n]*\|"
+            )
+            result = missing_section_pattern.sub(
+                lambda match: match.group(1) + "\n".join(missing_rows),
+                result,
+                count=1,
+            )
+        if below_limit_oom and not cls._has_normal_workload_baseline(context):
+            result = cls._remove_unsupported_oom_resource_advice(result, below_limit_oom)
+
+        if missing_config and not has_concrete_secret_reference:
+            result = cls._remove_unknown_secret_advice(result, missing_config)
+            config_scope_warning = (
+                f"运行时缺少 `{missing_config}`；具体来源仍需核对 "
+                "Deployment env/envFrom 与 Secret 引用。"
+            )
+            result = re.sub(
+                rf"(?m)^\s*Deployment\s+未定义/注入必需的环境变量\s+"
+                rf"`?{re.escape(missing_config)}`?[。.]?\s*$",
+                config_scope_warning,
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                rf"(?m)^(?P<prefix>.*?)根因是\s*\*{{0,2}}Deployment\s+配置缺失"
+                rf"\*{{0,2}}[^\n]*`?{re.escape(missing_config)}`?[^\n]*$",
+                lambda match: (
+                    f"{match.group('prefix').rstrip()} {config_scope_warning}"
+                ).lstrip(),
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                r"(?:ConfigMap/Secret|Secret/ConfigMap|ConfigMap\s*或\s*Secret)"
+                r"\s*中缺失\s*(`[^`\n]+`)(?:\s*环境变量)?",
+                r"运行时缺少 \1；具体来源仍需核对 Deployment "
+                r"env/envFrom 与 Secret 引用",
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                r"(?m)^\s*(?:-\s*)?(?:\*\*)?如果是独立 Pod(?:\*\*)?"
+                r"[^\n]*：?\s*$\n?",
+                "",
+                result,
+            )
+
+        has_service_port_evidence = bool(re.search(
+            r"(?:service_port|target_port|targetPort|port_mapping)\s*[:=]",
+            context,
+            re.IGNORECASE,
+        ))
+        if not has_service_port_evidence:
+            result = re.sub(
+                r"`kubectl\s+port-forward\s+svc/[A-Za-z0-9_.-]+"
+                r"\s+-n\s+[A-Za-z0-9_.-]+\s+\d+:\d+`",
+                "`先查询 Service 端口映射，再按真实 port/targetPort 执行 port-forward`",
+                result,
+                flags=re.IGNORECASE,
+            )
+
+        result = re.sub(
+            r"证据\s*\d+\s*确认\s*Pod\s*\d+\s*触顶",
+            "指标显示采样峰值逼近 limit，但未捕获触及硬限制的瞬间",
+            result,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            r"关联了外部请求与内部崩溃的具体行为"
+            r"(?:（[^）\n]*）|\([^)\n]*\))?",
+            "关联到外部请求与内部行为，但未证明请求直接导致崩溃",
+            result,
+        )
+        result = re.sub(
+            r"```bash\s*```",
+            "",
+            result,
+            flags=re.IGNORECASE,
+        )
+        sparse_metric = any(
+            len(re.findall(r'"[^"]+"', match.group(1))) <= 1
+            for match in re.finditer(
+                r"^\s*-\s*METRIC\b[^\n]*\bsamples=\[([^\]]*)\]",
+                context,
+                re.MULTILINE,
+            )
+        )
+        if sparse_metric:
+            result = re.sub(
+                r"Metrics\s*(?:证明|显示)"
+                r"[^，。；\n|]{0,30}(?:内存无压力|内存正常)"
+                r"\s*[,，]\s*(?:完全)?排除(?:资源|内存)问题",
+                "该单点指标仅说明采样时内存较低，资源问题仍未排除",
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                r"(?:完全)?排除内存问题",
+                "单点指标不能单独排除内存问题",
+                result,
+            )
+        if re.search(r"^\s*-\s*LOG\b", context, re.MULTILINE):
+            result = result.replace("无业务日志", "已有配置缺失业务日志")
+
+        return cls._restore_fenced_blocks(result, fenced_blocks)
+
+    @staticmethod
+    def _sanitize_evidence_source_table(
+        content: str,
+        structured_context: str = "",
+    ) -> str:
+        lines = content.splitlines()
+        in_table = False
+        has_fine_logging_evidence = bool(re.search(
+            r"(?:tool=|\[)get_aiops_case_evidence\b",
+            str(structured_context or ""),
+            re.IGNORECASE,
+        ))
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("|") and "来源命令" in stripped:
+                lines[index] = line.replace("来源命令", "采集来源")
+                in_table = True
+                continue
+            if not in_table:
+                continue
+            if not stripped.startswith("|"):
+                in_table = False
+                continue
+            if set(stripped.replace("|", "").strip()) <= {"-", ":", " "}:
+                continue
+            cells = line.split("|")
+            if len(cells) < 6:
+                continue
+            evidence_type = cells[2].strip().casefold()
+            if (
+                evidence_type in {"log", "logs"}
+                or "logging" in evidence_type
+                or "日志" in evidence_type
+            ):
+                cells[3] = (
+                    " `get_aiops_case_evidence` "
+                    if has_fine_logging_evidence
+                    else " `collect_aiops_case` "
+                )
+            elif any(
+                marker in evidence_type
+                for marker in ("k8s", "metric", "tracing", "trace", "拓扑")
+            ):
+                cells[3] = " `collect_aiops_case` "
+            lines[index] = "|".join(cells)
+        return "\n".join(lines)
+
+    @classmethod
+    def _below_limit_oom_fact(
+        cls,
+        structured_context: str,
+    ) -> Optional[Dict[str, str]]:
+        context = str(structured_context or "")
+        if not re.search(r"\bOOMKilled\b|abnormal_type=oomkilled", context, re.IGNORECASE):
+            return None
+
+        metric_lines = [
+            raw_line.strip()
+            for raw_line in context.splitlines()
+            if "METRIC " in raw_line
+        ]
+        oom_pods = {
+            str(block.get("pod") or "")
+            for block in cls._extract_entity_evidence_blocks(context)
+            if (
+                str(block.get("abnormal_type") or "").casefold() == "oomkilled"
+                or any(
+                    re.search(r"\bOOMKilled\b", fact, re.IGNORECASE)
+                    for fact in block.get("facts", [])
+                )
+            )
+            and str(block.get("pod") or "")
+        }
+
+        candidates: List[Dict[str, str]] = []
+        for line in metric_lines:
+            fields = {
+                key: value.strip('"')
+                for key, value in re.findall(r"(\S+)=((?:\"[^\"]*\")|\S+)", line)
+            }
+            maximum = fields.get("max")
+            limit = fields.get("limit")
+            if not maximum or not limit:
+                continue
+            max_match = re.fullmatch(r"(\d+(?:\.\d+)?)([KMGT]i)", maximum)
+            limit_match = re.fullmatch(r"(\d+(?:\.\d+)?)([KMGT]i)", limit)
+            if (
+                max_match
+                and limit_match
+                and max_match.group(2).casefold() == limit_match.group(2).casefold()
+                and float(max_match.group(1)) < float(limit_match.group(1))
+            ):
+                candidates.append({
+                    "maximum": maximum,
+                    "limit": limit,
+                    "pod": str(fields.get("pod") or ""),
+                })
+        matching = [
+            fact for fact in candidates
+            if fact.get("pod") in oom_pods
+        ]
+        if matching:
+            return matching[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    @staticmethod
+    def _has_normal_workload_baseline(structured_context: str) -> bool:
+        return bool(re.search(
+            r"(?:normal[_ -]?baseline|baseline_present\s*=\s*true|"
+            r"正常(?:业务|工作负载)?基线\s*(?:已采集|存在|present))",
+            str(structured_context or ""),
+            re.IGNORECASE,
+        ))
+
+    @staticmethod
+    def _missing_config_key(structured_context: str) -> str:
+        context = str(structured_context or "")
+        patterns = (
+            r"missing_config=([A-Za-z_][A-Za-z0-9_]*)",
+            r"required config\s+([A-Za-z_][A-Za-z0-9_]*)\s+is missing",
+            r"config\.key=([A-Za-z_][A-Za-z0-9_]*)\s+config\.present=false",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, context, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return ""
+
+    @staticmethod
+    def _has_concrete_secret_reference(structured_context: str) -> bool:
+        context = str(structured_context or "")
+        return bool(re.search(
+            r"(?:secret(?:_ref|_name|KeyRef)?|secretKeyRef)"
+            r"\s*[:=]\s*(?!<|unknown\b|none\b|null\b|未获取)"
+            r"[A-Za-z0-9_.-]+",
+            context,
+            re.IGNORECASE,
+        ))
+
+    @staticmethod
+    def _remove_unsupported_oom_resource_advice(
+        content: str,
+        fact: Dict[str, str],
+    ) -> str:
+        lines = content.splitlines()
+        kept: List[str] = []
+        inserted = False
+        for line in lines:
+            unsupported = bool(
+                re.search(
+                    r"(?:提高|提升|增加|调整|扩容|自动增加)[^。\n|]{0,80}"
+                    r"\d+(?:\.\d+)?\s*[KMGT]i",
+                    line,
+                    re.IGNORECASE,
+                )
+                or re.search(
+                    r"kubectl\s+set\s+resources\b[^\n]*--limits=memory=",
+                    line,
+                    re.IGNORECASE,
+                )
+                or re.search(
+                    r"(?:输出为|预期(?:结果)?|推荐值|目标值|建议值)"
+                    r"[^|\n]{0,40}\d+(?:\.\d+)?\s*[KMGT]i",
+                    line,
+                    re.IGNORECASE,
+                )
+                or re.search(
+                    r"\d+(?:\.\d+)?\s*[KMGT]i"
+                    r"[^|\n]{0,40}(?:推荐值|目标值|建议值)",
+                    line,
+                    re.IGNORECASE,
+                )
+            )
+            if unsupported:
+                if not inserted:
+                    kept.append(
+                        "- 当前证据确认 OOMKilled 和请求驱动的内存累积；"
+                        f"Prometheus 采样峰值 `{fact['maximum']}` 低于 limit "
+                        f"`{fact['limit']}`。应先采集正常业务基线并定位内存增长机制，"
+                        "再评估是否调整资源限制。"
+                    )
+                    inserted = True
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    @staticmethod
+    def _remove_unknown_secret_advice(content: str, config_key: str) -> str:
+        placeholder_pattern = re.compile(
+            r"<SECRET(?:_NAME)?>"
+            r"|\b(?:YOUR|REAL|ACTUAL|REPLACE_ME|CHANGE_ME|TODO)"
+            r"(?:_[A-Z0-9]+)+\b"
+            r"|\b[A-Za-z_][A-Za-z0-9_]*_FROM_SECRET\s*=",
+            re.IGNORECASE,
+        )
+
+        def unsupported_line(line: str) -> bool:
+            return bool(
+                placeholder_pattern.search(line)
+                or re.search(
+                    r"<[^>\n]*(?:token|secret|value|填入|替换|真实|实际)[^>\n]*>",
+                    line,
+                    re.IGNORECASE,
+                )
+                or re.search(
+                    r"kubectl\s+delete\s+pod\b",
+                    line,
+                    re.IGNORECASE,
+                )
+            )
+
+        warning = (
+            f"- `{config_key}` 的值和 Secret 引用尚未获取，"
+            "只能先核对 Deployment `env`/`envFrom` 与现有 Secret，"
+            "不能生成可执行的注入命令。"
+        )
+        inserted = False
+
+        def sanitize_bash_block(match: re.Match[str]) -> str:
+            nonlocal inserted
+            block = match.group(0)
+            if not any(unsupported_line(line) for line in block.splitlines()):
+                return block
+            if inserted:
+                return ""
+            inserted = True
+            return warning
+
+        content = re.sub(
+            r"```bash\s*\n.*?```",
+            sanitize_bash_block,
+            content,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        lines = content.splitlines()
+        kept: List[str] = []
+        for line in lines:
+            if unsupported_line(line):
+                if not inserted:
+                    kept.append(warning)
+                    inserted = True
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    @staticmethod
+    def _protect_fenced_blocks(
+        content: str,
+        *,
+        json_only: bool = False,
+    ) -> tuple[str, Dict[str, str]]:
+        """Replace fenced blocks while natural-language regexes run."""
+        blocks: Dict[str, str] = {}
+
+        def replace(match: re.Match[str]) -> str:
+            token = f"@@AIOPS_FENCED_BLOCK_{len(blocks):04d}@@"
+            blocks[token] = match.group(0)
+            return token
+
+        protected = re.sub(
+            r"```json\s*\n.*?```" if json_only else r"```[^\n]*\n.*?```",
+            replace,
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        return protected, blocks
+
+    @staticmethod
+    def _restore_fenced_blocks(content: str, blocks: Dict[str, str]) -> str:
+        result = content
+        for token, block in blocks.items():
+            result = result.replace(token, block)
+        return result
+
+    @classmethod
+    def _sanitize_evidence_bound_remediation_json(
+        cls,
+        content: str,
+        *,
+        below_limit_oom: Optional[Dict[str, str]],
+        has_normal_baseline: bool,
+        missing_config: str,
+        has_concrete_secret_reference: bool,
+    ) -> str:
+        block_pattern = re.compile(
+            r"(?P<prefix>```json\s*)(?P<body>\{.*?\})(?P<suffix>\s*```)",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        def sanitize(match: re.Match[str]) -> str:
+            try:
+                data = json.loads(match.group("body"))
+            except json.JSONDecodeError:
+                return match.group(0)
+            plan = data.get("remediation_plan") if isinstance(data.get("remediation_plan"), dict) else data
+            if not isinstance(plan, dict) or (
+                "remediation_available" not in plan and "actions" not in plan
+            ):
+                return match.group(0)
+
+            blocked_group_ids = set()
+            issue_groups = [
+                group for group in plan.get("issue_groups") or []
+                if isinstance(group, dict)
+            ]
+            for group in issue_groups:
+                problem_type = str(group.get("problem_type") or "").casefold()
+                group_id = str(group.get("group_id") or "").strip()
+                if below_limit_oom and not has_normal_baseline and "oom" in problem_type:
+                    group["auto_fixable"] = False
+                    group["strategy"] = (
+                        "先采集正常业务基线并定位内存增长机制，"
+                        "再由人工评估资源限制调整。"
+                    )
+                    if group_id:
+                        blocked_group_ids.add(group_id)
+                if (
+                    missing_config
+                    and not has_concrete_secret_reference
+                    and ("config" in problem_type or "secret" in problem_type)
+                ):
+                    group["auto_fixable"] = False
+                    group["strategy"] = (
+                        f"人工核对 {missing_config} 的来源及 Deployment "
+                        "env/envFrom 引用；当前未获取可执行的 Secret 引用。"
+                    )
+                    if group_id:
+                        blocked_group_ids.add(group_id)
+            plan["issue_groups"] = issue_groups
+
+            safe_actions = []
+            for action in plan.get("actions") or []:
+                if not isinstance(action, dict):
+                    continue
+                group_id = str(action.get("group_id") or "").strip()
+                command_text = " ".join(
+                    str(action.get(key) or "")
+                    for key in (
+                        "dry_run_command",
+                        "execute_command",
+                        "verify_command",
+                    )
+                )
+                unsupported_resource_patch = bool(
+                    below_limit_oom
+                    and not has_normal_baseline
+                    and re.search(
+                        r"kubectl\s+set\s+resources\b[^\n]*--limits=memory=",
+                        command_text,
+                        re.IGNORECASE,
+                    )
+                )
+                unknown_secret_command = bool(
+                    missing_config
+                    and not has_concrete_secret_reference
+                    and (
+                        re.search(r"<SECRET(?:_NAME)?>", command_text, re.IGNORECASE)
+                        or re.search(
+                            r"\b[A-Za-z_][A-Za-z0-9_]*_FROM_SECRET\s*=",
+                            command_text,
+                            re.IGNORECASE,
+                        )
+                    )
+                )
+                if group_id in blocked_group_ids or unsupported_resource_patch or unknown_secret_command:
+                    continue
+                safe_actions.append(action)
+            plan["actions"] = safe_actions
+
+            basis = []
+            for item in plan.get("basis") or []:
+                text = str(item)
+                if below_limit_oom:
+                    text = re.sub(
+                        r"(?P<maximum>\d+(?:\.\d+)?\s*[KMGT]i)\s*>\s*"
+                        r"(?P<limit>\d+(?:\.\d+)?\s*[KMGT]i)",
+                        r"\g<maximum> < \g<limit>",
+                        text,
+                        flags=re.IGNORECASE,
+                    )
+
+                    def correct_english_comparison(
+                        comparison: re.Match[str],
+                    ) -> str:
+                        maximum = comparison.group("maximum")
+                        limit = comparison.group("limit")
+                        maximum_match = re.fullmatch(
+                            r"(\d+(?:\.\d+)?)\s*([KMGT]i)",
+                            maximum,
+                            re.IGNORECASE,
+                        )
+                        limit_match = re.fullmatch(
+                            r"(\d+(?:\.\d+)?)\s*([KMGT]i)",
+                            limit,
+                            re.IGNORECASE,
+                        )
+                        if (
+                            maximum_match
+                            and limit_match
+                            and maximum_match.group(2).casefold()
+                            == limit_match.group(2).casefold()
+                            and float(maximum_match.group(1))
+                            < float(limit_match.group(1))
+                        ):
+                            return f"{maximum} < {limit}"
+                        return comparison.group(0)
+
+                    text = re.sub(
+                        r"(?P<maximum>\d+(?:\.\d+)?\s*[KMGT]i)"
+                        r"\s+exceeds\s+(?:the\s+)?limit\s+"
+                        r"(?P<limit>\d+(?:\.\d+)?\s*[KMGT]i)",
+                        correct_english_comparison,
+                        text,
+                        flags=re.IGNORECASE,
+                    )
+                basis.append(text)
+            plan["basis"] = basis
+
+            if not safe_actions:
+                plan["remediation_available"] = False
+                plan["fix_type"] = "manual_only"
+            else:
+                plan["remediation_available"] = True
+            stop_conditions = [str(item) for item in plan.get("stop_conditions") or []]
+            if blocked_group_ids:
+                stop_conditions.append(
+                    "缺少支持自动修复所需的正常业务基线或具体 Secret 引用"
+                )
+            plan["stop_conditions"] = list(dict.fromkeys(stop_conditions))
+
+            if plan is not data:
+                data["remediation_plan"] = plan
+            return (
+                match.group("prefix")
+                + json.dumps(data, ensure_ascii=False, indent=2)
+                + match.group("suffix")
+            )
+
+        return block_pattern.sub(sanitize, content)
+
+    @classmethod
+    def _enforce_entity_identity_facts(
+        cls,
+        content: str,
+        layer_analysis: str,
+        structured_context: str,
+    ) -> str:
+        """Keep node, Pod IP and restart counts bound to their source Pod."""
+        if not isinstance(content, str) or not content:
+            return content
+
+        blocks = cls._extract_entity_evidence_blocks(structured_context)
+        if not blocks:
+            return content
+
+        try:
+            layer_data = json.loads(layer_analysis) if layer_analysis else {}
+        except (json.JSONDecodeError, TypeError):
+            layer_data = {}
+
+        restart_counts: Dict[str, int] = {}
+        summary = (
+            layer_data.get("current_abnormal_summary")
+            if isinstance(layer_data, dict)
+            else {}
+        )
+        selected_rows = (
+            summary.get("selected_rows")
+            if isinstance(summary, dict)
+            else []
+        )
+        for row in selected_rows or []:
+            fields = str(row or "").split()
+            if len(fields) < 5 or not fields[4].isdigit():
+                continue
+            restart_counts[fields[1]] = int(fields[4])
+
+        nodes = list(dict.fromkeys(
+            str(block.get("node") or "")
+            for block in blocks
+            if str(block.get("node") or "")
+        ))
+        pod_ips = [
+            (
+                str(block.get("pod") or ""),
+                str(block.get("pod_ip") or ""),
+            )
+            for block in blocks
+            if str(block.get("pod") or "") and str(block.get("pod_ip") or "")
+        ]
+
+        lines = content.splitlines()
+        normalized_lines: List[str] = []
+        inserted_pod_ip_row = False
+        for line in lines:
+            stripped = line.strip()
+            if re.match(
+                r"^\|\s*\*{0,2}Pod\s*IP\*{0,2}\s*\|",
+                stripped,
+                re.IGNORECASE,
+            ):
+                continue
+            if nodes and re.match(
+                r"^\|\s*\*{0,2}节点\*{0,2}\s*\|",
+                stripped,
+            ):
+                normalized_lines.append(
+                    "| **节点** | "
+                    + ", ".join(f"`{node}`" for node in nodes)
+                    + " |"
+                )
+                if pod_ips:
+                    normalized_lines.append(
+                        "| **Pod IP** | "
+                        + ", ".join(
+                            f"`{pod}={pod_ip}`"
+                            for pod, pod_ip in pod_ips
+                        )
+                        + " |"
+                    )
+                    inserted_pod_ip_row = True
+                continue
+            normalized_lines.append(line)
+
+        if pod_ips and not inserted_pod_ip_row:
+            phenomenon_end = next(
+                (
+                    index
+                    for index, line in enumerate(normalized_lines)
+                    if index > 0 and re.match(r"^##\s+", line.strip())
+                    and "现象描述" not in line
+                ),
+                None,
+            )
+            if phenomenon_end is not None:
+                normalized_lines[phenomenon_end:phenomenon_end] = [
+                    "### 当前实体网络信息",
+                    "",
+                    "| Pod | Pod IP | Node |",
+                    "|-----|--------|------|",
+                    *[
+                        f"| `{block.get('pod')}` | `{block.get('pod_ip')}` | "
+                        f"`{block.get('node') or '-'}` |"
+                        for block in blocks
+                        if block.get("pod") and block.get("pod_ip")
+                    ],
+                    "",
+                ]
+
+        alias_to_pod: Dict[str, str] = {}
+        for block in blocks:
+            pod = str(block.get("pod") or "")
+            for alias in block.get("aliases", []):
+                alias_to_pod[str(alias).casefold()] = pod
+
+        corrected_lines: List[str] = []
+        active_pod = ""
+        for line in normalized_lines:
+            folded = line.casefold()
+            matched_pods = {
+                pod
+                for alias, pod in alias_to_pod.items()
+                if alias and alias in folded
+            }
+            if len(matched_pods) == 1:
+                active_pod = next(iter(matched_pods))
+            elif len(matched_pods) > 1:
+                active_pod = ""
+            elif re.match(r"^##\s+", line.strip()):
+                active_pod = ""
+
+            restart_count = restart_counts.get(active_pod)
+            if restart_count is not None:
+                line = re.sub(
+                    r"\b\d+\+?\s*次重启",
+                    f"{restart_count} 次重启",
+                    line,
+                )
+                line = re.sub(
+                    r"(\brestarts?\s*[=:]\s*)\d+",
+                    rf"\g<1>{restart_count}",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+            corrected_lines.append(line)
+
+        result = "\n".join(corrected_lines)
+        if content.endswith("\n"):
+            result += "\n"
+        return result
+
+    @classmethod
+    def _enforce_entity_evidence_consistency(
+        cls,
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Keep model-written root-cause text inside real case boundaries.
+
+        Multi-Pod reports are long enough that a small model can occasionally
+        attach a unique log, trace, or terminal reason to the wrong Pod even
+        though the source case blocks are correct. Detect that condition from
+        source-derived unique markers and rebuild only the root-cause section.
+        """
+        if not isinstance(content, str) or not content:
+            return content
+
+        blocks = cls._extract_entity_evidence_blocks(structured_context)
+        if not blocks:
+            return content
+
+        tool_facts = "\n".join(
+            fact
+            for block in blocks
+            for fact in block.get("facts", [])
+        )
+        leak_is_explicit = bool(re.search(
+            r"(?:内存泄漏|memory[_ -]?leak(?:[_ -](?:detected|confirmed))?)",
+            tool_facts,
+            re.IGNORECASE,
+        ))
+        result = content
+        if not leak_is_explicit:
+            result = re.sub(
+                r"内存泄漏",
+                "请求驱动的持续内存累积（未证明泄漏机制）",
+                result,
+            )
+            result = re.sub(
+                r"\bmemory\s+leak\b",
+                "request-driven sustained memory accumulation "
+                "(leak mechanism not proven)",
+                result,
+                flags=re.IGNORECASE,
+            )
+
+        if len(blocks) < 2 or not cls._has_cross_entity_root_cause_fact(result, blocks):
+            return result
+
+        rebuilt = cls._build_authoritative_entity_root_cause_section(blocks)
+        pattern = re.compile(
+            r"(?ms)^##\s+[^\n]*根因分析[^\n]*\n.*?(?=^##\s+|\Z)"
+        )
+        if pattern.search(result):
+            return pattern.sub(rebuilt.rstrip() + "\n\n", result, count=1)
+
+        remediation = re.search(r"(?m)^##\s+[^\n]*修复建议[^\n]*$", result)
+        if remediation:
+            return (
+                result[:remediation.start()].rstrip()
+                + "\n\n"
+                + rebuilt.rstrip()
+                + "\n\n"
+                + result[remediation.start():]
+            )
+        return result.rstrip() + "\n\n" + rebuilt
+
+    @staticmethod
+    def _extract_entity_evidence_blocks(structured_context: str) -> List[Dict[str, Any]]:
+        blocks: List[Dict[str, Any]] = []
+        current: Optional[Dict[str, Any]] = None
+        fact_prefixes = (
+            "K8S_SIGNAL ",
+            "METRIC ",
+            "LOG ",
+            "TRACE_CORRELATION ",
+            "DEEPFLOW ",
+            "TEMPO ",
+            "TOPOLOGY ",
+        )
+
+        def finish() -> None:
+            nonlocal current
+            if current and current.get("pod"):
+                pod = str(current["pod"])
+                aliases = [pod, f"{current.get('namespace', '')}/{pod}".strip("/")]
+                workload = re.fullmatch(
+                    r"(.+)-[a-z0-9]{8,10}-[a-z0-9]{5}",
+                    pod,
+                    re.IGNORECASE,
+                )
+                if workload:
+                    aliases.append(workload.group(1))
+                current["aliases"] = list(dict.fromkeys(
+                    alias for alias in aliases if alias
+                ))
+                current["markers"] = ConclusionFormatterNode._entity_fact_markers(
+                    current.get("facts", [])
+                )
+                blocks.append(current)
+            current = None
+
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith("AIOPS_CASE "):
+                finish()
+                abnormal_match = re.search(r"\babnormal_type=(\S+)", line)
+                current = {
+                    "abnormal_type": abnormal_match.group(1) if abnormal_match else "",
+                    "facts": [],
+                }
+                continue
+            if current is None:
+                continue
+            if line.startswith("ENTITY "):
+                entity_match = re.search(
+                    r"\bentity=\S+\s+([^/\s]+)/(\S+)",
+                    line,
+                )
+                if entity_match:
+                    current["namespace"] = entity_match.group(1)
+                    current["pod"] = entity_match.group(2)
+                else:
+                    namespace_match = re.search(r"\bnamespace=(\S+)", line)
+                    name_match = re.search(r"\bname=(\S+)", line)
+                    if namespace_match and name_match:
+                        current["namespace"] = namespace_match.group(1)
+                        current["pod"] = name_match.group(1)
+                node_match = re.search(r"\bnode=(\S+)", line)
+                pod_ip_match = re.search(r"\bpod_ip=(\S+)", line)
+                if node_match:
+                    current["node"] = node_match.group(1)
+                if pod_ip_match:
+                    current["pod_ip"] = pod_ip_match.group(1)
+                continue
+            if line.startswith(fact_prefixes):
+                current["facts"].append(line)
+        finish()
+        return blocks
+
+    @staticmethod
+    def _entity_fact_markers(facts: List[str]) -> set[str]:
+        markers: set[str] = set()
+        ignored = {
+            "present",
+            "false",
+            "true",
+            "error",
+            "http",
+            "business-api",
+        }
+        fields = (
+            "trace_id",
+            "missing_config",
+            "error_code",
+            "config.key",
+            "error.type",
+            "event",
+            "path",
+        )
+        for fact in facts:
+            for field in fields:
+                for match in re.finditer(
+                    rf"(?:^|\s){re.escape(field)}=(\"[^\"]+\"|\S+)",
+                    fact,
+                    re.IGNORECASE,
+                ):
+                    value = match.group(1).strip("\"'`.,;，。")
+                    if len(value) >= 4 and value.casefold() not in ignored:
+                        markers.add(value.casefold())
+            if re.search(r"\bOOMKilled\b", fact, re.IGNORECASE):
+                markers.add("oomkilled")
+            for match in re.finditer(
+                r"\bexit(?:Code)?[=:\s]+(\d+)\b",
+                fact,
+                re.IGNORECASE,
+            ):
+                markers.add(f"exit={match.group(1)}")
+        return markers
+
+    @classmethod
+    def _has_cross_entity_root_cause_fact(
+        cls,
+        content: str,
+        blocks: List[Dict[str, Any]],
+    ) -> bool:
+        root_match = re.search(
+            r"(?ms)^##\s+[^\n]*根因分析[^\n]*\n(.*?)(?=^##\s+|\Z)",
+            content,
+        )
+        if not root_match:
+            return False
+
+        marker_owners: Dict[str, set[int]] = {}
+        for index, block in enumerate(blocks):
+            for marker in block.get("markers", set()):
+                marker_owners.setdefault(marker, set()).add(index)
+        unique_markers = {
+            marker: next(iter(owners))
+            for marker, owners in marker_owners.items()
+            if len(owners) == 1
+        }
+
+        active_owner: Optional[int] = None
+        for line in root_match.group(1).splitlines():
+            folded = line.casefold()
+            line_owners = {
+                index
+                for index, block in enumerate(blocks)
+                if any(
+                    alias.casefold() in folded
+                    for alias in block.get("aliases", [])
+                )
+            }
+            if len(line_owners) == 1:
+                active_owner = next(iter(line_owners))
+            if active_owner is None or len(line_owners) > 1:
+                continue
+
+            for marker, marker_owner in unique_markers.items():
+                marker_present = marker in folded
+                if marker.startswith("exit="):
+                    exit_code = marker.split("=", 1)[1]
+                    marker_present = bool(re.search(
+                        rf"\bexit(?:Code)?[=:\s]+{re.escape(exit_code)}\b",
+                        line,
+                        re.IGNORECASE,
+                    ))
+                if not marker_present or marker_owner == active_owner:
+                    continue
+                foreign_alias_present = any(
+                    alias.casefold() in folded
+                    for alias in blocks[marker_owner].get("aliases", [])
+                )
+                if not foreign_alias_present:
+                    return True
+        return False
+
+    @staticmethod
+    def _build_authoritative_entity_root_cause_section(
+        blocks: List[Dict[str, Any]],
+    ) -> str:
+        lines = [
+            "## 🎯 根因分析",
+            "> 本节由系统按 `collect_aiops_case` 的实体边界重建；"
+            "每条事实只归属于其原始 Pod，优先于被替换的模型叙述。",
+        ]
+        labels = {
+            "K8S_SIGNAL ": "Kubernetes 直接终态",
+            "METRIC ": "Metrics",
+            "LOG ": "Logging",
+            "TRACE_CORRELATION ": "Trace 关联",
+            "DEEPFLOW ": "DeepFlow",
+            "TEMPO ": "Tempo",
+            "TOPOLOGY ": "责任拓扑",
+        }
+
+        for block in blocks:
+            namespace = str(block.get("namespace") or "")
+            pod = str(block.get("pod") or "")
+            lines.extend([
+                "",
+                f"### `{namespace}/{pod}`",
+                f"- **采集识别类型**：`{block.get('abnormal_type') or 'unknown'}`",
+            ])
+            for fact in block.get("facts", []):
+                label = next(
+                    (name for prefix, name in labels.items() if fact.startswith(prefix)),
+                    "事实",
+                )
+                lines.append(f"- **{label}**：`{fact}`")
+
+            joined = "\n".join(block.get("facts", []))
+            missing_match = re.search(r"\bmissing_config=(\S+)", joined)
+            error_match = re.search(r"\berror_code=(\S+)", joined)
+            if re.search(r"\bOOMKilled\b", joined, re.IGNORECASE):
+                lines.append(
+                    "- **证据约束结论**：Kubernetes 终态直接确认 OOMKilled；"
+                    "若日志和 Trace 仅显示请求驱动的持续分配，则结论限定为"
+                    "“请求驱动的持续内存累积”，不升级为已证明的内存泄漏。"
+                )
+            elif missing_match or error_match:
+                parts = []
+                if error_match:
+                    parts.append(f"error_code={error_match.group(1)}")
+                if missing_match:
+                    parts.append(f"missing_config={missing_match.group(1)}")
+                lines.append(
+                    "- **证据约束结论**：应用日志/Trace 直接确认 "
+                    + "、".join(parts)
+                    + "；该结论只归属于当前 Pod。"
+                )
+            else:
+                lines.append(
+                    "- **证据约束结论**：当前结论仅依据上述同一 Pod 的 "
+                    "Kubernetes、Metrics、Logging、Tracing 和 Topology 事实。"
+                )
+        return "\n".join(lines)
+
+    @classmethod
+    def _build_fact_report_context(
+        cls,
+        *,
+        evidence_analysis: Any,
+        rca_analysis: Any,
+    ) -> Optional[tuple[List[FactLedger], Dict[str, Any]]]:
+        ledgers = [
+            ledger
+            for ledger in extract_fact_ledgers_from_evidence_analysis(
+                evidence_analysis
+            )
+            if not ledger.legacy_contract
+        ]
+        if not ledgers:
+            return None
+
+        try:
+            if isinstance(rca_analysis, RCAOutput):
+                raw_claim = rca_analysis.model_dump(mode="json")
+            elif isinstance(rca_analysis, dict):
+                raw_claim = dict(rca_analysis)
+            else:
+                parsed = json.loads(str(rca_analysis or "{}"))
+                raw_claim = parsed if isinstance(parsed, dict) else {}
+            validated_claim = validate_rca_claims(raw_claim, ledgers)
+        except Exception as exc:
+            reason = (
+                "RCA structured output or fact-reference validation failed: "
+                f"{exc}"
+            )
+            validated_claim = {
+                "diagnostic_status": "inconclusive",
+                "phenomenon": "",
+                "root_cause": (
+                    "Current facts are insufficient for a validated "
+                    "root-cause conclusion"
+                ),
+                "root_cause_summary": (
+                    "Current facts are insufficient for a validated "
+                    "root-cause conclusion"
+                ),
+                "supporting_fact_ids": [],
+                "contradicting_fact_ids": [],
+                "unknowns": [reason],
+                "hypotheses": [],
+                "confidence": 0.1,
+                "confidence_reason": reason,
+                "limitations": reason,
+                "claim_validation": {
+                    "valid": False,
+                    "diagnostic_status": "inconclusive",
+                    "valid_supporting_fact_ids": [],
+                    "valid_contradicting_fact_ids": [],
+                    "invalid_fact_ids": [],
+                    "reasons": [reason],
+                    "legacy_contract": False,
+                },
+            }
+        return ledgers, validated_claim
+
+    @staticmethod
+    def _fact_record_index(
+        ledgers: List[FactLedger],
+    ) -> Dict[str, FactRecord]:
+        return {
+            record.fact_id: record
+            for ledger in ledgers
+            for record in ledger.records
+        }
+
+    @staticmethod
+    def _exact_json(value: Any) -> str:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+
+    @classmethod
+    def _render_fact_record(cls, record: FactRecord) -> str:
+        temporal = ", ".join(
+            f"{name}={value}"
+            for name, value in (
+                ("timestamp", record.timestamp),
+                ("start", record.start),
+                ("end", record.end),
+            )
+            if value
+        ) or "timestamp=unknown"
+        entity = (
+            f"{record.entity_kind}:{record.entity_id}"
+            f" namespace={record.namespace or '-'}"
+            f" name={record.entity_name or '-'}"
+        )
+        unit = record.unit or "-"
+        return (
+            f"- `{record.fact_id}` | entity={entity} | "
+            f"attribute={record.attribute} | "
+            f"exact_value=`{cls._exact_json(record.value)}` | unit={unit} | "
+            f"source_system={record.source_system} | "
+            f"directness={record.directness} | confidence={record.confidence} | "
+            f"{temporal} | "
+            f"evidence_refs=`{cls._exact_json(record.evidence_refs)}`"
+        )
+
+    @classmethod
+    def _render_fact_ledger_root_cause_section(
+        cls,
+        *,
+        ledgers: List[FactLedger],
+        validated_claim: Dict[str, Any],
+    ) -> tuple[str, List[FactRecord]]:
+        record_index = cls._fact_record_index(ledgers)
+        validation = (
+            validated_claim.get("claim_validation")
+            if isinstance(validated_claim.get("claim_validation"), dict)
+            else {}
+        )
+        supporting_ids = sorted({
+            str(fact_id)
+            for fact_id in validation.get("valid_supporting_fact_ids", [])
+            if str(fact_id) in record_index
+        })
+        contradicting_ids = sorted({
+            str(fact_id)
+            for fact_id in validation.get("valid_contradicting_fact_ids", [])
+            if str(fact_id) in record_index
+        })
+        referenced_ids = sorted(set(supporting_ids + contradicting_ids))
+        referenced_records = [
+            record_index[fact_id]
+            for fact_id in referenced_ids
+        ]
+        scope_entity_ids = {
+            entity_id
+            for ledger in ledgers
+            for entity_id in ledger.scope_entity_ids
+        }
+        status = str(
+            validated_claim.get("diagnostic_status") or "inconclusive"
+        )
+
+        lines = [
+            "## 🎯 根因分析",
+            "- **报告合同**: `fact-ledger-authoritative-v1`",
+            f"- **诊断状态**: `{status}`",
+        ]
+        if status == "diagnosed":
+            lines.append(
+                "- **根因候选**: 仅由下列 validated supporting "
+                "FactRecords 构成。"
+            )
+        else:
+            lines.extend([
+                "- **结论**: 未形成已确认根因，当前结果保持 `inconclusive`。",
+                "- **候选状态**: 当前 FactRecords 不足以形成已确认根因。",
+            ])
+
+        hypotheses = (
+            validated_claim.get("hypotheses")
+            if isinstance(validated_claim.get("hypotheses"), list)
+            else []
+        )
+        sorted_hypotheses = sorted(
+            (
+                item
+                for item in hypotheses
+                if isinstance(item, dict)
+            ),
+            key=lambda item: (
+                str(item.get("entity_id") or ""),
+                str(item.get("hypothesis_id") or ""),
+            ),
+        )
+        for hypothesis in sorted_hypotheses:
+            entity_id = str(hypothesis.get("entity_id") or "").strip()
+            if entity_id not in scope_entity_ids:
+                continue
+            hypothesis_support = [
+                str(fact_id)
+                for fact_id in hypothesis.get("supporting_fact_ids", [])
+                if str(fact_id) in supporting_ids
+            ]
+            hypothesis_contradicting = [
+                str(fact_id)
+                for fact_id in hypothesis.get("contradicting_fact_ids", [])
+                if str(fact_id) in contradicting_ids
+            ]
+            if status == "diagnosed" and not hypothesis_support:
+                continue
+            lines.extend([
+                "",
+                f"### `{entity_id}`",
+                (
+                    "- **候选依据**: "
+                    f"{len(hypothesis_support)} 条支持事实，"
+                    f"{len(hypothesis_contradicting)} 条反证事实。"
+                ),
+            ])
+            for fact_id in hypothesis_support:
+                lines.append(cls._render_fact_record(record_index[fact_id]))
+            for fact_id in hypothesis_contradicting:
+                lines.append(
+                    "- **反证** "
+                    + cls._render_fact_record(record_index[fact_id])[2:]
+                )
+
+        lines.extend(["", "### 支持事实"])
+        if supporting_ids:
+            lines.extend(
+                cls._render_fact_record(record_index[fact_id])
+                for fact_id in supporting_ids
+            )
+        else:
+            lines.append("- 无有效 supporting Fact ID。")
+
+        lines.extend(["", "### 反证事实"])
+        if contradicting_ids:
+            lines.extend(
+                cls._render_fact_record(record_index[fact_id])
+                for fact_id in contradicting_ids
+            )
+        else:
+            lines.append("- 无有效 contradicting Fact ID。")
+
+        lines.extend(["", "### 未知项与限制"])
+        validation_reasons = [
+            str(reason).strip()
+            for reason in validation.get("reasons", []) or []
+            if str(reason).strip()
+        ]
+        if validation_reasons:
+            lines.append(
+                "- Fact-reference validation 排除了 "
+                f"{len(validation_reasons)} 项未通过合同的模型输入。"
+            )
+        elif status != "diagnosed":
+            lines.append(
+                "- 需要新的同实体直接 FactRecords 才能形成已确认根因。"
+            )
+        else:
+            lines.append(
+                "- 当前 validated claim 未声明可由 FactRecords "
+                "确定的额外限制。"
+            )
+        return "\n".join(lines), referenced_records
+
+    @classmethod
+    def _render_fact_ledger_appendix(
+        cls,
+        *,
+        diagnostic_status: str,
+        records: List[FactRecord],
+    ) -> str:
+        payload = {
+            "contract": "fact-ledger-authoritative-v1",
+            "diagnostic_status": diagnostic_status,
+            "facts": [
+                record.model_dump(mode="json", exclude_none=True)
+                for record in sorted(records, key=lambda item: item.fact_id)
+            ],
+        }
+        return "\n".join([
+            "## 机器可核验附录",
+            "> 本附录仅包含 validated claim 实际引用的 Fact Records。",
+            "",
+            "```json",
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            ),
+            "```",
+        ])
+
+    @staticmethod
+    def _replace_root_cause_section(content: str, section: str) -> str:
+        pattern = re.compile(
+            r"(?ms)^##[^\n]*根因分析[^\n]*\n.*?(?=^##\s|\Z)"
+        )
+        content_without_roots = pattern.sub("", content or "").rstrip()
+        remediation = re.search(
+            r"(?m)^##[^\n]*修复建议[^\n]*$",
+            content_without_roots,
+        )
+        insertion = (
+            remediation.start()
+            if remediation
+            else len(content_without_roots)
+        )
+        return (
+            content_without_roots[:insertion].rstrip()
+            + "\n\n"
+            + section.rstrip()
+            + "\n\n"
+            + content_without_roots[insertion:].lstrip()
+        )
+
+    @staticmethod
+    def _remove_machine_verifiable_sections(content: str) -> str:
+        pattern = re.compile(
+            r"(?ms)^##[^\n]*(?:机器可核验|机器可验证)[^\n]*\n"
+            r".*?(?=^##\s|\Z)"
+        )
+        return pattern.sub("", content).rstrip()
+
+    @staticmethod
+    def _structured_remediation_section(
+        content: str,
+    ) -> Optional[tuple[int, int, str]]:
+        heading = re.search(
+            r"(?m)^##[^\n]*结构化修复计划[^\n]*$",
+            content or "",
+        )
+        if not heading:
+            return None
+        remainder = content[heading.end():]
+        next_heading = re.search(r"(?m)^##\s+", remainder)
+        end = (
+            heading.end() + next_heading.start()
+            if next_heading
+            else len(content)
+        )
+        return heading.start(), end, heading.group(0)
+
+    @classmethod
+    def _structured_remediation_payload(
+        cls,
+        content: str,
+    ) -> Optional[Dict[str, Any]]:
+        section = cls._structured_remediation_section(content)
+        if section is None:
+            return None
+        start, end, _heading = section
+        match = re.search(
+            r"```(?:json)?\s*(\{.*\})\s*```",
+            content[start:end],
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return None
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+        if (
+            isinstance(payload, dict)
+            and isinstance(payload.get("remediation_plan"), dict)
+        ):
+            payload = payload["remediation_plan"]
+        return dict(payload) if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _replace_structured_remediation_payload(
+        content: str,
+        payload: Dict[str, Any],
+    ) -> str:
+        section = ConclusionFormatterNode._structured_remediation_section(
+            content
+        )
+        if section is None:
+            return content
+        start, end, heading = section
+        replacement = (
+            heading
+            + "\n\n```json\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+            + "\n```\n\n"
+        )
+        return (
+            content[:start]
+            + replacement
+            + content[end:].lstrip("\n")
+        )
+
+    @classmethod
+    def _remediation_payload_from_json(
+        cls,
+        value: Any,
+    ) -> Optional[Dict[str, Any]]:
+        if isinstance(value, dict):
+            remediation_like = (
+                "remediation_available" in value
+                or (
+                    "actions" in value
+                    and (
+                        "fix_type" in value
+                        or "issue_groups" in value
+                    )
+                )
+            )
+            if remediation_like:
+                return dict(value)
+            children = value.values()
+        elif isinstance(value, list):
+            children = value
+        else:
+            return None
+
+        for child in children:
+            payload = cls._remediation_payload_from_json(child)
+            if payload is not None:
+                return payload
+        return None
+
+    @classmethod
+    def _model_remediation_json_spans(
+        cls,
+        content: str,
+    ) -> List[tuple[int, int, Dict[str, Any]]]:
+        text = content or ""
+        spans: List[tuple[int, int, Dict[str, Any]]] = []
+        masked = list(text)
+        fence_pattern = re.compile(
+            r"```(?:json)?[ \t]*\n(?P<body>.*?)```",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for match in fence_pattern.finditer(text):
+            try:
+                value = json.loads(match.group("body").strip())
+            except json.JSONDecodeError:
+                continue
+            payload = cls._remediation_payload_from_json(value)
+            if payload is None:
+                continue
+            spans.append((match.start(), match.end(), payload))
+            masked[match.start():match.end()] = " " * (
+                match.end() - match.start()
+            )
+
+        decoder = json.JSONDecoder()
+        masked_text = "".join(masked)
+        cursor = 0
+        while cursor < len(masked_text):
+            start = masked_text.find("{", cursor)
+            if start < 0:
+                break
+            try:
+                value, length = decoder.raw_decode(masked_text[start:])
+            except json.JSONDecodeError:
+                cursor = start + 1
+                continue
+            end = start + length
+            payload = cls._remediation_payload_from_json(value)
+            if payload is not None:
+                spans.append((start, end, payload))
+            cursor = max(end, start + 1)
+        return sorted(spans, key=lambda item: item[0])
+
+    @classmethod
+    def _remove_structured_remediation_sections(cls, content: str) -> str:
+        result = content or ""
+        section_pattern = re.compile(
+            r"(?ms)^##[^\n]*\n.*?(?=^##\s|\Z)"
+        )
+
+        def clean_section(match: re.Match[str]) -> str:
+            section = match.group(0)
+            spans = cls._model_remediation_json_spans(section)
+            if not spans:
+                return section
+            cleaned = section
+            for start, end, _payload in reversed(spans):
+                cleaned = cleaned[:start] + cleaned[end:]
+            body = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
+            return "" if not body.strip() else cleaned
+
+        result = section_pattern.sub(clean_section, result)
+        spans = cls._model_remediation_json_spans(result)
+        for start, end, _payload in reversed(spans):
+            result = result[:start] + result[end:]
+        return result.rstrip()
+
+    @staticmethod
+    def _render_structured_remediation_payload(
+        payload: Dict[str, Any],
+    ) -> str:
+        return (
+            "## 结构化修复计划\n\n```json\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+            + "\n```"
+        )
+
+    @staticmethod
+    def _decoded_kubectl_candidate(command: str) -> str:
+        decoded = re.sub(
+            r"(?i)\\u0020",
+            " ",
+            command,
+        )
+        return (
+            decoded.replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+        )
+
+    @classmethod
+    def _neutralize_kubectl_text(cls, content: str) -> str:
+        marker = "[未授权的 Kubernetes 写操作已移除]"
+        command_span = (
+            r"(?:"
+            r"\\(?:[nrt]|u[0-9a-fA-F]{4})"
+            r"|'(?:\\.|[^'\\\n`])*'"
+            r'|"(?:\\.|[^"\\\n`])*"'
+            r"|[^'\"\n`；。！？，：;&|]"
+            r")*"
+        )
+        command_pattern = re.compile(
+            rf"(?i)\bkubectl\b{command_span}"
+        )
+
+        def replace_command(match: re.Match[str]) -> str:
+            raw = match.group(0)
+            candidate = raw.rstrip()
+            trailing = raw[len(candidate):]
+            decoded = cls._decoded_kubectl_candidate(candidate)
+            try:
+                if is_read_only_kubectl_command(decoded):
+                    return raw
+            except (TypeError, ValueError):
+                pass
+            return marker + trailing
+
+        return command_pattern.sub(replace_command, content or "")
+
+    @classmethod
+    def _sanitize_json_command_values(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: cls._sanitize_json_command_values(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                cls._sanitize_json_command_values(item)
+                for item in value
+            ]
+        if isinstance(value, str):
+            return cls._neutralize_kubectl_text(value)
+        return value
+
+    @classmethod
+    def _neutralize_unstructured_kubectl_writes(cls, content: str) -> str:
+        normalized_content = re.sub(
+            r"\\\r?\n[ \t]*",
+            " ",
+            content or "",
+        )
+        protected: Dict[str, str] = {}
+        fence_pattern = re.compile(
+            r"```(?P<language>[A-Za-z0-9_-]*)[ \t]*\n"
+            r"(?P<body>.*?)```",
+            flags=re.DOTALL,
+        )
+
+        def protect_json_fence(match: re.Match[str]) -> str:
+            language = match.group("language").lower()
+            if language not in {"", "json"}:
+                return match.group(0)
+            try:
+                value = json.loads(match.group("body").strip())
+            except json.JSONDecodeError:
+                return match.group(0)
+            sanitized = cls._sanitize_json_command_values(value)
+            token = f"FACT_LEDGER_JSON_BLOCK_{len(protected)}"
+            opening = "```json" if language == "json" else "```"
+            protected[token] = (
+                opening
+                + "\n"
+                + json.dumps(
+                    sanitized,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n```"
+            )
+            return token
+
+        result = fence_pattern.sub(protect_json_fence, normalized_content)
+        result = cls._neutralize_kubectl_text(result)
+        for token, block in protected.items():
+            result = result.replace(token, block)
+        return result
+
+    @staticmethod
+    def _normalized_entity_kind(value: Any) -> str:
+        normalized = re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+        aliases = {
+            "deploy": "deployment",
+            "deployments": "deployment",
+            "pods": "pod",
+            "statefulsets": "statefulset",
+            "daemonsets": "daemonset",
+            "configmaps": "configmap",
+            "secrets": "secret",
+            "persistentvolumeclaims": "persistentvolumeclaim",
+            "pvc": "persistentvolumeclaim",
+        }
+        return aliases.get(normalized, normalized)
+
+    @classmethod
+    def _kubectl_resource_targets(
+        cls,
+        command: str,
+    ) -> List[tuple[str, str, str]]:
+        try:
+            validate_safe_kubectl_command(command)
+            parts = shlex.split(command)
+        except (ValueError, TypeError):
+            return []
+        if len(parts) < 3 or parts[0] != "kubectl":
+            return []
+
+        namespace = ""
+        for index, token in enumerate(parts):
+            if token in {"-n", "--namespace"} and index + 1 < len(parts):
+                namespace = parts[index + 1]
+            elif token.startswith(("--namespace=", "-n=")):
+                namespace = token.split("=", 1)[1]
+
+        index = 2
+        if parts[1] in {"set", "rollout"} and index < len(parts):
+            index += 1
+        allowed_options_with_values = {
+            "-c",
+            "-n",
+            "-o",
+            "-p",
+            "--container",
+            "--containers",
+            "--dry-run",
+            "--from-file",
+            "--from-literal",
+            "--grace-period",
+            "--image",
+            "--limits",
+            "--namespace",
+            "--output",
+            "--patch",
+            "--replicas",
+            "--requests",
+            "--since",
+            "--since-time",
+            "--sort-by",
+            "--tail",
+            "--timeout",
+            "--type",
+        }
+        allowed_flag_options = {
+            "-w",
+            "--force",
+            "--ignore-not-found",
+            "--overwrite",
+            "--previous",
+            "--record",
+            "--show-labels",
+            "--wait",
+            "--watch",
+        }
+        forbidden_scope_options = {
+            "-A",
+            "-f",
+            "-l",
+            "--all",
+            "--all-namespaces",
+            "--field-selector",
+            "--filename",
+            "--selector",
+        }
+        positionals: List[str] = []
+        while index < len(parts):
+            token = parts[index]
+            if token.startswith("-"):
+                option, separator, attached_value = token.partition("=")
+                if option in forbidden_scope_options:
+                    return []
+                if option in allowed_options_with_values:
+                    if separator:
+                        if not attached_value:
+                            return []
+                        index += 1
+                        continue
+                    if index + 1 >= len(parts):
+                        return []
+                    index += 2
+                    continue
+                if option in allowed_flag_options:
+                    if separator and not attached_value:
+                        return []
+                    index += 1
+                    continue
+                return []
+            positionals.append(token)
+            index += 1
+
+        resource_aliases = {
+            "pod",
+            "pods",
+            "deployment",
+            "deploy",
+            "deployments",
+            "statefulset",
+            "statefulsets",
+            "daemonset",
+            "daemonsets",
+            "configmap",
+            "configmaps",
+            "secret",
+            "secrets",
+            "persistentvolumeclaim",
+            "persistentvolumeclaims",
+            "pvc",
+        }
+        targets: List[tuple[str, str, str]] = []
+        active_kind = ""
+        for token in positionals:
+            if parts[1] == "set" and "=" in token:
+                continue
+            if "/" in token:
+                resource, name = token.split("/", 1)
+                if resource.lower() in resource_aliases and name:
+                    active_kind = cls._normalized_entity_kind(resource)
+                    targets.append(
+                        (active_kind, namespace, name)
+                    )
+                    continue
+            if token.lower() in resource_aliases:
+                active_kind = cls._normalized_entity_kind(token)
+                continue
+            if not active_kind:
+                return []
+            targets.append((active_kind, namespace, token))
+        return targets
+
+    @classmethod
+    def _command_targets_record(
+        cls,
+        command: str,
+        record: FactRecord,
+    ) -> bool:
+        targets = cls._kubectl_resource_targets(command)
+        if len(targets) != 1:
+            return False
+        kind, namespace, name = targets[0]
+        return (
+            kind == cls._normalized_entity_kind(record.entity_kind)
+            and name == str(record.entity_name or "")
+            and namespace == str(record.namespace or "")
+        )
+
+    @staticmethod
+    def _kubectl_patch_removes_finalizers(command: str) -> bool:
+        try:
+            validate_safe_kubectl_command(command)
+            parts = shlex.split(command)
+        except (ValueError, TypeError):
+            return False
+        if len(parts) < 3 or parts[1] != "patch":
+            return False
+
+        patch_values = ConclusionFormatterNode._command_option_values(
+            parts,
+            {"-p", "--patch"},
+        )
+        patch_types = ConclusionFormatterNode._command_option_values(
+            parts,
+            {"--type"},
+        )
+        if len(patch_values) != 1 or len(patch_types) > 1:
+            return False
+
+        patch_type = patch_types[0].strip().lower() if patch_types else ""
+        try:
+            payload = json.loads(patch_values[0])
+        except (json.JSONDecodeError, TypeError):
+            return False
+
+        if isinstance(payload, dict):
+            if patch_type not in {"", "merge", "strategic"}:
+                return False
+            if set(payload) != {"metadata"}:
+                return False
+            metadata = payload.get("metadata")
+            return (
+                isinstance(metadata, dict)
+                and set(metadata) == {"finalizers"}
+                and metadata["finalizers"] in (None, [])
+            )
+
+        if not isinstance(payload, list) or patch_type != "json":
+            return False
+        if len(payload) != 1 or not isinstance(payload[0], dict):
+            return False
+        operation = payload[0]
+        return (
+            set(operation) == {"op", "path"}
+            and str(operation.get("op") or "").lower() == "remove"
+            and str(operation.get("path") or "") == "/metadata/finalizers"
+        )
+
+    @staticmethod
+    def _substantive_fact_value(value: Any) -> bool:
+        if value is None or value is False:
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() not in {
+                "",
+                "none",
+                "<none>",
+                "nil",
+                "<nil>",
+                "null",
+                "false",
+                "empty",
+                "[]",
+                "无",
+                "不存在",
+            }
+        if isinstance(value, (list, tuple, set, dict)):
+            return bool(value)
+        return True
+
+    @classmethod
+    def _fact_explicitly_has_attribute(
+        cls,
+        record: FactRecord,
+        attribute_name: str,
+    ) -> bool:
+        normalized_target = cls._normalized_entity_kind(attribute_name)
+        normalized_attribute = cls._normalized_entity_kind(record.attribute)
+        if (
+            normalized_target in normalized_attribute
+            and cls._substantive_fact_value(record.value)
+        ):
+            return True
+        if isinstance(record.value, dict):
+            for key, value in record.value.items():
+                if (
+                    normalized_target
+                    in cls._normalized_entity_kind(key)
+                    and cls._substantive_fact_value(value)
+                ):
+                    return True
+        return False
+
+    @staticmethod
+    def _trusted_environment_source(record: FactRecord) -> bool:
+        trusted_base_sources = {
+            "kubernetes",
+            "prometheus",
+            "elasticsearch",
+            "logs",
+            "deepflow",
+            "tempo",
+        }
+        source_components = [
+            component.strip().lower()
+            for component in record.source_system.split("+")
+        ]
+        return bool(source_components) and all(
+            component and component in trusted_base_sources
+            for component in source_components
+        )
+
+    @staticmethod
+    def _semantic_key(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
+
+    @classmethod
+    def _fact_semantic_entries(
+        cls,
+        record: FactRecord,
+    ) -> List[tuple[List[str], Any]]:
+        entries: List[tuple[List[str], Any]] = []
+
+        def visit(value: Any, path: List[str]) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    visit(item, [*path, cls._semantic_key(key)])
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item, path)
+                return
+            entries.append((path, value))
+
+        attribute_path = [
+            cls._semantic_key(segment)
+            for segment in re.split(r"[./\[\]]+", record.attribute)
+            if cls._semantic_key(segment)
+        ]
+        visit(record.value, attribute_path)
+        return entries
+
+    @staticmethod
+    def _exact_semantic_value(actual: Any, expected: Any) -> bool:
+        if isinstance(expected, bool):
+            return isinstance(actual, bool) and actual is expected
+        if isinstance(expected, (int, float)) and not isinstance(
+            expected,
+            bool,
+        ):
+            return (
+                isinstance(actual, (int, float))
+                and not isinstance(actual, bool)
+                and actual == expected
+            )
+        return str(actual) == str(expected)
+
+    @classmethod
+    def _fact_matches_semantic_value(
+        cls,
+        record: FactRecord,
+        *,
+        terms: List[str],
+        expected: Any,
+    ) -> bool:
+        normalized_terms = [
+            cls._semantic_key(term)
+            for term in terms
+            if cls._semantic_key(term)
+        ]
+        return any(
+            all(term in path_segments for term in normalized_terms)
+            and cls._exact_semantic_value(value, expected)
+            for path_segments, value in cls._fact_semantic_entries(record)
+        )
+
+    @classmethod
+    def _mapping_value(
+        cls,
+        mapping: Dict[str, Any],
+        key: str,
+    ) -> tuple[bool, Any]:
+        normalized_key = cls._semantic_key(key)
+        for candidate, value in mapping.items():
+            if cls._semantic_key(candidate) == normalized_key:
+                return True, value
+        return False, None
+
+    @classmethod
+    def _fact_container_groups(
+        cls,
+        record: FactRecord,
+    ) -> List[tuple[List[Dict[str, Any]], bool]]:
+        groups: List[tuple[List[Dict[str, Any]], bool]] = []
+        seen: set[tuple[int, bool]] = set()
+
+        def add_group(value: Any, *, complete: bool) -> None:
+            if isinstance(value, dict):
+                containers = [value]
+                complete = False
+            elif isinstance(value, (list, tuple)):
+                if not value or not all(
+                    isinstance(item, dict)
+                    for item in value
+                ):
+                    return
+                containers = list(value)
+            else:
+                return
+            marker = (id(value), complete)
+            if marker in seen:
+                return
+            seen.add(marker)
+            groups.append((containers, complete))
+
+        attribute_path = [
+            cls._semantic_key(segment)
+            for segment in re.split(r"[./\[\]]+", record.attribute)
+            if cls._semantic_key(segment)
+        ]
+        if attribute_path and attribute_path[-1] == "containers":
+            add_group(
+                record.value,
+                complete=isinstance(record.value, (list, tuple)),
+            )
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if cls._semantic_key(key) == "containers":
+                        add_group(
+                            item,
+                            complete=isinstance(item, (list, tuple)),
+                        )
+                    visit(item)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        visit(record.value)
+        return groups
+
+    @classmethod
+    def _container_name(
+        cls,
+        container: Dict[str, Any],
+    ) -> str:
+        found, value = cls._mapping_value(container, "name")
+        return str(value) if found else ""
+
+    @classmethod
+    def _container_matches_paths(
+        cls,
+        container: Dict[str, Any],
+        requirements: List[tuple[List[str], Any]],
+    ) -> bool:
+        for path, expected in requirements:
+            current: Any = container
+            for segment in path:
+                if not isinstance(current, dict):
+                    return False
+                found, current = cls._mapping_value(current, segment)
+                if not found:
+                    return False
+            if not cls._exact_semantic_value(current, expected):
+                return False
+        return True
+
+    @classmethod
+    def _container_matches_env(
+        cls,
+        container: Dict[str, Any],
+        assignments: List[tuple[str, str]],
+    ) -> bool:
+        found, env = cls._mapping_value(container, "env")
+        if not found:
+            return False
+        if isinstance(env, dict):
+            return all(
+                key in env
+                and cls._exact_semantic_value(env[key], expected)
+                for key, expected in assignments
+            )
+        if not isinstance(env, (list, tuple)):
+            return False
+        return all(
+            any(
+                isinstance(item, dict)
+                and cls._container_name(item) == key
+                and cls._mapping_value(item, "value")[0]
+                and cls._exact_semantic_value(
+                    cls._mapping_value(item, "value")[1],
+                    expected,
+                )
+                for item in env
+            )
+            for key, expected in assignments
+        )
+
+    @classmethod
+    def _containers_authorize(
+        cls,
+        records: List[FactRecord],
+        *,
+        selectors: Optional[List[str]],
+        predicate: Any,
+    ) -> bool:
+        groups = [
+            group
+            for record in records
+            for group in cls._fact_container_groups(record)
+        ]
+        containers = [
+            container
+            for group, _complete in groups
+            for container in group
+        ]
+        if not containers:
+            return False
+
+        if selectors is not None:
+            if not selectors or "*" in selectors:
+                return False
+            return all(
+                any(
+                    cls._container_name(container) == selector
+                    and predicate(container)
+                    for container in containers
+                )
+                for selector in selectors
+            )
+
+        for group, complete in groups:
+            if not complete:
+                continue
+            names = [
+                cls._container_name(container)
+                for container in group
+            ]
+            if not names or any(not name for name in names):
+                continue
+            if len(set(names)) != len(names):
+                continue
+            if all(
+                any(
+                    cls._container_name(candidate) == name
+                    and predicate(candidate)
+                    for candidate in containers
+                )
+                for name in names
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _container_selectors(
+        cls,
+        parts: List[str],
+    ) -> Optional[List[str]]:
+        values = cls._command_option_values(
+            parts,
+            {"--containers"},
+        )
+        if not values:
+            return None
+        if len(values) != 1:
+            return []
+        return [
+            item.strip()
+            for item in values[0].split(",")
+            if item.strip()
+        ]
+
+    @staticmethod
+    def _command_option_values(
+        parts: List[str],
+        option_names: set[str],
+    ) -> List[str]:
+        values: List[str] = []
+        for index, token in enumerate(parts):
+            option, separator, attached = token.partition("=")
+            if option not in option_names:
+                continue
+            if separator:
+                if attached:
+                    values.append(attached)
+            elif index + 1 < len(parts):
+                values.append(parts[index + 1])
+        return values
+
+    @staticmethod
+    def _key_value_assignments(values: List[str]) -> List[tuple[str, str]]:
+        assignments: List[tuple[str, str]] = []
+        for value in values:
+            for item in value.split(","):
+                key, separator, assigned = item.partition("=")
+                if separator and key and assigned:
+                    assignments.append((key, assigned))
+        return assignments
+
+    @classmethod
+    def _patch_changes(
+        cls,
+        parts: List[str],
+    ) -> List[tuple[str, List[str], List[str], Any, bool]]:
+        changes: List[
+            tuple[str, List[str], List[str], Any, bool]
+        ] = []
+
+        def visit(value: Any, path: List[str]) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    visit(item, [*path, str(key)])
+                return
+            changes.append(("merge", path, [], value, True))
+
+        patch_values = cls._command_option_values(
+            parts,
+            {"-p", "--patch"},
+        )
+        patch_types = cls._command_option_values(
+            parts,
+            {"--type"},
+        )
+        if len(patch_values) != 1 or len(patch_types) > 1:
+            return []
+        patch_type = patch_types[0].strip().lower() if patch_types else ""
+        for patch_value in patch_values:
+            try:
+                payload = json.loads(patch_value)
+            except (json.JSONDecodeError, TypeError):
+                return []
+            if isinstance(payload, dict):
+                if patch_type == "json":
+                    return []
+                visit(payload, [])
+            elif isinstance(payload, list):
+                if patch_type != "json":
+                    return []
+                for operation in payload:
+                    if not isinstance(operation, dict):
+                        return []
+                    op = str(operation.get("op") or "").strip().lower()
+                    path = [
+                        segment.replace("~1", "/").replace("~0", "~")
+                        for segment in str(
+                            operation.get("path") or ""
+                        ).split("/")
+                        if segment
+                    ]
+                    from_path = [
+                        segment.replace("~1", "/").replace("~0", "~")
+                        for segment in str(
+                            operation.get("from") or ""
+                        ).split("/")
+                        if segment
+                    ]
+                    if not op or not path:
+                        return []
+                    changes.append(
+                        (
+                            op,
+                            path,
+                            from_path,
+                            operation.get("value"),
+                            "value" in operation,
+                        )
+                    )
+            else:
+                return []
+        return changes
+
+    @classmethod
+    def _facts_authorize_mutation(
+        cls,
+        command: str,
+        records: List[FactRecord],
+    ) -> bool:
+        try:
+            validate_safe_kubectl_command(command)
+            parts = shlex.split(command)
+        except (ValueError, TypeError):
+            return False
+        if len(parts) < 3 or parts[0] != "kubectl":
+            return False
+
+        verb = parts[1]
+        if verb == "delete":
+            return any(
+                cls._fact_matches_semantic_value(
+                    record,
+                    terms=["desired_state"],
+                    expected=desired_state,
+                )
+                for record in records
+                for desired_state in ("absent", "deleted", "removed")
+            )
+
+        if verb == "patch":
+            changes = cls._patch_changes(parts)
+            return bool(changes) and all(
+                operation in {"merge", "add", "replace"}
+                and value_present
+                and any(
+                    cls._fact_matches_semantic_value(
+                        record,
+                        terms=path,
+                        expected=value,
+                    )
+                    for record in records
+                )
+                for operation, path, _from_path, value, value_present in changes
+            )
+
+        if verb == "scale":
+            replicas = cls._command_option_values(
+                parts,
+                {"--replicas"},
+            )
+            return len(replicas) == 1 and any(
+                cls._fact_matches_semantic_value(
+                    record,
+                    terms=["replicas"],
+                    expected=int(replicas[0]),
+                )
+                for record in records
+                if replicas[0].isdigit()
+            )
+
+        if verb == "set" and len(parts) >= 4:
+            subcommand = parts[2]
+            if subcommand == "resources":
+                requirements: List[tuple[List[str], Any]] = []
+                for scope, option in (
+                    ("limits", "--limits"),
+                    ("requests", "--requests"),
+                ):
+                    requirements.extend(
+                        (
+                            ["resources", scope, resource_name],
+                            value,
+                        )
+                        for resource_name, value in cls._key_value_assignments(
+                            cls._command_option_values(parts, {option})
+                        )
+                    )
+                selectors = cls._container_selectors(parts)
+                return bool(requirements) and cls._containers_authorize(
+                    records,
+                    selectors=selectors,
+                    predicate=lambda container: cls._container_matches_paths(
+                        container,
+                        requirements,
+                    ),
+                )
+
+            assignments = [
+                (key, value)
+                for token in parts[3:]
+                if not token.startswith("-")
+                for key, value in cls._key_value_assignments([token])
+            ]
+            if subcommand == "image":
+                return bool(assignments) and all(
+                    cls._containers_authorize(
+                        records,
+                        selectors=[container],
+                        predicate=lambda candidate, image=image: (
+                            cls._container_matches_paths(
+                                candidate,
+                                [(["image"], image)],
+                            )
+                        ),
+                    )
+                    for container, image in assignments
+                )
+            if subcommand == "env":
+                selectors = cls._container_selectors(parts)
+                return bool(assignments) and cls._containers_authorize(
+                    records,
+                    selectors=selectors,
+                    predicate=lambda container: cls._container_matches_env(
+                        container,
+                        assignments,
+                    ),
+                )
+            return False
+
+        if (
+            verb == "rollout"
+            and len(parts) >= 4
+            and parts[2] == "restart"
+        ):
+            return any(
+                cls._fact_matches_semantic_value(
+                    record,
+                    terms=["rollout", "restart_required"],
+                    expected=True,
+                )
+                for record in records
+            )
+
+        return False
+
+    @classmethod
+    def _fact_bound_action_authorized(
+        cls,
+        action: Dict[str, Any],
+        *,
+        record_index: Dict[str, FactRecord],
+        valid_supporting_fact_ids: set[str],
+    ) -> bool:
+        target_entity_id = str(
+            action.get("target_entity_id") or ""
+        ).strip()
+        supporting_fact_ids = [
+            str(fact_id)
+            for fact_id in action.get("supporting_fact_ids", []) or []
+            if str(fact_id)
+        ]
+        if not target_entity_id or not supporting_fact_ids:
+            return False
+        if not set(supporting_fact_ids).issubset(
+            valid_supporting_fact_ids
+        ):
+            return False
+        records = [
+            record_index.get(fact_id)
+            for fact_id in supporting_fact_ids
+        ]
+        if any(record is None for record in records):
+            return False
+        bound_records = [
+            record
+            for record in records
+            if record is not None
+        ]
+        if any(
+            record.entity_id != target_entity_id
+            for record in bound_records
+        ):
+            return False
+        if any(
+            not cls._trusted_environment_source(record)
+            for record in bound_records
+        ):
+            return False
+        if all(
+            record.dimension == "topology"
+            for record in bound_records
+        ):
+            return False
+        target_record = bound_records[0]
+        execute_command = str(
+            action.get("execute_command")
+            or action.get("command")
+            or ""
+        ).strip()
+        if (
+            not execute_command
+            or not cls._command_targets_record(
+                execute_command,
+                target_record,
+            )
+        ):
+            return False
+        for key in (
+            "dry_run_command",
+            "execute_command",
+            "verify_command",
+        ):
+            command = str(action.get(key) or "").strip()
+            if command and not cls._command_targets_record(
+                command,
+                target_record,
+            ):
+                return False
+
+        execute_targets = cls._kubectl_resource_targets(execute_command)
+        is_finalizer_removal = (
+            len(execute_targets) == 1
+            and execute_targets[0][0] == "pod"
+            and cls._kubectl_patch_removes_finalizers(execute_command)
+        )
+        if not is_finalizer_removal:
+            return cls._facts_authorize_mutation(
+                execute_command,
+                bound_records,
+            )
+
+        return (
+            any(
+                cls._fact_explicitly_has_attribute(
+                    record,
+                    "deletionTimestamp",
+                )
+                for record in bound_records
+            )
+            and any(
+                cls._fact_explicitly_has_attribute(
+                    record,
+                    "finalizers",
+                )
+                for record in bound_records
+            )
+        )
+
+    @classmethod
+    def _render_fact_ledger_diagnostic_remediation(
+        cls,
+        content: str,
+        *,
+        ledgers: List[FactLedger],
+        validated_claim: Dict[str, Any],
+    ) -> str:
+        del ledgers, validated_claim
+        marker = (
+            "<!-- remediation_contract="
+            "fact-ledger-diagnostic-only-v1 -->"
+        )
+        source_payloads = [
+            payload
+            for _start, _end, payload
+            in cls._model_remediation_json_spans(content)
+        ]
+        source_payload = next(
+            (
+                payload
+                for payload in source_payloads
+                if isinstance(payload.get("issue_groups"), list)
+                and payload.get("issue_groups")
+            ),
+            source_payloads[0] if source_payloads else {},
+        )
+
+        base_content = cls._remove_structured_remediation_sections(content)
+        base_content = cls._neutralize_unstructured_kubectl_writes(
+            base_content
+        )
+        base_content = base_content.replace(marker, "").rstrip()
+
+        issue_groups = []
+        for group in source_payload.get("issue_groups", []) or []:
+            if not isinstance(group, dict):
+                continue
+            rebuilt: Dict[str, Any] = {}
+            for key in ("group_id", "problem_type", "target", "strategy"):
+                value = group.get(key)
+                if value is None:
+                    continue
+                sanitized = cls._neutralize_unstructured_kubectl_writes(
+                    str(value)
+                ).strip()
+                if "[未授权的 Kubernetes 写操作已移除]" in sanitized:
+                    sanitized = "[未授权的 Kubernetes 写操作已移除]"
+                rebuilt[key] = sanitized
+            rebuilt["auto_fixable"] = False
+            issue_groups.append(rebuilt)
+
+        payload = {
+            "remediation_contract": "fact-ledger-diagnostic-only-v1",
+            "remediation_available": False,
+            "fix_type": "manual_only",
+            "risk_level": (
+                str(source_payload.get("risk_level")).lower()
+                if str(source_payload.get("risk_level")).lower()
+                in {"low", "medium", "high"}
+                else "medium"
+            ),
+            "requires_human_approval": True,
+            "issue_groups": issue_groups,
+            "basis": [
+                "Fact Ledger reports are diagnostic-only; executable "
+                "writes require a separate typed Remediation Policy "
+                "Contract."
+            ],
+            "actions": [],
+            "stop_conditions": [
+                "Human review is required before any write action."
+            ],
+        }
+        result = (
+            base_content
+            + "\n\n"
+            + cls._render_structured_remediation_payload(payload)
+        )
+        result = result.rstrip() + "\n\n" + marker
+        return cls._neutralize_unstructured_kubectl_writes(result)
+
+    @classmethod
+    def _apply_fact_ledger_report_contract(
+        cls,
+        content: str,
+        *,
+        ledgers: List[FactLedger],
+        validated_claim: Dict[str, Any],
+    ) -> str:
+        root_section, referenced_records = (
+            cls._render_fact_ledger_root_cause_section(
+                ledgers=ledgers,
+                validated_claim=validated_claim,
+            )
+        )
+        result = cls._remove_machine_verifiable_sections(content)
+        result = cls._replace_root_cause_section(
+            result,
+            root_section,
+        )
+        result = cls._render_fact_ledger_diagnostic_remediation(
+            result,
+            ledgers=ledgers,
+            validated_claim=validated_claim,
+        )
+        appendix = cls._render_fact_ledger_appendix(
+            diagnostic_status=str(
+                validated_claim.get("diagnostic_status")
+                or "inconclusive"
+            ),
+            records=referenced_records,
+        )
+        final_report = result.rstrip() + "\n\n---\n\n" + appendix + "\n"
+        return cls._neutralize_unstructured_kubectl_writes(final_report)
+
+    @staticmethod
+    def _mark_legacy_report_contract(content: str) -> str:
+        marker = "<!-- report_contract=legacy-compatibility -->"
+        if marker in content:
+            return content
+        return content.rstrip() + "\n\n" + marker + "\n"
+
+    @staticmethod
+    def _append_exact_k8s_signal_appendix(
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Append immutable strong Kubernetes facts from the MCP response."""
+        if not isinstance(content, str) or not content:
+            return content
+        marker = "## 附录：机器可核验 Kubernetes 强证据"
+        if marker in content:
+            return content
+
+        contract_line = ""
+        signal_lines = []
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith("REPORT_MUST_QUOTE_K8S_SIGNAL_VERBATIM="):
+                contract_line = line
+            elif line.startswith("- K8S_SIGNAL "):
+                signal_lines.append(line[2:])
+
+        if not signal_lines:
+            return content
+
+        appendix = [
+            marker,
+            "> 以下内容由系统从 `collect_aiops_case` 的 Kubernetes 强信号确定性注入，未经过 LLM 改写。",
+            "",
+            "```text",
+        ]
+        if contract_line:
+            appendix.append(contract_line)
+        appendix.extend(signal_lines)
+        appendix.append("```")
+        return content.rstrip() + "\n\n---\n\n" + "\n".join(appendix)
+
+    @staticmethod
+    def _append_exact_observability_facts_appendix(
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Append immutable Metrics, Logs and Tracing facts."""
+        if not isinstance(content, str) or not content:
+            return content
+        marker = "## 附录：机器可核验可观测性核心事实"
+        if marker in content:
+            return content
+
+        contract_line = ""
+        fact_lines = []
+        prefixes = (
+            "- TRACE_CORRELATION ",
+            "- DEEPFLOW_SEMANTICS ",
+            "- METRIC ",
+            "- LOG ",
+            "- DEEPFLOW ",
+            "- TEMPO ",
+        )
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith("REPORT_MUST_QUOTE_OBSERVABILITY_FACTS_VERBATIM="):
+                contract_line = line
+            elif line.startswith(prefixes):
+                fact_lines.append(line[2:])
+
+        if not fact_lines:
+            return content
+
+        appendix = [
+            marker,
+            "> 以下内容由系统从 `collect_aiops_case` 的结构化可观测性事实确定性注入，未经过 LLM 改写。",
+            "",
+            "```text",
+        ]
+        if contract_line:
+            appendix.append(contract_line)
+        appendix.extend(fact_lines)
+        appendix.append("```")
+        return content.rstrip() + "\n\n---\n\n" + "\n".join(appendix)
 
     def _normalize_ask_remediation_plan(
         self,
@@ -1234,9 +5358,25 @@ class ConclusionFormatterNode(WorkflowNode):
             report_lines.append(f"| **问题分类** | {decision.category} |")
             report_lines.append(f"| **置信度** | {confidence_str} ({decision.confidence_score:.0%}) |")
         
-        evidence_count = len(evidence_items)
-        collected_count = sum(1 for e in evidence_items if e.collected)
-        report_lines.append(f"| **证据完整度** | {collected_count}/{evidence_count} ({collected_count/max(evidence_count,1):.0%}) |")
+        try:
+            evidence_data = (
+                evidence_analysis
+                if isinstance(evidence_analysis, dict)
+                else json.loads(evidence_analysis or "{}")
+            )
+            if not isinstance(evidence_data, dict):
+                raise ValueError("evidence_analysis must be a JSON object")
+            evidence_stats = self._extract_evidence_stats(evidence_data)
+            evidence_count = evidence_stats["primary_total"]
+            collected_count = evidence_stats["primary_collected"]
+            completeness = evidence_stats["primary_completeness"]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            evidence_count = len(evidence_items)
+            collected_count = sum(1 for e in evidence_items if e.collected)
+            completeness = collected_count / max(evidence_count, 1)
+        report_lines.append(
+            f"| **证据完整度** | {collected_count}/{evidence_count} ({completeness:.0%}) |"
+        )
         
         report_lines.append("")
         
@@ -1275,8 +5415,45 @@ class ConclusionFormatterNode(WorkflowNode):
                 value = str(item.value)[:40] if item.value else "-"
                 report_lines.append(f"| {i} | {item.description[:35]} | {level_icon} | {status} | `{value}` |")
             
-            report_lines.append("")
+        report_lines.append("")
         
+        report_lines.append("---")
+        report_lines.append("")
+
+        # ========== 可观测性数据 ==========
+        report_lines.append("## 📊 可观测性数据（三维度 + 拓扑）")
+        report_lines.append("")
+        report_lines.append("### 三大观测维度")
+        report_lines.append("")
+        report_lines.append(
+            "| 维度 | 数据来源 | 覆盖状态 | "
+            "关键原始信号（人可读的真实数据） | 证据 ref |"
+        )
+        report_lines.append(
+            "|------|----------|----------|"
+            "----------------------------------|----------|"
+        )
+        report_lines.append(
+            "| **Metrics** | Prometheus | 未获取到 | "
+            "未返回可用指标样本 | 见机器可核验附录 |"
+        )
+        report_lines.append(
+            "| **Logging** | ES/Filebeat | 未获取到 | "
+            "未返回可用日志原文 | 见机器可核验附录 |"
+        )
+        report_lines.append(
+            "| **Tracing** | DeepFlow/Tempo | 未获取到 | "
+            "未返回可用 Trace 数据 | 见机器可核验附录 |"
+        )
+        report_lines.append(
+            "| **K8s** | Kubernetes API | 未获取到 | "
+            "未返回可用 Kubernetes 强信号 | 见机器可核验附录 |"
+        )
+        report_lines.append("")
+        report_lines.append("### 拓扑关系（实体与边）")
+        report_lines.append("")
+        report_lines.append("- 本轮未返回可核验的拓扑原始边。")
+        report_lines.append("")
         report_lines.append("---")
         report_lines.append("")
         
@@ -1417,6 +5594,12 @@ class ConclusionFormatterNode(WorkflowNode):
                 f"{stats.get('environment_collected', 0)}/{stats.get('environment_total', 0)} "
                 f"({stats.get('environment_completeness_pct', '0%')})"
             )
+            lines.append(
+                "pod_observability_coverage: "
+                f"{stats.get('observability_target_collected', 0)}/"
+                f"{stats.get('observability_target_total', 0)} "
+                f"({stats.get('observability_target_completeness_pct', '0%')})"
+            )
 
         if collected:
             lines.append("已采集证据:")
@@ -1447,6 +5630,160 @@ class ConclusionFormatterNode(WorkflowNode):
         authoritative_facts = cls._build_authoritative_tool_facts(evidence_data)
         if authoritative_facts:
             lines.extend(["", authoritative_facts.rstrip()])
+
+        aiops_facts = []
+        aiops_contexts = []
+        exact_k8s_signals = []
+        exact_observability_facts = []
+        exact_topology_edges = []
+        exact_topology_edge_keys = set()
+        topology_case_counts = []
+        aiops_case_collected = False
+
+        def topology_edge_key(line: str) -> Optional[tuple[str, str, str, str, str]]:
+            fields = {}
+            for field in ("relationship", "source", "target", "directness", "confidence"):
+                if field == "relationship":
+                    match = re.search(r'relationship=("[^"]*"|\S+)', line)
+                else:
+                    match = re.search(rf"{field}=(\S+)", line)
+                if not match:
+                    return None
+                value = match.group(1)
+                if field == "relationship" and value.startswith('"'):
+                    try:
+                        value = json.loads(value)
+                    except json.JSONDecodeError:
+                        value = value.strip('"')
+                fields[field] = value
+            return (
+                fields["relationship"],
+                fields["source"],
+                fields["target"],
+                fields["directness"],
+                fields["confidence"],
+            )
+
+        for item in (evidence_data.get("tool_data", []) or [])[:12]:
+            if not isinstance(item, dict):
+                continue
+            tool = str(item.get("tool", "unknown") or "unknown")
+            if tool in {"collect_aiops_case", "get_aiops_case"}:
+                aiops_case_collected = True
+            agent_facts = str(item.get("agent_facts", "") or "").strip()
+            if agent_facts:
+                aiops_facts.append(f"- [{tool}]\n{agent_facts[:10000]}")
+                for fact_line in agent_facts.splitlines():
+                    fact_line = fact_line.strip()
+                    if fact_line.startswith("K8S_SIGNAL "):
+                        if fact_line not in exact_k8s_signals:
+                            exact_k8s_signals.append(fact_line)
+                    elif fact_line.startswith((
+                        "TRACE_CORRELATION ",
+                        "DEEPFLOW_SEMANTICS ",
+                        "METRIC ",
+                        "LOG ",
+                        "DEEPFLOW ",
+                        "TEMPO ",
+                    )):
+                        if fact_line not in exact_observability_facts:
+                            exact_observability_facts.append(fact_line)
+                    elif fact_line.startswith("TOPOLOGY relationship="):
+                        edge_key = topology_edge_key(fact_line)
+                        if edge_key not in exact_topology_edge_keys:
+                            exact_topology_edges.append(fact_line)
+                            if edge_key is not None:
+                                exact_topology_edge_keys.add(edge_key)
+            agent_context = str(item.get("agent_context", "") or "").strip()
+            if not agent_context:
+                continue
+            aiops_contexts.append(f"- [{tool}] {agent_context[:12000]}")
+            try:
+                parsed_context = json.loads(agent_context)
+            except (json.JSONDecodeError, TypeError):
+                parsed_context = {}
+            if not isinstance(parsed_context, dict):
+                continue
+            topology_summary = parsed_context.get("topology_summary")
+            if isinstance(topology_summary, dict):
+                entity_count = topology_summary.get("entity_count")
+                edge_count = topology_summary.get("edge_count")
+                if isinstance(entity_count, int) and isinstance(edge_count, int):
+                    case_id = str(parsed_context.get("case_id") or "").strip()
+                    topology_case_counts.append((case_id, entity_count, edge_count))
+            details = parsed_context.get("dimension_details")
+            topology = details.get("topology") if isinstance(details, dict) else {}
+            edges = topology.get("edges") if isinstance(topology, dict) else []
+            for edge in edges or []:
+                if not isinstance(edge, dict):
+                    continue
+                relationship = json.dumps(
+                    str(edge.get("relationship") or ""),
+                    ensure_ascii=False,
+                )
+                edge_line = (
+                    f"TOPOLOGY relationship={relationship}"
+                    f" source={edge.get('source', '')}"
+                    f" target={edge.get('target', '')}"
+                    f" source_system={edge.get('source_system', '')}"
+                    f" directness={edge.get('directness', '')}"
+                    f" confidence={edge.get('confidence', '')}"
+                ).strip()
+                edge_key = (
+                    str(edge.get("relationship") or ""),
+                    str(edge.get("source") or ""),
+                    str(edge.get("target") or ""),
+                    str(edge.get("directness") or ""),
+                    str(edge.get("confidence") or ""),
+                )
+                if edge_key not in exact_topology_edge_keys:
+                    exact_topology_edges.append(edge_line)
+                    exact_topology_edge_keys.add(edge_key)
+        if aiops_case_collected:
+            lines.append("aiops_observability_status: collected")
+        else:
+            lines.append("aiops_observability_status: not_collected")
+            lines.append(
+                "aiops_observability_guard: 本轮未调用 collect_aiops_case；"
+                "禁止声称本轮基于 collect_aiops_case，禁止编造 DeepFlow/Tempo/Topology 数据。"
+            )
+        if aiops_facts:
+            lines.append("aiops_observability_facts:")
+            lines.extend(aiops_facts)
+        if aiops_contexts:
+            lines.append("aiops_observability_context:")
+            lines.extend(aiops_contexts)
+        if exact_k8s_signals:
+            lines.append("REPORT_MUST_QUOTE_K8S_SIGNAL_VERBATIM=true")
+            lines.extend(f"- {signal}" for signal in exact_k8s_signals)
+        if exact_observability_facts:
+            lines.append("REPORT_MUST_QUOTE_OBSERVABILITY_FACTS_VERBATIM=true")
+            lines.append("IGNORE_UNSUPPORTED_LAYER_NUMERIC_FACTS=true")
+            lines.extend(f"- {fact}" for fact in exact_observability_facts)
+        lines.append(
+            "METRIC_SCOPE supporting_evidence_only=true "
+            "k8s_termination_reason_has_priority=true "
+            "single_or_sparse_samples_cannot_exclude_failure_mode=true"
+        )
+        lines.append("EXIT_CODE_SCOPE symbolic_name_requires_explicit_evidence=true")
+        if exact_topology_edges:
+            if len(topology_case_counts) == 1:
+                lines.append(f"TOPOLOGY_ENTITY_COUNT value={topology_case_counts[0][1]}")
+            elif topology_case_counts:
+                for case_id, entity_count, edge_count in topology_case_counts:
+                    lines.append(
+                        f"TOPOLOGY_CASE_COUNT case_id={case_id or 'unknown'} "
+                        f"entities={entity_count} edges={edge_count}"
+                    )
+            lines.append(f"TOPOLOGY_EXACT_EDGES count={len(exact_topology_edges)}")
+            lines.append("REPORT_MUST_QUOTE_TOPOLOGY_VERBATIM=true")
+            lines.append("FORBID_RELATIONSHIP_REVERSAL=true")
+            lines.append(
+                "TOPOLOGY_SCOPE relationships_only=true "
+                "health_not_proven=true complete_call_chain_not_proven=true "
+                "exact_edges_are_diagnostic_subset=true"
+            )
+            lines.extend(f"- {edge}" for edge in exact_topology_edges)
 
         root_cause = rca_data.get("root_cause_summary") or rca_data.get("root_cause")
         if root_cause:
@@ -1626,6 +5963,107 @@ class ConclusionFormatterNode(WorkflowNode):
             env_collected = sum(1 for item in measurable if item.get("collected"))
             env_completeness = env_collected / max(env_total, 1)
 
+        observability_total = int(evidence_data.get("observability_target_total") or 0)
+        observability_collected = int(evidence_data.get("observability_target_collected") or 0)
+        observability_completeness = float(
+            evidence_data.get("observability_target_completeness") or 0
+        )
+        diagnostic_total = int(evidence_data.get("diagnostic_evidence_total") or 0)
+        diagnostic_collected = int(
+            evidence_data.get("diagnostic_evidence_collected") or 0
+        )
+        diagnostic_completeness = float(
+            evidence_data.get("diagnostic_evidence_completeness") or 0
+        )
+        dimension_coverage = float(
+            evidence_data.get("dimension_coverage")
+            if evidence_data.get("dimension_coverage") is not None
+            else diagnostic_completeness
+        )
+        diagnostic_sufficiency = float(
+            evidence_data.get("diagnostic_sufficiency")
+            if evidence_data.get("diagnostic_sufficiency") is not None
+            else diagnostic_completeness
+        )
+        diagnostic_sufficiency_label = str(
+            evidence_data.get("diagnostic_sufficiency_label") or ""
+        )
+        tool_events = evidence_data.get("tool_data")
+        if not isinstance(tool_events, list) or not tool_events:
+            tool_events = evidence_data.get("tool_results")
+        if not isinstance(tool_events, list):
+            tool_events = []
+        executed_tool_count = int(
+            evidence_data.get("executed_tool_count")
+            if isinstance(evidence_data.get("executed_tool_count"), int)
+            else len(tool_events)
+        )
+        matched_tool_count = int(evidence_data.get("matched_tool_count") or 0)
+        unplanned_tool_count = int(evidence_data.get("unplanned_tool_count") or 0)
+        if isinstance(evidence_data.get("case_tool_count"), int):
+            case_tool_count = int(evidence_data.get("case_tool_count") or 0)
+        else:
+            case_tool_count = sum(
+                1
+                for event in tool_events
+                if isinstance(event, dict)
+                and str(event.get("tool") or event.get("tool_name") or "").strip()
+                == "collect_aiops_case"
+            )
+        if isinstance(evidence_data.get("supplemental_tool_count"), int):
+            supplemental_tool_count = int(
+                evidence_data.get("supplemental_tool_count") or 0
+            )
+        else:
+            supplemental_tool_count = max(
+                0,
+                executed_tool_count - case_tool_count,
+            )
+        skipped_plan_count = int(evidence_data.get("skipped_plan_count") or 0)
+        missing_reasons = evidence_data.get("missing_reasons")
+        missing_reason_count = (
+            sum(1 for reason in missing_reasons if str(reason or "").strip())
+            if isinstance(missing_reasons, list)
+            else 0
+        )
+        early_stop = evidence_data.get("early_stop")
+        early_stop_reason = (
+            str(early_stop.get("reason") or "")
+            if isinstance(early_stop, dict)
+            else ""
+        )
+        stop_reason_labels = {
+            "mandatory_live_observability_complete": "核心实时 case 已完整",
+            "mandatory_live_observability_ready_for_reconciliation": "实时 case 已返回，正在判断是否需要补充原始证据",
+            "post_case_reconciliation_complete": "实时 case 已完成补采判断",
+            "context_budget_stop": "上下文预算达到停止阈值",
+            "context_budget_threshold": "上下文达到阈值",
+            "collection_stalled": "采集连续无进展",
+        }
+        collection_stop_reason = stop_reason_labels.get(
+            early_stop_reason,
+            early_stop_reason or "未触发提前停止",
+        )
+        if diagnostic_total:
+            primary_total = diagnostic_total
+            primary_completeness = diagnostic_sufficiency
+            primary_collected = min(
+                diagnostic_total,
+                max(0, math.floor(diagnostic_total * diagnostic_sufficiency)),
+            )
+        elif plan_total:
+            primary_total = plan_total
+            primary_collected = plan_collected
+            primary_completeness = plan_completeness
+        elif observability_total:
+            primary_total = observability_total
+            primary_collected = observability_collected
+            primary_completeness = observability_completeness
+        else:
+            primary_total = env_total
+            primary_collected = env_collected
+            primary_completeness = env_completeness
+
         collection_summary = evidence_data.get("collection_summary") or (
             f"计划 {plan_total} 项，实际采集 {plan_collected} 项，"
             f"未采集 {plan_total - plan_collected} 项，完整度 {plan_completeness:.0%}；"
@@ -1641,6 +6079,31 @@ class ConclusionFormatterNode(WorkflowNode):
             "environment_collected": env_collected,
             "environment_completeness": env_completeness,
             "environment_completeness_pct": f"{env_completeness:.0%}",
+            "observability_target_total": observability_total,
+            "observability_target_collected": observability_collected,
+            "observability_target_completeness": observability_completeness,
+            "observability_target_completeness_pct": f"{observability_completeness:.0%}",
+            "diagnostic_evidence_total": diagnostic_total,
+            "diagnostic_evidence_collected": diagnostic_collected,
+            "diagnostic_evidence_completeness": diagnostic_completeness,
+            "diagnostic_evidence_completeness_pct": f"{diagnostic_completeness:.0%}",
+            "dimension_coverage": dimension_coverage,
+            "dimension_coverage_pct": f"{dimension_coverage:.0%}",
+            "diagnostic_sufficiency": diagnostic_sufficiency,
+            "diagnostic_sufficiency_pct": f"{diagnostic_sufficiency:.0%}",
+            "diagnostic_sufficiency_label": diagnostic_sufficiency_label,
+            "executed_tool_count": executed_tool_count,
+            "matched_tool_count": matched_tool_count,
+            "unplanned_tool_count": unplanned_tool_count,
+            "case_tool_count": case_tool_count,
+            "supplemental_tool_count": supplemental_tool_count,
+            "skipped_plan_count": skipped_plan_count,
+            "missing_reason_count": missing_reason_count,
+            "collection_stop_reason": collection_stop_reason,
+            "primary_total": primary_total,
+            "primary_collected": primary_collected,
+            "primary_completeness": primary_completeness,
+            "primary_completeness_pct": f"{primary_completeness:.0%}",
         }
 
     def _enforce_evidence_stats(self, content: str, evidence_analysis: str) -> str:
@@ -1662,9 +6125,9 @@ class ConclusionFormatterNode(WorkflowNode):
         if not stats and not inv:
             return content
 
-        total = int(stats.get("plan_total") or 0)
-        collected = int(stats.get("plan_collected") or 0)
-        completeness_pct = str(stats.get("plan_completeness_pct") or "0%")
+        total = int(stats.get("primary_total") or 0)
+        collected = int(stats.get("primary_collected") or 0)
+        completeness_pct = str(stats.get("primary_completeness_pct") or "0%")
 
         real_stat = f"{collected}/{total} ({completeness_pct})"
 
@@ -1672,7 +6135,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
         # 模式1: Markdown 表格行 | **证据完整度** | ... |
         pattern1 = re.compile(
-            r'(\|\s*\*{0,2}证据完整度\*{0,2}\s*\|)\s*[^|]+(\|)',
+            r'(\|\s*\*{0,2}(?:证据完整度|诊断证据充分度)\*{0,2}\s*\|)\s*[^|]+(\|)',
             re.IGNORECASE
         )
         if pattern1.search(content):
@@ -1681,7 +6144,7 @@ class ConclusionFormatterNode(WorkflowNode):
 
         # 模式2: **证据完整度**: ... 或 证据完整度: ...
         pattern2 = re.compile(
-            r'(\*{0,2}证据完整度\*{0,2}\s*[:：])\s*\S+.*',
+            r'(\*{0,2}(?:证据完整度|诊断证据充分度)\*{0,2}\s*[:：])\s*\S+.*',
             re.IGNORECASE
         )
         if pattern2.search(content):
@@ -1702,7 +6165,152 @@ class ConclusionFormatterNode(WorkflowNode):
         else:
             logger.debug("📊 [conclusion] 后处理: 未匹配到需要替换的证据统计模式")
 
-        return content
+        return re.sub(
+            r"(?ms)^###\s+采集统计\s*$.*?(?=^#{1,3}\s+|\Z)",
+            "",
+            content,
+        ).rstrip() + "\n"
+
+    def _enforce_collection_statistics_section(
+        self,
+        content: str,
+        evidence_analysis: str,
+    ) -> str:
+        """Inject one compact, deterministic statistics table into diagnosis reports."""
+        if not isinstance(content, str) or not content:
+            return content
+        try:
+            evidence_data = json.loads(evidence_analysis) if evidence_analysis else {}
+        except (json.JSONDecodeError, TypeError):
+            return content
+        if not isinstance(evidence_data, dict) or not evidence_data:
+            return content
+
+        stats = self._extract_evidence_stats(evidence_data)
+        observability_total = stats["observability_target_total"]
+        observability_collected = stats["observability_target_collected"]
+        observability_missing = max(
+            0,
+            observability_total - observability_collected,
+        )
+        plan_total = stats["plan_total"]
+        plan_collected = stats["plan_collected"]
+        plan_missing = max(0, plan_total - plan_collected)
+        executed_tool_count = stats["executed_tool_count"]
+        unplanned_rate = (
+            stats["unplanned_tool_count"] / executed_tool_count
+            if executed_tool_count
+            else 0.0
+        )
+
+        rows = []
+        if observability_total:
+            observability_note = (
+                "每个目标均执行成功的 `collect_aiops_case`"
+                if not observability_missing
+                else f"**仍有 {observability_missing} 个目标未完成实时 case**"
+            )
+            rows.append(
+                "| 异常 Pod 实时采集 | "
+                f"{observability_collected}/{observability_total} "
+                f"({stats['observability_target_completeness_pct']}) | "
+                f"{observability_note} |"
+            )
+        else:
+            rows.append(
+                "| 异常 Pod 实时采集 | 未启用 | "
+                "本轮未形成 `collect_aiops_case` 目标 |"
+            )
+
+        plan_note = (
+            "去重且参与完整度计算的计划项"
+            if not plan_missing
+            else f"**仍有 {plan_missing} 项未执行**"
+        )
+        rows.extend([
+            (
+                "| Evidence 可计数计划执行 | "
+                f"{plan_collected}/{plan_total} "
+                f"({stats['plan_completeness_pct']}) | "
+                f"{plan_note} |"
+            ),
+            (
+                "| 工具调用构成 | "
+                f"核心 case {stats['case_tool_count']}，"
+                f"补充 {stats['supplemental_tool_count']}，"
+                f"总计 {executed_tool_count} | "
+                f"计划外 {stats['unplanned_tool_count']}（{unplanned_rate:.0%}） |"
+            ),
+        ])
+
+        if stats["skipped_plan_count"]:
+            rows.append(
+                "| 充分证据后跳过 | "
+                f"{stats['skipped_plan_count']} 项 | "
+                "额外 follow-up，未计入已执行项 |"
+            )
+        if stats["missing_reason_count"]:
+            rows.append(
+                "| 明确缺失项 | "
+                f"{stats['missing_reason_count']} 项 | "
+                "**结论必须保留证据限制** |"
+            )
+
+        if stats["missing_reason_count"]:
+            stop_note = "**仍有明确缺失证据，结论需注明限制**"
+        elif observability_missing:
+            stop_note = "**存在未采集目标，结论需注明限制**"
+        elif plan_missing:
+            stop_note = "**存在未完成计划，结论需注明限制**"
+        elif stats["collection_stop_reason"] == "采集连续无进展":
+            stop_note = "**采集未完整，需检查工具错误或空结果**"
+        else:
+            stop_note = "已满足当前异常 Pod 的主要证据需求"
+        rows.append(
+            "| 采集停止原因 | "
+            f"{stats['collection_stop_reason']} | {stop_note} |"
+        )
+
+        section = "\n".join([
+            "### 采集统计",
+            "",
+            "| 统计项 | 结果 | 说明 |",
+            "|---|---|---|",
+            *rows,
+        ])
+
+        overview = re.search(
+            r"(?m)^(?P<heading>#{1,3})\s+.*诊断概览.*$",
+            content,
+        )
+        if not overview:
+            return content
+
+        existing_pattern = re.compile(
+            r"(?ms)^###\s+采集统计\s*$.*?(?=^#{1,3}\s+|\Z)"
+        )
+        content = existing_pattern.sub("", content).rstrip() + "\n"
+
+        overview = re.search(
+            r"(?m)^(?P<heading>#{1,3})\s+.*诊断概览.*$",
+            content,
+        )
+        overview_level = len(overview.group("heading"))
+        next_heading = re.search(
+            rf"(?m)^#{{1,{overview_level}}}\s+",
+            content[overview.end():],
+        )
+        insert_at = (
+            overview.end() + next_heading.start()
+            if next_heading
+            else len(content)
+        )
+        before = content[:insert_at].rstrip()
+        after = content[insert_at:].lstrip("\n")
+        result = f"{before}\n\n{section}\n\n"
+        if after:
+            result += after
+        return result
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:

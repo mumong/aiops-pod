@@ -102,10 +102,19 @@ class WorkflowMetrics:
     # LLM 调用统计
     total_llm_calls: int = 0
     total_llm_duration_ms: float = 0.0
+    direct_llm_calls: int = 0
+    direct_llm_duration_ms: float = 0.0
+    direct_llm_calls_by_node: Dict[str, int] = field(default_factory=dict)
+    direct_llm_duration_by_node: Dict[str, float] = field(default_factory=dict)
     
     # 工具调用统计
     total_tool_calls: int = 0
+    executed_tool_calls: int = 0
+    deduplicated_tool_calls: int = 0
+    successful_tool_calls: int = 0
+    failed_tool_calls: int = 0
     total_tool_duration_ms: float = 0.0
+    tool_wall_duration_ms: float = 0.0
     tool_call_details: List[Dict] = field(default_factory=list)
     
     # 核心指标
@@ -161,17 +170,40 @@ class WorkflowMetrics:
                 if not success and error:
                     self.errors.append(f"[{node_id}] {error}")
     
-    def record_llm_call(self, node_id: str, duration_ms: float):
+    def record_llm_call(
+        self,
+        node_id: str,
+        duration_ms: float,
+        *,
+        request_count: int = 1,
+        source: str = "direct",
+    ):
         """记录 LLM 调用"""
-        self.total_llm_calls += 1
+        request_count = max(0, int(request_count or 0))
+        self.total_llm_calls += request_count
+        if source == "direct":
+            self.direct_llm_calls += request_count
+            self.direct_llm_duration_ms += duration_ms
+            self.direct_llm_calls_by_node[node_id] = (
+                self.direct_llm_calls_by_node.get(node_id, 0) + request_count
+            )
+            self.direct_llm_duration_by_node[node_id] = (
+                self.direct_llm_duration_by_node.get(node_id, 0.0) + duration_ms
+            )
         self.total_llm_duration_ms += duration_ms
-        if node_id in self.nodes:
-            self.nodes[node_id].llm_calls += 1
-            self.nodes[node_id].llm_duration_ms += duration_ms
+        if node_id not in self.nodes:
+            self.nodes[node_id] = NodeMetrics(node_id=node_id, node_name=node_id)
+        self.nodes[node_id].llm_calls += request_count
+        self.nodes[node_id].llm_duration_ms += duration_ms
     
     def record_tool_call(self, tool_name: str, duration_ms: float, success: bool = True):
         """记录工具调用"""
         self.total_tool_calls += 1
+        self.executed_tool_calls += 1
+        if success:
+            self.successful_tool_calls += 1
+        else:
+            self.failed_tool_calls += 1
         self.total_tool_duration_ms += duration_ms
         self.tool_call_details.append({
             "tool": tool_name,
@@ -179,6 +211,166 @@ class WorkflowMetrics:
             "success": success,
             "timestamp": time.time()
         })
+
+    def rebuild_runtime_counts(self, thinking_events: List[Dict[str, Any]]) -> None:
+        """Rebuild provider/tool counts from the final deduplicated event stream."""
+        events = [event for event in (thinking_events or []) if isinstance(event, dict)]
+
+        usage_events: Dict[Any, Dict[str, Any]] = {}
+        for event in events:
+            if event.get("type") != "ai_usage":
+                continue
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            key = (
+                str(event.get("node") or ""),
+                event.get("iteration"),
+                event.get("timestamp"),
+                int(usage.get("input_tokens") or 0),
+                int(usage.get("output_tokens") or 0),
+                int(usage.get("total_tokens") or 0),
+            )
+            usage_events.setdefault(key, event)
+        self.total_llm_calls = self.direct_llm_calls + len(usage_events)
+        self.total_llm_duration_ms = self.direct_llm_duration_ms
+
+        for node_id, node in self.nodes.items():
+            node.llm_calls = self.direct_llm_calls_by_node.get(node_id, 0)
+            node.llm_duration_ms = self.direct_llm_duration_by_node.get(node_id, 0.0)
+
+        for event in usage_events.values():
+            node_id = str(event.get("node") or "unknown")
+            duration_ms = event.get("model_duration_ms")
+            if not isinstance(duration_ms, (int, float)):
+                duration_ms = 0.0
+            duration_ms = max(0.0, float(duration_ms))
+            self.total_llm_duration_ms += duration_ms
+            if node_id not in self.nodes:
+                self.nodes[node_id] = NodeMetrics(
+                    node_id=node_id,
+                    node_name=node_id,
+                )
+            self.nodes[node_id].llm_calls += 1
+            self.nodes[node_id].llm_duration_ms += duration_ms
+
+        starts: Dict[Any, Dict[str, Any]] = {}
+        results: Dict[Any, Dict[str, Any]] = {}
+        anonymous_index = 0
+        anonymous_pending: Dict[tuple[str, str], List[Any]] = {}
+
+        for event in events:
+            event_type = event.get("type")
+            if event_type not in {"tool_start", "tool_result"}:
+                continue
+            node = str(event.get("node") or "")
+            tool_name = str(event.get("tool_name") or "unknown")
+            call_id = str(event.get("tool_call_id") or "").strip()
+            if call_id:
+                key: Any = (node, call_id)
+            elif event_type == "tool_start":
+                anonymous_index += 1
+                key = (node, "anonymous", tool_name, anonymous_index)
+                anonymous_pending.setdefault((node, tool_name), []).append(key)
+            else:
+                pending = anonymous_pending.get((node, tool_name), [])
+                key = next(
+                    (candidate for candidate in pending if candidate not in results),
+                    None,
+                )
+                if key is None:
+                    anonymous_index += 1
+                    key = (node, "anonymous-result", tool_name, anonymous_index)
+
+            target = starts if event_type == "tool_start" else results
+            target.setdefault(key, event)
+
+        all_keys = list(starts)
+        all_keys.extend(key for key in results if key not in starts)
+        details: List[Dict[str, Any]] = []
+        successful = 0
+        executed = 0
+        deduplicated = 0
+        total_duration_ms = 0.0
+        tool_intervals: List[tuple[float, float]] = []
+
+        for key in all_keys:
+            start = starts.get(key, {})
+            result = results.get(key, {})
+            success = bool(result) and result.get("status") == "success"
+            is_deduplicated = bool(result.get("deduplicated"))
+            if success:
+                successful += 1
+            if is_deduplicated:
+                deduplicated += 1
+            elif result:
+                executed += 1
+            start_ts = start.get("timestamp")
+            result_ts = result.get("timestamp")
+            duration_ms = 0.0
+            if (
+                not is_deduplicated
+                and isinstance(start_ts, (int, float))
+                and isinstance(result_ts, (int, float))
+            ):
+                duration_ms = max(0.0, (float(result_ts) - float(start_ts)) * 1000)
+                tool_intervals.append((float(start_ts), float(result_ts)))
+            elif (
+                not is_deduplicated
+                and isinstance(result.get("duration_seconds"), (int, float))
+            ):
+                duration_ms = max(0.0, float(result["duration_seconds"]) * 1000)
+            total_duration_ms += duration_ms
+            detail = {
+                "tool": str(
+                    result.get("tool_name")
+                    or start.get("tool_name")
+                    or "unknown"
+                ),
+                "tool_call_id": str(
+                    result.get("tool_call_id")
+                    or start.get("tool_call_id")
+                    or ""
+                ),
+                "duration_ms": duration_ms,
+                "success": success,
+                "node": str(result.get("node") or start.get("node") or ""),
+            }
+            if is_deduplicated:
+                detail["deduplicated"] = True
+                detail["original_tool_call_id"] = str(
+                    result.get("original_tool_call_id") or ""
+                )
+            details.append(detail)
+
+        self.total_tool_calls = len(all_keys)
+        self.executed_tool_calls = executed
+        self.deduplicated_tool_calls = deduplicated
+        self.successful_tool_calls = successful
+        self.failed_tool_calls = max(0, self.total_tool_calls - successful)
+        self.total_tool_duration_ms = total_duration_ms
+        self.tool_wall_duration_ms = self._merge_interval_duration_ms(tool_intervals)
+        self.tool_call_details = details
+
+    @staticmethod
+    def _merge_interval_duration_ms(intervals: List[tuple[float, float]]) -> float:
+        """Return elapsed wall time covered by possibly parallel tool calls."""
+        normalized = sorted(
+            (float(start), float(end))
+            for start, end in intervals
+            if end >= start
+        )
+        if not normalized:
+            return 0.0
+
+        merged_start, merged_end = normalized[0]
+        total_seconds = 0.0
+        for start, end in normalized[1:]:
+            if start <= merged_end:
+                merged_end = max(merged_end, end)
+                continue
+            total_seconds += merged_end - merged_start
+            merged_start, merged_end = start, end
+        total_seconds += merged_end - merged_start
+        return max(0.0, total_seconds * 1000)
     
     def finish(self):
         """完成整个工作流，计算最终指标"""
@@ -283,7 +475,12 @@ class WorkflowMetrics:
                 "llm_calls": self.total_llm_calls,
                 "llm_duration_ms": self.total_llm_duration_ms,
                 "tool_calls": self.total_tool_calls,
+                "executed_tool_calls": self.executed_tool_calls,
+                "deduplicated_tool_calls": self.deduplicated_tool_calls,
+                "successful_tool_calls": self.successful_tool_calls,
+                "failed_tool_calls": self.failed_tool_calls,
                 "tool_duration_ms": self.total_tool_duration_ms,
+                "tool_wall_duration_ms": self.tool_wall_duration_ms,
             },
             "nodes": {
                 node_id: {
@@ -315,6 +512,7 @@ class WorkflowMetrics:
         else:
             total_str = f"{total_s / 3600:.1f}h"
 
+        lines.append("```text")
         lines.append(f"├─ 总耗时: {total_str}")
 
         # 各节点耗时（百分比以总耗时为分母，加起来≈100%）
@@ -327,7 +525,15 @@ class WorkflowMetrics:
 
         # LLM 和工具调用次数（简洁，不显示百分比）
         lines.append(f"├─ LLM 调用: {self.total_llm_calls} 次")
-        lines.append(f"└─ 工具调用: {self.total_tool_calls} 次")
+        lines.append(
+            f"└─ 工具调用: 请求 {self.total_tool_calls}，"
+            f"实际执行 {self.executed_tool_calls}，"
+            f"去重 {self.deduplicated_tool_calls}，"
+            f"成功响应 {self.successful_tool_calls}，"
+            f"失败/未完成 {self.failed_tool_calls}，"
+            f"累计耗时 {self.total_tool_duration_ms / 1000:.1f}s，"
+            f"并行关键路径 {self.tool_wall_duration_ms / 1000:.1f}s）"
+        )
         lines.append("```")
         lines.append("")
 
@@ -432,9 +638,29 @@ class WorkflowMetrics:
         lines.append("")
         if self.primary_runbook:
             lines.append(f"- **核心 Runbook**: {self.primary_runbook}")
-        runbook_display = self.runbook_id if self.runbook_matched and self.runbook_id else "无"
+        primary_runbooks = {
+            item.strip()
+            for item in str(self.primary_runbook or "").split(",")
+            if item.strip()
+        }
+        reference_runbooks = [
+            item.strip()
+            for item in str(self.runbook_id or "").split(",")
+            if item.strip() and item.strip() not in primary_runbooks
+        ]
+        runbook_display = (
+            ", ".join(reference_runbooks)
+            if self.runbook_matched and reference_runbooks
+            else "无"
+        )
         lines.append(f"- **参考 Runbook**: {runbook_display}")
-        lines.append(f"- **工具调用**: {self.total_tool_calls} 次")
+        lines.append(
+            f"- **工具调用**: 请求 {self.total_tool_calls}，"
+            f"实际执行 {self.executed_tool_calls}，"
+            f"去重 {self.deduplicated_tool_calls}，"
+            f"成功响应 {self.successful_tool_calls}，"
+            f"失败/未完成 {self.failed_tool_calls}）"
+        )
         lines.append(f"- **LLM 调用**: {self.total_llm_calls} 次")
         lines.append("")
 

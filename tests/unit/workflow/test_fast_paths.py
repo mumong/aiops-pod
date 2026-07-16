@@ -10,10 +10,14 @@ import yaml
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.service import HolmesService
+from app.core.remediation.plans import extract_remediation_plan
 from app.core.prompts import (
+    CONCLUSION_FORMATTER_PROMPT,
     EVIDENCE_COLLECTOR_PROMPT,
+    FACT_LEDGER_REMEDIATION_PLAN_PROMPT,
     LAYER_CLASSIFIER_PROMPT,
     REMEDIATION_PLAN_PROMPT,
+    ROOT_CAUSE_ANALYZER_PROMPT,
     get_query_evidence_normalization_prompt,
     get_conclusion_mode_instruction,
     get_workflow_prompt,
@@ -795,10 +799,11 @@ def test_rca_lite_mode_enables_text_fallback_after_native_structured_failure():
         captured.update(kwargs)
         parsed = RCAOutput.model_validate({
             "root_cause": "Pod 删除卡在 preStop hook",
-            "root_cause_summary": "Pod 删除卡在 preStop hook",
-            "causal_chain": {"root_cause": "preStop hook sleep 21600"},
-            "confidence": 0.95,
-        })
+                "root_cause_summary": "Pod 删除卡在 preStop hook",
+                "causal_chain": {"root_cause": "preStop hook sleep 21600"},
+                "confidence": 0.95,
+                "confidence_reason": "Pod 生命周期配置明确包含长时间 preStop sleep",
+            })
         return parsed, SimpleNamespace(result=parsed.model_dump_json()), []
 
     node._call_structured_agent = _fake_structured_agent
@@ -839,6 +844,572 @@ def test_conclusion_strips_think_blocks_from_final_report():
     content = "<think>内部推理不能展示</think>\n\n## 诊断概览\nPod ImagePullBackOff"
 
     assert ConclusionFormatterNode._strip_think_blocks(content) == "## 诊断概览\nPod ImagePullBackOff"
+
+
+def test_conclusion_appends_machine_verifiable_exact_topology_edges():
+    content = "\n".join([
+        "## 拓扑关系",
+        "- Pod trace-oom-api-pod --owned_by--> ReplicaSet trace-oom-api-rs",
+    ])
+    structured_context = "\n".join([
+        "TOPOLOGY_ENTITY_COUNT value=11",
+        "TOPOLOGY_EXACT_EDGES count=2",
+        "REPORT_MUST_QUOTE_TOPOLOGY_VERBATIM=true",
+        "FORBID_RELATIONSHIP_REVERSAL=true",
+        (
+            '- TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" '
+            "source=trace-oom-api-pod target=trace-oom-api-rs "
+            "directness=direct confidence=high"
+        ),
+        (
+            '- TOPOLOGY relationship="ReplicaSet --owned_by--> Deployment" '
+            "source=trace-oom-api-rs target=trace-oom-api "
+            "directness=direct confidence=high"
+        ),
+    ])
+
+    result = ConclusionFormatterNode._append_exact_topology_appendix(
+        content,
+        structured_context,
+    )
+
+    assert "## 附录：机器可核验拓扑原始边" in result
+    assert "TOPOLOGY_ENTITY_COUNT value=11" in result
+    assert "TOPOLOGY_EXACT_EDGES count=2" in result
+    assert (
+        'TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" '
+        "source=trace-oom-api-pod target=trace-oom-api-rs "
+        "directness=direct confidence=high"
+    ) in result
+    assert (
+        'TOPOLOGY relationship="ReplicaSet --owned_by--> Deployment" '
+        "source=trace-oom-api-rs target=trace-oom-api "
+        "directness=direct confidence=high"
+    ) in result
+
+
+def test_conclusion_sanitizes_model_generated_evidence_ref_aliases():
+    content = "\n".join([
+        "## 📊 可观测性数据（三维度 + 拓扑）",
+        "| 维度 | 数据来源 | 覆盖状态 | 关键原始信号 | 证据 ref |",
+        "|------|----------|----------|--------------|----------|",
+        "| Metrics | Prometheus | present | peak=76.9Mi | metric-oom-mem-high |",
+        (
+            "| Logging | Elasticsearch | present | CONFIG_MISSING | "
+            "log-aiops-traced-config-api-current |"
+        ),
+        "## 🕵️ 证据链",
+    ])
+    structured_context = "\n".join([
+        (
+            "METRIC metric=container_memory_working_set_bytes "
+            "evidence_ref=metric-aiops-traced-oom-api-prometheus"
+        ),
+        (
+            "LOG event=config_missing "
+            "evidence_ref=log-aiops-traced-config-api-current"
+        ),
+    ])
+
+    result = ConclusionFormatterNode._sanitize_observability_evidence_refs(
+        content,
+        structured_context,
+    )
+
+    assert "metric-oom-mem-high" not in result
+    assert "见机器可核验附录" in result
+    assert "log-aiops-traced-config-api-current" in result
+
+
+def test_conclusion_sanitizes_nonstandard_evidence_ref_aliases_and_plan_ids():
+    content = "\n".join([
+        "## 📊 可观测性数据（三维度 + 拓扑）",
+        "| 维度 | 数据来源 | 覆盖状态 | 关键原始信号 | 证据 ref |",
+        "|------|----------|----------|--------------|----------|",
+        (
+            "| Metrics | Prometheus | present | peak=77.0Mi | "
+            "evidence_prometheus_metrics_oom |"
+        ),
+        (
+            "| Logging | Elasticsearch | present | CONFIG_MISSING | "
+            "ep-1-collect-case-config (Logging) |"
+        ),
+        (
+            "| K8s | K8s-API | present | OOMKilled exit=137 | "
+            "k8s-aiops-traced-oom-pod-last-terminated |"
+        ),
+        "## 🕵️ 证据链",
+    ])
+    structured_context = "\n".join([
+        (
+            "- METRIC metric=container_memory_working_set_bytes "
+            "evidence_ref=metric-aiops-traced-oom-prometheus"
+        ),
+        (
+            "- LOG event=config_missing "
+            "evidence_ref=log-aiops-traced-config-previous"
+        ),
+        (
+            '- K8S_SIGNAL observed="OOMKilled exit=137" '
+            'evidence_refs=["k8s-aiops-traced-oom-pod-last-terminated"]'
+        ),
+    ])
+
+    result = ConclusionFormatterNode._sanitize_observability_evidence_refs(
+        content,
+        structured_context,
+    )
+
+    assert "evidence_prometheus_metrics_oom" not in result
+    assert "ep-1-collect-case-config" not in result
+    assert result.count("见机器可核验附录") == 2
+    assert "k8s-aiops-traced-oom-pod-last-terminated" in result
+
+
+def test_conclusion_appends_machine_verifiable_k8s_signals():
+    content = "\n".join([
+        "## 根因结论",
+        "Pod 发生了内存异常。",
+    ])
+    structured_context = "\n".join([
+        "REPORT_MUST_QUOTE_K8S_SIGNAL_VERBATIM=true",
+        (
+            '- K8S_SIGNAL signal_id=sig-k8s-present strength=strong '
+            'observed="Last terminated state: business-api=OOMKilled exit=137" '
+            'evidence_refs=["k8s.trace-oom-api.last-terminated"]'
+        ),
+    ])
+
+    result = ConclusionFormatterNode._append_exact_k8s_signal_appendix(
+        content,
+        structured_context,
+    )
+
+    assert "## 附录：机器可核验 Kubernetes 强证据" in result
+    assert "REPORT_MUST_QUOTE_K8S_SIGNAL_VERBATIM=true" in result
+    assert "Last terminated state: business-api=OOMKilled exit=137" in result
+    assert "k8s.trace-oom-api.last-terminated" in result
+
+
+def test_conclusion_appends_machine_verifiable_observability_facts():
+    content = "\n".join([
+        "## 根因结论",
+        "应用内存随请求持续累积。",
+    ])
+    structured_context = "\n".join([
+        "REPORT_MUST_QUOTE_OBSERVABILITY_FACTS_VERBATIM=true",
+        "IGNORE_UNSUPPORTED_LAYER_NUMERIC_FACTS=true",
+        (
+            '- TRACE_CORRELATION log_tempo_trace_ids=["ba7cabb5d9d1d26b89951c07b70a60fa"] '
+            'deepflow_trace_ids=["8ee108b5780011aa6a60a4b86c562fa8"] do_not_merge=true'
+        ),
+        (
+            "- METRIC metric=container_memory_working_set_bytes start=3.7Mi "
+            "max=74.9Mi limit=80.0Mi max_limit_ratio=0.9368"
+        ),
+        (
+            "- LOG event=allocate trace_id=ba7cabb5d9d1d26b89951c07b70a60fa "
+            "path=/allocate?mib=2&step=2018 allocated_mib=62"
+        ),
+        (
+            '- DEEPFLOW src=172.16.104.8 dst=172.16.104.13 '
+            'request="GET /allocate?mib=2&step=2019" duration_us=0 '
+            "trace_id=8ee108b5780011aa6a60a4b86c562fa8"
+        ),
+        (
+            '- TEMPO trace_id=ba7cabb5d9d1d26b89951c07b70a60fa '
+            'span="GET /allocate" aiops.allocated_mib.before=60 '
+            "aiops.allocated_mib.after=62"
+        ),
+    ])
+
+    result = ConclusionFormatterNode._append_exact_observability_facts_appendix(
+        content,
+        structured_context,
+    )
+
+    assert "## 附录：机器可核验可观测性核心事实" in result
+    assert "REPORT_MUST_QUOTE_OBSERVABILITY_FACTS_VERBATIM=true" in result
+    assert "ba7cabb5d9d1d26b89951c07b70a60fa" in result
+    assert "8ee108b5780011aa6a60a4b86c562fa8" in result
+    assert "start=3.7Mi max=74.9Mi limit=80.0Mi" in result
+    assert "allocated_mib=62" in result
+    assert "do_not_merge=true" in result
+
+
+def test_conclusion_corrects_tracing_absent_when_structured_trace_is_present():
+    content = "\n".join([
+        "## 📊 可观测性数据（三维度 + 拓扑）",
+        "### 三大观测维度",
+        "| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |",
+        "|------|----------|----------|----------------------------------|----------|",
+        "| **Metrics** | Prometheus | present | peak=66.9Mi | metric-real |",
+        "| **Logging** | ES/Filebeat | present | CONFIG_MISSING | log-real |",
+        "| **Tracing** | DeepFlow/Tempo | absent | 本轮未采集到 Trace 数据 | - |",
+        "| **K8s** | Kubernetes API | present | OOMKilled exit=137 | k8s-real |",
+        "### 拓扑关系（实体与边）",
+    ])
+    structured_context = "\n".join([
+        (
+            "COVERAGE k8s=present metrics=present logs=present "
+            "tracing=present trace=present topology=present"
+        ),
+        (
+            '- TRACE_CORRELATION log_tempo_trace_ids=["13fa16403170f1e56a27a32b18b50030"] '
+            'deepflow_trace_ids=["13fa16403170f1e56a27a32b18b50030"] '
+            'shared_trace_ids=["13fa16403170f1e56a27a32b18b50030"] '
+            "do_not_merge=false"
+        ),
+        (
+            '- DEEPFLOW src=172.16.104.8 dst=172.16.104.13 '
+            'request="GET /allocate?mib=2&step=26246" response_code=200 '
+            "duration_us=5918 trace_id=13fa16403170f1e56a27a32b18b50030 "
+            "evidence_ref=deepflow-real"
+        ),
+        (
+            '- TEMPO trace_id=13fa16403170f1e56a27a32b18b50030 '
+            'service=aiops-traced-oom-api span="GET /allocate" '
+            "aiops.allocated_mib.before=60 aiops.allocated_mib.after=62 "
+            "evidence_ref=tempo-real"
+        ),
+    ])
+
+    result = ConclusionFormatterNode._enforce_observability_dimension_table(
+        content,
+        structured_context,
+    )
+
+    tracing_row = next(
+        line for line in result.splitlines()
+        if line.startswith("| **Tracing**")
+    )
+    assert "| present |" in tracing_row
+    assert "absent" not in tracing_row
+    assert "13fa16403170f1e56a27a32b18b50030" in tracing_row
+    assert "GET /allocate?mib=2&step=26246" in tracing_row
+    assert "response_code=200" in tracing_row
+    assert "duration_us=5918" in tracing_row
+    assert "aiops.allocated_mib.before=60" in tracing_row
+    assert "deepflow-real" in tracing_row
+    assert "tempo-real" in tracing_row
+
+
+def test_conclusion_expands_metrics_logging_and_k8s_rows_from_exact_facts():
+    content = "\n".join([
+        "## 📊 可观测性数据（三维度 + 拓扑）",
+        "### 三大观测维度",
+        "| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |",
+        "|------|----------|----------|----------------------------------|----------|",
+        "| **Metrics** | Prometheus | present | series=34 | metric-old |",
+        "| **Logging** | ES/Filebeat | present | 27 records | log-old |",
+        "| **Tracing** | DeepFlow/Tempo | present | trace present | trace-old |",
+        "| **K8s** | Kubernetes API | present | CrashLoopBackOff | k8s-old |",
+        "### 拓扑关系（实体与边）",
+    ])
+    structured_context = "\n".join([
+        (
+            "COVERAGE k8s=present metrics=present logs=present "
+            "tracing=present trace=present topology=present"
+        ),
+        (
+            "- METRIC metric=container_memory_working_set_bytes "
+            "pod=api-pod start=3.5Mi max=66.9Mi last=66.9Mi "
+            "limit=80.0Mi max_limit_ratio=0.8365 "
+            'samples=["02:53:25=3.5Mi","02:54:25=66.9Mi"] '
+            "evidence_ref=metric-real"
+        ),
+        (
+            '- LOG role=target event=config_missing level=error '
+            'message="required config PAYMENT_GATEWAY_TOKEN is missing" '
+            "trace_id=trace-config error_code=CONFIG_MISSING pod=api-pod "
+            "evidence_ref=log-real"
+        ),
+        (
+            '- K8S_SIGNAL signal_id=sig-k8s-present strength=strong '
+            'observed="Last terminated state: business-api=Error exit=78" '
+            'evidence_refs=["k8s-last","k8s-events"]'
+        ),
+        (
+            '- DEEPFLOW request="GET /checkout" response_code=500 '
+            "duration_us=4029 trace_id=trace-config evidence_ref=deepflow-real"
+        ),
+        (
+            '- TEMPO trace_id=trace-config service=config-api '
+            'span="GET /checkout" error.type=CONFIG_MISSING '
+            "evidence_ref=tempo-real"
+        ),
+    ])
+
+    result = ConclusionFormatterNode._enforce_observability_dimension_table(
+        content,
+        structured_context,
+    )
+
+    assert "series=34" not in result
+    assert "metric=container_memory_working_set_bytes" in result
+    assert "start=3.5Mi" in result
+    assert "max=66.9Mi" in result
+    assert "limit=80.0Mi" in result
+    assert 'samples=["02:53:25=3.5Mi","02:54:25=66.9Mi"]' in result
+    assert "27 records" not in result
+    assert "required config PAYMENT_GATEWAY_TOKEN is missing" in result
+    assert "error_code=CONFIG_MISSING" in result
+    assert "Last terminated state: business-api=Error exit=78" in result
+    assert "metric-real" in result
+    assert "log-real" in result
+    assert "k8s-last" in result
+
+
+def test_conclusion_evidence_scope_preserves_observability_rows_with_html_breaks():
+    content = "\n".join([
+        "## 📊 可观测性数据（三维度 + 拓扑）",
+        "### 三大观测维度",
+        "| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |",
+        "|------|----------|----------|----------------------------------|----------|",
+        (
+            "| **Metrics** | Prometheus | present | "
+            "pod=config-api max=3.6Mi limit=96.0Mi<br>"
+            "pod=oom-api max=75.0Mi limit=80.0Mi | metric-config<br>metric-oom |"
+        ),
+        (
+            "| **Logging** | ES/Filebeat | present | "
+            "required config PAYMENT_GATEWAY_TOKEN is missing<br>"
+            "event=allocate allocated_mib=62 | log-config<br>log-oom |"
+        ),
+        (
+            "| **Tracing** | DeepFlow/Tempo | present | "
+            "GET /checkout response_code=500<br>"
+            "GET /allocate response_code=200 | deepflow-config<br>tempo-oom |"
+        ),
+        (
+            "| **K8s** | Kubernetes API | present | "
+            "Error exit=78<br>OOMKilled exit=137 | k8s-config<br>k8s-oom |"
+        ),
+        "### 拓扑关系（实体与边）",
+    ])
+    structured_context = "\n".join([
+        "AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff",
+        "ENTITY kind=Pod namespace=ns name=config-api",
+        (
+            '- LOG event=config_missing message="required config '
+            'PAYMENT_GATEWAY_TOKEN is missing" missing_config=PAYMENT_GATEWAY_TOKEN'
+        ),
+        "AIOPS_CASE case_id=oom status=case_collected abnormal_type=oomkilled",
+        "ENTITY kind=Pod namespace=ns name=oom-api",
+        (
+            "- K8S_SIGNAL strength=strong "
+            'observed="Last terminated state: app=OOMKilled exit=137"'
+        ),
+        (
+            "- METRIC metric=container_memory_working_set_bytes pod=oom-api "
+            "start=3.7Mi max=75.0Mi last=75.0Mi limit=80.0Mi "
+            "max_limit_ratio=0.937"
+        ),
+    ])
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert sum(
+        1
+        for line in result.splitlines()
+        if line.startswith("| **")
+        and any(name in line for name in ("Metrics", "Logging", "Tracing", "K8s"))
+    ) == 4
+    assert "<br>" in result
+
+
+def test_conclusion_metric_boundary_does_not_modify_fenced_remediation_json():
+    content = """## 🎯 根因分析
+- oom-api 内存从 3.7Mi 增至 75.0Mi，并突破 80Mi Limit。
+
+## 🧩 结构化修复计划
+```json
+{
+  "remediation_available": false,
+  "fix_type": "manual_only",
+  "issue_groups": [
+    {
+      "group_id": "g1",
+      "problem_type": "OOMKilled",
+      "auto_fixable": false,
+      "strategy": "应用内存逼近 limit，触发 OOMKilled；先采集基线"
+    }
+  ],
+  "actions": []
+}
+```
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=oom-api start=3.7Mi max=75.0Mi last=75.0Mi limit=80.0Mi max_limit_ratio=0.937
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    remediation_body = result.split("```json", 1)[1].split("```", 1)[0]
+    parsed = json.loads(remediation_body)
+    assert parsed["issue_groups"][0]["strategy"] == (
+        "应用内存逼近 limit，触发 OOMKilled；先采集基线"
+    )
+    assert "Prometheus 观测峰值 `75.0Mi`" in result.split("```json", 1)[0]
+
+
+def test_conclusion_validation_rejects_invalid_remediation_json():
+    content = """## 📊 诊断概览
+## 🔍 证据链
+## 🎯 根因分析
+## 🛠️ 修复建议
+## 🧩 结构化修复计划
+```json
+{
+  "remediation_available": true,
+  "actions": [
+    {"id": "a1",}
+  ]
+}
+```
+"""
+
+    errors = ConclusionFormatterNode._diagnosis_report_validation_errors(content)
+
+    assert "invalid_remediation_json" in errors
+
+
+def test_conclusion_repairs_invalid_remediation_json_to_safe_manual_plan():
+    content = """## 📊 诊断概览
+## 🔍 证据链
+## 🎯 根因分析
+## 🛠️ 修复建议
+## 🧩 结构化修复计划
+```json
+{
+  "remediation_available": true,
+  "actions": [
+    {"id": "a1",}
+  ]
+}
+```
+"""
+
+    result = ConclusionFormatterNode._repair_invalid_remediation_json(content)
+    plan = extract_remediation_plan(result)
+
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.fix_type == "manual_only"
+    assert plan.actions == []
+    assert "invalid_remediation_json" not in (
+        ConclusionFormatterNode._diagnosis_report_validation_errors(result)
+    )
+
+
+def test_conclusion_execute_runs_final_validation_after_postprocessors(monkeypatch):
+    node = ConclusionFormatterNode()
+    node.ai_call = _RecordingAICall(
+        """## 📊 诊断概览
+## 🔍 证据链
+## 🎯 根因分析
+## 🛠️ 修复建议
+## 🧩 结构化修复计划
+```json
+{
+  "remediation_available": false,
+  "fix_type": "manual_only",
+  "actions": []
+}
+```
+"""
+    )
+
+    monkeypatch.setattr(
+        node,
+        "_enforce_evidence_scope_claims",
+        lambda content, _context: content.replace(
+            '"actions": []',
+            '"actions": [{"id": "broken",}]',
+        ),
+    )
+
+    result = node.execute({
+        "question": "我的集群有什么问题？",
+        "layer": Layer.L2,
+        "layer_analysis": "{}",
+        "evidence_analysis": "{}",
+        "rca_analysis": "{}",
+        "thinking_events": [],
+    })
+
+    plan = extract_remediation_plan(result["conclusion"])
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.actions == []
+    assert "invalid_remediation_json" not in (
+        node._diagnosis_report_validation_errors(result["conclusion"])
+    )
+
+
+def test_below_limit_oom_fact_selects_metric_from_oom_entity():
+    structured_context = """
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+ENTITY kind=Pod namespace=ns name=config-api
+- METRIC metric=container_memory_working_set_bytes pod=config-api start=3.6Mi max=3.6Mi last=3.6Mi limit=96.0Mi max_limit_ratio=0.0377
+AIOPS_CASE case_id=oom status=case_collected abnormal_type=oomkilled
+ENTITY kind=Pod namespace=ns name=oom-api
+- K8S_SIGNAL strength=strong observed="Last terminated state: app=OOMKilled exit=137"
+- METRIC metric=container_memory_working_set_bytes pod=oom-api start=3.7Mi max=75.0Mi last=75.0Mi limit=80.0Mi max_limit_ratio=0.937
+"""
+
+    fact = ConclusionFormatterNode._below_limit_oom_fact(structured_context)
+
+    assert fact == {
+        "maximum": "75.0Mi",
+        "limit": "80.0Mi",
+        "pod": "oom-api",
+    }
+
+
+def test_conclusion_evidence_stats_floor_fractional_collected_count():
+    stats = ConclusionFormatterNode._extract_evidence_stats({
+        "diagnostic_evidence_total": 10,
+        "diagnostic_evidence_collected": 10,
+        "diagnostic_evidence_completeness": 1.0,
+        "dimension_coverage": 1.0,
+        "diagnostic_sufficiency": 0.95,
+        "diagnostic_sufficiency_label": "充分",
+    })
+
+    assert stats["primary_total"] == 10
+    assert stats["primary_collected"] == 9
+    assert stats["primary_completeness_pct"] == "95%"
+
+
+def test_conclusion_corrects_sampled_value_claimed_to_trigger_higher_limit():
+    content = "\n".join([
+        "## 根因分析",
+        "Pod `trace-oom-api-abc` 工作内存增长至 66.9Mi，触发 cgroup 80Mi 硬限制。",
+    ])
+    structured_context = "\n".join([
+        (
+            "- METRIC metric=container_memory_working_set_bytes "
+            "pod=trace-oom-api-abc start=48.8Mi max=66.9Mi "
+            "last=66.9Mi limit=80.0Mi max_limit_ratio=0.8364"
+        ),
+    ])
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "66.9Mi，触发 cgroup 80Mi 硬限制" not in result
+    assert "Prometheus 观测峰值 `66.9Mi`" in result
+    assert "低于 limit `80.0Mi`" in result
+    assert "实际触及硬限制的瞬间未被采样直接捕获" in result
 
 
 def test_conclusion_llm_prompt_includes_structured_diagnosis_context():
@@ -915,6 +1486,1472 @@ def test_conclusion_llm_prompt_includes_structured_diagnosis_context():
     assert "kubectl rollout status deployment/<name>" in prompt
 
 
+def test_conclusion_prompt_does_not_inject_collection_statistics_block():
+    node = ConclusionFormatterNode()
+    node.ai_call = _RecordingAICall(
+        """## 📊 诊断概览
+## 🔍 现象描述
+## 📊 可观测性数据（三维度 + 拓扑）
+### 三大观测维度
+| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |
+|------|----------|----------|----------------------------------|----------|
+## 🎯 根因分析
+## 🛠️ 修复建议
+"""
+    )
+
+    node._generate_with_llm(
+        question="我的集群有什么问题",
+        layer_analysis='{"layer":"L2"}',
+        evidence_analysis=json.dumps({
+            "collection_summary": "计划 1 项，实际采集 1 项",
+            "plan_total": 1,
+            "plan_collected": 1,
+            "plan_completeness": 1.0,
+            "evidence_inventory": [],
+        }),
+        rca_analysis="{}",
+        layer=Layer.L2,
+    )
+
+    prompt = node.ai_call.calls[0]["kwargs"]["question"]
+    assert "证据采集统计（系统数据" not in prompt
+    assert "\nplan_stats:" not in prompt
+
+
+def test_conclusion_inserts_missing_observability_rows_from_exact_facts():
+    content = "\n".join([
+        "## 📊 可观测性数据（三维度 + 拓扑）",
+        "### 三大观测维度",
+        "| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |",
+        "|------|----------|----------|----------------------------------|----------|",
+        "### 拓扑关系（实体与边）",
+    ])
+    structured_context = "\n".join([
+        "COVERAGE k8s=present metrics=present logs=present tracing=present trace=present topology=present",
+        "- METRIC metric=container_memory_working_set_bytes pod=api-pod max=66.9Mi limit=80.0Mi evidence_ref=metric-real",
+        '- LOG event=config_missing message="required config PAYMENT_GATEWAY_TOKEN is missing" evidence_ref=log-real',
+        "- DEEPFLOW request=\"GET /checkout\" response_code=500 trace_id=trace-real evidence_ref=deepflow-real",
+        "- TEMPO trace_id=trace-real span=\"GET /checkout\" error.type=CONFIG_MISSING evidence_ref=tempo-real",
+        '- K8S_SIGNAL observed="Last terminated state: business-api=Error exit=78" evidence_refs=["k8s-real"]',
+    ])
+
+    result = ConclusionFormatterNode._enforce_observability_dimension_table(
+        content,
+        structured_context,
+    )
+
+    assert result.count("| **Metrics** |") == 1
+    assert result.count("| **Logging** |") == 1
+    assert result.count("| **Tracing** |") == 1
+    assert result.count("| **K8s** |") == 1
+    assert "PAYMENT_GATEWAY_TOKEN" in result
+    assert "response_code=500" in result
+
+
+def test_conclusion_rejects_prompt_echo_and_falls_back_to_deterministic_report():
+    node = ConclusionFormatterNode()
+    node.ai_call = _RecordingAICall(
+        """# 用户问题
+我的集群现在有什么问题？
+
+# 阶段1：问题定位分析
+{"abnormal_pods": [{"name": "pod-a"}]}
+
+# ⚠️ 证据采集统计（系统数据，必须原样引用，禁止自行计算）
+plan_stats: 1/1 (100%)
+
+```json
+{"broken": true}
+"""
+    )
+    state = {
+        "question": "我的集群现在有什么问题？",
+        "layer": Layer.L2,
+        "layer_analysis": json.dumps({
+            "layer": "L2",
+            "confidence": 0.9,
+            "pod_status_keyword": "CrashLoopBackOff",
+            "pod_abnormal_type": "CrashLoopBackOffRuntime",
+            "abnormal_pods": [
+                {"namespace": "ns", "name": "pod-a", "status": "CrashLoopBackOff"}
+            ],
+        }),
+        "evidence_analysis": json.dumps({
+            "plan_total": 1,
+            "plan_collected": 1,
+            "plan_completeness": 1.0,
+            "environment_evidence_total": 1,
+            "environment_evidence_collected": 1,
+            "environment_evidence_completeness": 1.0,
+            "diagnostic_evidence_total": 5,
+            "diagnostic_evidence_collected": 3,
+            "diagnostic_evidence_completeness": 0.6,
+            "evidence_inventory": [],
+        }),
+        "rca_analysis": json.dumps({
+            "phenomenon": "pod-a CrashLoopBackOff",
+            "root_cause": "应用启动失败",
+            "root_cause_summary": "应用启动失败",
+            "confidence": 0.7,
+        }),
+        "thinking_events": [],
+    }
+
+    result = node.execute(state)["conclusion"]
+
+    assert "# 用户问题\n" not in result
+    assert "证据采集统计（系统数据" not in result
+    assert result.count("```") % 2 == 0
+    assert "## 📊 诊断概览" in result
+    assert "## 📊 可观测性数据（三维度 + 拓扑）" in result
+    assert "## 🎯 阶段三：根因分析与因果链" in result
+    assert "## 🛠️ 修复建议" in result
+
+
+def test_conclusion_uses_diagnostic_plan_as_primary_completeness():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "collection_summary": (
+            "Pod 可观测性覆盖 2/2，完整度 100%；"
+            "去重后证据计划 1/3，完整度 33%"
+        ),
+        "plan_total": 3,
+        "plan_collected": 1,
+        "plan_completeness": 1 / 3,
+        "environment_evidence_total": 3,
+        "environment_evidence_collected": 1,
+        "environment_evidence_completeness": 1 / 3,
+        "observability_target_total": 2,
+        "observability_target_collected": 2,
+        "observability_target_completeness": 1.0,
+        "evidence_inventory": [],
+    })
+
+    stats = node._extract_evidence_stats(json.loads(evidence_analysis))
+    report = node._enforce_evidence_stats(
+        "| 项目 | 内容 |\n|---|---|\n| **证据完整度** | 1/3 (33%) |",
+        evidence_analysis,
+    )
+
+    assert stats["observability_target_collected"] == 2
+    assert stats["observability_target_total"] == 2
+    assert stats["primary_completeness_pct"] == "33%"
+    assert "| **证据完整度** | 1/3 (33%) |" in report
+
+
+def test_conclusion_removes_redundant_collection_statistics_table():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "collection_summary": "Pod 可观测性覆盖 2/2，完整度 100%",
+        "plan_total": 2,
+        "plan_collected": 2,
+        "plan_completeness": 1.0,
+        "environment_evidence_total": 2,
+        "environment_evidence_collected": 2,
+        "environment_evidence_completeness": 1.0,
+        "executed_tool_count": 3,
+        "matched_tool_count": 2,
+        "unplanned_tool_count": 1,
+        "case_tool_count": 2,
+        "supplemental_tool_count": 1,
+        "skipped_plan_count": 1,
+        "observability_target_total": 2,
+        "observability_target_collected": 2,
+        "observability_target_completeness": 1.0,
+        "early_stop": {
+            "triggered": True,
+            "reason": "mandatory_live_observability_complete",
+        },
+        "evidence_inventory": [],
+    })
+    content = """# 诊断报告
+
+## 📊 诊断概览
+
+| 项目 | 结果 |
+|---|---|
+| **证据完整度** | 1/3 (33%) |
+
+## 🔍 现象描述
+
+保持原文。
+"""
+
+    result = node._enforce_evidence_stats(content, evidence_analysis)
+    repeated = node._enforce_evidence_stats(result, evidence_analysis)
+
+    assert "| **证据完整度** | 2/2 (100%) |" in result
+    assert "### 采集统计" not in result
+    assert repeated == result
+
+
+def test_conclusion_keeps_incomplete_diagnostic_evidence_without_statistics_section():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "plan_total": 3,
+        "plan_collected": 2,
+        "plan_completeness": 2 / 3,
+        "environment_evidence_total": 3,
+        "environment_evidence_collected": 2,
+        "environment_evidence_completeness": 2 / 3,
+        "executed_tool_count": 3,
+        "matched_tool_count": 2,
+        "unplanned_tool_count": 0,
+        "case_tool_count": 1,
+        "supplemental_tool_count": 2,
+        "skipped_plan_count": 0,
+        "observability_target_total": 2,
+        "observability_target_collected": 1,
+        "observability_target_completeness": 0.5,
+        "early_stop": {
+            "triggered": True,
+            "reason": "context_budget_threshold",
+        },
+        "missing_reasons": ["p3: 上下文达到阈值，未执行"],
+        "evidence_inventory": [],
+    })
+    content = """# 诊断报告
+
+## 诊断概览
+
+| 项目 | 结果 |
+|---|---|
+| **证据完整度** | 1/2 (50%) |
+
+## 根因分析
+
+保持原文。
+"""
+
+    result = node._enforce_evidence_stats(content, evidence_analysis)
+
+    assert "| **证据完整度** | 2/3 (67%) |" in result
+    assert "### 采集统计" not in result
+
+
+def test_conclusion_statistics_recover_tool_composition_from_legacy_archives():
+    node = ConclusionFormatterNode()
+    stats = node._extract_evidence_stats({
+        "plan_total": 3,
+        "plan_collected": 3,
+        "plan_completeness": 1.0,
+        "environment_evidence_total": 3,
+        "environment_evidence_collected": 3,
+        "environment_evidence_completeness": 1.0,
+        "executed_tool_count": 3,
+        "matched_tool_count": 3,
+        "unplanned_tool_count": 0,
+        "observability_target_total": 2,
+        "observability_target_collected": 2,
+        "observability_target_completeness": 1.0,
+        "tool_data": [
+            {"tool": "collect_aiops_case", "semantic_success": True},
+            {"tool": "collect_aiops_case", "semantic_success": True},
+            {"tool": "kubectl_describe", "semantic_success": True},
+        ],
+        "evidence_inventory": [],
+    })
+
+    assert stats["case_tool_count"] == 2
+    assert stats["supplemental_tool_count"] == 1
+    assert stats["executed_tool_count"] == 3
+
+
+def test_conclusion_statistics_do_not_hide_missing_items_with_skip_count():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "plan_total": 4,
+        "plan_collected": 2,
+        "plan_completeness": 0.5,
+        "environment_evidence_total": 2,
+        "environment_evidence_collected": 2,
+        "environment_evidence_completeness": 1.0,
+        "executed_tool_count": 2,
+        "matched_tool_count": 2,
+        "unplanned_tool_count": 0,
+        "case_tool_count": 2,
+        "supplemental_tool_count": 0,
+        "skipped_plan_count": 2,
+        "observability_target_total": 2,
+        "observability_target_collected": 2,
+        "observability_target_completeness": 1.0,
+        "early_stop": {
+            "triggered": True,
+            "reason": "mandatory_live_observability_complete",
+        },
+        "missing_reasons": [
+            "p3-fallback-oom-detect: 已规划但工具执行失败或无匹配结果",
+            "p4-fallback-config-detect: 已规划但工具执行失败或无匹配结果",
+        ],
+        "evidence_inventory": [],
+    })
+    content = """# 诊断报告
+
+## 诊断概览
+
+| 项目 | 结果 |
+|---|---|
+| **证据完整度** | 2/2 (100%) |
+
+## 根因分析
+"""
+
+    result = node._enforce_evidence_stats(content, evidence_analysis)
+
+    assert "| **证据完整度** | 2/4 (50%) |" in result
+    assert "### 采集统计" not in result
+
+
+def test_conclusion_statistics_keep_large_skip_count_separate_from_plan_total():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "plan_total": 2,
+        "plan_collected": 2,
+        "plan_completeness": 1.0,
+        "environment_evidence_total": 2,
+        "environment_evidence_collected": 2,
+        "environment_evidence_completeness": 1.0,
+        "executed_tool_count": 2,
+        "matched_tool_count": 2,
+        "unplanned_tool_count": 0,
+        "case_tool_count": 2,
+        "supplemental_tool_count": 0,
+        "skipped_plan_count": 4,
+        "observability_target_total": 2,
+        "observability_target_collected": 2,
+        "observability_target_completeness": 1.0,
+        "early_stop": {
+            "triggered": True,
+            "reason": "mandatory_live_observability_complete",
+        },
+        "missing_reasons": [],
+        "evidence_inventory": [],
+    })
+    content = """# 诊断报告
+
+## 诊断概览
+
+| 项目 | 结果 |
+|---|---|
+| **证据完整度** | 2/2 (100%) |
+
+## 根因分析
+"""
+
+    result = node._enforce_evidence_stats(content, evidence_analysis)
+
+    assert "| **证据完整度** | 2/2 (100%) |" in result
+    assert "### 采集统计" not in result
+
+
+def test_conclusion_does_not_inject_statistics_under_level_one_diagnosis_overview():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "plan_total": 2,
+        "plan_collected": 2,
+        "plan_completeness": 1.0,
+        "environment_evidence_total": 2,
+        "environment_evidence_collected": 2,
+        "environment_evidence_completeness": 1.0,
+        "executed_tool_count": 2,
+        "matched_tool_count": 2,
+        "unplanned_tool_count": 0,
+        "case_tool_count": 2,
+        "supplemental_tool_count": 0,
+        "skipped_plan_count": 0,
+        "observability_target_total": 2,
+        "observability_target_collected": 2,
+        "observability_target_completeness": 1.0,
+        "early_stop": {
+            "triggered": True,
+            "reason": "mandatory_live_observability_complete",
+        },
+        "evidence_inventory": [],
+    })
+    content = """## 节点四：汇总总结
+
+# 诊断概览
+
+| 项目 | 结果 |
+|---|---|
+| **证据完整度** | 2/2 (100%) |
+
+# 可观测性数据
+
+保持原文。
+"""
+
+    result = node._enforce_evidence_stats(content, evidence_analysis)
+
+    assert "### 采集统计" not in result
+    assert result.index("# 诊断概览") < result.index("# 可观测性数据")
+
+
+def test_conclusion_does_not_append_diagnosis_statistics_to_query_report():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "plan_total": 1,
+        "plan_collected": 1,
+        "plan_completeness": 1.0,
+        "environment_evidence_total": 1,
+        "environment_evidence_collected": 1,
+        "environment_evidence_completeness": 1.0,
+        "executed_tool_count": 1,
+        "matched_tool_count": 1,
+        "unplanned_tool_count": 0,
+        "skipped_plan_count": 0,
+        "evidence_inventory": [],
+    })
+    content = "## 📊 查询结果\n\n- 当前异常 Pod: 2\n"
+
+    result = node._enforce_evidence_stats(content, evidence_analysis)
+
+    assert "### 采集统计" not in result
+
+
+def test_conclusion_replaces_model_topology_section_with_exact_edges():
+    content = """# 诊断报告
+
+### 拓扑关系（实体与边）
+- `Deployment --owned_by--> ReplicaSet --owned_by--> Pod`
+- `driver --calls--> api` (related_context/weak)
+- 无 `owned_by` 控制器边显示，视为独立测试 Pod。
+
+---
+
+## 根因分析
+保持原文。
+"""
+    structured_context = """
+TOPOLOGY_EXACT_EDGES count=3
+- TOPOLOGY relationship="Pod --calls--> Pod" source=driver-pod target=api-pod source_system=deepflow+kubernetes directness=direct confidence=high
+- TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" source=api-pod target=api-rs source_system=kubernetes directness=direct confidence=high
+- TOPOLOGY relationship="ReplicaSet --owned_by--> Deployment" source=api-rs target=api source_system=kubernetes directness=direct confidence=high
+"""
+
+    result = ConclusionFormatterNode._enforce_exact_topology_section(
+        content,
+        structured_context,
+    )
+
+    assert "Deployment --owned_by--> ReplicaSet --owned_by--> Pod" not in result
+    assert "related_context/weak" not in result
+    assert "独立测试 Pod" not in result
+    assert "`Pod --calls--> Pod`: `driver-pod` -> `api-pod`" in result
+    assert "`Pod --owned_by--> ReplicaSet`: `api-pod` -> `api-rs`" in result
+    assert "`ReplicaSet --owned_by--> Deployment`: `api-rs` -> `api`" in result
+    assert "direct/high" in result
+    assert "调用方 `driver-pod` 的流量进入目标 Pod `api-pod`" in result
+    assert "目标 Pod `api-pod` 由 Deployment `api` 管理" in result
+    assert "责任边界落在 Deployment `api` 管理的工作负载" in result
+    assert "## 根因分析\n保持原文。" in result
+
+
+def test_conclusion_corrects_below_limit_metric_overclaims():
+    content = """## 根因分析
+- trace-oom-api 内存从 3.3Mi 增至 76.9Mi，并突破 80Mi Limit。
+- 96.18% 的采样值直接触发 OOMKilled。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-abc container=business-api start=3.3Mi max=76.9Mi last=76.9Mi limit=80.0Mi max_limit_ratio=0.9618
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "突破 80Mi" not in result
+    assert "直接触发 OOMKilled" not in result
+    assert "Prometheus 观测峰值 `76.9Mi`，低于 limit `80.0Mi`" in result
+    assert "实际触及硬限制的瞬间未被采样直接捕获" in result
+
+
+def test_conclusion_corrects_real_growth_then_breaks_limit_sentence():
+    content = """### 三大观测维度
+| **Metrics** | Prometheus | Present | **Pod `trace-oom-api` 内存峰值 `72.9Mi`，Limit `80.0Mi` (利用率 91.17%)**。请求 `GET /allocate?mib=2&step=28070` 触发分配，从 60Mi 增至 62Mi 后突破 Limit。 | 见机器可核验附录 |
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.3Mi max=72.9Mi last=72.9Mi limit=80.0Mi max_limit_ratio=0.9117
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "从 60Mi 增至 62Mi 后突破 Limit" not in result
+    assert "Prometheus 观测峰值 `72.9Mi`，低于 limit `80.0Mi`" in result
+    assert "实际触及硬限制的瞬间未被采样直接捕获" in result
+
+
+def test_conclusion_normalizes_real_malformed_repeated_metric_correction():
+    content = """### 因果链
+  -> 容器内存使用未由本次采样证明已突破硬限制；Prometheus 观测峰值 `72.9Mi`，低于 limit `80.0Mi`；实际触及硬限制的瞬间未被采样直接捕获> 80Mi 阈值；Prometheus 观测峰值 `72.9Mi`，低于 limit `80.0Mi`；实际触及硬限制的瞬间未被采样直接捕获；K8s OOM) 结论应以 Kubernetes termination reason 为准
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.3Mi max=72.9Mi last=72.9Mi limit=80.0Mi max_limit_ratio=0.9117
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "捕获> 80Mi" not in result
+    assert result.count("Prometheus 观测峰值 `72.9Mi`") == 1
+    assert "K8s OOM)" not in result
+    assert "容器终止事实应以 Kubernetes termination reason 为准" in result
+
+
+def test_conclusion_normalizes_triggered_kubernetes_boundary_claim():
+    content = """### 根因结论
+1. **trace-oom-api**: Prometheus 观测峰值 79.0Mi，低于 limit 80.0Mi，触发了 Kubernetes 的内存保护机制（OOMKilled）。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.4Mi max=79.0Mi last=79.0Mi limit=80.0Mi max_limit_ratio=0.9872
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "；了 Kubernetes" not in result
+    assert "Prometheus 观测峰值 `79.0Mi`，低于 limit `80.0Mi`" in result
+    assert result.count("Prometheus 观测峰值") == 1
+    assert "OOMKilled 结论应以 Kubernetes termination reason 为准" in result
+
+
+def test_conclusion_normalizes_deployed_triggered_kubernetes_fragment():
+    content = """### 根因结论
+1. **trace-oom-api**: Prometheus 观测峰值 `79.0Mi`，低于 limit `80.0Mi`；实际触及硬限制的瞬间未被采样直接捕获；了 Kubernetes 的内存保护机制（OOMKilled） 结论应以 Kubernetes termination reason 为准。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.4Mi max=79.0Mi last=79.0Mi limit=80.0Mi max_limit_ratio=0.9872
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "；了 Kubernetes" not in result
+    assert result.count("Prometheus 观测峰值 `79.0Mi`") == 1
+    assert "OOMKilled 结论应以 Kubernetes termination reason 为准" in result
+
+
+def test_conclusion_corrects_metric_table_claim_that_growth_touched_hard_limit():
+    content = """### 已采集证据
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 2 | Memory Metric | Prometheus | `container_memory_working_set_bytes` 峰值 **79.0Mi** (Limit 80.0Mi) | 内存持续增长且触及硬限制 |
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=26.8Mi max=79.0Mi last=79.0Mi limit=80.0Mi max_limit_ratio=0.9872
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "内存持续增长且触及硬限制" not in result
+    assert "Prometheus 观测峰值 `79.0Mi`，低于 limit `80.0Mi`" in result
+    assert "实际触及硬限制的瞬间未被采样直接捕获" in result
+
+
+def test_conclusion_corrects_accumulation_claimed_to_touch_numeric_limit():
+    content = """## 诊断摘要
+2. `trace-oom-api-598dcf5996-x6v6n` Pod 因内存累积触及 80Mi 限制，被系统 OOMKilled。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=26.8Mi max=79.0Mi last=79.0Mi limit=80.0Mi max_limit_ratio=0.9872
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+    second = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        result,
+        structured_context,
+    )
+
+    assert "内存累积触及 80Mi 限制" not in result
+    assert "Prometheus 观测峰值 `79.0Mi`，低于 limit `80.0Mi`" in result
+    assert "因Prometheus" not in result
+    assert "容器终止事实应以 Kubernetes termination reason 为准，被系统 OOMKilled" not in result
+    assert result == second
+
+
+def test_conclusion_corrects_standalone_memory_limit_touch_in_causal_chain():
+    content = """### 因果链
+[trace-oom-api-598dcf5996-x6v6n] 内存使用量持续增长 (26.8Mi -> 79.0Mi)
+  -> 触及容器 Memory Limit (80.0Mi)
+  -> Linux OOM Killer 强制终止容器
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=26.8Mi max=79.0Mi last=79.0Mi limit=80.0Mi max_limit_ratio=0.9872
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+    second = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        result,
+        structured_context,
+    )
+
+    assert "触及容器 Memory Limit (80.0Mi)" not in result
+    assert "Prometheus 观测峰值 `79.0Mi`，低于 limit `80.0Mi`" in result
+    assert result == second
+
+
+@pytest.mark.parametrize(
+    "unsupported_claim",
+    [
+        "当内存达到 80.0Mi Limit 时，容器被 OOMKilled。",
+        "trace-oom-api 触及 Limit -> OOMKilled。",
+        "trace-oom-api 触及 80Mi 限制被杀。",
+        "trace-oom-api 超过了设定的 80Mi Limit。",
+        "trace-oom-api 达到 80Mi 限制。",
+        "trace-oom-api 76.9Mi，触及 Limit 80.0Mi。",
+        "trace-oom-api 逼近并触及 K8s 限制。",
+        "trace-oom-api 触碰 Kubernetes memory limit。",
+        "trace-oom-api 触及 Kubernetes 内存 Limit。",
+        "trace-oom-api 内存使用触及 Limit。",
+        "trace-oom-api 业务代码分配内存超过 Limit。",
+    ],
+)
+def test_conclusion_corrects_fixed_archive_limit_overclaim_variants(
+    unsupported_claim,
+):
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.3Mi max=76.9Mi last=76.9Mi limit=80.0Mi max_limit_ratio=0.9612
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        unsupported_claim,
+        structured_context,
+    )
+    repeated = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        result,
+        structured_context,
+    )
+
+    assert unsupported_claim not in result
+    assert "Prometheus 观测峰值 `76.9Mi`，低于 limit `80.0Mi`" in result
+    assert "实际触及硬限制的瞬间未被采样直接捕获" in result
+    assert repeated == result
+
+
+def test_conclusion_keeps_canonical_metric_sampling_boundary_idempotent():
+    content = (
+        "trace-oom-api: Prometheus 观测峰值 `76.9Mi`，低于 limit `80.0Mi`；"
+        "实际触及硬限制的瞬间未被采样直接捕获；"
+        "容器终止事实应以 Kubernetes termination reason 为准。"
+    )
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.3Mi max=76.9Mi last=76.9Mi limit=80.0Mi max_limit_ratio=0.9612
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert result == content
+
+
+def test_conclusion_uses_nearby_metric_values_to_disambiguate_generic_limit_claim():
+    content = """| 2 | K8s Status | `trace-config-api`: exit=78 |
+| 3 | Metrics | `trace-oom-api`: 峰值 77.0Mi / limit 80.0Mi |
+| 4 | Logging | `trace-config-api`: required config is missing |
+| 5 | Tracing | `trace-oom-api`: GET /allocate |
+
+### 证据关联分析
+1. **OOM 场景关联**：请求驱动 -> 内存无界累积 -> 触碰 Limit -> 系统 OOM Kill。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-config-api-84bc7cb976-vgtl8 container=business-api start=3.7Mi max=4.1Mi last=4.1Mi limit=96.0Mi max_limit_ratio=0.0427
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.3Mi max=77.0Mi last=77.0Mi limit=80.0Mi max_limit_ratio=0.9625
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "触碰 Limit" not in result
+    assert "Prometheus 观测峰值 `77.0Mi`，低于 limit `80.0Mi`" in result
+    assert "limit `96.0Mi`" not in result
+
+
+def test_conclusion_scopes_metric_boundary_corrections_to_matching_pod():
+    content = """## 根因分析
+### trace-config-api
+- trace-config-api 内存保持 3.7Mi，低于 96Mi limit。
+
+### trace-oom-api
+- trace-oom-api 内存从 3.4Mi 增至 75.0Mi，并突破 80Mi Limit。
+- 93.81% 的采样值直接触发 OOMKilled。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-config-api-84bc7cb976-vgtl8 container=business-api start=3.7Mi max=3.7Mi last=3.7Mi limit=96.0Mi max_limit_ratio=0.0384
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.4Mi max=75.0Mi last=75.0Mi limit=80.0Mi max_limit_ratio=0.9381
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "突破 80Mi" not in result
+    assert "93.81% 的采样值直接触发 OOMKilled" not in result
+    assert "Prometheus 观测峰值 `75.0Mi`，低于 limit `80.0Mi`" in result
+    assert "Prometheus 观测峰值 `3.7Mi`，低于 limit `96.0Mi`" not in result
+    assert "trace-config-api 内存保持 3.7Mi，低于 96Mi limit。" in result
+
+
+def test_conclusion_metric_boundary_correction_keeps_sentence_spacing():
+    content = """## 根因分析
+- trace-oom-api 的内存使用量突破 80Mi Limit。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-abc container=business-api start=3.3Mi max=76.9Mi last=76.9Mi limit=80.0Mi max_limit_ratio=0.9618
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "量Prometheus" not in result
+    assert "内存使用量未由本次采样证明已突破硬限制" in result
+    assert "实际触及硬限制的瞬间未被采样直接捕获" in result
+
+
+def test_conclusion_metric_boundary_correction_consumes_trailing_limit_word():
+    content = """## 根因分析
+- trace-oom-api 内存已超过 80Mi limit 限制。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-abc container=business-api start=3.3Mi max=76.9Mi last=76.9Mi limit=80.0Mi max_limit_ratio=0.9618
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "捕获限制" not in result
+    assert "limit 限制" not in result
+    assert "Prometheus 观测峰值 `76.9Mi`，低于 limit `80.0Mi`" in result
+
+
+def test_conclusion_corrects_causal_overclaims_from_below_limit_samples():
+    content = """## 根因分析
+- trace-oom-api 指标证实内存逼近限制阈值，且 `allocate` 操作导致越界。
+- 由于当前 Limit 为 80Mi，且使用率达 86% 即崩溃，建议直接提高限制。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-abc container=business-api start=3.3Mi max=68.9Mi last=68.9Mi limit=80.0Mi max_limit_ratio=0.8617
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "操作导致越界" not in result
+    assert "使用率达 86% 即崩溃" not in result
+    assert "Prometheus 观测峰值 `68.9Mi`，低于 limit `80.0Mi`" in result
+    assert "实际触及硬限制的瞬间未被采样直接捕获" in result
+
+
+def test_conclusion_metric_boundary_correction_keeps_causal_sentence_grammatical():
+    content = """## 证据链
+- 决定性证据：容器因内存超过 80Mi 被 Linux OOM Killer 终止。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-abc container=business-api start=3.3Mi max=68.9Mi last=68.9Mi limit=80.0Mi max_limit_ratio=0.8617
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "因内存未由本次采样" not in result
+    assert "因内存使用量未由本次采样证明已突破硬限制" in result
+
+
+def test_conclusion_metric_boundary_correction_removes_malformed_kill_suffix():
+    content = """## 证据关联分析
+- Trace 证明请求触发内存增长，导致应用工作内存增长至 77.2Mi，触发 cgroup 80Mi 硬限制的 Limit 被内核 Kill 掉。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-abc container=business-api start=3.3Mi max=77.2Mi last=77.2Mi limit=80.0Mi max_limit_ratio=0.9649
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "硬限制的 Limit" not in result
+    assert "未被采样直接捕获的 Limit" not in result
+    assert "Prometheus 观测峰值 `77.2Mi`，低于 limit `80.0Mi`" in result
+    assert "容器终止事实应以 Kubernetes termination reason 为准" in result
+
+
+def test_conclusion_corrects_peak_below_limit_claimed_to_trigger_failure():
+    content = """### 三大观测维度
+| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |
+|------|----------|----------|----------------------------------|----------|
+| **Metrics** | Prometheus | Present | **Pod A**: `container_memory_working_set_bytes` 峰值 **75.0Mi** (Limit 80.0Mi, 93.7%)，触发 OOM | metric-real |
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=20.9Mi max=75.0Mi last=75.0Mi limit=80.0Mi max_limit_ratio=0.937
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "93.7%)，触发 OOM" not in result
+    assert "Prometheus 观测峰值 `75.0Mi`，低于 limit `80.0Mi`" in result
+    assert "容器终止事实应以 Kubernetes termination reason 为准" in result
+
+
+def test_conclusion_corrects_below_limit_proximity_claimed_to_trigger_failure():
+    content = """## 证据链
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 2 | Metrics | Prometheus | **Pod A**: `container_memory_working_set_bytes` 峰值 75.0Mi (Limit 80.0Mi) | 确认内存使用逼近 Limit，触发 OOM |
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=20.9Mi max=75.0Mi last=75.0Mi limit=80.0Mi max_limit_ratio=0.937
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "逼近 Limit，触发 OOM" not in result
+    assert "Prometheus 观测峰值 `75.0Mi`，低于 limit `80.0Mi`" in result
+    assert "实际触及硬限制的瞬间未被采样直接捕获" in result
+
+
+def test_conclusion_metric_boundary_correction_consumes_application_prefix():
+    content = """## 证据链
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 2 | Metrics | Prometheus | Max Usage: 75.0Mi (Limit: 80.0Mi) | 确认应用内存使用逼近 Limit，触发 OOM |
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.3Mi max=75.0Mi last=75.0Mi limit=80.0Mi max_limit_ratio=0.937
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "确认应用Prometheus" not in result
+    assert "确认应用内存使用逼近 Limit" not in result
+    assert "Prometheus 观测峰值 `75.0Mi`，低于 limit `80.0Mi`" in result
+
+
+def test_conclusion_metric_boundary_correction_keeps_separator_before_correction():
+    content = """## 证据链
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| E2 | Metrics | Prometheus | Memory 从 3.6Mi 持续积累至 **77.0Mi** (Limit 80.0Mi)，触发 OOMKilled | 内存持续增长。 |
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.6Mi max=77.0Mi last=77.0Mi limit=80.0Mi max_limit_ratio=0.962
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "MiPrometheus" not in result
+    assert ")Prometheus" not in result
+    assert "；Prometheus 观测峰值 `77.0Mi`" in result
+    assert "OOMKilled 结论应以 Kubernetes termination reason 为准" in result
+
+
+def test_conclusion_corrects_sampled_value_claimed_to_touch_higher_limit():
+    content = """## 根因分析
+- trace-oom-api 使用量达到 77.0Mi 触及 80.0Mi Limit。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.6Mi max=77.0Mi last=77.0Mi limit=80.0Mi max_limit_ratio=0.962
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "77.0Mi 触及 80.0Mi" not in result
+    assert "Prometheus 观测峰值 `77.0Mi`，低于 limit `80.0Mi`" in result
+    assert "容器终止事实应以 Kubernetes termination reason 为准" in result
+
+
+def test_conclusion_rebuilds_root_cause_when_unique_evidence_is_bound_to_wrong_pod():
+    content = """## 🎯 根因分析
+### 根因结论
+#### trace-oom-api-598dcf5996-x6v6n
+- **直接证据**：日志显示 `required config PAYMENT_GATEWAY_TOKEN is missing`。
+
+#### trace-config-api-84bc7cb976-vgtl8
+- **直接证据**：Kubernetes 显示 `OOMKilled exit=137`。
+
+## 🛠️ 修复建议
+保持后续内容。
+"""
+    structured_context = """
+aiops_observability_facts:
+- [collect_aiops_case]
+AIOPS_CASE case_id=oom status=case_collected abnormal_type=oomkilled
+ENTITY entity=Pod aiops-traced-oom/trace-oom-api-598dcf5996-x6v6n node=node2 pod_ip=172.16.104.13
+K8S_SIGNAL strength=strong observed="Last terminated state: business-api=OOMKilled exit=137" evidence_refs=["k8s-oom"]
+METRIC metric=container_memory_working_set_bytes start=3.6Mi max=74.9Mi last=74.9Mi limit=80.0Mi ratio=0.9369
+LOG event=allocate trace_id=oom-trace path=/allocate?mib=2 alloc_mib=2 allocated_mib=62
+DEEPFLOW src=172.16.104.8 dst=172.16.104.13 request=GET /allocate?mib=2 response_code=200 duration_us=7699 trace_id=oom-trace
+TEMPO trace_id=oom-trace service=aiops-traced-oom-api span=GET /allocate allocated_before=60 allocated_after=62
+TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" source=trace-oom-api-598dcf5996-x6v6n target=trace-oom-api-598dcf5996 directness=direct confidence=high
+- [collect_aiops_case]
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+ENTITY entity=Pod aiops-traced-config/trace-config-api-84bc7cb976-vgtl8 node=node2 pod_ip=172.16.104.2
+K8S_SIGNAL strength=strong observed="Last terminated state: business-api=Error exit=78" evidence_refs=["k8s-config"]
+METRIC metric=container_memory_working_set_bytes start=3.7Mi max=3.7Mi last=3.7Mi limit=96.0Mi ratio=0.0381
+LOG event=config_missing trace_id=config-trace path=/checkout error_code=CONFIG_MISSING missing_config=PAYMENT_GATEWAY_TOKEN http_status=500
+DEEPFLOW src=172.16.104.56 dst=172.16.104.2 request=GET /checkout response_code=500 duration_us=5010 trace_id=config-trace
+TEMPO trace_id=config-trace service=aiops-traced-config-api span=GET /checkout http.response.status_code=500 error.type=CONFIG_MISSING config.key=PAYMENT_GATEWAY_TOKEN config.present=false
+TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" source=trace-config-api-84bc7cb976-vgtl8 target=trace-config-api-84bc7cb976 directness=direct confidence=high
+"""
+
+    result = ConclusionFormatterNode._enforce_entity_evidence_consistency(
+        content,
+        structured_context,
+    )
+
+    oom_section = result.split(
+        "### `aiops-traced-oom/trace-oom-api-598dcf5996-x6v6n`",
+        1,
+    )[1].split(
+        "### `aiops-traced-config/trace-config-api-84bc7cb976-vgtl8`",
+        1,
+    )[0]
+    config_section = result.split(
+        "### `aiops-traced-config/trace-config-api-84bc7cb976-vgtl8`",
+        1,
+    )[1].split("## 🛠️ 修复建议", 1)[0]
+
+    assert "PAYMENT_GATEWAY_TOKEN" not in oom_section
+    assert "OOMKilled exit=137" in oom_section
+    assert "request=GET /allocate?mib=2" in oom_section
+    assert "required config PAYMENT_GATEWAY_TOKEN is missing" not in result
+    assert "missing_config=PAYMENT_GATEWAY_TOKEN" in config_section
+    assert "Error exit=78" in config_section
+    assert "保持后续内容。" in result
+
+
+def test_conclusion_entity_blocks_support_deployed_agent_facts_entity_format():
+    structured_context = """
+- [collect_aiops_case]
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+ENTITY kind=Pod namespace=aiops-traced-config name=trace-config-api-84bc7cb976-vgtl8 node=node2 pod_ip=172.16.104.2
+K8S_SIGNAL strength=strong observed="Last terminated state: business-api=Error exit=78" evidence_refs=["k8s-config"]
+LOG event=config_missing missing_config=PAYMENT_GATEWAY_TOKEN
+"""
+
+    blocks = ConclusionFormatterNode._extract_entity_evidence_blocks(
+        structured_context,
+    )
+
+    assert len(blocks) == 1
+    assert blocks[0]["namespace"] == "aiops-traced-config"
+    assert blocks[0]["pod"] == "trace-config-api-84bc7cb976-vgtl8"
+    assert "PAYMENT_GATEWAY_TOKEN".casefold() in blocks[0]["markers"]
+
+
+def test_conclusion_downgrades_unproven_memory_leak_claim_without_leak_evidence():
+    content = """## 🎯 根因分析
+- `trace-oom-api-598dcf5996-x6v6n` 存在内存泄漏，最终进入 CrashLoopBackOff。
+"""
+    structured_context = """
+- [collect_aiops_case]
+AIOPS_CASE case_id=oom status=case_collected abnormal_type=oomkilled
+ENTITY entity=Pod aiops-traced-oom/trace-oom-api-598dcf5996-x6v6n node=node2 pod_ip=172.16.104.13
+K8S_SIGNAL strength=strong observed="Last terminated state: business-api=OOMKilled exit=137" evidence_refs=["k8s-oom"]
+LOG event=allocate trace_id=oom-trace path=/allocate?mib=2 alloc_mib=2 allocated_mib=62
+TEMPO trace_id=oom-trace service=aiops-traced-oom-api span=GET /allocate allocated_before=60 allocated_after=62
+"""
+
+    result = ConclusionFormatterNode._enforce_entity_evidence_consistency(
+        content,
+        structured_context,
+    )
+
+    assert "内存泄漏" not in result
+    assert "请求驱动的持续内存累积（未证明泄漏机制）" in result
+
+
+def test_conclusion_downgrades_unproven_low_memory_limit_claim_without_baseline():
+    content = """## 🎯 根因分析
+- `trace-oom-api-598dcf5996-x6v6n` 的根因是 memory limit 80Mi 过低。
+"""
+    structured_context = """
+- [collect_aiops_case]
+AIOPS_CASE case_id=oom status=case_collected abnormal_type=oomkilled
+ENTITY entity=Pod aiops-traced-oom/trace-oom-api-598dcf5996-x6v6n node=node2 pod_ip=172.16.104.13
+- K8S_SIGNAL strength=strong observed="Last terminated state: business-api=OOMKilled exit=137" evidence_refs=["k8s-oom"]
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n max=72.9Mi limit=80.0Mi ratio=0.9118
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "limit 80Mi 过低" not in result
+    assert "是否偏低仍需结合正常业务基线验证" in result
+    assert "OOMKilled" not in result
+
+
+def test_conclusion_corrects_real_report_low_limit_and_false_comparison_variants():
+    content = """## 🎯 根因分析
+- **根因**: 内存限制不足。当前 Limit 80Mi 无法支撑 `/allocate` 请求的峰值内存需求（观测到 70.9Mi）。
+
+## 🧩 结构化修复计划
+- OOM Pod Last State OOMKilled exit=137, Metrics Max 70.9Mi > 80Mi Limit (需增加)
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=3.3Mi max=70.9Mi last=70.9Mi limit=80.0Mi max_limit_ratio=0.8866
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "内存限制不足" not in result
+    assert "当前 Limit 80Mi 无法支撑" not in result
+    assert "70.9Mi > 80Mi" not in result
+    assert "是否偏低仍需结合正常业务基线验证" in result
+    assert "Prometheus 观测峰值 `70.9Mi`，低于 limit `80.0Mi`" in result
+
+
+def test_conclusion_enforces_topology_trace_and_source_evidence_boundaries():
+    content = """## 📊 诊断概览
+| 项目 | 内容 |
+|------|------|
+| **置信度** | 高 (95%) |
+| **证据完整度** | 10/10 (100%) |
+
+## 🕵️ 证据链
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 1 | K8s 状态 | `kubectl describe pod/trace-oom-api...` | OOMKilled exit=137 | 确认 OOMKilled |
+| 2 | Logging | `logs --previous` | config missing | 确认配置缺失 |
+| 3 | Metrics | `container_memory_working_set_bytes` | Max 70.9Mi / Limit 80Mi | 证据 1 确认 Pod 1 触顶 |
+| 4 | Tracing | `deepflow` traces | trace-oom | 关联了外部请求与内部崩溃的具体行为 |
+
+## 🎯 根因分析
+- 当前问题由内存限制不足导致 OOMKilled。
+- 根本原因: trace-oom-api 容器内存限制（Limit: 80Mi）过低。
+- Service/RS/Deployment 链路正常，因此排除网络和调度问题。
+- Trace 显示 `/allocate` 操作触发。
+
+### 缺失证据（如有）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| 无 | - | 本轮所有维度均已获取决定性证据 |
+
+## 🧩 结构化修复计划
+- Metrics Max 70.9Mi < 80Mi Limit (需增加)
+
+## 📋 验证步骤
+| 步骤 | 命令 | 预期结果 |
+|------|------|----------|
+| 验证接口 | `kubectl port-forward svc/trace-config-api -n aiops-traced-config 8080:80` | HTTP 200 |
+
+## 🛠️ 修复建议
+```bash
+kubectl set env deployment/trace-config-api -n aiops-traced-config PAYMENT_GATEWAY_TOKEN=<REAL_TOKEN_VALUE>
+```
+
+如果是独立 Pod：
+```bash
+kubectl delete pod trace-config-api-abc -n aiops-traced-config
+```
+
+```bash
+```
+"""
+    structured_context = """
+TOPOLOGY_SCOPE relationships_only=true health_not_proven=true complete_call_chain_not_proven=true
+- detail: tool=get_aiops_case_evidence
+- K8S_SIGNAL strength=strong observed="Last terminated state: business-api=OOMKilled exit=137" evidence_refs=["k8s-oom"]
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-abc max=70.9Mi limit=80.0Mi max_limit_ratio=0.8866
+- LOG event=config_missing message="required config PAYMENT_GATEWAY_TOKEN is missing" missing_config=PAYMENT_GATEWAY_TOKEN
+- DEEPFLOW request="GET /allocate?mib=2" response_code=200 trace_id=trace-oom
+- TEMPO trace_id=trace-oom span="GET /allocate" aiops.allocated_mib.before=60 aiops.allocated_mib.after=62
+- TOPOLOGY relationship="Service --selects--> Pod" source=trace-oom-api target=trace-oom-api-abc source_system=kubernetes directness=direct confidence=high
+"""
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert "`kubectl describe pod/trace-oom-api...`" not in result
+    assert "`logs --previous`" not in result
+    assert "`deepflow` traces" not in result
+    assert result.count("`collect_aiops_case`") >= 3
+    assert "`get_aiops_case_evidence`" in result
+    assert "来源命令" not in result
+    assert "采集来源" in result
+    assert "链路正常" not in result
+    assert "排除网络和调度问题" not in result
+    assert "仅确认实体关系" in result
+    assert "操作触发 OOM" not in result
+    assert "单次内存分配" in result
+    assert "未证明该请求直接触发 OOM" in result
+    assert "内存限制不足" not in result
+    assert "Limit: 80Mi）过低" not in result
+    assert "(需增加)" not in result
+    assert "是否偏低尚待正常业务基线验证" in result
+    assert "**可观测性维度覆盖**" in result
+    assert "不代表根因结论充分" in result
+    assert "**分项置信度**" in result
+    assert "OOM 资源规格归因中等" in result
+    assert "8080:80" not in result
+    assert "先查询 Service 端口映射" in result
+    assert "| 无 | - | 无 |" not in result
+    assert "| 无 | - | 本轮所有维度均已获取决定性证据 |" not in result
+    assert "正常业务基线" in result
+    assert "Node MemoryPressure" in result
+    assert "确认 Pod 1 触顶" not in result
+    assert "未捕获触及硬限制的瞬间" in result
+    assert "关联了外部请求与内部崩溃" not in result
+    assert "未证明请求直接导致崩溃" in result
+    assert "<REAL_TOKEN_VALUE>" not in result
+    assert "kubectl set env deployment/trace-config-api" not in result
+    assert "kubectl delete pod trace-config-api-abc" not in result
+    assert "```bash\n```" not in result
+
+
+def test_conclusion_coarse_case_logging_source_remains_collect_aiops_case():
+    content = """## 🕵️ 证据链
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 1 | Logging | `logs --previous` | config missing | 确认配置缺失 |
+"""
+    structured_context = """
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+- LOG event=config_missing message="required config TOKEN is missing"
+"""
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert "`collect_aiops_case`" in result
+    assert "`get_aiops_case_evidence`" not in result
+
+
+def test_conclusion_removes_chinese_secret_placeholder_advice():
+    content = """## 🛠️ 修复建议
+- 建议执行 `kubectl set env deployment/api -n demo TOKEN=<填入真实token>`
+"""
+    structured_context = """
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+- LOG event=config_missing message="required config TOKEN is missing" missing_config=TOKEN
+"""
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert "<填入真实token>" not in result
+    assert "kubectl set env" not in result
+    assert "Secret 引用尚未获取" in result
+
+
+def test_conclusion_singular_log_source_uses_actual_fine_evidence_tool():
+    content = """## 🕵️ 证据链
+| # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 3 | Log | `kubectl logs -p` | config missing | 确认配置缺失 |
+"""
+    structured_context = """
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+- detail: tool=get_aiops_case_evidence
+- LOG event=config_missing message="required config TOKEN is missing"
+"""
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert "`kubectl logs -p`" not in result
+    assert "`get_aiops_case_evidence`" in result
+
+
+def test_conclusion_removes_ascii_secret_placeholder_command():
+    content = """## 🛠️ 修复建议
+```bash
+# 示例：请替换下方 YOUR_TOKEN_VALUE
+kubectl set env deployment/api -n demo TOKEN=YOUR_TOKEN_VALUE
+```
+"""
+    structured_context = """
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+- LOG event=config_missing message="required config TOKEN is missing" missing_config=TOKEN
+"""
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert "YOUR_TOKEN_VALUE" not in result
+    assert "kubectl set env" not in result
+    assert "Secret 引用尚未获取" in result
+
+
+def test_conclusion_downgrades_real_oom_low_limit_claims_without_baseline():
+    content = """## 🕵️ 证据链
+| # | 证据类型 | 采集来源 | 原始数据 | 分析结论 |
+|---|----------|----------|----------|----------|
+| 2 | Metrics | `collect_aiops_case` | max=77.0Mi, limit=80.0Mi | **佐证**：内存使用率 96.2%，证明 Limit 确实过小。 |
+
+## 🎯 根因分析
+Root Cause: Deployment 定义的 memory limits (80Mi) 低于应用实际运行需求。
+- **trace-oom-api**: 根因为 **内存配置过小**。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n container=business-api start=22.7Mi max=77.0Mi last=77.0Mi limit=80.0Mi max_limit_ratio=0.962 samples=["01:45:50=22.7Mi","01:46:05=32.8Mi","01:46:20=44.8Mi","01:46:35=62.9Mi","01:46:50=77.0Mi"]
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+
+    assert "证明 Limit 确实过小" not in result
+    assert "低于应用实际运行需求" not in result
+    assert "根因为 **内存配置过小**" not in result
+    assert "是否偏低仍需结合正常业务基线验证" in result
+
+
+def test_conclusion_downgrades_sparse_metric_exclusion_and_preserves_known_logs():
+    content = """## 🕵️ 证据关联分析
+- **Case 2 (Config)**: Metrics 证明内存无压力，排除资源问题，确认为配置缺失。
+
+## 🎯 根因分析
+Result: Pod 启动失败，无业务日志，服务不可用。
+"""
+    structured_context = """
+- METRIC metric=container_memory_working_set_bytes pod=trace-config-api-84bc7cb976-vgtl8 container=business-api start=3.5Mi max=3.5Mi last=3.5Mi limit=96.0Mi max_limit_ratio=0.0368 samples=["01:53:57=3.5Mi"]
+- LOG event=config_missing message="required config PAYMENT_GATEWAY_TOKEN is missing" pod=trace-config-api-84bc7cb976-vgtl8
+"""
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert "Metrics 证明内存无压力" not in result
+    assert "排除资源问题" not in result
+    assert "单点指标" in result
+    assert "无业务日志" not in result
+    assert "已有配置缺失业务日志" in result
+
+
+def test_conclusion_does_not_attribute_missing_runtime_config_to_secret_source():
+    content = """## 🎯 根因分析
+- 根因是 ConfigMap/Secret 中缺失 `PAYMENT_GATEWAY_TOKEN` 环境变量。
+"""
+    structured_context = """
+- LOG event=config_missing message="required config PAYMENT_GATEWAY_TOKEN is missing" missing_config=PAYMENT_GATEWAY_TOKEN
+"""
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert "ConfigMap/Secret 中缺失" not in result
+    assert "运行时缺少" in result
+    assert "env/envFrom" in result
+
+
+def test_conclusion_corrects_english_false_metric_comparison_in_remediation_basis():
+    content = """## 🧩 结构化修复计划
+```json
+{
+  "remediation_available": false,
+  "fix_type": "manual_only",
+  "basis": [
+    "Metric Evidence: Memory usage 77.0Mi exceeds limit 80.0Mi"
+  ],
+  "actions": []
+}
+```
+"""
+    structured_context = """
+AIOPS_CASE case_id=oom status=case_collected abnormal_type=oomkilled
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-598dcf5996-x6v6n max=77.0Mi limit=80.0Mi max_limit_ratio=0.962
+"""
+
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        content,
+        structured_context,
+    )
+
+    assert "77.0Mi exceeds limit 80.0Mi" not in result
+    assert "77.0Mi < 80.0Mi" in result
+
+
+def test_conclusion_downgrades_live_report_source_and_capacity_overclaims():
+    content = """## 🕵️ 证据关联分析
+- trace-oom-api 的证据链闭环，根因明确为**内存不足**。
+
+## 🎯 根因分析
+**Case A: OOMKilled**
+2. **trace-oom-api (OOMKilled)**：根因是 **Memory Limit 设置过低**。容器分配的内存限制为 **80.0Mi**，无法承载业务峰值（达到 77.0Mi）。
+
+**Case B: Config Error**
+Deployment 未定义/注入必需的环境变量 PAYMENT_GATEWAY_TOKEN。
+1. **trace-config-api (ConfigError)**：根因是 **Deployment 配置缺失**。环境变量 `PAYMENT_GATEWAY_TOKEN` 未在 `aiops-traced-config` 的 Deployment 模板中正确定义。
+
+## 📋 验证步骤
+| 步骤 | 命令 | 预期结果 |
+|------|------|----------|
+| 资源验证 | `kubectl get deployment api -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}'` | 输出为 `128Mi` |
+
+## ⚠️ 注意事项
+- **内存峰值基线**：128Mi 是基于当前证据的推荐值。
+"""
+    structured_context = """
+AIOPS_CASE case_id=oom status=case_collected abnormal_type=oomkilled
+K8S_SIGNAL strength=strong observed="Last terminated state: api=OOMKilled exit=137"
+- METRIC metric=container_memory_working_set_bytes pod=trace-oom-api-abc max=77.0Mi limit=80.0Mi max_limit_ratio=0.962 samples=["01:00:00=77.0Mi"]
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+- LOG event=config_missing message="required config PAYMENT_GATEWAY_TOKEN is missing" missing_config=PAYMENT_GATEWAY_TOKEN
+"""
+
+    result = ConclusionFormatterNode._enforce_metric_boundary_claims(
+        content,
+        structured_context,
+    )
+    result = ConclusionFormatterNode._enforce_evidence_scope_claims(
+        result,
+        structured_context,
+    )
+
+    assert "根因明确为**内存不足**" not in result
+    assert "Memory Limit 设置过低" not in result
+    assert "80Mi 无法承载业务峰值" not in result
+    assert "输出为 `128Mi`" not in result
+    assert "128Mi 是基于当前证据的推荐值" not in result
+    assert "Deployment 未定义/注入" not in result
+    assert "Deployment 配置缺失" not in result
+    assert "运行时缺少 `PAYMENT_GATEWAY_TOKEN`" in result
+    assert "正常业务基线" in result
+
+
+def test_conclusion_corrects_pod_ips_and_restart_counts_from_authoritative_entities():
+    content = """## 🔍 现象描述
+| 类型 | 值 |
+|------|-----|
+| 节点 | node2 (IP: 172.16.104.2 / 172.16.104.13) |
+
+## 🎯 根因分析
+1. OOM 故障 (`trace-oom-api-598dcf5996-x6v6n`):
+   -> 用户可见现象: CrashLoopBackOff, 554+ 次重启
+2. Config 故障 (`trace-config-api-84bc7cb976-vgtl8`):
+   -> 用户可见现象: CrashLoopBackOff, 488 次重启
+"""
+    layer_analysis = json.dumps({
+        "current_abnormal_summary": {
+            "selected_rows": [
+                (
+                    "aiops-traced-config trace-config-api-84bc7cb976-vgtl8 "
+                    "0/1 CrashLoopBackOff 554 (3m36s ago) 2d "
+                    "172.16.104.2 node2"
+                ),
+                (
+                    "aiops-traced-oom trace-oom-api-598dcf5996-x6v6n "
+                    "0/1 CrashLoopBackOff 488 (46s ago) 2d2h "
+                    "172.16.104.13 node2"
+                ),
+            ],
+        },
+    })
+    structured_context = """
+- [collect_aiops_case]
+AIOPS_CASE case_id=oom status=case_collected abnormal_type=oomkilled
+ENTITY entity=Pod aiops-traced-oom/trace-oom-api-598dcf5996-x6v6n node=node2 pod_ip=172.16.104.13
+- [collect_aiops_case]
+AIOPS_CASE case_id=config status=case_collected abnormal_type=crashloopbackoff
+ENTITY entity=Pod aiops-traced-config/trace-config-api-84bc7cb976-vgtl8 node=node2 pod_ip=172.16.104.2
+"""
+
+    result = ConclusionFormatterNode._enforce_entity_identity_facts(
+        content,
+        layer_analysis,
+        structured_context,
+    )
+
+    assert "| **节点** | `node2` |" in result
+    assert (
+        "| **Pod IP** | "
+        "`trace-oom-api-598dcf5996-x6v6n=172.16.104.13`, "
+        "`trace-config-api-84bc7cb976-vgtl8=172.16.104.2` |"
+    ) in result
+    assert "node2 (IP:" not in result
+    assert "CrashLoopBackOff, 488 次重启" in result
+    assert "CrashLoopBackOff, 554 次重启" in result
+
+
+def test_conclusion_keeps_memory_leak_claim_when_tool_fact_explicitly_confirms_it():
+    content = """## 🎯 根因分析
+- `api-pod` 的日志明确确认内存泄漏。
+"""
+    structured_context = """
+- [collect_aiops_case]
+AIOPS_CASE case_id=leak status=case_collected abnormal_type=oomkilled
+ENTITY entity=Pod app/api-pod node=node2 pod_ip=172.16.104.20
+K8S_SIGNAL strength=strong observed="Last terminated state: api=OOMKilled exit=137" evidence_refs=["k8s-leak"]
+LOG event=memory_leak_detected message=memory_leak_confirmed trace_id=leak-trace
+"""
+
+    result = ConclusionFormatterNode._enforce_entity_evidence_consistency(
+        content,
+        structured_context,
+    )
+
+    assert "内存泄漏" in result
+    assert "未证明泄漏机制" not in result
+
+
 def test_conclusion_prompt_uses_compact_structured_context_without_full_raw_duplication():
     node = ConclusionFormatterNode()
     node.ai_call = _RecordingAICall("## 诊断概览\n证据完整度: 1/1 (100%)")
@@ -957,7 +2994,8 @@ def test_conclusion_prompt_uses_compact_structured_context_without_full_raw_dupl
     assert "# 阶段3：根因分析\n{" not in prompt
     assert raw_blob not in prompt
     assert "节点出口网络超时导致镜像拉取失败" in prompt
-    assert "计划 1 项，实际采集 1 项" in prompt
+    assert "evidence_plan_stats: 1/1 (100%)" in prompt
+    assert "证据采集统计（系统数据" not in prompt
 
 
 def test_conclusion_prompt_marks_authoritative_tool_facts_above_candidate_scenarios():
@@ -1116,6 +3154,106 @@ def test_layer_prompt_requires_global_abnormal_pod_scan_first():
         assert phrase in LAYER_CLASSIFIER_PROMPT
 
 
+def test_layer_prompt_keeps_explicit_pod_request_in_scope():
+    expected_phrases = [
+        "用户明确指定 namespace + Pod",
+        "其他异常 Pod 只作为背景",
+        "不得加入本次 issue_groups",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in LAYER_CLASSIFIER_PROMPT
+
+
+def test_layer_full_diagnosis_only_exposes_lightweight_locator_tools():
+    class _Tool:
+        def __init__(self, name):
+            self.name = name
+
+    node = LayerClassifierNode.__new__(LayerClassifierNode)
+    node.tools = [
+        _Tool("kubectl_get_by_kind_in_cluster"),
+        _Tool("kubectl_get_by_name"),
+        _Tool("fetch_runbook"),
+        _Tool("kubectl_describe"),
+        _Tool("kubectl_previous_logs"),
+        _Tool("execute_prometheus_range_query"),
+        _Tool("collect_aiops_case"),
+    ]
+
+    blocked = node._get_layer_blocked_tool_names()
+
+    assert blocked == {
+        "kubectl_describe",
+        "kubectl_previous_logs",
+        "execute_prometheus_range_query",
+        "collect_aiops_case",
+    }
+
+
+def test_layer_explicit_pod_stop_checker_stops_after_target_pod_status():
+    node = LayerClassifierNode()
+    question = (
+        "请诊断 namespace aiops-traced-oom 中 Pod "
+        "trace-oom-api-598dcf5996-x6v6n 当前反复重启的问题"
+    )
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "fetch_runbook",
+            "tool_args": {"runbook_id": "pod-oomkilled.md"},
+            "result": "OOMKilled runbook",
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {
+                "kind": "pod",
+                "name": "trace-oom-api-598dcf5996-x6v6n",
+                "namespace": "aiops-traced-oom",
+            },
+            "result": (
+                "NAME READY STATUS RESTARTS AGE\n"
+                "trace-oom-api-598dcf5996-x6v6n 0/1 CrashLoopBackOff 15 70m"
+            ),
+        },
+    ]
+
+    assert node._should_stop_explicit_pod_early(question, events) is True
+
+
+def test_layer_explicit_pod_stop_checker_ignores_global_or_failed_results():
+    node = LayerClassifierNode()
+    question = "我的集群现在有什么问题？"
+    target_result = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_get_by_name",
+        "tool_args": {
+            "kind": "pod",
+            "name": "trace-oom-api-598dcf5996-x6v6n",
+            "namespace": "aiops-traced-oom",
+        },
+        "result": "trace-oom-api-598dcf5996-x6v6n CrashLoopBackOff",
+    }
+    failed_result = {
+        **target_result,
+        "semantic_success": False,
+        "result": "No resources found in aiops-traced-oom namespace.",
+    }
+
+    assert node._should_stop_explicit_pod_early(question, [target_result]) is False
+    assert node._should_stop_explicit_pod_early(
+        "请诊断 aiops-traced-oom/trace-oom-api-598dcf5996-x6v6n",
+        [failed_result],
+    ) is False
+
+
 def test_layer_prompt_defines_pod_abnormal_type_taxonomy_and_derived_layer():
     expected_phrases = [
         "L0-L4 只是 Pod 异常状态的归因分类兼容字段",
@@ -1218,7 +3356,9 @@ def test_deployed_workflow_disables_layer_early_stop_by_default():
     )
     app_config = yaml.safe_load(configmap["data"]["config.yaml"])
 
-    assert app_config["workflow"]["layer"]["early_stop"]["enabled"] is False
+    layer_early_stop = app_config["workflow"]["layer"]["early_stop"]
+    assert layer_early_stop["enabled"] is False
+    assert layer_early_stop["explicit_pod_enabled"] is True
 
 
 def test_deployed_config_enables_aiops_case_coarse_and_disables_fine_mcp_server():
@@ -1254,6 +3394,19 @@ def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
         assert phrase in LAYER_CLASSIFIER_PROMPT
 
 
+def test_layer_prompt_delegates_distinct_runbook_selection_to_qwen_without_duplicates():
+    expected_phrases = [
+        "由你根据每个异常 Pod 的当前状态和异常类型自主选择",
+        "多个独立异常类型需要调用多个对应 runbook",
+        "同一个 runbook 在本节点内最多调用一次",
+        "不能因为多个 Pod 都显示 CrashLoopBackOff 就只选择一个 runbook",
+        "每个已识别的独立异常类型已经获得匹配 runbook",
+    ]
+
+    for phrase in expected_phrases:
+        assert phrase in LAYER_CLASSIFIER_PROMPT
+
+
 def test_evidence_prompt_requires_pod_abnormal_handoff_fields():
     expected_phrases = [
         "abnormal_pods",
@@ -1266,7 +3419,7 @@ def test_evidence_prompt_requires_pod_abnormal_handoff_fields():
         "不要在 evidence 阶段重新选择 runbook",
         "异常 Pod 返回 NotFound",
         "collect_aiops_case",
-        "metrics/logs/traces/topology",
+        "Metrics、Logging、Tracing 和 Topology",
         "get_aiops_case_evidence",
     ]
 
@@ -1337,6 +3490,42 @@ def test_remediation_plan_prompt_centralizes_workload_verify_rules():
     assert "remediation_available\": false" in REMEDIATION_PLAN_PROMPT
 
 
+def test_remediation_plan_prompt_uses_fact_ledger_diagnostic_only_architecture():
+    prompt = FACT_LEDGER_REMEDIATION_PLAN_PROMPT
+    assert "Fact Ledger 主路径仅用于诊断" in prompt
+    assert '"fix_type": "manual_only"' in prompt
+    assert '"actions": []' in prompt
+    assert "Remediation Policy Contract" in prompt
+    assert "get、describe、logs、top、rollout status" in prompt
+    assert "supporting_fact_ids" not in prompt
+    assert "target_entity_id" not in prompt
+    assert '"remediation_available": true' not in prompt
+
+
+def test_active_fact_ledger_prompt_excludes_legacy_executable_schema():
+    node = ConclusionFormatterNode(holmes_service=SimpleNamespace())
+    node.workflow_config_override = {}
+    node.ai_call = _RecordingAICall(
+        "## 诊断概览\n\n## 根因分析\n\n## 修复建议\n"
+    )
+
+    node._generate_with_llm(
+        question="为什么 api Pod 异常？",
+        layer_analysis="{}",
+        evidence_analysis="{}",
+        rca_analysis="{}",
+        layer=Layer.L2,
+        fact_ledger_authoritative=True,
+    )
+
+    call = node.ai_call.calls[-1]["kwargs"]
+    active_prompt = call["system_prompt"] + "\n" + call["question"]
+    assert "supporting_fact_ids" not in active_prompt
+    assert "target_entity_id" not in active_prompt
+    assert '"remediation_available": true' not in active_prompt
+    assert "修复命令可直接复制执行" not in active_prompt
+
+
 def test_conclusion_prompt_supports_independent_response_language():
     prompt = get_workflow_prompt(
         "conclusion",
@@ -1370,35 +3559,129 @@ def test_holmes_service_i18n_getters_preserve_default_behavior_and_allow_overrid
     assert service.get_response_language() == "en"
 
 
-def test_inject_aiops_case_plan_item_deterministic_routing():
-    """collect_aiops_case must be deterministically injected as the first critical
-    plan item when available + an abnormal Pod is known (small models under-select
-    it). Behavior-safe: no-op when tool absent / no abnormal pod / already present."""
+def test_aiops_case_selection_uses_generic_mandatory_plan_contract():
+    """Every abnormal Pod gets a generic coarse plan item while Qwen still
+    executes tools and selects fine-grained fallback evidence."""
     from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 
-    class _Tool:
-        def __init__(self, name):
-            self.name = name
+    assert not hasattr(EvidenceCollectorNode, "_inject_aiops_case_plan_item")
+    assert hasattr(EvidenceCollectorNode, "_ensure_mandatory_aiops_case_plan")
+    assert "每个已确认异常 Pod" in EVIDENCE_COLLECTOR_PROMPT
+    assert "mandatory" in EVIDENCE_COLLECTOR_PROMPT
+    assert "Qwen 仍负责执行真实工具" in EVIDENCE_COLLECTOR_PROMPT
+    assert "kubectl 只能作为" in EVIDENCE_COLLECTOR_PROMPT
+    assert "故障类型特判" in EVIDENCE_COLLECTOR_PROMPT
 
-    node = EvidenceCollectorNode.__new__(EvidenceCollectorNode)
-    handoff = {"abnormal_pods": [{"name": "aiops-oom-business", "namespace": "aiops-temp", "status": "CrashLoopBackOff"}]}
-    base_plan = [{"id": "g1-describe", "tool": "kubectl_describe", "level": "critical"}]
 
-    # available + abnormal pod -> injected first, original kept
-    node.tools = [_Tool("collect_aiops_case"), _Tool("kubectl_describe")]
-    out = node._inject_aiops_case_plan_item(base_plan, handoff)
-    assert out[0]["tool"] == "collect_aiops_case"
-    assert out[0]["tool_args"] == {"namespace": "aiops-temp", "pod": "aiops-oom-business", "scenario": "auto"}
-    assert len(out) == 2
+def test_aiops_prompts_preserve_exact_observability_and_causality():
+    assert "dimension_details" in EVIDENCE_COLLECTOR_PROMPT
+    assert "coarse 项由系统按异常 Pod 实体通用补齐" in EVIDENCE_COLLECTOR_PROMPT
+    assert "不要重复规划同目标的 describe、YAML、events、logs 或 Prometheus" in EVIDENCE_COLLECTOR_PROMPT
+    assert "决定性 Fact 的原始 value 必须逐字保留" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "完整 trace_id" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "Tempo span attributes" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "不得把 direct/high 降级为 weak" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "不同 trace_id 不得合并" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "duration_us=0" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "不能推断请求无响应或失败" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "决定性 Fact 的原始 value 必须逐字保留" in CONCLUSION_FORMATTER_PROMPT
+    assert "必须逐字保留 topology relationship" in CONCLUSION_FORMATTER_PROMPT
+    assert "不同 trace_id 不得写成同一条调用链" in CONCLUSION_FORMATTER_PROMPT
+    assert "TOPOLOGY_EXACT_EDGES" in CONCLUSION_FORMATTER_PROMPT
+    assert "禁止把 `owned_by` 反向改写为 `owns`" in CONCLUSION_FORMATTER_PROMPT
+    assert "K8S_SIGNAL" in CONCLUSION_FORMATTER_PROMPT
+    assert "必须逐字引用 Kubernetes 强证据" in CONCLUSION_FORMATTER_PROMPT
+    assert "IGNORE_UNSUPPORTED_LAYER_NUMERIC_FACTS" in CONCLUSION_FORMATTER_PROMPT
+    assert "未被真实 evidence 支持的 Layer 数值" in CONCLUSION_FORMATTER_PROMPT
+    assert "只允许逐字复制结构化上下文中真实存在的 evidence_ref" in CONCLUSION_FORMATTER_PROMPT
+    assert "拓扑关系只能证明实体关系" in CONCLUSION_FORMATTER_PROMPT
+    assert "稀疏或单点指标不能证明稳定或正常" in CONCLUSION_FORMATTER_PROMPT
+    for seeded_example in (
+        "metric-...-prometheus",
+        "log-...-current",
+        "deepflow-...",
+        "k8s-...-pod-yaml",
+        "allocated business cache chunk=25 approx_mib=50",
+        "memory limit: 256Mi",
+        "共 N 个",
+    ):
+        assert seeded_example not in CONCLUSION_FORMATTER_PROMPT
 
-    # tool not available -> no-op
-    node.tools = [_Tool("kubectl_describe")]
-    assert node._inject_aiops_case_plan_item(base_plan, handoff) == base_plan
 
-    # no abnormal pod (healthy/query) -> no-op
-    node.tools = [_Tool("collect_aiops_case")]
-    assert node._inject_aiops_case_plan_item(base_plan, {"abnormal_pods": []}) == base_plan
+def test_rca_and_conclusion_prompts_require_verbatim_per_pod_observability():
+    rca_phrases = [
+        "每个异常 Pod 都必须独立形成证据分析和根因结论",
+        "至少引用一条最有判别力的日志 message 原文",
+        "决定性 Fact 的原始 value 必须逐字保留",
+        "不能只写抽象故障标签",
+    ]
+    conclusion_phrases = [
+        "可观测性表格只做跨维度摘要",
+        "根因分析正文必须按每个异常 Pod 展开真实数据",
+        "使用粗体突出决定性原始事实",
+        "决定性 Fact 的原始 value 必须逐字保留",
+        "每个异常 Pod 至少引用一条决定性原始事实",
+    ]
 
-    # already present -> no duplicate
-    existing = [{"id": "x", "tool": "collect_aiops_case"}]
-    assert node._inject_aiops_case_plan_item(existing, handoff) == existing
+    for phrase in rca_phrases:
+        assert phrase in ROOT_CAUSE_ANALYZER_PROMPT
+    for phrase in conclusion_phrases:
+        assert phrase in CONCLUSION_FORMATTER_PROMPT
+
+
+def test_active_rca_and_conclusion_prompts_are_fixture_free():
+    active_prompts = ROOT_CAUSE_ANALYZER_PROMPT + CONCLUSION_FORMATTER_PROMPT
+    for forbidden in (
+        "PAYMENT_GATEWAY_TOKEN",
+        "/allocate",
+        "trace-oom",
+        "trace-config",
+        "aiops-traced",
+        "required config PAYMENT_GATEWAY_TOKEN is missing",
+    ):
+        assert forbidden not in active_prompts
+
+    for phrase in (
+        "决定性 Fact 的原始 value 必须逐字保留",
+        "只有完整 trace_id 完全相同的记录才能合并",
+        "topology relationship、source、target、directness、confidence",
+    ):
+        assert phrase in ROOT_CAUSE_ANALYZER_PROMPT
+        assert phrase in CONCLUSION_FORMATTER_PROMPT
+
+
+def test_prompts_refine_runbooks_after_live_evidence_and_preserve_topology_semantics():
+    evidence_phrases = [
+        "拿到 `collect_aiops_case` 的真实结果后",
+        "补充更具体的 runbook",
+        "同一 runbook 在整个诊断流程中只允许调用一次",
+        "通用 CrashLoop runbook",
+    ]
+    conclusion_phrases = [
+        "`calls` 只表示调用或流量关系，不表示控制、归属或 owner",
+        "`owned_by` 才表示 Kubernetes 控制归属",
+        "完整 evidence_ref",
+        "禁止使用 case_id、工具名或截断字符串代替 evidence_ref",
+    ]
+
+    for phrase in evidence_phrases:
+        assert phrase in EVIDENCE_COLLECTOR_PROMPT
+    for phrase in conclusion_phrases:
+        assert phrase in CONCLUSION_FORMATTER_PROMPT
+
+
+def test_deployment_disables_legacy_evidence_early_stop():
+    manifest_path = Path(__file__).resolve().parents[3] / "deploy" / "configmap" / "config.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    config = yaml.safe_load(manifest["data"]["config.yaml"])
+
+    assert config["workflow"]["evidence"]["early_stop"]["enabled"] is False
+
+
+def test_traced_oom_manifest_does_not_leak_fault_answer_in_span_attributes():
+    manifest = (
+        Path(__file__).resolve().parents[3] / "testcases" / "aiops-traced-oom.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert "aiops.fault.type" not in manifest
+    assert "resource.memory.oomkilled" not in manifest

@@ -16,6 +16,7 @@
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
@@ -43,6 +44,11 @@ class LayerClassifierNode(WorkflowNode):
         "get_aiops_case_evidence",
         "search_aiops_cases",
     ]
+    FULL_DIAGNOSIS_ALLOWED_TOOLS = {
+        "kubectl_get_by_kind_in_cluster",
+        "kubectl_get_by_name",
+        "fetch_runbook",
+    }
 
     def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
         """
@@ -76,6 +82,22 @@ class LayerClassifierNode(WorkflowNode):
 
     def _is_direct_query_mode(self) -> bool:
         return self._get_query_mode() == "direct"
+
+    def _is_explicit_pod_early_stop_enabled(self, default: bool = True) -> bool:
+        cfg = self._get_workflow_config()
+        node_cfg = cfg.get("layer", {}) if isinstance(cfg, dict) else {}
+        early_cfg = node_cfg.get("early_stop", {}) if isinstance(node_cfg, dict) else {}
+        if isinstance(early_cfg, dict) and "explicit_pod_enabled" in early_cfg:
+            return self._parse_bool_config(early_cfg.get("explicit_pod_enabled"), default)
+        return default
+
+    def _get_layer_blocked_tool_names(self) -> set[str]:
+        return {
+            str(getattr(tool, "name", "") or "")
+            for tool in (getattr(self, "tools", []) or [])
+            if str(getattr(tool, "name", "") or "")
+            and str(getattr(tool, "name", "") or "") not in self.FULL_DIAGNOSIS_ALLOWED_TOOLS
+        }
 
     def _get_layer_prompt(self) -> str:
         if self._is_direct_query_mode():
@@ -477,6 +499,38 @@ class LayerClassifierNode(WorkflowNode):
             return started_call_ids.issubset(result_call_ids)
         return False
 
+    @staticmethod
+    def _should_stop_explicit_pod_early(
+        question: str,
+        thinking_events: List[Dict[str, Any]],
+    ) -> bool:
+        """Stop full diagnosis after the explicitly requested Pod is verified."""
+        question_text = str(question or "").lower()
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("status") != "success"
+                or event.get("semantic_success", True) is False
+                or event.get("tool_name") != "kubectl_get_by_name"
+            ):
+                continue
+            tool_args = event.get("tool_args") or {}
+            if not isinstance(tool_args, dict):
+                continue
+            kind = str(tool_args.get("kind") or "").strip().lower()
+            name = str(tool_args.get("name") or "").strip().lower()
+            namespace = str(tool_args.get("namespace") or "").strip().lower()
+            if kind not in {"pod", "pods"} or not name or not namespace:
+                continue
+            result = str(event.get("result") or event.get("result_preview") or "").lower()
+            if (
+                name in question_text
+                and namespace in question_text
+                and name in result
+            ):
+                return True
+        return False
+
     def _build_query_direct_failure_result(
         self,
         question: str,
@@ -746,6 +800,7 @@ class LayerClassifierNode(WorkflowNode):
     ) -> Dict[str, Any]:
         """Build a compact structured handoff for downstream nodes."""
         active_entities = self._normalize_entities(layer_result.get("key_entities", []))
+        explicit_pod_scope = self._get_explicit_pod_scope(question, active_entities)
         abnormal_pods = self._normalize_abnormal_pods(
             layer_result.get("abnormal_pods"),
             active_entities,
@@ -753,6 +808,21 @@ class LayerClassifierNode(WorkflowNode):
         )
         current_abnormal_pods = self._extract_current_abnormal_pods_from_events(thinking_events)
         current_abnormal_summary = self._extract_current_abnormal_summary_from_events(thinking_events)
+        if explicit_pod_scope:
+            current_abnormal_pods = [
+                pod
+                for pod in current_abnormal_pods
+                if self._pod_matches_scope(pod, explicit_pod_scope)
+            ]
+            abnormal_pods = [
+                pod
+                for pod in abnormal_pods
+                if self._pod_matches_scope(pod, explicit_pod_scope)
+            ]
+            current_abnormal_summary = self._scope_abnormal_summary_to_pod(
+                current_abnormal_summary,
+                explicit_pod_scope,
+            )
         if current_abnormal_pods:
             abnormal_pods = self._merge_current_abnormal_pods(abnormal_pods, current_abnormal_pods)
         active_signals = []
@@ -766,6 +836,8 @@ class LayerClassifierNode(WorkflowNode):
                 rb_id = self._extract_runbook_id(ev)
                 if rb_id and rb_id not in matched_runbooks:
                     matched_runbooks.append(rb_id)
+            if explicit_pod_scope and tool_name == "kubectl_get_by_kind_in_cluster":
+                continue
 
             signal = ev.get("result", "") or ev.get("result_preview", "")
             if signal:
@@ -792,8 +864,30 @@ class LayerClassifierNode(WorkflowNode):
             default_pod_abnormal_type=pod_abnormal_type,
             layer_result=layer_result,
         )
+        if explicit_pod_scope:
+            must_verify = [
+                "本轮仅验证用户明确指定的 namespace + Pod；全局扫描中的其他异常只作为背景",
+                "确认目标 Pod 当前仍存在于指定 namespace",
+                "确认目标 Pod 的 active_signals 仍能被真实工具结果验证",
+                "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
+            ]
+        else:
+            must_verify = [
+                "以 abnormal_groups、abnormal_pods、current_abnormal_summary 为覆盖基准",
+                "异常组完整/最小验证由 evidence 节点按 abnormal_groups 覆盖，避免遗漏 Terminating、Pending 等并发异常状态",
+                "确认 active_entities 中的对象当前仍存在于指定 namespace",
+                "确认 active_signals 仍能被真实工具结果验证",
+                "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
+                "如果某个异常 Pod 不在当前异常 Pod 列表中，必须把它视为历史事件噪音而不是当前故障",
+            ]
         handoff = {
-            "diagnosis_scope": "current_state_only" if "之前" in question or "当前" in question or "现在" in question else "question_scope",
+            "diagnosis_scope": (
+                "explicit_pod"
+                if explicit_pod_scope
+                else "current_state_only"
+                if "之前" in question or "当前" in question or "现在" in question
+                else "question_scope"
+            ),
             "layer": layer_value,
             "derived_layer": self._pick_text(layer_result.get("derived_layer"), layer_value),
             "layers": [l.value if hasattr(l, "value") else str(l) for l in layers],
@@ -813,14 +907,7 @@ class LayerClassifierNode(WorkflowNode):
             "active_signals": active_signals[:12],
             "possible_scenarios": layer_result.get("possible_scenarios", []),
             "matched_runbooks": matched_runbooks,
-            "must_verify": [
-                "以 abnormal_groups、abnormal_pods、current_abnormal_summary 为覆盖基准",
-                "异常组完整/最小验证由 evidence 节点按 abnormal_groups 覆盖，避免遗漏 Terminating、Pending 等并发异常状态",
-                "确认 active_entities 中的对象当前仍存在于指定 namespace",
-                "确认 active_signals 仍能被真实工具结果验证",
-                "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
-                "如果某个异常 Pod 不在当前异常 Pod 列表中，必须把它视为历史事件噪音而不是当前故障",
-            ],
+            "must_verify": must_verify,
             "do_not_change": [
                 "不要把上游 namespace、Pod、Service、Node 名称改写成其他对象",
                 "不要把历史 event 当成当前故障",
@@ -828,6 +915,59 @@ class LayerClassifierNode(WorkflowNode):
             ],
         }
         return LayerHandoff.model_validate(handoff).model_dump(exclude_none=True)
+
+    @classmethod
+    def _get_explicit_pod_scope(
+        cls,
+        question: str,
+        active_entities: List[Dict[str, Any]],
+    ) -> Optional[tuple[str, str]]:
+        text = str(question or "").lower()
+        candidates = []
+        for entity in active_entities or []:
+            if str(entity.get("type") or "").strip().lower() != "pod":
+                continue
+            namespace = cls._pick_text(entity.get("namespace")).lower()
+            name = cls._pick_text(entity.get("name"), entity.get("value")).lower()
+            if namespace and name and namespace in text and name in text:
+                candidates.append((namespace, name))
+        return candidates[0] if len(candidates) == 1 else None
+
+    @classmethod
+    def _pod_matches_scope(
+        cls,
+        pod: Dict[str, Any],
+        scope: tuple[str, str],
+    ) -> bool:
+        namespace, name = scope
+        return (
+            cls._pick_text(pod.get("namespace")).lower() == namespace
+            and cls._pick_text(pod.get("name")).lower() == name
+        )
+
+    @classmethod
+    def _scope_abnormal_summary_to_pod(
+        cls,
+        summary: Dict[str, Any],
+        scope: tuple[str, str],
+    ) -> Dict[str, Any]:
+        scoped = dict(summary or {})
+        namespace, name = scope
+        selected_rows = []
+        status_counts: Dict[str, int] = {}
+        for row in scoped.get("selected_rows") or []:
+            parts = str(row).split()
+            if len(parts) < 4:
+                continue
+            if parts[0].lower() != namespace or parts[1].lower() != name:
+                continue
+            selected_rows.append(str(row))
+            status = parts[3]
+            status_counts[status] = status_counts.get(status, 0) + 1
+        scoped["selected_rows"] = selected_rows
+        scoped["status_counts"] = status_counts
+        scoped["total_abnormal"] = len(selected_rows)
+        return scoped
 
     def _guard_healthy_with_active_abnormalities(
         self,
@@ -1076,6 +1216,8 @@ class LayerClassifierNode(WorkflowNode):
             return "TerminatingStuck"
         if "CrashLoopBackOff" in status_set:
             return cls._pick_text(default_pod_abnormal_type, "CrashLoopBackOffRuntime")
+        if "RecentRestart" in status_set:
+            return "CrashLoopBackOffRuntime"
         if "Evicted" in status_set:
             return "Evicted"
         if "Pending" in status_set:
@@ -1117,16 +1259,28 @@ class LayerClassifierNode(WorkflowNode):
             header = str(structured.get("header", ""))
             if not re.search(r"\bREADY\b.*\bSTATUS\b", header):
                 continue
+            recent_restart_rows = {
+                str(row)
+                for row in (structured.get("recent_restart_rows") or [])
+            }
             for row in structured.get("selected_rows") or []:
-                parts = str(row).split()
+                row_text = str(row)
+                parts = row_text.split()
                 if len(parts) < 4:
                     continue
                 namespace, name, ready, status = parts[0], parts[1], parts[2], parts[3]
-                if cls._is_normal_resource_status(status):
+                is_recent_restart = row_text in recent_restart_rows
+                if is_recent_restart:
+                    status = "RecentRestart"
+                elif cls._is_normal_resource_status(status):
                     continue
                 if "/" in ready:
                     current, desired = ready.split("/", 1)
-                    if current == desired and status.lower() == "running":
+                    if (
+                        current == desired
+                        and status.lower() == "running"
+                        and not is_recent_restart
+                    ):
                         continue
                 key = (namespace, name)
                 if key in seen:
@@ -1148,6 +1302,10 @@ class LayerClassifierNode(WorkflowNode):
             if not re.search(r"\bREADY\b.*\bSTATUS\b", header):
                 continue
 
+            recent_restart_rows = {
+                str(row)
+                for row in (structured.get("recent_restart_rows") or [])
+            }
             status_counts = {}
             for status, count in (structured.get("status_counts") or {}).items():
                 status_text = cls._pick_text(status)
@@ -1160,14 +1318,17 @@ class LayerClassifierNode(WorkflowNode):
 
             selected_rows = []
             for row in structured.get("selected_rows") or []:
-                parts = str(row).split()
+                row_text = str(row)
+                parts = row_text.split()
                 if len(parts) < 4:
                     continue
                 status = parts[3]
-                if cls._is_normal_resource_status(status):
+                if row_text in recent_restart_rows:
+                    status = "RecentRestart"
+                elif cls._is_normal_resource_status(status):
                     continue
-                selected_rows.append(str(row))
-                if not structured.get("status_counts"):
+                selected_rows.append(row_text)
+                if status == "RecentRestart" or not structured.get("status_counts"):
                     status_counts[status] = status_counts.get(status, 0) + 1
 
             return {
@@ -1361,7 +1522,23 @@ class LayerClassifierNode(WorkflowNode):
             logger.info("📍 [layer] 阶段1: AICall 工具调用开始 | tools=%d",
                         len(getattr(self, 'tools', [])))
             early_stop_enabled = self._is_early_stop_enabled(default=True)
-            logger.info("🧭 [layer] early_stop=%s", early_stop_enabled)
+            explicit_pod_early_stop_enabled = self._is_explicit_pod_early_stop_enabled(
+                default=True
+            )
+            logger.info(
+                "🧭 [layer] early_stop=%s explicit_pod_early_stop=%s",
+                early_stop_enabled,
+                explicit_pod_early_stop_enabled,
+            )
+            if self._is_direct_query_mode() and early_stop_enabled:
+                stop_checker = self._should_stop_query_direct_early
+            elif explicit_pod_early_stop_enabled:
+                stop_checker = lambda events: self._should_stop_explicit_pod_early(
+                    question,
+                    events,
+                )
+            else:
+                stop_checker = None
             response, thinking_events = self._call_llm(
                 question,
                 self._get_layer_prompt(),
@@ -1375,13 +1552,9 @@ class LayerClassifierNode(WorkflowNode):
                 blocked_tool_names=(
                     self.QUERY_DIRECT_BLOCKED_TOOLS
                     if self._is_direct_query_mode()
-                    else []
+                    else self._get_layer_blocked_tool_names()
                 ),
-                stop_checker=(
-                    self._should_stop_query_direct_early
-                    if self._is_direct_query_mode() and early_stop_enabled
-                    else None
-                ),
+                stop_checker=stop_checker,
             )
 
             stage1_text = (response.result or "") if response else ""
@@ -1605,15 +1778,23 @@ class LayerClassifierNode(WorkflowNode):
             f"# 失败原因\n{failure_reason or '未提供'}\n\n"
             f"# 分析文本\n{full_analysis_text or '无'}"
         )
-        structured, raw = ai_call.call_structured(
-            system_prompt=extract_prompt,
-            question=extract_input,
-            schema=LayerOutput,
-            node_id="layer_extract",
-            run_id=getattr(self, "current_run_id", ""),
-            max_tokens=2048,
-            allow_text_fallback=True,
-        )
+        llm_start = time.time()
+        try:
+            structured, raw = ai_call.call_structured(
+                system_prompt=extract_prompt,
+                question=extract_input,
+                schema=LayerOutput,
+                node_id="layer_extract",
+                run_id=getattr(self, "current_run_id", ""),
+                max_tokens=2048,
+                allow_text_fallback=True,
+            )
+        finally:
+            if self.metrics:
+                self.metrics.record_llm_call(
+                    self.node_id,
+                    (time.time() - llm_start) * 1000,
+                )
         parsed = structured.model_dump(exclude_none=True) if structured is not None else None
 
         if parsed is None:

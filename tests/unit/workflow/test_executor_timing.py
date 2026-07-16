@@ -1,8 +1,10 @@
+import json
 import os
 import sys
 import time
 import types
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,7 +12,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.service import HolmesService
 from app.core.skills.models import EvidenceItem, EvidenceLevel
-from app.core.workflow.executor import WorkflowExecutor
+from app.core.workflow.executor import WorkflowExecutor, _missing_structured_actions_reason
+from app.core.workflow.metrics import WorkflowMetrics
+from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
+from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
+from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
+from app.core.workflow.schemas import EvidencePlanOutput, LayerOutput
 
 
 def _install_fake_langfuse(monkeypatch):
@@ -273,6 +280,30 @@ def test_executor_evidence_snapshot_is_json_serializable():
     json.dumps(snapshot, ensure_ascii=False)
 
 
+def test_executor_evidence_handoff_summary_uses_structured_plan_counts():
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    state = {
+        "evidence_analysis": json.dumps({
+            "plan_total": 2,
+            "plan_collected": 2,
+        }),
+        "evidence_items": [
+            EvidenceItem(
+                id=f"item-{index}",
+                description="evidence",
+                level=EvidenceLevel.IMPORTANT,
+                collected=True,
+                source="layer_verified" if index >= 2 else "thinking_match",
+            )
+            for index in range(5)
+        ],
+    }
+
+    summary = executor._format_handoff_summary("evidence", state)
+
+    assert summary.startswith("evidence_items=2/2\n")
+
+
 class _SlowNode:
     def __init__(self, node_id: str):
         self.node_id = node_id
@@ -357,3 +388,383 @@ def test_workflow_to_text_renders_heartbeat_lines():
 
     assert "仍在处理" in output
     assert "汇总总结" in output
+
+
+def test_metrics_rebuilds_real_llm_and_tool_counts_from_thinking_events():
+    metrics = WorkflowMetrics(run_id="runtime-facts")
+    events = [
+        {
+            "type": "ai_usage",
+            "node": "layer",
+            "timestamp": 1.0,
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        },
+        {
+            "type": "tool_start",
+            "node": "layer",
+            "timestamp": 2.0,
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "tool_call_id": "tool-1",
+        },
+        {
+            "type": "tool_result",
+            "node": "layer",
+            "timestamp": 2.25,
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "tool_call_id": "tool-1",
+            "status": "success",
+        },
+        {
+            "type": "ai_usage",
+            "node": "layer",
+            "timestamp": 3.0,
+            "usage": {"input_tokens": 200, "output_tokens": 20},
+        },
+        {
+            "type": "tool_start",
+            "node": "layer",
+            "timestamp": 4.0,
+            "tool_name": "kubectl_get_by_name",
+            "tool_call_id": "tool-2",
+        },
+    ]
+
+    metrics.rebuild_runtime_counts(events)
+
+    assert metrics.total_llm_calls == 2
+    assert metrics.total_tool_calls == 2
+    assert metrics.successful_tool_calls == 1
+    assert metrics.failed_tool_calls == 1
+    assert metrics.total_tool_duration_ms == pytest.approx(250.0)
+    assert metrics.tool_call_details == [
+        {
+            "tool": "kubectl_get_by_kind_in_cluster",
+            "tool_call_id": "tool-1",
+            "duration_ms": pytest.approx(250.0),
+            "success": True,
+            "node": "layer",
+        },
+        {
+            "tool": "kubectl_get_by_name",
+            "tool_call_id": "tool-2",
+            "duration_ms": 0.0,
+            "success": False,
+            "node": "layer",
+        },
+    ]
+
+
+def test_metrics_runtime_rebuild_deduplicates_replayed_events():
+    metrics = WorkflowMetrics(run_id="runtime-replay")
+    usage = {
+        "type": "ai_usage",
+        "node": "evidence",
+        "timestamp": 1.0,
+        "iteration": 2,
+        "usage": {"input_tokens": 100, "output_tokens": 10},
+    }
+    start = {
+        "type": "tool_start",
+        "node": "evidence",
+        "timestamp": 2.0,
+        "tool_name": "collect_aiops_case",
+        "tool_call_id": "tool-case",
+    }
+    result = {
+        "type": "tool_result",
+        "node": "evidence",
+        "timestamp": 3.0,
+        "tool_name": "collect_aiops_case",
+        "tool_call_id": "tool-case",
+        "status": "success",
+    }
+
+    metrics.rebuild_runtime_counts([usage, usage, start, start, result, result])
+
+    assert metrics.total_llm_calls == 1
+    assert metrics.total_tool_calls == 1
+    assert metrics.successful_tool_calls == 1
+    assert metrics.failed_tool_calls == 0
+    assert metrics.total_tool_duration_ms == pytest.approx(1000.0)
+
+
+def test_metrics_runtime_rebuild_pairs_anonymous_start_and_result_as_one_call():
+    metrics = WorkflowMetrics(run_id="runtime-anonymous")
+    events = [
+        {
+            "type": "tool_start",
+            "node": "evidence",
+            "timestamp": 2.0,
+            "tool_name": "collect_aiops_case",
+        },
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "timestamp": 2.4,
+            "tool_name": "collect_aiops_case",
+            "status": "success",
+        },
+    ]
+
+    metrics.rebuild_runtime_counts(events)
+
+    assert metrics.total_tool_calls == 1
+    assert metrics.successful_tool_calls == 1
+    assert metrics.failed_tool_calls == 0
+    assert metrics.total_tool_duration_ms == pytest.approx(400.0)
+
+
+def test_metrics_stats_block_has_balanced_code_fence():
+    metrics = WorkflowMetrics(run_id="stats-fence")
+    metrics.end_time = metrics.start_time + 1
+
+    result = metrics.format_stats_block()
+
+    assert result.count("```") % 2 == 0
+    assert "```text" in result
+
+
+def test_rollout_status_verification_is_not_treated_as_write_advice():
+    report = """
+## 验证步骤
+`kubectl rollout status deployment/api -n demo --timeout=60s`
+"""
+    plan = SimpleNamespace(remediation_available=False, actions=[])
+
+    assert _missing_structured_actions_reason(report, plan) is None
+
+
+def test_bare_write_command_name_in_caution_is_not_treated_as_actionable_advice():
+    report = """
+## ⚠️ 注意事项
+- 执行 `kubectl set env` 和 `kubectl set resources` 会触发 Deployment 滚动更新。
+"""
+    plan = SimpleNamespace(remediation_available=False, actions=[])
+
+    assert _missing_structured_actions_reason(report, plan) is None
+
+
+class _DirectStructuredAICall:
+    def call_structured(self, **kwargs):
+        schema = kwargs["schema"]
+        if schema is LayerOutput:
+            value = schema.model_validate({
+                "layer": "L2",
+                "reasoning": "真实工具结果确认容器运行时异常",
+            })
+        elif schema is EvidencePlanOutput:
+            value = schema.model_validate({
+                "layer": "L2",
+                "evidence_plan": [{
+                    "id": "case-pod-a",
+                    "description": "采集 Pod 多维可观测性证据",
+                    "level": "critical",
+                    "tool": "collect_aiops_case",
+                    "command": "default/pod-a",
+                    "tool_args": {"namespace": "default", "pod": "pod-a"},
+                }],
+            })
+        else:
+            raise AssertionError(f"unexpected schema: {schema}")
+        return value, value.model_dump_json()
+
+
+class _DirectCompressionAICall:
+    def call_simple(self, **kwargs):
+        return "压缩后的真实证据"
+
+
+def test_layer_structured_extract_counts_one_direct_llm_request():
+    metrics = WorkflowMetrics(run_id="layer-direct")
+    node = LayerClassifierNode(metrics=metrics)
+    node.ai_call = _DirectStructuredAICall()
+
+    result = node._extract_with_lite_llm(
+        question="我的集群有什么问题",
+        full_analysis_text="kubectl 已确认 pod-a CrashLoopBackOff",
+    )
+
+    assert result["layer"] == "L2"
+    assert metrics.direct_llm_calls == 1
+    assert metrics.total_llm_calls == 1
+
+
+def test_evidence_plan_counts_one_direct_llm_request():
+    metrics = WorkflowMetrics(run_id="evidence-plan-direct")
+    node = EvidenceCollectorNode(metrics=metrics)
+    node.ai_call = _DirectStructuredAICall()
+
+    plan, _ = node._generate_structured_evidence_plan(
+        system_prompt="生成最小证据计划",
+        user_message="诊断 default/pod-a",
+        layer_str="L2",
+    )
+
+    assert plan[0]["tool"] == "collect_aiops_case"
+    assert metrics.direct_llm_calls == 1
+    assert metrics.total_llm_calls == 1
+
+
+def test_llm_context_compaction_counts_one_direct_llm_request():
+    metrics = WorkflowMetrics(run_id="compact-direct")
+    node = ConclusionFormatterNode(metrics=metrics)
+    node.ai_call = _DirectCompressionAICall()
+
+    result = node._compact_context("x" * 5000, max_chars=100)
+
+    assert result == "压缩后的真实证据"
+    assert metrics.direct_llm_calls == 1
+    assert metrics.total_llm_calls == 1
+
+
+def test_metrics_separates_parallel_tool_cumulative_and_wall_time():
+    metrics = WorkflowMetrics(run_id="parallel-tools")
+    events = [
+        {
+            "type": "tool_start",
+            "node": "evidence",
+            "timestamp": 10.0,
+            "tool_name": "collect_aiops_case",
+            "tool_call_id": "case-a",
+        },
+        {
+            "type": "tool_start",
+            "node": "evidence",
+            "timestamp": 10.0,
+            "tool_name": "collect_aiops_case",
+            "tool_call_id": "case-b",
+        },
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "timestamp": 20.0,
+            "tool_name": "collect_aiops_case",
+            "tool_call_id": "case-a",
+            "status": "success",
+        },
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "timestamp": 20.0,
+            "tool_name": "collect_aiops_case",
+            "tool_call_id": "case-b",
+            "status": "success",
+        },
+    ]
+
+    metrics.rebuild_runtime_counts(events)
+
+    assert metrics.total_tool_duration_ms == pytest.approx(20000.0)
+    assert metrics.tool_wall_duration_ms == pytest.approx(10000.0)
+    stats = metrics.format_stats_block()
+    assert "累计耗时 20.0s" in stats
+    assert "并行关键路径 10.0s" in stats
+
+
+def test_metrics_reports_requests_executions_dedup_and_unfinished_separately():
+    metrics = WorkflowMetrics(run_id="tool-real-counts")
+    events = [
+        {
+            "type": "tool_start",
+            "node": "layer",
+            "timestamp": 1.0,
+            "tool_name": "kubectl_get_by_name",
+            "tool_call_id": "first",
+        },
+        {
+            "type": "tool_result",
+            "node": "layer",
+            "timestamp": 2.0,
+            "tool_name": "kubectl_get_by_name",
+            "tool_call_id": "first",
+            "status": "success",
+        },
+        {
+            "type": "tool_start",
+            "node": "layer",
+            "timestamp": 3.0,
+            "tool_name": "kubectl_get_by_name",
+            "tool_call_id": "dedup",
+        },
+        {
+            "type": "tool_result",
+            "node": "layer",
+            "timestamp": 3.01,
+            "tool_name": "kubectl_get_by_name",
+            "tool_call_id": "dedup",
+            "status": "success",
+            "deduplicated": True,
+            "original_tool_call_id": "first",
+        },
+        {
+            "type": "tool_start",
+            "node": "layer",
+            "timestamp": 4.0,
+            "tool_name": "kubectl_get_by_name",
+            "tool_call_id": "unfinished",
+        },
+    ]
+
+    metrics.rebuild_runtime_counts(events)
+
+    assert metrics.total_tool_calls == 3
+    assert metrics.executed_tool_calls == 1
+    assert metrics.deduplicated_tool_calls == 1
+    assert metrics.successful_tool_calls == 2
+    assert metrics.failed_tool_calls == 1
+    assert metrics.total_tool_duration_ms == pytest.approx(1000.0)
+    stats = metrics.format_stats_block()
+    assert "请求 3" in stats
+    assert "实际执行 1" in stats
+    assert "去重 1" in stats
+    assert "失败/未完成 1" in stats
+
+
+def test_metrics_uses_provider_model_duration_instead_of_agent_wall_time():
+    metrics = WorkflowMetrics(run_id="model-duration")
+    metrics.record_llm_call(
+        "conclusion",
+        250.0,
+        request_count=1,
+        source="direct",
+    )
+    events = [
+        {
+            "type": "ai_usage",
+            "node": "layer",
+            "timestamp": 2.0,
+            "iteration": 1,
+            "model_duration_ms": 600.0,
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        },
+        {
+            "type": "tool_start",
+            "node": "layer",
+            "timestamp": 2.0,
+            "tool_name": "collect_aiops_case",
+            "tool_call_id": "case-a",
+        },
+        {
+            "type": "tool_result",
+            "node": "layer",
+            "timestamp": 12.0,
+            "tool_name": "collect_aiops_case",
+            "tool_call_id": "case-a",
+            "status": "success",
+        },
+        {
+            "type": "ai_usage",
+            "node": "layer",
+            "timestamp": 13.0,
+            "iteration": 2,
+            "model_duration_ms": 900.0,
+            "usage": {"input_tokens": 200, "output_tokens": 20},
+        },
+    ]
+
+    metrics.rebuild_runtime_counts(events)
+
+    assert metrics.total_llm_calls == 3
+    assert metrics.total_llm_duration_ms == pytest.approx(1750.0)
+    assert metrics.nodes["conclusion"].llm_duration_ms == pytest.approx(250.0)
+    assert metrics.nodes["layer"].llm_duration_ms == pytest.approx(1500.0)

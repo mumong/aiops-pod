@@ -10,6 +10,27 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 EvidenceLevelName = Literal["critical", "important", "optional", "reference"]
+FactDimension = Literal[
+    "kubernetes",
+    "metrics",
+    "logging",
+    "tracing",
+    "topology",
+    "coverage",
+]
+FactTypeName = Literal[
+    "state",
+    "measurement",
+    "event",
+    "log",
+    "span",
+    "flow",
+    "relationship",
+    "coverage",
+]
+FactDirectness = Literal["direct", "derived", "related_context"]
+FactConfidence = Literal["high", "medium", "low", "weak"]
+FactStrength = Literal["critical", "strong", "supporting", "context"]
 EvidenceToolName = Literal[
     "kubectl_describe",
     "kubectl_get_by_name",
@@ -338,6 +359,67 @@ class ToolObservationSummary(BaseModel):
     raw_ref: str = ""
 
 
+class FactRecord(BaseModel):
+    fact_id: str = Field(pattern=r"^fact-[A-Za-z0-9_-]{8,64}$")
+    entity_id: str = Field(min_length=1)
+    entity_kind: str = Field(min_length=1)
+    namespace: str | None = None
+    entity_name: str | None = None
+    dimension: FactDimension
+    fact_type: FactTypeName
+    attribute: str = Field(min_length=1)
+    value: Any
+    unit: str | None = None
+    timestamp: str | None = None
+    start: str | None = None
+    end: str | None = None
+    source_system: str = Field(min_length=1)
+    directness: FactDirectness
+    confidence: FactConfidence
+    strength: FactStrength | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_evidence_semantics(self) -> "FactRecord":
+        if self.directness == "related_context" and self.confidence == "high":
+            raise ValueError("related_context facts cannot have high confidence")
+        if self.fact_type != "coverage" and not self.evidence_refs:
+            raise ValueError("non-coverage facts require evidence_refs")
+        return self
+
+
+class FactLedger(BaseModel):
+    contract_version: Literal["aiops.fact-ledger.v1"] = "aiops.fact-ledger.v1"
+    case_id: str = Field(min_length=1)
+    scope_entity_ids: list[str] = Field(min_length=1)
+    records: list[FactRecord] = Field(default_factory=list)
+    record_count: int = Field(default=0, ge=0)
+    truncated: bool = False
+    source: Literal["mcp_canonical", "robusta_legacy_adapter"]
+    legacy_contract: bool = False
+
+    @model_validator(mode="after")
+    def normalize_record_count(self) -> "FactLedger":
+        self.scope_entity_ids = list(dict.fromkeys(
+            entity_id for entity_id in self.scope_entity_ids if entity_id
+        ))
+        if not self.scope_entity_ids:
+            raise ValueError("Fact Ledger requires at least one scope entity")
+        self.record_count = len(self.records)
+        return self
+
+
+class RCAHypothesis(BaseModel):
+    hypothesis_id: str = Field(min_length=1)
+    entity_id: str | None = Field(default=None, min_length=1)
+    summary: str = Field(min_length=1)
+    supporting_fact_ids: list[str] = Field(default_factory=list)
+    contradicting_fact_ids: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class EvidenceMatchItem(BaseModel):
     plan_id: str = Field(min_length=1)
     tool_result_index: int | None = None
@@ -367,6 +449,26 @@ class EvidenceCollectionOutput(BaseModel):
     executed_tool_count: int = Field(default=0, ge=0)
     matched_tool_count: int = Field(default=0, ge=0)
     unplanned_tool_count: int = Field(default=0, ge=0)
+    case_tool_count: int = Field(default=0, ge=0)
+    supplemental_tool_count: int = Field(default=0, ge=0)
+    skipped_plan_count: int = Field(default=0, ge=0)
+    observability_target_total: int = Field(default=0, ge=0)
+    observability_target_collected: int = Field(default=0, ge=0)
+    observability_target_completeness: float = Field(default=0.0, ge=0.0, le=1.0)
+    diagnostic_evidence_total: int = Field(default=0, ge=0)
+    diagnostic_evidence_collected: int = Field(default=0, ge=0)
+    diagnostic_evidence_completeness: float = Field(default=0.0, ge=0.0, le=1.0)
+    diagnostic_evidence_missing: list[str] = Field(default_factory=list)
+    dimension_coverage_total: int = Field(default=0, ge=0)
+    dimension_coverage_collected: int = Field(default=0, ge=0)
+    dimension_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    diagnostic_sufficiency: float = Field(default=0.0, ge=0.0, le=1.0)
+    diagnostic_sufficiency_label: str = ""
+    source_coverage: dict[str, Any] = Field(default_factory=dict)
+    case_target_coverage: dict[str, Any] = Field(default_factory=dict)
+    detail_retrieval: dict[str, Any] = Field(default_factory=dict)
+    diagnostic_sufficiency_summary: dict[str, Any] = Field(default_factory=dict)
+    unresolved_questions: list[str] = Field(default_factory=list)
     evidence_inventory: list[dict[str, Any]] = Field(default_factory=list)
     missing_reasons: list[str] = Field(default_factory=list)
     early_stop: dict[str, Any] = Field(default_factory=dict)
@@ -385,14 +487,20 @@ class ContextCompactionSummary(BaseModel):
 
 
 class RCAOutput(BaseModel):
+    diagnostic_status: Literal["diagnosed", "inconclusive"] = "diagnosed"
     phenomenon: str = ""
     evidence_inventory: list[dict[str, Any]] = Field(default_factory=list)
     evidence_analysis: list[dict[str, Any]] = Field(default_factory=list)
     causal_chain: dict[str, Any] = Field(default_factory=dict)
     root_cause: str = ""
     root_cause_summary: str = ""
-    confidence: float = Field(default=0.1, ge=0.0, le=1.0)
-    confidence_reason: str = ""
+    supporting_fact_ids: list[str] = Field(default_factory=list)
+    contradicting_fact_ids: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    hypotheses: list[RCAHypothesis] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+    confidence_reason: str = Field(min_length=1)
+    claim_validation: dict[str, Any] = Field(default_factory=dict)
     primary_runbooks: list[str] = Field(default_factory=list)
     alternative_causes: list[Any] = Field(default_factory=list)
     limitations: str = ""
@@ -413,6 +521,8 @@ class RCAOutput(BaseModel):
 
         if not (self.root_cause or "").strip():
             raise ValueError("RCA output requires root_cause or root_cause_summary")
+        if not (self.confidence_reason or "").strip():
+            raise ValueError("RCA output requires confidence_reason")
         return self
 
 

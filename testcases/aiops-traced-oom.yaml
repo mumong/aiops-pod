@@ -1,0 +1,325 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-traced-oom
+  labels:
+    aiops.testcase: traced-oom
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traced-oom-app
+  namespace: aiops-traced-oom
+data:
+  server.py: |
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import json
+    import os
+    import re
+    import secrets
+    import time
+    import traceback
+    import urllib.request
+
+    OTLP_ENDPOINT = os.environ.get("OTLP_ENDPOINT", "http://lgtm.xnet.svc:4318/v1/traces")
+    SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "aiops-traced-oom-api")
+    NAMESPACE = os.environ.get("POD_NAMESPACE", "aiops-traced-oom")
+    POD_NAME = os.environ.get("HOSTNAME", "")
+    chunks = []
+
+    def parse_traceparent(value):
+        if value:
+            match = re.match(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$", value.strip())
+            if match:
+                return match.group(1), match.group(2)
+        return secrets.token_hex(16), secrets.token_hex(8)
+
+    def otlp_value(value):
+        if isinstance(value, int):
+            return {"intValue": str(value)}
+        return {"stringValue": str(value)}
+
+    def export_span(trace_id, span_id, start_ns, end_ns, attributes):
+        payload = {
+            "resourceSpans": [{
+                "resource": {"attributes": [
+                    {"key": "service.name", "value": {"stringValue": SERVICE_NAME}},
+                    {"key": "k8s.namespace.name", "value": {"stringValue": NAMESPACE}},
+                    {"key": "k8s.pod.name", "value": {"stringValue": POD_NAME}},
+                ]},
+                "scopeSpans": [{
+                    "scope": {"name": "aiops.traced_oom.manual"},
+                    "spans": [{
+                        "traceId": trace_id,
+                        "spanId": span_id,
+                        "name": "GET /allocate",
+                        "kind": 2,
+                        "startTimeUnixNano": str(start_ns),
+                        "endTimeUnixNano": str(end_ns),
+                        "attributes": [
+                            {"key": key, "value": otlp_value(value)}
+                            for key, value in attributes.items()
+                        ],
+                        "status": {"code": 1},
+                    }],
+                }],
+            }],
+        }
+        request = urllib.request.Request(
+            OTLP_ENDPOINT,
+            data=json.dumps(payload).encode(),
+            headers={"content-type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=2) as response:
+                response.read()
+        except Exception as exc:
+            print(json.dumps({
+                "event": "otlp_export_error",
+                "trace_id": trace_id,
+                "error": str(exc),
+            }), flush=True)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            global chunks
+            start_ns = time.time_ns()
+            trace_id, parent_span_id = parse_traceparent(self.headers.get("traceparent"))
+            span_id = secrets.token_hex(8)
+            path = self.path
+            mib = 2
+            if "mib=" in path:
+                try:
+                    mib = max(1, min(8, int(path.split("mib=", 1)[1].split("&", 1)[0])))
+                except Exception:
+                    mib = 2
+            try:
+                before_mib = sum(len(chunk) for chunk in chunks) // (1024 * 1024)
+                chunks.append(bytearray(mib * 1024 * 1024))
+                after_mib = sum(len(chunk) for chunk in chunks) // (1024 * 1024)
+                end_ns = time.time_ns()
+                attributes = {
+                    "http.request.method": "GET",
+                    "http.route": "/allocate",
+                    "url.path": path,
+                    "aiops.allocated_mib.before": before_mib,
+                    "aiops.allocated_mib.after": after_mib,
+                    "aiops.alloc_mib": mib,
+                    "k8s.pod.name": POD_NAME,
+                }
+                export_span(trace_id, span_id, start_ns, end_ns, attributes)
+                log = {
+                    "event": "allocate",
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "parent_span_id": parent_span_id,
+                    "path": path,
+                    "alloc_mib": mib,
+                    "allocated_mib": after_mib,
+                    "pod": POD_NAME,
+                    "service": SERVICE_NAME,
+                }
+                print(json.dumps(log), flush=True)
+                body = json.dumps(log).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                print(json.dumps({
+                    "event": "handler_error",
+                    "trace_id": trace_id,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }), flush=True)
+                raise
+
+        def log_message(self, fmt, *args):
+            return
+
+    print(json.dumps({
+        "event": "traced_oom_api_started",
+        "service": SERVICE_NAME,
+        "pod": POD_NAME,
+        "otlp_endpoint": OTLP_ENDPOINT,
+    }), flush=True)
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+
+  driver.py: |
+    import json
+    import secrets
+    import time
+    import urllib.request
+
+    step = 0
+    while True:
+        step += 1
+        trace_id = secrets.token_hex(16)
+        span_id = secrets.token_hex(8)
+        traceparent = f"00-{trace_id}-{span_id}-01"
+        url = f"http://trace-oom-api:8080/allocate?mib=2&step={step}"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "traceparent": traceparent,
+                "x-aiops-case": "traced-oom",
+                "x-aiops-step": str(step),
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                body = response.read().decode()
+                print(json.dumps({
+                    "event": "request_succeeded",
+                    "step": step,
+                    "trace_id": trace_id,
+                    "traceparent": traceparent,
+                    "status": response.status,
+                    "target": url,
+                    "response": json.loads(body),
+                }), flush=True)
+        except Exception as exc:
+            print(json.dumps({
+                "event": "request_failed",
+                "step": step,
+                "trace_id": trace_id,
+                "traceparent": traceparent,
+                "target": url,
+                "error": str(exc),
+            }), flush=True)
+            time.sleep(4)
+        time.sleep(2)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trace-oom-api
+  namespace: aiops-traced-oom
+  labels:
+    aiops.testcase: traced-oom
+    app: trace-oom-api
+spec:
+  selector:
+    app: trace-oom-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trace-oom-api
+  namespace: aiops-traced-oom
+  labels:
+    aiops.testcase: traced-oom
+    app: trace-oom-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trace-oom-api
+  template:
+    metadata:
+      labels:
+        aiops.testcase: traced-oom
+        app: trace-oom-api
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: business-api
+          image: xnet.registry.io:8443/observability/python:3-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "/app/server.py"]
+          env:
+            - name: OTLP_ENDPOINT
+              value: http://lgtm.xnet.svc:4318/v1/traces
+            - name: OTEL_SERVICE_NAME
+              value: aiops-traced-oom-api
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 300m
+              memory: 80Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: traced-oom-app
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trace-oom-driver
+  namespace: aiops-traced-oom
+  labels:
+    aiops.testcase: traced-oom
+    app: trace-oom-driver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trace-oom-driver
+  template:
+    metadata:
+      labels:
+        aiops.testcase: traced-oom
+        app: trace-oom-driver
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: driver
+          image: xnet.registry.io:8443/observability/python:3-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "/app/driver.py"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 48Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: traced-oom-app

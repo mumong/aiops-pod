@@ -140,3 +140,21 @@ def test_reporter_detects_query_runbook_from_tool_start_args_when_result_preview
     update_metrics_from_state(metrics, state, runbook_catalog=_make_catalog())
 
     assert metrics.runbook_id == "private-k8s-query-promql-reference"
+
+
+def test_metrics_trace_excludes_primary_runbooks_from_reference_list():
+    metrics = WorkflowMetrics(run_id="r5", question="我的集群有什么问题")
+    metrics.runbook_matched = True
+    metrics.primary_runbook = "pod-oomkilled, pod-config-error"
+    metrics.runbook_id = (
+        "pod-oomkilled, pod-config-error, pod-crashloop-runtime"
+    )
+
+    trace = metrics.format_metrics_block(enabled=False)
+
+    assert "- **核心 Runbook**: pod-oomkilled, pod-config-error" in trace
+    assert "- **参考 Runbook**: pod-crashloop-runtime" in trace
+    assert (
+        "- **参考 Runbook**: pod-oomkilled, pod-config-error, "
+        "pod-crashloop-runtime"
+    ) not in trace

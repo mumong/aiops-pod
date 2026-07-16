@@ -408,9 +408,22 @@ class WorkflowNode(ABC):
         # metrics
         if getattr(self, 'metrics', None):
             actual_duration = result.duration_ms or llm_duration_ms
-            self.metrics.record_llm_call(self.node_id, actual_duration)
-            for _ in range(result.tool_call_count):
-                self.metrics.record_tool_call("llm_tool", 0, success=True)
+            usage_count = len({
+                (
+                    event.get("iteration"),
+                    event.get("timestamp"),
+                    tuple(sorted((event.get("usage") or {}).items())),
+                )
+                for event in (thinking_events or [])
+                if event.get("type") == "ai_usage"
+                and isinstance(event.get("usage"), dict)
+            })
+            self.metrics.record_llm_call(
+                self.node_id,
+                actual_duration,
+                request_count=max(1, usage_count),
+                source="agent",
+            )
 
         return result, thinking_events
 
@@ -535,11 +548,19 @@ class WorkflowNode(ABC):
         try:
             logger.info("📦 [%s] 执行 LLM 压缩: %d chars → 目标 %d chars",
                         self.node_id, len(text), max_chars)
-            compressed = ai_call.call_simple(
-                system_prompt=compress_prompt,
-                question=f"请压缩以下内容（原始 {len(text)} 字符，目标 {max_chars} 字符以内）：\n\n{text}",
-                max_tokens=4096,
-            )
+            llm_start = time.time()
+            try:
+                compressed = ai_call.call_simple(
+                    system_prompt=compress_prompt,
+                    question=f"请压缩以下内容（原始 {len(text)} 字符，目标 {max_chars} 字符以内）：\n\n{text}",
+                    max_tokens=4096,
+                )
+            finally:
+                if getattr(self, "metrics", None):
+                    self.metrics.record_llm_call(
+                        self.node_id,
+                        (time.time() - llm_start) * 1000,
+                    )
             if compressed and len(compressed) < len(text):
                 logger.info("📦 [%s] LLM 压缩完成: %d → %d chars (%.0f%%)",
                             self.node_id, len(text), len(compressed),

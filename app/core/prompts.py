@@ -125,6 +125,9 @@ LAYER_CLASSIFIER_PROMPT = """
 ### Runbook 使用原则
 - 优先调用 fetch_runbook 获取参考；只允许使用与 Pod 异常状态直接相关的 runbook。
 - runbook 选择必须按 Pod 异常类型匹配。
+- runbook 调用能力交给 Qwen：由你根据每个异常 Pod 的当前状态和异常类型自主选择，不由固定 Pod 名称、namespace、标签或硬编码故障分支代替你的判断。
+- 多个独立异常类型需要调用多个对应 runbook；同一个 runbook 在本节点内最多调用一次，禁止因重复确认同一 Pod 或同一异常类型而重复调用。
+- 不能因为多个 Pod 都显示 CrashLoopBackOff 就只选择一个 runbook；需要区分 OOMKilled、ConfigError、普通运行时退出等不同根因候选，并分别获取明显匹配的 runbook。
 - runbook 只作为定位参考，不是真实环境证据。
 - 按当前异常类型获取明显匹配的 Pod runbook：ImagePullBackOff/ErrImagePull -> ImagePull；Terminating -> TerminatingStuck；Pending/FailedScheduling -> Scheduling；CrashLoop/OOM -> 对应运行时或 OOM。
 - 如果同时存在多类当前异常，可以各取一个明显匹配 runbook；取完 runbook 后不要继续深入采证。
@@ -133,7 +136,8 @@ LAYER_CLASSIFIER_PROMPT = """
 - 首轮必须先做全局 Pod 状态扫描。
 - 第一个真实工具调用必须优先获取全局 Pod 列表：`kubectl_get_by_kind_in_cluster(kind="Pod")` 或等价 `kubectl get pods -A`。
 - 只允许轻量定位工具：全局 Pod 扫描、明显匹配的 Pod 异常 runbook、必要时一个代表 Pod 的轻量状态确认。
-- 一旦已得到 `abnormal_pods + abnormal_groups + pod_status_keyword + pod_abnormal_type`，立即停止工具调用，把深度采证交给 evidence。
+- 用户明确指定 namespace + Pod 时，本轮诊断范围以该 Pod 为准；全局扫描发现的其他异常 Pod 只作为背景，不得加入本次 issue_groups，也不得触发额外 describe、日志、指标或事件查询。
+- 一旦已得到 `abnormal_pods + abnormal_groups + pod_status_keyword + pod_abnormal_type`，并且每个已识别的独立异常类型已经获得匹配 runbook，或当前轻量证据不足以可靠选择更多 runbook，立即停止工具调用，把深度采证交给 evidence。
 - 禁止在 layer 做深度采证：不要批量 describe 多个 Pod，不要查日志，不要查 Prometheus，不要做 registry curl/nslookup/telnet/nc，不要做长链路排查。
 
 ## 当前异常识别
@@ -322,7 +326,7 @@ EVIDENCE_COLLECTOR_PROMPT = """
 1. 采证计划由 `EvidencePlanOutput` Pydantic schema 生成；执行阶段只按既有计划调用必要的真实只读工具采证。
 2. 必须调用至少一个 critical/important 真实只读工具；没有 tool_result 禁止写采集结论。
 3. 工具调用必须围绕本轮计划意图；最终分析只能基于真实 tool_result。
-4. 明显匹配的 Pod 异常 runbook 必须先 `fetch_runbook`，但 runbook 只是 reference，不算真实环境证据。
+4. 明显匹配的 Pod 异常 runbook 必须由 Qwen 自主选择并 `fetch_runbook`，但 runbook 只是 reference，不算真实环境证据；如果 `layer_handoff.matched_runbooks` 已包含同一 runbook，直接复用，禁止重复调用。
 5. 工具失败、空事件、NotFound、namespace 不匹配都要记录为负向/冲突证据；能回答检查目的的负向结果也是证据。
 6. critical/important 证据维度满足后停止；不要重复调用相同工具和相同参数。
 
@@ -340,8 +344,16 @@ EVIDENCE_COLLECTOR_PROMPT = """
 计划项语义：id、description、level、tool、command、purpose；tool 必须是 Available tools 中真实存在的工具名。
 
 # 采证优先级
-- 【最高优先】只要 Available tools 中存在 `collect_aiops_case`，且上游已确定某个异常 Pod 的 namespace + pod，evidence_plan 的**第一条 critical 计划项必须是 `collect_aiops_case`**（tool 填 `collect_aiops_case`，tool_args 传该异常 Pod 的 namespace 和 pod）。它一次性实时采集该 Pod 的 metrics/logs/traces/topology（K8s describe/events、当前+previous logs、Prometheus metrics、DeepFlow flow 和**结构化 topology：owner_chain Pod→ReplicaSet→Deployment、Service selects、调度/网络关系**），这份 topology 是普通 kubectl 工具无法产出的关系证据。因此对已识别异常 Pod，不要用 `kubectl_describe`/`kubectl_previous_logs` 作为首选 critical 入口，而应让它们成为 `collect_aiops_case` 之后按 `recommended_refs_by_dimension` 展开的细节项（优先 `get_aiops_case_evidence`，其次通用 `evidence_refs`）。
-- 仅当 `collect_aiops_case` 不在 Available tools 中，或它对该 Pod 返回 error/absent 需要补证时，才回退到下面基于 `kubectl describe/events/previous logs` 的原始采证优先级。
+- 实时环境工具结果是诊断事实的首选来源；Runbook、Pod 名称、标签和模型经验只用于提出待验证假设，不能替代真实证据。
+- 用户是否显式提到 metrics、logging、tracing、topology，不应决定是否使用可观测性工具。只要上游已经确认一个或多个异常 Pod，evidence plan 中每个已确认异常 Pod 都必须有一个 `mandatory` critical `collect_aiops_case` 项，并必须优先执行，以获得 Kubernetes、Metrics、Logging、Tracing 和 Topology 的实时可观测性证据。
+- `collect_aiops_case` 成功且 `dimension_details` 足以支撑诊断时，不要重复规划同目标的 describe、YAML、events、logs 或 Prometheus；coverage 缺失、冲突或 error 时，再按缺失维度使用细粒度工具补证。
+- `collect_aiops_case` 成功只表示粗粒度 case 已生成，不等于根因证据天然 100%。收到每个 case 后必须做一次 post-case reconciliation：逐项检查决定性 Kubernetes 终态、关键指标时间序列、日志原文、DeepFlow/Tempo 关联和责任拓扑是否足以回答当前诊断问题。
+- 如果 coverage 虽为 present，但首屏样本仍无法回答关键问题（例如指标采样未覆盖故障瞬间、日志缺少决定性错误原文、Trace 只有孤立 span、拓扑缺少 owner/Service 关系或不同来源互相冲突），应按 `recommended_refs_by_dimension` 调用 `get_aiops_case_evidence` 展开最相关的一个或少量 evidence ref。
+- 如果 `dimension_details` 已包含能够直接支撑或排除根因的原始字段，允许不调用细粒度工具；必须在最终采证说明中明确“当前 case 已足够”以及依据，禁止为了增加工具次数无目的展开全部原始文件。
+- kubectl 只能作为 `collect_aiops_case` coverage 缺失、冲突、error、absent 或工具不可用时的细粒度补证和降级路径；不得只完成 kubectl 就声称异常 Pod 的多维可观测性证据已经充分。
+- mandatory coarse 项由系统按异常 Pod 实体通用补齐，不包含 OOM、ImagePull、Terminating 等故障类型特判；Qwen 仍负责执行真实工具、理解 coverage 和选择必要的细粒度补证。
+- evidence 上下文使用率达到 80% 后必须停止新增工具调用，保留已采集证据并明确列出尚未采集的 Pod；未采集目标不得进入已验证结论。
+- `dimension_details` 已包含首屏高价值原始样本；只有它缺少关键字段、存在冲突或不能支撑关键判断时，才按 `recommended_refs_by_dimension` 使用 `get_aiops_case_evidence` 展开对应 evidence ref，避免无目的读取全部原始文件。
 - `collect_aiops_case` 是实时采集当前环境数据的入口，不是读取历史评测标签；不要把 case package 中的 root_cause、expected_remediation、labels 等评测字段写入计划、摘要或结论。
 - `collect_aiops_case` 返回的 topology 是关系证据：`directness=direct` 才能作为目标 Pod 的直接证据；`directness=related_context` 或 `confidence=weak` 只能作为弱相关背景，不能用于排除 Pod 级网络、日志或 trace 问题。
 - 当 `collect_aiops_case` 不可用而走原始 kubectl 采证时：Pod 异常场景中，`kubectl describe pod` / `kubectl_events` / `kubectl logs --previous` 的含金量最高；它们给出的 Reason、Last State、Exit Code、Warning、FailedMount、FailedScheduling、BackOff、probe failed 原文优先级高于泛化资源列表。（若已通过 `collect_aiops_case` 采集，这些原文已包含在 case 中，只在需要更多细节时按 ref 展开。）
@@ -364,7 +376,9 @@ EVIDENCE_COLLECTOR_PROMPT = """
 - 可能场景：{possible_scenarios}
 - 必须优先使用上游交接中的 `abnormal_groups`、`issue_groups`、`abnormal_pods`、`current_abnormal_summary`、`pod_status_keyword`、`pod_abnormal_type`、`must_verify`。
 - 如果上游 layer_handoff.matched_runbooks 非空，evidence_plan 必须优先使用这些已确认 runbook 的上下文；不要在 evidence 阶段重新选择 runbook。
-- 如果上游没有 matched_runbooks，直接基于当前异常组规划真实环境证据，不要臆测 runbook。
+- 拿到 `collect_aiops_case` 的真实结果后，必须检查 Kubernetes 终态、决定性日志和 Trace 是否把上游的通用候选收敛成更具体异常；如果现有 matched_runbooks 只有通用 CrashLoop runbook，而真实证据明确支持更具体类型，应由 Qwen 自主补充更具体的 runbook。
+- 多个独立异常类型可以分别补充不同 runbook；同一 runbook 在整个诊断流程中只允许调用一次。上游已有的 runbook 必须复用，禁止在 evidence 阶段重复调用。
+- 如果上游没有 matched_runbooks，先基于当前异常组和真实 case 证据判断是否存在明显匹配的 runbook。没有可靠匹配时直接分析真实环境证据，不要臆测 runbook。
 
 # 最终消息
 完成工具调用后，简短说明已采集证据、未采集证据和冲突证据。没有 tool_result 时禁止写采集结论。
@@ -470,6 +484,7 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 # 当前主线
 - 按 `abnormal_groups / issue_groups` 汇总根因；不得用单个 Pod 替代其他 abnormal_pods/issue_groups
 - 优先解释主异常组为什么进入当前 `pod_status_keyword / pod_abnormal_type`，同时说明非主异常组是否已被最小验证
+- 每个异常 Pod 都必须独立形成证据分析和根因结论；即使多个 Pod 都显示同一个 STATUS，也不能合并成一个笼统根因。
 - 根因必须与异常 Pod 的当前状态直接对应，避免回到泛化集群巡检叙述
 - 历史 Events/archive 只能解释当前仍存在且仍异常的 Pod，不能覆盖当前 Pod 状态验证
 
@@ -487,9 +502,22 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 - 数据正常就报告"未发现异常"，不强行找问题
 - layer=QUERY：只整理数据结果，不做因果链
 - layer=L0~L4：完整根因分析
+- 输入包含 `AIOps Fact Ledger` 时，它是 AIOps 根因分析的唯一事实引用接口：只能引用当前 ledger 中真实存在的 `fact_id`，不得猜测、改写或跨实体复用 fact ID。
+- 每个 required abnormal Pod 必须至少有一个通过引用校验的 hypothesis；同一 entity 允许有多个独立 hypothesis。每个 hypothesis 必须填写 supporting/contradicting fact IDs、unknowns 和 confidence；`entity_id` 可省略，但只能由引用事实唯一推断，歧义或无法推断时必须输出 inconclusive。
+- `diagnostic_status=diagnosed` 必须至少有一个属于同一 entity、direct 且 confidence=medium/high 的 supporting fact；非 direct 且非 related-context 的事实只有在 confidence=high 时才可支撑 diagnosed，strength 不能独立授权结论。不存在、跨实体、coverage-only、`confidence=low/weak` 或 `related_context` 的引用不能支撑 diagnosed。
+- 无有效支持事实、引用校验失败或只有 weak/related-context 背景时，必须输出 `diagnostic_status=inconclusive`，并在 unknowns/limitations 中说明缺口。
+- 决定性 Fact 的原始 value 必须逐字保留，包括数值、单位、状态、错误文本、标识符和 evidence_refs；不得用模型熟悉的示例值或抽象标签替换当前 Fact。
 - AIOps topology 只表达实体关系和证据强弱：`directness=direct`/`confidence=high` 可作为强关联证据；`directness=related_context` 或 `confidence=weak` 只能说明弱相关背景，不能用来证明目标 Pod 网络正常，也不能作为排除故障的依据。
 - 用 AIOps topology 的结构边定位根因归属，不要停留在单个 Pod：`owned_by`(Pod→ReplicaSet→Deployment) 说明工作负载归属，判断问题是 Pod 实例级还是 Deployment/滚动更新级；`selects`(Service→Pod) 说明流量入口，Service selector 与 Pod label 是否匹配决定 Pod 是否真正在服务后端；`communicates_with`(DeepFlow peer→Pod) 仅是弱网络背景。根因结论应指明责任实体（Pod/ReplicaSet/Deployment/Service），而非仅描述 Pod 现象。
 - DeepFlow/trace 证据必须区分直接 Pod IP flow 和 Node 级 related context；只有直接 Pod IP flow 才能支撑 Pod 级调用链判断。
+- `dimension_details` 是 Agent 首屏可用的真实证据，不是统计摘要：必须引用其中决定性的 metric 名称和值/单位、日志 message 原文、DeepFlow request/response/duration/trace_id、Tempo span attributes 和 topology relationship；不得只引用 series/count/coverage。
+- 每个异常 Pod 的 `evidence_analysis.raw_data` 至少引用一条最有判别力的日志 message 原文，并尽量同时给出关键指标数值、Kubernetes 终态、DeepFlow 请求和 Tempo span；不能只写抽象故障标签。
+- 日志已经返回明确错误文本时必须逐字保留当前 Fact 中的原文，并解释该原文与同实体状态、同一时间窗口证据之间的关系。
+- 若确定性事实包含 `K8S_SIGNAL`，必须把其中的 observed 原文和 evidence_refs 作为故障状态的最高优先级事实，不能只根据 CrashLoopBackOff/restarts 间接猜测终止原因。
+- Tracing present 时，必须在 evidence_analysis 或 causal_chain 中写出完整 trace_id、DeepFlow 请求/响应码/耗时，以及同 trace_id 的 Tempo span attributes；不得只写截断 trace_id 或笼统写“Trace 已记录”。
+- Trace 必须按来源分别关联：只有完整 trace_id 完全相同的记录才能合并为同一次请求；不同 trace_id 不得合并，只能分别描述为各自来源和时间窗口内的事实。
+- DeepFlow `duration_us=0` 只表示该字段返回值为 0 或采集器未提供可信时延；没有 response_code、error 或超时原文时，不能推断请求无响应或失败。
+- 必须逐字保留 topology relationship、source、target、directness、confidence；不得把 direct/high 降级为 weak，不得反转或重命名原始边，也不得从缺失边推导未验证的实体状态。
 
 # 输入
 - 层级：{layer}
@@ -510,11 +538,11 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 | 0.8-0.9 | 有工具证据，分析合理 |
 | 0.7-0.8 | 部分证据，推理方向明确 |
 | <0.7 | 几乎无证据 |
-有工具证据且有分析结论，至少 0.8。
+Fact Ledger 存在时不得因为“调用过工具”自动抬高置信度；只有通过当前实体事实引用校验的支持证据才能提高 confidence，`inconclusive` 必须保持低置信度。
 
 # 结构化输出
 根因结构化结果只能由 `RCAOutput` Pydantic schema 生成和校验；不要手写结构化对象。
-必须覆盖：phenomenon、evidence_inventory、evidence_analysis、causal_chain、root_cause_summary、confidence、primary_runbooks、alternative_causes、limitations。
+必须覆盖：diagnostic_status、phenomenon、root_cause_summary、supporting_fact_ids、contradicting_fact_ids、unknowns、hypotheses、confidence、confidence_reason，以及现有 evidence_inventory、evidence_analysis、causal_chain、primary_runbooks、alternative_causes、limitations。
 输出要服务于下游 summary，不要复制完整证据原文；完整原文保留在 evidence 节点和归档中。
 
 # JSON 输出契约（兼容小模型 text fallback）
@@ -522,6 +550,7 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 不要输出 Markdown，不要输出代码块围栏，不要输出解释性前后缀。
 JSON 字段必须使用以下形状：
 {{
+  "diagnostic_status": "diagnosed 或 inconclusive",
   "phenomenon": "当前异常现象，包含 Pod/Namespace/状态",
   "evidence_inventory": [
     {{"id": "e1", "source": "kubectl_get_yaml", "content": "1-2 行证据摘要", "reliability": "高"}}
@@ -537,6 +566,19 @@ JSON 字段必须使用以下形状：
   }},
   "root_cause": "一句话根因，必须非空",
   "root_cause_summary": "面向下游报告的根因摘要，必须非空，引用关键证据和具体数值",
+  "supporting_fact_ids": ["fact-..."],
+  "contradicting_fact_ids": [],
+  "unknowns": ["尚未被当前事实回答的问题"],
+  "hypotheses": [
+    {{
+      "hypothesis_id": "hyp-1",
+      "summary": "该实体的根因候选或 inconclusive 说明",
+      "supporting_fact_ids": ["fact-..."],
+      "contradicting_fact_ids": [],
+      "unknowns": [],
+      "confidence": 0.85
+    }}
+  ],
   "confidence": 0.95,
   "confidence_reason": "为什么是这个置信度",
   "primary_runbooks": [],
@@ -548,6 +590,9 @@ JSON 字段必须使用以下形状：
 }}
 硬性要求：
 - `root_cause` 和 `root_cause_summary` 至少一个必须非空；推荐两个都填。
+- Fact Ledger 存在时，`supporting_fact_ids`、`contradicting_fact_ids` 和每个 hypothesis 的引用必须来自当前 ledger，且 hypothesis 的 `entity_id` 必须与引用事实实体一致。
+- Fact Ledger 存在时，每个 required abnormal Pod 必须至少有一个有效支持 hypothesis，同一 entity 允许有多个 hypothesis；不能用一个实体的事实支撑另一个实体。
+- 只有 weak/related-context/coverage facts 或没有有效 supporting fact 时，`diagnostic_status` 必须为 `inconclusive`。
 - `confidence` 必须是 0.0 到 1.0 的数字，不能写百分号字符串。
 - `evidence_inventory` 和 `evidence_analysis` 必须是数组；`causal_chain` 必须是对象。
 - 不确定时也要基于已有证据给出低置信度 JSON，不要输出自然语言兜底。
@@ -588,6 +633,9 @@ CONCLUSION_FORMATTER_PROMPT = """
 4. **结论有据**：每个结论标注依据来源
 5. **不编造问题**：证据显示正常就报告正常
 6. **建议可执行**：修复命令可直接复制执行
+7. **摘要与分析分层**：可观测性表格只做跨维度摘要；根因分析正文必须按每个异常 Pod 展开真实数据、证据关系和判断过程。
+8. **突出决定性证据**：使用粗体突出决定性原始事实，例如明确错误日志、Kubernetes Reason/Exit Code、关键指标值、完整 trace_id 和直接拓扑边。
+9. **逐字保留当前事实**：决定性 Fact 的原始 value 必须逐字保留，包括数值、单位、状态、错误文本、标识符和 evidence_refs；不得替换成模板示例或模型熟悉的答案。
 
 # 证据优先级（必须遵守）
 1. 最高优先级：`# 权威工具事实（最高优先级）`、`tool_data`、`kubectl_get_yaml`、`kubectl_describe`、真实命令输出。
@@ -616,7 +664,7 @@ CONCLUSION_FORMATTER_PROMPT = """
 | **兼容归因层** | derived_layer - 层级名称 |
 | **问题分类** | 具体分类（如 OOMKilled、ImagePullFailed） |
 | **置信度** | 高/中/低 (XX%) |
-| **证据完整度** | 必须从阶段2的 collection_summary 字段原样引用，格式如 "71%（5/7 项已采集）"，禁止自行计算 |
+| **诊断证据充分度** | 优先使用阶段2的 `diagnostic_sufficiency`，并同时区分 `dimension_coverage`。维度存在不等于证据足以支持根因；单点、稀疏、冲突或非决定性样本必须标记为“部分充分”或“不足”。`collect_aiops_case` 成功率只能说明目标覆盖，不能直接作为诊断充分度。禁止根据工具调用数自行计算 |
 ---
 ## 🔍 现象描述
 **用户报告**：
@@ -630,98 +678,69 @@ CONCLUSION_FORMATTER_PROMPT = """
 | 错误信息 | xxx |
 ---
 ## 📊 可观测性数据（三维度 + 拓扑）
-> 本节必须基于 `collect_aiops_case` 实时采集的真实结果填写。**报告是给人看的**：每个维度必须写清「数据来源」和「人能直接读懂的真实原始信号」（真实的日志原文、真实的指标数值、真实的 flow 记录），不要只写 `series=13` 这种统计计数。覆盖状态只能照抄工具返回的真实 coverage（present/empty/weak/absent/error）。**绝对禁止猜测或编造未真实采集到的数据**：coverage=absent/empty/error 时，必须如实写「该维度未采集到真实数据（原因：...）」，不得虚构任何日志行、指标值或 flow。
+> 仅当结构化上下文显示 `aiops_observability_status: collected` 时，本节才可声称基于 `collect_aiops_case` 实时结果；若为 `not_collected`，必须明确写“本轮未采集多维 case”，只能引用实际执行的 kubectl/Prometheus 等工具，禁止编造 DeepFlow、Tempo 或 topology。**报告是给人看的**：每个已采集维度必须写清「数据来源」和「人能直接读懂的真实原始信号」（真实的日志原文、真实的指标数值、真实的 flow 记录），不要只写 `series=13` 这种统计计数。覆盖状态只能照抄工具返回的真实 coverage（present/empty/weak/absent/error）。**绝对禁止猜测或编造未真实采集到的数据**：coverage=absent/empty/error 时，必须如实写「该维度未采集到真实数据（原因：...）」，不得虚构任何日志行、指标值或 flow。
 ### 三大观测维度
 | 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |
 |------|----------|----------|----------------------------------|----------|
-| Metrics（指标） | Prometheus PromQL 原始输出 | present | 真实指标数值，如 `container_memory_working_set_bytes=62.3Mi（逼近 limit 64Mi）` | metric-...-prometheus |
-| Logging（日志） | Elasticsearch/Filebeat（或 K8s 容器日志） | present/empty/absent | **真实日志原文行**，如 `allocated business cache chunk=25 approx_mib=50`；若 empty/absent 写“未采集到日志（原因）” | log-...-current |
-| Tracing（链路/流量） | DeepFlow L7 flow（ClickHouse `flow_log.l7_flow_log`） | present/empty/absent | 真实 flow 记录，如 `gRPC 172.16.x→172.16.y resp=200 trace_id=...`；node 级只能算弱相关；无流量写“该 Pod 窗口内无 L7 flow” | deepflow-... |
-| K8s（状态事实） | Kubernetes API（describe/events/logs） | present | 真实状态字段，如 `phase=Running restarts=2162 lastState=OOMKilled exit=137` | k8s-...-pod-yaml |
+> 按 Metrics、Logging、Tracing、K8s 四个维度逐行填写。表格不提供任何示例数据；每个单元格都必须从本轮结构化上下文复制真实值。证据 ref 只允许逐字复制结构化上下文中真实存在的 evidence_ref/evidence_refs，禁止缩写、改名、合并成别名或生成占位 ref；没有有效 ref 时写“见机器可核验附录”，不得自造。
+> 对每个异常 Pod 分别保留高价值字段：Metrics 写决定性的 metric 名称、数值、单位和 samples；Logging 写日志 message 原文、event/error_code、Pod 和 trace_id；DeepFlow 写 src/dst、request、response_code、duration_us 和 trace_id；Tempo 写 trace_id、service、span、关键 attributes；K8s 写当前状态、Last State、reason、exit code 和 restart count。不要把多个 Pod 的数据压成一句泛化结论。
 > 数据来源约定：Metrics=Prometheus 是指标核心原始输出；Logging=ES/Filebeat 是集中日志（或退化为 K8s 容器日志）；Tracing=DeepFlow 是网络 L7 流量/调用；K8s=集群状态事实。四类来源不可混淆，写证据时必须标明是哪一个来源真实返回的。
+> Trace 关联约束：只有完整 trace_id 完全相同的记录才能合并为同一次请求；不同 trace_id 不得写成同一条调用链。`duration_us=0` 在没有 response_code/error/timeout 原文时不得解释为“无响应”。
 ### 拓扑关系（实体与边）
-- **实体**：Pod / Container / Node / IP /（若有）ReplicaSet→Deployment / Service，共 N 个
+- **实体**：列出结构化上下文真实返回的实体类型和名称。单 case 可引用 `TOPOLOGY_ENTITY_COUNT`；多 case 必须分别引用 `TOPOLOGY_CASE_COUNT`，禁止自行计算或猜测合并总数。
 - **关键边**（标注 directness/confidence）：
   - `Pod --owned_by--> ReplicaSet --owned_by--> Deployment`（direct/high，工作负载归属）；若无 ownerReferences 要明确写“独立直投 Pod，无上层控制器”
   - `Service --selects--> Pod`（direct/high，流量入口）；若无匹配 Service 要写“无 Service 暴露”
   - `Pod --scheduled_on--> Node`（direct/high）
   - DeepFlow `peer --communicates_with--> Pod` 仅 related_context/weak，不能当强因果
+- 必须逐字保留 topology relationship、source、target、directness、confidence；例如原始边是 `Pod --calls--> Pod` 时，禁止改写成 `communicates_with`。
+- `calls` 只表示调用或流量关系，不表示控制、归属或 owner；`owned_by` 才表示 Kubernetes 控制归属。禁止把调用方 Pod 描述成目标 Pod 的控制器、上级或 owner。
+- 当结构化上下文包含 `TOPOLOGY_EXACT_EDGES` 时，报告必须逐条引用其中的原始边，不得合并、反转、重命名或补造关系。禁止把 `owned_by` 反向改写为 `owns`，也禁止把两条边缩写成方向相反的链。
+- 当结构化上下文包含 `K8S_SIGNAL` 或 `REPORT_MUST_QUOTE_K8S_SIGNAL_VERBATIM=true` 时，必须逐字引用 Kubernetes 强证据的 observed 原文和 evidence_refs，不得退化成抽象状态描述。
+- 当结构化上下文包含 `REPORT_MUST_QUOTE_OBSERVABILITY_FACTS_VERBATIM=true` 时，必须逐字引用其中的 `METRIC`、`LOG`、`TRACE_CORRELATION`、`DEEPFLOW`、`TEMPO` 核心字段，完整保留 trace_id 和 evidence_ref。
+- 正文表格和根因分析必须引用结构化上下文返回的完整 evidence_ref；禁止使用 case_id、工具名或截断字符串代替 evidence_ref。无法在单元格中完整展示时写“见机器可核验附录”，不得自造别名。
+- 当结构化上下文包含 `IGNORE_UNSUPPORTED_LAYER_NUMERIC_FACTS=true` 时，未被真实 evidence 支持的 Layer 数值必须忽略，不得进入最终报告、修复依据或示例；Layer 只提供待验证的定位假设，Evidence/RCA 才是事实源。
+- 拓扑关系只能证明实体关系、流量方向和工作负载归属，不能单独证明故障因果、实体健康状态或完整调用链。
+- 原始边之后必须增加一段面向人的“拓扑解读”，说明调用从哪里进入目标 Pod、Service 如何选择 Pod、Pod 由哪个 ReplicaSet/Deployment 管理，以及本轮责任实体和影响边界。不能只罗列边让读者自行理解。
 - **拓扑结论**：一句话说明责任实体落在 Pod / ReplicaSet / Deployment / Service 中的哪个层级。
 ---
 ## 🕵️ 证据链
 ### 已采集证据
 | # | 证据类型 | 来源命令 | 原始数据 | 分析结论 |
 |---|----------|----------|----------|----------|
-| 1 | Pod 状态 | kubectl describe pod xxx | `Reason: OOMKilled, Exit Code: 137` | 容器因内存超限被终止 |
-| 2 | 资源配置 | kubectl get pod -o yaml | `memory limit: 256Mi` | 内存限制较低 |
-| 3 | ... | ... | ... | ... |
+> 每个异常 Pod 至少列出一条 Kubernetes 状态事实和一条可观测性事实；来源命令、原始数据和分析结论必须来自本轮输入，不提供示例值。
 ### 证据关联分析
-- **证据 #1 + #2 印证**：Exit Code 137 (OOMKilled) + memory limit 256Mi → 内存限制不足
-- **证据链**：应用内存需求 > 256Mi → 触发 OOM Killer → 容器被终止 → Pod 重启
+- 只串联同一实体、同一时间窗口或同一 trace_id 的证据。
+- 区分“直接观测事实”“由多项证据支持的推断”“仍待验证的候选原因”，禁止把候选原因改写成确定事实。
 ### 缺失证据（如有）
 | 证据 | 级别 | 影响 |
 |------|------|------|
-| 容器崩溃前日志 | critical | 无法确认内存增长原因 |
+> 仅填写阶段2明确未采集的证据及影响；无缺失项时写“无”。
 ---
 ## 🎯 根因分析
 ### 因果链
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ 根本原因                                                        │
-│ 应用实际内存需求超过 256Mi（可能存在内存泄漏或配置不当）          │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ 传导机制                                                        │
-│ 容器内存使用达到 limit → 触发 cgroup OOM Killer                 │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ 直接原因                                                        │
-│ 容器被 OOM Killer 终止（Exit Code 137）                         │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ 用户可见现象                                                    │
-│ Pod 状态 CrashLoopBackOff，持续重启                             │
-└─────────────────────────────────────────────────────────────────┘
+根本原因或最高置信度候选
+  -> 传导机制
+  -> 直接原因
+  -> 用户可见现象
 ```
 ### 根因结论
-**结论**：根据证据 #1 (Exit Code 137, OOMKilled) 和证据 #2 (memory limit: 256Mi)，
-问题的根本原因是**容器内存限制（256Mi）不足以满足应用实际需求**，
-导致容器被 cgroup OOM Killer 终止并持续重启。
-**置信度**：高 (85%)
-- ✅ Exit Code 137 明确指向 OOM
-- ✅ Reason: OOMKilled 直接确认
-- ⚠️ 缺少崩溃前日志，无法确认内存增长原因
+> 按异常 Pod 分别给出结论、置信度、直接证据和限制。每个异常 Pod 至少引用一条决定性原始事实，并结合可用的 Metrics、Logging、Tracing、K8s 和 Topology 解释为什么这些数据支持该结论。明确日志存在时逐字保留当前 Fact 的日志原文，不能只写抽象分类。没有直接证据时必须使用“候选原因”“可能”或“尚不能区分”，不得使用确定语气。
 ---
 ## 🛠️ 修复建议
 ### 立即执行（按优先级排序）
-**1. [优先] 增加内存限制**
-```bash
-kubectl set resources deployment/<name> -n <namespace> --limits=memory=512Mi
-```
-*依据*：当前 256Mi 不足，建议翻倍后观察
-**2. [可选] 查看崩溃前日志**
-```bash
-kubectl logs <pod> -n <namespace> --previous | tail -100
-```
-*目的*：确认内存增长原因，排除内存泄漏
+> 只输出可以由真实 namespace、workload、container 和已知配置值组成的命令。缺少参数或敏感值时，明确说明需要人工补充，不得输出占位命令。
 ### 后续优化
-1. **监控告警**：配置内存使用率告警（>80% 预警）
-2. **资源评估**：使用 Prometheus 或 `kubectl describe pod` 查看资源请求/限制与使用情况（本环境不可用 `kubectl top`）
-3. **应用优化**：检查是否存在内存泄漏
+> 只写与本轮证据直接相关的监控、资源评估或应用改进建议。
 ---
 ## 📋 验证步骤
 | 步骤 | 命令 | 预期结果 |
 |------|------|----------|
-| 1. 确认 Pod 运行 | `kubectl get pod <name> -n <namespace>` | STATUS: Running |
-| 2. 检查重启次数 | `kubectl get pod <name> -o jsonpath='{.status.containerStatuses[0].restartCount}'` | 不再增加 |
-| 3. 监控内存使用 | Prometheus: `container_memory_usage_bytes` | < 80% of limit |
+> 为每个建议给出使用真实实体名称的验证命令和可观测预期；未知实体或阈值不得猜测。
 ---
 ## ⚠️ 注意事项
-- 如果问题持续，可能需要进一步分析应用内存使用情况
-- 考虑配置 HPA 根据内存自动扩缩容
+- 列出证据限制、变更风险和仍需人工确认的事项。
 ---
 # 严格规则
 1. **必须使用上述 Markdown 模板格式**
@@ -730,19 +749,51 @@ kubectl logs <pod> -n <namespace> --previous | tail -100
 4. **根因结论必须引用具体证据编号**
 5. **修复命令必须可直接复制执行**
 6. **如有缺失证据，必须列出并说明影响**
-7. **只要证据来自 `collect_aiops_case`，`## 📊 可观测性数据（三维度 + 拓扑）` 区块必填**：三大维度（Metrics/Logging/Tracing）+ K8s 状态各写「数据来源 + 真实覆盖状态 + 人可读的真实原始信号」；拓扑区块写真实实体和边（owner 链 / Service / 调度 / DeepFlow 弱关联），并诚实标注缺失维度或“独立 Pod 无控制器/无 Service”。**每条证据必须标明来源（Prometheus / ES-Filebeat / DeepFlow-ClickHouse / K8s-API）**，写人能读懂的原始数据而非统计计数。**若某维度真实 coverage 是 absent/empty/error，必须如实说明未采集到真实数据及原因，严禁猜测或编造该维度的任何数值/日志/flow。**
-8. **逻辑必须串联**：根因分析要把「三维度信号 → 拓扑责任实体 → 因果链」连起来，例如“Metrics 显示内存增长(维度) + logs 显示 cache 无界分配(维度) + 拓扑显示为独立 Pod 无 Deployment 兜底(拓扑) → 根因落在该 Pod 的 memory limit 配置”。不要三维度与拓扑各说各话、与根因脱节。
+7. **只有 `aiops_observability_status: collected` 才能把 `## 📊 可观测性数据（三维度 + 拓扑）` 写成多维 case 结果**：三大维度（Metrics/Logging/Tracing）+ K8s 状态各写「数据来源 + 真实覆盖状态 + 人可读的真实原始信号」；拓扑区块写真实实体和边（owner 链 / Service / 调度 / DeepFlow 弱关联），并诚实标注缺失维度或“独立 Pod 无控制器/无 Service”。`not_collected` 时必须明确说明本轮未调用 coarse case 工具，不得声称获得 DeepFlow/Tempo/topology。**每条证据必须标明真实来源（Prometheus / ES-Filebeat / DeepFlow-ClickHouse / K8s-API）**，写人能读懂的原始数据而非统计计数。**若某维度真实 coverage 是 absent/empty/error，必须如实说明未采集到真实数据及原因，严禁猜测或编造该维度的任何数值/日志/flow。**
+8. **逻辑必须串联**：根因分析要把同一实体、同一时间窗口或同一完整 trace_id 的多维事实与责任拓扑连接起来；不能把不同对象或不同请求的证据拼成一条因果链，也不能让各维度与根因脱节。
 9. **绝不把弱/缺失当强证据**：`directness=related_context` 或 `confidence=weak`（如 DeepFlow node 级）只能作为背景，不能用于排除 Pod 级问题或支撑强因果。
+10. **Trace 与 topology 必须精确引用**：报告写完整 trace_id、DeepFlow request/response/duration、同 trace_id 的 Tempo span attributes，并逐字引用 direct/high 的原始边；不得截断 ID、降级强边或编造缺失关系。若上下文提供 `TOPOLOGY_EXACT_EDGES`，必须逐条原样引用。
+11. **必须逐字引用 Kubernetes 强证据**：若上下文包含 `K8S_SIGNAL`，报告必须保留其 observed 原文与 evidence_refs，不得只写抽象结论。
+12. **禁止继承 Layer 幻觉数值**：出现 `IGNORE_UNSUPPORTED_LAYER_NUMERIC_FACTS=true` 时，任何未在 `aiops_observability_facts`、真实工具结果或 RCA 证据清单中出现的数值都不得写入报告。
+13. **禁止过度推断**：稀疏或单点指标不能证明稳定或正常；拓扑关系不能单独证明请求导致故障；运行时配置不可用不能自动改写成具体配置源故障；证据没有明确证明的机制只能作为候选。
+14. **按 Pod 展开真实数据**：可观测性表格不能替代根因正文。根因分析必须逐个异常 Pod 引用决定性日志原文、关键指标值、Kubernetes 终态、Trace/DeepFlow 事实和责任拓扑；缺少某个维度时明确写缺失，不能用另一个 Pod 的数据补齐。
 """
 
 
 # ----------------------------------------------------------------------------
-# REMEDIATION_PLAN_PROMPT
+# FACT_LEDGER_REMEDIATION_PLAN_PROMPT / REMEDIATION_PLAN_PROMPT
 # 使用场景:
 # - conclusion 节点生成 `## 🧩 结构化修复计划`
-# - 该计划会被 remediation executor 消费并在人工审批后执行
-# - 这里集中维护修复计划的安全边界、JSON 合同和验证命令规则
+# - Fact Ledger 与 legacy 路径使用互斥 prompt，避免诊断事实被解释为写授权
 # ----------------------------------------------------------------------------
+FACT_LEDGER_REMEDIATION_PLAN_PROMPT = """
+Fact Ledger 主路径仅用于诊断。报告末尾输出一个 `## 🧩 结构化修复计划`
+区块，并包含一个 JSON fenced block。
+
+硬性要求:
+- 固定输出 `"remediation_available": false`、`"fix_type": "manual_only"` 和
+  `"actions": []`。
+- 所有 `issue_groups[].auto_fixable` 必须为 false。
+- 正文可以保留人工修复指导，但 Kubernetes 命令只允许 get、describe、logs、top、rollout status。
+- 任何写操作都需要独立的类型化 Remediation Policy Contract；当前
+  Conclusion/Fact Ledger 合同不生成或授权 action。
+
+固定 JSON 形状:
+```json
+{
+  "remediation_contract": "fact-ledger-diagnostic-only-v1",
+  "remediation_available": false,
+  "fix_type": "manual_only",
+  "risk_level": "medium",
+  "requires_human_approval": true,
+  "issue_groups": [],
+  "basis": ["人工修复指导可保留在报告正文"],
+  "actions": [],
+  "stop_conditions": ["任何写操作都需要独立 Remediation Policy Contract"]
+}
+```
+"""
+
 REMEDIATION_PLAN_PROMPT = """
 在报告末尾额外输出一个 `## 🧩 结构化修复计划` 区块，必须包含一个 JSON fenced block。
 
@@ -758,12 +809,11 @@ REMEDIATION_PLAN_PROMPT = """
 - 所有写操作必须同时给出 dry_run_command、execute_command 和 verify_command。
 - command 必须是单行 kubectl 命令，不要使用 shell 管道、重定向、here-doc 或分号。
 - command 必须能直接执行，必须使用真实工具证据中出现的 namespace、workload 名、container 名；禁止输出 `<name>`、`<namespace>`、`xxx`、`TODO`、`PLACEHOLDER` 等占位符。
+- 如果修复依赖未知的 Secret、Token、密码、证书或业务配置值，必须输出 `"remediation_available": false` 和空 actions；禁止在 execute_command 中使用 `your_token_value`、`replace_me`、`changeme`、`token_value` 等占位值，也禁止把敏感值直接写进 `kubectl set env`。
 - 如果只能定位到 Pod，不能从 ownerReferences/labels/ReplicaSet 证据确认 Deployment/StatefulSet/DaemonSet 名称，则不要生成写操作，输出 `"remediation_available": false`，在修复建议中说明需要先确认上层 workload。
 - 创建 ConfigMap/Secret/PVC 只有在真实 Pod/Workload YAML 里存在对该资源的明确引用时才允许；仅因为探测命令返回某个常见名称 NotFound，不能生成 create configmap/secret/pvc 动作。
 - 如果日志显示缺少环境变量，且真实证据能确认上层 Deployment/StatefulSet/DaemonSet，优先修复 workload 的 env，例如 `kubectl set env deployment/<真实名称> -n <真实命名空间> KEY=value`。
 - 资源配置类修复优先使用 `kubectl set resources deployment/<真实名称> -n <真实命名空间> --limits=memory=...` 这类简单命令，避免复杂 JSON patch 字符串。
-- OOMKilled 修复必须尊重真实资源证据：如果当前已存在 memory limit，新 limit 必须严格大于当前值；禁止把 512Mi 改成 256Mi 这类降低或不增加内存上限的动作。
-- 如果证据显示应用逻辑会无限分配内存（例如循环 append 大对象），不要把“调小/小幅调大 limit”作为成功修复；应输出 `manual_only` 或 `"remediation_available": false`，说明需要修改应用代码、镜像或启动参数。
 - 所有 action 都必须 requires_human_approval=true，由执行器在工具前中断等待人工同意。
 
 验证命令规则:
@@ -772,6 +822,9 @@ REMEDIATION_PLAN_PROMPT = """
 - 如果需要验证 env/resources 字段，应该查询 workload 模板，例如 `kubectl get deployment <name> -n <namespace> -o jsonpath='{.spec.template.spec.containers[0].env}'`，不能查询旧 Pod 实例。
 - 只有 Pod finalizer 删除、Pod delete 这类目标就是删除当前 Pod 的修复，才允许 verify_command 查询固定 Pod 名，并将 NotFound 视为成功。
 - verify_command 的目标必须验证“业务恢复终态”：rollout 成功、Pod Running/Ready、重启不再增加，或删除类修复的 NotFound；不能只验证某个字段存在就宣称修复成功。
+- Topology 边只证明实体关系或历史调用关系，不能据此声称 Service 当前健康、路由正常或“调用链完整”；只有明确的当前健康检查和完整多 Span 调用链证据才能这样判断。
+- 单点或稀疏 Metrics 只能作为辅助证据，不能单独“彻底排除”某类故障；Kubernetes Last State/Reason/Exit Code 的直接终态证据优先级更高。
+- 除非工具或应用文档明确给出符号名称，否则不要把 Exit Code 映射成 `EX_CONFIG`、`EX_UNAVAILABLE` 等名称，只报告数值和已验证行为。
 
 JSON 格式:
 ```json

@@ -11,6 +11,7 @@ from app.core.remediation.models import RemediationAction, RemediationPlan
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
+_FACT_LEDGER_REMEDIATION_CONTRACT = "fact-ledger-diagnostic-only-v1"
 _ALLOWED_KUBECTL_VERBS = {
     "apply",
     "create",
@@ -25,10 +26,42 @@ _ALLOWED_KUBECTL_VERBS = {
     "top",
 }
 _SHELL_METACHARS = re.compile(r"[;&|`$<>]")
+_CONTROL_WHITESPACE_RE = re.compile(r"[\t\n\r\v\f]")
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r"(?i)(?:=|:)(?:your[_-][A-Za-z0-9_-]*|replace[_-]?me|change[_-]?me|"
+    r"placeholder|example[_-]?value|actual[_-]?value|token[_-]?value)(?:\s|$)"
+)
+_KUBECTL_GLOBAL_OPTIONS_WITH_VALUE = {
+    "--as",
+    "--as-group",
+    "--cache-dir",
+    "--certificate-authority",
+    "--client-certificate",
+    "--client-key",
+    "--cluster",
+    "--context",
+    "--kubeconfig",
+    "--namespace",
+    "--request-timeout",
+    "--server",
+    "--tls-server-name",
+    "--token",
+    "--user",
+    "--v",
+    "--vmodule",
+    "-n",
+}
+_KUBECTL_GLOBAL_BOOLEAN_OPTIONS = {
+    "--disable-compression",
+    "--insecure-skip-tls-verify",
+    "--match-server-version",
+    "--warnings-as-errors",
+}
 
 
 def extract_remediation_plan(text: str) -> Optional[RemediationPlan]:
-    """Extract the first valid remediation JSON object from Markdown text."""
+    """Extract the canonical plan, or the first legacy plan when absent."""
+    candidates = []
     for candidate in _candidate_json_objects(text or ""):
         data = _loads_json(candidate)
         if not isinstance(data, dict):
@@ -37,6 +70,13 @@ def extract_remediation_plan(text: str) -> Optional[RemediationPlan]:
             data = data["remediation_plan"]
         if "remediation_available" not in data and "actions" not in data:
             continue
+        candidates.append(data)
+
+    for data in candidates:
+        if data.get("remediation_contract") == _FACT_LEDGER_REMEDIATION_CONTRACT:
+            return _build_plan(data)
+
+    for data in candidates:
         return _build_plan(data)
     return None
 
@@ -140,20 +180,61 @@ def _optional_command(value: Any) -> Optional[str]:
 
 
 def validate_safe_kubectl_command(command: str) -> None:
-    if _SHELL_METACHARS.search(command):
+    if _CONTROL_WHITESPACE_RE.search(command) or _SHELL_METACHARS.search(command):
         raise ValueError(f"unsafe remediation command: {command}")
+    if _PLACEHOLDER_VALUE_RE.search(command):
+        raise ValueError(f"placeholder remediation value: {command}")
     try:
         parts = shlex.split(command)
     except ValueError as exc:
         raise ValueError(f"unsafe remediation command: {command}") from exc
-    if len(parts) < 2 or parts[0] != "kubectl" or parts[1] not in _ALLOWED_KUBECTL_VERBS:
+    verb_index = _kubectl_verb_index(parts)
+    if (
+        verb_index is None
+        or parts[verb_index].lower() not in _ALLOWED_KUBECTL_VERBS
+    ):
         raise ValueError(f"unsafe remediation command: {command}")
 
 
 def is_read_only_kubectl_command(command: str) -> bool:
     validate_safe_kubectl_command(command)
     parts = shlex.split(command)
-    verb = parts[1]
+    verb_index = _kubectl_verb_index(parts)
+    if verb_index is None:
+        return False
+    verb = parts[verb_index].lower()
     if verb in {"get", "describe", "logs", "top"}:
         return True
-    return verb == "rollout" and len(parts) > 2 and parts[2] == "status"
+    return (
+        verb == "rollout"
+        and len(parts) > verb_index + 1
+        and parts[verb_index + 1].lower() == "status"
+    )
+
+
+def _kubectl_verb_index(parts: list[str]) -> Optional[int]:
+    if not parts or parts[0].lower() != "kubectl":
+        return None
+
+    index = 1
+    while index < len(parts) and parts[index].startswith("-"):
+        option = parts[index]
+        option_name = option.split("=", 1)[0].lower()
+        if "=" in option:
+            if (
+                option_name not in _KUBECTL_GLOBAL_OPTIONS_WITH_VALUE
+                and option_name not in _KUBECTL_GLOBAL_BOOLEAN_OPTIONS
+            ):
+                return None
+            index += 1
+            continue
+        if option_name in _KUBECTL_GLOBAL_BOOLEAN_OPTIONS:
+            index += 1
+            continue
+        if option_name not in _KUBECTL_GLOBAL_OPTIONS_WITH_VALUE:
+            return None
+        if index + 1 >= len(parts):
+            return None
+        index += 2
+
+    return index if index < len(parts) else None

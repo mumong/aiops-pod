@@ -1,12 +1,52 @@
+import asyncio
+import hashlib
 import os
 import sys
 import json
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.aicall.client import AICall
 from app.core.context.observation import ObservationProcessor
 from langchain_core.messages import AIMessage, ToolMessage
+
+
+def _canonical_fact_record(**overrides):
+    record = {
+        "entity_id": "k8s.pod:demo/api:uid-a",
+        "entity_kind": "Pod",
+        "namespace": "demo",
+        "entity_name": "api",
+        "dimension": "logging",
+        "fact_type": "log",
+        "attribute": "log.message",
+        "value": {"message": "request returned status 503"},
+        "source_system": "elasticsearch",
+        "directness": "direct",
+        "confidence": "high",
+        "strength": "strong",
+        "evidence_refs": ["logs:target"],
+    }
+    record.update(overrides)
+    identity = {
+        key: value
+        for key, value in record.items()
+        if key != "fact_id"
+        and value not in (None, {}, [])
+    }
+    identity["evidence_refs"] = sorted(set(identity["evidence_refs"]))
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    record["fact_id"] = (
+        "fact-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    )
+    return record
 
 
 def test_aicall_process_tool_observation_returns_bounded_summary(tmp_path):
@@ -26,6 +66,149 @@ def test_aicall_process_tool_observation_returns_bounded_summary(tmp_path):
     assert len(processed["summary"]) <= 500
     assert "OOMKilled" in processed["summary"]
     assert processed["raw_ref"].endswith(".raw.txt")
+
+
+def test_observation_processor_preserves_sanitized_canonical_fact_ledger(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=1200,
+    )
+    entity_id = "k8s.pod:demo/api:uid-a"
+    valid_record = _canonical_fact_record(entity_id=entity_id)
+    evaluator_record = _canonical_fact_record(
+        entity_id=entity_id,
+        value={"message": "must be rejected"},
+        evidence_refs=["logs:evaluator"],
+        metadata={
+            "nested": {
+                "expected/remediation": "must not reach the agent",
+                "LaBeL": "evaluator-only",
+            }
+        },
+    )
+    raw = json.dumps({
+        "ok": True,
+        "case_id": "case-facts",
+        "primary_entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+            "uid": "uid-a",
+        },
+        "coverage": {"logs": "present"},
+        "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "case-facts",
+            "scope_entity_ids": [entity_id],
+            "records": [valid_record, evaluator_record],
+            "record_count": 2,
+            "truncated": False,
+            "source": "mcp_canonical",
+            "legacy_contract": False,
+        },
+    })
+
+    processed = processor.process(
+        run_id="run-fact-ledger",
+        node_id="evidence",
+        sequence=1,
+        tool_name="collect_aiops_case",
+        raw_content=raw,
+    )
+
+    ledger = processed["structured"]["fact_ledger"]
+    assert ledger["contract_version"] == "aiops.fact-ledger.v1"
+    assert ledger["scope_entity_ids"] == [entity_id]
+    assert [record["fact_id"] for record in ledger["records"]] == [
+        valid_record["fact_id"]
+    ]
+    assert ledger["record_count"] == 1
+    assert "must not reach the agent" not in json.dumps(ledger)
+    assert "evaluator-only" not in json.dumps(ledger)
+
+
+def test_observation_processor_strips_nested_causal_keys_but_keeps_source_text(
+    tmp_path,
+):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=2000,
+    )
+    raw = json.dumps({
+        "ok": True,
+        "case_id": "case-legacy-sanitized",
+        "primary_entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+            "uid": "uid-a",
+        },
+        "dimension_details": {
+            "metrics": {
+                "highlights": [
+                    {
+                        "metric": "request_latency_seconds",
+                        "samples": [
+                            {
+                                "value": 1.25,
+                                "rootCauseState": "must not reach the agent",
+                                "causalRole": "must not reach the agent",
+                                "causalRoleState": "must not reach the agent",
+                                "prefix.CAUSAL-role/Suffix": "must not reach the agent",
+                                "diagnosticRole": "must not reach the agent",
+                                "diagnosticRoleState": "must not reach the agent",
+                                "prefix.DIAGNOSTIC-role/Suffix": "must not reach the agent",
+                            }
+                        ],
+                    }
+                ]
+            },
+            "logs": {
+                "samples": [
+                    {
+                        "message": (
+                            "request driver logged root cause label, causal role, "
+                            "and diagnostic role as source text"
+                        )
+                    }
+                ]
+            },
+            "tracing": {
+                "spans": [
+                    {
+                        "trace_id": "trace-a",
+                        "attributes": {
+                            "safe.attribute": "kept",
+                            "diagnosisReason": "must not reach the agent",
+                            "preFailureBehavior": "must not reach the agent",
+                            "requestDriver": "must not reach the agent",
+                            "causalRoleState": "must not reach the agent",
+                            "diagnosticRoleState": "must not reach the agent",
+                        },
+                    }
+                ]
+            },
+        },
+    })
+
+    processed = processor.process(
+        run_id="run-legacy-sanitized",
+        node_id="evidence",
+        sequence=1,
+        tool_name="collect_aiops_case",
+        raw_content=raw,
+    )
+
+    rendered = json.dumps(
+        processed["structured"]["dimension_details"],
+        ensure_ascii=False,
+    )
+    assert "must not reach the agent" not in rendered
+    assert "safe.attribute" in rendered
+    assert (
+        "request driver logged root cause label, causal role, and diagnostic "
+        "role as source text"
+    ) in rendered
 
 
 def test_aicall_mutates_tool_message_to_bounded_observation(tmp_path, monkeypatch):
@@ -77,6 +260,218 @@ def test_aicall_mutates_tool_message_to_bounded_observation(tmp_path, monkeypatc
     assert "OOMKilled" in msg.content
     assert "raw_ref" in result.tool_calls[0]
     assert events[0]["observation_processed"] is True
+
+
+def test_aicall_tool_result_event_includes_context_usage_ratio(tmp_path, monkeypatch):
+    ai = AICall(model="openai/test", api_key="sk-test")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    msg = ToolMessage(
+        content="Name: pod-a\nNamespace: default\nReason: OOMKilled\n",
+        tool_call_id="tc-context",
+        name="kubectl_describe",
+    )
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield ("updates", {"tools": {"messages": [msg]}})
+
+    original_process = ai._process_tool_observation
+
+    def _process_with_context_ratio(**kwargs):
+        result = original_process(**kwargs)
+        result["context_usage_ratio"] = 0.81
+        return result
+
+    monkeypatch.setattr(ai, "_process_tool_observation", _process_with_context_ratio)
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+
+    tool = type("T", (), {"name": "kubectl_describe", "description": "d", "args_schema": None})()
+    _, events = ai.call(
+        "sys",
+        "q",
+        tools=[tool],
+        node_id="evidence",
+        run_id="run-context-ratio",
+        max_steps=2,
+    )
+
+    tool_result = next(event for event in events if event["type"] == "tool_result")
+    assert tool_result["context_usage_ratio"] == 0.81
+
+
+def test_aicall_tool_archive_sequence_can_continue_across_rounds(tmp_path, monkeypatch):
+    ai = AICall(model="openai/test", api_key="sk-test")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    msg = ToolMessage(
+        content="Name: pod-b\nNamespace: default\nReason: Error\n",
+        tool_call_id="tc-sequence",
+        name="kubectl_describe",
+    )
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield ("updates", {"tools": {"messages": [msg]}})
+
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+
+    tool = type("T", (), {"name": "kubectl_describe", "description": "d", "args_schema": None})()
+    result, _ = ai.call(
+        "sys",
+        "q",
+        tools=[tool],
+        node_id="evidence",
+        run_id="run-sequence",
+        max_steps=2,
+        tool_result_sequence_start=5,
+    )
+
+    assert "/006-evidence-kubectl_describe.raw.txt" in result.tool_calls[0]["raw_ref"]
+
+
+def test_aicall_assigns_stable_sequence_to_parallel_tool_results(tmp_path, monkeypatch):
+    ai = AICall(model="openai/test", api_key="sk-test")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    ai_message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "tc-a",
+                "name": "kubectl_get_by_name",
+                "args": {"kind": "Pod", "namespace": "default", "name": "pod-a"},
+            },
+            {
+                "id": "tc-b",
+                "name": "kubectl_get_by_name",
+                "args": {"kind": "Pod", "namespace": "default", "name": "pod-b"},
+            },
+        ],
+    )
+    tool_messages = [
+        ToolMessage(
+            content="NAME pod-a STATUS Running",
+            tool_call_id="tc-a",
+            name="kubectl_get_by_name",
+        ),
+        ToolMessage(
+            content="NAME pod-b STATUS CrashLoopBackOff",
+            tool_call_id="tc-b",
+            name="kubectl_get_by_name",
+        ),
+    ]
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield ("updates", {"model": {"messages": [ai_message]}})
+            yield ("updates", {"tools": {"messages": tool_messages}})
+
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
+    monkeypatch.setattr(
+        "concurrent.futures.ThreadPoolExecutor",
+        lambda max_workers=1: _Executor(),
+    )
+
+    tool = type(
+        "T",
+        (),
+        {"name": "kubectl_get_by_name", "description": "d", "args_schema": None},
+    )()
+    _, events = ai.call(
+        "sys",
+        "q",
+        tools=[tool],
+        node_id="layer",
+        run_id="run-parallel-sequence",
+        max_steps=4,
+    )
+
+    starts = [event for event in events if event["type"] == "tool_start"]
+    results = [event for event in events if event["type"] == "tool_result"]
+    assert [event["tool_sequence"] for event in starts] == [1, 2]
+    assert [event["tool_sequence"] for event in results] == [1, 2]
+
+
+def test_tool_dedup_middleware_reuses_success_for_same_name_and_args():
+    middleware = AICall._build_tool_dedup_middleware()
+    executions = []
+
+    async def handler(request):
+        executions.append(request.tool_call["id"])
+        return ToolMessage(
+            content='{"status":"success","pod":"pod-a"}',
+            tool_call_id=request.tool_call["id"],
+            name=request.tool_call["name"],
+        )
+
+    first_request = SimpleNamespace(
+        tool_call={
+            "id": "tc-first",
+            "name": "kubectl_get_by_name",
+            "args": {"kind": "Pod", "namespace": "default", "name": "pod-a"},
+        }
+    )
+    second_request = SimpleNamespace(
+        tool_call={
+            "id": "tc-second",
+            "name": "kubectl_get_by_name",
+            "args": {"name": "pod-a", "namespace": "default", "kind": "Pod"},
+        }
+    )
+
+    first = asyncio.run(middleware.awrap_tool_call(first_request, handler))
+    second = asyncio.run(middleware.awrap_tool_call(second_request, handler))
+
+    assert first.content == second.content
+    assert executions == ["tc-first"]
+    assert second.tool_call_id == "tc-second"
+    assert second.additional_kwargs["aiops_deduplicated"] is True
+    assert second.additional_kwargs["aiops_original_tool_call_id"] == "tc-first"
 
 
 def test_aicall_writes_final_budget_with_dynamic_context(tmp_path, monkeypatch):
@@ -835,7 +1230,7 @@ Note: the above runbook is for DIAGNOSTIC REFERENCE ONLY.
 
 
 def test_observation_processor_summarizes_aiops_case_without_label_leakage(tmp_path):
-    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=1200)
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=3000)
     raw = json.dumps({
         "ok": True,
         "case_id": "oom-aiops-temp-aiops-oom-business",
@@ -858,8 +1253,11 @@ def test_observation_processor_summarizes_aiops_case_without_label_leakage(tmp_p
                 "signal_id": "sig_status_oom",
                 "dimension": "kubernetes",
                 "strength": "critical",
-                "observed": True,
-                "evidence_refs": ["k8s.describe"],
+                "observed": "Last terminated state: business-api=OOMKilled exit=137",
+                "evidence_refs": [
+                    "k8s.trace-oom-api.pod-yaml",
+                    "k8s.trace-oom-api.last-terminated",
+                ],
             },
             {
                 "signal_id": "sig_logs_memory_growth",
@@ -884,6 +1282,80 @@ def test_observation_processor_summarizes_aiops_case_without_label_leakage(tmp_p
             "relations": {"runs_on": 1, "contains": 1, "selects": 1},
             "directness": {"direct": 2, "related_context": 1},
             "confidence": {"high": 2, "weak": 1},
+        },
+        "dimension_details": {
+            "metrics": {
+                "coverage": "present",
+                "highlights": [
+                    {
+                        "metric": "container_memory_working_set_bytes",
+                        "container": "business-api",
+                        "start": "18.4Mi",
+                        "max": "63.2Mi",
+                        "last": "0.3Mi",
+                        "limit": "64.0Mi",
+                        "max_limit_ratio": 0.9875,
+                        "samples": ["01:00:00=18.4Mi", "01:01:00=63.2Mi"],
+                        "evidence_ref": "metric.memory_limit",
+                    }
+                ],
+            },
+            "logs": {
+                "coverage": "present",
+                "samples": [
+                    {
+                        "timestamp": "2026-07-06T10:00:00Z",
+                        "message": "trace_id=abc123 allocated_mib=50",
+                        "container": "business-api",
+                        "evidence_ref": "log.memory_growth",
+                    }
+                ],
+            },
+            "tracing": {
+                "coverage": "present",
+                "flows": [
+                    {
+                        "timestamp": "2026-07-06T10:00:00Z",
+                        "src": "10.244.0.20",
+                        "dst": "10.244.0.10",
+                        "protocol": "HTTP",
+                        "request": "GET /allocate?mib=2",
+                        "response_code": 200,
+                        "duration_us": 1820,
+                        "trace_id": "abc123",
+                        "span_id": "span01",
+                        "evidence_ref": "deepflow.flow",
+                    }
+                ],
+                "spans": [
+                    {
+                        "trace_id": "abc123",
+                        "service": "aiops-oom-business",
+                        "name": "GET /allocate",
+                        "start": "2026-07-06T10:00:00Z",
+                        "end": "2026-07-06T10:00:00.001820Z",
+                        "attributes": {"aiops.allocated_mib.after": 50},
+                        "evidence_ref": "tempo.span",
+                    }
+                ],
+                "call_chains": [],
+            },
+            "topology": {
+                "coverage": "present",
+                "entities": [
+                    {"entity_id": "service:aiops-temp/oom", "kind": "Service", "name": "oom"}
+                ],
+                "edges": [
+                    {
+                        "relationship": "Service --selects--> Pod",
+                        "source": "oom",
+                        "target": "aiops-oom-business",
+                        "directness": "direct",
+                        "confidence": "high",
+                        "evidence_refs": ["k8s.describe"],
+                    }
+                ],
+            },
         },
         "evidence_inventory": [
             {"ref": "evidence/k8s_describe.txt", "exists": True, "records": 80},
@@ -922,14 +1394,478 @@ def test_observation_processor_summarizes_aiops_case_without_label_leakage(tmp_p
     assert processed["structured"]["recommended_refs_by_dimension"]["metrics"] == ["metric.memory_limit"]
     assert processed["structured"]["topology_summary"]["directness"]["related_context"] == 1
     assert processed["structured"]["topology_summary"]["confidence"]["weak"] == 1
+    details = processed["structured"]["dimension_details"]
+    assert details["metrics"]["highlights"][0]["max"] == "63.2Mi"
+    assert details["logs"]["samples"][0]["message"] == "trace_id=abc123 allocated_mib=50"
+    assert details["tracing"]["flows"][0]["request"] == "GET /allocate?mib=2"
+    assert details["tracing"]["spans"][0]["attributes"]["aiops.allocated_mib.after"] == 50
+    assert details["topology"]["edges"][0]["relationship"] == "Service --selects--> Pod"
     assert "collect_aiops_case 摘要" in processed["summary"]
     assert "aiops-temp/aiops-oom-business" in processed["summary"]
     assert "tracing=weak_context" in processed["summary"]
+    assert (
+        'K8S_SIGNAL strength=critical observed="Last terminated state: '
+        'business-api=OOMKilled exit=137"'
+    ) in processed["summary"]
+    assert "k8s.trace-oom-api.last-terminated" in processed["summary"]
     assert "recommended_refs_by_dimension" in processed["summary"]
     assert "directness={'direct': 2, 'related_context': 1}" in processed["summary"]
     assert "k8s.describe" in processed["summary"]
+    assert "63.2Mi" in processed["summary"]
+    assert "allocated_mib=50" in processed["summary"]
+    assert "GET /allocate?mib=2" in processed["summary"]
+    assert "Service --selects--> Pod" in processed["summary"]
+    assert len(processed["summary"]) <= processor.max_observation_chars
     assert "root_cause" not in processed["summary"]
     assert "expected_remediation" not in processed["summary"]
+
+
+def test_aiops_case_uses_deterministic_summary_with_trace_and_topology_constraints(tmp_path):
+    summarizer_calls = []
+
+    def _lossy_summarizer(tool, raw, summary):
+        summarizer_calls.append((tool, raw, summary))
+        return "generic lossy summary"
+
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=1800,
+        summarizer=_lossy_summarizer,
+        summary_mode="rule",
+    )
+    raw = json.dumps({
+        "ok": True,
+        "case_id": "auto-aiops-traced-oom-trace-oom-api-abc",
+        "abnormal_type": "oomkilled",
+        "primary_entity": {
+            "kind": "Pod",
+            "namespace": "aiops-traced-oom",
+            "name": "trace-oom-api-abc",
+            "node": "node2",
+            "pod_ip": "172.16.104.13",
+        },
+        "coverage": {
+            "k8s": "present",
+            "metrics": "present",
+            "logs": "present",
+            "tracing": "present",
+            "trace": "present",
+            "topology": "present",
+        },
+        "signals_summary": [
+            {
+                "signal_id": f"signal-{index}",
+                "dimension": "logging",
+                "strength": "important",
+                "observed": True,
+                "evidence_refs": [f"log-{index}"],
+            }
+            for index in range(12)
+        ],
+        "timeline_summary": [
+            {
+                "timestamp": f"2026-07-13T05:15:{index:02d}Z",
+                "dimension": "logging",
+                "summary": "memory allocation request observed " + ("x" * 100),
+                "evidence_refs": [f"log-{index}"],
+            }
+            for index in range(12)
+        ],
+        "dimension_details": {
+            "metrics": {
+                "coverage": "present",
+                "highlights": [{
+                    "metric": "container_memory_working_set_bytes",
+                    "container": "business-api",
+                    "start": "3.6Mi",
+                    "max": "77.0Mi",
+                    "last": "77.0Mi",
+                    "limit": "80.0Mi",
+                    "max_limit_ratio": 0.9619,
+                    "evidence_ref": "metric-memory",
+                }],
+            },
+            "logs": {
+                "coverage": "present",
+                "samples": [{
+                    "message": json.dumps({
+                        "event": "allocate",
+                        "trace_id": "a6725e70f3ba82f6097397a3dad5e444",
+                        "path": "/allocate?mib=2&step=1267",
+                        "allocated_mib": 62,
+                    }),
+                    "role": "target",
+                    "evidence_ref": "log-target",
+                }],
+            },
+            "tracing": {
+                "coverage": "present",
+                "deepflow_coverage": "present",
+                "tempo_coverage": "present",
+                "flows": [{
+                    "src": "172.16.104.8",
+                    "dst": "172.16.104.13",
+                    "request": "GET /allocate?mib=2&step=1268",
+                    "duration_us": "0",
+                    "trace_id": "f715a43e716af7177105c5e793cbe5f6",
+                    "evidence_ref": "deepflow-flow",
+                }],
+                "spans": [{
+                    "trace_id": "a6725e70f3ba82f6097397a3dad5e444",
+                    "service": "aiops-traced-oom-api",
+                    "name": "GET /allocate",
+                    "attributes": {
+                        "aiops.allocated_mib.before": 60,
+                        "aiops.allocated_mib.after": 62,
+                    },
+                    "evidence_ref": "tempo-span",
+                }],
+            },
+            "topology": {
+                "coverage": "present",
+                "edges": [
+                    {
+                        "relationship": "Pod --calls--> Pod",
+                        "source": "trace-oom-driver-xyz",
+                        "target": "trace-oom-api-abc",
+                        "directness": "direct",
+                        "confidence": "high",
+                    },
+                    {
+                        "relationship": "Service --selects--> Pod",
+                        "source": "trace-oom-api",
+                        "target": "trace-oom-api-abc",
+                        "directness": "direct",
+                        "confidence": "high",
+                    },
+                    {
+                        "relationship": "Pod --owned_by--> ReplicaSet",
+                        "source": "trace-oom-api-abc",
+                        "target": "trace-oom-api-rs",
+                        "directness": "direct",
+                        "confidence": "high",
+                    },
+                    {
+                        "relationship": "ReplicaSet --owned_by--> Deployment",
+                        "source": "trace-oom-api-rs",
+                        "target": "trace-oom-api",
+                        "directness": "direct",
+                        "confidence": "high",
+                    },
+                ],
+            },
+        },
+        "recommended_refs_by_dimension": {
+            "metrics": ["metric-memory"],
+            "logs": ["log-target"],
+            "tracing": ["deepflow-flow"],
+            "trace": ["tempo-span"],
+        },
+    }, ensure_ascii=False)
+
+    processed = processor.process(
+        run_id="run-aiops-deterministic-summary",
+        node_id="evidence",
+        sequence=1,
+        tool_name="collect_aiops_case",
+        raw_content=raw,
+    )
+
+    assert summarizer_calls == []
+    assert processed["processor"] == "aiops_case"
+    assert len(processed["summary"]) <= 1800
+    assert processed["summary"].startswith(
+        "AIOPS_CASE case_id=auto-aiops-traced-oom-trace-oom-api-abc"
+    )
+    assert "TRACE_CORRELATION" in processed["summary"]
+    assert "log_tempo_trace_id=a6725e70f3ba82f6097397a3dad5e444" in processed["summary"]
+    assert "deepflow_trace_id=f715a43e716af7177105c5e793cbe5f6" in processed["summary"]
+    assert "do_not_merge=true" in processed["summary"]
+    assert "duration_us=0 is_not_failure_evidence=true" in processed["summary"]
+    assert "MEMORY_PATTERN" not in processed["summary"]
+    assert 'relationship="Pod --calls--> Pod"' in processed["summary"]
+    assert 'relationship="Service --selects--> Pod"' in processed["summary"]
+    assert 'relationship="Pod --owned_by--> ReplicaSet"' in processed["summary"]
+    assert 'relationship="ReplicaSet --owned_by--> Deployment"' in processed["summary"]
+    assert (
+        "DIMENSION_DETAILS complete=true "
+        "action=post_case_reconciliation"
+    ) in processed["summary"]
+    assert "do_not_guess_evidence_refs=true" in processed["summary"]
+
+
+def test_aiops_case_summary_reserves_budget_for_recommended_refs_after_core_topology(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=3000,
+        summary_mode="rule",
+    )
+    trace_id = "4dc7a082a2043f2dcedfbb5a0de47718"
+    pod = "trace-config-api-84bc7cb976-vgtl8"
+    structured = {
+        "status": "case_collected",
+        "tool": "collect_aiops_case",
+        "case_id": f"auto-aiops-traced-config-{pod}",
+        "abnormal_type": "crashloopbackoff",
+        "primary_entity": {
+            "kind": "Pod",
+            "namespace": "aiops-traced-config",
+            "name": pod,
+            "node": "node2",
+            "pod_ip": "172.16.104.2",
+        },
+        "coverage": {
+            "k8s": "present",
+            "metrics": "present",
+            "logs": "present",
+            "tracing": "present",
+            "trace": "present",
+            "caller_logs": "present",
+            "topology": "present",
+        },
+        "signals_summary": [{
+            "dimension": "k8s",
+            "strength": "strong",
+            "observed": "Last terminated state: business-api=Error exit=78",
+            "evidence_refs": [
+                f"k8s-aiops-traced-config-{pod}-{suffix}"
+                for suffix in (
+                    "pod-yaml",
+                    "last-terminated",
+                    "events",
+                    "current",
+                    "previous",
+                )
+            ],
+        }],
+        "dimension_details": {
+            "metrics": {
+                "highlights": [{
+                    "metric": "container_memory_working_set_bytes",
+                    "start": "3.7Mi",
+                    "max": "3.7Mi",
+                    "last": "3.7Mi",
+                    "limit": "96.0Mi",
+                    "max_limit_ratio": 0.0381,
+                }],
+            },
+            "logs": {
+                "samples": [{
+                    "message": json.dumps({
+                        "event": "config_missing",
+                        "trace_id": trace_id,
+                        "path": "/checkout?order_id=order-58973",
+                        "error_code": "CONFIG_MISSING",
+                        "missing_config": "PAYMENT_GATEWAY_TOKEN",
+                        "http_status": 500,
+                    }),
+                }],
+            },
+            "tracing": {
+                "flows": [{
+                    "src": "172.16.104.56",
+                    "dst": "172.16.104.2",
+                    "request": "GET /checkout?order_id=order-58973",
+                    "response_code": 500,
+                    "duration_us": 5010,
+                    "trace_id": trace_id,
+                }],
+                "spans": [{
+                    "trace_id": trace_id,
+                    "service": "aiops-traced-config-api",
+                    "name": "GET /checkout",
+                    "attributes": {
+                        "http.response.status_code": 500,
+                        "error.type": "CONFIG_MISSING",
+                        "config.key": "PAYMENT_GATEWAY_TOKEN",
+                        "config.present": False,
+                    },
+                }],
+            },
+            "topology": {
+                "edges": [
+                    {
+                        "relationship": relationship,
+                        "source": source,
+                        "target": target,
+                        "directness": "direct",
+                        "confidence": "high",
+                    }
+                    for relationship, source, target in (
+                        (
+                            "Pod --calls--> Pod",
+                            "trace-config-driver-59fd97ff89-jh8t6",
+                            pod,
+                        ),
+                        ("Service --selects--> Pod", "trace-config-api", pod),
+                        (
+                            "Pod --owned_by--> ReplicaSet",
+                            pod,
+                            "trace-config-api-84bc7cb976",
+                        ),
+                        (
+                            "ReplicaSet --owned_by--> Deployment",
+                            "trace-config-api-84bc7cb976",
+                            "trace-config-api",
+                        ),
+                        ("Evidence --observes--> Pod", "prometheus-metrics", pod),
+                    )
+                ],
+            },
+        },
+        "topology_summary": {
+            "directness": {"direct": 10, "related_context": 2},
+            "confidence": {"high": 8, "medium": 2, "weak": 2},
+        },
+        "recommended_refs_by_dimension": {
+            "k8s": [f"k8s-aiops-traced-config-{pod}-pod-yaml"],
+            "metrics": [f"metric-aiops-traced-config-{pod}-prometheus"],
+            "logs": [f"log-aiops-traced-config-{pod}-elasticsearch"],
+            "tracing": [f"deepflow-aiops-traced-config-{pod}-pod-ip-flow"],
+            "trace": [f"tempo-aiops-traced-config-{pod}-spans"],
+            "caller_logs": [f"caller-log-aiops-traced-config-{pod}-driver"],
+        },
+    }
+
+    summary = processor._build_aiops_case_prompt_summary(structured)
+
+    assert len(summary) <= 3000
+    assert 'relationship="ReplicaSet --owned_by--> Deployment"' in summary
+    assert "recommended_refs_by_dimension=" in summary
+    assert f"metric-aiops-traced-config-{pod}-prometheus" in summary
+
+
+def test_aiops_case_summary_preserves_generic_log_and_trace_error_fields(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=3000,
+        summary_mode="rule",
+    )
+    raw = json.dumps({
+        "ok": True,
+        "case_id": "auto-config-crashloop",
+        "abnormal_type": "crashloopbackoff",
+        "coverage": {
+            "k8s": "present",
+            "metrics": "present",
+            "logs": "present",
+            "tracing": "present",
+            "trace": "present",
+            "topology": "present",
+        },
+        "dimension_details": {
+            "metrics": {"coverage": "present", "highlights": []},
+            "logs": {
+                "coverage": "present",
+                "samples": [{
+                    "message": json.dumps({
+                        "event": "config_missing",
+                        "error_code": "CONFIG_MISSING",
+                        "missing_config": "PAYMENT_GATEWAY_TOKEN",
+                        "http_status": 500,
+                        "exit_code": 78,
+                        "trace_id": "trace-config-1",
+                        "path": "/checkout",
+                    }),
+                    "role": "target",
+                    "evidence_ref": "log-config",
+                }],
+            },
+            "tracing": {
+                "coverage": "present",
+                "flows": [],
+                "spans": [{
+                    "trace_id": "trace-config-1",
+                    "service": "config-api",
+                    "name": "GET /checkout",
+                    "attributes": {
+                        "http.response.status_code": 500,
+                        "error.type": "CONFIG_MISSING",
+                        "config.key": "PAYMENT_GATEWAY_TOKEN",
+                        "config.present": False,
+                    },
+                    "evidence_ref": "tempo-config",
+                }],
+            },
+            "topology": {"coverage": "present", "edges": []},
+        },
+    }, ensure_ascii=False)
+
+    processed = processor.process(
+        run_id="run-config-crashloop",
+        node_id="evidence",
+        sequence=1,
+        tool_name="collect_aiops_case",
+        raw_content=raw,
+    )
+
+    summary = processed["summary"]
+    assert "event=config_missing" in summary
+    assert "error_code=CONFIG_MISSING" in summary
+    assert "missing_config=PAYMENT_GATEWAY_TOKEN" in summary
+    assert "http_status=500" in summary
+    assert "exit_code=78" in summary
+    assert "http.response.status_code=500" in summary
+    assert "error.type=CONFIG_MISSING" in summary
+    assert "config.key=PAYMENT_GATEWAY_TOKEN" in summary
+    assert "config.present=false" in summary
+    assert "MEMORY_PATTERN" not in summary
+
+
+def test_aiops_case_summary_marks_fully_mismatched_trace_sources_non_mergeable(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=3000,
+        summary_mode="rule",
+    )
+
+    summary = processor._build_aiops_case_prompt_summary({
+        "status": "case_collected",
+        "tool": "collect_aiops_case",
+        "case_id": "trace-mismatch",
+        "primary_entity": {
+            "kind": "Pod",
+            "namespace": "ns",
+            "name": "pod-a",
+        },
+        "coverage": {
+            "k8s": "present",
+            "metrics": "present",
+            "logs": "present",
+            "tracing": "present",
+            "topology": "present",
+        },
+        "dimension_details": {
+            "logs": {
+                "samples": [
+                    {
+                        "message": json.dumps({
+                            "trace_id": "log-trace",
+                            "path": "/allocate?step=2",
+                        })
+                    }
+                ]
+            },
+            "tracing": {
+                "flows": [
+                    {
+                        "trace_id": "network-trace",
+                        "request": "GET /allocate?step=1",
+                    }
+                ],
+                "spans": [
+                    {
+                        "trace_id": "network-trace",
+                        "name": "GET /allocate",
+                    }
+                ],
+            },
+        },
+    })
+
+    assert "log_tempo_trace_id=-" in summary
+    assert "deepflow_trace_id=network-trace" in summary
+    assert "do_not_merge=true" in summary
 
 
 def test_observation_processor_preserves_aiops_evidence_strength_fields(tmp_path):
@@ -949,7 +1885,23 @@ def test_observation_processor_preserves_aiops_evidence_strength_fields(tmp_path
             "confidence": "weak",
             "directness": "related_context",
             "trace_correlation": {"pod_ip": "10.244.0.10", "trace_ids": []},
-            "payload": {"large": "not selected"},
+            "payload": {
+                "samples": [
+                    {
+                        "timestamp": "2026-07-08T05:00:00Z",
+                        "src": "10.244.0.20",
+                        "dst": "10.244.0.10",
+                        "protocol": "HTTP",
+                        "request": "GET /allocate?mib=2",
+                        "response_code": 200,
+                        "duration_us": 1820,
+                        "trace_id": "abc123",
+                        "span_id": "span01",
+                    }
+                ],
+                "large": "not selected",
+                "root_cause": "must not leak",
+            },
         },
     }, ensure_ascii=False)
 
@@ -965,7 +1917,11 @@ def test_observation_processor_preserves_aiops_evidence_strength_fields(tmp_path
     assert record["confidence"] == "weak"
     assert record["directness"] == "related_context"
     assert record["trace_correlation"]["pod_ip"] == "10.244.0.10"
-    assert "payload" not in record
+    assert record["payload"]["samples"][0]["request"] == "GET /allocate?mib=2"
+    assert record["payload"]["samples"][0]["trace_id"] == "abc123"
+    assert "large" not in record["payload"]
+    assert "root_cause" not in record["payload"]
+    assert "GET /allocate?mib=2" in processed["summary"]
     assert "labels" not in processed["structured"]
 
 
@@ -1075,6 +2031,68 @@ aiops-e2e     terminating-stuck                         0/1     Terminating     
     assert any("terminating-stuck" in row for row in selected_rows)
     assert all("observability-kepler-8fhp6" not in row for row in selected_rows)
     assert all("observability-kibana-65d7c45f6d-7zc9l" not in row for row in selected_rows)
+
+
+def test_observation_processor_table_selects_running_pod_with_recent_restart(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=2000)
+    raw = """NAMESPACE          NAME                         READY   STATUS    RESTARTS          AGE
+aiops-traced-oom   trace-oom-api-598dcf-x6v6n   1/1     Running   234 (5m23s ago)   5d
+xnet               stable-api-5d7c8             1/1     Running   0                 12d
+"""
+
+    processed = processor.process(
+        run_id="run-table-recent-restart",
+        node_id="layer",
+        sequence=1,
+        tool_name="kubectl_get_by_kind_in_cluster",
+        raw_content=raw,
+    )
+
+    structured = processed["structured"]
+    assert structured["abnormal_count"] == 1
+    assert structured["recent_restart_count"] == 1
+    assert structured["recent_restart_rows"] == [
+        "aiops-traced-oom   trace-oom-api-598dcf-x6v6n   1/1     Running   234 (5m23s ago)   5d"
+    ]
+    assert structured["selected_rows"] == structured["recent_restart_rows"]
+
+
+def test_observation_processor_table_keeps_old_running_restart_as_normal(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=2000)
+    raw = """NAMESPACE   NAME                    READY   STATUS    RESTARTS       AGE
+xnet        observability-kepler    1/1     Running   1 (69d ago)    90d
+"""
+
+    processed = processor.process(
+        run_id="run-table-old-restart",
+        node_id="layer",
+        sequence=1,
+        tool_name="kubectl_get_by_kind_in_cluster",
+        raw_content=raw,
+    )
+
+    assert processed["structured"]["abnormal_count"] == 0
+    assert processed["structured"]["recent_restart_count"] == 0
+    assert processed["structured"]["recent_restart_rows"] == []
+
+
+def test_observation_processor_table_keeps_zero_restart_running_pod_normal(tmp_path):
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=2000)
+    raw = """NAMESPACE   NAME          READY   STATUS    RESTARTS   AGE
+xnet        stable-api    1/1     Running   0          12d
+"""
+
+    processed = processor.process(
+        run_id="run-table-zero-restart",
+        node_id="layer",
+        sequence=1,
+        tool_name="kubectl_get_by_kind_in_cluster",
+        raw_content=raw,
+    )
+
+    assert processed["structured"]["abnormal_count"] == 0
+    assert processed["structured"]["recent_restart_count"] == 0
+    assert processed["structured"]["recent_restart_rows"] == []
 
 
 def test_observation_processor_table_treats_ready_bound_and_active_as_normal(tmp_path):

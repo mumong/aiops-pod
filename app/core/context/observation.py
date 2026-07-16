@@ -13,6 +13,12 @@ from typing import Any, Callable, Dict, Optional
 
 import yaml
 
+from app.core.workflow.fact_contract import (
+    is_forbidden_fact_key,
+    normalize_fact_ledger,
+    sanitize_evidence_value,
+)
+
 from .archive import ContextArchive, get_archive_root
 
 
@@ -20,6 +26,8 @@ Summarizer = Callable[[str, str, str], Optional[str]]
 
 
 class ObservationProcessor:
+    RECENT_RESTART_WINDOW_SECONDS = 15 * 60
+
     HEAVY_TOOLS = {
         "kubectl_get_by_kind_in_cluster",
         "kubectl_get_by_kind_in_namespace",
@@ -113,7 +121,10 @@ class ObservationProcessor:
             context_usage_ratio is not None
             and context_usage_ratio >= self.context_pressure_threshold
         )
-        if full_passthrough:
+        deterministic_case_summary = tool in self.AIOPS_CASE_TOOLS
+        if deterministic_case_summary:
+            should_llm_summarize = False
+        elif full_passthrough:
             should_llm_summarize = over_context_threshold
         else:
             should_llm_summarize = (
@@ -288,6 +299,12 @@ class ObservationProcessor:
                         "trace_correlation",
                     ],
                 )
+                evidence_payload = self._sanitize_aiops_evidence_payload(
+                    str(record.get("dimension") or ""),
+                    record.get("payload"),
+                )
+                if evidence_payload:
+                    structured["record"]["payload"] = evidence_payload
             content = str(payload.get("content") or "").strip()
             if content:
                 structured["content_chars"] = len(content)
@@ -334,6 +351,8 @@ class ObservationProcessor:
             for key, value in recommended_refs.items()
             if isinstance(value, list)
         }
+        dimension_details = self._sanitize_aiops_dimension_details(payload.get("dimension_details"))
+        fact_ledger = normalize_fact_ledger(payload.get("fact_ledger"))
         status = "case_collected" if tool == "collect_aiops_case" else "case_loaded"
         structured = {
             "status": status,
@@ -342,80 +361,538 @@ class ObservationProcessor:
             "abnormal_type": payload.get("abnormal_type"),
             "scenario": payload.get("scenario"),
             "primary_entity": self._select_keys(primary, ["kind", "namespace", "name", "uid", "node", "pod_ip"]),
-            "coverage": dict(coverage),
+            "coverage": sanitize_evidence_value(coverage),
             "signals_summary": signals,
             "timeline_summary": timeline,
             "topology_summary": self._select_keys(
                 topology,
                 ["entity_count", "edge_count", "entity_kinds", "relations", "directness", "confidence"],
             ),
+            "dimension_details": dimension_details,
             "evidence_inventory": inventory,
             "evidence_refs": evidence_refs,
             "recommended_refs_by_dimension": recommended_refs,
             "package_ref": payload.get("package_ref"),
         }
+        if fact_ledger is not None:
+            structured["fact_ledger"] = fact_ledger.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
 
-        namespace = structured["primary_entity"].get("namespace") or ""
-        name = structured["primary_entity"].get("name") or ""
-        kind = structured["primary_entity"].get("kind") or "Pod"
-        coverage_text = " ".join(
-            f"{key}={value}"
-            for key, value in sorted(structured["coverage"].items())
-        ) or "-"
-        topology_text = (
-            f"entities={structured['topology_summary'].get('entity_count', 0)} "
-            f"edges={structured['topology_summary'].get('edge_count', 0)} "
-            f"relations={structured['topology_summary'].get('relations', {})} "
-            f"directness={structured['topology_summary'].get('directness', {})} "
-            f"confidence={structured['topology_summary'].get('confidence', {})}"
+        summary = self._build_aiops_case_prompt_summary(structured)
+        return structured, summary, "aiops_case"
+
+    def _build_aiops_case_prompt_summary(self, structured: Dict[str, Any]) -> str:
+        """Render deterministic high-value facts for the evidence agent.
+
+        This summary is itself a control boundary. It must preserve source-
+        specific trace IDs and exact topology relationships, so it is not sent
+        through another LLM summarizer.
+        """
+        details = structured.get("dimension_details")
+        if not isinstance(details, dict):
+            details = {}
+        primary = structured.get("primary_entity")
+        if not isinstance(primary, dict):
+            primary = {}
+        coverage = structured.get("coverage")
+        if not isinstance(coverage, dict):
+            coverage = {}
+
+        lines: list[str] = []
+
+        def compact(value: Any, limit: int = 120) -> str:
+            if value is None:
+                text = ""
+            elif isinstance(value, bool):
+                text = str(value).lower()
+            else:
+                text = str(value)
+            text = text.replace("\n", " ").strip()
+            return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
+
+        def add(line: str) -> None:
+            if not line:
+                return
+            projected = len("\n".join([*lines, line]))
+            if projected <= self.max_observation_chars:
+                lines.append(line)
+
+        case_id = compact(structured.get("case_id"), 160)
+        abnormal_type = compact(structured.get("abnormal_type"), 60)
+        add(
+            f"AIOPS_CASE case_id={case_id} status={structured.get('status')} "
+            f"abnormal_type={abnormal_type} {structured.get('tool')} 摘要"
         )
-        lines = [
-            f"{tool} 摘要: case_id={structured.get('case_id')} abnormal_type={structured.get('abnormal_type')}",
-            f"primary_entity={kind} {namespace}/{name}",
-            f"coverage={coverage_text}",
-            f"topology={topology_text}",
-        ]
-        if signals:
-            lines.append("signals:")
-            for item in signals[:8]:
-                lines.append(
-                    "- {signal_id} dimension={dimension} strength={strength} observed={observed} refs={refs}".format(
-                        signal_id=item.get("signal_id", ""),
-                        dimension=item.get("dimension", ""),
-                        strength=item.get("strength", ""),
-                        observed=item.get("observed", ""),
-                        refs=",".join(str(ref) for ref in (item.get("evidence_refs") or [])[:5]),
-                    )
-                )
-        if timeline:
-            lines.append("timeline:")
-            for item in timeline[:6]:
-                lines.append(
-                    "- {timestamp} {dimension}: {summary} refs={refs}".format(
-                        timestamp=item.get("timestamp", ""),
-                        dimension=item.get("dimension", ""),
-                        summary=item.get("summary", ""),
-                        refs=",".join(str(ref) for ref in (item.get("evidence_refs") or [])[:5]),
-                    )
-                )
-        if evidence_refs:
-            lines.append("evidence_refs=" + ", ".join(evidence_refs[:20]))
-        if recommended_refs:
-            lines.append("recommended_refs_by_dimension=" + json.dumps(recommended_refs, ensure_ascii=False, default=str))
-        if structured.get("package_ref"):
-            lines.append(f"package_ref={structured['package_ref']}")
+        add(
+            "ENTITY entity={kind} {namespace}/{name} node={node} pod_ip={pod_ip}".format(
+                kind=compact(primary.get("kind"), 30),
+                namespace=compact(primary.get("namespace"), 80),
+                name=compact(primary.get("name"), 100),
+                node=compact(primary.get("node"), 60),
+                pod_ip=compact(primary.get("pod_ip"), 60),
+            )
+        )
+        coverage_text = " ".join(f"{key}={value}" for key, value in sorted(coverage.items()))
+        add(f"COVERAGE {coverage_text or '-'}")
 
-        return structured, "\n".join(lines), "aiops_case"
+        signals = structured.get("signals_summary")
+        if isinstance(signals, list):
+            for item in signals:
+                if not isinstance(item, dict):
+                    continue
+                dimension = str(item.get("dimension") or "").strip().lower()
+                strength = str(item.get("strength") or "").strip().lower()
+                observed = item.get("observed")
+                if (
+                    dimension not in {"k8s", "kubernetes"}
+                    or strength not in {"strong", "critical"}
+                    or not isinstance(observed, str)
+                    or not observed.strip()
+                ):
+                    continue
+                refs = [
+                    str(ref)
+                    for ref in (item.get("evidence_refs") or [])[:5]
+                    if ref
+                ]
+                add(
+                    "K8S_SIGNAL strength={strength} observed={observed} evidence_refs={refs}".format(
+                        strength=compact(strength, 20),
+                        observed=json.dumps(compact(observed, 240), ensure_ascii=False),
+                        refs=json.dumps(refs, ensure_ascii=False, separators=(",", ":")),
+                    )
+                )
+                break
+
+        metrics = details.get("metrics") if isinstance(details.get("metrics"), dict) else {}
+        for item in (metrics.get("highlights") or [])[:1]:
+            if not isinstance(item, dict):
+                continue
+            add(
+                "METRIC metric={metric} start={start} max={max} last={last} limit={limit} "
+                "ratio={ratio}".format(
+                    metric=compact(item.get("metric"), 80),
+                    start=compact(item.get("start"), 30),
+                    max=compact(item.get("max"), 30),
+                    last=compact(item.get("last"), 30),
+                    limit=compact(item.get("limit"), 30),
+                    ratio=compact(item.get("max_limit_ratio"), 30),
+                )
+            )
+
+        logs = details.get("logs") if isinstance(details.get("logs"), dict) else {}
+        log_trace_ids: set[str] = set()
+        for item in (logs.get("samples") or [])[:1]:
+            if not isinstance(item, dict):
+                continue
+            message = str(item.get("message") or "")
+            parsed: Dict[str, Any] = {}
+            try:
+                decoded = json.loads(message)
+                if isinstance(decoded, dict):
+                    parsed = decoded
+            except json.JSONDecodeError:
+                parsed = {}
+            trace_id = str(parsed.get("trace_id") or "")
+            if trace_id:
+                log_trace_ids.add(trace_id)
+            log_fields = [
+                ("event", parsed.get("event")),
+                ("trace_id", trace_id),
+                ("path", parsed.get("path") or message),
+                ("error_code", parsed.get("error_code")),
+                ("missing_config", parsed.get("missing_config")),
+                ("http_status", parsed.get("http_status")),
+                ("exit_code", parsed.get("exit_code")),
+                ("alloc_mib", parsed.get("alloc_mib")),
+                ("allocated_mib", parsed.get("allocated_mib")),
+            ]
+            add("LOG " + " ".join(
+                f"{key}={compact(value, 120)}"
+                for key, value in log_fields
+                if value is not None and value != ""
+            ))
+
+        tracing = details.get("tracing") if isinstance(details.get("tracing"), dict) else {}
+        flows = [item for item in (tracing.get("flows") or []) if isinstance(item, dict)]
+        spans = [item for item in (tracing.get("spans") or []) if isinstance(item, dict)]
+        deepflow_trace_ids = {
+            str(item.get("trace_id"))
+            for item in flows
+            if item.get("trace_id")
+        }
+        tempo_trace_ids = {
+            str(item.get("trace_id"))
+            for item in spans
+            if item.get("trace_id")
+        }
+        log_tempo_trace_ids = sorted(log_trace_ids & tempo_trace_ids)
+        source_trace_sets = [
+            trace_ids
+            for trace_ids in (
+                log_trace_ids,
+                tempo_trace_ids,
+                deepflow_trace_ids,
+            )
+            if trace_ids
+        ]
+        do_not_merge = (
+            len(source_trace_sets) >= 2
+            and any(
+                trace_ids != source_trace_sets[0]
+                for trace_ids in source_trace_sets[1:]
+            )
+        )
+        if log_tempo_trace_ids or deepflow_trace_ids:
+            add(
+                "TRACE_CORRELATION log_tempo_trace_id={log_tempo} "
+                "deepflow_trace_id={deepflow} do_not_merge={do_not_merge}".format(
+                    log_tempo=",".join(log_tempo_trace_ids) or "-",
+                    deepflow=",".join(sorted(deepflow_trace_ids)) or "-",
+                    do_not_merge=str(do_not_merge).lower(),
+                )
+            )
+
+        for item in flows[:1]:
+            add(
+                "DEEPFLOW src={src} dst={dst} request={request} response_code={code} "
+                "duration_us={duration} trace_id={trace_id}".format(
+                    src=compact(item.get("src"), 60),
+                    dst=compact(item.get("dst"), 60),
+                    request=compact(item.get("request"), 120),
+                    code=compact(item.get("response_code"), 30),
+                    duration=compact(item.get("duration_us"), 30),
+                    trace_id=compact(item.get("trace_id"), 64),
+                )
+            )
+        if any(str(item.get("duration_us") or "").strip() in {"0", "0.0"} for item in flows):
+            add("DEEPFLOW_SEMANTICS duration_us=0 is_not_failure_evidence=true")
+
+        for item in spans[:1]:
+            attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+            span_fields = [
+                ("trace_id", item.get("trace_id")),
+                ("service", item.get("service")),
+                ("span", item.get("name")),
+                ("http.response.status_code", attrs.get("http.response.status_code")),
+                ("error.type", attrs.get("error.type")),
+                ("config.key", attrs.get("config.key")),
+                ("config.present", attrs.get("config.present")),
+                ("allocated_before", attrs.get("aiops.allocated_mib.before")),
+                ("allocated_after", attrs.get("aiops.allocated_mib.after")),
+            ]
+            add("TEMPO " + " ".join(
+                f"{key}={compact(value, 120)}"
+                for key, value in span_fields
+                if value is not None and value != ""
+            ))
+
+        complete = self._aiops_case_dimensions_complete(coverage)
+        add(
+            "DIMENSION_DETAILS complete={complete} action={action}".format(
+                complete=str(complete).lower(),
+                action=(
+                    "post_case_reconciliation"
+                    if complete
+                    else "supplement_missing_dimensions"
+                ),
+            )
+        )
+        add("REF_POLICY do_not_guess_evidence_refs=true")
+
+        topology = details.get("topology") if isinstance(details.get("topology"), dict) else {}
+        topology_edges = [
+            item
+            for item in (topology.get("edges") or [])[:8]
+            if isinstance(item, dict)
+        ]
+
+        def add_topology_edge(item: Dict[str, Any]) -> None:
+            relationship = json.dumps(str(item.get("relationship") or ""), ensure_ascii=False)
+            add(
+                "TOPOLOGY relationship={relationship} source={source} target={target} "
+                "directness={directness} confidence={confidence}".format(
+                    relationship=relationship,
+                    source=compact(item.get("source"), 90),
+                    target=compact(item.get("target"), 90),
+                    directness=compact(item.get("directness"), 30),
+                    confidence=compact(item.get("confidence"), 30),
+                )
+            )
+
+        for item in topology_edges[:4]:
+            add_topology_edge(item)
+
+        recommended = structured.get("recommended_refs_by_dimension")
+        if isinstance(recommended, dict) and recommended:
+            add(
+                "recommended_refs_by_dimension="
+                + compact(json.dumps(recommended, ensure_ascii=False, separators=(",", ":")), 500)
+            )
+
+        for item in topology_edges[4:]:
+            add_topology_edge(item)
+
+        topology_summary = structured.get("topology_summary")
+        if isinstance(topology_summary, dict):
+            add(
+                "TOPOLOGY_SUMMARY directness={directness} confidence={confidence}".format(
+                    directness=topology_summary.get("directness", {}),
+                    confidence=topology_summary.get("confidence", {}),
+                )
+            )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _aiops_case_dimensions_complete(coverage: Dict[str, Any]) -> bool:
+        present = {"present", "observed"}
+
+        def status(*keys: str) -> str:
+            for key in keys:
+                if key in coverage:
+                    return str(coverage.get(key) or "").strip().lower()
+            return ""
+
+        required_statuses = [
+            status("k8s", "kubernetes"),
+            status("metrics"),
+            status("logs", "logging"),
+            status("tracing"),
+            status("topology"),
+        ]
+        if "trace" in coverage:
+            required_statuses.append(status("trace"))
+        return bool(required_statuses) and all(item in present for item in required_statuses)
+
+    def _sanitize_aiops_dimension_details(self, value: Any) -> Dict[str, Any]:
+        sanitized = sanitize_evidence_value(value)
+        details = sanitized if isinstance(sanitized, dict) else {}
+        metrics = details.get("metrics") if isinstance(details.get("metrics"), dict) else {}
+        logs = details.get("logs") if isinstance(details.get("logs"), dict) else {}
+        tracing = details.get("tracing") if isinstance(details.get("tracing"), dict) else {}
+        topology = details.get("topology") if isinstance(details.get("topology"), dict) else {}
+        return {
+            "metrics": {
+                "coverage": metrics.get("coverage"),
+                "highlights": [
+                    self._select_keys(
+                        item,
+                        [
+                            "metric", "pod", "container", "start", "max", "last",
+                            "limit", "max_limit_ratio", "samples", "evidence_ref",
+                        ],
+                    )
+                    for item in (metrics.get("highlights") or [])[:5]
+                    if isinstance(item, dict)
+                ],
+            },
+            "logs": {
+                "coverage": logs.get("coverage"),
+                "samples": [
+                    self._select_keys(
+                        item,
+                        ["timestamp", "message", "container", "role", "evidence_ref"],
+                    )
+                    for item in (logs.get("samples") or [])[:8]
+                    if isinstance(item, dict)
+                ],
+            },
+            "tracing": {
+                "coverage": tracing.get("coverage"),
+                "deepflow_coverage": tracing.get("deepflow_coverage"),
+                "tempo_coverage": tracing.get("tempo_coverage"),
+                "flows": [
+                    self._select_keys(
+                        item,
+                        [
+                            "timestamp", "src", "dst", "protocol", "request",
+                            "response_code", "duration_us", "trace_id", "span_id",
+                            "evidence_ref",
+                        ],
+                    )
+                    for item in (tracing.get("flows") or [])[:5]
+                    if isinstance(item, dict)
+                ],
+                "spans": [
+                    {
+                        **self._select_keys(
+                            item,
+                            ["trace_id", "service", "name", "start", "end", "evidence_ref"],
+                        ),
+                        "attributes": self._sanitize_scalar_mapping(item.get("attributes"), max_items=8),
+                    }
+                    for item in (tracing.get("spans") or [])[:3]
+                    if isinstance(item, dict)
+                ],
+                "call_chains": [
+                    {
+                        **self._select_keys(item, ["syscall_trace_id", "hop_count", "evidence_ref"]),
+                        "hops": [
+                            self._select_keys(
+                                hop,
+                                ["src", "dst", "proto", "endpoint", "code", "duration_us"],
+                            )
+                            for hop in (item.get("hops") or [])[:5]
+                            if isinstance(hop, dict)
+                        ],
+                    }
+                    for item in (tracing.get("call_chains") or [])[:3]
+                    if isinstance(item, dict)
+                ],
+            },
+            "topology": {
+                "coverage": topology.get("coverage"),
+                "entities": [
+                    {
+                        **self._select_keys(
+                            item,
+                            ["entity_id", "kind", "namespace", "name", "evidence_refs"],
+                        ),
+                        "attributes": self._sanitize_scalar_mapping(item.get("attributes"), max_items=8),
+                    }
+                    for item in (topology.get("entities") or [])[:10]
+                    if isinstance(item, dict)
+                ],
+                "edges": [
+                    self._select_keys(
+                        item,
+                        [
+                            "relationship", "source", "target", "source_system",
+                            "directness", "confidence", "evidence_refs",
+                        ],
+                    )
+                    for item in (topology.get("edges") or [])[:12]
+                    if isinstance(item, dict)
+                ],
+            },
+        }
+
+    def _sanitize_aiops_evidence_payload(self, dimension: str, value: Any) -> Dict[str, Any]:
+        sanitized = sanitize_evidence_value(value)
+        payload = sanitized if isinstance(sanitized, dict) else {}
+        if dimension == "metrics":
+            return self._sanitize_aiops_dimension_details(
+                {"metrics": {"highlights": payload.get("highlights") or []}}
+            )["metrics"]
+        if dimension in {"logs", "caller_logs"}:
+            result = self._sanitize_aiops_dimension_details(
+                {"logs": {"samples": payload.get("samples") or []}}
+            )["logs"]
+            if payload.get("log_preview"):
+                result["log_preview"] = str(payload["log_preview"])[-2000:]
+            return result
+        if dimension == "tracing":
+            tracing = self._sanitize_aiops_dimension_details(
+                {
+                    "tracing": {
+                        "flows": payload.get("samples") or [],
+                        "call_chains": payload.get("call_chains") or [],
+                    }
+                }
+            )["tracing"]
+            return {"samples": tracing["flows"], "call_chains": tracing["call_chains"]}
+        if dimension == "trace":
+            tracing = self._sanitize_aiops_dimension_details(
+                {"tracing": {"spans": payload.get("spans") or []}}
+            )["tracing"]
+            return {"spans": tracing["spans"]}
+        if dimension == "k8s":
+            return {
+                key: payload[key]
+                for key in ("last_terminated", "events_preview", "log_preview")
+                if key in payload
+            }
+        return {}
+
+    @staticmethod
+    def _sanitize_scalar_mapping(value: Any, max_items: int) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        result: Dict[str, Any] = {}
+        for key, item in list(value.items())[:max_items]:
+            if is_forbidden_fact_key(key):
+                continue
+            if isinstance(item, str):
+                result[str(key)] = item[:200]
+            elif isinstance(item, (int, float, bool)) or item is None:
+                result[str(key)] = item
+            else:
+                result[str(key)] = str(item)[:200]
+        return result
+
+    @staticmethod
+    def _aiops_dimension_detail_lines(details: Dict[str, Any]) -> list[str]:
+        lines = ["dimension_details（真实可观测性原始信号）:"]
+        metrics = details.get("metrics") or {}
+        lines.append(f"- Metrics coverage={metrics.get('coverage')}")
+        for item in (metrics.get("highlights") or [])[:3]:
+            lines.append(
+                "  metric={metric} container={container} start={start} max={max} "
+                "last={last} limit={limit} ratio={ratio} samples={samples} ref={ref}".format(
+                    metric=item.get("metric", ""),
+                    container=item.get("container", ""),
+                    start=item.get("start", ""),
+                    max=item.get("max", ""),
+                    last=item.get("last", ""),
+                    limit=item.get("limit", ""),
+                    ratio=item.get("max_limit_ratio", ""),
+                    samples=item.get("samples", []),
+                    ref=item.get("evidence_ref", ""),
+                )
+            )
+        logs = details.get("logs") or {}
+        lines.append(f"- Logging coverage={logs.get('coverage')}")
+        for item in (logs.get("samples") or [])[:4]:
+            lines.append(
+                f"  {item.get('timestamp', '')} container={item.get('container', '')} "
+                f"message={item.get('message', '')} ref={item.get('evidence_ref', '')}"
+            )
+        tracing = details.get("tracing") or {}
+        lines.append(
+            f"- Tracing coverage={tracing.get('coverage')} "
+            f"deepflow={tracing.get('deepflow_coverage')} tempo={tracing.get('tempo_coverage')}"
+        )
+        for item in (tracing.get("flows") or [])[:3]:
+            lines.append(
+                f"  flow {item.get('src', '')}->{item.get('dst', '')} "
+                f"{item.get('protocol', '')} {item.get('request', '')} "
+                f"code={item.get('response_code', '')} duration_us={item.get('duration_us', '')} "
+                f"trace_id={item.get('trace_id', '')} ref={item.get('evidence_ref', '')}"
+            )
+        for item in (tracing.get("spans") or [])[:2]:
+            lines.append(
+                f"  span trace_id={item.get('trace_id', '')} service={item.get('service', '')} "
+                f"name={item.get('name', '')} attributes={item.get('attributes', {})} "
+                f"ref={item.get('evidence_ref', '')}"
+            )
+        topology = details.get("topology") or {}
+        lines.append(f"- Topology coverage={topology.get('coverage')}")
+        for item in (topology.get("edges") or [])[:5]:
+            lines.append(
+                f"  {item.get('source', '')}: {item.get('relationship', '')} -> {item.get('target', '')} "
+                f"directness={item.get('directness', '')} confidence={item.get('confidence', '')} "
+                f"refs={item.get('evidence_refs', [])}"
+            )
+        return lines
 
     @staticmethod
     def _select_keys(payload: Dict[str, Any], keys: list[str]) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             return {}
-        return {
+        selected = {
             key: payload[key]
             for key in keys
-            if key in payload and payload.get(key) is not None
+            if (
+                key in payload
+                and payload.get(key) is not None
+                and not is_forbidden_fact_key(key)
+            )
         }
+        sanitized = sanitize_evidence_value(selected)
+        return sanitized if isinstance(sanitized, dict) else {}
 
     def _extract_runbook(self, raw: str) -> tuple[Dict[str, Any], str, str]:
         if re.match(r"^\s*Error:\s*Runbook\b", raw or "", re.IGNORECASE):
@@ -755,10 +1232,28 @@ class ObservationProcessor:
             idx for idx, column in enumerate(columns)
             if column.upper() in {"ENDPOINTS"}
         }
-        abnormal = [
-            ln for ln in lines[1:]
-            if self._table_row_is_abnormal(ln, status_indexes, pure_status_indexes, endpoint_indexes)
-        ]
+        restart_indexes = {
+            idx for idx, column in enumerate(columns)
+            if column.upper() in {"RESTARTS"}
+        }
+        abnormal = []
+        recent_restart_rows = []
+        for line in lines[1:]:
+            if self._table_row_is_abnormal(
+                line,
+                status_indexes,
+                pure_status_indexes,
+                endpoint_indexes,
+            ):
+                abnormal.append(line)
+                continue
+            if self._table_row_has_recent_restart(
+                line,
+                pure_status_indexes,
+                restart_indexes,
+            ):
+                abnormal.append(line)
+                recent_restart_rows.append(line)
         status_counts: Dict[str, int] = {}
         for ln in lines[1:]:
             for status in re.findall(
@@ -773,12 +1268,19 @@ class ObservationProcessor:
             "status": "table_summarized",
             "row_count": max(0, len(lines) - 1),
             "abnormal_count": len(abnormal),
+            "recent_restart_count": len(recent_restart_rows),
+            "recent_restart_rows": recent_restart_rows,
             "status_counts": status_counts,
             "header": header,
             "selected_rows": selected,
         }
         label = "异常行" if abnormal else "样例行"
-        summary = f"{tool} 表格摘要: rows={structured['row_count']} abnormal={len(abnormal)} status_counts={status_counts}\n{header}\n# {label}\n" + "\n".join(selected)
+        summary = (
+            f"{tool} 表格摘要: rows={structured['row_count']} "
+            f"abnormal={len(abnormal)} recent_restarts={len(recent_restart_rows)} "
+            f"status_counts={status_counts}\n{header}\n# {label}\n"
+            + "\n".join(selected)
+        )
         return structured, summary, "k8s_table"
 
     @staticmethod
@@ -1163,6 +1665,59 @@ class ObservationProcessor:
             status_text,
             re.IGNORECASE,
         ))
+
+    @classmethod
+    def _table_row_has_recent_restart(
+        cls,
+        row: str,
+        pure_status_indexes: set[int],
+        restart_indexes: set[int],
+    ) -> bool:
+        if not pure_status_indexes or not restart_indexes:
+            return False
+        cells = re.split(r"\s{2,}|\t+", row.strip())
+        status_text = " ".join(
+            cells[idx] for idx in pure_status_indexes
+            if idx < len(cells)
+        ).strip().lower()
+        if status_text != "running":
+            return False
+
+        restart_text = " ".join(
+            cells[idx] for idx in restart_indexes
+            if idx < len(cells)
+        ).strip()
+        match = re.fullmatch(
+            r"(?P<count>\d+)\s+\((?P<age>[^()]+?)\s+ago\)",
+            restart_text,
+            re.IGNORECASE,
+        )
+        if not match or int(match.group("count")) <= 0:
+            return False
+
+        age_seconds = cls._parse_kubectl_duration_seconds(match.group("age"))
+        return (
+            age_seconds is not None
+            and age_seconds <= cls.RECENT_RESTART_WINDOW_SECONDS
+        )
+
+    @staticmethod
+    def _parse_kubectl_duration_seconds(value: str) -> Optional[int]:
+        normalized = re.sub(r"\s+", "", str(value or "").strip().lower())
+        if not normalized:
+            return None
+        parts = re.findall(r"(\d+)([dhms])", normalized)
+        if not parts:
+            return None
+        if "".join(f"{amount}{unit}" for amount, unit in parts) != normalized:
+            return None
+        multipliers = {
+            "d": 24 * 60 * 60,
+            "h": 60 * 60,
+            "m": 60,
+            "s": 1,
+        }
+        return sum(int(amount) * multipliers[unit] for amount, unit in parts)
 
     def _extract_run_image(self, raw: str) -> tuple[Dict[str, Any], str, str]:
         stripped = (raw or "").strip()

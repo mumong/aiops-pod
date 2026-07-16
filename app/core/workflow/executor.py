@@ -67,14 +67,18 @@ def _invalid_remediation_plan_event(run_id: str, error: Exception) -> Dict[str, 
 def _missing_structured_actions_reason(report: str, plan: Any) -> Optional[str]:
     """Detect report/plan mismatch without extracting commands from prose."""
     text = report or ""
-    lower = text.lower()
-    has_write_advice = (
-        "kubectl patch" in lower
-        or "kubectl apply" in lower
-        or "kubectl delete" in lower
-        or "kubectl rollout" in lower
-        or "kubectl scale" in lower
-        or "kubectl set" in lower
+    write_patterns = (
+        r"\bkubectl\s+(?:apply|create|delete|patch|scale)\s+"
+        r"(?:[A-Za-z0-9_.-]+|-[A-Za-z0-9_.-]+)",
+        r"\bkubectl\s+set\s+"
+        r"(?:env|image|resources|selector|serviceaccount|subject)\s+"
+        r"(?:[A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+",
+        r"\bkubectl\s+rollout\s+(?:pause|restart|resume|undo)\s+"
+        r"(?:[A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+",
+    )
+    has_write_advice = any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in write_patterns
     )
     if not has_write_advice:
         return None
@@ -574,6 +578,7 @@ class WorkflowExecutor:
             
             # 更新指标
             self._update_metrics_from_state(metrics, final_state)
+            metrics.rebuild_runtime_counts(final_state.get("thinking_events", []))
 
             # 从日志监听器提取 runbook 信息（补充，不覆盖已有结果）
             runbook_summary = log_listener.get_runbook_summary()
@@ -615,8 +620,18 @@ class WorkflowExecutor:
             for nid, node in metrics.nodes.items():
                 pct = (node.duration_ms / metrics.total_duration_ms * 100) if metrics.total_duration_ms > 0 else 0
                 logger.info(f"   {node.node_name}: {node.duration_ms/1000:.1f}s ({pct:.0f}%)")
-            logger.info(f"   LLM 总耗时: {metrics.total_llm_duration_ms/1000:.1f}s ({metrics.total_llm_calls} 次)")
-            logger.info(f"   工具总耗时: {metrics.total_tool_duration_ms/1000:.1f}s ({metrics.total_tool_calls} 次)")
+            logger.info(f"   模型请求耗时: {metrics.total_llm_duration_ms/1000:.1f}s ({metrics.total_llm_calls} 次)")
+            logger.info(
+                "   工具耗时: 累计 %.1fs，关键路径 %.1fs "
+                "(请求 %d，实际执行 %d，去重 %d，成功响应 %d，失败/未完成 %d)",
+                metrics.total_tool_duration_ms / 1000,
+                metrics.tool_wall_duration_ms / 1000,
+                metrics.total_tool_calls,
+                metrics.executed_tool_calls,
+                metrics.deduplicated_tool_calls,
+                metrics.successful_tool_calls,
+                metrics.failed_tool_calls,
+            )
             logger.info(f"   总计: {metrics.total_duration_seconds:.1f}s")
             logger.info("=" * 60)
             
@@ -967,9 +982,17 @@ class WorkflowExecutor:
         elif node_name == "evidence":
             items = state.get("evidence_items", [])
             collected = sum(1 for e in items if getattr(e, 'collected', False))
+            total = len(items)
             analysis = state.get("evidence_analysis", "")
+            try:
+                analysis_data = _json.loads(analysis) if analysis else {}
+                if isinstance(analysis_data.get("plan_total"), int):
+                    collected = int(analysis_data.get("plan_collected") or 0)
+                    total = int(analysis_data.get("plan_total") or 0)
+            except Exception:
+                pass
             return (
-                f"evidence_items={collected}/{len(items)}\n"
+                f"evidence_items={collected}/{total}\n"
                 f"   evidence_analysis={analysis}"
             )
         elif node_name == "rca":

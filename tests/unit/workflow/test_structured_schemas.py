@@ -10,10 +10,13 @@ from app.core.workflow.schemas import (
     EvidenceCollectionOutput,
     EvidenceMatchOutput,
     EvidencePlanOutput,
+    FactLedger,
+    FactRecord,
     LayerHandoff,
     LayerOutput,
     ConclusionOutput,
     QueryResult,
+    RCAHypothesis,
     RCAOutput,
 )
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
@@ -469,6 +472,7 @@ def test_rca_output_normalizes_root_cause_from_summary():
         },
         "root_cause_summary": "节点访问 Docker Hub 超时，导致镜像拉取失败",
         "confidence": 0.86,
+        "confidence_reason": "事件中的 i/o timeout 与镜像拉取失败直接对应",
         "primary_runbooks": ["pod-imagepull-failed.md"],
         "alternative_causes": [],
         "limitations": "未验证节点出口网络",
@@ -486,3 +490,101 @@ def test_rca_output_rejects_empty_root_cause():
             "causal_chain": {},
             "confidence": 0.9,
         })
+
+
+def test_rca_output_rejects_missing_confidence():
+    with pytest.raises(ValidationError):
+        RCAOutput.model_validate({
+            "phenomenon": "Pod 异常",
+            "root_cause": "应用配置缺失导致容器退出",
+            "confidence_reason": "日志和容器终态相互印证",
+        })
+
+
+def test_rca_output_rejects_missing_confidence_reason():
+    with pytest.raises(ValidationError):
+        RCAOutput.model_validate({
+            "phenomenon": "Pod 异常",
+            "root_cause": "应用配置缺失导致容器退出",
+            "confidence": 0.95,
+        })
+
+
+def test_fact_and_rca_schemas_accept_generic_evidence_contract():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = FactRecord.model_validate({
+        "fact_id": "fact-000000000001",
+        "entity_id": entity_id,
+        "entity_kind": "Pod",
+        "namespace": "demo",
+        "entity_name": "api",
+        "dimension": "logging",
+        "fact_type": "log",
+        "attribute": "log.message",
+        "value": {"message": "request returned status 503"},
+        "source_system": "elasticsearch",
+        "directness": "direct",
+        "confidence": "high",
+        "strength": "strong",
+        "evidence_refs": ["logs:target"],
+    })
+    ledger = FactLedger.model_validate({
+        "contract_version": "aiops.fact-ledger.v1",
+        "case_id": "case-facts",
+        "scope_entity_ids": [entity_id],
+        "records": [record.model_dump()],
+        "record_count": 1,
+        "truncated": False,
+        "source": "mcp_canonical",
+        "legacy_contract": False,
+    })
+    hypothesis = RCAHypothesis.model_validate({
+        "hypothesis_id": "hyp-a",
+        "entity_id": entity_id,
+        "summary": "Evidence-backed candidate",
+        "supporting_fact_ids": [record.fact_id],
+        "contradicting_fact_ids": [],
+        "unknowns": [],
+        "confidence": 0.86,
+    })
+    rca = RCAOutput.model_validate({
+        "diagnostic_status": "diagnosed",
+        "phenomenon": "Scoped entity is abnormal",
+        "root_cause_summary": "Evidence-backed candidate",
+        "supporting_fact_ids": [record.fact_id],
+        "contradicting_fact_ids": [],
+        "unknowns": [],
+        "hypotheses": [hypothesis.model_dump()],
+        "confidence": 0.86,
+        "confidence_reason": "Direct current-scope fact",
+    })
+
+    assert ledger.records[0].fact_id == record.fact_id
+    assert rca.hypotheses[0].entity_id == entity_id
+    assert rca.diagnostic_status == "diagnosed"
+
+
+def test_rca_hypothesis_accepts_published_shape_without_entity_id():
+    hypothesis = RCAHypothesis.model_validate({
+        "hypothesis_id": "hyp-published",
+        "summary": "Evidence-backed candidate",
+        "supporting_fact_ids": ["fact-12345678"],
+        "contradicting_fact_ids": [],
+        "unknowns": [],
+        "confidence": 0.8,
+    })
+
+    assert hypothesis.entity_id is None
+
+
+def test_rca_output_keeps_legacy_callers_compatible_without_fact_fields():
+    parsed = RCAOutput.model_validate({
+        "phenomenon": "Legacy evidence path",
+        "root_cause": "Legacy evidence-backed candidate",
+        "confidence": 0.7,
+        "confidence_reason": "Legacy tool evidence remains available",
+    })
+
+    assert parsed.diagnostic_status == "diagnosed"
+    assert parsed.supporting_fact_ids == []
+    assert parsed.hypotheses == []
