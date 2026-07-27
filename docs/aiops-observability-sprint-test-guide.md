@@ -36,8 +36,9 @@ Agent 流程验收。
 
 测试点：
 
-> 完整运行一次 Robusta 诊断，真实获取 Kubernetes、Metrics、Logging、
-> Tracing 和 Topology，并基于真实证据输出人可读报告。
+> 完整运行一次 Robusta 诊断，真实获取 Kubernetes、Metrics、Logging 和
+> Tracing，并基于真实证据输出人可读报告。Topology 若被 Agent 调用，必须只
+> 展示工具返回的真实实体和关系边；未调用时不得推测。
 
 ## 2. 环境背景
 
@@ -387,6 +388,8 @@ cd /root/huhu/agent/combine-aiops-mcp/mcpstander
 通过标准：
 
 - `execute_pod_promql` 拒绝没有精确 namespace 和 Pod matcher 的 PromQL。
+- 范围查询优先使用 `window_minutes`；若显式 `start/end` 早于当前 Pod
+  生命周期，必须返回明确错误或在受控规则下纠正，不能混入同名旧 Pod 数据。
 - `query_pod_logs` 返回真实 message，而不是只有 count。
 - `query_pod_tracing` 分开返回 DeepFlow flows 和 Tempo spans。
 - `query_pod_topology` 只返回来源可核验的关系。
@@ -502,6 +505,7 @@ PY
 logs=present，但只有 returned 50 records，没有 message
 tracing=present，但只有 returned 12 traces，没有 flow/span
 metrics=present，但只有 series 数量，没有数值
+topology 未执行，但报告根据标签或 Pod 名称推测 Deployment/Service 关系
 ```
 
 `get_aiops_case_evidence` 必须：
@@ -598,8 +602,11 @@ kubectl -n aiops exec deploy/aiops-copilot -- \
 execute_pod_promql
 query_pod_logs
 query_pod_tracing
-query_pod_topology
 ```
+
+`query_pod_topology` 是按需工具，不要求每轮强制调用。若报告出现拓扑实体或关系，
+则必须能找到对应的 `query_pod_topology` 归档和真实 edge；否则该拓扑内容判定为
+模型推测，测试失败。
 
 同时应存在必要的 Kubernetes 当前态查询。
 
@@ -641,7 +648,8 @@ kubectl -n aiops exec deploy/aiops-copilot -- \
 通过标准：
 
 - 每个核心事实有明确实体范围。
-- Metrics、Logging、Tracing、Topology 至少有 coverage 状态。
+- Metrics、Logging、Tracing 至少有 coverage 状态；Topology 仅在真实调用后
+  才进入覆盖统计。
 - `present` 维度保留真实 samples。
 - RCA 使用 Fact Ledger/fact ID 或等价结构化事实，不只使用一句摘要。
 
@@ -682,7 +690,7 @@ Driver 请求
 
 #### 拓扑责任
 
-报告应说明：
+只有真实调用 `query_pod_topology` 并返回关系边时，报告才应说明：
 
 ```text
 Driver Pod --calls--> API Pod
@@ -704,6 +712,15 @@ Trace 返回 12 条
 ```
 
 必须写出决定性数值、日志原文、请求路径、trace ID 或 span attributes。
+
+可观测性总表与机器附录必须一致：
+
+- 如果附录已经存在日志 message、flow 或 span，总表不得显示“未返回可用日志
+  原文”，也不能只显示 trace ID。
+- 每个 `coverage=present` 的维度至少展示一条人可读核心结果；原始 JSON 可以
+  截取关键字段，但必须保留 evidence ref，便于继续展开。
+- 未执行 `query_pod_topology` 时，报告不得根据标签、Pod 名称或
+  `pod-template-hash` 推测 owner、Service 或调用关系。
 
 #### 缺失边界
 
@@ -733,7 +750,37 @@ OOM Sprint 最低通过线是“中”；当前 traced OOM 基线应达到“高
 | 测试二 | case ID 按需读取 | `get_aiops_case` 和 `get_aiops_case_evidence` 使用真实 refs 成功读取，非法路径被拒绝 | 待填写 |
 | 测试三 | Robusta 完整诊断 | 模糊提问触发真实工具，RCA 和报告引用核心原始证据并形成因果链 | 待填写 |
 
-## 8. 测试完成后的清理
+## 8. 2026-07-27 真实运行审计示例
+
+运行信息：
+
+```text
+run_id=5a7686b8d5614336
+question=我的集群现在有什么问题？
+target=aiops-traced-oom/trace-oom-api-7c75757475-vgvxs
+```
+
+真实采集结果：
+
+| 维度 | 结果 | 代表性事实 |
+|---|---|---|
+| Kubernetes | present | `Reason=OOMKilled`、`Exit Code=137`、restart count 950、BackOff 事件累计 22198 次 |
+| Logging | present | ES 日志包含 `event=allocate`、`path=/allocate?mib=2`、`allocated_mib=20/22/24` 和 trace ID |
+| Tracing | present | DeepFlow 返回 `GET /allocate?mib=2`、HTTP 200、调用方/目标 IP；Tempo 同 trace ID 的 span 包含 `allocated_before=46`、`allocated_after=48` |
+| Metrics | error | Qwen 传入 `2024-01-01T00:00:00Z` 到 `2024-01-01T01:00:00Z`，早于当前 Pod 的 `2026-07-23T07:25:45Z` 创建时间，MCP 返回 `range_precedes_pod_lifecycle` |
+| Topology | not executed | 本轮未调用 `query_pod_topology`，因此不应输出推测的 Deployment 关系 |
+
+本次运行的诊断根因正确，但 Sprint 测试三暂不应判定为完全通过：
+
+1. Prometheus 查询参数错误导致三维决定性证据只有 2/3，充分度为 67%。
+2. 日志和 Trace 原始事实已进入 Fact Ledger 和机器附录，但可观测性总表没有
+   展示代表性原文，存在人可读渲染缺口。
+3. 本轮未执行拓扑工具，报告仍推测了 Deployment 关系，不符合真实证据边界。
+
+该示例可作为后续修复的回归基线：修复后必须使用同样的模糊问题重新运行，并
+逐项确认 Metrics、Logging、Tracing 和按需 Topology 的真实结果。
+
+## 9. 测试完成后的清理
 
 ```bash
 cd /root/huhu/agent/combine-aiops-mcp/robusta

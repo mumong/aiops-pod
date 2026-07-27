@@ -15,8 +15,10 @@
 1. **Robusta 当前默认路径：自主组合查询**
    - Robusta 启用 `aiops-observability-query`，地址为
      `http://mcp-server-manager.mcp.svc.cluster.local:8100/sse`。
-   - Evidence 节点对每个异常 Pod 首轮真实执行 Metrics、Logging、Tracing、
-     Topology 四个通用查询。
+   - Evidence 节点对每个异常 Pod 首轮真实执行 Metrics、Logging、Tracing
+     三个通用查询。
+   - Topology 是独立通用工具，由模型在需要确认 owner、Service、Node 或调用
+     关系时按需执行；未执行时报告不得推测拓扑边。
    - Qwen 可以根据首轮结果继续修改 PromQL、日志关键词、Trace 条件和时间窗。
    - 每次工具结果独立形成 `raw.txt`、`structured.json`、`summary.txt` 和
      Fact Ledger，不要求先生成完整磁盘 Case Package。
@@ -97,14 +99,18 @@ Robusta 当前启用的通用可观测性 MCP 工具有：
 
 ### 3.2 首轮门控
 
-Evidence 节点会对每个已确认异常 Pod 补齐四个首轮查询：
+Evidence 节点会对每个已确认异常 Pod 补齐三个首轮查询：
 
 ```text
 execute_pod_promql
 query_pod_logs
 query_pod_tracing
-query_pod_topology
 ```
+
+`query_pod_topology` 不属于当前强制首轮门控。模型需要确认 owner 链、
+Service selector、Node 调度或真实调用关系时可以调用它。若本轮没有执行该工具，
+最终报告只能写“本轮未查询拓扑”，不能根据 Pod 名称、标签或
+`pod-template-hash` 推测 Deployment、Service 或调用边。
 
 首轮 PromQL 是通用 Pod 生命周期基线，包含：
 
@@ -433,6 +439,20 @@ RCA 和 Conclusion 不应只读取一句自然语言摘要，而是优先消费 
 因此，当前 Agent 并不是直接读取整个本地 Case Package；它使用与 Case Package
 同源的证据模型。启用 coarse 路径时，Case Package 会直接成为工具结果的底层
 存储。
+
+两条路径的对应关系可以概括为：
+
+```text
+Case Package evidence/*.jsonl
+  <-> 自主查询 tools/*.structured.json
+  -> 统一实体身份、coverage、facts/samples、evidence refs
+  -> Fact Ledger
+  -> RCA
+```
+
+它们在“证据字段和消费接口”上相似，在“落盘粒度”上不同。Case Package 是
+一个完整 case 目录；默认 Agent 路径是一次诊断中的多个独立工具结果，不会为了
+在线诊断强制生成完整 case 目录。
 
 ## 8. 常用检查命令
 
