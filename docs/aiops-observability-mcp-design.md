@@ -1,304 +1,494 @@
-# AIOps 可观测性 MCP 工具设计文档
+# AIOps 真实可观测性数据与 MCP 使用说明
 
-> 本文档介绍本轮设计的 AIOps 可观测性采集能力：做了什么 MCP 工具、它真实采集的是什么数据、
-> 为什么这些数据能代表 **Metrics / Logging / Tracing / 图拓扑** 四大可观测维度，
-> 以及从「设计 → 工具实现 → 真实调用结果 → 最终报告分析」如何一以贯之地体现真实数据。
->
-> 关联：mcpstander `servers/aiops_observability/`（采集实现）、robusta `app/core/prompts.py`（报告体现）、
-> ADR `docs/adr/0001-behavior-preserving-perf-optimization.md`。
+**更新日期**：2026-07-27
 
----
+**适用项目**：
 
-## 1. 一句话概述
+- `data`：真实故障样本采集、Case Package 原型、离线校验和评测。
+- `mcpstander`：生产环境可观测性采集和 MCP 服务。
+- `robusta`：异常 Pod 发现、证据编排、RCA 和最终报告。
 
-本轮在 **mcpstander**（MCP Server Manager）内部实现了一组「AIOps 可观测性采集器」，
-对外通过 **coarse MCP server（端口 8089）** 暴露一个核心工具 `collect_aiops_case`，
-让 Robusta Agent 只需传入「异常 Pod 的 namespace + pod」，即可**实时**从集群真实组件采集
-Kubernetes 状态、Prometheus 指标、Elasticsearch/Filebeat 日志、DeepFlow 网络流量/调用链、
-Tempo 分布式 trace，并构建 Pod 级图拓扑，压缩成一份 agent 可稳定消费的 case package。
+## 1. 当前结论
 
-设计铁律：**只采真实数据；采不到就诚实标 empty/absent 并给原因，绝不编造。**
+当前系统已经具备两条可观测性消费路径：
 
----
+1. **Robusta 当前默认路径：自主组合查询**
+   - Robusta 启用 `aiops-observability-query`，地址为
+     `http://mcp-server-manager.mcp.svc.cluster.local:8100/sse`。
+   - Evidence 节点对每个异常 Pod 首轮真实执行 Metrics、Logging、Tracing、
+     Topology 四个通用查询。
+   - Qwen 可以根据首轮结果继续修改 PromQL、日志关键词、Trace 条件和时间窗。
+   - 每次工具结果独立形成 `raw.txt`、`structured.json`、`summary.txt` 和
+     Fact Ledger，不要求先生成完整磁盘 Case Package。
 
-## 2. 设计目标与背景
+2. **Case Package 路径：粗粒度采集和按 case ID 读取**
+   - mcpstander 的 `aiops-case` 服务仍在 8089 运行。
+   - `collect_aiops_case` 一次采集 Kubernetes、Prometheus、日志、
+     DeepFlow/Tempo 和轻量拓扑，并将结果保存为 Case Package。
+   - `get_aiops_case` 和 `get_aiops_case_evidence` 可根据 `case_id` 和真实
+     evidence ref 按需读取。
+   - Robusta 当前配置中 `aiops-case-coarse.enabled=false`，该路径主要用于
+     Sprint 验收、兼容和离线复盘；需要使用时可单独开启。
 
-| 目标 | 说明 |
-|------|------|
-| 生产不依赖 `data` | 采集能力内建在 mcpstander，运行时不 import/shell 到 `data` 脚本 |
-| 任意 Pod 可用 | 输入统一为 `namespace + pod`，不针对某种异常类型硬编码 |
-| 真实可交叉核验 | 每条数据都能用 kubectl / Prometheus / ClickHouse / Tempo 独立复核 |
-| 诚实优先 | 空/弱/缺失/错误显式标记，不伪造正向证据 |
-| 小模型友好 | Agent-facing 返回 compact 摘要 + refs，大证据按 ref 展开 |
-| 低侵入 | Robusta 只做配置、prompt、observation 分支增量，不重构主 workflow |
+两条路径共用相同的证据语义：
 
----
-
-## 3. MCP 工具设计
-
-### 3.1 工具面（对外接口）
-
-coarse server（8089，Robusta 默认启用）暴露 4 个工具：
-
-| 工具 | 作用 |
-|------|------|
-| `collect_aiops_case(namespace, pod, scenario?, window_minutes?)` | 一次性采集异常 Pod 的全维度证据，返回 compact case summary |
-| `get_aiops_case(case_id)` | 读回已采集 case 的 compact 摘要 |
-| `get_aiops_case_evidence(case_id, evidence_ref)` | 按 ref 展开单条证据/受限文件（拒绝路径穿越、拒绝评测标签） |
-| `search_aiops_cases(namespace?, pod?, abnormal_type?)` | 检索已采集 case |
-
-fine server（8090，默认关闭）提供 Pod 级单源查询工具，供专家/调试模式使用。
-
-### 3.2 内部结构
-
-```
-mcpstander/servers/aiops_observability/
-├── schemas.py          # EvidenceItem / SourceResult / TimeWindow 契约
-├── config.py           # 运行时配置（端点、kubectl-exec 参数、凭证 secret）
-├── evidence_store.py   # 文件型 case package 读写 + 路径安全 + 反泄漏
-├── case_builder.py     # 编排：调各 collector → 建拓扑 → 生成信号/时间线 → 落盘 → compact summary
-├── topology.py         # Pod 级图拓扑构建
-└── collectors/
-    ├── _kube.py        # kubectl 辅助：run_kubectl / secret_value(base64) / exec_in_pod / find_pod
-    ├── kubernetes.py   # K8s 状态：get/describe/events/logs + owner 链 + matching Service
-    ├── prometheus.py   # 指标：受控 PromQL
-    ├── elasticsearch.py# 日志：kubectl-exec 进 ES pod 查 Filebeat
-    ├── deepflow.py     # 网络流量/调用链：ClickHouse L7 flow + eBPF 自动追踪
-    └── tempo.py        # 分布式 trace：按 trace_id 查 Tempo span
+```text
+准确实体身份
+  + 有界时间窗
+  + 数据源 coverage
+  + 真实 facts/samples
+  + evidence refs
+  + topology relationships
+  -> Robusta Evidence
+  -> Fact Ledger
+  -> RCA
+  -> 最终报告
 ```
 
-`collect_aiops_case` 的执行流水线（`case_builder.collect_case`）：
+设计底线是：**数据源没有返回结果时必须标记为
+`empty`、`absent`、`weak` 或 `error`，不能由模型补造数据。**
 
-```
-输入 namespace + pod
-  1. collect_kubernetes  → Pod json/describe/events/current+previous logs + ownerReferences 链 + Service
-  2. collect_prometheus  → 4 个受控 PromQL（内存/重启/终止原因/phase）
-  3. collect_elasticsearch → kubectl exec 进 ES pod，curl filebeat-*/_search（凭证自动获取）
-  4. collect_deepflow    → kubectl exec 进 ClickHouse，查 L7 flow（含 eBPF syscall_trace_id）
-  5. discover_correlation → 发现 trace_id + caller IP
-  6. collect_tempo       → 用发现的 trace_id 查 Tempo 分布式 span
-  7. caller logs         → caller IP 反查 pod，采其日志（request_driver）
-  8. build_topology      → 实体 + 边（owner/service/调度/网络/证据观测）
-  9. 生成 role 信号 + 时间线 → 落盘 case package → 返回 compact summary
-```
+## 2. 当前环境背景
 
----
+| 组件 | 当前运行位置 | 作用 |
+|---|---|---|
+| Robusta Agent | namespace `aiops` | 发现异常 Pod、调用 MCP、生成 RCA 和报告 |
+| MCP Server Manager | namespace `mcp` | 暴露 K8s 和 AIOps MCP 工具 |
+| Prometheus | namespace `monitor` | Pod 指标和 kube-state-metrics |
+| Elasticsearch/Filebeat | namespace `monitor` | 目标 Pod 和调用方日志 |
+| DeepFlow/ClickHouse | namespace `monitor` | Pod L4/L7 网络流和 Trace 关联字段 |
+| LGTM/Tempo | namespace `monitor` | 应用级 OTLP span |
+| OOM 测试环境 | namespace `aiops-traced-oom` | 产生真实请求、内存增长、日志、flow 和 span |
 
-## 4. 四大可观测维度 + 图拓扑：采什么、怎么采、为什么能代表
+mcpstander 当前配置的主要数据源包括：
 
-每个维度产出一条带 **role（语义角色）+ observed（真实原文）+ interpretation（大白话解读）+ strength** 的信号，
-既给人讲故事，也给小模型精确关联。
-
-### 4.1 Metrics（指标）— 来源：Prometheus
-
-**采什么**：容器工作集内存、重启次数、上次终止原因、Pod phase 等受控 PromQL 的**真实数值**。
-
-**为什么能代表指标**：直接查 Prometheus HTTP API（`/api/v1/query`），拿的是指标核心原始输出——
-资源使用趋势是否逼近/超过 limit 的第一手证据。
-
-**真实例子**（OOM Pod）：
-```
-[metrics/resource_trend] src=prometheus
-  container_memory_working_set_bytes ≈ 17584128 (16.8MiB)；limit=67108864 (64Mi)；request=33554432 (32Mi)
-```
-> 交叉核验：live Prometheus 查同一 Pod 返回 `17301504`（抓取时刻微差），limit 字节数 `67108864` 与 kubectl `64Mi` 逐字节吻合。
-
-### 4.2 Logging（日志）— 来源：Elasticsearch/Filebeat（+ K8s 容器日志）
-
-**采什么**：目标 Pod 在时间窗内的真实日志原文行。
-
-**怎么采（关键实现）**：不直连 ES（脆、要认证、TLS 麻烦），而是**学 data 脚本**：
-从 K8s secret `xnet/elasticsearch-master-credentials` **自动获取凭证**（base64 解码），
-`kubectl exec -i elasticsearch-master-0 -- curl -u user:pass localhost:9200/filebeat-*/_search`。
-若 ES 未接入，退化为 K8s 容器 current/previous 日志。
-
-**日志归属正确性（重要）**：ES 查询把 **Pod 身份（pod.name/pod_name/pod.uid）设为必需的 `must` 条件**，
-namespace 只作 `filter`——避免"命名空间内其他 Pod 的日志被错误归到目标 Pod"的串味问题。
-
-**为什么能代表日志**：拿到的是应用失败前的**进程内真实行为**，解释异常"是怎么发生的"。
-
-**真实例子**（OOM Pod，崩溃前内存增长）：
-```
-[logs/pre_failure_behavior] src=elasticsearch（来源：kubectl exec elasticsearch-master-0 -> filebeat-*）
-  allocated business cache chunk=22 approx_mib=44
-  allocated business cache chunk=23 approx_mib=46
-  allocated business cache chunk=24 approx_mib=48   ← 应用不断分配缓存直到触及 64Mi limit
-```
-> 交叉核验：`kubectl logs aiops-oom-business -n aiops-temp --previous` 逐条一致；每条记录 `kubernetes.pod.name` 均为目标 Pod，无混入。
-
-### 4.3 Tracing（链路/流量）— 来源：DeepFlow（eBPF）+ Tempo
-
-这是本轮最有价值的一块。分两层，**任意 Pod（无需插桩）都能得第一层**：
-
-**① DeepFlow eBPF 网络流量与自动调用链（无需 app 插桩）**
-
-DeepFlow 是 eBPF，内核层自动抓所有 Pod 的真实 L7 流量。关键字段：
-- `request_resource`（真实 SQL/HTTP 路径）、`response_code`、`response_duration`（真实延迟）
-- `syscall_trace_id_request/response`（eBPF 内核生成，~50% 流量有）、`req_tcp_seq`（100%）—— **无需 app 埋点即可拼调用链**
-
-> 数据佐证：全集群近 30min 有 81 万条 flow，其中带 app `trace_id` 的只有 0.018%，但带 eBPF `syscall_trace_id` 的约 50%。
-> 即：真实生产 Pod 极少插桩，但 eBPF 自动追踪对它们都有效。
-
-**真实例子**（未插桩的 MySQL Pod，eBPF 自动拼出 2 跳调用链）：
-```
-[tracing] eBPF 自动追踪拼出调用链（syscall_trace_id=594288737879969836）
-  172.16.219.65 → 172.16.219.127  MySQL  COMMIT               dur=43us
-  172.16.219.65 → 172.16.219.127  MySQL  SELECT dashboard.org_id...
+```text
+PROMETHEUS_URL=http://observability-prometheus.monitor.svc:9090
+AIOPS_ES_EXEC_NAMESPACE=monitor
+AIOPS_CLICKHOUSE_EXEC_NAMESPACE=monitor
+AIOPS_TEMPO_EXEC_NAMESPACE=monitor
+DEEPFLOW_CLICKHOUSE_DATABASE=flow_log
 ```
 
-**② Tempo 分布式 trace（插桩 Pod 的额外增强）**
+生产运行时不依赖 `data` 目录。`data` 中的脚本用于研发、样本生成和验收，
+生产采集逻辑已经内建到 mcpstander。
 
-对被 OpenTelemetry 插桩的 Pod，`trace_id` 会出现在日志/flow 里。
-`discover_correlation` 从 DeepFlow flow **和日志文本**里提取 `trace_id`，
-再 `kubectl exec` 进 lgtm/Tempo pod 查 `/api/traces/{trace_id}` 取真实 span。
+## 3. 当前默认 Agent 路径
 
-**真实例子**（插桩 OOM Pod）：
+### 3.1 工具
+
+Robusta 当前启用的通用可观测性 MCP 工具有：
+
+| 工具 | 输入重点 | 真实数据源 |
+|---|---|---|
+| `execute_pod_promql` | namespace、pod、purpose、PromQL、查询类型 | Prometheus |
+| `query_pod_logs` | namespace、pod、purpose、关键词、级别、trace ID、时间窗 | Elasticsearch/Filebeat |
+| `query_pod_tracing` | namespace、pod、purpose、方向、协议、状态码、路径、trace ID | DeepFlow/ClickHouse + Tempo |
+| `query_pod_topology` | namespace、pod、purpose | Kubernetes API |
+
+这些工具不根据 `OOMKilled`、`ConfigError` 等故障名称在服务端做场景路由。
+模型选择查询条件，工具负责：
+
+- 强制 namespace 和 Pod 精确作用域。
+- 校验 Pod UID，避免同名 Pod 生命周期串数据。
+- 限制查询时间窗和返回大小。
+- 生成可核验的查询描述、facts、samples 和 evidence refs。
+- 明确返回 `present/empty/absent/weak/error`。
+
+### 3.2 首轮门控
+
+Evidence 节点会对每个已确认异常 Pod 补齐四个首轮查询：
+
+```text
+execute_pod_promql
+query_pod_logs
+query_pod_tracing
+query_pod_topology
 ```
-[trace/span_evidence] src=tempo
-  Tempo 返回 10 条 trace 的分布式 span：e2e054876b6a5b936572000000000001, ...0002, ...
-```
-> 交叉核验：独立审计逐个打 Tempo API 确认 `...0001/...000a` 有 span；失败 trace `...000b`（触发 OOM 无响应）Tempo 返回 404，工具**也确实没报它**——有据、不虚报。
 
-**为什么 tracing 能代表**：DeepFlow 给出真实调用方向/端点/延迟/调用链（谁调用了它、慢在哪），
-Tempo 给出端到端 span 路径。**弱/强分级严格**：DeepFlow node 级流量只算 `related_context/weak`，
-Pod IP 直连 flow 算 `medium`，绝不当强因果。
+首轮 PromQL 是通用 Pod 生命周期基线，包含：
 
-### 4.4 Kubernetes（状态事实）— 来源：K8s API
-
-**采什么**：Pod phase、containerStatuses、lastState.terminated（reason/exitCode）、events、owner、finalizers 等真实状态。
-
-**为什么能代表**：K8s 终态与事件是根因状态的**直接证据**（OOMKilled/exit137、FailedScheduling、ImagePullBackOff）。
-
-**真实例子**：
-```
-[k8s/root_cause_state] src=kubernetes
-  Last terminated state: business-api=OOMKilled exit=137；restarts=2406；Warning BackOff x56536 over 8d
+```promql
+kube_pod_status_phase{namespace="<ns>",pod="<pod>"}
+or kube_pod_container_status_waiting_reason{namespace="<ns>",pod="<pod>"}
+or kube_pod_container_status_last_terminated_reason{namespace="<ns>",pod="<pod>"}
+or kube_pod_container_status_restarts_total{namespace="<ns>",pod="<pod>"}
 ```
 
-### 4.5 图拓扑（Topology）— 来源：K8s owner/Service + DeepFlow peer
+它用于先确认 phase、waiting reason、终止原因和重启次数，不是 OOM 专用查询。
+对于 OOM，模型仍应根据返回继续查询：
 
-**采什么**：真实实体（Pod/Container/Node/IP/ReplicaSet/Deployment/StatefulSet/Service/Evidence）
-和它们之间带 `directness/confidence` 的关系边。
-
-**为什么能代表拓扑**：不是画复杂图数据库，而是让模型明确"每条证据属于哪个实体、责任落在哪一层"——
-避免把同 namespace/同 node/历史日志误判为直接证据。
-
-**真实例子**（插桩 Pod，10 实体 9 边）：
+```promql
+container_memory_working_set_bytes{namespace="<ns>",pod="<pod>",container="<container>"}
+kube_pod_container_resource_limits{namespace="<ns>",pod="<pod>",container="<container>",resource="memory"}
 ```
-Pod trace-oom-api-...      --scheduled_on-->  Node node2                [direct/high]   调度
-Pod trace-oom-api-...      --assigned_to-->   IP 172.16.104.27          [direct/high]
-Pod trace-oom-api-...      --owns_container-> Container api             [direct/high]
-Pod trace-oom-api-...      --owned_by-->      ReplicaSet trace-oom-...  [direct/high]   ┐ 工作负载归属链
-ReplicaSet trace-oom-...   --owned_by-->      Deployment trace-oom-api  [direct/high]   ┘
-Service trace-oom-api      --selects-->       Pod trace-oom-api-...     [direct/high]   流量入口
-evidence:prometheus-metrics--observes-->      Pod                       [direct/high]   ┐ 证据挂载
-evidence:logs             --observes-->       Pod                       [direct/medium] │
-evidence:deepflow         --observes-->       Node                      [related_ctx/weak]┘
-```
-> 若 Pod 无 ownerReferences，则明确标"独立直投 Pod，无上层控制器"；若无匹配 Service，标"无 Service 暴露"。
-> 拓扑理解会**直接影响修复命令**：识别出独立 Pod → 修复从 `kubectl set resources deployment` 改为 `kubectl patch pod`。
 
----
+### 3.3 工具结果合同
 
-## 5. 工具实现的关键设计点（保证"真实 + 稳定"）
-
-| 设计点 | 解决的问题 |
-|--------|-----------|
-| **kubectl-exec 采集模式** | ES/DeepFlow/Tempo 不直连（认证/TLS/网络脆），而是 exec 进后端 Pod 查 localhost，稳定 |
-| **凭证自动获取** | 从 K8s secret base64 解码 ES 账号，无需手工配置密钥 |
-| **ClickHouse 时区显式 UTC** | ClickHouse 服务器时区是 Asia/Shanghai，窗口用 UTC 差 8h 会错过全部近期 flow → `toDateTime(..,'UTC')` |
-| **ES 查询 Pod 身份必需** | Pod 身份进 `must`、namespace 进 `filter`，杜绝跨 Pod 日志串味 |
-| **role 信号 + interpretation** | 借鉴 data 脚本，让信号人可读、直接指向问题 |
-| **从日志提取 trace_id** | 插桩 Pod 即使窗口内无新 flow，日志里的 trace_id 也能查到 Tempo span |
-| **compact summary + refs** | Agent-facing 返回摘要 + `recommended_refs_by_dimension`，大证据按需展开 |
-| **反泄漏** | 拒绝返回 root_cause label / expected_remediation / evaluator-only 文件 |
-
----
-
-## 6. 真实调用结果示例（端到端）
-
-对插桩 Pod `aiops-dfotel-test/trace-oom-api-...` 调用 `collect_aiops_case` 的真实返回（compact summary）：
+自主查询工具的结构化结果包含：
 
 ```json
 {
-  "coverage": {"k8s":"present","metrics":"present","logs":"present","tracing":"empty","trace":"present","topology":"present"},
-  "signals_summary": [
-    {"dimension":"k8s","role":"root_cause_state","source_system":"kubernetes","observed":"Last terminated state: api=OOMKilled exit=137"},
-    {"dimension":"metrics","role":"resource_trend","source_system":"prometheus","observed":"Prometheus pod metrics queried: series=16 metrics=4"},
-    {"dimension":"logs","role":"pre_failure_behavior","source_system":"elasticsearch","observed":"..."},
-    {"dimension":"tracing","role":"network_flow","source_system":"deepflow","observed":"..."},
-    {"dimension":"trace","role":"span_evidence","source_system":"tempo","observed":"Tempo 返回 10 条 trace 的分布式 span：e2e054876b..."}
-  ],
-  "topology_summary": {"entity_count":10,"edge_count":9,"relations":{"owned_by":2,"selects":1,"scheduled_on":1,...}},
-  "recommended_refs_by_dimension": {"k8s":[...],"logs":[...],"metrics":[...],"tracing":[...]},
-  "package_ref": "/app/aiops-cases/auto-..."
+  "ok": true,
+  "status": "query_executed",
+  "source_system": "prometheus",
+  "dimension": "metrics",
+  "entity": {
+    "namespace": "aiops-traced-oom",
+    "pod": "trace-oom-api-...",
+    "pod_uid": "..."
+  },
+  "purpose": "验证容器内存是否持续逼近 limit",
+  "coverage": "present",
+  "directness": "direct",
+  "query": {},
+  "facts": [],
+  "samples": [],
+  "evidence_refs": [],
+  "truncated": false
 }
 ```
 
-**数据分层（审计时要认清）**：MCP 工具的**原始输出**是上面这份干净 JSON（归档 `raw.txt`）；
-Robusta 后台 ObservationProcessor 会把它**压缩成叙述式摘要**（`key_facts/missing`，归档 `summary.txt`）喂给小模型。
-**单一真值源是 raw.txt**，摘要是忠实但有损的压缩。
+单次返回限制在约 6 KiB。限制的是注入小模型的结构化投影，不是删除原始工具
+输出；完整原文仍进入 Robusta 归档。
 
-**稳定性**：同一 Pod 连采多次结果确定性一致（独立审计 10/10 = 100%）。
+## 4. Case Package 路径
 
----
+### 4.1 MCP 工具
 
-## 7. 数据真实性保证
+8089 的 coarse MCP 暴露：
 
-1. **可交叉核验**：每条数据都能用 kubectl / Prometheus / ClickHouse / Tempo 独立复核同一 Pod、同一窗口。
-   例：MCP 报 restarts=2406 → live kubectl=2421（涨了，仍在崩溃循环，同源一致）；limit 67108864B → kubectl 64Mi 逐字节吻合。
-2. **无编造**：coverage=absent/empty/error 时如实说明原因，不虚构任何数值/日志/flow。
-   例：失败 trace 无 span → Tempo 404 → 工具不报；ImagePullBackOff Pod 容器没起来 → logs/tracing 诚实 empty。
-3. **无串味**：ES 查询 Pod 身份必需，日志逐条归属目标 Pod。
-4. **诚实的窗口语义**：Prometheus/ClickHouse 严格按声明窗口；K8s 容器日志与 Tempo 按 trace_id 取整段 buffer，
-   可能包含窗口外的崩溃前证据（对诊断是好事，消费方需知晓非严格窗口内）。
-
----
-
-## 8. 最终报告如何体现（Robusta 侧）
-
-Robusta 的 conclusion 报告模板新增 **`## 📊 可观测性数据（三维度 + 拓扑）`** 模块（`app/core/prompts.py`），
-强制体现真实数据、标注来源、串联逻辑：
-
-```markdown
-## 📊 可观测性数据（三维度 + 拓扑）
-### 三大观测维度
-| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |
-| Metrics | Prometheus PromQL container_memory_working_set_bytes | present | 56MB working_set / 64Mi limit / 32Mi request | metric-... |
-| Logging | Elasticsearch/Filebeat（kubectl exec）| present | allocated business cache chunk=24 approx_mib=48 | log-... |
-| Tracing | DeepFlow L7（eBPF）/ Tempo | present/empty | 真实 flow/调用链 或 诚实标空 | deepflow-.../tempo-... |
-| K8s | Kubernetes API | present | OOMKilled exit=137 restarts=2406 | k8s-... |
-### 拓扑关系（实体与边）
-- Pod --owned_by--> ReplicaSet --owned_by--> Deployment（工作负载归属）
-- Service --selects--> Pod（流量入口）
-- 拓扑结论：责任落在 Pod / ReplicaSet / Deployment / Service 哪一层
+```text
+collect_aiops_case
+get_aiops_case
+get_aiops_case_evidence
+search_aiops_cases
 ```
 
-严格规则（prompt 强制）：
-1. 证据来自 `collect_aiops_case` 时该模块必填；每条证据标明来源（Prometheus/ES-Filebeat/DeepFlow-ClickHouse/K8s-API）。
-2. 写**人可读的真实原始数据**（真实日志行/指标值/flow），不写 `series=13` 这种裸计数。
-3. 某维度 coverage=absent/empty/error 时**如实说明未采集到，严禁猜测或编造**。
-4. 根因分析必须串联「三维度信号 → 拓扑责任实体 → 因果链」，不能各说各话。
-5. 弱证据（`related_context`/`weak`，如 DeepFlow node 级）不得当强因果。
+职责分别是：
 
-**效果（真实报告片段）**：报告显示 Metrics(56MB/64Mi 自洽真实值)、Logging(真实 cache 增长日志)、
-Tracing(诚实标 empty 或真实调用链)、K8s(OOMKilled/137)、Topology(独立 Pod 无 Deployment)，
-且拓扑理解直接改变了修复建议（独立 Pod → `kubectl patch pod` 而非 `set resources deployment`）。
+- `collect_aiops_case`：根据 namespace 和 Pod 实时采集并落盘。
+- `get_aiops_case`：根据 case ID 返回有界摘要。
+- `get_aiops_case_evidence`：按真实 evidence ID 或允许的相对文件路径展开证据。
+- `search_aiops_cases`：按 namespace、Pod 或异常类型检索已有 case。
 
----
+### 4.2 生产 Case Package 结构
 
-## 9. 版本与部署
+真实样本：
 
-- **mcpstander**：coarse `aiops-case`=8089（默认启用）、fine `aiops-observability-fine`=8090（默认关闭）。
-  采集端点/凭证通过 env 与 K8s secret 配置（`AIOPS_ES_EXEC_*`、`AIOPS_CLICKHOUSE_EXEC_*`、`AIOPS_TEMPO_EXEC_*`，均有本集群默认值）。
-- **Robusta**：`deploy/configmap/config.yaml` 的 `mcp_servers.aiops-case-coarse.enabled: true` 连接 SSE 端点；
-  observation 分支保留 `coverage/topology_summary/signals/directness/confidence` 字段；prompt 体现可观测模块。
-- 部署：各自 `make build && make push && make deploy`（mcpstander ns=`mcp`，robusta ns=`aiops`）。
+```text
+/root/huhu/agent/combine-aiops-mcp/aiops-cases/
+└── sprint-audit-20260727-oom/
+    ├── case.yaml
+    ├── entities.jsonl
+    ├── topology.jsonl
+    ├── signals.jsonl
+    ├── timeline.jsonl
+    └── evidence/
+        ├── k8s_pod.yaml
+        ├── k8s_describe.txt
+        ├── k8s_events.jsonl
+        ├── metrics.jsonl
+        ├── logs.jsonl
+        ├── deepflow_l4.jsonl
+        ├── deepflow_l7.jsonl
+        └── tempo_traces.jsonl
+```
 
----
+文件职责：
 
-## 附：设计到验证的一致性
+| 文件 | 内容 | 是否核心 |
+|---|---|---|
+| `case.yaml` | case ID、异常 Pod、UID、IP、Node、时间窗、coverage、推荐 refs | 是 |
+| `evidence/*` | 各数据源的真实原始或结构化证据 | 是 |
+| `entities.jsonl` | 本 case 涉及的 Pod、Container、Node、Service、owner、Evidence 实体 | 是 |
+| `topology.jsonl` | `owned_by`、`selects`、`calls`、`observes` 等关系 | 是 |
+| `signals.jsonl` | 每个维度的角色、强度和引用入口 | 辅助索引 |
+| `timeline.jsonl` | 跨数据源时间线 | 辅助索引 |
 
-本设计经过多轮真实集群端到端验证与**独立 agent 审计**（fresh context，逐项 kubectl/Prometheus/ClickHouse/Tempo 交叉核验）：
-数据真实性 1:1、诚实度可信、稳定性 100%；与 data 脚本真值对比——对同一 Pod 采到的真实数据同源一致，
-唯一差异是 data 脚本「主动部署插桩 workload + 注入已知 trace_id」的受控实验部分（那需要自建 workload，不适用于诊断任意现成 Pod）。
+**根因判断的单一真实来源是 `evidence/*`。**
+`signals.jsonl` 中“返回 50 条日志”一类内容只表示库存和查询命中，不足以支撑
+根因。
+
+### 4.3 `dimension_details`
+
+`collect_aiops_case` 不把整个 package 返回给模型，而是从 `evidence/*` 中投影：
+
+- 最多 5 个指标 highlight。
+- 最多 8 条日志样本。
+- 最多 5 条 DeepFlow flow。
+- 最多 3 个 Tempo span。
+- 最多 3 条调用链。
+- 有界的拓扑实体和边。
+
+整体约束在 6000 字符左右。若同一个 `trace_id` 同时存在于日志、DeepFlow 和
+Tempo，投影会优先对齐同一组样本。
+
+## 5. 真实 OOM Case 的核心证据
+
+样本：
+
+```text
+case_id=sprint-audit-20260727-oom
+namespace=aiops-traced-oom
+pod=trace-oom-api-7c75757475-vgvxs
+uid=02b86eed-e9db-449c-9c6a-9fce6f0ca566
+pod_ip=172.16.104.25
+node=node2
+```
+
+### 5.1 Kubernetes
+
+```text
+current state=CrashLoopBackOff
+last reason=OOMKilled
+last exit code=137
+restart_count=925
+Warning BackOff x21618 over 3d23h
+```
+
+含义：
+
+- `OOMKilled + exit 137` 是容器被内存限制终止的直接状态证据。
+- `CrashLoopBackOff` 和高重启次数是 OOM 后不断重启的结果。
+
+### 5.2 Prometheus
+
+```text
+metric=container_memory_working_set_bytes
+container=business-api
+start=3.7Mi
+max=79.0Mi
+last=79.0Mi
+limit=80.0Mi
+max_limit_ratio=0.9872
+
+06:52:46=3.7Mi
+06:53:01=3.7Mi
+06:53:16=28.8Mi
+06:53:46=60.9Mi
+06:54:01=79.0Mi
+```
+
+含义：容器工作集从约 3.7 MiB 上升到 79.0 MiB，达到 80 MiB 限制的
+98.72%。这不是“有一条内存指标”，而是明确的内存增长轨迹。
+
+### 5.3 Logging
+
+代表性真实日志：
+
+```json
+{
+  "event": "allocate",
+  "trace_id": "7f54c092ad81bdc124e7d16034d07ca9",
+  "path": "/allocate?mib=2&step=271038",
+  "alloc_mib": 2,
+  "allocated_mib": 62,
+  "pod": "trace-oom-api-7c75757475-vgvxs"
+}
+```
+
+含义：
+
+- `alloc_mib=2`：本次请求让进程新增长期保留约 2 MiB 内存。
+- `allocated_mib=62`：处理完成后，业务进程累计保留约 62 MiB。
+- 日志解释了 Prometheus 内存增长的应用行为，但 OOM 终态仍以 Kubernetes 为准。
+
+### 5.4 DeepFlow
+
+同一 `trace_id` 的真实 L7 flow：
+
+```text
+2026-07-27 15:12:29
+172.16.104.8 -> 172.16.104.25
+HTTP GET /allocate?mib=2&step=271038
+response_code=200
+duration_us=11621
+trace_id=7f54c092ad81bdc124e7d16034d07ca9
+```
+
+含义：调用方请求真实到达目标 Pod，并成功执行。DeepFlow 证明的是网络请求和
+调用方向，不单独证明 OOM。
+
+### 5.5 Tempo
+
+同一 `trace_id` 的代表性应用 span：
+
+```text
+service=aiops-traced-oom-api
+span=GET /allocate
+trace_id=7f54c092ad81bdc124e7d16034d07ca9
+aiops.allocated_mib.before=60
+aiops.alloc_mib=2
+aiops.allocated_mib.after=62
+url.path=/allocate?mib=2&step=271038
+```
+
+含义：目标应用确实执行了 `/allocate`，业务累计分配量从 60 MiB 增长到
+62 MiB。Tempo 给出应用内部语义，DeepFlow 给出网络事实，两者作用不同。
+
+### 5.6 跨源因果链
+
+```text
+DeepFlow：driver 请求到达目标 Pod
+  -> Tempo：应用执行 /allocate，60MiB -> 62MiB
+  -> Logging：同一 trace_id 输出 allocated_mib=62
+  -> Prometheus：工作集 3.7MiB -> 79.0MiB，limit=80MiB
+  -> Kubernetes：OOMKilled/137
+  -> caller logs：目标重启窗口出现 Connection refused
+```
+
+这条链可以支持：
+
+> 业务请求持续触发内存保留，容器工作集逼近 80 MiB limit，随后被 cgroup
+> OOM Kill，Deployment 管理的 Pod 进入 CrashLoopBackOff。
+
+## 6. 人可读证据标准
+
+### 6.1 不能只展示计数
+
+以下内容只属于库存信息，不属于充分诊断证据：
+
+```text
+返回 50 条日志
+返回 50 条 DeepFlow flow
+返回 12 条 trace
+Prometheus series=35
+```
+
+最终报告或证据摘要还必须包含：
+
+| 维度 | 至少展示 |
+|---|---|
+| Metrics | metric 名称、关键时间点、max、limit、比例和单位 |
+| Logging | 至少一条原始 `message`，保留决定性字段 |
+| DeepFlow | src/dst、协议、请求、状态码、时延、trace ID |
+| Tempo | trace ID、service、span name、关键 attributes |
+| Kubernetes | reason、exit code、状态、重启次数或决定性 Event |
+| Topology | source、relationship、target、directness、confidence |
+
+### 6.2 `present` 与无返回
+
+- coverage 为 `present` 时，对应的 decisive samples 不能为空。
+- coverage 为 `empty/absent/error` 时，可以没有样本，但必须保留真实原因。
+- “应用没有插桩”可以导致 Tempo 为空，但不能据此说 DeepFlow 也为空。
+- “容器从未启动”通常会导致应用日志和 L7 flow 为空，这是符合事实的结果。
+
+### 6.3 证据充分度
+
+需要区分两个概念：
+
+1. **维度覆盖度**：是否真实查询过数据源，以及返回什么 coverage。
+2. **根因充分度**：返回内容是否能排除主要候选并支持当前根因。
+
+四个维度都执行过，不代表根因一定充分。例如只有“50 条日志”和“12 条 trace”
+计数时，覆盖度可以是高，但根因充分度仍然低。
+
+## 7. Robusta 如何消费证据
+
+### 7.1 工具归档
+
+每次工具调用都会保存：
+
+```text
+/tmp/aiops/reports/context_archives/<run_id>/tools/
+├── NNN-<node>-<tool>.raw.txt
+├── NNN-<node>-<tool>.structured.json
+└── NNN-<node>-<tool>.summary.txt
+```
+
+| 文件 | 用途 |
+|---|---|
+| `raw.txt` | 完整工具原始输出，人工审计的首选来源 |
+| `structured.json` | 白名单化、机器可读的结构化事实 |
+| `summary.txt` | 注入小模型的短文本摘要 |
+
+### 7.2 Evidence 投影
+
+Evidence 节点继续生成：
+
+- `agent_facts`：最多约 10000 字符，适合小模型直接引用的事实文本。
+- `agent_context`：最多约 12000 字符的结构化上下文或 Fact Ledger。
+- `fact_ledger`：RCA 的权威事实接口，包含实体范围、fact ID、来源、
+  directness、coverage 和 evidence refs。
+
+RCA 和 Conclusion 不应只读取一句自然语言摘要，而是优先消费 Fact Ledger。
+
+### 7.3 Case Package 与 Agent Evidence 的关系
+
+二者**相似但不相同**：
+
+| 项目 | Case Package | 当前默认自主查询 |
+|---|---|---|
+| 物理形态 | 一个 case 目录 | 多次独立工具事件和运行归档 |
+| 完整原始数据 | `evidence/*` | `tools/*.raw.txt` |
+| 结构化数据 | JSONL/YAML | `tools/*.structured.json` |
+| 模型输入 | `dimension_details`/refs | summary + agent facts/context |
+| 实体边界 | `primary_entity`/entities | 每个查询的 `entity` |
+| 时间窗 | `case.yaml` | 每个查询的 `query` |
+| coverage | case 维度 coverage | 每个工具自己的 coverage |
+| 拓扑 | `topology.jsonl` | `query_pod_topology` facts/edges |
+| RCA 接口 | 可转换为 Fact Ledger | 直接转换为 Fact Ledger |
+
+因此，当前 Agent 并不是直接读取整个本地 Case Package；它使用与 Case Package
+同源的证据模型。启用 coarse 路径时，Case Package 会直接成为工具结果的底层
+存储。
+
+## 8. 常用检查命令
+
+检查当前 MCP 开关：
+
+```bash
+cd /root/huhu/agent/combine-aiops-mcp/robusta
+sed -n '65,145p' deploy/configmap/config.yaml
+```
+
+检查 MCP 服务：
+
+```bash
+kubectl get pod,svc -n mcp
+kubectl logs -n mcp deployment/mcp-server-manager --tail=200 |
+  grep -E 'aiops-case|aiops-observability-query|8089|8100'
+```
+
+检查一次 Agent 运行归档：
+
+```bash
+RUN_ID=<run_id>
+kubectl -n aiops exec deploy/aiops-copilot -- \
+  find "/tmp/aiops/reports/context_archives/${RUN_ID}" -maxdepth 3 -type f | sort
+```
+
+检查可观测工具原始结果：
+
+```bash
+RUN_ID=<run_id>
+kubectl -n aiops exec deploy/aiops-copilot -- sh -c \
+  "grep -RIlE 'execute_pod_promql|query_pod_logs|query_pod_tracing|query_pod_topology|collect_aiops_case' \
+   /tmp/aiops/reports/context_archives/${RUN_ID}/tools"
+```
+
+## 9. 日志或 Tracing 显示无返回时如何定位
+
+按以下顺序检查：
+
+1. 查看工具 `raw.txt`，确认数据源真实返回还是后续投影丢失。
+2. 查看 `structured.json` 的 `coverage`、`samples`、`flows`、`spans` 和
+   `limitations`。
+3. 查看 `summary.txt`，确认决定性样本是否进入小模型文本。
+4. 查看 Evidence 到 RCA 的 handoff 和 Fact Ledger。
+5. 最后检查报告，确认是否错误地把 `present` 写成“无数据”。
+
+如果 `raw.txt` 本身为空，问题在数据源、实体身份、时间窗或应用埋点；如果
+`raw.txt` 有数据但 `structured.json` 没有，问题在结构化投影；如果
+`structured.json` 有数据但报告没引用，问题在 Agent/RCA/Conclusion 消费链路。
+
+## 10. 能力边界
+
+- Kubernetes 的 `OOMKilled/137` 是 OOM 终态权威证据。
+- Prometheus 采样可能错过被杀前最后几秒，最大采样值不要求精确等于 limit。
+- DeepFlow 无需应用埋点即可观察支持协议的网络流，但完整应用 span 通常需要
+  OpenTelemetry 手工埋点、自动埋点或等价 Trace Context 传播。
+- 当前 OOM 测试是单调用方到单 API 的受控链路，不代表复杂微服务全链路。
+- Case Package 是文件存储，适合当前 Sprint、回放和审计；现阶段不需要额外图
+  数据库或 RAG 才能完成一个典型场景验证。

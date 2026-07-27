@@ -877,6 +877,9 @@ curl http://<node-ip>:30800/api/v1/mcp/status
 
 - `docs/ARCHITECTURE.md`
 - `docs/GUIDE.md`
+- `docs/aiops-observability-mcp-design.md`
+- `docs/aiops-traced-oom-test-environment.md`
+- `docs/aiops-observability-sprint-test-guide.md`
 - `docs/remediation-usage.md`
 - `docs/workflow-structured-runtime-evolution-2026-05-09.md`
 - `docs/上下文管理设计与实现.md`
