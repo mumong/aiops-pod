@@ -89,17 +89,28 @@ data:
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8095/sse"
           mode: "sse"
+        enabled: false
+
+      # ------------------------------------------------------------------------
+      # AIOps 可观测 MCP - 自主组合查询，默认启用
+      # Qwen 选择 Pod 级 PromQL、日志过滤条件和链路过滤条件。
+      # ------------------------------------------------------------------------
+      aiops-observability-query:
+        description: "Pod 级自主可观测性查询 MCP - Qwen 按诊断目的组合 Prometheus、ES/Filebeat、DeepFlow/Tempo 查询"
+        config:
+          url: "http://mcp-server-manager.mcp.svc.cluster.local:8100/sse"
+          mode: "sse"
         enabled: true
 
       # ------------------------------------------------------------------------
-      # AIOps 可观测 MCP - 粗粒度工具，默认启用，给 Agent 主流程使用
+      # AIOps 可观测 MCP - 粗粒度兼容路径，默认关闭
       # ------------------------------------------------------------------------
       aiops-case-coarse:
         description: "AIOps Case MCP - 根据异常 Pod 实时采集 metrics/logs/traces/topology 并生成 case summary"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8089/sse"
           mode: "sse"
-        enabled: true
+        enabled: false
 
       # ------------------------------------------------------------------------
       # AIOps 可观测 MCP - 细粒度工具，默认关闭，调试/专家模式使用
@@ -172,8 +183,15 @@ data:
           enabled: false
           explicit_pod_enabled: true
       evidence:
+        # autonomous: Qwen 组合 Kubernetes 与三个通用可观测性查询工具。
+        # legacy: 保留 collect_aiops_case mandatory coarse 兼容行为。
+        observability_mode: autonomous
+        # 首轮按异常 Pod 强制真实尝试 Metrics、Logging、Tracing；
+        # 三维返回后仍由 Qwen 自主决定是否使用更精确参数继续补证。
+        observability_first_round_gate:
+          enabled: true
         early_stop:
-          enabled: false
+          enabled: true
 
       conclusion:
         # 最终报告输出 token 上限；query 短答，diagnosis 完整报告。
@@ -220,6 +238,12 @@ data:
         trigger_ratio: 0.70
         max_compactions_per_call: 1
         summary_max_tokens: 1200
+        # structured output 在调用模型前执行硬预算门禁。32K 模型默认将
+        # system/user/schema 总输入限制在 72%，并为输出和 tokenizer 偏差留空间。
+        hard_guard_enabled: true
+        hard_guard_input_ratio: 0.72
+        hard_guard_safety_tokens: 2000
+        hard_guard_preserve_tail_tokens: 1200
 
     # ------------------------------------------------------------------------
     # 5. Quality Metrics

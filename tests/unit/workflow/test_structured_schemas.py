@@ -68,6 +68,41 @@ def test_evidence_plan_output_accepts_aiops_case_mcp_tools():
     ]
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    ],
+)
+def test_evidence_plan_output_accepts_autonomous_observability_tools(tool_name):
+    parsed = EvidencePlanOutput.model_validate({
+        "layer": "L3",
+        "evidence_plan": [
+            {
+                "id": f"query-{tool_name}",
+                "description": "按诊断目的查询目标 Pod 的真实可观测性数据",
+                "level": "critical",
+                "tool": tool_name,
+                "command": tool_name,
+                "tool_args": {
+                    "namespace": "demo",
+                    "pod": "api",
+                    "purpose": "验证当前候选根因",
+                },
+                "purpose": "验证当前候选根因",
+                "acceptable_tools": [tool_name],
+            }
+        ],
+        "collection_strategy": "由 Qwen 根据真实结果决定是否继续补证。",
+    })
+
+    assert parsed.evidence_plan[0].tool == tool_name
+    assert parsed.evidence_plan[0].acceptable_tools == [tool_name]
+
+
 def test_conclusion_output_schema_accepts_report_payload():
     parsed = ConclusionOutput.model_validate({
         "title": "诊断报告",

@@ -1,6 +1,9 @@
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
+
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
@@ -158,3 +161,55 @@ def test_metrics_trace_excludes_primary_runbooks_from_reference_list():
         "- **参考 Runbook**: pod-oomkilled, pod-config-error, "
         "pod-crashloop-runtime"
     ) not in trace
+
+
+def test_autonomous_observability_runtime_switches_are_deployed():
+    configmap = yaml.safe_load(
+        Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")
+    )
+    config = yaml.safe_load(configmap["data"]["config.yaml"])
+    servers = config["mcp_servers"]
+
+    assert servers["k8s-mcp-service"]["enabled"] is True
+    assert servers["aiops-observability-query"]["enabled"] is True
+    assert (
+        servers["aiops-observability-query"]["config"]["url"]
+        == "http://mcp-server-manager.mcp.svc.cluster.local:8100/sse"
+    )
+    assert servers["aiops-case-coarse"]["enabled"] is False
+    assert servers["aiops-observability-fine"]["enabled"] is False
+    assert servers["prometheus_tool"]["enabled"] is False
+    assert config["workflow"]["evidence"]["observability_mode"] == "autonomous"
+    assert (
+        config["workflow"]["evidence"]["observability_first_round_gate"]["enabled"]
+        is True
+    )
+    assert config["workflow"]["evidence"]["early_stop"]["enabled"] is True
+    assert config["workflow"]["context_compaction"]["trigger_ratio"] == 0.70
+
+
+def test_primary_runbooks_offer_query_guidance_without_fixed_tool_sequence():
+    configmap = yaml.safe_load(
+        Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8")
+    )
+    data = configmap["data"]
+
+    for name in (
+        "pod-oomkilled.md",
+        "pod-config-error.md",
+        "pod-imagepull-failed.md",
+    ):
+        runbook = data[name]
+        for section in (
+            "## 诊断问题",
+            "## 可选观测维度",
+            "## 查询构造建议",
+            "## 证据边界",
+            "## 停止条件",
+        ):
+            assert section in runbook
+        assert "execute_pod_promql" in runbook
+        assert "query_pod_logs" in runbook
+        assert "query_pod_tracing" in runbook
+        assert "固定工具顺序" not in runbook
+        assert "必须依次调用" not in runbook

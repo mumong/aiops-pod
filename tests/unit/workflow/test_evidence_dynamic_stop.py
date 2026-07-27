@@ -10,6 +10,8 @@ import json
 import pytest
 
 from app.core.prompts import EVIDENCE_COLLECTOR_PROMPT
+from app.core.workflow.fact_contract import extract_fact_ledgers_from_tool_data
+from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.schemas import EvidenceCollectionOutput, EvidencePlanOutput
 from app.core.skills.models import EvidenceItem, EvidenceLevel, Layer
@@ -300,6 +302,38 @@ def test_yaml_plan_matches_real_yaml_summary():
     assert matched is True
 
 
+def test_plan_tool_match_rejects_same_tool_result_from_a_different_pod():
+    matched = EvidenceCollectorNode._tool_result_matches_plan(
+        plan_tool="kubectl_describe",
+        plan_cmd=(
+            "kubectl_describe pod trace-oom-api-598dcf5996-x6v6n "
+            "-n aiops-traced-oom"
+        ),
+        plan_desc="确认 OOM Pod 的容器终态",
+        tool_name="kubectl_describe",
+        result=(
+            "kubectl_describe 摘要:\n"
+            "name: trace-config-api-84bc7cb976-vgtl8\n"
+            "namespace: aiops-traced-config\n"
+            "status: Running\n"
+            "Reason: CrashLoopBackOff\n"
+        ),
+        structured={"status": "describe_summarized"},
+        tool_args={
+            "kind": "pod",
+            "name": "trace-config-api-84bc7cb976-vgtl8",
+            "namespace": "aiops-traced-config",
+        },
+        plan_tool_args={
+            "kind": "pod",
+            "name": "trace-oom-api-598dcf5996-x6v6n",
+            "namespace": "aiops-traced-oom",
+        },
+    )
+
+    assert matched is False
+
+
 def test_evidence_execute_retries_when_plan_exists_but_no_tool_results():
     node = EvidenceCollectorNode()
     calls = []
@@ -531,11 +565,681 @@ def test_evidence_user_prompt_keeps_live_observability_guidance_generic():
     assert "固定调用次数" not in guidance
 
 
+def test_autonomous_mode_does_not_inject_legacy_coarse_case():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name="collect_aiops_case"),
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+        SimpleNamespace(name="kubectl_describe"),
+    ]
+    plan = [{
+        "id": "status",
+        "description": "确认 Pod 当前状态",
+        "level": "critical",
+        "tool": "kubectl_describe",
+        "command": "kubectl describe pod api -n demo",
+        "purpose": "确认生命周期状态和容器终态",
+    }, {
+        "id": "logs",
+        "description": "查找启动失败原文",
+        "level": "important",
+        "tool": "query_pod_logs",
+        "command": "query pod logs for startup errors",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "验证启动失败是否由配置缺失导致",
+            "keywords": ["required", "missing"],
+        },
+        "purpose": "验证启动失败是否由配置缺失导致",
+    }]
+
+    prepared = node._prepare_evidence_plan(
+        plan,
+        {"abnormal_pods": [{"kind": "Pod", "namespace": "demo", "name": "api"}]},
+    )
+
+    assert [item["id"] for item in prepared] == ["status", "logs"]
+    assert "collect_aiops_case" not in {item["tool"] for item in prepared}
+
+
+def test_autonomous_guidance_requires_first_round_three_dimensions_then_allows_follow_up():
+    message = EvidenceCollectorNode._build_evidence_user_message(
+        question="我的集群有什么问题",
+        layer="L3",
+        layer_handoff=json.dumps({
+            "abnormal_pods": [{
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+            }],
+        }),
+        observability_mode="autonomous",
+    )
+
+    guidance = message.rsplit("# 自主可观测性组合查询", 1)[1]
+    assert "execute_pod_promql" in guidance
+    assert "query_pod_logs" in guidance
+    assert "query_pod_tracing" in guidance
+    assert "query_pod_topology" in guidance
+    assert "Kubernetes" in guidance
+    assert "purpose" in guidance
+    assert "改变根因判断" in guidance
+    assert "继续补证" in guidance
+    assert "首轮门控" in guidance
+    assert "四个工具都必须真实执行一次" in guidance
+    assert "empty/absent/weak/error" in guidance
+    assert "门控完成后" in guidance
+    assert "collect_aiops_case" not in guidance
+    assert "没有固定顺序" in guidance
+    assert "必须按固定顺序" not in guidance
+    assert "80%" in guidance
+
+
+def test_autonomous_gate_detects_every_missing_pod_dimension():
+    plan = [{
+        "id": "api-metrics",
+        "tool": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "验证当前状态",
+            "promql": 'kube_pod_status_phase{namespace="demo",pod="api"}',
+            "query_type": "instant",
+        },
+    }, {
+        "id": "worker-logs",
+        "tool": "query_pod_logs",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "worker",
+            "purpose": "读取最近日志",
+        },
+    }]
+    handoff = {
+        "abnormal_pods": [
+            {"kind": "Pod", "namespace": "demo", "name": "api"},
+            {"kind": "Pod", "namespace": "demo", "name": "worker"},
+        ],
+    }
+
+    missing = EvidenceCollectorNode._missing_autonomous_observability_gate_items(
+        plan,
+        handoff,
+    )
+
+    assert missing == [
+        ("demo", "api", "query_pod_logs"),
+        ("demo", "api", "query_pod_tracing"),
+        ("demo", "api", "query_pod_topology"),
+        ("demo", "worker", "execute_pod_promql"),
+        ("demo", "worker", "query_pod_tracing"),
+        ("demo", "worker", "query_pod_topology"),
+    ]
+
+
+def test_autonomous_gate_fallback_adds_generic_four_dimensions_without_scenario_routing():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {"enabled": True},
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+        SimpleNamespace(name="query_pod_topology"),
+    ]
+
+    plan = node._ensure_autonomous_observability_gate_plan(
+        [{
+            "id": "status",
+            "description": "确认 Pod 状态",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": "demo",
+                "name": "api",
+            },
+            "purpose": "确认生命周期状态",
+        }],
+        {
+            "abnormal_pods": [{
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+            }],
+        },
+    )
+
+    gate_items = [
+        item
+        for item in plan
+        if item.get("source") == "observability_first_round_gate"
+    ]
+    assert [item["tool"] for item in gate_items] == [
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    ]
+    assert all(item["level"] == "critical" for item in gate_items)
+    assert all(item["tool_args"]["namespace"] == "demo" for item in gate_items)
+    assert all(item["tool_args"]["pod"] == "api" for item in gate_items)
+    assert all(item["tool_args"]["purpose"] for item in gate_items)
+
+    metrics_args = gate_items[0]["tool_args"]
+    assert metrics_args["query_type"] == "instant"
+    assert 'namespace="demo"' in metrics_args["promql"]
+    assert 'pod="api"' in metrics_args["promql"]
+    assert "oom" not in metrics_args["promql"].lower()
+    assert "memory" not in metrics_args["promql"].lower()
+
+    serialized = json.dumps(gate_items, ensure_ascii=False).lower()
+    assert "imagepullbackoff" not in serialized
+    assert "configerror" not in serialized
+    assert "scenario" not in serialized
+
+
+@pytest.mark.parametrize("status,coverage", [
+    ("success", "empty"),
+    ("success", "absent"),
+    ("success", "weak"),
+    ("error", "error"),
+])
+def test_autonomous_gate_counts_real_tool_result_as_attempt_even_without_data(
+    status,
+    coverage,
+):
+    event = {
+        "type": "tool_result",
+        "status": status,
+        "tool_name": "query_pod_tracing",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "首轮查询目标 Pod 的真实调用数据",
+        },
+        "structured": {
+            "coverage": coverage,
+            "entity": {"namespace": "demo", "pod": "api"},
+        },
+    }
+
+    attempted = (
+        EvidenceCollectorNode._attempted_autonomous_observability_gate_items(
+            [event]
+        )
+    )
+
+    assert attempted == {("demo", "api", "query_pod_tracing")}
+
+
+def test_autonomous_gate_remaining_items_are_tracked_per_dimension_not_only_per_pod():
+    plan = [{
+        "id": "metrics",
+        "tool": "execute_pod_promql",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+    }, {
+        "id": "logs",
+        "tool": "query_pod_logs",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+    }, {
+        "id": "tracing",
+        "tool": "query_pod_tracing",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+    }]
+    events = [{
+        "type": "tool_result",
+        "status": "success",
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "确认指标覆盖",
+        },
+        "structured": {
+            "coverage": "present",
+            "entity": {"namespace": "demo", "pod": "api"},
+        },
+    }]
+
+    remaining = EvidenceCollectorNode._remaining_unattempted_autonomous_items(
+        plan,
+        events,
+    )
+
+    assert [item["tool"] for item in remaining] == [
+        "query_pod_logs",
+        "query_pod_tracing",
+    ]
+
+
+def test_autonomous_preplanned_execution_allows_kubernetes_and_generic_query_tools():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name="kubectl_describe"),
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+        SimpleNamespace(name="query_pod_topology"),
+        SimpleNamespace(name="collect_aiops_case"),
+        SimpleNamespace(name="query_aiops_metrics"),
+    ]
+    structured_plan = EvidencePlanOutput.model_validate({
+        "layer": "L3",
+        "evidence_plan": [{
+            "id": "status",
+            "description": "确认 Pod 当前状态",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod api -n demo",
+            "purpose": "确认生命周期状态",
+            "acceptable_tools": ["kubectl_describe"],
+        }, {
+            "id": "metric",
+            "description": "查询可改变根因判断的指标",
+            "level": "important",
+            "tool": "execute_pod_promql",
+            "command": "execute scoped Pod PromQL",
+            "purpose": "验证指标趋势是否支持候选根因",
+            "acceptable_tools": ["execute_pod_promql"],
+        }, {
+            "id": "logs",
+            "description": "查询决定性业务日志",
+            "level": "important",
+            "tool": "query_pod_logs",
+            "command": "query scoped Pod logs",
+            "purpose": "验证日志原文是否支持候选根因",
+            "acceptable_tools": ["query_pod_logs"],
+        }, {
+            "id": "tracing",
+            "description": "查询目标 Pod 的真实调用证据",
+            "level": "optional",
+            "tool": "query_pod_tracing",
+            "command": "query scoped Pod tracing",
+            "purpose": "验证调用流量是否支持候选根因",
+            "acceptable_tools": ["query_pod_tracing"],
+        }],
+        "collection_strategy": "先确认状态，再由 Qwen 按需组合查询。",
+    })
+
+    blocked = node._blocked_tools_for_preplanned_execution([
+        item.model_dump() for item in structured_plan.evidence_plan
+    ])
+
+    assert "kubectl_describe" not in blocked
+    assert "execute_pod_promql" not in blocked
+    assert "query_pod_logs" not in blocked
+    assert "query_pod_tracing" not in blocked
+    assert "collect_aiops_case" in blocked
+    assert "query_aiops_metrics" in blocked
+
+
+def test_autonomous_preplanned_execution_keeps_unplanned_generic_query_tools_for_follow_up():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name="kubectl_describe"),
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+        SimpleNamespace(name="collect_aiops_case"),
+    ]
+
+    blocked = node._blocked_tools_for_preplanned_execution([{
+        "id": "metric",
+        "description": "先验证目标 Pod 的关键指标",
+        "level": "critical",
+        "tool": "execute_pod_promql",
+        "command": "execute scoped Pod PromQL",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "验证当前候选根因",
+        },
+        "purpose": "验证当前候选根因",
+        "acceptable_tools": ["execute_pod_promql"],
+    }])
+
+    assert "execute_pod_promql" not in blocked
+    assert "query_pod_logs" not in blocked
+    assert "query_pod_tracing" not in blocked
+    assert "kubectl_describe" in blocked
+    assert "collect_aiops_case" in blocked
+
+
+def test_autonomous_plan_retries_then_falls_back_for_each_missing_dimension():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name="kubectl_describe"),
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+    ]
+    plan_questions = []
+
+    first_plan = {
+        "layer": "L3",
+        "evidence_plan": [{
+            "id": "oom-status",
+            "description": "确认 oom Pod 当前状态",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod oom-api -n oom-ns",
+            "tool_args": {
+                "kind": "pod",
+                "name": "oom-api",
+                "namespace": "oom-ns",
+            },
+            "purpose": "确认当前生命周期状态",
+        }, {
+            "id": "config-status",
+            "description": "确认 config Pod 当前状态",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "command": "kubectl describe pod config-api -n config-ns",
+            "tool_args": {
+                "kind": "pod",
+                "name": "config-api",
+                "namespace": "config-ns",
+            },
+            "purpose": "确认当前生命周期状态",
+        }, {
+            "id": "oom-metric",
+            "description": "查询 oom Pod 的关键指标",
+            "level": "important",
+            "tool": "execute_pod_promql",
+            "command": "execute scoped Pod PromQL",
+            "tool_args": {
+                "namespace": "oom-ns",
+                "pod": "oom-api",
+                "purpose": "验证资源趋势是否支持候选根因",
+                "promql": (
+                    'container_memory_working_set_bytes'
+                    '{namespace="oom-ns",pod="oom-api",container="api"}'
+                ),
+                "query_type": "range",
+            },
+            "purpose": "验证资源趋势是否支持候选根因",
+        }],
+        "collection_strategy": "先确认两个 Pod，再查询关键指标。",
+    }
+    repaired_plan = {
+        "layer": "L3",
+        "evidence_plan": [
+            *first_plan["evidence_plan"],
+            {
+                "id": "config-logs",
+                "description": "查询 config Pod 的启动错误原文",
+                "level": "important",
+                "tool": "query_pod_logs",
+                "command": "query scoped Pod logs",
+                "tool_args": {
+                    "namespace": "config-ns",
+                    "pod": "config-api",
+                    "purpose": "验证启动失败是否由配置缺失导致",
+                    "keywords": ["required", "missing", "config"],
+                },
+                "purpose": "验证启动失败是否由配置缺失导致",
+            },
+        ],
+        "collection_strategy": "补充部分缺失的实时观测问题。",
+    }
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            plan_questions.append(question)
+            payload = first_plan if len(plan_questions) == 1 else repaired_plan
+            parsed = schema.model_validate(payload)
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+
+    def _fake_call_llm(question, system_prompt, **kwargs):
+        return SimpleNamespace(result="已执行修复后的计划"), [{
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "query_pod_logs",
+            "tool_args": {
+                "namespace": "config-ns",
+                "pod": "config-api",
+                "purpose": "验证启动失败是否由配置缺失导致",
+            },
+            "result": "required config PAYMENT_GATEWAY_TOKEN is missing",
+            "structured": {
+                "status": "query_succeeded",
+                "coverage": "present",
+                "dimension": "logging",
+                "entity": {"namespace": "config-ns", "pod": "config-api"},
+                "facts": [{"value": "required config PAYMENT_GATEWAY_TOKEN is missing"}],
+            },
+        }]
+
+    node._call_llm = _fake_call_llm
+    plan, _, _ = node._plan_evidence_with_llm(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "abnormal_pods": [{
+                "kind": "Pod",
+                "namespace": "oom-ns",
+                "name": "oom-api",
+            }, {
+                "kind": "Pod",
+                "namespace": "config-ns",
+                "name": "config-api",
+            }],
+        }),
+    )
+
+    assert len(plan_questions) == 2
+    assert "config-ns/config-api" in plan_questions[1]
+    planned_gate_items = {
+        (
+            *EvidenceCollectorNode._extract_plan_pod_target(item),
+            item["tool"],
+        )
+        for item in plan
+        if item["tool"] in EvidenceCollectorNode._OBSERVABILITY_QUERY_TOOLS
+    }
+    assert planned_gate_items == {
+        ("oom-ns", "oom-api", "execute_pod_promql"),
+        ("oom-ns", "oom-api", "query_pod_logs"),
+        ("oom-ns", "oom-api", "query_pod_tracing"),
+        ("oom-ns", "oom-api", "query_pod_topology"),
+        ("config-ns", "config-api", "execute_pod_promql"),
+        ("config-ns", "config-api", "query_pod_logs"),
+        ("config-ns", "config-api", "query_pod_tracing"),
+        ("config-ns", "config-api", "query_pod_topology"),
+    }
+
+
+def test_autonomous_context_guard_stops_new_queries_at_eighty_percent():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    node._active_evidence_plan = [{
+        "id": "metric-api",
+        "description": "验证 api 的关键指标",
+        "level": "critical",
+        "tool": "execute_pod_promql",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+    }, {
+        "id": "logs-worker",
+        "description": "验证 worker 的关键日志",
+        "level": "important",
+        "tool": "query_pod_logs",
+        "tool_args": {"namespace": "demo", "pod": "worker"},
+    }]
+
+    stopped = node._should_stop_autonomous_collection([{
+        "type": "tool_result",
+        "status": "success",
+        "tool_name": "execute_pod_promql",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+        "structured": {"coverage": "present"},
+        "context_usage_ratio": 0.81,
+    }])
+
+    assert stopped is True
+    assert node._early_stop_state["reason"] == "context_budget_stop"
+    assert node._early_stop_state["context_usage_ratio"] == 0.81
+    assert "demo/api:query_pod_logs" in node._early_stop_state["uncollected_targets"]
+    assert "demo/api:query_pod_tracing" in node._early_stop_state["uncollected_targets"]
+    assert "demo/worker:execute_pod_promql" in node._early_stop_state["uncollected_targets"]
+
+
+def test_autonomous_execution_uses_context_guard_and_leaves_follow_up_to_qwen():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "early_stop": {"enabled": True},
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name="kubectl_describe"),
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+        SimpleNamespace(name="query_pod_topology"),
+    ]
+    captured = {}
+
+    def _fake_call_llm(question, system_prompt, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(result="根据首轮日志继续查询 trace 后完成"), [{
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "验证当前生命周期和重启状态",
+            },
+            "result": "coverage=present restart_count=3",
+            "structured": {"coverage": "present"},
+        }, {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "query_pod_logs",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "查找决定性启动错误",
+            },
+            "result": "coverage=weak",
+            "structured": {"coverage": "weak"},
+        }, {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "query_pod_tracing",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "验证错误请求是否存在应用 span",
+            },
+            "result": "coverage=present trace_id=trace-1",
+            "structured": {"coverage": "present"},
+        }, {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "query_pod_topology",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认控制器、Service 和节点关系",
+            },
+            "result": "coverage=present relationship=owned_by",
+            "structured": {"coverage": "present"},
+        }]
+
+    node._call_llm = _fake_call_llm
+    plan, events, text = node._execute_existing_evidence_plan(
+        question="我的集群有什么问题",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "abnormal_pods": [{
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+            }],
+        }),
+        context_archive_ref="",
+        layer_archive_ref={},
+        evidence_plan=[{
+            "id": "logs",
+            "description": "查询启动日志并按结果决定是否补证",
+            "level": "critical",
+            "tool": "query_pod_logs",
+            "acceptable_tools": ["query_pod_logs", "query_pod_tracing"],
+            "purpose": "验证启动失败根因，结果有歧义时继续补证",
+        }],
+        failure_reason="执行自主查询计划",
+    )
+
+    assert captured["stop_checker"] == node._should_stop_autonomous_collection
+    assert [event["tool_name"] for event in events] == [
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    ]
+    assert "继续查询 trace" in text
+    assert {
+        item["tool"]
+        for item in plan
+        if item.get("source") == "observability_first_round_gate"
+    } == {
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    }
+
+
 def test_evidence_system_prompt_prioritizes_live_observability_independent_of_user_wording():
     assert "用户是否显式提到" in EVIDENCE_COLLECTOR_PROMPT
     assert "实时可观测性证据" in EVIDENCE_COLLECTOR_PROMPT
     assert "每个已确认异常 Pod" in EVIDENCE_COLLECTOR_PROMPT
-    assert "mandatory" in EVIDENCE_COLLECTOR_PROMPT
+    assert "execute_pod_promql" in EVIDENCE_COLLECTOR_PROMPT
+    assert "query_pod_logs" in EVIDENCE_COLLECTOR_PROMPT
+    assert "query_pod_tracing" in EVIDENCE_COLLECTOR_PROMPT
+    assert "三个通用工具" in EVIDENCE_COLLECTOR_PROMPT
+    assert "不保证每个维度都有数据" in EVIDENCE_COLLECTOR_PROMPT
+    assert "补证由上一轮真实结果驱动" in EVIDENCE_COLLECTOR_PROMPT
     assert "80%" in EVIDENCE_COLLECTOR_PROMPT
     assert "若单一 kubectl 事实已足够回答问题" not in EVIDENCE_COLLECTOR_PROMPT
 
@@ -2570,6 +3274,65 @@ def test_observability_target_coverage_counts_unique_successful_case_targets():
     }
 
 
+def test_observability_target_coverage_counts_first_round_gate_per_pod_dimension():
+    plan = [{
+        "id": "metrics",
+        "tool": "execute_pod_promql",
+        "source": "observability_first_round_gate",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+    }, {
+        "id": "logs",
+        "tool": "query_pod_logs",
+        "source": "observability_first_round_gate",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+    }, {
+        "id": "tracing",
+        "tool": "query_pod_tracing",
+        "source": "observability_first_round_gate",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+    }]
+    events = [{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "确认指标覆盖",
+        },
+        "structured": {
+            "status": "query_succeeded",
+            "dimension": "metrics",
+            "entity": {"namespace": "demo", "pod": "api"},
+            "purpose": "确认指标覆盖",
+            "coverage": "present",
+            "facts": [{"name": "up", "value": 1}],
+        },
+    }, {
+        "type": "tool_result",
+        "status": "error",
+        "tool_name": "query_pod_logs",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "确认日志覆盖",
+        },
+        "structured": {"coverage": "error"},
+    }]
+
+    stats = EvidenceCollectorNode._calculate_observability_target_coverage(
+        plan,
+        events,
+    )
+
+    assert stats == {
+        "observability_target_total": 3,
+        "observability_target_collected": 1,
+        "observability_target_completeness": pytest.approx(1 / 3),
+    }
+
+
 def test_observability_target_coverage_accepts_tool_event_target_aliases():
     plan = [
         {
@@ -4107,6 +4870,198 @@ def test_evidence_tool_data_preserves_generic_application_error_facts():
     assert "MEMORY_PATTERN" not in facts
 
 
+def test_evidence_tool_data_and_coverage_preserve_generic_query_results():
+    node = EvidenceCollectorNode()
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_pod_promql",
+            "semantic_success": True,
+            "result": "OBSERVABILITY_QUERY metrics coverage=present",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "验证 waiting reason",
+            },
+            "structured": {
+                "status": "query_succeeded",
+                "source_system": "prometheus",
+                "dimension": "metrics",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "purpose": "验证 waiting reason",
+                "coverage": "present",
+                "directness": "direct",
+                "query": {
+                    "promql": (
+                        'kube_pod_container_status_waiting_reason'
+                        '{namespace="demo",pod="api"}'
+                    ),
+                },
+                "facts": [{
+                    "ref": "metric-waiting",
+                    "name": "kube_pod_container_status_waiting_reason",
+                    "value": "1",
+                    "unit": "unitless",
+                    "labels": {"reason": "ImagePullBackOff"},
+                    "sample_count": 1,
+                    "trend_evaluable": False,
+                    "series_role": "application_container",
+                    "directness": "direct",
+                }],
+                "samples": [{"value": [1784592000, "1"]}],
+                "evidence_refs": ["metric-waiting"],
+            },
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "query_pod_logs",
+            "semantic_success": True,
+            "result": "required config PAYMENT_GATEWAY_TOKEN is missing",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "验证配置缺失",
+            },
+            "structured": {
+                "status": "query_succeeded",
+                "source_system": "elasticsearch",
+                "dimension": "logging",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "purpose": "验证配置缺失",
+                "coverage": "present",
+                "directness": "direct",
+                "query": {"identity_basis": "pod_uid"},
+                "facts": [{
+                    "ref": "log-config",
+                    "name": "log.message",
+                    "value": "required config PAYMENT_GATEWAY_TOKEN is missing",
+                    "raw_ref": "filebeat-2026.07.21/doc-42",
+                }],
+                "samples": [{
+                    "ref": "log-config",
+                    "message": "required config PAYMENT_GATEWAY_TOKEN is missing",
+                }],
+                "evidence_refs": ["log-config"],
+            },
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "query_pod_tracing",
+            "semantic_success": True,
+            "result": "coverage=absent no application spans",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "验证应用是否产生错误 span",
+            },
+            "structured": {
+                "status": "query_succeeded",
+                "source_system": "deepflow+tempo",
+                "dimension": "tracing",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "purpose": "验证应用是否产生错误 span",
+                "coverage": "absent",
+                "directness": "direct",
+                "query": {"pod_ip": None},
+                "facts": [],
+                "samples": [],
+                "flows": [],
+                "spans": [],
+                "correlations": [],
+                "telemetry": {
+                    "deepflow": {"coverage": "empty"},
+                    "tempo": {"coverage": "absent", "executed": False},
+                },
+                "limitations": ["Pod has no IP"],
+                "evidence_refs": [],
+            },
+        },
+    ]
+
+    tool_data = node._extract_tool_data_from_thinking(events)
+    by_tool = {item["tool"]: item for item in tool_data}
+
+    metric_context = json.loads(by_tool["execute_pod_promql"]["agent_context"])
+    assert metric_context["query"]["promql"].startswith(
+        "kube_pod_container_status_waiting_reason"
+    )
+    assert metric_context["facts"][0]["labels"]["reason"] == "ImagePullBackOff"
+    assert "OBSERVABILITY_QUERY" in by_tool["execute_pod_promql"]["agent_facts"]
+    assert "metric-waiting" in by_tool["execute_pod_promql"]["agent_facts"]
+    assert "unit=unitless" in by_tool["execute_pod_promql"]["agent_facts"]
+    assert "sample_count=1" in by_tool["execute_pod_promql"]["agent_facts"]
+    assert "trend_evaluable=false" in by_tool["execute_pod_promql"]["agent_facts"]
+    assert "series_role=application_container" in by_tool["execute_pod_promql"]["agent_facts"]
+
+    log_context = json.loads(by_tool["query_pod_logs"]["agent_context"])
+    assert (
+        log_context["samples"][0]["message"]
+        == "required config PAYMENT_GATEWAY_TOKEN is missing"
+    )
+    assert "filebeat-2026.07.21/doc-42" in by_tool["query_pod_logs"]["agent_facts"]
+
+    trace_context = json.loads(by_tool["query_pod_tracing"]["agent_context"])
+    assert trace_context["coverage"] == "absent"
+    assert trace_context["telemetry"]["tempo"]["coverage"] == "absent"
+    assert "Pod has no IP" in by_tool["query_pod_tracing"]["agent_facts"]
+
+    source_coverage = node._calculate_source_coverage(events)
+    assert source_coverage["cases"] == []
+    assert [item["dimension"] for item in source_coverage["queries"]] == [
+        "metrics",
+        "logging",
+        "tracing",
+    ]
+    assert source_coverage["queries"][2]["coverage"] == "absent"
+
+    stats = node._calculate_diagnostic_evidence_coverage(events)
+    assert stats["dimension_coverage_total"] == 3
+    assert stats["dimension_coverage_collected"] == 2
+    assert stats["dimension_coverage"] == pytest.approx(2 / 3)
+
+
+def test_related_context_single_point_metric_is_not_full_diagnostic_sufficiency():
+    stats = EvidenceCollectorNode._calculate_diagnostic_evidence_coverage([{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "验证业务容器内存是否接近限制",
+        },
+        "structured": {
+            "status": "query_succeeded",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {"namespace": "demo", "pod": "api"},
+            "coverage": "present",
+            "facts": [{
+                "name": "container_memory_working_set_bytes",
+                "value": "245760",
+                "unit": "bytes",
+                "series_role": "pod_aggregate",
+                "sample_count": 1,
+                "trend_evaluable": False,
+                "directness": "related_context",
+            }],
+            "samples": [{
+                "value": [1784611640.006, "245760"],
+                "series_role": "pod_aggregate",
+                "directness": "related_context",
+            }],
+        },
+    }])
+
+    assert stats["dimension_coverage"] == 1.0
+    assert stats["diagnostic_sufficiency"] < 0.5
+    assert stats["diagnostic_sufficiency_label"] == "不足"
+
+
 def test_aiops_trace_contract_marks_fully_mismatched_sources_non_mergeable():
     contract = EvidenceCollectorNode._build_aiops_trace_contract({
         "logs": {
@@ -5490,3 +6445,1044 @@ def test_evidence_plan_match_does_not_call_llm_by_default():
 
     assert matched is None
     assert node.ai_call.calls == []
+
+
+def test_autonomous_first_round_gate_includes_topology_for_each_abnormal_pod():
+    node = EvidenceCollectorNode()
+    plan = node._ensure_autonomous_observability_gate_plan(
+        evidence_plan=[],
+        layer_handoff={
+            "abnormal_pods": [
+                {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "name": "api-abc",
+                    "status": "CrashLoopBackOff",
+                }
+            ]
+        },
+    )
+
+    gate_items = [
+        item
+        for item in plan
+        if item.get("source") == "observability_first_round_gate"
+    ]
+    assert [item["tool"] for item in gate_items] == [
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    ]
+    topology_item = gate_items[-1]
+    assert topology_item["tool_args"] == {
+        "namespace": "demo",
+        "pod": "api-abc",
+        "purpose": topology_item["purpose"],
+    }
+
+
+def test_successful_observability_retry_supersedes_initial_rejection_everywhere():
+    node = EvidenceCollectorNode()
+    rejected = {
+        "type": "tool_result",
+        "status": "success",
+        "tool_name": "execute_pod_promql",
+        "semantic_success": False,
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api-abc",
+            "purpose": "确认内存趋势",
+        },
+        "result": "invalid_time_range: range queries require start and end",
+        "structured": {
+            "status": "query_rejected",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {"namespace": "demo", "pod": "api-abc"},
+            "purpose": "确认内存趋势",
+            "coverage": "error",
+            "facts": [],
+            "samples": [],
+            "evidence_refs": [],
+        },
+        "raw_ref": "/archive/metrics-rejected.raw",
+        "structured_ref": "/archive/metrics-rejected.structured.json",
+    }
+    succeeded = {
+        "type": "tool_result",
+        "status": "success",
+        "tool_name": "execute_pod_promql",
+        "semantic_success": True,
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api-abc",
+            "purpose": "确认内存趋势",
+        },
+        "result": "container_memory_working_set_bytes max=70168576",
+        "structured": {
+            "status": "query_succeeded",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api-abc",
+            },
+            "purpose": "确认内存趋势",
+            "coverage": "present",
+            "directness": "direct",
+            "query": {"query_type": "range"},
+            "facts": [
+                {
+                    "ref": "prometheus-working-set",
+                    "source_system": "prometheus",
+                    "dimension": "metrics",
+                    "name": "container_memory_working_set_bytes",
+                    "value": 70168576,
+                    "unit": "bytes",
+                    "sample_count": 3,
+                    "trend_evaluable": True,
+                    "directness": "direct",
+                }
+            ],
+            "samples": [{"value": 70168576, "directness": "direct"}],
+            "evidence_refs": ["prometheus-working-set"],
+        },
+        "raw_ref": "/archive/metrics-success.raw",
+        "structured_ref": "/archive/metrics-success.structured.json",
+    }
+    events = [rejected, succeeded]
+
+    source_coverage = node._calculate_source_coverage(events)
+    assert source_coverage["queries"] == [
+        {
+            "target": "demo/api-abc",
+            "tool": "execute_pod_promql",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "purpose": "确认内存趋势",
+            "coverage": "present",
+            "directness": "direct",
+            "evidence_refs": ["prometheus-working-set"],
+        }
+    ]
+
+    stats = node._calculate_diagnostic_evidence_coverage(events)
+    assert stats["dimension_coverage_total"] == 1
+    assert stats["dimension_coverage_collected"] == 1
+    assert stats["diagnostic_evidence_missing"] == []
+
+    tool_data = node._extract_tool_data_from_thinking(events)
+    metric_items = [
+        item for item in tool_data if item["tool"] == "execute_pod_promql"
+    ]
+    assert len(metric_items) == 1
+    assert metric_items[0]["semantic_success"] is True
+    assert "prometheus-working-set" in metric_items[0]["agent_facts"]
+    assert "invalid_time_range" not in json.dumps(metric_items[0], ensure_ascii=False)
+
+    completed = node._format_completed_autonomous_gate_summary(events)
+    assert "prometheus-working-set" in completed
+    assert "invalid_time_range" not in completed
+
+
+def test_observability_projection_preserves_independent_successful_intents():
+    node = EvidenceCollectorNode()
+
+    def metric_event(
+        *,
+        purpose,
+        ref,
+        metric,
+        value,
+        semantic_success=True,
+        coverage="present",
+        result=None,
+    ):
+        return {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_pod_promql",
+            "semantic_success": semantic_success,
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": purpose,
+            },
+            "result": result or f"{metric}={value}",
+            "result_preview": result or f"{metric}={value}",
+            "structured": {
+                "status": (
+                    "query_succeeded"
+                    if semantic_success
+                    else "query_rejected"
+                ),
+                "source_system": "prometheus",
+                "dimension": "metrics",
+                "entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "pod": "api",
+                    "pod_uid": "uid-api",
+                },
+                "purpose": purpose,
+                "coverage": coverage,
+                "directness": "direct",
+                "facts": (
+                    [
+                        {
+                            "ref": ref,
+                            "source_system": "prometheus",
+                            "dimension": "metrics",
+                            "name": metric,
+                            "value": value,
+                            "sample_count": 2,
+                            "trend_evaluable": True,
+                            "directness": "direct",
+                        }
+                    ]
+                    if semantic_success
+                    else []
+                ),
+                "samples": [],
+                "evidence_refs": [ref] if semantic_success else [],
+            },
+        }
+
+    events = [
+        metric_event(
+            purpose="确认内存趋势",
+            ref="",
+            metric="container_memory_working_set_bytes",
+            value=0,
+            semantic_success=False,
+            coverage="error",
+            result="invalid_time_range",
+        ),
+        metric_event(
+            purpose="确认内存趋势",
+            ref="memory-working-set",
+            metric="container_memory_working_set_bytes",
+            value=70168576,
+        ),
+        metric_event(
+            purpose="确认重启增量",
+            ref="restart-increase",
+            metric="increase(kube_pod_container_status_restarts_total[10m])",
+            value=4,
+        ),
+    ]
+
+    source_coverage = node._calculate_source_coverage(events)
+    assert [item["purpose"] for item in source_coverage["queries"]] == [
+        "确认内存趋势",
+        "确认重启增量",
+    ]
+    tool_data = node._extract_tool_data_from_thinking(events)
+    assert len([
+        item for item in tool_data
+        if item["tool"] == "execute_pod_promql"
+    ]) == 2
+    rendered = json.dumps(tool_data, ensure_ascii=False)
+    assert "memory-working-set" in rendered
+    assert "restart-increase" in rendered
+    assert "invalid_time_range" not in rendered
+
+
+def test_lifecycle_and_query_ledgers_share_trusted_same_scope_pod_uid():
+    node = EvidenceCollectorNode()
+    tool_data = node._extract_tool_data_from_thinking([
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": "demo",
+                "name": "api",
+            },
+            "result": "Last State: Terminated",
+            "raw_ref": "/archive/describe.raw",
+            "structured": {
+                "name": "api",
+                "namespace": "demo",
+                "status": "Running",
+                "containers": [
+                    {
+                        "name": "app",
+                        "last_state": "Terminated",
+                        "reason": "Error",
+                        "exit_code": "78",
+                        "restart_count": "3",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认重启次数",
+            },
+            "result": "restart_count=3",
+            "structured": {
+                "status": "query_succeeded",
+                "source_system": "prometheus",
+                "dimension": "metrics",
+                "entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "pod": "api",
+                    "pod_uid": "uid-api",
+                },
+                "purpose": "确认重启次数",
+                "coverage": "present",
+                "directness": "direct",
+                "facts": [
+                    {
+                        "ref": "restart-count",
+                        "source_system": "prometheus",
+                        "dimension": "metrics",
+                        "name": "kube_pod_container_status_restarts_total",
+                        "value": 3,
+                        "directness": "direct",
+                    }
+                ],
+                "samples": [],
+                "evidence_refs": ["restart-count"],
+            },
+        },
+    ])
+
+    scope_ids = {
+        scope_id
+        for item in tool_data
+        for scope_id in item.get("fact_ledger", {}).get(
+            "scope_entity_ids",
+            [],
+        )
+    }
+    record_entity_ids = {
+        record["entity_id"]
+        for item in tool_data
+        for record in item.get("fact_ledger", {}).get("records", [])
+    }
+    assert scope_ids == {"k8s.pod:demo/api:uid-api"}
+    assert record_entity_ids == {"k8s.pod:demo/api:uid-api"}
+
+
+def test_conflicting_same_scope_pod_uids_do_not_rebind_lifecycle_ledger():
+    node = EvidenceCollectorNode()
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_describe",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": "demo",
+                "name": "api",
+            },
+            "result": "Last State: Terminated",
+            "raw_ref": "/archive/describe.raw",
+            "structured": {
+                "name": "api",
+                "namespace": "demo",
+                "containers": [
+                    {
+                        "name": "app",
+                        "last_state": "Terminated",
+                        "reason": "Error",
+                    }
+                ],
+            },
+        },
+    ]
+    for uid, purpose in (
+        ("uid-a", "确认内存"),
+        ("uid-b", "确认重启"),
+    ):
+        events.append({
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": purpose,
+            },
+            "result": purpose,
+            "structured": {
+                "status": "query_succeeded",
+                "source_system": "prometheus",
+                "dimension": "metrics",
+                "entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "pod": "api",
+                    "pod_uid": uid,
+                },
+                "purpose": purpose,
+                "coverage": "present",
+                "directness": "direct",
+                "facts": [
+                    {
+                        "ref": purpose,
+                        "source_system": "prometheus",
+                        "dimension": "metrics",
+                        "name": purpose,
+                        "value": 1,
+                    }
+                ],
+                "samples": [],
+                "evidence_refs": [purpose],
+            },
+        })
+
+    tool_data = node._extract_tool_data_from_thinking(events)
+    lifecycle = next(
+        item for item in tool_data
+        if item["tool"] == "kubectl_describe"
+    )
+    assert lifecycle["fact_ledger"]["scope_entity_ids"] == [
+        "k8s.pod:demo/api"
+    ]
+
+
+def test_partial_query_facts_and_limitations_reach_rca_and_conclusion():
+    node = EvidenceCollectorNode()
+    event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "确认内存峰值并保留后端截断边界",
+        },
+        "result": "container_memory_working_set_bytes=70168576",
+        "result_preview": "container_memory_working_set_bytes=70168576",
+        "structured": {
+            "ok": False,
+            "status": "query_partial",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-api",
+            },
+            "purpose": "确认内存峰值并保留后端截断边界",
+            "coverage": "partial",
+            "directness": "direct",
+            "facts": [
+                {
+                    "ref": "metric-partial-memory",
+                    "source_system": "prometheus",
+                    "dimension": "metrics",
+                    "name": "container_memory_working_set_bytes",
+                    "value": 70168576,
+                    "unit": "bytes",
+                    "directness": "direct",
+                }
+            ],
+            "samples": [],
+            "limitations": ["Prometheus returned only the newest shard"],
+            "evidence_refs": ["metric-partial-memory"],
+        },
+        "raw_ref": "/archive/metrics-partial.raw",
+        "structured_ref": "/archive/metrics-partial.structured.json",
+    }
+
+    tool_data = node._extract_tool_data_from_thinking([event])
+
+    assert len(tool_data) == 1
+    records = {
+        record["attribute"]: record
+        for record in tool_data[0]["fact_ledger"]["records"]
+    }
+    assert records["container_memory_working_set_bytes"]["value"] == 70168576
+    assert records["metrics.coverage"]["value"]["coverage"] == "partial"
+    assert (
+        records["metrics.coverage"]["value"]["limitations"]
+        == ["Prometheus returned only the newest shard"]
+    )
+    assert len(extract_fact_ledgers_from_tool_data(tool_data)) == 1
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        json.dumps({"tool_data": tool_data}, ensure_ascii=False),
+        "{}",
+    )
+    assert "OBSERVABILITY_EXECUTION metrics=partial" in context
+    assert "metric-partial-memory" in context
+    assert "Prometheus returned only the newest shard" in context
+
+
+def test_missing_or_empty_purpose_queries_remain_archived_only():
+    node = EvidenceCollectorNode()
+    lifecycle_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "result": "Last State: Terminated",
+        "result_preview": "Last State: Terminated",
+        "raw_ref": "/archive/describe.raw",
+        "structured": {
+            "status": "Running",
+            "name": "api",
+            "namespace": "demo",
+            "containers": [
+                {
+                    "name": "app",
+                    "last_state": "Terminated",
+                    "reason": "Error",
+                    "exit_code": "78",
+                    "restart_count": "3",
+                }
+            ],
+        },
+    }
+    missing_purpose_success = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+        },
+        "result": "missing-purpose-memory=70168576",
+        "result_preview": "missing-purpose-memory=70168576",
+        "raw_ref": "/archive/missing-purpose-success.raw",
+        "structured_ref": "/archive/missing-purpose-success.structured.json",
+        "structured": {
+            "status": "query_succeeded",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-must-not-bind",
+            },
+            "coverage": "present",
+            "directness": "direct",
+            "facts": [
+                {
+                    "ref": "missing-purpose-memory",
+                    "source_system": "prometheus",
+                    "dimension": "metrics",
+                    "name": "container_memory_working_set_bytes",
+                    "value": 70168576,
+                    "directness": "direct",
+                }
+            ],
+            "samples": [],
+            "evidence_refs": ["missing-purpose-memory"],
+        },
+    }
+    empty_purpose_rejection = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": False,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "   ",
+        },
+        "result": "empty-purpose-invalid-time-range",
+        "result_preview": "empty-purpose-invalid-time-range",
+        "raw_ref": "/archive/empty-purpose-rejection.raw",
+        "structured_ref": "/archive/empty-purpose-rejection.structured.json",
+        "structured": {
+            "status": "query_rejected",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+            },
+            "purpose": "",
+            "coverage": "error",
+            "directness": "direct",
+            "facts": [],
+            "samples": [],
+            "evidence_refs": [],
+        },
+    }
+    events = [
+        lifecycle_event,
+        missing_purpose_success,
+        empty_purpose_rejection,
+    ]
+
+    assert node._calculate_source_coverage(events)["queries"] == []
+    assert node._calculate_diagnostic_evidence_coverage(events) == {
+        "diagnostic_evidence_total": 0,
+        "diagnostic_evidence_collected": 0,
+        "diagnostic_evidence_completeness": 0.0,
+        "diagnostic_evidence_missing": [],
+        "dimension_coverage_total": 0,
+        "dimension_coverage_collected": 0,
+        "dimension_coverage": 0.0,
+        "diagnostic_sufficiency": 0.0,
+        "diagnostic_sufficiency_label": "不足",
+    }
+    assert node._format_completed_autonomous_gate_summary(events) == ""
+    assert node._calculate_observability_target_coverage(
+        evidence_plan=[
+            {
+                "id": "observability-gate-metrics",
+                "tool": "execute_pod_promql",
+                "source": "observability_first_round_gate",
+                "purpose": "确认内存趋势",
+                "tool_args": {
+                    "namespace": "demo",
+                    "pod": "api",
+                    "purpose": "确认内存趋势",
+                },
+            }
+        ],
+        thinking_events=events,
+    ) == {
+        "observability_target_total": 1,
+        "observability_target_collected": 0,
+        "observability_target_completeness": 0.0,
+    }
+
+    tool_data = node._extract_tool_data_from_thinking(events)
+    assert [item["tool"] for item in tool_data] == ["kubectl_describe"]
+    ledgers = extract_fact_ledgers_from_tool_data(tool_data)
+    assert len(ledgers) == 1
+    assert ledgers[0].scope_entity_ids == ["k8s.pod:demo/api"]
+
+    conclusion_preview = ConclusionFormatterNode()._build_tool_data_section(
+        events
+    )
+    assert "Last State: Terminated" in conclusion_preview
+    assert "missing-purpose-memory" not in conclusion_preview
+    assert "empty-purpose-invalid-time-range" not in conclusion_preview
+
+    assert len(events) == 3
+    assert events[1]["raw_ref"] == "/archive/missing-purpose-success.raw"
+    assert events[1]["result"] == "missing-purpose-memory=70168576"
+    assert events[2]["raw_ref"] == "/archive/empty-purpose-rejection.raw"
+
+
+def test_invalid_query_uids_do_not_conflict_with_explicit_semantic_success():
+    node = EvidenceCollectorNode()
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_describe",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": "demo",
+                "name": "api",
+            },
+            "result": "Last State: Terminated",
+            "raw_ref": "/archive/describe.raw",
+            "structured": {
+                "status": "Running",
+                "name": "api",
+                "namespace": "demo",
+                "containers": [
+                    {
+                        "name": "app",
+                        "last_state": "Terminated",
+                        "reason": "Error",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认重启次数",
+            },
+            "result": "restart_count=3",
+            "structured": {
+                "status": "query_succeeded",
+                "source_system": "prometheus",
+                "dimension": "metrics",
+                "entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "pod": "api",
+                    "pod_uid": "uid-trusted",
+                },
+                "purpose": "确认重启次数",
+                "coverage": "present",
+                "facts": [
+                    {
+                        "ref": "restart-count",
+                        "source_system": "prometheus",
+                        "dimension": "metrics",
+                        "name": "restart_count",
+                        "value": 3,
+                    }
+                ],
+                "evidence_refs": ["restart-count"],
+            },
+        },
+    ]
+
+    invalid_contracts = [
+        {
+            "semantic_success": True,
+            "status": "query_rejected",
+            "coverage": "error",
+            "facts": [],
+        },
+        {
+            "semantic_success": True,
+            "status": "query_succeeded",
+            "coverage": "error",
+            "facts": [],
+        },
+        {
+            "semantic_success": True,
+            "status": "query_partial",
+            "coverage": "partial",
+            "facts": [],
+        },
+        {
+            "status": "query_succeeded",
+            "coverage": "present",
+            "facts": [
+                {
+                    "ref": "transport-only",
+                    "source_system": "prometheus",
+                    "name": "transport-only",
+                    "value": 1,
+                }
+            ],
+        },
+    ]
+    for index, invalid in enumerate(invalid_contracts, start=1):
+        event = {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": f"invalid-{index}",
+            },
+            "result": f"invalid-{index}",
+            "structured": {
+                "status": invalid["status"],
+                "source_system": "prometheus",
+                "dimension": "metrics",
+                "entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "pod": "api",
+                    "pod_uid": f"uid-invalid-{index}",
+                },
+                "purpose": f"invalid-{index}",
+                "coverage": invalid["coverage"],
+                "facts": invalid["facts"],
+                "evidence_refs": [],
+            },
+        }
+        if "semantic_success" in invalid:
+            event["semantic_success"] = invalid["semantic_success"]
+        events.append(event)
+
+    tool_data = node._extract_tool_data_from_thinking(events)
+    lifecycle = next(
+        item for item in tool_data
+        if item["tool"] == "kubectl_describe"
+    )
+
+    assert lifecycle["fact_ledger"]["scope_entity_ids"] == [
+        "k8s.pod:demo/api:uid-trusted"
+    ]
+
+
+def test_transport_only_query_is_excluded_from_final_downstream_state():
+    node = EvidenceCollectorNode()
+    rejected = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": False,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "确认内存趋势",
+        },
+        "result": "invalid_time_range",
+        "structured": {
+            "status": "query_rejected",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {"namespace": "demo", "pod": "api"},
+            "purpose": "确认内存趋势",
+            "coverage": "error",
+            "facts": [],
+            "evidence_refs": [],
+        },
+    }
+    transport_only = {
+        "type": "tool_result",
+        "status": "success",
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "确认内存趋势",
+        },
+        "result": "memory-working-set=70168576",
+        "structured": {
+            "status": "query_succeeded",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {"namespace": "demo", "pod": "api"},
+            "purpose": "确认内存趋势",
+            "coverage": "present",
+            "facts": [
+                {
+                    "ref": "transport-only-memory",
+                    "source_system": "prometheus",
+                    "name": "container_memory_working_set_bytes",
+                    "value": 70168576,
+                }
+            ],
+            "evidence_refs": ["transport-only-memory"],
+        },
+    }
+
+    events = [rejected, transport_only]
+
+    assert node._calculate_source_coverage(events)["queries"] == [
+        {
+            "target": "demo/api",
+            "tool": "execute_pod_promql",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "purpose": "确认内存趋势",
+            "coverage": "error",
+            "directness": "",
+            "evidence_refs": [],
+        }
+    ]
+    tool_data = node._extract_tool_data_from_thinking(events)
+    rendered = json.dumps(tool_data, ensure_ascii=False)
+    assert "invalid_time_range" in rendered
+    assert "memory-working-set=70168576" not in rendered
+    assert "transport-only-memory" not in rendered
+
+
+def test_missing_purpose_query_cannot_inflate_plan_evidence_or_tool_stats():
+    node = EvidenceCollectorNode()
+    plan = [
+        {
+            "id": "observability-gate-metrics",
+            "description": "确认目标 Pod 的内存趋势",
+            "level": "critical",
+            "tool": "execute_pod_promql",
+            "command": "query metrics for demo/api",
+            "purpose": "确认目标 Pod 的内存趋势",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认目标 Pod 的内存趋势",
+            },
+            "source": "observability_first_round_gate",
+        }
+    ]
+    unidentified_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+        },
+        "result": "container_memory_working_set_bytes=70168576",
+        "result_preview": "container_memory_working_set_bytes=70168576",
+        "raw_ref": "/archive/missing-purpose-metrics.raw",
+        "structured_ref": "/archive/missing-purpose-metrics.structured.json",
+        "structured": {
+            "status": "query_succeeded",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+            },
+            "coverage": "present",
+            "directness": "direct",
+            "facts": [
+                {
+                    "ref": "missing-purpose-memory",
+                    "source_system": "prometheus",
+                    "dimension": "metrics",
+                    "name": "container_memory_working_set_bytes",
+                    "value": 70168576,
+                    "directness": "direct",
+                }
+            ],
+            "samples": [],
+            "evidence_refs": ["missing-purpose-memory"],
+        },
+    }
+    events = [unidentified_event]
+
+    evidence_items = node._build_evidence_items_from_thinking(plan, events)
+    plan_stats = node._calculate_plan_completeness(evidence_items, [])
+    tool_stats = node._calculate_evidence_tool_stats(
+        evidence_plan=plan,
+        thinking_events=events,
+        evidence_items=evidence_items,
+        upstream_evidence_items=[],
+    )
+    node._active_evidence_plan = plan
+
+    assert len(evidence_items) == 1
+    assert evidence_items[0].collected is False
+    assert evidence_items[0].source == "planned"
+    assert node._calculate_completeness(evidence_items) == 0.0
+    assert plan_stats == {
+        "plan_total": 1,
+        "plan_collected": 0,
+        "plan_completeness": 0.0,
+    }
+    assert tool_stats["executed_tool_count"] == 0
+    assert tool_stats["matched_tool_count"] == 0
+    assert node._should_stop_collection_early(events) is False
+
+    assert events == [unidentified_event]
+    assert events[0]["raw_ref"] == "/archive/missing-purpose-metrics.raw"
+    assert events[0]["structured_ref"] == (
+        "/archive/missing-purpose-metrics.structured.json"
+    )
+
+
+def test_a029_first_round_reports_seven_present_but_stops_after_all_attempts():
+    dimensions = (
+        ("metrics", "execute_pod_promql"),
+        ("logging", "query_pod_logs"),
+        ("tracing", "query_pod_tracing"),
+        ("topology", "query_pod_topology"),
+    )
+    targets = (
+        ("demo", "config-api"),
+        ("demo", "oom-api"),
+    )
+    plan = []
+    events = []
+    for namespace, pod in targets:
+        for dimension, tool in dimensions:
+            purpose = f"collect {pod} {dimension}"
+            plan.append({
+                "id": f"{pod}-{dimension}",
+                "tool": tool,
+                "source": "observability_first_round_gate",
+                "tool_args": {
+                    "namespace": namespace,
+                    "pod": pod,
+                    "purpose": purpose,
+                },
+            })
+            coverage = (
+                "weak"
+                if pod == "oom-api" and dimension == "tracing"
+                else "present"
+            )
+            fact = {
+                "name": f"{dimension}.observed",
+                "value": 1,
+                "directness": "direct",
+            }
+            if dimension == "topology":
+                fact = {
+                    "relationship": "Pod --owned_by--> ReplicaSet",
+                    "value": {
+                        "relationship": "Pod --owned_by--> ReplicaSet",
+                    },
+                    "directness": "direct",
+                }
+            events.append({
+                "type": "tool_result",
+                "status": "success",
+                "semantic_success": True,
+                "tool_name": tool,
+                "tool_args": {
+                    "namespace": namespace,
+                    "pod": pod,
+                    "purpose": purpose,
+                },
+                "structured": {
+                    "status": "query_succeeded",
+                    "source_system": "test-source",
+                    "dimension": dimension,
+                    "entity": {
+                        "kind": "Pod",
+                        "namespace": namespace,
+                        "pod": pod,
+                    },
+                    "purpose": purpose,
+                    "coverage": coverage,
+                    "facts": [fact],
+                },
+            })
+
+    target_stats = (
+        EvidenceCollectorNode._calculate_observability_target_coverage(
+            plan,
+            events,
+        )
+    )
+    diagnostic_stats = (
+        EvidenceCollectorNode._calculate_diagnostic_evidence_coverage(
+            events
+        )
+    )
+    remaining = (
+        EvidenceCollectorNode._remaining_unattempted_autonomous_items(
+            plan,
+            events,
+        )
+    )
+
+    assert target_stats == {
+        "observability_target_total": 8,
+        "observability_target_collected": 7,
+        "observability_target_completeness": pytest.approx(7 / 8),
+    }
+    assert diagnostic_stats["dimension_coverage_total"] == 8
+    assert diagnostic_stats["dimension_coverage_collected"] == 7
+    assert diagnostic_stats["dimension_coverage"] == pytest.approx(7 / 8)
+    assert diagnostic_stats["diagnostic_sufficiency"] > 0
+    assert "demo/oom-api:tracing" in (
+        diagnostic_stats["diagnostic_evidence_missing"]
+    )
+    assert remaining == []

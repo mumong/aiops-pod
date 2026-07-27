@@ -21,7 +21,7 @@ data:
     import traceback
     import urllib.request
 
-    OTLP_ENDPOINT = os.environ.get("OTLP_ENDPOINT", "http://lgtm.xnet.svc:4318/v1/traces")
+    OTLP_ENDPOINT = os.environ.get("OTLP_ENDPOINT", "http://lgtm.monitor.svc:4318/v1/traces")
     SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "aiops-traced-oom-api")
     NAMESPACE = os.environ.get("POD_NAMESPACE", "aiops-traced-oom")
     POD_NAME = os.environ.get("HOSTNAME", "")
@@ -39,7 +39,7 @@ data:
             return {"intValue": str(value)}
         return {"stringValue": str(value)}
 
-    def export_span(trace_id, span_id, start_ns, end_ns, attributes):
+    def export_span(trace_id, span_id, parent_span_id, start_ns, end_ns, attributes):
         payload = {
             "resourceSpans": [{
                 "resource": {"attributes": [
@@ -52,6 +52,7 @@ data:
                     "spans": [{
                         "traceId": trace_id,
                         "spanId": span_id,
+                        "parentSpanId": parent_span_id,
                         "name": "GET /allocate",
                         "kind": 2,
                         "startTimeUnixNano": str(start_ns),
@@ -95,19 +96,19 @@ data:
                     mib = 2
             try:
                 before_mib = sum(len(chunk) for chunk in chunks) // (1024 * 1024)
-                chunks.append(bytearray(mib * 1024 * 1024))
-                after_mib = sum(len(chunk) for chunk in chunks) // (1024 * 1024)
                 end_ns = time.time_ns()
                 attributes = {
                     "http.request.method": "GET",
                     "http.route": "/allocate",
                     "url.path": path,
                     "aiops.allocated_mib.before": before_mib,
-                    "aiops.allocated_mib.after": after_mib,
                     "aiops.alloc_mib": mib,
+                    "aiops.allocation.phase": "pre_allocation_attempt",
                     "k8s.pod.name": POD_NAME,
                 }
-                export_span(trace_id, span_id, start_ns, end_ns, attributes)
+                export_span(trace_id, span_id, parent_span_id, start_ns, end_ns, attributes)
+                chunks.append(bytearray(mib * 1024 * 1024))
+                after_mib = sum(len(chunk) for chunk in chunks) // (1024 * 1024)
                 log = {
                     "event": "allocate",
                     "trace_id": trace_id,
@@ -241,7 +242,7 @@ spec:
           command: ["python", "-u", "/app/server.py"]
           env:
             - name: OTLP_ENDPOINT
-              value: http://lgtm.xnet.svc:4318/v1/traces
+              value: http://lgtm.monitor.svc:4318/v1/traces
             - name: OTEL_SERVICE_NAME
               value: aiops-traced-oom-api
             - name: POD_NAMESPACE

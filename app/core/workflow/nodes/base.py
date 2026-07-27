@@ -347,6 +347,7 @@ class WorkflowNode(ABC):
             components=static_context_components,
             api_base=getattr(ai_call, "api_base", "") or "",
             api_key=getattr(ai_call, "api_key", "") or "",
+            enable_usage_probe=False,
         )
         ContextBudgetEstimator().log(budget)
         if run_id:

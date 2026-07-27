@@ -154,6 +154,63 @@ def test_call_llm_force_no_tools_passes_empty_tool_list_to_aicall():
     assert captured["tools"] == []
 
 
+def test_workflow_node_preflight_budget_disables_provider_usage_probe(
+    monkeypatch,
+):
+    class _Node(WorkflowNode):
+        node_id = "demo"
+        node_name = "demo"
+
+        def execute(self, state):
+            return {}
+
+    node = _Node()
+    node.tools = []
+    captured_budget = {}
+
+    def _estimate(self, **kwargs):
+        captured_budget.update(kwargs)
+        return {
+            "node": "demo",
+            "context_window": 32000,
+            "components": [],
+            "actual_context_tokens": 10,
+            "reserved_tokens": 0,
+            "estimated_total": 10,
+            "usage_ratio": 0.001,
+            "token_count_accuracy": "estimated",
+            "token_count_sources": [],
+        }
+
+    monkeypatch.setattr(
+        "app.core.workflow.nodes.base.ContextBudgetEstimator.estimate",
+        _estimate,
+    )
+    monkeypatch.setattr(
+        "app.core.workflow.nodes.base.ContextBudgetEstimator.log",
+        lambda self, budget: None,
+    )
+
+    class _AICall:
+        model_str = "openai/Qwen3.6-35B-A3B"
+        model = model_str
+        api_base = "http://llm.example/v1"
+        api_key = "sk-test"
+
+        def call(self, **kwargs):
+            return SimpleNamespace(
+                result="ok",
+                tool_call_count=0,
+                duration_ms=1,
+                iterations=1,
+            ), []
+
+    node.ai_call = _AICall()
+    node._call_llm("question", "system")
+
+    assert captured_budget["enable_usage_probe"] is False
+
+
 def test_call_llm_retries_without_response_schema_on_gateway_structured_failure():
     class _Node(WorkflowNode):
         node_id = "demo"

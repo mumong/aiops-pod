@@ -14,7 +14,14 @@ from app.core.workflow.schemas import RCAOutput
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
-from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
+from app.core.workflow.nodes.root_cause_analyzer import (
+    RCA_CONTEXT_MAX_CHARS,
+    RCA_HANDOFF_MAX_CHARS,
+    RCA_QUALITY_MAX_CHARS,
+    RCA_SUPPLEMENTARY_MAX_CHARS,
+    RCA_TOOL_CONTEXT_MAX_CHARS,
+    RootCauseAnalyzerNode,
+)
 
 
 def _canonical_fact_record(**overrides):
@@ -547,6 +554,404 @@ def test_rca_summary_prefers_layer_handoff_over_full_layer_text():
 
     assert "ImagePullBackOff x509" in summary
     assert "SHOULD_NOT_APPEAR" not in summary
+
+
+def test_rca_handoff_keeps_all_abnormal_pod_entities_under_long_section_pressure():
+    node = RootCauseAnalyzerNode()
+    abnormal_pods = [
+        {
+            "namespace": f"team-{index}",
+            "name": f"service-{index}",
+            "status": "CrashLoopBackOff",
+            "uid": f"uid-{index}",
+        }
+        for index in range(5)
+    ]
+    layer_handoff = {
+        "layer": "L2",
+        "abnormal_pods": abnormal_pods,
+        "active_signals": [
+            {
+                "namespace": f"team-{index % 5}",
+                "pod": f"service-{index % 5}",
+                "detail": "signal " * 400,
+            }
+            for index in range(18)
+        ],
+        "primary_problem": "cluster has multiple abnormal pods " * 400,
+        "issue_groups": [
+            {
+                "group_id": f"group-{index}",
+                "entities": [{"kind": "Pod", **pod}],
+                "observations": ["observation " * 400 for _ in range(4)],
+            }
+            for index, pod in enumerate(abnormal_pods)
+        ],
+        "current_abnormal_summary": {
+            "source": "current_scan",
+            "status_counts": {"CrashLoopBackOff": 5},
+            "total_abnormal": 5,
+            "selected_rows": [
+                {**pod, "details": "summary " * 400}
+                for pod in abnormal_pods
+            ],
+        },
+    }
+
+    compact_handoff = node._compact_layer_handoff_for_rca(layer_handoff)
+    rca_context = node._build_rca_context({
+        "layer_handoff": layer_handoff,
+        "evidence_items": [],
+        "evidence_analysis": "{}",
+    })
+
+    assert len(compact_handoff) <= RCA_HANDOFF_MAX_CHARS
+    for pod in abnormal_pods:
+        assert pod["namespace"] in compact_handoff
+        assert pod["name"] in compact_handoff
+        assert pod["status"] in compact_handoff
+        assert pod["uid"] in compact_handoff
+        assert pod["namespace"] in rca_context
+        assert pod["name"] in rca_context
+        assert pod["status"] in rca_context
+        assert pod["uid"] in rca_context
+    assert json.loads(compact_handoff)["abnormal_pod_entity_index"] == abnormal_pods
+    assert '"abnormal_pod_entity_index"' in rca_context
+    assert len(rca_context) <= RCA_CONTEXT_MAX_CHARS
+
+
+def test_rca_handoff_keeps_thirty_abnormal_pod_identities_within_budget():
+    abnormal_pods = [
+        {
+            "namespace": f"team-{index:02d}",
+            "name": f"service-{index:02d}",
+            "status": "CrashLoopBackOff",
+            "uid": f"uid-{index:02d}",
+        }
+        for index in range(30)
+    ]
+    handoff = {
+        "layer": "L2",
+        "abnormal_pods": abnormal_pods,
+        "active_signals": [
+            {
+                "entity": f"team-{index:02d}/service-{index:02d}",
+                "detail": "signal " * 300,
+            }
+            for index in range(30)
+        ],
+        "issue_groups": [
+            {
+                "group_id": f"group-{index:02d}",
+                "entities": [{"kind": "Pod", **pod}],
+                "observations": ["observation " * 300],
+            }
+            for index, pod in enumerate(abnormal_pods)
+        ],
+        "current_abnormal_summary": {
+            "source": "current_scan",
+            "status_counts": {"CrashLoopBackOff": 30},
+            "total_abnormal": 30,
+            "selected_rows": abnormal_pods,
+        },
+    }
+
+    compact_handoff = RootCauseAnalyzerNode._compact_layer_handoff_for_rca(
+        handoff
+    )
+    parsed = json.loads(compact_handoff)
+
+    assert len(compact_handoff) <= RCA_HANDOFF_MAX_CHARS
+    assert parsed["abnormal_pod_entity_index"] == abnormal_pods
+
+
+def test_rca_handoff_rejects_identity_index_that_cannot_fit_budget():
+    abnormal_pods = [
+        {
+            "namespace": f"team-{index:02d}-" + ("n" * 180),
+            "name": f"service-{index:02d}-" + ("p" * 180),
+            "status": "CrashLoopBackOff-" + ("s" * 180),
+            "uid": f"uid-{index:02d}-" + ("u" * 180),
+        }
+        for index in range(30)
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="abnormal Pod identity index exceeds RCA handoff budget",
+    ):
+        RootCauseAnalyzerNode._compact_layer_handoff_for_rca({
+            "layer": "L2",
+            "abnormal_pods": abnormal_pods,
+        })
+
+
+def test_rca_context_bounds_multi_entity_real_observability_evidence():
+    node = RootCauseAnalyzerNode()
+    tool_data = []
+    expected_entities = []
+    expected_direct_fact_ids = []
+    for index in range(5):
+        namespace = f"demo-{index}"
+        pod = f"api-{index}"
+        entity_id = f"k8s.pod:{namespace}/{pod}:uid-{index}"
+        direct = _canonical_fact_record(
+            entity_id=entity_id,
+            namespace=namespace,
+            entity_name=pod,
+            value={
+                "message": (
+                    f"pod={pod} required config TOKEN_{index} is missing "
+                    + ("direct-evidence " * 30)
+                )
+            },
+            evidence_refs=[f"logs:{namespace}/{pod}"],
+        )
+        coverage = _canonical_fact_record(
+            entity_id=entity_id,
+            namespace=namespace,
+            entity_name=pod,
+            dimension="coverage",
+            fact_type="coverage",
+            attribute="coverage.tracing",
+            value={"coverage": "present", "noise": "x" * 400},
+            source_system="deepflow+tempo",
+            directness="related_context",
+            confidence="medium",
+            strength="context",
+            evidence_refs=[f"coverage:{namespace}/{pod}:tracing"],
+        )
+        tool_data.append({
+            "tool": "query_pod_logs",
+            "fact_ledger": {
+                "contract_version": "aiops.fact-ledger.v1",
+                "case_id": f"case-{index}",
+                "scope_entity_ids": [entity_id],
+                "records": [coverage, direct],
+                "record_count": 2,
+                "truncated": False,
+                "source": "mcp_canonical",
+                "legacy_contract": False,
+            },
+        })
+        expected_entities.append(entity_id)
+        expected_direct_fact_ids.append(direct["fact_id"])
+
+    for index in range(20):
+        tool_data.append({
+            "tool": "query_pod_tracing",
+            "agent_context": json.dumps({
+                "status": "query_succeeded",
+                "entity": {
+                    "namespace": f"demo-{index % 5}",
+                    "pod": f"api-{index % 5}",
+                },
+                "dimension": "tracing",
+                "coverage": "present",
+                "facts": [
+                    {
+                        "ref": f"trace-{index}",
+                        "value": "HTTP 500 " + ("trace-noise " * 600),
+                    }
+                ],
+            }),
+        })
+
+    context = node._build_rca_context({
+        "layer_handoff": {
+            "layer": "L2",
+            "primary_problem": "verbose reasoning " * 8000,
+            "abnormal_pods": [
+                {
+                    "namespace": f"demo-{index}",
+                    "name": f"api-{index}",
+                    "status": "CrashLoopBackOff",
+                }
+                for index in range(5)
+            ],
+            "issue_groups": [
+                {
+                    "group_id": f"g-{index}",
+                    "entities": [
+                        {
+                            "kind": "Pod",
+                            "namespace": f"demo-{index}",
+                            "name": f"api-{index}",
+                        }
+                    ],
+                    "possible_scenarios": ["configuration failure " * 100],
+                }
+                for index in range(5)
+            ],
+        },
+        "evidence_items": [],
+        "evidence_analysis": json.dumps({
+            "source_coverage": {
+                "cases": [
+                    {
+                        "target": f"demo-{index}/api-{index}",
+                        "dimensions": {
+                            "metrics": "present",
+                            "logging": "present",
+                            "tracing": "present",
+                        },
+                    }
+                    for index in range(5)
+                ]
+            },
+            "unresolved_questions": ["missing scheduler event " * 400],
+            "tool_data": tool_data,
+        }),
+    })
+
+    assert len(context) <= 52000
+    for entity_id in expected_entities:
+        assert entity_id in context
+    for fact_id in expected_direct_fact_ids:
+        assert fact_id in context
+
+
+def test_rca_supplementary_tool_context_uses_shared_budget():
+    node = RootCauseAnalyzerNode()
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                    "tool": "query_pod_tracing",
+                    "agent_context": json.dumps({
+                        "status": "query_succeeded",
+                        "source_system": "tempo",
+                        "dimension": "tracing",
+                        "entity": {"namespace": "demo", "pod": f"api-{index}"},
+                        "purpose": "验证补充 tracing 上下文预算",
+                        "coverage": "present",
+                        "facts": [
+                            {
+                                "ref": f"trace-{index}",
+                                "source_system": "tempo",
+                                "name": "application_span",
+                                "value": "HTTP 500 " + ("payload " * 3000),
+                            }
+                        ],
+                        "evidence_refs": [f"trace-{index}"],
+                    }),
+                }
+            for index in range(30)
+        ]
+    })
+
+    context = node._extract_tool_data_for_rca(
+        evidence_analysis,
+        max_chars=12000,
+    )
+
+    assert len(context) <= 12000
+    assert "## AIOps Fact Ledger" in context
+    assert "k8s.pod:demo/api-0" in context
+    assert "k8s.pod:demo/api-29" in context
+
+
+def test_rca_generic_query_ledgers_keep_decisive_facts_across_dimensions():
+    entity = {
+        "kind": "Pod",
+        "namespace": "demo",
+        "pod": "api",
+        "pod_uid": "uid-a",
+    }
+    tool_data = [
+        {
+            "tool": "execute_pod_promql",
+            "agent_context": json.dumps({
+                "status": "query_succeeded",
+                "source_system": "prometheus",
+                "dimension": "metrics",
+                "entity": entity,
+                "coverage": "present",
+                "directness": "direct",
+                "facts": [{
+                    "ref": "metric-restarts",
+                    "name": "prometheus_sample",
+                    "value": {
+                        "first": 0,
+                        "max": 5,
+                        "last": 1,
+                    },
+                    "source_system": "prometheus",
+                    "directness": "direct",
+                }],
+            }),
+        },
+        {
+            "tool": "query_pod_logs",
+            "agent_context": json.dumps({
+                "status": "query_succeeded",
+                "source_system": "elasticsearch",
+                "dimension": "logging",
+                "entity": entity,
+                "coverage": "present",
+                "directness": "direct",
+                "facts": [{
+                    "ref": "log-config",
+                    "name": "log.message",
+                    "value": (
+                        "required config PAYMENT_GATEWAY_TOKEN is missing; "
+                        "error_code=CONFIG_MISSING"
+                    ),
+                    "source_system": "elasticsearch",
+                    "directness": "direct",
+                }],
+            }),
+        },
+        {
+            "tool": "query_pod_tracing",
+            "agent_context": json.dumps({
+                "status": "query_succeeded",
+                "source_system": "deepflow+tempo",
+                "dimension": "tracing",
+                "entity": entity,
+                "coverage": "present",
+                "directness": "direct",
+                "facts": [
+                    {
+                        "ref": "deepflow-config",
+                        "name": "l7_flow",
+                        "value": {
+                            "trace_id": "trace-config",
+                            "request_resource": "/checkout",
+                            "response_code": 500,
+                        },
+                        "source_system": "deepflow",
+                        "directness": "direct",
+                    },
+                    {
+                        "ref": "tempo-config",
+                        "name": "application_span",
+                        "value": {
+                            "trace_id": "trace-config",
+                            "name": "GET /checkout",
+                            "attributes": {
+                                "error.type": "CONFIG_MISSING",
+                                "config.key": "PAYMENT_GATEWAY_TOKEN",
+                            },
+                        },
+                        "source_system": "tempo",
+                        "directness": "direct",
+                    },
+                ],
+            }),
+        },
+    ]
+
+    context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+        json.dumps({"tool_data": tool_data}),
+        max_chars=12000,
+    )
+
+    assert len(context) <= 12000
+    assert "required config PAYMENT_GATEWAY_TOKEN is missing" in context
+    assert "error_code=CONFIG_MISSING" in context
+    assert context.count("trace-config") >= 2
+    assert "response_code" in context
+    assert "config.key" in context
 
 
 def test_layer_handoff_primary_pod_must_come_from_current_abnormal_pod_scan():
@@ -1153,7 +1558,18 @@ def test_rca_context_prefers_deterministic_aiops_agent_facts():
             {
                 "tool": "collect_aiops_case",
                 "data": "compact summary",
-                "agent_context": '{"dimension_details":{"tracing":{"flows":[]}}}',
+                "agent_context": json.dumps({
+                    "dimension_details": {
+                        "tracing": {
+                            "flows": [
+                                {
+                                    "trace_id": "ordinary-context-must-not-win",
+                                    "duration_us": 999999,
+                                }
+                            ]
+                        }
+                    }
+                }),
                 "agent_facts": (
                     "K8S_SIGNAL signal_id=sig-k8s-present strength=strong "
                     "observed=\"Last terminated state: business-api=OOMKilled exit=137\" "
@@ -1181,6 +1597,40 @@ def test_rca_context_prefers_deterministic_aiops_agent_facts():
     assert 'relationship="Pod --calls--> Pod"' in context
     assert "do_not_merge=true" in context
     assert "is_not_failure_evidence=true" in context
+    assert "ordinary-context-must-not-win" not in context
+
+
+def test_rca_supplementary_semantic_groups_share_single_budget():
+    node = RootCauseAnalyzerNode()
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "facts-tool",
+                "agent_facts": "FACT_MARKER\n" + ("deterministic fact " * 1200),
+            },
+            {
+                "tool": "context-tool",
+                "agent_context": json.dumps({
+                    "marker": "CONTEXT_MARKER",
+                    "payload": "structured context " * 1200,
+                }),
+            },
+            {
+                "tool": "raw-tool",
+                "data": "RAW_MARKER\n" + ("raw result " * 1200),
+            },
+        ],
+    })
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "## AIOps 确定性可观测事实" in context
+    assert "## AIOps 结构化可观测性上下文" in context
+    assert "## 工具原始输出" in context
+    assert "FACT_MARKER" in context
+    assert "CONTEXT_MARKER" in context
+    assert "RAW_MARKER" in context
+    assert len(context) <= RCA_SUPPLEMENTARY_MAX_CHARS
 
 
 def test_conclusion_context_includes_aiops_agent_context():
@@ -1394,6 +1844,50 @@ def test_conclusion_context_keeps_per_case_topology_counts_for_multiple_cases():
     assert "exact_edges_are_diagnostic_subset=true" in context
 
 
+def test_conclusion_context_prioritizes_topology_after_first_twelve_tool_items():
+    noise = [
+        {
+            "tool": "kubectl_describe",
+            "data": f"bounded non-topology result {index}",
+        }
+        for index in range(12)
+    ]
+    topology = {
+        "tool": "query_pod_topology",
+        "agent_facts": (
+            'TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" '
+            "source=k8s.pod:demo/api:uid-api "
+            "target=k8s.replicaset:demo/api-rs:uid-rs "
+            "source_system=kubernetes directness=direct confidence=high "
+            "source_field=metadata.ownerReferences "
+            "evidence_refs=topology-owned-by"
+        ),
+        "agent_context": json.dumps(
+            {
+                "coverage": "present",
+                "topology_summary": {
+                    "entity_count": 2,
+                    "edge_count": 1,
+                },
+            },
+            ensure_ascii=False,
+        ),
+    }
+    evidence_analysis = json.dumps(
+        {"tool_data": [*noise, topology]},
+        ensure_ascii=False,
+    )
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+    )
+
+    assert "TOPOLOGY_EXACT_EDGES count=1" in context
+    assert "metadata.ownerReferences" in context
+    assert "topology-owned-by" in context
+
+
 def test_conclusion_context_marks_aiops_case_as_not_collected_without_coarse_tool():
     evidence_analysis = json.dumps(
         {
@@ -1419,6 +1913,203 @@ def test_conclusion_context_marks_aiops_case_as_not_collected_without_coarse_too
     assert "aiops_observability_status: not_collected" in context
     assert "禁止声称本轮基于 collect_aiops_case" in context
     assert "aiops_observability_facts:" not in context
+
+
+def test_conclusion_context_marks_generic_observability_queries_as_collected():
+    evidence_analysis = json.dumps(
+        {
+            "tool_data": [
+                {
+                    "tool": "query_pod_logs",
+                    "data": (
+                        "OBSERVABILITY_QUERY coverage=present\n"
+                        "required config PAYMENT_GATEWAY_TOKEN is missing"
+                    ),
+                    "agent_facts": (
+                        "OBSERVABILITY_QUERY tool=query_pod_logs "
+                        "dimension=logging coverage=present\n"
+                        "QUERY_FACT ref=log-config name=log.message "
+                        'value="required config PAYMENT_GATEWAY_TOKEN is missing" '
+                        "raw_ref=filebeat-2026.07.21/doc-42"
+                    ),
+                    "agent_context": json.dumps({
+                        "status": "query_succeeded",
+                        "source_system": "elasticsearch",
+                        "dimension": "logging",
+                        "entity": {"namespace": "demo", "pod": "api"},
+                        "purpose": "验证配置缺失",
+                        "coverage": "present",
+                        "query": {"identity_basis": "pod_uid"},
+                        "facts": [{
+                            "ref": "log-config",
+                            "name": "log.message",
+                            "value": (
+                                "required config "
+                                "PAYMENT_GATEWAY_TOKEN is missing"
+                            ),
+                        }],
+                        "samples": [{
+                            "message": (
+                                "required config "
+                                "PAYMENT_GATEWAY_TOKEN is missing"
+                            ),
+                        }],
+                        "evidence_refs": ["log-config"],
+                    }, ensure_ascii=False),
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+    )
+
+    assert "aiops_observability_status: collected" in context
+    assert "observability_collection_mode: autonomous_query" in context
+    assert "禁止声称本轮基于 collect_aiops_case" not in context
+    assert "required config PAYMENT_GATEWAY_TOKEN is missing" in context
+    assert "filebeat-2026.07.21/doc-42" in context
+
+
+def test_a021_autonomous_observability_context_keeps_present_and_emits_sources():
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "query_pod_logs",
+                "agent_facts": (
+                    "OBSERVABILITY_QUERY tool=query_pod_logs "
+                    "status=query_succeeded source_system=elasticsearch "
+                    "dimension=logging coverage=present directness=direct\n"
+                    "QUERY_FACT ref=log-oom source_system=elasticsearch "
+                    "name=log.message "
+                    'value="{\\"event\\": \\"allocate\\", '
+                    '\\"message\\": \\"allocated memory\\", '
+                    '\\"allocated_mib\\": 62, '
+                    '\\"pod\\": \\"api-pod-abc123def0-x1y2z\\"}" '
+                    'raw_ref={"document_id":"oom-log"} directness=direct'
+                ),
+                "agent_context": json.dumps({
+                    "status": "query_succeeded",
+                    "source_system": "elasticsearch",
+                    "dimension": "logging",
+                    "coverage": "present",
+                }),
+            },
+            {
+                "tool": "query_pod_topology",
+                "agent_facts": (
+                    "OBSERVABILITY_QUERY tool=query_pod_topology "
+                    "status=query_succeeded source_system=kubernetes "
+                    "dimension=topology coverage=present directness=direct\n"
+                    'TOPOLOGY relationship="ReplicaSet --owned_by--> Deployment" '
+                    "source=e:rs target=e:deploy source_system=kubernetes "
+                    "directness=direct confidence=high"
+                ),
+                "agent_context": json.dumps({
+                    "status": "query_succeeded",
+                    "source_system": "kubernetes",
+                    "dimension": "topology",
+                    "coverage": "present",
+                    "entities": [
+                        {
+                            "entity_id": "e:deploy",
+                            "kind": "Deployment",
+                            "namespace": "demo",
+                            "name": "api",
+                            "source_system": "kubernetes",
+                        }
+                    ],
+                    "topology_summary": {
+                        "entity_count": 1,
+                        "edge_count": 1,
+                    },
+                }),
+            },
+            {
+                "tool": "query_pod_logs",
+                "agent_facts": (
+                    "OBSERVABILITY_QUERY tool=query_pod_logs "
+                    "status=query_succeeded source_system=elasticsearch "
+                    "dimension=logging coverage=empty directness=direct"
+                ),
+                "agent_context": json.dumps({
+                    "status": "query_succeeded",
+                    "source_system": "elasticsearch",
+                    "dimension": "logging",
+                    "coverage": "empty",
+                }),
+            },
+            {
+                "tool": "kubectl_describe",
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "kubernetes-lifecycle-oom",
+                    "scope_entity_ids": ["k8s.pod:demo/api"],
+                    "records": [
+                        _canonical_fact_record(
+                            entity_id="k8s.pod:demo/api",
+                            entity_name="api",
+                            dimension="kubernetes",
+                            fact_type="state",
+                            attribute="container.last_terminated_reason",
+                            value={
+                                "container": "business-api",
+                                "reason": "OOMKilled",
+                            },
+                            source_system="kubernetes",
+                            evidence_refs=["kubectl-describe-oom"],
+                        )
+                    ],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "robusta_legacy_adapter",
+                    "legacy_contract": True,
+                },
+            },
+        ],
+    }, ensure_ascii=False)
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis=json.dumps({
+            "limitations": (
+                '当前 ledger 中 Pod phase/status 为 "Running"。'
+                "未提供 api-pod 日志原文，因而无法引用日志 message；"
+                "未提供 api-other 日志原文；"
+                "也未提供其资源配置、内存指标或节点内存压力。"
+            ),
+        }, ensure_ascii=False),
+    )
+
+    execution_line = next(
+        line for line in context.splitlines()
+        if line.startswith("OBSERVABILITY_EXECUTION ")
+    )
+    assert "logging=present" in execution_line
+    assert (
+        "OBSERVABILITY_SOURCE dimension=logging tool=query_pod_logs "
+        "source_system=elasticsearch coverage=present"
+    ) in context
+    assert (
+        "OBSERVABILITY_SOURCE dimension=topology tool=query_pod_topology "
+        "source_system=kubernetes coverage=present"
+    ) in context
+    assert (
+        "TOPOLOGY_ENTITY entity_id=e:deploy kind=Deployment "
+        "namespace=demo name=api"
+    ) in context
+    assert (
+        "CANONICAL_FACT fact_id="
+        in context
+        and "attribute=container.last_terminated_reason" in context
+        and "tool=kubectl_describe" in context
+    )
+    assert "未提供 api-pod 日志原文" not in context
+    assert "未提供 api-other 日志原文" in context
+    assert "未提供其资源配置、内存指标或节点内存压力" in context
 
 
 def test_rca_execute_sanitizes_large_evidence_fields_before_handoff():
@@ -1523,6 +2214,63 @@ def test_rca_context_includes_evidence_quality_contract():
     assert "source_coverage" in context
 
 
+def test_rca_quality_contract_keeps_all_top_level_fields_under_pressure():
+    node = RootCauseAnalyzerNode()
+    quality_contract = {
+        "source_coverage": {
+            "cases": [
+                {
+                    "target": f"demo/api-{index}",
+                    "dimensions": {
+                        "metrics": "present",
+                        "logging": "present",
+                        "tracing": "present",
+                    },
+                    "noise": "coverage " * 500,
+                }
+                for index in range(40)
+            ]
+        },
+        "case_target_coverage": {
+            "total": 40,
+            "collected": 38,
+            "rate": 0.95,
+        },
+        "detail_retrieval": {
+            "evaluated": True,
+            "requested": 8,
+            "collected": 6,
+            "refs": [f"detail-ref-{index}" for index in range(80)],
+        },
+        "diagnostic_sufficiency_summary": {
+            "score": 0.75,
+            "status": "partially_sufficient",
+        },
+        "unresolved_questions": [
+            f"demo/api-{index}: " + ("question " * 500)
+            for index in range(40)
+        ],
+    }
+
+    rendered = node._compact_quality_contract(
+        quality_contract,
+        max_chars=RCA_QUALITY_MAX_CHARS,
+    )
+    parsed = json.loads(rendered)
+
+    assert len(rendered) <= RCA_QUALITY_MAX_CHARS
+    assert list(parsed) == [
+        "source_coverage",
+        "case_target_coverage",
+        "detail_retrieval",
+        "diagnostic_sufficiency_summary",
+        "unresolved_questions",
+    ]
+    assert parsed["case_target_coverage"]["rate"] == 0.95
+    assert parsed["detail_retrieval"]["collected"] == 6
+    assert parsed["diagnostic_sufficiency_summary"]["score"] == 0.75
+
+
 def test_conclusion_uses_handoff_not_full_layer_analysis():
     node = ConclusionFormatterNode()
     layer_analysis = node._select_layer_context(
@@ -1575,12 +2323,214 @@ def test_rca_context_uses_fact_ledgers_without_duplicate_aiops_representations()
     context = node._extract_tool_data_for_rca(evidence_analysis)
 
     assert "AIOps Fact Ledger" in context
+    assert "## 补充工具输出" in context
     assert "case-facts" in context
     assert fact_record["fact_id"] in context
     assert "kubectl_describe" in context
     assert "DUPLICATE COARSE SUMMARY" not in context
     assert "DUPLICATE AGENT FACTS" not in context
     assert "dimension_details" not in context
+
+
+def test_rca_mixed_ledger_and_legacy_supplementary_preserves_case_identity():
+    node = RootCauseAnalyzerNode()
+    canonical_entity = "k8s.pod:demo/canonical-api:uid-canonical"
+    canonical_fact = _canonical_fact_record(
+        entity_id=canonical_entity,
+    )
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "collect_aiops_case",
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-canonical",
+                    "scope_entity_ids": [canonical_entity],
+                    "records": [canonical_fact],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+            },
+            {
+                "tool": "collect_aiops_case",
+                "agent_context": json.dumps({
+                    "case_id": "case-legacy-config",
+                    "primary_entity": {
+                        "kind": "Pod",
+                        "namespace": "legacy-ns",
+                        "name": "legacy-api",
+                        "uid": "uid-legacy-api",
+                    },
+                }),
+                "agent_facts": (
+                    "LEGACY_CONFIG_FACT required config TOKEN is missing"
+                ),
+            },
+        ],
+    })
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "AIOps Fact Ledger" in context
+    assert "LEGACY_CONFIG_FACT" in context
+    assert "case-legacy-config" in context
+    assert "legacy-ns" in context
+    assert "legacy-api" in context
+    assert "uid-legacy-api" in context
+
+
+def test_rca_multiple_legacy_cases_preserve_every_identity_under_shared_budget():
+    node = RootCauseAnalyzerNode()
+    tool_data = []
+    for index in range(10):
+        tool_data.append({
+            "tool": "collect_aiops_case",
+            "agent_context": json.dumps({
+                "case_id": f"case-legacy-{index}",
+                "primary_entity": {
+                    "kind": "Pod",
+                    "namespace": f"namespace-{index}",
+                    "name": f"legacy-pod-{index}",
+                    "uid": f"uid-legacy-{index}",
+                },
+            }),
+            "agent_facts": (
+                f"LEGACY_FACT_{index} "
+                + ("diagnostic evidence " * 1000)
+            ),
+        })
+    context = node._extract_tool_data_for_rca(
+        json.dumps({"tool_data": tool_data})
+    )
+
+    assert len(context) <= RCA_SUPPLEMENTARY_MAX_CHARS
+    for index in range(10):
+        assert f"case-legacy-{index}" in context
+        assert f"namespace-{index}" in context
+        assert f"legacy-pod-{index}" in context
+        assert f"uid-legacy-{index}" in context
+
+
+def test_rca_more_than_supplementary_limit_preserves_every_identity_with_ledger():
+    canonical_entity = "k8s.pod:demo/canonical-api:uid-canonical"
+    tool_data = [
+        {
+            "tool": "collect_aiops_case",
+            "fact_ledger": {
+                "contract_version": "aiops.fact-ledger.v1",
+                "case_id": "case-canonical",
+                "scope_entity_ids": [canonical_entity],
+                "records": [
+                    _canonical_fact_record(entity_id=canonical_entity)
+                ],
+                "record_count": 1,
+                "truncated": False,
+                "source": "mcp_canonical",
+                "legacy_contract": False,
+            },
+        }
+    ]
+    for index in range(12):
+        tool_data.append({
+            "tool": "collect_aiops_case",
+            "agent_context": json.dumps({
+                "case_id": f"case-over-limit-{index}",
+                "primary_entity": {
+                    "kind": "Pod",
+                    "namespace": f"ns-{index}",
+                    "name": f"pod-{index}",
+                    "uid": f"uid-{index}",
+                },
+            }),
+            "agent_facts": f"FACT_OVER_LIMIT_{index}",
+        })
+
+    context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+        json.dumps({"tool_data": tool_data})
+    )
+
+    assert len(context) <= RCA_TOOL_CONTEXT_MAX_CHARS
+    for index in range(12):
+        assert f"case-over-limit-{index}" in context
+        assert f"pod-{index}" in context
+        assert f"uid-{index}" in context
+    assert "FACT_OVER_LIMIT_9" in context
+    assert "FACT_OVER_LIMIT_10" not in context
+    assert "FACT_OVER_LIMIT_11" not in context
+
+
+def test_rca_more_than_supplementary_limit_preserves_every_identity_without_ledger():
+    tool_data = []
+    for index in range(12):
+        tool_data.append({
+            "tool": "collect_aiops_case",
+            "agent_context": json.dumps({
+                "case_id": f"case-no-ledger-{index}",
+                "primary_entity": {
+                    "kind": "Pod",
+                    "namespace": f"ns-{index}",
+                    "name": f"pod-{index}",
+                    "uid": f"uid-{index}",
+                },
+            }),
+            "agent_facts": f"FACT_NO_LEDGER_{index}",
+        })
+
+    context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+        json.dumps({"tool_data": tool_data})
+    )
+
+    assert len(context) <= RCA_SUPPLEMENTARY_MAX_CHARS
+    for index in range(12):
+        assert f"case-no-ledger-{index}" in context
+        assert f"pod-{index}" in context
+        assert f"uid-{index}" in context
+    assert "FACT_NO_LEDGER_9" in context
+    assert "FACT_NO_LEDGER_10" not in context
+    assert "FACT_NO_LEDGER_11" not in context
+
+
+def test_rca_supplementary_identity_index_fails_when_minimum_cannot_fit():
+    items = [
+        {
+            "tool": "collect_aiops_case",
+            "identity_envelope": {
+                "case_id": "case-impossible",
+                "primary_entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                    "uid": "uid-impossible",
+                },
+            },
+            "agent_facts": "required config TOKEN is missing",
+        }
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="supplementary identity",
+    ):
+        RootCauseAnalyzerNode._compact_supplementary_tool_sections(
+            items,
+            max_chars=32,
+        )
+
+
+def test_rca_supplementary_without_identity_can_drop_optional_data_at_tiny_budget():
+    rendered = RootCauseAnalyzerNode._compact_supplementary_tool_data(
+        [
+            {
+                "tool": "kubectl_describe",
+                "data": "large optional output " * 100,
+            }
+        ],
+        max_chars=2,
+    )
+
+    assert rendered == "{}"
 
 
 def test_rca_persisted_no_ledger_aiops_item_uses_one_representation():
@@ -1608,10 +2558,11 @@ def test_rca_persisted_no_ledger_aiops_item_uses_one_representation():
 
     context = node._extract_tool_data_for_rca(evidence_analysis)
 
-    assert "STRUCTURED CONTEXT REPRESENTATION" in context
-    assert "TEXT FACT REPRESENTATION" not in context
+    assert "AIOps 确定性可观测事实" in context
+    assert "TEXT FACT REPRESENTATION" in context
+    assert "STRUCTURED CONTEXT REPRESENTATION" not in context
     assert "RAW REPRESENTATION" not in context
-    assert context.count("STRUCTURED CONTEXT REPRESENTATION") == 1
+    assert context.count("TEXT FACT REPRESENTATION") == 1
 
 
 def test_rca_execute_validates_fact_references_before_handoff():
@@ -2025,6 +2976,12 @@ def test_evidence_to_rca_legacy_context_preserves_mandatory_identity_under_budge
         "uid": "uid-a",
     }
     assert "case-identity-envelope" in rca_context
+    assert "AIOps 确定性可观测事实" in rca_context
+    assert "ENTITY kind=Pod" in rca_context
+    assert '"case_id":"case-identity-envelope"' in rca_context
+    assert '"kind":"Pod"' in rca_context
     assert '"namespace":"demo"' in rca_context
     assert '"name":"api"' in rca_context
     assert '"uid":"uid-a"' in rca_context
+    assert "optional-0000" not in rca_context
+    assert len(rca_context) <= RCA_SUPPLEMENTARY_MAX_CHARS

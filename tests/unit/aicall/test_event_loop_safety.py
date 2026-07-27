@@ -1,14 +1,29 @@
 import sys
 import types
+import json
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import queue
 
+import httpx
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIResponseValidationError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    RateLimitError,
+    UnprocessableEntityError,
+)
 from pydantic import BaseModel
 
 from app.core.aicall.client import AICall
+from app.core.context.budget import count_tokens, serialize_tool_schema
 from app.core.workflow.schemas import EvidencePlanOutput
 
 
@@ -44,6 +59,30 @@ def _install_fake_langfuse(monkeypatch):
     return calls
 
 
+def _patch_length_token_counter(monkeypatch, *, accuracy):
+    def _count(value, model=""):
+        if value is None:
+            value = ""
+        elif not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        return {
+            "tokens": len(value),
+            "source": f"test:length-{accuracy}",
+            "accuracy": accuracy,
+        }
+
+    monkeypatch.setattr("app.core.context.budget.count_tokens", _count)
+    monkeypatch.setattr("app.core.aicall.client.count_tokens", _count)
+    return _count
+
+
+class _BoundaryAgentRequest(SimpleNamespace):
+    def override(self, **kwargs):
+        values = vars(self).copy()
+        values.update(kwargs)
+        return type(self)(**values)
+
+
 def test_call_simple_creates_fresh_chat_model_per_invocation():
     model_instances = []
 
@@ -66,6 +105,996 @@ def test_call_simple_creates_fresh_chat_model_per_invocation():
     assert model_instances[0] is not model_instances[1]
     model_instances[0].invoke.assert_called_once()
     model_instances[1].invoke.assert_called_once()
+
+
+def test_call_simple_replays_stream_eof_once_without_streaming(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/gpt-5.6-sol", api_key="sk-test")
+    created = []
+    invocations = []
+
+    class _Model:
+        def __init__(self, result=None, error=None):
+            self.result = result
+            self.error = error
+            self.bind_kwargs = {}
+
+        def bind(self, **kwargs):
+            self.bind_kwargs = kwargs
+            return self
+
+        def invoke(self, messages, config=None):
+            invocations.append({
+                "messages": messages,
+                "config": config,
+                "bind_kwargs": dict(self.bind_kwargs),
+            })
+            if self.error is not None:
+                raise self.error
+            return self.result
+
+    models = [
+        _Model(
+            error=APIError(
+                "unexpected EOF",
+                request=httpx.Request("POST", "http://llm.example/v1/chat/completions"),
+                body=None,
+            )
+        ),
+        _Model(result=AIMessage(content="recovered report")),
+    ]
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return models[len(created) - 1]
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    result = ai.call_simple(
+        "system",
+        "question",
+        node_id="conclusion",
+        max_tokens=8192,
+    )
+
+    assert result == "recovered report"
+    assert len(created) == 2
+    assert created[0].get("disable_streaming", False) is False
+    assert created[1]["disable_streaming"] is True
+    assert len(invocations) == 2
+    assert [message.content for message in invocations[0]["messages"]] == [
+        message.content for message in invocations[1]["messages"]
+    ]
+    assert invocations[0]["bind_kwargs"] == invocations[1]["bind_kwargs"] == {
+        "max_tokens": 8192,
+    }
+    assert invocations[0]["config"] == invocations[1]["config"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "unexpected EOF",
+        "empty_stream",
+        "closed before first payload",
+    ],
+)
+def test_call_simple_replays_measured_stream_interruptions_once_for_api_subclasses(
+    monkeypatch,
+    message,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/gpt-5.6-sol", api_key="sk-test")
+    created = []
+    request = httpx.Request(
+        "POST",
+        "http://llm.example/v1/chat/completions",
+    )
+    interruption = InternalServerError(
+        message,
+        response=httpx.Response(500, request=request),
+        body=None,
+    )
+
+    class _Model:
+        def __init__(self, *, error=None, content=""):
+            self.error = error
+            self.content = content
+
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            if self.error is not None:
+                raise self.error
+            return AIMessage(content=self.content)
+
+    models = [
+        _Model(error=interruption),
+        _Model(content="recovered"),
+    ]
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return models[len(created) - 1]
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    assert ai.call_simple("system", "question") == "recovered"
+    assert len(created) == 2
+    assert created[0].get("disable_streaming", False) is False
+    assert created[1]["disable_streaming"] is True
+
+
+class _UnexpectedEOFTimeout(APITimeoutError):
+    def __str__(self):
+        return "unexpected EOF"
+
+
+def test_call_simple_retries_api_connection_eof_once_without_streaming(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/generic-model", api_key="sk-test")
+    created = []
+    interruption = APIConnectionError(
+        message="unexpected EOF",
+        request=httpx.Request(
+            "POST",
+            "http://llm.example/v1/chat/completions",
+        ),
+    )
+
+    class _Model:
+        def __init__(self, *, error=None, content=""):
+            self.error = error
+            self.content = content
+
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            if self.error is not None:
+                raise self.error
+            return AIMessage(content=self.content)
+
+    models = [
+        _Model(error=interruption),
+        _Model(content="recovered"),
+    ]
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return models[len(created) - 1]
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    assert ai.call_simple("system", "question") == "recovered"
+    assert len(created) == 2
+    assert created[1]["disable_streaming"] is True
+
+
+def test_call_simple_retries_api_connection_eof_from_cause_chain(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/generic-model", api_key="sk-test")
+    created = []
+    interruption = APIConnectionError(
+        request=httpx.Request(
+            "POST",
+            "http://llm.example/v1/chat/completions",
+        ),
+    )
+    interruption.__cause__ = RuntimeError("unexpected EOF")
+    assert str(interruption) == "Connection error."
+
+    class _Model:
+        def __init__(self, *, error=None, content=""):
+            self.error = error
+            self.content = content
+
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            if self.error is not None:
+                raise self.error
+            return AIMessage(content=self.content)
+
+    models = [
+        _Model(error=interruption),
+        _Model(content="recovered from wrapped EOF"),
+    ]
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return models[len(created) - 1]
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    assert ai.call_simple("system", "question") == "recovered from wrapped EOF"
+    assert len(created) == 2
+    assert created[1]["disable_streaming"] is True
+
+
+@pytest.mark.parametrize(
+    "outer_error",
+    [
+        APITimeoutError(
+            request=httpx.Request(
+                "POST",
+                "http://llm.example/v1/chat/completions",
+            ),
+        ),
+        AuthenticationError(
+            "authentication failed",
+            response=httpx.Response(
+                401,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+        ),
+        RuntimeError("provider wrapper failed"),
+    ],
+    ids=["timeout", "authentication", "generic"],
+)
+def test_stream_eof_cause_chain_preserves_outer_exception_exclusions(
+    outer_error,
+):
+    outer_error.__cause__ = RuntimeError("empty_stream")
+
+    assert AICall._is_retryable_stream_eof(outer_error) is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _UnexpectedEOFTimeout(
+            request=httpx.Request(
+                "POST",
+                "http://llm.example/v1/chat/completions",
+            ),
+        ),
+        AuthenticationError(
+            "unexpected EOF",
+            response=httpx.Response(
+                401,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+        ),
+        RateLimitError(
+            "empty_stream",
+            response=httpx.Response(
+                429,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+        ),
+        BadRequestError(
+            "closed before first payload",
+            response=httpx.Response(
+                400,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+        ),
+        UnprocessableEntityError(
+            "unexpected EOF",
+            response=httpx.Response(
+                422,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+        ),
+        APIResponseValidationError(
+            response=httpx.Response(
+                200,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+            message="unexpected EOF",
+        ),
+    ],
+    ids=[
+        "timeout",
+        "authentication",
+        "rate-limit",
+        "bad-request",
+        "unprocessable-request",
+        "response-validation",
+    ],
+)
+def test_call_simple_does_not_retry_excluded_api_errors_with_eof_signatures(
+    monkeypatch,
+    error,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/generic-model", api_key="sk-test")
+    created = []
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            raise error
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return _Model()
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    with pytest.raises(type(error)) as exc_info:
+        ai.call_simple("system", "question")
+
+    assert exc_info.value is error
+    assert len(created) == 1
+
+
+def test_call_simple_does_not_retry_generic_exception_with_eof_signature(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/generic-model", api_key="sk-test")
+    created = []
+    error = RuntimeError("unexpected EOF")
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            raise error
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return _Model()
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ai.call_simple("system", "question")
+
+    assert exc_info.value is error
+    assert len(created) == 1
+
+
+def test_call_simple_retries_matching_api_error_only_once(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/generic-model", api_key="sk-test")
+    created = []
+    first_error = APIError(
+        "unexpected EOF",
+        request=httpx.Request(
+            "POST",
+            "http://llm.example/v1/chat/completions",
+        ),
+        body=None,
+    )
+    second_error = APIError(
+        "empty_stream",
+        request=httpx.Request(
+            "POST",
+            "http://llm.example/v1/chat/completions",
+        ),
+        body=None,
+    )
+
+    class _Model:
+        def __init__(self, error):
+            self.error = error
+
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            raise self.error
+
+    models = [_Model(first_error), _Model(second_error)]
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return models[len(created) - 1]
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    with pytest.raises(APIError) as exc_info:
+        ai.call_simple("system", "question")
+
+    assert exc_info.value is second_error
+    assert len(created) == 2
+    assert created[1]["disable_streaming"] is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BadRequestError(
+            "maximum context length exceeded",
+            response=httpx.Response(
+                400,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+        ),
+        APITimeoutError(
+            request=httpx.Request(
+                "POST",
+                "http://llm.example/v1/chat/completions",
+            )
+        ),
+        BadRequestError(
+            "invalid request payload",
+            response=httpx.Response(
+                400,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+        ),
+        InternalServerError(
+            "upstream overloaded",
+            response=httpx.Response(
+                500,
+                request=httpx.Request(
+                    "POST",
+                    "http://llm.example/v1/chat/completions",
+                ),
+            ),
+            body=None,
+        ),
+    ],
+    ids=[
+        "context-error",
+        "timeout",
+        "ordinary-4xx",
+        "ordinary-5xx",
+    ],
+)
+def test_call_simple_does_not_retry_non_whitelisted_api_errors(
+    monkeypatch,
+    error,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/gpt-5.6-sol", api_key="sk-test")
+    created = []
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            raise error
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return _Model()
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    with pytest.raises(type(error)) as exc_info:
+        ai.call_simple("system", "question")
+
+    assert exc_info.value is error
+    assert len(created) == 1
+
+
+def test_call_simple_does_not_retry_other_api_errors(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/gpt-5.6-sol", api_key="sk-test")
+    created = []
+    error = APIError(
+        "upstream returned malformed payload",
+        request=httpx.Request("POST", "http://llm.example/v1/chat/completions"),
+        body=None,
+    )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            raise error
+
+    def _create_chat_model(**kwargs):
+        created.append(kwargs)
+        return _Model()
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+
+    with pytest.raises(APIError) as exc_info:
+        ai.call_simple(
+            "system",
+            "question",
+            node_id="conclusion",
+            max_tokens=8192,
+        )
+
+    assert exc_info.value is error
+    assert len(created) == 1
+
+
+def test_call_simple_budget_observation_does_not_issue_usage_probe(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_USAGE_PROBE", "true")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        api_base="http://llm.example/v1",
+    )
+
+    class _ForbiddenProbe:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "budget observation must not issue a provider probe"
+            )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            return AIMessage(content="ok")
+
+    monkeypatch.setattr(
+        "app.core.context.budget.OpenAIUsageProbe",
+        _ForbiddenProbe,
+    )
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+
+    assert ai.call_simple("system", "question") == "ok"
+
+
+def test_call_simple_hard_guard_bounds_provider_input_and_archives_budget(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_preserve_tail_tokens": 1200,
+        },
+    )
+    captured = {}
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            captured["system"] = messages[0].content
+            captured["question"] = messages[-1].content
+            return AIMessage(content="bounded")
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    question = (
+        "HEAD preserve diagnosis scope\n"
+        + ("oversized plain workflow context " * 6000)
+        + "\nTAIL preserve final report constraints"
+    )
+
+    result = ai.call_simple(
+        "plain workflow system contract " * 300,
+        question,
+        node_id="conclusion",
+        run_id="run-simple-hard-guard",
+        max_tokens=6000,
+    )
+
+    final_input_tokens = count_tokens(
+        {
+            "system": captured["system"],
+            "question": captured["question"],
+        },
+        model=ai.model_str,
+    )["tokens"]
+    assert result == "bounded"
+    assert final_input_tokens <= 23040
+    assert captured["question"].startswith("HEAD preserve diagnosis scope")
+    assert captured["question"].endswith(
+        "TAIL preserve final report constraints"
+    )
+    assert "deterministic context compaction" in captured["question"]
+
+    pre_guard = json.loads(
+        (
+            tmp_path
+            / "run-simple-hard-guard"
+            / "budget"
+            / "conclusion_pre_guard.json"
+        ).read_text()
+    )
+    final_budget = json.loads(
+        (
+            tmp_path
+            / "run-simple-hard-guard"
+            / "budget"
+            / "conclusion.json"
+        ).read_text()
+    )
+    assert pre_guard["hard_guard"]["triggered"] is True
+    assert final_budget["hard_guard"]["final_input_tokens"] <= 23040
+    assert final_budget["reserved_tokens"] == 8000
+
+
+def test_call_simple_hard_guard_uses_fixed_estimator_drift_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    monkeypatch.delenv("AIOPS_TOKENIZER_JSON_PATH", raising=False)
+    monkeypatch.delenv("AIOPS_TIKTOKEN_ENCODING", raising=False)
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_estimator_drift_reserve": 0,
+        },
+    )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            return AIMessage(content="bounded")
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+
+    assert ai.call_simple(
+        "system",
+        "question",
+        node_id="conclusion",
+        run_id="run-simple-drift",
+        max_tokens=6000,
+    ) == "bounded"
+
+    final_budget = json.loads(
+        (
+            tmp_path
+            / "run-simple-drift"
+            / "budget"
+            / "conclusion.json"
+        ).read_text()
+    )
+    hard_guard = final_budget["hard_guard"]
+    assert hard_guard["token_count_accuracy"] != "exact"
+    assert hard_guard["max_input_tokens"] == 23040
+    assert hard_guard["estimator_drift_reserve"] == 256
+    assert hard_guard["effective_input_target"] == 22784
+
+
+@pytest.mark.parametrize(
+    (
+        "configured_reserve",
+        "expected_reserve",
+        "expected_target",
+    ),
+    [
+        (0, 256, 22784),
+        (512, 512, 22528),
+    ],
+    ids=["minimum", "upward-override"],
+)
+def test_hard_guard_estimator_drift_reserve_has_minimum_and_upward_config(
+    monkeypatch,
+    configured_reserve,
+    expected_reserve,
+    expected_target,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_estimator_drift_reserve": configured_reserve,
+        },
+    )
+
+    (
+        _system_prompt,
+        guarded_question,
+        hard_guard,
+        _pre_budget,
+        _final_budget,
+    ) = ai._prepare_structured_call_context(
+        system_prompt="system",
+        question="question",
+        schema=None,
+        node_id="simple",
+        output_reserved=6000,
+    )
+
+    assert guarded_question == "question"
+    assert hard_guard["token_count_accuracy"] != "exact"
+    assert hard_guard["max_input_tokens"] == 23040
+    assert hard_guard["estimator_drift_reserve"] == expected_reserve
+    assert hard_guard["effective_input_target"] == expected_target
+
+
+def test_call_simple_hard_guard_reserves_provider_framing_with_exact_content_counts(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+
+    def _exact_count(value, model=""):
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        return {
+            "tokens": max(1, (len(value) + 3) // 4) if value else 0,
+            "source": "test:exact-tokenizer",
+            "accuracy": "exact",
+        }
+
+    monkeypatch.setattr(
+        "app.core.context.budget.count_tokens",
+        _exact_count,
+    )
+    monkeypatch.setattr(
+        "app.core.aicall.client.count_tokens",
+        _exact_count,
+    )
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            return AIMessage(content="exact")
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+
+    assert ai.call_simple(
+        "system",
+        "question",
+        node_id="conclusion",
+        run_id="run-simple-exact",
+        max_tokens=6000,
+    ) == "exact"
+
+    final_budget = json.loads(
+        (
+            tmp_path
+            / "run-simple-exact"
+            / "budget"
+            / "conclusion.json"
+        ).read_text()
+    )
+    hard_guard = final_budget["hard_guard"]
+    provider_overhead = next(
+        component
+        for component in final_budget["components"]
+        if component["name"] == "provider_request_overhead"
+    )
+    assert provider_overhead["token_accuracy"] == "estimated"
+    assert hard_guard["token_count_accuracy"] != "exact"
+    assert hard_guard["max_input_tokens"] == 23040
+    assert hard_guard["estimator_drift_reserve"] == 256
+    assert hard_guard["effective_input_target"] == 22784
+
+
+def test_call_simple_estimated_boundary_compacts_above_effective_target(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    token_count = _patch_length_token_counter(
+        monkeypatch,
+        accuracy="estimated",
+    )
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+    captured = {}
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            captured["question"] = messages[-1].content
+            return AIMessage(content="bounded")
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    system_prompt = "s" * 100
+    desired_total = 22900
+    question = "q" * (
+        desired_total
+        - token_count(system_prompt)["tokens"]
+        - 64
+    )
+
+    assert ai.call_simple(
+        system_prompt,
+        question,
+        node_id="conclusion",
+        run_id="run-simple-estimated-boundary",
+        max_tokens=6000,
+    ) == "bounded"
+
+    final_budget = json.loads(
+        (
+            tmp_path
+            / "run-simple-estimated-boundary"
+            / "budget"
+            / "conclusion.json"
+        ).read_text()
+    )
+    hard_guard = final_budget["hard_guard"]
+    assert hard_guard["original_input_tokens"] == desired_total
+    assert hard_guard["original_input_tokens"] > 22784
+    assert hard_guard["triggered"] is True
+    assert hard_guard["final_input_tokens"] <= 22784
+    assert captured["question"] != question
+    assert len(captured["question"]) < len(question)
+
+
+def test_call_simple_exact_boundary_compacts_above_effective_target(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    token_count = _patch_length_token_counter(
+        monkeypatch,
+        accuracy="exact",
+    )
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+    captured = {}
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages, config=None):
+            captured["question"] = messages[-1].content
+            return AIMessage(content="exact")
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    system_prompt = "s" * 100
+    desired_total = 22900
+    question = "q" * (
+        desired_total
+        - token_count(system_prompt)["tokens"]
+        - 64
+    )
+
+    assert ai.call_simple(
+        system_prompt,
+        question,
+        node_id="conclusion",
+        run_id="run-simple-exact-boundary",
+        max_tokens=6000,
+    ) == "exact"
+
+    final_budget = json.loads(
+        (
+            tmp_path
+            / "run-simple-exact-boundary"
+            / "budget"
+            / "conclusion.json"
+        ).read_text()
+    )
+    hard_guard = final_budget["hard_guard"]
+    assert 22785 <= hard_guard["original_input_tokens"] <= 23040
+    assert hard_guard["original_input_tokens"] == desired_total
+    assert hard_guard["final_input_tokens"] <= 22784
+    assert hard_guard["triggered"] is True
+    assert captured["question"] != question
+    assert len(captured["question"]) < len(question)
+
+
+def test_call_simple_hard_guard_fails_closed_before_provider_when_window_unknown(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("MODEL_CONTEXT_WINDOW", raising=False)
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "app.core.aicall.client.ModelContextResolver.resolve",
+        lambda self, *args, **kwargs: {
+            "context_window": None,
+            "source": "unavailable",
+            "accuracy": "unknown",
+        },
+    )
+    ai = AICall(
+        model="openai/unknown-local-model",
+        api_key="sk-test",
+        context_compaction_config={"hard_guard_enabled": True},
+    )
+    provider_calls = []
+    monkeypatch.setattr(
+        ai,
+        "_create_chat_model",
+        lambda **kwargs: provider_calls.append(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="context window is unavailable"):
+        ai.call_simple(
+            "system",
+            "question",
+            node_id="conclusion",
+            run_id="run-simple-unknown-window",
+        )
+
+    assert provider_calls == []
+    archived = json.loads(
+        (
+            tmp_path
+            / "run-simple-unknown-window"
+            / "budget"
+            / "conclusion_pre_guard.json"
+        ).read_text()
+    )
+    assert archived["hard_guard"]["error"] == "context_window_unavailable"
 
 
 def test_call_simple_propagates_langfuse_session_id(monkeypatch):
@@ -202,6 +1231,180 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
     assert create_agent_calls[0] is model_instances[0]
     assert create_agent_calls[1] is model_instances[1]
     assert create_agent_calls[0] is not create_agent_calls[1]
+
+
+def test_call_with_tools_retries_stream_interruption_before_agent_progress(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/generic-model", api_key="sk-test")
+    created_models = []
+    created_agents = []
+    interruption = InternalServerError(
+        "empty_stream",
+        response=httpx.Response(
+            500,
+            request=httpx.Request(
+                "POST",
+                "http://llm.example/v1/chat/completions",
+            ),
+        ),
+        body=None,
+    )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _FailingAgent:
+        async def astream(self, *args, **kwargs):
+            raise interruption
+            if False:
+                yield None
+
+    class _SuccessfulAgent:
+        async def astream(self, *args, **kwargs):
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(content="recovered agent response")
+                        ]
+                    }
+                },
+            )
+
+    agents = [_FailingAgent(), _SuccessfulAgent()]
+
+    def _create_chat_model(**kwargs):
+        created_models.append(kwargs)
+        return _Model()
+
+    def _create_agent(**kwargs):
+        created_agents.append(kwargs)
+        return agents[len(created_agents) - 1]
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+    tool = MagicMock()
+    tool.name = "tool_a"
+    tool.description = "tool"
+    tool.args_schema = None
+
+    with patch("langchain.agents.create_agent", side_effect=_create_agent), \
+         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+        result, events = ai.call("sys", "q", tools=[tool], max_steps=3)
+
+    assert result.result == "recovered agent response"
+    assert result.tool_call_count == 0
+    assert len(created_models) == 2
+    assert created_models[0].get("disable_streaming", False) is False
+    assert created_models[1]["disable_streaming"] is True
+    assert len(created_agents) == 2
+    assert not [event for event in events if event.get("type") == "tool_start"]
+
+
+def test_call_with_tools_does_not_retry_stream_interruption_after_tool_call(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/generic-model", api_key="sk-test")
+    created_models = []
+    created_agents = []
+    interruption = InternalServerError(
+        "empty_stream",
+        response=httpx.Response(
+            500,
+            request=httpx.Request(
+                "POST",
+                "http://llm.example/v1/chat/completions",
+            ),
+        ),
+        body=None,
+    )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _PartiallyProgressedAgent:
+        async def astream(self, *args, **kwargs):
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "name": "tool_a",
+                                        "args": {"value": "once"},
+                                        "id": "tool-call-1",
+                                    }
+                                ],
+                            )
+                        ]
+                    }
+                },
+            )
+            raise interruption
+
+    def _create_chat_model(**kwargs):
+        created_models.append(kwargs)
+        return _Model()
+
+    def _create_agent(**kwargs):
+        created_agents.append(kwargs)
+        return _PartiallyProgressedAgent()
+
+    monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
+    tool = MagicMock()
+    tool.name = "tool_a"
+    tool.description = "tool"
+    tool.args_schema = None
+
+    with patch("langchain.agents.create_agent", side_effect=_create_agent), \
+         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+        result, events = ai.call("sys", "q", tools=[tool], max_steps=3)
+
+    assert result.result == f"Agent 执行异常: {interruption}"
+    assert result.tool_call_count == 1
+    assert len(created_models) == 1
+    assert len(created_agents) == 1
+    assert len([
+        event for event in events if event.get("type") == "tool_start"
+    ]) == 1
 
 
 def test_call_with_tools_can_return_structured_response_without_extra_extract_llm():
@@ -574,6 +1777,729 @@ def test_call_structured_prefers_native_pydantic_output(monkeypatch):
     assert "kubectl_events" in raw
     assert created_models
     assert created_models[0].kwargs["disable_streaming"] is True
+
+
+def test_call_structured_hard_guard_bounds_provider_input_and_archives_budget(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_preserve_tail_tokens": 1200,
+        },
+    )
+    captured = {}
+
+    class _StructuredModel:
+        def invoke(self, messages, config=None):
+            captured["system"] = messages[0].content
+            captured["question"] = messages[-1].content
+            return EvidencePlanOutput(
+                layer="L3",
+                evidence_plan=[],
+                collection_strategy="bounded",
+            )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def with_structured_output(self, schema, **kwargs):
+            return _StructuredModel()
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    system_prompt = "RCA system contract " * 300
+    question = (
+        "HEAD scoped entities and direct facts\n"
+        + ("oversized evidence payload " * 6000)
+        + "\nTAIL RCAOutput requirements"
+    )
+
+    parsed, _raw = ai.call_structured(
+        system_prompt,
+        question,
+        EvidencePlanOutput,
+        node_id="rca",
+        run_id="run-hard-guard",
+        max_tokens=6000,
+    )
+
+    schema_tokens = count_tokens(
+        EvidencePlanOutput.model_json_schema(),
+        model=ai.model_str,
+    )["tokens"]
+    final_input_tokens = (
+        count_tokens(captured["system"], model=ai.model_str)["tokens"]
+        + count_tokens(captured["question"], model=ai.model_str)["tokens"]
+        + schema_tokens
+    )
+    assert isinstance(parsed, EvidencePlanOutput)
+    assert final_input_tokens <= 23040
+    assert captured["question"].startswith("HEAD scoped entities")
+    assert captured["question"].endswith("TAIL RCAOutput requirements")
+    assert "deterministic context compaction" in captured["question"]
+
+    pre_guard = json.loads(
+        (tmp_path / "run-hard-guard" / "budget" / "rca_pre_guard.json").read_text()
+    )
+    final_budget = json.loads(
+        (tmp_path / "run-hard-guard" / "budget" / "rca.json").read_text()
+    )
+    assert pre_guard["hard_guard"]["triggered"] is True
+    assert final_budget["hard_guard"]["final_input_tokens"] <= 23040
+    assert final_budget["reserved_tokens"] == 8000
+    assert any(
+        component["name"] == "safety_margin"
+        and component["tokens"] == 2000
+        for component in final_budget["components"]
+    )
+    assert final_budget["hard_guard"]["original_question_chars"] > final_budget["hard_guard"]["final_question_chars"]
+
+
+def test_call_structured_hard_guard_reserves_estimator_drift_below_public_limit(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    monkeypatch.delenv("AIOPS_TOKENIZER_JSON_PATH", raising=False)
+    monkeypatch.delenv("AIOPS_TIKTOKEN_ENCODING", raising=False)
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_preserve_tail_tokens": 1200,
+            "hard_guard_estimator_drift_reserve": 0,
+        },
+    )
+
+    class _StructuredModel:
+        def invoke(self, messages, config=None):
+            return EvidencePlanOutput(
+                layer="L3",
+                evidence_plan=[],
+                collection_strategy="estimated-count-reserve",
+            )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def with_structured_output(self, schema, **kwargs):
+            return _StructuredModel()
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    ai.call_structured(
+        "RCA system contract " * 300,
+        "HEAD\n" + ("estimated evidence payload " * 6000) + "\nTAIL",
+        EvidencePlanOutput,
+        node_id="rca",
+        run_id="run-estimator-drift",
+        max_tokens=6000,
+    )
+
+    final_budget = json.loads(
+        (
+            tmp_path
+            / "run-estimator-drift"
+            / "budget"
+            / "rca.json"
+        ).read_text()
+    )
+    hard_guard = final_budget["hard_guard"]
+    assert final_budget["token_count_accuracy"] != "exact"
+    assert hard_guard["token_count_accuracy"] != "exact"
+    assert hard_guard["max_input_tokens"] == 23040
+    assert hard_guard["estimator_drift_reserve"] == 256
+    assert hard_guard["effective_input_target"] == 22784
+    assert hard_guard["final_input_tokens"] <= 22784
+
+
+def test_call_structured_hard_guard_reserves_provider_framing_with_exact_content_counts(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+
+    def _exact_count(value, model=""):
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        return {
+            "tokens": max(1, (len(value) + 3) // 4) if value else 0,
+            "source": "test:exact-tokenizer",
+            "accuracy": "exact",
+        }
+
+    monkeypatch.setattr(
+        "app.core.context.budget.count_tokens",
+        _exact_count,
+    )
+    monkeypatch.setattr(
+        "app.core.aicall.client.count_tokens",
+        _exact_count,
+    )
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_preserve_tail_tokens": 1200,
+        },
+    )
+
+    class _StructuredModel:
+        def invoke(self, messages, config=None):
+            return EvidencePlanOutput(
+                layer="L3",
+                evidence_plan=[],
+                collection_strategy="exact-count-no-reserve",
+            )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def with_structured_output(self, schema, **kwargs):
+            return _StructuredModel()
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    ai.call_structured(
+        "RCA system contract " * 300,
+        "HEAD\n" + ("exact tokenizer evidence payload " * 6000) + "\nTAIL",
+        EvidencePlanOutput,
+        node_id="rca",
+        run_id="run-exact-tokenizer",
+        max_tokens=6000,
+    )
+
+    final_budget = json.loads(
+        (
+            tmp_path
+            / "run-exact-tokenizer"
+            / "budget"
+            / "rca.json"
+        ).read_text()
+    )
+    hard_guard = final_budget["hard_guard"]
+    provider_overhead = next(
+        component
+        for component in final_budget["components"]
+        if component["name"] == "provider_request_overhead"
+    )
+    assert provider_overhead["token_accuracy"] == "estimated"
+    assert final_budget["token_count_accuracy"] != "exact"
+    assert hard_guard["token_count_accuracy"] != "exact"
+    assert hard_guard["max_input_tokens"] == 23040
+    assert hard_guard["estimator_drift_reserve"] == 256
+    assert hard_guard["effective_input_target"] == 22784
+    assert hard_guard["final_input_tokens"] <= 22784
+
+
+def test_call_structured_exact_boundary_compacts_above_effective_target(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    token_count = _patch_length_token_counter(
+        monkeypatch,
+        accuracy="exact",
+    )
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+    captured = {}
+
+    class _StructuredModel:
+        def invoke(self, messages, config=None):
+            captured["question"] = messages[-1].content
+            return EvidencePlanOutput(
+                layer="L3",
+                evidence_plan=[],
+                collection_strategy="exact-boundary-no-compaction",
+            )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def with_structured_output(self, schema, **kwargs):
+            return _StructuredModel()
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    system_prompt = "s" * 100
+    schema_payload = EvidencePlanOutput.model_json_schema()
+    desired_total = 22900
+    question = "q" * (
+        desired_total
+        - token_count(system_prompt)["tokens"]
+        - token_count(schema_payload)["tokens"]
+        - 64
+    )
+
+    parsed, _raw = ai.call_structured(
+        system_prompt,
+        question,
+        EvidencePlanOutput,
+        node_id="rca",
+        run_id="run-structured-exact-boundary",
+        max_tokens=6000,
+    )
+
+    final_budget = json.loads(
+        (
+            tmp_path
+            / "run-structured-exact-boundary"
+            / "budget"
+            / "rca.json"
+        ).read_text()
+    )
+    hard_guard = final_budget["hard_guard"]
+    assert isinstance(parsed, EvidencePlanOutput)
+    assert 22785 <= hard_guard["original_input_tokens"] <= 23040
+    assert hard_guard["original_input_tokens"] == desired_total
+    assert hard_guard["final_input_tokens"] <= 22784
+    assert hard_guard["triggered"] is True
+    assert captured["question"] != question
+    assert len(captured["question"]) < len(question)
+
+
+def test_agent_hard_guard_records_fixed_estimator_drift_metadata(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.delenv("AIOPS_TOKENIZER_JSON_PATH", raising=False)
+    monkeypatch.delenv("AIOPS_TIKTOKEN_ENCODING", raising=False)
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_estimator_drift_reserve": 0,
+        },
+    )
+    request = SimpleNamespace(
+        model_settings={"max_tokens": 6000},
+        system_message=SystemMessage(content="system"),
+        messages=[HumanMessage(content="question")],
+        tools=[],
+        response_format=None,
+    )
+
+    guarded_request, budget = ai._guard_agent_model_request(
+        request,
+        node_id="evidence",
+    )
+
+    hard_guard = budget["hard_guard"]
+    assert guarded_request is request
+    assert hard_guard["token_count_accuracy"] != "exact"
+    assert hard_guard["max_input_tokens"] == 23040
+    assert hard_guard["estimator_drift_reserve"] == 256
+    assert hard_guard["effective_input_target"] == 22784
+
+
+def test_agent_hard_guard_reserves_provider_framing_with_exact_content_counts(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+
+    def _exact_count(value, model=""):
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        return {
+            "tokens": max(1, (len(value) + 3) // 4) if value else 0,
+            "source": "test:exact-tokenizer",
+            "accuracy": "exact",
+        }
+
+    monkeypatch.setattr(
+        "app.core.context.budget.count_tokens",
+        _exact_count,
+    )
+    monkeypatch.setattr(
+        "app.core.aicall.client.count_tokens",
+        _exact_count,
+    )
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+    request = SimpleNamespace(
+        model_settings={"max_tokens": 6000},
+        system_message=SystemMessage(content="system"),
+        messages=[HumanMessage(content="question")],
+        tools=[],
+        response_format=None,
+    )
+
+    guarded_request, budget = ai._guard_agent_model_request(
+        request,
+        node_id="evidence",
+    )
+
+    hard_guard = budget["hard_guard"]
+    provider_overhead = next(
+        component
+        for component in budget["components"]
+        if component["name"] == "provider_request_overhead"
+    )
+    assert guarded_request is request
+    assert provider_overhead["token_accuracy"] == "estimated"
+    assert hard_guard["token_count_accuracy"] != "exact"
+    assert hard_guard["max_input_tokens"] == 23040
+    assert hard_guard["estimator_drift_reserve"] == 256
+    assert hard_guard["effective_input_target"] == 22784
+
+
+def test_agent_estimated_boundary_compacts_above_effective_target(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    token_count = _patch_length_token_counter(
+        monkeypatch,
+        accuracy="estimated",
+    )
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+    system_prompt = "system"
+    empty_history = [
+        ai._serialize_agent_message(HumanMessage(content=""))
+    ]
+    fixed_tokens = (
+        token_count(system_prompt)["tokens"]
+        + token_count(empty_history)["tokens"]
+        + token_count(serialize_tool_schema([]))["tokens"]
+        + token_count(ai._serialize_agent_response_format(None))["tokens"]
+        + 64
+    )
+    desired_total = 22900
+    question = "q" * (desired_total - fixed_tokens)
+    request = _BoundaryAgentRequest(
+        model_settings={"max_tokens": 6000},
+        system_message=SystemMessage(content=system_prompt),
+        messages=[HumanMessage(content=question)],
+        tools=[],
+        response_format=None,
+    )
+
+    guarded_request, budget = ai._guard_agent_model_request(
+        request,
+        node_id="evidence",
+    )
+
+    hard_guard = budget["hard_guard"]
+    assert hard_guard["original_input_tokens"] == desired_total
+    assert hard_guard["original_input_tokens"] > 22784
+    assert hard_guard["triggered"] is True
+    assert hard_guard["final_input_tokens"] <= 22784
+    assert guarded_request is not request
+    assert request.messages[0].content == question
+    assert len(guarded_request.messages) == 1
+    assert guarded_request.messages[0].content != question
+    assert "context_compacted" in guarded_request.messages[0].content
+
+
+def test_agent_exact_boundary_compacts_above_effective_target(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    token_count = _patch_length_token_counter(
+        monkeypatch,
+        accuracy="exact",
+    )
+    ai = AICall(
+        model="openai/generic-model",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+    system_prompt = "system"
+    empty_history = [
+        ai._serialize_agent_message(HumanMessage(content=""))
+    ]
+    fixed_tokens = (
+        token_count(system_prompt)["tokens"]
+        + token_count(empty_history)["tokens"]
+        + token_count(serialize_tool_schema([]))["tokens"]
+        + token_count(ai._serialize_agent_response_format(None))["tokens"]
+        + 64
+    )
+    desired_total = 22900
+    question = "q" * (desired_total - fixed_tokens)
+    request = _BoundaryAgentRequest(
+        model_settings={"max_tokens": 6000},
+        system_message=SystemMessage(content=system_prompt),
+        messages=[HumanMessage(content=question)],
+        tools=[],
+        response_format=None,
+    )
+
+    guarded_request, budget = ai._guard_agent_model_request(
+        request,
+        node_id="evidence",
+    )
+
+    hard_guard = budget["hard_guard"]
+    assert 22785 <= hard_guard["original_input_tokens"] <= 23040
+    assert hard_guard["original_input_tokens"] == desired_total
+    assert hard_guard["final_input_tokens"] <= 22784
+    assert hard_guard["triggered"] is True
+    assert guarded_request is not request
+    assert request.messages[0].content == question
+    assert guarded_request.messages[0].content != question
+    assert "context_compacted" in guarded_request.messages[0].content
+
+
+def test_call_structured_hard_guard_rejects_oversized_static_contract_before_provider(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "1000")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 200,
+        },
+    )
+    provider_calls = []
+    monkeypatch.setattr(
+        ai,
+        "_create_chat_model",
+        lambda **kwargs: provider_calls.append(kwargs),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="system prompt and structured schema exceed hard input budget",
+    ):
+        ai.call_structured(
+            "static RCA contract " * 600,
+            "short user message",
+            EvidencePlanOutput,
+            node_id="rca",
+            max_tokens=500,
+        )
+
+    assert provider_calls == []
+
+
+def test_call_structured_hard_guard_never_uses_completion_probe(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_USAGE_PROBE", "true")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        api_base="http://llm.example/v1",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+    class _ForbiddenProbe:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "completion-based token probe must not run inside hard guard"
+            )
+
+    monkeypatch.setattr(
+        "app.core.context.budget.OpenAIUsageProbe",
+        _ForbiddenProbe,
+    )
+
+    captured = {}
+    class _StructuredModel:
+        def invoke(self, messages, config=None):
+            captured["question"] = messages[-1].content
+            return EvidencePlanOutput(
+                layer="L3",
+                evidence_plan=[],
+                collection_strategy="bounded-without-probe",
+            )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def with_structured_output(self, schema, **kwargs):
+            return _StructuredModel()
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    question = (
+        "HEAD\n"
+        + ("oversized raw provider probe input " * 6500)
+        + "\nTAIL"
+    )
+
+    parsed, _raw = ai.call_structured(
+        "system",
+        question,
+        EvidencePlanOutput,
+        node_id="rca",
+        max_tokens=6000,
+    )
+
+    assert isinstance(parsed, EvidencePlanOutput)
+    assert len(captured["question"]) < len(question)
+
+
+def test_call_structured_hard_guard_fails_closed_and_archives_unknown_window(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("MODEL_CONTEXT_WINDOW", raising=False)
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "app.core.aicall.client.ModelContextResolver.resolve",
+        lambda self, *args, **kwargs: {
+            "context_window": None,
+            "source": "unavailable",
+            "accuracy": "unknown",
+        },
+    )
+    ai = AICall(
+        model="openai/unknown-local-model",
+        api_key="sk-test",
+        context_compaction_config={"hard_guard_enabled": True},
+    )
+    provider_calls = []
+    monkeypatch.setattr(
+        ai,
+        "_create_chat_model",
+        lambda **kwargs: provider_calls.append(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="context window is unavailable"):
+        ai.call_structured(
+            "system",
+            "oversized" * 20000,
+            EvidencePlanOutput,
+            node_id="rca",
+            run_id="run-unknown-window",
+        )
+
+    assert provider_calls == []
+    pre_guard_path = (
+        tmp_path
+        / "run-unknown-window"
+        / "budget"
+        / "rca_pre_guard.json"
+    )
+    assert pre_guard_path.exists()
+    archived = json.loads(pre_guard_path.read_text())
+    assert archived["hard_guard"]["enabled"] is True
+    assert archived["hard_guard"]["error"] == "context_window_unavailable"
+
+
+def test_call_structured_hard_guard_uses_conservative_utf8_count_for_cjk(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_USAGE_PROBE", "true")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        api_base="http://llm.example/v1",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_preserve_tail_tokens": 1200,
+        },
+    )
+    class _ForbiddenProbe:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "hard guard must use local tokenizer or conservative count"
+            )
+
+    monkeypatch.setattr(
+        "app.core.context.budget.OpenAIUsageProbe",
+        _ForbiddenProbe,
+    )
+    captured = {}
+
+    class _StructuredModel:
+        def invoke(self, messages, config=None):
+            captured["question"] = messages[-1].content
+            return EvidencePlanOutput(
+                layer="L3",
+                evidence_plan=[],
+                collection_strategy="conservative-local-count",
+            )
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def with_structured_output(self, schema, **kwargs):
+            return _StructuredModel()
+
+    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
+    question = (
+        "HEAD preserve conservative local evidence\n"
+        + ("本地估算必须保守计算中文内容，不能依赖补发请求计数。" * 2000)
+        + "\nTAIL preserve structured output requirements"
+    )
+
+    parsed, _raw = ai.call_structured(
+        "system",
+        question,
+        EvidencePlanOutput,
+        node_id="rca",
+        max_tokens=6000,
+    )
+
+    assert isinstance(parsed, EvidencePlanOutput)
+    assert len(captured["question"]) < len(question)
+    assert captured["question"].startswith("HEAD preserve")
+    assert captured["question"].endswith(
+        "TAIL preserve structured output requirements"
+    )
+    schema_tokens = count_tokens(
+        EvidencePlanOutput.model_json_schema(),
+        model=ai.model_str,
+    )["tokens"]
+    assert (
+        count_tokens("system", model=ai.model_str)["tokens"]
+        + count_tokens(captured["question"], model=ai.model_str)["tokens"]
+        + schema_tokens
+    ) <= 23040
 
 
 def test_call_with_expect_json_interrupts_on_valid_json_message():

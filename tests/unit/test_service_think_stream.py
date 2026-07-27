@@ -202,6 +202,10 @@ def test_holmes_service_context_compaction_config_defaults():
         "trigger_ratio": 0.70,
         "max_compactions_per_call": 1,
         "summary_max_tokens": 1200,
+        "hard_guard_enabled": True,
+        "hard_guard_input_ratio": 0.72,
+        "hard_guard_safety_tokens": 2000,
+        "hard_guard_preserve_tail_tokens": 1200,
     }
 
 
@@ -216,6 +220,10 @@ def test_holmes_service_context_compaction_config_uses_workflow_config(monkeypat
             "trigger_ratio": "0.65",
             "max_compactions_per_call": "2",
             "summary_max_tokens": "900",
+            "hard_guard_enabled": False,
+            "hard_guard_input_ratio": "0.68",
+            "hard_guard_safety_tokens": "1800",
+            "hard_guard_preserve_tail_tokens": "700",
         }
     }
 
@@ -226,4 +234,19 @@ def test_holmes_service_context_compaction_config_uses_workflow_config(monkeypat
         "trigger_ratio": 0.65,
         "max_compactions_per_call": 2,
         "summary_max_tokens": 900,
+        "hard_guard_enabled": False,
+        "hard_guard_input_ratio": 0.68,
+        "hard_guard_safety_tokens": 1800,
+        "hard_guard_preserve_tail_tokens": 700,
     }
+
+
+def test_holmes_service_context_compaction_config_preserves_zero_compactions():
+    svc = HolmesService()
+    svc.workflow_config = {
+        "context_compaction": {
+            "max_compactions_per_call": 0,
+        }
+    }
+
+    assert svc.get_context_compaction_config()["max_compactions_per_call"] == 0

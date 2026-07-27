@@ -18,15 +18,31 @@ import re
 import time
 from copy import deepcopy
 from contextlib import ExitStack, contextmanager, nullcontext
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import anyio
 from pydantic import BaseModel, ValidationError
 from langgraph.errors import GraphRecursionError
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+from openai import (
+    APIError,
+    APIResponseValidationError,
+    APIStatusError,
+    APITimeoutError,
+    InternalServerError,
+)
 
 from app.core.context.archive import ContextArchive
-from app.core.context.budget import ContextBudgetEstimator, ModelContextResolver, serialize_tool_schema
+from app.core.context.budget import (
+    ContextBudgetEstimator,
+    ModelContextResolver,
+    calculate_hard_input_limit,
+    compact_text_to_token_budget,
+    count_tokens,
+    serialize_tool_schema,
+)
 from app.core.context.observation import ObservationProcessor
 from app.core.prompts import get_workflow_prompt
 from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
@@ -40,6 +56,14 @@ _PROVIDER_BASE_URLS = {
     "deepseek": "https://api.deepseek.com/v1",
     "openai": None,  # 默认
 }
+
+_PROVIDER_REQUEST_OVERHEAD_TOKENS = 64
+_ESTIMATOR_DRIFT_RESERVE_TOKENS = 256
+_RETRYABLE_STREAM_INTERRUPTION_SIGNATURES = (
+    "unexpected eof",
+    "empty_stream",
+    "closed before first payload",
+)
 
 
 def _parse_model(model_str: str, api_base: str = "") -> Tuple[str, Optional[str]]:
@@ -60,6 +84,21 @@ def _parse_model(model_str: str, api_base: str = "") -> Tuple[str, Optional[str]
         base_url = _PROVIDER_BASE_URLS.get(provider.lower())
         return model_name, base_url
     return model_str, None
+
+
+class StructuredContextBudgetError(RuntimeError):
+    """Structured request rejected locally before a provider invocation."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        pre_budget: Optional[Dict[str, Any]] = None,
+        final_budget: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(message)
+        self.pre_budget = pre_budget
+        self.final_budget = final_budget
 
 
 class AICall:
@@ -121,6 +160,33 @@ class AICall:
             kwargs["extra_body"] = extra_body
         return ChatOpenAI(**kwargs)
 
+    @staticmethod
+    def _is_retryable_stream_eof(exc: Exception) -> bool:
+        """Recognize the SDK's incomplete streamed-response failure."""
+        if not isinstance(exc, APIError):
+            return False
+        if isinstance(exc, (APITimeoutError, APIResponseValidationError)):
+            return False
+        if isinstance(exc, APIStatusError) and not isinstance(
+            exc,
+            InternalServerError,
+        ):
+            return False
+        current: Optional[BaseException] = exc
+        seen = set()
+        for _ in range(5):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            message = str(current).strip().lower()
+            if any(
+                signature in message
+                for signature in _RETRYABLE_STREAM_INTERRUPTION_SIGNATURES
+            ):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -137,26 +203,78 @@ class AICall:
         run_id = kwargs.pop("run_id", "")
         static_context_components = kwargs.pop("static_context_components", None)
         output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
+        try:
+            (
+                system_prompt,
+                question,
+                hard_guard,
+                pre_guard_budget,
+                budget,
+            ) = self._prepare_structured_call_context(
+                system_prompt=system_prompt,
+                question=question,
+                schema=None,
+                node_id=node_id or "simple",
+                output_reserved=output_reserved,
+            )
+        except StructuredContextBudgetError as exc:
+            if run_id:
+                try:
+                    archive = ContextArchive(run_id=run_id)
+                    if isinstance(exc.pre_budget, dict):
+                        archive.write_budget(
+                            f"{node_id or 'simple'}_pre_guard",
+                            exc.pre_budget,
+                        )
+                    if isinstance(exc.final_budget, dict):
+                        archive.write_budget(
+                            node_id or "simple",
+                            exc.final_budget,
+                        )
+                except Exception as archive_exc:
+                    logger.warning(
+                        "⚠️ [AICall] simple hard guard 失败归档写入失败: %s",
+                        archive_exc,
+                    )
+            raise
         if static_context_components is None:
             static_context_components = [
-                {"name": "node_system_prompt", "category": "static_input", "content": system_prompt},
-                {"name": "user_message", "category": "static_input", "content": question},
-                {"name": "output_reserved", "category": "reserved", "tokens": output_reserved},
+                {
+                    "name": "node_system_prompt",
+                    "category": "static_input",
+                    "content": system_prompt,
+                },
+                {
+                    "name": "user_message",
+                    "category": "static_input",
+                    "content": question,
+                },
+                {
+                    "name": "output_reserved",
+                    "category": "reserved",
+                    "tokens": output_reserved,
+                },
+                {
+                    "name": "safety_margin",
+                    "category": "reserved",
+                    "tokens": hard_guard.get("safety_tokens", 0),
+                },
+                {
+                    "name": "provider_request_overhead",
+                    "category": "static_input",
+                    "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
+                    "token_accuracy": "estimated",
+                },
             ]
-        budget = ContextBudgetEstimator().estimate(
-            node_id=node_id or "simple",
-            model=self.model_str,
-            system_prompt=system_prompt,
-            user_message=question,
-            tool_count=0,
-            components=static_context_components,
-            api_base=self.api_base or "",
-            api_key=self.api_key or "",
-        )
         ContextBudgetEstimator().log(budget)
         if run_id:
             try:
-                ContextArchive(run_id=run_id).write_budget(node_id or "simple", budget)
+                archive = ContextArchive(run_id=run_id)
+                archive.write_budget(
+                    f"{node_id or 'simple'}_pre_guard",
+                    pre_guard_budget,
+                )
+                archive.write_budget(node_id or "simple", budget)
             except Exception as exc:
                 logger.warning("⚠️ [AICall] call_simple 写入 context budget 失败: %s", exc)
 
@@ -170,15 +288,37 @@ class AICall:
         messages.append(HumanMessage(content=question))
 
         session_id = self._normalize_langfuse_session_id(run_id)
-        # 透传 kwargs（如 max_tokens）到 model.invoke
-        model = self._create_chat_model(session_id=session_id, node_id=node_id or "simple")
-        if kwargs:
-            model = model.bind(**kwargs)
-
-        model = self._bind_session_metadata(model, session_id, node_id=node_id or "simple")
         invoke_config = self._build_langchain_config(session_id, node_id=node_id or "simple")
-        with self._langfuse_session_scope(session_id, node_id or "simple"):
-            result = model.invoke(messages, config=invoke_config) if invoke_config else model.invoke(messages)
+
+        def _invoke(*, disable_streaming: bool = False):
+            model = self._create_chat_model(
+                session_id=session_id,
+                node_id=node_id or "simple",
+                disable_streaming=disable_streaming,
+            )
+            if kwargs:
+                model = model.bind(**kwargs)
+            model = self._bind_session_metadata(
+                model,
+                session_id,
+                node_id=node_id or "simple",
+            )
+            with self._langfuse_session_scope(session_id, node_id or "simple"):
+                if invoke_config:
+                    return model.invoke(messages, config=invoke_config)
+                return model.invoke(messages)
+
+        try:
+            result = _invoke()
+        except Exception as exc:
+            if not self._is_retryable_stream_eof(exc):
+                raise
+            logger.warning(
+                "⚠️ [AICall] streamed response ended unexpectedly; "
+                "retrying once without streaming | node=%s",
+                node_id or "simple",
+            )
+            result = _invoke(disable_streaming=True)
         content = result.content or ""
         usage = self._extract_usage_metadata(result)
         self._log_provider_usage(node_id or "simple", usage, source="provider_usage:call_simple")
@@ -199,7 +339,9 @@ class AICall:
                 components=final_components,
                 api_base=self.api_base or "",
                 api_key=self.api_key or "",
+                enable_usage_probe=False,
             )
+            final_budget["hard_guard"] = hard_guard
             try:
                 ContextArchive(run_id=run_id).write_budget(node_id or "simple", final_budget)
             except Exception as exc:
@@ -237,8 +379,61 @@ class AICall:
         """
         use_native = bool(kwargs.pop("use_native_structured", True))
         allow_text_fallback = bool(kwargs.pop("allow_text_fallback", False))
+        context_compactor = kwargs.pop("context_compactor", None)
+        node_id = str(kwargs.get("node_id") or "structured")
+        run_id = str(kwargs.get("run_id") or "")
+        output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
+        try:
+            (
+                system_prompt,
+                question,
+                hard_guard,
+                pre_guard_budget,
+                final_guard_budget,
+            ) = self._prepare_structured_call_context(
+                system_prompt=system_prompt,
+                question=question,
+                schema=schema,
+                node_id=node_id,
+                output_reserved=output_reserved,
+                context_compactor=context_compactor,
+            )
+        except StructuredContextBudgetError as exc:
+            if run_id:
+                try:
+                    archive = ContextArchive(run_id=run_id)
+                    if isinstance(exc.pre_budget, dict):
+                        archive.write_budget(
+                            f"{node_id}_pre_guard",
+                            exc.pre_budget,
+                        )
+                    if isinstance(exc.final_budget, dict):
+                        archive.write_budget(node_id, exc.final_budget)
+                except Exception as archive_exc:
+                    logger.warning(
+                        "⚠️ [AICall] structured hard guard 失败归档写入失败: %s",
+                        archive_exc,
+                    )
+            raise
+        if run_id:
+            try:
+                archive = ContextArchive(run_id=run_id)
+                archive.write_budget(f"{node_id}_pre_guard", pre_guard_budget)
+                archive.write_budget(node_id, final_guard_budget)
+            except Exception as exc:
+                logger.warning(
+                    "⚠️ [AICall] structured hard guard 写入 context budget 失败: %s",
+                    exc,
+                )
         if use_native:
-            native, raw = self._call_native_structured(system_prompt, question, schema, **kwargs)
+            native, raw = self._call_native_structured(
+                system_prompt,
+                question,
+                schema,
+                hard_guard_metadata=hard_guard,
+                hard_guard_budget=final_guard_budget,
+                **kwargs,
+            )
             if native is not None:
                 return native, raw
 
@@ -253,6 +448,17 @@ class AICall:
         # support native structured output. The schema is still enforced by
         # Pydantic; invalid JSON is treated as no result.
         raw = self.call_simple(system_prompt, question, **kwargs)
+        if run_id:
+            try:
+                ContextArchive(run_id=run_id).write_budget(
+                    node_id,
+                    final_guard_budget,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "⚠️ [AICall] structured JSON fallback 写回 hard guard budget 失败: %s",
+                    exc,
+                )
         parsed = self.extract_json_payload(raw)
         if parsed is None:
             logger.warning("⚠️ [AICall] structured output parse failed for schema=%s", schema.__name__)
@@ -279,23 +485,48 @@ class AICall:
         run_id = kwargs.pop("run_id", "")
         static_context_components = kwargs.pop("static_context_components", None)
         structured_method = kwargs.pop("structured_method", "function_calling")
+        hard_guard_metadata = kwargs.pop("hard_guard_metadata", None)
+        hard_guard_budget = kwargs.pop("hard_guard_budget", None)
         output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
+        try:
+            schema_payload = schema.model_json_schema()
+        except Exception:
+            schema_payload = {"schema": getattr(schema, "__name__", str(schema))}
         if static_context_components is None:
             static_context_components = [
                 {"name": "node_system_prompt", "category": "static_input", "content": system_prompt},
                 {"name": "user_message", "category": "static_input", "content": question},
+                {"name": "structured_schema", "category": "static_input", "content": schema_payload},
                 {"name": "output_reserved", "category": "reserved", "tokens": output_reserved},
             ]
-        budget = ContextBudgetEstimator().estimate(
-            node_id=node_id or "structured",
-            model=self.model_str,
-            system_prompt=system_prompt,
-            user_message=question,
-            tool_count=0,
-            components=static_context_components,
-            api_base=self.api_base or "",
-            api_key=self.api_key or "",
-        )
+        elif not any(
+            component.get("name") == "structured_schema"
+            for component in static_context_components
+        ):
+            static_context_components = [
+                *static_context_components,
+                {
+                    "name": "structured_schema",
+                    "category": "static_input",
+                    "content": schema_payload,
+                },
+            ]
+        if isinstance(hard_guard_budget, dict):
+            budget = deepcopy(hard_guard_budget)
+        else:
+            budget = ContextBudgetEstimator().estimate(
+                node_id=node_id or "structured",
+                model=self.model_str,
+                system_prompt=system_prompt,
+                user_message=question,
+                tool_count=0,
+                components=static_context_components,
+                api_base=self.api_base or "",
+                api_key=self.api_key or "",
+                enable_usage_probe=False,
+            )
+        if isinstance(hard_guard_metadata, dict):
+            budget["hard_guard"] = hard_guard_metadata
         ContextBudgetEstimator().log(budget)
         if run_id:
             try:
@@ -347,6 +578,340 @@ class AICall:
                 exc,
             )
             return None, ""
+
+    def _prepare_structured_call_context(
+        self,
+        *,
+        system_prompt: str,
+        question: str,
+        schema: Optional[type[BaseModel]],
+        node_id: str,
+        output_reserved: int,
+        context_compactor: Optional[Callable[..., str]] = None,
+    ) -> Tuple[str, str, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        """Apply a deterministic hard budget before any provider call."""
+        config = self._structured_hard_guard_config()
+        resolved = ModelContextResolver().resolve(
+            self.model_str,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+        )
+        context_window = resolved.get("context_window")
+        schema_payload: Any = None
+        if schema is not None:
+            try:
+                schema_payload = schema.model_json_schema()
+            except Exception:
+                schema_payload = {
+                    "schema": getattr(schema, "__name__", str(schema))
+                }
+
+        safety_margin = int(config["safety_tokens"])
+        components = [
+            {
+                "name": "node_system_prompt",
+                "category": "static_input",
+                "content": system_prompt,
+            },
+            {
+                "name": "user_message",
+                "category": "static_input",
+                "content": question,
+            },
+            {
+                "name": "output_reserved",
+                "category": "reserved",
+                "tokens": output_reserved,
+            },
+            {
+                "name": "safety_margin",
+                "category": "reserved",
+                "tokens": safety_margin,
+            },
+            {
+                "name": "provider_request_overhead",
+                "category": "static_input",
+                "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
+                "token_accuracy": "estimated",
+            },
+        ]
+        if schema_payload is not None:
+            components.insert(2, {
+                "name": "structured_schema",
+                "category": "static_input",
+                "content": schema_payload,
+            })
+        estimator = ContextBudgetEstimator()
+        pre_budget = estimator.estimate(
+            node_id=node_id,
+            model=self.model_str,
+            system_prompt=system_prompt,
+            user_message=question,
+            components=components,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+            enable_usage_probe=False,
+        )
+        schema_tokens = (
+            count_tokens(schema_payload, model=self.model_str)["tokens"]
+            if schema_payload is not None
+            else 0
+        )
+        local_input_tokens = int(pre_budget.get("actual_context_tokens") or 0)
+        original_input_tokens = local_input_tokens
+        token_count_accuracy = str(
+            pre_budget.get("token_count_accuracy") or "estimated"
+        ).strip().lower()
+        metadata: Dict[str, Any] = {
+            "enabled": bool(config["enabled"]),
+            "triggered": False,
+            "strategy": "none",
+            "context_window": context_window,
+            "input_ratio": config["input_ratio"],
+            "output_reserved": output_reserved,
+            "safety_tokens": safety_margin,
+            "original_input_tokens": original_input_tokens,
+            "final_input_tokens": original_input_tokens,
+            "max_input_tokens": None,
+            "effective_input_target": None,
+            "estimator_drift_reserve": 0,
+            "token_count_accuracy": token_count_accuracy,
+            "original_question_chars": len(question),
+            "final_question_chars": len(question),
+        }
+        pre_budget["hard_guard"] = dict(metadata)
+
+        if not config["enabled"]:
+            final_budget = dict(pre_budget)
+            return system_prompt, question, metadata, pre_budget, final_budget
+        if not isinstance(context_window, int) or context_window <= 0:
+            metadata["error"] = "context_window_unavailable"
+            pre_budget["hard_guard"] = dict(metadata)
+            raise StructuredContextBudgetError(
+                f"[context_budget] node={node_id} context window is unavailable",
+                pre_budget=pre_budget,
+            )
+
+        max_input_tokens = calculate_hard_input_limit(
+            context_window=context_window,
+            output_reserved=output_reserved,
+            safety_margin=safety_margin,
+            input_ratio=float(config["input_ratio"]),
+        )
+        metadata["max_input_tokens"] = max_input_tokens
+        estimator_drift_reserve = (
+            0
+            if token_count_accuracy == "exact"
+            else min(
+                max_input_tokens,
+                int(config["estimator_drift_reserve"]),
+            )
+        )
+        effective_input_target = max(
+            0,
+            max_input_tokens - estimator_drift_reserve,
+        )
+        metadata["effective_input_target"] = effective_input_target
+        metadata["estimator_drift_reserve"] = estimator_drift_reserve
+        pre_budget["hard_guard"] = dict(metadata)
+        if effective_input_target <= 0:
+            metadata["error"] = "input_budget_unavailable"
+            pre_budget["hard_guard"] = dict(metadata)
+            raise StructuredContextBudgetError(
+                f"[context_budget] node={node_id} has no input budget after "
+                f"output_reserved={output_reserved} safety={safety_margin} "
+                f"estimator_drift_reserve={estimator_drift_reserve}",
+                pre_budget=pre_budget,
+            )
+
+        final_question = question
+        strategies: List[str] = []
+        system_tokens = count_tokens(
+            system_prompt,
+            model=self.model_str,
+        )["tokens"]
+        local_question_budget = (
+            effective_input_target
+            - system_tokens
+            - schema_tokens
+            - _PROVIDER_REQUEST_OVERHEAD_TOKENS
+        )
+        if local_question_budget <= 0:
+            metadata["error"] = "static_contract_exceeds_input_budget"
+            pre_budget["hard_guard"] = dict(metadata)
+            contract_name = (
+                "system prompt and structured schema"
+                if schema_payload is not None
+                else "system prompt"
+            )
+            raise StructuredContextBudgetError(
+                f"[context_budget] node={node_id} {contract_name} exceed "
+                f"hard input budget {max_input_tokens} "
+                f"(effective target {effective_input_target})",
+                pre_budget=pre_budget,
+            )
+
+        if original_input_tokens > effective_input_target:
+            metadata["triggered"] = True
+            if callable(context_compactor):
+                try:
+                    compacted = context_compactor(
+                        final_question,
+                        max_tokens=local_question_budget,
+                        model=self.model_str,
+                    )
+                    if isinstance(compacted, str) and compacted.strip():
+                        final_question = compacted
+                        strategies.append("node_compactor")
+                except Exception as exc:
+                    logger.warning(
+                        "⚠️ [AICall] node-specific context compactor failed "
+                        "node=%s: %s",
+                        node_id,
+                        exc,
+                    )
+
+            if (
+                count_tokens(final_question, model=self.model_str)["tokens"]
+                > local_question_budget
+            ):
+                final_question = compact_text_to_token_budget(
+                    final_question,
+                    max_tokens=local_question_budget,
+                    model=self.model_str,
+                    preserve_tail_tokens=int(config["preserve_tail_tokens"]),
+                )
+                strategies.append("deterministic_head_tail")
+
+        def _estimate_candidate(candidate_question: str) -> Dict[str, Any]:
+            candidate_components = [
+                {
+                    "name": "node_system_prompt",
+                    "category": "static_input",
+                    "content": system_prompt,
+                },
+                {
+                    "name": "user_message",
+                    "category": "static_input",
+                    "content": candidate_question,
+                },
+                {
+                    "name": "output_reserved",
+                    "category": "reserved",
+                    "tokens": output_reserved,
+                },
+                {
+                    "name": "safety_margin",
+                    "category": "reserved",
+                    "tokens": safety_margin,
+                },
+                {
+                    "name": "provider_request_overhead",
+                    "category": "static_input",
+                    "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
+                    "token_accuracy": "estimated",
+                },
+            ]
+            if schema_payload is not None:
+                candidate_components.insert(2, {
+                    "name": "structured_schema",
+                    "category": "static_input",
+                    "content": schema_payload,
+                })
+            return estimator.estimate(
+                node_id=node_id,
+                model=self.model_str,
+                system_prompt=system_prompt,
+                user_message=candidate_question,
+                components=candidate_components,
+                api_base=self.api_base or "",
+                api_key=self.api_key or "",
+                enable_usage_probe=False,
+            )
+
+        final_budget = _estimate_candidate(final_question)
+        final_input_tokens = int(
+            final_budget.get("actual_context_tokens") or 0
+        )
+
+        if final_input_tokens > effective_input_target:
+            metadata["error"] = "deterministic_compaction_failed"
+            metadata["final_input_tokens"] = final_input_tokens
+            metadata["final_question_chars"] = len(final_question)
+            pre_budget["hard_guard"] = dict(metadata)
+            final_budget["hard_guard"] = dict(metadata)
+            raise StructuredContextBudgetError(
+                f"[context_budget] node={node_id} deterministic compaction failed: "
+                f"input={final_input_tokens} target={effective_input_target} "
+                f"limit={max_input_tokens}",
+                pre_budget=pre_budget,
+                final_budget=final_budget,
+            )
+
+        metadata.update({
+            "strategy": "+".join(strategies) if strategies else "none",
+            "final_input_tokens": final_input_tokens,
+            "final_question_chars": len(final_question),
+        })
+        pre_budget["hard_guard"] = dict(metadata)
+        final_budget["hard_guard"] = dict(metadata)
+        if metadata["triggered"]:
+            logger.warning(
+                "🧯 [AICall] structured hard context guard | node=%s "
+                "input=%d→%d target=%d limit=%d chars=%d→%d strategy=%s",
+                node_id,
+                original_input_tokens,
+                final_input_tokens,
+                effective_input_target,
+                max_input_tokens,
+                len(question),
+                len(final_question),
+                metadata["strategy"],
+            )
+        return (
+            system_prompt,
+            final_question,
+            metadata,
+            pre_budget,
+            final_budget,
+        )
+
+    def _structured_hard_guard_config(self) -> Dict[str, Any]:
+        config = self.context_compaction_config
+        enabled = bool(config.get("hard_guard_enabled", True))
+        try:
+            input_ratio = float(config.get("hard_guard_input_ratio", 0.72))
+        except (TypeError, ValueError):
+            input_ratio = 0.72
+        try:
+            safety_tokens = int(config.get("hard_guard_safety_tokens", 2000))
+        except (TypeError, ValueError):
+            safety_tokens = 2000
+        try:
+            preserve_tail_tokens = int(
+                config.get("hard_guard_preserve_tail_tokens", 1200)
+            )
+        except (TypeError, ValueError):
+            preserve_tail_tokens = 1200
+        try:
+            estimator_drift_reserve = int(
+                config.get(
+                    "hard_guard_estimator_drift_reserve",
+                    _ESTIMATOR_DRIFT_RESERVE_TOKENS,
+                )
+            )
+        except (TypeError, ValueError):
+            estimator_drift_reserve = _ESTIMATOR_DRIFT_RESERVE_TOKENS
+        return {
+            "enabled": enabled,
+            "input_ratio": min(max(input_ratio, 0.05), 0.95),
+            "safety_tokens": max(0, safety_tokens),
+            "preserve_tail_tokens": max(0, preserve_tail_tokens),
+            "estimator_drift_reserve": max(
+                _ESTIMATOR_DRIFT_RESERVE_TOKENS,
+                estimator_drift_reserve,
+            ),
+        }
 
     def call(
         self,
@@ -430,11 +995,6 @@ class AICall:
         from langchain.agents import create_agent
 
         session_id = self._normalize_langfuse_session_id(run_id)
-        agent_model = self._bind_session_metadata(
-            self._create_chat_model(session_id=session_id, node_id=node_id or "agent"),
-            session_id,
-            node_id=node_id or "agent",
-        )
         response_format = None
         structured_output_tool_names = set()
         if response_schema is not None:
@@ -450,15 +1010,31 @@ class AICall:
                 if str(getattr(spec, "name", "")).strip()
             }
 
-        create_agent_kwargs = {
-            "model": agent_model,
-            "tools": tools,
-            "system_prompt": system_prompt,
-            "middleware": [self._build_tool_dedup_middleware()],
-        }
-        if response_format is not None:
-            create_agent_kwargs["response_format"] = response_format
-        agent = create_agent(**create_agent_kwargs)
+        def _create_agent_instance(*, disable_streaming: bool = False):
+            agent_model = self._bind_session_metadata(
+                self._create_chat_model(
+                    session_id=session_id,
+                    node_id=node_id or "agent",
+                    disable_streaming=disable_streaming,
+                ),
+                session_id,
+                node_id=node_id or "agent",
+            )
+            create_agent_kwargs = {
+                "model": agent_model,
+                "tools": tools,
+                "system_prompt": system_prompt,
+                "middleware": [
+                    self._build_context_hard_guard_middleware(
+                        node_id=node_id or "agent",
+                        run_id=run_id,
+                    ),
+                    self._build_tool_dedup_middleware(),
+                ],
+            }
+            if response_format is not None:
+                create_agent_kwargs["response_format"] = response_format
+            return create_agent(**create_agent_kwargs)
 
         # 使用 async stream 模式（MCP 工具需要异步调用）
         import asyncio
@@ -476,12 +1052,26 @@ class AICall:
         structured_response = None
         _content_buffer = []  # 收集 token 级别的文本片段
         tool_observation_contents: List[str] = []
-        compaction_triggered = False
+        compaction_count = 0
+        try:
+            max_compactions = max(
+                0,
+                int(
+                    self._runtime_compaction_config().get(
+                        "max_compactions_per_call",
+                        1,
+                    )
+                    or 0
+                ),
+            )
+        except (TypeError, ValueError):
+            max_compactions = 1
         emitted_ai_messages: List[Tuple[Any, str]] = []
         emitted_tool_messages: List[Tuple[Any, Dict[str, Any]]] = []
+        agent = None
 
         async def _run_agent():
-            nonlocal final_content, structured_response, iteration, tool_call_count, tool_result_sequence, compaction_triggered
+            nonlocal final_content, structured_response, iteration, tool_call_count, tool_result_sequence, compaction_count
             model_request_started_at = time.time()
             async for chunk in agent.astream(
                 input_messages, config=config,
@@ -577,13 +1167,27 @@ class AICall:
 
                             # AI 完整消息（用于 final_content 和工具调用检测）
                             full_msg_text = self._extract_visible_ai_text(msg)
-                            should_emit_ai_message = bool(full_msg_text) and (not msg_tool_calls or bool(new_tool_calls))
+                            should_track_ai_message = (
+                                bool(full_msg_text) or bool(new_tool_calls)
+                            ) and (
+                                not msg_tool_calls or bool(new_tool_calls)
+                            )
+                            if should_track_ai_message:
+                                emitted_ai_messages.append(
+                                    (msg, full_msg_text)
+                                )
+                                if compaction_count > 0:
+                                    self._compact_langgraph_ai_messages_in_place(
+                                        emitted_ai_messages
+                                    )
+
+                            should_emit_ai_message = (
+                                bool(full_msg_text)
+                                and should_track_ai_message
+                            )
                             if should_emit_ai_message:
                                 final_content = full_msg_text
                                 iteration += 1
-                                emitted_ai_messages.append((msg, full_msg_text))
-                                if compaction_triggered:
-                                    self._compact_langgraph_ai_messages_in_place(emitted_ai_messages)
                                 logger.debug("   💬 [AICall] AI 消息 #%d:\n%s",
                                             iteration, full_msg_text[:1000])
                                 evt = {"type": "ai_message",
@@ -676,9 +1280,32 @@ class AICall:
                             tool_observation_contents.append(bounded_content)
                             try:
                                 msg.content = bounded_content
+                                additional_kwargs = dict(
+                                    getattr(msg, "additional_kwargs", None) or {}
+                                )
+                                additional_kwargs.update({
+                                    "aiops_raw_ref": observation.get("raw_ref"),
+                                    "aiops_structured_ref": observation.get(
+                                        "structured_ref"
+                                    ),
+                                    "aiops_summary_ref": observation.get(
+                                        "summary_ref"
+                                    ),
+                                    "aiops_semantic_success": observation.get(
+                                        "semantic_success",
+                                        True,
+                                    ),
+                                })
+                                msg.additional_kwargs = additional_kwargs
                             except Exception as exc:
                                 logger.warning("⚠️ [AICall] ToolMessage 内容压缩回写失败: %s", exc)
-                            status = "success"
+                            status = str(
+                                getattr(msg, "status", "success") or "success"
+                            ).strip().lower()
+                            if status not in {"success", "error"}:
+                                status = "success"
+                            if status == "error":
+                                observation["semantic_success"] = False
                             tool_call_id = getattr(msg, "tool_call_id", None)
                             tool_args = tool_args_by_call_id.get(str(tool_call_id), {}) if tool_call_id else {}
                             tool_sequence = tool_sequence_by_call_id.get(
@@ -693,6 +1320,7 @@ class AICall:
                             all_tool_calls.append({
                                 "tool_name": tool_name,
                                 "tool_args": tool_args,
+                                "status": status,
                                 "result": bounded_content,
                                 "raw_ref": observation.get("raw_ref"),
                                 "structured_ref": observation.get("structured_ref"),
@@ -706,6 +1334,11 @@ class AICall:
                             })
                             emitted_tool_messages.append((msg, {
                                 "tool_name": tool_name,
+                                "semantic_success": observation.get(
+                                    "semantic_success",
+                                    True,
+                                ),
+                                "result_preview": bounded_content[:500],
                                 "raw_ref": observation.get("raw_ref"),
                                 "structured_ref": observation.get("structured_ref"),
                                 "summary_ref": observation.get("summary_ref"),
@@ -755,15 +1388,19 @@ class AICall:
                             self._record(thinking_events, "tool_result", node_id, **evt)
                             model_request_started_at = time.time()
 
-                            if not compaction_triggered:
-                                compaction_triggered = self._maybe_compact_runtime_context(
-                                    node_id=node_id or "unknown",
-                                    run_id=run_id,
-                                    static_context_components=static_context_components,
-                                    thinking_events=thinking_events,
-                                    tool_observation_contents=tool_observation_contents,
+                            if compaction_count < max_compactions:
+                                compacted = await anyio.to_thread.run_sync(
+                                    partial(
+                                        self._maybe_compact_runtime_context,
+                                        node_id=node_id or "unknown",
+                                        run_id=run_id,
+                                        static_context_components=static_context_components,
+                                        thinking_events=thinking_events,
+                                        tool_observation_contents=tool_observation_contents,
+                                    ),
                                 )
-                                if compaction_triggered:
+                                if compacted:
+                                    compaction_count += 1
                                     self._compact_langgraph_ai_messages_in_place(emitted_ai_messages)
                                     self._compact_langgraph_tool_messages_in_place(emitted_tool_messages)
 
@@ -787,22 +1424,55 @@ class AICall:
             with self._langfuse_session_scope(session_id, node_id or "agent"):
                 asyncio.run(_run_agent())
 
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                pool.submit(_run_agent_thread).result(timeout=max_steps * 30)
-        except concurrent.futures.TimeoutError:
-            logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
-            if not final_content:
-                final_content = "Agent 执行超时"
-        except GraphRecursionError as e:
-            recursion_msg = str(e).splitlines()[0].strip()
-            logger.warning("⚠️ [AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
-            if not final_content:
-                final_content = f"达到最大工具执行步数限制: {recursion_msg}"
-        except Exception as e:
-            logger.error("❌ [AICall] agent 执行异常: %s", e, exc_info=True)
-            if not final_content:
-                final_content = f"Agent 执行异常: {e}"
+        def _agent_has_progress() -> bool:
+            return bool(
+                tool_call_count
+                or iteration
+                or _content_buffer
+                or final_content
+                or structured_response is not None
+                or seen_tool_call_signatures
+                or seen_tool_result_signatures
+                or all_tool_calls
+                or emitted_ai_messages
+                or emitted_tool_messages
+            )
+
+        for attempt in range(2):
+            try:
+                agent = _create_agent_instance(
+                    disable_streaming=attempt == 1,
+                )
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(_run_agent_thread).result(timeout=max_steps * 30)
+                break
+            except concurrent.futures.TimeoutError:
+                logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
+                if not final_content:
+                    final_content = "Agent 执行超时"
+                break
+            except GraphRecursionError as e:
+                recursion_msg = str(e).splitlines()[0].strip()
+                logger.warning("⚠️ [AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
+                if not final_content:
+                    final_content = f"达到最大工具执行步数限制: {recursion_msg}"
+                break
+            except Exception as e:
+                if (
+                    attempt == 0
+                    and self._is_retryable_stream_eof(e)
+                    and not _agent_has_progress()
+                ):
+                    logger.warning(
+                        "⚠️ [AICall] agent stream ended before first payload; "
+                        "retrying once without streaming | node=%s",
+                        node_id or "agent",
+                    )
+                    continue
+                logger.error("❌ [AICall] agent 执行异常: %s", e, exc_info=True)
+                if not final_content:
+                    final_content = f"Agent 执行异常: {e}"
+                break
 
         total_ms = (time.time() - call_start) * 1000
         aggregate_usage = self._aggregate_usage_from_events(thinking_events)
@@ -1147,6 +1817,490 @@ class AICall:
             if stack is not None:
                 stack.close()
 
+    def _build_context_hard_guard_middleware(
+        self,
+        *,
+        node_id: str,
+        run_id: str,
+    ):
+        """Bound every LangGraph model request before it reaches the provider."""
+        from langchain.agents.middleware import wrap_model_call
+
+        request_sequence = 0
+
+        @wrap_model_call
+        async def guard_model_request(request, handler):
+            nonlocal request_sequence
+            request_sequence += 1
+            try:
+                guarded_request, budget = self._guard_agent_model_request(
+                    request,
+                    node_id=node_id,
+                )
+            except StructuredContextBudgetError as exc:
+                if run_id and isinstance(exc.pre_budget, dict):
+                    try:
+                        ContextArchive(run_id=run_id).write_budget(
+                            f"{node_id}_agent_guard_{request_sequence:03d}",
+                            exc.pre_budget,
+                        )
+                    except Exception as archive_exc:
+                        logger.warning(
+                            "⚠️ [AICall] agent hard guard 失败归档写入失败: %s",
+                            archive_exc,
+                        )
+                raise
+
+            if run_id:
+                try:
+                    ContextArchive(run_id=run_id).write_budget(
+                        f"{node_id}_agent_guard_{request_sequence:03d}",
+                        budget,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "⚠️ [AICall] agent hard guard budget 写入失败: %s",
+                        exc,
+                    )
+            return await handler(guarded_request)
+
+        return guard_model_request
+
+    def _guard_agent_model_request(
+        self,
+        request: Any,
+        *,
+        node_id: str,
+    ) -> Tuple[Any, Dict[str, Any]]:
+        config = self._structured_hard_guard_config()
+        resolved = ModelContextResolver().resolve(
+            self.model_str,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+        )
+        context_window = resolved.get("context_window")
+        output_reserved = 6000
+        model_settings = getattr(request, "model_settings", None)
+        if isinstance(model_settings, dict):
+            try:
+                output_reserved = int(
+                    model_settings.get("max_tokens")
+                    or model_settings.get("max_completion_tokens")
+                    or output_reserved
+                )
+            except (TypeError, ValueError):
+                output_reserved = 6000
+        safety_margin = int(config["safety_tokens"])
+
+        system_content = (
+            getattr(getattr(request, "system_message", None), "content", "")
+            or ""
+        )
+        messages = list(getattr(request, "messages", None) or [])
+        messages_payload = [
+            self._serialize_agent_message(message)
+            for message in messages
+        ]
+        tool_schema_payload = serialize_tool_schema(
+            getattr(request, "tools", None) or []
+        )
+        response_schema_payload = self._serialize_agent_response_format(
+            getattr(request, "response_format", None)
+        )
+
+        def _components(message_content: Any) -> List[Dict[str, Any]]:
+            return [
+                {
+                    "name": "node_system_prompt",
+                    "category": "static_input",
+                    "content": system_content,
+                },
+                {
+                    "name": "agent_message_history",
+                    "category": "dynamic_runtime",
+                    "content": message_content,
+                },
+                {
+                    "name": "tool_schema",
+                    "category": "static_input",
+                    "content": tool_schema_payload,
+                },
+                {
+                    "name": "structured_schema",
+                    "category": "static_input",
+                    "content": response_schema_payload,
+                },
+                {
+                    "name": "output_reserved",
+                    "category": "reserved",
+                    "tokens": output_reserved,
+                },
+                {
+                    "name": "safety_margin",
+                    "category": "reserved",
+                    "tokens": safety_margin,
+                },
+                {
+                    "name": "provider_request_overhead",
+                    "category": "static_input",
+                    "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
+                    "token_accuracy": "estimated",
+                },
+            ]
+
+        estimator = ContextBudgetEstimator()
+        pre_budget = estimator.estimate(
+            node_id=f"{node_id}_agent_guard",
+            model=self.model_str,
+            system_prompt=system_content,
+            user_message="",
+            components=_components(messages_payload),
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+            enable_usage_probe=False,
+        )
+        original_input_tokens = int(
+            pre_budget.get("actual_context_tokens") or 0
+        )
+        token_count_accuracy = str(
+            pre_budget.get("token_count_accuracy") or "estimated"
+        ).strip().lower()
+        metadata: Dict[str, Any] = {
+            "enabled": bool(config["enabled"]),
+            "triggered": False,
+            "strategy": "none",
+            "context_window": context_window,
+            "input_ratio": config["input_ratio"],
+            "output_reserved": output_reserved,
+            "safety_tokens": safety_margin,
+            "original_input_tokens": original_input_tokens,
+            "final_input_tokens": original_input_tokens,
+            "max_input_tokens": None,
+            "effective_input_target": None,
+            "estimator_drift_reserve": 0,
+            "token_count_accuracy": token_count_accuracy,
+            "original_message_count": len(messages),
+            "final_message_count": len(messages),
+        }
+        pre_budget["hard_guard"] = dict(metadata)
+        if not config["enabled"]:
+            return request, pre_budget
+        if not isinstance(context_window, int) or context_window <= 0:
+            metadata["error"] = "context_window_unavailable"
+            pre_budget["hard_guard"] = dict(metadata)
+            raise StructuredContextBudgetError(
+                f"[context_budget] node={node_id} agent context window is unavailable",
+                pre_budget=pre_budget,
+            )
+
+        max_input_tokens = calculate_hard_input_limit(
+            context_window=context_window,
+            output_reserved=output_reserved,
+            safety_margin=safety_margin,
+            input_ratio=float(config["input_ratio"]),
+        )
+        metadata["max_input_tokens"] = max_input_tokens
+        estimator_drift_reserve = (
+            0
+            if token_count_accuracy == "exact"
+            else min(
+                max_input_tokens,
+                int(config["estimator_drift_reserve"]),
+            )
+        )
+        effective_input_target = max(
+            0,
+            max_input_tokens - estimator_drift_reserve,
+        )
+        metadata["effective_input_target"] = effective_input_target
+        metadata["estimator_drift_reserve"] = estimator_drift_reserve
+        pre_budget["hard_guard"] = dict(metadata)
+        if effective_input_target <= 0:
+            metadata["error"] = "input_budget_unavailable"
+            pre_budget["hard_guard"] = dict(metadata)
+            raise StructuredContextBudgetError(
+                f"[context_budget] node={node_id} agent has no input budget",
+                pre_budget=pre_budget,
+            )
+        if original_input_tokens <= effective_input_target:
+            return request, pre_budget
+
+        fixed_tokens = sum(
+            int(component.get("tokens") or 0)
+            for component in pre_budget.get("components", [])
+            if component.get("name") != "agent_message_history"
+            and component.get("category") != "reserved"
+        )
+        message_budget = effective_input_target - fixed_tokens
+        if message_budget <= 0:
+            metadata["error"] = "static_contract_exceeds_input_budget"
+            pre_budget["hard_guard"] = dict(metadata)
+            raise StructuredContextBudgetError(
+                f"[context_budget] node={node_id} agent system prompt, tools, "
+                f"and response schema exceed hard input budget "
+                f"{max_input_tokens} (effective target "
+                f"{effective_input_target})",
+                pre_budget=pre_budget,
+            )
+
+        compacted_history = self._build_agent_request_compaction_summary(
+            messages,
+            max_tokens=message_budget,
+        )
+        compacted_messages = [HumanMessage(content=compacted_history)]
+        final_budget = estimator.estimate(
+            node_id=f"{node_id}_agent_guard",
+            model=self.model_str,
+            system_prompt=system_content,
+            user_message="",
+            components=_components([
+                self._serialize_agent_message(compacted_messages[0])
+            ]),
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+            enable_usage_probe=False,
+        )
+        final_input_tokens = int(
+            final_budget.get("actual_context_tokens") or 0
+        )
+        if final_input_tokens > effective_input_target:
+            overflow = final_input_tokens - effective_input_target
+            tighter_budget = max(1, message_budget - overflow - 64)
+            compacted_history = compact_text_to_token_budget(
+                compacted_history,
+                max_tokens=tighter_budget,
+                model=self.model_str,
+                preserve_tail_tokens=int(config["preserve_tail_tokens"]),
+            )
+            compacted_messages = [HumanMessage(content=compacted_history)]
+            final_budget = estimator.estimate(
+                node_id=f"{node_id}_agent_guard",
+                model=self.model_str,
+                system_prompt=system_content,
+                user_message="",
+                components=_components([
+                    self._serialize_agent_message(compacted_messages[0])
+                ]),
+                api_base=self.api_base or "",
+                api_key=self.api_key or "",
+                enable_usage_probe=False,
+            )
+            final_input_tokens = int(
+                final_budget.get("actual_context_tokens") or 0
+            )
+        if final_input_tokens > effective_input_target:
+            metadata.update({
+                "triggered": True,
+                "strategy": "deterministic_agent_summary",
+                "error": "deterministic_compaction_failed",
+                "final_input_tokens": final_input_tokens,
+                "final_message_count": 1,
+            })
+            pre_budget["hard_guard"] = dict(metadata)
+            final_budget["hard_guard"] = dict(metadata)
+            raise StructuredContextBudgetError(
+                f"[context_budget] node={node_id} agent deterministic "
+                f"compaction failed: input={final_input_tokens} "
+                f"target={effective_input_target} limit={max_input_tokens}",
+                pre_budget=pre_budget,
+                final_budget=final_budget,
+            )
+
+        metadata.update({
+            "triggered": True,
+            "strategy": "deterministic_agent_summary",
+            "final_input_tokens": final_input_tokens,
+            "final_message_count": 1,
+        })
+        pre_budget["hard_guard"] = dict(metadata)
+        final_budget["hard_guard"] = dict(metadata)
+        logger.warning(
+            "🧯 [AICall] agent hard context guard | node=%s "
+            "input=%d→%d target=%d limit=%d messages=%d→1",
+            node_id,
+            original_input_tokens,
+            final_input_tokens,
+            effective_input_target,
+            max_input_tokens,
+            len(messages),
+        )
+        return request.override(messages=compacted_messages), final_budget
+
+    @staticmethod
+    def _serialize_agent_message(message: Any) -> Dict[str, Any]:
+        if isinstance(message, dict):
+            return dict(message)
+        if hasattr(message, "model_dump"):
+            try:
+                return message.model_dump(exclude_none=True)
+            except Exception:
+                pass
+        return {
+            "type": getattr(message, "type", type(message).__name__),
+            "content": getattr(message, "content", str(message)),
+        }
+
+    @staticmethod
+    def _serialize_agent_response_format(response_format: Any) -> Any:
+        if response_format is None:
+            return {}
+        specs = getattr(response_format, "schema_specs", None)
+        if isinstance(specs, list):
+            payload = []
+            for spec in specs:
+                json_schema = getattr(spec, "json_schema", None)
+                if json_schema:
+                    payload.append({
+                        "name": getattr(spec, "name", ""),
+                        "json_schema": json_schema,
+                    })
+            if payload:
+                return payload
+        schema = getattr(response_format, "schema", None)
+        if hasattr(schema, "model_json_schema"):
+            try:
+                return schema.model_json_schema()
+            except Exception:
+                pass
+        return str(response_format)
+
+    def _build_agent_request_compaction_summary(
+        self,
+        messages: List[Any],
+        *,
+        max_tokens: int,
+    ) -> str:
+        user_requests: List[str] = []
+        assistant_messages: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        tool_results: List[Tuple[int, int, Dict[str, Any]]] = []
+
+        def _bounded(value: Any, max_value_tokens: int) -> str:
+            return compact_text_to_token_budget(
+                value,
+                max_tokens=max_value_tokens,
+                model=self.model_str,
+                preserve_tail_tokens=max(16, max_value_tokens // 4),
+            )
+
+        for index, message in enumerate(messages):
+            content = str(getattr(message, "content", "") or "")
+            if isinstance(message, HumanMessage):
+                if content:
+                    user_requests.append(_bounded(content, 320))
+                continue
+            if isinstance(message, AIMessage):
+                if content:
+                    assistant_messages.append(_bounded(content, 240))
+                for tool_call in list(message.tool_calls or []):
+                    tool_calls.append({
+                        "tool_name": str(
+                            tool_call.get("name") or "unknown"
+                        ),
+                        "tool_args": _bounded(
+                            json.dumps(
+                                tool_call.get("args") or {},
+                                ensure_ascii=False,
+                                default=str,
+                            ),
+                            240,
+                        ),
+                    })
+                continue
+            if isinstance(message, ToolMessage):
+                additional = dict(message.additional_kwargs or {})
+                item: Dict[str, Any] = {
+                    "tool_name": str(message.name or "unknown"),
+                    "semantic_success": additional.get(
+                        "aiops_semantic_success"
+                    ),
+                    "result_preview": _bounded(content, 480),
+                }
+                refs_available = False
+                for field, key in (
+                    ("raw_ref", "aiops_raw_ref"),
+                    ("structured_ref", "aiops_structured_ref"),
+                    ("summary_ref", "aiops_summary_ref"),
+                ):
+                    value = additional.get(key)
+                    if value:
+                        item[field] = str(value)
+                        refs_available = True
+                item["refs_available"] = refs_available
+                priority = (
+                    0
+                    if item.get("semantic_success") is False
+                    else 1
+                    if refs_available
+                    else 2
+                )
+                tool_results.append((priority, -index, item))
+
+        tool_results.sort(key=lambda candidate: (candidate[0], candidate[1]))
+        summary: Dict[str, Any] = {
+            "context_compacted": True,
+            "compaction_strategy": "deterministic_agent_request",
+            "original_message_count": len(messages),
+            "user_requests": user_requests[:2],
+            "tool_results": [
+                item for _, _, item in tool_results[:12]
+            ],
+            "tool_calls": tool_calls[-12:],
+            "assistant_messages": assistant_messages[-4:],
+        }
+
+        def _serialized() -> str:
+            return json.dumps(
+                summary,
+                ensure_ascii=False,
+                default=str,
+            )
+
+        serialized = _serialized()
+        if count_tokens(serialized, model=self.model_str)["tokens"] <= max_tokens:
+            return serialized
+
+        summary["assistant_messages"] = []
+        for text_budget in (240, 120, 64):
+            for item in summary["tool_results"]:
+                item["result_preview"] = _bounded(
+                    item.get("result_preview") or "",
+                    text_budget,
+                )
+            for item in summary["tool_calls"]:
+                item["tool_args"] = _bounded(
+                    item.get("tool_args") or "",
+                    text_budget,
+                )
+            serialized = _serialized()
+            if count_tokens(
+                serialized,
+                model=self.model_str,
+            )["tokens"] <= max_tokens:
+                return serialized
+
+        while (
+            count_tokens(_serialized(), model=self.model_str)["tokens"]
+            > max_tokens
+            and len(summary["tool_results"]) > 1
+        ):
+            summary["tool_results"].pop()
+        while (
+            count_tokens(_serialized(), model=self.model_str)["tokens"]
+            > max_tokens
+            and len(summary["tool_calls"]) > 1
+        ):
+            summary["tool_calls"].pop(0)
+        serialized = _serialized()
+        if count_tokens(serialized, model=self.model_str)["tokens"] <= max_tokens:
+            return serialized
+        return compact_text_to_token_budget(
+            serialized,
+            max_tokens=max_tokens,
+            model=self.model_str,
+            preserve_tail_tokens=max(32, max_tokens // 5),
+        )
+
     @staticmethod
     def _tool_call_signature(tool_call: Dict[str, Any]) -> str:
         name = tool_call.get("name") or "unknown"
@@ -1231,6 +2385,41 @@ class AICall:
 
             try:
                 result = await task
+            except Exception as exc:
+                error_message = compact_text_to_token_budget(
+                    str(exc) or type(exc).__name__,
+                    max_tokens=240,
+                    model="",
+                    preserve_tail_tokens=48,
+                )
+                logger.warning(
+                    "⚠️ [AICall] isolated tool failure | tool=%s "
+                    "call_id=%s error=%s: %s",
+                    tool_call.get("name") or "unknown",
+                    current_call_id,
+                    type(exc).__name__,
+                    error_message,
+                )
+                return ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "tool_error",
+                            "semantic_success": False,
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": error_message,
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=current_call_id,
+                    name=str(tool_call.get("name") or "unknown"),
+                    status="error",
+                    additional_kwargs={
+                        "aiops_tool_error": True,
+                        "aiops_error_type": type(exc).__name__,
+                    },
+                )
             finally:
                 if owner:
                     async with lock:
@@ -1350,6 +2539,7 @@ class AICall:
             api_key=self.api_key or "",
             scratchpad_reserved=0,
             output_reserved=0,
+            enable_usage_probe=False,
         )
         context_window = budget.get("context_window")
         if not isinstance(context_window, int) or context_window <= 0:
@@ -1399,6 +2589,7 @@ class AICall:
             api_key=self.api_key or "",
             scratchpad_reserved=0,
             output_reserved=0,
+            enable_usage_probe=False,
         )
         actual_tokens = int(budget.get("actual_context_tokens") or 0)
         usage_ratio = actual_tokens / context_window
@@ -1412,15 +2603,70 @@ class AICall:
             context_window=context_window,
             thinking_events=thinking_events,
             tool_observation_contents=tool_observation_contents,
+            model=self.model_str,
+            max_events=24,
+            max_tokens=6000,
+        )
+        try:
+            configured_summary_max_tokens = max(
+                1,
+                int(config.get("summary_max_tokens") or 1200),
+            )
+        except (TypeError, ValueError):
+            configured_summary_max_tokens = 1200
+        source_summary = self._build_deterministic_runtime_compaction_summary(
+            thinking_events,
+            max_tokens=max(1200, configured_summary_max_tokens),
+        )
+        minimum_contract = self._minimum_runtime_summary_contract(
+            source_summary
+        )
+        minimum_contract = self._fit_minimum_runtime_contract_to_budget(
+            minimum_contract,
+            max_tokens=configured_summary_max_tokens,
+        )
+        minimum_contract_tokens = count_tokens(
+            json.dumps(
+                minimum_contract,
+                ensure_ascii=False,
+                default=str,
+            ),
+            model=self.model_str,
+        )["tokens"]
+        summary_max_tokens = max(
+            configured_summary_max_tokens,
+            minimum_contract_tokens,
         )
         summary = self._compact_context_with_lite_llm(
             payload,
             node_id=node_text,
             run_id=run_id,
-            max_tokens=int(config.get("summary_max_tokens") or 1200),
+            max_tokens=summary_max_tokens,
         )
-        if not isinstance(summary, dict):
-            return False
+        validated_summary = None
+        if isinstance(summary, dict):
+            try:
+                candidate = ContextCompactionSummary.model_validate(summary).model_dump()
+                if self._runtime_compaction_summary_has_evidence_contract(
+                    candidate,
+                    thinking_events,
+                ):
+                    validated_summary = (
+                        self._sanitize_runtime_compaction_summary(
+                            candidate,
+                            source_summary=source_summary,
+                            max_tokens=summary_max_tokens,
+                        )
+                    )
+            except Exception:
+                validated_summary = None
+        if validated_summary is None:
+            summary = self._fit_deterministic_runtime_summary_to_token_budget(
+                source_summary,
+                max_tokens=summary_max_tokens,
+            )
+        else:
+            summary = validated_summary
 
         compact_text = json.dumps(summary, ensure_ascii=False, default=str)
         if not compact_text.strip():
@@ -1447,6 +2693,584 @@ class AICall:
         return True
 
     @staticmethod
+    def _runtime_compaction_summary_has_evidence_contract(
+        candidate: Dict[str, Any],
+        thinking_events: List[Dict[str, Any]],
+    ) -> bool:
+        plan_items = candidate.get("evidence_plan")
+        has_plan = isinstance(plan_items, list) and any(
+            isinstance(item, dict)
+            and any(value not in (None, "", [], {}) for value in item.values())
+            for item in plan_items
+        )
+        completed_items = candidate.get("completed_items")
+        completed_evidence_keys = {
+            "tool_name",
+            "tool",
+            "semantic_success",
+            "outcome",
+            "fact",
+            "result_preview",
+            "error",
+            "raw_ref",
+            "structured_ref",
+            "summary_ref",
+        }
+        has_completed_tool_evidence = (
+            isinstance(completed_items, list)
+            and any(
+                isinstance(item, dict)
+                and any(
+                    key in item and item.get(key) not in (None, "", [], {})
+                    for key in completed_evidence_keys
+                )
+                for item in completed_items
+            )
+        )
+
+        def _has_archive_ref(value: Any) -> bool:
+            if isinstance(value, dict):
+                for key in ("raw_ref", "structured_ref", "summary_ref"):
+                    if str(value.get(key) or "").strip():
+                        return True
+                return any(_has_archive_ref(item) for item in value.values())
+            if isinstance(value, list):
+                return any(_has_archive_ref(item) for item in value)
+            return False
+
+        has_candidate_ref = _has_archive_ref(candidate)
+        source_tool_events = [
+            event
+            for event in thinking_events
+            if event.get("type") == "tool_result"
+        ]
+        source_has_tool_result = bool(source_tool_events)
+        if source_has_tool_result:
+            source_tool_names = {
+                str(event.get("tool_name") or "").strip()
+                for event in source_tool_events
+                if str(event.get("tool_name") or "").strip()
+            }
+            source_refs = {
+                str(event.get(key)).strip()
+                for event in source_tool_events
+                for key in ("raw_ref", "structured_ref", "summary_ref")
+                if str(event.get(key) or "").strip()
+            }
+            candidate_tool_names = {
+                str(item.get("tool_name") or item.get("tool") or "").strip()
+                for item in (completed_items or [])
+                if isinstance(item, dict)
+                and str(
+                    item.get("tool_name") or item.get("tool") or ""
+                ).strip()
+            }
+
+            def _collect_refs(value: Any) -> set[str]:
+                refs: set[str] = set()
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if key in {
+                            "raw_ref",
+                            "structured_ref",
+                            "summary_ref",
+                        } and str(item or "").strip():
+                            refs.add(str(item).strip())
+                        else:
+                            refs.update(_collect_refs(item))
+                elif isinstance(value, list):
+                    for item in value:
+                        refs.update(_collect_refs(item))
+                return refs
+
+            candidate_refs = _collect_refs(candidate)
+            if candidate_tool_names and not candidate_tool_names.issubset(
+                source_tool_names
+            ):
+                return False
+            if candidate_refs and not candidate_refs.issubset(source_refs):
+                return False
+
+            source_by_tool: Dict[str, List[Dict[str, Any]]] = {}
+            source_corpus_parts: List[str] = []
+            for event in source_tool_events:
+                tool_name = str(event.get("tool_name") or "").strip()
+                source_by_tool.setdefault(tool_name, []).append(event)
+                source_corpus_parts.append(
+                    json.dumps(event, ensure_ascii=False, default=str)
+                )
+            source_corpus = "\n".join(source_corpus_parts).lower()
+            has_bound_candidate = False
+            for item in completed_items or []:
+                if not isinstance(item, dict):
+                    continue
+                item_tool = str(
+                    item.get("tool_name") or item.get("tool") or ""
+                ).strip()
+                item_refs = {
+                    str(item.get(key)).strip()
+                    for key in ("raw_ref", "structured_ref", "summary_ref")
+                    if str(item.get(key) or "").strip()
+                }
+                if not item_tool and not item_refs:
+                    continue
+                has_bound_candidate = True
+                matching_events = source_by_tool.get(item_tool, [])
+                if item_refs:
+                    matching_events = [
+                        event
+                        for event in matching_events
+                        if item_refs.issubset({
+                            str(event.get(key)).strip()
+                            for key in (
+                                "raw_ref",
+                                "structured_ref",
+                                "summary_ref",
+                            )
+                            if str(event.get(key) or "").strip()
+                        })
+                    ]
+                if not matching_events:
+                    return False
+                matched = False
+                for event in matching_events:
+                    event_corpus = json.dumps(
+                        event,
+                        ensure_ascii=False,
+                        default=str,
+                    ).lower()
+                    if (
+                        item.get("semantic_success") is not None
+                        and item.get("semantic_success")
+                        != event.get("semantic_success")
+                    ):
+                        continue
+                    if any(
+                        str(item.get(key) or "").strip()
+                        and str(item.get(key)).strip().lower()
+                        not in event_corpus
+                        for key in (
+                            "result_preview",
+                            "fact",
+                            "error",
+                            "outcome",
+                        )
+                    ):
+                        continue
+                    matched = True
+                    break
+                if not matched:
+                    return False
+
+            if has_bound_candidate:
+                for key in ("key_facts", "negative_facts", "conflicts"):
+                    for value in candidate.get(key) or []:
+                        text = str(value or "").strip().lower()
+                        if text and text not in source_corpus:
+                            return False
+            return has_completed_tool_evidence or has_candidate_ref
+        return has_plan or has_completed_tool_evidence or has_candidate_ref
+
+    def _sanitize_runtime_compaction_summary(
+        self,
+        candidate: Dict[str, Any],
+        *,
+        source_summary: Dict[str, Any],
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        """Rebuild every evidence-bearing field from deterministic source events."""
+        sanitized = {
+            "compaction_strategy": "validated_llm_shape_source_evidence",
+            "process_summary": deepcopy(
+                source_summary.get("process_summary") or []
+            ),
+            "evidence_plan": deepcopy(
+                source_summary.get("evidence_plan") or []
+            ),
+            "completed_items": deepcopy(
+                source_summary.get("completed_items") or []
+            ),
+            "open_items": deepcopy(
+                source_summary.get("open_items") or []
+            ),
+            "key_facts": deepcopy(
+                source_summary.get("key_facts") or []
+            ),
+            "negative_facts": deepcopy(
+                source_summary.get("negative_facts") or []
+            ),
+            "conflicts": deepcopy(
+                source_summary.get("conflicts") or []
+            ),
+            "discarded_noise": deepcopy(
+                source_summary.get("discarded_noise") or []
+            ),
+            "next_focus": deepcopy(
+                source_summary.get("next_focus") or []
+            ),
+        }
+        return self._fit_deterministic_runtime_summary_to_token_budget(
+            sanitized,
+            max_tokens=max_tokens,
+        )
+
+    def _build_deterministic_runtime_compaction_summary(
+        self,
+        thinking_events: List[Dict[str, Any]],
+        *,
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        evidence_plan: List[Dict[str, Any]] = []
+        completed_items: List[Dict[str, Any]] = []
+        seen_plan_items = set()
+        seen_tool_items = set()
+        plan_limit = max(1, min(8, max_tokens // 160 or 1))
+        tool_limit = max(1, min(8, max_tokens // 110 or 1))
+
+        def _bounded_text(value: Any, limit: int) -> str:
+            text = (
+                value
+                if isinstance(value, str)
+                else json.dumps(value, ensure_ascii=False, default=str)
+            )
+            return text if len(text) <= limit else text[:limit] + "...[truncated]"
+
+        for event in thinking_events:
+            if event.get("type") != "ai_message":
+                continue
+            text = str(event.get("full_content") or event.get("content") or "")
+            if "evidence_plan" not in text:
+                continue
+            parsed = self.extract_json_payload(text)
+            if not isinstance(parsed, dict):
+                continue
+            plan_items = parsed.get("evidence_plan")
+            if isinstance(plan_items, list):
+                for item in plan_items:
+                    if not isinstance(item, dict):
+                        continue
+                    bounded_item = {
+                        key: _bounded_text(item.get(key), 180)
+                        for key in (
+                            "id",
+                            "description",
+                            "tool",
+                            "purpose",
+                            "level",
+                            "command",
+                        )
+                        if item.get(key) not in (None, "", [], {})
+                    }
+                    if not bounded_item:
+                        continue
+                    signature = json.dumps(
+                        bounded_item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    if signature in seen_plan_items:
+                        continue
+                    seen_plan_items.add(signature)
+                    evidence_plan.append(bounded_item)
+                    if len(evidence_plan) >= plan_limit:
+                        break
+            if len(evidence_plan) >= plan_limit:
+                break
+
+        tool_candidates: List[Tuple[int, int, Dict[str, Any]]] = []
+        for event in thinking_events:
+            if event.get("type") != "tool_result":
+                continue
+            result_preview = _bounded_text(
+                event.get("result_preview") or event.get("result") or "",
+                260,
+            )
+            error = event.get("error")
+            structured = event.get("structured")
+            if error is None and isinstance(structured, dict):
+                error = structured.get("error")
+            item = {
+                "tool_name": str(event.get("tool_name") or "unknown"),
+                "semantic_success": event.get("semantic_success"),
+                "result_preview": result_preview,
+            }
+            if error not in (None, "", {}, []):
+                item["error"] = _bounded_text(error, 260)
+            refs_available = False
+            for ref_name in ("raw_ref", "structured_ref", "summary_ref"):
+                ref_value = event.get(ref_name)
+                if ref_value:
+                    item[ref_name] = str(ref_value)
+                    refs_available = True
+            item["refs_available"] = refs_available
+            signature = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            if signature in seen_tool_items:
+                continue
+            seen_tool_items.add(signature)
+            priority = (
+                0
+                if event.get("semantic_success") is False or "error" in item
+                else 1
+                if refs_available
+                else 2
+            )
+            tool_candidates.append((priority, len(tool_candidates), item))
+
+        tool_candidates.sort(key=lambda candidate: (candidate[0], candidate[1]))
+        completed_items = [
+            item for _, _, item in tool_candidates[:tool_limit]
+        ]
+        summary = {
+            "compaction_strategy": "deterministic_fallback",
+            "deterministic_fallback": True,
+            "process_summary": [
+                "Invalid LLM compaction output was replaced by bounded "
+                "deterministic evidence."
+            ],
+            "evidence_plan": evidence_plan,
+            "completed_items": completed_items,
+            "discarded_noise": [
+                f"omitted_plan_items={max(0, len(seen_plan_items) - len(evidence_plan))}; "
+                f"omitted_tool_items={max(0, len(tool_candidates) - len(completed_items))}"
+            ],
+        }
+        return self._fit_deterministic_runtime_summary_to_token_budget(
+            summary,
+            max_tokens=max_tokens,
+        )
+
+    def _fit_deterministic_runtime_summary_to_token_budget(
+        self,
+        summary: Dict[str, Any],
+        *,
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        def _token_count(value: Dict[str, Any]) -> int:
+            return count_tokens(
+                json.dumps(value, ensure_ascii=False, default=str),
+                model=self.model_str,
+            )["tokens"]
+
+        def _shrink(value: Any, limit: int) -> str:
+            text = str(value or "")
+            return text if len(text) <= limit else text[:limit] + "..."
+
+        minimum_contract = self._fit_minimum_runtime_contract_to_budget(
+            self._minimum_runtime_summary_contract(summary),
+            max_tokens=max_tokens,
+        )
+        effective_max_tokens = max(
+            int(max_tokens),
+            _token_count(minimum_contract),
+        )
+
+        if _token_count(summary) <= effective_max_tokens:
+            return summary
+
+        summary["process_summary"] = []
+        summary["discarded_noise"] = ["bounded deterministic evidence"]
+        for text_limit in (120, 72, 40):
+            for item in summary.get("evidence_plan", []):
+                for key in ("description", "purpose", "command"):
+                    if key in item:
+                        item[key] = _shrink(item[key], text_limit)
+            for item in summary.get("completed_items", []):
+                for key in (
+                    "result_preview",
+                    "error",
+                ):
+                    if key in item:
+                        item[key] = _shrink(item[key], text_limit)
+            if _token_count(summary) <= effective_max_tokens:
+                return summary
+
+        for item in summary.get("evidence_plan", []):
+            for key in tuple(item):
+                if key not in {"id", "tool"}:
+                    item.pop(key, None)
+        for item in summary.get("completed_items", []):
+            if item.get("error"):
+                item.pop("result_preview", None)
+            for key in ("error", "result_preview"):
+                if key in item:
+                    item[key] = _shrink(item[key], 32)
+        summary.pop("process_summary", None)
+        summary.pop("discarded_noise", None)
+        if _token_count(summary) <= effective_max_tokens:
+            return summary
+        return minimum_contract
+
+    @staticmethod
+    def _minimum_runtime_summary_contract(
+        summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        evidence_plan = []
+        for item in summary.get("evidence_plan") or []:
+            if not isinstance(item, dict):
+                continue
+            minimum_item = {
+                key: item[key]
+                for key in ("id", "tool")
+                if item.get(key) not in (None, "", [], {})
+            }
+            if not minimum_item:
+                for key, value in item.items():
+                    if value not in (None, "", [], {}):
+                        minimum_item[key] = value
+                        break
+            if minimum_item:
+                evidence_plan.append(minimum_item)
+
+        completed_items = []
+        for item in summary.get("completed_items") or []:
+            if not isinstance(item, dict):
+                continue
+            minimum_item = {
+                key: item[key]
+                for key in (
+                    "tool_name",
+                    "semantic_success",
+                    "error",
+                    "raw_ref",
+                    "structured_ref",
+                    "summary_ref",
+                    "refs_available",
+                )
+                if key in item
+                and item.get(key) not in (None, "", [], {})
+            }
+            if minimum_item:
+                completed_items.append(minimum_item)
+
+        return {
+            "compaction_strategy": "minimum_evidence_contract",
+            "deterministic_fallback": True,
+            "evidence_plan": evidence_plan,
+            "completed_items": completed_items,
+        }
+
+    def _fit_minimum_runtime_contract_to_budget(
+        self,
+        minimum: Dict[str, Any],
+        *,
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        bounded = deepcopy(minimum)
+
+        def _tokens() -> int:
+            return count_tokens(
+                json.dumps(bounded, ensure_ascii=False, default=str),
+                model=self.model_str,
+            )["tokens"]
+
+        while (
+            _tokens() > max_tokens
+            and len(bounded.get("completed_items") or []) > 1
+        ):
+            bounded["completed_items"].pop()
+        while (
+            _tokens() > max_tokens
+            and len(bounded.get("evidence_plan") or []) > 1
+        ):
+            bounded["evidence_plan"].pop()
+        return bounded
+
+    @staticmethod
+    def _bounded_evidence_plan_text(
+        text: str,
+        *,
+        max_chars: int = 1600,
+    ) -> str:
+        parsed = AICall.extract_json_payload(text)
+        plan_items = (
+            parsed.get("evidence_plan")
+            if isinstance(parsed, dict)
+            else None
+        )
+        bounded_items: List[Dict[str, Any]] = []
+
+        def _short(value: Any, limit: int) -> str:
+            value_text = str(value or "")
+            return (
+                value_text
+                if len(value_text) <= limit
+                else value_text[:limit] + "..."
+            )
+
+        if isinstance(plan_items, list):
+            for item in plan_items[:8]:
+                if not isinstance(item, dict):
+                    continue
+                bounded_item = {
+                    key: _short(item.get(key), 140)
+                    for key in (
+                        "id",
+                        "tool",
+                        "description",
+                        "purpose",
+                        "level",
+                    )
+                    if item.get(key) not in (None, "", [], {})
+                }
+                if bounded_item:
+                    bounded_items.append(bounded_item)
+
+        payload: Dict[str, Any] = {
+            "context_compacted": True,
+            "bounded_evidence_plan": True,
+            "evidence_plan": bounded_items,
+        }
+        if isinstance(plan_items, list):
+            payload["source_plan_count"] = len(plan_items)
+            payload["omitted_plan_count"] = max(
+                0,
+                len(plan_items) - len(bounded_items),
+            )
+        else:
+            payload["plan_preview"] = _short(text, 600)
+            payload["plan_parse_status"] = "unavailable"
+
+        serialized = json.dumps(payload, ensure_ascii=False)
+        while len(serialized) > max_chars and len(bounded_items) > 1:
+            bounded_items.pop()
+            payload["evidence_plan"] = bounded_items
+            if isinstance(plan_items, list):
+                payload["omitted_plan_count"] = (
+                    len(plan_items) - len(bounded_items)
+                )
+            serialized = json.dumps(payload, ensure_ascii=False)
+        if len(serialized) <= max_chars:
+            return serialized
+
+        for item in bounded_items:
+            for key in ("description", "purpose"):
+                if key in item:
+                    item[key] = _short(item[key], 48)
+        serialized = json.dumps(payload, ensure_ascii=False)
+        if len(serialized) <= max_chars:
+            return serialized
+
+        payload["evidence_plan"] = [
+            {
+                key: item[key]
+                for key in ("id", "tool")
+                if key in item
+            }
+            for item in bounded_items[:1]
+        ]
+        payload.pop("plan_preview", None)
+        serialized = json.dumps(payload, ensure_ascii=False)
+        if len(serialized) <= max_chars:
+            return serialized
+        return json.dumps(
+            {
+                "context_compacted": True,
+                "bounded_evidence_plan": True,
+            },
+            ensure_ascii=False,
+        )
+
+    @staticmethod
     def _compact_thinking_events_in_place(
         thinking_events: List[Dict[str, Any]],
         compact_event: Dict[str, Any],
@@ -1458,7 +3282,16 @@ class AICall:
             if ev_type == "ai_message":
                 text = ev.get("full_content") or ev.get("content") or ""
                 if "evidence_plan" in text:
-                    compacted_events.append(ev)
+                    if len(text) <= 1200:
+                        compacted_events.append(ev)
+                        continue
+                    compacted = dict(ev)
+                    bounded_plan = AICall._bounded_evidence_plan_text(text)
+                    compacted["full_content"] = bounded_plan
+                    compacted["content"] = bounded_plan[:500]
+                    compacted["context_compacted"] = True
+                    compacted["original_chars"] = len(text)
+                    compacted_events.append(compacted)
                     continue
                 compacted = dict(ev)
                 compacted["full_content"] = ""
@@ -1470,14 +3303,21 @@ class AICall:
             if ev_type == "tool_result":
                 compacted = dict(ev)
                 result = str(compacted.get("result") or compacted.get("result_preview") or "")
+                result_preview = str(compacted.get("result_preview") or result)
                 raw_ref = compacted.get("raw_ref")
                 structured_ref = compacted.get("structured_ref")
                 summary_ref = compacted.get("summary_ref")
-                # If archive refs exist, the full payload is recoverable. Keep
-                # enough text for plan matching and human stream previews.
-                if (raw_ref or structured_ref or summary_ref) and len(result) > 1200:
-                    compacted["result"] = result[:1200] + "\n...[compacted: see raw_ref/structured_ref/summary_ref]"
-                    compacted["result_preview"] = compacted["result"][:200]
+                if len(result) > 1200:
+                    marker = (
+                        "see raw_ref/structured_ref/summary_ref"
+                        if raw_ref or structured_ref or summary_ref
+                        else "refs unavailable"
+                    )
+                    compacted["result"] = (
+                        result_preview[:1200]
+                        + f"\n...[compacted: {marker}]"
+                    )
+                    compacted["result_preview"] = result_preview[:200]
                     compacted["context_compacted"] = True
                 compacted_events.append(compacted)
                 continue
@@ -1487,15 +3327,91 @@ class AICall:
 
     @staticmethod
     def _compact_langgraph_ai_messages_in_place(messages: List[Tuple[Any, str]]) -> None:
-        """Compact already-emitted AI text while preserving evidence_plan messages."""
+        """Compact emitted AI text and provider-bound historical tool arguments."""
         for msg, original_text in messages:
             text = str(original_text or "")
-            if not text or "evidence_plan" in text:
-                continue
             try:
-                msg.content = f"[compacted ai_message: original_chars={len(text)}]"
+                tool_calls = list(getattr(msg, "tool_calls", None) or [])
+                if tool_calls:
+                    compacted_tool_calls = []
+                    for tool_call in tool_calls:
+                        compacted = dict(tool_call)
+                        compacted["args"] = AICall._bounded_tool_call_args(
+                            tool_call.get("args") or {}
+                        )
+                        compacted_tool_calls.append(compacted)
+                    msg.tool_calls = compacted_tool_calls
+                    additional_kwargs = dict(
+                        getattr(msg, "additional_kwargs", None) or {}
+                    )
+                    if isinstance(additional_kwargs.get("tool_calls"), list):
+                        additional_kwargs["tool_calls"] = compacted_tool_calls
+                        msg.additional_kwargs = additional_kwargs
+
+                if text:
+                    if "evidence_plan" in text:
+                        if len(text) > 1200:
+                            msg.content = AICall._bounded_evidence_plan_text(
+                                text
+                            )
+                    else:
+                        msg.content = (
+                            f"[compacted ai_message: original_chars={len(text)}]"
+                        )
             except Exception:
                 continue
+
+    @staticmethod
+    def _bounded_tool_call_args(
+        args: Any,
+        *,
+        max_chars: int = 1200,
+    ) -> Dict[str, Any]:
+        if not isinstance(args, dict):
+            args = {"value": args}
+        serialized = json.dumps(
+            args,
+            ensure_ascii=False,
+            default=str,
+        )
+        if len(serialized) <= max_chars:
+            return dict(args)
+
+        compacted: Dict[str, Any] = {"context_compacted": True}
+        for key, value in args.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                text = str(value or "")
+                compacted[str(key)] = (
+                    value
+                    if len(text) <= 160
+                    else text[:160] + "...[truncated]"
+                )
+            else:
+                value_text = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    default=str,
+                )
+                compacted[str(key)] = (
+                    value
+                    if len(value_text) <= 240
+                    else value_text[:240] + "...[truncated]"
+                )
+
+        while (
+            len(json.dumps(compacted, ensure_ascii=False, default=str))
+            > max_chars
+            and len(compacted) > 2
+        ):
+            removable = [
+                key
+                for key in compacted
+                if key != "context_compacted"
+            ]
+            if not removable:
+                break
+            compacted.pop(removable[-1], None)
+        return compacted
 
     @staticmethod
     def _compact_langgraph_tool_messages_in_place(messages: List[Tuple[Any, Dict[str, Any]]]) -> None:
@@ -1507,13 +3423,19 @@ class AICall:
             raw_ref = metadata.get("raw_ref")
             structured_ref = metadata.get("structured_ref")
             summary_ref = metadata.get("summary_ref")
+            semantic_success = metadata.get("semantic_success")
+            result_preview = str(metadata.get("result_preview") or current)
             ref_text = ", ".join(str(v) for v in (raw_ref, structured_ref, summary_ref) if v)
             replacement = (
                 f"[compacted tool_result: tool={metadata.get('tool_name') or 'unknown'} "
-                f"original_chars={len(current)}"
+                f"semantic_success={semantic_success} "
+                f"original_chars={len(current)} "
+                f"preview={result_preview[:500]}"
             )
             if ref_text:
                 replacement += f" refs={ref_text}"
+            else:
+                replacement += " refs unavailable"
             replacement += "]"
             try:
                 msg.content = replacement
@@ -1548,6 +3470,18 @@ class AICall:
             for ev in thinking_events
             if ev.get("type") == "ai_message"
         )
+        tool_call_text = "\n".join(
+            json.dumps(
+                {
+                    "tool_name": ev.get("tool_name"),
+                    "tool_args": ev.get("tool_args") or {},
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+            for ev in thinking_events
+            if ev.get("type") == "tool_start"
+        )
         return [
             {
                 "name": "tool_observations",
@@ -1561,6 +3495,12 @@ class AICall:
                 "content": ai_message_text,
                 "preview": ai_message_text[:200],
             },
+            {
+                "name": "tool_calls",
+                "category": "dynamic_runtime",
+                "content": tool_call_text,
+                "preview": tool_call_text[:200],
+            },
         ]
 
     @staticmethod
@@ -1570,23 +3510,36 @@ class AICall:
         context_window: int,
         thinking_events: List[Dict[str, Any]],
         tool_observation_contents: List[str],
+        model: str = "",
+        max_events: int = 24,
+        max_tokens: int = 6000,
     ) -> Dict[str, Any]:
-        ai_messages = [
-            (ev.get("full_content") or ev.get("content") or "")[:4000]
+        bounded_event_count = max(1, int(max_events or 1))
+        selected_events = [
+            ev
             for ev in thinking_events
+            if ev.get("type") in {"ai_message", "tool_result"}
+        ][-bounded_event_count:]
+        ai_messages = [
+            (ev.get("full_content") or ev.get("content") or "")[:2000]
+            for ev in selected_events
             if ev.get("type") == "ai_message"
         ]
-        tool_results = []
-        for ev in thinking_events:
+        tool_results: List[Dict[str, Any]] = []
+        for ev in selected_events:
             if ev.get("type") != "tool_result":
                 continue
             tool_results.append({
                 "tool_name": ev.get("tool_name"),
                 "semantic_success": ev.get("semantic_success"),
-                "result": (ev.get("result") or ev.get("result_preview") or "")[:3000],
-                "structured": ev.get("structured") or {},
+                "result": (
+                    ev.get("result") or ev.get("result_preview") or ""
+                )[:1600],
+                "raw_ref": ev.get("raw_ref"),
+                "structured_ref": ev.get("structured_ref"),
+                "summary_ref": ev.get("summary_ref"),
             })
-        return {
+        payload = {
             "node_id": node_id,
             "usage_ratio": round(usage_ratio, 4),
             "context_window": context_window,
@@ -1597,8 +3550,111 @@ class AICall:
             ),
             "ai_messages": ai_messages,
             "tool_results": tool_results,
-            "tool_observation_tail": [str(item)[:2000] for item in tool_observation_contents[-5:]],
+            "tool_observation_tail": [
+                str(item)[:1200]
+                for item in tool_observation_contents[-3:]
+            ],
         }
+        token_limit = max(1, int(max_tokens or 1))
+
+        def _tokens() -> int:
+            return count_tokens(
+                json.dumps(payload, ensure_ascii=False, default=str),
+                model=model,
+            )["tokens"]
+
+        for text_limit in (900, 480, 240):
+            if _tokens() <= token_limit:
+                return payload
+            payload["ai_messages"] = [
+                compact_text_to_token_budget(
+                    item,
+                    max_tokens=max(16, text_limit // 3),
+                    model=model,
+                    preserve_tail_tokens=max(4, text_limit // 12),
+                )
+                for item in payload["ai_messages"]
+            ]
+            for item in payload["tool_results"]:
+                item["result"] = compact_text_to_token_budget(
+                    item.get("result") or "",
+                    max_tokens=max(24, text_limit // 3),
+                    model=model,
+                    preserve_tail_tokens=max(6, text_limit // 12),
+                )
+            payload["tool_observation_tail"] = [
+                compact_text_to_token_budget(
+                    item,
+                    max_tokens=max(16, text_limit // 4),
+                    model=model,
+                    preserve_tail_tokens=max(4, text_limit // 16),
+                )
+                for item in payload["tool_observation_tail"]
+            ]
+
+        while _tokens() > token_limit and len(payload["ai_messages"]) > 1:
+            payload["ai_messages"].pop(0)
+        while _tokens() > token_limit and len(payload["tool_results"]) > 1:
+            payload["tool_results"].pop(0)
+        while (
+            _tokens() > token_limit
+            and len(payload["tool_observation_tail"]) > 1
+        ):
+            payload["tool_observation_tail"].pop(0)
+        if _tokens() <= token_limit:
+            return payload
+
+        payload["instruction"] = (
+            "压缩 evidence 上下文，保留计划、工具事实、错误和证据引用。"
+        )
+        while _tokens() > token_limit and payload["ai_messages"]:
+            payload["ai_messages"].pop(0)
+        while _tokens() > token_limit and payload["tool_observation_tail"]:
+            payload["tool_observation_tail"].pop(0)
+        while _tokens() > token_limit and len(payload["tool_results"]) > 1:
+            payload["tool_results"].pop()
+        if _tokens() <= token_limit:
+            return payload
+
+        serialized = compact_text_to_token_budget(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            max_tokens=max(1, token_limit - 32),
+            model=model,
+            preserve_tail_tokens=max(16, token_limit // 5),
+        )
+        bounded = {
+            "node_id": node_id,
+            "bounded_payload": serialized,
+        }
+        for _attempt in range(8):
+            bounded_tokens = count_tokens(
+                json.dumps(bounded, ensure_ascii=False, default=str),
+                model=model,
+            )["tokens"]
+            if bounded_tokens <= token_limit:
+                return bounded
+            serialized_tokens = count_tokens(
+                bounded.get("bounded_payload") or "",
+                model=model,
+            )["tokens"]
+            serialized = compact_text_to_token_budget(
+                bounded.get("bounded_payload") or "",
+                max_tokens=max(
+                    1,
+                    serialized_tokens
+                    - (bounded_tokens - token_limit)
+                    - 8,
+                ),
+                model=model,
+                preserve_tail_tokens=max(4, token_limit // 8),
+            )
+            bounded["bounded_payload"] = serialized
+        if count_tokens(
+            json.dumps(bounded, ensure_ascii=False, default=str),
+            model=model,
+        )["tokens"] <= token_limit:
+            return bounded
+        return {}
 
     def _compact_context_with_lite_llm(
         self,
@@ -1693,6 +3749,7 @@ class AICall:
             components=final_components,
             api_base=self.api_base or "",
             api_key=self.api_key or "",
+            enable_usage_probe=False,
         )
         ContextBudgetEstimator().log(budget)
         try:

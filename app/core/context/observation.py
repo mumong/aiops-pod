@@ -66,6 +66,28 @@ class ObservationProcessor:
         "get_aiops_case_evidence",
         "search_aiops_cases",
     }
+    OBSERVABILITY_QUERY_TOOLS = {
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    }
+    OBSERVABILITY_QUERY_REQUIRED_FIELDS = {
+        "ok",
+        "status",
+        "source_system",
+        "dimension",
+        "entity",
+        "purpose",
+        "coverage",
+        "directness",
+        "query",
+        "facts",
+        "samples",
+        "evidence_refs",
+        "truncated",
+        "limits",
+    }
 
     def __init__(
         self,
@@ -121,8 +143,11 @@ class ObservationProcessor:
             context_usage_ratio is not None
             and context_usage_ratio >= self.context_pressure_threshold
         )
-        deterministic_case_summary = tool in self.AIOPS_CASE_TOOLS
-        if deterministic_case_summary:
+        deterministic_summary = (
+            tool in self.AIOPS_CASE_TOOLS
+            or tool in self.OBSERVABILITY_QUERY_TOOLS
+        )
+        if deterministic_summary:
             should_llm_summarize = False
         elif full_passthrough:
             should_llm_summarize = over_context_threshold
@@ -177,6 +202,8 @@ class ObservationProcessor:
             }, self._generic_summary(tool, raw), "invalid_tool"
         if tool in self.AIOPS_CASE_TOOLS:
             return self._extract_aiops_case(tool, raw)
+        if tool in self.OBSERVABILITY_QUERY_TOOLS:
+            return self._extract_observability_query(tool, raw)
 
         # Tool-specific processors must see successful describe/events/log output
         # before generic failure detection. Kubernetes diagnostic payloads often
@@ -220,6 +247,282 @@ class ObservationProcessor:
         if tool in self.MEDIUM_TOOLS and len(raw) <= self.max_observation_chars:
             return {"status": "kept_small_output"}, raw, "passthrough"
         return {"status": "generic_summary"}, self._generic_summary(tool, raw), "generic"
+
+    def _extract_observability_query(
+        self,
+        tool: str,
+        raw: str,
+    ) -> tuple[Dict[str, Any], str, str]:
+        try:
+            payload = json.loads(raw or "{}")
+        except Exception:
+            return {
+                "status": "query_parse_failed",
+                "tool": tool,
+                "coverage": "error",
+                "raw_preview": raw[:1000],
+            }, self._generic_summary(tool, raw), "observability_query_parse_failed"
+
+        if not isinstance(payload, dict):
+            return {
+                "status": "query_parse_failed",
+                "tool": tool,
+                "coverage": "error",
+                "raw_preview": raw[:1000],
+            }, self._generic_summary(tool, raw), "observability_query_parse_failed"
+
+        contract_errors = self._observability_query_contract_errors(payload)
+        if contract_errors:
+            structured = {
+                "status": "query_parse_failed",
+                "tool": tool,
+                "coverage": "error",
+                "contract_errors": contract_errors,
+                "raw_preview": raw[:1000],
+            }
+            return (
+                structured,
+                (
+                    f"{tool} 返回不完整或无效的 MCP contract: "
+                    + "; ".join(contract_errors)
+                ),
+                "observability_query_parse_failed",
+            )
+
+        allowed_keys = [
+            "ok",
+            "status",
+            "source_system",
+            "dimension",
+            "entity",
+            "purpose",
+            "coverage",
+            "directness",
+            "query",
+            "facts",
+            "samples",
+            "flows",
+            "spans",
+            "correlations",
+            "telemetry",
+            "limitations",
+            "evidence_refs",
+            "truncated",
+            "limits",
+            "error",
+            "result_type",
+            "raw_series_count",
+            "series_count",
+            "series",
+            "entities",
+            "edges",
+            "topology_summary",
+        ]
+        structured = {
+            key: payload[key]
+            for key in allowed_keys
+            if key in payload and payload.get(key) is not None
+        }
+        structured["tool"] = tool
+        structured.setdefault("status", "query_succeeded")
+        structured.setdefault("coverage", "error" if payload.get("ok") is False else "empty")
+        structured.setdefault("facts", [])
+        structured.setdefault("samples", [])
+        structured.setdefault("evidence_refs", [])
+
+        summary = self._build_observability_query_summary(structured)
+        return structured, summary, "observability_query"
+
+    @classmethod
+    def _has_source_backed_observability_fact(
+        cls,
+        payload: Dict[str, Any],
+    ) -> bool:
+        default_source = str(payload.get("source_system") or "").strip()
+        for fact in payload.get("facts") or []:
+            if not isinstance(fact, dict):
+                continue
+            refs = [
+                fact.get("ref"),
+                fact.get("evidence_ref"),
+            ]
+            if isinstance(fact.get("evidence_refs"), list):
+                refs.extend(fact["evidence_refs"])
+            has_ref = any(str(ref or "").strip() for ref in refs)
+            source_system = str(
+                fact.get("source_system") or default_source
+            ).strip()
+            if has_ref and source_system:
+                return True
+        return False
+
+    @classmethod
+    def _observability_query_contract_errors(
+        cls,
+        payload: Dict[str, Any],
+    ) -> list[str]:
+        missing = sorted(cls.OBSERVABILITY_QUERY_REQUIRED_FIELDS - payload.keys())
+        errors = [f"missing={','.join(missing)}"] if missing else []
+
+        expected_types = {
+            "ok": bool,
+            "status": str,
+            "source_system": str,
+            "dimension": str,
+            "entity": dict,
+            "purpose": str,
+            "coverage": str,
+            "directness": str,
+            "query": dict,
+            "facts": list,
+            "samples": list,
+            "evidence_refs": list,
+            "truncated": bool,
+            "limits": dict,
+        }
+        for field, expected_type in expected_types.items():
+            if field in payload and not isinstance(payload[field], expected_type):
+                errors.append(f"{field}_type={type(payload[field]).__name__}")
+
+        coverage = payload.get("coverage")
+        if coverage is not None and coverage not in {
+            "present",
+            "empty",
+            "absent",
+            "weak",
+            "partial",
+            "error",
+        }:
+            errors.append(f"coverage={coverage}")
+        directness = payload.get("directness")
+        if directness is not None and directness not in {
+            "direct",
+            "related_context",
+        }:
+            errors.append(f"directness={directness}")
+
+        status = str(payload.get("status") or "").strip()
+        if status == "query_partial":
+            if payload.get("ok") is True and "error" in payload:
+                errors.append("error_present_for_success")
+            if (
+                coverage != "partial"
+                or not cls._has_source_backed_observability_fact(
+                    payload
+                )
+            ):
+                errors.append("invalid_partial_contract")
+        elif payload.get("ok") is False:
+            error = payload.get("error")
+            if (
+                status != "query_rejected"
+                or coverage != "error"
+                or not isinstance(error, dict)
+                or not str(error.get("code") or "").strip()
+                or not str(error.get("message") or "").strip()
+            ):
+                errors.append("invalid_rejection_contract")
+        elif payload.get("ok") is True:
+            if "error" in payload:
+                errors.append("error_present_for_success")
+            if (
+                status != "query_succeeded"
+                or coverage in {"partial", "error"}
+            ):
+                errors.append("invalid_success_contract")
+
+        return errors
+
+    def _build_observability_query_summary(
+        self,
+        structured: Dict[str, Any],
+    ) -> str:
+        lines: list[str] = []
+
+        def compact(value: Any, limit: int = 900) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                text = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            else:
+                text = str(value)
+            text = text.replace("\n", " ").strip()
+            return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
+
+        def add(label: str, value: Any, limit: int = 900) -> None:
+            text = compact(value, limit)
+            if not text:
+                return
+            line = f"{label}={text}"
+            projected = len("\n".join([*lines, line]))
+            if projected <= self.max_observation_chars:
+                lines.append(line)
+
+        entity = structured.get("entity")
+        if not isinstance(entity, dict):
+            entity = {}
+        add(
+            "OBSERVABILITY_QUERY",
+            {
+                "tool": structured.get("tool"),
+                "status": structured.get("status"),
+                "source_system": structured.get("source_system"),
+                "dimension": structured.get("dimension"),
+                "coverage": structured.get("coverage"),
+                "directness": structured.get("directness"),
+            },
+            500,
+        )
+        add(
+            "ENTITY",
+            {
+                key: entity.get(key)
+                for key in (
+                    "kind",
+                    "namespace",
+                    "pod",
+                    "pod_uid",
+                    "pod_ip",
+                    "node",
+                    "containers",
+                )
+                if entity.get(key) not in (None, "", [], {})
+            },
+            500,
+        )
+        add("PURPOSE", structured.get("purpose"), 500)
+        add("QUERY", structured.get("query"), 1000)
+
+        telemetry = structured.get("telemetry")
+        if isinstance(telemetry, dict):
+            add("TELEMETRY", telemetry, 600)
+
+        add("TOPOLOGY_SUMMARY", structured.get("topology_summary"), 600)
+        for index, item in enumerate((structured.get("entities") or [])[:8], start=1):
+            add(f"ENTITY_NODE[{index}]", item, 700)
+        for index, item in enumerate((structured.get("edges") or [])[:8], start=1):
+            add(f"TOPOLOGY_EDGE[{index}]", item, 900)
+
+        for index, fact in enumerate((structured.get("facts") or [])[:6], start=1):
+            add(f"FACT[{index}]", fact, 1000)
+        for index, sample in enumerate((structured.get("samples") or [])[:4], start=1):
+            add(f"SAMPLE[{index}]", sample, 1200)
+
+        if not structured.get("samples"):
+            for key, limit in (("flows", 3), ("spans", 2), ("correlations", 2)):
+                for index, item in enumerate((structured.get(key) or [])[:limit], start=1):
+                    add(f"{key.upper()}[{index}]", item, 900)
+
+        add("LIMITATIONS", structured.get("limitations"), 500)
+        add("EVIDENCE_REFS", structured.get("evidence_refs"), 700)
+        if isinstance(structured.get("error"), dict):
+            add("ERROR", structured.get("error"), 700)
+        return "\n".join(lines)
 
     def _extract_aiops_case(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
         try:
@@ -1880,6 +2183,25 @@ class ObservationProcessor:
     @staticmethod
     def _is_semantically_successful(structured: Dict[str, Any], summary: str) -> bool:
         status = str((structured or {}).get("status", "")).lower()
+        if status in {"query_rejected", "query_parse_failed"}:
+            return False
+        if status == "query_succeeded":
+            return str((structured or {}).get("coverage") or "").lower() in {
+                "present",
+                "empty",
+                "absent",
+                "weak",
+            }
+        if status == "query_partial":
+            return (
+                str(
+                    (structured or {}).get("coverage") or ""
+                ).lower()
+                == "partial"
+                and ObservationProcessor._has_source_backed_observability_fact(
+                    structured or {}
+                )
+            )
         if status in {
             "empty",
             "command_failed",

@@ -336,6 +336,35 @@ data:
     | Last State | OOMKilled |
     | 排除项 | 如果 Pod Reason=Evicted，应按 Evicted 处理；OOMKilled 必须来自 containerStatuses/Last State |
 
+    ## 诊断问题
+    - 容器是否真实到达 memory limit，还是节点级 OOM、Evicted 或人工终止？
+    - 故障前内存是持续增长、周期性尖峰，还是单次突发？
+    - 应用日志是否出现内存分配、缓存增长、GC/heap 或业务批处理相关原文？
+    - 如果应用有真实流量和 Trace，是否存在与内存增长时间一致的高负载接口、错误请求或特定调用方？
+
+    ## 可选观测维度
+    - Kubernetes: 必选，用于确认 Last State、Reason、Exit Code、restartCount、memory limit、Node MemoryPressure 和事件时间。
+    - Metrics: 推荐，用于验证 memory working set/RSS、limit、重启与 terminated reason 的时间关系。
+    - Logging: 推荐，用于寻找内存分配、缓存、GC、heap、allocation failure 或业务批处理原文。
+    - Tracing: 条件式；只有应用曾启动、有 Pod IP 且存在业务流量/埋点时才有价值。Trace 主要回答“什么请求在故障前驱动了负载”，不能替代 OOMKilled 终态。
+
+    ## 查询构造建议
+    - `execute_pod_promql`: 优先考虑 `container_memory_working_set_bytes`、`container_memory_rss`、容器 memory limit、`kube_pod_container_status_restarts_total` 和 last terminated reason；使用目标 namespace/pod 精确作用域，趋势问题使用覆盖故障前后的 range 查询。
+    - `query_pod_logs`: purpose 应明确为验证“持续内存增长”“GC/heap 异常”或“某类业务分配行为”；关键词可围绕 memory、heap、GC、allocate、cache、batch、OOM，并结合容器名和故障时间窗。
+    - `query_pod_tracing`: purpose 应明确为验证“哪个接口/调用方与故障前负载相关”；可按 request resource、错误状态码、时延、peer 或已从日志得到的 trace ID 缩小范围。
+    - 第一轮只有单点指标、宽泛日志或孤立 flow 时，使用新的 purpose 缩小时间窗或过滤条件继续补证；不要重复同一查询。
+
+    ## 证据边界
+    - `terminated.reason=OOMKilled` 或明确 cgroup OOM 事件是故障类型主证据；内存曲线只说明逼近 limit 的过程。
+    - working set 接近 limit 支持内存压力，但单个采样点不能证明泄漏；至少需要趋势、重复周期或日志/Trace 行为相互印证。
+    - DeepFlow flow 只能证明网络调用；Tempo span 只能证明应用埋点。两者必须 trace ID 精确一致才能作为同一请求链。
+    - Tracing empty/absent 不否定 OOM；应用可能在采集窗口无流量、无埋点或在导出 span 前被杀死。
+
+    ## 停止条件
+    - 已确认 OOMKilled 终态，并由 Metrics 或 Logging 至少一个维度解释故障前内存行为；现有证据足以区分 limit 过低、持续增长、节点级 OOM 或 Evicted。
+    - 如果应用没有流量/埋点，明确记录 Tracing absent/empty 后停止，不为凑齐三维继续查询。
+    - 上下文接近预算或后续查询不会改变根因判断时停止，列出尚未验证的假设。
+
     ## 根因分流
     - 内存 limit 过低: lastState.reason=OOMKilled + exitCode=137，resources.limits.memory 明显低于应用需求或近期用量。
     - 应用内存泄漏/峰值过高: 日志或历史指标显示内存持续增长、GC overhead、heap space、allocation failure。
@@ -416,6 +445,35 @@ data:
     | Pod 状态 | ImagePullBackOff / ErrImagePull / ImageInspectError |
     | Events | `Failed to pull image`, `connection refused`, `timeout`, `manifest unknown`, `context canceled`，或长时间停留在 `Pulling image` |
     | 常见原因 | 镜像名/tag 错误、私有仓库认证失败、仓库访问超时、DNS 解析失败、TLS 证书不被信任、镜像拉取策略导致必须远程拉取 |
+
+    ## 诊断问题
+    - kubelet/容器运行时返回的原始拉取错误是什么：镜像不存在、认证失败、DNS/网络、TLS、限流还是格式错误？
+    - Pod spec 中的 image、imagePullPolicy、imagePullSecrets 和 ServiceAccount 是否与错误原文一致？
+    - waiting reason 是否持续为 ErrImagePull/ImagePullBackOff，还是已经转为其他生命周期问题？
+    - 该容器是否从未启动；如果从未启动，应避免把缺少应用日志和 Trace 误判为采集故障。
+
+    ## 可选观测维度
+    - Kubernetes: 主证据，必须读取 Waiting Reason、Events、image、imagePullSecrets、ServiceAccount 和节点信息。
+    - Metrics: 可选，用于确认 waiting reason、ready/started 状态和异常持续时间；它不能替代 Events 中的 registry 原始错误。
+    - Logging: 通常不查询应用日志，因为目标容器尚未启动；只有 init/sidecar/previous container 或节点运行时日志与问题相关时才使用。
+    - Tracing: 通常不存在，因为应用容器没有 Pod 业务请求；只有 Pod 曾成功启动并有 Pod IP/流量时才有条件查询。
+
+    ## 查询构造建议
+    - `execute_pod_promql`: 优先考虑 `kube_pod_container_status_waiting_reason`、container ready/started 和 restart 状态；按 namespace/pod/container/reason 精确过滤，验证异常是否仍然存在。
+    - `query_pod_logs`: 仅在有实际产生日志的 init、sidecar 或 previous container 时使用，purpose 必须说明要验证哪个组件；不要宽泛搜索不存在的主容器业务日志。
+    - `query_pod_tracing`: 只有目标 Pod 已分配 IP 且曾提供业务流量时使用；如果无 Pod IP 或容器从未启动，应接受 empty/absent，不继续构造无意义链路查询。
+    - registry/DNS/TLS 连通性由 Kubernetes Events 和批准的只读网络探测验证，不要用应用 Trace 推断镜像仓库可达性。
+
+    ## 证据边界
+    - Events 中 `manifest unknown`、`unauthorized`、`x509`、timeout 等原文通常是最决定性的证据。
+    - `kube_pod_container_status_waiting_reason=1` 只能确认等待状态，不能区分镜像不存在、认证或网络根因。
+    - 应用日志和 Trace 缺失是“容器未启动”的预期结果，不代表 ES、DeepFlow 或 Tempo 本身故障。
+    - 如果 Pod 后来成功启动，查询必须使用与异常事件一致的时间窗，避免把恢复后的业务流量错误关联到拉取失败。
+
+    ## 停止条件
+    - Events 原文已明确错误类别，并完成对应 image/Secret/ServiceAccount 或网络最小验证。
+    - Metrics 只用于确认状态持续性；如果不会改变 Events 已确定的根因，不继续扩展指标。
+    - 容器从未启动时明确记录 Logging/Tracing 不适用或 absent 后停止，不为凑齐三维调用无意义工具。
 
     ## 诊断流程
 
@@ -505,6 +563,35 @@ data:
     | 排除 OOM | 无 `OOMKilled`、无 `Exit Code 137` |
     | 排除拉镜像失败 | 无 `ImagePullBackOff`、容器实际已启动并输出业务日志 |
     | 排除驱逐 | 无 `Evicted`、无 `disk pressure`、无 `ENOSPC` |
+
+    ## 诊断问题
+    - 错误发生在 kubelet 创建容器之前，还是应用进程启动后的配置校验阶段？
+    - 决定性原文是否指向缺失 ConfigMap/Secret/key、非法 env、错误 command/args，或业务必填参数缺失？
+    - restart/waiting/termination 状态是否与该配置错误时间一致，并能排除 OOMKilled、ImagePullBackOff 和 Evicted？
+    - 如果应用曾启动并处理请求，是否有错误 span/flow 能说明配置问题的业务影响；如果启动前退出，Tracing 是否应当 absent？
+
+    ## 可选观测维度
+    - Kubernetes: 必选，用于确认 Waiting/Last State、exitCode、Events、env/envFrom、volume、ConfigMap/Secret 引用和 initContainer。
+    - Logging: 优先级最高的可观测性维度，用于获取 missing required、validation failed、bootstrap、key not found 等决定性业务原文。
+    - Metrics: 可选，用于确认 waiting reason、restart 增长、last terminated reason 和 ready 状态；CPU/内存通常不能解释配置缺失。
+    - Tracing: 条件式；应用启动后返回错误时可查询错误请求和 span。应用在监听端口前退出时，Trace 缺失是预期边界。
+
+    ## 查询构造建议
+    - `query_pod_logs`: purpose 应明确为验证具体配置假设；优先组合 required、missing、config、validation、bootstrap、secret、key、token 等关键词，并限定目标容器和故障时间窗。
+    - `execute_pod_promql`: 优先考虑 `kube_pod_container_status_waiting_reason`、`kube_pod_container_status_restarts_total`、last terminated reason、ready/started 状态；不要默认查询 CPU/内存并把无异常误当作配置正常。
+    - `query_pod_tracing`: 仅在应用曾启动、有 Pod IP 或日志给出 trace ID 时查询；可按错误状态码、request resource、service 或 trace ID 验证业务影响。
+    - 日志只给出宽泛 error 时，先缩小关键词/容器/时间窗；日志已给出具体缺失 key 后，转向 Kubernetes spec/ConfigMap/Secret 做最小验证。
+
+    ## 证据边界
+    - 应用日志中的具体缺失字段和 Kubernetes 配置引用共同出现时，根因证据最强。
+    - restart/waiting 指标只能确认异常持续，不会告诉你缺失的是哪个 key；Metrics 不能替代日志和 spec。
+    - CreateContainerConfigError 可能在应用进程启动前发生，此时应用日志和 Trace 为空；应以 Events 与 Pod spec 为主。
+    - Trace 中 5xx 支持业务影响，但不能单独证明配置缺失；必须与日志/config 事实关联。
+
+    ## 停止条件
+    - 已获得一条决定性错误原文，并通过 Pod spec、ConfigMap/Secret、command/args 或 initContainer 配置完成对应验证。
+    - 已排除 OOMKilled、ImagePullBackOff、Evicted 等冲突生命周期事实。
+    - 应用启动前退出时，记录 Tracing absent 后停止；应用已运行时只有在 Trace 能改变影响面或根因判断时才继续查询。
 
     ## 诊断流程
 

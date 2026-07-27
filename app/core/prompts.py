@@ -343,23 +343,23 @@ EVIDENCE_COLLECTOR_PROMPT = """
 证据计划是 `EvidenceCollectionOutput` 的一部分，由 Pydantic response_format 产生和校验；本 prompt 不提供结构化示例。
 计划项语义：id、description、level、tool、command、purpose；tool 必须是 Available tools 中真实存在的工具名。
 
-# 采证优先级
+# 实时可观测性证据与采证优先级
 - 实时环境工具结果是诊断事实的首选来源；Runbook、Pod 名称、标签和模型经验只用于提出待验证假设，不能替代真实证据。
-- 用户是否显式提到 metrics、logging、tracing、topology，不应决定是否使用可观测性工具。只要上游已经确认一个或多个异常 Pod，evidence plan 中每个已确认异常 Pod 都必须有一个 `mandatory` critical `collect_aiops_case` 项，并必须优先执行，以获得 Kubernetes、Metrics、Logging、Tracing 和 Topology 的实时可观测性证据。
-- `collect_aiops_case` 成功且 `dimension_details` 足以支撑诊断时，不要重复规划同目标的 describe、YAML、events、logs 或 Prometheus；coverage 缺失、冲突或 error 时，再按缺失维度使用细粒度工具补证。
-- `collect_aiops_case` 成功只表示粗粒度 case 已生成，不等于根因证据天然 100%。收到每个 case 后必须做一次 post-case reconciliation：逐项检查决定性 Kubernetes 终态、关键指标时间序列、日志原文、DeepFlow/Tempo 关联和责任拓扑是否足以回答当前诊断问题。
-- 如果 coverage 虽为 present，但首屏样本仍无法回答关键问题（例如指标采样未覆盖故障瞬间、日志缺少决定性错误原文、Trace 只有孤立 span、拓扑缺少 owner/Service 关系或不同来源互相冲突），应按 `recommended_refs_by_dimension` 调用 `get_aiops_case_evidence` 展开最相关的一个或少量 evidence ref。
-- 如果 `dimension_details` 已包含能够直接支撑或排除根因的原始字段，允许不调用细粒度工具；必须在最终采证说明中明确“当前 case 已足够”以及依据，禁止为了增加工具次数无目的展开全部原始文件。
-- kubectl 只能作为 `collect_aiops_case` coverage 缺失、冲突、error、absent 或工具不可用时的细粒度补证和降级路径；不得只完成 kubectl 就声称异常 Pod 的多维可观测性证据已经充分。
-- mandatory coarse 项由系统按异常 Pod 实体通用补齐，不包含 OOM、ImagePull、Terminating 等故障类型特判；Qwen 仍负责执行真实工具、理解 coverage 和选择必要的细粒度补证。
+- 用户是否显式提到 metrics、logging、tracing，不应决定是否查询可观测性数据。只要上游已确认异常 Pod，首轮门控就必须对每个已确认异常 Pod 真实执行 `execute_pod_promql`、`query_pod_logs`、`query_pod_tracing` 三个通用工具；同时用 Kubernetes 只读工具确认生命周期、容器终态、事件和当前实体身份。
+- `execute_pod_promql` 是通用 Pod Metrics 查询工具。Qwen 根据待验证问题选择精确包含 namespace/pod 的 PromQL、instant/range 类型和时间窗；MCP 只校验 Pod scope 并执行，不按异常类型选择固定指标。
+- `query_pod_logs` 是通用 Pod Logging 查询工具。Qwen 根据待验证问题选择关键词、匹配方式、级别、容器、trace ID 和时间窗；优先寻找能够直接支持或排除候选根因的原始日志，不要只查宽泛的 error。
+- `query_pod_tracing` 是通用 Pod Tracing 查询工具。Qwen 根据待验证问题选择方向、协议、响应状态/状态码、时延、对端、资源、service 或 trace ID；DeepFlow flow 与 Tempo span 是不同证据，只有 trace ID 精确一致时才能关联。
+- 每个通用查询都必须填写明确 `purpose`，说明该查询要验证什么、什么结果会改变当前根因判断。禁止使用“查看一下”“全面检查”这类无判定标准的目的。
+- 首轮门控只保证三个工具都产生真实 `tool_result`，不保证每个维度都有数据。容器尚未启动时通常没有应用日志和 Trace；Pod 没有 IP 时 DeepFlow Pod 作用域查询应返回 empty；应用未埋点、Tempo 不可用或后端查询失败时必须保留 absent/weak/error，不能因为预计无数据而跳过调用，更不能编造。
+- 三维首轮结果返回后，先分析 Kubernetes 与 Metrics、Logging、Tracing 的一致性和缺口。仍有关键歧义、冲突、时间窗不足或样本不能回答 purpose 时，Qwen 可以使用新的 purpose 和更精确的过滤条件继续补证；证据已经充分时可以停止。补证由上一轮真实结果驱动，不使用固定工具顺序，也不按故障类型写死工具链。
+- Kubernetes 容器日志可用于快速发现决定性错误原文、HTTP path 和 trace_id，但不等同于 ES/Filebeat 实时日志查询。容器确实运行过且 kubectl 日志已出现能改变根因判断的业务原文时，优先用 `query_pod_logs` 以同一实体和时间窗做结构化核验。
+- 当真实日志或已有证据出现有效 trace_id 或 HTTP path，且目标 Pod 有 IP 时，判断 `query_pod_tracing` 能否验证调用关系、错误传播或影响面；有诊断增益时按该线索查询，无增益时可不调用并说明边界。
+- coverage=present 只表示命中真实数据，不自动等于根因成立；empty/absent/weak/error 是明确的数据边界。最终判断必须引用真实 facts/samples/query/evidence_refs，并说明这些证据支持或排除了什么。
+- Kubernetes 与可观测性结果互相校验：Kubernetes lifecycle/Reason/Last State/Events 是 Pod 状态事实；Prometheus、ES/Filebeat、DeepFlow/Tempo 用于补充趋势、业务原文、调用关系和影响面。任何单一维度都不能覆盖另一个维度未验证的事实。
 - evidence 上下文使用率达到 80% 后必须停止新增工具调用，保留已采集证据并明确列出尚未采集的 Pod；未采集目标不得进入已验证结论。
-- `dimension_details` 已包含首屏高价值原始样本；只有它缺少关键字段、存在冲突或不能支撑关键判断时，才按 `recommended_refs_by_dimension` 使用 `get_aiops_case_evidence` 展开对应 evidence ref，避免无目的读取全部原始文件。
-- `collect_aiops_case` 是实时采集当前环境数据的入口，不是读取历史评测标签；不要把 case package 中的 root_cause、expected_remediation、labels 等评测字段写入计划、摘要或结论。
-- `collect_aiops_case` 返回的 topology 是关系证据：`directness=direct` 才能作为目标 Pod 的直接证据；`directness=related_context` 或 `confidence=weak` 只能作为弱相关背景，不能用于排除 Pod 级网络、日志或 trace 问题。
-- 当 `collect_aiops_case` 不可用而走原始 kubectl 采证时：Pod 异常场景中，`kubectl describe pod` / `kubectl_events` / `kubectl logs --previous` 的含金量最高；它们给出的 Reason、Last State、Exit Code、Warning、FailedMount、FailedScheduling、BackOff、probe failed 原文优先级高于泛化资源列表。（若已通过 `collect_aiops_case` 采集，这些原文已包含在 case 中，只在需要更多细节时按 ref 展开。）
+- Pod 异常场景中，`kubectl describe pod` / `kubectl_events` / 上一次容器日志的含金量通常最高；它们给出的 Reason、Last State、Exit Code、Warning、FailedMount、FailedScheduling、BackOff、probe failed 原文优先级高于泛化资源列表。
 - Runbook 是分流 guide，不是全量 checklist。先用最高优先级工具读当前错误原文；一旦错误原文命中明确分支，只规划该分支的最小验证，不要把 runbook 的所有典型原因都展开。
 - VolumeMountFailed 必须先看 Pod Events 和 Pod spec 的 volume 类型；只有 Events 或 spec 指向 PVC/PV 时才查 PVC/PV/StorageClass。若 Events 已显示 `configmap/secret not found` 且来自 volume 引用，优先验证对应 ConfigMap/Secret，不要继续泛化查 PVC。
-- 若已用 `collect_aiops_case` 采集异常 Pod，上述各异常类型所需的 describe/events/previous logs/调度原文均已在 case 内，按需展开即可；仅当未使用 `collect_aiops_case` 时才按原始工具优先级采证：CrashLoop/OOM 必须优先 describe + previous logs；ImagePull 必须优先 describe events + image/imagePullSecrets；Pending 必须优先 FailedScheduling 原文；Terminating 必须优先 deletionTimestamp/finalizers；NotReady 必须优先 probe events + logs。
 - 如果 evidence_plan 的 command 包含 `kubectl get ... -o yaml`，或目的要求检查 `finalizers/deletionTimestamp/preStop/lifecycle/terminationGracePeriodSeconds/spec/status` 等 YAML 字段，必须优先使用 `kubectl_get_yaml` 或等价只读 YAML 命令；不要用普通 `kubectl_get_by_name` 表格输出替代 YAML 证据。
 - 如果 evidence_plan 的 `tool/tool_args` 与 `command/purpose/evidence_type` 存在冲突，优先满足诊断意图和 command 语义；`tool_args` 是建议参数，不是禁止你选择更正确工具的硬约束。
 - 先覆盖影响范围最大的异常组：从该组选择代表 Pod 做完整验证，同时结合 `abnormal_groups.entities` / `abnormal_pods` 覆盖同组其他对象的最小状态验证。
@@ -376,9 +376,9 @@ EVIDENCE_COLLECTOR_PROMPT = """
 - 可能场景：{possible_scenarios}
 - 必须优先使用上游交接中的 `abnormal_groups`、`issue_groups`、`abnormal_pods`、`current_abnormal_summary`、`pod_status_keyword`、`pod_abnormal_type`、`must_verify`。
 - 如果上游 layer_handoff.matched_runbooks 非空，evidence_plan 必须优先使用这些已确认 runbook 的上下文；不要在 evidence 阶段重新选择 runbook。
-- 拿到 `collect_aiops_case` 的真实结果后，必须检查 Kubernetes 终态、决定性日志和 Trace 是否把上游的通用候选收敛成更具体异常；如果现有 matched_runbooks 只有通用 CrashLoop runbook，而真实证据明确支持更具体类型，应由 Qwen 自主补充更具体的 runbook。
+- 拿到 Kubernetes 与通用可观测性查询的真实结果后，必须检查生命周期终态、决定性日志、关键指标和 Trace 是否把上游通用候选收敛成更具体异常；如果现有 matched_runbooks 过于宽泛，而真实证据明确支持更具体类型，应由 Qwen 自主补充更具体的 runbook。
 - 多个独立异常类型可以分别补充不同 runbook；同一 runbook 在整个诊断流程中只允许调用一次。上游已有的 runbook 必须复用，禁止在 evidence 阶段重复调用。
-- 如果上游没有 matched_runbooks，先基于当前异常组和真实 case 证据判断是否存在明显匹配的 runbook。没有可靠匹配时直接分析真实环境证据，不要臆测 runbook。
+- 如果上游没有 matched_runbooks，先基于当前异常组和真实工具证据判断是否存在明显匹配的 runbook。没有可靠匹配时直接分析真实环境证据，不要臆测 runbook。
 
 # 最终消息
 完成工具调用后，简短说明已采集证据、未采集证据和冲突证据。没有 tool_result 时禁止写采集结论。
@@ -677,8 +677,8 @@ CONCLUSION_FORMATTER_PROMPT = """
 | Node | xxx |
 | 错误信息 | xxx |
 ---
-## 📊 可观测性数据（三维度 + 拓扑）
-> 仅当结构化上下文显示 `aiops_observability_status: collected` 时，本节才可声称基于 `collect_aiops_case` 实时结果；若为 `not_collected`，必须明确写“本轮未采集多维 case”，只能引用实际执行的 kubectl/Prometheus 等工具，禁止编造 DeepFlow、Tempo 或 topology。**报告是给人看的**：每个已采集维度必须写清「数据来源」和「人能直接读懂的真实原始信号」（真实的日志原文、真实的指标数值、真实的 flow 记录），不要只写 `series=13` 这种统计计数。覆盖状态只能照抄工具返回的真实 coverage（present/empty/weak/absent/error）。**绝对禁止猜测或编造未真实采集到的数据**：coverage=absent/empty/error 时，必须如实写「该维度未采集到真实数据（原因：...）」，不得虚构任何日志行、指标值或 flow。
+## 📊 可观测性数据
+> 仅当结构化上下文显示 `aiops_observability_status: collected` 时，本节才可声称获得了实时可观测性结果；同时读取 `observability_collection_mode`：`coarse_case` 表示聚合 case，`autonomous_query` 表示 Qwen 通过通用 Metrics/Logging/Tracing 工具按目的组合查询。若为 `not_collected`，只能引用本轮实际执行的 Kubernetes 等工具，禁止编造 Prometheus、ES、DeepFlow、Tempo 或 topology。**报告是给人看的**：只写本轮真实查询过的维度，每个维度必须写清「数据来源、查询目的、真实 coverage、可读的原始信号和判断意义」，不要只写 `series=13` 这种统计计数，也不要为了格式凑齐三维。覆盖状态只能照抄工具返回的真实 coverage（present/empty/weak/absent/error）。**绝对禁止猜测或编造未真实采集到的数据**：coverage=absent/empty/error 时，必须如实写「该维度未采集到真实数据（原因：...）」，不得虚构任何日志行、指标值、span 或 flow。
 ### 三大观测维度
 | 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |
 |------|----------|----------|----------------------------------|----------|
@@ -749,7 +749,7 @@ CONCLUSION_FORMATTER_PROMPT = """
 4. **根因结论必须引用具体证据编号**
 5. **修复命令必须可直接复制执行**
 6. **如有缺失证据，必须列出并说明影响**
-7. **只有 `aiops_observability_status: collected` 才能把 `## 📊 可观测性数据（三维度 + 拓扑）` 写成多维 case 结果**：三大维度（Metrics/Logging/Tracing）+ K8s 状态各写「数据来源 + 真实覆盖状态 + 人可读的真实原始信号」；拓扑区块写真实实体和边（owner 链 / Service / 调度 / DeepFlow 弱关联），并诚实标注缺失维度或“独立 Pod 无控制器/无 Service”。`not_collected` 时必须明确说明本轮未调用 coarse case 工具，不得声称获得 DeepFlow/Tempo/topology。**每条证据必须标明真实来源（Prometheus / ES-Filebeat / DeepFlow-ClickHouse / K8s-API）**，写人能读懂的原始数据而非统计计数。**若某维度真实 coverage 是 absent/empty/error，必须如实说明未采集到真实数据及原因，严禁猜测或编造该维度的任何数值/日志/flow。**
+7. **只有 `aiops_observability_status: collected` 才能把 `## 📊 可观测性数据` 写成实时结果**：根据 `observability_collection_mode` 区分聚合 case 与自主组合查询。自主模式只展示实际调用过的 Metrics/Logging/Tracing 维度，不要求凑齐三维；每项写「数据来源 + purpose + 真实 coverage + 人可读原始信号 + 对根因判断的作用」。只有工具真实返回拓扑实体/边时才写拓扑区块，不能从 trace 或 Pod 名称猜 topology。`not_collected` 时不得声称获得 Prometheus、ES、DeepFlow、Tempo 或 topology。**每条证据必须标明真实来源（Prometheus / ES-Filebeat / DeepFlow-ClickHouse / Tempo / K8s-API）**，写人能读懂的原始数据而非统计计数。**若某维度真实 coverage 是 absent/empty/error，必须如实说明未采集到真实数据及原因，严禁猜测或编造该维度的任何数值、日志、span 或 flow。**
 8. **逻辑必须串联**：根因分析要把同一实体、同一时间窗口或同一完整 trace_id 的多维事实与责任拓扑连接起来；不能把不同对象或不同请求的证据拼成一条因果链，也不能让各维度与根因脱节。
 9. **绝不把弱/缺失当强证据**：`directness=related_context` 或 `confidence=weak`（如 DeepFlow node 级）只能作为背景，不能用于排除 Pod 级问题或支撑强因果。
 10. **Trace 与 topology 必须精确引用**：报告写完整 trace_id、DeepFlow request/response/duration、同 trace_id 的 Tempo span attributes，并逐字引用 direct/high 的原始边；不得截断 ID、降级强边或编造缺失关系。若上下文提供 `TOPOLOGY_EXACT_EDGES`，必须逐条原样引用。

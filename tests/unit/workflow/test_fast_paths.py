@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,11 +24,18 @@ from app.core.prompts import (
     get_workflow_prompt,
 )
 from app.core.skills.models import Layer
+from app.core.workflow.fact_contract import _canonical_fact_id
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
-from app.core.workflow.schemas import ConclusionOutput, LayerOutput, QueryResult, RCAOutput
+from app.core.workflow.schemas import (
+    ConclusionOutput,
+    FactLedger,
+    LayerOutput,
+    QueryResult,
+    RCAOutput,
+)
 
 
 class _RecordingAICall:
@@ -1092,6 +1100,51 @@ def test_conclusion_corrects_tracing_absent_when_structured_trace_is_present():
     assert "aiops.allocated_mib.before=60" in tracing_row
     assert "deepflow-real" in tracing_row
     assert "tempo-real" in tracing_row
+
+
+def test_conclusion_marks_unexecuted_dimensions_as_unverified_not_absent():
+    content = "\n".join([
+        "## 📊 可观测性数据",
+        "### 三大观测维度",
+        "| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |",
+        "|------|----------|----------|----------------------------------|----------|",
+        "| **Metrics** | Prometheus | present | value=245760 KB | metric-real |",
+        "| **Logging** | ES/Filebeat | absent | 本轮未采集到日志 | - |",
+        "| **Tracing** | DeepFlow/Tempo | absent | 本轮未采集到 Trace | - |",
+        "| **K8s** | Kubernetes API | present | OOMKilled exit=137 | k8s-real |",
+    ])
+    structured_context = "\n".join([
+        (
+            "OBSERVABILITY_EXECUTION "
+            "metrics=present logging=not_executed tracing=not_executed"
+        ),
+        (
+            "- QUERY_FACT ref=metric-real "
+            "name=container_memory_working_set_bytes value=245760 "
+            "unit=bytes sample_count=1 trend_evaluable=false "
+            "series_role=pod_aggregate directness=related_context"
+        ),
+    ])
+
+    result = ConclusionFormatterNode._enforce_observability_dimension_table(
+        content,
+        structured_context,
+    )
+
+    logging_row = next(
+        line for line in result.splitlines()
+        if line.startswith("| **Logging**")
+    )
+    tracing_row = next(
+        line for line in result.splitlines()
+        if line.startswith("| **Tracing**")
+    )
+    assert "| not_executed |" in logging_row
+    assert "| not_executed |" in tracing_row
+    assert "未验证" in logging_row
+    assert "未验证" in tracing_row
+    assert "absent" not in logging_row
+    assert "absent" not in tracing_row
 
 
 def test_conclusion_expands_metrics_logging_and_k8s_rows_from_exact_facts():
@@ -3361,14 +3414,19 @@ def test_deployed_workflow_disables_layer_early_stop_by_default():
     assert layer_early_stop["explicit_pod_enabled"] is True
 
 
-def test_deployed_config_enables_aiops_case_coarse_and_disables_fine_mcp_server():
+def test_deployed_config_enables_autonomous_observability_and_disables_compatibility_servers():
     configmap = yaml.safe_load(
         Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")
     )
     app_config = yaml.safe_load(configmap["data"]["config.yaml"])
 
+    autonomous = app_config["mcp_servers"]["aiops-observability-query"]
+    assert autonomous["enabled"] is True
+    assert autonomous["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8100/sse"
+    assert autonomous["config"]["mode"] == "sse"
+
     coarse = app_config["mcp_servers"]["aiops-case-coarse"]
-    assert coarse["enabled"] is True
+    assert coarse["enabled"] is False
     assert coarse["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8089/sse"
     assert coarse["config"]["mode"] == "sse"
 
@@ -3376,6 +3434,11 @@ def test_deployed_config_enables_aiops_case_coarse_and_disables_fine_mcp_server(
     assert fine["enabled"] is False
     assert fine["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8090/sse"
     assert fine["config"]["mode"] == "sse"
+    assert app_config["workflow"]["evidence"]["observability_mode"] == "autonomous"
+    assert (
+        app_config["workflow"]["evidence"]["observability_first_round_gate"]["enabled"]
+        is True
+    )
 
 
 def test_query_evidence_normalization_prompt_is_disabled():
@@ -3407,7 +3470,7 @@ def test_layer_prompt_delegates_distinct_runbook_selection_to_qwen_without_dupli
         assert phrase in LAYER_CLASSIFIER_PROMPT
 
 
-def test_evidence_prompt_requires_pod_abnormal_handoff_fields():
+def test_evidence_prompt_requires_pod_handoff_and_autonomous_observability_contract():
     expected_phrases = [
         "abnormal_pods",
         "abnormal_groups",
@@ -3418,14 +3481,20 @@ def test_evidence_prompt_requires_pod_abnormal_handoff_fields():
         "layer_handoff.matched_runbooks",
         "不要在 evidence 阶段重新选择 runbook",
         "异常 Pod 返回 NotFound",
-        "collect_aiops_case",
-        "Metrics、Logging、Tracing 和 Topology",
-        "get_aiops_case_evidence",
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "每个通用查询都必须填写明确 `purpose`",
+        "首轮门控",
+        "不保证每个维度都有数据",
+        "三维首轮结果返回后",
     ]
 
     for phrase in expected_phrases:
         assert phrase in EVIDENCE_COLLECTOR_PROMPT
 
+    assert "collect_aiops_case" not in EVIDENCE_COLLECTOR_PROMPT
+    assert "get_aiops_case_evidence" not in EVIDENCE_COLLECTOR_PROMPT
     assert "recommended_runbooks" not in EVIDENCE_COLLECTOR_PROMPT
     assert "evidence_plan 第一项应为 `fetch_runbook`" not in EVIDENCE_COLLECTOR_PROMPT
 
@@ -3559,24 +3628,24 @@ def test_holmes_service_i18n_getters_preserve_default_behavior_and_allow_overrid
     assert service.get_response_language() == "en"
 
 
-def test_aiops_case_selection_uses_generic_mandatory_plan_contract():
-    """Every abnormal Pod gets a generic coarse plan item while Qwen still
-    executes tools and selects fine-grained fallback evidence."""
+def test_autonomous_observability_uses_model_selected_query_contract():
+    """Qwen selects scoped queries while the legacy coarse helper remains available."""
     from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 
     assert not hasattr(EvidenceCollectorNode, "_inject_aiops_case_plan_item")
     assert hasattr(EvidenceCollectorNode, "_ensure_mandatory_aiops_case_plan")
-    assert "每个已确认异常 Pod" in EVIDENCE_COLLECTOR_PROMPT
-    assert "mandatory" in EVIDENCE_COLLECTOR_PROMPT
-    assert "Qwen 仍负责执行真实工具" in EVIDENCE_COLLECTOR_PROMPT
-    assert "kubectl 只能作为" in EVIDENCE_COLLECTOR_PROMPT
-    assert "故障类型特判" in EVIDENCE_COLLECTOR_PROMPT
+    assert "MCP 只校验 Pod scope 并执行，不按异常类型选择固定指标" in EVIDENCE_COLLECTOR_PROMPT
+    assert "补证由上一轮真实结果驱动" in EVIDENCE_COLLECTOR_PROMPT
+    assert "不使用固定工具顺序，也不按故障类型写死工具链" in EVIDENCE_COLLECTOR_PROMPT
+    assert "evidence 上下文使用率达到 80% 后必须停止新增工具调用" in EVIDENCE_COLLECTOR_PROMPT
+    assert "mandatory" not in EVIDENCE_COLLECTOR_PROMPT
 
 
 def test_aiops_prompts_preserve_exact_observability_and_causality():
-    assert "dimension_details" in EVIDENCE_COLLECTOR_PROMPT
-    assert "coarse 项由系统按异常 Pod 实体通用补齐" in EVIDENCE_COLLECTOR_PROMPT
-    assert "不要重复规划同目标的 describe、YAML、events、logs 或 Prometheus" in EVIDENCE_COLLECTOR_PROMPT
+    assert "facts/samples/query/evidence_refs" in EVIDENCE_COLLECTOR_PROMPT
+    assert "DeepFlow flow 与 Tempo span 是不同证据" in EVIDENCE_COLLECTOR_PROMPT
+    assert "coverage=present 只表示命中真实数据，不自动等于根因成立" in EVIDENCE_COLLECTOR_PROMPT
+    assert "empty/absent/weak/error 是明确的数据边界" in EVIDENCE_COLLECTOR_PROMPT
     assert "决定性 Fact 的原始 value 必须逐字保留" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "完整 trace_id" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "Tempo span attributes" in ROOT_CAUSE_ANALYZER_PROMPT
@@ -3652,10 +3721,10 @@ def test_active_rca_and_conclusion_prompts_are_fixture_free():
 
 def test_prompts_refine_runbooks_after_live_evidence_and_preserve_topology_semantics():
     evidence_phrases = [
-        "拿到 `collect_aiops_case` 的真实结果后",
+        "拿到 Kubernetes 与通用可观测性查询的真实结果后",
         "补充更具体的 runbook",
         "同一 runbook 在整个诊断流程中只允许调用一次",
-        "通用 CrashLoop runbook",
+        "多个独立异常类型可以分别补充不同 runbook",
     ]
     conclusion_phrases = [
         "`calls` 只表示调用或流量关系，不表示控制、归属或 owner",
@@ -3666,16 +3735,19 @@ def test_prompts_refine_runbooks_after_live_evidence_and_preserve_topology_seman
 
     for phrase in evidence_phrases:
         assert phrase in EVIDENCE_COLLECTOR_PROMPT
+    assert "拿到 `collect_aiops_case` 的真实结果后" not in EVIDENCE_COLLECTOR_PROMPT
+    assert "通用 CrashLoop runbook" not in EVIDENCE_COLLECTOR_PROMPT
     for phrase in conclusion_phrases:
         assert phrase in CONCLUSION_FORMATTER_PROMPT
 
 
-def test_deployment_disables_legacy_evidence_early_stop():
+def test_deployment_enables_autonomous_evidence_context_stop():
     manifest_path = Path(__file__).resolve().parents[3] / "deploy" / "configmap" / "config.yaml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     config = yaml.safe_load(manifest["data"]["config.yaml"])
 
-    assert config["workflow"]["evidence"]["early_stop"]["enabled"] is False
+    assert config["workflow"]["evidence"]["observability_mode"] == "autonomous"
+    assert config["workflow"]["evidence"]["early_stop"]["enabled"] is True
 
 
 def test_traced_oom_manifest_does_not_leak_fault_answer_in_span_attributes():
@@ -3685,3 +3757,1192 @@ def test_traced_oom_manifest_does_not_leak_fault_answer_in_span_attributes():
 
     assert "aiops.fault.type" not in manifest
     assert "resource.memory.oomkilled" not in manifest
+
+
+def test_conclusion_keeps_deepflow_only_trace_ids_out_of_tempo():
+    report = """| 维度 | 数据源 | 状态 | 核心事实 | 证据 ref |
+|---|---|---|---|---|
+| **Tracing** | DeepFlow/Tempo | present | old | old-ref |
+"""
+    structured_context = """
+OBSERVABILITY_EXECUTION metrics=present logging=present tracing=present topology=present
+- QUERY_FACT ref=deepflow-only source_system=deepflow name=l7_flow trace_id=deepflow-trace directness=direct
+- QUERY_FACT ref=tempo-shared source_system=tempo name=application_span trace_id=shared-trace directness=direct
+"""
+
+    result = ConclusionFormatterNode._enforce_observability_dimension_table(
+        report,
+        structured_context,
+    )
+    tracing_row = next(
+        line for line in result.splitlines() if line.startswith("| **Tracing**")
+    )
+
+    assert "DeepFlow trace_id=deepflow-trace" in tracing_row
+    assert "Tempo trace_id=shared-trace" in tracing_row
+    assert "Tempo trace_id=deepflow-trace" not in tracing_row
+
+
+def test_conclusion_tool_data_uses_final_observability_projection():
+    node = ConclusionFormatterNode()
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_pod_promql",
+            "semantic_success": False,
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认内存趋势",
+            },
+            "result_preview": "invalid_time_range",
+            "structured": {
+                "status": "query_rejected",
+                "dimension": "metrics",
+                "coverage": "error",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "purpose": "确认内存趋势",
+            },
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_pod_promql",
+            "semantic_success": True,
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认内存趋势",
+            },
+            "result_preview": "memory-working-set=70168576",
+            "structured": {
+                "status": "query_succeeded",
+                "dimension": "metrics",
+                "coverage": "present",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "purpose": "确认内存趋势",
+            },
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_pod_promql",
+            "semantic_success": True,
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认重启增量",
+            },
+            "result_preview": "restart-increase=4",
+            "structured": {
+                "status": "query_succeeded",
+                "dimension": "metrics",
+                "coverage": "present",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "purpose": "确认重启增量",
+            },
+        },
+    ]
+
+    section = node._build_tool_data_section(events)
+
+    assert "memory-working-set=70168576" in section
+    assert "restart-increase=4" in section
+    assert "invalid_time_range" not in section
+
+
+def test_conclusion_projection_excludes_transport_only_query_success():
+    node = ConclusionFormatterNode()
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": False,
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认内存趋势",
+            },
+            "result_preview": "invalid_time_range",
+            "structured": {
+                "status": "query_rejected",
+                "dimension": "metrics",
+                "coverage": "error",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "purpose": "确认内存趋势",
+            },
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "确认内存趋势",
+            },
+            "result_preview": "transport-only-memory=70168576",
+            "structured": {
+                "status": "query_succeeded",
+                "dimension": "metrics",
+                "coverage": "present",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "purpose": "确认内存趋势",
+            },
+        },
+    ]
+
+    section = node._build_tool_data_section(events)
+
+    assert "invalid_time_range" in section
+    assert "transport-only-memory=70168576" not in section
+
+
+def test_actual_topology_query_facts_reach_conclusion_as_edges():
+    structured = {
+        "status": "query_succeeded",
+        "source_system": "kubernetes",
+        "dimension": "topology",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api",
+            "pod_uid": "uid-api",
+        },
+        "purpose": "确认控制器关系",
+        "coverage": "present",
+        "directness": "direct",
+        "facts": [
+            {
+                "ref": "topology-owned-by",
+                "source_system": "kubernetes",
+                "name": "kubernetes.relationship",
+                "relation": "owned_by",
+                "value": {
+                    "relation": "owned_by",
+                    "relationship": "Pod --owned_by--> ReplicaSet",
+                    "source": {
+                        "kind": "Pod",
+                        "namespace": "demo",
+                        "name": "api",
+                        "uid": "uid-api",
+                    },
+                    "target": {
+                        "kind": "ReplicaSet",
+                        "namespace": "demo",
+                        "name": "api-rs",
+                        "uid": "uid-rs",
+                    },
+                    "source_field": "metadata.ownerReferences",
+                },
+                "directness": "direct",
+                "confidence": "high",
+            }
+        ],
+        "samples": [],
+        "evidence_refs": ["topology-owned-by"],
+    }
+    agent_facts = EvidenceCollectorNode._build_aiops_agent_facts(
+        "query_pod_topology",
+        structured,
+    )
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "query_pod_topology",
+                "agent_facts": agent_facts,
+                "agent_context": json.dumps(structured),
+            }
+        ]
+    })
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        evidence_analysis,
+        "{}",
+    )
+
+    assert (
+        'TOPOLOGY relationship="Pod --owned_by--> ReplicaSet"'
+        in context
+    )
+    assert "source_field=metadata.ownerReferences" in context
+    assert "topology-owned-by" in context
+
+
+def test_deployed_partial_topology_reaches_ledger_rca_and_conclusion_context():
+    node = EvidenceCollectorNode()
+    structured = {
+        "ok": False,
+        "status": "query_partial",
+        "source_system": "kubernetes",
+        "dimension": "topology",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api-abc",
+            "pod_uid": "uid-api",
+            "node": "node1",
+        },
+        "purpose": "确认目标 Pod 的控制器、Service 和节点关系",
+        "coverage": "partial",
+        "directness": "direct",
+        "query": {"namespace": "demo", "pod": "api-abc"},
+        "facts": [
+            {
+                "ref": "k8s-topology-owned-by",
+                "source_system": "kubernetes",
+                "dimension": "topology",
+                "name": "topology.relationship",
+                "value": {
+                    "relationship": "Pod --owned_by--> ReplicaSet",
+                    "source": "api-abc",
+                    "target": "api-rs",
+                },
+                "directness": "direct",
+            }
+        ],
+        "samples": [],
+        "entities": [
+            {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api-abc",
+                "uid": "uid-api",
+                "source_system": "kubernetes",
+            },
+            {
+                "kind": "ReplicaSet",
+                "namespace": "demo",
+                "name": "api-rs",
+                "uid": "uid-rs",
+                "source_system": "kubernetes",
+            },
+        ],
+        "edges": [
+            {
+                "relationship": "Pod --owned_by--> ReplicaSet",
+                "source": "api-abc",
+                "target": "api-rs",
+                "source_field": "metadata.ownerReferences",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": ["k8s-topology-owned-by"],
+            }
+        ],
+        "topology_summary": {
+            "entity_count": 2,
+            "edge_count": 1,
+            "relations": ["owned_by"],
+        },
+        "limitations": [
+            "Service and Endpoint discovery exceeded the topology response limit"
+        ],
+        "evidence_refs": ["k8s-topology-owned-by"],
+        "truncated": True,
+        "limits": {"max_entities": 20, "max_edges": 20},
+    }
+    event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "query_pod_topology",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api-abc",
+            "purpose": structured["purpose"],
+        },
+        "result": "partial topology",
+        "result_preview": "partial topology",
+        "raw_ref": "/archive/partial-topology.raw",
+        "structured_ref": "/archive/partial-topology.structured.json",
+        "structured": structured,
+    }
+
+    tool_data = node._extract_tool_data_from_thinking([event])
+
+    assert len(tool_data) == 1
+    ledger = tool_data[0]["fact_ledger"]
+    records = ledger["records"]
+    records_by_attribute = {
+        record["attribute"]: record
+        for record in records
+        if record["attribute"] != "topology.relationship"
+    }
+    relationships = [
+        record
+        for record in records
+        if record["attribute"] == "topology.relationship"
+    ]
+    assert records_by_attribute["topology.entities"]["value"] == (
+        structured["entities"]
+    )
+    assert records_by_attribute["topology.summary"]["value"] == (
+        structured["topology_summary"]
+    )
+    assert len(relationships) == 1
+    assert relationships[0]["value"] == {
+        "relationship": "Pod --owned_by--> ReplicaSet",
+        "source": "api-abc",
+        "target": "api-rs",
+        "source_field": "metadata.ownerReferences",
+    }
+    assert relationships[0]["source_system"] == "kubernetes"
+    assert relationships[0]["directness"] == "direct"
+    assert relationships[0]["confidence"] == "high"
+    assert relationships[0]["evidence_refs"] == [
+        "k8s-topology-owned-by"
+    ]
+    assert records_by_attribute["topology.coverage"]["value"] == {
+        "coverage": "partial",
+        "limitations": structured["limitations"],
+    }
+
+    canonical_only_tool_data = [
+        {
+            "tool": "query_pod_topology",
+            "fact_ledger": ledger,
+        }
+    ]
+    evidence_analysis = json.dumps(
+        {"tool_data": canonical_only_tool_data},
+        ensure_ascii=False,
+    )
+    rca_context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+        evidence_analysis,
+        max_chars=20000,
+    )
+    conclusion_context = (
+        ConclusionFormatterNode._build_structured_diagnosis_context(
+            evidence_analysis,
+            "{}",
+        )
+    )
+
+    for context in (rca_context, conclusion_context):
+        assert "topology.entities" in context
+        assert "api-abc" in context
+        assert "api-rs" in context
+        assert "topology.summary" in context
+        assert "entity_count" in context
+        assert "Pod --owned_by--> ReplicaSet" in context
+        assert "metadata.ownerReferences" in context
+        assert "k8s-topology-owned-by" in context
+        assert "confidence" in context
+        assert "high" in context
+        assert structured["limitations"][0] in context
+
+
+def test_deterministic_report_reconciles_present_facts_and_isolates_entity_chains():
+    def fact(
+        *,
+        entity_id,
+        entity_name,
+        dimension,
+        fact_type,
+        attribute,
+        value,
+        source_system,
+        ref,
+        unit=None,
+    ):
+        record = {
+            "entity_id": entity_id,
+            "entity_kind": "Pod",
+            "namespace": "demo",
+            "entity_name": entity_name,
+            "dimension": dimension,
+            "fact_type": fact_type,
+            "attribute": attribute,
+            "value": value,
+            "source_system": source_system,
+            "directness": "direct",
+            "confidence": "high",
+            "strength": "strong",
+            "evidence_refs": [ref],
+        }
+        if unit:
+            record["unit"] = unit
+        record["fact_id"] = _canonical_fact_id(record)
+        return record
+
+    def coverage(*, entity_id, entity_name, dimension):
+        record = {
+            "entity_id": entity_id,
+            "entity_kind": "Pod",
+            "namespace": "demo",
+            "entity_name": entity_name,
+            "dimension": dimension,
+            "fact_type": "coverage",
+            "attribute": f"{dimension}.coverage",
+            "value": {"coverage": "present"},
+            "source_system": "structured-query",
+            "directness": "direct",
+            "confidence": "high",
+            "strength": "supporting",
+            "evidence_refs": [],
+        }
+        record["fact_id"] = _canonical_fact_id(record)
+        return record
+
+    entity_a = "k8s.pod:demo/api-a"
+    entity_b = "k8s.pod:demo/api-b"
+    invented_summary_fragments = [
+        "CPU=99.9%",
+        "trace_id=trace-invented",
+        "ref=ref-invented",
+        "Service --owns--> Pod",
+    ]
+    records_by_entity = {}
+    for entity_id, entity_name, suffix in (
+        (entity_a, "api-a", "a"),
+        (entity_b, "api-b", "b"),
+    ):
+        records = [
+            fact(
+                entity_id=entity_id,
+                entity_name=entity_name,
+                dimension="kubernetes",
+                fact_type="state",
+                attribute="pod.current_state",
+                value={"ready": False, "restart_count": 3},
+                source_system="kubernetes",
+                ref=f"k8s-{suffix}",
+            ),
+            fact(
+                entity_id=entity_id,
+                entity_name=entity_name,
+                dimension="metrics",
+                fact_type="measurement",
+                attribute="container.request_rate",
+                value={"value": 17 + len(suffix)},
+                source_system="prometheus",
+                ref=f"metric-{suffix}",
+                unit="requests/s",
+            ),
+            fact(
+                entity_id=entity_id,
+                entity_name=entity_name,
+                dimension="logging",
+                fact_type="log",
+                attribute="application.error",
+                value={
+                    "message": (
+                        f"entity-{suffix} startup failed"
+                        + (
+                            " ... 截断，原始 545 字符"
+                            if suffix == "a"
+                            else ""
+                        )
+                    )
+                },
+                source_system="elasticsearch",
+                ref=f"log-{suffix}",
+            ),
+            fact(
+                entity_id=entity_id,
+                entity_name=entity_name,
+                dimension="tracing",
+                fact_type="span",
+                attribute="application.span",
+                value={
+                    "trace_id": f"trace-{suffix}",
+                    "span": f"GET /entity-{suffix}",
+                },
+                source_system="tempo",
+                ref=f"trace-{suffix}",
+            ),
+            fact(
+                entity_id=entity_id,
+                entity_name=entity_name,
+                dimension="topology",
+                fact_type="relationship",
+                attribute="topology.relationship",
+                value={
+                    "relationship": "Pod --owned_by--> ReplicaSet",
+                    "source_entity_id": entity_id,
+                    "target_entity_id": (
+                        f"k8s.replicaset:demo/{entity_name}-rs"
+                    ),
+                },
+                source_system="kubernetes",
+                ref=f"topology-{suffix}",
+            ),
+        ]
+        records.extend(
+            coverage(
+                entity_id=entity_id,
+                entity_name=entity_name,
+                dimension=dimension,
+            )
+            for dimension in (
+                "kubernetes",
+                "metrics",
+                "logging",
+                "tracing",
+                "topology",
+            )
+        )
+        records_by_entity[entity_id] = records
+
+    ledgers = []
+    for index, (entity_id, records) in enumerate(
+        records_by_entity.items(),
+        start=1,
+    ):
+        ledgers.append({
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": f"case-{index}",
+            "scope_entity_ids": [entity_id],
+            "records": records,
+            "record_count": len(records),
+            "truncated": False,
+            "source": "mcp_canonical",
+            "legacy_contract": False,
+        })
+
+    supporting_by_entity = {
+        entity_id: [
+            record["fact_id"]
+            for record in records
+            if record["fact_type"] != "coverage"
+        ]
+        for entity_id, records in records_by_entity.items()
+    }
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            {
+                "tool": "structured_observability_query",
+                "fact_ledger": ledger,
+            }
+            for ledger in ledgers
+        ],
+    }, ensure_ascii=False)
+    rca_analysis = json.dumps({
+        "diagnostic_status": "diagnosed",
+        "root_cause_summary": "Two independent entity-scoped failures",
+        "supporting_fact_ids": [
+            fact_id
+            for fact_ids in supporting_by_entity.values()
+            for fact_id in fact_ids
+        ],
+        "contradicting_fact_ids": [],
+        "hypotheses": [
+            {
+                "hypothesis_id": "entity-a-hypothesis",
+                "entity_id": entity_a,
+                "summary": " ".join([
+                    *invented_summary_fragments,
+                    entity_b,
+                    "entity-b startup failed",
+                ]),
+                "supporting_fact_ids": supporting_by_entity[entity_a],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.91,
+            },
+            {
+                "hypothesis_id": "entity-b-hypothesis",
+                "entity_id": entity_b,
+                "summary": "api-b has an independent entity-scoped startup failure",
+                "supporting_fact_ids": supporting_by_entity[entity_b],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.89,
+            },
+        ],
+        "confidence": 0.9,
+        "confidence_reason": "Each hypothesis references only same-entity direct facts",
+        "limitations": (
+            "Metrics、Logging、Tracing、Kubernetes 和 Topology 未提供该维度；"
+            "... 截断，原始 545 字符"
+        ),
+    }, ensure_ascii=False)
+    layer_analysis = json.dumps({
+        "layer": "L3",
+        "issue_groups": [
+            {
+                "group_id": "group-a",
+                "entities": [
+                    {"kind": "Pod", "namespace": "demo", "name": "api-a"}
+                ],
+            },
+            {
+                "group_id": "group-b",
+                "entities": [
+                    {"kind": "Pod", "namespace": "demo", "name": "api-b"}
+                ],
+            },
+        ],
+    }, ensure_ascii=False)
+
+    result = ConclusionFormatterNode().execute({
+        "question": "What is failing?",
+        "layer": Layer.L3,
+        "layer_analysis": layer_analysis,
+        "evidence_analysis": evidence_analysis,
+        "rca_analysis": rca_analysis,
+        "root_cause": "combined stale root cause",
+        "causal_chain": {
+            "trigger": "combined trigger",
+            "mechanism": "cross-entity mechanism",
+            "manifestation": "combined manifestation",
+        },
+        "thinking_events": [],
+    })["conclusion"]
+
+    for dimension in ("Metrics", "Logging", "Tracing", "K8s"):
+        row = next(
+            line
+            for line in result.splitlines()
+            if line.startswith(f"| **{dimension}**")
+        )
+        assert "| present |" in row
+        assert "未返回可用" not in row
+        assert "未获取到" not in row
+    assert "Pod --owned_by--> ReplicaSet" in result
+    assert "本轮未返回可核验的拓扑原始边" not in result
+    assert "未提供该维度" not in result
+    assert "... 截断，原始 545 字符" not in result
+    assert "combined trigger" not in result
+    assert "Two independent entity-scoped failures" not in result
+    for fragment in invented_summary_fragments:
+        assert fragment not in result
+    assert result.count("#### 实体隔离因果链") == 2
+
+    entity_a_section = result.split(f"### `{entity_a}`", 1)[1].split(
+        f"### `{entity_b}`",
+        1,
+    )[0]
+    entity_b_section = result.split(f"### `{entity_b}`", 1)[1].split(
+        "### 支持事实",
+        1,
+    )[0]
+    assert entity_a in entity_a_section
+    assert entity_b not in entity_a_section
+    assert "entity-b startup failed" not in entity_a_section
+    assert entity_b in entity_b_section
+    assert entity_a not in entity_b_section
+
+
+def test_a021_autonomous_query_fact_json_populates_log_k8s_and_tool_sources():
+    report = """## 📊 可观测性数据
+
+### 三大观测维度
+| 维度 | 数据来源 | 覆盖状态 | 关键原始信号（人可读的真实数据） | 证据 ref |
+|------|----------|----------|----------------------------------|----------|
+| **Metrics** | Prometheus | present | old | old |
+| **Logging** | ES/Filebeat | present | 未返回可用日志原文 | old |
+| **Tracing** | DeepFlow/Tempo | present | old | old |
+| **K8s** | Kubernetes API | present | 未返回可用 Kubernetes 强信号 | old |
+"""
+    structured_context = r'''
+observability_collection_mode: autonomous_query
+OBSERVABILITY_EXECUTION metrics=present logging=present tracing=present topology=present
+OBSERVABILITY_SOURCE dimension=metrics tool=execute_pod_promql source_system=prometheus coverage=present
+OBSERVABILITY_SOURCE dimension=logging tool=query_pod_logs source_system=elasticsearch coverage=present
+OBSERVABILITY_SOURCE dimension=tracing tool=query_pod_tracing source_system=deepflow+tempo coverage=present
+OBSERVABILITY_SOURCE dimension=topology tool=query_pod_topology source_system=kubernetes coverage=present
+- QUERY_FACT ref=log-config source_system=elasticsearch name=log.message value="{\"event\": \"fatal configuration error\", \"message\": \"required config PAYMENT_GATEWAY_TOKEN is missing\", \"details\": {\"quoted\": \"value with spaces\"}, \"exit_code\": 78}" raw_ref={"source_system":"elasticsearch","document_id":"doc-1"} directness=direct
+- QUERY_FACT ref=tempo-config source_system=tempo name=application_span value={"trace_id":"4033f62179da91859589a57617a467df","attributes":{"error.type":"CONFIG_MISSING","config.key":"PAYMENT_GATEWAY_TOKEN"}} trace_id=4033f62179da91859589a57617a467df directness=direct
+- CANONICAL_FACT fact_id=fact-oom-reason dimension=kubernetes fact_type=state attribute=container.last_terminated_reason value={"container":"business-api","reason":"OOMKilled"} source_system=kubernetes evidence_refs=["kubectl-describe-oom"] tool=kubectl_describe
+- CANONICAL_FACT fact_id=fact-oom-exit dimension=kubernetes fact_type=state attribute=container.last_exit_code value={"container":"business-api","exit_code":137} source_system=kubernetes evidence_refs=["kubectl-describe-oom"] tool=kubectl_describe
+'''
+
+    result = ConclusionFormatterNode._enforce_observability_dimension_table(
+        report,
+        structured_context,
+    )
+
+    logging_row = next(
+        line for line in result.splitlines()
+        if line.startswith("| **Logging**")
+    )
+    tracing_row = next(
+        line for line in result.splitlines()
+        if line.startswith("| **Tracing**")
+    )
+    k8s_row = next(
+        line for line in result.splitlines()
+        if line.startswith("| **K8s**")
+    )
+    assert "query_pod_logs" in logging_row
+    assert "required config PAYMENT_GATEWAY_TOKEN is missing" in logging_row
+    assert "fatal configuration error" in logging_row
+    assert "value with spaces" in logging_row
+    assert "未返回可用日志原文" not in logging_row
+    assert "query_pod_tracing" in tracing_row
+    assert "4033f62179da91859589a57617a467df" in tracing_row
+    assert "kubectl_describe" in k8s_row
+    assert "OOMKilled" in k8s_row
+    assert "exit_code" in k8s_row
+    assert "137" in k8s_row
+    assert "未返回可用 Kubernetes 强信号" not in k8s_row
+
+
+def test_a021_topology_uses_query_tool_entities_and_removes_stale_limitations():
+    report = """## 📊 可观测性数据
+
+### 拓扑关系（实体与边）
+> 以下关系由 `collect_aiops_case` 的结构化原始边确定性生成。
+- stale edge
+
+---
+
+### 缺失证据（如有）
+- 未提供 OOM 应用日志原文。
+- 两个工作负载的真实 Deployment 名称不可用。
+- OOM ReplicaSet 到 Deployment 关系 unavailable。
+- 完整 trace ID 未获取到。
+- 尚未提供 resources.limits.memory。
+
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| 完整 `trace_id` 与逐 span 原始属性 | 中 | 不能把不同请求合并成一条完整调用链；当前仅能依据每条查询返回的请求/响应事实判断影响。 |
+
+当前尚未获得完整 `env`、`envFrom` 引用及 Deployment 名称。
+
+需要人工确认：
+- 上层 Deployment 的真实名称；
+- 真实上层 Deployment 名称以及 `resources.limits.memory`。
+
+```json
+{
+  "stop_conditions": [
+    "未获得两个工作负载的真实 Deployment 名称",
+    "未获得 resources.limits.memory"
+  ]
+}
+```
+"""
+    structured_context = r'''
+observability_collection_mode: autonomous_query
+OBSERVABILITY_SOURCE dimension=logging tool=query_pod_logs source_system=elasticsearch coverage=present
+OBSERVABILITY_SOURCE dimension=tracing tool=query_pod_tracing source_system=deepflow+tempo coverage=present
+OBSERVABILITY_SOURCE dimension=topology tool=query_pod_topology source_system=kubernetes coverage=present
+- QUERY_FACT ref=log-oom source_system=elasticsearch name=log.message value="{\"event\":\"allocate\",\"message\":\"allocated memory\",\"allocated_mib\":62}" raw_ref={"document_id":"oom-log"} directness=direct
+- QUERY_FACT ref=tempo-oom source_system=tempo name=application_span value={"trace_id":"2d670350586cf4c6ec20f89865c1ede4"} trace_id=2d670350586cf4c6ec20f89865c1ede4 directness=direct
+TOPOLOGY_ENTITY entity_id=e:pod kind=Pod namespace=demo name=api-pod source_system=kubernetes tool=query_pod_topology
+TOPOLOGY_ENTITY entity_id=e:rs kind=ReplicaSet namespace=demo name=api-rs source_system=kubernetes tool=query_pod_topology
+TOPOLOGY_ENTITY entity_id=e:deploy kind=Deployment namespace=demo name=api source_system=kubernetes tool=query_pod_topology
+TOPOLOGY_ENTITY entity_id=e:deploy-worker kind=Deployment namespace=demo name=worker source_system=kubernetes tool=query_pod_topology
+TOPOLOGY_EXACT_EDGES count=2
+- TOPOLOGY relationship="Pod --owned_by--> ReplicaSet" source=e:pod target=e:rs source_system=kubernetes directness=direct confidence=high
+- TOPOLOGY relationship="ReplicaSet --owned_by--> Deployment" source=e:rs target=e:deploy source_system=kubernetes directness=direct confidence=high
+'''
+
+    result = ConclusionFormatterNode._enforce_exact_topology_section(
+        report,
+        structured_context,
+    )
+    result = ConclusionFormatterNode._append_exact_topology_appendix(
+        result,
+        structured_context,
+    )
+    result = ConclusionFormatterNode._reconcile_legacy_report_limitations(
+        result,
+        structured_context,
+    )
+
+    assert "`query_pod_topology`" in result
+    assert "`collect_aiops_case`" not in result
+    assert "Deployment `demo/api`" in result
+    assert "未提供 OOM 应用日志原文" not in result
+    assert "真实 Deployment 名称不可用" not in result
+    assert "ReplicaSet 到 Deployment 关系 unavailable" not in result
+    assert "完整 trace ID 未获取到" not in result
+    assert "完整 `trace_id` 与逐 span 原始属性" not in result
+    assert "已有精确 trace_id 与代表性 Tempo application span" in result
+    assert "当前采样不能证明完整端到端调用链" in result
+    assert "引用及 Deployment 名称" not in result
+    assert "上层 Deployment 的真实名称" not in result
+    assert "真实上层 Deployment 名称以及" not in result
+    assert "未获得两个工作负载的真实 Deployment 名称" not in result
+    assert "完整 `env`、`envFrom` 引用" in result
+    assert "resources.limits.memory" in result
+    assert "尚未提供 resources.limits.memory" in result
+
+
+def test_a024_short_trace_id_table_row_becomes_sampling_boundary():
+    report = """### 缺失证据（如有）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| 完整 trace_id | 中 | 不能将不同流记录拼接成单一完整调用链。 |
+"""
+    structured_context = """
+OBSERVABILITY_SOURCE dimension=tracing tool=query_pod_tracing source_system=deepflow+tempo coverage=present
+- QUERY_FACT ref=deepflow-a source_system=deepflow name=flow value={"trace_id":"0123456789abcdef0123456789abcdef"} trace_id=0123456789abcdef0123456789abcdef directness=direct
+- QUERY_FACT ref=tempo-a source_system=tempo name=application_span value={"trace_id":"0123456789abcdef0123456789abcdef","span":"GET /orders"} trace_id=0123456789abcdef0123456789abcdef directness=direct
+"""
+
+    result = ConclusionFormatterNode._reconcile_legacy_report_limitations(
+        report,
+        structured_context,
+    )
+
+    assert "| 完整 trace_id |" not in result
+    assert "已有精确 trace_id 与代表性 Tempo application span" in result
+    assert "当前采样不能证明完整端到端调用链" in result
+
+
+def test_a024_known_deployment_keeps_only_podtemplate_resource_gap():
+    report = """### 缺失证据（如有）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| `orders-api` 上层 Deployment 的准确名称及 PodTemplate | 高 | 无法安全生成针对该工作负载的资源写操作。 |
+"""
+    structured_context = """
+OBSERVABILITY_SOURCE dimension=topology tool=query_pod_topology source_system=kubernetes coverage=present
+TOPOLOGY_ENTITY entity_id=e:deployment kind=Deployment namespace=demo name=orders-api source_system=kubernetes tool=query_pod_topology
+"""
+
+    result = ConclusionFormatterNode._reconcile_legacy_report_limitations(
+        report,
+        structured_context,
+    )
+
+    assert "Deployment `demo/orders-api`" in result
+    assert "准确名称" not in result
+    assert "PodTemplate/resources" in result
+    assert "资源写操作" in result
+
+
+def test_a026_replay_import_enforces_measured_offline_boundary():
+    repo_root = Path(__file__).resolve().parents[3]
+    replay_path = (
+        repo_root
+        / "agent-loop/tasks/T007/attempts/A026/artifacts/replay_a024.py"
+    )
+    probe = r'''
+import json
+import os
+import runpy
+import socket
+import subprocess
+import sys
+
+attempts = []
+
+
+def blocked(category, target):
+    attempts.append({"category": category, "target": str(target)})
+    raise RuntimeError(f"external access blocked: {category}: {target}")
+
+
+def block_socket_connect(_socket, address, *args, **kwargs):
+    return blocked("network", address)
+
+
+def block_create_connection(address, *args, **kwargs):
+    return blocked("network", address)
+
+
+def block_process(*args, **kwargs):
+    target = args[0] if args else kwargs
+    return blocked("subprocess", target)
+
+
+socket.socket.connect = block_socket_connect
+socket.socket.connect_ex = block_socket_connect
+socket.create_connection = block_create_connection
+subprocess.Popen = block_process
+subprocess.run = block_process
+subprocess.call = block_process
+subprocess.check_call = block_process
+subprocess.check_output = block_process
+os.system = block_process
+
+error = None
+driver_audit = None
+try:
+    namespace = runpy.run_path(sys.argv[1], run_name="a026_replay_import")
+    guard = namespace.get("OFFLINE_GUARD")
+    if guard is None:
+        error = "replay driver did not expose OFFLINE_GUARD"
+    else:
+        driver_audit = guard.audit()
+except BaseException as exc:
+    error = f"{type(exc).__name__}: {exc}"
+
+payload = {
+    "attempts": attempts,
+    "driver_audit": driver_audit,
+    "error": error,
+}
+print(json.dumps(payload, sort_keys=True))
+if (
+    error
+    or attempts
+    or not driver_audit
+    or driver_audit.get("attempt_count") != 0
+    or driver_audit.get("attempts") != []
+    or driver_audit.get("enforced") is not True
+    or set(driver_audit.get("guarded_categories") or [])
+    != {"network", "subprocess", "llm", "mcp", "kubernetes"}
+):
+    raise SystemExit(1)
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", probe, str(replay_path)],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_a026_unknown_deployment_subject_is_not_replaced_from_context():
+    report = """### 缺失证据（如有）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| `worker-api` 上层 Deployment 的准确名称及 PodTemplate | 高 | 无法安全生成针对该工作负载的资源写操作。 |
+"""
+    structured_context = """
+OBSERVABILITY_SOURCE dimension=topology tool=query_pod_topology source_system=kubernetes coverage=present
+TOPOLOGY_ENTITY entity_id=e:deployment kind=Deployment namespace=demo name=orders-api source_system=kubernetes tool=query_pod_topology
+"""
+
+    result = ConclusionFormatterNode._reconcile_legacy_report_limitations(
+        report,
+        structured_context,
+    )
+
+    assert "`worker-api` 上层 Deployment 的准确名称及 PodTemplate" in result
+    assert "Deployment `demo/orders-api`" not in result
+
+
+def test_a027_owned_deployment_subject_is_not_replaced_from_context():
+    report = """### 缺失证据（如有）
+| 证据 | 级别 | 影响 |
+|------|------|------|
+| `worker-api` 对应的上层 Deployment 的准确名称及 PodTemplate | 高 | 无法安全生成针对该工作负载的资源写操作。 |
+"""
+    structured_context = """
+OBSERVABILITY_SOURCE dimension=topology tool=query_pod_topology source_system=kubernetes coverage=present
+TOPOLOGY_ENTITY entity_id=e:deployment kind=Deployment namespace=demo name=orders-api source_system=kubernetes tool=query_pod_topology
+"""
+
+    result = ConclusionFormatterNode._reconcile_legacy_report_limitations(
+        report,
+        structured_context,
+    )
+
+    assert (
+        "`worker-api` 对应的上层 Deployment 的准确名称及 PodTemplate"
+        in result
+    )
+    assert "Deployment `demo/orders-api`" not in result
+
+
+def test_a021_evidence_stats_separate_dimension_coverage_from_sufficiency():
+    node = ConclusionFormatterNode()
+    evidence_analysis = json.dumps({
+        "observability_target_total": 8,
+        "observability_target_collected": 8,
+        "observability_target_completeness": 1.0,
+        "diagnostic_evidence_total": 8,
+        "diagnostic_evidence_collected": 8,
+        "diagnostic_evidence_completeness": 1.0,
+        "dimension_coverage": 1.0,
+        "diagnostic_sufficiency": 0.85,
+        "diagnostic_sufficiency_label": "充分",
+        "evidence_inventory": [],
+    })
+    report = """## 📊 诊断概览
+
+| 项目 | 内容 |
+|------|------|
+| **诊断证据充分度** | 6/8 (85%) |
+"""
+
+    result = node._enforce_evidence_stats(report, evidence_analysis)
+
+    assert "| **可观测性维度覆盖** | 8/8 (100%) |" in result
+    assert "| **诊断证据充分度** | 85% |" in result
+    assert "6/8 (85%)" not in result
+
+
+def test_a029_fact_ledger_report_keeps_weak_tracing_and_known_owners_truthful():
+    def fact(
+        *,
+        entity_id,
+        namespace,
+        entity_name,
+        dimension,
+        fact_type,
+        attribute,
+        value,
+        source_system,
+        marker,
+        directness="direct",
+        confidence="high",
+        strength="strong",
+    ):
+        record = {
+            "entity_id": entity_id,
+            "entity_kind": "Pod",
+            "namespace": namespace,
+            "entity_name": entity_name,
+            "dimension": dimension,
+            "fact_type": fact_type,
+            "attribute": attribute,
+            "value": value,
+            "source_system": source_system,
+            "directness": directness,
+            "confidence": confidence,
+            "strength": strength,
+            "evidence_refs": [f"ref:{marker}"],
+        }
+        record["fact_id"] = _canonical_fact_id(record)
+        return record
+
+    ledgers = []
+    for workload, trace_coverage in (
+        ("config-api", "present"),
+        ("oom-api", "weak"),
+    ):
+        namespace = f"demo-{workload}"
+        entity_id = f"k8s.pod:{namespace}/{workload}:uid-{workload}"
+        trace_id = (
+            "0123456789abcdef0123456789abcdef"
+            if workload == "config-api"
+            else "fedcba9876543210fedcba9876543210"
+        )
+        records = [
+            fact(
+                entity_id=entity_id,
+                namespace=namespace,
+                entity_name=workload,
+                dimension="tracing",
+                fact_type="flow",
+                attribute="l7_flow",
+                value={"trace_id": trace_id},
+                source_system="deepflow",
+                marker=f"{workload}-flow",
+            ),
+            fact(
+                entity_id=entity_id,
+                namespace=namespace,
+                entity_name=workload,
+                dimension="topology",
+                fact_type="relationship",
+                attribute="kubernetes.relationship",
+                value={
+                    "relation": "owned_by",
+                    "relationship": (
+                        "ReplicaSet --owned_by--> Deployment"
+                    ),
+                    "source": {
+                        "kind": "ReplicaSet",
+                        "namespace": namespace,
+                        "name": f"{workload}-rs",
+                    },
+                    "target": {
+                        "kind": "Deployment",
+                        "namespace": namespace,
+                        "name": workload,
+                    },
+                },
+                source_system="kubernetes",
+                marker=f"{workload}-owner",
+            ),
+        ]
+        if trace_coverage == "present":
+            records.append(
+                fact(
+                    entity_id=entity_id,
+                    namespace=namespace,
+                    entity_name=workload,
+                    dimension="tracing",
+                    fact_type="span",
+                    attribute="application_span",
+                    value={"trace_id": trace_id, "name": "GET /work"},
+                    source_system="tempo",
+                    marker=f"{workload}-span",
+                )
+            )
+        else:
+            records.append(
+                fact(
+                    entity_id=entity_id,
+                    namespace=namespace,
+                    entity_name=workload,
+                    dimension="tracing",
+                    fact_type="coverage",
+                    attribute="tracing.coverage",
+                    value={
+                        "coverage": "weak",
+                        "telemetry": {
+                            "deepflow": {"coverage": "present"},
+                            "tempo": {"coverage": "error"},
+                        },
+                    },
+                    source_system="deepflow+tempo",
+                    marker=f"{workload}-coverage",
+                    directness="related_context",
+                    confidence="medium",
+                    strength="supporting",
+                )
+            )
+        ledgers.append(FactLedger.model_validate({
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": f"case-{workload}",
+            "scope_entity_ids": [entity_id],
+            "records": records,
+            "record_count": len(records),
+            "truncated": False,
+            "source": "mcp_canonical",
+            "legacy_contract": False,
+        }))
+
+    report = """## 📊 可观测性数据
+
+### 三大观测维度
+| 维度 | 数据来源 | 覆盖状态 | 关键原始信号 | 证据 ref |
+|---|---|---|---|---|
+| **Tracing** | DeepFlow/Tempo | present | stale | stale |
+
+### 拓扑关系（实体与边）
+- stale
+
+### 缺失证据（如有）
+- 两个工作负载的真实 Deployment 名称不可用。
+- oom-api ReplicaSet 到 Deployment 关系 unavailable。
+"""
+    result = ConclusionFormatterNode._apply_fact_ledger_report_contract(
+        report,
+        ledgers=ledgers,
+        validated_claim={
+            "diagnostic_status": "inconclusive",
+            "supporting_fact_ids": [],
+            "contradicting_fact_ids": [],
+            "hypotheses": [],
+            "claim_validation": {
+                "valid": True,
+                "valid_supporting_fact_ids": [],
+                "valid_contradicting_fact_ids": [],
+                "invalid_fact_ids": [],
+                "reasons": [],
+            },
+        },
+    )
+    tracing_row = next(
+        line
+        for line in result.splitlines()
+        if line.startswith("| **Tracing**")
+    )
+
+    assert "| partial |" in tracing_row
+    assert "| present |" not in tracing_row
+    assert "真实 Deployment 名称不可用" not in result
+    assert "ReplicaSet 到 Deployment 关系 unavailable" not in result
+    assert "demo-config-api/config-api" in result
+    assert "demo-oom-api/oom-api" in result

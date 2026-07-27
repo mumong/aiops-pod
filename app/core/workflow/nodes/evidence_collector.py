@@ -26,10 +26,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.workflow.fact_contract import (
+    build_kubernetes_lifecycle_fact_ledger,
+    build_observability_query_fact_ledger,
     compact_aiops_legacy_context_json,
     compact_fact_ledgers_json,
+    is_observability_event_semantic_success,
+    normalize_topology_query_fact_value,
     normalize_case_fact_ledger,
     normalize_fact_ledger,
+    project_final_observability_events,
 )
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import EvidenceCollectionOutput, EvidencePlanOutput, QueryResult
@@ -66,6 +71,13 @@ class EvidenceCollectorNode(WorkflowNode):
         "query_aiops_deepflow_flows",
         "build_aiops_topology",
     }
+    _OBSERVABILITY_QUERY_ORDER = (
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    )
+    _OBSERVABILITY_QUERY_TOOLS = set(_OBSERVABILITY_QUERY_ORDER)
 
     def __init__(
         self,
@@ -106,6 +118,25 @@ class EvidenceCollectorNode(WorkflowNode):
     def get_required_fields(self) -> List[str]:
         return ["question", "layer"]
 
+    def _is_autonomous_observability_enabled(self) -> bool:
+        workflow = self._get_workflow_config()
+        evidence = workflow.get("evidence", {}) if isinstance(workflow, dict) else {}
+        mode = evidence.get("observability_mode") if isinstance(evidence, dict) else None
+        return str(mode or "").strip().lower() == "autonomous"
+
+    def _is_observability_first_round_gate_enabled(self) -> bool:
+        if not self._is_autonomous_observability_enabled():
+            return False
+        workflow = self._get_workflow_config()
+        evidence = workflow.get("evidence", {}) if isinstance(workflow, dict) else {}
+        gate = (
+            evidence.get("observability_first_round_gate", {})
+            if isinstance(evidence, dict)
+            else {}
+        )
+        if isinstance(gate, dict) and "enabled" in gate:
+            return self._parse_bool_config(gate.get("enabled"), True)
+        return True
 
     @staticmethod
     def _has_semantic_tool_success(thinking_events: List[Dict[str, Any]]) -> bool:
@@ -234,7 +265,10 @@ class EvidenceCollectorNode(WorkflowNode):
             if not evidence_items and not upstream_evidence_items:
                 layer_thinking = state.get("thinking_events", [])
                 layer_tool_events = [
-                    ev for ev in layer_thinking
+                    ev
+                    for ev in self._project_final_evidence_events(
+                        layer_thinking
+                    )
                     if ev.get("type") == "tool_result"
                     and ev.get("status") == "success"
                     and ev.get("node") == "layer"
@@ -511,8 +545,18 @@ class EvidenceCollectorNode(WorkflowNode):
         detail_retrieval: Optional[Dict[str, Any]] = None,
         unresolved_questions: Optional[List[str]] = None,
     ) -> EvidenceCollectionOutput:
+        is_first_round_gate = any(
+            isinstance(item, dict)
+            and item.get("source") == "observability_first_round_gate"
+            for item in (evidence_plan or [])
+        )
         observability_summary = (
-            f"Pod 可观测性覆盖 {observability_target_collected}/"
+            (
+                "首轮可观测查询执行 "
+                if is_first_round_gate
+                else "Pod 可观测性覆盖 "
+            )
+            + f"{observability_target_collected}/"
             f"{observability_target_total}，完整度 {observability_target_completeness:.0%}"
             if observability_target_total
             else "Pod 可观测性覆盖不适用"
@@ -569,6 +613,11 @@ class EvidenceCollectorNode(WorkflowNode):
             "diagnostic_sufficiency_label": diagnostic_sufficiency_label,
             "source_coverage": source_coverage or {},
             "case_target_coverage": {
+                "mode": (
+                    "observability_first_round_gate"
+                    if is_first_round_gate
+                    else "case_target"
+                ),
                 "total": observability_target_total,
                 "collected": observability_target_collected,
                 "rate": observability_target_completeness,
@@ -795,6 +844,11 @@ class EvidenceCollectorNode(WorkflowNode):
                 failure_reason=failure_reason,
                 existing_plan=existing_plan,
                 plan_mode="dynamic_collection",
+                observability_mode=(
+                    "autonomous"
+                    if self._is_autonomous_observability_enabled()
+                    else "legacy"
+                ),
             )
             if not getattr(self, "_logged_evidence_user_prompt", False):
                 logger.info(
@@ -823,6 +877,11 @@ class EvidenceCollectorNode(WorkflowNode):
                     existing_plan,
                     handoff_for_existing,
                 )
+                if self._is_observability_first_round_gate_enabled():
+                    evidence_plan = self._ensure_autonomous_observability_gate_plan(
+                        evidence_plan,
+                        handoff_for_existing,
+                    )
                 if not evidence_plan:
                     logger.warning("⚠️ [evidence] 既有 evidence_plan 为空，拒绝执行自由文本采证")
                     return [], [], ""
@@ -848,6 +907,61 @@ class EvidenceCollectorNode(WorkflowNode):
                 evidence_plan,
                 handoff_for_plan,
             )
+            if self._is_observability_first_round_gate_enabled():
+                missing_gate_items = (
+                    self._missing_autonomous_observability_gate_items(
+                        evidence_plan,
+                        handoff_for_plan,
+                    )
+                )
+                if missing_gate_items:
+                    repair_message = self._build_autonomous_plan_repair_message(
+                        user_message,
+                        evidence_plan,
+                        missing_gate_items,
+                    )
+                    repaired_plan, repaired_raw = self._generate_structured_evidence_plan(
+                        system_prompt=system_prompt,
+                        user_message=repair_message,
+                        layer_str=layer_str,
+                    )
+                    repaired_plan = self._prepare_evidence_plan(
+                        repaired_plan,
+                        handoff_for_plan,
+                    )
+                    if repaired_plan:
+                        evidence_plan = repaired_plan
+                        plan_raw = repaired_raw
+                evidence_plan = self._ensure_autonomous_observability_gate_plan(
+                    evidence_plan,
+                    handoff_for_plan,
+                )
+            elif self._is_autonomous_observability_enabled():
+                missing_targets = self._missing_autonomous_observability_targets(
+                    evidence_plan,
+                    handoff_for_plan,
+                )
+                if missing_targets:
+                    repair_message = self._build_autonomous_plan_repair_message(
+                        user_message,
+                        evidence_plan,
+                        [
+                            (namespace, pod, "")
+                            for namespace, pod in missing_targets
+                        ],
+                    )
+                    repaired_plan, repaired_raw = self._generate_structured_evidence_plan(
+                        system_prompt=system_prompt,
+                        user_message=repair_message,
+                        layer_str=layer_str,
+                    )
+                    repaired_plan = self._prepare_evidence_plan(
+                        repaired_plan,
+                        handoff_for_plan,
+                    )
+                    if repaired_plan:
+                        evidence_plan = repaired_plan
+                        plan_raw = repaired_raw
             if not evidence_plan:
                 logger.warning("LLM 未返回有效 evidence_plan Pydantic 结构，拒绝进入工具执行")
                 return [], [], plan_raw
@@ -921,6 +1035,12 @@ class EvidenceCollectorNode(WorkflowNode):
         failure_reason: str,
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
         layer_str = layer.value if layer else "L2"
+        parsed_layer_handoff = self._parse_handoff_json(layer_analysis)
+        if self._is_observability_first_round_gate_enabled():
+            evidence_plan = self._ensure_autonomous_observability_gate_plan(
+                evidence_plan,
+                parsed_layer_handoff,
+            )
         if possible_scenarios:
             parts = []
             for s in possible_scenarios:
@@ -956,12 +1076,22 @@ class EvidenceCollectorNode(WorkflowNode):
             failure_reason=failure_reason,
             existing_plan=evidence_plan,
             plan_mode="preplanned_execution",
+            observability_mode=(
+                "autonomous"
+                if self._is_autonomous_observability_enabled()
+                else "legacy"
+            ),
         )
 
         legacy_early_stop_enabled = self._is_early_stop_enabled(default=True)
+        autonomous_mode = self._is_autonomous_observability_enabled()
+        first_round_gate = self._is_observability_first_round_gate_enabled()
         has_mandatory_targets = bool(self._mandatory_case_targets(evidence_plan))
         logger.info(
-            "🧭 [evidence] legacy_early_stop=%s mandatory_targets=%s",
+            "🧭 [evidence] autonomous_mode=%s first_round_gate=%s "
+            "legacy_early_stop=%s mandatory_targets=%s",
+            autonomous_mode,
+            first_round_gate,
             legacy_early_stop_enabled,
             has_mandatory_targets,
         )
@@ -976,7 +1106,21 @@ class EvidenceCollectorNode(WorkflowNode):
         self._active_evidence_plan = evidence_plan
         try:
             while True:
-                prior_attempted = self._attempted_mandatory_case_targets(all_thinking_events)
+                prior_attempted = (
+                    self._attempted_autonomous_observability_gate_items(
+                        all_thinking_events
+                    )
+                    if first_round_gate
+                    else (
+                        self._attempted_autonomous_observability_targets(
+                            all_thinking_events
+                        )
+                        if autonomous_mode
+                        else self._attempted_mandatory_case_targets(
+                            all_thinking_events
+                        )
+                    )
+                )
 
                 def stop_checker(round_events: List[Dict[str, Any]]) -> bool:
                     return self._should_stop_collection_early(
@@ -987,12 +1131,16 @@ class EvidenceCollectorNode(WorkflowNode):
                     user_message,
                     system_prompt,
                     stop_checker=(
-                        stop_checker
-                        if has_mandatory_targets
+                        self._should_stop_autonomous_collection
+                        if autonomous_mode
                         else (
-                            self._should_stop_collection_early
-                            if legacy_early_stop_enabled
-                            else None
+                            stop_checker
+                            if has_mandatory_targets
+                            else (
+                                self._should_stop_collection_early
+                                if legacy_early_stop_enabled
+                                else None
+                            )
                         )
                     ),
                     tool_result_sequence_start=tool_result_sequence_start,
@@ -1010,12 +1158,19 @@ class EvidenceCollectorNode(WorkflowNode):
                 if self._early_stop_state.get("reason") == "context_budget_stop":
                     break
 
-                remaining_plan = self._remaining_unattempted_mandatory_items(
-                    evidence_plan,
-                    all_thinking_events,
+                remaining_plan = (
+                    self._remaining_unattempted_autonomous_items(
+                        evidence_plan,
+                        all_thinking_events,
+                    )
+                    if autonomous_mode
+                    else self._remaining_unattempted_mandatory_items(
+                        evidence_plan,
+                        all_thinking_events,
+                    )
                 )
                 if not remaining_plan:
-                    if has_mandatory_targets:
+                    if has_mandatory_targets and not autonomous_mode:
                         refinement_response, refinement_events = (
                             self._run_post_case_evidence_refinement(
                                 question=question,
@@ -1075,8 +1230,20 @@ class EvidenceCollectorNode(WorkflowNode):
                         }
                     break
 
-                current_attempted = self._attempted_mandatory_case_targets(
-                    all_thinking_events
+                current_attempted = (
+                    self._attempted_autonomous_observability_gate_items(
+                        all_thinking_events
+                    )
+                    if first_round_gate
+                    else (
+                        self._attempted_autonomous_observability_targets(
+                            all_thinking_events
+                        )
+                        if autonomous_mode
+                        else self._attempted_mandatory_case_targets(
+                            all_thinking_events
+                        )
+                    )
                 )
                 if len(current_attempted) > len(prior_attempted):
                     stalled_rounds = 0
@@ -1088,8 +1255,29 @@ class EvidenceCollectorNode(WorkflowNode):
                         "reason": "collection_stalled",
                         "required_levels": ["mandatory_live_observability"],
                         "uncollected_targets": [
-                            f"{namespace}/{pod}"
-                            for namespace, pod in self._mandatory_case_targets(remaining_plan)
+                            (
+                                f"{namespace}/{pod}:{tool}"
+                                if tool
+                                else f"{namespace}/{pod}"
+                            )
+                            for namespace, pod, tool in (
+                                self._autonomous_observability_gate_items(
+                                    remaining_plan
+                                )
+                                if first_round_gate
+                                else [
+                                    (namespace, pod, "")
+                                    for namespace, pod in (
+                                        self._autonomous_observability_targets(
+                                            remaining_plan
+                                        )
+                                        if autonomous_mode
+                                        else self._mandatory_case_targets(
+                                            remaining_plan
+                                        )
+                                    )
+                                ]
+                            )
                         ],
                     }
                     break
@@ -1101,17 +1289,32 @@ class EvidenceCollectorNode(WorkflowNode):
                     context_archive_ref=context_archive_ref,
                     layer_archive_ref=layer_archive_ref or {},
                     strict_mode=False,
-                    failure_reason="继续执行尚未尝试的 mandatory 实时可观测性采集项",
+                    failure_reason=(
+                        "继续执行尚未尝试的首轮 Metrics、Logging、Tracing、Topology 门控项"
+                        if first_round_gate
+                        else "继续执行尚未尝试的 mandatory 实时可观测性采集项"
+                    ),
                     existing_plan=remaining_plan,
                     plan_mode="preplanned_execution",
+                    observability_mode=(
+                        "autonomous"
+                        if autonomous_mode
+                        else "legacy"
+                    ),
                 )
-                completed_summary = self._format_completed_mandatory_summary(
-                    all_thinking_events
+                completed_summary = (
+                    self._format_completed_autonomous_gate_summary(
+                        all_thinking_events
+                    )
+                    if first_round_gate
+                    else self._format_completed_mandatory_summary(
+                        all_thinking_events
+                    )
                 )
                 if completed_summary:
                     user_message = (
                         f"{user_message.rstrip()}\n\n"
-                        "# 已完成 mandatory 采集摘要（不要重复调用）\n"
+                        "# 已完成首轮采集摘要（不要用相同参数重复调用）\n"
                         f"{completed_summary}\n"
                     )
         finally:
@@ -1529,6 +1732,8 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     ) -> set[str]:
         """Limit execution to tools declared by the structured evidence plan."""
         allowed_tools = {"fetch_runbook"}
+        if self._is_autonomous_observability_enabled():
+            allowed_tools.update(self._OBSERVABILITY_QUERY_TOOLS)
         if any(
             isinstance(item, dict)
             and (
@@ -1558,6 +1763,297 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             not in allowed_tools
         }
 
+    @classmethod
+    def _missing_autonomous_observability_targets(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+        layer_handoff: Optional[Dict[str, Any]],
+    ) -> List[tuple[str, str]]:
+        handoff_targets = [
+            (namespace.lower(), pod.lower())
+            for namespace, pod in cls._collect_handoff_pod_targets(
+                layer_handoff or {}
+            )
+        ]
+        planned_targets = {
+            target
+            for item in (evidence_plan or [])
+            if isinstance(item, dict)
+            and cls._normalize_plan_text(item.get("tool"))
+            in cls._OBSERVABILITY_QUERY_TOOLS
+            if (target := cls._extract_plan_pod_target(item))
+        }
+        return [
+            target
+            for target in dict.fromkeys(handoff_targets)
+            if target not in planned_targets
+        ]
+
+    @classmethod
+    def _missing_autonomous_observability_gate_items(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+        layer_handoff: Optional[Dict[str, Any]],
+    ) -> List[tuple[str, str, str]]:
+        targets = [
+            (namespace.lower(), pod.lower())
+            for namespace, pod in cls._collect_handoff_pod_targets(
+                layer_handoff or {}
+            )
+        ]
+        planned = set(cls._autonomous_observability_gate_items(evidence_plan))
+        return [
+            (namespace, pod, tool_name)
+            for namespace, pod in dict.fromkeys(targets)
+            for tool_name in cls._OBSERVABILITY_QUERY_ORDER
+            if (namespace, pod, tool_name) not in planned
+        ]
+
+    @staticmethod
+    def _build_autonomous_plan_repair_message(
+        user_message: str,
+        evidence_plan: List[Dict[str, Any]],
+        missing_gate_items: List[tuple[str, str, str]],
+    ) -> str:
+        missing_text = ", ".join(
+            (
+                f"{namespace}/{pod}:{tool_name}"
+                if tool_name
+                else f"{namespace}/{pod}"
+            )
+            for namespace, pod, tool_name in missing_gate_items
+        )
+        current_plan = json.dumps(
+            evidence_plan,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        return (
+            f"{user_message.rstrip()}\n\n"
+            "# evidence_plan 首轮四维门控校验失败\n"
+            f"- 缺少的异常 Pod/工具组合：{missing_text}。\n"
+            "- 重新输出完整 EvidencePlanOutput；保留仍然有效的 Kubernetes 计划，"
+            "并补齐上述 Metrics、Logging、Tracing、Topology 首轮查询。\n"
+            "- 每个缺失项的查询参数、purpose、指标、关键词和链路过滤条件仍由你根据"
+            "Pod 生命周期和当前假设自主选择；不要按故障类型使用固定工具链。\n"
+            "- empty、absent、weak 或 error 都是允许的真实结果边界，不能因为预计无数据"
+            "而省略首轮工具调用。\n"
+            "- 这是唯一一次计划修复，不要输出自然语言说明。\n"
+            f"# 首轮 evidence_plan\n{current_plan}\n"
+        )
+
+    def _ensure_autonomous_observability_gate_plan(
+        self,
+        evidence_plan: List[Dict[str, Any]],
+        layer_handoff: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        plan = [
+            dict(item)
+            for item in (evidence_plan or [])
+            if isinstance(item, dict)
+        ]
+        targets = [
+            (namespace.lower(), pod.lower())
+            for namespace, pod in self._collect_handoff_pod_targets(
+                layer_handoff or {}
+            )
+        ]
+        targets = list(dict.fromkeys(targets))
+        if not targets:
+            return plan
+
+        selected_indexes: set[int] = set()
+        gate_items: List[Dict[str, Any]] = []
+        for target_index, (namespace, pod) in enumerate(targets, start=1):
+            for tool_name in self._OBSERVABILITY_QUERY_ORDER:
+                existing_index = next(
+                    (
+                        index
+                        for index, item in enumerate(plan)
+                        if index not in selected_indexes
+                        and self._normalize_plan_text(item.get("tool")) == tool_name
+                        and self._extract_plan_pod_target(item)
+                        == (namespace, pod)
+                    ),
+                    None,
+                )
+                if existing_index is not None:
+                    item = dict(plan[existing_index])
+                    selected_indexes.add(existing_index)
+                else:
+                    item = self._build_autonomous_observability_gate_item(
+                        namespace=namespace,
+                        pod=pod,
+                        tool_name=tool_name,
+                        target_index=target_index,
+                    )
+                    logger.info(
+                        "🧭 [evidence] 补入首轮可观测门控项: %s/%s:%s",
+                        namespace,
+                        pod,
+                        tool_name,
+                    )
+
+                args = dict(item.get("tool_args") or {})
+                args.setdefault("namespace", namespace)
+                args.setdefault("pod", pod)
+                args.setdefault(
+                    "purpose",
+                    self._default_observability_gate_purpose(tool_name),
+                )
+                item["tool_args"] = args
+                item["purpose"] = str(
+                    item.get("purpose")
+                    or args.get("purpose")
+                    or self._default_observability_gate_purpose(tool_name)
+                )
+                item["level"] = "critical"
+                item["source"] = "observability_first_round_gate"
+                acceptable = [
+                    str(value).strip()
+                    for value in (item.get("acceptable_tools") or [])
+                    if str(value).strip()
+                ]
+                if tool_name not in acceptable:
+                    acceptable.append(tool_name)
+                item["acceptable_tools"] = acceptable
+                gate_items.append(item)
+
+        remaining = [
+            item
+            for index, item in enumerate(plan)
+            if index not in selected_indexes
+        ]
+        return self._normalize_evidence_plan(
+            [*gate_items, *remaining],
+            layer_handoff=layer_handoff,
+        )
+
+    @classmethod
+    def _build_autonomous_observability_gate_item(
+        cls,
+        *,
+        namespace: str,
+        pod: str,
+        tool_name: str,
+        target_index: int,
+    ) -> Dict[str, Any]:
+        purpose = cls._default_observability_gate_purpose(tool_name)
+        common = {
+            "id": (
+                f"observability-gate-{target_index}-"
+                f"{cls._observability_tool_dimension(tool_name)}"
+            ),
+            "description": (
+                f"首轮查询异常 Pod {namespace}/{pod} 的"
+                f"{cls._observability_tool_dimension(tool_name)} 真实数据"
+            ),
+            "level": "critical",
+            "tool": tool_name,
+            "purpose": purpose,
+            "acceptable_tools": [tool_name],
+            "source": "observability_first_round_gate",
+        }
+        if tool_name == "execute_pod_promql":
+            namespace_selector = json.dumps(namespace)
+            pod_selector = json.dumps(pod)
+            promql = " or ".join([
+                (
+                    "kube_pod_status_phase"
+                    f"{{namespace={namespace_selector},pod={pod_selector}}}"
+                ),
+                (
+                    "kube_pod_container_status_waiting_reason"
+                    f"{{namespace={namespace_selector},pod={pod_selector}}}"
+                ),
+                (
+                    "kube_pod_container_status_last_terminated_reason"
+                    f"{{namespace={namespace_selector},pod={pod_selector}}}"
+                ),
+                (
+                    "kube_pod_container_status_restarts_total"
+                    f"{{namespace={namespace_selector},pod={pod_selector}}}"
+                ),
+            ])
+            common.update({
+                "command": "execute generic Pod lifecycle PromQL",
+                "tool_args": {
+                    "namespace": namespace,
+                    "pod": pod,
+                    "purpose": purpose,
+                    "promql": promql,
+                    "query_type": "instant",
+                },
+            })
+            return common
+        if tool_name == "query_pod_logs":
+            common.update({
+                "command": "query recent real Pod logs without preset fault keywords",
+                "tool_args": {
+                    "namespace": namespace,
+                    "pod": pod,
+                    "purpose": purpose,
+                    "window_minutes": 30,
+                    "max_records": 20,
+                    "allow_name_fallback": True,
+                },
+            })
+            return common
+        if tool_name == "query_pod_topology":
+            common.update({
+                "command": "query source-backed Pod topology relationships",
+                "tool_args": {
+                    "namespace": namespace,
+                    "pod": pod,
+                    "purpose": purpose,
+                },
+            })
+            return common
+        common.update({
+            "command": "query recent real Pod flows and application spans",
+            "tool_args": {
+                "namespace": namespace,
+                "pod": pod,
+                "purpose": purpose,
+                "window_minutes": 30,
+                "direction": "any",
+                "include_tempo": True,
+                "max_records": 20,
+            },
+        })
+        return common
+
+    @staticmethod
+    def _observability_tool_dimension(tool_name: str) -> str:
+        return {
+            "execute_pod_promql": "metrics",
+            "query_pod_logs": "logging",
+            "query_pod_tracing": "tracing",
+            "query_pod_topology": "topology",
+        }.get(str(tool_name or "").strip().lower(), "observability")
+
+    @classmethod
+    def _default_observability_gate_purpose(cls, tool_name: str) -> str:
+        return {
+            "execute_pod_promql": (
+                "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，"
+                "为后续选择更具体的 PromQL 提供基线"
+            ),
+            "query_pod_logs": (
+                "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，"
+                "识别可用于后续精确查询的错误原文、字段、路径或 trace ID"
+            ),
+            "query_pod_tracing": (
+                "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，"
+                "确认调用数据是否存在并发现可继续追踪的请求或 trace ID"
+            ),
+            "query_pod_topology": (
+                "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，"
+                "为后续因果链提供来源可核验的拓扑边"
+            ),
+        }.get(str(tool_name or "").strip().lower(), "首轮获取目标 Pod 的真实可观测性数据")
+
 
     @staticmethod
     def _build_evidence_user_message(
@@ -1570,6 +2066,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         failure_reason: str = "",
         existing_plan: Optional[List[Dict[str, Any]]] = None,
         plan_mode: str = "dynamic_collection",
+        observability_mode: str = "legacy",
     ) -> str:
         strict_section = ""
         if existing_plan:
@@ -1638,10 +2135,11 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 else "调用必要真实工具后输出简短证据结论；不要手写 EvidenceCollectionOutput。"
             ),
         )
-        if not existing_plan:
+        if not existing_plan or observability_mode == "autonomous":
             case_guidance = EvidenceCollectorNode._build_live_observability_plan_guidance(
                 question,
                 handoff_obj,
+                observability_mode=observability_mode,
             )
             if case_guidance:
                 message = f"{message.rstrip()}\n\n{case_guidance}\n"
@@ -1652,6 +2150,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         cls,
         question: str,
         handoff: Dict[str, Any],
+        observability_mode: str = "legacy",
     ) -> str:
         del question
         targets = cls._collect_handoff_pod_targets(handoff)
@@ -1663,6 +2162,31 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         )
         if len(targets) > 8:
             rendered_targets += f" 等 {len(targets)} 个 Pod"
+        if str(observability_mode or "").strip().lower() == "autonomous":
+            return (
+                "# 自主可观测性组合查询\n"
+                f"- 上游已确认的异常 Pod 候选：{rendered_targets}。\n"
+                "- 先使用 Kubernetes 只读工具确认当前生命周期、容器状态、事件和实体身份；"
+                "Kubernetes 事实与可观测性查询应组合使用。\n"
+                "- 首轮门控对每个异常 Pod 都包含 Metrics、Logging、Tracing、Topology 四个通用查询；"
+                "四个工具都必须真实执行一次，并在工具参数中填写明确 `purpose`，"
+                "说明结果如何改变根因判断。\n"
+                "- Metrics 使用 `execute_pod_promql`，由 Qwen 根据待验证问题选择 Pod 精确作用域的 PromQL；"
+                "Logging 使用 `query_pod_logs`，由 Qwen 选择关键词、级别、容器、trace ID 和时间窗；"
+                "Tracing 使用 `query_pod_tracing`，由 Qwen 选择方向、协议、状态码、时延、对端、资源或 trace ID；"
+                "Topology 使用 `query_pod_topology`，获取来源可核验的控制器、Service、节点和容器关系。\n"
+                "- 首轮只保证真实尝试，不要求四个维度都有数据；容器尚未启动、Pod 无 IP、应用无插桩"
+                "或后端查询失败时，必须如实保留 empty/absent/weak/error，不能跳过或编造。\n"
+                "- 门控完成后先比较四维真实返回与 Kubernetes 事实；仍有关键歧义、冲突、时间窗不足"
+                "或样本不能回答 purpose 时，可使用新的 `purpose` 和更精确条件继续补证；"
+                "查询没有固定顺序，Qwen 根据上一轮真实结果自主决定下一步。\n"
+                "- kubectl 日志用于发现错误原文、HTTP path 和 trace_id；容器真实运行过且日志出现决定性业务原文时，"
+                "优先用 `query_pod_logs` 以同一实体和时间窗做 ES/Filebeat 结构化核验。\n"
+                "- 真实证据出现有效 trace_id 或 HTTP path 且 Pod 有 IP 时，判断 `query_pod_tracing` 是否能验证"
+                "调用关系、错误传播或影响面；有诊断增益时按线索查询，无增益时可不调用并说明边界。\n"
+                "- Runbook 只提供值得验证的问题和查询构造建议，不是固定工具序列，也不能替代真实 tool_result。\n"
+                "- 上下文使用率达到 80% 后停止新增采集，明确列出未采集 Pod/维度，不得把它们写成已验证结论。"
+            )
         return (
             "# 实时可观测性证据优先\n"
             f"- 上游已确认的异常 Pod 候选：{rendered_targets}。\n"
@@ -1885,6 +2409,8 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             evidence_plan,
             layer_handoff=layer_handoff,
         )
+        if self._is_autonomous_observability_enabled():
+            return normalized
         with_mandatory = self._ensure_mandatory_aiops_case_plan(
             normalized,
             layer_handoff,
@@ -2372,7 +2898,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             command,
             re.IGNORECASE,
         )
-        if pod_command_match:
+        if pod_command_match and not pod_command_match.group(1).startswith("-"):
             pod_name = pod_name or pod_command_match.group(1).lower()
 
         event_match = re.search(r"involvedObject\.name=([^,\s]+)", command, re.IGNORECASE)
@@ -2625,6 +3151,14 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         tool = cls._normalize_plan_text(item.get("tool"))
         command = cls._normalize_plan_text(item.get("command"))
         purpose = cls._normalize_plan_text(item.get("purpose"), item.get("description"))
+        if tool in cls._OBSERVABILITY_QUERY_TOOLS:
+            pod_target = cls._extract_plan_pod_target(item)
+            if pod_target:
+                return (
+                    tool,
+                    f"{pod_target[0]}/{pod_target[1]}",
+                    purpose[:120] or command[:160],
+                )
         target = cls._extract_plan_target(command)
         intent = cls._classify_plan_intent(command, purpose)
 
@@ -2852,7 +3386,10 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             return False
 
         successful_tools = [
-            ev for ev in thinking_events
+            ev
+            for ev in self._project_final_evidence_events(
+                thinking_events
+            )
             if ev.get("type") == "tool_result"
             and ev.get("deduplicated") is not True
             and ev.get("status") == "success"
@@ -2986,6 +3523,17 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             if observed_namespace and observed_pod
             else None
         )
+        entity = (
+            structured.get("entity")
+            if isinstance(structured.get("entity"), dict)
+            else {}
+        )
+        entity_namespace = str(entity.get("namespace") or "").strip().lower()
+        entity_pod = str(
+            entity.get("pod") or entity.get("name") or ""
+        ).strip().lower()
+        if entity_namespace and entity_pod:
+            observed = (entity_namespace, entity_pod)
         if require_consistent and requested and observed and requested != observed:
             logger.warning(
                 "⚠️ [evidence] collect_aiops_case 请求目标与返回实体不一致: requested=%s/%s observed=%s/%s",
@@ -2995,7 +3543,312 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 observed[1],
             )
             return None
-        return requested or observed
+        return observed or requested
+
+    @classmethod
+    def _trusted_pod_uid_index(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> Dict[tuple[str, str], str]:
+        candidates: Dict[tuple[str, str], set[str]] = {}
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or event.get("status") != "success"
+                or event.get("semantic_success") is not True
+            ):
+                continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            tool_name = str(
+                event.get("tool_name") or ""
+            ).strip().lower()
+            if tool_name in cls._OBSERVABILITY_QUERY_TOOLS:
+                args = (
+                    event.get("tool_args")
+                    if isinstance(event.get("tool_args"), dict)
+                    else {}
+                )
+                purpose = str(
+                    structured.get("purpose")
+                    or args.get("purpose")
+                    or ""
+                ).strip()
+                if (
+                    not purpose
+                    or not is_observability_event_semantic_success(
+                        event
+                    )
+                ):
+                    continue
+            scope = cls._extract_tool_event_pod_target(
+                event,
+                require_consistent=True,
+            )
+            if not scope:
+                continue
+            observed_uids: set[str] = set()
+            for candidate, name_keys in (
+                (structured.get("primary_entity"), ("name", "pod")),
+                (structured.get("entity"), ("pod", "name")),
+                (structured, ("name", "pod")),
+            ):
+                if not isinstance(candidate, dict):
+                    continue
+                kind = str(candidate.get("kind") or "Pod").strip().lower()
+                namespace = str(
+                    candidate.get("namespace") or ""
+                ).strip().lower()
+                name = next(
+                    (
+                        str(candidate.get(key) or "").strip().lower()
+                        for key in name_keys
+                        if str(candidate.get(key) or "").strip()
+                    ),
+                    "",
+                )
+                uid = str(
+                    candidate.get("uid")
+                    or candidate.get("pod_uid")
+                    or ""
+                ).strip()
+                if (
+                    kind in {"pod", "pods"}
+                    and namespace
+                    and name
+                    and (namespace, name) == scope
+                    and uid
+                ):
+                    observed_uids.add(uid)
+            if observed_uids:
+                candidates.setdefault(scope, set()).update(observed_uids)
+        return {
+            scope: next(iter(uids))
+            for scope, uids in candidates.items()
+            if len(uids) == 1
+        }
+
+    @classmethod
+    def _with_trusted_pod_uid(
+        cls,
+        event: Dict[str, Any],
+        structured: Dict[str, Any],
+        trusted_uid_index: Dict[tuple[str, str], str],
+    ) -> Dict[str, Any]:
+        scope = cls._extract_tool_event_pod_target(
+            event,
+            require_consistent=True,
+        )
+        uid = trusted_uid_index.get(scope) if scope else None
+        if not uid:
+            return dict(structured)
+
+        enriched = dict(structured)
+        for key, name_keys, uid_key in (
+            ("primary_entity", ("name", "pod"), "uid"),
+            ("entity", ("pod", "name"), "pod_uid"),
+        ):
+            candidate = enriched.get(key)
+            if not isinstance(candidate, dict):
+                continue
+            candidate_scope = (
+                str(candidate.get("namespace") or "").strip().lower(),
+                next(
+                    (
+                        str(candidate.get(name_key) or "").strip().lower()
+                        for name_key in name_keys
+                        if str(candidate.get(name_key) or "").strip()
+                    ),
+                    "",
+                ),
+            )
+            if (
+                candidate_scope == scope
+                and not str(
+                    candidate.get("uid")
+                    or candidate.get("pod_uid")
+                    or ""
+                ).strip()
+            ):
+                candidate = dict(candidate)
+                candidate[uid_key] = uid
+                enriched[key] = candidate
+
+        top_level_scope = (
+            str(enriched.get("namespace") or "").strip().lower(),
+            str(
+                enriched.get("name")
+                or enriched.get("pod")
+                or ""
+            ).strip().lower(),
+        )
+        if (
+            top_level_scope == scope
+            and not str(
+                enriched.get("uid")
+                or enriched.get("pod_uid")
+                or ""
+            ).strip()
+        ):
+            enriched["uid"] = uid
+        return enriched
+
+    @classmethod
+    def _final_observability_query_events(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Return the shared final semantic projection for query attempts."""
+        return [
+            event
+            for event in project_final_observability_events(
+                thinking_events
+            )
+            if isinstance(event, dict)
+        ]
+
+    @classmethod
+    def _project_final_evidence_events(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Keep raw non-query evidence and only final semantic query events."""
+        final_query_event_ids = {
+            id(event)
+            for event in cls._final_observability_query_events(
+                thinking_events
+            )
+        }
+        return [
+            event
+            for event in (thinking_events or [])
+            if isinstance(event, dict)
+            and (
+                str(event.get("tool_name") or "").strip().lower()
+                not in cls._OBSERVABILITY_QUERY_TOOLS
+                or id(event) in final_query_event_ids
+            )
+        ]
+
+    @classmethod
+    def _autonomous_observability_targets(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+    ) -> List[tuple[str, str]]:
+        targets = [
+            (namespace, pod)
+            for namespace, pod, _ in cls._autonomous_observability_gate_items(
+                evidence_plan
+            )
+        ]
+        return list(dict.fromkeys(targets))
+
+    @classmethod
+    def _autonomous_observability_gate_items(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+    ) -> List[tuple[str, str, str]]:
+        items = [
+            (target[0], target[1], tool_name)
+            for item in (evidence_plan or [])
+            if isinstance(item, dict)
+            and (
+                tool_name := str(item.get("tool") or "").strip().lower()
+            )
+            in cls._OBSERVABILITY_QUERY_TOOLS
+            if (target := cls._extract_plan_pod_target(item))
+        ]
+        return list(dict.fromkeys(items))
+
+    @classmethod
+    def _attempted_autonomous_observability_gate_items(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> set[tuple[str, str, str]]:
+        attempted: set[tuple[str, str, str]] = set()
+        for event in thinking_events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+            ):
+                continue
+            tool_name = str(event.get("tool_name") or "").strip().lower()
+            if tool_name not in cls._OBSERVABILITY_QUERY_TOOLS:
+                continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            args = (
+                event.get("tool_args")
+                if isinstance(event.get("tool_args"), dict)
+                else {}
+            )
+            purpose = str(
+                structured.get("purpose") or args.get("purpose") or ""
+            ).strip()
+            if not purpose:
+                continue
+            target = cls._extract_tool_event_pod_target(
+                event,
+                require_consistent=True,
+            )
+            if target:
+                attempted.add((target[0], target[1], tool_name))
+        return attempted
+
+    @classmethod
+    def _attempted_autonomous_observability_targets(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> set[tuple[str, str]]:
+        return {
+            (namespace, pod)
+            for namespace, pod, _ in (
+                cls._attempted_autonomous_observability_gate_items(
+                    thinking_events
+                )
+            )
+        }
+
+    @classmethod
+    def _present_autonomous_observability_gate_items(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> set[tuple[str, str, str]]:
+        present: set[tuple[str, str, str]] = set()
+        for event in cls._final_observability_query_events(
+            thinking_events
+        ):
+            tool_name = str(
+                event.get("tool_name") or ""
+            ).strip().lower()
+            if tool_name not in cls._OBSERVABILITY_QUERY_TOOLS:
+                continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            if (
+                structured.get("status") != "query_succeeded"
+                or str(
+                    structured.get("coverage") or ""
+                ).strip().lower() != "present"
+            ):
+                continue
+            target = cls._extract_tool_event_pod_target(
+                event,
+                require_consistent=True,
+            )
+            if target:
+                present.add((target[0], target[1], tool_name))
+        return present
 
     @classmethod
     def _attempted_mandatory_case_targets(
@@ -3037,10 +3890,74 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         evidence_plan: List[Dict[str, Any]],
         thinking_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        has_first_round_gate = any(
+            isinstance(item, dict)
+            and item.get("source") == "observability_first_round_gate"
+            for item in (evidence_plan or [])
+        )
+        if has_first_round_gate:
+            planned_gate_items = set(
+                cls._autonomous_observability_gate_items(evidence_plan)
+            )
+            present_gate_items = (
+                cls._present_autonomous_observability_gate_items(
+                    thinking_events
+                )
+            )
+            collected_gate_items = (
+                planned_gate_items & present_gate_items
+            )
+            total = len(planned_gate_items)
+            collected = len(collected_gate_items)
+            return {
+                "observability_target_total": total,
+                "observability_target_collected": collected,
+                "observability_target_completeness": (
+                    collected / total if total else 0.0
+                ),
+            }
+
         mandatory_targets = set(cls._mandatory_case_targets(evidence_plan))
-        successful_targets = cls._successful_mandatory_case_targets(thinking_events)
-        collected_targets = mandatory_targets & successful_targets
-        total = len(mandatory_targets)
+        if mandatory_targets:
+            successful_targets = cls._successful_mandatory_case_targets(thinking_events)
+            collected_targets = mandatory_targets & successful_targets
+            total = len(mandatory_targets)
+            collected = len(collected_targets)
+            return {
+                "observability_target_total": total,
+                "observability_target_collected": collected,
+                "observability_target_completeness": collected / total if total else 0.0,
+            }
+
+        planned_targets = {
+            target
+            for item in (evidence_plan or [])
+            if isinstance(item, dict)
+            and str(item.get("tool") or "").strip().lower()
+            in cls._OBSERVABILITY_QUERY_TOOLS
+            if (target := cls._extract_plan_pod_target(item))
+        }
+        successful_targets = {
+            target
+            for event in (thinking_events or [])
+            if str(
+                (
+                    event.get("structured")
+                    if isinstance(event.get("structured"), dict)
+                    else {}
+                ).get("purpose")
+                or (
+                    event.get("tool_args")
+                    if isinstance(event.get("tool_args"), dict)
+                    else {}
+                ).get("purpose")
+                or ""
+            ).strip()
+            if is_observability_event_semantic_success(event)
+            if (target := cls._extract_tool_event_pod_target(event))
+        }
+        collected_targets = planned_targets & successful_targets
+        total = len(planned_targets)
         collected = len(collected_targets)
         return {
             "observability_target_total": total,
@@ -3054,21 +3971,49 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         thinking_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         cases: List[Dict[str, Any]] = []
+        queries: List[Dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
-        for event in thinking_events or []:
-            if (
-                event.get("type") != "tool_result"
-                or event.get("deduplicated") is True
-                or event.get("status") != "success"
-                or str(event.get("tool_name") or "").lower()
-                != "collect_aiops_case"
-            ):
-                continue
+        for event in cls._final_observability_query_events(thinking_events):
+            tool_name = str(event.get("tool_name") or "").lower()
             structured = (
                 event.get("structured")
                 if isinstance(event.get("structured"), dict)
                 else {}
             )
+            target = cls._extract_tool_event_pod_target(event)
+            dimension = str(structured.get("dimension") or "").strip().lower()
+            purpose = str(structured.get("purpose") or "").strip()
+            queries.append({
+                "target": (
+                    f"{target[0]}/{target[1]}"
+                    if target
+                    else "unknown/unknown"
+                ),
+                "tool": tool_name,
+                "source_system": str(structured.get("source_system") or ""),
+                "dimension": dimension,
+                "purpose": purpose,
+                "coverage": str(structured.get("coverage") or ""),
+                "directness": str(structured.get("directness") or ""),
+                "evidence_refs": list(
+                    structured.get("evidence_refs") or []
+                )[:20],
+            })
+
+        for event in thinking_events or []:
+            tool_name = str(event.get("tool_name") or "").lower()
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+                or event.get("status") != "success"
+                or tool_name != "collect_aiops_case"
+            ):
+                continue
             if structured.get("status") != "case_collected":
                 continue
             target = cls._extract_tool_event_pod_target(event)
@@ -3084,7 +4029,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     else {}
                 ),
             })
-        return {"cases": cases}
+        return {"cases": cases, "queries": queries}
 
     @classmethod
     def _calculate_detail_retrieval(
@@ -3141,10 +4086,10 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         thinking_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Separate dimension presence from evidence quality and sufficiency."""
-        total = 0
-        collected = 0
-        sufficiency_points = 0.0
-        missing: List[str] = []
+        dimension_results: Dict[
+            tuple[str, str],
+            tuple[bool, float, str],
+        ] = {}
 
         for event in thinking_events or []:
             if (
@@ -3352,13 +4297,120 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 "tracing": trace_score,
                 "topology": topology_score,
             }
-            total += len(checks)
-            sufficiency_points += sum(scores.values())
             for dimension, present in checks.items():
-                if present:
-                    collected += 1
-                else:
-                    missing.append(f"{target}:{dimension}")
+                dimension_results[(target, dimension)] = (
+                    present,
+                    scores[dimension],
+                    f"{target}:{dimension}",
+                )
+
+        for event in cls._final_observability_query_events(thinking_events):
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            dimension = str(
+                structured.get("dimension") or ""
+            ).strip().lower()
+            if not dimension:
+                continue
+            target_tuple = cls._extract_tool_event_pod_target(event)
+            target = (
+                f"{target_tuple[0]}/{target_tuple[1]}"
+                if target_tuple
+                else "unknown/unknown"
+            )
+            key = (target, dimension)
+            coverage = str(
+                structured.get("coverage") or ""
+            ).strip().lower()
+            evidence_rows = [
+                item
+                for field in (
+                    "facts",
+                    "samples",
+                    "flows",
+                    "spans",
+                    "edges",
+                )
+                for item in (
+                    structured.get(field)
+                    if isinstance(structured.get(field), list)
+                    else []
+                )
+                if isinstance(item, dict)
+            ]
+            query_has_evidence = (
+                is_observability_event_semantic_success(event)
+                and coverage in {"present", "weak", "partial"}
+                and bool(evidence_rows)
+            )
+            query_present = (
+                query_has_evidence
+                and structured.get("status") == "query_succeeded"
+                and coverage == "present"
+            )
+            query_score = 0.0
+            if query_has_evidence:
+                directness_values = {
+                    str(item.get("directness") or "").strip().lower()
+                    for item in evidence_rows
+                    if item.get("directness")
+                }
+                query_score = (
+                    0.25
+                    if (
+                        directness_values
+                        and directness_values <= {
+                            "related_context",
+                            "weak",
+                        }
+                    )
+                    else 1.0
+                )
+                if coverage in {"weak", "partial"}:
+                    query_score = min(query_score, 0.5)
+                if dimension == "metrics" and not any(
+                    item.get("trend_evaluable") is True
+                    and int(item.get("sample_count") or 0) >= 2
+                    for item in evidence_rows
+                ):
+                    query_score = min(query_score, 0.4)
+
+            current = dimension_results.get(key)
+            if query_has_evidence and (
+                current is None
+                or (query_present and not current[0])
+                or (
+                    query_present == current[0]
+                    and query_score > current[1]
+                )
+            ):
+                dimension_results[key] = (
+                    query_present,
+                    query_score,
+                    f"{target}:{dimension}",
+                )
+            elif current is None:
+                dimension_results[key] = (
+                    False,
+                    0.0,
+                    f"{target}:{dimension}({coverage or 'unknown'})",
+                )
+
+        total = len(dimension_results)
+        collected = sum(
+            1 for present, _, _ in dimension_results.values() if present
+        )
+        sufficiency_points = sum(
+            score for _, score, _ in dimension_results.values()
+        )
+        missing = [
+            label
+            for present, _, label in dimension_results.values()
+            if not present
+        ]
 
         coverage = collected / total if total else 0.0
         sufficiency = sufficiency_points / total if total else 0.0
@@ -3395,6 +4447,92 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             and (target := cls._extract_plan_pod_target(item))
             and target not in attempted
         ]
+
+    @classmethod
+    def _remaining_unattempted_autonomous_items(
+        cls,
+        evidence_plan: List[Dict[str, Any]],
+        thinking_events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        attempted = cls._attempted_autonomous_observability_gate_items(
+            thinking_events
+        )
+        remaining_gate_items = (
+            set(cls._autonomous_observability_gate_items(evidence_plan))
+            - attempted
+        )
+        selected: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in evidence_plan or []:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool") or "").strip().lower()
+            if tool_name not in cls._OBSERVABILITY_QUERY_TOOLS:
+                continue
+            target = cls._extract_plan_pod_target(item)
+            gate_item = (
+                (target[0], target[1], tool_name)
+                if target
+                else None
+            )
+            if (
+                not gate_item
+                or gate_item not in remaining_gate_items
+                or gate_item in seen
+            ):
+                continue
+            selected.append(dict(item))
+            seen.add(gate_item)
+        return selected
+
+    @classmethod
+    def _format_completed_autonomous_gate_summary(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+    ) -> str:
+        lines: List[str] = []
+        for event in cls._final_observability_query_events(thinking_events):
+            tool_name = str(event.get("tool_name") or "").strip().lower()
+            target = cls._extract_tool_event_pod_target(event)
+            if not target:
+                continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            coverage = str(
+                structured.get("coverage")
+                or ("error" if event.get("status") != "success" else "unknown")
+            ).strip()
+            purpose = str(
+                structured.get("purpose")
+                or (
+                    event.get("tool_args", {}).get("purpose")
+                    if isinstance(event.get("tool_args"), dict)
+                    else ""
+                )
+                or ""
+            ).strip()
+            result = str(
+                event.get("agent_facts")
+                or cls._build_aiops_agent_facts(
+                    tool_name=tool_name,
+                    structured=structured,
+                )
+                or event.get("result")
+                or event.get("result_preview")
+                or ""
+            )
+            compact_result = " ".join(result.split())[:800]
+            lines.append(
+                f"- {target[0]}/{target[1]}:{tool_name} "
+                f"status={event.get('status') or 'unknown'} "
+                f"coverage={coverage or 'unknown'} purpose={purpose or '-'}"
+            )
+            if compact_result:
+                lines.append(f"  真实返回摘要: {compact_result}")
+        return "\n".join(lines)
 
     @classmethod
     def _format_completed_mandatory_summary(
@@ -3528,7 +4666,9 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         # 从 thinking_events 提取可用于证据匹配的工具调用。部分只读探测
         # 命令的失败结果本身就是诊断证据，例如 curl registry 超时。
         successful_tools = []
-        for ev in thinking_events:
+        for ev in self._project_final_evidence_events(
+            thinking_events
+        ):
             if (
                 ev.get("type") == "tool_result"
                 and ev.get("status") == "success"
@@ -3760,7 +4900,9 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     def _extract_evidence_tool_events(self, thinking_events: list) -> List[Dict[str, Any]]:
         """Return successful/diagnostic tool observations that count as evidence attempts."""
         evidence_events: List[Dict[str, Any]] = []
-        for ev in thinking_events or []:
+        for ev in self._project_final_evidence_events(
+            thinking_events
+        ):
             if ev.get("type") != "tool_result" or ev.get("status") != "success":
                 continue
             if ev.get("deduplicated") is True:
@@ -3790,7 +4932,10 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         separate from evidence-plan execution with source=layer_verified.
         """
         layer_events = [
-            ev for ev in thinking_events or []
+            ev
+            for ev in self._project_final_evidence_events(
+                thinking_events
+            )
             if ev.get("type") == "tool_result"
             and ev.get("node") == "layer"
             and ev.get("status") == "success"
@@ -4078,6 +5223,24 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         if not tool_match:
             return False
 
+        expected_pod_target = EvidenceCollectorNode._extract_plan_pod_target({
+            "tool": plan_tool,
+            "command": plan_cmd,
+            "target_scope": plan_target_scope,
+            "tool_args": plan_tool_args or {},
+        })
+        observed_pod_target = EvidenceCollectorNode._extract_result_pod_target(
+            result=result,
+            structured=structured or {},
+            tool_args=tool_args or {},
+        )
+        if (
+            expected_pod_target
+            and observed_pod_target
+            and expected_pod_target != observed_pod_target
+        ):
+            return False
+
         if plan_tool in {"collect_aiops_case", "get_aiops_case"}:
             expected_status = "case_collected" if plan_tool == "collect_aiops_case" else "case_loaded"
             if tool_name != plan_tool or structured.get("status") != expected_status:
@@ -4274,6 +5437,44 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
 
         return False
 
+    def _should_stop_autonomous_collection(self, thinking_events: list) -> bool:
+        """Let Qwen stop naturally, but enforce the hard 80% context boundary."""
+        context_ratio = self._max_context_usage_ratio(thinking_events)
+        if context_ratio < 0.8:
+            return False
+
+        active_plan = getattr(self, "_active_evidence_plan", None) or []
+        planned_targets = {
+            target
+            for item in active_plan
+            if isinstance(item, dict)
+            if (target := self._extract_plan_pod_target(item))
+        }
+        planned_gate_items = {
+            (namespace, pod, tool_name)
+            for namespace, pod in planned_targets
+            for tool_name in self._OBSERVABILITY_QUERY_ORDER
+        }
+        attempted_gate_items = (
+            self._attempted_autonomous_observability_gate_items(
+                thinking_events
+            )
+        )
+
+        self._early_stop_state = {
+            "triggered": True,
+            "reason": "context_budget_stop",
+            "required_levels": ["critical", "important"],
+            "context_usage_ratio": context_ratio,
+            "uncollected_targets": [
+                f"{namespace}/{pod}:{tool_name}"
+                for namespace, pod, tool_name in sorted(
+                    planned_gate_items - attempted_gate_items
+                )
+            ],
+        }
+        return True
+
     @staticmethod
     def _is_kubectl_log_tool(tool_name: str) -> bool:
         return (tool_name or "").lower() in {
@@ -4387,6 +5588,55 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             kind = "pod"
 
         return {"kind": kind, "namespace": namespace, "name": name}
+
+    @staticmethod
+    def _extract_result_pod_target(
+        result: str,
+        structured: Dict[str, Any],
+        tool_args: Dict[str, Any],
+    ) -> Optional[tuple[str, str]]:
+        for candidate in (
+            structured.get("entity"),
+            structured.get("primary_entity"),
+        ):
+            if not isinstance(candidate, dict):
+                continue
+            kind = EvidenceCollectorNode._normalize_resource_kind(
+                candidate.get("kind") or candidate.get("type") or "pod"
+            )
+            namespace = str(candidate.get("namespace") or "").strip().lower()
+            pod = str(
+                candidate.get("pod")
+                or candidate.get("name")
+                or ""
+            ).strip().lower()
+            if kind in {"", "pod"} and namespace and pod:
+                return namespace, pod
+
+        resource_target = EvidenceCollectorNode._extract_result_resource_target(
+            result=result,
+            structured=structured,
+            tool_args=tool_args,
+        )
+        if (
+            resource_target.get("kind") in {"", "pod"}
+            and resource_target.get("namespace")
+            and resource_target.get("name")
+        ):
+            return (
+                resource_target["namespace"],
+                resource_target["name"],
+            )
+
+        namespace = str(tool_args.get("namespace") or "").strip().lower()
+        pod = str(
+            tool_args.get("pod")
+            or tool_args.get("pod_name")
+            or ""
+        ).strip().lower()
+        if namespace and pod:
+            return namespace, pod
+        return None
 
     @staticmethod
     def _normalize_resource_kind(value: Any) -> str:
@@ -4685,19 +5935,100 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         """
         case_tool_data = []
         supplementary_tool_data = []
+        trusted_uid_index = self._trusted_pod_uid_index(thinking_events)
+        final_query_event_ids = {
+            id(event)
+            for event in self._final_observability_query_events(
+                thinking_events
+            )
+        }
         for ev in thinking_events:
             if ev.get("type") == "tool_result" and ev.get("deduplicated") is not True:
                 tool_name = ev.get("tool_name", "")
+                normalized_tool = str(tool_name or "").strip().lower()
+                if (
+                    normalized_tool in self._OBSERVABILITY_QUERY_TOOLS
+                    and id(ev) not in final_query_event_ids
+                ):
+                    continue
                 result_text = ev.get("result", "") or ev.get("result_preview", "")
                 status = ev.get("status", "")
-                structured = ev.get("structured") or {}
-                fact_ledger = normalize_case_fact_ledger(structured)
+                raw_structured = (
+                    ev.get("structured")
+                    if isinstance(ev.get("structured"), dict)
+                    else {}
+                )
+                structured = self._with_trusted_pod_uid(
+                    ev,
+                    raw_structured,
+                    trusted_uid_index,
+                )
+                is_observability_query = (
+                    normalized_tool
+                    in self._OBSERVABILITY_QUERY_TOOLS
+                )
+                query_semantic_success = (
+                    is_observability_event_semantic_success(ev)
+                    if is_observability_query
+                    else None
+                )
+                fact_ledger = (
+                    normalize_case_fact_ledger(structured)
+                    if (
+                        not is_observability_query
+                        or query_semantic_success
+                    )
+                    else None
+                )
+                if (
+                    fact_ledger is None
+                    and is_observability_query
+                    and query_semantic_success
+                ):
+                    fact_ledger = build_observability_query_fact_ledger(
+                        structured
+                    )
+                if (
+                    fact_ledger is None
+                    and not is_observability_query
+                    and isinstance(structured, dict)
+                ):
+                    lifecycle_structured = dict(structured)
+                    lifecycle_structured["evidence_refs"] = list(
+                        dict.fromkeys([
+                            *(
+                                structured.get("evidence_refs")
+                                if isinstance(
+                                    structured.get("evidence_refs"),
+                                    list,
+                                )
+                                else []
+                            ),
+                            *[
+                                str(ref)
+                                for ref in (
+                                    ev.get("raw_ref"),
+                                    ev.get("structured_ref"),
+                                    ev.get("summary_ref"),
+                                )
+                                if str(ref or "").strip()
+                            ],
+                        ])
+                    )
+                    fact_ledger = build_kubernetes_lifecycle_fact_ledger(
+                        lifecycle_structured
+                    )
                 if (result_text or fact_ledger is not None) and status == "success":
                     item = {
                         "tool": tool_name,
                         "data": result_text,
                         "duration_s": ev.get("duration_seconds", 0),
-                        "semantic_success": ev.get("semantic_success", True),
+                        "semantic_success": (
+                            query_semantic_success
+                            if is_observability_query
+                            else ev.get("semantic_success", True)
+                            is not False
+                        ),
                         "raw_ref": ev.get("raw_ref"),
                         "structured_ref": ev.get("structured_ref"),
                         "summary_ref": ev.get("summary_ref"),
@@ -4713,9 +6044,16 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     )
                     if agent_context:
                         item["agent_context"] = agent_context
-                    agent_facts = self._build_aiops_agent_facts(
-                        tool_name=tool_name,
-                        structured=ev.get("structured") or {},
+                    agent_facts = (
+                        self._build_aiops_agent_facts(
+                            tool_name=tool_name,
+                            structured=structured,
+                        )
+                        if (
+                            not is_observability_query
+                            or query_semantic_success
+                        )
+                        else ""
                     )
                     if agent_facts:
                         item["agent_facts"] = agent_facts
@@ -4728,7 +6066,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     @classmethod
     def _build_aiops_agent_facts(cls, tool_name: str, structured: Dict[str, Any]) -> str:
         """Render short immutable facts that small models can quote verbatim."""
-        if str(tool_name or "").lower() not in {"collect_aiops_case", "get_aiops_case"}:
+        normalized_tool = str(tool_name or "").lower()
+        if normalized_tool not in {
+            "collect_aiops_case",
+            "get_aiops_case",
+            *cls._OBSERVABILITY_QUERY_TOOLS,
+        }:
             return ""
         if not isinstance(structured, dict):
             return ""
@@ -4746,6 +6089,126 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             current_chars = sum(len(item) + 1 for item in lines)
             if current_chars + len(line) <= max_chars:
                 lines.append(line)
+
+        if normalized_tool in cls._OBSERVABILITY_QUERY_TOOLS:
+            add("OBSERVABILITY_QUERY", [
+                ("tool", normalized_tool),
+                ("status", structured.get("status")),
+                ("source_system", structured.get("source_system")),
+                ("dimension", structured.get("dimension")),
+                ("coverage", structured.get("coverage")),
+                ("directness", structured.get("directness")),
+                ("purpose", structured.get("purpose")),
+            ])
+            entity = structured.get("entity")
+            if isinstance(entity, dict):
+                add("ENTITY", [
+                    ("kind", entity.get("kind")),
+                    ("namespace", entity.get("namespace")),
+                    ("pod", entity.get("pod")),
+                    ("pod_uid", entity.get("pod_uid")),
+                    ("pod_ip", entity.get("pod_ip")),
+                    ("node", entity.get("node")),
+                ])
+            add("EXECUTED_QUERY", [
+                ("query", structured.get("query")),
+            ])
+            for fact in (structured.get("facts") or [])[:8]:
+                if not isinstance(fact, dict):
+                    continue
+                normalized_value = (
+                    normalize_topology_query_fact_value(
+                        fact,
+                        default_namespace=str(
+                            entity.get("namespace") or ""
+                        )
+                        if isinstance(entity, dict)
+                        else "",
+                    )
+                    if str(
+                        fact.get("dimension")
+                        or structured.get("dimension")
+                        or ""
+                    ).strip().lower() == "topology"
+                    else None
+                )
+                if normalized_value:
+                    add("TOPOLOGY", [
+                        ("relationship", normalized_value.get("relationship")),
+                        ("relation", normalized_value.get("relation")),
+                        (
+                            "source",
+                            (
+                                normalized_value.get("source") or {}
+                            ).get("entity_id")
+                            if isinstance(
+                                normalized_value.get("source"),
+                                dict,
+                            )
+                            else normalized_value.get("source"),
+                        ),
+                        (
+                            "target",
+                            (
+                                normalized_value.get("target") or {}
+                            ).get("entity_id")
+                            if isinstance(
+                                normalized_value.get("target"),
+                                dict,
+                            )
+                            else normalized_value.get("target"),
+                        ),
+                        (
+                            "source_field",
+                            normalized_value.get("source_field"),
+                        ),
+                        (
+                            "source_system",
+                            fact.get("source_system")
+                            or structured.get("source_system"),
+                        ),
+                        ("directness", fact.get("directness")),
+                        ("confidence", fact.get("confidence")),
+                        ("ref", fact.get("ref")),
+                    ])
+                add("QUERY_FACT", [
+                    ("ref", fact.get("ref")),
+                    (
+                        "source_system",
+                        fact.get("source_system")
+                        or structured.get("source_system"),
+                    ),
+                    ("name", fact.get("name")),
+                    (
+                        "value",
+                        normalized_value
+                        if normalized_value is not None
+                        else fact.get("value"),
+                    ),
+                    ("unit", fact.get("unit")),
+                    ("labels", fact.get("labels")),
+                    ("stats", fact.get("stats")),
+                    ("sample_count", fact.get("sample_count")),
+                    ("trend_evaluable", fact.get("trend_evaluable")),
+                    ("series_role", fact.get("series_role")),
+                    ("level", fact.get("level")),
+                    ("trace_id", fact.get("trace_id")),
+                    ("raw_ref", fact.get("raw_ref")),
+                    ("directness", fact.get("directness")),
+                ])
+            telemetry = structured.get("telemetry")
+            if isinstance(telemetry, dict):
+                add("TELEMETRY", [
+                    ("sources", telemetry),
+                ])
+            add("QUERY_LIMITATIONS", [
+                ("limitations", structured.get("limitations")),
+                ("error", structured.get("error")),
+            ])
+            add("EVIDENCE_REFS", [
+                ("values", structured.get("evidence_refs")),
+            ])
+            return "\n".join(lines)
 
         add("AIOPS_CASE", [
             ("case_id", structured.get("case_id")),
@@ -5067,7 +6530,46 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     @staticmethod
     def _build_aiops_agent_context(tool_name: str, structured: Dict[str, Any]) -> str:
         """Keep bounded, label-free observability facts for downstream agents."""
-        if str(tool_name or "").lower() not in {
+        normalized_tool = str(tool_name or "").lower()
+        if normalized_tool in EvidenceCollectorNode._OBSERVABILITY_QUERY_TOOLS:
+            allowed_keys = (
+                "status",
+                "source_system",
+                "dimension",
+                "entity",
+                "purpose",
+                "coverage",
+                "directness",
+                "query",
+                "facts",
+                "samples",
+                "flows",
+                "spans",
+                "correlations",
+                "telemetry",
+                "entities",
+                "edges",
+                "topology_summary",
+                "limitations",
+                "evidence_refs",
+                "truncated",
+                "error",
+            )
+            payload = {
+                key: structured.get(key)
+                for key in allowed_keys
+                if structured.get(key) not in (None, "", [], {})
+            }
+            if not payload:
+                return ""
+            return json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+
+        if normalized_tool not in {
             "collect_aiops_case",
             "get_aiops_case",
         }:

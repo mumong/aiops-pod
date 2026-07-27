@@ -93,3 +93,27 @@
 - [ ] 检查原始 archive 是否保持完整。
 - [ ] 独立 reviewer 给出 ACCEPT 或 REWORK。
 
+### Task 7: Live 返工：Tokenizer 漂移、流中断恢复和报告一致性
+
+**Files:**
+- Modify: `app/core/aicall/client.py`
+- Modify: `app/core/workflow/nodes/conclusion_formatter.py`
+- Modify only if the failing report test proves it is required: `app/core/workflow/nodes/root_cause_analyzer.py`
+- Test: `tests/unit/aicall/test_event_loop_safety.py`
+- Test: `tests/unit/workflow/test_fast_paths.py`
+- Test: `tests/unit/workflow/test_reporter_runbooks.py`
+- Record: `agent-loop/tasks/T007/attempts/A016/`
+
+- [ ] 编写失败测试：当本地 token 计数为 estimated 时，hard guard 必须在公开上限 `23040` 内再保留固定 estimator drift reserve；exact tokenizer 不应重复扣减该 reserve。
+- [ ] 运行新增 hard guard 测试，确认当前实现因为仍裁剪到 `23040` 而失败。
+- [ ] 实现通用 drift reserve，归档同时记录 `max_input_tokens`、`effective_input_target`、`estimator_drift_reserve` 和 token accuracy；不得按模型名称、故障类型、namespace 或 Pod 名称分支。
+- [ ] 编写失败测试：OpenAI `APIError` 子类返回 `unexpected EOF`、`empty_stream` 或 `closed before first payload` 时只重试一次并切换 non-streaming；普通 4xx/5xx、超时和上下文错误不得重试。
+- [ ] 运行流中断测试，确认 `InternalServerError: empty_stream` 当前不会被恢复。
+- [ ] 实现严格白名单流中断判断，保留一次重试上限。
+- [ ] 编写失败测试：当 Fact Ledger/机器附录已提供 `coverage=present` 的日志、指标、Trace、Kubernetes 和拓扑事实时，确定性报告不得输出“未返回可用”或“未提供该维度”，也不得暴露 `... 截断，原始 N 字符`。
+- [ ] 编写失败测试：两个独立异常实体必须渲染为两条实体隔离的因果链，不能合并为一个跨实体 trigger/mechanism/manifestation 链。
+- [ ] 实现基于结构化 coverage、事实和实体 ID 的通用报告一致性处理；不得增加 OOM、ConfigError 或测试 Pod 特判。
+- [ ] 集中运行 AICall、workflow 和完整单元测试。
+- [ ] 构建隔离 probe 镜像，不修改生产 Qwen、共享 `aiops-config` 或测试 Pod。
+- [ ] 重新运行“我的集群现在有什么问题？”，归档 provider token、八项真实查询、两条因果链、最终报告、部署前后快照和完整测试日志。
+- [ ] 独立 reviewer 按 T007 contract 给出 `ACCEPT` 或精确 `REWORK`。

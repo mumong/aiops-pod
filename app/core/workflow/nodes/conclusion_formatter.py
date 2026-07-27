@@ -27,7 +27,11 @@ from app.core.remediation.plans import (
     validate_safe_kubectl_command,
 )
 from app.core.workflow.fact_contract import (
+    OBSERVABILITY_QUERY_TOOLS,
+    compact_fact_ledgers_json,
     extract_fact_ledgers_from_evidence_analysis,
+    extract_fact_ledgers_from_tool_data,
+    project_final_observability_events,
     validate_rca_claims,
 )
 from app.core.workflow.nodes.base import WorkflowNode
@@ -336,6 +340,10 @@ class ConclusionFormatterNode(WorkflowNode):
                     report,
                     structured_context,
                 )
+                report = self._reconcile_legacy_report_limitations(
+                    report,
+                    structured_context,
+                )
                 report = self._enforce_metric_boundary_claims(
                     report,
                     structured_context,
@@ -403,6 +411,8 @@ class ConclusionFormatterNode(WorkflowNode):
                             warnings=state.get("warnings", []),
                         )
                     )
+
+            conclusion = self._remove_truncation_markers(conclusion)
             
             new_state.update({
                 "conclusion": conclusion,
@@ -950,27 +960,189 @@ class ConclusionFormatterNode(WorkflowNode):
 
         def parse_fields(line: str) -> Dict[str, str]:
             fields: Dict[str, str] = {}
-            for key, raw_value in re.findall(
-                r"([A-Za-z0-9_.]+)=(\"[^\"]*\"|\[[^\]]*\]|\S+)",
-                line,
+            field_starts: List[tuple[str, int, int]] = []
+            quote = ""
+            escaped = False
+            brace_depth = 0
+            bracket_depth = 0
+            index = 0
+            while index < len(line):
+                char = line[index]
+                if quote:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == quote:
+                        quote = ""
+                    index += 1
+                    continue
+                if char in {'"', "'"}:
+                    quote = char
+                    index += 1
+                    continue
+                if char == "{":
+                    brace_depth += 1
+                    index += 1
+                    continue
+                if char == "}":
+                    brace_depth = max(0, brace_depth - 1)
+                    index += 1
+                    continue
+                if char == "[":
+                    bracket_depth += 1
+                    index += 1
+                    continue
+                if char == "]":
+                    bracket_depth = max(0, bracket_depth - 1)
+                    index += 1
+                    continue
+                if (
+                    brace_depth == 0
+                    and bracket_depth == 0
+                    and (index == 0 or line[index - 1].isspace())
+                ):
+                    match = re.match(r"([A-Za-z0-9_.]+)=", line[index:])
+                    if match:
+                        field_starts.append((
+                            match.group(1),
+                            index,
+                            index + match.end(),
+                        ))
+                        index += match.end()
+                        continue
+                index += 1
+
+            for field_index, (key, _key_start, value_start) in enumerate(
+                field_starts
             ):
-                value = raw_value
-                if value.startswith('"'):
+                value_end = (
+                    field_starts[field_index + 1][1]
+                    if field_index + 1 < len(field_starts)
+                    else len(line)
+                )
+                raw_value = line[value_start:value_end].strip()
+                value: Any = raw_value
+                if raw_value.startswith(('"', "{", "[")):
                     try:
-                        value = str(json.loads(value))
-                    except json.JSONDecodeError:
-                        value = value.strip('"')
-                fields[key] = value
+                        value = json.loads(raw_value)
+                    except (json.JSONDecodeError, TypeError):
+                        value = raw_value.strip('"')
+                fields[key] = (
+                    json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    if isinstance(value, (dict, list))
+                    else str(value)
+                )
             return fields
+
+        def expand_structured_value(fields: Dict[str, str]) -> Dict[str, str]:
+            parsed: Any = str(fields.get("value") or "").strip()
+            for _ in range(2):
+                if not isinstance(parsed, str) or not parsed.startswith(("{", "[")):
+                    break
+                try:
+                    parsed = json.loads(parsed)
+                except json.JSONDecodeError:
+                    break
+            if not isinstance(parsed, dict):
+                return fields
+            expanded = dict(fields)
+            for key, value in parsed.items():
+                expanded.setdefault(
+                    str(key),
+                    (
+                        json.dumps(
+                            value,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        if isinstance(value, (dict, list))
+                        else str(value)
+                    ),
+                )
+            attributes = parsed.get("attributes")
+            if isinstance(attributes, dict):
+                for key, value in attributes.items():
+                    expanded.setdefault(
+                        str(key),
+                        (
+                            json.dumps(
+                                value,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                            if isinstance(value, (dict, list))
+                            else str(value)
+                        ),
+                    )
+            return expanded
+
+        def enforce_unexecuted_rows(
+            report: str,
+            execution_states: Dict[str, str],
+        ) -> str:
+            source_by_dimension = {
+                "metrics": "Prometheus",
+                "logging": "ES/Filebeat",
+                "tracing": "DeepFlow/Tempo",
+            }
+            label_by_dimension = {
+                "metrics": "Metrics",
+                "logging": "Logging",
+                "tracing": "Tracing",
+            }
+            lines = report.splitlines()
+            for index, line in enumerate(lines):
+                for dimension, state in execution_states.items():
+                    if state != "not_executed":
+                        continue
+                    label = label_by_dimension.get(dimension)
+                    if not label or not re.match(
+                        rf"^\|\s*\*{{0,2}}{label}\*{{0,2}}\s*\|",
+                        line.strip(),
+                        re.IGNORECASE,
+                    ):
+                        continue
+                    cells = line.split("|")
+                    if len(cells) < 7:
+                        continue
+                    cells[2] = f" {source_by_dimension[dimension]} "
+                    cells[3] = " not_executed "
+                    cells[4] = " 本轮未执行该维度查询，当前状态未验证，不能解释为数据不存在 "
+                    cells[5] = " - "
+                    lines[index] = "|".join(cells)
+            result = "\n".join(lines)
+            if report.endswith("\n"):
+                result += "\n"
+            return result
 
         coverage_present = False
         coverage_fields: Dict[str, str] = {}
+        execution_fields: Dict[str, str] = {}
         correlations: List[Dict[str, str]] = []
         metric_facts: List[Dict[str, str]] = []
         log_facts: List[Dict[str, str]] = []
         k8s_facts: List[Dict[str, str]] = []
         deepflow_facts: List[Dict[str, str]] = []
         tempo_facts: List[Dict[str, str]] = []
+        source_states: Dict[str, Dict[str, str]] = {
+            "metrics": {},
+            "logging": {},
+            "tracing": {},
+            "topology": {},
+            "kubernetes": {},
+        }
+        coverage_rank = {
+            "present": 4,
+            "partial": 3,
+            "empty": 2,
+            "failed": 1,
+            "not_executed": 0,
+        }
         for raw_line in str(structured_context or "").splitlines():
             line = raw_line.strip()
             if line.startswith("COVERAGE "):
@@ -980,6 +1152,31 @@ class ConclusionFormatterNode(WorkflowNode):
                     str(fields.get(key) or "").lower() == "present"
                     for key in ("tracing", "trace")
                 )
+            elif line.startswith("OBSERVABILITY_EXECUTION "):
+                execution_fields.update({
+                    key: str(value or "").strip().lower()
+                    for key, value in parse_fields(line).items()
+                    if key in {"metrics", "logging", "tracing"}
+                })
+            elif line.startswith("OBSERVABILITY_SOURCE "):
+                fields = parse_fields(line)
+                dimension = str(fields.get("dimension") or "").strip().lower()
+                tool = str(fields.get("tool") or "").strip()
+                coverage = str(fields.get("coverage") or "executed").strip().lower()
+                if dimension in source_states and tool:
+                    previous = source_states[dimension].get(tool, "")
+                    if coverage_rank.get(coverage, 0) >= coverage_rank.get(
+                        previous,
+                        -1,
+                    ):
+                        source_states[dimension][tool] = coverage
+                coverage_key = "logs" if dimension == "logging" else dimension
+                previous_coverage = str(coverage_fields.get(coverage_key) or "")
+                if coverage_rank.get(coverage, 0) >= coverage_rank.get(
+                    previous_coverage,
+                    -1,
+                ):
+                    coverage_fields[coverage_key] = coverage
             elif line.startswith("- TRACE_CORRELATION "):
                 correlations.append(parse_fields(line))
             elif line.startswith("- METRIC "):
@@ -992,6 +1189,43 @@ class ConclusionFormatterNode(WorkflowNode):
                 deepflow_facts.append(parse_fields(line))
             elif line.startswith("- TEMPO "):
                 tempo_facts.append(parse_fields(line))
+            elif line.startswith("- QUERY_FACT "):
+                fields = expand_structured_value(parse_fields(line))
+                if fields.get("unit") or fields.get("sample_count"):
+                    metric_facts.append(fields)
+                elif (
+                    str(fields.get("source_system") or "").strip().lower()
+                    in {"elasticsearch", "filebeat"}
+                    or str(fields.get("name") or "").strip().lower().startswith("log.")
+                ):
+                    log_facts.append(fields)
+                elif fields.get("trace_id"):
+                    source_components = {
+                        component
+                        for component in re.split(
+                            r"[+,/|]",
+                            str(fields.get("source_system") or "").lower(),
+                        )
+                        if component
+                    }
+                    fact_name = str(fields.get("name") or "").lower()
+                    if "deepflow" in source_components:
+                        deepflow_facts.append(fields)
+                    if (
+                        "tempo" in source_components
+                        and (
+                            source_components == {"tempo"}
+                            or "span" in fact_name
+                        )
+                    ):
+                        tempo_facts.append(fields)
+            elif line.startswith("- CANONICAL_FACT "):
+                fields = expand_structured_value(parse_fields(line))
+                if str(fields.get("dimension") or "").strip().lower() == "kubernetes":
+                    k8s_facts.append(fields)
+                    tool = str(fields.get("tool") or "").strip()
+                    if tool:
+                        source_states["kubernetes"][tool] = "present"
 
         if not (
             coverage_present
@@ -1000,8 +1234,18 @@ class ConclusionFormatterNode(WorkflowNode):
             or k8s_facts
             or deepflow_facts
             or tempo_facts
+            or execution_fields
         ):
             return content
+        if execution_fields and not (
+            coverage_present
+            or metric_facts
+            or log_facts
+            or k8s_facts
+            or deepflow_facts
+            or tempo_facts
+        ):
+            return enforce_unexecuted_rows(content, execution_fields)
 
         do_not_merge = any(
             str(item.get("do_not_merge") or "").lower() == "true"
@@ -1036,8 +1280,9 @@ class ConclusionFormatterNode(WorkflowNode):
                     parts.append(f"{key}={fact[key]}")
             if parts:
                 signals.append("DeepFlow " + " ".join(parts))
-            if fact.get("evidence_ref"):
-                evidence_refs.append(fact["evidence_ref"])
+            evidence_ref = fact.get("evidence_ref") or fact.get("ref")
+            if evidence_ref:
+                evidence_refs.append(evidence_ref)
 
         tempo_detail_keys = (
             "http.response.status_code",
@@ -1061,8 +1306,9 @@ class ConclusionFormatterNode(WorkflowNode):
                     parts.append(f"{key}={fact[key]}")
             if parts:
                 signals.append("Tempo " + " ".join(parts))
-            if fact.get("evidence_ref"):
-                evidence_refs.append(fact["evidence_ref"])
+            evidence_ref = fact.get("evidence_ref") or fact.get("ref")
+            if evidence_ref:
+                evidence_refs.append(evidence_ref)
 
         if not signals:
             signals.append("结构化 coverage 标记 tracing/trace=present")
@@ -1074,10 +1320,23 @@ class ConclusionFormatterNode(WorkflowNode):
                 if value
             )
 
+        def source_cell(dimension: str, fallback: str) -> str:
+            tools = [
+                tool
+                for tool, state in source_states.get(dimension, {}).items()
+                if state != "not_executed"
+            ]
+            if not tools:
+                return fallback
+            return f"{fallback} ({', '.join(f'`{tool}`' for tool in tools)})"
+
         metric_signals: List[str] = []
         metric_refs: List[str] = []
         metric_keys = (
             "metric",
+            "name",
+            "value",
+            "unit",
             "pod",
             "container",
             "start",
@@ -1086,13 +1345,18 @@ class ConclusionFormatterNode(WorkflowNode):
             "limit",
             "max_limit_ratio",
             "samples",
+            "sample_count",
+            "trend_evaluable",
+            "series_role",
+            "stats",
         )
         for fact in metric_facts:
             parts = [f"{key}={fact[key]}" for key in metric_keys if fact.get(key)]
             if parts:
                 metric_signals.append(" ".join(parts))
-            if fact.get("evidence_ref"):
-                metric_refs.append(fact["evidence_ref"])
+            ref = fact.get("evidence_ref") or fact.get("ref")
+            if ref:
+                metric_refs.append(ref)
 
         log_signals: List[str] = []
         log_refs: List[str] = []
@@ -1105,19 +1369,29 @@ class ConclusionFormatterNode(WorkflowNode):
             "pod",
             "path",
             "trace_id",
+            "value",
         )
         for fact in log_facts:
             parts = [f"{key}={fact[key]}" for key in log_keys if fact.get(key)]
             if parts:
                 log_signals.append(" ".join(parts))
-            if fact.get("evidence_ref"):
-                log_refs.append(fact["evidence_ref"])
+            ref = fact.get("evidence_ref") or fact.get("ref")
+            if ref:
+                log_refs.append(ref)
 
         k8s_signals: List[str] = []
         k8s_refs: List[str] = []
         for fact in k8s_facts:
             if fact.get("observed"):
                 k8s_signals.append(fact["observed"])
+            else:
+                parts = [
+                    f"{key}={fact[key]}"
+                    for key in ("entity_id", "attribute", "value")
+                    if fact.get(key)
+                ]
+                if parts:
+                    k8s_signals.append(" ".join(parts))
             raw_refs = fact.get("evidence_refs")
             if raw_refs:
                 try:
@@ -1126,28 +1400,31 @@ class ConclusionFormatterNode(WorkflowNode):
                     parsed_refs = []
                 if isinstance(parsed_refs, list):
                     k8s_refs.extend(str(ref) for ref in parsed_refs if ref)
+            fact_ref = fact.get("ref") or fact.get("fact_id")
+            if fact_ref:
+                k8s_refs.append(str(fact_ref))
 
         tracing_row = (
-            "| **Tracing** | DeepFlow/Tempo | present | "
+            f"| **Tracing** | {source_cell('tracing', 'DeepFlow/Tempo')} | present | "
             f"{table_cell(signals)} | "
             f"{table_cell(evidence_refs) or '见机器可核验附录'} |"
         )
         exact_rows = {
             "metrics": (
-                "| **Metrics** | Prometheus | "
+                f"| **Metrics** | {source_cell('metrics', 'Prometheus')} | "
                 f"{coverage_fields.get('metrics') or 'present'} | "
                 f"{table_cell(metric_signals) or '未返回可用指标样本'} | "
                 f"{table_cell(metric_refs) or '见机器可核验附录'} |"
             ),
             "logging": (
-                "| **Logging** | ES/Filebeat | "
+                f"| **Logging** | {source_cell('logging', 'ES/Filebeat')} | "
                 f"{coverage_fields.get('logs') or 'present'} | "
                 f"{table_cell(log_signals) or '未返回可用日志原文'} | "
                 f"{table_cell(log_refs) or '见机器可核验附录'} |"
             ),
             "tracing": tracing_row,
             "k8s": (
-                "| **K8s** | Kubernetes API | "
+                f"| **K8s** | {source_cell('kubernetes', 'Kubernetes API')} | "
                 f"{coverage_fields.get('k8s') or 'present'} | "
                 f"{table_cell(k8s_signals) or '未返回可用 Kubernetes 强信号'} | "
                 f"{table_cell(k8s_refs) or '见机器可核验附录'} |"
@@ -1162,7 +1439,46 @@ class ConclusionFormatterNode(WorkflowNode):
             None,
         )
         if section_start is None:
-            return content
+            supported_dimensions = {
+                dimension
+                for dimension, supported in {
+                    "metrics": bool(metric_facts or coverage_fields.get("metrics")),
+                    "logging": bool(log_facts or coverage_fields.get("logs")),
+                    "tracing": bool(
+                        deepflow_facts
+                        or tempo_facts
+                        or coverage_present
+                    ),
+                    "k8s": bool(k8s_facts or coverage_fields.get("k8s")),
+                }.items()
+                if supported
+            }
+            dimension_rows = {
+                "metrics": exact_rows["metrics"],
+                "logging": exact_rows["logging"],
+                "tracing": exact_rows["tracing"],
+                "k8s": exact_rows["k8s"],
+            }
+            replaced = False
+            for index, line in enumerate(lines):
+                match = re.match(
+                    r"^\|\s*\*{0,2}(metrics|logging|tracing|k8s)\*{0,2}\s*\|",
+                    line.strip(),
+                    re.IGNORECASE,
+                )
+                if not match:
+                    continue
+                dimension = match.group(1).lower()
+                if dimension not in supported_dimensions:
+                    continue
+                lines[index] = dimension_rows[dimension]
+                replaced = True
+            if not replaced:
+                return content
+            result = "\n".join(lines)
+            if content.endswith("\n"):
+                result += "\n"
+            return result
         section_end = next(
             (
                 index for index in range(section_start + 1, len(lines))
@@ -1208,7 +1524,64 @@ class ConclusionFormatterNode(WorkflowNode):
         result = "\n".join(lines)
         if content.endswith("\n"):
             result += "\n"
-        return result
+        return enforce_unexecuted_rows(result, execution_fields)
+
+    @staticmethod
+    def _source_tools_for_dimension(
+        structured_context: str,
+        dimension: str,
+    ) -> List[str]:
+        tools: List[str] = []
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith("OBSERVABILITY_SOURCE "):
+                dimension_match = re.search(r"\bdimension=(\S+)", line)
+                tool_match = re.search(r"\btool=(\S+)", line)
+                if (
+                    dimension_match
+                    and tool_match
+                    and dimension_match.group(1).strip().lower()
+                    == dimension.strip().lower()
+                ):
+                    tools.append(tool_match.group(1))
+            elif line.startswith("- CANONICAL_FACT "):
+                dimension_match = re.search(r"\bdimension=(\S+)", line)
+                tool_match = re.search(r"\btool=(\S+)", line)
+                if (
+                    dimension_match
+                    and tool_match
+                    and dimension_match.group(1).strip().lower()
+                    == dimension.strip().lower()
+                ):
+                    tools.append(tool_match.group(1))
+        if tools:
+            return list(dict.fromkeys(tools))
+        if "observability_collection_mode: coarse_case" in str(
+            structured_context or ""
+        ):
+            return ["collect_aiops_case"]
+        return []
+
+    @classmethod
+    def _provenance_label(
+        cls,
+        structured_context: str,
+        dimensions: tuple[str, ...],
+        *,
+        fallback: str,
+    ) -> str:
+        tools = [
+            tool
+            for dimension in dimensions
+            for tool in cls._source_tools_for_dimension(
+                structured_context,
+                dimension,
+            )
+        ]
+        tools = list(dict.fromkeys(tools))
+        if not tools:
+            return fallback
+        return "、".join(f"`{tool}`" for tool in tools)
 
     @staticmethod
     def _append_exact_topology_appendix(
@@ -1223,12 +1596,15 @@ class ConclusionFormatterNode(WorkflowNode):
             return content
 
         entity_count_lines = []
+        entity_lines = []
         edge_count_line = ""
         edge_lines = []
         for raw_line in str(structured_context or "").splitlines():
             line = raw_line.strip()
             if line.startswith(("TOPOLOGY_ENTITY_COUNT ", "TOPOLOGY_CASE_COUNT ")):
                 entity_count_lines.append(line)
+            elif line.startswith("TOPOLOGY_ENTITY "):
+                entity_lines.append(line)
             elif line.startswith("TOPOLOGY_EXACT_EDGES "):
                 edge_count_line = line
             elif line.startswith("- TOPOLOGY relationship="):
@@ -1239,13 +1615,22 @@ class ConclusionFormatterNode(WorkflowNode):
 
         appendix = [
             marker,
-            "> 以下内容由系统从 `collect_aiops_case` 结构化结果确定性注入，未经过 LLM 改写。",
+            (
+                "> 以下内容由系统从 "
+                + ConclusionFormatterNode._provenance_label(
+                    structured_context,
+                    ("topology",),
+                    fallback="结构化拓扑结果",
+                )
+                + " 确定性注入，未经过 LLM 改写。"
+            ),
             "",
             "```text",
         ]
         appendix.extend(entity_count_lines)
         if edge_count_line:
             appendix.append(edge_count_line)
+        appendix.extend(entity_lines)
         appendix.extend(edge_lines)
         appendix.append("```")
         return content.rstrip() + "\n\n---\n\n" + "\n".join(appendix)
@@ -1261,6 +1646,44 @@ class ConclusionFormatterNode(WorkflowNode):
 
         edge_lines = []
         parsed_edges: List[Dict[str, str]] = []
+        entities: Dict[str, Dict[str, str]] = {}
+        for raw_line in str(structured_context or "").splitlines():
+            line = raw_line.strip()
+            if not line.startswith("TOPOLOGY_ENTITY "):
+                continue
+            fields: Dict[str, str] = {}
+            try:
+                tokens = shlex.split(line)
+            except ValueError:
+                tokens = line.split()
+            for token in tokens[1:]:
+                if "=" not in token:
+                    continue
+                key, value = token.split("=", 1)
+                fields[key] = value
+            entity_id = fields.get("entity_id")
+            if entity_id:
+                entities[entity_id] = fields
+
+        def entity_display(entity_id: str) -> str:
+            entity = entities.get(entity_id)
+            if not entity:
+                return f"`{entity_id}`"
+            kind = str(entity.get("kind") or "Entity")
+            name = str(entity.get("name") or entity_id)
+            namespace = str(entity.get("namespace") or "").strip()
+            scoped_name = (
+                f"{namespace}/{name}"
+                if namespace and namespace != "-"
+                else name
+            )
+            return f"{kind} `{scoped_name}`"
+
+        def typed_entity_display(entity_id: str, fallback_kind: str) -> str:
+            if entity_id in entities:
+                return entity_display(entity_id)
+            return f"{fallback_kind} `{entity_id}`"
+
         for raw_line in str(structured_context or "").splitlines():
             line = raw_line.strip()
             if not line.startswith("- TOPOLOGY relationship="):
@@ -1303,8 +1726,9 @@ class ConclusionFormatterNode(WorkflowNode):
                 annotations.append(f"source_system={fields['source_system']}")
             suffix = f" ({'; '.join(annotations)})" if annotations else ""
             edge_lines.append(
-                f"- `{fields['relationship']}`: `{fields['source']}` -> "
-                f"`{fields['target']}`{suffix}"
+                f"- `{fields['relationship']}`: "
+                f"{entity_display(fields['source'])} -> "
+                f"{entity_display(fields['target'])}{suffix}"
             )
             parsed_edges.append(fields)
 
@@ -1321,11 +1745,13 @@ class ConclusionFormatterNode(WorkflowNode):
             target = edge.get("target")
             if relationship == "Pod --calls--> Pod":
                 topology_explanations.append(
-                    f"调用方 `{source}` 的流量进入目标 Pod `{target}`"
+                    f"调用方 {entity_display(source)} 的流量进入目标 "
+                    f"{typed_entity_display(target, 'Pod')}"
                 )
             elif relationship == "Service --selects--> Pod":
                 topology_explanations.append(
-                    f"Service `{source}` 将流量选择到 Pod `{target}`"
+                    f"{typed_entity_display(source, 'Service')} 将流量选择到 "
+                    f"{typed_entity_display(target, 'Pod')}"
                 )
             elif relationship == "Pod --owned_by--> ReplicaSet":
                 pod_to_rs[source] = target
@@ -1338,12 +1764,16 @@ class ConclusionFormatterNode(WorkflowNode):
                 continue
             deployments.append(deployment)
             topology_explanations.append(
-                f"目标 Pod `{pod}` 由 Deployment `{deployment}` 管理，"
-                f"中间控制器为 ReplicaSet `{replica_set}`"
+                f"目标 {typed_entity_display(pod, 'Pod')} 由 "
+                f"{typed_entity_display(deployment, 'Deployment')} 管理，"
+                f"中间控制器为 "
+                f"{typed_entity_display(replica_set, 'ReplicaSet')}"
             )
         for deployment in dict.fromkeys(deployments):
             topology_explanations.append(
-                f"责任边界落在 Deployment `{deployment}` 管理的工作负载"
+                f"责任边界落在 "
+                f"{typed_entity_display(deployment, 'Deployment')} "
+                "管理的工作负载"
             )
 
         topology_summary = (
@@ -1353,7 +1783,15 @@ class ConclusionFormatterNode(WorkflowNode):
         )
         section = [
             "### 拓扑关系（实体与边）",
-            "> 以下关系由 `collect_aiops_case` 的结构化原始边确定性生成。",
+            (
+                "> 以下关系由 "
+                + ConclusionFormatterNode._provenance_label(
+                    structured_context,
+                    ("topology",),
+                    fallback="结构化拓扑结果",
+                )
+                + " 的原始边确定性生成。"
+            ),
             *edge_lines,
             f"- **拓扑解读**：{topology_summary}",
             "- **拓扑结论**：仅依据以上原始边判断调用、流量入口和工作负载归属。",
@@ -1365,6 +1803,503 @@ class ConclusionFormatterNode(WorkflowNode):
         if not pattern.search(content):
             return content
         return pattern.sub("\n".join(section), content, count=1)
+
+    @staticmethod
+    def _reconcile_legacy_report_limitations(
+        content: str,
+        structured_context: str,
+    ) -> str:
+        """Remove stale unavailability claims contradicted by exact current facts."""
+        if not isinstance(content, str) or not content:
+            return content
+
+        context = str(structured_context or "")
+        has_log_fact = bool(re.search(
+            r"(?m)^-\s+QUERY_FACT\b[^\n]*"
+            r"source_system=(?:elasticsearch|filebeat)\b",
+            context,
+            re.IGNORECASE,
+        ))
+        has_trace_id = bool(re.search(
+            r"\btrace_id=[0-9a-f]{32}\b",
+            context,
+            re.IGNORECASE,
+        ))
+        has_tempo_span = bool(re.search(
+            r"(?m)^-\s+QUERY_FACT\b[^\n]*\bsource_system=tempo\b"
+            r"[^\n]*\bname=application_span\b",
+            context,
+            re.IGNORECASE,
+        ))
+        has_deployment_name = bool(re.search(
+            r"(?m)^TOPOLOGY_ENTITY\b[^\n]*\bkind=Deployment\b"
+            r"[^\n]*\bname=[^\s]+",
+            context,
+            re.IGNORECASE,
+        ))
+        has_deployment_relation = (
+            'relationship="ReplicaSet --owned_by--> Deployment"' in context
+        )
+        unavailable_markers = (
+            "未返回可用",
+            "未获取到",
+            "未获取",
+            "未获得",
+            "尚未获得",
+            "未提供",
+            "不可用",
+            "unavailable",
+            "not available",
+            "no usable",
+        )
+        deployment_entities: List[str] = []
+        for raw_line in context.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("TOPOLOGY_ENTITY "):
+                continue
+            try:
+                tokens = shlex.split(line)
+            except ValueError:
+                tokens = line.split()
+            fields = {
+                key: value
+                for token in tokens[1:]
+                if "=" in token
+                for key, value in [token.split("=", 1)]
+            }
+            if str(fields.get("kind") or "").casefold() != "deployment":
+                continue
+            name = str(fields.get("name") or "").strip()
+            namespace = str(fields.get("namespace") or "").strip()
+            if not name:
+                continue
+            deployment_entities.append(
+                f"{namespace}/{name}"
+                if namespace and namespace != "-"
+                else name
+            )
+        deployment_entities = list(dict.fromkeys(deployment_entities))
+        deployment_scope = "、".join(
+            f"`{entity}`" for entity in deployment_entities
+        )
+        deployment_name_pattern = re.compile(
+            r"(?:(?:两个|多个|当前|目标)\s*工作负载的\s*)?"
+            r"(?:完整\s*)?(?:真实\s*)?(?:上层\s*)?"
+            r"Deployment\s*(?:的\s*)?"
+            r"(?:(?:真实|准确|精确)\s*)?名称",
+            re.IGNORECASE,
+        )
+        deployment_identifier_pattern = re.compile(
+            r"(?<![A-Za-z0-9_.\-/])`?(?P<subject>"
+            r"[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?"
+            r"(?:/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?)?"
+            r")`?(?![A-Za-z0-9_.\-/])",
+            re.IGNORECASE,
+        )
+        deployment_subject_pattern = re.compile(
+            deployment_identifier_pattern.pattern
+            + r"(?P<bridge>"
+            + r"[^A-Za-z0-9_.\-/`|。；;\n]{0,48})"
+            + r"Deployment\b",
+            re.IGNORECASE,
+        )
+
+        def deployment_evidence_cell(line: str) -> str:
+            if line.lstrip().startswith("|"):
+                cells = line.split("|")
+                if len(cells) >= 3:
+                    return cells[1]
+            return line
+
+        def deployment_subjects(line: str) -> List[str]:
+            evidence_cell = deployment_evidence_cell(line)
+            name_match = deployment_name_pattern.search(evidence_cell)
+            subject_text = (
+                evidence_cell[:name_match.end()]
+                if name_match is not None
+                else evidence_cell
+            )
+            deployment_match = re.search(
+                r"\bDeployment\b",
+                subject_text,
+                re.IGNORECASE,
+            )
+            if deployment_match is None:
+                return []
+            prefix = subject_text[:deployment_match.start()]
+            matches = list(deployment_identifier_pattern.finditer(prefix))
+            known_aliases = {
+                alias
+                for entity in deployment_entities
+                for alias in (
+                    entity.casefold(),
+                    entity.rsplit("/", 1)[-1].casefold(),
+                )
+            }
+
+            def is_resource_identifier(match: re.Match[str]) -> bool:
+                subject = match.group("subject")
+                return (
+                    any(char in subject for char in "._-/")
+                    or subject.casefold() in known_aliases
+                )
+
+            explicit = [
+                match.group("subject")
+                for match in matches
+                if (
+                    is_resource_identifier(match)
+                    and (
+                        match.group(0).startswith("`")
+                        or any(
+                            char in match.group("subject")
+                            for char in "._-/"
+                        )
+                    )
+                )
+            ]
+            explicit.extend(
+                match.group("subject")
+                for match in deployment_subject_pattern.finditer(subject_text)
+                if (
+                    match.group("subject").casefold()
+                    not in {"pod", "workload", "workloads"}
+                    and (
+                        is_resource_identifier(match)
+                        or (
+                            len(matches) == 1
+                            and not re.search(
+                                r"[、,，；;]|(?:以及|及)",
+                                match.group("bridge"),
+                            )
+                        )
+                    )
+                )
+            )
+            return list(dict.fromkeys(explicit))
+
+        def resolve_deployment_scope(line: str) -> List[str]:
+            subjects = deployment_subjects(line)
+            if subjects:
+                resolved: List[str] = []
+                for subject in subjects:
+                    folded_subject = subject.casefold()
+                    matches = [
+                        entity
+                        for entity in deployment_entities
+                        if folded_subject
+                        in {
+                            entity.casefold(),
+                            entity.rsplit("/", 1)[-1].casefold(),
+                        }
+                    ]
+                    if len(matches) != 1:
+                        return []
+                    if matches[0] not in resolved:
+                        resolved.append(matches[0])
+                return resolved
+            if re.search(r"两个\s*工作负载", line):
+                return (
+                    list(deployment_entities)
+                    if len(deployment_entities) == 2
+                    else []
+                )
+            if re.search(r"多个\s*工作负载", line):
+                return (
+                    list(deployment_entities)
+                    if len(deployment_entities) >= 2
+                    else []
+                )
+            return list(deployment_entities)
+
+        log_entities: List[str] = []
+        for raw_line in context.splitlines():
+            line = raw_line.strip()
+            if not (
+                line.startswith("- QUERY_FACT ")
+                and re.search(
+                    r"\bsource_system=(?:elasticsearch|filebeat)\b",
+                    line,
+                    re.IGNORECASE,
+                )
+            ):
+                continue
+            for match in re.finditer(
+                r'\\"pod\\"\s*:\s*\\"([^"\\]+)'
+                r'|"pod"\s*:\s*"([^"]+)"',
+                line,
+            ):
+                pod = next(
+                    (value for value in match.groups() if value),
+                    "",
+                )
+                if pod:
+                    log_entities.append(pod)
+        log_entities = list(dict.fromkeys(log_entities))
+        log_entity_aliases = {
+            alias
+            for entity in log_entities
+            for alias in (
+                entity,
+                re.sub(
+                    r"-[a-z0-9]{8,10}-[a-z0-9]{5}$",
+                    "",
+                    entity,
+                ),
+            )
+            if alias
+        }
+
+        def log_fact_supports_line(line: str) -> bool:
+            if not has_log_fact:
+                return False
+            subject_match = re.search(
+                r"`?([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)`?"
+                r"\s*(?:Pod\s*)?(?:的\s*)?(?:应用\s*)?日志",
+                line,
+            )
+            if not subject_match:
+                return True
+            subject = subject_match.group(1)
+            return any(
+                alias == subject
+                or alias.startswith(subject + "-")
+                or subject.startswith(alias + "-")
+                for alias in log_entity_aliases
+            )
+
+        def reconcile_trace_table_line(line: str) -> str:
+            if not (
+                has_trace_id
+                and has_tempo_span
+                and line.lstrip().startswith("|")
+                and re.search(r"\btrace[_ ]?id\b", line, re.IGNORECASE)
+                and ("完整" in line or "逐" in line)
+            ):
+                return line
+            cells = line.split("|")
+            if len(cells) < 5:
+                return line
+            cells[1] = " 端到端调用链覆盖 "
+            cells[3] = (
+                " 已有精确 trace_id 与代表性 Tempo application span；"
+                "当前采样不能证明完整端到端调用链。 "
+            )
+            return "|".join(cells)
+
+        def reconcile_limitation_prose(text: str) -> str:
+            clauses = re.split(r"(?<=[。；;])", text)
+            kept: List[str] = []
+            for clause in clauses:
+                folded = clause.casefold()
+                unavailable = any(
+                    marker.casefold() in folded
+                    for marker in unavailable_markers
+                )
+                if not unavailable:
+                    kept.append(clause)
+                    continue
+                if (
+                    re.search(
+                        r"\b(?:log|logging|elasticsearch)\b|日志",
+                        clause,
+                        re.IGNORECASE,
+                    )
+                    and log_fact_supports_line(clause)
+                ):
+                    continue
+                if (
+                    has_trace_id
+                    and re.search(
+                        r"\b(?:trace|tracing|tempo|deepflow)\b|链路|追踪",
+                        clause,
+                        re.IGNORECASE,
+                    )
+                ):
+                    if (
+                        has_tempo_span
+                        and re.search(
+                            r"完整(?:端到端)?调用链|complete.*(?:trace|chain)",
+                            clause,
+                            re.IGNORECASE,
+                        )
+                    ):
+                        kept.append(
+                            "已有精确 trace_id 与代表性 Tempo application span；"
+                            "当前采样不能证明完整端到端调用链。"
+                        )
+                    continue
+                if (
+                    has_deployment_name
+                    and re.search(r"\bDeployment\b", clause, re.IGNORECASE)
+                    and re.search(r"名称|\bname\b", clause, re.IGNORECASE)
+                    and resolve_deployment_scope(clause)
+                ):
+                    continue
+                if (
+                    has_deployment_relation
+                    and re.search(r"\bReplicaSet\b", clause, re.IGNORECASE)
+                    and re.search(r"\bDeployment\b", clause, re.IGNORECASE)
+                ):
+                    continue
+                kept.append(clause)
+            result = "".join(kept).strip()
+            result = re.sub(
+                r"^也(?=未提供|未获取|未获得)",
+                "仍",
+                result,
+            )
+            return re.sub(
+                r"([。；;])\s*也(?=未提供|未获取|未获得)",
+                r"\1仍",
+                result,
+            )
+
+        def reconcile_deployment_name_line(line: str) -> Optional[str]:
+            if not (
+                has_deployment_name
+                and deployment_scope
+                and deployment_name_pattern.search(line)
+            ):
+                return line
+            matching_deployments = resolve_deployment_scope(line)
+            if not matching_deployments:
+                return line
+            line_deployment_scope = "、".join(
+                f"`{entity}`"
+                for entity in matching_deployments
+            )
+            if (
+                line.lstrip().startswith("|")
+                and re.search(r"\bPodTemplate\b", line, re.IGNORECASE)
+            ):
+                cells = line.split("|")
+                if len(cells) >= 5:
+                    cells[1] = (
+                        f" Deployment {line_deployment_scope} "
+                        "的 PodTemplate/resources "
+                    )
+                    return "|".join(cells)
+            unavailable = any(
+                marker.casefold() in line.casefold()
+                for marker in unavailable_markers
+            )
+            if line.lstrip().startswith("|") and unavailable:
+                return None
+
+            indent = line[:len(line) - len(line.lstrip())]
+            stripped = line.strip()
+            trailing_comma = stripped.endswith(",")
+            json_text = stripped[:-1] if trailing_comma else stripped
+            json_string = None
+            if json_text.startswith('"') and json_text.endswith('"'):
+                try:
+                    parsed = json.loads(json_text)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, str):
+                    json_string = parsed
+
+            prefix = ""
+            text = json_string if json_string is not None else stripped
+            if text.startswith("- "):
+                prefix = "- "
+                text = text[2:].strip()
+            text = re.sub(
+                rf"(?:及|以及|、|，)?\s*"
+                rf"{deployment_name_pattern.pattern}"
+                rf"\s*(?:及|以及|、|，)?",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
+            text = re.sub(
+                r"(?:尚未|未)(?:获得|获取|提供)\s*[：:]?\s*$",
+                "",
+                text,
+            )
+            text = re.sub(r"\s{2,}", " ", text).strip(" ，、；;。")
+
+            factual_check = (
+                "写操作前确认已识别 Deployment 是否为预期变更对象："
+                f"{line_deployment_scope}"
+            )
+            if json_string is not None:
+                value = text or factual_check
+                return (
+                    indent
+                    + json.dumps(value, ensure_ascii=False)
+                    + ("," if trailing_comma else "")
+                )
+            if prefix:
+                return indent + prefix + (text or factual_check) + "；"
+            if text:
+                return indent + text + "。"
+            return (
+                indent
+                + "拓扑已识别上层 Deployment："
+                + f"{line_deployment_scope}。"
+            )
+
+        kept_lines: List[str] = []
+        for original_line in content.splitlines():
+            line = reconcile_deployment_name_line(original_line)
+            if line is None:
+                continue
+            line = reconcile_trace_table_line(line)
+            stripped = line.strip()
+            json_candidate = stripped[:-1] if stripped.endswith(",") else stripped
+            is_json_string = (
+                json_candidate.startswith('"')
+                and json_candidate.endswith('"')
+            )
+            if not line.lstrip().startswith("|") and not is_json_string:
+                line = reconcile_limitation_prose(line)
+                if not line:
+                    continue
+                kept_lines.append(line)
+                continue
+            folded = line.casefold()
+            unavailable = any(
+                marker.casefold() in folded
+                for marker in unavailable_markers
+            )
+            contradicted = False
+            if unavailable and has_log_fact:
+                contradicted = bool(
+                    re.search(
+                        r"\b(?:log|logging|elasticsearch)\b|日志",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    and log_fact_supports_line(line)
+                )
+            if unavailable and has_trace_id and not contradicted:
+                contradicted = bool(re.search(
+                    r"\b(?:trace|tracing|tempo|deepflow)\b|链路|追踪",
+                    line,
+                    re.IGNORECASE,
+                ))
+            if unavailable and has_deployment_name and not contradicted:
+                contradicted = bool(
+                    re.search(r"\bDeployment\b", line, re.IGNORECASE)
+                    and re.search(r"名称|\bname\b", line, re.IGNORECASE)
+                    and resolve_deployment_scope(line)
+                )
+            if unavailable and has_deployment_relation and not contradicted:
+                contradicted = bool(
+                    re.search(r"\bReplicaSet\b", line, re.IGNORECASE)
+                    and re.search(r"\bDeployment\b", line, re.IGNORECASE)
+                )
+            if contradicted:
+                continue
+            kept_lines.append(line)
+
+        result = "\n".join(kept_lines)
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        if content.endswith("\n"):
+            result += "\n"
+        return result
 
     @staticmethod
     def _enforce_metric_boundary_claims(
@@ -3261,7 +4196,32 @@ class ConclusionFormatterNode(WorkflowNode):
                     f"{len(hypothesis_support)} 条支持事实，"
                     f"{len(hypothesis_contradicting)} 条反证事实。"
                 ),
+                "",
+                "#### 实体隔离因果链",
+                f"- **实体边界**: `{entity_id}`",
             ])
+            if hypothesis_support:
+                trigger = record_index[hypothesis_support[0]]
+                lines.append(
+                    "- **触发事实**: "
+                    f"`{trigger.fact_id}` {trigger.attribute}="
+                    f"`{cls._exact_json(trigger.value)}`"
+                )
+                lines.append(
+                    "- **传导证据序列**: "
+                    + " -> ".join(
+                        f"`{fact_id}` {record_index[fact_id].attribute}="
+                        f"`{cls._exact_json(record_index[fact_id].value)}`"
+                        for fact_id in hypothesis_support
+                    )
+                )
+                manifestation = record_index[hypothesis_support[-1]]
+                lines.append(
+                    "- **最终表现事实**: "
+                    f"`{manifestation.fact_id}` "
+                    f"{manifestation.attribute}="
+                    f"`{cls._exact_json(manifestation.value)}`"
+                )
             for fact_id in hypothesis_support:
                 lines.append(cls._render_fact_record(record_index[fact_id]))
             for fact_id in hypothesis_contradicting:
@@ -3309,6 +4269,497 @@ class ConclusionFormatterNode(WorkflowNode):
                 "确定的额外限制。"
             )
         return "\n".join(lines), referenced_records
+
+    @classmethod
+    def _enforce_fact_ledger_observability_sections(
+        cls,
+        content: str,
+        *,
+        ledgers: List[FactLedger],
+    ) -> tuple[str, set[str]]:
+        """Rebuild dimension rows and topology text from canonical records."""
+        if not isinstance(content, str) or not content:
+            return content, set()
+
+        records_by_dimension: Dict[str, List[FactRecord]] = {
+            dimension: []
+            for dimension in (
+                "metrics",
+                "logging",
+                "tracing",
+                "kubernetes",
+                "topology",
+            )
+        }
+        coverage_by_entity_dimension: Dict[
+            tuple[str, str],
+            List[str],
+        ] = {}
+        available_dimensions: set[str] = set()
+        for ledger in ledgers:
+            for record in ledger.records:
+                dimension = str(record.dimension or "").strip().lower()
+                if dimension not in records_by_dimension:
+                    continue
+                if record.fact_type == "coverage":
+                    coverage_value = record.value
+                    if isinstance(coverage_value, dict):
+                        coverage_state = str(
+                            coverage_value.get("coverage") or ""
+                        ).strip().lower()
+                    else:
+                        coverage_state = str(coverage_value or "").strip().lower()
+                    if coverage_state:
+                        coverage_by_entity_dimension.setdefault(
+                            (record.entity_id, dimension),
+                            [],
+                        ).append(coverage_state)
+                        available_dimensions.add(dimension)
+                    continue
+                records_by_dimension[dimension].append(record)
+                available_dimensions.add(dimension)
+
+        if not available_dimensions:
+            return content, available_dimensions
+
+        def trace_ids(record: FactRecord) -> set[str]:
+            value = record.value
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    value = {}
+            if not isinstance(value, dict):
+                return set()
+            return {
+                str(item).lower()
+                for key, item in value.items()
+                if str(key).strip().lower() in {"trace_id", "traceid"}
+                and re.fullmatch(
+                    r"[0-9a-fA-F]{16,64}",
+                    str(item or ""),
+                )
+            }
+
+        state_rank = {
+            "failed": 0,
+            "error": 0,
+            "empty": 1,
+            "absent": 1,
+            "partial": 2,
+            "weak": 2,
+            "present": 3,
+        }
+
+        def normalized_state(value: str) -> str:
+            state = str(value or "").strip().lower()
+            if state in {"weak", "partial"}:
+                return "partial"
+            if state in {"error", "failed"}:
+                return "failed"
+            if state in {"empty", "absent"}:
+                return "empty"
+            return "present" if state == "present" else "failed"
+
+        records_by_entity_dimension: Dict[
+            tuple[str, str],
+            List[FactRecord],
+        ] = {}
+        for dimension, records in records_by_dimension.items():
+            for record in records:
+                records_by_entity_dimension.setdefault(
+                    (record.entity_id, dimension),
+                    [],
+                ).append(record)
+
+        entity_dimension_states: Dict[tuple[str, str], str] = {}
+        keys = (
+            set(records_by_entity_dimension)
+            | set(coverage_by_entity_dimension)
+        )
+        for key in keys:
+            explicit_states = coverage_by_entity_dimension.get(key, [])
+            if explicit_states:
+                entity_dimension_states[key] = min(
+                    (
+                        normalized_state(state)
+                        for state in explicit_states
+                    ),
+                    key=lambda state: state_rank[state],
+                )
+                continue
+            entity_records = records_by_entity_dimension.get(key, [])
+            if key[1] != "tracing":
+                entity_dimension_states[key] = "present"
+                continue
+            deepflow_ids = {
+                trace_id
+                for record in entity_records
+                if "deepflow" in str(
+                    record.source_system or ""
+                ).casefold()
+                for trace_id in trace_ids(record)
+            }
+            tempo_ids = {
+                trace_id
+                for record in entity_records
+                if (
+                    "tempo" in str(
+                        record.source_system or ""
+                    ).casefold()
+                    and record.fact_type == "span"
+                    and record.attribute == "application_span"
+                )
+                for trace_id in trace_ids(record)
+            }
+            entity_dimension_states[key] = (
+                "present"
+                if deepflow_ids & tempo_ids
+                else "partial"
+            )
+
+        dimension_states: Dict[str, str] = {}
+        for dimension in available_dimensions:
+            states = [
+                state
+                for (
+                    _entity_id,
+                    item_dimension,
+                ), state in entity_dimension_states.items()
+                if item_dimension == dimension
+            ]
+            if states and all(state == "present" for state in states):
+                dimension_states[dimension] = "present"
+            elif any(state in {"present", "partial"} for state in states):
+                dimension_states[dimension] = "partial"
+            elif states and all(state == "empty" for state in states):
+                dimension_states[dimension] = "empty"
+            else:
+                dimension_states[dimension] = "failed"
+
+        def table_cell(values: List[str]) -> str:
+            return "<br>".join(
+                value.replace("|", r"\|")
+                for value in dict.fromkeys(values)
+                if value
+            )
+
+        labels = {
+            "metrics": ("Metrics", "Prometheus"),
+            "logging": ("Logging", "ES/Filebeat"),
+            "tracing": ("Tracing", "DeepFlow/Tempo"),
+            "kubernetes": ("K8s", "Kubernetes API"),
+        }
+        exact_rows: Dict[str, str] = {}
+        for dimension, (label, fallback_source) in labels.items():
+            if dimension not in available_dimensions:
+                continue
+            records = records_by_dimension[dimension]
+            sources = [
+                record.source_system
+                for record in records
+                if record.source_system
+            ]
+            signals = [
+                (
+                    f"{record.entity_id} {record.attribute}="
+                    f"{cls._exact_json(record.value)}"
+                )
+                for record in records[:6]
+            ]
+            refs = [
+                ref
+                for record in records
+                for ref in record.evidence_refs
+            ]
+            state = dimension_states.get(dimension, "failed")
+            exact_rows[dimension] = (
+                f"| **{label}** | "
+                f"{table_cell(sources) or fallback_source} | {state} | "
+                f"{table_cell(signals) or f'结构化 coverage={state}'} | "
+                f"{table_cell(refs) or '见机器可核验附录'} |"
+            )
+
+        lines = content.splitlines()
+        row_dimensions = {
+            "metrics": "metrics",
+            "logging": "logging",
+            "tracing": "tracing",
+            "k8s": "kubernetes",
+        }
+        for index, line in enumerate(lines):
+            match = re.match(
+                r"^\|\s*\*{0,2}(metrics|logging|tracing|k8s)\*{0,2}\s*\|",
+                line.strip(),
+                re.IGNORECASE,
+            )
+            if not match:
+                continue
+            dimension = row_dimensions[match.group(1).lower()]
+            replacement = exact_rows.get(dimension)
+            if replacement:
+                lines[index] = replacement
+
+        topology_records = records_by_dimension["topology"]
+        if "topology" in available_dimensions:
+            topology_lines = [
+                (
+                    f"- `{record.entity_id}` {record.attribute}="
+                    f"`{cls._exact_json(record.value)}` "
+                    f"(source={record.source_system}, "
+                    f"refs={cls._exact_json(record.evidence_refs)})"
+                )
+                for record in topology_records[:8]
+            ] or ["- 结构化 coverage=present。"]
+            heading_candidates = [
+                index
+                for index, line in enumerate(lines)
+                if re.match(r"^#{1,4}\s+.*拓扑", line.strip())
+            ]
+            heading_index = next(
+                (
+                    index
+                    for index in heading_candidates
+                    if "拓扑关系" in lines[index]
+                ),
+                heading_candidates[-1] if heading_candidates else None,
+            )
+            if heading_index is not None:
+                section_end = next(
+                    (
+                        index
+                        for index in range(heading_index + 1, len(lines))
+                        if re.match(r"^#{1,4}\s+", lines[index].strip())
+                    ),
+                    len(lines),
+                )
+                retained = [
+                    line
+                    for line in lines[heading_index + 1:section_end]
+                    if not any(
+                        marker in line
+                        for marker in (
+                            "未返回可核验",
+                            "未返回可用",
+                            "未获取到",
+                            "未提供该维度",
+                        )
+                    )
+                ]
+                lines[heading_index + 1:section_end] = [
+                    "",
+                    *topology_lines,
+                    *(
+                        [""] + retained
+                        if any(line.strip() for line in retained)
+                        else []
+                    ),
+                ]
+
+        result = "\n".join(lines)
+        if content.endswith("\n"):
+            result += "\n"
+        return result, available_dimensions
+
+    @staticmethod
+    def _remove_stale_combined_causal_sections(content: str) -> str:
+        """Remove legacy aggregate RCA blocks before entity-scoped rendering."""
+        result = re.sub(
+            r"(?ms)^###\s+[^\n]*(?:根因结论|因果链)[^\n]*\n"
+            r".*?(?=^###\s+|^##\s+|\Z)",
+            "",
+            content or "",
+        )
+        result = re.sub(
+            r"(?ms)^##\s+[^\n]*综合诊断结论[^\n]*\n"
+            r"\s*(?=^##\s+|\Z)",
+            "",
+            result,
+        )
+        return result
+
+    @staticmethod
+    def _reconcile_present_dimension_limitations(
+        content: str,
+        *,
+        present_dimensions: set[str],
+        known_owner_aliases: set[str] | None = None,
+        known_owner_count: int = 0,
+    ) -> str:
+        """Drop stale unavailability claims contradicted by current coverage."""
+        if not present_dimensions:
+            return content
+
+        owner_aliases = {
+            str(alias or "").casefold()
+            for alias in (known_owner_aliases or set())
+            if str(alias or "").strip()
+        }
+        aliases = {
+            "metrics": ("metrics", "metric", "prometheus", "指标"),
+            "logging": ("logging", "log", "elasticsearch", "日志"),
+            "tracing": (
+                "tracing",
+                "trace",
+                "tempo",
+                "deepflow",
+                "链路",
+                "追踪",
+            ),
+            "kubernetes": ("kubernetes", "k8s"),
+            "topology": ("topology", "拓扑"),
+        }
+        unavailable_markers = (
+            "未返回可用",
+            "未获取到",
+            "未提供该维度",
+            "无可用",
+            "不可用",
+            "unavailable",
+            "not available",
+            "no usable",
+        )
+        kept_lines: List[str] = []
+        removed_stale_claim = False
+        for line in str(content or "").splitlines():
+            folded = line.casefold()
+            contradicts_known_owner = (
+                any(marker in folded for marker in unavailable_markers)
+                and "deployment" in folded
+                and (
+                    (
+                        known_owner_count >= 2
+                        and re.search(
+                            r"(?:两个|多个)\s*工作负载",
+                            line,
+                        )
+                    )
+                    or any(
+                        alias in folded
+                        for alias in owner_aliases
+                    )
+                )
+            )
+            contradicts_present = (
+                any(marker in folded for marker in unavailable_markers)
+                and any(
+                    alias.casefold() in folded
+                    for dimension in present_dimensions
+                    for alias in aliases.get(dimension, ())
+                )
+            )
+            if contradicts_known_owner or contradicts_present:
+                removed_stale_claim = True
+                continue
+            kept_lines.append(line)
+
+        result = "\n".join(kept_lines)
+        result = ConclusionFormatterNode._remove_truncation_markers(result)
+        result = re.sub(r"(?m)^[>\-\s]*$", "", result)
+        result = re.sub(r"\n{3,}", "\n\n", result).strip()
+        if removed_stale_claim:
+            labels = {
+                "metrics": "Metrics",
+                "logging": "Logging",
+                "tracing": "Tracing",
+                "kubernetes": "Kubernetes",
+                "topology": "Topology",
+            }
+            coverage_note = (
+                "> 结构化 Fact Ledger 覆盖校正："
+                + "、".join(
+                    labels[dimension]
+                    for dimension in (
+                        "metrics",
+                        "logging",
+                        "tracing",
+                        "kubernetes",
+                        "topology",
+                    )
+                    if dimension in present_dimensions
+                )
+                + " 均存在当前事实。"
+            )
+            root_heading = re.search(
+                r"(?m)^##\s+[^\n]*根因分析[^\n]*$",
+                result,
+            )
+            if root_heading:
+                result = (
+                    result[:root_heading.start()].rstrip()
+                    + "\n\n"
+                    + coverage_note
+                    + "\n\n"
+                    + result[root_heading.start():]
+                )
+            else:
+                result = result.rstrip() + "\n\n" + coverage_note
+        return result.rstrip() + "\n"
+
+    @staticmethod
+    def _known_deployment_owner_aliases(
+        ledgers: List[FactLedger],
+    ) -> tuple[set[str], int]:
+        aliases: set[str] = set()
+        deployments: set[tuple[str, str]] = set()
+        for ledger in ledgers:
+            for record in ledger.records:
+                if (
+                    record.dimension != "topology"
+                    or record.fact_type != "relationship"
+                    or record.directness != "direct"
+                    or not record.evidence_refs
+                    or not isinstance(record.value, dict)
+                    or str(
+                        record.value.get("relation") or ""
+                    ).casefold() != "owned_by"
+                ):
+                    continue
+                source = (
+                    record.value.get("source")
+                    if isinstance(
+                        record.value.get("source"),
+                        dict,
+                    )
+                    else {}
+                )
+                target = (
+                    record.value.get("target")
+                    if isinstance(
+                        record.value.get("target"),
+                        dict,
+                    )
+                    else {}
+                )
+                if (
+                    str(source.get("kind") or "").casefold()
+                    != "replicaset"
+                    or str(target.get("kind") or "").casefold()
+                    != "deployment"
+                ):
+                    continue
+                namespace = str(
+                    target.get("namespace")
+                    or record.namespace
+                    or ""
+                ).strip()
+                name = str(target.get("name") or "").strip()
+                if not name:
+                    continue
+                deployments.add((namespace, name))
+                aliases.add(name)
+                if namespace:
+                    aliases.add(f"{namespace}/{name}")
+        return aliases, len(deployments)
+
+    @staticmethod
+    def _remove_truncation_markers(content: str) -> str:
+        """Remove user-visible truncation placeholders without dropping evidence."""
+        return re.sub(
+            r"(?:\.{3}|…+)\s*截断，原始\s*\d+\s*(?:字符|项)",
+            "",
+            str(content or ""),
+        )
 
     @classmethod
     def _render_fact_ledger_appendix(
@@ -4621,9 +6072,25 @@ class ConclusionFormatterNode(WorkflowNode):
             )
         )
         result = cls._remove_machine_verifiable_sections(content)
+        result = cls._remove_stale_combined_causal_sections(result)
         result = cls._replace_root_cause_section(
             result,
             root_section,
+        )
+        result, present_dimensions = (
+            cls._enforce_fact_ledger_observability_sections(
+                result,
+                ledgers=ledgers,
+            )
+        )
+        known_owner_aliases, known_owner_count = (
+            cls._known_deployment_owner_aliases(ledgers)
+        )
+        result = cls._reconcile_present_dimension_limitations(
+            result,
+            present_dimensions=present_dimensions,
+            known_owner_aliases=known_owner_aliases,
+            known_owner_count=known_owner_count,
         )
         result = cls._render_fact_ledger_diagnostic_remediation(
             result,
@@ -4667,13 +6134,26 @@ class ConclusionFormatterNode(WorkflowNode):
                 contract_line = line
             elif line.startswith("- K8S_SIGNAL "):
                 signal_lines.append(line[2:])
+            elif (
+                line.startswith("- CANONICAL_FACT ")
+                and " dimension=kubernetes " in f" {line} "
+            ):
+                signal_lines.append(line[2:])
 
         if not signal_lines:
             return content
 
         appendix = [
             marker,
-            "> 以下内容由系统从 `collect_aiops_case` 的 Kubernetes 强信号确定性注入，未经过 LLM 改写。",
+            (
+                "> 以下内容由系统从 "
+                + ConclusionFormatterNode._provenance_label(
+                    structured_context,
+                    ("kubernetes",),
+                    fallback="Kubernetes 结构化事实",
+                )
+                + " 的强信号确定性注入，未经过 LLM 改写。"
+            ),
             "",
             "```text",
         ]
@@ -4704,6 +6184,7 @@ class ConclusionFormatterNode(WorkflowNode):
             "- LOG ",
             "- DEEPFLOW ",
             "- TEMPO ",
+            "- QUERY_FACT ",
         )
         for raw_line in str(structured_context or "").splitlines():
             line = raw_line.strip()
@@ -4717,7 +6198,15 @@ class ConclusionFormatterNode(WorkflowNode):
 
         appendix = [
             marker,
-            "> 以下内容由系统从 `collect_aiops_case` 的结构化可观测性事实确定性注入，未经过 LLM 改写。",
+            (
+                "> 以下内容由系统从 "
+                + ConclusionFormatterNode._provenance_label(
+                    structured_context,
+                    ("metrics", "logging", "tracing"),
+                    fallback="结构化可观测性事实",
+                )
+                + " 确定性注入，未经过 LLM 改写。"
+            ),
             "",
             "```text",
         ]
@@ -5534,12 +7023,24 @@ class ConclusionFormatterNode(WorkflowNode):
         """
         parts = []
         seen = set()
+        final_observability_event_ids = {
+            id(event)
+            for event in project_final_observability_events(
+                thinking_events
+            )
+        }
         for ev in thinking_events:
             if ev.get("type") != "tool_result":
                 continue
             if ev.get("status") != "success":
                 continue
             tool_name = ev.get("tool_name", "unknown")
+            if (
+                str(tool_name or "").strip().lower()
+                in OBSERVABILITY_QUERY_TOOLS
+                and id(ev) not in final_observability_event_ids
+            ):
+                continue
             preview = ev.get("result_preview", "")[:300]  # 限制 preview 长度
             if not preview:
                 continue
@@ -5627,18 +7128,143 @@ class ConclusionFormatterNode(WorkflowNode):
             for reason in missing_reasons[:12]:
                 lines.append(f"- {reason}")
 
+        source_coverage = evidence_data.get("source_coverage")
+        source_queries = (
+            source_coverage.get("queries")
+            if isinstance(source_coverage, dict)
+            else []
+        )
+        source_rank = {
+            "present": 4,
+            "partial": 3,
+            "empty": 2,
+            "failed": 1,
+            "not_executed": 0,
+        }
+        source_records: Dict[tuple[str, str, str], Dict[str, str]] = {}
+        for query in source_queries if isinstance(source_queries, list) else []:
+            if not isinstance(query, dict):
+                continue
+            dimension = str(query.get("dimension") or "").strip().lower()
+            tool = str(query.get("tool") or "").strip()
+            source_system = str(query.get("source_system") or "").strip()
+            coverage = str(query.get("coverage") or "").strip().lower()
+            if not dimension or not tool:
+                continue
+            key = (dimension, tool, source_system)
+            previous = source_records.get(key)
+            if (
+                previous is None
+                or source_rank.get(coverage, 0)
+                >= source_rank.get(previous.get("coverage", ""), -1)
+            ):
+                source_records[key] = {
+                    "dimension": dimension,
+                    "tool": tool,
+                    "source_system": source_system,
+                    "coverage": coverage or "executed",
+                }
+        if source_records:
+            lines.append("observability_sources:")
+            for record in source_records.values():
+                lines.append(
+                    "OBSERVABILITY_SOURCE "
+                    f"dimension={record['dimension']} "
+                    f"tool={record['tool']} "
+                    f"source_system={record['source_system'] or 'unknown'} "
+                    f"coverage={record['coverage']}"
+                )
+
         authoritative_facts = cls._build_authoritative_tool_facts(evidence_data)
         if authoritative_facts:
             lines.extend(["", authoritative_facts.rstrip()])
+
+        ledger_only_tool_data = [
+            item
+            for item in (evidence_data.get("tool_data") or [])
+            if isinstance(item, dict)
+            and item.get("fact_ledger") is not None
+            and not str(item.get("agent_facts") or "").strip()
+            and not str(item.get("agent_context") or "").strip()
+        ]
+        canonical_ledgers = extract_fact_ledgers_from_tool_data(
+            ledger_only_tool_data
+        )
+        if canonical_ledgers:
+            lines.extend([
+                "",
+                "canonical_fact_ledgers:",
+                compact_fact_ledgers_json(
+                    canonical_ledgers,
+                    max_chars=12000,
+                ),
+            ])
+            lines.append("canonical_kubernetes_facts:")
+            for item in ledger_only_tool_data:
+                tool = str(item.get("tool") or "unknown").strip() or "unknown"
+                for ledger in extract_fact_ledgers_from_tool_data([item]):
+                    for record in ledger.records:
+                        if str(record.dimension or "").strip().lower() != "kubernetes":
+                            continue
+                        value = json.dumps(
+                            record.value,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
+                        )
+                        lines.append(
+                            "- CANONICAL_FACT "
+                            f"fact_id={record.fact_id} "
+                            f"entity_id={record.entity_id} "
+                            f"dimension=kubernetes "
+                            f"fact_type={record.fact_type} "
+                            f"attribute={record.attribute} "
+                            f"value={value} "
+                            f"source_system={record.source_system or 'kubernetes'} "
+                            f"ref=k8s-{record.fact_id} "
+                            f"tool={tool}"
+                        )
 
         aiops_facts = []
         aiops_contexts = []
         exact_k8s_signals = []
         exact_observability_facts = []
+        exact_topology_entities = []
+        exact_topology_entity_ids = set()
         exact_topology_edges = []
         exact_topology_edge_keys = set()
         topology_case_counts = []
         aiops_case_collected = False
+        autonomous_query_collected = False
+        autonomous_execution = {
+            "metrics": "not_executed",
+            "logging": "not_executed",
+            "tracing": "not_executed",
+            "topology": "not_executed",
+        }
+        autonomous_tool_dimensions = {
+            "execute_pod_promql": "metrics",
+            "query_pod_logs": "logging",
+            "query_pod_tracing": "tracing",
+            "query_pod_topology": "topology",
+        }
+
+        def update_autonomous_execution(dimension: str, state: str) -> None:
+            normalized_state = str(state or "executed").strip().lower()
+            previous_state = autonomous_execution.get(
+                dimension,
+                "not_executed",
+            )
+            execution_rank = {
+                **source_rank,
+                "query_succeeded": 1,
+                "executed": 0,
+            }
+            if execution_rank.get(
+                normalized_state,
+                0,
+            ) >= execution_rank.get(previous_state, -1):
+                autonomous_execution[dimension] = normalized_state
 
         def topology_edge_key(line: str) -> Optional[tuple[str, str, str, str, str]]:
             fields = {}
@@ -5664,12 +7290,27 @@ class ConclusionFormatterNode(WorkflowNode):
                 fields["confidence"],
             )
 
-        for item in (evidence_data.get("tool_data", []) or [])[:12]:
+        selected_tool_data = cls._select_diagnostic_tool_data(
+            evidence_data.get("tool_data", []) or [],
+            limit=12,
+        )
+        for item in selected_tool_data:
             if not isinstance(item, dict):
                 continue
             tool = str(item.get("tool", "unknown") or "unknown")
             if tool in {"collect_aiops_case", "get_aiops_case"}:
                 aiops_case_collected = True
+            if tool in {
+                "execute_pod_promql",
+                "query_pod_logs",
+                "query_pod_tracing",
+                "query_pod_topology",
+            }:
+                autonomous_query_collected = True
+                update_autonomous_execution(
+                    autonomous_tool_dimensions[tool],
+                    "executed",
+                )
             agent_facts = str(item.get("agent_facts", "") or "").strip()
             if agent_facts:
                 aiops_facts.append(f"- [{tool}]\n{agent_facts[:10000]}")
@@ -5685,6 +7326,7 @@ class ConclusionFormatterNode(WorkflowNode):
                         "LOG ",
                         "DEEPFLOW ",
                         "TEMPO ",
+                        "QUERY_FACT ",
                     )):
                         if fact_line not in exact_observability_facts:
                             exact_observability_facts.append(fact_line)
@@ -5704,6 +7346,33 @@ class ConclusionFormatterNode(WorkflowNode):
                 parsed_context = {}
             if not isinstance(parsed_context, dict):
                 continue
+            dimension = autonomous_tool_dimensions.get(tool)
+            if dimension:
+                coverage = str(
+                    parsed_context.get("coverage")
+                    or parsed_context.get("status")
+                    or "executed"
+                ).strip().lower()
+                update_autonomous_execution(dimension, coverage)
+                source_system = str(
+                    parsed_context.get("source_system") or ""
+                ).strip()
+                source_key = (dimension, tool, source_system)
+                previous_source = source_records.get(source_key)
+                if (
+                    previous_source is None
+                    or source_rank.get(coverage, 0)
+                    >= source_rank.get(
+                        previous_source.get("coverage", ""),
+                        -1,
+                    )
+                ):
+                    source_records[source_key] = {
+                        "dimension": dimension,
+                        "tool": tool,
+                        "source_system": source_system,
+                        "coverage": coverage or "executed",
+                    }
             topology_summary = parsed_context.get("topology_summary")
             if isinstance(topology_summary, dict):
                 entity_count = topology_summary.get("entity_count")
@@ -5711,6 +7380,23 @@ class ConclusionFormatterNode(WorkflowNode):
                 if isinstance(entity_count, int) and isinstance(edge_count, int):
                     case_id = str(parsed_context.get("case_id") or "").strip()
                     topology_case_counts.append((case_id, entity_count, edge_count))
+            entities = parsed_context.get("entities")
+            for entity in entities if isinstance(entities, list) else []:
+                if not isinstance(entity, dict):
+                    continue
+                entity_id = str(entity.get("entity_id") or "").strip()
+                if not entity_id or entity_id in exact_topology_entity_ids:
+                    continue
+                exact_topology_entities.append(
+                    "TOPOLOGY_ENTITY "
+                    f"entity_id={entity_id} "
+                    f"kind={str(entity.get('kind') or 'Unknown').strip()} "
+                    f"namespace={str(entity.get('namespace') or '-').strip()} "
+                    f"name={str(entity.get('name') or entity_id).strip()} "
+                    f"source_system={str(entity.get('source_system') or 'kubernetes').strip()} "
+                    f"tool={tool}"
+                )
+                exact_topology_entity_ids.add(entity_id)
             details = parsed_context.get("dimension_details")
             topology = details.get("topology") if isinstance(details, dict) else {}
             edges = topology.get("edges") if isinstance(topology, dict) else []
@@ -5739,8 +7425,34 @@ class ConclusionFormatterNode(WorkflowNode):
                 if edge_key not in exact_topology_edge_keys:
                     exact_topology_edges.append(edge_line)
                     exact_topology_edge_keys.add(edge_key)
-        if aiops_case_collected:
+        for record in source_records.values():
+            source_line = (
+                "OBSERVABILITY_SOURCE "
+                f"dimension={record['dimension']} "
+                f"tool={record['tool']} "
+                f"source_system={record['source_system'] or 'unknown'} "
+                f"coverage={record['coverage']}"
+            )
+            if source_line not in lines:
+                lines.append(source_line)
+        if aiops_case_collected or autonomous_query_collected:
             lines.append("aiops_observability_status: collected")
+            lines.append(
+                "observability_collection_mode: "
+                + (
+                    "coarse_case"
+                    if aiops_case_collected
+                    else "autonomous_query"
+                )
+            )
+            if autonomous_query_collected and not aiops_case_collected:
+                lines.append(
+                    "OBSERVABILITY_EXECUTION "
+                    + " ".join(
+                        f"{dimension}={state}"
+                        for dimension, state in autonomous_execution.items()
+                    )
+                )
         else:
             lines.append("aiops_observability_status: not_collected")
             lines.append(
@@ -5783,6 +7495,7 @@ class ConclusionFormatterNode(WorkflowNode):
                 "health_not_proven=true complete_call_chain_not_proven=true "
                 "exact_edges_are_diagnostic_subset=true"
             )
+            lines.extend(exact_topology_entities)
             lines.extend(f"- {edge}" for edge in exact_topology_edges)
 
         root_cause = rca_data.get("root_cause_summary") or rca_data.get("root_cause")
@@ -5807,7 +7520,12 @@ class ConclusionFormatterNode(WorkflowNode):
 
         limitations = rca_data.get("limitations")
         if limitations:
-            lines.append(f"rca_limitations: {limitations}")
+            reconciled_limitations = cls._reconcile_legacy_report_limitations(
+                str(limitations),
+                "\n".join(lines),
+            ).strip()
+            if reconciled_limitations:
+                lines.append(f"rca_limitations: {reconciled_limitations}")
 
         return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
@@ -5826,7 +7544,7 @@ class ConclusionFormatterNode(WorkflowNode):
         lines: List[str] = []
         all_text_parts: List[str] = []
         seen = set()
-        for item in tool_data[:12]:
+        for item in cls._select_diagnostic_tool_data(tool_data, limit=12):
             if not isinstance(item, dict):
                 continue
             tool = str(item.get("tool", "unknown"))
@@ -5860,6 +7578,35 @@ class ConclusionFormatterNode(WorkflowNode):
             result.append("强约束结论:")
             result.extend(f"- {item}" for item in conclusions)
         return "\n".join(result) + "\n"
+
+    @staticmethod
+    def _select_diagnostic_tool_data(
+        tool_data: List[Dict[str, Any]],
+        *,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Bound conclusion input while preserving source-backed evidence."""
+        normalized = [
+            (index, item)
+            for index, item in enumerate(tool_data or [])
+            if isinstance(item, dict)
+        ]
+
+        def priority(entry: tuple[int, Dict[str, Any]]) -> tuple[int, int]:
+            index, item = entry
+            tool = str(item.get("tool") or "").strip()
+            if item.get("fact_ledger") is not None:
+                return (0, index)
+            if tool in OBSERVABILITY_QUERY_TOOLS:
+                return (1, index)
+            if tool in {"collect_aiops_case", "get_aiops_case"}:
+                return (2, index)
+            if tool.startswith("kubectl_"):
+                return (3, index)
+            return (4, index)
+
+        selected = sorted(normalized, key=priority)[:max(0, int(limit))]
+        return [item for _, item in sorted(selected, key=lambda entry: entry[0])]
 
     @staticmethod
     def _extract_priority_fact_lines(tool: str, data: str) -> List[str]:
@@ -5980,6 +7727,24 @@ class ConclusionFormatterNode(WorkflowNode):
             if evidence_data.get("dimension_coverage") is not None
             else diagnostic_completeness
         )
+        dimension_coverage_total = int(
+            evidence_data.get("dimension_coverage_total")
+            or diagnostic_total
+            or observability_total
+            or 0
+        )
+        if evidence_data.get("dimension_coverage_collected") is not None:
+            dimension_coverage_collected = int(
+                evidence_data.get("dimension_coverage_collected") or 0
+            )
+        else:
+            dimension_coverage_collected = min(
+                dimension_coverage_total,
+                max(
+                    0,
+                    round(dimension_coverage_total * dimension_coverage),
+                ),
+            )
         diagnostic_sufficiency = float(
             evidence_data.get("diagnostic_sufficiency")
             if evidence_data.get("diagnostic_sufficiency") is not None
@@ -6087,6 +7852,8 @@ class ConclusionFormatterNode(WorkflowNode):
             "diagnostic_evidence_collected": diagnostic_collected,
             "diagnostic_evidence_completeness": diagnostic_completeness,
             "diagnostic_evidence_completeness_pct": f"{diagnostic_completeness:.0%}",
+            "dimension_coverage_total": dimension_coverage_total,
+            "dimension_coverage_collected": dimension_coverage_collected,
             "dimension_coverage": dimension_coverage,
             "dimension_coverage_pct": f"{dimension_coverage:.0%}",
             "diagnostic_sufficiency": diagnostic_sufficiency,
@@ -6128,27 +7895,110 @@ class ConclusionFormatterNode(WorkflowNode):
         total = int(stats.get("primary_total") or 0)
         collected = int(stats.get("primary_collected") or 0)
         completeness_pct = str(stats.get("primary_completeness_pct") or "0%")
+        dimension_total = int(stats.get("dimension_coverage_total") or 0)
+        dimension_collected = int(
+            stats.get("dimension_coverage_collected") or 0
+        )
+        dimension_pct = str(stats.get("dimension_coverage_pct") or "0%")
+        sufficiency_pct = str(
+            stats.get("diagnostic_sufficiency_pct") or "0%"
+        )
 
         real_stat = f"{collected}/{total} ({completeness_pct})"
+        dimension_stat = (
+            f"{dimension_collected}/{dimension_total} ({dimension_pct})"
+        )
 
         replaced = False
 
         # 模式1: Markdown 表格行 | **证据完整度** | ... |
-        pattern1 = re.compile(
-            r'(\|\s*\*{0,2}(?:证据完整度|诊断证据充分度)\*{0,2}\s*\|)\s*[^|]+(\|)',
+        completeness_table_pattern = re.compile(
+            r'(\|\s*\*{0,2}证据完整度\*{0,2}\s*\|)\s*[^|]+(\|)',
             re.IGNORECASE
         )
-        if pattern1.search(content):
-            content = pattern1.sub(rf'\1 {real_stat} \2', content)
+        if completeness_table_pattern.search(content):
+            content = completeness_table_pattern.sub(
+                rf'\1 {real_stat} \2',
+                content,
+            )
             replaced = True
 
+        dimension_table_pattern = re.compile(
+            r'(\|\s*\*{0,2}可观测性维度覆盖\*{0,2}\s*\|)\s*[^|]+(\|)',
+            re.IGNORECASE,
+        )
+        if dimension_table_pattern.search(content):
+            content = dimension_table_pattern.sub(
+                rf'\1 {dimension_stat} \2',
+                content,
+            )
+            replaced = True
+
+        sufficiency_table_pattern = re.compile(
+            r'(\|\s*\*{0,2}诊断证据充分度\*{0,2}\s*\|)\s*[^|]+(\|)',
+            re.IGNORECASE,
+        )
+        if sufficiency_table_pattern.search(content):
+            content = sufficiency_table_pattern.sub(
+                rf'\1 {sufficiency_pct} \2',
+                content,
+            )
+            replaced = True
+
+        if (
+            dimension_total > 0
+            and not dimension_table_pattern.search(content)
+        ):
+            sufficiency_line_pattern = re.compile(
+                r'(?m)^(?P<indent>[ \t]*)(?P<row>'
+                r'\|[ \t]*\*{0,2}诊断证据充分度\*{0,2}'
+                r'[ \t]*\|[^\n]*)$',
+                re.IGNORECASE,
+            )
+            if sufficiency_line_pattern.search(content):
+                content = sufficiency_line_pattern.sub(
+                    lambda match: (
+                        f"{match.group('indent')}"
+                        f"| **可观测性维度覆盖** | {dimension_stat} |\n"
+                        f"{match.group('indent')}{match.group('row')}"
+                    ),
+                    content,
+                    count=1,
+                )
+                replaced = True
+
         # 模式2: **证据完整度**: ... 或 证据完整度: ...
-        pattern2 = re.compile(
-            r'(\*{0,2}(?:证据完整度|诊断证据充分度)\*{0,2}\s*[:：])\s*\S+.*',
+        completeness_text_pattern = re.compile(
+            r'(\*{0,2}证据完整度\*{0,2}\s*[:：])\s*\S+.*',
             re.IGNORECASE
         )
-        if pattern2.search(content):
-            content = pattern2.sub(rf'\1 {real_stat}', content)
+        if completeness_text_pattern.search(content):
+            content = completeness_text_pattern.sub(
+                rf'\1 {real_stat}',
+                content,
+            )
+            replaced = True
+
+        dimension_text_pattern = re.compile(
+            r'(\*{0,2}可观测性维度覆盖\*{0,2}\s*[:：])\s*\S+.*',
+            re.IGNORECASE,
+        )
+        if dimension_text_pattern.search(content):
+            content = dimension_text_pattern.sub(
+                rf'\1 {dimension_stat}',
+                content,
+            )
+            replaced = True
+
+        sufficiency_text_pattern = re.compile(
+            r'(\*{0,2}诊断证据充分度\*{0,2}\s*[:：])\s*\S+.*',
+            re.IGNORECASE,
+        )
+        if sufficiency_text_pattern.search(content):
+            content = sufficiency_text_pattern.sub(
+                rf'\1 {sufficiency_pct}',
+                content,
+            )
             replaced = True
 
         # 模式3: 证据: X/Y 项 或 证据采集: X/Y

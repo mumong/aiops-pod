@@ -37,6 +37,9 @@ _CONTEXT_WINDOW_KEYS = {
 
 
 _TOKENIZER_CACHE: Dict[str, Any] = {}
+_DETERMINISTIC_COMPACTION_MARKER = (
+    "\n...[deterministic context compaction: middle omitted]...\n"
+)
 
 
 def _env_truthy(name: str, default: str = "false") -> bool:
@@ -46,14 +49,15 @@ def _env_truthy(name: str, default: str = "false") -> bool:
 def estimate_tokens(text: Any) -> int:
     """Cheap cross-provider estimate.
 
-    Chinese and JSON-heavy prompts vary by tokenizer; chars/3 is a pragmatic
-    estimate that errs slightly high for English and slightly low for dense CJK.
+    UTF-8 bytes/3 stays close to chars/3 for ASCII while conservatively counting
+    dense CJK at roughly one token per character. Hard guards must prefer
+    over-counting to sending an oversized request.
     """
     if text is None:
         return 0
     if not isinstance(text, str):
         text = json.dumps(text, ensure_ascii=False, default=str)
-    return max(1, (len(text) + 2) // 3) if text else 0
+    return max(1, (len(text.encode("utf-8")) + 2) // 3) if text else 0
 
 
 def _token_text(value: Any) -> str:
@@ -131,9 +135,120 @@ def count_tokens(text: Any, model: str = "") -> Dict[str, Any]:
 
     return {
         "tokens": estimate_tokens(value),
-        "source": "heuristic:chars/3",
+        "source": "heuristic:utf8_bytes/3",
         "accuracy": "estimated",
     }
+
+
+def calculate_hard_input_limit(
+    *,
+    context_window: int,
+    output_reserved: int = 6000,
+    safety_margin: int = 2000,
+    input_ratio: float = 0.72,
+) -> int:
+    """Return the maximum provider input allowed before a structured call.
+
+    The ratio protects small models from attention collapse while the reserve
+    calculation guarantees space for structured output and tokenizer error.
+    The stricter limit wins.
+    """
+    if context_window <= 0:
+        return 0
+    normalized_ratio = min(max(float(input_ratio), 0.05), 0.95)
+    ratio_limit = int(context_window * normalized_ratio)
+    reserve_limit = (
+        int(context_window)
+        - max(0, int(output_reserved))
+        - max(0, int(safety_margin))
+    )
+    return max(0, min(ratio_limit, reserve_limit))
+
+
+def compact_text_to_token_budget(
+    text: Any,
+    *,
+    max_tokens: int,
+    model: str = "",
+    preserve_tail_tokens: int = 1200,
+) -> str:
+    """Deterministically fit text into a token budget.
+
+    The beginning normally contains scope and entities, while the end contains
+    output requirements and limitations. Both are retained; only the middle is
+    removed. This function never calls an LLM.
+    """
+    value = _token_text(text)
+    token_limit = max(0, int(max_tokens))
+    if not value or token_limit <= 0:
+        return ""
+    if count_tokens(value, model=model)["tokens"] <= token_limit:
+        return value
+
+    marker = _DETERMINISTIC_COMPACTION_MARKER
+    marker_tokens = count_tokens(marker, model=model)["tokens"]
+    if marker_tokens >= token_limit:
+        return _fit_text_edge_to_token_budget(
+            value,
+            max_tokens=token_limit,
+            model=model,
+            from_end=False,
+        )
+
+    tail_ratio = min(
+        0.40,
+        max(0.05, max(0, int(preserve_tail_tokens)) / max(token_limit, 1)),
+    )
+    low = 0
+    high = len(value)
+    best = marker
+    while low <= high:
+        retained_chars = (low + high) // 2
+        tail_chars = int(retained_chars * tail_ratio)
+        head_chars = retained_chars - tail_chars
+        tail = value[-tail_chars:] if tail_chars else ""
+        candidate = value[:head_chars] + marker + tail
+        tokens = count_tokens(candidate, model=model)["tokens"]
+        if tokens <= token_limit:
+            best = candidate
+            low = retained_chars + 1
+        else:
+            high = retained_chars - 1
+
+    if count_tokens(best, model=model)["tokens"] <= token_limit:
+        return best
+    return _fit_text_edge_to_token_budget(
+        value,
+        max_tokens=token_limit,
+        model=model,
+        from_end=False,
+    )
+
+
+def _fit_text_edge_to_token_budget(
+    text: str,
+    *,
+    max_tokens: int,
+    model: str,
+    from_end: bool,
+) -> str:
+    """Return the longest prefix or suffix that fits a token budget."""
+    if max_tokens <= 0 or not text:
+        return ""
+    low = 0
+    high = len(text)
+    best = ""
+    while low <= high:
+        length = (low + high) // 2
+        candidate = text[-length:] if from_end and length else (
+            text[:length] if length else ""
+        )
+        if count_tokens(candidate, model=model)["tokens"] <= max_tokens:
+            best = candidate
+            low = length + 1
+        else:
+            high = length - 1
+    return best
 
 
 def _short_model_name(model: str = "") -> str:
@@ -295,6 +410,30 @@ def serialize_tool_schema(tools: Optional[Iterable[Any]]) -> List[Dict[str, Any]
     """Serialize enough of tool schemas to estimate prompt pressure."""
     serialized: List[Dict[str, Any]] = []
     for tool in tools or []:
+        if isinstance(tool, dict):
+            function = (
+                tool.get("function")
+                if isinstance(tool.get("function"), dict)
+                else tool
+            )
+            item = {
+                "name": function.get("name") or tool.get("name") or "unknown_tool",
+                "description": (
+                    function.get("description")
+                    or tool.get("description")
+                    or ""
+                ),
+            }
+            parameters = (
+                function.get("parameters")
+                or function.get("args_schema")
+                or tool.get("parameters")
+                or tool.get("args_schema")
+            )
+            if parameters is not None:
+                item["args_schema"] = parameters
+            serialized.append(item)
+            continue
         item: Dict[str, Any] = {
             "name": getattr(tool, "name", tool.__class__.__name__),
             "description": getattr(tool, "description", "") or "",
@@ -350,6 +489,7 @@ class ContextBudgetEstimator:
         api_key: str = "",
         scratchpad_reserved: int = 4096,
         output_reserved: int = 6000,
+        enable_usage_probe: bool = True,
     ) -> Dict[str, Any]:
         resolved_window = ModelContextResolver().resolve(model, api_base=api_base, api_key=api_key)
         context_window = resolved_window.get("context_window")
@@ -359,7 +499,11 @@ class ContextBudgetEstimator:
         provider_usage_source: Optional[str] = None
         provider_usage_error: str = ""
 
-        if _env_truthy("AIOPS_CONTEXT_USAGE_PROBE") and api_base:
+        if (
+            enable_usage_probe
+            and _env_truthy("AIOPS_CONTEXT_USAGE_PROBE")
+            and api_base
+        ):
             messages: List[Dict[str, Any]] = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})

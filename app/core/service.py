@@ -599,13 +599,22 @@ class HolmesService:
         """
         wf_cfg = self.workflow_config if isinstance(self.workflow_config, dict) else {}
         cfg = wf_cfg.get("context_compaction", {}) if isinstance(wf_cfg.get("context_compaction", {}), dict) else {}
+        max_compactions = cfg.get("max_compactions_per_call")
         result: Dict[str, Any] = {
             "enabled": bool(cfg.get("enabled", True)),
             "nodes": cfg.get("nodes") or ["evidence"],
             "max_context_window": cfg.get("max_context_window") or 35000,
             "trigger_ratio": cfg.get("trigger_ratio") or 0.70,
-            "max_compactions_per_call": cfg.get("max_compactions_per_call") or 1,
+            "max_compactions_per_call": (
+                1 if max_compactions is None else max_compactions
+            ),
             "summary_max_tokens": cfg.get("summary_max_tokens") or 1200,
+            "hard_guard_enabled": bool(cfg.get("hard_guard_enabled", True)),
+            "hard_guard_input_ratio": cfg.get("hard_guard_input_ratio") or 0.72,
+            "hard_guard_safety_tokens": cfg.get("hard_guard_safety_tokens") or 2000,
+            "hard_guard_preserve_tail_tokens": (
+                cfg.get("hard_guard_preserve_tail_tokens") or 1200
+            ),
         }
         if isinstance(result["nodes"], str):
             result["nodes"] = [result["nodes"]]
@@ -625,6 +634,24 @@ class HolmesService:
             result["summary_max_tokens"] = int(result["summary_max_tokens"])
         except (TypeError, ValueError):
             result["summary_max_tokens"] = 1200
+        try:
+            result["hard_guard_input_ratio"] = float(
+                result["hard_guard_input_ratio"]
+            )
+        except (TypeError, ValueError):
+            result["hard_guard_input_ratio"] = 0.72
+        try:
+            result["hard_guard_safety_tokens"] = int(
+                result["hard_guard_safety_tokens"]
+            )
+        except (TypeError, ValueError):
+            result["hard_guard_safety_tokens"] = 2000
+        try:
+            result["hard_guard_preserve_tail_tokens"] = int(
+                result["hard_guard_preserve_tail_tokens"]
+            )
+        except (TypeError, ValueError):
+            result["hard_guard_preserve_tail_tokens"] = 1200
         return result
 
     def get_chat_model_extra_body_config(

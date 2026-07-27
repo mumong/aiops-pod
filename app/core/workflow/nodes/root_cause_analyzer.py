@@ -19,9 +19,10 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from app.core.workflow.fact_contract import (
+    bounded_json_dumps,
     compact_fact_ledgers_json,
     extract_fact_ledger_inputs_from_evidence_analysis,
     extract_fact_ledgers_from_evidence_analysis,
@@ -44,6 +45,13 @@ logger = logging.getLogger(__name__)
 
 RCA_TEXT_FIELD_LIMIT = 500
 RCA_LIST_LIMIT = 12
+RCA_CONTEXT_MAX_CHARS = 52000
+RCA_HANDOFF_MAX_CHARS = 7000
+RCA_TOOL_CONTEXT_MAX_CHARS = 36000
+RCA_FACT_LEDGER_MAX_CHARS = 24000
+RCA_QUALITY_MAX_CHARS = 4000
+RCA_SUPPLEMENTARY_MAX_CHARS = 7000
+RCA_AUXILIARY_MAX_CHARS = 3000
 
 
 class RootCauseAnalyzerNode(WorkflowNode):
@@ -166,14 +174,23 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
         return new_state
 
-    def _build_evidence_summary(self, evidence_items: List[EvidenceItem]) -> str:
+    def _build_evidence_summary(
+        self,
+        evidence_items: List[EvidenceItem],
+        *,
+        max_chars: int = 6000,
+    ) -> str:
         """构建证据摘要"""
         lines = []
-        for i, item in enumerate(evidence_items, 1):
+        for i, item in enumerate(evidence_items[:24], 1):
             status = "✅ 已采集" if item.collected else "❌ 未采集"
-            value = f"= {item.value}" if item.value else ""
+            compact_value = self._compact_text_value(item.value, limit=500)
+            value = f"= {compact_value}" if compact_value else ""
             lines.append(f"{i}. [{status}] {item.description} {value}")
-        return "\n".join(lines) if lines else "暂无证据"
+        if len(evidence_items) > 24:
+            lines.append(f"... 截断，原始 {len(evidence_items)} 项")
+        rendered = "\n".join(lines) if lines else "暂无证据"
+        return self._compact_text_value(rendered, limit=max_chars)
 
     def _build_rca_context(self, state: WorkflowState) -> str:
         """Build compact RCA input from handoff + bounded evidence facts."""
@@ -184,9 +201,12 @@ class RootCauseAnalyzerNode(WorkflowNode):
         if not layer_handoff:
             layer_handoff = self._layer_analysis_to_handoff(state.get("layer_analysis", ""))
 
+        compact_handoff = self._compact_layer_handoff_for_rca(
+            layer_handoff or {}
+        )
         parts = [
             "# 问题定位结构化交接 layer_handoff",
-            json.dumps(layer_handoff or {}, ensure_ascii=False, indent=2, default=str),
+            compact_handoff,
         ]
         if fact_ledgers:
             parts.extend([
@@ -198,24 +218,184 @@ class RootCauseAnalyzerNode(WorkflowNode):
             parts.extend([
                 "",
                 "# 证据采集结果",
-                self._build_evidence_summary(evidence_items),
+                self._build_evidence_summary(
+                    evidence_items,
+                    max_chars=RCA_AUXILIARY_MAX_CHARS,
+                ),
             ])
 
         facts = state.get("evidence_facts") or []
         conflicts = state.get("evidence_conflicts") or []
         missing = state.get("missing_evidence") or []
         if facts and not fact_ledgers:
-            parts.extend(["", "# 已验证事实", json.dumps(facts, ensure_ascii=False, indent=2, default=str)])
+            parts.extend([
+                "",
+                "# 已验证事实",
+                bounded_json_dumps(
+                    facts,
+                    max_chars=RCA_AUXILIARY_MAX_CHARS,
+                ),
+            ])
         if conflicts:
-            parts.extend(["", "# 冲突/负向证据", json.dumps(conflicts, ensure_ascii=False, indent=2, default=str)])
+            parts.extend([
+                "",
+                "# 冲突/负向证据",
+                bounded_json_dumps(
+                    conflicts,
+                    max_chars=RCA_AUXILIARY_MAX_CHARS,
+                ),
+            ])
         if missing:
-            parts.extend(["", "# 缺失证据", json.dumps(missing, ensure_ascii=False, indent=2, default=str)])
+            parts.extend([
+                "",
+                "# 缺失证据",
+                bounded_json_dumps(
+                    missing,
+                    max_chars=RCA_AUXILIARY_MAX_CHARS,
+                ),
+            ])
 
-        extra_data = self._extract_tool_data_for_rca(evidence_analysis)
+        base_context = "\n".join(parts)
+        remaining_chars = max(
+            2,
+            min(
+                RCA_TOOL_CONTEXT_MAX_CHARS,
+                RCA_CONTEXT_MAX_CHARS - len(base_context) - 32,
+            ),
+        )
+        extra_data = self._extract_tool_data_for_rca(
+            evidence_analysis,
+            max_chars=remaining_chars,
+        )
         if extra_data:
             parts.extend(["", "# 工具采集摘要", extra_data])
 
-        return "\n".join(parts)
+        context = "\n".join(parts)
+        if len(context) > RCA_CONTEXT_MAX_CHARS:
+            logger.warning(
+                "⚠️ [rca] section budgets exceeded final context cap: %d > %d",
+                len(context),
+                RCA_CONTEXT_MAX_CHARS,
+            )
+            context = context[:RCA_CONTEXT_MAX_CHARS]
+        return context
+
+    @classmethod
+    def _compact_layer_handoff_for_rca(cls, value: Any) -> str:
+        """Keep RCA-relevant handoff fields without repeated model reasoning."""
+        handoff = dict(value) if isinstance(value, dict) else {}
+        abnormal_pod_entity_index = cls._build_abnormal_pod_entity_index(
+            handoff.get("abnormal_pods")
+        )
+        compact: Dict[str, Any] = {}
+        scalar_keys = (
+            "diagnosis_scope",
+            "layer",
+            "derived_layer",
+            "layers",
+            "confidence",
+            "primary_pod",
+            "pod_status_keyword",
+            "pod_abnormal_type",
+            "status_category",
+            "abnormal_pods",
+            "active_entities",
+            "active_signals",
+            "possible_scenarios",
+            "matched_runbooks",
+            "must_verify",
+            "do_not_change",
+        )
+        for key in scalar_keys:
+            if handoff.get(key) not in (None, {}, []):
+                compact[key] = handoff.get(key)
+
+        primary_problem = str(
+            handoff.get("primary_problem")
+            or handoff.get("reasoning")
+            or ""
+        ).strip()
+        if primary_problem:
+            compact["primary_problem"] = cls._compact_text_value(
+                primary_problem,
+                limit=1200,
+            )
+
+        issue_groups = handoff.get("issue_groups")
+        if not isinstance(issue_groups, list):
+            issue_groups = handoff.get("abnormal_groups")
+        if isinstance(issue_groups, list) and issue_groups:
+            compact["issue_groups"] = issue_groups
+
+        current_summary = handoff.get("current_abnormal_summary")
+        if isinstance(current_summary, dict):
+            compact["current_abnormal_summary"] = {
+                key: current_summary.get(key)
+                for key in (
+                    "source",
+                    "status_counts",
+                    "total_abnormal",
+                    "selected_rows",
+                )
+                if current_summary.get(key) not in (None, {}, [])
+            }
+
+        if not abnormal_pod_entity_index:
+            return bounded_json_dumps(
+                compact,
+                max_chars=RCA_HANDOFF_MAX_CHARS,
+            )
+
+        compact.pop("abnormal_pods", None)
+        entity_index_text = json.dumps(
+            {"abnormal_pod_entity_index": abnormal_pod_entity_index},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        if len(entity_index_text) > RCA_HANDOFF_MAX_CHARS:
+            raise ValueError(
+                "abnormal Pod identity index exceeds RCA handoff budget: "
+                f"{len(entity_index_text)} > {RCA_HANDOFF_MAX_CHARS}"
+            )
+
+        detail_budget = RCA_HANDOFF_MAX_CHARS - len(entity_index_text) + 1
+        compact_detail_text = bounded_json_dumps(
+            compact,
+            max_chars=detail_budget,
+        )
+        if compact_detail_text == "{}":
+            return entity_index_text
+        return f"{entity_index_text[:-1]},{compact_detail_text[1:]}"
+
+    @staticmethod
+    def _build_abnormal_pod_entity_index(value: Any) -> List[Dict[str, Any]]:
+        """Project abnormal Pods into a small identity set before compression."""
+        if not isinstance(value, list):
+            return []
+
+        entities: List[Dict[str, Any]] = []
+        seen = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            entity = {
+                key: item.get(key)
+                for key in ("namespace", "name", "status", "uid")
+                if item.get(key) not in (None, "")
+            }
+            if not entity:
+                continue
+            identity = tuple(
+                entity.get(key)
+                for key in ("namespace", "name", "status", "uid")
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            entities.append(entity)
+        return entities
 
     @staticmethod
     def _layer_analysis_to_handoff(layer_analysis: str) -> Dict[str, Any]:
@@ -593,7 +773,81 @@ class RootCauseAnalyzerNode(WorkflowNode):
             facts=[]
         )
 
-    def _extract_tool_data_for_rca(self, evidence_analysis: str) -> str:
+    @classmethod
+    def _compact_quality_contract(
+        cls,
+        value: Dict[str, Any],
+        *,
+        max_chars: int,
+    ) -> str:
+        quality_keys = (
+            "source_coverage",
+            "case_target_coverage",
+            "detail_retrieval",
+            "diagnostic_sufficiency_summary",
+            "unresolved_questions",
+        )
+        quality_contract = {
+            key: value.get(key)
+            for key in quality_keys
+        }
+        minimum_contract = {
+            key: (
+                []
+                if isinstance(quality_contract[key], list)
+                else {}
+                if isinstance(quality_contract[key], dict)
+                else None
+            )
+            for key in quality_keys
+        }
+        minimum_text = json.dumps(
+            minimum_contract,
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+        if len(minimum_text) > max_chars:
+            raise ValueError(
+                "quality contract field envelope exceeds RCA quality budget"
+            )
+
+        field_budget = max(
+            2,
+            (max_chars - len(minimum_text)) // len(quality_keys),
+        )
+        while True:
+            compacted: Dict[str, Any] = {}
+            for key in quality_keys:
+                field_text = bounded_json_dumps(
+                    quality_contract[key],
+                    max_chars=field_budget,
+                    indent=2,
+                )
+                compacted[key] = json.loads(field_text)
+
+            rendered = json.dumps(
+                compacted,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+            if len(rendered) <= max_chars:
+                return rendered
+            if field_budget <= 2:
+                return minimum_text
+            overflow_per_field = max(
+                1,
+                (len(rendered) - max_chars) // len(quality_keys) + 1,
+            )
+            field_budget = max(2, field_budget - overflow_per_field)
+
+    def _extract_tool_data_for_rca(
+        self,
+        evidence_analysis: str,
+        *,
+        max_chars: int = RCA_TOOL_CONTEXT_MAX_CHARS,
+    ) -> str:
         """
         从 evidence_analysis JSON 中提取工具采集的真实数据，
         供 RCA prompt 使用，确保根因分析基于实际数据。
@@ -603,7 +857,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if not isinstance(data, dict):
                 return ""
 
-            parts = []
+            if max_chars < 2:
+                return ""
+            sections: List[tuple[str, str]] = []
 
             quality_keys = (
                 "source_coverage",
@@ -612,23 +868,28 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "diagnostic_sufficiency_summary",
                 "unresolved_questions",
             )
-            quality_contract = {
+            quality_values = {
                 key: data.get(key)
                 for key in quality_keys
-                if data.get(key) not in (None, {}, [])
             }
-            if quality_contract:
-                parts.extend([
+            if any(
+                value not in (None, {}, [])
+                for value in quality_values.values()
+            ):
+                quality_budget = min(
+                    RCA_QUALITY_MAX_CHARS,
+                    max(2, max_chars // 4),
+                )
+                quality_text = self._compact_quality_contract(
+                    quality_values,
+                    max_chars=quality_budget,
+                )
+                sections.append((
                     "## 证据质量合同",
                     "source_coverage/case_target_coverage 只表示采集覆盖，"
-                    "不能替代 diagnostic_sufficiency；未回答问题必须进入结论限制。",
-                    json.dumps(
-                        quality_contract,
-                        ensure_ascii=False,
-                        indent=2,
-                        default=str,
-                    ),
-                ])
+                    "不能替代 diagnostic_sufficiency；未回答问题必须进入结论限制。\n"
+                    + quality_text,
+                ))
 
             tool_data = data.get("tool_data", [])
             if not isinstance(tool_data, list):
@@ -642,99 +903,427 @@ class RootCauseAnalyzerNode(WorkflowNode):
             )
 
             if fact_ledgers:
-                parts.extend([
+                ledger_budget = min(
+                    RCA_FACT_LEDGER_MAX_CHARS,
+                    max(
+                        2,
+                        max_chars
+                        - sum(len(title) + len(content) + 4 for title, content in sections)
+                        - 512,
+                    ),
+                )
+                sections.append((
                     "## AIOps Fact Ledger",
                     compact_fact_ledgers_json(
                         fact_ledgers,
-                        max_chars=12000,
+                        max_chars=ledger_budget,
                     ),
-                ])
-                supplementary_raw_parts = []
-                supplementary_fact_parts = []
-                supplementary_context_parts = []
-                index = 1
-                for item in selected_tool_data:
-                    if item.get("fact_ledger") is not None:
-                        continue
-                    tool = item.get("tool", "unknown")
-                    if item.get("agent_context"):
-                        context = self._compact_text_value(
-                            item.get("agent_context", ""),
-                            limit=12000,
-                        )
-                        supplementary_context_parts.append(
-                            f"[{tool}] {context}"
-                        )
-                    elif item.get("agent_facts"):
-                        facts = self._compact_text_value(
-                            item.get("agent_facts", ""),
-                            limit=10000,
-                        )
-                        supplementary_fact_parts.append(f"[{tool}]\n{facts}")
-                    else:
-                        raw = self._compact_text_value(
-                            item.get("data", ""),
-                            limit=500,
-                        )
-                        supplementary_raw_parts.append(
-                            f"{index}. [{tool}]: {raw}"
-                        )
-                    index += 1
-                if supplementary_raw_parts:
-                    parts.append("## 补充工具输出")
-                    parts.extend(supplementary_raw_parts)
-                if supplementary_fact_parts:
-                    parts.append("## AIOps 确定性可观测事实")
-                    parts.extend(supplementary_fact_parts)
-                if supplementary_context_parts:
-                    parts.append("## AIOps 结构化可观测性上下文")
-                    parts.extend(supplementary_context_parts)
-                return "\n".join(parts)
+                ))
+                supplementary = [
+                    item
+                    for item in selected_tool_data
+                    if item.get("fact_ledger") is None
+                ]
+                if supplementary:
+                    supplementary_budget = min(
+                        RCA_SUPPLEMENTARY_MAX_CHARS,
+                        max(
+                            2,
+                            max_chars
+                            - sum(
+                                len(title) + len(content) + 4
+                                for title, content in sections
+                            )
+                            - 128,
+                        ),
+                    )
+                    sections.append((
+                        "## 补充工具输出",
+                        self._compact_supplementary_tool_data(
+                            supplementary,
+                            max_chars=supplementary_budget,
+                        ),
+                    ))
+                return self._join_rca_sections(
+                    sections,
+                    max_chars=max_chars,
+                )
 
             # 1. LLM 的分析文本（包含工具调用结果的总结）
             llm_analysis = data.get("llm_analysis", "")
             if llm_analysis:
-                parts.append(f"## LLM 证据分析\n{llm_analysis[:2000]}")
+                sections.append((
+                    "## LLM 证据分析",
+                    self._compact_text_value(llm_analysis, limit=2000),
+                ))
 
             # 2. MCP 工具的原始输出
             if selected_tool_data:
-                tool_parts = []
-                aiops_fact_parts = []
-                aiops_context_parts = []
-                index = 1
-                for td in selected_tool_data:
-                    tool = td.get("tool", "unknown")
-                    if td.get("agent_context"):
-                        agent_context = self._compact_text_value(
-                            td.get("agent_context", ""),
-                            limit=12000,
-                        )
-                        aiops_context_parts.append(
-                            f"[{tool}] {agent_context}"
-                        )
-                    elif td.get("agent_facts"):
-                        agent_facts = self._compact_text_value(
-                            td.get("agent_facts", ""),
-                            limit=10000,
-                        )
-                        aiops_fact_parts.append(f"[{tool}]\n{agent_facts}")
-                    else:
-                        raw = self._compact_text_value(
-                            td.get("data", ""),
-                            limit=500,
-                        )
-                        tool_parts.append(f"{index}. [{tool}]: {raw}")
-                    index += 1
-                if tool_parts:
-                    parts.append("## 工具原始输出")
-                    parts.extend(tool_parts)
-                if aiops_fact_parts:
-                    parts.append("## AIOps 确定性可观测事实")
-                    parts.extend(aiops_fact_parts)
-                if aiops_context_parts:
-                    parts.append("## AIOps 结构化可观测性上下文")
-                    parts.extend(aiops_context_parts)
+                current_size = sum(
+                    len(title) + len(content) + 4
+                    for title, content in sections
+                )
+                supplementary_budget = max(
+                    2,
+                    min(
+                        RCA_SUPPLEMENTARY_MAX_CHARS,
+                        max_chars - current_size - 128,
+                    ),
+                )
+                sections.extend(
+                    self._compact_supplementary_tool_sections(
+                        selected_tool_data,
+                        max_chars=supplementary_budget,
+                    )
+                )
 
-            return "\n".join(parts)
+            return self._join_rca_sections(
+                sections,
+                max_chars=max_chars,
+            )
         except (json.JSONDecodeError, TypeError):
             return ""
+
+    @classmethod
+    def _compact_supplementary_tool_data(
+        cls,
+        items: List[Dict[str, Any]],
+        *,
+        max_chars: int,
+    ) -> str:
+        identity_index = cls._build_supplementary_identity_index(items)
+        minimum_payload: Dict[str, Any] = {"supplementary_tool_data": []}
+        if identity_index:
+            minimum_payload["supplementary_identity_index"] = identity_index
+        minimum_text = json.dumps(
+            minimum_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        if len(minimum_text) > max_chars:
+            if identity_index:
+                raise ValueError(
+                    "supplementary identity index exceeds RCA budget: "
+                    f"{len(minimum_text)} > {max_chars}"
+                )
+            return "{}"
+
+        def build_projection(
+            item: Dict[str, Any],
+            *,
+            representation_limit: int,
+        ) -> Dict[str, Any]:
+            projected: Dict[str, Any] = {
+                key: item.get(key)
+                for key in (
+                    "tool",
+                    "status",
+                    "semantic_success",
+                    "dimension",
+                    "source_system",
+                    "coverage",
+                    "purpose",
+                    "raw_ref",
+                    "structured_ref",
+                    "summary_ref",
+                )
+                if item.get(key) not in (None, "", {}, [])
+            }
+            if representation_limit <= 0:
+                return projected
+            if item.get("agent_facts"):
+                projected["agent_facts"] = cls._compact_text_value(
+                    item.get("agent_facts"),
+                    limit=representation_limit,
+                )
+            elif item.get("agent_context"):
+                raw_context = item.get("agent_context")
+                if isinstance(raw_context, str):
+                    try:
+                        raw_context = json.loads(raw_context)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if isinstance(raw_context, (dict, list)):
+                    projected["agent_context"] = json.loads(
+                        bounded_json_dumps(
+                            raw_context,
+                            max_chars=max(2, representation_limit),
+                        )
+                    )
+                else:
+                    projected["agent_context"] = cls._compact_text_to_chars(
+                        raw_context,
+                        max_chars=representation_limit,
+                    )
+            else:
+                projected["data"] = cls._compact_text_to_chars(
+                    item.get("data", ""),
+                    max_chars=representation_limit,
+                )
+            return projected
+
+        def render(representation_limit: int) -> str:
+            payload: Dict[str, Any] = {
+                "supplementary_tool_data": [
+                    build_projection(
+                        item,
+                        representation_limit=representation_limit,
+                    )
+                    for item in items
+                ],
+            }
+            if identity_index:
+                payload["supplementary_identity_index"] = identity_index
+            return json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+
+        metadata_only = render(0)
+        if len(metadata_only) > max_chars:
+            return minimum_text
+
+        low = 0
+        high = 1200
+        best = metadata_only
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = render(middle)
+            if len(candidate) <= max_chars:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        return best
+
+    @classmethod
+    def _build_supplementary_identity_index(
+        cls,
+        items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        identities: List[Dict[str, Any]] = []
+        seen = set()
+        for item in items:
+            identity = cls._supplementary_identity_envelope(item)
+            if not identity:
+                continue
+            serialized = json.dumps(
+                identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            if serialized in seen:
+                continue
+            seen.add(serialized)
+            identities.append(identity)
+        return identities
+
+    @staticmethod
+    def _supplementary_identity_envelope(
+        item: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        raw_identity = item.get("identity_envelope")
+        if not isinstance(raw_identity, Mapping):
+            raw_context = item.get("agent_context")
+            if isinstance(raw_context, str):
+                try:
+                    raw_context = json.loads(raw_context)
+                except (json.JSONDecodeError, TypeError):
+                    raw_context = None
+            raw_identity = raw_context if isinstance(raw_context, Mapping) else {}
+
+        identity: Dict[str, Any] = {}
+        case_id = str(raw_identity.get("case_id") or "").strip()
+        if case_id:
+            identity["case_id"] = case_id
+
+        primary = raw_identity.get("primary_entity")
+        if isinstance(primary, Mapping):
+            compact_primary = {
+                key: primary.get(key)
+                for key in ("kind", "namespace", "name", "uid")
+                if primary.get(key) not in (None, "")
+            }
+            if compact_primary:
+                identity["primary_entity"] = compact_primary
+        return identity
+
+    @classmethod
+    def _compact_supplementary_tool_sections(
+        cls,
+        items: List[Dict[str, Any]],
+        *,
+        max_chars: int,
+    ) -> List[tuple[str, str]]:
+        fact_blocks: List[str] = []
+        context_blocks: List[str] = []
+        raw_blocks: List[str] = []
+
+        for index, item in enumerate(items, 1):
+            tool = str(item.get("tool") or "unknown")
+            if item.get("agent_facts"):
+                fact_parts = [f"[{tool}]"]
+                fact_parts.append(str(item.get("agent_facts")).strip())
+                fact_blocks.append("\n".join(fact_parts))
+                continue
+            if item.get("agent_context"):
+                context = item.get("agent_context")
+                if isinstance(context, str):
+                    try:
+                        context = json.loads(context)
+                    except (json.JSONDecodeError, TypeError):
+                        context = context.strip()
+                if isinstance(context, (dict, list)):
+                    context = json.dumps(
+                        context,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                        default=str,
+                    )
+                context_blocks.append(f"[{tool}]\n{context}")
+                continue
+            raw = cls._compact_text_value(
+                item.get("data", ""),
+                limit=500,
+            )
+            if raw:
+                raw_blocks.append(f"{index}. [{tool}]: {raw}")
+
+        optional_groups = [
+            (
+                "## AIOps 确定性可观测事实",
+                "\n".join(fact_blocks),
+            ),
+            (
+                "## AIOps 结构化可观测性上下文",
+                "\n".join(context_blocks),
+            ),
+            (
+                "## 工具原始输出",
+                "\n".join(raw_blocks),
+            ),
+        ]
+        optional_groups = [
+            (title, content)
+            for title, content in optional_groups
+            if content
+        ]
+
+        groups: List[tuple[str, str]] = []
+        identity_index = cls._build_supplementary_identity_index(items)
+        if identity_index:
+            identity_text = json.dumps(
+                {"supplementary_identity_index": identity_index},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            identity_title = "## AIOps 补充实体索引"
+            identity_chars = len(identity_title) + 1 + len(identity_text)
+            if identity_chars > max_chars:
+                raise ValueError(
+                    "supplementary identity index exceeds RCA budget: "
+                    f"{identity_chars} > {max_chars}"
+                )
+            groups.append((identity_title, identity_text))
+
+        if not optional_groups:
+            return groups
+
+        used_chars = sum(
+            len(title) + 1 + len(content)
+            for title, content in groups
+        )
+        if groups:
+            used_chars += len(groups) - 1
+
+        selected_optional: List[tuple[str, str]] = []
+        for title, content in optional_groups:
+            minimum_addition = (1 if groups or selected_optional else 0) + len(title) + 2
+            if used_chars + minimum_addition > max_chars:
+                continue
+            selected_optional.append((title, content))
+            used_chars += minimum_addition
+
+        if not selected_optional:
+            return groups
+
+        all_groups = groups + selected_optional
+        fixed_chars = (
+            sum(len(title) + 1 for title, _content in all_groups)
+            + len(all_groups)
+            - 1
+        )
+        content_budget = max_chars - fixed_chars
+        identity_content_chars = sum(
+            len(content)
+            for title, content in groups
+            if title == "## AIOps 补充实体索引"
+        )
+        optional_content_budget = content_budget - identity_content_chars
+        if optional_content_budget < len(selected_optional):
+            return groups
+
+        base_share = optional_content_budget // len(selected_optional)
+        allocations = [
+            min(len(content), base_share)
+            for _title, content in selected_optional
+        ]
+        remaining = optional_content_budget - sum(allocations)
+        for index, (_title, content) in enumerate(selected_optional):
+            if remaining <= 0:
+                break
+            extra = min(len(content) - allocations[index], remaining)
+            allocations[index] += extra
+            remaining -= extra
+
+        groups.extend([
+            (
+                title,
+                cls._compact_text_to_chars(
+                    content,
+                    max_chars=allocations[index],
+                ),
+            )
+            for index, (title, content) in enumerate(selected_optional)
+        ])
+        if not groups:
+            return []
+        return groups
+
+    @staticmethod
+    def _compact_text_to_chars(value: Any, *, max_chars: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= max_chars:
+            return text
+        marker = f"\n... 截断，原始 {len(text)} 字符"
+        if len(marker) >= max_chars:
+            return marker[:max_chars]
+        prefix_chars = max_chars - len(marker)
+        return text[:prefix_chars].rstrip() + marker
+
+    @staticmethod
+    def _join_rca_sections(
+        sections: List[tuple[str, str]],
+        *,
+        max_chars: int,
+    ) -> str:
+        rendered: List[str] = []
+        used = 0
+        for title, content in sections:
+            block = f"{title}\n{content}".strip()
+            separator = "\n" if rendered else ""
+            if used + len(separator) + len(block) > max_chars:
+                continue
+            rendered.append(block)
+            used += len(separator) + len(block)
+        return "\n".join(rendered)

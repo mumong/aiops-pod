@@ -6,7 +6,13 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.context.archive import ContextArchive, get_archive_root
-from app.core.context.budget import ContextBudgetEstimator, ModelContextResolver, count_tokens
+from app.core.context import budget as budget_module
+from app.core.context.budget import (
+    ContextBudgetEstimator,
+    ModelContextResolver,
+    count_tokens,
+    serialize_tool_schema,
+)
 from app.core.context.observation import ObservationProcessor
 
 
@@ -87,6 +93,82 @@ def test_context_budget_estimator_reports_required_categories(monkeypatch):
     ]:
         assert key in budget
     assert budget["estimated_total"] > 0
+
+
+def test_hard_input_budget_reserves_output_and_safety_margin():
+    limit = budget_module.calculate_hard_input_limit(
+        context_window=32000,
+        output_reserved=6000,
+        safety_margin=2000,
+        input_ratio=0.72,
+    )
+
+    assert limit == 23040
+
+
+def test_serialize_tool_schema_preserves_openai_dict_tool_contract():
+    serialized = serialize_tool_schema([
+        {
+            "type": "function",
+            "function": {
+                "name": "query_pod_logs",
+                "description": "query real pod logs",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {"type": "string"},
+                        "pod": {"type": "string"},
+                    },
+                },
+            },
+        }
+    ])
+
+    assert serialized == [
+        {
+            "name": "query_pod_logs",
+            "description": "query real pod logs",
+            "args_schema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string"},
+                    "pod": {"type": "string"},
+                },
+            },
+        }
+    ]
+
+
+def test_fallback_token_counter_is_conservative_for_dense_cjk():
+    text = "中文故障证据" * 100
+    counted = count_tokens(
+        text,
+        model="openai/Qwen3.6-35B-A3B",
+    )
+
+    assert counted["accuracy"] == "estimated"
+    assert counted["source"] == "heuristic:utf8_bytes/3"
+    assert counted["tokens"] >= len(text)
+
+
+def test_deterministic_token_compaction_preserves_head_tail_and_budget():
+    text = (
+        "HEAD primary entity k8s.pod:demo/api\n"
+        + ("middle-observation " * 4000)
+        + "\nTAIL output schema and limitations"
+    )
+
+    compacted = budget_module.compact_text_to_token_budget(
+        text,
+        max_tokens=400,
+        model="openai/Qwen3.6-35B-A3B",
+        preserve_tail_tokens=80,
+    )
+
+    assert count_tokens(compacted, model="openai/Qwen3.6-35B-A3B")["tokens"] <= 400
+    assert compacted.startswith("HEAD primary entity")
+    assert compacted.endswith("TAIL output schema and limitations")
+    assert "deterministic context compaction" in compacted
 
 
 def test_model_context_resolver_prefers_env_exact(monkeypatch):

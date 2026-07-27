@@ -1,15 +1,33 @@
 import asyncio
+import copy
 import hashlib
 import os
 import sys
 import json
+import time
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Sequence
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.aicall.client import AICall
+from app.core.context.budget import count_tokens
 from app.core.context.observation import ObservationProcessor
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain.agents.middleware.types import ToolCallRequest
+from langchain.agents.middleware import ModelRequest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
+from pydantic import Field
 
 
 def _canonical_fact_record(**overrides):
@@ -66,6 +84,151 @@ def test_aicall_process_tool_observation_returns_bounded_summary(tmp_path):
     assert len(processed["summary"]) <= 500
     assert "OOMKilled" in processed["summary"]
     assert processed["raw_ref"].endswith(".raw.txt")
+
+
+def test_tool_middleware_isolates_parallel_failure_and_keeps_success():
+    middleware = AICall._build_tool_dedup_middleware()
+    success_request = ToolCallRequest(
+        tool_call={
+            "id": "call-success",
+            "name": "query_real_data",
+            "args": {"scope": "pod-a"},
+        },
+        tool=None,
+        state={},
+        runtime=None,
+    )
+    timeout_request = ToolCallRequest(
+        tool_call={
+            "id": "call-timeout",
+            "name": "query_slow_data",
+            "args": {"scope": "pod-b"},
+        },
+        tool=None,
+        state={},
+        runtime=None,
+    )
+
+    async def handler(request):
+        if request.tool_call["name"] == "query_slow_data":
+            raise TimeoutError("MCP request timed out")
+        await asyncio.sleep(0)
+        return ToolMessage(
+            content='{"status":"query_succeeded","coverage":"present"}',
+            tool_call_id=request.tool_call["id"],
+            name=request.tool_call["name"],
+        )
+
+    async def run_parallel():
+        return await asyncio.gather(
+            middleware.awrap_tool_call(success_request, handler),
+            middleware.awrap_tool_call(timeout_request, handler),
+        )
+
+    success, failed = asyncio.run(run_parallel())
+
+    assert success.status == "success"
+    assert success.tool_call_id == "call-success"
+    assert "query_succeeded" in str(success.content)
+    assert failed.status == "error"
+    assert failed.tool_call_id == "call-timeout"
+    assert failed.name == "query_slow_data"
+    error_payload = json.loads(str(failed.content))
+    assert error_payload["status"] == "tool_error"
+    assert error_payload["semantic_success"] is False
+    assert error_payload["error"]["type"] == "TimeoutError"
+    assert error_payload["error"]["message"] == "MCP request timed out"
+
+
+def test_aicall_records_parallel_success_and_error_tool_messages(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    ai = AICall(model="openai/test", api_key="sk-test")
+    success_message = ToolMessage(
+        content='{"status":"query_succeeded","coverage":"present"}',
+        tool_call_id="call-success",
+        name="query_real_data",
+    )
+    failed_message = ToolMessage(
+        content=json.dumps({
+            "status": "tool_error",
+            "semantic_success": False,
+            "error": {
+                "type": "TimeoutError",
+                "message": "MCP request timed out",
+            },
+        }),
+        tool_call_id="call-timeout",
+        name="query_slow_data",
+        status="error",
+    )
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [success_message, failed_message],
+                    }
+                },
+            )
+
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
+    monkeypatch.setattr(
+        "concurrent.futures.ThreadPoolExecutor",
+        lambda max_workers=1: _Executor(),
+    )
+
+    tools = [
+        type(
+            "T",
+            (),
+            {
+                "name": name,
+                "description": name,
+                "args_schema": None,
+            },
+        )()
+        for name in ("query_real_data", "query_slow_data")
+    ]
+    result, events = ai.call(
+        "system",
+        "question",
+        tools=tools,
+        node_id="evidence",
+        run_id="run-partial-batch",
+        max_steps=2,
+    )
+
+    by_call_id = {
+        event["tool_call_id"]: event
+        for event in events
+        if event.get("type") == "tool_result"
+    }
+    assert len(result.tool_calls) == 2
+    assert set(by_call_id) == {"call-success", "call-timeout"}
+    assert by_call_id["call-success"]["status"] == "success"
+    assert by_call_id["call-success"]["semantic_success"] is True
+    assert by_call_id["call-timeout"]["status"] == "error"
+    assert by_call_id["call-timeout"]["semantic_success"] is False
 
 
 def test_observation_processor_preserves_sanitized_canonical_fact_ledger(tmp_path):
@@ -626,9 +789,1295 @@ def test_aicall_compacts_evidence_runtime_context_when_small_window_is_hot(monke
     )
     summary = thinking_events[0]["full_content"]
     assert "process_summary" in summary
-    assert "curl registry 超时" in summary
-    assert "重复 node capacity 查询" in summary
+    assert "curl timed out" in summary
+    assert "curl registry 超时" not in summary
+    assert "重复 node capacity 查询" not in summary
+    assert "omitted_tool_items=" in summary
     assert all("循环思考循环思考循环思考" not in json.dumps(ev, ensure_ascii=False) for ev in thinking_events)
+
+
+@pytest.mark.parametrize(
+    "compactor_result",
+    [
+        None,
+        {"unexpected": "payload"},
+        {"process_summary": ["generic summary without evidence contract"]},
+        {
+            "process_summary": ["plan was preserved"],
+            "evidence_plan": [
+                {
+                    "id": "e1",
+                    "description": "query real Pod logs",
+                    "tool": "query_pod_logs",
+                }
+            ],
+        },
+        {
+            "process_summary": ["malformed top-level ref"],
+            "raw_ref": "/archive/should-be-dropped.raw",
+        },
+    ],
+)
+def test_aicall_uses_deterministic_runtime_compaction_when_llm_compactor_fails(
+    monkeypatch,
+    compactor_result,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "trigger_ratio": 0.01,
+            "summary_max_tokens": 1200,
+        },
+    )
+    ai._compact_context_with_lite_llm = (
+        lambda payload, **kwargs: compactor_result
+    )
+    plan_text = json.dumps({
+        "evidence_plan": [
+            {
+                "id": "e1",
+                "description": "query real Pod logs",
+                "tool": "query_pod_logs",
+            }
+        ]
+    })
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": plan_text,
+            "content": plan_text,
+        },
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": "repeated reasoning " * 6000,
+            "content": "repeated reasoning",
+        },
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "tool_name": "query_pod_logs",
+            "status": "success",
+            "semantic_success": True,
+            "result": "required config PAYMENT_GATEWAY_TOKEN is missing " * 800,
+            "result_preview": "required config PAYMENT_GATEWAY_TOKEN is missing",
+            "raw_ref": "/archive/log.raw",
+            "structured_ref": "/archive/log.structured.json",
+            "summary_ref": "/archive/log.summary.txt",
+        },
+    ]
+    observations = [thinking_events[-1]["result"]]
+
+    compacted = ai._maybe_compact_runtime_context(
+        node_id="evidence",
+        run_id="run-deterministic-fallback",
+        static_context_components=[
+            {
+                "name": "node_system_prompt",
+                "category": "static_input",
+                "content": "system " * 1000,
+            }
+        ],
+        thinking_events=thinking_events,
+        tool_observation_contents=observations,
+    )
+
+    assert compacted is True
+    assert thinking_events[0]["type"] == "context_summary"
+    assert "deterministic" in thinking_events[0]["full_content"]
+    assert "evidence_plan" in json.dumps(thinking_events, ensure_ascii=False)
+    assert "PAYMENT_GATEWAY_TOKEN" in json.dumps(thinking_events, ensure_ascii=False)
+    assert len(observations) == 1
+    assert len(observations[0]) < 6000
+    summary = json.loads(observations[0])
+    tool_evidence = summary["completed_items"][0]
+    assert tool_evidence["tool_name"] == "query_pod_logs"
+    assert tool_evidence["semantic_success"] is True
+    assert "PAYMENT_GATEWAY_TOKEN" in tool_evidence["result_preview"]
+    assert tool_evidence["raw_ref"] == "/archive/log.raw"
+    assert tool_evidence["structured_ref"] == "/archive/log.structured.json"
+    assert tool_evidence["summary_ref"] == "/archive/log.summary.txt"
+
+
+def test_aicall_accepts_valid_plan_summary_when_source_has_no_tool_results(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "trigger_ratio": 0.01,
+            "summary_max_tokens": 1200,
+        },
+    )
+    plan_summary = {
+        "process_summary": ["evidence collection has not started"],
+        "evidence_plan": [
+            {
+                "id": "e1",
+                "description": "query current workload state",
+                "tool": "query_runtime_state",
+            }
+        ],
+    }
+    ai._compact_context_with_lite_llm = (
+        lambda payload, **kwargs: plan_summary
+    )
+    plan_text = json.dumps(plan_summary) + (" planning context" * 5000)
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": plan_text,
+            "content": plan_text[:500],
+        }
+    ]
+    observations = []
+
+    compacted = ai._maybe_compact_runtime_context(
+        node_id="evidence",
+        run_id="run-plan-only-before-tools",
+        static_context_components=[
+            {
+                "name": "node_system_prompt",
+                "category": "static_input",
+                "content": "system " * 1000,
+            }
+        ],
+        thinking_events=thinking_events,
+        tool_observation_contents=observations,
+    )
+
+    assert compacted is True
+    summary = json.loads(observations[0])
+    assert "deterministic_fallback" not in summary
+    assert summary["evidence_plan"][0]["tool"] == "query_runtime_state"
+
+
+def test_compaction_bounds_long_evidence_plan_in_events_and_langgraph_messages():
+    plan_text = json.dumps(
+        {
+            "evidence_plan": [
+                {
+                    "id": f"e{index}",
+                    "description": f"inspect source {index} " + ("detail " * 200),
+                    "tool": f"query_tool_{index}",
+                    "purpose": "retain plan semantics " * 100,
+                }
+                for index in range(40)
+            ]
+        }
+    )
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": plan_text,
+            "content": plan_text[:500],
+        }
+    ]
+    dynamic_before = sum(
+        len(component["content"])
+        for component in AICall._runtime_dynamic_components(thinking_events)
+    )
+
+    AICall._compact_thinking_events_in_place(
+        thinking_events,
+        {
+            "type": "context_summary",
+            "node": "evidence",
+            "full_content": "{}",
+        },
+    )
+
+    plan_event = next(
+        event for event in thinking_events if event.get("type") == "ai_message"
+    )
+    dynamic_after = sum(
+        len(component["content"])
+        for component in AICall._runtime_dynamic_components(thinking_events)
+    )
+    assert len(plan_event["full_content"]) < 2000
+    assert "bounded_evidence_plan" in plan_event["full_content"]
+    assert '"id": "e0"' in plan_event["full_content"]
+    assert '"tool": "query_tool_0"' in plan_event["full_content"]
+    assert plan_event["context_compacted"] is True
+    assert dynamic_after < dynamic_before // 5
+
+    langgraph_message = AIMessage(content=plan_text)
+    AICall._compact_langgraph_ai_messages_in_place(
+        [(langgraph_message, plan_text)]
+    )
+
+    assert len(langgraph_message.content) < 2000
+    assert "bounded_evidence_plan" in langgraph_message.content
+    assert '"id": "e0"' in langgraph_message.content
+    assert '"tool": "query_tool_0"' in langgraph_message.content
+
+
+def test_compact_thinking_events_truncates_long_tool_result_without_archive_refs():
+    thinking_events = [
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "tool_name": "query_runtime_state",
+            "semantic_success": False,
+            "result": "backend unavailable " * 1000,
+            "result_preview": "backend unavailable",
+        }
+    ]
+    compact_event = {
+        "type": "context_summary",
+        "node": "evidence",
+        "full_content": "{}",
+    }
+
+    AICall._compact_thinking_events_in_place(thinking_events, compact_event)
+
+    tool_event = next(
+        event for event in thinking_events if event.get("type") == "tool_result"
+    )
+    assert len(tool_event["result"]) < 1600
+    assert "refs unavailable" in tool_event["result"]
+    assert tool_event["context_compacted"] is True
+
+
+def test_runtime_dynamic_components_count_tool_call_arguments():
+    components = AICall._runtime_dynamic_components([
+        {
+            "type": "tool_start",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "promql": "rate(container_cpu_usage_seconds_total[5m])"
+                + (" query-detail" * 1000),
+            },
+        }
+    ])
+
+    tool_calls = next(
+        component
+        for component in components
+        if component["name"] == "tool_calls"
+    )
+    assert "execute_pod_promql" in tool_calls["content"]
+    assert "container_cpu_usage_seconds_total" in tool_calls["content"]
+
+
+def test_runtime_compaction_payload_is_bounded_by_events_and_tokens():
+    thinking_events = []
+    for index in range(40):
+        thinking_events.extend([
+            {
+                "type": "ai_message",
+                "full_content": f"analysis-{index} " + ("reasoning " * 500),
+            },
+            {
+                "type": "tool_result",
+                "tool_name": f"query_{index}",
+                "semantic_success": index % 2 == 0,
+                "result": f"result-{index} " + ("payload " * 500),
+                "structured": {"facts": ["fact " * 500]},
+            },
+        ])
+
+    payload = AICall._build_runtime_compaction_payload(
+        node_id="evidence",
+        usage_ratio=0.9,
+        context_window=32000,
+        thinking_events=thinking_events,
+        tool_observation_contents=["observation " * 500 for _ in range(20)],
+        model="openai/Qwen3.6-35B-A3B",
+        max_events=8,
+        max_tokens=600,
+    )
+
+    assert len(payload["ai_messages"]) + len(payload["tool_results"]) <= 8
+    assert count_tokens(
+        json.dumps(payload, ensure_ascii=False),
+        model="openai/Qwen3.6-35B-A3B",
+    )["tokens"] <= 600
+
+
+def test_runtime_compaction_rejects_fabricated_tool_and_archive_refs():
+    source_events = [
+        {
+            "type": "tool_result",
+            "tool_name": "query_pod_logs",
+            "semantic_success": True,
+            "result_preview": "required config TOKEN is missing",
+            "raw_ref": "/archive/real.raw",
+            "structured_ref": "/archive/real.structured.json",
+        }
+    ]
+    fabricated = {
+        "process_summary": ["invented evidence"],
+        "evidence_plan": [],
+        "completed_items": [
+            {
+                "tool_name": "query_pod_tracing",
+                "semantic_success": True,
+                "result_preview": "trace proves root cause",
+                "raw_ref": "/archive/fake.raw",
+            }
+        ],
+        "open_items": [],
+        "key_facts": [],
+        "negative_facts": [],
+        "conflicts": [],
+        "discarded_noise": [],
+        "next_focus": [],
+    }
+
+    assert AICall._runtime_compaction_summary_has_evidence_contract(
+        fabricated,
+        source_events,
+    ) is False
+
+    same_identity_fabrication = {
+        **fabricated,
+        "completed_items": [
+            {
+                "tool_name": "query_pod_logs",
+                "semantic_success": False,
+                "result_preview": "invented root cause not present in source",
+                "raw_ref": "/archive/real.raw",
+                "structured_ref": "/archive/real.structured.json",
+            }
+        ],
+        "key_facts": ["invented root cause not present in source"],
+    }
+    assert AICall._runtime_compaction_summary_has_evidence_contract(
+        same_identity_fabrication,
+        source_events,
+    ) is False
+
+
+def test_compact_langgraph_tool_message_preserves_preview_status_and_refs():
+    message = ToolMessage(
+        content="required config PAYMENT_GATEWAY_TOKEN is missing\n"
+        + ("startup failure " * 500),
+        tool_call_id="tc-config",
+        name="query_pod_logs",
+    )
+
+    AICall._compact_langgraph_tool_messages_in_place([
+        (
+            message,
+            {
+                "tool_name": "query_pod_logs",
+                "semantic_success": False,
+                "result_preview": (
+                    "required config PAYMENT_GATEWAY_TOKEN is missing"
+                ),
+                "raw_ref": "/archive/config.raw",
+                "structured_ref": "/archive/config.structured.json",
+            },
+        )
+    ])
+
+    assert "PAYMENT_GATEWAY_TOKEN" in message.content
+    assert "semantic_success=False" in message.content
+    assert "/archive/config.raw" in message.content
+
+
+def test_compact_langgraph_ai_message_bounds_tool_call_arguments():
+    message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "tc-promql",
+                "name": "execute_pod_promql",
+                "args": {
+                    "namespace": "demo",
+                    "pod": "api",
+                    "promql": (
+                        "rate(container_cpu_usage_seconds_total[5m])"
+                        + (" query-detail" * 8000)
+                    ),
+                },
+            }
+        ],
+    )
+
+    AICall._compact_langgraph_ai_messages_in_place([(message, "")])
+
+    compacted_args = message.tool_calls[0]["args"]
+    assert compacted_args["namespace"] == "demo"
+    assert compacted_args["pod"] == "api"
+    assert "context_compacted" in compacted_args
+    assert len(json.dumps(compacted_args, ensure_ascii=False)) < 2000
+
+
+def test_runtime_compaction_tracks_empty_ai_tool_call_message_and_bounds_args(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "trigger_ratio": 0.01,
+            "summary_max_tokens": 400,
+            "max_compactions_per_call": 1,
+        },
+    )
+    ai._compact_context_with_lite_llm = lambda payload, **kwargs: None
+    ai_message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "tc-long-args",
+                "name": "execute_pod_promql",
+                "args": {
+                    "namespace": "demo",
+                    "pod": "api",
+                    "query": "container_memory_working_set_bytes",
+                    "noise": "large query argument " * 1200,
+                },
+            }
+        ],
+    )
+    tool_message = ToolMessage(
+        content=json.dumps(
+            {
+                "ok": True,
+                "metric": "container_memory_working_set_bytes",
+                "value": 73400320,
+            }
+        ),
+        tool_call_id="tc-long-args",
+        name="execute_pod_promql",
+    )
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield ("updates", {"agent": {"messages": [ai_message]}})
+            yield ("updates", {"tools": {"messages": [tool_message]}})
+
+    monkeypatch.setattr(
+        "langchain.agents.create_agent",
+        lambda **kwargs: _Agent(),
+    )
+    monkeypatch.setattr(
+        "concurrent.futures.ThreadPoolExecutor",
+        lambda max_workers=1: _Executor(),
+    )
+    tool = type(
+        "T",
+        (),
+        {
+            "name": "execute_pod_promql",
+            "description": "query pod metrics",
+            "args_schema": None,
+        },
+    )()
+
+    _result, events = ai.call(
+        "evidence system",
+        "diagnose demo/api",
+        tools=[tool],
+        node_id="evidence",
+        run_id="run-empty-ai-tool-args",
+        max_steps=3,
+    )
+
+    context_summaries = [
+        event for event in events
+        if event.get("type") == "context_summary"
+    ]
+    compacted_args = ai_message.tool_calls[0]["args"]
+    assert len(context_summaries) == 1
+    assert compacted_args["namespace"] == "demo"
+    assert compacted_args["pod"] == "api"
+    assert compacted_args["context_compacted"] is True
+    assert len(json.dumps(compacted_args, ensure_ascii=False)) < 2000
+
+
+def test_runtime_compaction_bounds_real_provider_tool_call_history(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+
+    class _CapturingModel(BaseChatModel):
+        calls: list[list[Any]] = Field(default_factory=list)
+        invocation: int = 0
+
+        @property
+        def _llm_type(self) -> str:
+            return "capturing-regression-model"
+
+        def bind_tools(
+            self,
+            tools: Sequence[Any],
+            *,
+            tool_choice=None,
+            **kwargs,
+        ):
+            return self
+
+        def _generate(
+            self,
+            messages,
+            stop=None,
+            run_manager=None,
+            **kwargs,
+        ):
+            self.calls.append(copy.deepcopy(list(messages)))
+            self.invocation += 1
+            if self.invocation == 1:
+                message = AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "tc-regression-1",
+                            "name": "runtime_echo_tool",
+                            "args": {
+                                "namespace": "demo",
+                                "pod": "api",
+                                "noise": "argument-detail " * 1000,
+                            },
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            else:
+                message = AIMessage(content="done")
+            return ChatResult(
+                generations=[ChatGeneration(message=message)]
+            )
+
+    @tool
+    def runtime_echo_tool(
+        namespace: str,
+        pod: str,
+        noise: str,
+    ) -> str:
+        """Return a short diagnostic observation."""
+        return "required config TOKEN is missing"
+
+    model = _CapturingModel()
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        observation_summary_max_chars=3000,
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "trigger_ratio": 0.01,
+            "summary_max_tokens": 400,
+            "max_compactions_per_call": 1,
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.72,
+            "hard_guard_safety_tokens": 2000,
+        },
+    )
+    monkeypatch.setattr(
+        ai,
+        "_create_chat_model",
+        lambda **kwargs: model,
+    )
+    monkeypatch.setattr(
+        ai,
+        "_compact_context_with_lite_llm",
+        lambda payload, **kwargs: None,
+    )
+
+    _result, events = ai.call(
+        "evidence system",
+        "inspect demo/api",
+        tools=[runtime_echo_tool],
+        node_id="evidence",
+        max_steps=6,
+    )
+
+    assert any(
+        event.get("type") == "context_summary"
+        for event in events
+    )
+    assert len(model.calls) == 2
+    second_request = model.calls[1]
+    historical_tool_message = next(
+        message
+        for message in second_request
+        if isinstance(message, AIMessage) and message.tool_calls
+    )
+    bounded_args = historical_tool_message.tool_calls[0]["args"]
+    serialized_args = json.dumps(
+        bounded_args,
+        ensure_ascii=False,
+    )
+    assert bounded_args.get("context_compacted") is True
+    assert bounded_args["namespace"] == "demo"
+    assert bounded_args["pod"] == "api"
+    assert len(serialized_args) < 2000
+
+
+def test_runtime_compaction_payload_final_wrapper_stays_within_limit():
+    long_ref = "/archive/" + ("nested/" * 1000) + "result.raw"
+    payload = AICall._build_runtime_compaction_payload(
+        node_id="evidence",
+        usage_ratio=0.95,
+        context_window=32000,
+        thinking_events=[
+            {
+                "type": "tool_result",
+                "tool_name": "query_pod_logs",
+                "semantic_success": False,
+                "result": "failed " * 5000,
+                "raw_ref": long_ref,
+                "structured_ref": long_ref + ".json",
+            }
+        ],
+        tool_observation_contents=["observation " * 5000],
+        model="openai/Qwen3.6-35B-A3B",
+        max_events=4,
+        max_tokens=600,
+    )
+
+    assert count_tokens(
+        json.dumps(payload, ensure_ascii=False),
+        model="openai/Qwen3.6-35B-A3B",
+    )["tokens"] <= 600
+
+
+def test_deterministic_runtime_summary_clamps_budget_to_preserve_plan_and_ref():
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+    )
+    long_ref = "/archive/" + ("deep/" * 200) + "evidence.raw"
+    summary = ai._build_deterministic_runtime_compaction_summary(
+        [
+            {
+                "type": "ai_message",
+                "full_content": json.dumps({
+                    "evidence_plan": [
+                        {
+                            "id": "e1",
+                            "tool": "query_pod_logs",
+                            "description": "query current pod logs",
+                        }
+                    ]
+                }),
+            },
+            {
+                "type": "tool_result",
+                "tool_name": "query_pod_logs",
+                "semantic_success": False,
+                "result_preview": "required config TOKEN is missing",
+                "raw_ref": long_ref,
+            },
+        ],
+        max_tokens=120,
+    )
+
+    assert summary["evidence_plan"][0]["id"] == "e1"
+    assert summary["evidence_plan"][0]["tool"] == "query_pod_logs"
+    assert summary["completed_items"][0]["raw_ref"] == long_ref
+
+
+def test_agent_model_hard_guard_compacts_actual_request_before_handler(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "hard_guard_enabled": True,
+            "hard_guard_input_ratio": 0.10,
+            "hard_guard_safety_tokens": 2000,
+            "hard_guard_preserve_tail_tokens": 400,
+        },
+    )
+    middleware = ai._build_context_hard_guard_middleware(
+        node_id="evidence",
+        run_id="",
+    )
+    original_messages = [
+        HumanMessage(content="检查 demo/api 的真实异常"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": "tc-1",
+                    "name": "query_pod_logs",
+                    "args": {
+                        "namespace": "demo",
+                        "pod": "api",
+                        "keywords": ["required config", "missing"],
+                        "noise": "long-argument " * 2000,
+                    },
+                }
+            ],
+        ),
+        ToolMessage(
+            content=(
+                "required config PAYMENT_GATEWAY_TOKEN is missing\n"
+                + ("startup failure " * 3000)
+            ),
+            tool_call_id="tc-1",
+            name="query_pod_logs",
+            additional_kwargs={
+                "aiops_raw_ref": "/archive/config.raw",
+                "aiops_structured_ref": "/archive/config.structured.json",
+                "aiops_semantic_success": False,
+            },
+        ),
+    ]
+    request = ModelRequest(
+        model=object(),
+        messages=original_messages,
+        system_message=SystemMessage(content="evidence system contract"),
+        tools=[],
+        response_format=None,
+    )
+    captured = {}
+
+    async def handler(candidate):
+        captured["request"] = candidate
+        return AIMessage(content="bounded")
+
+    asyncio.run(middleware.awrap_model_call(request, handler))
+
+    sent = captured["request"]
+    assert len(sent.messages) == 1
+    assert "context_compacted" in sent.messages[0].content
+    assert "query_pod_logs" in sent.messages[0].content
+    assert "PAYMENT_GATEWAY_TOKEN" in sent.messages[0].content
+    assert "/archive/config.raw" in sent.messages[0].content
+    assert count_tokens(
+        {
+            "system": sent.system_message.content,
+            "messages": [message.model_dump() for message in sent.messages],
+        },
+        model=ai.model_str,
+    )["tokens"] <= 3200
+
+
+def test_deterministic_runtime_compaction_respects_global_summary_budget(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "trigger_ratio": 0.01,
+            "summary_max_tokens": 320,
+        },
+    )
+    ai._compact_context_with_lite_llm = lambda payload, **kwargs: None
+    plan_text = json.dumps(
+        {
+            "evidence_plan": [
+                {
+                    "id": f"e{index}",
+                    "description": f"inspect evidence {index} " + ("detail " * 100),
+                    "tool": f"query_tool_{index}",
+                    "purpose": "preserve diagnostic intent " * 20,
+                }
+                for index in range(30)
+            ]
+        }
+    )
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": plan_text,
+            "content": plan_text[:500],
+        }
+    ]
+    for index in range(30):
+        event = {
+            "type": "tool_result",
+            "node": "evidence",
+            "tool_name": f"query_tool_{index}",
+            "semantic_success": index != 0,
+            "result": f"result-{index} " + ("diagnostic payload " * 200),
+            "result_preview": f"result-{index} decisive preview " + ("detail " * 50),
+            "raw_ref": f"/archive/tool-{index}.raw",
+            "structured_ref": f"/archive/tool-{index}.structured.json",
+            "summary_ref": f"/archive/tool-{index}.summary.txt",
+        }
+        if index == 0:
+            event["structured"] = {
+                "error": {"message": "metrics backend unavailable"}
+            }
+        thinking_events.append(event)
+    observations = [
+        event["result"]
+        for event in thinking_events
+        if event.get("type") == "tool_result"
+    ]
+
+    compacted = ai._maybe_compact_runtime_context(
+        node_id="evidence",
+        run_id="run-bounded-deterministic-summary",
+        static_context_components=[
+            {
+                "name": "node_system_prompt",
+                "category": "static_input",
+                "content": "system " * 1000,
+            }
+        ],
+        thinking_events=thinking_events,
+        tool_observation_contents=observations,
+    )
+
+    assert compacted is True
+    assert len(observations) == 1
+    assert count_tokens(observations[0], model=ai.model_str)["tokens"] <= 320
+    summary = json.loads(observations[0])
+    assert summary["deterministic_fallback"] is True
+    assert len(summary["evidence_plan"]) <= 8
+    assert len(summary["completed_items"]) <= 8
+    assert not summary.get("key_facts")
+    assert not summary.get("negative_facts")
+    first_tool = summary["completed_items"][0]
+    assert first_tool["tool_name"] == "query_tool_0"
+    assert first_tool["semantic_success"] is False
+    assert "metrics backend unavailable" in first_tool["error"]
+    assert first_tool["raw_ref"] == "/archive/tool-0.raw"
+
+
+def test_runtime_compaction_removes_fabricated_llm_process_claims(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "trigger_ratio": 0.01,
+            "summary_max_tokens": 800,
+        },
+    )
+    source_ref = "/archive/real-trace.raw"
+    ai._compact_context_with_lite_llm = lambda payload, **kwargs: {
+        "process_summary": [
+            "query_pod_tracing failed: fabricated backend unavailable; "
+            "ref=/archive/fake.raw"
+        ],
+        "evidence_plan": [
+            {
+                "id": "e1",
+                "tool": "query_pod_tracing",
+                "description": "inspect the real trace",
+            }
+        ],
+        "completed_items": [
+            {
+                "tool_name": "query_pod_tracing",
+                "semantic_success": True,
+                "result_preview": "HTTP 200 trace_id=real-trace",
+                "raw_ref": source_ref,
+            }
+        ],
+        "open_items": [
+            {
+                "tool_name": "query_fake_tool",
+                "status": "failed",
+                "error": "fabricated backend failure",
+                "result_preview": "fabricated preview",
+            }
+        ],
+        "key_facts": [],
+        "negative_facts": [],
+        "conflicts": [],
+        "discarded_noise": [
+            "fabricated fact: OOMKilled from query_fake_tool"
+        ],
+        "next_focus": [
+            "read /archive/fake.raw because query_pod_tracing failed"
+        ],
+    }
+    plan_text = json.dumps(
+        {
+            "evidence_plan": [
+                {
+                    "id": "e1",
+                    "tool": "query_pod_tracing",
+                    "description": "inspect the real trace",
+                }
+            ]
+        }
+    )
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": plan_text,
+            "content": plan_text,
+        },
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "tool_name": "query_pod_tracing",
+            "semantic_success": True,
+            "result": "HTTP 200 trace_id=real-trace " + ("trace " * 3000),
+            "result_preview": "HTTP 200 trace_id=real-trace",
+            "raw_ref": source_ref,
+        },
+    ]
+    observations = [thinking_events[-1]["result"]]
+
+    compacted = ai._maybe_compact_runtime_context(
+        node_id="evidence",
+        run_id="run-fabricated-process-fields",
+        static_context_components=[
+            {
+                "name": "node_system_prompt",
+                "category": "static_input",
+                "content": "system " * 1000,
+            }
+        ],
+        thinking_events=thinking_events,
+        tool_observation_contents=observations,
+    )
+
+    assert compacted is True
+    summary = json.loads(observations[0])
+    rendered = json.dumps(summary, ensure_ascii=False)
+    assert "query_pod_tracing" in rendered
+    assert source_ref in rendered
+    assert "real-trace" in rendered
+    assert "query_fake_tool" not in rendered
+    assert "/archive/fake.raw" not in rendered
+    assert "fabricated" not in rendered
+
+
+def test_aicall_real_runtime_helper_compacts_again_after_context_regrows(
+    monkeypatch,
+):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "trigger_ratio": 0.01,
+            "summary_max_tokens": 400,
+            "max_compactions_per_call": 2,
+        },
+    )
+    ai._compact_context_with_lite_llm = lambda payload, **kwargs: None
+    plan_text = json.dumps(
+        {
+            "evidence_plan": [
+                {
+                    "id": "e1",
+                    "description": "inspect the first evidence source",
+                    "tool": "query_first",
+                },
+                {
+                    "id": "e2",
+                    "description": "inspect the second evidence source",
+                    "tool": "query_second",
+                },
+            ]
+        }
+    )
+    thinking_events = [
+        {
+            "type": "ai_message",
+            "node": "evidence",
+            "full_content": plan_text,
+            "content": plan_text,
+        },
+        {
+            "type": "tool_result",
+            "node": "evidence",
+            "tool_name": "query_first",
+            "semantic_success": True,
+            "result": "first result " * 1500,
+            "result_preview": "first decisive result",
+            "raw_ref": "/archive/first.raw",
+            "structured_ref": "/archive/first.structured.json",
+            "summary_ref": "/archive/first.summary.txt",
+        },
+    ]
+    observations = [thinking_events[-1]["result"]]
+    static_components = [
+        {
+            "name": "node_system_prompt",
+            "category": "static_input",
+            "content": "system " * 1000,
+        }
+    ]
+
+    first_compacted = ai._maybe_compact_runtime_context(
+        node_id="evidence",
+        run_id="run-real-repeat-compaction",
+        static_context_components=static_components,
+        thinking_events=thinking_events,
+        tool_observation_contents=observations,
+    )
+    first_summary = observations[0]
+
+    thinking_events.extend(
+        [
+            {
+                "type": "ai_message",
+                "node": "evidence",
+                "full_content": "new reasoning after first compaction " * 2000,
+                "content": "new reasoning",
+            },
+            {
+                "type": "tool_result",
+                "node": "evidence",
+                "tool_name": "query_second",
+                "semantic_success": False,
+                "result": "second backend failure " * 1500,
+                "result_preview": "second backend failure",
+                "structured": {
+                    "error": {"message": "second backend unavailable"}
+                },
+            },
+        ]
+    )
+    observations.append(thinking_events[-1]["result"])
+
+    second_compacted = ai._maybe_compact_runtime_context(
+        node_id="evidence",
+        run_id="run-real-repeat-compaction",
+        static_context_components=static_components,
+        thinking_events=thinking_events,
+        tool_observation_contents=observations,
+    )
+
+    assert first_compacted is True
+    assert second_compacted is True
+    assert observations[0] != first_summary
+    second_summary = json.loads(observations[0])
+    assert any(
+        item["tool_name"] == "query_second"
+        for item in second_summary["completed_items"]
+    )
+    assert count_tokens(observations[0], model=ai.model_str)["tokens"] <= 400
+    second_tool_event = next(
+        event
+        for event in thinking_events
+        if event.get("type") == "tool_result"
+        and event.get("tool_name") == "query_second"
+    )
+    assert "refs unavailable" in second_tool_event["result"]
+
+
+def test_aicall_allows_runtime_context_to_compact_twice_up_to_configured_limit(
+    monkeypatch,
+):
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "max_compactions_per_call": 2,
+        },
+    )
+    compaction_checks = []
+
+    def _compact(**kwargs):
+        compaction_checks.append(list(kwargs["tool_observation_contents"]))
+        return True
+
+    ai._maybe_compact_runtime_context = _compact
+    ai._process_tool_observation = lambda **kwargs: {
+        "summary": kwargs["tool_content"],
+        "raw_chars": len(kwargs["tool_content"]),
+        "summary_chars": len(kwargs["tool_content"]),
+        "semantic_success": True,
+        "processed": True,
+        "processor": "test",
+    }
+    tool_messages = [
+        ToolMessage(
+            content=f"tool observation {index}",
+            tool_call_id=f"tc-{index}",
+            name="query_observability",
+        )
+        for index in range(1, 4)
+    ]
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            for message in tool_messages:
+                yield ("updates", {"tools": {"messages": [message]}})
+
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
+    monkeypatch.setattr(
+        "concurrent.futures.ThreadPoolExecutor",
+        lambda max_workers=1: _Executor(),
+    )
+
+    tool = type(
+        "T",
+        (),
+        {
+            "name": "query_observability",
+            "description": "query observability evidence",
+            "args_schema": None,
+        },
+    )()
+    ai.call(
+        "system prompt",
+        "user prompt",
+        tools=[tool],
+        node_id="evidence",
+        run_id="run-repeat-compaction",
+        max_steps=4,
+    )
+
+    assert len(compaction_checks) == 2
+    assert compaction_checks[0] == ["tool observation 1"]
+    assert compaction_checks[1] == ["tool observation 1", "tool observation 2"]
+
+
+def test_runtime_compaction_does_not_block_parallel_async_tool_transport(
+    monkeypatch,
+):
+    ai = AICall(
+        model="openai/Qwen3.6-35B-A3B",
+        api_key="sk-test",
+        context_compaction_config={
+            "enabled": True,
+            "nodes": ["evidence"],
+            "max_compactions_per_call": 1,
+        },
+    )
+    compaction_window = {}
+    transport_ticks = []
+
+    def _slow_compaction(**kwargs):
+        compaction_window["start"] = time.monotonic()
+        time.sleep(0.12)
+        compaction_window["end"] = time.monotonic()
+        return True
+
+    ai._maybe_compact_runtime_context = _slow_compaction
+    ai._process_tool_observation = lambda **kwargs: {
+        "summary": kwargs["tool_content"],
+        "raw_chars": len(kwargs["tool_content"]),
+        "summary_chars": len(kwargs["tool_content"]),
+        "semantic_success": True,
+        "processed": True,
+        "processor": "test",
+    }
+    tool_message = ToolMessage(
+        content="first parallel tool result",
+        tool_call_id="tc-1",
+        name="query_observability",
+    )
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            stop = asyncio.Event()
+
+            async def _transport_heartbeat():
+                while not stop.is_set():
+                    transport_ticks.append(time.monotonic())
+                    await asyncio.sleep(0.005)
+
+            heartbeat = asyncio.create_task(_transport_heartbeat())
+            await asyncio.sleep(0)
+            yield ("updates", {"tools": {"messages": [tool_message]}})
+            stop.set()
+            await heartbeat
+
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
+    monkeypatch.setattr(
+        "concurrent.futures.ThreadPoolExecutor",
+        lambda max_workers=1: _Executor(),
+    )
+
+    tool = type(
+        "T",
+        (),
+        {
+            "name": "query_observability",
+            "description": "query observability evidence",
+            "args_schema": None,
+        },
+    )()
+    ai.call(
+        "system prompt",
+        "user prompt",
+        tools=[tool],
+        node_id="evidence",
+        run_id="run-nonblocking-compaction",
+        max_steps=2,
+    )
+
+    assert any(
+        compaction_window["start"] < tick < compaction_window["end"]
+        for tick in transport_ticks
+    )
 
 
 def test_aicall_compaction_rewrites_non_plan_ai_messages_in_agent_context(tmp_path, monkeypatch):
@@ -1227,6 +2676,478 @@ Note: the above runbook is for DIAGNOSTIC REFERENCE ONLY.
     assert processed["structured"]["status"] == "runbook_loaded"
     assert processed["semantic_success"] is True
     assert "Failed to pull image" in processed["summary"]
+
+
+def test_observation_processor_preserves_generic_observability_query_contract(tmp_path):
+    summarizer_calls = []
+
+    def _lossy_summarizer(tool, raw, summary):
+        summarizer_calls.append((tool, raw, summary))
+        return "lossy summary"
+
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=3000,
+        summarizer=_lossy_summarizer,
+        summary_mode="ai",
+    )
+    payloads = {
+        "execute_pod_promql": {
+            "ok": True,
+            "status": "query_succeeded",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-api",
+            },
+            "purpose": "验证容器是否处于镜像拉取等待状态",
+            "coverage": "present",
+            "directness": "direct",
+            "query": {
+                "promql": (
+                    'kube_pod_container_status_waiting_reason'
+                    '{namespace="demo",pod="api",reason="ImagePullBackOff"}'
+                ),
+                "query_type": "instant",
+            },
+            "facts": [{
+                "ref": "metric-demo-api-waiting",
+                "name": "kube_pod_container_status_waiting_reason",
+                "value": "1",
+                "labels": {"reason": "ImagePullBackOff", "container": "api"},
+                "directness": "direct",
+            }],
+            "samples": [{
+                "metric": {
+                    "__name__": "kube_pod_container_status_waiting_reason",
+                    "reason": "ImagePullBackOff",
+                },
+                "value": [1784592000, "1"],
+            }],
+            "evidence_refs": ["metric-demo-api-waiting"],
+            "truncated": False,
+            "limits": {"max_serialized_bytes": 6144},
+        },
+        "query_pod_logs": {
+            "ok": True,
+            "status": "query_succeeded",
+            "source_system": "elasticsearch",
+            "dimension": "logging",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-api",
+            },
+            "purpose": "查找应用启动失败的决定性配置错误",
+            "coverage": "present",
+            "directness": "direct",
+            "query": {
+                "identity_basis": "pod_uid",
+                "keywords": ["required config", "missing"],
+            },
+            "facts": [{
+                "ref": "log-demo-api-config",
+                "name": "log.message",
+                "value": "required config PAYMENT_GATEWAY_TOKEN is missing",
+                "raw_ref": "filebeat-2026.07.21/doc-42",
+                "value_original_length": 48,
+                "value_sha256": "a" * 64,
+                "value_truncated": False,
+                "directness": "direct",
+            }],
+            "samples": [{
+                "ref": "log-demo-api-config",
+                "timestamp": "2026-07-21T01:02:03Z",
+                "message": "required config PAYMENT_GATEWAY_TOKEN is missing",
+                "message_original_length": 48,
+                "message_sha256": "a" * 64,
+                "message_truncated": False,
+                "raw_ref": "filebeat-2026.07.21/doc-42",
+            }],
+            "evidence_refs": ["log-demo-api-config"],
+            "truncated": False,
+            "limits": {"max_serialized_bytes": 6144},
+        },
+        "query_pod_tracing": {
+            "ok": True,
+            "status": "query_succeeded",
+            "source_system": "deepflow+tempo",
+            "dimension": "tracing",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-api",
+                "pod_ip": "10.244.1.8",
+            },
+            "purpose": "确认失败请求的调用方和应用 span 是否精确关联",
+            "coverage": "weak",
+            "directness": "direct",
+            "query": {
+                "sql": "SELECT * FROM l7_flow_log WHERE ip4_1 = '10.244.1.8'",
+                "tempo_trace_ids": ["trace-1"],
+            },
+            "facts": [{
+                "ref": "trace-demo-api-flow",
+                "name": "l7_flow",
+                "value": "POST /checkout status=500",
+                "directness": "direct",
+            }],
+            "samples": [{
+                "type": "flow",
+                "ref": "trace-demo-api-flow",
+                "trace_id": "trace-1",
+                "request_resource": "/checkout",
+                "response_code": 500,
+            }],
+            "flows": [{
+                "ref": "trace-demo-api-flow",
+                "trace_id": "trace-1",
+                "request_resource": "/checkout",
+                "response_code": 500,
+            }],
+            "spans": [{
+                "ref": "trace-demo-api-span",
+                "trace_id": "trace-1",
+                "service": "checkout",
+                "name": "POST /checkout",
+            }],
+            "correlations": [{
+                "trace_id": "trace-1",
+                "flow_ref": "trace-demo-api-flow",
+                "span_ref": "trace-demo-api-span",
+            }],
+            "telemetry": {
+                "deepflow": {"coverage": "present"},
+                "tempo": {"coverage": "present", "executed": True},
+            },
+            "limitations": ["only one matching request"],
+            "evidence_refs": ["trace-demo-api-flow"],
+            "truncated": False,
+            "limits": {"max_serialized_bytes": 6144},
+        },
+    }
+
+    processed_by_tool = {}
+    for sequence, (tool_name, payload) in enumerate(payloads.items(), start=1):
+        raw = json.dumps(payload, ensure_ascii=False)
+        processed = processor.process(
+            run_id="run-generic-observability",
+            node_id="evidence",
+            sequence=sequence,
+            tool_name=tool_name,
+            raw_content=raw,
+        )
+        processed_by_tool[tool_name] = processed
+
+        assert processed["processor"] == "observability_query"
+        assert processed["structured"]["query"] == payload["query"]
+        assert processed["structured"]["purpose"] == payload["purpose"]
+        assert processed["structured"]["coverage"] == payload["coverage"]
+        assert processed["structured"]["facts"] == payload["facts"]
+        assert processed["structured"]["samples"] == payload["samples"]
+        assert processed["structured"]["evidence_refs"] == payload["evidence_refs"]
+        assert Path(processed["raw_ref"]).read_text(encoding="utf-8") == raw
+        assert Path(processed["structured_ref"]).exists()
+        assert Path(processed["summary_ref"]).exists()
+
+    assert summarizer_calls == []
+    assert "ImagePullBackOff" in processed_by_tool["execute_pod_promql"]["summary"]
+    assert (
+        "required config PAYMENT_GATEWAY_TOKEN is missing"
+        in processed_by_tool["query_pod_logs"]["summary"]
+    )
+    trace = processed_by_tool["query_pod_tracing"]
+    assert trace["structured"]["flows"][0]["response_code"] == 500
+    assert trace["structured"]["spans"][0]["service"] == "checkout"
+    assert trace["structured"]["correlations"][0]["trace_id"] == "trace-1"
+    assert trace["structured"]["telemetry"]["tempo"]["coverage"] == "present"
+    assert "POST /checkout" in trace["summary"]
+
+
+def test_observation_processor_keeps_generic_query_negative_states_distinct(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=1200,
+    )
+
+    for sequence, coverage in enumerate(("empty", "absent", "weak", "error"), start=1):
+        payload = {
+            "ok": coverage != "error",
+            "status": "query_succeeded" if coverage != "error" else "query_rejected",
+            "source_system": "deepflow+tempo",
+            "dimension": "tracing",
+            "entity": {"kind": "Pod", "namespace": "demo", "pod": "api"},
+            "purpose": f"验证 coverage={coverage}",
+            "coverage": coverage,
+            "directness": "direct",
+            "query": {"pod_ip": None},
+            "facts": [],
+            "samples": [],
+            "evidence_refs": [],
+            "truncated": False,
+            "limits": {"max_serialized_bytes": 6144},
+            "telemetry": {
+                "deepflow": {"coverage": coverage},
+                "tempo": {"coverage": "absent", "executed": False},
+            },
+        }
+        if coverage == "error":
+            payload["error"] = {
+                "code": "query_rejected",
+                "message": "backend unavailable",
+            }
+        processed = processor.process(
+            run_id="run-generic-negative-states",
+            node_id="evidence",
+            sequence=sequence,
+            tool_name="query_pod_tracing",
+            raw_content=json.dumps(payload, ensure_ascii=False),
+        )
+
+        assert processed["structured"]["coverage"] == coverage
+        assert f"coverage={coverage}" in processed["summary"]
+        assert processed["structured"]["telemetry"]["deepflow"]["coverage"] == coverage
+        if coverage == "error":
+            assert processed["semantic_success"] is False
+            assert processed["structured"]["error"]["message"] == "backend unavailable"
+        else:
+            assert processed["semantic_success"] is True
+
+
+def test_observation_processor_accepts_source_backed_partial_query_contract(
+    tmp_path,
+):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=1600,
+    )
+    payload = {
+        "ok": True,
+        "status": "query_partial",
+        "source_system": "prometheus",
+        "dimension": "metrics",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api",
+            "pod_uid": "uid-api",
+        },
+        "purpose": "确认内存峰值并保留后端截断边界",
+        "coverage": "partial",
+        "directness": "direct",
+        "query": {"promql": "container_memory_working_set_bytes"},
+        "facts": [
+            {
+                "ref": "metric-partial-memory",
+                "source_system": "prometheus",
+                "dimension": "metrics",
+                "name": "container_memory_working_set_bytes",
+                "value": 70168576,
+                "unit": "bytes",
+                "directness": "direct",
+            }
+        ],
+        "samples": [],
+        "limitations": ["Prometheus returned only the newest shard"],
+        "evidence_refs": ["metric-partial-memory"],
+        "truncated": True,
+        "limits": {"max_series": 1},
+    }
+
+    processed = processor.process(
+        run_id="run-partial-query",
+        node_id="evidence",
+        sequence=1,
+        tool_name="execute_pod_promql",
+        raw_content=json.dumps(payload, ensure_ascii=False),
+    )
+
+    assert processed["processor"] == "observability_query"
+    assert processed["semantic_success"] is True
+    assert processed["structured"]["status"] == "query_partial"
+    assert processed["structured"]["coverage"] == "partial"
+    assert processed["structured"]["facts"] == payload["facts"]
+    assert processed["structured"]["limitations"] == payload["limitations"]
+    assert "Prometheus returned only the newest shard" in processed["summary"]
+
+
+def test_observation_processor_accepts_deployed_partial_topology_contract(
+    tmp_path,
+):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=3000,
+    )
+    payload = {
+        "ok": False,
+        "status": "query_partial",
+        "source_system": "kubernetes",
+        "dimension": "topology",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api-abc",
+            "pod_uid": "uid-api",
+            "node": "node1",
+        },
+        "purpose": "确认目标 Pod 的控制器、Service 和节点关系",
+        "coverage": "partial",
+        "directness": "direct",
+        "query": {"namespace": "demo", "pod": "api-abc"},
+        "facts": [
+            {
+                "ref": "k8s-topology-owned-by",
+                "source_system": "kubernetes",
+                "dimension": "topology",
+                "name": "topology.relationship",
+                "value": {
+                    "relationship": "Pod --owned_by--> ReplicaSet",
+                    "source": "api-abc",
+                    "target": "api-rs",
+                },
+                "directness": "direct",
+            }
+        ],
+        "samples": [],
+        "entities": [
+            {"kind": "Pod", "namespace": "demo", "name": "api-abc"},
+            {"kind": "ReplicaSet", "namespace": "demo", "name": "api-rs"},
+        ],
+        "edges": [
+            {
+                "relationship": "Pod --owned_by--> ReplicaSet",
+                "source": "api-abc",
+                "target": "api-rs",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": ["k8s-topology-owned-by"],
+            }
+        ],
+        "topology_summary": {
+            "entity_count": 2,
+            "edge_count": 1,
+            "relations": ["owned_by"],
+        },
+        "limitations": [
+            "Service and Endpoint discovery exceeded the topology response limit"
+        ],
+        "evidence_refs": ["k8s-topology-owned-by"],
+        "truncated": True,
+        "limits": {"max_entities": 20, "max_edges": 20},
+    }
+
+    processed = processor.process(
+        run_id="run-deployed-partial-topology",
+        node_id="evidence",
+        sequence=1,
+        tool_name="query_pod_topology",
+        raw_content=json.dumps(payload),
+    )
+
+    assert processed["processor"] == "observability_query"
+    assert processed["semantic_success"] is True
+    assert processed["structured"]["ok"] is False
+    assert processed["structured"]["status"] == "query_partial"
+    assert processed["structured"]["coverage"] == "partial"
+    assert processed["structured"]["facts"] == payload["facts"]
+    assert processed["structured"]["entities"] == payload["entities"]
+    assert processed["structured"]["edges"] == payload["edges"]
+    assert processed["structured"]["topology_summary"] == payload["topology_summary"]
+    assert processed["structured"]["limitations"] == payload["limitations"]
+    assert payload["limitations"][0] in processed["summary"]
+
+
+def test_observation_processor_rejects_partial_query_without_source_backed_fact(
+    tmp_path,
+):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=1200,
+    )
+    payload = {
+        "ok": True,
+        "status": "query_partial",
+        "source_system": "prometheus",
+        "dimension": "metrics",
+        "entity": {"kind": "Pod", "namespace": "demo", "pod": "api"},
+        "purpose": "确认内存峰值",
+        "coverage": "partial",
+        "directness": "direct",
+        "query": {"promql": "container_memory_working_set_bytes"},
+        "facts": [
+            {
+                "name": "container_memory_working_set_bytes",
+                "value": 70168576,
+            }
+        ],
+        "samples": [],
+        "limitations": ["missing source reference"],
+        "evidence_refs": [],
+        "truncated": False,
+        "limits": {"max_series": 1},
+    }
+
+    processed = processor.process(
+        run_id="run-invalid-partial-query",
+        node_id="evidence",
+        sequence=1,
+        tool_name="execute_pod_promql",
+        raw_content=json.dumps(payload, ensure_ascii=False),
+    )
+
+    assert processed["processor"] == "observability_query_parse_failed"
+    assert processed["structured"]["status"] == "query_parse_failed"
+    assert processed["semantic_success"] is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {
+            "ok": True,
+            "status": "query_succeeded",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {"kind": "Pod", "namespace": "demo", "pod": "api"},
+            "purpose": "验证容器内存趋势",
+            "coverage": "present",
+            "directness": "direct",
+            "query": {"promql": "up", "query_type": "instant"},
+            "facts": [],
+            "samples": [],
+            "evidence_refs": [],
+            "truncated": False,
+        },
+    ],
+)
+def test_observation_processor_rejects_incomplete_generic_query_contract(
+    tmp_path,
+    payload,
+):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=1200,
+    )
+
+    processed = processor.process(
+        run_id="run-incomplete-generic-contract",
+        node_id="evidence",
+        sequence=1,
+        tool_name="execute_pod_promql",
+        raw_content=json.dumps(payload, ensure_ascii=False),
+    )
+
+    assert processed["processor"] == "observability_query_parse_failed"
+    assert processed["structured"]["status"] == "query_parse_failed"
+    assert processed["structured"]["coverage"] == "error"
+    assert processed["semantic_success"] is False
 
 
 def test_observation_processor_summarizes_aiops_case_without_label_leakage(tmp_path):
@@ -2143,3 +4064,82 @@ kube      Active   223d
 
     assert namespace_processed["structured"]["abnormal_count"] == 0
     assert "# 样例行" in namespace_processed["summary"]
+
+
+def test_observation_processor_accepts_pod_topology_query_contract(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=3000,
+    )
+    payload = {
+        "ok": True,
+        "status": "query_succeeded",
+        "source_system": "kubernetes",
+        "dimension": "topology",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api-abc",
+            "pod_uid": "uid-api",
+            "node": "node1",
+        },
+        "purpose": "确认目标 Pod 的控制器、Service 和节点关系",
+        "coverage": "present",
+        "directness": "direct",
+        "query": {"namespace": "demo", "pod": "api-abc"},
+        "facts": [
+            {
+                "ref": "k8s-topology-owned-by",
+                "source_system": "kubernetes",
+                "dimension": "topology",
+                "name": "topology.relationship",
+                "value": {
+                    "relationship": "Pod --owned_by--> ReplicaSet",
+                    "source": "api-abc",
+                    "target": "api-rs",
+                },
+                "directness": "direct",
+            }
+        ],
+        "samples": [],
+        "entities": [
+            {"kind": "Pod", "namespace": "demo", "name": "api-abc"},
+            {"kind": "ReplicaSet", "namespace": "demo", "name": "api-rs"},
+        ],
+        "edges": [
+            {
+                "relationship": "Pod --owned_by--> ReplicaSet",
+                "source": "api-abc",
+                "target": "api-rs",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": ["k8s-topology-owned-by"],
+            }
+        ],
+        "topology_summary": {
+            "entity_count": 2,
+            "edge_count": 1,
+            "relations": ["owned_by"],
+        },
+        "evidence_refs": ["k8s-topology-owned-by"],
+        "truncated": False,
+        "limits": {"max_entities": 20, "max_edges": 20},
+    }
+
+    processed = processor.process(
+        run_id="run-topology-query",
+        node_id="evidence",
+        sequence=1,
+        tool_name="query_pod_topology",
+        raw_content=json.dumps(payload),
+    )
+
+    assert processed["processor"] == "observability_query"
+    assert processed["semantic_success"] is True
+    assert processed["structured"]["dimension"] == "topology"
+    assert processed["structured"]["edges"][0]["relationship"] == (
+        "Pod --owned_by--> ReplicaSet"
+    )
+    assert processed["structured"]["topology_summary"]["edge_count"] == 1
+    assert "k8s-topology-owned-by" in processed["summary"]

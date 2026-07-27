@@ -49,7 +49,7 @@
 采用本方案：
 
 1. RCA 使用确定性的结构化预算分配生成紧凑上下文。
-2. `call_structured()` 计算包含 system prompt、user message、Pydantic schema、输出预留和安全余量的预算。
+2. `call_simple()` 和 `call_structured()` 统一计算 system prompt、user message、可选 Pydantic schema、provider 请求封装、输出预留和安全余量。
 3. 仍超限时执行通用确定性头尾裁剪，作为最后一道不可绕过的保险。
 4. Evidence LLM 压缩失败时执行确定性事件压缩。
 
@@ -57,22 +57,23 @@
 
 ## 5. 设计
 
-### 5.1 通用结构化调用硬门禁
+### 5.1 通用模型调用硬门禁
 
-在 `AICall.call_structured()` 进入 native structured output 或 JSON fallback 前执行预检：
+在 `AICall.call_simple()`、`AICall.call_structured()` 进入 provider 前执行预检：
 
 ```text
 resolve model context window
-  -> count system/user/schema tokens
+  -> local count system/user/optional schema/provider envelope
   -> reserve output tokens
   -> reserve safety margin
   -> calculate maximum input tokens
   -> input over budget?
        no  -> invoke model
-       yes -> deterministic compact
-             -> recount
+       yes -> node-aware compact when available
+             -> deterministic head/tail compact
+             -> local recount
              -> still over budget?
-                  yes -> stricter hard truncate or local failure
+                  yes -> local failure, provider_calls=0
                   no  -> invoke model
 ```
 
@@ -95,7 +96,9 @@ output reserved   = 6,000 tokens
 safety margin     = 2,000 tokens
 ```
 
-预算统计必须包含 `schema.model_json_schema()`，避免 function-calling schema 成为未统计开销。
+预算统计必须包含 `schema.model_json_schema()`，避免 function-calling schema 成为未统计开销；同时统一计入 64 tokens 的 provider request envelope，覆盖 role/content 和顶层请求包装的固定成本。
+
+硬门禁禁止使用 completion-based `OpenAIUsageProbe`，因为该“计数”本身就是一次 `/chat/completions` provider 调用，可能在压缩前先发送超长 prompt。计数优先使用与服务一致的本地 tokenizer；未配置时使用保守的 `UTF-8 bytes/3` 估算。native structured 调用复用门禁生成的最终预算，不能再次估算并覆盖 safety margin。
 
 通用裁剪采用头部与尾部保留：
 
@@ -104,7 +107,37 @@ safety margin     = 2,000 tokens
 - 中间插入明确的 deterministic compaction 标记。
 - 裁剪后重新计数，直到满足硬预算。
 
-### 5.2 RCA 证据感知压缩
+### 5.2 LangGraph Agent 每轮硬门禁
+
+Evidence 等工具型节点使用 `create_agent()` 多轮调用，不能只依靠工具返回后的外部事件压缩。系统通过 `wrap_model_call` 在每次真实 provider 调用前检查 `ModelRequest`：
+
+```text
+system prompt
++ current LangGraph messages
++ AI tool_calls arguments
++ tool schemas
++ response-format schema
++ output reserve
++ safety margin
+  -> over hard input limit?
+       no  -> invoke provider
+       yes -> replace provider-bound history with deterministic evidence summary
+             -> recount
+             -> still over?
+                  yes -> local failure
+                  no  -> invoke provider
+```
+
+确定性摘要保留：
+
+- 原始用户目标。
+- 已调用工具及有界参数。
+- ToolMessage 的关键结果预览和 `semantic_success`。
+- `raw_ref`、`structured_ref`、`summary_ref`。
+
+它不依赖额外 LLM，因此 Qwen 压缩调用失败也不会导致原始大历史继续发送。
+
+### 5.3 RCA 证据感知压缩
 
 RCA 不依赖 LLM 再次总结，而是按固定优先级构建 Prompt：
 
@@ -122,12 +155,16 @@ RCA 不依赖 LLM 再次总结，而是按固定优先级构建 Prompt：
 4. 补充工具证据
    - 每条只保留工具名、实体、维度、coverage、关键事实、错误和 evidence refs。
    - 整个补充区共享上限，不允许每个工具单独占用 10K/12K。
+   - 所有 legacy case 先生成最小身份索引；详情数量限制不能删除
+     case ID 或 primary Pod kind/namespace/name/uid。
+   - 超过详情数量限制的 case 只保留 identity-only 投影。
+   - 最小身份索引本身无法放入预算时明确失败，不允许静默前缀截断。
 5. 冲突与缺失
    - 始终保留 bounded 表示，防止模型把缺证据误判为已确认根因。
 
 RCA 主上下文目标上限为约 54,000 字符。底层 token 门禁仍是最终权威，因为中文、JSON 和具体 tokenizer 的字符/token 比例并不固定。
 
-### 5.3 Evidence 压缩失败兜底
+### 5.4 Evidence 压缩失败兜底
 
 运行时压缩仍优先尝试 `ContextCompactionSummary`，但输入先做 deterministic bound。
 
@@ -138,15 +175,20 @@ RCA 主上下文目标上限为约 54,000 字符。底层 token 门禁仍是最�
 - 长 AI 消息替换为占位。
 - 长 ToolMessage 替换为引用占位。
 - `tool_observation_contents` 只保留确定性摘要。
+- 空内容 AIMessage 中的 `tool_calls[].args` 同样计入动态预算。
+- 空内容但包含 tool calls 的 AIMessage 也必须进入真实 LangGraph 历史压缩列表。
+- LLM 压缩摘要只提供 schema/过程候选；所有可承载证据断言的字段最终从真实 source events 确定性重建，不能注入工具名、状态、错误、事实或 archive refs。
+- 发送给压缩 LLM 的 payload 同时受事件数量和 token 总量限制。
 
 `max_compactions_per_call` 必须真正生效，避免压缩一次后继续执行大量工具再次增长。
 
-### 5.4 归档与可观测性
+### 5.5 归档与可观测性
 
 每次结构化调用至少保留：
 
 - guard 前预算。
 - guard 后最终预算。
+- Agent 每轮 `*_agent_guard_NNN.json` 预算。
 - 是否触发硬裁剪。
 - 原始/最终字符数。
 - 原始/最终估算 token 数。
@@ -169,7 +211,7 @@ hard_guard_preserve_tail_tokens: 1200
 
 ## 7. 错误处理
 
-- 无法解析模型上下文窗口：记录 warning，保持兼容，不执行不可靠硬裁剪。
+- 硬门禁启用但无法解析模型上下文窗口：fail closed，本地抛错并归档 `context_window_unavailable`，provider 调用次数为 0。
 - system prompt + schema 本身超过输入预算：本地抛出明确错误，不发送必然失败的请求。
 - 自定义压缩后仍超限：执行通用确定性裁剪。
 - 确定性裁剪后仍超限：本地失败并进入节点现有低置信度 fallback。
@@ -184,4 +226,3 @@ hard_guard_preserve_tail_tokens: 1200
 5. `max_compactions_per_call` 能执行多次且不会无限压缩。
 6. 现有 structured output、Fact Ledger 校验和 Context Archive 测试不回归。
 7. 使用历史真实超限归档重放时，RCA Prompt 满足 32K 预算。
-
