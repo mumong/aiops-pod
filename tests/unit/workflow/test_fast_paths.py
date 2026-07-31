@@ -3636,7 +3636,7 @@ def test_conclusion_prompt_supports_independent_response_language():
         response_language="en",
     )
 
-    assert "你是资深 K8s 诊断报告专家" in prompt
+    assert "把已验证诊断事实写成给人看的 Markdown 报告" in prompt
     assert "All user-facing final report text must be in English." in prompt
 
 
@@ -3687,18 +3687,43 @@ def test_aiops_prompts_preserve_exact_observability_and_causality():
     assert "不同 trace_id 不得合并" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "duration_us=0" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "不能推断请求无响应或失败" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "决定性 Fact 的原始 value 必须逐字保留" in CONCLUSION_FORMATTER_PROMPT
-    assert "必须逐字保留 topology relationship" in CONCLUSION_FORMATTER_PROMPT
-    assert "不同 trace_id 不得写成同一条调用链" in CONCLUSION_FORMATTER_PROMPT
-    assert "TOPOLOGY_EXACT_EDGES" in CONCLUSION_FORMATTER_PROMPT
-    assert "禁止把 `owned_by` 反向改写为 `owns`" in CONCLUSION_FORMATTER_PROMPT
-    assert "K8S_SIGNAL" in CONCLUSION_FORMATTER_PROMPT
-    assert "必须逐字引用 Kubernetes 强证据" in CONCLUSION_FORMATTER_PROMPT
-    assert "IGNORE_UNSUPPORTED_LAYER_NUMERIC_FACTS" in CONCLUSION_FORMATTER_PROMPT
-    assert "未被真实 evidence 支持的 Layer 数值" in CONCLUSION_FORMATTER_PROMPT
-    assert "只允许逐字复制结构化上下文中真实存在的 evidence_ref" in CONCLUSION_FORMATTER_PROMPT
-    assert "拓扑关系只能证明实体关系" in CONCLUSION_FORMATTER_PROMPT
-    assert "稀疏或单点指标不能证明稳定或正常" in CONCLUSION_FORMATTER_PROMPT
+    assert "精确值、状态、实体、来源和因果只能来自" in CONCLUSION_FORMATTER_PROMPT
+    assert "不同实体、时间窗口或 trace_id 不拼接" in CONCLUSION_FORMATTER_PROMPT
+    assert "拓扑事实只描述关系，不自动证明健康或因果" in CONCLUSION_FORMATTER_PROMPT
+    assert "背景证据不得升级为根因" in CONCLUSION_FORMATTER_PROMPT
+
+
+def test_conclusion_prompt_is_human_focused_and_grounded():
+    prompt = CONCLUSION_FORMATTER_PROMPT
+
+    for heading in (
+        "诊断概览",
+        "现象描述",
+        "关键证据",
+        "证据关联与因果链",
+        "根因结论",
+        "修复建议",
+        "验证步骤",
+        "注意事项",
+    ):
+        assert heading in prompt
+    assert "<!-- facts:fact-id[,fact-id...] -->" in prompt
+    assert "Markdown 粗体" in prompt
+    assert "正文不展示 Fact ID、entity ID 或 JSON" in prompt
+    assert "背景证据不得升级为根因" in prompt
+
+
+def test_conclusion_prompt_does_not_teach_one_fault_scenario():
+    prompt = CONCLUSION_FORMATTER_PROMPT
+
+    for scenario in (
+        "OOMKilled",
+        "ImagePullBackOff",
+        "ConfigError",
+        "TerminatingStuck",
+    ):
+        assert scenario not in prompt
+    assert len(prompt) < 6000
     for seeded_example in (
         "metric-...-prometheus",
         "log-...-current",
@@ -3719,11 +3744,11 @@ def test_rca_and_conclusion_prompts_require_verbatim_per_pod_observability():
         "不能只写抽象故障标签",
     ]
     conclusion_phrases = [
-        "可观测性表格只做跨维度摘要",
-        "根因分析正文必须按每个异常 Pod 展开真实数据",
-        "使用粗体突出决定性原始事实",
-        "决定性 Fact 的原始 value 必须逐字保留",
-        "每个异常 Pod 至少引用一条决定性原始事实",
+        "多实体分别总结",
+        "可观测性表只做维度摘要",
+        "核心实体、状态、错误、指标和值使用 Markdown 粗体",
+        "每个事实段落末尾添加",
+        "根因只使用 validated supporting facts",
     ]
 
     for phrase in rca_phrases:
@@ -3750,7 +3775,8 @@ def test_active_rca_and_conclusion_prompts_are_fixture_free():
         "topology relationship、source、target、directness、confidence",
     ):
         assert phrase in ROOT_CAUSE_ANALYZER_PROMPT
-        assert phrase in CONCLUSION_FORMATTER_PROMPT
+    assert "不同实体、时间窗口或 trace_id 不拼接" in CONCLUSION_FORMATTER_PROMPT
+    assert "拓扑事实只描述关系，不自动证明健康或因果" in CONCLUSION_FORMATTER_PROMPT
 
 
 def test_prompts_refine_runbooks_after_live_evidence_and_preserve_topology_semantics():
@@ -3761,10 +3787,9 @@ def test_prompts_refine_runbooks_after_live_evidence_and_preserve_topology_seman
         "多个独立异常类型可以分别补充不同 runbook",
     ]
     conclusion_phrases = [
-        "`calls` 只表示调用或流量关系，不表示控制、归属或 owner",
-        "`owned_by` 才表示 Kubernetes 控制归属",
-        "完整 evidence_ref",
-        "禁止使用 case_id、工具名或截断字符串代替 evidence_ref",
+        "拓扑事实只描述关系，不自动证明健康或因果",
+        "原始关系由机器附录保留",
+        "只引用输入中存在的完整 Fact ID",
     ]
 
     for phrase in evidence_phrases:

@@ -759,6 +759,34 @@ CONCLUSION_FORMATTER_PROMPT = """
 14. **按 Pod 展开真实数据**：可观测性表格不能替代根因正文。根因分析必须逐个异常 Pod 引用决定性日志原文、关键指标值、Kubernetes 终态、Trace/DeepFlow 事实和责任拓扑；缺少某个维度时明确写缺失，不能用另一个 Pod 的数据补齐。
 """
 
+# Compact runtime contract. The legacy long-form assignment above is removed
+# after compatibility assertions migrate to the evidence validators.
+CONCLUSION_FORMATTER_PROMPT = """
+# 任务
+把已验证诊断事实写成给人看的 Markdown 报告。先回答问题，再解释证据；准确但不展示内部合同实现。
+
+# 事实边界
+- 精确值、状态、实体、来源和因果只能来自 validated FactRecords 或 source-backed observations。
+- 可观测性使用本轮全部有效证据，不限于 RCA supporting facts；背景证据不得升级为根因。
+- 不补算、不猜测。真实空结果写“查询完成，当前窗口未发现匹配记录”。
+- 正文不展示 Fact ID、entity ID 或 JSON；机器字段留在底部附录。
+- 每个事实段落末尾添加 `<!-- facts:fact-id[,fact-id...] -->`，只引用输入中存在的完整 Fact ID。
+- 没有 Fact ID 的 source-backed observation 只能进入可观测性摘要，并标明真实工具来源。
+- 多实体分别总结；可观测性表只做维度摘要，根因只串联同一实体的支持事实。
+- 拓扑事实只描述关系，不自动证明健康或因果；原始关系由机器附录保留。
+
+# 写作
+- 使用：诊断概览、现象描述、关键证据、可观测性摘要、证据关联与因果链、根因结论、修复建议、验证步骤、注意事项。
+- 解释“信号说明什么”，不要逐字段抄写。
+- 核心实体、状态、错误、指标和值使用 Markdown 粗体。
+- 语气明确、简洁；不输出内部权威性、模型限制或合同教学。
+
+# 安全
+- 根因只使用 validated supporting facts；不同实体、时间窗口或 trace_id 不拼接。
+- 未提供 typed Remediation Policy 时只给人工处理和只读验证，不生成 Kubernetes 写命令。
+- 保留调用方提供的结构化修复计划合同。
+"""
+
 
 # ----------------------------------------------------------------------------
 # FACT_LEDGER_REMEDIATION_PLAN_PROMPT / REMEDIATION_PLAN_PROMPT
