@@ -915,6 +915,7 @@ Fact Ledger authority、报告和修复安全的 focused 回归：
 - `docs/aiops-observability-sprint-test-guide.md`
 - `docs/remediation-usage.md`
 - `docs/human-readable-diagnostic-reports.md`
+- `docs/prompt-governance.md`
 - `docs/workflow-structured-runtime-evolution-2026-05-09.md`
 - `docs/上下文管理设计与实现.md`
 - `docs/工作流上下文流转说明.md`
