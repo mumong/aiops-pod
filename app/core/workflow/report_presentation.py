@@ -133,6 +133,22 @@ def _fact_signal(record: FactRecord) -> str:
         if message not in (None, ""):
             return _bold(message)
 
+        relation = value.get("relation") or value.get("relationship")
+        if relation:
+            target = value.get("target")
+            target_kind = (
+                target.get("kind")
+                if isinstance(target, Mapping)
+                else ""
+            )
+            relation_text = " ".join(
+                part for part in (_cell(relation), _cell(target_kind)) if part
+            )
+            return (
+                f"{_bold(record.entity_name or record.entity_kind)} 的 "
+                f"拓扑关系为 {_bold(relation_text)}"
+            )
+
         method = value.get("request_type") or value.get("method")
         resource = (
             value.get("request_resource")
@@ -234,6 +250,13 @@ def build_dimension_presentations(
     for ledger in ledgers:
         for record in ledger.records:
             dimension = str(record.dimension or "").strip().lower()
+            if record.fact_type == "coverage" and dimension == "coverage":
+                value = record.value
+                dimension = (
+                    str(value.get("dimension") or "").strip().lower()
+                    if isinstance(value, Mapping)
+                    else ""
+                )
             if dimension not in records:
                 continue
             if record.fact_type == "coverage":
@@ -315,6 +338,18 @@ def _entity_label(record: FactRecord) -> str:
     return record.entity_name or record.entity_kind
 
 
+def _entity_fact_groups(
+    records: Sequence[FactRecord],
+) -> list[tuple[str, list[FactRecord]]]:
+    groups: dict[str, tuple[str, list[FactRecord]]] = {}
+    for record in records:
+        key = record.entity_id or _entity_label(record)
+        if key not in groups:
+            groups[key] = (_entity_label(record), [])
+        groups[key][1].append(record)
+    return list(groups.values())
+
+
 def _grounded_model_sections(
     model_content: str,
     *,
@@ -376,13 +411,18 @@ def render_human_report(
         record for record in records.values() if record.fact_type != "coverage"
     ]
     first = non_coverage[0] if non_coverage else None
+    entity_groups = _entity_fact_groups(non_coverage)
     status = str(validated_claim.get("diagnostic_status") or "inconclusive")
     try:
         confidence = float(validated_claim.get("confidence") or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
     confidence = min(max(confidence, 0.0), 1.0)
-    subject = _entity_label(first) if first else "当前诊断对象"
+    subject = (
+        "、".join(dict.fromkeys(label for label, _items in entity_groups))
+        if entity_groups
+        else "当前诊断对象"
+    )
 
     validation = validated_claim.get("claim_validation")
     if not isinstance(validation, Mapping):
@@ -424,10 +464,21 @@ def render_human_report(
         for signal in item.signals
     ][:6]
     lines.extend(f"- {item}" for item in model_sections["evidence"])
-    lines.extend(
-        [f"- {signal}" for signal in key_signals]
-        or ["- 当前没有可展示的来源证据。"]
-    )
+    if len(entity_groups) > 1:
+        for label, entity_records in entity_groups:
+            lines.extend([f"### **{_cell(label)}**", ""])
+            lines.extend(
+                f"- {_fact_signal(record)}"
+                for record in entity_records[:3]
+            )
+            lines.append("")
+        while lines and not lines[-1]:
+            lines.pop()
+    else:
+        lines.extend(
+            [f"- {signal}" for signal in key_signals]
+            or ["- 当前没有可展示的来源证据。"]
+        )
 
     lines.extend([
         "",

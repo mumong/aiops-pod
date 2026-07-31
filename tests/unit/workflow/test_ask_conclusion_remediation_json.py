@@ -665,26 +665,28 @@ def test_fact_ledger_report_renders_validated_facts_and_appendix_deterministical
     second = node.execute(state)["conclusion"]
 
     assert first == second
+    body, appendix = first.split("## 机器可核验附录", 1)
     assert "模型生成的自然语言概览应保留" not in first
     assert "模型生成的现象叙述应保留" not in first
-    assert "权威结论仅由 validated FactRecords 及其引用确定" in first
+    assert "权威结论仅由 validated FactRecords 及其引用确定" not in body
     assert "模型错误地改写为另一个根因" not in first
-    assert "**诊断状态**: `diagnosed`" in first
+    assert "**诊断状态**：**diagnosed**" in body
     assert "当前事实支持配置缺失根因候选" not in first
     assert "配置缺失导致当前 Pod 启动失败" not in first
     assert "缺少正常业务基线" not in first
     assert "尚未执行任何修复" not in first
     for record in records:
-        assert record["fact_id"] in first
+        assert record["fact_id"] not in body
+        assert record["fact_id"] in appendix
     assert "81234567" in first
     assert "77.47Mi" in first
     assert "required config PAYMENT_GATEWAY_TOKEN is missing" in first
     assert "trace-valid-1234567890" in first
-    assert '"relation":"owned_by"' in first
+    assert '"relation": "owned_by"' in appendix
     assert "metric:api-memory" in first
-    assert "source_system=prometheus" in first
-    assert "directness=direct" in first
-    assert "confidence=high" in first
+    assert '"source_system": "prometheus"' in appendix
+    assert '"directness": "direct"' in appendix
+    assert '"confidence": "high"' in appendix
     assert "2026-07-16T01:02:03Z" in first
     assert "invented_value=999Mi" not in first
     assert "ref-invented" not in first
@@ -810,8 +812,8 @@ def test_fact_ledger_report_keeps_inconclusive_and_excludes_unknown_references()
         }
     )["conclusion"]
 
-    assert "**诊断状态**: `inconclusive`" in conclusion
-    assert "未形成已确认根因" in conclusion
+    assert "**诊断状态**：**inconclusive**" in conclusion
+    assert "当前证据支持继续按上述关键事实开展人工研判" in conclusion
     assert "当前只有根因候选，不能确认" not in conclusion
     assert "CPU 变化可能相关但证据不足" not in conclusion
     assert "缺少故障窗口日志" not in conclusion
@@ -895,8 +897,8 @@ def test_invalid_inconclusive_legacy_ledger_uses_deterministic_read_only_report(
         }
     )["conclusion"]
 
-    assert "**诊断状态**: `inconclusive`" in conclusion
-    assert "**RCA 置信度上限**: `35%`" in conclusion
+    assert "**诊断状态**：**inconclusive**" in conclusion
+    assert "**结论置信度**：**35%**" in conclusion
     assert "diagnosed" not in conclusion
     assert "90%" not in conclusion
     assert "Node Ready" not in conclusion
@@ -969,8 +971,8 @@ def test_inconclusive_without_incoming_validation_discards_all_model_narrative(
         }
     )["conclusion"]
 
-    assert "**诊断状态**: `inconclusive`" in conclusion
-    assert "**RCA 置信度上限**: `35%`" in conclusion
+    assert "**诊断状态**：**inconclusive**" in conclusion
+    assert "**结论置信度**：**35%**" in conclusion
     assert lifecycle["fact_id"] in conclusion
     assert "kubernetes:describe" in conclusion
     assert "服务已完全中断" not in conclusion
@@ -1409,22 +1411,25 @@ def test_fact_ledger_report_keeps_two_pod_facts_in_their_own_sections():
         }
     )["conclusion"]
 
-    section_a = conclusion.split(f"### `{entity_a}`", 1)[1].split(
-        f"### `{entity_b}`",
+    body, appendix = conclusion.split("## 机器可核验附录", 1)
+    section_a = body.split("### **demo/api-a**", 1)[1].split(
+        "### **demo/api-b**",
         1,
     )[0]
-    section_b = conclusion.split(f"### `{entity_b}`", 1)[1].split(
-        "### 支持事实",
+    section_b = body.split("### **demo/api-b**", 1)[1].split(
+        "## 可观测性摘要",
         1,
     )[0]
-    assert fact_a["fact_id"] in section_a
     assert "api-a-only-error" in section_a
-    assert fact_b["fact_id"] not in section_a
     assert "api-b-only-error" not in section_a
-    assert fact_b["fact_id"] in section_b
     assert "api-b-only-error" in section_b
-    assert fact_a["fact_id"] not in section_b
     assert "api-a-only-error" not in section_b
+    assert entity_a not in body
+    assert entity_b not in body
+    assert fact_a["fact_id"] not in body
+    assert fact_b["fact_id"] not in body
+    assert fact_a["fact_id"] in appendix
+    assert fact_b["fact_id"] in appendix
 
 
 def test_fact_ledger_report_replaces_all_root_cause_sections_with_one_canonical_section():
@@ -1487,15 +1492,17 @@ FORGED_LATE_ROOT
     root_headings = [
         line
         for line in conclusion.splitlines()
-        if line.startswith("##") and "根因分析" in line
+        if line.startswith("##") and "根因结论" in line
     ]
-    assert root_headings == ["## 🎯 根因分析"]
+    assert root_headings == ["## 根因结论"]
     assert "FORGED_FIRST_ROOT" not in conclusion
     assert "FORGED_LATE_ROOT" not in conclusion
     assert fact["fact_id"] in conclusion
     assert "普通诊断概览应保留" not in conclusion
     assert "普通现象描述应保留" not in conclusion
-    assert "权威结论仅由 validated FactRecords" in conclusion
+    body, appendix = conclusion.split("## 机器可核验附录", 1)
+    assert "权威结论仅由 validated FactRecords" not in body
+    assert "fact-ledger-authoritative-v1" in appendix
 
 
 def test_fact_ledger_diagnostic_only_report_drops_model_guidance_and_commands():
@@ -1577,7 +1584,7 @@ def test_fact_ledger_diagnostic_only_report_drops_model_guidance_and_commands():
         assert command not in conclusion
     for command in read_only_commands:
         assert command not in conclusion
-    assert "本报告不授权 Kubernetes 写操作" in conclusion
+    assert "当前报告不授权写操作" in conclusion
     assert conclusion.count("## 结构化修复计划") == 1
     assert plan is not None
     assert plan.remediation_available is False
@@ -2392,7 +2399,9 @@ def test_fact_ledger_path_bypasses_legacy_fault_specific_report_helpers():
         }
     )["conclusion"]
 
-    assert "**报告合同**: `fact-ledger-authoritative-v1`" in conclusion
+    body, appendix = conclusion.split("## 机器可核验附录", 1)
+    assert "报告合同" not in body
+    assert '"contract": "fact-ledger-authoritative-v1"' in appendix
 
 
 def test_no_fact_ledger_keeps_legacy_compatibility_path_and_marks_contract():
@@ -4342,6 +4351,124 @@ model-authored placeholder
         assert unsupported not in report
     assert report.count("## 诊断概览") == 1
     assert report.count("## 现象描述") == 1
+
+
+def test_fact_ledger_report_has_human_body_and_separate_machine_appendix():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    log = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="logging",
+        fact_type="log",
+        attribute="log.message",
+        value={"message": "required configuration is missing"},
+        source_system="kubernetes",
+        evidence_ref="logs:previous-container",
+    )
+    current_ledger = FactLedger.model_validate(
+        _ledger("case-human-report", [entity_id], [log])
+    )
+    claim = {
+        "diagnostic_status": "diagnosed",
+        "confidence": 0.9,
+        "hypotheses": [{
+            "hypothesis_id": "hyp-api",
+            "entity_id": entity_id,
+            "supporting_fact_ids": [log["fact_id"]],
+            "contradicting_fact_ids": [],
+        }],
+        "claim_validation": {
+            "valid": True,
+            "valid_supporting_fact_ids": [log["fact_id"]],
+            "valid_contradicting_fact_ids": [],
+            "reasons": [],
+        },
+    }
+    model_report = f"""## 诊断概览
+**api** 的诊断已经完成。 <!-- facts:{log['fact_id']} -->
+
+## 现象描述
+previous-container 日志记录了 **required configuration is missing**。 <!-- facts:{log['fact_id']} -->
+
+## 根因结论
+该日志直接解释了容器无法继续启动。 <!-- facts:{log['fact_id']} -->
+"""
+
+    report = ConclusionFormatterNode._apply_fact_ledger_report_contract(
+        model_report,
+        ledgers=[current_ledger],
+        validated_claim=claim,
+    )
+
+    body, appendix = report.split("## 机器可核验附录", 1)
+    for phrase in (
+        "权威结论仅由",
+        "未验证的模型叙述",
+        "当前可核验现象仅见",
+        "本节不保留模型生成",
+    ):
+        assert phrase not in body
+    assert "previous-container 日志记录了" in body
+    assert "**required configuration is missing**" in body
+    assert log["fact_id"] not in body
+    assert '"attribute"' not in body
+    assert log["fact_id"] in appendix
+    assert "fact-ledger-authoritative-v1" in appendix
+    plan = extract_remediation_plan(report)
+    assert plan is not None
+    assert plan.fix_type == "manual_only"
+    assert plan.requires_human_approval is True
+    assert plan.actions == []
+
+
+def test_fact_ledger_report_rejects_invented_ai_value_and_uses_readable_fallback():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    metric = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="metrics",
+        fact_type="measurement",
+        attribute="container_memory_working_set_bytes",
+        value="65953792",
+        unit="bytes",
+        source_system="prometheus",
+        evidence_ref="metrics:working-set",
+    )
+    current_ledger = FactLedger.model_validate(
+        _ledger("case-human-fallback", [entity_id], [metric])
+    )
+    claim = {
+        "diagnostic_status": "diagnosed",
+        "confidence": 0.8,
+        "hypotheses": [{
+            "hypothesis_id": "hyp-api",
+            "entity_id": entity_id,
+            "supporting_fact_ids": [metric["fact_id"]],
+            "contradicting_fact_ids": [],
+        }],
+        "claim_validation": {
+            "valid": True,
+            "valid_supporting_fact_ids": [metric["fact_id"]],
+            "valid_contradicting_fact_ids": [],
+            "reasons": [],
+        },
+    }
+    model_report = (
+        "## 根因结论\n"
+        f"内存峰值为 **999Mi**。 <!-- facts:{metric['fact_id']} -->\n"
+    )
+
+    report = ConclusionFormatterNode._apply_fact_ledger_report_contract(
+        model_report,
+        ledgers=[current_ledger],
+        validated_claim=claim,
+    )
+
+    assert "999Mi" not in report
+    assert "已验证证据共同指向" in report
+    assert "**65953792 bytes**" in report
 
 
 @pytest.mark.parametrize(

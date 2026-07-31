@@ -19,7 +19,7 @@ import math
 import os
 import re
 import shlex
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from app.core.remediation.plans import (
     extract_remediation_plan,
@@ -39,6 +39,10 @@ from app.core.workflow.fact_contract import (
     validate_rca_claims,
 )
 from app.core.workflow.nodes.base import WorkflowNode
+from app.core.workflow.report_presentation import (
+    build_dimension_presentations,
+    render_human_report,
+)
 from app.core.workflow.schemas import (
     ConclusionOutput,
     FactLedger,
@@ -237,6 +241,9 @@ class ConclusionFormatterNode(WorkflowNode):
                 if layer not in {Layer.QUERY, Layer.HEALTHY}
                 else None
             )
+            fact_report_observations = self._report_observations(
+                evidence_analysis
+            )
             fact_ledger_input_present = (
                 layer not in {Layer.QUERY, Layer.HEALTHY}
                 and self._has_fact_ledger_input(evidence_analysis)
@@ -344,6 +351,7 @@ class ConclusionFormatterNode(WorkflowNode):
                         report,
                         ledgers=ledgers,
                         validated_claim=validated_claim,
+                        observations=fact_report_observations,
                     )
                 report = self._enforce_observability_dimension_table(
                     report,
@@ -854,7 +862,7 @@ class ConclusionFormatterNode(WorkflowNode):
         required_groups = (
             ("diagnosis_overview", ("诊断概览",)),
             ("evidence", ("现象描述", "证据链", "可观测性数据")),
-            ("root_cause", ("根因分析",)),
+            ("root_cause", ("根因分析", "根因结论")),
             ("remediation", ("修复建议",)),
         )
         for name, candidates in required_groups:
@@ -4094,6 +4102,25 @@ class ConclusionFormatterNode(WorkflowNode):
             for item in tool_data
         )
 
+    @staticmethod
+    def _report_observations(
+        evidence_analysis: Any,
+    ) -> List[Mapping[str, object]]:
+        try:
+            evidence_data = (
+                json.loads(evidence_analysis)
+                if isinstance(evidence_analysis, str)
+                else evidence_analysis
+            )
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(evidence_data, dict):
+            return []
+        tool_data = evidence_data.get("tool_data")
+        if not isinstance(tool_data, list):
+            return []
+        return [item for item in tool_data if isinstance(item, Mapping)]
+
     @classmethod
     def _build_fact_report_context(
         cls,
@@ -5104,18 +5131,33 @@ class ConclusionFormatterNode(WorkflowNode):
         *,
         diagnostic_status: str,
         records: List[FactRecord],
+        claim_fact_ids: Sequence[str] = (),
+        limitations: Sequence[Any] = (),
     ) -> str:
         payload = {
             "contract": "fact-ledger-authoritative-v1",
             "diagnostic_status": diagnostic_status,
+            "claim_fact_ids": list(dict.fromkeys(
+                str(fact_id)
+                for fact_id in claim_fact_ids
+                if str(fact_id).strip()
+            )),
             "facts": [
                 record.model_dump(mode="json", exclude_none=True)
                 for record in sorted(records, key=lambda item: item.fact_id)
             ],
+            "limitations": [
+                (
+                    item.model_dump(mode="json", exclude_none=True)
+                    if hasattr(item, "model_dump")
+                    else item
+                )
+                for item in limitations
+            ],
         }
         return "\n".join([
             "## 机器可核验附录",
-            "> 本附录仅包含 validated claim 实际引用的 Fact Records。",
+            "> 本附录包含本轮全部已验证事实、根因引用和证据限制。",
             "",
             "```json",
             json.dumps(
@@ -6500,41 +6542,45 @@ class ConclusionFormatterNode(WorkflowNode):
         *,
         ledgers: List[FactLedger],
         validated_claim: Dict[str, Any],
+        observations: Sequence[Mapping[str, object]] = (),
     ) -> str:
-        del content
-        root_section, referenced_records = (
-            cls._render_fact_ledger_root_cause_section(
-                ledgers=ledgers,
-                validated_claim=validated_claim,
-            )
+        dimensions = build_dimension_presentations(
+            ledgers,
+            observations,
         )
-        result = cls._format_deterministic_fact_report_shell()
-        result = cls._enforce_fact_ledger_diagnosis_overview(
-            result,
+        result = render_human_report(
+            model_content=content,
+            ledgers=ledgers,
             validated_claim=validated_claim,
-        )
-        result = cls._enforce_fact_ledger_phenomenon(result)
-        result = cls._replace_root_cause_section(
-            result,
-            root_section,
-        )
-        result, _present_dimensions = (
-            cls._enforce_fact_ledger_observability_sections(
-                result,
-                ledgers=ledgers,
-            )
+            dimensions=dimensions,
         )
         result = cls._render_fact_ledger_diagnostic_remediation(
             result,
             ledgers=ledgers,
             validated_claim=validated_claim,
         )
+        validation = (
+            validated_claim.get("claim_validation")
+            if isinstance(validated_claim.get("claim_validation"), dict)
+            else {}
+        )
+        claim_fact_ids = [
+            *(validation.get("valid_supporting_fact_ids") or []),
+            *(validation.get("valid_contradicting_fact_ids") or []),
+        ]
+        all_records = list({
+            record.fact_id: record
+            for ledger in ledgers
+            for record in ledger.records
+        }.values())
         appendix = cls._render_fact_ledger_appendix(
             diagnostic_status=str(
                 validated_claim.get("diagnostic_status")
                 or "inconclusive"
             ),
-            records=referenced_records,
+            records=all_records,
+            claim_fact_ids=claim_fact_ids,
+            limitations=derive_evidence_limitations(ledgers),
         )
         final_report = result.rstrip() + "\n\n---\n\n" + appendix + "\n"
         return cls._neutralize_unstructured_kubectl_writes(final_report)
