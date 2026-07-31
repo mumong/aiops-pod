@@ -8,6 +8,7 @@ validator and the machine-verifiable appendix.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -33,6 +34,12 @@ _LOG_TOOLS = frozenset({
     "kubectl_logs_all_containers_grep",
 })
 _EMPTY_COVERAGE = frozenset({"empty", "absent", "error", "failed", "weak", "partial"})
+FACT_MARKER = re.compile(r"<!--\s*facts:([^>]+)\s*-->")
+EXACT_LITERAL = re.compile(
+    r"`[^`]+`|\b\d+(?:\.\d+)?(?:Mi|Gi|Ki|ms|us|s|%|bytes?)?\b|"
+    r"\b[0-9a-f]{16,64}\b",
+    re.IGNORECASE,
+)
 
 
 def _cell(value: Any) -> str:
@@ -41,6 +48,44 @@ def _cell(value: Any) -> str:
 
 def _bold(value: Any) -> str:
     return f"**{_cell(value)}**"
+
+
+def keep_grounded_narrative(
+    text: str,
+    *,
+    records: Mapping[str, FactRecord],
+    allowed_fact_ids: set[str],
+) -> str:
+    """Return visible prose only when refs and exact literals are supported."""
+    match = FACT_MARKER.search(text or "")
+    if not match:
+        return ""
+    cited = {
+        item.strip()
+        for item in match.group(1).split(",")
+        if item.strip()
+    }
+    if (
+        not cited
+        or not cited <= allowed_fact_ids
+        or not cited <= records.keys()
+    ):
+        return ""
+    visible = FACT_MARKER.sub("", text).strip()
+    inventory = " ".join(
+        json.dumps(
+            records[fact_id].model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        for fact_id in sorted(cited)
+    )
+    for token in EXACT_LITERAL.findall(visible):
+        literal = token.strip("`")
+        if literal not in inventory:
+            return ""
+    return visible
 
 
 @dataclass(frozen=True)
@@ -270,6 +315,54 @@ def _entity_label(record: FactRecord) -> str:
     return record.entity_name or record.entity_kind
 
 
+def _grounded_model_sections(
+    model_content: str,
+    *,
+    records: Mapping[str, FactRecord],
+    supporting_fact_ids: set[str],
+) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {
+        "overview": [],
+        "phenomenon": [],
+        "evidence": [],
+        "causal": [],
+        "root": [],
+    }
+    current = ""
+    for raw_line in str(model_content or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("#"):
+            heading = line.lstrip("#").strip()
+            if "诊断概览" in heading:
+                current = "overview"
+            elif "现象" in heading:
+                current = "phenomenon"
+            elif "关键证据" in heading or heading == "证据链":
+                current = "evidence"
+            elif "证据关联" in heading or "因果链" in heading:
+                current = "causal"
+            elif "根因结论" in heading or "根因分析" in heading:
+                current = "root"
+            else:
+                current = ""
+            continue
+        if not current or "<!--" not in line:
+            continue
+        allowed = (
+            supporting_fact_ids
+            if current in {"causal", "root"}
+            else set(records)
+        )
+        visible = keep_grounded_narrative(
+            line.lstrip("- ").strip(),
+            records=records,
+            allowed_fact_ids=allowed,
+        )
+        if visible:
+            sections[current].append(visible)
+    return sections
+
+
 def render_human_report(
     *,
     model_content: str,
@@ -277,8 +370,7 @@ def render_human_report(
     validated_claim: Mapping[str, Any],
     dimensions: Mapping[str, DimensionPresentation],
 ) -> str:
-    """Render a readable fallback body; grounded model prose is added later."""
-    del model_content
+    """Render a readable body with validated AI prose and generic fallback."""
     records = _record_index(ledgers)
     non_coverage = [
         record for record in records.values() if record.fact_type != "coverage"
@@ -292,6 +384,21 @@ def render_human_report(
     confidence = min(max(confidence, 0.0), 1.0)
     subject = _entity_label(first) if first else "当前诊断对象"
 
+    validation = validated_claim.get("claim_validation")
+    if not isinstance(validation, Mapping):
+        validation = {}
+    supporting_ids = [
+        str(item)
+        for item in validation.get("valid_supporting_fact_ids", []) or []
+        if str(item) in records
+    ]
+    supporting = [records[item] for item in supporting_ids]
+    model_sections = _grounded_model_sections(
+        model_content,
+        records=records,
+        supporting_fact_ids=set(supporting_ids),
+    )
+
     lines = [
         "# K8s 诊断报告",
         "",
@@ -300,11 +407,12 @@ def render_human_report(
         f"- **诊断状态**：**{status}**",
         f"- **影响对象**：**{subject}**",
         f"- **结论置信度**：**{confidence:.0%}**",
-        "",
-        "## 现象描述",
-        "",
     ]
-    if first:
+    lines.extend(f"- {item}" for item in model_sections["overview"])
+    lines.extend(["", "## 现象描述", ""])
+    if model_sections["phenomenon"]:
+        lines.extend(f"- {item}" for item in model_sections["phenomenon"])
+    elif first:
         lines.append(f"- {_fact_signal(first)}。")
     else:
         lines.append("- 当前诊断已完成证据收集，具体信号见下方摘要。")
@@ -315,6 +423,7 @@ def render_human_report(
         for item in dimensions.values()
         for signal in item.signals
     ][:6]
+    lines.extend(f"- {item}" for item in model_sections["evidence"])
     lines.extend(
         [f"- {signal}" for signal in key_signals]
         or ["- 当前没有可展示的来源证据。"]
@@ -333,17 +442,10 @@ def render_human_report(
         if item.dimension != "topology"
     )
 
-    validation = validated_claim.get("claim_validation")
-    if not isinstance(validation, Mapping):
-        validation = {}
-    supporting_ids = [
-        str(item)
-        for item in validation.get("valid_supporting_fact_ids", []) or []
-        if str(item) in records
-    ]
-    supporting = [records[item] for item in supporting_ids]
     lines.extend(["", "## 证据关联与因果链", ""])
-    if supporting:
+    if model_sections["causal"]:
+        lines.extend(f"- {item}" for item in model_sections["causal"])
+    elif supporting:
         lines.append(
             "- " + " → ".join(_fact_signal(record) for record in supporting)
         )
@@ -351,7 +453,9 @@ def render_human_report(
         lines.append("- 当前证据用于描述现象，尚未形成可确认的因果链。")
 
     lines.extend(["", "## 根因结论", ""])
-    if status == "diagnosed" and supporting:
+    if model_sections["root"]:
+        lines.extend(f"- {item}" for item in model_sections["root"])
+    elif status == "diagnosed" and supporting:
         lines.append(
             "- 已验证证据共同指向："
             + "；".join(_fact_signal(record) for record in supporting[:3])

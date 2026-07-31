@@ -2,6 +2,7 @@ import pytest
 
 from app.core.workflow.report_presentation import (
     build_dimension_presentations,
+    keep_grounded_narrative,
     render_human_report,
 )
 from app.core.workflow.schemas import FactLedger, FactRecord
@@ -177,3 +178,101 @@ def test_fault_values_share_one_generic_report_path(observed_state):
     assert "## 证据关联与因果链" in report
     assert "## 根因结论" in report
     assert f"**{observed_state}**" in report
+
+
+def test_grounded_paragraph_is_kept_and_hidden_refs_removed():
+    state_record = fact(
+        fact_id="fact-state002",
+        dimension="kubernetes",
+        fact_type="state",
+        source_system="kubernetes",
+        attribute="container.state",
+        value={"state": "ErrImagePull"},
+    )
+
+    result = keep_grounded_narrative(
+        "容器状态为 **ErrImagePull**。 <!-- facts:fact-state002 -->",
+        records={state_record.fact_id: state_record},
+        allowed_fact_ids={state_record.fact_id},
+    )
+
+    assert "ErrImagePull" in result
+    assert "fact-state002" not in result
+    assert "<!--" not in result
+
+
+def test_narrative_with_unsupported_exact_value_is_rejected():
+    metric_record = fact(
+        fact_id="fact-metric01",
+        dimension="metrics",
+        fact_type="measurement",
+        source_system="prometheus",
+        attribute="container_memory_working_set_bytes",
+        value="65953792",
+    )
+
+    result = keep_grounded_narrative(
+        "内存峰值为 **999Mi**。 <!-- facts:fact-metric01 -->",
+        records={metric_record.fact_id: metric_record},
+        allowed_fact_ids={metric_record.fact_id},
+    )
+
+    assert result == ""
+
+
+def test_narrative_with_unknown_fact_reference_is_rejected():
+    state_record = fact(
+        fact_id="fact-state003",
+        dimension="kubernetes",
+        fact_type="state",
+        source_system="kubernetes",
+        attribute="container.state",
+        value={"state": "Running"},
+    )
+
+    result = keep_grounded_narrative(
+        "状态已确认。 <!-- facts:fact-unknown -->",
+        records={state_record.fact_id: state_record},
+        allowed_fact_ids={state_record.fact_id},
+    )
+
+    assert result == ""
+
+
+def test_human_report_keeps_grounded_ai_explanation_and_drops_invention():
+    state_record = fact(
+        fact_id="fact-state004",
+        dimension="kubernetes",
+        fact_type="state",
+        source_system="kubernetes",
+        attribute="container.state",
+        value={"state": "ErrImagePull"},
+    )
+    current_ledger = ledger([state_record])
+    claim = {
+        "diagnostic_status": "diagnosed",
+        "confidence": 0.9,
+        "claim_validation": {
+            "valid": True,
+            "valid_supporting_fact_ids": [state_record.fact_id],
+            "valid_contradicting_fact_ids": [],
+        },
+    }
+    model_content = """## 现象描述
+镜像状态为 **ErrImagePull**，这解释了容器尚未启动。 <!-- facts:fact-state004 -->
+
+## 根因结论
+镜像下载耗时 **999s**。 <!-- facts:fact-state004 -->
+"""
+
+    report = render_human_report(
+        model_content=model_content,
+        ledgers=[current_ledger],
+        validated_claim=claim,
+        dimensions=build_dimension_presentations([current_ledger]),
+    )
+
+    assert "这解释了容器尚未启动" in report
+    assert "999s" not in report
+    assert "fact-state004" not in report
+    assert "<!--" not in report
