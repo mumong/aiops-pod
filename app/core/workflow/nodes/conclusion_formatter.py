@@ -6434,6 +6434,7 @@ class ConclusionFormatterNode(WorkflowNode):
         *,
         ledgers: List[FactLedger],
         validated_claim: Dict[str, Any],
+        display_values: Sequence[Any] = (),
     ) -> str:
         del validated_claim
         marker = (
@@ -6467,7 +6468,7 @@ class ConclusionFormatterNode(WorkflowNode):
                 }
                 for ledger in ledgers
                 for record in ledger.records
-            ],
+            ] + list(display_values),
             ensure_ascii=False,
             sort_keys=True,
             default=str,
@@ -6558,6 +6559,11 @@ class ConclusionFormatterNode(WorkflowNode):
             result,
             ledgers=ledgers,
             validated_claim=validated_claim,
+            display_values=[
+                signal
+                for dimension in dimensions.values()
+                for signal in dimension.signals
+            ],
         )
         validation = (
             validated_claim.get("claim_validation")

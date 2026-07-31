@@ -225,15 +225,66 @@ def _observation_log_signal(
     selected = structured.get("selected_lines")
     if not isinstance(selected, list):
         return None
-    line = next((str(item).strip() for item in selected if str(item).strip()), "")
-    if not line:
+    lines = [str(item).strip() for item in selected if str(item).strip()]
+    if not lines:
         return None
+    representative = [lines[0]]
+    if lines[-1] != lines[0]:
+        representative.append(lines[-1])
+    signal = "；".join(
+        _render_observation_log_line(line)
+        for line in representative
+    )
     refs = tuple(
         str(observation.get(key)).strip()
         for key in ("raw_ref", "structured_ref", "summary_ref")
         if str(observation.get(key) or "").strip()
     )
-    return tool, _bold(line), refs
+    return tool, signal, refs
+
+
+def _render_observation_log_line(line: str) -> str:
+    try:
+        decoded = json.loads(line)
+    except json.JSONDecodeError:
+        return _bold(line)
+    if not isinstance(decoded, Mapping):
+        return _bold(line)
+
+    message = decoded.get("message")
+    if message not in (None, ""):
+        return _bold(message)
+
+    parts: list[str] = []
+    event = decoded.get("event")
+    if event not in (None, ""):
+        parts.append(f"事件 {_bold(event)}")
+    path = decoded.get("path") or decoded.get("request_resource")
+    if path not in (None, ""):
+        parts.append(f"请求 {_bold(path)}")
+
+    unit_suffixes = (
+        ("_mib", "MiB"),
+        ("_gib", "GiB"),
+        ("_kib", "KiB"),
+        ("_bytes", "bytes"),
+        ("_ms", "ms"),
+        ("_us", "us"),
+    )
+    for key, value in decoded.items():
+        if value in (None, ""):
+            continue
+        suffix = next(
+            (item for item in unit_suffixes if str(key).endswith(item[0])),
+            None,
+        )
+        if suffix is None:
+            continue
+        field_suffix, unit = suffix
+        label = str(key)[:-len(field_suffix)].replace("_", " ")
+        parts.append(f"{_cell(label)} {_bold(f'{value} {unit}')}")
+
+    return "，".join(parts) if parts else _bold(line)
 
 
 def build_dimension_presentations(

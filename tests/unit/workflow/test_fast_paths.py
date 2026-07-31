@@ -4760,6 +4760,52 @@ TOPOLOGY_ENTITY entity_id=e:deployment kind=Deployment namespace=demo name=order
     assert "资源写操作" in result
 
 
+def test_a006_replay_shows_previous_logs_and_deepflow_in_human_body():
+    fixture_path = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures/observability/a006_human_report_replay.json"
+    )
+    replay = json.loads(fixture_path.read_text(encoding="utf-8"))
+    ledgers = [
+        FactLedger.model_validate(item)
+        for item in replay["fact_ledgers"]
+    ]
+
+    report = ConclusionFormatterNode._apply_fact_ledger_report_contract(
+        "",
+        ledgers=ledgers,
+        validated_claim=replay["validated_claim"],
+        observations=replay["observations"],
+    )
+    body, appendix = report.split("## 机器可核验附录", 1)
+    logging = next(
+        line for line in body.splitlines()
+        if line.startswith("| **Logging**")
+    )
+    tracing = next(
+        line for line in body.splitlines()
+        if line.startswith("| **Tracing**")
+    )
+
+    assert "kubectl_previous_logs" in logging
+    assert "2 MiB" in logging
+    assert "62 MiB" in logging
+    assert "未获取到" not in logging
+    assert "deepflow" in tracing
+    assert "GET" in tracing and "/allocate" in tracing and "200" in tracing
+    assert "26577 us" in tracing
+    assert "未获取到" not in tracing
+    for ledger in ledgers:
+        for record in ledger.records:
+            assert record.fact_id not in body
+    assert "fact-a00600000004" in appendix
+    plan = extract_remediation_plan(report)
+    assert plan is not None
+    assert plan.fix_type == "manual_only"
+    assert plan.requires_human_approval is True
+    assert plan.actions == []
+
+
 def test_offline_replay_fixture_import_enforces_measured_boundary():
     repo_root = Path(__file__).resolve().parents[3]
     replay_path = (
