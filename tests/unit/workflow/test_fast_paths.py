@@ -3736,6 +3736,37 @@ def test_conclusion_prompt_does_not_teach_one_fault_scenario():
         assert seeded_example not in CONCLUSION_FORMATTER_PROMPT
 
 
+def test_active_workflow_prompts_stay_within_attention_budgets():
+    budgets = {
+        "layer": 2600,
+        "layer_extract": 1400,
+        "layer_query_direct": 1900,
+        "evidence": 4000,
+        "rca": 4300,
+        "conclusion": 1200,
+    }
+
+    for name, ceiling in budgets.items():
+        assert len(get_workflow_prompt(name)) <= ceiling
+
+
+def test_runtime_prompts_encode_tasks_not_prompt_methodology():
+    active = "\n".join(
+        get_workflow_prompt(name)
+        for name in (
+            "layer",
+            "layer_extract",
+            "layer_query_direct",
+            "evidence",
+            "rca",
+            "conclusion",
+        )
+    )
+
+    for phrase in ("第一性原理", "隐性提纯", "负向配平", "高维潜空间"):
+        assert phrase not in active
+
+
 def test_rca_and_conclusion_prompts_require_verbatim_per_pod_observability():
     rca_phrases = [
         "每个异常 Pod 都必须独立形成证据分析和根因结论",
