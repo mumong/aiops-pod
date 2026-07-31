@@ -21,15 +21,20 @@ import os
 import re
 import shlex
 import time
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.core.context.archive import ContextArchive
 from app.core.workflow.fact_contract import (
+    attach_internal_report_authority,
     build_kubernetes_lifecycle_fact_ledger,
     build_observability_query_fact_ledger,
     compact_aiops_legacy_context_json,
     compact_fact_ledgers_json,
+    contains_forbidden_fact_fields,
+    evaluate_report_authority,
     is_observability_event_semantic_success,
     normalize_topology_query_fact_value,
     normalize_case_fact_ledger,
@@ -78,6 +83,21 @@ class EvidenceCollectorNode(WorkflowNode):
         "query_pod_topology",
     )
     _OBSERVABILITY_QUERY_TOOLS = set(_OBSERVABILITY_QUERY_ORDER)
+    _KUBERNETES_LIFECYCLE_AUTHORITY_TOOLS = {
+        "kubectl_describe",
+        "kubectl_get_yaml",
+    }
+    _DNS1123_LABEL_RE = re.compile(
+        r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    )
+    _SYSTEM_FORCED_PLAN_SOURCES = {
+        "mandatory_live_observability",
+        "observability_first_round_gate",
+        "structured_plan_fallback",
+    }
+    _STRUCTURED_PLAN_TERMINAL_REASON = (
+        "结构化证据计划为空且没有已确认的 Pod 目标，未执行工具"
+    )
 
     def __init__(
         self,
@@ -204,6 +224,8 @@ class EvidenceCollectorNode(WorkflowNode):
             }
             self._plan_match_adjudication_enabled = bool(getattr(self, "plan_match_adjudicator", None))
             self._logged_evidence_user_prompt = False
+            self._structured_plan_terminal_empty = False
+            self._structured_plan_failure_reason = ""
 
             # 1. 调用 LLM 规划证据采集计划
             evidence_plan, thinking_events, llm_result_text = self._plan_evidence_with_llm(
@@ -219,7 +241,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 evidence_plan=evidence_plan,
                 thinking_events=thinking_events,
             )
-            if retry_reason:
+            if retry_reason and not self._structured_plan_terminal_empty:
                 retry_existing_plan = (
                     evidence_plan
                     if self._plan_exists_without_tool_results(retry_reason)
@@ -367,6 +389,11 @@ class EvidenceCollectorNode(WorkflowNode):
                     missing_reasons.append(f"{e.id}({e.description}): 已规划但工具执行失败或无匹配结果")
                 else:
                     missing_reasons.append(f"{e.id}({e.description}): 未采集")
+            if self._structured_plan_terminal_empty:
+                missing_reasons.append(
+                    self._structured_plan_failure_reason
+                    or self._STRUCTURED_PLAN_TERMINAL_REASON
+                )
 
             collection_output = self._build_evidence_collection_output(
                 evidence_plan=evidence_plan,
@@ -423,11 +450,19 @@ class EvidenceCollectorNode(WorkflowNode):
                 source_coverage=source_coverage,
                 detail_retrieval=detail_retrieval,
                 unresolved_questions=unresolved_questions,
+                plan_status=(
+                    "terminal_empty"
+                    if self._structured_plan_terminal_empty
+                    else "ready"
+                ),
+                plan_failure_reason=self._structured_plan_failure_reason,
             )
 
             new_state.update({
                 "evidence_items": combined_evidence_items,
-                "evidence_analysis": collection_output.model_dump_json(),
+                "evidence_analysis": self._publish_evidence_analysis(
+                    collection_output
+                ),
                 "evidence_completeness": (
                     diagnostic_evidence_stats["diagnostic_sufficiency"]
                     if diagnostic_evidence_stats["diagnostic_evidence_total"]
@@ -481,14 +516,27 @@ class EvidenceCollectorNode(WorkflowNode):
         try:
             parsed = json.loads(layer_analysis) if layer_analysis else {}
             if isinstance(parsed, dict):
-                return {
+                handoff = {
                     "layer": parsed.get("layer"),
                     "confidence": parsed.get("confidence"),
                     "primary_problem": parsed.get("reasoning", ""),
-                    "active_entities": parsed.get("key_entities", []),
+                    "active_entities": (
+                        parsed.get("active_entities")
+                        or parsed.get("key_entities", [])
+                    ),
                     "possible_scenarios": parsed.get("possible_scenarios", []),
                     "must_verify": ["基于真实 tool_result 重新验证上游定位"],
                 }
+                for field in (
+                    "primary_pod",
+                    "primary_entities",
+                    "abnormal_pods",
+                    "issue_groups",
+                    "abnormal_groups",
+                ):
+                    if field in parsed:
+                        handoff[field] = parsed.get(field)
+                return handoff
         except (json.JSONDecodeError, TypeError):
             pass
         return {}
@@ -544,6 +592,8 @@ class EvidenceCollectorNode(WorkflowNode):
         source_coverage: Optional[Dict[str, Any]] = None,
         detail_retrieval: Optional[Dict[str, Any]] = None,
         unresolved_questions: Optional[List[str]] = None,
+        plan_status: str = "ready",
+        plan_failure_reason: str = "",
     ) -> EvidenceCollectionOutput:
         is_first_round_gate = any(
             isinstance(item, dict)
@@ -566,6 +616,8 @@ class EvidenceCollectorNode(WorkflowNode):
             "tool_results": [r.get("summary", "") for r in tool_results],
             "tool_data": tool_data,
             "llm_analysis": llm_result_text[:3000] if llm_result_text else "",
+            "plan_status": plan_status,
+            "plan_failure_reason": plan_failure_reason,
             "collection_summary": (
                 f"{observability_summary}；"
                 f"去重后证据计划 {plan_total} 项，实际采集 {plan_collected} 项，"
@@ -632,6 +684,33 @@ class EvidenceCollectorNode(WorkflowNode):
             "missing_reasons": missing_reasons,
             "early_stop": early_stop,
         })
+
+    def _publish_evidence_analysis(
+        self,
+        output: EvidenceCollectionOutput,
+    ) -> str:
+        full_payload = output.model_dump(mode="json")
+        run_id = str(getattr(self, "current_run_id", "") or "").strip()
+        if run_id:
+            try:
+                ContextArchive(run_id=run_id).write_json(
+                    "node_outputs/evidence.full.json",
+                    full_payload,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "⚠️ [evidence] 写入完整 Evidence 审计归档失败: %s",
+                    exc,
+                )
+
+        handoff_payload = dict(full_payload)
+        handoff_payload.pop("llm_analysis", None)
+        return json.dumps(
+            handoff_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
 
     @staticmethod
     def _build_evidence_conflicts(
@@ -877,11 +956,6 @@ class EvidenceCollectorNode(WorkflowNode):
                     existing_plan,
                     handoff_for_existing,
                 )
-                if self._is_observability_first_round_gate_enabled():
-                    evidence_plan = self._ensure_autonomous_observability_gate_plan(
-                        evidence_plan,
-                        handoff_for_existing,
-                    )
                 if not evidence_plan:
                     logger.warning("⚠️ [evidence] 既有 evidence_plan 为空，拒绝执行自由文本采证")
                     return [], [], ""
@@ -907,62 +981,21 @@ class EvidenceCollectorNode(WorkflowNode):
                 evidence_plan,
                 handoff_for_plan,
             )
-            if self._is_observability_first_round_gate_enabled():
-                missing_gate_items = (
-                    self._missing_autonomous_observability_gate_items(
-                        evidence_plan,
-                        handoff_for_plan,
-                    )
+            if (
+                not evidence_plan
+                and self._is_autonomous_observability_enabled()
+            ):
+                evidence_plan = self._build_structured_plan_fallback(
+                    handoff_for_plan
                 )
-                if missing_gate_items:
-                    repair_message = self._build_autonomous_plan_repair_message(
-                        user_message,
-                        evidence_plan,
-                        missing_gate_items,
-                    )
-                    repaired_plan, repaired_raw = self._generate_structured_evidence_plan(
-                        system_prompt=system_prompt,
-                        user_message=repair_message,
-                        layer_str=layer_str,
-                    )
-                    repaired_plan = self._prepare_evidence_plan(
-                        repaired_plan,
-                        handoff_for_plan,
-                    )
-                    if repaired_plan:
-                        evidence_plan = repaired_plan
-                        plan_raw = repaired_raw
-                evidence_plan = self._ensure_autonomous_observability_gate_plan(
-                    evidence_plan,
-                    handoff_for_plan,
-                )
-            elif self._is_autonomous_observability_enabled():
-                missing_targets = self._missing_autonomous_observability_targets(
-                    evidence_plan,
-                    handoff_for_plan,
-                )
-                if missing_targets:
-                    repair_message = self._build_autonomous_plan_repair_message(
-                        user_message,
-                        evidence_plan,
-                        [
-                            (namespace, pod, "")
-                            for namespace, pod in missing_targets
-                        ],
-                    )
-                    repaired_plan, repaired_raw = self._generate_structured_evidence_plan(
-                        system_prompt=system_prompt,
-                        user_message=repair_message,
-                        layer_str=layer_str,
-                    )
-                    repaired_plan = self._prepare_evidence_plan(
-                        repaired_plan,
-                        handoff_for_plan,
-                    )
-                    if repaired_plan:
-                        evidence_plan = repaired_plan
-                        plan_raw = repaired_raw
             if not evidence_plan:
+                if not self._collect_confirmed_handoff_pod_targets(
+                    handoff_for_plan
+                ):
+                    self._structured_plan_terminal_empty = True
+                    self._structured_plan_failure_reason = (
+                        self._STRUCTURED_PLAN_TERMINAL_REASON
+                    )
                 logger.warning("LLM 未返回有效 evidence_plan Pydantic 结构，拒绝进入工具执行")
                 return [], [], plan_raw
 
@@ -1002,14 +1035,24 @@ class EvidenceCollectorNode(WorkflowNode):
         )
         llm_start = time.time()
         try:
-            structured, raw = ai_call.call_structured(
-                system_prompt=plan_prompt,
-                question=user_message,
-                schema=EvidencePlanOutput,
-                node_id="evidence_plan",
-                run_id=getattr(self, "current_run_id", ""),
-                max_tokens=2048,
-            )
+            try:
+                structured, raw = ai_call.call_structured(
+                    system_prompt=plan_prompt,
+                    question=user_message,
+                    schema=EvidencePlanOutput,
+                    node_id="evidence_plan",
+                    run_id=getattr(self, "current_run_id", ""),
+                    max_tokens=2048,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "⚠️ [evidence] Pydantic evidence_plan 生成失败，使用统一回退: %s",
+                    exc,
+                )
+                return [], json.dumps({
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                }, ensure_ascii=False)
         finally:
             if self.metrics:
                 self.metrics.record_llm_call(
@@ -1021,6 +1064,44 @@ class EvidenceCollectorNode(WorkflowNode):
         output = structured.model_dump()
         output.setdefault("layer", layer_str)
         return [item.model_dump() for item in structured.evidence_plan], raw
+
+    @classmethod
+    def _build_structured_plan_fallback(
+        cls,
+        layer_handoff: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        targets = cls._collect_confirmed_handoff_pod_targets(
+            layer_handoff or {}
+        )
+        if not targets:
+            return []
+
+        fallback_plan = []
+        for index, (namespace, pod) in enumerate(targets, start=1):
+            fallback_plan.append({
+                "id": f"structured-plan-fallback-{index}",
+                "description": "确认目标 Pod 当前生命周期状态和事件",
+                "level": "critical",
+                "tool": "kubectl_describe",
+                "command": (
+                    f"kubectl describe pod {shlex.quote(pod)} "
+                    f"-n {shlex.quote(namespace)}"
+                ),
+                "tool_args": {
+                    "kind": "pod",
+                    "namespace": namespace,
+                    "name": pod,
+                },
+                "purpose": "确认目标 Pod 的当前状态、容器终态和近期事件",
+                "evidence_type": "pod_lifecycle",
+                "target_scope": f"{namespace}/{pod}",
+                "acceptable_tools": ["kubectl_describe"],
+                "source": "structured_plan_fallback",
+            })
+        return cls._normalize_evidence_plan(
+            fallback_plan,
+            layer_handoff=layer_handoff,
+        )
 
     def _execute_existing_evidence_plan(
         self,
@@ -1763,86 +1844,6 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             not in allowed_tools
         }
 
-    @classmethod
-    def _missing_autonomous_observability_targets(
-        cls,
-        evidence_plan: List[Dict[str, Any]],
-        layer_handoff: Optional[Dict[str, Any]],
-    ) -> List[tuple[str, str]]:
-        handoff_targets = [
-            (namespace.lower(), pod.lower())
-            for namespace, pod in cls._collect_handoff_pod_targets(
-                layer_handoff or {}
-            )
-        ]
-        planned_targets = {
-            target
-            for item in (evidence_plan or [])
-            if isinstance(item, dict)
-            and cls._normalize_plan_text(item.get("tool"))
-            in cls._OBSERVABILITY_QUERY_TOOLS
-            if (target := cls._extract_plan_pod_target(item))
-        }
-        return [
-            target
-            for target in dict.fromkeys(handoff_targets)
-            if target not in planned_targets
-        ]
-
-    @classmethod
-    def _missing_autonomous_observability_gate_items(
-        cls,
-        evidence_plan: List[Dict[str, Any]],
-        layer_handoff: Optional[Dict[str, Any]],
-    ) -> List[tuple[str, str, str]]:
-        targets = [
-            (namespace.lower(), pod.lower())
-            for namespace, pod in cls._collect_handoff_pod_targets(
-                layer_handoff or {}
-            )
-        ]
-        planned = set(cls._autonomous_observability_gate_items(evidence_plan))
-        return [
-            (namespace, pod, tool_name)
-            for namespace, pod in dict.fromkeys(targets)
-            for tool_name in cls._OBSERVABILITY_QUERY_ORDER
-            if (namespace, pod, tool_name) not in planned
-        ]
-
-    @staticmethod
-    def _build_autonomous_plan_repair_message(
-        user_message: str,
-        evidence_plan: List[Dict[str, Any]],
-        missing_gate_items: List[tuple[str, str, str]],
-    ) -> str:
-        missing_text = ", ".join(
-            (
-                f"{namespace}/{pod}:{tool_name}"
-                if tool_name
-                else f"{namespace}/{pod}"
-            )
-            for namespace, pod, tool_name in missing_gate_items
-        )
-        current_plan = json.dumps(
-            evidence_plan,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-        return (
-            f"{user_message.rstrip()}\n\n"
-            "# evidence_plan 首轮四维门控校验失败\n"
-            f"- 缺少的异常 Pod/工具组合：{missing_text}。\n"
-            "- 重新输出完整 EvidencePlanOutput；保留仍然有效的 Kubernetes 计划，"
-            "并补齐上述 Metrics、Logging、Tracing、Topology 首轮查询。\n"
-            "- 每个缺失项的查询参数、purpose、指标、关键词和链路过滤条件仍由你根据"
-            "Pod 生命周期和当前假设自主选择；不要按故障类型使用固定工具链。\n"
-            "- empty、absent、weak 或 error 都是允许的真实结果边界，不能因为预计无数据"
-            "而省略首轮工具调用。\n"
-            "- 这是唯一一次计划修复，不要输出自然语言说明。\n"
-            f"# 首轮 evidence_plan\n{current_plan}\n"
-        )
-
     def _ensure_autonomous_observability_gate_plan(
         self,
         evidence_plan: List[Dict[str, Any]],
@@ -1855,7 +1856,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         ]
         targets = [
             (namespace.lower(), pod.lower())
-            for namespace, pod in self._collect_handoff_pod_targets(
+            for namespace, pod in self._collect_confirmed_handoff_pod_targets(
                 layer_handoff or {}
             )
         ]
@@ -1926,7 +1927,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             if index not in selected_indexes
         ]
         return self._normalize_evidence_plan(
-            [*gate_items, *remaining],
+            [*remaining, *gate_items],
             layer_handoff=layer_handoff,
         )
 
@@ -2153,7 +2154,10 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         observability_mode: str = "legacy",
     ) -> str:
         del question
-        targets = cls._collect_handoff_pod_targets(handoff)
+        autonomous_mode = (
+            str(observability_mode or "").strip().lower() == "autonomous"
+        )
+        targets = cls._collect_confirmed_handoff_pod_targets(handoff)
         if not targets:
             return ""
         rendered_targets = ", ".join(
@@ -2162,7 +2166,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         )
         if len(targets) > 8:
             rendered_targets += f" 等 {len(targets)} 个 Pod"
-        if str(observability_mode or "").strip().lower() == "autonomous":
+        if autonomous_mode:
             return (
                 "# 自主可观测性组合查询\n"
                 f"- 上游已确认的异常 Pod 候选：{rendered_targets}。\n"
@@ -2199,18 +2203,94 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             "- 上下文使用率达到 80% 后停止新增采集，明确列出未采集 Pod，不得把它们写成已验证结论。"
         )
 
-    @staticmethod
-    def _collect_handoff_pod_targets(
+    @classmethod
+    def _validated_pod_target(
+        cls,
+        namespace: Any,
+        pod: Any,
+    ) -> Optional[tuple[str, str]]:
+        namespace_text = str(namespace or "")
+        pod_text = str(pod or "")
+        if (
+            not namespace_text
+            or len(namespace_text) > 63
+            or not cls._DNS1123_LABEL_RE.fullmatch(namespace_text)
+            or not pod_text
+            or len(pod_text) > 253
+        ):
+            return None
+        segments = pod_text.split(".")
+        if not segments or any(
+            len(segment) > 63
+            or not cls._DNS1123_LABEL_RE.fullmatch(segment)
+            for segment in segments
+        ):
+            return None
+        return namespace_text, pod_text
+
+    @classmethod
+    def _collect_confirmed_handoff_pod_targets(
+        cls,
         handoff: Dict[str, Any],
     ) -> List[tuple[str, str]]:
         confirmed_targets: List[tuple[str, str]] = []
+
+        def add_target(entity: Dict[str, Any]) -> None:
+            target = cls._validated_pod_target(
+                entity.get("namespace"),
+                entity.get("name") or entity.get("value"),
+            )
+            if target:
+                confirmed_targets.append(target)
+
+        primary_pod = handoff.get("primary_pod")
+        if isinstance(primary_pod, dict):
+            add_target(primary_pod)
+        for entity in handoff.get("primary_entities") or []:
+            if not isinstance(entity, dict):
+                continue
+            kind = entity.get("kind") or entity.get("type")
+            if str(kind or "").strip().lower() == "pod":
+                add_target(entity)
+        for group_key in ("issue_groups", "abnormal_groups"):
+            for group in handoff.get(group_key) or []:
+                if not isinstance(group, dict):
+                    continue
+                for entity in (
+                    group.get("entities")
+                    or group.get("primary_entities")
+                    or []
+                ):
+                    if not isinstance(entity, dict):
+                        continue
+                    kind = entity.get("kind") or entity.get("type")
+                    if str(kind or "").strip().lower() == "pod":
+                        add_target(entity)
+        for entity in handoff.get("abnormal_pods") or []:
+            if not isinstance(entity, dict):
+                continue
+            kind = entity.get("kind") or entity.get("type") or "pod"
+            if str(kind).strip().lower() == "pod":
+                add_target(entity)
+        return list(dict.fromkeys(confirmed_targets))
+
+    @classmethod
+    def _collect_handoff_pod_targets(
+        cls,
+        handoff: Dict[str, Any],
+    ) -> List[tuple[str, str]]:
+        confirmed_targets = cls._collect_confirmed_handoff_pod_targets(
+            handoff
+        )
         fallback_targets: List[tuple[str, str]] = []
 
         def add_target(entity: Dict[str, Any], destination: List[tuple[str, str]]) -> None:
-            namespace = str(entity.get("namespace") or "").strip()
-            name = str(entity.get("name") or entity.get("value") or "").strip()
-            if namespace and name:
-                destination.append((namespace, name))
+            target = cls._validated_pod_target(
+                entity.get("namespace"),
+                entity.get("name") or entity.get("value"),
+            )
+            if target:
+                destination.append(target)
 
         for entity in handoff.get("active_entities") or []:
             if not isinstance(entity, dict):
@@ -2218,25 +2298,6 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             if str(entity.get("type") or "").strip().lower() != "pod":
                 continue
             add_target(entity, fallback_targets)
-        for group_key in ("issue_groups", "abnormal_groups"):
-            groups = handoff.get(group_key) or []
-            for group in groups:
-                if not isinstance(group, dict):
-                    continue
-                for entity in group.get("entities") or []:
-                    if not isinstance(entity, dict):
-                        continue
-                    kind = entity.get("kind") or entity.get("type")
-                    if str(kind or "").strip().lower() != "pod":
-                        continue
-                    add_target(entity, confirmed_targets)
-        for entity in handoff.get("abnormal_pods") or []:
-            if not isinstance(entity, dict):
-                continue
-            kind = entity.get("kind") or entity.get("type") or "pod"
-            if str(kind).strip().lower() != "pod":
-                continue
-            add_target(entity, confirmed_targets)
         if confirmed_targets:
             confirmed_set = set(confirmed_targets)
             targets = [
@@ -2322,7 +2383,9 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         if "collect_aiops_case" not in tool_names:
             return plan
 
-        targets = self._collect_handoff_pod_targets(layer_handoff or {})
+        targets = self._collect_confirmed_handoff_pod_targets(
+            layer_handoff or {}
+        )
         if not targets:
             return plan
         normalized_targets = {
@@ -2683,7 +2746,9 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         This keeps dynamic planning but removes repeated variants for the same
         evidence dimension, e.g. curl/telnet/nc against the same registry.
         """
-        handoff_targets = cls._collect_handoff_pod_targets(layer_handoff or {})
+        handoff_targets = cls._collect_confirmed_handoff_pod_targets(
+            layer_handoff or {}
+        )
         prepared = [
             cls._bind_handoff_pod_target(
                 cls._normalize_plan_tool_args(item),
@@ -2703,9 +2768,13 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         normalized: List[Dict[str, Any]] = []
         seen_signatures: set[tuple[str, str, str]] = set()
         max_items = 10
+        regular_items = 0
 
         for item in prepared:
-            if cls._is_redundant_with_coarse_case(
+            is_system_forced = (
+                item.get("source") in cls._SYSTEM_FORCED_PLAN_SOURCES
+            )
+            if not is_system_forced and cls._is_redundant_with_coarse_case(
                 item,
                 coarse_targets=coarse_targets,
                 has_coarse_case=has_coarse_case,
@@ -2727,10 +2796,11 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 )
                 continue
             seen_signatures.add(signature)
-            is_mandatory = item.get("source") == "mandatory_live_observability"
-            if len(normalized) >= max_items and not is_mandatory:
-                logger.info("✂️ [evidence] evidence_plan 超过 %d 项，已截断", max_items)
-                continue
+            if not is_system_forced:
+                if regular_items >= max_items:
+                    logger.info("✂️ [evidence] evidence_plan 超过 %d 项，已截断", max_items)
+                    continue
+                regular_items += 1
             normalized.append(item)
 
         if layer_handoff:
@@ -3567,29 +3637,19 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             tool_name = str(
                 event.get("tool_name") or ""
             ).strip().lower()
-            if tool_name in cls._OBSERVABILITY_QUERY_TOOLS:
-                args = (
-                    event.get("tool_args")
-                    if isinstance(event.get("tool_args"), dict)
-                    else {}
-                )
-                purpose = str(
-                    structured.get("purpose")
-                    or args.get("purpose")
-                    or ""
-                ).strip()
-                if (
-                    not purpose
-                    or not is_observability_event_semantic_success(
-                        event
-                    )
-                ):
-                    continue
+            if (
+                tool_name
+                not in cls._KUBERNETES_LIFECYCLE_AUTHORITY_TOOLS
+            ):
+                continue
+            requested_scope = cls._exact_pod_identity_request(event)
+            if not requested_scope:
+                continue
             scope = cls._extract_tool_event_pod_target(
                 event,
                 require_consistent=True,
             )
-            if not scope:
+            if not scope or scope != requested_scope:
                 continue
             observed_uids: set[str] = set()
             for candidate, name_keys in (
@@ -3633,6 +3693,53 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         }
 
     @classmethod
+    def _exact_pod_identity_request(
+        cls,
+        event: Dict[str, Any],
+    ) -> Optional[tuple[str, str]]:
+        args = (
+            event.get("tool_args")
+            if isinstance(event.get("tool_args"), dict)
+            else {}
+        )
+        kind = cls._normalize_resource_kind(
+            args.get("kind")
+            or args.get("resource_kind")
+            or args.get("resource_type")
+            or args.get("entity_type")
+        )
+        if kind != "pod":
+            return None
+        return cls._extract_plan_pod_target({
+            "tool": event.get("tool_name") or "",
+            "tool_args": args,
+        })
+
+    @classmethod
+    def _project_authority_pod_entity(
+        cls,
+        *,
+        raw_entity: Any,
+        event_scope: Optional[tuple[str, str]],
+        trusted_pod_uid: Optional[str],
+    ) -> Dict[str, Any]:
+        if not isinstance(raw_entity, dict) or not event_scope:
+            return {}
+        kind = cls._normalize_resource_kind(
+            raw_entity.get("kind") or "pod"
+        )
+        if kind != "pod":
+            return {}
+        projected = {
+            "kind": "Pod",
+            "namespace": event_scope[0],
+            "pod": event_scope[1],
+        }
+        if trusted_pod_uid:
+            projected["pod_uid"] = trusted_pod_uid
+        return projected
+
+    @classmethod
     def _with_trusted_pod_uid(
         cls,
         event: Dict[str, Any],
@@ -3666,6 +3773,18 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     "",
                 ),
             )
+            if (
+                key == "entity"
+                and candidate_scope == ("", "")
+                and str(candidate.get("kind") or "Pod").strip().lower()
+                in {"pod", "pods"}
+            ):
+                candidate = dict(candidate)
+                candidate["namespace"] = scope[0]
+                candidate["pod"] = scope[1]
+                candidate[uid_key] = uid
+                enriched[key] = candidate
+                continue
             if (
                 candidate_scope == scope
                 and not str(
@@ -5958,6 +6077,15 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     if isinstance(ev.get("structured"), dict)
                     else {}
                 )
+                event_scope = self._extract_tool_event_pod_target(
+                    ev,
+                    require_consistent=True,
+                )
+                trusted_pod_uid = (
+                    trusted_uid_index.get(event_scope)
+                    if event_scope
+                    else None
+                )
                 structured = self._with_trusted_pod_uid(
                     ev,
                     raw_structured,
@@ -5967,21 +6095,35 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     normalized_tool
                     in self._OBSERVABILITY_QUERY_TOOLS
                 )
+                is_kubernetes_lifecycle = (
+                    normalized_tool
+                    in self._KUBERNETES_LIFECYCLE_AUTHORITY_TOOLS
+                )
                 query_semantic_success = (
                     is_observability_event_semantic_success(ev)
                     if is_observability_query
                     else None
                 )
-                fact_ledger = (
-                    normalize_case_fact_ledger(structured)
+                native_ledger_input = (
+                    deepcopy(raw_structured.get("fact_ledger"))
                     if (
-                        not is_observability_query
-                        or query_semantic_success
+                        is_observability_query
+                        and query_semantic_success
+                        and isinstance(
+                            raw_structured.get("fact_ledger"),
+                            dict,
+                        )
                     )
                     else None
                 )
+                fact_ledger = None
+                if not is_observability_query:
+                    fact_ledger = normalize_case_fact_ledger(
+                        structured
+                    )
                 if (
-                    fact_ledger is None
+                    native_ledger_input is None
+                    and fact_ledger is None
                     and is_observability_query
                     and query_semantic_success
                 ):
@@ -6018,7 +6160,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     fact_ledger = build_kubernetes_lifecycle_fact_ledger(
                         lifecycle_structured
                     )
-                if (result_text or fact_ledger is not None) and status == "success":
+                ledger_input = (
+                    native_ledger_input
+                    if native_ledger_input is not None
+                    else fact_ledger
+                )
+                if (result_text or ledger_input is not None) and status == "success":
                     item = {
                         "tool": tool_name,
                         "data": result_text,
@@ -6033,31 +6180,144 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                         "structured_ref": ev.get("structured_ref"),
                         "summary_ref": ev.get("summary_ref"),
                     }
-                    if fact_ledger is not None:
-                        item["fact_ledger"] = fact_ledger.model_dump(
-                            mode="json",
-                            exclude_none=True,
+                    provider_is_canonical = False
+                    if ledger_input is not None:
+                        semantic_success = (
+                            query_semantic_success
+                            if is_observability_query
+                            else ev.get("semantic_success", True)
+                            is not False
                         )
-                    agent_context = self._build_aiops_agent_context(
-                        tool_name=tool_name,
-                        structured=structured,
-                    )
-                    if agent_context:
-                        item["agent_context"] = agent_context
-                    agent_facts = (
-                        self._build_aiops_agent_facts(
+                        if is_kubernetes_lifecycle and event_scope:
+                            authority_entity = {
+                                "kind": "Pod",
+                                "namespace": event_scope[0],
+                                "pod": event_scope[1],
+                            }
+                            if trusted_pod_uid:
+                                authority_entity["pod_uid"] = (
+                                    trusted_pod_uid
+                                )
+                            authority_context = {
+                                "semantic_success": semantic_success,
+                                "status": "kubernetes_observed",
+                                "coverage": "present",
+                                "source_system": "kubernetes",
+                                "entity": authority_entity,
+                                "evaluator_field_present": (
+                                    contains_forbidden_fact_fields(
+                                        raw_structured
+                                    )
+                                ),
+                            }
+                        else:
+                            raw_entity = raw_structured.get("entity")
+                            authority_context = {
+                                "semantic_success": semantic_success,
+                                "status": structured.get("status"),
+                                "coverage": structured.get("coverage"),
+                                "source_system": structured.get(
+                                    "source_system"
+                                ),
+                                "entity": self._project_authority_pod_entity(
+                                    raw_entity=raw_entity,
+                                    event_scope=event_scope,
+                                    trusted_pod_uid=trusted_pod_uid,
+                                ),
+                                "evaluator_field_present": (
+                                    contains_forbidden_fact_fields(
+                                        raw_entity
+                                    )
+                                    if native_ledger_input is not None
+                                    else contains_forbidden_fact_fields(
+                                        raw_structured
+                                    )
+                                ),
+                            }
+                        if trusted_pod_uid:
+                            authority_context["trusted_pod_uid"] = (
+                                trusted_pod_uid
+                            )
+                        item["authority_context"] = authority_context
+                        authority = evaluate_report_authority(
+                            ledger_input=ledger_input,
+                            tool_item=item,
+                        )
+
+                        provider_ledger = (
+                            normalize_fact_ledger(ledger_input)
+                            if (
+                                native_ledger_input is None
+                                or authority.authoritative
+                            )
+                            else None
+                        )
+                        if (
+                            provider_ledger is not None
+                            and provider_ledger.source == "mcp_canonical"
+                        ):
+                            compacted_payload = json.loads(
+                                compact_fact_ledgers_json(
+                                    [provider_ledger],
+                                    max_chars=10000,
+                                )
+                            )
+                            compacted_ledgers = compacted_payload.get(
+                                "fact_ledgers"
+                            )
+                            if (
+                                isinstance(compacted_ledgers, list)
+                                and compacted_ledgers
+                            ):
+                                compacted_ledger = normalize_fact_ledger(
+                                    compacted_ledgers[0]
+                                )
+                                if compacted_ledger is not None:
+                                    provider_ledger = compacted_ledger
+                        if provider_ledger is not None:
+                            item["fact_ledger"] = provider_ledger.model_dump(
+                                mode="json",
+                                exclude_none=True,
+                            )
+                            provider_is_canonical = (
+                                provider_ledger.source == "mcp_canonical"
+                            )
+                        else:
+                            item["fact_ledger"] = deepcopy(
+                                native_ledger_input
+                            )
+                        provider_authority = evaluate_report_authority(
+                            ledger_input=item["fact_ledger"],
+                            tool_item=item,
+                        )
+                        attach_internal_report_authority(
+                            item,
+                            ledger_input=item["fact_ledger"],
+                            decision=provider_authority,
+                        )
+                    if not provider_is_canonical:
+                        agent_context = self._build_aiops_agent_context(
                             tool_name=tool_name,
                             structured=structured,
                         )
-                        if (
-                            not is_observability_query
-                            or query_semantic_success
+                        if agent_context:
+                            item["agent_context"] = agent_context
+                        agent_facts = (
+                            self._build_aiops_agent_facts(
+                                tool_name=tool_name,
+                                structured=structured,
+                            )
+                            if (
+                                not is_observability_query
+                                or query_semantic_success
+                            )
+                            else ""
                         )
-                        else ""
-                    )
-                    if agent_facts:
-                        item["agent_facts"] = agent_facts
-                    if fact_ledger is not None:
+                        if agent_facts:
+                            item["agent_facts"] = agent_facts
+                    else:
+                        item.pop("data", None)
+                    if ledger_input is not None:
                         case_tool_data.append(item)
                     else:
                         supplementary_tool_data.append(item)

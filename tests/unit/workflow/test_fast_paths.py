@@ -24,7 +24,11 @@ from app.core.prompts import (
     get_workflow_prompt,
 )
 from app.core.skills.models import Layer
-from app.core.workflow.fact_contract import _canonical_fact_id
+from app.core.workflow.fact_contract import (
+    _canonical_fact_id,
+    attach_internal_report_authority,
+    evaluate_report_authority,
+)
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
@@ -1999,6 +2003,36 @@ TOPOLOGY_EXACT_EDGES count=3
     assert "目标 Pod `api-pod` 由 Deployment `api` 管理" in result
     assert "责任边界落在 Deployment `api` 管理的工作负载" in result
     assert "## 根因分析\n保持原文。" in result
+
+
+def test_autonomous_report_removes_inferred_topology_when_not_executed():
+    report = """## 📊 可观测性数据
+
+### 拓扑关系（实体与边）
+- `Pod --owned_by--> Deployment (推测)`：根据标签推测。
+- `Pod --scheduled_on--> Node`：node2。
+
+---
+
+## 🎯 根因分析
+root cause
+"""
+    structured_context = """
+observability_collection_mode: autonomous_query
+OBSERVABILITY_EXECUTION metrics=present logging=present tracing=present topology=not_executed
+OBSERVABILITY_SOURCE dimension=logging tool=query_pod_logs source_system=elasticsearch coverage=present
+OBSERVABILITY_SOURCE dimension=tracing tool=query_pod_tracing source_system=deepflow+tempo coverage=present
+"""
+
+    result = ConclusionFormatterNode._enforce_exact_topology_section(
+        report,
+        structured_context,
+    )
+
+    assert "Pod --owned_by--> Deployment (推测)" not in result
+    assert "Pod --scheduled_on--> Node" not in result
+    assert "本轮未执行 `query_pod_topology`" in result
+    assert "不对 Deployment、Service 或调用关系作推断" in result
 
 
 def test_conclusion_corrects_below_limit_metric_overclaims():
@@ -3996,9 +4030,20 @@ def test_deployed_partial_topology_reaches_ledger_rca_and_conclusion_context():
                 "dimension": "topology",
                 "name": "topology.relationship",
                 "value": {
+                    "relation": "owned_by",
                     "relationship": "Pod --owned_by--> ReplicaSet",
-                    "source": "api-abc",
-                    "target": "api-rs",
+                    "source": {
+                        "kind": "Pod",
+                        "namespace": "demo",
+                        "name": "api-abc",
+                        "uid": "uid-api",
+                    },
+                    "target": {
+                        "kind": "ReplicaSet",
+                        "namespace": "demo",
+                        "name": "api-rs",
+                        "uid": "uid-rs",
+                    },
                 },
                 "directness": "direct",
             }
@@ -4022,9 +4067,20 @@ def test_deployed_partial_topology_reaches_ledger_rca_and_conclusion_context():
         ],
         "edges": [
             {
+                "relation": "owned_by",
                 "relationship": "Pod --owned_by--> ReplicaSet",
-                "source": "api-abc",
-                "target": "api-rs",
+                "source": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "name": "api-abc",
+                    "uid": "uid-api",
+                },
+                "target": {
+                    "kind": "ReplicaSet",
+                    "namespace": "demo",
+                    "name": "api-rs",
+                    "uid": "uid-rs",
+                },
                 "source_field": "metadata.ownerReferences",
                 "source_system": "kubernetes",
                 "directness": "direct",
@@ -4061,10 +4117,36 @@ def test_deployed_partial_topology_reaches_ledger_rca_and_conclusion_context():
         "structured": structured,
     }
 
-    tool_data = node._extract_tool_data_from_thinking([event])
+    independent_uid_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api-abc",
+        },
+        "structured": {
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api-abc",
+                "uid": "uid-api",
+            }
+        },
+    }
+    tool_data = node._extract_tool_data_from_thinking(
+        [event, independent_uid_event]
+    )
+    query_tool_data = [
+        item
+        for item in tool_data
+        if item.get("tool") == "query_pod_topology"
+    ]
 
-    assert len(tool_data) == 1
-    ledger = tool_data[0]["fact_ledger"]
+    assert len(query_tool_data) == 1
+    ledger = query_tool_data[0]["fact_ledger"]
     records = ledger["records"]
     records_by_attribute = {
         record["attribute"]: record
@@ -4084,9 +4166,24 @@ def test_deployed_partial_topology_reaches_ledger_rca_and_conclusion_context():
     )
     assert len(relationships) == 1
     assert relationships[0]["value"] == {
+        "relation": "owned_by",
         "relationship": "Pod --owned_by--> ReplicaSet",
-        "source": "api-abc",
-        "target": "api-rs",
+        "source": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api-abc",
+            "uid": "uid-api",
+            "source_system": "kubernetes",
+            "entity_id": "k8s.pod:demo/api-abc:uid-api",
+        },
+        "target": {
+            "kind": "ReplicaSet",
+            "namespace": "demo",
+            "name": "api-rs",
+            "uid": "uid-rs",
+            "source_system": "kubernetes",
+            "entity_id": "k8s.replicaset:demo/api-rs:uid-rs",
+        },
         "source_field": "metadata.ownerReferences",
     }
     assert relationships[0]["source_system"] == "kubernetes"
@@ -4100,25 +4197,25 @@ def test_deployed_partial_topology_reaches_ledger_rca_and_conclusion_context():
         "limitations": structured["limitations"],
     }
 
-    canonical_only_tool_data = [
-        {
-            "tool": "query_pod_topology",
-            "fact_ledger": ledger,
-        }
-    ]
     evidence_analysis = json.dumps(
-        {"tool_data": canonical_only_tool_data},
+        {"tool_data": query_tool_data},
         ensure_ascii=False,
     )
     rca_context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
         evidence_analysis,
         max_chars=20000,
     )
-    conclusion_context = (
-        ConclusionFormatterNode._build_structured_diagnosis_context(
-            evidence_analysis,
-            "{}",
-        )
+    fact_report_context = ConclusionFormatterNode._build_fact_report_context(
+        evidence_analysis=evidence_analysis,
+        rca_analysis="{}",
+    )
+    assert fact_report_context is not None
+    conclusion_context = json.dumps(
+        [
+            selected.model_dump(mode="json", exclude_none=True)
+            for selected in fact_report_context[0]
+        ],
+        ensure_ascii=False,
     )
 
     for context in (rca_context, conclusion_context):
@@ -4187,8 +4284,8 @@ def test_deterministic_report_reconciles_present_facts_and_isolates_entity_chain
         record["fact_id"] = _canonical_fact_id(record)
         return record
 
-    entity_a = "k8s.pod:demo/api-a"
-    entity_b = "k8s.pod:demo/api-b"
+    entity_a = "k8s.pod:demo/api-a:uid-a"
+    entity_b = "k8s.pod:demo/api-b:uid-b"
     invented_summary_fragments = [
         "CPU=99.9%",
         "trace_id=trace-invented",
@@ -4261,6 +4358,7 @@ def test_deterministic_report_reconciles_present_facts_and_isolates_entity_chain
                 fact_type="relationship",
                 attribute="topology.relationship",
                 value={
+                    "relation": "owned_by",
                     "relationship": "Pod --owned_by--> ReplicaSet",
                     "source_entity_id": entity_id,
                     "target_entity_id": (
@@ -4311,15 +4409,43 @@ def test_deterministic_report_reconciles_present_facts_and_isolates_entity_chain
         ]
         for entity_id, records in records_by_entity.items()
     }
-    evidence_analysis = json.dumps({
-        "tool_data": [
-            {
-                "tool": "structured_observability_query",
-                "fact_ledger": ledger,
-            }
-            for ledger in ledgers
-        ],
-    }, ensure_ascii=False)
+    authority_tool_data = []
+    for ledger in ledgers:
+        scoped_entity_id = ledger["scope_entity_ids"][0]
+        pod_name = ledger["records"][0]["entity_name"]
+        pod_uid = scoped_entity_id.rsplit(":", 1)[-1]
+        item = {
+            "tool": "query_pod_logs",
+            "semantic_success": True,
+            "authority_context": {
+                "semantic_success": True,
+                "status": "query_succeeded",
+                "coverage": "present",
+                "source_system": "kubernetes",
+                "entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "pod": pod_name,
+                    "pod_uid": pod_uid,
+                },
+                "trusted_pod_uid": pod_uid,
+            },
+            "fact_ledger": ledger,
+        }
+        decision = evaluate_report_authority(
+            ledger_input=ledger,
+            tool_item=item,
+        )
+        attach_internal_report_authority(
+            item,
+            ledger_input=ledger,
+            decision=decision,
+        )
+        authority_tool_data.append(item)
+    evidence_analysis = json.dumps(
+        {"tool_data": authority_tool_data},
+        ensure_ascii=False,
+    )
     rca_analysis = json.dumps({
         "diagnostic_status": "diagnosed",
         "root_cause_summary": "Two independent entity-scoped failures",

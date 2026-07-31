@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -9,8 +10,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
+import app.core.workflow.fact_contract as fact_contract_module
 from app.core.skills.models import Layer
-from app.core.workflow.schemas import RCAOutput
+from app.core.workflow.schemas import EvidenceCollectionOutput, RCAOutput
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
@@ -59,6 +61,477 @@ def _canonical_fact_record(**overrides):
         "fact-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
     )
     return record
+
+
+def _internally_authorized_tool_item(
+    ledger,
+    *,
+    tool=None,
+    status="query_succeeded",
+    coverage="present",
+    source_system=None,
+    **extra,
+):
+    ledger_mapping = (
+        ledger.model_dump(mode="json", exclude_none=True)
+        if hasattr(ledger, "model_dump")
+        else ledger
+    )
+    scope = next(
+        str(value)
+        for value in ledger_mapping.get("scope_entity_ids") or []
+        if str(value).lower().startswith("k8s.pod:")
+    )
+    match = re.fullmatch(
+        r"k8s\.pod:([^/]+)/([^:]+):(.+)",
+        scope,
+        flags=re.IGNORECASE,
+    )
+    assert match is not None
+    namespace, pod, pod_uid = match.groups()
+    records = ledger_mapping.get("records") or []
+    dimension = str((records[0] if records else {}).get("dimension") or "")
+    selected_tool = tool or {
+        "metrics": "execute_pod_promql",
+        "tracing": "query_pod_tracing",
+        "topology": "query_pod_topology",
+    }.get(dimension, "query_pod_logs")
+    item = {
+        **extra,
+        "tool": selected_tool,
+        "semantic_success": True,
+        "fact_ledger": ledger_mapping,
+        "authority_context": {
+            "semantic_success": True,
+            "status": status,
+            "coverage": coverage,
+            "source_system": str(
+                source_system
+                or (records[0] if records else {}).get("source_system")
+                or "test-source"
+            ),
+            "entity": {
+                "kind": "Pod",
+                "namespace": namespace,
+                "pod": pod,
+                "pod_uid": pod_uid,
+            },
+            "trusted_pod_uid": pod_uid,
+        },
+    }
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger_mapping,
+        tool_item=item,
+    )
+    if decision.authoritative:
+        normalized = fact_contract_module.normalize_fact_ledger(
+            ledger_mapping
+        )
+        assert normalized is not None
+        ledger_mapping = normalized.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+        item["fact_ledger"] = ledger_mapping
+        decision = fact_contract_module.evaluate_report_authority(
+            ledger_input=ledger_mapping,
+            tool_item=item,
+        )
+    fact_contract_module.attach_internal_report_authority(
+        item,
+        ledger_input=ledger_mapping,
+        decision=decision,
+    )
+    return item
+
+
+def _internally_authorized_agent_context_item(tool, context):
+    ledger = fact_contract_module._fact_ledger_from_agent_context(context)
+    assert ledger is not None
+    return _internally_authorized_tool_item(
+        ledger,
+        tool=tool,
+        status=context.get("status", "query_succeeded"),
+        coverage=context.get("coverage", "present"),
+        source_system=context.get("source_system"),
+    )
+
+
+def _t017_canonical_stage_fixture():
+    sentinel = "T017_STAGE_SENTINEL_7f3c"
+    record = _canonical_fact_record(
+        value={"message": sentinel},
+        evidence_refs=["logs:t017-stage-sentinel"],
+    )
+    ledger = {
+        "contract_version": "aiops.fact-ledger.v1",
+        "case_id": "case-t017-stage-projection",
+        "scope_entity_ids": [record["entity_id"]],
+        "records": [record],
+        "record_count": 1,
+        "truncated": False,
+        "source": "mcp_canonical",
+        "legacy_contract": False,
+    }
+    structured = {
+        "status": "query_succeeded",
+        "coverage": "present",
+        "source_system": "elasticsearch",
+        "dimension": "logging",
+        "purpose": "capture projection sentinel",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api",
+            "pod_uid": "uid-a",
+        },
+        "facts": [{
+            "ref": "logs:t017-stage-sentinel",
+            "value": {"message": sentinel},
+            "source_system": "elasticsearch",
+            "directness": "direct",
+        }],
+        "fact_ledger": ledger,
+    }
+    duplicated_item = {
+        "tool": "query_pod_logs",
+        "semantic_success": True,
+        "data": json.dumps({"fact_ledger": ledger}, ensure_ascii=False),
+        "agent_facts": f"QUERY_FACT value={sentinel}",
+        "agent_context": json.dumps(structured, ensure_ascii=False),
+        "fact_ledger": ledger,
+        "raw_ref": "/archive/t017-stage.raw",
+        "structured_ref": "/archive/t017-stage.structured.json",
+        "summary_ref": "/archive/t017-stage.summary",
+    }
+    authority_item = next(
+        item
+        for item in EvidenceCollectorNode()._extract_tool_data_from_thinking([
+            {
+                "type": "tool_result",
+                "status": "success",
+                "semantic_success": True,
+                "tool_name": "query_pod_logs",
+                "tool_args": {
+                    "namespace": "demo",
+                    "pod": "api",
+                    "purpose": "capture projection sentinel",
+                },
+                "result": json.dumps({"fact_ledger": ledger}),
+                "structured": structured,
+            },
+            {
+                "type": "tool_result",
+                "status": "success",
+                "semantic_success": True,
+                "tool_name": "kubectl_describe",
+                "tool_args": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                },
+                "structured": {
+                    "primary_entity": {
+                        "kind": "Pod",
+                        "namespace": "demo",
+                        "name": "api",
+                        "uid": "uid-a",
+                    }
+                },
+            },
+        ])
+        if item.get("tool") == "query_pod_logs"
+    )
+    duplicated_item["fact_ledger"] = authority_item["fact_ledger"]
+    duplicated_item["authority_context"] = authority_item["authority_context"]
+    duplicated_item["report_authority"] = authority_item["report_authority"]
+    return sentinel, record, ledger, structured, duplicated_item
+
+
+def test_t017_evidence_provider_item_uses_one_canonical_ledger_projection():
+    sentinel, record, ledger, structured, _ = _t017_canonical_stage_fixture()
+    query_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "query_pod_logs",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "capture projection sentinel",
+        },
+        "result": json.dumps({"fact_ledger": ledger}, ensure_ascii=False),
+        "structured": structured,
+        "raw_ref": "/archive/t017-stage.raw",
+        "structured_ref": "/archive/t017-stage.structured.json",
+        "summary_ref": "/archive/t017-stage.summary",
+    }
+    independent_uid_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "structured": {
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-a",
+            }
+        },
+    }
+    events = [query_event, independent_uid_event]
+    archived_copy = json.loads(json.dumps(events))
+
+    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(events)
+    item = next(
+        value for value in tool_data
+        if value.get("tool") == "query_pod_logs"
+    )
+    rendered = json.dumps(item, ensure_ascii=False)
+
+    assert rendered.count(sentinel) == 1
+    assert rendered.count(record["fact_id"]) == 1
+    assert item["fact_ledger"]["contract_version"] == ledger["contract_version"]
+    assert item["fact_ledger"]["source"] == "mcp_canonical"
+    assert item["fact_ledger"]["scope_entity_ids"] == ledger["scope_entity_ids"]
+    assert item["fact_ledger"]["records"][0]["fact_id"] == record["fact_id"]
+    assert "data" not in item
+    assert "agent_facts" not in item
+    assert "agent_context" not in item
+    assert item["raw_ref"] == "/archive/t017-stage.raw"
+    assert item["structured_ref"] == "/archive/t017-stage.structured.json"
+    assert item["summary_ref"] == "/archive/t017-stage.summary"
+    assert events == archived_copy
+
+
+def test_t017_rca_provider_context_uses_one_canonical_ledger_projection():
+    sentinel, record, _, _, duplicated_item = _t017_canonical_stage_fixture()
+
+    context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+        json.dumps({"tool_data": [duplicated_item]}, ensure_ascii=False),
+        max_chars=12000,
+    )
+
+    assert context.count(sentinel) == 1
+    assert context.count(record["fact_id"]) == 1
+    assert context.count('"contract_version":"aiops.fact-ledger.v1"') == 1
+
+
+def test_t017_conclusion_provider_context_uses_one_canonical_ledger_projection():
+    sentinel, record, _, _, duplicated_item = _t017_canonical_stage_fixture()
+
+    context = ConclusionFormatterNode._build_structured_diagnosis_context(
+        json.dumps({"tool_data": [duplicated_item]}, ensure_ascii=False),
+        "{}",
+    )
+
+    assert "canonical_fact_ledgers:" in context
+    assert context.count(sentinel) == 1
+    assert context.count(record["fact_id"]) == 1
+    assert context.count('"contract_version":"aiops.fact-ledger.v1"') == 1
+
+
+def test_t017_rejected_native_ledger_stays_archive_only_across_provider_stages():
+    sentinel = "T017_REJECTED_LEDGER_SENTINEL_91c2"
+    record = _canonical_fact_record(
+        value={"message": sentinel},
+        evidence_refs=["logs:t017-rejected-sentinel"],
+    )
+    raw_ledger = {
+        "contract_version": "aiops.fact-ledger.v1",
+        "case_id": "case-t017-rejected-provider-projection",
+        "scope_entity_ids": [record["entity_id"]],
+        "records": [record],
+        "record_count": 1,
+        "truncated": False,
+        "source": "attacker_unknown",
+        "legacy_contract": False,
+    }
+    query_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "query_pod_logs",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "capture rejected projection sentinel",
+        },
+        "result": json.dumps({"fact_ledger": raw_ledger}),
+        "raw_ref": "/archive/t017-rejected.raw",
+        "structured_ref": "/archive/t017-rejected.structured.json",
+        "summary_ref": "/archive/t017-rejected.summary",
+        "structured": {
+            "status": "query_succeeded",
+            "coverage": "present",
+            "source_system": "elasticsearch",
+            "dimension": "logging",
+            "purpose": "capture rejected projection sentinel",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-a",
+            },
+            "facts": [{
+                "ref": "logs:t017-rejected-sentinel",
+                "value": {"message": sentinel},
+                "source_system": "elasticsearch",
+                "directness": "direct",
+            }],
+            "fact_ledger": raw_ledger,
+        },
+    }
+    independent_uid_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "structured": {
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-a",
+            }
+        },
+    }
+    events = [query_event, independent_uid_event]
+    archived_copy = json.loads(json.dumps(events))
+
+    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(events)
+    rejected_item = next(
+        item for item in tool_data if item.get("tool") == "query_pod_logs"
+    )
+    evidence_analysis = json.dumps(
+        {"tool_data": tool_data},
+        ensure_ascii=False,
+    )
+    rca_context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+        evidence_analysis,
+        max_chars=12000,
+    )
+    conclusion_context = (
+        ConclusionFormatterNode._build_structured_diagnosis_context(
+            evidence_analysis,
+            "{}",
+        )
+    )
+
+    assert rejected_item["report_authority"]["mode"] == "rejected"
+    assert rejected_item["report_authority"]["authoritative"] is False
+    assert rejected_item["fact_ledger"] == raw_ledger
+    assert sentinel in json.dumps(rejected_item, ensure_ascii=False)
+    assert record["fact_id"] in json.dumps(rejected_item, ensure_ascii=False)
+    for provider_context in (rca_context, conclusion_context):
+        assert sentinel not in provider_context
+        assert record["fact_id"] not in provider_context
+        assert '"source":"mcp_canonical"' not in provider_context
+    assert "canonical_fact_ledgers:" not in conclusion_context
+    assert events == archived_copy
+
+
+@pytest.mark.parametrize(
+    "authority_mutation",
+    ["missing", "non_mapping", "self_attested"],
+)
+def test_t017_provider_rejects_unbound_or_self_attested_authority_metadata(
+    authority_mutation,
+):
+    sentinel, record, ledger, structured, _ = _t017_canonical_stage_fixture()
+    raw_ledger = json.loads(json.dumps(ledger))
+    raw_ledger["case_id"] = "case-t017-unbound-provider-authority"
+    raw_ledger["source"] = "attacker_unknown"
+    raw_structured = json.loads(json.dumps(structured))
+    raw_structured["fact_ledger"] = raw_ledger
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "query_pod_logs",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "reject unbound provider authority",
+            },
+            "result": json.dumps({"fact_ledger": raw_ledger}),
+            "structured": raw_structured,
+            "raw_ref": "/archive/t017-unbound.raw",
+            "structured_ref": "/archive/t017-unbound.structured.json",
+            "summary_ref": "/archive/t017-unbound.summary",
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_describe",
+            "structured": {
+                "primary_entity": {
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                    "uid": "uid-a",
+                }
+            },
+        },
+    ]
+    rejected_item = next(
+        item
+        for item in EvidenceCollectorNode()._extract_tool_data_from_thinking(
+            events
+        )
+        if item.get("tool") == "query_pod_logs"
+    )
+    assert rejected_item["report_authority"]["authoritative"] is False
+
+    mutated_item = json.loads(json.dumps(rejected_item))
+    if authority_mutation == "missing":
+        mutated_item.pop("report_authority")
+    elif authority_mutation == "non_mapping":
+        mutated_item["report_authority"] = "authoritative"
+    else:
+        mutated_item["report_authority"] = {
+            "mode": "canonical",
+            "authoritative": True,
+            "ledger_case_id": raw_ledger["case_id"],
+            "tool_name": "query_pod_logs",
+            "reasons": ["valid_canonical_ledger"],
+            "source": "mcp_canonical",
+            "legacy_contract": False,
+        }
+    provider_input_copy = json.loads(json.dumps(mutated_item))
+    evidence_analysis = json.dumps(
+        {"tool_data": [mutated_item]},
+        ensure_ascii=False,
+    )
+
+    rca_context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+        evidence_analysis,
+        max_chars=12000,
+    )
+    conclusion_context = (
+        ConclusionFormatterNode._build_structured_diagnosis_context(
+            evidence_analysis,
+            "{}",
+        )
+    )
+
+    assert mutated_item["fact_ledger"] == raw_ledger
+    assert sentinel in json.dumps(mutated_item, ensure_ascii=False)
+    assert record["fact_id"] in json.dumps(mutated_item, ensure_ascii=False)
+    for provider_context in (rca_context, conclusion_context):
+        assert sentinel not in provider_context
+        assert record["fact_id"] not in provider_context
+        assert '"source":"mcp_canonical"' not in provider_context
+    assert "canonical_fact_ledgers:" not in conclusion_context
+    assert mutated_item == provider_input_copy
 
 
 def test_layer_execute_archives_full_analysis_and_publishes_handoff(tmp_path, monkeypatch):
@@ -721,9 +1194,8 @@ def test_rca_context_bounds_multi_entity_real_observability_evidence():
             strength="context",
             evidence_refs=[f"coverage:{namespace}/{pod}:tracing"],
         )
-        tool_data.append({
-            "tool": "query_pod_logs",
-            "fact_ledger": {
+        tool_data.append(_internally_authorized_tool_item(
+            {
                 "contract_version": "aiops.fact-ledger.v1",
                 "case_id": f"case-{index}",
                 "scope_entity_ids": [entity_id],
@@ -733,7 +1205,8 @@ def test_rca_context_bounds_multi_entity_real_observability_evidence():
                 "source": "mcp_canonical",
                 "legacy_contract": False,
             },
-        })
+            tool="query_pod_logs",
+        ))
         expected_entities.append(entity_id)
         expected_direct_fact_ids.append(direct["fact_id"])
 
@@ -815,13 +1288,17 @@ def test_rca_supplementary_tool_context_uses_shared_budget():
     node = RootCauseAnalyzerNode()
     evidence_analysis = json.dumps({
         "tool_data": [
-            {
-                    "tool": "query_pod_tracing",
-                    "agent_context": json.dumps({
+            _internally_authorized_agent_context_item(
+                "query_pod_tracing",
+                {
                         "status": "query_succeeded",
                         "source_system": "tempo",
                         "dimension": "tracing",
-                        "entity": {"namespace": "demo", "pod": f"api-{index}"},
+                        "entity": {
+                            "namespace": "demo",
+                            "pod": f"api-{index}",
+                            "pod_uid": f"uid-{index}",
+                        },
                         "purpose": "验证补充 tracing 上下文预算",
                         "coverage": "present",
                         "facts": [
@@ -833,8 +1310,8 @@ def test_rca_supplementary_tool_context_uses_shared_budget():
                             }
                         ],
                         "evidence_refs": [f"trace-{index}"],
-                    }),
-                }
+                    },
+                )
             for index in range(30)
         ]
     })
@@ -858,9 +1335,9 @@ def test_rca_generic_query_ledgers_keep_decisive_facts_across_dimensions():
         "pod_uid": "uid-a",
     }
     tool_data = [
-        {
-            "tool": "execute_pod_promql",
-            "agent_context": json.dumps({
+        _internally_authorized_agent_context_item(
+            "execute_pod_promql",
+            {
                 "status": "query_succeeded",
                 "source_system": "prometheus",
                 "dimension": "metrics",
@@ -878,11 +1355,11 @@ def test_rca_generic_query_ledgers_keep_decisive_facts_across_dimensions():
                     "source_system": "prometheus",
                     "directness": "direct",
                 }],
-            }),
-        },
-        {
-            "tool": "query_pod_logs",
-            "agent_context": json.dumps({
+            },
+        ),
+        _internally_authorized_agent_context_item(
+            "query_pod_logs",
+            {
                 "status": "query_succeeded",
                 "source_system": "elasticsearch",
                 "dimension": "logging",
@@ -899,11 +1376,11 @@ def test_rca_generic_query_ledgers_keep_decisive_facts_across_dimensions():
                     "source_system": "elasticsearch",
                     "directness": "direct",
                 }],
-            }),
-        },
-        {
-            "tool": "query_pod_tracing",
-            "agent_context": json.dumps({
+            },
+        ),
+        _internally_authorized_agent_context_item(
+            "query_pod_tracing",
+            {
                 "status": "query_succeeded",
                 "source_system": "deepflow+tempo",
                 "dimension": "tracing",
@@ -937,8 +1414,8 @@ def test_rca_generic_query_ledgers_keep_decisive_facts_across_dimensions():
                         "directness": "direct",
                     },
                 ],
-            }),
-        },
+            },
+        ),
     ]
 
     context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
@@ -2101,12 +2578,8 @@ def test_a021_autonomous_observability_context_keeps_present_and_emits_sources()
         "TOPOLOGY_ENTITY entity_id=e:deploy kind=Deployment "
         "namespace=demo name=api"
     ) in context
-    assert (
-        "CANONICAL_FACT fact_id="
-        in context
-        and "attribute=container.last_terminated_reason" in context
-        and "tool=kubectl_describe" in context
-    )
+    assert "CANONICAL_FACT fact_id=" not in context
+    assert "attribute=container.last_terminated_reason" not in context
     assert "未提供 api-pod 日志原文" not in context
     assert "未提供 api-other 日志原文" in context
     assert "未提供其资源配置、内存指标或节点内存压力" in context
@@ -2297,12 +2770,8 @@ def test_rca_context_uses_fact_ledgers_without_duplicate_aiops_representations()
             "cases": [{"target": "demo/api", "case_id": "case-facts"}],
         },
         "tool_data": [
-            {
-                "tool": "collect_aiops_case",
-                "data": "DUPLICATE COARSE SUMMARY",
-                "agent_facts": "DUPLICATE AGENT FACTS",
-                "agent_context": '{"dimension_details":{"logs":{"samples":[]}}}',
-                "fact_ledger": {
+            _internally_authorized_tool_item(
+                {
                     "contract_version": "aiops.fact-ledger.v1",
                     "case_id": "case-facts",
                     "scope_entity_ids": [entity_id],
@@ -2312,7 +2781,13 @@ def test_rca_context_uses_fact_ledgers_without_duplicate_aiops_representations()
                     "source": "mcp_canonical",
                     "legacy_contract": False,
                 },
-            },
+                tool="query_pod_logs",
+                data="DUPLICATE COARSE SUMMARY",
+                agent_facts="DUPLICATE AGENT FACTS",
+                agent_context=(
+                    '{"dimension_details":{"logs":{"samples":[]}}}'
+                ),
+            ),
             {
                 "tool": "kubectl_describe",
                 "data": "Name: api\nStatus: Running",
@@ -2332,6 +2807,179 @@ def test_rca_context_uses_fact_ledgers_without_duplicate_aiops_representations()
     assert "dimension_details" not in context
 
 
+def test_evidence_handoff_excludes_llm_analysis_while_full_archive_retains_it(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    node = EvidenceCollectorNode()
+    node.current_run_id = "evidence-authority-boundary"
+    output = EvidenceCollectionOutput.model_validate({
+        "tool_data": [
+            {
+                "tool": "kubectl_describe",
+                "fact_ledger": {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-evidence-authority-boundary",
+                    "scope_entity_ids": ["k8s.pod:demo/api:uid-a"],
+                    "records": [],
+                    "record_count": 0,
+                    "truncated": False,
+                    "source": "robusta_legacy_adapter",
+                    "legacy_contract": True,
+                },
+            }
+        ],
+        "llm_analysis": (
+            "Model-only analysis incorrectly says mib=309012 means 309GB."
+        ),
+        "collection_summary": "Collected source-backed evidence.",
+        "plan_total": 1,
+        "plan_collected": 1,
+        "plan_completeness": 1.0,
+        "environment_evidence_total": 1,
+        "environment_evidence_collected": 1,
+        "environment_evidence_completeness": 1.0,
+    })
+
+    handoff_json = node._publish_evidence_analysis(output)
+    handoff = json.loads(handoff_json)
+    archived = json.loads(
+        (
+            tmp_path
+            / "evidence-authority-boundary"
+            / "node_outputs"
+            / "evidence.full.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert archived["llm_analysis"].endswith("means 309GB.")
+    assert archived["tool_data"] == output.tool_data
+    assert "llm_analysis" not in handoff
+    assert "309GB" not in handoff_json
+    assert handoff["tool_data"] == output.tool_data
+
+
+def test_rca_context_excludes_llm_analysis_when_fact_ledger_exists():
+    node = RootCauseAnalyzerNode()
+    entity_id = "k8s.pod:demo/api:uid-a"
+    fact_record = _canonical_fact_record(
+        entity_id=entity_id,
+        value={"message": "container restarted"},
+        evidence_refs=["kubernetes:restart"],
+    )
+    evidence_analysis = json.dumps({
+        "llm_analysis": (
+            "日志明确出现 Cannot allocate memory，"
+            "因此一定是业务内存泄漏。"
+        ),
+        "tool_data": [_internally_authorized_tool_item(
+            {
+                "contract_version": "aiops.fact-ledger.v1",
+                "case_id": "case-ledger-authoritative",
+                "scope_entity_ids": [entity_id],
+                "records": [fact_record],
+                "record_count": 1,
+                "truncated": False,
+                "source": "mcp_canonical",
+                "legacy_contract": False,
+            },
+            tool="query_pod_logs",
+        )],
+    }, ensure_ascii=False)
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "## AIOps Fact Ledger" in context
+    assert fact_record["fact_id"] in context
+    assert "Cannot allocate memory" not in context
+    assert "业务内存泄漏" not in context
+    assert "## LLM 证据分析" not in context
+
+
+def test_rca_context_keeps_llm_analysis_for_legacy_input_without_fact_ledger():
+    node = RootCauseAnalyzerNode()
+    evidence_analysis = json.dumps({
+        "llm_analysis": "Legacy evidence summary remains available.",
+        "tool_data": [],
+    })
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "## LLM 证据分析" in context
+    assert "Legacy evidence summary remains available." in context
+
+
+def test_rca_provider_input_excludes_llm_analysis_when_fact_ledger_exists():
+    node = RootCauseAnalyzerNode()
+    entity_id = "k8s.pod:demo/api:uid-a"
+    fact_record = _canonical_fact_record(
+        entity_id=entity_id,
+        value={"message": "container restarted"},
+        evidence_refs=["kubernetes:restart"],
+    )
+    captured = {}
+    parsed = RCAOutput.model_validate({
+        "diagnostic_status": "inconclusive",
+        "phenomenon": "Pod restarted",
+        "root_cause": "证据不足，无法确认根因",
+        "supporting_fact_ids": [],
+        "contradicting_fact_ids": [],
+        "unknowns": ["缺少决定性错误原文"],
+        "hypotheses": [],
+        "confidence": 0.2,
+        "confidence_reason": "Fact Ledger 只证明容器发生重启",
+    })
+
+    def _capture_provider_call(question, system_prompt, schema, **kwargs):
+        captured["question"] = question
+        return (
+            parsed,
+            SimpleNamespace(
+                result=parsed.model_dump_json(),
+                structured_response=parsed,
+            ),
+            [],
+        )
+
+    node.ai_call = object()
+    node._call_structured_agent = _capture_provider_call
+    node._save_thinking = lambda state, new_state, thinking_events: None
+    evidence_analysis = json.dumps({
+        "llm_analysis": (
+            "日志明确出现 Cannot allocate memory，"
+            "因此一定是业务内存泄漏。"
+        ),
+        "tool_data": [_internally_authorized_tool_item(
+            {
+                "contract_version": "aiops.fact-ledger.v1",
+                "case_id": "case-provider-boundary",
+                "scope_entity_ids": [entity_id],
+                "records": [fact_record],
+                "record_count": 1,
+                "truncated": False,
+                "source": "mcp_canonical",
+                "legacy_contract": False,
+            },
+            tool="query_pod_logs",
+        )],
+    }, ensure_ascii=False)
+
+    node.execute({
+        "question": "我的集群有什么问题？",
+        "layer": Layer.L2,
+        "evidence_items": [],
+        "evidence_analysis": evidence_analysis,
+        "thinking_events": [],
+    })
+
+    assert "## AIOps Fact Ledger" in captured["question"]
+    assert fact_record["fact_id"] in captured["question"]
+    assert "Cannot allocate memory" not in captured["question"]
+    assert "业务内存泄漏" not in captured["question"]
+    assert "## LLM 证据分析" not in captured["question"]
+
+
 def test_rca_mixed_ledger_and_legacy_supplementary_preserves_case_identity():
     node = RootCauseAnalyzerNode()
     canonical_entity = "k8s.pod:demo/canonical-api:uid-canonical"
@@ -2340,9 +2988,8 @@ def test_rca_mixed_ledger_and_legacy_supplementary_preserves_case_identity():
     )
     evidence_analysis = json.dumps({
         "tool_data": [
-            {
-                "tool": "collect_aiops_case",
-                "fact_ledger": {
+            _internally_authorized_tool_item(
+                {
                     "contract_version": "aiops.fact-ledger.v1",
                     "case_id": "case-canonical",
                     "scope_entity_ids": [canonical_entity],
@@ -2352,7 +2999,8 @@ def test_rca_mixed_ledger_and_legacy_supplementary_preserves_case_identity():
                     "source": "mcp_canonical",
                     "legacy_contract": False,
                 },
-            },
+                tool="query_pod_logs",
+            ),
             {
                 "tool": "collect_aiops_case",
                 "agent_context": json.dumps({
@@ -2598,10 +3246,8 @@ def test_rca_execute_validates_fact_references_before_handoff():
     )
     evidence_analysis = json.dumps({
         "tool_data": [
-            {
-                "tool": "collect_aiops_case",
-                "data": "compact summary",
-                "fact_ledger": {
+            _internally_authorized_tool_item(
+                {
                     "contract_version": "aiops.fact-ledger.v1",
                     "case_id": "case-facts",
                     "scope_entity_ids": [entity_id],
@@ -2611,7 +3257,9 @@ def test_rca_execute_validates_fact_references_before_handoff():
                     "source": "mcp_canonical",
                     "legacy_contract": False,
                 },
-            }
+                tool="query_pod_logs",
+                data="compact summary",
+            )
         ],
     })
 
@@ -2630,7 +3278,9 @@ def test_rca_execute_validates_fact_references_before_handoff():
     assert result["root_cause"] != "Unsupported model claim"
 
 
-def test_rca_validation_preserves_cross_ledger_collision_diagnostics():
+def test_rca_validation_preserves_cross_ledger_collision_diagnostics(
+    monkeypatch,
+):
     node = RootCauseAnalyzerNode()
     entity_id = "k8s.pod:demo/api:uid-a"
     first_record = _canonical_fact_record(
@@ -2646,11 +3296,15 @@ def test_rca_validation_preserves_cross_ledger_collision_diagnostics():
         ),
         "fact_id": first_record["fact_id"],
     }
+    monkeypatch.setattr(
+        fact_contract_module,
+        "_canonical_fact_id",
+        lambda _record: first_record["fact_id"],
+    )
     evidence_analysis = json.dumps({
         "tool_data": [
-            {
-                "tool": "collect_aiops_case",
-                "fact_ledger": {
+            _internally_authorized_tool_item(
+                {
                     "contract_version": "aiops.fact-ledger.v1",
                     "case_id": "case-first",
                     "scope_entity_ids": [entity_id],
@@ -2660,10 +3314,10 @@ def test_rca_validation_preserves_cross_ledger_collision_diagnostics():
                     "source": "mcp_canonical",
                     "legacy_contract": False,
                 },
-            },
-            {
-                "tool": "get_aiops_case",
-                "fact_ledger": {
+                tool="query_pod_logs",
+            ),
+            _internally_authorized_tool_item(
+                {
                     "contract_version": "aiops.fact-ledger.v1",
                     "case_id": "case-second",
                     "scope_entity_ids": [entity_id],
@@ -2673,7 +3327,8 @@ def test_rca_validation_preserves_cross_ledger_collision_diagnostics():
                     "source": "mcp_canonical",
                     "legacy_contract": False,
                 },
-            },
+                tool="query_pod_logs",
+            ),
         ],
     })
     claim = {
@@ -2723,24 +3378,41 @@ def _validate_topology_record_through_rca(
     owner_id = "k8s.service:demo/api"
     record = _canonical_fact_record(
         entity_id=owner_id,
-        entity_kind="TopologyEdge",
+        entity_kind="Service",
         namespace="demo",
         entity_name="api",
         dimension="topology",
         fact_type="relationship",
         attribute="topology.relationship",
         value=topology_value,
-        source_system="topology",
+        source_system="kubernetes",
         directness="direct",
         confidence="high",
         strength="strong",
         evidence_refs=["topology:reviewer-probe"],
     )
+    control = _canonical_fact_record(
+        entity_id=required_entity_id,
+        value={"message": "source-backed control"},
+        evidence_refs=["logs:source-backed-control"],
+    )
     evidence_analysis = json.dumps({
         "tool_data": [
-            {
-                "tool": "collect_aiops_case",
-                "fact_ledger": {
+            _internally_authorized_tool_item(
+                {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-topology-control",
+                    "scope_entity_ids": [required_entity_id],
+                    "records": [control],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+                tool="query_pod_logs",
+            ),
+            _internally_authorized_tool_item(
+                {
                     "contract_version": "aiops.fact-ledger.v1",
                     "case_id": "case-topology-reviewer-probe",
                     "scope_entity_ids": [required_entity_id],
@@ -2750,7 +3422,8 @@ def _validate_topology_record_through_rca(
                     "source": "mcp_canonical",
                     "legacy_contract": False,
                 },
-            }
+                tool="query_pod_topology",
+            ),
         ],
     })
     claim = {
@@ -2811,11 +3484,28 @@ def test_rca_real_entry_rejects_evaluator_role_supporting_fact(forbidden_key):
         },
         evidence_refs=["logs:contaminated"],
     )
+    control = _canonical_fact_record(
+        entity_id=entity_id,
+        value={"message": "source-backed control"},
+        evidence_refs=["logs:source-backed-control"],
+    )
     evidence_analysis = json.dumps({
         "tool_data": [
-            {
-                "tool": "collect_aiops_case",
-                "fact_ledger": {
+            _internally_authorized_tool_item(
+                {
+                    "contract_version": "aiops.fact-ledger.v1",
+                    "case_id": "case-contaminated-control",
+                    "scope_entity_ids": [entity_id],
+                    "records": [control],
+                    "record_count": 1,
+                    "truncated": False,
+                    "source": "mcp_canonical",
+                    "legacy_contract": False,
+                },
+                tool="query_pod_logs",
+            ),
+            _internally_authorized_tool_item(
+                {
                     "contract_version": "aiops.fact-ledger.v1",
                     "case_id": "case-contaminated",
                     "scope_entity_ids": [entity_id],
@@ -2825,7 +3515,8 @@ def test_rca_real_entry_rejects_evaluator_role_supporting_fact(forbidden_key):
                     "source": "mcp_canonical",
                     "legacy_contract": False,
                 },
-            }
+                tool="query_pod_logs",
+            ),
         ],
     })
     claim = {
@@ -2985,3 +3676,120 @@ def test_evidence_to_rca_legacy_context_preserves_mandatory_identity_under_budge
     assert '"uid":"uid-a"' in rca_context
     assert "optional-0000" not in rca_context
     assert len(rca_context) <= RCA_SUPPLEMENTARY_MAX_CHARS
+
+
+def _t017_legacy_query_event(*, pod_uid: str = "uid-a") -> dict:
+    return {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "measure current memory",
+        },
+        "result": "bounded query result",
+        "raw_ref": "/archive/query.raw.txt",
+        "structured_ref": "/archive/query.structured.json",
+        "summary_ref": "/archive/query.summary.txt",
+        "structured": {
+            "ok": True,
+            "status": "query_succeeded",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": pod_uid,
+            },
+            "purpose": "measure current memory",
+            "coverage": "present",
+            "directness": "direct",
+            "query": {"promql": "container_memory_working_set_bytes"},
+            "facts": [
+                {
+                    "name": "container_memory_working_set_bytes",
+                    "value": 1048576,
+                    "unit": "By",
+                    "source_system": "prometheus",
+                    "ref": "prometheus:sample:1",
+                    "directness": "direct",
+                    "confidence": "high",
+                }
+            ],
+            "samples": [],
+            "evidence_refs": ["prometheus:sample:1"],
+            "truncated": False,
+            "limits": {"max_serialized_bytes": 6144},
+        },
+    }
+
+
+def test_t017_evidence_authority_uses_independent_trusted_current_pod_uid_index():
+    node = EvidenceCollectorNode()
+    identity_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "result": "api Running",
+        "raw_ref": "/archive/pod.raw.txt",
+        "structured_ref": "/archive/pod.structured.json",
+        "summary_ref": "/archive/pod.summary.txt",
+        "structured": {
+            "status": "kept_small_output",
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-a",
+            },
+        },
+    }
+    query_event = _t017_legacy_query_event()
+
+    tool_data = node._extract_tool_data_from_thinking(
+        [identity_event, query_event]
+    )
+    query_item = next(
+        item
+        for item in tool_data
+        if item["tool"] == "execute_pod_promql"
+    )
+
+    assert query_item["fact_ledger"]["source"] == (
+        "robusta_legacy_adapter"
+    )
+    assert query_item["fact_ledger"]["legacy_contract"] is True
+    assert query_item["authority_context"]["trusted_pod_uid"] == "uid-a"
+    assert query_item["report_authority"]["mode"] == "trusted_legacy"
+    assert query_item["report_authority"]["authoritative"] is True
+    assert query_item["report_authority"]["tool_name"] == (
+        "execute_pod_promql"
+    )
+
+
+def test_t017_legacy_query_cannot_trust_its_own_asserted_pod_uid():
+    node = EvidenceCollectorNode()
+
+    tool_data = node._extract_tool_data_from_thinking([
+        _t017_legacy_query_event(pod_uid="uid-self-asserted")
+    ])
+    query_item = next(
+        item
+        for item in tool_data
+        if item["tool"] == "execute_pod_promql"
+    )
+
+    assert "trusted_pod_uid" not in query_item["authority_context"]
+    assert query_item["report_authority"]["mode"] == (
+        "legacy_compatibility"
+    )
+    assert "missing_pod_uid" in query_item["report_authority"]["reasons"]

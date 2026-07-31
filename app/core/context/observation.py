@@ -17,6 +17,7 @@ from app.core.workflow.fact_contract import (
     is_forbidden_fact_key,
     normalize_fact_ledger,
     sanitize_evidence_value,
+    validate_canonical_fact_ledger_contract,
 )
 
 from .archive import ContextArchive, get_archive_root
@@ -122,14 +123,22 @@ class ObservationProcessor:
         full_passthrough = tool in self.FULL_PASSTHROUGH_TOOLS
 
         if full_passthrough:
-            structured, _, extracted_processor = self._extract(tool, raw)
+            structured, _, extracted_processor = self._extract(
+                tool,
+                raw,
+                tool_args=tool_args,
+            )
             if tool == "fetch_runbook":
                 self._attach_runbook_metadata(structured, tool_args or {})
             summary = raw
             processor = f"{extracted_processor}+passthrough_full"
         else:
             try:
-                structured, summary, processor = self._extract(tool, raw)
+                structured, summary, processor = self._extract(
+                    tool,
+                    raw,
+                    tool_args=tool_args,
+                )
                 if tool == "fetch_runbook":
                     self._attach_runbook_metadata(structured, tool_args or {})
             except Exception as exc:
@@ -191,7 +200,13 @@ class ObservationProcessor:
             **refs,
         }
 
-    def _extract(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
+    def _extract(
+        self,
+        tool: str,
+        raw: str,
+        *,
+        tool_args: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], str, str]:
         if tool == "fetch_runbook":
             return self._extract_runbook(raw)
         if re.search(r"is not a valid tool|try one of \[", raw, re.IGNORECASE):
@@ -212,7 +227,7 @@ class ObservationProcessor:
         if tool == "kubectl_events":
             return self._extract_events(raw)
         if tool == "kubectl_describe":
-            return self._extract_describe(raw)
+            return self._extract_describe(raw, tool_args=tool_args)
         if tool in self.LOG_TOOLS:
             return self._extract_logs(tool, raw)
 
@@ -272,6 +287,21 @@ class ObservationProcessor:
             }, self._generic_summary(tool, raw), "observability_query_parse_failed"
 
         contract_errors = self._observability_query_contract_errors(payload)
+        normalized_ledger = None
+        if not contract_errors and "fact_ledger" in payload:
+            ledger_input = payload.get("fact_ledger")
+            normalized_ledger, ledger_reasons = (
+                validate_canonical_fact_ledger_contract(
+                    ledger_input
+                    if isinstance(ledger_input, dict)
+                    else {}
+                )
+            )
+            if normalized_ledger is None:
+                contract_errors.append(
+                    "invalid_fact_ledger="
+                    + ",".join(ledger_reasons)
+                )
         if contract_errors:
             structured = {
                 "status": "query_parse_failed",
@@ -317,6 +347,7 @@ class ObservationProcessor:
             "entities",
             "edges",
             "topology_summary",
+            "fact_ledger",
         ]
         structured = {
             key: payload[key]
@@ -329,6 +360,8 @@ class ObservationProcessor:
         structured.setdefault("facts", [])
         structured.setdefault("samples", [])
         structured.setdefault("evidence_refs", [])
+        if normalized_ledger is not None:
+            structured["fact_ledger"] = payload["fact_ledger"]
 
         summary = self._build_observability_query_summary(structured)
         return structured, summary, "observability_query"
@@ -508,8 +541,24 @@ class ObservationProcessor:
         for index, item in enumerate((structured.get("edges") or [])[:8], start=1):
             add(f"TOPOLOGY_EDGE[{index}]", item, 900)
 
-        for index, fact in enumerate((structured.get("facts") or [])[:6], start=1):
-            add(f"FACT[{index}]", fact, 1000)
+        fact_ledger = normalize_fact_ledger(
+            structured.get("fact_ledger")
+        )
+        if fact_ledger is not None:
+            add(
+                "FACT_LEDGER",
+                fact_ledger.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                ),
+                3200,
+            )
+        else:
+            for index, fact in enumerate(
+                (structured.get("facts") or [])[:6],
+                start=1,
+            ):
+                add(f"FACT[{index}]", fact, 1000)
         for index, sample in enumerate((structured.get("samples") or [])[:4], start=1):
             add(f"SAMPLE[{index}]", sample, 1200)
 
@@ -1253,7 +1302,12 @@ class ObservationProcessor:
         summary = "\n".join(summary_lines)
         return structured, summary, "k8s_events"
 
-    def _extract_describe(self, raw: str) -> tuple[Dict[str, Any], str, str]:
+    def _extract_describe(
+        self,
+        raw: str,
+        *,
+        tool_args: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], str, str]:
         if self._is_command_failure(raw):
             return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary("kubectl_describe", raw), "k8s_describe"
 
@@ -1283,8 +1337,34 @@ class ObservationProcessor:
             *pod_sections.get("signals", []),
         ])
 
+        primary_entity: Dict[str, Any] = {}
+        pod_name = str(fields.get("name") or "").strip()
+        namespace = str(fields.get("namespace") or "").strip()
+        if (
+            pod_name
+            and namespace
+            and self._is_exact_pod_request(tool_args)
+        ):
+            primary_entity = {
+                "kind": "Pod",
+                "namespace": namespace,
+                "name": pod_name,
+            }
+            pod_uid = self._extract_describe_pod_uid(
+                raw,
+                pod_name=pod_name,
+                namespace=namespace,
+            )
+            if pod_uid:
+                primary_entity["uid"] = pod_uid
+
         structured = {
             **fields,
+            **(
+                {"primary_entity": primary_entity}
+                if primary_entity
+                else {}
+            ),
             "lifecycle": pod_sections.get("lifecycle", {}),
             "containers": pod_sections.get("containers", []),
             "scheduling": pod_sections.get("scheduling", {}),
@@ -1312,6 +1392,56 @@ class ObservationProcessor:
                 if ln not in diagnostic_lines and ln not in section_seen
             ])
         return structured, "\n".join(summary_lines), "k8s_describe"
+
+    @staticmethod
+    def _is_exact_pod_request(
+        tool_args: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not isinstance(tool_args, dict):
+            return False
+        kind = str(
+            tool_args.get("kind")
+            or tool_args.get("resource_kind")
+            or tool_args.get("resource_type")
+            or ""
+        ).strip().lower()
+        namespace = str(tool_args.get("namespace") or "").strip()
+        name = str(
+            tool_args.get("pod")
+            or tool_args.get("pod_name")
+            or tool_args.get("name")
+            or tool_args.get("resource_name")
+            or ""
+        ).strip()
+        return kind in {"pod", "pods", "po"} and bool(
+            namespace and name
+        )
+
+    @staticmethod
+    def _extract_describe_pod_uid(
+        raw: str,
+        *,
+        pod_name: str,
+        namespace: str,
+    ) -> str:
+        direct_match = re.search(
+            r"^UID:\s*([A-Za-z0-9][A-Za-z0-9._-]{7,127})\s*$",
+            raw,
+            re.MULTILINE,
+        )
+        candidates = (
+            {direct_match.group(1)}
+            if direct_match
+            else set()
+        )
+
+        event_pattern = re.compile(
+            rf"\bpod\s+{re.escape(pod_name)}_{re.escape(namespace)}"
+            r"\(([A-Za-z0-9][A-Za-z0-9._-]{7,127})\)",
+            re.IGNORECASE,
+        )
+        candidates.update(event_pattern.findall(raw))
+        return next(iter(candidates)) if len(candidates) == 1 else ""
 
     @classmethod
     def _extract_describe_pod_sections(cls, raw: str) -> Dict[str, Any]:
@@ -1381,6 +1511,7 @@ class ObservationProcessor:
         summary: list[str] = []
         current: Optional[Dict[str, Any]] = None
         capture_multiline: Optional[str] = None
+        resource_group: Optional[str] = None
         keep_keys = {
             "Container ID",
             "Image",
@@ -1410,12 +1541,44 @@ class ObservationProcessor:
                 containers.append(current)
                 summary.append(line)
                 capture_multiline = None
+                resource_group = None
+                continue
+
+            resource_heading = re.match(
+                r"^\s{4}(Limits|Requests):\s*$",
+                line,
+            )
+            if resource_heading:
+                resource_group = resource_heading.group(1).lower()
+                capture_multiline = None
+                if current is not None:
+                    current.setdefault("resources", {}).setdefault(
+                        resource_group,
+                        {},
+                    )
+                summary.append(line)
+                continue
+
+            resource_quantity = re.match(
+                r"^\s{6}([^:\s][^:]*):\s*(\S.*)$",
+                line,
+            )
+            if resource_group and resource_quantity:
+                resource_name = resource_quantity.group(1).strip()
+                quantity = resource_quantity.group(2).strip()
+                if current is not None:
+                    current.setdefault("resources", {}).setdefault(
+                        resource_group,
+                        {},
+                    )[resource_name] = quantity
+                summary.append(line)
                 continue
 
             key_match = re.match(r"^\s{4}([^:]+):\s*(.*)$", line)
             if key_match:
                 key = key_match.group(1).strip()
                 value = key_match.group(2).strip()
+                resource_group = None
                 capture_multiline = key if key in {"Command", "Args"} else None
                 if key not in keep_keys:
                     continue
@@ -1777,6 +1940,7 @@ class ObservationProcessor:
             "kind": "Pod",
             "name": metadata.get("name"),
             "namespace": metadata.get("namespace"),
+            "uid": metadata.get("uid"),
             "creationTimestamp": metadata.get("creationTimestamp"),
             "deletionTimestamp": metadata.get("deletionTimestamp"),
             "deletionGracePeriodSeconds": metadata.get("deletionGracePeriodSeconds"),

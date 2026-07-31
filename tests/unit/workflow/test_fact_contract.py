@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import app.core.workflow.fact_contract as fact_contract_module
 from app.core.prompts import ROOT_CAUSE_ANALYZER_PROMPT
@@ -19,7 +20,7 @@ from app.core.workflow.fact_contract import (
     select_tool_data_for_rca,
     validate_rca_claims,
 )
-from app.core.workflow.schemas import FactLedger
+from app.core.workflow.schemas import FactLedger, FactRecord
 
 
 MIN_FACT_LEDGER_JSON_CHARS = len('{"fact_ledgers":[]}')
@@ -121,6 +122,59 @@ def _ledger(
     }
 
 
+def _internally_authorized_tool_item(
+    ledger: dict,
+    *,
+    tool: str = "query_pod_logs",
+    status: str = "query_succeeded",
+    coverage: str = "present",
+) -> dict:
+    scope = next(
+        str(value)
+        for value in ledger.get("scope_entity_ids") or []
+        if str(value).lower().startswith("k8s.pod:")
+    )
+    match = re.fullmatch(
+        r"k8s\.pod:([^/]+)/([^:]+):(.+)",
+        scope,
+        flags=re.IGNORECASE,
+    )
+    assert match is not None
+    namespace, pod, pod_uid = match.groups()
+    records = ledger.get("records") or []
+    item = {
+        "tool": tool,
+        "semantic_success": True,
+        "fact_ledger": ledger,
+        "authority_context": {
+            "semantic_success": True,
+            "status": status,
+            "coverage": coverage,
+            "source_system": str(
+                (records[0] if records else {}).get("source_system")
+                or "test-source"
+            ),
+            "entity": {
+                "kind": "Pod",
+                "namespace": namespace,
+                "pod": pod,
+                "pod_uid": pod_uid,
+            },
+            "trusted_pod_uid": pod_uid,
+        },
+    }
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+    fact_contract_module.attach_internal_report_authority(
+        item,
+        ledger_input=ledger,
+        decision=decision,
+    )
+    return item
+
+
 def _diagnosed_claim(
     hypotheses: list[dict],
     supporting_fact_ids: list[str],
@@ -137,6 +191,84 @@ def _diagnosed_claim(
         "confidence": 0.86,
         "confidence_reason": "Current-scope direct facts support each hypothesis",
     }
+
+
+def test_fact_record_preserves_nonblank_source_system():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    payload = _fact("source-preserved", entity_id)
+    payload["source_system"] = "kubernetes"
+
+    record = FactRecord.model_validate(payload)
+
+    assert record.source_system == "kubernetes"
+
+
+def test_fact_record_strips_nonblank_source_system():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    payload = _fact("source-stripped", entity_id)
+    payload["source_system"] = "  kubernetes  "
+
+    record = FactRecord.model_validate(payload)
+
+    assert record.source_system == "kubernetes"
+
+
+def test_fact_record_rejects_whitespace_only_source_system():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    payload = _fact("source-blank", entity_id)
+    payload["source_system"] = "   "
+
+    with pytest.raises(
+        ValidationError,
+        match="source_system must not be blank",
+    ):
+        FactRecord.model_validate(payload)
+
+
+def test_normalize_fact_ledger_keeps_id_built_from_stripped_source():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("source-canonical-after-strip", entity_id)
+    record["source_system"] = "  kubernetes  "
+    record["fact_id"] = _canonical_fact_id({
+        **record,
+        "source_system": "kubernetes",
+    })
+
+    ledger = normalize_fact_ledger(
+        _ledger(
+            "case-source-canonical-after-strip",
+            entity_id,
+            [record],
+            source="robusta_legacy_adapter",
+            legacy_contract=True,
+        )
+    )
+
+    assert ledger is not None
+    assert ledger.record_count == 1
+    assert ledger.records[0].fact_id == record["fact_id"]
+    assert ledger.records[0].source_system == "kubernetes"
+
+
+def test_normalize_fact_ledger_drops_id_built_from_unstripped_source():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("source-canonical-before-strip", entity_id)
+    record["source_system"] = "  kubernetes  "
+    record["fact_id"] = _canonical_fact_id(record)
+
+    ledger = normalize_fact_ledger(
+        _ledger(
+            "case-source-canonical-before-strip",
+            entity_id,
+            [record],
+            source="robusta_legacy_adapter",
+            legacy_contract=True,
+        )
+    )
+
+    assert ledger is not None
+    assert ledger.records == []
+    assert ledger.record_count == 0
 
 
 def test_normalize_case_fact_ledger_accepts_canonical_and_rejects_evaluator_records():
@@ -259,13 +391,20 @@ def test_extract_fact_ledgers_preserves_legacy_contract_marker():
             "uid": "uid-a",
         },
         "coverage": {"logs": "present"},
+        "dimension_details": {
+            "logs": {
+                "samples": [{
+                    "message": "request returned status 503",
+                    "evidence_ref": "logs:target",
+                }],
+            },
+        },
     })
 
     extracted = extract_fact_ledgers_from_tool_data([
-        {
-            "tool": "collect_aiops_case",
-            "fact_ledger": ledger.model_dump(mode="json"),
-        }
+        _internally_authorized_tool_item(
+            ledger.model_dump(mode="json", exclude_none=True)
+        )
     ])
 
     assert extracted[0].source == "robusta_legacy_adapter"
@@ -522,15 +661,18 @@ def test_compact_fact_ledgers_prefers_canonical_source_over_legacy_peer():
 
 def test_select_tool_data_for_rca_keeps_every_case_before_supplementary_limit():
     case_items = [
-        {
-            "tool": "collect_aiops_case",
-            "data": f"case summary {index}",
-            "fact_ledger": _ledger(
+        _internally_authorized_tool_item(
+            _ledger(
                 f"case-{index}",
                 f"k8s.pod:demo/api-{index}:uid-{index}",
-                [],
+                [
+                    _fact(
+                        f"case-{index}",
+                        f"k8s.pod:demo/api-{index}:uid-{index}",
+                    )
+                ],
             ),
-        }
+        )
         for index in range(12)
     ]
     supplementary = [
@@ -558,7 +700,7 @@ def test_rca_ledger_selection_excludes_only_marked_replay():
     first_record = _fact("first", entity_id)
     second_record = _fact("second", entity_id)
     first = {
-        "tool": "collect_aiops_case",
+        "tool": "query_pod_logs",
         "data": "first",
         "fact_ledger": _ledger(
             "case-a",
@@ -567,7 +709,7 @@ def test_rca_ledger_selection_excludes_only_marked_replay():
         ),
     }
     second = {
-        "tool": "get_aiops_case",
+        "tool": "query_pod_logs",
         "data": "second",
         "fact_ledger": _ledger(
             "case-a",
@@ -580,11 +722,18 @@ def test_rca_ledger_selection_excludes_only_marked_replay():
         "data": "replay",
         "deduplicated": True,
     }
+    first = _internally_authorized_tool_item(first["fact_ledger"])
+    second = _internally_authorized_tool_item(second["fact_ledger"])
+    replay = {**first, "data": "replay", "deduplicated": True}
 
     selected = select_tool_data_for_rca([replay, first, second])
     ledgers = extract_fact_ledgers_from_tool_data([replay, first, second])
 
-    assert [item["data"] for item in selected] == ["first", "second"]
+    assert [
+        item["fact_ledger"]["records"][0]["fact_id"]
+        for item in selected
+    ] == [first_record["fact_id"], second_record["fact_id"]]
+    assert all("data" not in item for item in selected)
     assert [
         ledger.records[0].fact_id for ledger in ledgers
     ] == [first_record["fact_id"], second_record["fact_id"]]
@@ -1597,6 +1746,97 @@ def test_validate_rca_claims_infers_entity_for_published_hypothesis_shape():
     assert result["hypotheses"][0]["entity_id"] == entity_id
 
 
+def test_validate_rca_claims_resolves_unique_qwen_fact_alias_and_infers_entity():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("qwen-alias", entity_id)
+    alias = "f-" + record["fact_id"].removeprefix("fact-")
+    ledger = FactLedger.model_validate(
+        _ledger("case-qwen-alias", entity_id, [record])
+    )
+    claim = _diagnosed_claim(
+        [
+            {
+                "hypothesis_id": "hyp-qwen-alias",
+                "summary": "Small model omitted entity scope and shortened the prefix",
+                "supporting_fact_ids": [alias],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.86,
+            }
+        ],
+        [alias],
+    )
+
+    result = validate_rca_claims(claim, [ledger])
+
+    assert result["diagnostic_status"] == "diagnosed"
+    assert result["supporting_fact_ids"] == [record["fact_id"]]
+    assert result["hypotheses"][0]["entity_id"] == entity_id
+    assert result["hypotheses"][0]["supporting_fact_ids"] == [
+        record["fact_id"]
+    ]
+    assert result["claim_validation"]["valid"] is True
+    assert result["claim_validation"]["invalid_fact_ids"] == []
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "f-ffffffffffff",
+        "f-12345678",
+        "f-12345678901",
+        "F-123456789012",
+    ],
+)
+def test_validate_rca_claims_rejects_unknown_short_or_noncanonical_qwen_alias(
+    reference,
+):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("qwen-alias-invalid", entity_id)
+    ledger = FactLedger.model_validate(
+        _ledger("case-qwen-alias-invalid", entity_id, [record])
+    )
+    claim = _diagnosed_claim(
+        [
+            {
+                "hypothesis_id": "hyp-qwen-alias-invalid",
+                "summary": "Invalid alias must not authorize a diagnosis",
+                "supporting_fact_ids": [reference],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.86,
+            }
+        ],
+        [reference],
+    )
+
+    result = validate_rca_claims(claim, [ledger])
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert reference in result["claim_validation"]["invalid_fact_ids"]
+    assert result["supporting_fact_ids"] == []
+
+
+def test_qwen_fact_alias_resolution_rejects_multiple_current_ledger_matches():
+    reference = "f-123456789abc"
+    payload = fact_contract_module._correct_unique_fact_id_prefixes(
+        {
+            "diagnostic_status": "diagnosed",
+            "supporting_fact_ids": [reference],
+            "contradicting_fact_ids": [],
+            "hypotheses": [],
+            "confidence": 0.8,
+            "confidence_reason": "ambiguous alias",
+        },
+        record_ids=[
+            "fact-123456789abc-first",
+            "fact-123456789abc-second",
+        ],
+    )
+
+    assert payload["supporting_fact_ids"] == [reference]
+
+
 def test_validate_rca_claims_allows_multiple_supported_hypotheses_for_entity():
     entity_id = "k8s.pod:demo/api:uid-a"
     first = _fact("candidate-a", entity_id)
@@ -2006,7 +2246,7 @@ def test_compact_fact_ledgers_json_retains_identity_index_for_many_cases():
     assert all(item["ledger_ref"] for item in parsed["case_index"])
 
 
-def test_persisted_aiops_context_is_adapted_before_other_representations():
+def test_persisted_aiops_context_without_internal_authority_cannot_reach_provider():
     structured_context = {
         "case_id": "case-persisted",
         "primary_entity": {
@@ -2037,9 +2277,11 @@ def test_persisted_aiops_context_is_adapted_before_other_representations():
     ])
     ledgers = extract_fact_ledgers_from_tool_data(selected)
 
-    assert len(ledgers) == 1
-    assert ledgers[0].source == "robusta_legacy_adapter"
+    assert ledgers == []
     assert selected[0]["fact_ledger"]["case_id"] == "case-persisted"
+    assert not fact_contract_module.tool_item_allows_fact_ledger_projection(
+        selected[0]
+    )
 
 
 def test_rca_prompt_matches_generic_fact_support_threshold():
@@ -2099,6 +2341,229 @@ def test_kubernetes_lifecycle_adapter_preserves_last_reason_and_exit_code():
         "/archive/kubectl-describe.raw" in record.evidence_refs
         for record in records.values()
     )
+
+
+def test_kubernetes_lifecycle_adapter_preserves_container_resource_quantities():
+    ledger = build_kubernetes_lifecycle_fact_ledger({
+        "name": "api",
+        "namespace": "demo",
+        "uid": "uid-a",
+        "containers": [{
+            "name": "business-api",
+            "resources": {
+                "limits": {
+                    "cpu": "300m",
+                    "memory": "80Mi",
+                },
+                "requests": {
+                    "cpu": "20m",
+                    "memory": "32Mi",
+                },
+            },
+        }],
+        "evidence_refs": [
+            "/archive/kubectl-get-yaml.raw",
+            "/archive/kubectl-get-yaml.structured",
+        ],
+    })
+
+    assert ledger is not None
+    records = {record.attribute: record for record in ledger.records}
+    expected = {
+        "container.resource_limit.cpu": "300m",
+        "container.resource_limit.memory": "80Mi",
+        "container.resource_request.cpu": "20m",
+        "container.resource_request.memory": "32Mi",
+    }
+    assert set(expected) <= set(records)
+    for attribute, quantity in expected.items():
+        record = records[attribute]
+        assert record.fact_type == "configuration"
+        assert record.value == {
+            "container": "business-api",
+            "value": quantity,
+        }
+        assert record.unit == "kubernetes_quantity"
+        assert record.source_system == "kubernetes"
+        assert record.directness == "direct"
+        assert record.confidence == "high"
+        assert record.evidence_refs == [
+            "/archive/kubectl-get-yaml.raw",
+            "/archive/kubectl-get-yaml.structured",
+        ]
+
+
+def test_kubernetes_lifecycle_adapter_prioritizes_all_resource_facts_when_truncated():
+    containers = []
+    expected = {}
+    for index in range(7):
+        container = f"business-{index}"
+        quantities = {
+            "container.resource_limit.cpu": f"{300 + index}m",
+            "container.resource_limit.memory": f"{80 + index}Mi",
+            "container.resource_request.cpu": f"{20 + index}m",
+            "container.resource_request.memory": f"{32 + index}Mi",
+        }
+        expected.update({
+            (container, attribute): quantity
+            for attribute, quantity in quantities.items()
+        })
+        containers.append({
+            "name": container,
+            "resources": {
+                "limits": {
+                    "cpu": quantities["container.resource_limit.cpu"],
+                    "memory": quantities[
+                        "container.resource_limit.memory"
+                    ],
+                },
+                "requests": {
+                    "cpu": quantities[
+                        "container.resource_request.cpu"
+                    ],
+                    "memory": quantities[
+                        "container.resource_request.memory"
+                    ],
+                },
+            },
+            "last_state": "Terminated",
+            "reason": "Error",
+            "exit_code": 1,
+            "restart_count": index,
+        })
+
+    ledger = build_kubernetes_lifecycle_fact_ledger({
+        "name": "api",
+        "namespace": "demo",
+        "uid": "uid-a",
+        "containers": containers,
+        "evidence_refs": ["kubernetes:pod-yaml"],
+    })
+
+    assert ledger is not None
+    assert ledger.record_count == 48
+    assert ledger.truncated is True
+    resource_records = {
+        (
+            record.value["container"],
+            record.attribute,
+        ): record
+        for record in ledger.records
+        if record.fact_type == "configuration"
+    }
+    assert set(resource_records) == set(expected)
+    lifecycle_records = {
+        (
+            record.value["container"],
+            record.attribute,
+        )
+        for record in ledger.records
+        if record.attribute in {
+            "container.last_terminated_reason",
+            "container.last_exit_code",
+        }
+    }
+    assert lifecycle_records == {
+        (f"business-{index}", attribute)
+        for index in range(7)
+        for attribute in {
+            "container.last_terminated_reason",
+            "container.last_exit_code",
+        }
+    }
+    for key, quantity in expected.items():
+        record = resource_records[key]
+        assert record.value["value"] == quantity
+        assert record.unit == "kubernetes_quantity"
+        assert record.evidence_refs == ["kubernetes:pod-yaml"]
+
+
+def test_kubernetes_lifecycle_adapter_keeps_decisive_lifecycle_under_resource_pressure():
+    containers = [{
+        "name": f"business-{index}",
+        "resources": {
+            "limits": {
+                "cpu": f"{300 + index}m",
+                "memory": f"{80 + index}Mi",
+            },
+            "requests": {
+                "cpu": f"{20 + index}m",
+                "memory": f"{32 + index}Mi",
+            },
+        },
+        "last_state": "Terminated",
+        "reason": "OOMKilled",
+        "exit_code": 137,
+        "restart_count": index,
+    } for index in range(12)]
+
+    ledger = build_kubernetes_lifecycle_fact_ledger({
+        "name": "api",
+        "namespace": "demo",
+        "containers": containers,
+        "evidence_refs": ["kubernetes:pod-yaml"],
+    })
+
+    assert ledger is not None
+    decisive = {
+        (
+            record.value["container"],
+            record.attribute,
+        )
+        for record in ledger.records
+        if record.attribute in {
+            "container.last_terminated_reason",
+            "container.last_exit_code",
+        }
+    }
+    assert decisive == {
+        (f"business-{index}", attribute)
+        for index in range(12)
+        for attribute in {
+            "container.last_terminated_reason",
+            "container.last_exit_code",
+        }
+    }
+    assert any(
+        record.fact_type == "configuration"
+        for record in ledger.records
+    )
+
+
+def test_kubernetes_lifecycle_adapter_reads_resources_only_from_spec_containers():
+    ledger = build_kubernetes_lifecycle_fact_ledger({
+        "name": "api",
+        "namespace": "demo",
+        "containers": [{
+            "name": "business-api",
+            "resources": {
+                "limits": {"memory": "80Mi"},
+                "requests": {"memory": "32Mi"},
+            },
+        }],
+        "containerStatuses": [{
+            "name": "business-api",
+            "resources": {
+                "limits": {"memory": "999Mi"},
+                "requests": {"memory": "998Mi"},
+            },
+            "lastTerminated": {
+                "reason": "OOMKilled",
+                "exitCode": 137,
+            },
+            "restartCount": 42,
+        }],
+        "evidence_refs": ["kubernetes:pod-yaml"],
+    })
+
+    assert ledger is not None
+    serialized = ledger.model_dump_json()
+    assert "80Mi" in serialized
+    assert "32Mi" in serialized
+    assert "999Mi" not in serialized
+    assert "998Mi" not in serialized
+    assert "OOMKilled" in serialized
+    assert '"exit_code":137' in serialized
 
 
 def test_topology_query_fact_adapter_adds_canonical_typed_endpoints():
@@ -3155,3 +3620,1171 @@ def test_a029_rca_reconciles_logging_and_exact_trace_denials_only():
     )
     assert "日志中的时间戳未知" in serialized
     assert "当前采样不能证明完整端到端调用链" in serialized
+
+
+def _t017_authority_item(
+    ledger: dict,
+    *,
+    tool: str = "query_pod_logs",
+    trusted_pod_uid: str | None = "uid-a",
+    status: str = "query_succeeded",
+    coverage: str = "present",
+) -> dict:
+    context = {
+        "semantic_success": True,
+        "status": status,
+        "coverage": coverage,
+        "source_system": "test-source",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api",
+            "pod_uid": "uid-a",
+        },
+    }
+    if trusted_pod_uid is not None:
+        context["trusted_pod_uid"] = trusted_pod_uid
+    item = {
+        "tool": tool,
+        "semantic_success": True,
+        "fact_ledger": ledger,
+        "authority_context": context,
+    }
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+    fact_contract_module.attach_internal_report_authority(
+        item,
+        ledger_input=ledger,
+        decision=decision,
+    )
+    return item
+
+
+def test_t017_report_authority_covers_all_modes_with_stable_reasons():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("authority", entity_id)
+    canonical = _ledger("case-canonical", entity_id, [record])
+    canonical_decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=canonical,
+        tool_item=_t017_authority_item(canonical),
+    )
+    assert canonical_decision.mode == "canonical"
+    assert canonical_decision.authoritative is True
+    assert canonical_decision.reasons == ("valid_canonical_ledger",)
+
+    legacy = _ledger(
+        "case-legacy",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    trusted_decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=legacy,
+        tool_item=_t017_authority_item(legacy),
+    )
+    assert trusted_decision.mode == "trusted_legacy"
+    assert trusted_decision.authoritative is True
+    assert trusted_decision.source == "robusta_legacy_adapter"
+    assert trusted_decision.legacy_contract is True
+    assert trusted_decision.reasons == (
+        "supported_read_only_tool",
+        "query_result_verified",
+        "pod_uid_verified",
+        "facts_verified",
+    )
+
+    unsupported = fact_contract_module.evaluate_report_authority(
+        ledger_input=legacy,
+        tool_item=_t017_authority_item(
+            legacy,
+            tool="kubectl_events",
+        ),
+    )
+    assert unsupported.mode == "legacy_compatibility"
+    assert unsupported.authoritative is False
+    assert "unsupported_tool" in unsupported.reasons
+
+    polluted = json.loads(json.dumps(legacy))
+    polluted["records"][0]["metadata"] = {
+        "nested": {"root/cause": "must not be trusted"}
+    }
+    polluted["records"][0]["fact_id"] = _canonical_fact_id(
+        polluted["records"][0]
+    )
+    rejected = fact_contract_module.evaluate_report_authority(
+        ledger_input=polluted,
+        tool_item=_t017_authority_item(polluted),
+    )
+    assert rejected.mode == "rejected"
+    assert rejected.authoritative is False
+    assert "evaluator_field_present" in rejected.reasons
+
+
+def test_t018_trusts_exact_uid_bound_read_only_kubernetes_lifecycle_ledger():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact(
+        "kubernetes-lifecycle",
+        entity_id,
+        dimension="kubernetes",
+        fact_type="state",
+        value={"container": "api", "reason": "OOMKilled"},
+    )
+    record["attribute"] = "container.last_terminated_reason"
+    record["source_system"] = "kubernetes"
+    record["fact_id"] = _canonical_fact_id(record)
+    ledger = _ledger(
+        "case-kubernetes-lifecycle",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = {
+        "tool": "kubectl_describe",
+        "semantic_success": True,
+        "fact_ledger": ledger,
+        "authority_context": {
+            "semantic_success": True,
+            "status": "kubernetes_observed",
+            "coverage": "present",
+            "source_system": "kubernetes",
+            "trusted_pod_uid": "uid-a",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-a",
+            },
+        },
+    }
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "trusted_legacy"
+    assert decision.authoritative is True
+    assert decision.reasons == (
+        "supported_read_only_tool",
+        "query_result_verified",
+        "pod_uid_verified",
+        "facts_verified",
+    )
+
+
+def test_t018_does_not_relabel_kubernetes_lifecycle_ledger_as_mcp_canonical():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact(
+        "canonical-kubernetes-lifecycle",
+        entity_id,
+        dimension="kubernetes",
+        fact_type="state",
+        value={"container": "api", "reason": "OOMKilled"},
+    )
+    record["source_system"] = "kubernetes"
+    record["fact_id"] = _canonical_fact_id(record)
+    ledger = _ledger(
+        "case-canonical-kubernetes-lifecycle",
+        entity_id,
+        [record],
+    )
+    item = {
+        "tool": "kubectl_describe",
+        "semantic_success": True,
+        "authority_context": {
+            "semantic_success": True,
+            "status": "kubernetes_observed",
+            "coverage": "present",
+            "source_system": "kubernetes",
+            "trusted_pod_uid": "uid-a",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-a",
+            },
+        },
+    }
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "rejected"
+    assert decision.authoritative is False
+    assert "unsupported_tool" in decision.reasons
+
+
+@pytest.mark.parametrize("tool", ["kubectl_events", "kubectl_previous_logs"])
+def test_t018_does_not_trust_other_kubernetes_tool_ledgers(tool):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact(
+        "unsupported-kubernetes-tool",
+        entity_id,
+        dimension="kubernetes",
+    )
+    record["source_system"] = "kubernetes"
+    record["fact_id"] = _canonical_fact_id(record)
+    ledger = _ledger(
+        "case-unsupported-kubernetes-tool",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = {
+        "tool": tool,
+        "semantic_success": True,
+        "authority_context": {
+            "semantic_success": True,
+            "status": "kubernetes_observed",
+            "coverage": "present",
+            "source_system": "kubernetes",
+            "trusted_pod_uid": "uid-a",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-a",
+            },
+        },
+    }
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "legacy_compatibility"
+    assert decision.authoritative is False
+    assert "unsupported_tool" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("missing_uid", "missing_pod_uid"),
+        ("blank_source", "blank_source_system"),
+        ("missing_ref", "missing_evidence_ref"),
+        ("fact_id_mismatch", "fact_id_mismatch"),
+        ("cross_entity", "cross_entity_fact"),
+        ("partial_low_quality", "insufficient_fact_quality"),
+    ],
+)
+def test_t017_trusted_legacy_fails_closed_for_each_provenance_gate(
+    mutation,
+    reason,
+):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("legacy-gate", entity_id)
+    ledger = _ledger(
+        "case-legacy-gate",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = _t017_authority_item(ledger)
+
+    if mutation == "missing_uid":
+        item["authority_context"].pop("trusted_pod_uid")
+    elif mutation == "blank_source":
+        ledger["records"][0]["source_system"] = "   "
+        ledger["records"][0]["fact_id"] = _canonical_fact_id(
+            ledger["records"][0]
+        )
+    elif mutation == "missing_ref":
+        ledger["records"][0]["evidence_refs"] = []
+        ledger["records"][0]["fact_id"] = _canonical_fact_id(
+            ledger["records"][0]
+        )
+    elif mutation == "fact_id_mismatch":
+        ledger["records"][0]["fact_id"] = "fact-deadbeef0000"
+    elif mutation == "cross_entity":
+        ledger["records"][0]["entity_id"] = (
+            "k8s.pod:demo/other:uid-other"
+        )
+        ledger["records"][0]["fact_id"] = _canonical_fact_id(
+            ledger["records"][0]
+        )
+    elif mutation == "partial_low_quality":
+        item["authority_context"]["status"] = "query_partial"
+        item["authority_context"]["coverage"] = "partial"
+        ledger["records"][0]["confidence"] = "weak"
+        ledger["records"][0]["fact_id"] = _canonical_fact_id(
+            ledger["records"][0]
+        )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.authoritative is False
+    assert reason in decision.reasons
+    if mutation == "fact_id_mismatch":
+        assert decision.mode == "rejected"
+    else:
+        assert decision.mode == "legacy_compatibility"
+
+
+@pytest.mark.parametrize("coverage", ["empty", "absent", "weak", "error"])
+def test_t017_trusted_legacy_rejects_direct_high_fact_for_nonpresent_result(
+    coverage,
+):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("nonpresent-direct-high", entity_id)
+    ledger = _ledger(
+        "case-nonpresent-direct-high",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = _t017_authority_item(ledger, coverage=coverage)
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "legacy_compatibility"
+    assert decision.authoritative is False
+    assert "invalid_query_result" in decision.reasons
+
+
+def test_t017_trusted_legacy_partial_requires_explicit_coverage_fact():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("partial-source-backed", entity_id)
+    ledger = _ledger(
+        "case-partial-without-coverage-fact",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = _t017_authority_item(
+        ledger,
+        status="query_partial",
+        coverage="partial",
+    )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "legacy_compatibility"
+    assert decision.authoritative is False
+    assert "missing_partial_coverage_fact" in decision.reasons
+
+
+def test_t017_trusted_legacy_rejects_untyped_model_causal_topology_edge():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact(
+        "model-causal-edge",
+        "k8s.service:demo/frontend",
+        dimension="topology",
+        fact_type="relationship",
+        value={
+            "source": {"entity_id": entity_id, "kind": "Pod"},
+            "relation": "causes",
+            "target": "untyped-target",
+        },
+    )
+    ledger = _ledger(
+        "case-untyped-model-causal-edge",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = _t017_authority_item(
+        ledger,
+        tool="query_pod_topology",
+    )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "legacy_compatibility"
+    assert decision.authoritative is False
+    assert "untrusted_topology_relationship" in decision.reasons
+
+
+def test_t017_trusted_legacy_rejects_in_scope_untyped_model_causal_edge():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact(
+        "in-scope-model-causal-edge",
+        entity_id,
+        dimension="topology",
+        fact_type="relationship",
+        value={
+            "source": {"entity_id": entity_id, "kind": "Pod"},
+            "relation": "causes",
+            "target": "untyped-target",
+        },
+    )
+    ledger = _ledger(
+        "case-in-scope-model-causal-edge",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = _t017_authority_item(
+        ledger,
+        tool="query_pod_topology",
+    )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "legacy_compatibility"
+    assert decision.authoritative is False
+    assert "untrusted_topology_relationship" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    ("source_system", "relation", "target"),
+    [
+        (
+            "kubernetes",
+            "owned_by",
+            {
+                "entity_id": "k8s.replicaset:demo/api-rs:uid-rs",
+                "kind": "ReplicaSet",
+            },
+        ),
+        (
+            "deepflow",
+            "calls",
+            {
+                "entity_id": "k8s.service:demo/backend:uid-service",
+                "kind": "Service",
+            },
+        ),
+    ],
+)
+def test_t017_trusted_legacy_accepts_in_scope_typed_source_backed_edges(
+    source_system,
+    relation,
+    target,
+):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact(
+        f"in-scope-{source_system}-{relation}",
+        entity_id,
+        dimension="topology",
+        fact_type="relationship",
+        value={
+            "source": {"entity_id": entity_id, "kind": "Pod"},
+            "relation": relation,
+            "target": target,
+        },
+    )
+    record["source_system"] = source_system
+    record["fact_id"] = _canonical_fact_id(record)
+    ledger = _ledger(
+        f"case-in-scope-{source_system}-{relation}",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = _t017_authority_item(
+        ledger,
+        tool="query_pod_topology",
+    )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "trusted_legacy"
+    assert decision.authoritative is True
+
+
+@pytest.mark.parametrize(
+    ("source_system", "relation", "record_entity_id"),
+    [
+        ("model_summary", "calls", "k8s.pod:demo/api:uid-a"),
+        ("unknown_graph", "calls", "k8s.pod:demo/api:uid-a"),
+        ("kubernetes", "calls", "k8s.pod:demo/api:uid-a"),
+        ("deepflow", "owned_by", "k8s.pod:demo/api:uid-a"),
+        (
+            "deepflow",
+            "calls",
+            "k8s.service:demo/unrelated:uid-unrelated",
+        ),
+    ],
+)
+def test_t017_trusted_legacy_rejects_untrusted_or_incoherent_topology_edges(
+    source_system,
+    relation,
+    record_entity_id,
+):
+    scope_entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact(
+        f"topology-{source_system}-{relation}-{record_entity_id}",
+        record_entity_id,
+        dimension="topology",
+        fact_type="relationship",
+        value={
+            "source": {
+                "entity_id": scope_entity_id,
+                "kind": "Pod",
+            },
+            "relation": relation,
+            "target": {
+                "entity_id": "k8s.service:demo/backend:uid-backend",
+                "kind": "Service",
+            },
+        },
+    )
+    record["source_system"] = source_system
+    record["fact_id"] = _canonical_fact_id(record)
+    ledger = _ledger(
+        f"case-topology-{source_system}-{relation}",
+        scope_entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = _t017_authority_item(
+        ledger,
+        tool="query_pod_topology",
+    )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "legacy_compatibility"
+    assert decision.authoritative is False
+    assert "untrusted_topology_relationship" in decision.reasons
+
+
+def test_t017_trusted_legacy_accepts_typed_source_backed_topology_edge():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact(
+        "source-backed-edge",
+        "k8s.service:demo/frontend",
+        dimension="topology",
+        fact_type="relationship",
+        value={
+            "source": {
+                "entity_id": "k8s.service:demo/frontend",
+                "kind": "Service",
+            },
+            "relation": "selects",
+            "target": {"entity_id": entity_id, "kind": "Pod"},
+        },
+    )
+    record["source_system"] = "kubernetes"
+    record["fact_id"] = _canonical_fact_id(record)
+    ledger = _ledger(
+        "case-source-backed-topology-edge",
+        entity_id,
+        [record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    item = _t017_authority_item(
+        ledger,
+        tool="query_pod_topology",
+    )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "trusted_legacy"
+    assert decision.authoritative is True
+
+
+def test_t017_canonical_accepts_source_backed_topology_graph_connected_to_scope():
+    pod_id = "k8s.pod:demo/api:uid-a"
+    replica_set_id = "k8s.replicaset:demo/api-rs:uid-rs"
+    deployment_id = "k8s.deployment:demo/api:uid-deploy"
+    node_id = "k8s.node:cluster/node-a"
+    container_id = "k8s.container:demo/app"
+
+    def edge(marker, source_id, source_kind, relation, target_id, target_kind):
+        record = _fact(
+            marker,
+            source_id,
+            dimension="topology",
+            fact_type="relationship",
+            value={
+                "source": {"entity_id": source_id, "kind": source_kind},
+                "relation": relation,
+                "target": {"entity_id": target_id, "kind": target_kind},
+            },
+        )
+        record["source_system"] = "kubernetes"
+        record["fact_id"] = _canonical_fact_id(record)
+        return record
+
+    records = [
+        edge("pod-owner", pod_id, "Pod", "owned_by", replica_set_id, "ReplicaSet"),
+        edge(
+            "owner-chain",
+            replica_set_id,
+            "ReplicaSet",
+            "owned_by",
+            deployment_id,
+            "Deployment",
+        ),
+        edge("pod-node", pod_id, "Pod", "scheduled_on", node_id, "Node"),
+        edge(
+            "pod-container",
+            pod_id,
+            "Pod",
+            "owns_container",
+            container_id,
+            "Container",
+        ),
+    ]
+    ledger = _ledger("case-connected-topology", pod_id, records)
+    item = _t017_authority_item(
+        ledger,
+        tool="query_pod_topology",
+    )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "canonical"
+    assert decision.authoritative is True
+
+
+def test_t017_canonical_binds_bounded_scope_alias_only_for_native_ledger():
+    short_pod_name = "api"
+    short_pod_id = f"k8s.pod:demo/{short_pod_name}:uid-a"
+    long_pod_name = "p" * 193
+    long_pod_id = f"k8s.pod:demo/{long_pod_name}:uid-a"
+    scope_alias = "k8s.pod:scope/current"
+
+    def edge(marker, source_id, source_kind, relation, target_id, target_kind):
+        record = _fact(
+            marker,
+            source_id,
+            dimension="topology",
+            fact_type="relationship",
+            value={
+                "source": {"entity_id": source_id, "kind": source_kind},
+                "relation": relation,
+                "target": {"entity_id": target_id, "kind": target_kind},
+            },
+        )
+        record["source_system"] = "kubernetes"
+        record["fact_id"] = _canonical_fact_id(record)
+        return record
+
+    bounded = edge(
+        "bounded-scope-reference",
+        scope_alias,
+        "Pod",
+        "scheduled_on",
+        "k8s.node:cluster/node-a",
+        "Node",
+    )
+
+    def decision(ledger, pod_name):
+        item = _t017_authority_item(
+            ledger,
+            tool="query_pod_topology",
+        )
+        item["authority_context"]["entity"]["pod"] = pod_name
+        return fact_contract_module.evaluate_report_authority(
+            ledger_input=ledger,
+            tool_item=item,
+        )
+
+    long_native_ledger = _ledger(
+        "case-long-native-scope-alias",
+        long_pod_id,
+        [bounded],
+    )
+    long_native = decision(long_native_ledger, long_pod_name)
+
+    short_native_ledger = _ledger(
+        "case-short-native-scope-alias",
+        short_pod_id,
+        [bounded],
+    )
+    short_native = decision(short_native_ledger, short_pod_name)
+
+    legacy_alias_ledger = _ledger(
+        "case-legacy-scope-alias",
+        long_pod_id,
+        [bounded],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    legacy_alias = decision(legacy_alias_ledger, long_pod_name)
+
+    assert long_native.mode == "canonical"
+    assert long_native.authoritative is True
+    assert short_native.mode == "rejected"
+    assert short_native.authoritative is False
+    assert "untrusted_topology_relationship" in short_native.reasons
+    assert legacy_alias.mode == "legacy_compatibility"
+    assert legacy_alias.authoritative is False
+    assert "untrusted_topology_relationship" in legacy_alias.reasons
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("unsupported_tool", "unsupported_tool"),
+        ("semantic_failure", "invalid_query_result"),
+        ("structured_scope_mismatch", "missing_pod_uid"),
+        ("missing_independent_uid", "missing_pod_uid"),
+        ("mismatched_independent_uid", "missing_pod_uid"),
+        ("blank_query_source", "blank_source_system"),
+        ("weak_only", "insufficient_fact_quality"),
+    ],
+)
+def test_t017_canonical_fails_closed_for_each_outer_query_gate(
+    mutation,
+    reason,
+):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("canonical-outer-gate", entity_id)
+    ledger = _ledger("case-canonical-outer-gate", entity_id, [record])
+    item = _t017_authority_item(ledger)
+
+    if mutation == "unsupported_tool":
+        item["tool"] = "kubectl_events"
+    elif mutation == "semantic_failure":
+        item["semantic_success"] = False
+    elif mutation == "structured_scope_mismatch":
+        item["authority_context"]["entity"]["pod"] = "other"
+    elif mutation == "missing_independent_uid":
+        item["authority_context"].pop("trusted_pod_uid")
+    elif mutation == "mismatched_independent_uid":
+        item["authority_context"]["trusted_pod_uid"] = "uid-current-b"
+    elif mutation == "blank_query_source":
+        item["authority_context"]["source_system"] = "   "
+    elif mutation == "weak_only":
+        ledger["records"][0]["confidence"] = "weak"
+        ledger["records"][0]["fact_id"] = _canonical_fact_id(
+            ledger["records"][0]
+        )
+
+    decision = fact_contract_module.evaluate_report_authority(
+        ledger_input=ledger,
+        tool_item=item,
+    )
+
+    assert decision.mode == "rejected"
+    assert decision.authoritative is False
+    assert reason in decision.reasons
+
+
+def test_t017_canonical_precedes_equivalent_trusted_legacy_without_mutating_archive_inputs():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    canonical_record = _fact("canonical-wins", entity_id)
+    legacy_record = json.loads(json.dumps(canonical_record))
+    canonical = _ledger(
+        "case-canonical-wins",
+        entity_id,
+        [canonical_record],
+    )
+    legacy = _ledger(
+        "case-legacy-loses",
+        entity_id,
+        [legacy_record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    tool_data = [
+        _t017_authority_item(legacy),
+        _t017_authority_item(canonical),
+    ]
+    archived_copy = json.loads(json.dumps(tool_data))
+
+    selected, decisions = fact_contract_module.select_authoritative_fact_ledgers(
+        tool_data
+    )
+
+    assert [ledger.case_id for ledger in selected] == [
+        "case-canonical-wins"
+    ]
+    assert {decision.mode for decision in decisions} == {
+        "canonical",
+        "trusted_legacy",
+    }
+    assert tool_data == archived_copy
+
+
+@pytest.mark.parametrize("canonical_boundary", ["truncated", "partial"])
+def test_t017_canonical_precedence_preserves_non_equivalent_legacy_context(
+    canonical_boundary,
+):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    canonical_record = _fact(
+        "shared-canonical-value",
+        entity_id,
+        value={"message": "shared value"},
+    )
+    equivalent_legacy_record = _fact(
+        "equivalent-legacy-provenance",
+        entity_id,
+        value={"message": "shared value"},
+    )
+    supplemental_legacy_record = _fact(
+        "legacy-supplemental-value",
+        entity_id,
+        value={"message": "additional source-backed context"},
+    )
+    supplemental_legacy_record["attribute"] = "logging.additional_context"
+    supplemental_legacy_record["fact_id"] = _canonical_fact_id(
+        supplemental_legacy_record
+    )
+    canonical_records = [canonical_record]
+    legacy_records = [
+        equivalent_legacy_record,
+        supplemental_legacy_record,
+    ]
+    item_status = "query_succeeded"
+    item_coverage = "present"
+    if canonical_boundary == "partial":
+        coverage_record = _fact(
+            "logging-partial",
+            entity_id,
+            dimension="coverage",
+            fact_type="coverage",
+            directness="derived",
+            confidence="weak",
+            strength="context",
+            value={"dimension": "logging", "coverage": "partial"},
+        )
+        coverage_record["evidence_refs"] = []
+        coverage_record["fact_id"] = _canonical_fact_id(coverage_record)
+        canonical_records.append(coverage_record)
+        legacy_records.append(json.loads(json.dumps(coverage_record)))
+        item_status = "query_partial"
+        item_coverage = "partial"
+
+    canonical = _ledger(
+        f"case-canonical-{canonical_boundary}",
+        entity_id,
+        canonical_records,
+    )
+    canonical["truncated"] = canonical_boundary == "truncated"
+    legacy = _ledger(
+        f"case-legacy-{canonical_boundary}",
+        entity_id,
+        legacy_records,
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+    tool_data = [
+        _t017_authority_item(
+            legacy,
+            status=item_status,
+            coverage=item_coverage,
+        ),
+        _t017_authority_item(
+            canonical,
+            status=item_status,
+            coverage=item_coverage,
+        ),
+    ]
+    archived_copy = json.loads(json.dumps(tool_data))
+
+    selected, decisions = fact_contract_module.select_authoritative_fact_ledgers(
+        tool_data
+    )
+
+    assert {decision.mode for decision in decisions} == {
+        "canonical",
+        "trusted_legacy",
+    }
+    selected_by_source = {ledger.source: ledger for ledger in selected}
+    assert set(selected_by_source) == {
+        "mcp_canonical",
+        "robusta_legacy_adapter",
+    }
+    retained_legacy = selected_by_source["robusta_legacy_adapter"]
+    assert retained_legacy.legacy_contract is True
+    assert [record.attribute for record in retained_legacy.records] == [
+        "logging.additional_context"
+    ]
+    assert sum(
+        record.attribute == canonical_record["attribute"]
+        and record.value == canonical_record["value"]
+        for ledger in selected
+        for record in ledger.records
+    ) == 1
+    assert tool_data == archived_copy
+
+
+@pytest.mark.parametrize(
+    ("canonical_time", "legacy_time"),
+    [
+        (
+            {"timestamp": "2026-07-30T00:00:00Z"},
+            {"timestamp": "2026-07-30T00:05:00Z"},
+        ),
+        (
+            {
+                "start": "2026-07-30T00:00:00Z",
+                "end": "2026-07-30T00:05:00Z",
+            },
+            {
+                "start": "2026-07-30T00:05:00Z",
+                "end": "2026-07-30T00:10:00Z",
+            },
+        ),
+    ],
+)
+def test_t017_canonical_precedence_preserves_same_value_at_distinct_times(
+    canonical_time,
+    legacy_time,
+):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    canonical_record = _fact(
+        "temporal-canonical",
+        entity_id,
+        value={"message": "same observed event"},
+    )
+    canonical_record.update(canonical_time)
+    canonical_record["fact_id"] = _canonical_fact_id(canonical_record)
+    legacy_record = _fact(
+        "temporal-legacy",
+        entity_id,
+        value={"message": "same observed event"},
+    )
+    legacy_record.update(legacy_time)
+    legacy_record["fact_id"] = _canonical_fact_id(legacy_record)
+    canonical = _ledger(
+        "case-temporal-canonical",
+        entity_id,
+        [canonical_record],
+    )
+    legacy = _ledger(
+        "case-temporal-legacy",
+        entity_id,
+        [legacy_record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+
+    selected, decisions = fact_contract_module.select_authoritative_fact_ledgers([
+        _t017_authority_item(legacy),
+        _t017_authority_item(canonical),
+    ])
+
+    assert {decision.mode for decision in decisions} == {
+        "canonical",
+        "trusted_legacy",
+    }
+    assert {ledger.source for ledger in selected} == {
+        "mcp_canonical",
+        "robusta_legacy_adapter",
+    }
+    assert {
+        record.fact_id
+        for ledger in selected
+        for record in ledger.records
+    } == {canonical_record["fact_id"], legacy_record["fact_id"]}
+
+
+def test_t017_canonical_precedence_deduplicates_truly_equivalent_timed_event():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    timestamp = "2026-07-30T00:00:00Z"
+    canonical_record = _fact(
+        "timed-equivalent-canonical",
+        entity_id,
+        value={"message": "same timed event"},
+    )
+    canonical_record["timestamp"] = timestamp
+    canonical_record["fact_id"] = _canonical_fact_id(canonical_record)
+    legacy_record = _fact(
+        "timed-equivalent-legacy",
+        entity_id,
+        value={"message": "same timed event"},
+    )
+    legacy_record["timestamp"] = timestamp
+    legacy_record["fact_id"] = _canonical_fact_id(legacy_record)
+    canonical = _ledger(
+        "case-timed-equivalent-canonical",
+        entity_id,
+        [canonical_record],
+    )
+    legacy = _ledger(
+        "case-timed-equivalent-legacy",
+        entity_id,
+        [legacy_record],
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+
+    selected, decisions = fact_contract_module.select_authoritative_fact_ledgers([
+        _t017_authority_item(legacy),
+        _t017_authority_item(canonical),
+    ])
+
+    assert {decision.mode for decision in decisions} == {
+        "canonical",
+        "trusted_legacy",
+    }
+    assert [ledger.source for ledger in selected] == ["mcp_canonical"]
+    assert selected[0].records[0].fact_id == canonical_record["fact_id"]
+
+
+def test_t017_cross_ledger_fact_id_collision_is_rejected_before_selection(
+    monkeypatch,
+):
+    entity_id = "k8s.pod:demo/api:uid-a"
+    collision_id = "fact-collision0001"
+    first_record = _fact("collision-first", entity_id)
+    second_record = _fact("collision-second", entity_id)
+    first_record["fact_id"] = collision_id
+    second_record["fact_id"] = collision_id
+    monkeypatch.setattr(
+        fact_contract_module,
+        "_canonical_fact_id",
+        lambda _record: collision_id,
+    )
+    first = _ledger("case-collision-first", entity_id, [first_record])
+    second = _ledger("case-collision-second", entity_id, [second_record])
+
+    selected, decisions = fact_contract_module.select_authoritative_fact_ledgers([
+        _t017_authority_item(first),
+        _t017_authority_item(second),
+    ])
+
+    assert selected == []
+    assert all(decision.mode == "rejected" for decision in decisions)
+    assert all(
+        "fact_id_collision" in decision.reasons
+        for decision in decisions
+    )
+
+
+def test_t017_evidence_limitations_are_derived_only_from_fact_capabilities():
+    entity_id = "k8s.pod:demo/unrelated-name:uid-a"
+    metric = _fact(
+        "metric-sample",
+        entity_id,
+        dimension="metrics",
+        fact_type="measurement",
+        value={"value": 7},
+    )
+    metric["timestamp"] = "2026-07-30T00:00:00Z"
+    metric["fact_id"] = _canonical_fact_id(metric)
+    span = _fact(
+        "successful-span",
+        entity_id,
+        dimension="tracing",
+        fact_type="span",
+        value={"trace_id": "0123456789abcdef", "status_code": 200},
+    )
+    relationship = _fact(
+        "topology-edge",
+        entity_id,
+        dimension="topology",
+        fact_type="relationship",
+        value={
+            "source": {"entity_id": entity_id},
+            "relation": "calls",
+            "target": {"entity_id": "k8s.service:demo/backend:uid-b"},
+        },
+    )
+    coverage = _fact(
+        "partial-coverage",
+        entity_id,
+        dimension="coverage",
+        fact_type="coverage",
+        directness="derived",
+        confidence="weak",
+        strength="context",
+        value={"coverage": "partial", "dimension": "logging"},
+    )
+    coverage["evidence_refs"] = []
+    coverage["fact_id"] = _canonical_fact_id(coverage)
+    ledger = FactLedger.model_validate(
+        _ledger(
+            "case-capability-limitations",
+            entity_id,
+            [metric, span, relationship, coverage],
+        )
+    )
+
+    limitations = fact_contract_module.derive_evidence_limitations([ledger])
+
+    assert [item.code for item in limitations] == [
+        "sampled_interval_unknown",
+        "representative_trace_only",
+        "availability_unmeasured",
+        "capacity_policy_missing",
+        "topology_relation_only",
+        "partial_coverage",
+    ]
+    rendered = json.dumps(
+        [item.model_dump(mode="json") for item in limitations],
+        ensure_ascii=False,
+    )
+    assert "unrelated-name" not in rendered
+    assert "OOMKilled" not in rendered
+
+
+def test_t017_sampled_limitation_applies_to_metric_measurement_without_time():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    metric = _fact(
+        "metric-without-time",
+        entity_id,
+        dimension="metrics",
+        fact_type="measurement",
+        value={"value": 7},
+    )
+    ledger = FactLedger.model_validate(
+        _ledger("case-metric-without-time", entity_id, [metric])
+    )
+
+    limitations = fact_contract_module.derive_evidence_limitations([ledger])
+
+    assert "sampled_interval_unknown" in {
+        limitation.code for limitation in limitations
+    }
+
+
+def test_t017_sampled_limitation_applies_to_nonmetric_interval_fact():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    interval_log = _fact(
+        "nonmetric-interval",
+        entity_id,
+        dimension="logging",
+        fact_type="log",
+    )
+    interval_log["start"] = "2026-07-30T00:00:00Z"
+    interval_log["end"] = "2026-07-30T00:05:00Z"
+    interval_log["fact_id"] = _canonical_fact_id(interval_log)
+    ledger = FactLedger.model_validate(
+        _ledger("case-nonmetric-interval", entity_id, [interval_log])
+    )
+
+    limitations = fact_contract_module.derive_evidence_limitations([ledger])
+
+    assert "sampled_interval_unknown" in {
+        limitation.code for limitation in limitations
+    }

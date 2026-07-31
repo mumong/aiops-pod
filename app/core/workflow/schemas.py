@@ -6,7 +6,7 @@ import re
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 EvidenceLevelName = Literal["critical", "important", "optional", "reference"]
@@ -20,6 +20,7 @@ FactDimension = Literal[
 ]
 FactTypeName = Literal[
     "state",
+    "configuration",
     "measurement",
     "event",
     "log",
@@ -31,6 +32,20 @@ FactTypeName = Literal[
 FactDirectness = Literal["direct", "derived", "related_context"]
 FactConfidence = Literal["high", "medium", "low", "weak"]
 FactStrength = Literal["critical", "strong", "supporting", "context"]
+ReportAuthorityMode = Literal[
+    "canonical",
+    "trusted_legacy",
+    "legacy_compatibility",
+    "rejected",
+]
+EvidenceLimitationCode = Literal[
+    "sampled_interval_unknown",
+    "representative_trace_only",
+    "availability_unmeasured",
+    "capacity_policy_missing",
+    "topology_relation_only",
+    "partial_coverage",
+]
 EvidenceToolName = Literal[
     "kubectl_describe",
     "kubectl_get_by_name",
@@ -384,6 +399,16 @@ class FactRecord(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("source_system", mode="before")
+    @classmethod
+    def normalize_source_system(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        source_system = value.strip()
+        if not source_system:
+            raise ValueError("source_system must not be blank")
+        return source_system
+
     @model_validator(mode="after")
     def validate_evidence_semantics(self) -> "FactRecord":
         if self.directness == "related_context" and self.confidence == "high":
@@ -412,6 +437,27 @@ class FactLedger(BaseModel):
             raise ValueError("Fact Ledger requires at least one scope entity")
         self.record_count = len(self.records)
         return self
+
+
+class ReportAuthorityDecision(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    mode: ReportAuthorityMode
+    authoritative: bool
+    ledger_case_id: str = ""
+    tool_name: str | None = None
+    reasons: tuple[str, ...] = ()
+    source: str = ""
+    legacy_contract: bool = False
+
+
+class EvidenceLimitation(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    code: EvidenceLimitationCode
+    applies_to: tuple[str, ...] = ()
+    statement: str = Field(min_length=1)
+    source_basis: tuple[str, ...] = ()
 
 
 class RCAHypothesis(BaseModel):
@@ -443,6 +489,8 @@ class EvidenceCollectionOutput(BaseModel):
     tool_results: list[str] = Field(default_factory=list)
     tool_data: list[dict[str, Any]] = Field(default_factory=list)
     llm_analysis: str = ""
+    plan_status: Literal["ready", "terminal_empty"] = "ready"
+    plan_failure_reason: str = ""
     collection_summary: str = ""
     plan_total: int = Field(ge=0)
     plan_collected: int = Field(ge=0)

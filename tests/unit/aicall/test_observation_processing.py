@@ -290,6 +290,159 @@ def test_observation_processor_preserves_sanitized_canonical_fact_ledger(tmp_pat
     assert "evaluator-only" not in json.dumps(ledger)
 
 
+def test_t017_observability_query_archives_native_ledger_without_summary_fact_duplication(
+    tmp_path,
+):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=5000,
+    )
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _canonical_fact_record(entity_id=entity_id)
+    payload = {
+        "ok": True,
+        "status": "query_succeeded",
+        "source_system": "elasticsearch",
+        "dimension": "logging",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api",
+            "pod_uid": "uid-a",
+        },
+        "purpose": "collect current Pod logs",
+        "coverage": "present",
+        "directness": "direct",
+        "query": {"query": "kubernetes.pod.name:api"},
+        "facts": [
+            {
+                "name": "log.message",
+                "value": record["value"],
+                "source_system": "elasticsearch",
+                "ref": "logs:target",
+                "directness": "direct",
+                "confidence": "high",
+            }
+        ],
+        "samples": [],
+        "evidence_refs": ["logs:target"],
+        "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-native-logs",
+            "scope_entity_ids": [entity_id],
+            "records": [record],
+            "record_count": 1,
+            "truncated": False,
+            "source": "mcp_canonical",
+            "legacy_contract": False,
+        },
+        "truncated": False,
+        "limits": {"max_serialized_bytes": 6144},
+    }
+    raw = json.dumps(payload, ensure_ascii=False)
+
+    processed = processor.process(
+        run_id="run-native-query-ledger",
+        node_id="evidence",
+        sequence=1,
+        tool_name="query_pod_logs",
+        raw_content=raw,
+    )
+
+    assert processed["structured"]["facts"] == payload["facts"]
+    assert processed["structured"]["fact_ledger"] == payload["fact_ledger"]
+    assert "FACT[1]" not in processed["summary"]
+    assert processed["summary"].count(record["fact_id"]) == 1
+    assert Path(processed["raw_ref"]).read_text() == raw
+    archived = json.loads(Path(processed["structured_ref"]).read_text())
+    assert archived["facts"] == payload["facts"]
+    assert archived["fact_ledger"] == payload["fact_ledger"]
+    assert Path(processed["summary_ref"]).read_text() == processed["summary"]
+
+
+def test_t017_observability_query_accepts_prometheus_metric_labels_metadata(
+    tmp_path,
+):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=5000,
+    )
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _canonical_fact_record(
+        entity_id=entity_id,
+        dimension="metrics",
+        fact_type="measurement",
+        attribute="kube_pod_container_status_last_terminated_reason",
+        value="1",
+        unit="unitless",
+        source_system="prometheus",
+        strength=None,
+        evidence_refs=["metric:terminated-reason"],
+        metadata={
+            "labels": {
+                "__name__": "kube_pod_container_status_last_terminated_reason",
+                "container": "api",
+                "namespace": "demo",
+                "pod": "api",
+                "reason": "OOMKilled",
+                "uid": "uid-a",
+            },
+            "sample_count": 1,
+        },
+    )
+    record.pop("strength")
+    payload = {
+        "ok": True,
+        "status": "query_succeeded",
+        "source_system": "prometheus",
+        "dimension": "metrics",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api",
+            "pod_uid": "uid-a",
+        },
+        "purpose": "verify current termination reason",
+        "coverage": "present",
+        "directness": "direct",
+        "query": {"promql": "kube_pod_container_status_last_terminated_reason"},
+        "facts": [{
+            "ref": "metric:terminated-reason",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "name": record["attribute"],
+            "value": "1",
+            "labels": record["metadata"]["labels"],
+        }],
+        "samples": [],
+        "evidence_refs": ["metric:terminated-reason"],
+        "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-live-prometheus-shape",
+            "scope_entity_ids": [entity_id],
+            "records": [record],
+            "record_count": 1,
+            "truncated": False,
+            "source": "mcp_canonical",
+            "legacy_contract": False,
+        },
+        "truncated": False,
+        "limits": {"max_serialized_bytes": 6144},
+    }
+
+    processed = processor.process(
+        run_id="run-live-prometheus-shape",
+        node_id="evidence",
+        sequence=1,
+        tool_name="execute_pod_promql",
+        raw_content=json.dumps(payload, ensure_ascii=False),
+    )
+
+    assert processed["structured"]["status"] == "query_succeeded"
+    assert processed["structured"]["coverage"] == "present"
+    assert processed["structured"]["fact_ledger"] == payload["fact_ledger"]
+
+
 def test_observation_processor_strips_nested_causal_keys_but_keeps_source_text(
     tmp_path,
 ):
@@ -2277,6 +2430,7 @@ kind: Pod
 metadata:
   name: terminating-stuck
   namespace: aiops-e2e
+  uid: 153e5f52-303c-4887-b639-8cbf05d7b627
   creationTimestamp: "2026-04-29T06:54:19Z"
   deletionTimestamp: "2026-04-29T06:56:00Z"
   deletionGracePeriodSeconds: 0
@@ -2323,6 +2477,7 @@ status:
     structured = processed["structured"]
     summary = processed["summary"]
 
+    assert structured["uid"] == "153e5f52-303c-4887-b639-8cbf05d7b627"
     assert structured["deletionTimestamp"] == "2026-04-29T06:56:00Z"
     assert structured["deletionGracePeriodSeconds"] == 0
     assert structured["finalizers"] == ["aiops.e2e/hold"]
@@ -2531,6 +2686,200 @@ def test_observation_processor_marks_failed_describe_as_negative(tmp_path):
     assert processed["structured"]["status"] == "command_failed"
     assert processed["semantic_success"] is False
     assert "NotFound" in processed["summary"]
+
+
+def test_observation_processor_preserves_describe_container_resource_quantities(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=2400,
+    )
+    raw = """Name:             api-abc
+Namespace:        demo
+Status:           Running
+Containers:
+  business-api:
+    Image:         example.invalid/api:v1
+    State:          Waiting
+      Reason:       CrashLoopBackOff
+    Last State:     Terminated
+      Reason:       Error
+      Exit Code:    1
+    Restart Count:  42
+    Limits:
+      cpu:     300m
+      memory:  80Mi
+    Requests:
+      cpu:     20m
+      memory:  32Mi
+    Environment:
+      MODE:  test
+Conditions:
+  Type    Status
+  Ready   False
+"""
+
+    processed = processor.process(
+        run_id="run-describe-resources",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_describe",
+        raw_content=raw,
+    )
+
+    assert processed["processor"] == "k8s_describe"
+    container = processed["structured"]["containers"][0]
+    assert container["name"] == "business-api"
+    assert container["image"] == "example.invalid/api:v1"
+    assert container["last_state"] == "Terminated"
+    assert container["exit_code"] == "1"
+    assert container["restart_count"] == "42"
+    assert container["resources"] == {
+        "limits": {
+            "cpu": "300m",
+            "memory": "80Mi",
+        },
+        "requests": {
+            "cpu": "20m",
+            "memory": "32Mi",
+        },
+    }
+
+
+def test_observation_processor_extracts_current_pod_uid_from_describe_event(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=2400,
+    )
+    raw = """Name:             api-abc
+Namespace:        demo
+Status:           Running
+Containers:
+  business-api:
+    State:          Waiting
+      Reason:       CrashLoopBackOff
+Events:
+  Type     Reason   Age                From     Message
+  ----     ------   ----               ----     -------
+  Warning  BackOff  36s (x42 over 20m) kubelet  Back-off restarting failed container business-api in pod api-abc_demo(02b86eed-e9db-449c-9c6a-9fce6f0ca566)
+"""
+
+    processed = processor.process(
+        run_id="run-describe-pod-identity",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_describe",
+        raw_content=raw,
+        tool_args={
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api-abc",
+        },
+    )
+
+    assert processed["structured"]["primary_entity"] == {
+        "kind": "Pod",
+        "namespace": "demo",
+        "name": "api-abc",
+        "uid": "02b86eed-e9db-449c-9c6a-9fce6f0ca566",
+    }
+
+
+def test_observation_processor_does_not_bind_describe_uid_from_other_pod(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=2400,
+    )
+    raw = """Name:             api-abc
+Namespace:        demo
+Status:           Running
+Events:
+  Type     Reason   Age  From     Message
+  ----     ------   ---  ----     -------
+  Warning  BackOff  36s  kubelet  Back-off restarting failed container worker in pod worker-demo_demo(02b86eed-e9db-449c-9c6a-9fce6f0ca566)
+"""
+
+    processed = processor.process(
+        run_id="run-describe-other-pod-identity",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_describe",
+        raw_content=raw,
+        tool_args={
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api-abc",
+        },
+    )
+
+    assert processed["structured"]["primary_entity"] == {
+        "kind": "Pod",
+        "namespace": "demo",
+        "name": "api-abc",
+    }
+
+
+def test_observation_processor_rejects_conflicting_exact_describe_uids(tmp_path):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=2400,
+    )
+    raw = """Name:             api-abc
+Namespace:        demo
+UID:              02b86eed-e9db-449c-9c6a-9fce6f0ca566
+Status:           Running
+Events:
+  Type     Reason   Age  From     Message
+  ----     ------   ---  ----     -------
+  Warning  BackOff  36s  kubelet  Back-off restarting failed container api in pod api-abc_demo(153e5f52-303c-4887-b639-8cbf05d7b627)
+"""
+
+    processed = processor.process(
+        run_id="run-describe-conflicting-identities",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_describe",
+        raw_content=raw,
+        tool_args={
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api-abc",
+        },
+    )
+
+    assert processed["structured"]["primary_entity"] == {
+        "kind": "Pod",
+        "namespace": "demo",
+        "name": "api-abc",
+    }
+
+
+def test_observation_processor_does_not_project_deployment_describe_as_pod(
+    tmp_path,
+):
+    processor = ObservationProcessor(
+        archive_root=str(tmp_path),
+        max_observation_chars=2400,
+    )
+    raw = """Name:             api
+Namespace:        demo
+UID:              02b86eed-e9db-449c-9c6a-9fce6f0ca566
+Replicas:         1 desired | 1 updated | 1 total | 1 available
+"""
+
+    processed = processor.process(
+        run_id="run-describe-deployment-identity",
+        node_id="evidence",
+        sequence=1,
+        tool_name="kubectl_describe",
+        raw_content=raw,
+        tool_args={
+            "kind": "Deployment",
+            "namespace": "demo",
+            "name": "api",
+        },
+    )
+
+    assert "primary_entity" not in processed["structured"]
 
 
 def test_observation_processor_preserves_describe_event_not_found_as_diagnostic_evidence(tmp_path):

@@ -1078,10 +1078,6 @@ class AICall:
                 stream_mode=["updates", "messages"],
                 version="v2",
             ):
-                # 检查取消信号
-                if cancel_event and cancel_event.is_set():
-                    logger.info("🛑 [AICall] 收到取消信号，停止 agent (node=%s)", node_id)
-                    break
                 # v2 格式: chunk 是 dict {"type": "updates"|"messages", "data": ..., "ns": [...]}
                 # 但某些版本可能返回 tuple (stream_mode_name, data)
                 if isinstance(chunk, tuple):
@@ -1092,6 +1088,14 @@ class AICall:
                 else:
                     logger.debug("   ⚠️ [AICall] 未知 chunk 类型: %s", type(chunk))
                     continue
+
+                if (
+                    chunk_type != "updates"
+                    and cancel_event
+                    and cancel_event.is_set()
+                ):
+                    logger.info("🛑 [AICall] 收到取消信号，停止 agent (node=%s)", node_id)
+                    break
 
                 # ── messages 模式：token 级别流式 ──
                 if chunk_type == "messages":
@@ -1404,20 +1408,23 @@ class AICall:
                                     self._compact_langgraph_ai_messages_in_place(emitted_ai_messages)
                                     self._compact_langgraph_tool_messages_in_place(emitted_tool_messages)
 
-                            if stop_checker:
-                                try:
-                                    if stop_checker(thinking_events):
-                                        logger.info("🛑 [AICall] stop_checker 触发，提前结束 agent (node=%s)", node_id)
-                                        self._record(
-                                            thinking_events,
-                                            "early_stop",
-                                            node_id,
-                                            reason="stop_checker",
-                                            iteration=iteration,
-                                        )
-                                        return
-                                except Exception as exc:
-                                    logger.warning("⚠️ [AICall] stop_checker 执行失败: %s", exc)
+                if cancel_event and cancel_event.is_set():
+                    logger.info("🛑 [AICall] 收到取消信号，停止 agent (node=%s)", node_id)
+                    break
+                if stop_checker:
+                    try:
+                        if stop_checker(thinking_events):
+                            logger.info("🛑 [AICall] stop_checker 触发，提前结束 agent (node=%s)", node_id)
+                            self._record(
+                                thinking_events,
+                                "early_stop",
+                                node_id,
+                                reason="stop_checker",
+                                iteration=iteration,
+                            )
+                            return
+                    except Exception as exc:
+                        logger.warning("⚠️ [AICall] stop_checker 执行失败: %s", exc)
 
         # 在新线程中运行异步 agent（避免与 uvicorn event loop 冲突）
         def _run_agent_thread():

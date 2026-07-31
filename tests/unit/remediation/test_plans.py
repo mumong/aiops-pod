@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.core.remediation.plans import extract_remediation_plan
+from app.core.remediation.plans import _loads_json, extract_remediation_plan
 
 
 def test_extracts_remediation_plan_from_json_fence():
@@ -76,6 +76,107 @@ def test_canonical_fact_ledger_contract_precedes_ordinary_remediation_json():
     assert plan is not None
     assert plan.remediation_available is False
     assert plan.fix_type == "manual_only"
+    assert plan.actions == []
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        "fact-ledger-authoritative-v1",
+        "fact-ledger-diagnostic-only-v1",
+    ],
+)
+def test_t017_fact_ledger_authority_marker_forces_manual_only_plan(contract):
+    text = "```json\n" + json.dumps(
+        {
+            "remediation_contract": contract,
+            "remediation_available": True,
+            "fix_type": "patch_workload_resources",
+            "requires_human_approval": False,
+            "actions": [
+                {
+                    "id": "unsafe-write",
+                    "type": "kubectl_set",
+                    "execute_command": (
+                        "kubectl set resources deployment/api -n demo "
+                        "--limits=memory=128Mi"
+                    ),
+                }
+            ],
+        },
+        ensure_ascii=False,
+    ) + "\n```"
+
+    plan = extract_remediation_plan(text)
+
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.fix_type == "manual_only"
+    assert plan.requires_human_approval is True
+    assert plan.actions == []
+
+
+def test_t017_nested_fact_ledger_marker_forces_manual_only_for_sibling_plan():
+    text = "```json\n" + json.dumps(
+        {
+            "diagnostic_contract": {
+                "authority": {
+                    "remediation_contract": (
+                        "fact-ledger-diagnostic-only-v1"
+                    )
+                }
+            },
+            "remediation_plan": {
+                "remediation_available": True,
+                "fix_type": "delete_pod",
+                "requires_human_approval": False,
+                "actions": [{
+                    "id": "unsafe-nested-marker-write",
+                    "type": "kubectl_delete",
+                    "execute_command": "kubectl delete pod api -n demo",
+                }],
+            },
+        },
+        ensure_ascii=False,
+    ) + "\n```"
+
+    plan = extract_remediation_plan(text)
+
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.fix_type == "manual_only"
+    assert plan.requires_human_approval is True
+    assert plan.actions == []
+
+
+def test_t017_duplicate_json_keys_are_rejected_by_strict_loader():
+    assert _loads_json('{"actions": [], "actions": [{"id": "write"}]}') is None
+
+
+def test_t017_duplicate_contract_key_cannot_overwrite_fact_ledger_marker():
+    text = """```json
+{
+  "remediation_contract": "fact-ledger-authoritative-v1",
+  "remediation_contract": "legacy-executable-v1",
+  "remediation_available": true,
+  "fix_type": "delete_pod",
+  "requires_human_approval": false,
+  "actions": [
+    {
+      "id": "unsafe-duplicate-key-write",
+      "type": "kubectl_delete",
+      "execute_command": "kubectl delete pod api -n demo"
+    }
+  ]
+}
+```"""
+
+    plan = extract_remediation_plan(text)
+
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.fix_type == "manual_only"
+    assert plan.requires_human_approval is True
     assert plan.actions == []
 
 

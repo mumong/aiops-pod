@@ -1,6 +1,6 @@
 # AIOps 真实可观测性数据与 MCP 使用说明
 
-**更新日期**：2026-07-27
+**更新日期**：2026-07-29
 
 **适用项目**：
 
@@ -349,6 +349,31 @@ DeepFlow：driver 请求到达目标 Pod
 > 业务请求持续触发内存保留，容器工作集逼近 80 MiB limit，随后被 cgroup
 > OOM Kill，Deployment 管理的 Pod 进入 CrashLoopBackOff。
 
+### 5.7 标准 `data` 脚本最新验收
+
+2026-07-29 使用同一个目标 Pod 运行：
+
+```text
+case_id=oom-script-20260729-094641
+output=/root/huhu/agent/combine-aiops-mcp/data/cases/oom-script-20260729-094641
+```
+
+结果：
+
+```text
+metrics=present/9
+logging=present/20
+tracing_flow=present/80
+kubernetes=present/4
+trace=present/11
+three_way_shared_trace_ids=9
+```
+
+该结果证明 `data` 原型和生产 coarse Case Package 的核心结构已经对齐：
+`case.yaml + evidence/* + signals + timeline + entities/topology`。生产 Agent
+默认自主查询路径不强制生成该目录，但工具归档使用相同的实体、coverage、核心
+事实、原始摘录和 evidence ref 语义。
+
 ## 6. 人可读证据标准
 
 ### 6.1 不能只展示计数
@@ -389,6 +414,60 @@ Prometheus series=35
 
 四个维度都执行过，不代表根因一定充分。例如只有“50 条日志”和“12 条 trace”
 计数时，覆盖度可以是高，但根因充分度仍然低。
+
+### 6.4 最终报告的证据展示合同
+
+每个真实执行过的维度应采用同一组字段：
+
+| 字段 | 说明 |
+|---|---|
+| `source` | Prometheus、ES/Filebeat、DeepFlow/ClickHouse、Tempo 或 K8s API |
+| `purpose` | 为什么执行本次查询，要验证或排除什么 |
+| `coverage` | `present/empty/weak/absent/error` |
+| `core_fact` | 结构化关键值，例如 max、limit、状态码、span 属性 |
+| `raw_excerpt` | 1 至 3 条最有判别力的原始输出摘录 |
+| `evidence_ref` | 可继续展开的真实引用 |
+| `limitation` | 当前证据不能说明什么 |
+
+因此，“把工具核心结果放到报告”是正确做法，但不是把完整 raw 全量放进
+Prompt。推荐采用两层：
+
+```text
+报告正文：
+  核心结构化事实 + 少量原始摘录 + evidence ref
+
+审计/补证：
+  raw_ref 或 get_aiops_case_evidence 返回有界原始内容
+```
+
+OOM 示例：
+
+| 维度 | 人可读核心结果 |
+|---|---|
+| Metrics | `container_memory_working_set_bytes: 3.7Mi -> 79.0Mi; limit=80.0Mi; ratio=98.72%` |
+| Logging | `event=allocate path=/allocate?mib=2 alloc_mib=2 allocated_mib=62 trace_id=...` |
+| DeepFlow | `172.16.104.8 -> 172.16.104.25 GET /allocate... HTTP 200 duration_us=11621 trace_id=...` |
+| Tempo | `service=aiops-traced-oom-api span=GET /allocate allocated_before=60 allocated_after=62 trace_id=...` |
+| K8s | `last_reason=OOMKilled last_exit=137 current=CrashLoopBackOff restarts=...` |
+
+如果正文只写“日志 50 条”或“Trace 12 条”，应判定为证据展示失败。
+
+### 6.5 “无返回”的分层诊断
+
+日志或 Tracing 显示无返回时，不应直接认定数据源没有数据：
+
+1. `raw.txt` 无记录：
+   - 检查 Pod UID/IP、时间窗、日志索引、DeepFlow SQL、Tempo trace ID 和应用
+     埋点。
+   - coverage 应为 `empty/absent/error`，并保留原因。
+2. `raw.txt` 有记录但 `structured.json` 无样本：
+   - 属于 MCP/Observation 结构化投影缺陷。
+3. `structured.json` 有样本但报告写“未返回”：
+   - 属于 RCA/Conclusion 消费或渲染缺陷。
+4. 报告有事实但无有效 evidence ref：
+   - 属于不可回溯引用，不能计入充分证据。
+
+只有第一种属于真实采集无数据；后面三种都是系统链路缺陷。
 
 ## 7. Robusta 如何消费证据
 

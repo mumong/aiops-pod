@@ -1,6 +1,6 @@
 # AIOps Traced OOM 测试环境与采集使用说明
 
-**更新日期**：2026-07-27
+**更新日期**：2026-07-29
 
 ## 1. 测试目标
 
@@ -163,13 +163,32 @@ namespace + pod + scenario + case_id + output
 - Prometheus
 - Elasticsearch/Filebeat
 - DeepFlow L4/L7
+- Tempo application span
 - 轻量拓扑
 
-其中 Tracing 指 DeepFlow 网络流和存在时的 trace/span 关联字段。标准
-`collect_case.py` 不负责查询 Tempo application span；Tempo 是生产 coarse
-collector 和专用 Trace 审计路径的增强维度。
+Tracing 包含两层：DeepFlow 网络流，以及使用 Logging/DeepFlow 中真实
+`trace_id` 精确查询得到的 Tempo application span。应用未插桩或 trace 未成功
+导出时，Tempo 可以诚实返回 `absent`，但不会影响 DeepFlow 网络证据。
 
 ### 5.2 真实采集命令
+
+先按 [Sprint 测试指南](aiops-observability-sprint-test-guide.md) 的 3.2 节建立
+Prometheus、Elasticsearch 通道，并设置
+`PROMETHEUS_URL`、`ELASTICSEARCH_URL`、认证信息和
+`DEEPFLOW_CLICKHOUSE_URL`。
+
+同时设置：
+
+```bash
+export TEMPO_EXEC_ENABLED=true
+export TEMPO_EXEC_NAMESPACE=monitor
+export TEMPO_EXEC_SELECTOR='app=lgtm'
+export TEMPO_LOCAL_URL='http://127.0.0.1:3200'
+```
+
+如果这些环境变量未设置，脚本仍可能生成结构合法的 Case Package，但
+Metrics、Logging 或 DeepFlow evidence 会为空。`validate=ok` 不能替代真实数据
+内容检查。
 
 ```bash
 cd /root/huhu/agent/combine-aiops-mcp/data
@@ -219,7 +238,8 @@ ok
     ├── metrics.jsonl
     ├── logs.jsonl
     ├── deepflow_l4.jsonl
-    └── deepflow_l7.jsonl
+    ├── deepflow_l7.jsonl
+    └── tempo_traces.jsonl
 ```
 
 文件分层：
@@ -249,7 +269,9 @@ ok
    - 是否包含目标 Pod 的原始业务日志，而不是只有命中条数。
 5. `evidence/deepflow_l7.jsonl`
    - 是否包含目标 Pod IP、HTTP `/allocate`、状态码、时延和 trace ID。
-6. `topology.jsonl`
+6. `evidence/tempo_traces.jsonl`
+   - 是否包含同一 trace ID、目标 service、`GET /allocate` span 和业务内存属性。
+7. `topology.jsonl`
    - 是否能从 Driver/Service/owner/Node 关系定位责任实体。
 
 `signals.jsonl` 是索引，不是最终原始证据。以下内容不能单独判定通过：
@@ -264,8 +286,7 @@ returned 50 rows
 
 ## 6. 完整 Tempo 关联验收
 
-如果测试目标还包括 application span，应使用当前 mcpstander coarse collector
-或默认自主 `query_pod_tracing`：
+标准 `collect_case.py package` 已实现：
 
 ```text
 DeepFlow L7
@@ -293,14 +314,33 @@ Tempo:
 真实参考样本：
 
 ```text
-/root/huhu/agent/combine-aiops-mcp/aiops-cases/
-  sprint-audit-20260727-oom
+/root/huhu/agent/combine-aiops-mcp/data/cases/
+  oom-script-20260729-094641
 ```
 
 代表性 `trace_id`：
 
 ```text
-7f54c092ad81bdc124e7d16034d07ca9
+192d16297831f81fa46afa473f763631
+```
+
+该 trace 的三源事实：
+
+```text
+Logging:
+  allocated_mib=48
+
+DeepFlow:
+  172.16.104.8 -> 172.16.104.25
+  GET /allocate?mib=2&step=304943
+  HTTP 200
+
+Tempo:
+  service=aiops-traced-oom-api
+  span=GET /allocate
+  allocated before=46
+  alloc=2
+  allocated after=48
 ```
 
 ## 7. 脚本测试通过标准

@@ -133,6 +133,20 @@ class WorkflowExecutor:
         except (TypeError, ValueError):
             return 15.0
 
+    @staticmethod
+    def _join_worker_if_needed(
+        worker: Optional[threading.Thread],
+        *,
+        timeout: float,
+    ) -> bool:
+        if worker is None:
+            return False
+        if worker is threading.current_thread():
+            return worker.is_alive()
+        if worker.is_alive():
+            worker.join(timeout=timeout)
+        return worker.is_alive()
+
     def _save_report(self, layer, question: str, full_answer: str):
         """保存诊断报告到固定目录"""
         _save_report_fn(self.REPORTS_DIR, layer, question, full_answer)
@@ -287,6 +301,7 @@ class WorkflowExecutor:
             except Exception as exc:
                 event_queue.put(("langgraph_error", exc))
 
+        worker: Optional[threading.Thread] = None
         try:
             # 设置节点级事件队列（per-request，并发安全）
             for node in node_instances:
@@ -544,7 +559,7 @@ class WorkflowExecutor:
                     raise data  # re-raise exception from worker thread
 
             # 等待线程结束
-            worker.join(timeout=5)
+            self._join_worker_if_needed(worker, timeout=5)
 
             # Finalize 剩余节点（最后一个节点）
             for node_name in current_nodes:
@@ -806,10 +821,15 @@ class WorkflowExecutor:
             # 清除事件队列（实例级，无需类级别清理）+ 等待后台线程结束
             for node in node_instances:
                 node.set_event_queue(None)
-            if worker.is_alive():
-                worker.join(timeout=5)
-                if worker.is_alive():
-                    logger.warning("⚠️ [Workflow] 后台线程未在 5s 内结束 (run_id=%s)", run_id)
+            worker_alive = self._join_worker_if_needed(
+                worker,
+                timeout=5,
+            )
+            if (
+                worker_alive
+                and worker is not threading.current_thread()
+            ):
+                logger.warning("⚠️ [Workflow] 后台线程未在 5s 内结束 (run_id=%s)", run_id)
 
     @staticmethod
     def _normalize_langfuse_session_id(run_id: str) -> Optional[str]:

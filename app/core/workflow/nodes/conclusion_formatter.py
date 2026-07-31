@@ -29,9 +29,13 @@ from app.core.remediation.plans import (
 from app.core.workflow.fact_contract import (
     OBSERVABILITY_QUERY_TOOLS,
     compact_fact_ledgers_json,
+    derive_evidence_limitations,
     extract_fact_ledgers_from_evidence_analysis,
     extract_fact_ledgers_from_tool_data,
+    normalize_fact_ledger,
     project_final_observability_events,
+    select_authoritative_fact_ledgers,
+    tool_item_allows_fact_ledger_projection,
     validate_rca_claims,
 )
 from app.core.workflow.nodes.base import WorkflowNode
@@ -75,6 +79,8 @@ class ConclusionFormatterNode(WorkflowNode):
 
     整合前3个节点的分析结果，生成最终报告
     """
+
+    _CONTEXT_ARCHIVE_ROOT = "/tmp/aiops/reports/context_archives/"
 
     def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
         """
@@ -231,6 +237,10 @@ class ConclusionFormatterNode(WorkflowNode):
                 if layer not in {Layer.QUERY, Layer.HEALTHY}
                 else None
             )
+            fact_ledger_input_present = (
+                layer not in {Layer.QUERY, Layer.HEALTHY}
+                and self._has_fact_ledger_input(evidence_analysis)
+            )
             if layer == Layer.HEALTHY:
                 conclusion = self._format_healthy_fast_path(
                     question=question,
@@ -239,6 +249,13 @@ class ConclusionFormatterNode(WorkflowNode):
                 )
             elif layer == Layer.QUERY and self._get_query_mode() == "direct" and query_result:
                 conclusion = self._render_query_result(query_result)
+            elif (
+                fact_report_context is not None
+                and self._requires_deterministic_fact_report(
+                    fact_report_context[1]
+                )
+            ):
+                conclusion = self._format_deterministic_fact_report_shell()
             
             # 使用 LLM 生成最终报告
             elif getattr(self, 'ai_call', None) is not None:
@@ -373,15 +390,23 @@ class ConclusionFormatterNode(WorkflowNode):
                     report,
                     structured_context,
                 )
+                if fact_ledger_input_present:
+                    report = self._render_fact_ledger_diagnostic_remediation(
+                        report,
+                        ledgers=[],
+                        validated_claim={},
+                    )
                 if layer not in {Layer.QUERY, Layer.HEALTHY}:
                     report = self._mark_legacy_report_contract(report)
                 return report
 
             conclusion = apply_diagnosis_postprocessors(conclusion)
+            conclusion = self._sanitize_context_archive_paths(conclusion)
             if layer not in {Layer.QUERY, Layer.HEALTHY}:
                 final_errors = self._diagnosis_report_validation_errors(conclusion)
                 if "invalid_remediation_json" in final_errors:
                     conclusion = self._repair_invalid_remediation_json(conclusion)
+                    conclusion = self._sanitize_context_archive_paths(conclusion)
                     final_errors = self._diagnosis_report_validation_errors(conclusion)
                 final_fatal_errors = {
                     "empty_report",
@@ -411,6 +436,25 @@ class ConclusionFormatterNode(WorkflowNode):
                             warnings=state.get("warnings", []),
                         )
                     )
+                    conclusion = self._sanitize_context_archive_paths(conclusion)
+                    fallback_errors = (
+                        self._diagnosis_report_validation_errors(conclusion)
+                    )
+                    if "invalid_remediation_json" in fallback_errors:
+                        conclusion = self._repair_invalid_remediation_json(
+                            conclusion
+                        )
+                        conclusion = self._sanitize_context_archive_paths(
+                            conclusion
+                        )
+                        fallback_errors = (
+                            self._diagnosis_report_validation_errors(conclusion)
+                        )
+                    if fallback_errors:
+                        raise ValueError(
+                            "deterministic report fallback failed validation: "
+                            + ", ".join(fallback_errors)
+                        )
 
             conclusion = self._remove_truncation_markers(conclusion)
             
@@ -1733,7 +1777,16 @@ class ConclusionFormatterNode(WorkflowNode):
             parsed_edges.append(fields)
 
         if not edge_lines:
-            return content
+            topology_tools = (
+                ConclusionFormatterNode._source_tools_for_dimension(
+                    structured_context,
+                    "topology",
+                )
+            )
+            return ConclusionFormatterNode._replace_unverified_topology_section(
+                content,
+                executed=bool(topology_tools),
+            )
 
         topology_explanations: List[str] = []
         pod_to_rs: Dict[str, str] = {}
@@ -1803,6 +1856,31 @@ class ConclusionFormatterNode(WorkflowNode):
         if not pattern.search(content):
             return content
         return pattern.sub("\n".join(section), content, count=1)
+
+    @staticmethod
+    def _replace_unverified_topology_section(
+        content: str,
+        *,
+        executed: bool,
+    ) -> str:
+        message = (
+            "- 本轮已执行 `query_pod_topology`，但未返回可核验关系边；"
+            "不对 Deployment、Service 或调用关系作推断。"
+            if executed
+            else
+            "- 本轮未执行 `query_pod_topology`；"
+            "不对 Deployment、Service 或调用关系作推断。"
+        )
+        section = "\n".join([
+            "### 拓扑关系（实体与边）",
+            message,
+            "",
+        ])
+        pattern = re.compile(
+            r"(?ms)^###\s+拓扑关系（实体与边）\s*$.*?"
+            r"(?=^---\s*$|^#{1,3}\s+|\Z)"
+        )
+        return pattern.sub(section, content, count=1)
 
     @staticmethod
     def _reconcile_legacy_report_limitations(
@@ -3996,21 +4074,50 @@ class ConclusionFormatterNode(WorkflowNode):
         return "\n".join(lines)
 
     @classmethod
+    def _has_fact_ledger_input(cls, evidence_analysis: Any) -> bool:
+        try:
+            evidence_data = (
+                json.loads(evidence_analysis)
+                if isinstance(evidence_analysis, str)
+                else evidence_analysis
+            )
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if not isinstance(evidence_data, dict):
+            return False
+        tool_data = evidence_data.get("tool_data")
+        if not isinstance(tool_data, list):
+            return False
+        return any(
+            isinstance(item, dict)
+            and isinstance(item.get("fact_ledger"), (dict, FactLedger))
+            for item in tool_data
+        )
+
+    @classmethod
     def _build_fact_report_context(
         cls,
         *,
         evidence_analysis: Any,
         rca_analysis: Any,
     ) -> Optional[tuple[List[FactLedger], Dict[str, Any]]]:
-        ledgers = [
-            ledger
-            for ledger in extract_fact_ledgers_from_evidence_analysis(
-                evidence_analysis
+        try:
+            evidence_data = (
+                json.loads(evidence_analysis)
+                if isinstance(evidence_analysis, str)
+                else evidence_analysis
             )
-            if not ledger.legacy_contract
-        ]
-        if not ledgers:
-            return None
+        except (json.JSONDecodeError, TypeError):
+            evidence_data = {}
+        tool_data = (
+            evidence_data.get("tool_data")
+            if isinstance(evidence_data, dict)
+            and isinstance(evidence_data.get("tool_data"), list)
+            else []
+        )
+        all_ledgers, _authority_decisions = (
+            select_authoritative_fact_ledgers(tool_data)
+        )
 
         try:
             if isinstance(rca_analysis, RCAOutput):
@@ -4020,6 +4127,26 @@ class ConclusionFormatterNode(WorkflowNode):
             else:
                 parsed = json.loads(str(rca_analysis or "{}"))
                 raw_claim = parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raw_claim = {}
+
+        raw_validation = (
+            raw_claim.get("claim_validation")
+            if isinstance(raw_claim.get("claim_validation"), dict)
+            else {}
+        )
+        raw_status = str(
+            raw_claim.get("diagnostic_status") or ""
+        ).strip().lower()
+        has_hard_inconclusive_cap = (
+            raw_status == "inconclusive"
+            or raw_validation.get("valid") is False
+        )
+        ledgers = all_ledgers
+        if not ledgers:
+            return None
+
+        try:
             validated_claim = validate_rca_claims(raw_claim, ledgers)
         except Exception as exc:
             reason = (
@@ -4054,7 +4181,178 @@ class ConclusionFormatterNode(WorkflowNode):
                     "legacy_contract": False,
                 },
             }
+
+        if has_hard_inconclusive_cap:
+            validated_claim["diagnostic_status"] = "inconclusive"
+            generic_summary = (
+                "Current facts are insufficient for a validated "
+                "root-cause conclusion"
+            )
+            validated_claim["root_cause"] = generic_summary
+            validated_claim["root_cause_summary"] = generic_summary
+            try:
+                raw_confidence = float(raw_claim.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                raw_confidence = 0.0
+            try:
+                validated_confidence = float(
+                    validated_claim.get("confidence") or 0.0
+                )
+            except (TypeError, ValueError):
+                validated_confidence = 0.0
+            validated_claim["confidence"] = min(
+                max(raw_confidence, 0.0),
+                max(validated_confidence, 0.0),
+                0.49,
+            )
+
+            validation = (
+                dict(validated_claim.get("claim_validation"))
+                if isinstance(
+                    validated_claim.get("claim_validation"),
+                    dict,
+                )
+                else {}
+            )
+            validation["diagnostic_status"] = "inconclusive"
+            if raw_validation.get("valid") is False:
+                validation["valid"] = False
+                validation["invalid_fact_ids"] = sorted({
+                    str(fact_id)
+                    for fact_id in [
+                        *(validation.get("invalid_fact_ids") or []),
+                        *(raw_validation.get("invalid_fact_ids") or []),
+                    ]
+                    if str(fact_id).strip()
+                })
+                validation["reasons"] = list(dict.fromkeys(
+                    str(reason).strip()
+                    for reason in [
+                        *(validation.get("reasons") or []),
+                        *(raw_validation.get("reasons") or []),
+                    ]
+                    if str(reason).strip()
+                ))
+            validated_claim["claim_validation"] = validation
         return ledgers, validated_claim
+
+    @staticmethod
+    def _fact_record_subject(record: FactRecord) -> str:
+        value = record.value if isinstance(record.value, dict) else {}
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        for candidate in (
+            value.get("container"),
+            value.get("subject"),
+            metadata.get("subject"),
+            metadata.get("container"),
+        ):
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return ""
+
+    @classmethod
+    def _state_configuration_slot(
+        cls,
+        record: FactRecord,
+    ) -> Optional[tuple[str, str, str]]:
+        if record.fact_type not in {"state", "configuration"}:
+            return None
+        return (
+            record.entity_id,
+            record.attribute,
+            cls._fact_record_subject(record),
+        )
+
+    @classmethod
+    def _merge_inconclusive_fact_ledgers(
+        cls,
+        *,
+        all_ledgers: List[FactLedger],
+        canonical_ledgers: List[FactLedger],
+    ) -> List[FactLedger]:
+        canonical_slots = {
+            slot
+            for ledger in canonical_ledgers
+            for record in ledger.records
+            if (slot := cls._state_configuration_slot(record)) is not None
+        }
+        merged = list(canonical_ledgers)
+        for ledger in all_ledgers:
+            if not ledger.legacy_contract:
+                continue
+            retained = [
+                record
+                for record in ledger.records
+                if str(record.source_system or "").strip()
+                and record.evidence_refs
+                and (
+                    cls._state_configuration_slot(record)
+                    not in canonical_slots
+                )
+            ]
+            if retained:
+                merged.append(ledger.model_copy(update={
+                    "records": retained,
+                    "record_count": len(retained),
+                }))
+        return merged
+
+    @staticmethod
+    def _requires_deterministic_fact_report(
+        validated_claim: Dict[str, Any],
+    ) -> bool:
+        validation = (
+            validated_claim.get("claim_validation")
+            if isinstance(
+                validated_claim.get("claim_validation"),
+                dict,
+            )
+            else {}
+        )
+        return (
+            str(
+                validated_claim.get("diagnostic_status") or ""
+            ).strip().lower() == "inconclusive"
+            or
+            validation.get("valid") is False
+        )
+
+    @staticmethod
+    def _format_deterministic_fact_report_shell() -> str:
+        return """# K8s 诊断报告
+
+## 诊断概览
+
+- 当前 RCA 未达到已确认根因的报告边界。
+
+## 现象描述
+
+- 本报告仅展示当前 Fact Ledger 中可核验的只读事实。
+
+## 可观测性数据
+
+### 三大观测维度
+
+| 维度 | 数据来源 | 覆盖状态 | 关键原始信号 | 证据 ref |
+|---|---|---|---|---|
+| **Metrics** | Prometheus | 未获取到 | 未返回可用指标样本 | 见机器可核验附录 |
+| **Logging** | ES/Filebeat | 未获取到 | 未返回可用日志原文 | 见机器可核验附录 |
+| **Tracing** | DeepFlow/Tempo | 未获取到 | 未返回可用 Trace 数据 | 见机器可核验附录 |
+| **K8s** | Kubernetes API | 未获取到 | 未返回可用 Kubernetes 强信号 | 见机器可核验附录 |
+
+### 拓扑关系（实体与边）
+
+- 未经 Fact Ledger 验证的 Node、网络或拓扑排除结论不进入报告。
+
+## 根因分析
+
+- 当前结果保持 inconclusive。
+
+## 修复建议
+
+- 仅保留人工复核和只读验证；本报告不授权 Kubernetes 写操作。
+"""
 
     @staticmethod
     def _fact_record_index(
@@ -4077,6 +4375,22 @@ class ConclusionFormatterNode(WorkflowNode):
         )
 
     @classmethod
+    def _report_safe_evidence_ref(cls, value: Any) -> str:
+        return str(value or "").replace(
+            cls._CONTEXT_ARCHIVE_ROOT,
+            "context-archive:",
+        )
+
+    @classmethod
+    def _sanitize_context_archive_paths(cls, content: str) -> str:
+        if not isinstance(content, str) or not content:
+            return content
+        return content.replace(
+            cls._CONTEXT_ARCHIVE_ROOT,
+            "context-archive:",
+        )
+
+    @classmethod
     def _render_fact_record(cls, record: FactRecord) -> str:
         temporal = ", ".join(
             f"{name}={value}"
@@ -4093,6 +4407,10 @@ class ConclusionFormatterNode(WorkflowNode):
             f" name={record.entity_name or '-'}"
         )
         unit = record.unit or "-"
+        evidence_refs = [
+            cls._report_safe_evidence_ref(ref)
+            for ref in record.evidence_refs
+        ]
         return (
             f"- `{record.fact_id}` | entity={entity} | "
             f"attribute={record.attribute} | "
@@ -4100,7 +4418,7 @@ class ConclusionFormatterNode(WorkflowNode):
             f"source_system={record.source_system} | "
             f"directness={record.directness} | confidence={record.confidence} | "
             f"{temporal} | "
-            f"evidence_refs=`{cls._exact_json(record.evidence_refs)}`"
+            f"evidence_refs=`{cls._exact_json(evidence_refs)}`"
         )
 
     @classmethod
@@ -4151,7 +4469,18 @@ class ConclusionFormatterNode(WorkflowNode):
                 "FactRecords 构成。"
             )
         else:
+            try:
+                confidence = min(
+                    max(
+                        float(validated_claim.get("confidence") or 0.0),
+                        0.0,
+                    ),
+                    1.0,
+                )
+            except (TypeError, ValueError):
+                confidence = 0.0
             lines.extend([
+                f"- **RCA 置信度上限**: `{confidence:.0%}`",
                 "- **结论**: 未形成已确认根因，当前结果保持 `inconclusive`。",
                 "- **候选状态**: 当前 FactRecords 不足以形成已确认根因。",
             ])
@@ -4248,6 +4577,20 @@ class ConclusionFormatterNode(WorkflowNode):
         else:
             lines.append("- 无有效 contradicting Fact ID。")
 
+        if status != "diagnosed":
+            available_records = sorted(
+                record_index.values(),
+                key=lambda record: record.fact_id,
+            )
+            lines.extend(["", "### 当前可核验事实（不构成根因支持）"])
+            if available_records:
+                lines.extend(
+                    cls._render_fact_record(record)
+                    for record in available_records
+                )
+            else:
+                lines.append("- 当前 Ledger 没有可展示的 FactRecord。")
+
         lines.extend(["", "### 未知项与限制"])
         validation_reasons = [
             str(reason).strip()
@@ -4267,6 +4610,11 @@ class ConclusionFormatterNode(WorkflowNode):
             lines.append(
                 "- 当前 validated claim 未声明可由 FactRecords "
                 "确定的额外限制。"
+            )
+        for limitation in derive_evidence_limitations(ledgers):
+            lines.append(
+                f"- `[{limitation.code}]` {limitation.statement} "
+                f"source_basis=`{cls._exact_json(list(limitation.source_basis))}`"
             )
         return "\n".join(lines), referenced_records
 
@@ -4299,22 +4647,29 @@ class ConclusionFormatterNode(WorkflowNode):
         for ledger in ledgers:
             for record in ledger.records:
                 dimension = str(record.dimension or "").strip().lower()
-                if dimension not in records_by_dimension:
-                    continue
                 if record.fact_type == "coverage":
                     coverage_value = record.value
                     if isinstance(coverage_value, dict):
+                        target_dimension = str(
+                            coverage_value.get("dimension") or dimension
+                        ).strip().lower()
                         coverage_state = str(
                             coverage_value.get("coverage") or ""
                         ).strip().lower()
                     else:
+                        target_dimension = dimension
                         coverage_state = str(coverage_value or "").strip().lower()
-                    if coverage_state:
+                    if (
+                        target_dimension in records_by_dimension
+                        and coverage_state
+                    ):
                         coverage_by_entity_dimension.setdefault(
-                            (record.entity_id, dimension),
+                            (record.entity_id, target_dimension),
                             [],
                         ).append(coverage_state)
-                        available_dimensions.add(dimension)
+                        available_dimensions.add(target_dimension)
+                    continue
+                if dimension not in records_by_dimension:
                     continue
                 records_by_dimension[dimension].append(record)
                 available_dimensions.add(dimension)
@@ -4533,27 +4888,9 @@ class ConclusionFormatterNode(WorkflowNode):
                     ),
                     len(lines),
                 )
-                retained = [
-                    line
-                    for line in lines[heading_index + 1:section_end]
-                    if not any(
-                        marker in line
-                        for marker in (
-                            "未返回可核验",
-                            "未返回可用",
-                            "未获取到",
-                            "未提供该维度",
-                        )
-                    )
-                ]
                 lines[heading_index + 1:section_end] = [
                     "",
                     *topology_lines,
-                    *(
-                        [""] + retained
-                        if any(line.strip() for line in retained)
-                        else []
-                    ),
                 ]
 
         result = "\n".join(lines)
@@ -4812,6 +5149,79 @@ class ConclusionFormatterNode(WorkflowNode):
             + "\n\n"
             + content_without_roots[insertion:].lstrip()
         )
+
+    @staticmethod
+    def _enforce_fact_ledger_diagnosis_overview(
+        content: str,
+        *,
+        validated_claim: Dict[str, Any],
+    ) -> str:
+        status = str(
+            validated_claim.get("diagnostic_status") or "inconclusive"
+        ).strip().lower()
+        if status == "diagnosed":
+            section_lines = [
+                "## 诊断概览",
+                "",
+                "- **诊断状态**: `diagnosed`",
+                "- 权威结论仅由 validated FactRecords 及其引用确定。",
+                "- 未验证的模型叙述不构成精确值、可用性、内部机制或因果关系证据。",
+                "",
+            ]
+        else:
+            try:
+                confidence = min(
+                    max(
+                        float(validated_claim.get("confidence") or 0.0),
+                        0.0,
+                    ),
+                    1.0,
+                )
+            except (TypeError, ValueError):
+                confidence = 0.0
+            section_lines = [
+                "## 诊断概览",
+                "",
+                f"- **诊断状态**: `{status}`",
+                f"- **RCA 置信度上限**: `{confidence:.0%}`",
+                "- 当前事实不足以形成已确认根因，报告保持只读诊断边界。",
+                "",
+            ]
+        section = "\n".join(section_lines)
+        pattern = re.compile(
+            r"(?ms)^##[^\n]*诊断概览[^\n]*\n.*?(?=^##\s|\Z)"
+        )
+        if pattern.search(content or ""):
+            return pattern.sub(section, content, count=1)
+        return section + "\n" + str(content or "").lstrip()
+
+    @staticmethod
+    def _enforce_fact_ledger_phenomenon(content: str) -> str:
+        section = "\n".join([
+            "## 现象描述",
+            "",
+            "- 当前可核验现象仅见可观测性数据、validated 根因事实和机器可核验附录。",
+            "- 本节不保留模型生成的精确值、可用性、内部机制或因果拓扑声明。",
+            "",
+        ])
+        pattern = re.compile(
+            r"(?ms)^##[^\n]*(?:现象描述|现象总结)[^\n]*\n.*?(?=^##\s|\Z)"
+        )
+        if pattern.search(content or ""):
+            return pattern.sub(section, content, count=1)
+        overview = re.search(
+            r"(?ms)^##[^\n]*诊断概览[^\n]*\n.*?(?=^##\s|\Z)",
+            content or "",
+        )
+        if overview:
+            return (
+                str(content or "")[:overview.end()].rstrip()
+                + "\n\n"
+                + section
+                + "\n"
+                + str(content or "")[overview.end():].lstrip()
+            )
+        return section + "\n" + str(content or "").lstrip()
 
     @staticmethod
     def _remove_machine_verifiable_sections(content: str) -> str:
@@ -5983,7 +6393,7 @@ class ConclusionFormatterNode(WorkflowNode):
         ledgers: List[FactLedger],
         validated_claim: Dict[str, Any],
     ) -> str:
-        del ledgers, validated_claim
+        del validated_claim
         marker = (
             "<!-- remediation_contract="
             "fact-ledger-diagnostic-only-v1 -->"
@@ -6006,6 +6416,32 @@ class ConclusionFormatterNode(WorkflowNode):
         base_content = cls._remove_structured_remediation_sections(content)
         base_content = cls._neutralize_unstructured_kubectl_writes(
             base_content
+        )
+        fact_values = json.dumps(
+            [
+                {
+                    "value": record.value,
+                    "unit": record.unit,
+                }
+                for ledger in ledgers
+                for record in ledger.records
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).casefold()
+        fixed_capacity = re.compile(
+            r"(?i)\b\d+(?:\.\d+)?\s*(?:ki|mi|gi|ti|pi|ei|"
+            r"kib|mib|gib|tib|kb|mb|gb|tb|m?cpu|cores?)\b"
+        )
+        base_content = "\n".join(
+            line
+            for line in base_content.splitlines()
+            if not any(
+                match.group(0).replace(" ", "").casefold()
+                not in fact_values.replace(" ", "")
+                for match in fixed_capacity.finditer(line)
+            )
         )
         base_content = base_content.replace(marker, "").rstrip()
 
@@ -6065,32 +6501,28 @@ class ConclusionFormatterNode(WorkflowNode):
         ledgers: List[FactLedger],
         validated_claim: Dict[str, Any],
     ) -> str:
+        del content
         root_section, referenced_records = (
             cls._render_fact_ledger_root_cause_section(
                 ledgers=ledgers,
                 validated_claim=validated_claim,
             )
         )
-        result = cls._remove_machine_verifiable_sections(content)
-        result = cls._remove_stale_combined_causal_sections(result)
+        result = cls._format_deterministic_fact_report_shell()
+        result = cls._enforce_fact_ledger_diagnosis_overview(
+            result,
+            validated_claim=validated_claim,
+        )
+        result = cls._enforce_fact_ledger_phenomenon(result)
         result = cls._replace_root_cause_section(
             result,
             root_section,
         )
-        result, present_dimensions = (
+        result, _present_dimensions = (
             cls._enforce_fact_ledger_observability_sections(
                 result,
                 ledgers=ledgers,
             )
-        )
-        known_owner_aliases, known_owner_count = (
-            cls._known_deployment_owner_aliases(ledgers)
-        )
-        result = cls._reconcile_present_dimension_limitations(
-            result,
-            present_dimensions=present_dimensions,
-            known_owner_aliases=known_owner_aliases,
-            known_owner_count=known_owner_count,
         )
         result = cls._render_fact_ledger_diagnostic_remediation(
             result,
@@ -7179,17 +7611,23 @@ class ConclusionFormatterNode(WorkflowNode):
         if authoritative_facts:
             lines.extend(["", authoritative_facts.rstrip()])
 
-        ledger_only_tool_data = [
-            item
-            for item in (evidence_data.get("tool_data") or [])
-            if isinstance(item, dict)
-            and item.get("fact_ledger") is not None
-            and not str(item.get("agent_facts") or "").strip()
-            and not str(item.get("agent_context") or "").strip()
-        ]
-        canonical_ledgers = extract_fact_ledgers_from_tool_data(
-            ledger_only_tool_data
-        )
+        canonical_ledgers = []
+        legacy_ledger_items = []
+        for item in evidence_data.get("tool_data") or []:
+            if not isinstance(item, dict):
+                continue
+            if not tool_item_allows_fact_ledger_projection(item):
+                continue
+            ledger = normalize_fact_ledger(item.get("fact_ledger"))
+            if ledger is None:
+                continue
+            if ledger.source == "mcp_canonical":
+                canonical_ledgers.append(ledger)
+            elif (
+                not str(item.get("agent_facts") or "").strip()
+                and not str(item.get("agent_context") or "").strip()
+            ):
+                legacy_ledger_items.append((item, ledger))
         if canonical_ledgers:
             lines.extend([
                 "",
@@ -7199,31 +7637,33 @@ class ConclusionFormatterNode(WorkflowNode):
                     max_chars=12000,
                 ),
             ])
+        if legacy_ledger_items:
             lines.append("canonical_kubernetes_facts:")
-            for item in ledger_only_tool_data:
-                tool = str(item.get("tool") or "unknown").strip() or "unknown"
-                for ledger in extract_fact_ledgers_from_tool_data([item]):
-                    for record in ledger.records:
-                        if str(record.dimension or "").strip().lower() != "kubernetes":
-                            continue
-                        value = json.dumps(
-                            record.value,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                            default=str,
-                        )
-                        lines.append(
-                            "- CANONICAL_FACT "
-                            f"fact_id={record.fact_id} "
-                            f"entity_id={record.entity_id} "
-                            f"dimension=kubernetes "
-                            f"fact_type={record.fact_type} "
-                            f"attribute={record.attribute} "
-                            f"value={value} "
-                            f"source_system={record.source_system or 'kubernetes'} "
-                            f"ref=k8s-{record.fact_id} "
-                            f"tool={tool}"
-                        )
+            for item, ledger in legacy_ledger_items:
+                tool = str(
+                    item.get("tool") or "unknown"
+                ).strip() or "unknown"
+                for record in ledger.records:
+                    if record.dimension != "kubernetes":
+                        continue
+                    value = json.dumps(
+                        record.value,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    lines.append(
+                        "- CANONICAL_FACT "
+                        f"fact_id={record.fact_id} "
+                        f"entity_id={record.entity_id} "
+                        "dimension=kubernetes "
+                        f"fact_type={record.fact_type} "
+                        f"attribute={record.attribute} "
+                        f"value={value} "
+                        f"source_system={record.source_system or 'kubernetes'} "
+                        f"ref=k8s-{record.fact_id} "
+                        f"tool={tool}"
+                    )
 
         aiops_facts = []
         aiops_contexts = []
@@ -7311,6 +7751,12 @@ class ConclusionFormatterNode(WorkflowNode):
                     autonomous_tool_dimensions[tool],
                     "executed",
                 )
+            item_ledger = normalize_fact_ledger(item.get("fact_ledger"))
+            if (
+                item_ledger is not None
+                and item_ledger.source == "mcp_canonical"
+            ):
+                continue
             agent_facts = str(item.get("agent_facts", "") or "").strip()
             if agent_facts:
                 aiops_facts.append(f"- [{tool}]\n{agent_facts[:10000]}")
@@ -7547,6 +7993,9 @@ class ConclusionFormatterNode(WorkflowNode):
         for item in cls._select_diagnostic_tool_data(tool_data, limit=12):
             if not isinstance(item, dict):
                 continue
+            ledger = normalize_fact_ledger(item.get("fact_ledger"))
+            if ledger is not None and ledger.source == "mcp_canonical":
+                continue
             tool = str(item.get("tool", "unknown"))
             if tool.lower() in {"fetch_runbook", "read_context_archive"}:
                 continue
@@ -7590,6 +8039,7 @@ class ConclusionFormatterNode(WorkflowNode):
             (index, item)
             for index, item in enumerate(tool_data or [])
             if isinstance(item, dict)
+            and tool_item_allows_fact_ledger_projection(item)
         ]
 
         def priority(entry: tuple[int, Dict[str, Any]]) -> tuple[int, int]:

@@ -1,6 +1,6 @@
 # Robusta AIOps 可观测性 Sprint 测试指南
 
-**文档日期**：2026-07-27
+**文档日期**：2026-07-29
 
 **近期优先级**：先完成“真实 OOMKilled 脚本采集”验收，再进行 MCP 和完整
 Agent 流程验收。
@@ -99,6 +99,14 @@ AIOPS_TEMPO_EXEC_NAMESPACE=monitor
 
 这是当前最优先的测试。
 
+本测试必须区分两个结论：
+
+1. `validate=ok`：只证明 Case Package 结构合法、文件可解析。
+2. 多模态采集通过：还必须证明 Prometheus、Logging、DeepFlow、Tempo 的真实
+   记录非空，或以明确状态说明真实缺失，并展示决定性数值或原文。
+
+只看到目录和 `ok`，不能判定真实可观测数据已经采集成功。
+
 ### 3.1 部署真实 OOM 工作负载
 
 ```bash
@@ -121,7 +129,60 @@ echo "namespace=${NS}"
 echo "pod=${POD}"
 ```
 
-### 3.2 采集 Case Package
+### 3.2 配置脚本访问真实数据源
+
+`data/scripts/collect_case.py` 从环境变量读取 Prometheus、Elasticsearch 和
+DeepFlow 地址。未设置这些变量时，脚本仍可能生成结构完整的 package，但对应
+证据会为空。因此这一步是脚本验收的强制前置条件。
+
+当前集群的数据系统位于 `monitor` namespace。
+
+终端一：
+
+```bash
+kubectl -n monitor port-forward svc/observability-prometheus 19090:9090
+```
+
+终端二：
+
+```bash
+kubectl -n monitor port-forward pod/elasticsearch-master-0 19200:9200
+```
+
+采集终端：
+
+```bash
+export PROMETHEUS_URL=http://127.0.0.1:19090
+export ELASTICSEARCH_URL=https://127.0.0.1:19200
+export ELASTICSEARCH_INDEX='filebeat-*'
+export ELASTICSEARCH_USERNAME="$(
+  kubectl get secret -n monitor elasticsearch-master-credentials \
+    -o jsonpath='{.data.username}' | base64 -d
+)"
+export ELASTICSEARCH_PASSWORD="$(
+  kubectl get secret -n monitor elasticsearch-master-credentials \
+    -o jsonpath='{.data.password}' | base64 -d
+)"
+export DEEPFLOW_CLICKHOUSE_URL='kubectl://monitor/observability-clickhouse-0?container=clickhouse'
+export TEMPO_EXEC_ENABLED=true
+export TEMPO_EXEC_NAMESPACE=monitor
+export TEMPO_EXEC_SELECTOR='app=lgtm'
+export TEMPO_LOCAL_URL='http://127.0.0.1:3200'
+```
+
+连通性检查：
+
+```bash
+curl -fsS "${PROMETHEUS_URL}/-/ready"
+curl -fksS -u "${ELASTICSEARCH_USERNAME}:${ELASTICSEARCH_PASSWORD}" \
+  "${ELASTICSEARCH_URL}/_cluster/health"
+kubectl -n monitor exec observability-clickhouse-0 -c clickhouse -- \
+  clickhouse-client --query 'SELECT 1'
+```
+
+预期分别返回 Prometheus ready、Elasticsearch health JSON 和 `1`。
+
+### 3.3 采集 Case Package
 
 ```bash
 cd /root/huhu/agent/combine-aiops-mcp/data
@@ -149,7 +210,10 @@ python3 scripts/collect_case.py validate --case "${OUT}"
 ok
 ```
 
-### 3.3 检查 Package 结构
+注意：`validate=ok` 不是多模态数据通过的充分条件，必须继续执行后面的
+Kubernetes、Metrics、Logging、DeepFlow 和 Tempo 内容检查。
+
+### 3.4 检查 Package 结构
 
 ```bash
 find "${OUT}" -maxdepth 2 -type f -printf '%P\n' | sort
@@ -173,9 +237,10 @@ evidence/metrics.jsonl
 evidence/logs.jsonl
 evidence/deepflow_l4.jsonl
 evidence/deepflow_l7.jsonl
+evidence/tempo_traces.jsonl
 ```
 
-### 3.4 检查输入身份
+### 3.5 检查输入身份
 
 ```bash
 python3 - "${OUT}/case.yaml" <<'PY'
@@ -200,7 +265,7 @@ PY
 - `abnormal_type=oomkilled`，或至少 K8s 证据明确显示 OOMKilled。
 - 时间窗属于当前 Pod 生命周期。
 
-### 3.5 检查 Kubernetes 核心证据
+### 3.6 检查 Kubernetes 核心证据
 
 ```bash
 grep -nE 'OOMKilled|exitCode|CrashLoopBackOff|restartCount|BackOff' \
@@ -215,7 +280,7 @@ grep -nE 'OOMKilled|exitCode|CrashLoopBackOff|restartCount|BackOff' \
 - 存在 exit code 137。
 - 能看到 CrashLoopBackOff、重启次数或 BackOff Event。
 
-### 3.6 检查 Prometheus 核心证据
+### 3.7 检查 Prometheus 核心证据
 
 查看实际执行的 PromQL：
 
@@ -244,7 +309,7 @@ jq -c '{
 - 能取得 memory limit，或可从 K8s 资源配置独立核对为 80 MiB。
 - 最终可以比较 `max memory / limit`。
 
-### 3.7 检查 Logging 核心证据
+### 3.8 检查 Logging 核心证据
 
 ```bash
 jq -r 'select((.raw.message // .summary // "") != "") |
@@ -261,35 +326,77 @@ jq -r 'select((.raw.message // .summary // "") != "") |
 - 至少能看到 `alloc_mib` 和 `allocated_mib`。
 - 不能只看到“返回 50 条日志”。
 
-### 3.8 检查 DeepFlow/Trace 核心证据
+### 3.9 检查 DeepFlow 核心证据
 
 ```bash
 jq -c '{
   timestamp,
   entity,
-  trace_id,
-  span_id,
   directness,
   trace_correlation,
+  summary,
   raw
 }' "${OUT}/evidence/deepflow_l7.jsonl" |
-  grep -E '/allocate|trace_id|HTTP' |
+  grep -E '/allocate|trace_id|status=' |
   head -n 20
 ```
 
 通过标准：
 
 - 至少一条 flow 的源或目标 IP 等于目标 Pod IP。
-- 存在真实 HTTP `/allocate` 路径、响应码和时延。
+- 存在真实 HTTP `/allocate` 路径、响应码和 trace ID。
 - 存在 trace ID 时，应保留 trace ID 和关联状态。
 - 没有 DeepFlow 数据时不能伪造，coverage 必须为 `empty/absent/error` 并说明原因。
 
-说明：
+### 3.10 检查 Tempo application span
 
-- 该脚本的 Tracing 核心是 DeepFlow flow。
-- Tempo application span 属于增强测试，在 Sprint 测试二和三中验证。
+```bash
+jq -c '{
+  timestamp,
+  summary,
+  trace_id: .raw.trace_id,
+  span_count: .raw.span_count,
+  services: .raw.services,
+  spans: [.raw.spans[] | {
+    service,
+    name,
+    duration_ms,
+    attributes
+  }],
+  evidence_id
+}' "${OUT}/evidence/tempo_traces.jsonl" |
+  head -n 20
+```
 
-### 3.9 检查轻量拓扑
+通过标准：
+
+- 至少一条 span 的 service 为目标应用。
+- span name 包含真实业务入口，例如 `GET /allocate`。
+- attributes 包含业务语义，例如
+  `aiops.allocated_mib.before/after` 和 `aiops.alloc_mib`。
+- 某个失败请求没有 span 时，对应 query 应为 `absent`，不能伪造。
+
+### 3.11 检查三源共同 trace ID
+
+```bash
+comm -12 \
+  <(comm -12 \
+    <(jq -r '.raw.message // empty' "${OUT}/evidence/logs.jsonl" |
+      grep -oE '"trace_id": "[0-9a-f]{32}"' |
+      sed -E 's/.*"([0-9a-f]{32})"/\1/' | sort -u) \
+    <(jq -r '.raw.trace_id // empty' "${OUT}/evidence/deepflow_l7.jsonl" |
+      grep -E '^[0-9a-f]{32}$' | sort -u)) \
+  <(jq -r '.raw.trace_id // empty' "${OUT}/evidence/tempo_traces.jsonl" |
+    sort -u)
+```
+
+通过标准：至少输出一个完整 trace ID。该 ID 必须能分别回查到：
+
+- Logging 的原始 message。
+- DeepFlow 的 src/dst/request/status。
+- Tempo 的 service/span/attributes。
+
+### 3.12 检查轻量拓扑
 
 ```bash
 wc -l "${OUT}/entities.jsonl" "${OUT}/topology.jsonl"
@@ -313,7 +420,14 @@ Evidence --observes--> Pod
 Caller Pod --calls--> Target Pod
 ```
 
-### 3.10 检查 Agent 安全输入
+同一个 trace ID 存在时，还应出现：
+
+```text
+Trace Group --correlates--> Service/Pod
+OTel Service --emits_trace--> Trace Group
+```
+
+### 3.13 检查 Agent 安全输入
 
 ```bash
 sed -n '1,240p' "${OUT}/diagnosis-input.yaml"
@@ -331,7 +445,7 @@ scoring
 
 `labels.yaml` 是离线评测文件，不应提供给在线 Agent。
 
-### 3.11 Sprint 测试一验收记录
+### 3.14 Sprint 测试一验收记录
 
 填写：
 
@@ -346,8 +460,11 @@ Kubernetes：present / empty / error
 Prometheus：present / empty / error
 Logging：present / empty / error
 DeepFlow：present / empty / error
+Tempo：present / empty / error / not_tested
 Topology：present / empty / error
 validate：pass / fail
+核心原始摘录：pass / fail
+跨源 trace ID：pass / fail / not_tested
 结论：pass / fail
 ```
 
@@ -499,6 +616,15 @@ PY
 - Tracing：至少一条 flow 或 span。
 - Topology：至少两条可核验关系边。
 
+推荐统一检查以下七个字段，而不是直接展示整段 JSON：
+
+```text
+source + purpose + coverage + core_fact + raw_excerpt + evidence_ref + limitation
+```
+
+其中 `raw_excerpt` 保留 1 至 3 条最有判别力的原始记录。完整原始输出继续存放在
+Case Package 或 Robusta `raw.txt`，避免把小模型上下文撑满。
+
 以下结果判定为失败：
 
 ```text
@@ -573,6 +699,37 @@ get_aiops_case_evidence:
 这里的 `2/1/1/4` 是 6000 字符首屏预算下的代表性投影，不是磁盘 package
 中的全部记录。它证明当前首屏已经包含核心原始样本，不再只有命中数量。
 
+### 4.5 Case Package 与 Agent Evidence 的对应关系
+
+Agent 实时调用得到的证据与 Case Package **采用相同的证据语义，但不是同一种
+物理存储形式**。
+
+| 证据概念 | Case Package / coarse MCP | 默认自主查询 Agent |
+|---|---|---|
+| 目标实体 | `case.yaml.primary_entity` | 每次工具结果的 `entity` |
+| 查询时间窗 | `case.yaml.time_window`、`queries.yaml` | 每次工具结果的 `query` |
+| 数据覆盖状态 | `case.yaml.coverage` | 每次工具结果的 `coverage` |
+| 完整原始数据 | `evidence/*` | `tools/*.raw.txt` |
+| 结构化证据 | `evidence/*.jsonl` | `tools/*.structured.json` |
+| 小模型输入 | `diagnosis-input.yaml`、`signals.jsonl`、推荐 refs | `tools/*.summary.txt`、`agent_facts`、`agent_context` |
+| 深入读取入口 | `get_aiops_case_evidence(case_id, evidence_ref)` | 工具归档 ref，或模型再次调用细粒度查询工具 |
+| RCA 接口 | Package 证据转换为 Fact Ledger | 工具结果直接转换为 Fact Ledger |
+
+因此：
+
+1. 启用 coarse MCP 时，`collect_aiops_case` 会实时生成完整 Case Package，
+   `get_aiops_case_evidence` 再按 case ID 和 evidence ref 展开原始证据。
+2. 当前默认自主查询模式不会先生成完整 case 目录；它按 Metrics、Logging、
+   Tracing、Topology 分次查询，并把每次真实结果归档。
+3. 两条路径最终都以实体、时间窗、coverage、核心 facts/samples 和 evidence
+   refs 进入 Fact Ledger，所以 RCA 的消费合同相同。
+4. Case Package 更适合 Sprint 验收、离线复盘和评测；默认自主查询更适合在线
+   诊断和模型按需补证。
+
+更完整的设计说明见
+`docs/aiops-observability-mcp-design.md` 的“7.3 Case Package 与 Agent
+Evidence 的关系”。
+
 ## 5. Sprint 测试三：Robusta 完整 OOM 诊断
 
 ### 5.1 测试输入
@@ -636,6 +793,15 @@ kubectl -n aiops exec deploy/aiops-copilot -- sh -c \
 
 如果 `raw.txt` 有日志或 Trace，但 `structured.json` 没有，属于投影缺陷。
 如果 `structured.json` 有数据但最终报告未引用，属于 Agent 消费缺陷。
+
+对“日志/Tracing 无返回”必须按下表判责：
+
+| 检查结果 | 问题位置 | 测试结论 |
+|---|---|---|
+| `raw.txt` 无记录，coverage=`empty/absent/error` | 数据源、查询条件、实体身份、时间窗或埋点 | 诚实缺失，不允许补造 |
+| `raw.txt` 有记录，`structured.json` 无 samples/flows/spans | Observation 结构化投影 | 失败 |
+| `structured.json` 有 samples/flows/spans，报告写“未返回” | RCA/Conclusion 消费或渲染 | 失败 |
+| 报告有原文，但 evidence ref 不存在 | 引用完整性 | 失败 |
 
 ### 5.4 检查 Evidence 到 RCA
 
@@ -741,16 +907,69 @@ Trace 返回 12 条
 
 OOM Sprint 最低通过线是“中”；当前 traced OOM 基线应达到“高”。
 
+“把工具核心结果放到报告里”是正确方向，但应放入**有界的核心原始摘录**，而
+不是完整 raw：
+
+- Metrics：3 至 5 个关键时间点、最大值、limit 和比例。
+- Logging：1 至 3 条决定性 message 原文。
+- DeepFlow：1 至 3 条 flow 的 src/dst/request/status/duration/trace ID。
+- Tempo：1 至 3 条 span 的 service/name/关键 attributes。
+- K8s：终态 reason、exit code、restart count 和关键 Event。
+- Topology：2 至 8 条与责任定位直接相关的边。
+
+完整结果通过 `raw_ref` 或 `get_aiops_case_evidence` 展开。
+
 ## 7. 三项 Sprint 最终验收表
 
 | Sprint | 验收项 | 通过标准 | 结果 |
 |---|---|---|---|
-| 测试一 | namespace + Pod 脚本采集 | Package 校验通过，K8s/Prometheus/Logging/DeepFlow/Topology 有真实证据或诚实缺失状态 | 待填写 |
-| 测试二 | MCP 实时采集 | 通用查询 MCP 能返回真实有界证据；coarse MCP 能生成 case ID | 待填写 |
-| 测试二 | case ID 按需读取 | `get_aiops_case` 和 `get_aiops_case_evidence` 使用真实 refs 成功读取，非法路径被拒绝 | 待填写 |
-| 测试三 | Robusta 完整诊断 | 模糊提问触发真实工具，RCA 和报告引用核心原始证据并形成因果链 | 待填写 |
+| 测试一 | namespace + Pod 脚本采集 | Package 校验通过，K8s/Prometheus/Logging/DeepFlow/Tempo/Topology 有真实证据或诚实缺失状态 | **已通过**：2026-07-29，`oom-script-20260729-094641` |
+| 测试二 | MCP 实时采集 | 通用查询 MCP 能返回真实有界证据；coarse MCP 能生成 case ID | **核心功能已有真实基线，本轮未重新现场复验**：按 4.1 至 4.3 重新执行后封版 |
+| 测试二 | case ID 按需读取 | `get_aiops_case` 和 `get_aiops_case_evidence` 使用真实 refs 成功读取，非法路径被拒绝 | **已有 2026-07-27 SSE 实测记录，本轮未重新现场复验** |
+| 测试三 | Robusta 完整诊断 | 模糊提问触发真实工具，RCA 和报告引用核心原始证据并形成因果链 | **待回归**：2026-07-27 历史运行根因正确，但 Metrics 时间窗、报告渲染和未查询拓扑边界未全部通过 |
 
-## 8. 2026-07-27 真实运行审计示例
+当前状态不能简化为“三项全部通过”：
+
+- 本轮已经用标准脚本重新完成测试一，证据覆盖 Kubernetes、Prometheus、
+  Logging、DeepFlow、Tempo 和轻量拓扑。
+- 测试二有已部署能力、模块测试和 2026-07-27 SSE 读取基线，但本轮没有针对
+  当前部署重新执行完整 MCP Client 流程。
+- 测试三需要使用当前版本和同一个模糊问题再运行一次 Robusta，确认 Metrics、
+  Logging、Tracing 的决定性原始证据进入 RCA 和最终报告；Topology 只在真实
+  调用后展示。
+
+## 8. 真实运行审计示例
+
+### 8.1 2026-07-29 标准脚本验收
+
+```text
+case_id=oom-script-20260729-094641
+namespace=aiops-traced-oom
+pod=trace-oom-api-7c75757475-vgvxs
+pod_uid=02b86eed-e9db-449c-9c6a-9fce6f0ca566
+output=/root/huhu/agent/combine-aiops-mcp/data/cases/oom-script-20260729-094641
+validate=pass
+```
+
+| 维度 | coverage | 真实结果 |
+|---|---|---|
+| Kubernetes | present/4 | restart count `1335`，上一轮 `OOMKilled/137`，memory limit `80Mi` |
+| Prometheus | present/9 | working set `26.8 MiB -> 68.9 MiB`，restart `1333 -> 1334`，OOM reason `1`，limit `80.0 MiB` |
+| Logging | present/20 | `event=allocate`、`alloc_mib=2`、`allocated_mib=48` 和完整 trace ID |
+| DeepFlow | present/80 | `172.16.104.8 -> 172.16.104.25`，`GET /allocate?mib=2&step=304943`，HTTP `200` |
+| Tempo | present/11 | `GET /allocate` span，`allocated before=46`、`alloc=2`、`after=48` |
+| Topology | present | trace group 同时关联 Service、Pod、DeepFlow evidence 和 Tempo evidence |
+
+Logging、DeepFlow、Tempo 三方共同 trace ID 共 `9` 个。代表值：
+
+```text
+192d16297831f81fa46afa473f763631
+```
+
+本测试判定：**Sprint 测试一通过**。该结论基于真实 source evidence，不是只基于
+`validate=ok`。
+
+### 8.2 2026-07-27 Agent 运行历史审计
 
 运行信息：
 

@@ -11,7 +11,10 @@ from app.core.remediation.models import RemediationAction, RemediationPlan
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
-_FACT_LEDGER_REMEDIATION_CONTRACT = "fact-ledger-diagnostic-only-v1"
+_FACT_LEDGER_REMEDIATION_CONTRACTS = {
+    "fact-ledger-authoritative-v1",
+    "fact-ledger-diagnostic-only-v1",
+}
 _ALLOWED_KUBECTL_VERBS = {
     "apply",
     "create",
@@ -62,7 +65,12 @@ _KUBECTL_GLOBAL_BOOLEAN_OPTIONS = {
 def extract_remediation_plan(text: str) -> Optional[RemediationPlan]:
     """Extract the canonical plan, or the first legacy plan when absent."""
     candidates = []
+    fact_ledger_marker_present = False
     for candidate in _candidate_json_objects(text or ""):
+        fact_ledger_marker_present = (
+            fact_ledger_marker_present
+            or _contains_fact_ledger_contract_marker(candidate)
+        )
         data = _loads_json(candidate)
         if not isinstance(data, dict):
             continue
@@ -72,13 +80,53 @@ def extract_remediation_plan(text: str) -> Optional[RemediationPlan]:
             continue
         candidates.append(data)
 
-    for data in candidates:
-        if data.get("remediation_contract") == _FACT_LEDGER_REMEDIATION_CONTRACT:
-            return _build_plan(data)
+    if fact_ledger_marker_present:
+        source = candidates[0] if candidates else {}
+        return _build_plan({
+            "remediation_available": False,
+            "fix_type": "manual_only",
+            "risk_level": "medium",
+            "requires_human_approval": True,
+            "issue_groups": _fact_ledger_issue_groups(source),
+            "basis": [
+                "Fact Ledger reports are diagnostic-only; executable "
+                "writes require a typed policy contract."
+            ],
+            "actions": [],
+            "stop_conditions": [],
+        })
 
     for data in candidates:
         return _build_plan(data)
     return None
+
+
+def _fact_ledger_issue_groups(data: Dict[str, Any]) -> list[Dict[str, Any]]:
+    groups: list[Dict[str, Any]] = []
+    for item in data.get("issue_groups") or []:
+        if not isinstance(item, dict):
+            continue
+        group: Dict[str, Any] = {
+            key: item[key]
+            for key in (
+                "group_id",
+                "problem_type",
+                "target",
+                "strategy",
+            )
+            if item.get(key) not in (None, "")
+        }
+        for key, value in list(group.items()):
+            if isinstance(value, str) and re.search(
+                r"(?i)\bkubectl\b",
+                value,
+            ):
+                group[key] = (
+                    "[未授权的 Kubernetes 写操作已移除]"
+                )
+        group["auto_fixable"] = False
+        groups.append(group)
+    return groups
 
 
 def _candidate_json_objects(text: str) -> Iterable[str]:
@@ -90,10 +138,42 @@ def _candidate_json_objects(text: str) -> Iterable[str]:
 
 
 def _loads_json(raw: str) -> Any:
+    def reject_duplicate_keys(
+        pairs: list[tuple[str, Any]],
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
+        return json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except (json.JSONDecodeError, ValueError):
         return None
+
+
+def _contains_fact_ledger_contract_marker(raw: str) -> bool:
+    marker_present = False
+
+    def inspect_object(
+        pairs: list[tuple[str, Any]],
+    ) -> Dict[str, Any]:
+        nonlocal marker_present
+        for key, value in pairs:
+            if (
+                key == "remediation_contract"
+                and value in _FACT_LEDGER_REMEDIATION_CONTRACTS
+            ):
+                marker_present = True
+        return dict(pairs)
+
+    try:
+        json.loads(raw, object_pairs_hook=inspect_object)
+    except json.JSONDecodeError:
+        return False
+    return marker_present
 
 
 def _build_plan(data: Dict[str, Any]) -> RemediationPlan:

@@ -1,14 +1,18 @@
 import hashlib
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 import json
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
+from app.core.aicall.client import AICall
 from app.core.prompts import EVIDENCE_COLLECTOR_PROMPT
 from app.core.workflow.fact_contract import extract_fact_ledgers_from_tool_data
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
@@ -52,6 +56,665 @@ def _canonical_fact_record(**overrides):
         "fact-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
     )
     return record
+
+
+def test_t017_trusted_uid_index_does_not_accept_canonical_self_attestation():
+    record = _canonical_fact_record()
+    canonical_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "query_pod_logs",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "current logs",
+        },
+        "structured": {
+            "status": "query_succeeded",
+            "coverage": "present",
+            "source_system": "elasticsearch",
+            "purpose": "current logs",
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-a",
+            },
+            "facts": [{
+                "ref": "logs:target",
+                "source_system": "elasticsearch",
+            }],
+            "fact_ledger": {
+                "contract_version": "aiops.fact-ledger.v1",
+                "case_id": "case-self-attested-uid",
+                "scope_entity_ids": ["k8s.pod:demo/api:uid-a"],
+                "records": [record],
+                "record_count": 1,
+                "truncated": False,
+                "source": "mcp_canonical",
+                "legacy_contract": False,
+            },
+        },
+    }
+
+    assert EvidenceCollectorNode._trusted_pod_uid_index([
+        canonical_event
+    ]) == {}
+
+    independent_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "structured": {
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-a",
+            }
+        },
+    }
+    assert EvidenceCollectorNode._trusted_pod_uid_index([
+        canonical_event,
+        independent_event,
+    ]) == {("demo", "api"): "uid-a"}
+
+
+@pytest.mark.parametrize("tool_name", ["kubectl_events", "run_bash_command"])
+def test_t018_trusted_uid_index_rejects_non_identity_oracles(tool_name):
+    event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": tool_name,
+        "tool_args": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "structured": {
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-untrusted",
+            },
+        },
+    }
+
+    assert EvidenceCollectorNode._trusted_pod_uid_index([event]) == {}
+
+
+def test_t018_exact_uid_describe_publishes_trusted_kubernetes_lifecycle_ledger():
+    event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "result": "Reason: OOMKilled\nExit Code: 137",
+        "raw_ref": "/archive/describe.raw.txt",
+        "structured_ref": "/archive/describe.structured.json",
+        "summary_ref": "/archive/describe.summary.txt",
+        "structured": {
+            "name": "api",
+            "namespace": "demo",
+            "status": "Running",
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-a",
+            },
+            "containers": [{
+                "name": "api",
+                "last_state": "Terminated",
+                "reason": "OOMKilled",
+                "exit_code": "137",
+                "restart_count": "9",
+                "resources": {
+                    "limits": {"memory": "80Mi"},
+                    "requests": {"memory": "32Mi"},
+                },
+            }],
+        },
+    }
+
+    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(
+        [event]
+    )
+
+    item = next(
+        item for item in tool_data if item["tool"] == "kubectl_describe"
+    )
+    assert item["authority_context"] == {
+        "semantic_success": True,
+        "status": "kubernetes_observed",
+        "coverage": "present",
+        "source_system": "kubernetes",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api",
+            "pod_uid": "uid-a",
+        },
+        "evaluator_field_present": False,
+        "trusted_pod_uid": "uid-a",
+    }
+    assert item["fact_ledger"]["source"] == "robusta_legacy_adapter"
+    assert item["report_authority"]["mode"] == "trusted_legacy"
+    assert item["report_authority"]["authoritative"] is True
+
+
+def test_t018_canonical_entity_pollution_is_rejected_and_not_projected():
+    raw_ledger = _t017_raw_known_answer_ledger()
+    events = _t017_raw_canonical_query_events(raw_ledger)
+    events[1]["structured"]["entity"]["diagnosis"] = {
+        "root_cause": "provider supplied answer",
+    }
+
+    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(
+        events
+    )
+    query_item = next(
+        item for item in tool_data if item["tool"] == "query_pod_logs"
+    )
+
+    assert query_item["report_authority"]["mode"] == "rejected"
+    assert query_item["report_authority"]["authoritative"] is False
+    assert "evaluator_field_present" in query_item["report_authority"][
+        "reasons"
+    ]
+    assert query_item["authority_context"]["entity"] == {
+        "kind": "Pod",
+        "namespace": "demo",
+        "pod": "api",
+        "pod_uid": "uid-a",
+    }
+
+
+def _t017_raw_canonical_query_events(fact_ledger):
+    identity_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "result": "api Running",
+        "structured": {
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-a",
+            },
+        },
+    }
+    query_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "query_pod_logs",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "inspect current logs",
+        },
+        "result": "observed event",
+        "raw_ref": "/archive/logs.raw.txt",
+        "structured_ref": "/archive/logs.structured.json",
+        "summary_ref": "/archive/logs.summary.txt",
+        "structured": {
+            "status": "query_succeeded",
+            "coverage": "present",
+            "source_system": "elasticsearch",
+            "dimension": "logging",
+            "purpose": "inspect current logs",
+            "query": {"query_string": "kubernetes.pod_name:api"},
+            "entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "pod": "api",
+                "pod_uid": "uid-a",
+            },
+            "facts": [{
+                "ref": "logs:target",
+                "source_system": "elasticsearch",
+                "dimension": "logging",
+                "name": "log.message",
+                "value": {"message": "observed event"},
+                "directness": "direct",
+                "confidence": "high",
+            }],
+            "evidence_refs": ["logs:target"],
+            "fact_ledger": fact_ledger,
+        },
+    }
+    return [identity_event, query_event]
+
+
+def _t017_raw_known_answer_ledger():
+    return {
+        "contract_version": "aiops.fact-ledger.v1",
+        "case_id": "case-raw-ledger-mutation",
+        "scope_entity_ids": ["k8s.pod:demo/api:uid-a"],
+        "records": [{
+            "fact_id": "fact-38d15186060d",
+            "entity_id": "k8s.pod:demo/api:uid-a",
+            "entity_kind": "Pod",
+            "namespace": "demo",
+            "entity_name": "api",
+            "dimension": "logging",
+            "fact_type": "log",
+            "attribute": "log.message",
+            "value": {"message": "observed event"},
+            "source_system": "elasticsearch",
+            "directness": "direct",
+            "confidence": "high",
+            "strength": "strong",
+            "evidence_refs": ["logs:target"],
+        }],
+        "record_count": 1,
+        "truncated": False,
+        "source": "mcp_canonical",
+        "legacy_contract": False,
+    }
+
+
+def test_t017_evidence_accepts_unsanitized_native_ledger_known_answer():
+    raw_ledger = _t017_raw_known_answer_ledger()
+    raw_copy = json.loads(json.dumps(raw_ledger))
+
+    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(
+        _t017_raw_canonical_query_events(raw_ledger)
+    )
+    query_item = next(
+        item for item in tool_data if item["tool"] == "query_pod_logs"
+    )
+
+    assert query_item["report_authority"]["mode"] == "canonical"
+    assert query_item["report_authority"]["authoritative"] is True
+    assert query_item["fact_ledger"]["source"] == "mcp_canonical"
+    assert query_item["fact_ledger"]["record_count"] == 1
+    assert query_item["fact_ledger"]["records"][0]["fact_id"] == (
+        "fact-38d15186060d"
+    )
+    assert raw_ledger == raw_copy
+
+
+def test_t017_evidence_accepts_native_prometheus_metric_labels_as_canonical():
+    record = _canonical_fact_record(
+        dimension="metrics",
+        fact_type="measurement",
+        attribute="kube_pod_container_status_last_terminated_reason",
+        value="1",
+        source_system="prometheus",
+        strength=None,
+        evidence_refs=["metric:terminated-reason"],
+        metadata={
+            "labels": {
+                "__name__": "kube_pod_container_status_last_terminated_reason",
+                "container": "api",
+                "namespace": "demo",
+                "pod": "api",
+                "reason": "OOMKilled",
+                "uid": "uid-a",
+            },
+            "sample_count": 1,
+        },
+    )
+    record.pop("strength")
+    ledger = {
+        "contract_version": "aiops.fact-ledger.v1",
+        "case_id": "query-live-prometheus-shape",
+        "scope_entity_ids": ["k8s.pod:demo/api:uid-a"],
+        "records": [record],
+        "record_count": 1,
+        "truncated": False,
+        "source": "mcp_canonical",
+        "legacy_contract": False,
+    }
+    events = _t017_raw_canonical_query_events(ledger)
+    query_event = events[1]
+    query_event["tool_name"] = "execute_pod_promql"
+    query_event["structured"].update({
+        "source_system": "prometheus",
+        "dimension": "metrics",
+        "facts": [{
+            "ref": "metric:terminated-reason",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "name": record["attribute"],
+            "value": "1",
+            "labels": record["metadata"]["labels"],
+        }],
+        "evidence_refs": ["metric:terminated-reason"],
+    })
+
+    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(events)
+    query_item = next(
+        item for item in tool_data if item["tool"] == "execute_pod_promql"
+    )
+
+    assert query_item["report_authority"]["mode"] == "canonical"
+    assert query_item["report_authority"]["authoritative"] is True
+    assert query_item["fact_ledger"]["records"][0]["metadata"]["labels"][
+        "reason"
+    ] == "OOMKilled"
+    assert "data" not in query_item
+    assert "agent_context" not in query_item
+    assert "agent_facts" not in query_item
+
+
+def test_t017_evidence_restores_trusted_scope_for_compacted_topology_entity():
+    scope_id = "k8s.pod:demo/api:uid-a"
+    node_id = "k8s.node:cluster/node-a"
+    record = _canonical_fact_record(
+        entity_id=scope_id,
+        dimension="topology",
+        fact_type="relationship",
+        attribute="kubernetes.relationship",
+        value={
+            "relation": "scheduled_on",
+            "source": scope_id,
+            "target": node_id,
+        },
+        source_system="kubernetes",
+        evidence_refs=["topology:pod-node"],
+    )
+    ledger = {
+        "contract_version": "aiops.fact-ledger.v1",
+        "case_id": "query-compacted-topology",
+        "scope_entity_ids": [scope_id],
+        "records": [record],
+        "record_count": 1,
+        "truncated": False,
+        "source": "mcp_canonical",
+        "legacy_contract": False,
+    }
+    events = _t017_raw_canonical_query_events(ledger)
+    query_event = events[1]
+    query_event["tool_name"] = "query_pod_topology"
+    query_event["tool_args"] = {
+        "namespace": "demo",
+        "pod": "api",
+        "purpose": "inspect current topology",
+    }
+    query_event["structured"].update({
+        "source_system": "kubernetes",
+        "dimension": "topology",
+        "entity": {"kind": "Pod", "entity_id": "e:compact"},
+        "facts": [],
+        "evidence_refs": ["topology:pod-node"],
+    })
+
+    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(events)
+    query_item = next(
+        item for item in tool_data if item["tool"] == "query_pod_topology"
+    )
+
+    assert query_item["report_authority"]["mode"] == "canonical"
+    assert query_item["report_authority"]["authoritative"] is True
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unknown_source",
+        "extra_ledger_field",
+        "missing_ledger_field",
+        "valid_plus_malformed_record",
+    ],
+)
+def test_t017_evidence_strictly_rejects_unsanitized_native_ledger_mutations(
+    mutation,
+):
+    raw_ledger = _t017_raw_known_answer_ledger()
+    if mutation == "unknown_source":
+        raw_ledger["source"] = "attacker_unknown"
+    elif mutation == "extra_ledger_field":
+        raw_ledger["unexpected_authority"] = True
+    elif mutation == "missing_ledger_field":
+        raw_ledger.pop("record_count")
+    else:
+        raw_ledger["records"].append({
+            "fact_id": "fact-malformed0001",
+            "entity_id": "k8s.pod:demo/api:uid-a",
+            "dimension": "logging",
+            "fact_type": "log",
+            "attribute": "log.message",
+            "value": {"message": "must not be silently dropped"},
+            "source_system": "elasticsearch",
+            "directness": "direct",
+            "confidence": "high",
+            "evidence_refs": ["logs:malformed"],
+        })
+        raw_ledger["record_count"] = 2
+
+    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(
+        _t017_raw_canonical_query_events(raw_ledger)
+    )
+    query_item = next(
+        item for item in tool_data if item["tool"] == "query_pod_logs"
+    )
+
+    assert query_item["report_authority"]["mode"] == "rejected"
+    assert query_item["report_authority"]["authoritative"] is False
+    assert "malformed_ledger" in query_item["report_authority"]["reasons"]
+    assert query_item["fact_ledger"] == raw_ledger
+    if mutation == "unknown_source":
+        assert query_item["report_authority"]["source"] == (
+            "attacker_unknown"
+        )
+
+
+def test_t017_stop_checker_drains_same_batch_completed_sibling_archives(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    payloads = {
+        "call-a": json.dumps({
+            "status": "kept",
+            "marker": "completed-sibling-a",
+        }),
+        "call-b": json.dumps({
+            "status": "kept",
+            "marker": "completed-sibling-b",
+        }),
+    }
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "tool_a",
+                                    "args": {"target": "a"},
+                                    "id": "call-a",
+                                },
+                                {
+                                    "name": "tool_b",
+                                    "args": {"target": "b"},
+                                    "id": "call-b",
+                                },
+                            ],
+                        )]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(
+                                content=payloads["call-a"],
+                                tool_call_id="call-a",
+                                name="tool_a",
+                            ),
+                            ToolMessage(
+                                content=payloads["call-b"],
+                                tool_call_id="call-b",
+                                name="tool_b",
+                            ),
+                        ]
+                    }
+                },
+            )
+
+    tools = []
+    for name in ("tool_a", "tool_b"):
+        tool = MagicMock()
+        tool.name = name
+        tool.description = name
+        tool.args_schema = None
+        tools.append(tool)
+
+    with patch(
+        "app.core.aicall.client.ChatOpenAI",
+        return_value=MagicMock(),
+    ), patch(
+        "langchain.agents.create_agent",
+        return_value=_Agent(),
+    ):
+        _, events = AICall(
+            model="openai/test-model",
+            api_key="local-test-key",
+        ).call(
+            "system",
+            "question",
+            tools=tools,
+            node_id="evidence",
+            run_id="t017-same-batch-drain",
+            max_steps=3,
+            stop_checker=lambda current: any(
+                event.get("type") == "tool_result"
+                for event in current
+            ),
+        )
+
+    starts = [
+        event for event in events
+        if event.get("type") == "tool_start"
+    ]
+    results = [
+        event for event in events
+        if event.get("type") == "tool_result"
+    ]
+    assert [event["tool_call_id"] for event in starts] == [
+        "call-a",
+        "call-b",
+    ]
+    assert [event["tool_call_id"] for event in results] == [
+        "call-a",
+        "call-b",
+    ]
+
+    archive_refs = []
+    for event in results:
+        call_id = event["tool_call_id"]
+        marker = json.loads(payloads[call_id])["marker"]
+        for ref_key in ("raw_ref", "structured_ref", "summary_ref"):
+            ref = event.get(ref_key)
+            assert ref
+            path = Path(ref)
+            assert path.exists()
+            archived_text = path.read_text()
+            assert archived_text.strip()
+            if ref_key == "raw_ref":
+                assert marker in archived_text
+            archive_refs.append(str(path))
+    assert len(set(archive_refs)) == 6
+    assert len([
+        event for event in events
+        if event.get("type") == "early_stop"
+    ]) == 1
+
+
+def _successful_events_for_active_plan(node):
+    events = []
+    for item in node._active_evidence_plan or []:
+        tool_name = item.get("tool")
+        tool_args = dict(item.get("tool_args") or {})
+        if tool_name in EvidenceCollectorNode._OBSERVABILITY_QUERY_TOOLS:
+            dimension = EvidenceCollectorNode._observability_tool_dimension(
+                tool_name
+            )
+            namespace = tool_args["namespace"]
+            pod = tool_args["pod"]
+            purpose = tool_args["purpose"]
+            evidence_ref = f"{dimension}:{namespace}/{pod}"
+            events.append({
+                "type": "tool_result",
+                "status": "success",
+                "semantic_success": True,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "result": f"{dimension}=present",
+                "structured": {
+                    "status": "query_succeeded",
+                    "source_system": dimension,
+                    "dimension": dimension,
+                    "entity": {
+                        "kind": "Pod",
+                        "namespace": namespace,
+                        "pod": pod,
+                    },
+                    "purpose": purpose,
+                    "coverage": "present",
+                    "directness": "direct",
+                    "facts": [{
+                        "ref": evidence_ref,
+                        "source_system": dimension,
+                        "dimension": dimension,
+                        "name": f"{dimension}.sample",
+                        "value": 1,
+                    }],
+                    "evidence_refs": [evidence_ref],
+                },
+            })
+        elif tool_name == "kubectl_describe":
+            namespace = tool_args["namespace"]
+            pod = tool_args["name"]
+            events.append({
+                "type": "tool_result",
+                "status": "success",
+                "semantic_success": True,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "result": (
+                    f"Name: {pod}\nNamespace: {namespace}\n"
+                    "Status: Running"
+                ),
+                "structured": {
+                    "status": "describe_summarized",
+                    "kind": "Pod",
+                    "namespace": namespace,
+                    "name": pod,
+                },
+            })
+    return events
 
 
 def test_evidence_should_continue_when_important_item_is_still_missing():
@@ -502,14 +1165,14 @@ def test_evidence_user_prompt_prioritizes_live_observability_for_broad_multi_pod
         layer="L2",
         layer_handoff=json.dumps(
             {
-                "active_entities": [
+                "abnormal_pods": [
                     {
-                        "type": "Pod",
+                        "kind": "Pod",
                         "namespace": "ns-a",
                         "name": "pod-a",
                     },
                     {
-                        "type": "Pod",
+                        "kind": "Pod",
                         "namespace": "ns-b",
                         "name": "pod-b",
                     },
@@ -532,6 +1195,22 @@ def test_evidence_user_prompt_prioritizes_live_observability_for_broad_multi_pod
     assert "80%" in guidance
     assert "用户同时要求 metrics" not in guidance
     assert "不是代码强制编排" not in guidance
+
+
+def test_autonomous_guidance_does_not_promote_active_only_pod_target():
+    guidance = EvidenceCollectorNode._build_live_observability_plan_guidance(
+        question="我的集群现在有什么问题？",
+        handoff={
+            "active_entities": [{
+                "type": "Pod",
+                "namespace": "context-only",
+                "name": "unconfirmed-pod",
+            }],
+        },
+        observability_mode="autonomous",
+    )
+
+    assert guidance == ""
 
 
 def test_evidence_user_prompt_keeps_live_observability_guidance_generic():
@@ -643,48 +1322,6 @@ def test_autonomous_guidance_requires_first_round_three_dimensions_then_allows_f
     assert "80%" in guidance
 
 
-def test_autonomous_gate_detects_every_missing_pod_dimension():
-    plan = [{
-        "id": "api-metrics",
-        "tool": "execute_pod_promql",
-        "tool_args": {
-            "namespace": "demo",
-            "pod": "api",
-            "purpose": "验证当前状态",
-            "promql": 'kube_pod_status_phase{namespace="demo",pod="api"}',
-            "query_type": "instant",
-        },
-    }, {
-        "id": "worker-logs",
-        "tool": "query_pod_logs",
-        "tool_args": {
-            "namespace": "demo",
-            "pod": "worker",
-            "purpose": "读取最近日志",
-        },
-    }]
-    handoff = {
-        "abnormal_pods": [
-            {"kind": "Pod", "namespace": "demo", "name": "api"},
-            {"kind": "Pod", "namespace": "demo", "name": "worker"},
-        ],
-    }
-
-    missing = EvidenceCollectorNode._missing_autonomous_observability_gate_items(
-        plan,
-        handoff,
-    )
-
-    assert missing == [
-        ("demo", "api", "query_pod_logs"),
-        ("demo", "api", "query_pod_tracing"),
-        ("demo", "api", "query_pod_topology"),
-        ("demo", "worker", "execute_pod_promql"),
-        ("demo", "worker", "query_pod_tracing"),
-        ("demo", "worker", "query_pod_topology"),
-    ]
-
-
 def test_autonomous_gate_fallback_adds_generic_four_dimensions_without_scenario_routing():
     node = EvidenceCollectorNode()
     node.workflow_config_override = {
@@ -749,6 +1386,36 @@ def test_autonomous_gate_fallback_adds_generic_four_dimensions_without_scenario_
     assert "imagepullbackoff" not in serialized
     assert "configerror" not in serialized
     assert "scenario" not in serialized
+
+
+def test_autonomous_gate_does_not_bind_active_only_pod_to_nonempty_plan():
+    node = EvidenceCollectorNode()
+    model_plan = [{
+        "id": "cluster-events",
+        "description": "检查集群近期异常事件",
+        "level": "important",
+        "tool": "kubectl_events",
+        "command": "kubectl get events --all-namespaces",
+        "tool_args": {},
+        "purpose": "确认异常对象",
+    }]
+
+    gated = node._ensure_autonomous_observability_gate_plan(
+        model_plan,
+        {
+            "active_entities": [{
+                "type": "Pod",
+                "namespace": "context-only",
+                "name": "unconfirmed-pod",
+            }],
+        },
+    )
+
+    assert gated == model_plan
+    assert not any(
+        item.get("source") == "observability_first_round_gate"
+        for item in gated
+    )
 
 
 @pytest.mark.parametrize("status,coverage", [
@@ -928,7 +1595,7 @@ def test_autonomous_preplanned_execution_keeps_unplanned_generic_query_tools_for
     assert "collect_aiops_case" in blocked
 
 
-def test_autonomous_plan_retries_then_falls_back_for_each_missing_dimension():
+def test_autonomous_plan_uses_one_structured_call_then_generic_gate_for_missing_dimensions():
     node = EvidenceCollectorNode()
     node.workflow_config_override = {
         "evidence": {
@@ -989,33 +1656,10 @@ def test_autonomous_plan_retries_then_falls_back_for_each_missing_dimension():
         }],
         "collection_strategy": "先确认两个 Pod，再查询关键指标。",
     }
-    repaired_plan = {
-        "layer": "L3",
-        "evidence_plan": [
-            *first_plan["evidence_plan"],
-            {
-                "id": "config-logs",
-                "description": "查询 config Pod 的启动错误原文",
-                "level": "important",
-                "tool": "query_pod_logs",
-                "command": "query scoped Pod logs",
-                "tool_args": {
-                    "namespace": "config-ns",
-                    "pod": "config-api",
-                    "purpose": "验证启动失败是否由配置缺失导致",
-                    "keywords": ["required", "missing", "config"],
-                },
-                "purpose": "验证启动失败是否由配置缺失导致",
-            },
-        ],
-        "collection_strategy": "补充部分缺失的实时观测问题。",
-    }
-
     class _StructuredAICall:
         def call_structured(self, system_prompt, question, schema, **kwargs):
             plan_questions.append(question)
-            payload = first_plan if len(plan_questions) == 1 else repaired_plan
-            parsed = schema.model_validate(payload)
+            parsed = schema.model_validate(first_plan)
             return parsed, parsed.model_dump_json()
 
     node.ai_call = _StructuredAICall()
@@ -1059,8 +1703,7 @@ def test_autonomous_plan_retries_then_falls_back_for_each_missing_dimension():
         }),
     )
 
-    assert len(plan_questions) == 2
-    assert "config-ns/config-api" in plan_questions[1]
+    assert len(plan_questions) == 1
     planned_gate_items = {
         (
             *EvidenceCollectorNode._extract_plan_pod_target(item),
@@ -1079,6 +1722,1096 @@ def test_autonomous_plan_retries_then_falls_back_for_each_missing_dimension():
         ("config-ns", "config-api", "query_pod_tracing"),
         ("config-ns", "config-api", "query_pod_topology"),
     }
+    qwen_metric = next(item for item in plan if item["id"] == "oom-metric")
+    assert qwen_metric["tool_args"]["promql"] == (
+        'container_memory_working_set_bytes'
+        '{namespace="oom-ns",pod="oom-api",container="api"}'
+    )
+    assert qwen_metric["tool_args"]["query_type"] == "range"
+    assert qwen_metric["tool_args"]["purpose"] == "验证资源趋势是否支持候选根因"
+
+
+def test_empty_structured_plan_builds_generic_describe_fallback_before_gate():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    structured_calls = []
+    ensure_calls = []
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            structured_calls.append(question)
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [],
+                "collection_strategy": "",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+    original_ensure = node._ensure_autonomous_observability_gate_plan
+
+    def _count_ensure(evidence_plan, layer_handoff):
+        ensure_calls.append(list(evidence_plan))
+        return original_ensure(evidence_plan, layer_handoff)
+
+    node._ensure_autonomous_observability_gate_plan = _count_ensure
+    node._call_llm = lambda *args, **kwargs: (
+        SimpleNamespace(result="已执行 fallback 和首轮 gate"),
+        _successful_events_for_active_plan(node),
+    )
+
+    plan, events, text = node._plan_evidence_with_llm(
+        question="检查目标 Pod",
+        layer=Layer.L3,
+        possible_scenarios=[
+            "oom",
+            "configerror",
+            "imagepullbackoff",
+            "terminating",
+        ],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "abnormal_pods": [{
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "status": "Unknown",
+            }],
+        }),
+    )
+
+    assert len(structured_calls) == 1
+    assert len(ensure_calls) == 1
+    assert len(events) == 5
+    assert text == "已执行 fallback 和首轮 gate"
+
+    fallback_items = [
+        item
+        for item in plan
+        if item.get("source") == "structured_plan_fallback"
+    ]
+    assert len(fallback_items) == 1
+    assert fallback_items[0]["tool"] == "kubectl_describe"
+    assert fallback_items[0]["tool_args"] == {
+        "kind": "pod",
+        "namespace": "demo",
+        "name": "api",
+    }
+    serialized = json.dumps(fallback_items, ensure_ascii=False).lower()
+    for scenario_word in (
+        "oom",
+        "configerror",
+        "imagepullbackoff",
+        "terminating",
+    ):
+        assert scenario_word not in serialized
+
+    assert {
+        item["tool"]
+        for item in plan
+        if item.get("source") == "observability_first_round_gate"
+    } == {
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    }
+    assert plan[0]["source"] == "structured_plan_fallback"
+    assert all(
+        item["source"] == "observability_first_round_gate"
+        for item in plan[1:]
+    )
+
+
+@pytest.mark.parametrize(
+    "layer_handoff",
+    [
+        {
+            "primary_pod": {
+                "namespace": "demo",
+                "name": "api",
+            },
+        },
+        {
+            "primary_entities": [
+                {
+                    "kind": "Service",
+                    "namespace": "demo",
+                    "name": "ignored-service",
+                },
+                {
+                    "type": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                },
+            ],
+        },
+        {
+            "abnormal_pods": [{
+                "namespace": "demo",
+                "name": "api",
+            }],
+        },
+        {
+            "issue_groups": [{
+                "entities": [{
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                }],
+            }],
+        },
+        {
+            "issue_groups": [{
+                "primary_entities": [{
+                    "kind": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                }],
+            }],
+        },
+        {
+            "abnormal_groups": [{
+                "entities": [{
+                    "type": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                }],
+            }],
+        },
+        {
+            "abnormal_groups": [{
+                "primary_entities": [{
+                    "type": "Pod",
+                    "namespace": "demo",
+                    "name": "api",
+                }],
+            }],
+        },
+    ],
+    ids=[
+        "primary-pod",
+        "primary-entities",
+        "abnormal-pods",
+        "issue-groups",
+        "issue-groups-primary-entities",
+        "abnormal-groups",
+        "abnormal-groups-primary-entities",
+    ],
+)
+def test_empty_structured_plan_with_gate_disabled_builds_describe_for_each_confirmed_shape(
+    layer_handoff,
+):
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {"enabled": False},
+        }
+    }
+    structured_calls = []
+    captured = {}
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            structured_calls.append(question)
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [],
+                "collection_strategy": "",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+
+    def _capture_execution(**kwargs):
+        captured["plan"] = kwargs["evidence_plan"]
+        return kwargs["evidence_plan"], [], ""
+
+    node._execute_existing_evidence_plan = _capture_execution
+
+    plan, events, text = node._plan_evidence_with_llm(
+        question="检查目标 Pod",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps(layer_handoff),
+    )
+
+    assert len(structured_calls) == 1
+    assert "plan" in captured
+    assert plan == captured["plan"]
+    assert events == []
+    assert text == ""
+    assert [
+        (
+            item["tool"],
+            item["tool_args"]["namespace"],
+            item["tool_args"]["name"],
+            item.get("source"),
+        )
+        for item in plan
+    ] == [
+        ("kubectl_describe", "demo", "api", "structured_plan_fallback"),
+    ]
+    assert not any(
+        item["tool"] in EvidenceCollectorNode._OBSERVABILITY_QUERY_TOOLS
+        for item in plan
+    )
+
+
+def test_confirmed_handoff_pod_targets_deduplicate_across_all_supported_shapes():
+    handoff = {
+        "primary_pod": {
+            "namespace": "demo",
+            "name": "api",
+        },
+        "primary_entities": [
+            {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+            },
+        ],
+        "abnormal_pods": [{
+            "namespace": "demo",
+            "name": "api",
+        }],
+        "issue_groups": [{
+            "entities": [{
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+            }],
+        }, {
+            "primary_entities": [{
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+            }],
+        }],
+        "abnormal_groups": [{
+            "entities": [{
+                "type": "Pod",
+                "namespace": "demo",
+                "name": "api",
+            }],
+        }, {
+            "primary_entities": [{
+                "type": "Pod",
+                "namespace": "demo",
+                "name": "api",
+            }],
+        }],
+    }
+
+    assert EvidenceCollectorNode._collect_confirmed_handoff_pod_targets(
+        handoff
+    ) == [("demo", "api")]
+    fallback = EvidenceCollectorNode._build_structured_plan_fallback(handoff)
+    assert len(fallback) == 1
+    assert fallback[0]["tool_args"]["name"] == "api"
+
+
+def test_legacy_layer_handoff_parser_preserves_confirmed_target_fields():
+    layer_analysis = {
+        "layer": "L3",
+        "confidence": 0.9,
+        "reasoning": "legacy layer output",
+        "key_entities": [{
+            "type": "Pod",
+            "namespace": "weak",
+            "name": "context-only",
+        }],
+        "primary_pod": {
+            "namespace": "primary",
+            "name": "pod-a",
+        },
+        "primary_entities": [{
+            "kind": "Pod",
+            "namespace": "primary-list",
+            "name": "pod-b",
+        }],
+        "abnormal_pods": [{
+            "namespace": "abnormal",
+            "name": "pod-c",
+        }],
+        "issue_groups": [{
+            "primary_entities": [{
+                "kind": "Pod",
+                "namespace": "issue",
+                "name": "pod-d",
+            }],
+        }],
+        "abnormal_groups": [{
+            "primary_entities": [{
+                "type": "Pod",
+                "namespace": "group",
+                "name": "pod-e",
+            }],
+        }],
+    }
+
+    parsed = EvidenceCollectorNode._parse_layer_handoff(
+        json.dumps(layer_analysis)
+    )
+
+    for field in (
+        "primary_pod",
+        "primary_entities",
+        "abnormal_pods",
+        "issue_groups",
+        "abnormal_groups",
+    ):
+        assert parsed[field] == layer_analysis[field]
+    assert parsed["active_entities"] == layer_analysis["key_entities"]
+
+    fallback = EvidenceCollectorNode._build_structured_plan_fallback(parsed)
+    assert [
+        (
+            item["tool_args"]["namespace"],
+            item["tool_args"]["name"],
+        )
+        for item in fallback
+    ] == [
+        ("primary", "pod-a"),
+        ("primary-list", "pod-b"),
+        ("issue", "pod-d"),
+        ("group", "pod-e"),
+        ("abnormal", "pod-c"),
+    ]
+
+
+def test_valid_structured_plan_with_gate_disabled_calls_once_without_gate_injection():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {"enabled": False},
+        }
+    }
+    structured_calls = []
+    captured = {}
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            structured_calls.append(question)
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [{
+                    "id": "status",
+                    "description": "确认目标 Pod 当前状态",
+                    "level": "critical",
+                    "tool": "kubectl_describe",
+                    "command": "kubectl describe pod api -n demo",
+                    "tool_args": {
+                        "kind": "pod",
+                        "namespace": "demo",
+                        "name": "api",
+                    },
+                    "purpose": "确认当前生命周期状态",
+                }],
+                "collection_strategy": "执行现有计划",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+
+    def _capture_execution(**kwargs):
+        captured["plan"] = kwargs["evidence_plan"]
+        return kwargs["evidence_plan"], [], ""
+
+    node._execute_existing_evidence_plan = _capture_execution
+
+    plan, _, _ = node._plan_evidence_with_llm(
+        question="检查目标 Pod",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "primary_pod": {
+                "namespace": "demo",
+                "name": "api",
+            },
+        }),
+    )
+
+    assert len(structured_calls) == 1
+    assert plan == captured["plan"]
+    assert [item["tool"] for item in plan] == ["kubectl_describe"]
+    assert not any(
+        item.get("source") == "observability_first_round_gate"
+        for item in plan
+    )
+
+
+def test_empty_structured_plan_with_gate_disabled_and_active_only_remains_empty():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {"enabled": False},
+        }
+    }
+    structured_calls = []
+    execution_calls = []
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            structured_calls.append(question)
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [],
+                "collection_strategy": "",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+
+    def _capture_execution(**kwargs):
+        execution_calls.append(kwargs)
+        return kwargs["evidence_plan"], [], ""
+
+    node._execute_existing_evidence_plan = _capture_execution
+
+    plan, events, text = node._plan_evidence_with_llm(
+        question="检查当前环境",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "active_entities": [{
+                "type": "Pod",
+                "namespace": "context-only",
+                "name": "unconfirmed-pod",
+            }],
+            "issue_groups": [],
+            "abnormal_pods": [],
+        }),
+    )
+
+    assert len(structured_calls) == 1
+    assert execution_calls == []
+    assert plan == []
+    assert events == []
+    assert json.loads(text)["evidence_plan"] == []
+
+
+@pytest.mark.parametrize("source", ["confirmed", "active"])
+@pytest.mark.parametrize("field", ["namespace", "pod"])
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "bad;value",
+        "bad$(id)",
+        "bad`id`",
+        "bad value",
+        "bad/value",
+    ],
+)
+def test_invalid_pod_targets_never_build_fallback_gate_or_enter_execution(
+    source,
+    field,
+    bad_value,
+):
+    namespace = bad_value if field == "namespace" else "demo"
+    pod = bad_value if field == "pod" else "api"
+    entity = {
+        "type": "Pod",
+        "namespace": namespace,
+        "name": pod,
+    }
+    handoff = (
+        {"abnormal_pods": [entity]}
+        if source == "confirmed"
+        else {"active_entities": [entity]}
+    )
+
+    assert EvidenceCollectorNode._collect_confirmed_handoff_pod_targets(
+        handoff
+    ) == []
+    assert EvidenceCollectorNode._collect_handoff_pod_targets(handoff) == []
+    assert EvidenceCollectorNode._build_structured_plan_fallback(handoff) == []
+
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    assert node._ensure_autonomous_observability_gate_plan([], handoff) == []
+
+    structured_calls = []
+    execution_calls = []
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            structured_calls.append(question)
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [],
+                "collection_strategy": "",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+
+    def _capture_execution(**kwargs):
+        execution_calls.append(kwargs)
+        return kwargs["evidence_plan"], [], ""
+
+    node._execute_existing_evidence_plan = _capture_execution
+
+    plan, events, _ = node._plan_evidence_with_llm(
+        question="检查目标 Pod",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps(handoff),
+    )
+
+    assert len(structured_calls) == 1
+    assert execution_calls == []
+    assert plan == []
+    assert events == []
+
+
+def test_pod_target_validation_accepts_dns_boundary_values():
+    namespace = "a" * 63
+    pod = ".".join(["b" * 63, "c" * 63, "d" * 63, "e" * 61])
+    assert len(pod) == 253
+    handoff = {
+        "abnormal_pods": [{
+            "namespace": namespace,
+            "name": pod,
+        }],
+        "active_entities": [{
+            "type": "Pod",
+            "namespace": namespace,
+            "name": pod,
+        }],
+    }
+
+    assert EvidenceCollectorNode._collect_confirmed_handoff_pod_targets(
+        handoff
+    ) == [(namespace, pod)]
+    assert EvidenceCollectorNode._collect_handoff_pod_targets(handoff) == [
+        (namespace, pod),
+    ]
+
+
+def test_three_pod_empty_plan_preserves_describes_before_complete_gate():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    structured_calls = []
+
+    class _StructuredAICall:
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            structured_calls.append(question)
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [],
+                "collection_strategy": "",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+    node._call_llm = lambda *args, **kwargs: (
+        SimpleNamespace(result="已执行三 Pod 计划"),
+        _successful_events_for_active_plan(node),
+    )
+    handoff = {
+        "abnormal_pods": [
+            {"namespace": "demo", "name": "api-1"},
+            {"namespace": "demo", "name": "api-2"},
+            {"namespace": "demo", "name": "api-3"},
+        ],
+    }
+
+    plan, events, _ = node._plan_evidence_with_llm(
+        question="检查三个目标 Pod",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps(handoff),
+    )
+
+    assert len(structured_calls) == 1
+    assert len(plan) == 15
+    assert len(events) == 15
+    assert [
+        item["source"]
+        for item in plan[:3]
+    ] == ["structured_plan_fallback"] * 3
+    assert [
+        item["tool_args"]["name"]
+        for item in plan[:3]
+    ] == ["api-1", "api-2", "api-3"]
+    gate_items = plan[3:]
+    assert len(gate_items) == 12
+    assert all(
+        item["source"] == "observability_first_round_gate"
+        for item in gate_items
+    )
+    assert {
+        (item["tool_args"]["pod"], item["tool"])
+        for item in gate_items
+    } == {
+        (pod, tool)
+        for pod in ("api-1", "api-2", "api-3")
+        for tool in EvidenceCollectorNode._OBSERVABILITY_QUERY_ORDER
+    }
+
+
+def test_model_plans_stay_before_complete_gate_when_total_exceeds_ten():
+    node = EvidenceCollectorNode()
+    model_plan = [{
+        "id": "model-describe",
+        "description": "确认 api-1 当前状态",
+        "level": "critical",
+        "tool": "kubectl_describe",
+        "command": "kubectl describe pod api-1 -n demo",
+        "tool_args": {
+            "kind": "pod",
+            "namespace": "demo",
+            "name": "api-1",
+        },
+        "purpose": "确认当前状态",
+    }, {
+        "id": "model-yaml",
+        "description": "读取 api-1 YAML",
+        "level": "important",
+        "tool": "kubectl_get_yaml",
+        "command": "kubectl get pod api-1 -n demo -o yaml",
+        "tool_args": {
+            "kind": "pod",
+            "namespace": "demo",
+            "name": "api-1",
+        },
+        "purpose": "确认配置",
+    }, {
+        "id": "model-events",
+        "description": "读取 demo 事件",
+        "level": "important",
+        "tool": "kubectl_events",
+        "command": "kubectl get events -n demo",
+        "tool_args": {
+            "namespace": "demo",
+        },
+        "purpose": "确认近期事件",
+    }]
+
+    plan = node._ensure_autonomous_observability_gate_plan(
+        model_plan,
+        {
+            "abnormal_pods": [
+                {"namespace": "demo", "name": "api-1"},
+                {"namespace": "demo", "name": "api-2"},
+            ],
+        },
+    )
+
+    assert len(plan) == 11
+    assert [item["id"] for item in plan[:3]] == [
+        "model-describe",
+        "model-yaml",
+        "model-events",
+    ]
+    assert all(
+        item["source"] == "observability_first_round_gate"
+        for item in plan[3:]
+    )
+    assert len(plan[3:]) == 8
+
+
+def test_existing_plan_applies_gate_once_at_execution_boundary():
+    node = EvidenceCollectorNode()
+    node.ai_call = SimpleNamespace()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    ensure_calls = []
+    original_ensure = node._ensure_autonomous_observability_gate_plan
+
+    def _count_ensure(evidence_plan, layer_handoff):
+        ensure_calls.append(list(evidence_plan))
+        return original_ensure(evidence_plan, layer_handoff)
+
+    node._ensure_autonomous_observability_gate_plan = _count_ensure
+    node._call_llm = lambda *args, **kwargs: (
+        SimpleNamespace(result="已执行既有计划"),
+        _successful_events_for_active_plan(node),
+    )
+    existing_plan = [{
+        "id": "status",
+        "description": "确认目标 Pod 当前状态",
+        "level": "critical",
+        "tool": "kubectl_describe",
+        "command": "kubectl describe pod api -n demo",
+        "tool_args": {
+            "kind": "pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "purpose": "确认当前状态",
+    }]
+
+    plan, events, _ = node._plan_evidence_with_llm(
+        question="检查目标 Pod",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "abnormal_pods": [{
+                "namespace": "demo",
+                "name": "api",
+            }],
+        }),
+        existing_plan=existing_plan,
+    )
+
+    assert len(ensure_calls) == 1
+    assert len(plan) == 5
+    assert len(events) == 5
+    assert plan[0]["id"] == "status"
+
+
+def test_generate_structured_plan_exception_returns_auditable_raw_error():
+    node = EvidenceCollectorNode()
+
+    class _RaisingAICall:
+        def call_structured(self, *args, **kwargs):
+            raise RuntimeError("structured backend unavailable")
+
+    node.ai_call = _RaisingAICall()
+
+    plan, raw = node._generate_structured_evidence_plan(
+        system_prompt="system",
+        user_message="question",
+        layer_str="L3",
+    )
+
+    assert plan == []
+    assert json.loads(raw) == {
+        "error": "RuntimeError",
+        "message": "structured backend unavailable",
+    }
+
+
+def test_execute_uses_fallback_after_structured_exception_without_retrying_plan():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+
+    class _RaisingAICall:
+        def __init__(self):
+            self.calls = 0
+
+        def call_structured(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("structured backend unavailable")
+
+    node.ai_call = _RaisingAICall()
+    node._call_llm = lambda *args, **kwargs: (
+        SimpleNamespace(result="已执行异常回退计划"),
+        _successful_events_for_active_plan(node),
+    )
+    node._save_thinking = lambda state, new_state, thinking_events: None
+
+    result = node.execute({
+        "question": "检查目标 Pod",
+        "layer": Layer.L3,
+        "layer_handoff": {
+            "abnormal_pods": [{
+                "namespace": "demo",
+                "name": "api",
+            }],
+        },
+        "layer_analysis": "{}",
+        "possible_scenarios": [],
+        "key_entities": [],
+    })
+
+    analysis = json.loads(result["evidence_analysis"])
+    plan = analysis["evidence_plan"]
+    assert node.ai_call.calls == 1
+    assert len(plan) == 5
+    assert plan[0]["id"] == "structured-plan-fallback-1"
+    assert plan[0]["tool"] == "kubectl_describe"
+    assert [
+        item["tool"]
+        for item in plan[1:]
+    ] == list(EvidenceCollectorNode._OBSERVABILITY_QUERY_ORDER)
+    assert result.get("errors", []) == []
+
+
+@pytest.mark.parametrize("gate_enabled", [True, False])
+@pytest.mark.parametrize("structured_failure", ["empty", "exception"])
+@pytest.mark.parametrize("observability_mode", ["autonomous", "legacy"])
+def test_execute_treats_active_only_empty_structured_plan_as_terminal(
+    gate_enabled,
+    structured_failure,
+    observability_mode,
+):
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": observability_mode,
+            "observability_first_round_gate": {
+                "enabled": gate_enabled,
+            },
+        }
+    }
+    if observability_mode == "legacy":
+        node.tools = [SimpleNamespace(name="collect_aiops_case")]
+    execution_calls = []
+
+    class _StructuredAICall:
+        def __init__(self):
+            self.calls = 0
+
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            self.calls += 1
+            if structured_failure == "exception":
+                raise RuntimeError("structured backend unavailable")
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [],
+                "collection_strategy": "",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+    node._save_thinking = lambda state, new_state, thinking_events: None
+
+    def _capture_execution(**kwargs):
+        execution_calls.append(kwargs)
+        return kwargs["evidence_plan"], [], ""
+
+    node._execute_existing_evidence_plan = _capture_execution
+
+    result = node.execute({
+        "question": "检查当前环境",
+        "layer": Layer.L3,
+        "layer_handoff": {
+            "active_entities": [{
+                "type": "Pod",
+                "namespace": "context-only",
+                "name": "unconfirmed-pod",
+            }],
+            "issue_groups": [],
+            "abnormal_pods": [],
+        },
+        "layer_analysis": "{}",
+        "possible_scenarios": [],
+        "key_entities": [],
+    })
+
+    analysis = json.loads(result["evidence_analysis"])
+    assert node.ai_call.calls == 1
+    assert execution_calls == []
+    assert analysis["evidence_plan"] == []
+    assert analysis["tool_data"] == []
+    assert analysis["plan_status"] == "terminal_empty"
+    assert "没有已确认的 Pod 目标" in analysis["plan_failure_reason"]
+    assert any(
+        "没有已确认的 Pod 目标" in reason
+        for reason in analysis["missing_reasons"]
+    )
+    assert result["evidence_items"] == []
+
+
+def test_execute_valid_plan_retry_reuses_existing_plan_without_structured_recall():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {
+                "enabled": False,
+            },
+        }
+    }
+    execution_calls = []
+
+    class _StructuredAICall:
+        def __init__(self):
+            self.calls = 0
+
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            self.calls += 1
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": [{
+                    "id": "status",
+                    "description": "确认目标 Pod 当前状态",
+                    "level": "critical",
+                    "tool": "kubectl_describe",
+                    "command": "kubectl describe pod api -n demo",
+                    "tool_args": {
+                        "kind": "pod",
+                        "namespace": "demo",
+                        "name": "api",
+                    },
+                    "purpose": "确认当前生命周期状态",
+                }],
+                "collection_strategy": "执行现有计划",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+    node._save_thinking = lambda state, new_state, thinking_events: None
+
+    def _capture_execution(**kwargs):
+        execution_calls.append(kwargs)
+        if len(execution_calls) == 1:
+            return kwargs["evidence_plan"], [], "只输出了计划，没有执行工具"
+        return kwargs["evidence_plan"], [{
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_describe",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": "demo",
+                "name": "api",
+            },
+            "result": "Name: api\nNamespace: demo\nStatus: Running",
+        }], "复用既有计划并执行工具"
+
+    node._execute_existing_evidence_plan = _capture_execution
+
+    result = node.execute({
+        "question": "检查目标 Pod",
+        "layer": Layer.L3,
+        "layer_handoff": {
+            "primary_pod": {
+                "namespace": "demo",
+                "name": "api",
+            },
+        },
+        "layer_analysis": "{}",
+        "possible_scenarios": [],
+        "key_entities": [],
+    })
+
+    assert node.ai_call.calls == 1
+    assert len(execution_calls) == 2
+    assert execution_calls[1]["evidence_plan"] == execution_calls[0]["evidence_plan"]
+    assert json.loads(result["evidence_analysis"])["evidence_plan"] == (
+        execution_calls[0]["evidence_plan"]
+    )
+
+
+def test_execute_resets_terminal_empty_before_next_run_protocol_retry():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {
+                "enabled": False,
+            },
+        }
+    }
+    execution_calls = []
+
+    class _StructuredAICall:
+        def __init__(self):
+            self.calls = 0
+
+        def call_structured(self, system_prompt, question, schema, **kwargs):
+            self.calls += 1
+            plan = []
+            if self.calls == 2:
+                plan = [{
+                    "id": "status",
+                    "description": "确认目标 Pod 当前状态",
+                    "level": "critical",
+                    "tool": "kubectl_describe",
+                    "command": "kubectl describe pod api -n demo",
+                    "tool_args": {
+                        "kind": "pod",
+                        "namespace": "demo",
+                        "name": "api",
+                    },
+                    "purpose": "确认当前生命周期状态",
+                }]
+            parsed = schema.model_validate({
+                "layer": "L3",
+                "evidence_plan": plan,
+                "collection_strategy": "",
+            })
+            return parsed, parsed.model_dump_json()
+
+    node.ai_call = _StructuredAICall()
+    node._save_thinking = lambda state, new_state, thinking_events: None
+
+    def _capture_execution(**kwargs):
+        execution_calls.append(kwargs)
+        if len(execution_calls) == 1:
+            return kwargs["evidence_plan"], [], "有效计划尚未产生工具结果"
+        return kwargs["evidence_plan"], [{
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_describe",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": "demo",
+                "name": "api",
+            },
+            "result": "Name: api\nNamespace: demo\nStatus: Running",
+        }], "复用既有计划并执行工具"
+
+    node._execute_existing_evidence_plan = _capture_execution
+
+    first = node.execute({
+        "question": "检查当前环境",
+        "layer": Layer.L3,
+        "layer_handoff": {
+            "active_entities": [{
+                "type": "Pod",
+                "namespace": "context-only",
+                "name": "unconfirmed-pod",
+            }],
+        },
+        "layer_analysis": "{}",
+        "possible_scenarios": [],
+        "key_entities": [],
+    })
+    second = node.execute({
+        "question": "检查目标 Pod",
+        "layer": Layer.L3,
+        "layer_handoff": {
+            "primary_pod": {
+                "namespace": "demo",
+                "name": "api",
+            },
+        },
+        "layer_analysis": "{}",
+        "possible_scenarios": [],
+        "key_entities": [],
+    })
+
+    assert json.loads(first["evidence_analysis"])["evidence_plan"] == []
+    assert node.ai_call.calls == 2
+    assert len(execution_calls) == 2
+    assert execution_calls[1]["evidence_plan"] == execution_calls[0]["evidence_plan"]
+    assert json.loads(second["evidence_analysis"])["evidence_plan"] == (
+        execution_calls[0]["evidence_plan"]
+    )
 
 
 def test_autonomous_context_guard_stops_new_queries_at_eighty_percent():
@@ -3646,6 +5379,10 @@ def test_evidence_injects_mandatory_case_for_every_unique_abnormal_pod():
     node = EvidenceCollectorNode()
     node.tools = [SimpleNamespace(name="collect_aiops_case")]
     handoff = {
+        "primary_pod": {
+            "namespace": "ns-a",
+            "name": "pod-a",
+        },
         "active_entities": [
             {"type": "Pod", "namespace": "ns-a", "name": "pod-a"},
         ],
@@ -4551,10 +6288,20 @@ def test_evidence_tool_data_attaches_bounded_valid_fact_ledger_json():
 
     assert len(tool_data) == 1
     assert tool_data[0]["fact_ledger"]["case_id"] == "case-facts"
-    agent_context = tool_data[0]["agent_context"]
-    parsed = json.loads(agent_context)
-    assert parsed["fact_ledgers"][0]["case_id"] == "case-facts"
-    assert len(agent_context) <= 12000
+    assert "data" not in tool_data[0]
+    assert "agent_facts" not in tool_data[0]
+    assert "agent_context" not in tool_data[0]
+    rendered = json.dumps(tool_data[0], ensure_ascii=False)
+    assert rendered.count("aiops.fact-ledger.v1") == 1
+    selected_records = tool_data[0]["fact_ledger"]["records"]
+    assert selected_records
+    assert all(
+        rendered.count(record["fact_id"]) == 1
+        for record in selected_records
+    )
+    assert tool_data[0]["fact_ledger"]["truncated"] is True
+    assert tool_data[0]["fact_ledger"]["record_count"] < len(records)
+    assert len(rendered) <= 12000
 
 
 def test_evidence_excludes_deduplicated_case_replay_from_data_and_counts():
@@ -6704,10 +8451,11 @@ def test_lifecycle_and_query_ledgers_share_trusted_same_scope_pod_uid():
             },
             "result": "Last State: Terminated",
             "raw_ref": "/archive/describe.raw",
-            "structured": {
-                "name": "api",
-                "namespace": "demo",
-                "status": "Running",
+                "structured": {
+                    "name": "api",
+                    "namespace": "demo",
+                    "uid": "uid-api",
+                    "status": "Running",
                 "containers": [
                     {
                         "name": "app",
@@ -6901,13 +8649,40 @@ def test_partial_query_facts_and_limitations_reach_rca_and_conclusion():
         "raw_ref": "/archive/metrics-partial.raw",
         "structured_ref": "/archive/metrics-partial.structured.json",
     }
+    independent_uid_event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "name": "api",
+        },
+        "structured": {
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-api",
+            }
+        },
+    }
 
-    tool_data = node._extract_tool_data_from_thinking([event])
+    tool_data = node._extract_tool_data_from_thinking([
+        event,
+        independent_uid_event,
+    ])
+    query_tool_data = [
+        item
+        for item in tool_data
+        if item.get("tool") == "execute_pod_promql"
+    ]
 
-    assert len(tool_data) == 1
+    assert len(query_tool_data) == 1
     records = {
         record["attribute"]: record
-        for record in tool_data[0]["fact_ledger"]["records"]
+        for record in query_tool_data[0]["fact_ledger"]["records"]
     }
     assert records["container_memory_working_set_bytes"]["value"] == 70168576
     assert records["metrics.coverage"]["value"]["coverage"] == "partial"
@@ -6915,10 +8690,10 @@ def test_partial_query_facts_and_limitations_reach_rca_and_conclusion():
         records["metrics.coverage"]["value"]["limitations"]
         == ["Prometheus returned only the newest shard"]
     )
-    assert len(extract_fact_ledgers_from_tool_data(tool_data)) == 1
+    assert len(extract_fact_ledgers_from_tool_data(query_tool_data)) == 1
 
     context = ConclusionFormatterNode._build_structured_diagnosis_context(
-        json.dumps({"tool_data": tool_data}, ensure_ascii=False),
+        json.dumps({"tool_data": query_tool_data}, ensure_ascii=False),
         "{}",
     )
     assert "OBSERVABILITY_EXECUTION metrics=partial" in context
@@ -6941,11 +8716,11 @@ def test_missing_or_empty_purpose_queries_remain_archived_only():
         "result": "Last State: Terminated",
         "result_preview": "Last State: Terminated",
         "raw_ref": "/archive/describe.raw",
-        "structured": {
-            "status": "Running",
-            "name": "api",
-            "namespace": "demo",
-            "containers": [
+                "structured": {
+                    "status": "Running",
+                    "name": "api",
+                    "namespace": "demo",
+                    "containers": [
                 {
                     "name": "app",
                     "last_state": "Terminated",
@@ -7068,9 +8843,11 @@ def test_missing_or_empty_purpose_queries_remain_archived_only():
 
     tool_data = node._extract_tool_data_from_thinking(events)
     assert [item["tool"] for item in tool_data] == ["kubectl_describe"]
-    ledgers = extract_fact_ledgers_from_tool_data(tool_data)
-    assert len(ledgers) == 1
-    assert ledgers[0].scope_entity_ids == ["k8s.pod:demo/api"]
+    assert tool_data[0]["fact_ledger"]["scope_entity_ids"] == [
+        "k8s.pod:demo/api"
+    ]
+    assert tool_data[0]["report_authority"]["authoritative"] is False
+    assert extract_fact_ledgers_from_tool_data(tool_data) == []
 
     conclusion_preview = ConclusionFormatterNode()._build_tool_data_section(
         events
@@ -7104,6 +8881,7 @@ def test_invalid_query_uids_do_not_conflict_with_explicit_semantic_success():
                 "status": "Running",
                 "name": "api",
                 "namespace": "demo",
+                "uid": "uid-trusted",
                 "containers": [
                     {
                         "name": "app",

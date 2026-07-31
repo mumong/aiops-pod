@@ -102,6 +102,72 @@ class _DummyHolmesService:
     workflow_config = {"nodes": {"layer": False, "evidence": False, "rca": True, "conclusion": True}}
 
 
+def test_executor_join_helper_never_joins_current_thread():
+    import threading
+
+    alive = WorkflowExecutor._join_worker_if_needed(
+        threading.current_thread(),
+        timeout=5,
+    )
+
+    assert alive is True
+
+
+def test_executor_join_helper_keeps_bounded_join_for_other_worker(monkeypatch):
+    class _Worker:
+        def __init__(self):
+            self.alive = True
+            self.join_calls = []
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, *, timeout):
+            self.join_calls.append(timeout)
+            self.alive = False
+
+    worker = _Worker()
+    monkeypatch.setattr(
+        "app.core.workflow.executor.threading.current_thread",
+        lambda: object(),
+    )
+
+    alive = WorkflowExecutor._join_worker_if_needed(
+        worker,
+        timeout=5,
+    )
+
+    assert alive is False
+    assert worker.join_calls == [5]
+
+
+def test_executor_preserves_setup_error_before_worker_creation(monkeypatch):
+    class _FailingNode(_DummyNode):
+        def set_event_queue(self, q):
+            if q is not None:
+                raise RuntimeError("event queue setup failed")
+            super().set_event_queue(q)
+
+    node = _FailingNode("rca")
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow",
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+            _DummyWorkflow([node]),
+            [node],
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.workflow.executor.create_log_listener",
+        lambda: _DummyLogListener(),
+    )
+
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    events = list(executor.execute_stream("setup failure"))
+
+    error_event = next(event for event in events if event.get("type") == "error")
+    assert error_event["error"] == "event queue setup failed"
+
+
 def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
     nodes = [_DummyNode("rca"), _DummyNode("conclusion")]
 

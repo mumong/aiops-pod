@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
+import app.core.workflow.fact_contract as fact_contract_module
 from app.core.remediation.plans import extract_remediation_plan
 from app.core.prompts import (
     FACT_LEDGER_REMEDIATION_PLAN_PROMPT,
@@ -16,6 +18,7 @@ from app.core.prompts import (
 from app.core.skills.models import Layer
 from app.core.workflow.executor import WorkflowExecutor
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
+from app.core.workflow.schemas import FactLedger, FactRecord
 
 
 class _PlainAICall:
@@ -220,10 +223,63 @@ def _ledger(case_id: str, scope_entity_ids: list[str], records: list[dict]) -> d
 
 
 def _fact_evidence(*ledgers: dict, extra_tool_data: list[dict] | None = None) -> str:
-    tool_data = [
-        {"tool": "collect_aiops_case", "fact_ledger": ledger}
-        for ledger in ledgers
-    ]
+    tool_data = []
+    for ledger in ledgers:
+        item = {
+            "tool": "collect_aiops_case",
+            "fact_ledger": ledger,
+        }
+        if ledger.get("source") in {
+            "mcp_canonical",
+            "robusta_legacy_adapter",
+        }:
+            scope = next(
+                (
+                    str(value)
+                    for value in ledger.get("scope_entity_ids") or []
+                    if str(value).lower().startswith("k8s.pod:")
+                ),
+                "",
+            )
+            match = re.fullmatch(
+                r"k8s\.pod:([^/]+)/([^:]+):(.+)",
+                scope,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                namespace, pod, pod_uid = match.groups()
+                item.update({
+                    "tool": "query_pod_logs",
+                    "semantic_success": True,
+                    "authority_context": {
+                        "semantic_success": True,
+                        "status": "query_succeeded",
+                        "coverage": "present",
+                        "source_system": str(
+                            (
+                                (ledger.get("records") or [{}])[0]
+                            ).get("source_system")
+                            or "legacy-source"
+                        ),
+                        "entity": {
+                            "kind": "Pod",
+                            "namespace": namespace,
+                            "pod": pod,
+                            "pod_uid": pod_uid,
+                        },
+                        "trusted_pod_uid": pod_uid,
+                    },
+                })
+                decision = fact_contract_module.evaluate_report_authority(
+                    ledger_input=ledger,
+                    tool_item=item,
+                )
+                fact_contract_module.attach_internal_report_authority(
+                    item,
+                    ledger_input=ledger,
+                    decision=decision,
+                )
+        tool_data.append(item)
     tool_data.extend(extra_tool_data or [])
     return json.dumps(
         {
@@ -539,19 +595,22 @@ def test_fact_ledger_report_renders_validated_facts_and_appendix_deterministical
         timestamp="2026-07-16T01:02:04Z",
     )
     topology = _fact(
-        entity_id="topology.edge:api-owner",
+        entity_id=entity_id,
         namespace="demo",
-        entity_name="api-owner",
-        entity_kind="TopologyEdge",
+        entity_name="api",
+        entity_kind="Pod",
         dimension="topology",
         fact_type="relationship",
         attribute="topology.relationship",
         value={
-            "relationship": "owned_by",
-            "source_entity_id": entity_id,
-            "target_entity_id": "k8s.replicaset:demo/api-rs:uid-rs",
+            "source": {"entity_id": entity_id, "kind": "Pod"},
+            "relation": "owned_by",
+            "target": {
+                "entity_id": "k8s.replicaset:demo/api-rs:uid-rs",
+                "kind": "ReplicaSet",
+            },
         },
-        source_system="topology",
+        source_system="kubernetes",
         evidence_ref="topology:api-owner",
     )
     contradiction = _fact(
@@ -606,7 +665,9 @@ def test_fact_ledger_report_renders_validated_facts_and_appendix_deterministical
     second = node.execute(state)["conclusion"]
 
     assert first == second
-    assert "模型生成的自然语言概览应保留" in first
+    assert "模型生成的自然语言概览应保留" not in first
+    assert "模型生成的现象叙述应保留" not in first
+    assert "权威结论仅由 validated FactRecords 及其引用确定" in first
     assert "模型错误地改写为另一个根因" not in first
     assert "**诊断状态**: `diagnosed`" in first
     assert "当前事实支持配置缺失根因候选" not in first
@@ -619,7 +680,7 @@ def test_fact_ledger_report_renders_validated_facts_and_appendix_deterministical
     assert "77.47Mi" in first
     assert "required config PAYMENT_GATEWAY_TOKEN is missing" in first
     assert "trace-valid-1234567890" in first
-    assert '"relationship":"owned_by"' in first
+    assert '"relation":"owned_by"' in first
     assert "metric:api-memory" in first
     assert "source_system=prometheus" in first
     assert "directness=direct" in first
@@ -761,6 +822,520 @@ def test_fact_ledger_report_keeps_inconclusive_and_excludes_unknown_references()
     assert "Service --owns--> Pod" not in conclusion
     assert metric["fact_id"] in conclusion
     assert "metric:cpu-real" in conclusion
+
+
+def test_invalid_inconclusive_legacy_ledger_uses_deterministic_read_only_report():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    lifecycle = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="container.last_exit_code",
+        value={"container": "api", "exit_code": 1},
+        evidence_ref="kubernetes:describe",
+    )
+    legacy_ledger = _ledger(
+        "case-legacy-invalid",
+        [entity_id],
+        [lifecycle],
+    )
+    legacy_ledger["source"] = "robusta_legacy_adapter"
+    legacy_ledger["legacy_contract"] = True
+    claim = json.loads(
+        _rca_claim(
+            diagnostic_status="inconclusive",
+            root_cause_summary=(
+                "Current facts are insufficient for a validated "
+                "root-cause conclusion"
+            ),
+            hypotheses=[
+                {
+                    "hypothesis_id": "hyp-invalid",
+                    "summary": "Unsupported candidate",
+                    "supporting_fact_ids": ["fact-ffffffffffff"],
+                    "contradicting_fact_ids": [],
+                    "unknowns": [],
+                    "confidence": 0.9,
+                }
+            ],
+            supporting_fact_ids=["fact-ffffffffffff"],
+            unknowns=["Fact reference validation failed"],
+        )
+    )
+    claim["confidence"] = 0.35
+    claim["claim_validation"] = {
+        "valid": False,
+        "diagnostic_status": "inconclusive",
+        "valid_supporting_fact_ids": [],
+        "valid_contradicting_fact_ids": [],
+        "invalid_fact_ids": ["fact-ffffffffffff"],
+        "reasons": ["unknown supporting fact reference"],
+        "legacy_contract": True,
+    }
+    unsafe_model_report = """
+## 诊断概览
+诊断状态：diagnosed。置信度：高（90%）。Node Ready，网络和配置问题均已排除。
+
+## 根因分析
+根因已经锁定，需要将资源目标固定为 128Mi。
+
+## 修复建议
+立即执行 `kubectl set resources deployment/api -n demo --limits=memory=128Mi`。
+"""
+    node = _node_with_response(unsafe_model_report)
+
+    conclusion = node.execute(
+        {
+            "question": "我的集群有什么问题？",
+            "layer": Layer.L2,
+            "layer_analysis": "{}",
+            "evidence_analysis": _fact_evidence(legacy_ledger),
+            "rca_analysis": json.dumps(claim, ensure_ascii=False),
+            "thinking_events": [],
+        }
+    )["conclusion"]
+
+    assert "**诊断状态**: `inconclusive`" in conclusion
+    assert "**RCA 置信度上限**: `35%`" in conclusion
+    assert "diagnosed" not in conclusion
+    assert "90%" not in conclusion
+    assert "Node Ready" not in conclusion
+    assert "网络和配置问题均已排除" not in conclusion
+    assert "128Mi" not in conclusion
+    assert "kubectl set resources" not in conclusion
+    assert "remediation_available" in conclusion
+    assert '"remediation_available": false' in conclusion
+    assert lifecycle["fact_id"] in conclusion
+    assert "kubernetes:describe" in conclusion
+
+
+@pytest.mark.parametrize("legacy_contract", [False, True])
+def test_inconclusive_without_incoming_validation_discards_all_model_narrative(
+    legacy_contract,
+):
+    entity_id = "k8s.pod:demo/api:uid-api"
+    lifecycle = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="container.restart_count",
+        value={"container": "api", "restart_count": 7},
+        unit="count",
+        fact_type="measurement",
+        evidence_ref="kubernetes:describe",
+    )
+    ledger = _ledger(
+        f"case-inconclusive-{legacy_contract}",
+        [entity_id],
+        [lifecycle],
+    )
+    if legacy_contract:
+        ledger["source"] = "robusta_legacy_adapter"
+        ledger["legacy_contract"] = True
+    claim = _rca_claim(
+        diagnostic_status="inconclusive",
+        root_cause_summary="当前事实不足以确认根因",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "重启次数需要结合更多事实",
+                "supporting_fact_ids": [lifecycle["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.35,
+            }
+        ],
+        supporting_fact_ids=[lifecycle["fact_id"]],
+    )
+    adversarial_report = _diagnosis_report(
+        root_text="根因段会被 Fact Ledger 重建。",
+        appendix_text="""
+## 影响评估
+服务已完全中断。Node Ready，网络和配置问题均已排除。
+建议将 memory limit 固定为 128Mi。
+""".strip(),
+    )
+    node = _node_with_response(adversarial_report)
+
+    conclusion = node.execute(
+        {
+            "question": "我的集群有什么问题？",
+            "layer": Layer.L2,
+            "layer_analysis": "{}",
+            "evidence_analysis": _fact_evidence(ledger),
+            "rca_analysis": claim,
+            "thinking_events": [],
+        }
+    )["conclusion"]
+
+    assert "**诊断状态**: `inconclusive`" in conclusion
+    assert "**RCA 置信度上限**: `35%`" in conclusion
+    assert lifecycle["fact_id"] in conclusion
+    assert "kubernetes:describe" in conclusion
+    assert "服务已完全中断" not in conclusion
+    assert "Node Ready" not in conclusion
+    assert "网络和配置问题均已排除" not in conclusion
+    assert "128Mi" not in conclusion
+
+
+def test_inconclusive_mixed_ledgers_preserve_non_equivalent_legacy_context():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    canonical_state = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="pod.status",
+        value={"status": "Running"},
+        evidence_ref="canonical:pod-status",
+    )
+    legacy_resource = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="container.resource_limit.memory",
+        value={"container": "business-api", "value": "80Mi"},
+        unit="kubernetes_quantity",
+        fact_type="configuration",
+        evidence_ref="legacy:describe",
+    )
+    legacy_ledger = _ledger(
+        "case-legacy-resource",
+        [entity_id],
+        [legacy_resource],
+    )
+    legacy_ledger["source"] = "robusta_legacy_adapter"
+    legacy_ledger["legacy_contract"] = True
+    claim = _rca_claim(
+        diagnostic_status="inconclusive",
+        root_cause_summary="当前事实不足以确认根因",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "只读事实待补证",
+                "supporting_fact_ids": [canonical_state["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.35,
+            }
+        ],
+        supporting_fact_ids=[canonical_state["fact_id"]],
+    )
+    node = _node_with_response(_diagnosis_report(root_text="不应保留。"))
+
+    conclusion = node.execute(
+        {
+            "question": "我的集群有什么问题？",
+            "layer": Layer.L2,
+            "layer_analysis": "{}",
+            "evidence_analysis": _fact_evidence(
+                _ledger(
+                    "case-canonical",
+                    [entity_id],
+                    [canonical_state],
+                ),
+                legacy_ledger,
+            ),
+            "rca_analysis": claim,
+            "thinking_events": [],
+        }
+    )["conclusion"]
+
+    assert canonical_state["fact_id"] in conclusion
+    assert legacy_resource["fact_id"] in conclusion
+    assert "80Mi" in conclusion
+    assert "legacy:describe" in conclusion
+
+
+def test_inconclusive_mixed_ledgers_reject_blank_source_legacy_fact():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    canonical_state = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="pod.status",
+        value={"status": "Running"},
+        evidence_ref="canonical:pod-status",
+    )
+    blank_source = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="container.resource_request.memory",
+        value={"container": "business-api", "value": "33Mi"},
+        unit="kubernetes_quantity",
+        fact_type="configuration",
+        source_system="   ",
+        evidence_ref="legacy:blank-source",
+    )
+    legacy_ledger = _ledger(
+        "case-legacy-blank-source",
+        [entity_id],
+        [blank_source],
+    )
+    legacy_ledger["source"] = "robusta_legacy_adapter"
+    legacy_ledger["legacy_contract"] = True
+    claim = _rca_claim(
+        diagnostic_status="inconclusive",
+        root_cause_summary="当前事实不足以确认根因",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "只读事实待补证",
+                "supporting_fact_ids": [canonical_state["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.35,
+            }
+        ],
+        supporting_fact_ids=[canonical_state["fact_id"]],
+    )
+    node = _node_with_response(_diagnosis_report(root_text="不应保留。"))
+
+    conclusion = node.execute(
+        {
+            "question": "我的集群有什么问题？",
+            "layer": Layer.L2,
+            "layer_analysis": "{}",
+            "evidence_analysis": _fact_evidence(
+                _ledger(
+                    "case-canonical",
+                    [entity_id],
+                    [canonical_state],
+                ),
+                legacy_ledger,
+            ),
+            "rca_analysis": claim,
+            "thinking_events": [],
+        }
+    )["conclusion"]
+
+    assert canonical_state["fact_id"] in conclusion
+    assert blank_source["fact_id"] not in conclusion
+    assert "33Mi" not in conclusion
+    assert "legacy:blank-source" not in conclusion
+
+
+def test_inconclusive_merge_gate_rejects_validator_bypass_legacy_facts():
+    entity_id = "k8s.pod:demo/api:uid-api"
+
+    def bypass_fact(
+        *,
+        fact_id: str,
+        value: str,
+        source_system: str,
+        evidence_refs: list[str],
+    ) -> FactRecord:
+        return FactRecord.model_construct(
+            fact_id=fact_id,
+            entity_id=entity_id,
+            entity_kind="Pod",
+            namespace="demo",
+            entity_name="api",
+            dimension="kubernetes",
+            fact_type="configuration",
+            attribute="container.resource_request.memory",
+            value={"container": "business-api", "value": value},
+            unit="kubernetes_quantity",
+            timestamp=None,
+            start=None,
+            end=None,
+            source_system=source_system,
+            directness="direct",
+            confidence="high",
+            strength="strong",
+            evidence_refs=evidence_refs,
+            metadata={},
+        )
+
+    valid_80mi = bypass_fact(
+        fact_id="fact-valid80mi",
+        value="80Mi",
+        source_system="kubernetes",
+        evidence_refs=["legacy:valid-80mi"],
+    )
+    blank_source_33mi = bypass_fact(
+        fact_id="fact-blank33mi",
+        value="33Mi",
+        source_system="   ",
+        evidence_refs=["legacy:blank-source"],
+    )
+    empty_refs_48mi = bypass_fact(
+        fact_id="fact-emptyrefs48mi",
+        value="48Mi",
+        source_system="kubernetes",
+        evidence_refs=[],
+    )
+    legacy_ledger = FactLedger.model_construct(
+        contract_version="aiops.fact-ledger.v1",
+        case_id="case-legacy-publication-gate",
+        scope_entity_ids=[entity_id],
+        records=[
+            valid_80mi,
+            blank_source_33mi,
+            empty_refs_48mi,
+        ],
+        record_count=3,
+        truncated=False,
+        source="robusta_legacy_adapter",
+        legacy_contract=True,
+    )
+
+    merged = ConclusionFormatterNode._merge_inconclusive_fact_ledgers(
+        all_ledgers=[legacy_ledger],
+        canonical_ledgers=[],
+    )
+    serialized = json.dumps(
+        [ledger.model_dump(mode="json") for ledger in merged],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+    assert len(merged) == 1
+    assert merged[0].record_count == 1
+    assert [record.fact_id for record in merged[0].records] == [
+        valid_80mi.fact_id
+    ]
+    assert valid_80mi.fact_id in serialized
+    assert "80Mi" in serialized
+    assert "legacy:valid-80mi" in serialized
+    assert blank_source_33mi.fact_id not in serialized
+    assert "33Mi" not in serialized
+    assert "legacy:blank-source" not in serialized
+    assert empty_refs_48mi.fact_id not in serialized
+    assert "48Mi" not in serialized
+    assert '"evidence_refs": []' not in serialized
+
+
+def test_inconclusive_mixed_ledgers_preserve_non_equivalent_legacy_value():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    canonical_resource = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="container.resource_limit.memory",
+        value={"container": "business-api", "value": "80Mi"},
+        unit="kubernetes_quantity",
+        fact_type="configuration",
+        evidence_ref="canonical:resource-limit",
+    )
+    legacy_conflict = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="container.resource_limit.memory",
+        value={"container": "business-api", "value": "128Mi"},
+        unit="kubernetes_quantity",
+        fact_type="configuration",
+        evidence_ref="legacy:describe",
+    )
+    legacy_ledger = _ledger(
+        "case-legacy-conflict",
+        [entity_id],
+        [legacy_conflict],
+    )
+    legacy_ledger["source"] = "robusta_legacy_adapter"
+    legacy_ledger["legacy_contract"] = True
+    claim = _rca_claim(
+        diagnostic_status="inconclusive",
+        root_cause_summary="当前事实不足以确认根因",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "只读事实待补证",
+                "supporting_fact_ids": [canonical_resource["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.35,
+            }
+        ],
+        supporting_fact_ids=[canonical_resource["fact_id"]],
+    )
+    node = _node_with_response(_diagnosis_report(root_text="不应保留。"))
+
+    conclusion = node.execute(
+        {
+            "question": "我的集群有什么问题？",
+            "layer": Layer.L2,
+            "layer_analysis": "{}",
+            "evidence_analysis": _fact_evidence(
+                _ledger(
+                    "case-canonical-resource",
+                    [entity_id],
+                    [canonical_resource],
+                ),
+                legacy_ledger,
+            ),
+            "rca_analysis": claim,
+            "thinking_events": [],
+        }
+    )["conclusion"]
+
+    assert canonical_resource["fact_id"] in conclusion
+    assert "80Mi" in conclusion
+    assert legacy_conflict["fact_id"] in conclusion
+    assert "128Mi" in conclusion
+    assert "legacy:describe" in conclusion
+
+
+def test_fact_report_fallback_sanitizes_archive_refs_and_passes_final_gate():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    archive_root = "/tmp/aiops/reports/context_archives/"
+    absolute_ref = (
+        archive_root
+        + "run-123/tools/001-evidence-kubectl_describe.raw.txt"
+    )
+    lifecycle = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        attribute="container.restart_count",
+        value={"container": "api", "restart_count": 7},
+        unit="count",
+        fact_type="measurement",
+        evidence_ref=absolute_ref,
+    )
+    claim = _rca_claim(
+        diagnostic_status="diagnosed",
+        root_cause_summary="当前事实支持已诊断结论",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "当前事实支持已诊断结论",
+                "supporting_fact_ids": [lifecycle["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.88,
+            }
+        ],
+        supporting_fact_ids=[lifecycle["fact_id"]],
+    )
+    node = _node_with_response("# 阶段1：问题定位分析")
+    node._format_with_template = lambda **kwargs: _diagnosis_report(
+        root_text="fallback-template-used",
+        appendix_text=f"## 其他信息\nref={absolute_ref}",
+    )
+
+    conclusion = node.execute(
+        {
+            "question": "我的集群有什么问题？",
+            "layer": Layer.L2,
+            "layer_analysis": "{}",
+            "evidence_analysis": _fact_evidence(
+                _ledger("case-archive-ref", [entity_id], [lifecycle])
+            ),
+            "rca_analysis": claim,
+            "thinking_events": [],
+        }
+    )["conclusion"]
+
+    assert archive_root not in conclusion
+    assert "context-archive:run-123/tools/" in conclusion
+    assert node._diagnosis_report_validation_errors(conclusion) == []
 
 
 def test_fact_ledger_report_keeps_two_pod_facts_in_their_own_sections():
@@ -918,10 +1493,12 @@ FORGED_LATE_ROOT
     assert "FORGED_FIRST_ROOT" not in conclusion
     assert "FORGED_LATE_ROOT" not in conclusion
     assert fact["fact_id"] in conclusion
-    assert "普通诊断概览应保留" in conclusion
+    assert "普通诊断概览应保留" not in conclusion
+    assert "普通现象描述应保留" not in conclusion
+    assert "权威结论仅由 validated FactRecords" in conclusion
 
 
-def test_fact_ledger_diagnostic_only_report_preserves_guidance_and_reads():
+def test_fact_ledger_diagnostic_only_report_drops_model_guidance_and_commands():
     entity_id = "k8s.pod:demo/api:uid-api"
     fact = _fact(
         entity_id=entity_id,
@@ -995,11 +1572,12 @@ def test_fact_ledger_diagnostic_only_report_preserves_guidance_and_reads():
     )["conclusion"]
     plan = extract_remediation_plan(conclusion)
 
-    assert "人工修复指导应保留" in conclusion
+    assert "人工修复指导应保留" not in conclusion
     for command in write_commands:
         assert command not in conclusion
     for command in read_only_commands:
-        assert command in conclusion
+        assert command not in conclusion
+    assert "本报告不授权 Kubernetes 写操作" in conclusion
     assert conclusion.count("## 结构化修复计划") == 1
     assert plan is not None
     assert plan.remediation_available is False
@@ -1008,7 +1586,7 @@ def test_fact_ledger_diagnostic_only_report_preserves_guidance_and_reads():
     assert plan.actions == []
 
 
-def test_fact_ledger_report_neutralizes_shell_realistic_writes_and_preserves_reads():
+def test_fact_ledger_report_drops_all_model_shell_content():
     entity_id = "k8s.pod:demo/api:uid-api"
     fact = _fact(
         entity_id=entity_id,
@@ -1039,10 +1617,20 @@ def test_fact_ledger_report_neutralizes_shell_realistic_writes_and_preserves_rea
         + "`kubectl --context prod get pod api -n demo`\n"
     )
     claim = _rca_claim(
-        diagnostic_status="inconclusive",
-        root_cause_summary="当前证据不足",
-        hypotheses=[],
-        supporting_fact_ids=[],
+        diagnostic_status="diagnosed",
+        root_cause_summary="当前事实支持诊断结论",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "当前事实支持诊断结论",
+                "supporting_fact_ids": [fact["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.88,
+            }
+        ],
+        supporting_fact_ids=[fact["fact_id"]],
     )
     node = _node_with_response(response)
 
@@ -1068,7 +1656,7 @@ def test_fact_ledger_report_neutralizes_shell_realistic_writes_and_preserves_rea
     ):
         assert write_target not in conclusion
     assert "kubectl rollout history deployment/api -n demo" not in conclusion
-    assert "普通诊断文本和人工复核说明应保留" in conclusion
+    assert "普通诊断文本和人工复核说明应保留" not in conclusion
     for read_only_command in (
         "kubectl --namespace demo get pod api",
         "kubectl -n demo describe pod api",
@@ -1077,7 +1665,7 @@ def test_fact_ledger_report_neutralizes_shell_realistic_writes_and_preserves_rea
         "kubectl rollout status deployment/api -n demo",
         "kubectl --context prod get pod api -n demo",
     ):
-        assert read_only_command in conclusion
+        assert read_only_command not in conclusion
 
 
 def test_fact_ledger_report_neutralizes_short_namespace_equals_writes_in_all_forms():
@@ -1102,10 +1690,20 @@ def test_fact_ledger_report_neutralizes_short_namespace_equals_writes_in_all_for
         + "```\n"
     )
     claim = _rca_claim(
-        diagnostic_status="inconclusive",
-        root_cause_summary="当前证据不足",
-        hypotheses=[],
-        supporting_fact_ids=[],
+        diagnostic_status="diagnosed",
+        root_cause_summary="当前事实支持诊断结论",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "当前事实支持诊断结论",
+                "supporting_fact_ids": [fact["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.88,
+            }
+        ],
+        supporting_fact_ids=[fact["fact_id"]],
     )
     node = _node_with_response(response)
 
@@ -1128,12 +1726,12 @@ def test_fact_ledger_report_neutralizes_short_namespace_equals_writes_in_all_for
         "write-short-eq-fenced",
     ):
         assert write_target not in conclusion
-    assert "kubectl -n=demo get pod api" in conclusion
-    assert conclusion.count("```shell") == 1
+    assert "kubectl -n=demo get pod api" not in conclusion
+    assert conclusion.count("```shell") == 0
     assert conclusion.count("```") % 2 == 0
 
 
-def test_fact_ledger_report_preserves_same_line_prose_when_neutralizing_write():
+def test_fact_ledger_report_drops_same_line_model_prose_with_write():
     entity_id = "k8s.pod:demo/api:uid-api"
     fact = _fact(
         entity_id=entity_id,
@@ -1155,10 +1753,20 @@ def test_fact_ledger_report_preserves_same_line_prose_when_neutralizing_write():
         + "```\n"
     )
     claim = _rca_claim(
-        diagnostic_status="inconclusive",
-        root_cause_summary="当前证据不足",
-        hypotheses=[],
-        supporting_fact_ids=[],
+        diagnostic_status="diagnosed",
+        root_cause_summary="当前事实支持诊断结论",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "当前事实支持诊断结论",
+                "supporting_fact_ids": [fact["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.88,
+            }
+        ],
+        supporting_fact_ids=[fact["fact_id"]],
     )
     node = _node_with_response(response)
 
@@ -1177,11 +1785,11 @@ def test_fact_ledger_report_preserves_same_line_prose_when_neutralizing_write():
 
     assert "write-prose" not in conclusion
     assert "write-fenced-prose" not in conclusion
-    assert "尾部诊断结论应保留" in conclusion
-    assert "kubectl get pod api -n demo" in conclusion
-    assert "KEEP_FENCE_START" in conclusion
-    assert "KEEP_FENCE_END" in conclusion
-    assert conclusion.count("```shell") == 1
+    assert "尾部诊断结论应保留" not in conclusion
+    assert "kubectl get pod api -n demo" not in conclusion
+    assert "KEEP_FENCE_START" not in conclusion
+    assert "KEEP_FENCE_END" not in conclusion
+    assert conclusion.count("```shell") == 0
     assert conclusion.count("```") % 2 == 0
 
 
@@ -1196,7 +1804,7 @@ def test_fact_ledger_report_preserves_same_line_prose_when_neutralizing_write():
         ("：", "同行中文冒号文本应保留"),
     ],
 )
-def test_fact_ledger_report_preserves_chinese_punctuation_after_write(
+def test_fact_ledger_report_drops_chinese_model_prose_after_write(
     separator,
     trailing_text,
 ):
@@ -1220,10 +1828,20 @@ def test_fact_ledger_report_preserves_chinese_punctuation_after_write(
         + "```\n"
     )
     claim = _rca_claim(
-        diagnostic_status="inconclusive",
-        root_cause_summary="当前证据不足",
-        hypotheses=[],
-        supporting_fact_ids=[],
+        diagnostic_status="diagnosed",
+        root_cause_summary="当前事实支持诊断结论",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "当前事实支持诊断结论",
+                "supporting_fact_ids": [fact["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.88,
+            }
+        ],
+        supporting_fact_ids=[fact["fact_id"]],
     )
     node = _node_with_response(response)
 
@@ -1241,9 +1859,9 @@ def test_fact_ledger_report_preserves_chinese_punctuation_after_write(
     )["conclusion"]
 
     assert "write-chinese-punctuation" not in conclusion
-    assert trailing_text in conclusion
-    assert "kubectl get pod api -n demo" in conclusion
-    assert conclusion.count("```shell") == 1
+    assert trailing_text not in conclusion
+    assert "kubectl get pod api -n demo" not in conclusion
+    assert conclusion.count("```shell") == 0
     assert conclusion.count("```") % 2 == 0
 
 
@@ -1584,8 +2202,8 @@ def test_fact_ledger_report_removes_nested_remediation_envelopes(
 
     assert f"{envelope_shape.replace('_', '-')}-envelope-marker" not in conclusion
     assert "custom_model_field" not in conclusion
-    assert "ordinary-envelope-marker" in conclusion
-    assert "retain-ordinary-json" in conclusion
+    assert "ordinary-envelope-marker" not in conclusion
+    assert "retain-ordinary-json" not in conclusion
     assert conclusion.count(
         '"remediation_contract": "fact-ledger-diagnostic-only-v1"'
     ) == 1
@@ -1654,10 +2272,20 @@ def test_fact_ledger_report_allowlists_commands_and_issue_group_fields():
         + "\n```\n"
     )
     claim = _rca_claim(
-        diagnostic_status="inconclusive",
-        root_cause_summary="当前证据不足",
-        hypotheses=[],
-        supporting_fact_ids=[],
+        diagnostic_status="diagnosed",
+        root_cause_summary="当前事实支持诊断结论",
+        hypotheses=[
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "summary": "当前事实支持诊断结论",
+                "supporting_fact_ids": [fact["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.88,
+            }
+        ],
+        supporting_fact_ids=[fact["fact_id"]],
     )
     node = _node_with_response(response)
 
@@ -1689,22 +2317,14 @@ def test_fact_ledger_report_allowlists_commands_and_issue_group_fields():
         "must not survive",
     ):
         assert target not in conclusion
-    for read_only_command in (
+    for model_command in (
         "kubectl --context prod get pod api -n demo",
         "kubectl rollout status deployment/api -n demo",
         "kubectl describe pod api -n demo",
     ):
-        assert read_only_command in conclusion
+        assert model_command not in conclusion
     assert plan is not None
-    assert plan.issue_groups == [
-        {
-            "group_id": "g1",
-            "problem_type": "GenericWorkloadIssue",
-            "target": "demo/pod/api",
-            "auto_fixable": False,
-            "strategy": "[未授权的 Kubernetes 写操作已移除]",
-        }
-    ]
+    assert plan.issue_groups == []
     assert plan.remediation_available is False
     assert plan.fix_type == "manual_only"
     assert plan.actions == []
@@ -2263,6 +2883,63 @@ def test_fact_bound_generic_action_rejects_non_environment_authorization(
 
     assert plan is not None
     assert plan.remediation_available is False
+
+
+def test_rejected_non_pod_ledger_still_forces_diagnostic_only_remediation():
+    entity_id = "k8s.deployment:demo/api:uid-deployment"
+    fact = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        entity_kind="Deployment",
+        dimension="configuration",
+        fact_type="configuration",
+        attribute="spec.replicas",
+        value=2,
+        source_system="kubernetes",
+        evidence_ref="k8s:deployment-api",
+    )
+    plan_data = _deployment_patch_plan(
+        entity_id=entity_id,
+        supporting_fact_ids=[fact["fact_id"]],
+    )
+    node = _node_with_response(_report_with_remediation_plan(plan_data))
+
+    conclusion = node.execute(
+        {
+            "question": "为什么工作负载异常？",
+            "layer": Layer.L2,
+            "layer_analysis": "{}",
+            "evidence_analysis": _fact_evidence(
+                _ledger("case-rejected-deployment", [entity_id], [fact])
+            ),
+            "rca_analysis": _rca_claim(
+                diagnostic_status="diagnosed",
+                root_cause_summary="模型提出工作负载根因候选",
+                hypotheses=[
+                    {
+                        "hypothesis_id": "hyp-rejected-deployment",
+                        "entity_id": entity_id,
+                        "summary": "模型提出工作负载根因候选",
+                        "supporting_fact_ids": [fact["fact_id"]],
+                        "contradicting_fact_ids": [],
+                        "unknowns": [],
+                        "confidence": 0.9,
+                    }
+                ],
+                supporting_fact_ids=[fact["fact_id"]],
+            ),
+            "thinking_events": [],
+        }
+    )["conclusion"]
+    plan = extract_remediation_plan(conclusion)
+
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.fix_type == "manual_only"
+    assert plan.requires_human_approval is True
+    assert plan.actions == []
+    assert "kubectl patch deployment" not in conclusion
     assert plan.actions == []
 
 
@@ -2636,7 +3313,7 @@ def test_inconclusive_claim_with_valid_same_entity_facts_authorizes_no_action():
     assert plan.actions == []
 
 
-def test_invalid_claim_with_retained_valid_fact_authorizes_no_action():
+def test_invalid_claim_with_rejected_non_pod_ledger_authorizes_no_action():
     entity_id = "k8s.deployment:demo/api:uid-deployment"
     fact = _fact(
         entity_id=entity_id,
@@ -2680,12 +3357,7 @@ def test_invalid_claim_with_retained_valid_fact_authorizes_no_action():
         rca_analysis=claim,
     )
 
-    assert context is not None
-    validated_claim = context[1]
-    assert validated_claim["claim_validation"]["valid"] is False
-    assert fact["fact_id"] in validated_claim["claim_validation"][
-        "valid_supporting_fact_ids"
-    ]
+    assert context is None
 
     conclusion = node.execute(
         {
@@ -3383,6 +4055,496 @@ def test_remediation_prompt_marks_fact_ledger_as_diagnostic_only():
     assert "supporting_fact_ids" not in prompt
     assert "target_entity_id" not in prompt
     assert '"remediation_available": true' not in prompt
+
+
+def test_t017_authoritative_report_rebuilds_exact_sections_from_validated_facts_only():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    metric = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="metrics",
+        fact_type="measurement",
+        attribute="request_latency_seconds",
+        value={"value": 0.42},
+        unit="s",
+        source_system="prometheus",
+        evidence_ref="prometheus:latency:1",
+        timestamp="2026-07-30T00:00:00Z",
+    )
+    log = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="logging",
+        fact_type="log",
+        attribute="log.message",
+        value={"message": "validated source log line"},
+        source_system="elasticsearch",
+        evidence_ref="logs:api:1",
+        timestamp="2026-07-30T00:00:01Z",
+    )
+    span = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="tracing",
+        fact_type="span",
+        attribute="application_span",
+        value={
+            "trace_id": "0123456789abcdef0123456789abcdef",
+            "status_code": 200,
+        },
+        source_system="tempo",
+        evidence_ref="tempo:span:1",
+    )
+    topology = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="topology",
+        fact_type="relationship",
+        attribute="topology.relationship",
+        value={
+            "source": {"entity_id": entity_id, "kind": "Pod"},
+            "relation": "calls",
+            "target": {
+                "entity_id": "k8s.service:demo/backend:uid-b",
+                "kind": "Service",
+            },
+        },
+        source_system="kubernetes",
+        evidence_ref="topology:edge:1",
+    )
+    partial = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="coverage",
+        fact_type="coverage",
+        attribute="coverage.logging",
+        value={"dimension": "logging", "coverage": "partial"},
+        source_system="elasticsearch",
+        evidence_ref="coverage:logging",
+        directness="derived",
+        confidence="weak",
+        strength="context",
+    )
+    partial["evidence_refs"] = []
+    partial["fact_id"] = _canonical_fact_id(partial)
+    ledger = FactLedger.model_validate(
+        _ledger(
+            "case-t017-authoritative-report",
+            [entity_id],
+            [metric, log, span, topology, partial],
+        )
+    )
+    supporting_ids = [
+        metric["fact_id"],
+        log["fact_id"],
+        span["fact_id"],
+        topology["fact_id"],
+    ]
+    validated_claim = {
+        "diagnostic_status": "diagnosed",
+        "confidence": 0.9,
+        "hypotheses": [
+            {
+                "hypothesis_id": "hyp-api",
+                "entity_id": entity_id,
+                "supporting_fact_ids": supporting_ids,
+                "contradicting_fact_ids": [],
+            }
+        ],
+        "claim_validation": {
+            "valid": True,
+            "valid_supporting_fact_ids": supporting_ids,
+            "valid_contradicting_fact_ids": [],
+            "reasons": [],
+        },
+    }
+    malicious_model_report = """
+## 诊断概览
+模型声称结论已经确认。
+
+## 现象描述
+仅保留非权威说明。
+
+## 可观测性数据
+
+### 三大观测维度
+
+| 维度 | 数据来源 | 覆盖状态 | 关键原始信号 | 证据 ref |
+|---|---|---|---|---|
+| **Metrics** | model | present | sampled threshold crossing | fake-ref |
+| **Logging** | model | present | oom_score_adj=-997 | fake-ref |
+| **Tracing** | model | present | service unavailable | fake-ref |
+| **K8s** | model | present | unsupported | fake-ref |
+
+### 拓扑关系（实体与边）
+- model invented Database --causes--> Pod relation.
+
+## 根因分析
+- sampled threshold crossing proves service unavailable and oom_score_adj=-997.
+
+## 修复建议
+- Set a fixed target of 128Mi.
+- `kubectl set resources deployment/api -n demo --limits=memory=128Mi`
+""".strip()
+
+    report = ConclusionFormatterNode._apply_fact_ledger_report_contract(
+        malicious_model_report,
+        ledgers=[ledger],
+        validated_claim=validated_claim,
+    )
+
+    assert "validated source log line" in report
+    assert "0123456789abcdef0123456789abcdef" in report
+    assert "topology:edge:1" in report
+    assert "sampled threshold crossing" not in report
+    assert "oom_score_adj" not in report
+    assert "service unavailable" not in report
+    assert "Database --causes--> Pod" not in report
+    assert "128Mi" not in report
+    assert "kubectl set resources" not in report
+    for code in (
+        "sampled_interval_unknown",
+        "representative_trace_only",
+        "availability_unmeasured",
+        "capacity_policy_missing",
+        "topology_relation_only",
+        "partial_coverage",
+    ):
+        assert code in report
+    plan = extract_remediation_plan(report)
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.fix_type == "manual_only"
+    assert plan.requires_human_approval is True
+    assert plan.actions == []
+
+
+def test_t017_coverage_fact_targets_logging_before_dimension_filtering():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    log = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="logging",
+        fact_type="log",
+        attribute="log.message",
+        value={"message": "validated partial log"},
+        source_system="elasticsearch",
+        evidence_ref="logs:partial:1",
+    )
+    partial = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="coverage",
+        fact_type="coverage",
+        attribute="coverage.logging",
+        value={"dimension": "logging", "coverage": "partial"},
+        source_system="elasticsearch",
+        evidence_ref="coverage:logging",
+        directness="derived",
+        confidence="weak",
+        strength="context",
+    )
+    partial["evidence_refs"] = []
+    partial["fact_id"] = _canonical_fact_id(partial)
+    ledger = FactLedger.model_validate(
+        _ledger("case-t017-target-coverage", [entity_id], [log, partial])
+    )
+    model_table = """| 维度 | 数据来源 | 覆盖状态 | 关键原始信号 | 证据 ref |
+|---|---|---|---|---|
+| **Logging** | model | present | invented | fake-ref |"""
+
+    report, available_dimensions = (
+        ConclusionFormatterNode._enforce_fact_ledger_observability_sections(
+            model_table,
+            ledgers=[ledger],
+        )
+    )
+
+    assert available_dimensions == {"logging"}
+    assert "| **Logging** | elasticsearch | partial |" in report
+    assert "| **Logging** | model | present |" not in report
+
+
+def test_t017_authoritative_report_rebuilds_adversarial_overview_and_phenomenon():
+    entity_id = "k8s.pod:demo/api:uid-api"
+    fact = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="logging",
+        fact_type="log",
+        attribute="log.message",
+        value={"message": "validated phenomenon source"},
+        source_system="elasticsearch",
+        evidence_ref="logs:validated-phenomenon",
+    )
+    ledger = FactLedger.model_validate(
+        _ledger("case-t017-whole-report-boundary", [entity_id], [fact])
+    )
+    validated_claim = {
+        "diagnostic_status": "diagnosed",
+        "confidence": 0.9,
+        "hypotheses": [{
+            "hypothesis_id": "hyp-api",
+            "entity_id": entity_id,
+            "supporting_fact_ids": [fact["fact_id"]],
+            "contradicting_fact_ids": [],
+        }],
+        "claim_validation": {
+            "valid": True,
+            "valid_supporting_fact_ids": [fact["fact_id"]],
+            "valid_contradicting_fact_ids": [],
+            "reasons": [],
+        },
+    }
+    malicious_report = """
+## 诊断概览
+UNSUPPORTED_EXACT=999.99 proves service unavailable at a fixed 128Mi limit.
+The internal mechanism sets oom_score_adj=-997 before termination.
+
+## 现象描述
+sampled threshold crossing proves the outage.
+Database --causes--> Pod is the causal topology.
+
+## 可观测性数据
+model-authored placeholder
+
+## 根因分析
+model-authored placeholder
+
+## 修复建议
+model-authored placeholder
+""".strip()
+
+    report = ConclusionFormatterNode._apply_fact_ledger_report_contract(
+        malicious_report,
+        ledgers=[ledger],
+        validated_claim=validated_claim,
+    )
+
+    assert "validated phenomenon source" in report
+    assert fact["fact_id"] in report
+    for unsupported in (
+        "UNSUPPORTED_EXACT=999.99",
+        "service unavailable",
+        "128Mi",
+        "oom_score_adj",
+        "sampled threshold crossing",
+        "Database --causes--> Pod",
+    ):
+        assert unsupported not in report
+    assert report.count("## 诊断概览") == 1
+    assert report.count("## 现象描述") == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "legacy_contract"),
+    [
+        ("mcp_canonical", False),
+        ("robusta_legacy_adapter", True),
+    ],
+    ids=["canonical", "trusted-legacy"],
+)
+def test_t017_authoritative_report_allowlists_complete_report_structure(
+    source,
+    legacy_contract,
+):
+    entity_id = "k8s.pod:demo/api:uid-api"
+    metric = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="metrics",
+        fact_type="measurement",
+        attribute="request_latency_seconds",
+        value={"value": 42.125},
+        unit="s",
+        source_system="prometheus",
+        evidence_ref="prometheus:validated-latency",
+    )
+    log = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="logging",
+        fact_type="log",
+        attribute="log.message",
+        value={"message": "validated distributed evidence"},
+        source_system="elasticsearch",
+        evidence_ref="logs:validated-distributed",
+    )
+    span = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="tracing",
+        fact_type="span",
+        attribute="application_span",
+        value={
+            "trace_id": "0123456789abcdef0123456789abcdef",
+            "status_code": 200,
+        },
+        source_system="tempo",
+        evidence_ref="tempo:validated-span",
+    )
+    topology = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="topology",
+        fact_type="relationship",
+        attribute="topology.relationship",
+        value={
+            "source": {"entity_id": entity_id, "kind": "Pod"},
+            "relation": "calls",
+            "target": {
+                "entity_id": "k8s.service:demo/backend:uid-b",
+                "kind": "Service",
+            },
+        },
+        source_system="deepflow",
+        evidence_ref="topology:validated-edge",
+    )
+    partial = _fact(
+        entity_id=entity_id,
+        namespace="demo",
+        entity_name="api",
+        dimension="coverage",
+        fact_type="coverage",
+        attribute="coverage.logging",
+        value={"dimension": "logging", "coverage": "partial"},
+        source_system="elasticsearch",
+        evidence_ref="coverage:logging",
+        directness="derived",
+        confidence="weak",
+        strength="context",
+    )
+    partial["evidence_refs"] = []
+    partial["fact_id"] = _canonical_fact_id(partial)
+    records = [metric, log, span, topology, partial]
+    ledger = _ledger(
+        "case-t017-complete-report-allowlist",
+        [entity_id],
+        records,
+    )
+    ledger["source"] = source
+    ledger["legacy_contract"] = legacy_contract
+    supporting_ids = [
+        record["fact_id"]
+        for record in records
+        if record["fact_type"] != "coverage"
+    ]
+    claim = _rca_claim(
+        diagnostic_status="diagnosed",
+        root_cause_summary="validated records only",
+        hypotheses=[{
+            "hypothesis_id": "hyp-complete-report-allowlist",
+            "entity_id": entity_id,
+            "summary": "validated records only",
+            "supporting_fact_ids": supporting_ids,
+            "contradicting_fact_ids": [],
+            "unknowns": [],
+            "confidence": 0.9,
+        }],
+        supporting_fact_ids=supporting_ids,
+    )
+    malicious_report = """
+# MODEL_AUTHORED_PREAMBLE
+This unrecognized preamble must not become report authority.
+
+## 诊断概览
+model placeholder
+
+## 现象描述
+model placeholder
+
+## 证据链
+UNSUPPORTED_EXACT=999.99
+
+## 影响范围
+service unavailable
+
+## 执行过程
+oom_score_adj=-997 is the internal mechanism
+
+## 限制说明
+sampled threshold crossing proves a global outage
+
+## 模型补充
+Database --causes--> Pod
+
+## 可观测性数据
+model placeholder
+
+## 根因分析
+model placeholder
+
+## 修复建议
+model placeholder
+""".strip()
+    node = _node_with_response(malicious_report)
+
+    report = node.execute(
+        {
+            "question": "为什么 api Pod 异常？",
+            "layer": Layer.L2,
+            "layer_analysis": "{}",
+            "evidence_analysis": _fact_evidence(ledger),
+            "rca_analysis": claim,
+            "thinking_events": [],
+        }
+    )["conclusion"]
+
+    for unsupported in (
+        "MODEL_AUTHORED_PREAMBLE",
+        "UNSUPPORTED_EXACT=999.99",
+        "oom_score_adj",
+        "sampled threshold crossing",
+        "service unavailable",
+        "Database --causes--> Pod",
+    ):
+        assert report.count(unsupported) == 0
+    for heading in (
+        "## 证据链",
+        "## 影响范围",
+        "## 执行过程",
+        "## 限制说明",
+        "## 模型补充",
+    ):
+        assert heading not in report
+    assert "42.125" in report
+    assert "validated distributed evidence" in report
+    for fact_id in supporting_ids:
+        assert fact_id in report
+    for evidence_ref in (
+        "prometheus:validated-latency",
+        "logs:validated-distributed",
+        "tempo:validated-span",
+        "topology:validated-edge",
+    ):
+        assert evidence_ref in report
+    for code in (
+        "sampled_interval_unknown",
+        "representative_trace_only",
+        "availability_unmeasured",
+        "capacity_policy_missing",
+        "topology_relation_only",
+        "partial_coverage",
+    ):
+        assert code in report
+    plan = extract_remediation_plan(report)
+    assert plan is not None
+    assert plan.remediation_available is False
+    assert plan.fix_type == "manual_only"
+    assert plan.requires_human_approval is True
+    assert plan.actions == []
 
 
 def test_ask_conclusion_normalizes_finalizer_patch_plan_when_actions_missing():

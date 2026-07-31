@@ -5,12 +5,20 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import OrderedDict
 from copy import deepcopy
+from threading import RLock
 from typing import Any, Iterable, Mapping, Sequence
 
 from pydantic import ValidationError
 
-from app.core.workflow.schemas import FactLedger, FactRecord, RCAOutput
+from app.core.workflow.schemas import (
+    EvidenceLimitation,
+    FactLedger,
+    FactRecord,
+    RCAOutput,
+    ReportAuthorityDecision,
+)
 
 
 FACT_LEDGER_VERSION = "aiops.fact-ledger.v1"
@@ -26,6 +34,10 @@ OBSERVABILITY_QUERY_TOOL_DIMENSIONS = {
 OBSERVABILITY_QUERY_TOOLS = frozenset(
     OBSERVABILITY_QUERY_TOOL_DIMENSIONS
 )
+KUBERNETES_LIFECYCLE_AUTHORITY_TOOLS = frozenset({
+    "kubectl_describe",
+    "kubectl_get_yaml",
+})
 
 _FORBIDDEN_KEYS = {
     "diagnosis",
@@ -81,6 +93,29 @@ _RECORD_FIELDS = {
     "evidence_refs",
     "metadata",
 }
+_REQUIRED_RECORD_FIELDS = {
+    "fact_id",
+    "entity_id",
+    "entity_kind",
+    "dimension",
+    "fact_type",
+    "attribute",
+    "value",
+    "source_system",
+    "directness",
+    "confidence",
+    "evidence_refs",
+}
+_LEDGER_FIELDS = {
+    "contract_version",
+    "case_id",
+    "scope_entity_ids",
+    "records",
+    "record_count",
+    "truncated",
+    "source",
+    "legacy_contract",
+}
 _CANONICAL_OPTIONAL_FIELDS = {
     "namespace",
     "entity_name",
@@ -119,6 +154,38 @@ _LEDGER_SOURCE_ORDER = {
     "mcp_canonical": 0,
     "robusta_legacy_adapter": 1,
 }
+_ALLOWED_TOPOLOGY_RELATIONS = frozenset({
+    "calls",
+    "ownedby",
+    "ownscontainer",
+    "scheduledon",
+    "selectedby",
+    "selects",
+})
+_TOPOLOGY_RELATIONS_BY_SOURCE = {
+    "kubernetes": frozenset({
+        "ownedby",
+        "ownscontainer",
+        "scheduledon",
+        "selectedby",
+        "selects",
+    }),
+    "deepflow": frozenset({"calls"}),
+}
+_CANONICAL_TOPOLOGY_SCOPE_ALIAS = "k8s.pod:scope/current"
+_MAX_CANONICAL_TOPOLOGY_ENTITY_ID_CHARS = 192
+_REPORT_AUTHORITY_FIELDS = frozenset({
+    "mode",
+    "authoritative",
+    "ledger_case_id",
+    "tool_name",
+    "reasons",
+    "source",
+    "legacy_contract",
+})
+_MAX_INTERNAL_AUTHORITY_BINDINGS = 4096
+_INTERNAL_AUTHORITY_BINDINGS: OrderedDict[str, None] = OrderedDict()
+_INTERNAL_AUTHORITY_BINDINGS_LOCK = RLock()
 
 
 def _normalized_key(value: Any) -> str:
@@ -377,12 +444,51 @@ def _contains_evaluator_fields(value: Any) -> bool:
     return False
 
 
+def contains_forbidden_fact_fields(value: Any) -> bool:
+    """Return whether structured evidence contains authority-forbidden keys."""
+    return _contains_evaluator_fields(value)
+
+
 def _record_contains_evaluator_fields(value: Mapping[str, Any]) -> bool:
-    if any(is_forbidden_fact_key(key) for key in value):
-        return True
+    metadata = value.get("metadata")
+    for key, item in value.items():
+        if key == "metadata":
+            continue
+        if is_forbidden_fact_key(key) or _contains_evaluator_fields(item):
+            return True
     if is_forbidden_fact_key(value.get("attribute")):
         return True
-    return _contains_evaluator_fields(value)
+
+    if not isinstance(metadata, Mapping):
+        return _contains_evaluator_fields(metadata)
+    allow_prometheus_labels = (
+        _normalized_key(value.get("source_system")) == "prometheus"
+        and _normalized_key(value.get("dimension")) == "metrics"
+        and _normalized_key(value.get("fact_type")) == "measurement"
+    )
+    for key, item in metadata.items():
+        if _normalized_key(key) == "labels" and allow_prometheus_labels:
+            if not isinstance(item, Mapping) or _contains_evaluator_fields(item):
+                return True
+            continue
+        if is_forbidden_fact_key(key) or _contains_evaluator_fields(item):
+            return True
+    return False
+
+
+def _ledger_contains_evaluator_fields(value: Mapping[str, Any]) -> bool:
+    for key, item in value.items():
+        if key == "records" and isinstance(item, list):
+            if any(
+                _record_contains_evaluator_fields(record)
+                for record in item
+                if isinstance(record, Mapping)
+            ):
+                return True
+            continue
+        if is_forbidden_fact_key(key) or _contains_evaluator_fields(item):
+            return True
+    return False
 
 
 def _string_list(
@@ -473,11 +579,23 @@ def _normalize_record(value: Any) -> FactRecord | None:
 
 
 def _record_priority(record: FactRecord) -> tuple[Any, ...]:
+    semantic_priority = (
+        0
+        if record.attribute == "container.last_terminated_reason"
+        else 1
+        if record.attribute == "container.last_exit_code"
+        else 2
+        if record.fact_type == "configuration"
+        else 3
+        if record.attribute == "container.restart_count"
+        else 4
+    )
     return (
         1 if record.fact_type == "coverage" else 0,
         _STRENGTH_ORDER.get(str(record.strength or ""), 5),
         _DIRECTNESS_ORDER.get(record.directness, 3),
         _CONFIDENCE_ORDER.get(record.confidence, 4),
+        semantic_priority,
         record.entity_id,
         record.dimension,
         record.fact_id,
@@ -1581,15 +1699,62 @@ def build_kubernetes_lifecycle_fact_ledger(
     if status and status.lower() not in internal_statuses:
         add_record(attribute="pod.status", value={"status": status})
 
-    containers: list[Mapping[str, Any]] = []
-    for key in ("containers", "containerStatuses"):
-        value = structured.get(key)
-        if isinstance(value, list):
-            containers.extend(
-                item for item in value if isinstance(item, Mapping)
-            )
+    spec_containers = [
+        item
+        for item in (
+            structured.get("containers")
+            if isinstance(structured.get("containers"), list)
+            else []
+        )
+        if isinstance(item, Mapping)
+    ]
+    status_containers = [
+        item
+        for item in (
+            structured.get("containerStatuses")
+            if isinstance(structured.get("containerStatuses"), list)
+            else []
+        )
+        if isinstance(item, Mapping)
+    ]
 
-    for container in containers:
+    for container in spec_containers:
+        container_name = str(container.get("name") or "").strip()
+        if not container_name:
+            continue
+
+        resources = (
+            container.get("resources")
+            if isinstance(container.get("resources"), Mapping)
+            else {}
+        )
+        for resource_group, attribute_group in (
+            ("limits", "resource_limit"),
+            ("requests", "resource_request"),
+        ):
+            quantities = (
+                resources.get(resource_group)
+                if isinstance(resources.get(resource_group), Mapping)
+                else {}
+            )
+            for resource_name in ("cpu", "memory"):
+                quantity = quantities.get(resource_name)
+                if quantity in (None, ""):
+                    continue
+                add_record(
+                    attribute=(
+                        f"container.{attribute_group}.{resource_name}"
+                    ),
+                    value={
+                        "container": container_name,
+                        "value": str(quantity),
+                    },
+                    fact_type="configuration",
+                    unit="kubernetes_quantity",
+                )
+
+    lifecycle_containers = status_containers or spec_containers
+    for container in lifecycle_containers:
         container_name = str(container.get("name") or "").strip()
         if not container_name:
             continue
@@ -2289,6 +2454,10 @@ def _fact_ledgers_from_agent_context(value: Any) -> list[FactLedger]:
     if context is None:
         return []
 
+    native = normalize_fact_ledger(context.get("fact_ledger"))
+    if native is not None:
+        return [native]
+
     direct = normalize_fact_ledger(context)
     if direct is not None:
         return [direct]
@@ -2390,9 +2559,14 @@ def select_tool_data_for_rca(
     for item in tool_data or []:
         if not isinstance(item, Mapping) or item.get("deduplicated") is True:
             continue
+        if not tool_item_allows_fact_ledger_projection(item):
+            continue
         copied = dict(item)
         native_ledger = normalize_fact_ledger(copied.get("fact_ledger"))
         if native_ledger is not None:
+            if native_ledger.source == "mcp_canonical":
+                for key in ("data", "agent_facts", "agent_context"):
+                    copied.pop(key, None)
             copied["fact_ledger"] = native_ledger.model_dump(
                 mode="json",
                 exclude_none=True,
@@ -2511,6 +2685,8 @@ def extract_fact_ledger_inputs_from_evidence_analysis(
     for item in tool_data:
         if not isinstance(item, Mapping) or item.get("deduplicated") is True:
             continue
+        if not tool_item_allows_fact_ledger_projection(item):
+            continue
         raw_ledger = item.get("fact_ledger")
         if isinstance(raw_ledger, FactLedger):
             ledgers.append(raw_ledger)
@@ -2534,6 +2710,47 @@ def _append_unique(target: list[str], values: Iterable[str]) -> None:
             target.append(text)
 
 
+def tool_item_allows_fact_ledger_projection(
+    item: Mapping[str, Any],
+) -> bool:
+    """Allow only internally bound, freshly reproducible Ledger authority."""
+    raw_ledger = item.get("fact_ledger")
+    if raw_ledger is None:
+        return True
+    if not isinstance(raw_ledger, (FactLedger, Mapping)):
+        return False
+
+    raw_decision = item.get("report_authority")
+    if (
+        not isinstance(raw_decision, Mapping)
+        or set(raw_decision) != _REPORT_AUTHORITY_FIELDS
+    ):
+        return False
+    try:
+        decision = ReportAuthorityDecision.model_validate(raw_decision)
+    except ValidationError:
+        return False
+    if (
+        not decision.authoritative
+        or decision.mode not in {"canonical", "trusted_legacy"}
+    ):
+        return False
+
+    fresh = evaluate_report_authority(
+        ledger_input=raw_ledger,
+        tool_item=item,
+    )
+    if fresh != decision:
+        return False
+    binding = _report_authority_binding_fingerprint(
+        item,
+        ledger_input=raw_ledger,
+        decision=decision,
+    )
+    with _INTERNAL_AUTHORITY_BINDINGS_LOCK:
+        return binding in _INTERNAL_AUTHORITY_BINDINGS
+
+
 def _support_quality(record: FactRecord) -> bool:
     if record.fact_type == "coverage":
         return False
@@ -2545,6 +2762,822 @@ def _support_quality(record: FactRecord) -> bool:
         record.directness == "direct"
         and record.confidence == "medium"
     )
+
+
+def _pod_scope_parts(entity_id: Any) -> tuple[str, str, str] | None:
+    match = re.fullmatch(
+        r"k8s\.pod:([^/]+)/([^:]+):(.+)",
+        str(entity_id or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match or not all(part.strip() for part in match.groups()):
+        return None
+    return tuple(part.strip() for part in match.groups())  # type: ignore[return-value]
+
+
+def _topology_record_is_source_backed(record: FactRecord) -> bool:
+    if (
+        record.dimension != "topology"
+        or record.fact_type != "relationship"
+        or not isinstance(record.value, Mapping)
+    ):
+        return False
+    endpoint_ids = _typed_topology_endpoints(record)
+    relation = _normalized_key(
+        record.value.get("relation")
+        or record.value.get("relationship")
+    )
+    source_system = _normalized_key(record.source_system)
+    source_relations = _TOPOLOGY_RELATIONS_BY_SOURCE.get(
+        source_system,
+        frozenset(),
+    )
+    return (
+        len(endpoint_ids) == 2
+        and record.entity_id in endpoint_ids
+        and relation in _ALLOWED_TOPOLOGY_RELATIONS
+        and relation in source_relations
+        and record.directness == "direct"
+        and bool(record.evidence_refs)
+    )
+
+
+def _topology_graph_is_scope_connected(
+    records: Sequence[FactRecord],
+    scope_entity_ids: set[str],
+    *,
+    allow_bounded_scope_alias: bool,
+) -> bool:
+    endpoint_sets = [
+        _typed_topology_endpoints(record)
+        for record in records
+        if record.dimension == "topology"
+        and record.fact_type == "relationship"
+    ]
+    if not endpoint_sets:
+        return True
+
+    reachable = set(scope_entity_ids)
+    if (
+        allow_bounded_scope_alias
+        and len(scope_entity_ids) == 1
+        and len(next(iter(scope_entity_ids)))
+        > _MAX_CANONICAL_TOPOLOGY_ENTITY_ID_CHARS
+    ):
+        reachable.add(_CANONICAL_TOPOLOGY_SCOPE_ALIAS)
+    pending = list(endpoint_sets)
+    while pending:
+        remaining: list[set[str]] = []
+        progressed = False
+        for endpoints in pending:
+            if endpoints & reachable:
+                reachable.update(endpoints)
+                progressed = True
+            else:
+                remaining.append(endpoints)
+        if not progressed:
+            return False
+        pending = remaining
+    return True
+
+
+def _strict_authority_ledger(
+    value: FactLedger | Mapping[str, Any],
+) -> tuple[FactLedger | None, list[str]]:
+    raw = (
+        value.model_dump(mode="json", exclude_none=True)
+        if isinstance(value, FactLedger)
+        else deepcopy(dict(value))
+    )
+    reasons: list[str] = []
+
+    if _ledger_contains_evaluator_fields(raw):
+        reasons.append("evaluator_field_present")
+    if set(raw) != _LEDGER_FIELDS:
+        reasons.append("malformed_ledger")
+    if raw.get("contract_version") != FACT_LEDGER_VERSION:
+        reasons.append("malformed_ledger")
+    if not str(raw.get("case_id") or "").strip():
+        reasons.append("malformed_ledger")
+
+    scopes = raw.get("scope_entity_ids")
+    if (
+        not isinstance(scopes, list)
+        or not scopes
+        or any(not str(item or "").strip() for item in scopes)
+        or len(set(str(item) for item in scopes)) != len(scopes)
+    ):
+        reasons.append("malformed_ledger")
+        scope_entity_ids: set[str] = set()
+    else:
+        scope_entity_ids = {
+            str(item).strip()
+            for item in scopes
+        }
+
+    records = raw.get("records")
+    if not isinstance(records, list):
+        records = []
+        reasons.append("malformed_ledger")
+    if (
+        not isinstance(raw.get("record_count"), int)
+        or raw.get("record_count") != len(records)
+        or not isinstance(raw.get("truncated"), bool)
+        or not isinstance(raw.get("legacy_contract"), bool)
+    ):
+        reasons.append("malformed_ledger")
+
+    source = str(raw.get("source") or "").strip()
+    legacy_contract = raw.get("legacy_contract")
+    if (
+        (source == "mcp_canonical" and legacy_contract is not False)
+        or (
+            source == "robusta_legacy_adapter"
+            and legacy_contract is not True
+        )
+        or source not in {
+            "mcp_canonical",
+            "robusta_legacy_adapter",
+        }
+    ):
+        reasons.append("malformed_ledger")
+
+    parsed_records: list[FactRecord] = []
+    payload_by_id: dict[str, str] = {}
+    for item in records:
+        if not isinstance(item, Mapping):
+            reasons.append("malformed_ledger")
+            continue
+        raw_record = dict(item)
+        if (
+            set(raw_record) - _RECORD_FIELDS
+            or _REQUIRED_RECORD_FIELDS - set(raw_record)
+        ):
+            reasons.append("malformed_ledger")
+            continue
+        if _record_contains_evaluator_fields(raw_record):
+            reasons.append("evaluator_field_present")
+            continue
+        source_system = str(
+            raw_record.get("source_system") or ""
+        ).strip()
+        if not source_system:
+            reasons.append("blank_source_system")
+            continue
+        refs = _string_list(
+            raw_record.get("evidence_refs"),
+            limit=None,
+        )
+        if (
+            raw_record.get("fact_type") != "coverage"
+            and not refs
+        ):
+            reasons.append("missing_evidence_ref")
+            continue
+        try:
+            record = FactRecord.model_validate(raw_record)
+        except ValidationError:
+            reasons.append("malformed_ledger")
+            continue
+        if record.fact_id != _canonical_fact_id(record):
+            reasons.append("fact_id_mismatch")
+            continue
+        if (
+            record.dimension == "topology"
+            and record.fact_type == "relationship"
+            and not _topology_record_is_source_backed(record)
+        ):
+            reasons.append("untrusted_topology_relationship")
+            continue
+        if (
+            record.entity_id not in scope_entity_ids
+            and not (
+                record.dimension == "topology"
+                and record.fact_type == "relationship"
+            )
+        ):
+            reasons.append("cross_entity_fact")
+            continue
+        payload = _canonical_record_json(record)
+        prior = payload_by_id.get(record.fact_id)
+        if prior is not None and prior != payload:
+            reasons.append("fact_id_collision")
+            continue
+        payload_by_id[record.fact_id] = payload
+        parsed_records.append(record)
+
+    if not _topology_graph_is_scope_connected(
+        parsed_records,
+        scope_entity_ids,
+        allow_bounded_scope_alias=(source == "mcp_canonical"),
+    ):
+        reasons.append("untrusted_topology_relationship")
+
+    fatal_reasons = {
+        "evaluator_field_present",
+        "fact_id_collision",
+        "fact_id_mismatch",
+        "malformed_ledger",
+    }
+    unique_reasons = list(dict.fromkeys(reasons))
+    if fatal_reasons.intersection(unique_reasons):
+        return None, unique_reasons
+    if len(parsed_records) != len(records):
+        return None, unique_reasons
+    try:
+        ledger = FactLedger.model_validate({
+            **raw,
+            "records": [
+                record.model_dump(mode="json", exclude_none=True)
+                for record in parsed_records
+            ],
+        })
+    except ValidationError:
+        return None, list(dict.fromkeys([
+            *unique_reasons,
+            "malformed_ledger",
+        ]))
+    return ledger, unique_reasons
+
+
+def validate_canonical_fact_ledger_contract(
+    value: FactLedger | Mapping[str, Any],
+) -> tuple[FactLedger | None, tuple[str, ...]]:
+    """Validate a native Ledger without assigning current-report authority."""
+    raw = (
+        value.model_dump(mode="json", exclude_none=True)
+        if isinstance(value, FactLedger)
+        else dict(value)
+    )
+    ledger, reasons = _strict_authority_ledger(value)
+    if (
+        str(raw.get("source") or "").strip() != "mcp_canonical"
+        or raw.get("legacy_contract") is not False
+    ):
+        reasons.append("malformed_ledger")
+    reasons = list(dict.fromkeys(reasons))
+    if ledger is None or reasons:
+        return None, tuple(reasons or ["malformed_ledger"])
+    return ledger, ()
+
+
+def evaluate_report_authority(
+    *,
+    ledger_input: FactLedger | Mapping[str, Any],
+    tool_item: Mapping[str, Any],
+) -> ReportAuthorityDecision:
+    """Evaluate raw ledger provenance before normalization can discard data."""
+    raw = (
+        ledger_input.model_dump(mode="json", exclude_none=True)
+        if isinstance(ledger_input, FactLedger)
+        else dict(ledger_input)
+    )
+    source = str(raw.get("source") or "").strip()
+    legacy_contract = raw.get("legacy_contract") is True
+    case_id = str(raw.get("case_id") or "").strip()
+    tool_name = str(tool_item.get("tool") or "").strip() or None
+    ledger, reasons = _strict_authority_ledger(ledger_input)
+    context = (
+        tool_item.get("authority_context")
+        if isinstance(tool_item.get("authority_context"), Mapping)
+        else {}
+    )
+    if context.get("evaluator_field_present") is True:
+        reasons.append("evaluator_field_present")
+    reasons = list(dict.fromkeys(reasons))
+    fatal_reasons = {
+        "evaluator_field_present",
+        "fact_id_collision",
+        "fact_id_mismatch",
+        "malformed_ledger",
+    }
+    if fatal_reasons.intersection(reasons):
+        return ReportAuthorityDecision(
+            mode="rejected",
+            authoritative=False,
+            ledger_case_id=case_id,
+            tool_name=tool_name,
+            reasons=tuple(reasons),
+            source=source,
+            legacy_contract=legacy_contract,
+        )
+
+    is_canonical = (
+        source == "mcp_canonical" and legacy_contract is False
+    )
+    is_legacy = (
+        source == "robusta_legacy_adapter" and legacy_contract
+    )
+    if not is_canonical and not is_legacy:
+        return ReportAuthorityDecision(
+            mode="rejected",
+            authoritative=False,
+            ledger_case_id=case_id,
+            tool_name=tool_name,
+            reasons=("malformed_ledger",),
+            source=source,
+            legacy_contract=legacy_contract,
+        )
+
+    gate_reasons = list(reasons)
+    normalized_tool_name = str(tool_name or "").strip().lower()
+    is_observability_query = (
+        normalized_tool_name in OBSERVABILITY_QUERY_TOOLS
+    )
+    is_kubernetes_lifecycle = (
+        normalized_tool_name in KUBERNETES_LIFECYCLE_AUTHORITY_TOOLS
+    )
+    supported_tool = is_observability_query or (
+        is_legacy and is_kubernetes_lifecycle
+    )
+    if not supported_tool:
+        gate_reasons.append("unsupported_tool")
+    semantic_success = (
+        context.get("semantic_success") is True
+        and tool_item.get("semantic_success") is True
+    )
+    status = str(context.get("status") or "").strip().lower()
+    coverage = str(context.get("coverage") or "").strip().lower()
+    valid_status = (
+        (
+            is_observability_query
+            and (
+                (
+                    status == "query_succeeded"
+                    and coverage == "present"
+                )
+                or (
+                    status == "query_partial"
+                    and coverage == "partial"
+                )
+            )
+        )
+        or (
+            is_legacy
+            and is_kubernetes_lifecycle
+            and status == "kubernetes_observed"
+            and coverage == "present"
+        )
+    )
+    if not semantic_success or not valid_status:
+        gate_reasons.append("invalid_query_result")
+
+    pod_scopes = [
+        parts
+        for entity_id in raw.get("scope_entity_ids") or []
+        if (parts := _pod_scope_parts(entity_id)) is not None
+    ]
+    trusted_uid = str(
+        context.get("trusted_pod_uid") or ""
+    ).strip()
+    entity = (
+        context.get("entity")
+        if isinstance(context.get("entity"), Mapping)
+        else {}
+    )
+    entity_scope = (
+        str(entity.get("namespace") or "").strip(),
+        str(
+            entity.get("pod")
+            or entity.get("name")
+            or ""
+        ).strip(),
+        str(
+            entity.get("pod_uid")
+            or entity.get("uid")
+            or ""
+        ).strip(),
+    )
+    if (
+        not trusted_uid
+        or len(pod_scopes) != 1
+        or pod_scopes[0][2] != trusted_uid
+        or not all(entity_scope)
+        or entity_scope != pod_scopes[0]
+    ):
+        gate_reasons.append("missing_pod_uid")
+
+    query_source = str(
+        context.get("source_system") or ""
+    ).strip()
+    if not query_source:
+        gate_reasons.append("blank_source_system")
+    if ledger is None or not any(
+        _support_quality(record)
+        for record in ledger.records
+    ):
+        gate_reasons.append("insufficient_fact_quality")
+    if (
+        is_observability_query
+        and status == "query_partial"
+        and coverage == "partial"
+    ):
+        query_dimension = OBSERVABILITY_QUERY_TOOL_DIMENSIONS.get(
+            str(tool_name or "").lower(),
+            "",
+        )
+        has_partial_coverage_fact = ledger is not None and any(
+            record.fact_type == "coverage"
+            and isinstance(record.value, Mapping)
+            and str(
+                record.value.get("coverage") or ""
+            ).strip().lower() == "partial"
+            and (
+                record.dimension == query_dimension
+                or (
+                    record.dimension == "coverage"
+                    and str(
+                        record.value.get("dimension") or ""
+                    ).strip().lower() == query_dimension
+                )
+            )
+            for record in ledger.records
+        )
+        if not has_partial_coverage_fact:
+            gate_reasons.append("missing_partial_coverage_fact")
+
+    gate_reasons = list(dict.fromkeys(gate_reasons))
+    if is_canonical:
+        if ledger is not None and not gate_reasons:
+            return ReportAuthorityDecision(
+                mode="canonical",
+                authoritative=True,
+                ledger_case_id=case_id,
+                tool_name=tool_name,
+                reasons=("valid_canonical_ledger",),
+                source=source,
+                legacy_contract=False,
+            )
+        return ReportAuthorityDecision(
+            mode="rejected",
+            authoritative=False,
+            ledger_case_id=case_id,
+            tool_name=tool_name,
+            reasons=tuple(gate_reasons or ["malformed_ledger"]),
+            source=source,
+            legacy_contract=False,
+        )
+
+    if gate_reasons:
+        return ReportAuthorityDecision(
+            mode="legacy_compatibility",
+            authoritative=False,
+            ledger_case_id=case_id,
+            tool_name=tool_name,
+            reasons=tuple(gate_reasons),
+            source=source,
+            legacy_contract=True,
+        )
+    return ReportAuthorityDecision(
+        mode="trusted_legacy",
+        authoritative=True,
+        ledger_case_id=case_id,
+        tool_name=tool_name,
+        reasons=(
+            "supported_read_only_tool",
+            "query_result_verified",
+            "pod_uid_verified",
+            "facts_verified",
+        ),
+        source=source,
+        legacy_contract=True,
+    )
+
+
+def _authority_ledger_mapping(
+    value: FactLedger | Mapping[str, Any],
+) -> dict[str, Any]:
+    if isinstance(value, FactLedger):
+        return value.model_dump(mode="json", exclude_none=True)
+    return deepcopy(dict(value))
+
+
+def _report_authority_binding_fingerprint(
+    item: Mapping[str, Any],
+    *,
+    ledger_input: FactLedger | Mapping[str, Any],
+    decision: ReportAuthorityDecision,
+) -> str:
+    payload = {
+        "tool": item.get("tool"),
+        "semantic_success": item.get("semantic_success"),
+        "authority_context": deepcopy(item.get("authority_context")),
+        "fact_ledger": _authority_ledger_mapping(ledger_input),
+        "report_authority": decision.model_dump(mode="json"),
+    }
+    return hashlib.sha256(
+        _json_dumps(payload).encode("utf-8")
+    ).hexdigest()
+
+
+def attach_internal_report_authority(
+    item: dict[str, Any],
+    *,
+    ledger_input: FactLedger | Mapping[str, Any],
+    decision: ReportAuthorityDecision,
+) -> None:
+    """Bind an Evidence-generated decision to its exact provider Ledger."""
+    item_ledger = item.get("fact_ledger")
+    if not isinstance(item_ledger, (FactLedger, Mapping)):
+        raise ValueError("report authority requires a Fact Ledger")
+    if _json_dumps(_authority_ledger_mapping(item_ledger)) != _json_dumps(
+        _authority_ledger_mapping(ledger_input)
+    ):
+        raise ValueError("report authority Ledger binding mismatch")
+
+    item["report_authority"] = decision.model_dump(mode="json")
+    binding = _report_authority_binding_fingerprint(
+        item,
+        ledger_input=ledger_input,
+        decision=decision,
+    )
+    with _INTERNAL_AUTHORITY_BINDINGS_LOCK:
+        _INTERNAL_AUTHORITY_BINDINGS.pop(binding, None)
+        _INTERNAL_AUTHORITY_BINDINGS[binding] = None
+        while (
+            len(_INTERNAL_AUTHORITY_BINDINGS)
+            > _MAX_INTERNAL_AUTHORITY_BINDINGS
+        ):
+            _INTERNAL_AUTHORITY_BINDINGS.popitem(last=False)
+
+
+def _fact_event_identity_key(record: FactRecord) -> tuple[Any, ...]:
+    """Return semantic event identity without source/provenance quality."""
+    return (
+        record.entity_id,
+        record.entity_kind,
+        record.namespace or "",
+        record.entity_name or "",
+        record.dimension,
+        record.fact_type,
+        record.attribute,
+        _json_dumps(record.value),
+        record.unit or "",
+        record.timestamp or "",
+        record.start or "",
+        record.end or "",
+        _json_dumps(record.metadata),
+    )
+
+
+def select_authoritative_fact_ledgers(
+    tool_data: Sequence[Mapping[str, Any]],
+) -> tuple[list[FactLedger], list[ReportAuthorityDecision]]:
+    """Select canonical-first ledgers without mutating archived tool data."""
+    evaluated: list[
+        tuple[int, FactLedger | None, ReportAuthorityDecision]
+    ] = []
+    for index, item in enumerate(tool_data or []):
+        if not isinstance(item, Mapping):
+            continue
+        if not tool_item_allows_fact_ledger_projection(item):
+            continue
+        raw_ledger = item.get("fact_ledger")
+        if not isinstance(raw_ledger, (FactLedger, Mapping)):
+            continue
+        decision = evaluate_report_authority(
+            ledger_input=raw_ledger,
+            tool_item=item,
+        )
+        ledger = (
+            normalize_fact_ledger(raw_ledger)
+            if decision.authoritative
+            else None
+        )
+        evaluated.append((index, ledger, decision))
+
+    id_payloads: dict[str, set[str]] = {}
+    id_indexes: dict[str, set[int]] = {}
+    for index, ledger, decision in evaluated:
+        if not decision.authoritative or ledger is None:
+            continue
+        for record in ledger.records:
+            id_payloads.setdefault(record.fact_id, set()).add(
+                _canonical_record_json(record)
+            )
+            id_indexes.setdefault(record.fact_id, set()).add(index)
+    collision_indexes = {
+        index
+        for fact_id, payloads in id_payloads.items()
+        if len(payloads) > 1
+        for index in id_indexes.get(fact_id, set())
+    }
+
+    revised: list[
+        tuple[int, FactLedger | None, ReportAuthorityDecision]
+    ] = []
+    for index, ledger, decision in evaluated:
+        if index in collision_indexes:
+            decision = decision.model_copy(update={
+                "mode": "rejected",
+                "authoritative": False,
+                "reasons": tuple(dict.fromkeys([
+                    *decision.reasons,
+                    "fact_id_collision",
+                ])),
+            })
+            ledger = None
+        revised.append((index, ledger, decision))
+
+    canonical = [
+        ledger
+        for _, ledger, decision in revised
+        if ledger is not None and decision.mode == "canonical"
+    ]
+    canonical_records = {
+        _fact_event_identity_key(record)
+        for ledger in canonical
+        for record in ledger.records
+    }
+    trusted: list[FactLedger] = []
+    for _, ledger, decision in revised:
+        if ledger is None or decision.mode != "trusted_legacy":
+            continue
+        retained = [
+            record
+            for record in ledger.records
+            if _fact_event_identity_key(record) not in canonical_records
+        ]
+        if retained:
+            trusted.append(ledger.model_copy(update={
+                "records": retained,
+                "record_count": len(retained),
+            }))
+    selected = sorted(canonical, key=_ledger_sort_key) + sorted(
+        trusted,
+        key=_ledger_sort_key,
+    )
+    return selected, [decision for _, _, decision in revised]
+
+
+_LIMITATION_STATEMENTS = {
+    "sampled_interval_unknown": (
+        "指标只证明离散采样时刻，采样间瞬时值未知。"
+    ),
+    "representative_trace_only": (
+        "成功 Trace 仅代表一次成功请求，不证明最终致命请求或全局可用性。"
+    ),
+    "availability_unmeasured": (
+        "当前事实未直接测量服务可用性，不声明服务不可用。"
+    ),
+    "capacity_policy_missing": (
+        "当前没有 typed capacity/remediation policy，不给出固定资源目标。"
+    ),
+    "topology_relation_only": (
+        "拓扑关系只证明连接或归属，不证明组件健康或因果方向。"
+    ),
+    "partial_coverage": (
+        "至少一个证据维度为 partial、weak、error 或已截断，覆盖不完整。"
+    ),
+}
+
+
+def derive_evidence_limitations(
+    ledgers: Sequence[FactLedger],
+) -> list[EvidenceLimitation]:
+    records = [record for ledger in ledgers for record in ledger.records]
+    sampled = [
+        record
+        for record in records
+        if (
+            record.dimension == "metrics"
+            and record.fact_type == "measurement"
+        )
+        or any((record.timestamp, record.start, record.end))
+    ]
+    def is_successful_trace(record: FactRecord) -> bool:
+        if (
+            record.dimension != "tracing"
+            or record.fact_type not in {"span", "flow"}
+        ):
+            return False
+        if not isinstance(record.value, Mapping):
+            return record.attribute == "application_span"
+        for key in (
+            "status_code",
+            "response_code",
+            "http_status",
+        ):
+            if key not in record.value:
+                continue
+            try:
+                code = int(record.value[key])
+            except (TypeError, ValueError):
+                return False
+            return 200 <= code < 400
+        status = str(record.value.get("status") or "").strip().lower()
+        if status:
+            return status in {"ok", "success", "succeeded"}
+        return record.attribute == "application_span"
+
+    successful_traces = [
+        record
+        for record in records
+        if is_successful_trace(record)
+    ]
+    availability = [
+        record
+        for record in records
+        if any(
+            marker in _normalized_key(record.attribute)
+            for marker in (
+                "availability",
+                "successrate",
+                "errorrate",
+                "probe",
+            )
+        )
+    ]
+    capacity_policy = [
+        record
+        for record in records
+        if any(
+            marker in _normalized_key(record.attribute)
+            for marker in (
+                "capacitybaseline",
+                "capacitypolicy",
+                "remediationpolicy",
+            )
+        )
+    ]
+    relationships = [
+        record
+        for record in records
+        if record.dimension == "topology"
+        and record.fact_type == "relationship"
+    ]
+    partial_basis = [
+        record
+        for record in records
+        if record.fact_type == "coverage"
+        and (
+            str(
+                record.value.get("coverage")
+                if isinstance(record.value, Mapping)
+                else record.value
+            ).strip().lower()
+            in {"partial", "weak", "error", "failed"}
+        )
+    ]
+    truncated_cases = [
+        ledger.case_id
+        for ledger in ledgers
+        if ledger.truncated
+    ]
+
+    limitations: list[EvidenceLimitation] = []
+
+    def add(code: str, basis: Sequence[FactRecord], *, applies_to: Sequence[str]) -> None:
+        limitations.append(EvidenceLimitation(
+            code=code,
+            applies_to=tuple(dict.fromkeys(applies_to)),
+            statement=_LIMITATION_STATEMENTS[code],
+            source_basis=tuple(
+                dict.fromkeys(record.fact_id for record in basis)
+            ),
+        ))
+
+    if sampled:
+        add(
+            "sampled_interval_unknown",
+            sampled,
+            applies_to=[record.fact_id for record in sampled],
+        )
+    if successful_traces:
+        add(
+            "representative_trace_only",
+            successful_traces,
+            applies_to=[record.fact_id for record in successful_traces],
+        )
+    if not availability:
+        add(
+            "availability_unmeasured",
+            [],
+            applies_to=["availability"],
+        )
+    if not capacity_policy:
+        add(
+            "capacity_policy_missing",
+            [],
+            applies_to=["capacity_policy"],
+        )
+    if relationships:
+        add(
+            "topology_relation_only",
+            relationships,
+            applies_to=[record.fact_id for record in relationships],
+        )
+    if partial_basis or truncated_cases:
+        limitations.append(EvidenceLimitation(
+            code="partial_coverage",
+            applies_to=("coverage",),
+            statement=_LIMITATION_STATEMENTS["partial_coverage"],
+            source_basis=tuple(dict.fromkeys([
+                *(record.fact_id for record in partial_basis),
+                *truncated_cases,
+            ])),
+        ))
+    return limitations
 
 
 def _typed_entity_kind(entity_id: str) -> str:
@@ -3356,6 +4389,7 @@ def _reconcile_rca_trace_gaps(
 
 
 _LONG_FACT_ID_PREFIX = re.compile(r"^fact-[0-9a-f]{11,}$")
+_QWEN_FACT_ID_ALIAS = re.compile(r"^f-([0-9a-f]{12})$")
 
 
 def _strip_resolved_fact_reference_text(
@@ -3426,16 +4460,24 @@ def _correct_unique_fact_id_prefixes(
 
     def resolve(reference: Any) -> Any:
         text = str(reference or "").strip()
-        if (
-            text in canonical_ids
-            or not _LONG_FACT_ID_PREFIX.fullmatch(text)
-        ):
+        if text in canonical_ids:
             return reference
-        matches = [
-            fact_id
-            for fact_id in canonical_ids
-            if fact_id.startswith(text)
-        ]
+        qwen_alias = _QWEN_FACT_ID_ALIAS.fullmatch(text)
+        if qwen_alias:
+            canonical_prefix = f"fact-{qwen_alias.group(1)}"
+            matches = [
+                fact_id
+                for fact_id in canonical_ids
+                if fact_id.startswith(canonical_prefix)
+            ]
+        elif _LONG_FACT_ID_PREFIX.fullmatch(text):
+            matches = [
+                fact_id
+                for fact_id in canonical_ids
+                if fact_id.startswith(text)
+            ]
+        else:
+            return reference
         if len(matches) == 1:
             corrections[text] = matches[0]
             return matches[0]
