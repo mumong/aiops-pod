@@ -4544,13 +4544,14 @@ def test_deterministic_report_reconciles_present_facts_and_isolates_entity_chain
         "thinking_events": [],
     })["conclusion"]
 
-    for dimension in ("Metrics", "Logging", "Tracing", "K8s"):
+    body, appendix = result.split("## 机器可核验附录", 1)
+    for dimension in ("Metrics", "Logging", "Tracing", "Kubernetes"):
         row = next(
             line
-            for line in result.splitlines()
+            for line in body.splitlines()
             if line.startswith(f"| **{dimension}**")
         )
-        assert "| present |" in row
+        assert "| 已有数据 |" in row
         assert "未返回可用" not in row
         assert "未获取到" not in row
     assert "Pod --owned_by--> ReplicaSet" in result
@@ -4561,21 +4562,24 @@ def test_deterministic_report_reconciles_present_facts_and_isolates_entity_chain
     assert "Two independent entity-scoped failures" not in result
     for fragment in invented_summary_fragments:
         assert fragment not in result
-    assert result.count("#### 实体隔离因果链") == 2
+    assert body.count("### **demo/api-") == 2
 
-    entity_a_section = result.split(f"### `{entity_a}`", 1)[1].split(
-        f"### `{entity_b}`",
+    entity_a_section = body.split("### **demo/api-a**", 1)[1].split(
+        "### **demo/api-b**",
         1,
     )[0]
-    entity_b_section = result.split(f"### `{entity_b}`", 1)[1].split(
-        "### 支持事实",
+    entity_b_section = body.split("### **demo/api-b**", 1)[1].split(
+        "## 可观测性摘要",
         1,
     )[0]
-    assert entity_a in entity_a_section
-    assert entity_b not in entity_a_section
+    assert "entity-a startup failed" in entity_a_section
     assert "entity-b startup failed" not in entity_a_section
-    assert entity_b in entity_b_section
-    assert entity_a not in entity_b_section
+    assert "entity-b startup failed" in entity_b_section
+    assert "entity-a startup failed" not in entity_b_section
+    assert entity_a not in body
+    assert entity_b not in body
+    assert entity_a in appendix
+    assert entity_b in appendix
 
 
 def test_a021_autonomous_query_fact_json_populates_log_k8s_and_tool_sources():
@@ -5137,8 +5141,8 @@ def test_a029_fact_ledger_report_keeps_weak_tracing_and_known_owners_truthful():
         if line.startswith("| **Tracing**")
     )
 
-    assert "| partial |" in tracing_row
-    assert "| present |" not in tracing_row
+    assert "| 部分数据 |" in tracing_row
+    assert "| 已有数据 |" not in tracing_row
     assert "真实 Deployment 名称不可用" not in result
     assert "ReplicaSet 到 Deployment 关系 unavailable" not in result
     assert "demo-config-api/config-api" in result
