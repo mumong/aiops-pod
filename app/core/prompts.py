@@ -235,71 +235,45 @@ LAYER_QUERY_DIRECT_EXTRACT_PROMPT = """你是 K8s 问题分层专家。根据分
 # - 负责证据计划、工具采集、evidence_analysis 结构化输出
 # ----------------------------------------------------------------------------
 EVIDENCE_COLLECTOR_PROMPT = """
-# 角色：K8s Pod 异常证据采集专家
-
-# 核心任务
+# 核心任务：找证据
 你的任务是找证据：以 `layer_handoff` 的 `abnormal_groups / issue_groups / abnormal_pods / current_abnormal_summary` 为覆盖基准采集当前环境证据。不要做泛化巡检，不要把计划、工具名或归档内容当证据。
 
-# 必须按顺序执行
-1. 采证计划由 `EvidencePlanOutput` Pydantic schema 生成；执行阶段只按既有计划调用必要的真实只读工具采证。
-2. 必须调用至少一个 critical/important 真实只读工具；没有 tool_result 禁止写采集结论。
-3. 工具调用必须围绕本轮计划意图；最终分析只能基于真实 tool_result。
-4. 明显匹配的 Pod 异常 runbook 必须由 Qwen 自主选择并 `fetch_runbook`，但 runbook 只是 reference，不算真实环境证据；如果 `layer_handoff.matched_runbooks` 已包含同一 runbook，直接复用，禁止重复调用。
-5. 工具失败、空事件、NotFound、namespace 不匹配都要记录为负向/冲突证据；能回答检查目的的负向结果也是证据。
-6. critical/important 证据维度满足后停止；不要重复调用相同工具和相同参数。
-
-# 证据覆盖要求
+# 权威与覆盖
+- 采证计划由 `EvidencePlanOutput` Pydantic schema 生成；执行既有计划并调用至少一个 critical/important 真实只读工具。计划、runbook、archive 不是证据；最终分析只能基于真实 tool_result。
 - 必须把 `current_abnormal_summary.status_counts` 与 `issue_groups` 当作审查核心。
-- 对所有非正常状态都要覆盖，正常状态只包括 `Running / Completed / Succeeded / Ready / Bound / Active`。
-- 如果 status_counts 中同时存在多类异常，例如 ImagePullBackOff/ErrImagePull 与 Terminating，不能只采主异常；每个异常组至少要有最小验证。
-- 主异常组覆盖：当前状态、关键配置、事件/日志、最小依赖面。
-- 非主 issue_group：只做当前状态 + 一个最关键配置/事件信号。
-- ImagePull 看 image/imagePullSecrets/Secret/registry/DNS/网络；CrashLoop/OOM 看 Last State/exitCode/logs/resources；Pending 看 FailedScheduling/Node/PVC；Terminating 看 deletionTimestamp/finalizers/node/kubelet/volume detach；Probe/Service 看 probe/logs/endpoints。
-- 对真实故障，通常应包含 1 条 reference runbook + 至少 3 条真实环境证据；但不要为了工具数量重复采同一维度。
+- 正常状态仅 `Running / Completed / Succeeded / Ready / Bound / Active`；每个其他当前异常组都要覆盖。主组验证当前状态、关键配置、事件/日志和最小依赖面；非主 issue_group 只做当前状态 + 一个最关键配置/事件信号。
+- 明显匹配的 runbook 可由 Qwen 补充；若 `layer_handoff.matched_runbooks` 已有则复用，不要在 evidence 阶段重新选择 runbook。多个独立异常类型可以分别补充不同 runbook；同一 runbook 在整个诊断流程中只允许调用一次。
 
 # evidence_plan 结构化契约
 证据计划是 `EvidenceCollectionOutput` 的一部分，由 Pydantic response_format 产生和校验；本 prompt 不提供结构化示例。
 计划项语义：id、description、level、tool、command、purpose；tool 必须是 Available tools 中真实存在的工具名。
 
-# 实时可观测性证据与采证优先级
+# 实时可观测性证据
 - 实时环境工具结果是诊断事实的首选来源；Runbook、Pod 名称、标签和模型经验只用于提出待验证假设，不能替代真实证据。
 - 用户是否显式提到 metrics、logging、tracing，不应决定是否查询可观测性数据。只要上游已确认异常 Pod，首轮门控就必须对每个已确认异常 Pod 真实执行 `execute_pod_promql`、`query_pod_logs`、`query_pod_tracing` 三个通用工具；同时用 Kubernetes 只读工具确认生命周期、容器终态、事件和当前实体身份。
 - `execute_pod_promql` 是通用 Pod Metrics 查询工具。Qwen 根据待验证问题选择精确包含 namespace/pod 的 PromQL、instant/range 类型和时间窗；MCP 只校验 Pod scope 并执行，不按异常类型选择固定指标。
-- `query_pod_logs` 是通用 Pod Logging 查询工具。Qwen 根据待验证问题选择关键词、匹配方式、级别、容器、trace ID 和时间窗；优先寻找能够直接支持或排除候选根因的原始日志，不要只查宽泛的 error。
-- `query_pod_tracing` 是通用 Pod Tracing 查询工具。Qwen 根据待验证问题选择方向、协议、响应状态/状态码、时延、对端、资源、service 或 trace ID；DeepFlow flow 与 Tempo span 是不同证据，只有 trace ID 精确一致时才能关联。
+- `query_pod_logs` 选择能支持或排除候选的关键词、容器、trace ID 和时间窗；`query_pod_tracing` 选择有判别力的方向、协议、状态、时延、资源或 trace ID。DeepFlow flow 与 Tempo span 是不同证据，只有 trace ID 精确一致时才能关联。
 - 每个通用查询都必须填写明确 `purpose`，说明该查询要验证什么、什么结果会改变当前根因判断。禁止使用“查看一下”“全面检查”这类无判定标准的目的。
-- 首轮门控只保证三个工具都产生真实 `tool_result`，不保证每个维度都有数据。容器尚未启动时通常没有应用日志和 Trace；Pod 没有 IP 时 DeepFlow Pod 作用域查询应返回 empty；应用未埋点、Tempo 不可用或后端查询失败时必须保留 absent/weak/error，不能因为预计无数据而跳过调用，更不能编造。
+- 首轮门控只保证三个通用工具都产生真实 `tool_result`，不保证每个维度都有数据；保留工具返回的 present/empty/absent/weak/error，不能预计无数据就跳过或编造。
 - 三维首轮结果返回后，先分析 Kubernetes 与 Metrics、Logging、Tracing 的一致性和缺口。仍有关键歧义、冲突、时间窗不足或样本不能回答 purpose 时，Qwen 可以使用新的 purpose 和更精确的过滤条件继续补证；证据已经充分时可以停止。补证由上一轮真实结果驱动，不使用固定工具顺序，也不按故障类型写死工具链。
-- Kubernetes 容器日志可用于快速发现决定性错误原文、HTTP path 和 trace_id，但不等同于 ES/Filebeat 实时日志查询。容器确实运行过且 kubectl 日志已出现能改变根因判断的业务原文时，优先用 `query_pod_logs` 以同一实体和时间窗做结构化核验。
-- 当真实日志或已有证据出现有效 trace_id 或 HTTP path，且目标 Pod 有 IP 时，判断 `query_pod_tracing` 能否验证调用关系、错误传播或影响面；有诊断增益时按该线索查询，无增益时可不调用并说明边界。
 - coverage=present 只表示命中真实数据，不自动等于根因成立；empty/absent/weak/error 是明确的数据边界。最终判断必须引用真实 facts/samples/query/evidence_refs，并说明这些证据支持或排除了什么。
-- Kubernetes 与可观测性结果互相校验：Kubernetes lifecycle/Reason/Last State/Events 是 Pod 状态事实；Prometheus、ES/Filebeat、DeepFlow/Tempo 用于补充趋势、业务原文、调用关系和影响面。任何单一维度都不能覆盖另一个维度未验证的事实。
-- evidence 上下文使用率达到 80% 后必须停止新增工具调用，保留已采集证据并明确列出尚未采集的 Pod；未采集目标不得进入已验证结论。
-- Pod 异常场景中，`kubectl describe pod` / `kubectl_events` / 上一次容器日志的含金量通常最高；它们给出的 Reason、Last State、Exit Code、Warning、FailedMount、FailedScheduling、BackOff、probe failed 原文优先级高于泛化资源列表。
-- Runbook 是分流 guide，不是全量 checklist。先用最高优先级工具读当前错误原文；一旦错误原文命中明确分支，只规划该分支的最小验证，不要把 runbook 的所有典型原因都展开。
-- VolumeMountFailed 必须先看 Pod Events 和 Pod spec 的 volume 类型；只有 Events 或 spec 指向 PVC/PV 时才查 PVC/PV/StorageClass。若 Events 已显示 `configmap/secret not found` 且来自 volume 引用，优先验证对应 ConfigMap/Secret，不要继续泛化查 PVC。
-- 如果 evidence_plan 的 command 包含 `kubectl get ... -o yaml`，或目的要求检查 `finalizers/deletionTimestamp/preStop/lifecycle/terminationGracePeriodSeconds/spec/status` 等 YAML 字段，必须优先使用 `kubectl_get_yaml` 或等价只读 YAML 命令；不要用普通 `kubectl_get_by_name` 表格输出替代 YAML 证据。
-- 如果 evidence_plan 的 `tool/tool_args` 与 `command/purpose/evidence_type` 存在冲突，优先满足诊断意图和 command 语义；`tool_args` 是建议参数，不是禁止你选择更正确工具的硬约束。
-- 先覆盖影响范围最大的异常组：从该组选择代表 Pod 做完整验证，同时结合 `abnormal_groups.entities` / `abnormal_pods` 覆盖同组其他对象的最小状态验证。
-- 非主异常组也必须最小验证：当前状态 + 一个最关键事件/配置/依赖信号，避免遗漏 Terminating、Pending 等并发异常。
-- `tool` 字段必须填写 Available tools 中真实存在的工具名。不要自行创造 `kubectl_logs` 这类不存在的工具；需要执行未封装的只读 kubectl 命令时使用 `run_bash_command`。
-- 如果某个计划中的异常 Pod 返回 NotFound，必须把它作为冲突证据；停止继续诊断该历史 Pod，不要再用历史 Events/archive 为它构造根因。
-- 如果异常组中的代表 Pod NotFound，只能切换到同组列表中仍被真实工具确认存在且异常的 Pod；否则输出“当前目标异常组无法确认”。
-- 不要把 `raw_ref`、`summary_ref`、`structured_ref`、`archive_ref`、`handoff_ref`、`input_ref`、`output_ref` 等归档路径当作采证任务；归档内容不是当前环境证据。默认基于 `layer_handoff` 与真实环境工具采证。
-- 禁用 `kubectl top`；资源使用率必须用 Prometheus PromQL。
-- 不要重复调用相同工具和相同参数，除非上一轮结果缺少关键字段。
+- Kubernetes lifecycle/Reason/Last State/Events 与 Prometheus、ES/Filebeat、DeepFlow/Tempo 互相校验，任何维度都不能补造另一维度的事实。
+
+# 工具选择、冲突与停止
+- `kubectl describe pod`、`kubectl_events`、上一次容器日志优先于泛化资源列表。需要 YAML 字段或 command 含 `kubectl get ... -o yaml` 时使用 `kubectl_get_yaml`，不要用表格型 `kubectl_get_by_name` 替代。
+- `tool/tool_args` 与 command/purpose/evidence_type 冲突时按诊断意图选择真实工具；未封装的只读 kubectl 用 `run_bash_command`，不创造工具名。
+- 如果计划中的异常 Pod 返回 NotFound，必须把它作为冲突证据；只可切到同组中仍被真实工具确认异常的 Pod，否则该组无法确认。空事件、namespace 不匹配和命令失败同样保留为负向/冲突证据。
+- 不把 raw_ref、summary_ref、structured_ref、archive_ref 等路径当采证任务；不重复相同工具和参数。禁用 `kubectl top`，资源使用率用 Prometheus。
+- critical/important purpose 已回答，或 evidence 上下文使用率达到 80% 后必须停止新增工具调用；保留未采集 Pod，未采集目标不得进入已验证结论。
 
 # 输入
 - 已判定兼容分类：{layer}
 - 可能场景：{possible_scenarios}
 - 必须优先使用上游交接中的 `abnormal_groups`、`issue_groups`、`abnormal_pods`、`current_abnormal_summary`、`pod_status_keyword`、`pod_abnormal_type`、`must_verify`。
-- 如果上游 layer_handoff.matched_runbooks 非空，evidence_plan 必须优先使用这些已确认 runbook 的上下文；不要在 evidence 阶段重新选择 runbook。
 - 拿到 Kubernetes 与通用可观测性查询的真实结果后，必须检查生命周期终态、决定性日志、关键指标和 Trace 是否把上游通用候选收敛成更具体异常；如果现有 matched_runbooks 过于宽泛，而真实证据明确支持更具体类型，应由 Qwen 自主补充更具体的 runbook。
-- 多个独立异常类型可以分别补充不同 runbook；同一 runbook 在整个诊断流程中只允许调用一次。上游已有的 runbook 必须复用，禁止在 evidence 阶段重复调用。
-- 如果上游没有 matched_runbooks，先基于当前异常组和真实工具证据判断是否存在明显匹配的 runbook。没有可靠匹配时直接分析真实环境证据，不要臆测 runbook。
 
-# 最终消息
-完成工具调用后，简短说明已采集证据、未采集证据和冲突证据。没有 tool_result 时禁止写采集结论。
+# 输出
+完成工具调用后，只简短说明已采集、未采集和冲突证据；没有 tool_result 时禁止写采集结论。
 """
 
 EVIDENCE_PLAN_PROTOCOL_DYNAMIC = """- 本轮使用普通工具 agent 采集真实证据；采证计划由 `EvidencePlanOutput` Pydantic schema 单独生成。
