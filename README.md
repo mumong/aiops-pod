@@ -68,12 +68,13 @@ Agent 和 MCP 工具集合需要部署在同一个集群中，Agent 才能通过
 | 当前态优先 | `abnormal_pods` 只能来自当前工具扫描；历史 Event 只能作为辅助，不替代当前状态 |
 | 异常组覆盖 | 基于 `abnormal_groups` / `current_abnormal_summary.status_counts` 覆盖并发异常，不只分析单个 Pod |
 | 证据驱动 | `evidence` 节点按计划调用真实工具，结论以当前工具结果、指标、事件、日志为依据 |
+| 权威事实合同 | 优先消费 `aiops.fact-ledger.v1`，只允许通过来源、实体、UID 和引用校验的 FactRecord 进入权威报告 |
 | 查询与诊断分流 | `/query` 走 direct 快路径，`/ask` 走完整诊断链路 |
 | Pod Runbook 知识库 | 模型可按 Pod 异常类型抓取对应 Runbook，辅助诊断和修复计划生成 |
 | MCP 扩展 | Kubernetes、Prometheus、Bash、Helm、Runbook 等能力通过 MCP SSE 接入 |
 | 多集群联邦 | 支持广播式多集群查询，也支持 Agent-to-Agent 智能路由查询 |
 | 上下文归档 | 工具原始输出、结构化摘要、节点输入输出、token budget、handoff 会落盘，便于复盘 |
-| 修复审批 | 诊断报告可生成 remediation plan，并按 `review` 或 `auto` 模式执行 |
+| 修复审批 | 诊断报告可生成 remediation plan；canonical Fact 路径在没有 typed policy 时固定为 `manual_only` 且 `actions=[]` |
 
 ### 1.5 当前 Pod 异常检测模型
 
@@ -368,7 +369,10 @@ curl --no-buffer -G "http://<node-ip>:30800/query" \
 | MCP 工具调用 | 通过 `mcp_servers` 配置加载 Kubernetes、Prometheus、Bash、Helm、Runbook 等工具 |
 | Runbook 参考 | 模型可调用 Runbook 工具，最终报告区分核心 Runbook 和参考 Runbook |
 | 结构化运行时 | `LayerOutput`、`LayerHandoff`、`QueryResult`、Evidence/RCA 结构通过 Pydantic 校验 |
+| Canonical Fact Ledger | 保留 MCP canonical Ledger，严格门禁 trusted legacy adapter，并校验 RCA 引用的 Fact ID |
+| 权威报告 | 精确事实、coverage、限制和机器附录从 validated FactRecords 确定性渲染 |
 | 上下文治理 | observation summary、context compaction、context archive、token budget 日志 |
+| 32K 硬门禁 | 每次 provider-bound 请求在调用前校验，超限时先做确定性压缩或停止 |
 | 流式输出 | 支持 text 和 SSE，展示节点进度、工具调用、模型输出和最终报告 |
 | 修复审批 | `workflow.remediation` 控制 deterministic/react executor 和 review/auto mode |
 | 报告查看 | `/reports`、`/reports/{filename}` 查看已保存报告 |
@@ -402,6 +406,17 @@ question
 | `conclusion` | 生成最终 Markdown 报告，并按需生成 remediation plan | `conclusion_formatted`、`remediation_plan`、`remediation_result` |
 
 `HEALTHY` 会从 `layer` 直接到 `conclusion`。这类问题不进入完整采证和 RCA，避免把健康态硬分析成故障。
+
+#### Canonical Fact Ledger authority
+
+MCP 原生 `source=mcp_canonical`、`legacy_contract=false` 的 Ledger 是首选路径。
+滚动升级期间，legacy 结果只有在来源、namespace/Pod、独立 Pod UID、
+evidence refs、Fact ID 和实体关系全部通过时才会标记为 `trusted_legacy`。
+其他结果保留为兼容或拒绝状态，不会把模型文本升级为精确事实。
+
+RCA 仍由模型形成 hypothesis 和 supporting Fact ID，但 Conclusion 只发布引用
+校验通过的 FactRecords。指标采样间隔、代表性 Trace、可用性未测量、容量策略
+缺失和拓扑因果边界由确定性代码生成。
 
 ### 5.2 `/query` 查询链路
 
@@ -447,6 +462,8 @@ question
 | `mode=auto` | 自动执行安全校验通过的动作，生产环境谨慎使用 |
 
 旧环境变量或请求参数 `remediate` 不再控制修复执行，修复行为以 `workflow.remediation` 配置为准。
+对 canonical Fact Ledger 报告，上述执行配置不会覆盖证据合同：没有独立
+typed Remediation Policy Contract 时只允许人工复核和只读验证。
 
 ## 6. API 使用
 
@@ -853,6 +870,17 @@ curl http://<node-ip>:30800/api/v1/mcp/status
 
 ```bash
 .venv/bin/python -m pytest -q tests/unit/workflow
+```
+
+Fact Ledger authority、报告和修复安全的 focused 回归：
+
+```bash
+.venv/bin/python -m pytest -q \
+  tests/unit/aicall/test_observation_processing.py \
+  tests/unit/workflow/test_fact_contract.py \
+  tests/unit/workflow/test_context_handoff.py \
+  tests/unit/workflow/test_ask_conclusion_remediation_json.py \
+  tests/unit/remediation/test_plans.py
 ```
 
 ## 11. 关键目录

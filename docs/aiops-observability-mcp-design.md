@@ -1,6 +1,6 @@
 # AIOps 真实可观测性数据与 MCP 使用说明
 
-**更新日期**：2026-07-29
+**更新日期**：2026-07-31
 
 **适用项目**：
 
@@ -21,7 +21,9 @@
      关系时按需执行；未执行时报告不得推测拓扑边。
    - Qwen 可以根据首轮结果继续修改 PromQL、日志关键词、Trace 条件和时间窗。
    - 每次工具结果独立形成 `raw.txt`、`structured.json`、`summary.txt` 和
-     Fact Ledger，不要求先生成完整磁盘 Case Package。
+     `aiops.fact-ledger.v1`，不要求先生成完整磁盘 Case Package。
+   - Robusta 优先消费 `mcp_canonical` Ledger；legacy 投影只在来源、实体、
+     独立 Pod UID、引用和 Fact ID 全部通过时才成为权威事实。
 
 2. **Case Package 路径：粗粒度采集和按 case ID 读取**
    - mcpstander 的 `aiops-case` 服务仍在 8089 运行。
@@ -157,6 +159,11 @@ kube_pod_container_resource_limits{namespace="<ns>",pod="<pod>",container="<cont
 
 单次返回限制在约 6 KiB。限制的是注入小模型的结构化投影，不是删除原始工具
 输出；完整原文仍进入 Robusta 归档。
+
+Ledger 在最终有界结果上重建，使用 `source=mcp_canonical`、
+`legacy_contract=false`。因此裁剪后的 Fact ID 不会引用已删除内容，相同输入的
+Fact ID、排序和投影保持稳定。Ledger 递归拒绝 diagnosis、root cause、
+remediation、ground truth 和 evaluator 字段。
 
 ## 4. Case Package 路径
 
@@ -492,12 +499,13 @@ OOM 示例：
 
 Evidence 节点继续生成：
 
-- `agent_facts`：最多约 10000 字符，适合小模型直接引用的事实文本。
-- `agent_context`：最多约 12000 字符的结构化上下文或 Fact Ledger。
+- `agent_facts`：legacy 兼容的有界事实文本。
+- `agent_context`：legacy 兼容的有界结构化上下文。
 - `fact_ledger`：RCA 的权威事实接口，包含实体范围、fact ID、来源、
   directness、coverage 和 evidence refs。
 
-RCA 和 Conclusion 不应只读取一句自然语言摘要，而是优先消费 Fact Ledger。
+canonical Ledger 存在时，模型上下文不再重复注入同义顶层 facts。RCA 和
+Conclusion 不应只读取一句自然语言摘要，而是优先消费 Fact Ledger。
 
 ### 7.3 Case Package 与 Agent Evidence 的关系
 
@@ -532,6 +540,26 @@ Case Package evidence/*.jsonl
 它们在“证据字段和消费接口”上相似，在“落盘粒度”上不同。Case Package 是
 一个完整 case 目录；默认 Agent 路径是一次诊断中的多个独立工具结果，不会为了
 在线诊断强制生成完整 case 目录。
+
+### 7.4 Authority 和报告边界
+
+Fact Ledger 的消费模式是 fail closed：
+
+| 模式 | 含义 | 是否可进入权威报告 |
+|---|---|---|
+| `canonical` | MCP 原生 Ledger，严格合同和实体门禁通过 | 是 |
+| `trusted_legacy` | 只读 legacy 工具的来源、精确 Pod UID、引用和 Fact ID 全部通过 | 是 |
+| `legacy_compatibility` | 可用于兼容性上下文，但证据门禁不完整 | 否 |
+| `rejected` | 来源、实体、UID、引用或污染检查失败 | 否 |
+
+Kubernetes lifecycle authority 只接受精确 Pod 的只读 `kubectl_describe` 和
+`kubectl_get_yaml`。查询工具自己声称的 UID、其他 Pod 事件、shell 和写工具不能充当
+UID oracle。
+
+RCA 可以生成 hypothesis，但最终报告只渲染校验通过的 supporting
+FactRecords。通用 limitation 会显式区分采样间隔、代表性 Trace、未测可用性、
+容量策略缺失和拓扑因果边界。没有 typed remediation policy 时，报告固定为
+`manual_only`、`requires_human_approval=true`、`actions=[]`。
 
 ## 8. 常用检查命令
 

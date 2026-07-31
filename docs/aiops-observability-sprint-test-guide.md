@@ -924,19 +924,15 @@ OOM Sprint 最低通过线是“中”；当前 traced OOM 基线应达到“高
 | Sprint | 验收项 | 通过标准 | 结果 |
 |---|---|---|---|
 | 测试一 | namespace + Pod 脚本采集 | Package 校验通过，K8s/Prometheus/Logging/DeepFlow/Tempo/Topology 有真实证据或诚实缺失状态 | **已通过**：2026-07-29，`oom-script-20260729-094641` |
-| 测试二 | MCP 实时采集 | 通用查询 MCP 能返回真实有界证据；coarse MCP 能生成 case ID | **核心功能已有真实基线，本轮未重新现场复验**：按 4.1 至 4.3 重新执行后封版 |
-| 测试二 | case ID 按需读取 | `get_aiops_case` 和 `get_aiops_case_evidence` 使用真实 refs 成功读取，非法路径被拒绝 | **已有 2026-07-27 SSE 实测记录，本轮未重新现场复验** |
-| 测试三 | Robusta 完整诊断 | 模糊提问触发真实工具，RCA 和报告引用核心原始证据并形成因果链 | **待回归**：2026-07-27 历史运行根因正确，但 Metrics 时间窗、报告渲染和未查询拓扑边界未全部通过 |
+| 测试二 | MCP 实时采集 | 通用查询 MCP 能返回真实有界证据；coarse MCP 能生成 case ID | **已通过**：自主查询覆盖 Metrics、Logging、Tracing 和 Topology，canonical Ledger 通过合同回放 |
+| 测试二 | case ID 按需读取 | `get_aiops_case` 和 `get_aiops_case_evidence` 使用真实 refs 成功读取，非法路径被拒绝 | **已通过**：真实 SSE 读取与 allowlist 边界已复验 |
+| 测试三 | Robusta 完整诊断 | 模糊提问触发真实工具，RCA 和报告引用核心原始证据并形成因果链 | **已通过**：2026-07-31 单次 Qwen 请求取得独立评审 `ACCEPT` |
 
-当前状态不能简化为“三项全部通过”：
-
-- 本轮已经用标准脚本重新完成测试一，证据覆盖 Kubernetes、Prometheus、
-  Logging、DeepFlow、Tempo 和轻量拓扑。
-- 测试二有已部署能力、模块测试和 2026-07-27 SSE 读取基线，但本轮没有针对
-  当前部署重新执行完整 MCP Client 流程。
-- 测试三需要使用当前版本和同一个模糊问题再运行一次 Robusta，确认 Metrics、
-  Logging、Tracing 的决定性原始证据进入 RCA 和最终报告；Topology 只在真实
-  调用后展示。
+当前三项 Sprint 验收全部通过。最终运行使用一次模糊问题，自主完成 11 次只读
+工具调用，运行时间 173 秒。Kubernetes、Prometheus、DeepFlow/Tempo 和 Topology
+决定性事实进入权威 Ledger；ES/Filebeat 零命中保留为 `coverage=empty`。
+RCA 引用的 5 个 Fact ID 全部校验通过，最终修复合同为 `manual_only`、
+`actions=[]`。所有 provider-bound 请求低于 32000 token，最大估算值为 27000。
 
 ## 8. 真实运行审计示例
 
@@ -998,6 +994,24 @@ target=aiops-traced-oom/trace-oom-api-7c75757475-vgvxs
 
 该示例可作为后续修复的回归基线：修复后必须使用同样的模糊问题重新运行，并
 逐项确认 Metrics、Logging、Tracing 和按需 Topology 的真实结果。
+
+### 8.3 2026-07-31 Canonical Fact Ledger 最终验收
+
+| 验收项 | 结果 |
+|---|---|
+| 模糊问题 | 只发送 1 次，无质量重试 |
+| 工具执行 | 11 次只读调用，11 次成功 |
+| Kubernetes | `OOMKilled`、exit `137`、memory limit `80Mi` 通过精确 Pod UID 绑定 |
+| Metrics | Prometheus application-container 采样和统计进入 canonical Ledger |
+| Logging | ES/Filebeat 零命中保留 `coverage=empty`，不伪造日志 |
+| Tracing | DeepFlow HTTP flow 为 direct evidence，按 representative/partial 限制表达 |
+| Topology | 5 条 source-backed owner、Service、Node 和 Container 关系 |
+| RCA | 5 个 supporting Fact ID，`valid=true`，无 invalid Fact ID |
+| Context | provider-bound 最大估算 27000，未超过 32000 |
+| Remediation | `manual_only`、需要人工审批、`actions=[]` |
+
+该结果的验收依据是数据源引用、Context Archive、validated Fact IDs 和确定性
+报告合同，不是模型叙述是否听起来合理。
 
 ## 9. 测试完成后的清理
 
