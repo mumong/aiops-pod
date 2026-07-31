@@ -371,6 +371,7 @@ curl --no-buffer -G "http://<node-ip>:30800/query" \
 | 结构化运行时 | `LayerOutput`、`LayerHandoff`、`QueryResult`、Evidence/RCA 结构通过 Pydantic 校验 |
 | Canonical Fact Ledger | 保留 MCP canonical Ledger，严格门禁 trusted legacy adapter，并校验 RCA 引用的 Fact ID |
 | 权威报告 | 精确事实、coverage、限制和机器附录从 validated FactRecords 确定性渲染 |
+| 人类可读报告 | 正文解释证据且隐藏内部 ID；机器附录保留完整 Fact、引用和限制；混合 provider 下真实信号优先于单源空结果 |
 | 上下文治理 | observation summary、context compaction、context archive、token budget 日志 |
 | 32K 硬门禁 | 每次 provider-bound 请求在调用前校验，超限时先做确定性压缩或停止 |
 | 流式输出 | 支持 text 和 SSE，展示节点进度、工具调用、模型输出和最终报告 |
@@ -417,6 +418,9 @@ evidence refs、Fact ID 和实体关系全部通过时才会标记为 `trusted_l
 RCA 仍由模型形成 hypothesis 和 supporting Fact ID，但 Conclusion 只发布引用
 校验通过的 FactRecords。指标采样间隔、代表性 Trace、可用性未测量、容量策略
 缺失和拓扑因果边界由确定性代码生成。
+
+正文与机器附录的边界、混合来源优先级和通用扩展规则见
+[`docs/human-readable-diagnostic-reports.md`](docs/human-readable-diagnostic-reports.md)。
 
 ### 5.2 `/query` 查询链路
 
@@ -725,6 +729,7 @@ metrics:
 | 工作流状态 | `app/core/workflow/state.py` | 定义 `WorkflowState`，承载节点间结构化字段 |
 | 结构化 schema | `app/core/workflow/schemas.py` | 定义 Layer、Handoff、Query、Evidence、RCA 等 Pydantic contract |
 | 工作流节点 | `app/core/workflow/nodes/` | layer、evidence、rca、conclusion 四个节点实现 |
+| 报告展示 | `app/core/workflow/report_presentation.py` | 通用维度投影、source-backed observation 归一化和 AI 事实引用校验 |
 | Context 管理 | `app/core/context/` | context archive、token budget、observation summary、usage probe |
 | 修复执行 | `app/core/remediation/` | 修复计划解析、审批、deterministic/react 执行 |
 | 多集群联邦 | `app/core/federation/` | 子集群注册、广播查询、Agent-to-Agent、报告聚合 |
@@ -909,6 +914,7 @@ Fact Ledger authority、报告和修复安全的 focused 回归：
 - `docs/aiops-traced-oom-test-environment.md`
 - `docs/aiops-observability-sprint-test-guide.md`
 - `docs/remediation-usage.md`
+- `docs/human-readable-diagnostic-reports.md`
 - `docs/workflow-structured-runtime-evolution-2026-05-09.md`
 - `docs/上下文管理设计与实现.md`
 - `docs/工作流上下文流转说明.md`
