@@ -4735,11 +4735,11 @@ TOPOLOGY_ENTITY entity_id=e:deployment kind=Deployment namespace=demo name=order
     assert "资源写操作" in result
 
 
-def test_a026_replay_import_enforces_measured_offline_boundary():
+def test_offline_replay_fixture_import_enforces_measured_boundary():
     repo_root = Path(__file__).resolve().parents[3]
     replay_path = (
         repo_root
-        / "agent-loop/tasks/T007/attempts/A026/artifacts/replay_a024.py"
+        / "tests/fixtures/observability/offline_replay_import.py"
     )
     probe = r'''
 import json

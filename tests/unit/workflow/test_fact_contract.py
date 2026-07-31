@@ -3326,18 +3326,11 @@ def test_final_projection_requires_explicit_success_and_explicit_retry_intent():
 
 
 def test_a029_compact_a028_ledgers_is_fair_bounded_and_order_independent():
-    archive = (
+    fixture = (
         Path(__file__).resolve().parents[3]
-        / "agent-loop/tasks/T007/attempts/A028/artifacts/context_archive/"
-        "node_outputs/evidence.output.json"
+        / "tests/fixtures/observability/a028_fact_ledgers.json"
     )
-    evidence_output = json.loads(archive.read_text(encoding="utf-8"))
-    evidence = json.loads(evidence_output["snapshot"]["evidence_analysis"])
-    ledgers = [
-        item["fact_ledger"]
-        for item in evidence["tool_data"]
-        if item.get("fact_ledger")
-    ]
+    ledgers = json.loads(fixture.read_text(encoding="utf-8"))["fact_ledgers"]
 
     forward = compact_fact_ledgers_json(ledgers, max_chars=24000)
     reverse = compact_fact_ledgers_json(
