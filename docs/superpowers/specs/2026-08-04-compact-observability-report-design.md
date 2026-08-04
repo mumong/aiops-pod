@@ -157,8 +157,8 @@ appendix and into an optional visible table:
 |---|---|
 ```
 
-Show at most three limitations, deduplicated by `(capability, statement)` while
-preserving their first-seen order. The stable human label for `capability` becomes the
+Show at most three limitations, deduplicated by `(code, statement)` while preserving
+their first-seen order. The stable human label for the `EvidenceLimitation.code` becomes the
 `缺失项`; the limitation statement becomes the `影响`. Do not expose Fact IDs,
 `applies_to`, or `source_basis` in the body. Omit the subsection when there are no
 limitations.
