@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-driver
+  labels:
+    app.kubernetes.io/name: traffic-driver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traffic-driver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traffic-driver
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: driver
+          image: xnet.registry.io:8443/observability/python:3-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/opt/aiops/driver.py"]
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: TARGET_URL
+              value: http://workload:8080/work
+            - name: CASE_RUN_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 48Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: code
+              mountPath: /opt/aiops
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: workload-code

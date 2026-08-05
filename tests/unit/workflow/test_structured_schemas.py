@@ -8,13 +8,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.workflow.schemas import (
     EvidenceCollectionOutput,
-    EvidenceMatchOutput,
     EvidencePlanOutput,
     FactLedger,
     FactRecord,
     LayerHandoff,
     LayerOutput,
-    ConclusionOutput,
     QueryResult,
     RCAHypothesis,
     RCAOutput,
@@ -101,52 +99,6 @@ def test_evidence_plan_output_accepts_autonomous_observability_tools(tool_name):
 
     assert parsed.evidence_plan[0].tool == tool_name
     assert parsed.evidence_plan[0].acceptable_tools == [tool_name]
-
-
-def test_conclusion_output_schema_accepts_report_payload():
-    parsed = ConclusionOutput.model_validate({
-        "title": "诊断报告",
-        "diagnosis_overview": {"layer": "L3"},
-        "evidence_chain": [],
-        "root_cause": "节点无法访问 Docker Hub",
-        "recommendations": ["配置镜像代理"],
-        "limitations": [],
-        "markdown_report": "## 诊断报告\n节点无法访问 Docker Hub",
-    })
-
-    assert parsed.title == "诊断报告"
-    assert parsed.markdown_report.startswith("## 诊断报告")
-
-
-def test_conclusion_output_normalizes_flattened_markdown_report():
-    parsed = ConclusionOutput.model_validate({
-        "title": "诊断报告",
-        "diagnosis_overview": {"layer": "L3"},
-        "evidence_chain": [],
-        "root_cause": "节点无法访问 Docker Hub",
-        "recommendations": ["配置镜像代理"],
-        "limitations": [],
-        "markdown_report": "---## 📊 诊断概览| 项目 | 内容 ||------|------|| **Pod异常状态** | ImagePullBackOff |",
-    })
-
-    assert parsed.markdown_report.startswith("---\n## 📊 诊断概览")
-    assert "| 项目 | 内容 |" in parsed.markdown_report
-    assert "\n|------|------|" in parsed.markdown_report
-
-
-def test_conclusion_output_repairs_flattened_adjacent_table_rows():
-    parsed = ConclusionOutput.model_validate({
-        "markdown_report": (
-            "## 📊 诊断概览 | 项目 | 内容 | |------|------| "
-            "| **Pod异常状态** | ImagePullBackOff (4), Terminating (1) | "
-            "| **兼容归因层** | L1, L3 |"
-        ),
-    })
-
-    assert "## 📊 诊断概览\n| 项目 | 内容 |" in parsed.markdown_report
-    assert "\n|------|------|" in parsed.markdown_report
-    assert "\n| **Pod异常状态** | ImagePullBackOff (4), Terminating (1) |" in parsed.markdown_report
-    assert "| |------" not in parsed.markdown_report
 
 
 def test_evidence_plan_output_rejects_unknown_tool_name():
@@ -408,32 +360,6 @@ def test_evidence_plan_output_rejects_missing_command():
         })
 
 
-def test_evidence_match_output_validates_match_decisions():
-    parsed = EvidenceMatchOutput.model_validate({
-        "matches": [
-            {
-                "plan_id": "e1",
-                "tool_result_index": 0,
-                "matched": True,
-                "confidence": 0.91,
-                "reason": "对象、namespace、工具意图一致",
-            },
-            {
-                "plan_id": "e2",
-                "tool_result_index": None,
-                "matched": False,
-                "confidence": 0.93,
-                "reason": "计划查询 NetworkPolicy，但结果是 Secret 表",
-            },
-        ],
-        "unmatched_plan_ids": ["e2"],
-        "unplanned_tool_result_indexes": [3],
-    })
-
-    assert parsed.matches[0].matched is True
-    assert parsed.matches[1].tool_result_index is None
-
-
 def test_evidence_collection_output_validates_summary_counts():
     parsed = EvidenceCollectionOutput.model_validate({
         "evidence_plan": [
@@ -623,3 +549,24 @@ def test_rca_output_keeps_legacy_callers_compatible_without_fact_fields():
     assert parsed.diagnostic_status == "diagnosed"
     assert parsed.supporting_fact_ids == []
     assert parsed.hypotheses == []
+
+
+def test_rca_hypothesis_normalizes_loose_small_model_output():
+    """c03 实测：hypothesis 缺 id/summary 且 confidence 为字符串时不应整体校验失败。"""
+    from app.core.workflow.schemas import RCAHypothesis, RCAOutput
+
+    hyp = RCAHypothesis.model_validate({
+        "entity_id": "k8s.pod:aiops-case-03/workload-x:uid",
+        "supporting_fact_ids": ["fact-abc123def456"],
+        "confidence": "high",
+    })
+    assert hyp.confidence == 0.9
+    assert hyp.hypothesis_id == "h-auto"
+    assert hyp.summary
+
+    out = RCAOutput.model_validate({
+        "root_cause": "configmap unavailable-config not found",
+        "confidence": "高",
+        "confidence_reason": "FailedMount 事件明确",
+    })
+    assert out.confidence == 0.9

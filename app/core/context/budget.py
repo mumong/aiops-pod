@@ -11,7 +11,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
-from .usage_probe import OpenAIUsageProbe
 
 logger = logging.getLogger(__name__)
 
@@ -499,32 +498,7 @@ class ContextBudgetEstimator:
         provider_usage_source: Optional[str] = None
         provider_usage_error: str = ""
 
-        if (
-            enable_usage_probe
-            and _env_truthy("AIOPS_CONTEXT_USAGE_PROBE")
-            and api_base
-        ):
-            messages: List[Dict[str, Any]] = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            if user_message:
-                messages.append({"role": "user", "content": user_message})
-            if messages:
-                probe = OpenAIUsageProbe(
-                    api_base=api_base,
-                    api_key=api_key,
-                    timeout=float(os.getenv("AIOPS_CONTEXT_USAGE_PROBE_TIMEOUT", "30") or 30),
-                )
-                probed = probe.count_prompt_tokens(
-                    model=model,
-                    messages=messages,
-                    tools=serialize_tool_schema_for_openai(tools) if tools else None,
-                )
-                provider_prompt_tokens = probed.prompt_tokens
-                provider_total_tokens = probed.total_tokens
-                provider_completion_tokens = probed.completion_tokens
-                provider_usage_source = probed.source
-                provider_usage_error = probed.error or ""
+        # usage probe 已移除：所有调用点均禁用，token 估算走本地 tokenizer
 
         if components is None:
             tool_schema_payload = serialize_tool_schema(tools)

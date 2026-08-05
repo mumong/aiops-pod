@@ -1,14 +1,13 @@
 """
-Deterministic Skills Layer for AIOps
+Skills 数据模型
 
 模块结构：
-- models.py    : 数据模型（DeterministicDecision, Evidence, Fact 等）
-- evidence.py  : 证据规格定义与提取器
-- rules.py     : 声明式规则定义
-- engine.py    : 规则引擎（匹配、置信度计算）
+- models.py : 数据模型（Layer, DeterministicDecision, EvidenceItem, Fact 等）
+
+说明：早期的确定性规则引擎（engine/rules/evidence）已移除，
+工作流只使用 models.py 中的数据模型。
 """
 
-# 数据模型
 from .models import (
     Confidence,
     DeterministicDecision,
@@ -18,30 +17,11 @@ from .models import (
     Layer,
 )
 
-# 规则引擎
-from .engine import RulesEngine, get_engine
-
-# 证据与规则
-from .evidence import EvidenceExtractor, EvidenceSpec, EVIDENCE_SPECS
-from .rules import Rule, RULES, get_rule, list_all_rules
-
-
 __all__ = [
-    # 数据模型
     "Confidence",
     "DeterministicDecision",
     "EvidenceItem",
     "EvidenceLevel",
     "Fact",
     "Layer",
-
-    # 引擎
-    "RulesEngine",
-    "get_engine",
-
-    # 规则与证据
-    "Rule",
-    "RULES",
-    "EvidenceSpec",
-    "EVIDENCE_SPECS",
 ]

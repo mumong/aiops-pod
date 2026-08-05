@@ -28,13 +28,10 @@ from typing import Any, Dict, List, Optional
 
 from app.core.context.archive import ContextArchive
 from app.core.workflow.fact_contract import (
-    attach_internal_report_authority,
     build_kubernetes_lifecycle_fact_ledger,
     build_observability_query_fact_ledger,
     compact_aiops_legacy_context_json,
     compact_fact_ledgers_json,
-    contains_forbidden_fact_fields,
-    evaluate_report_authority,
     is_observability_event_semantic_success,
     normalize_topology_query_fact_value,
     normalize_case_fact_ledger,
@@ -104,7 +101,6 @@ class EvidenceCollectorNode(WorkflowNode):
         holmes_service: Any = None,
         metrics: Any = None,
         runbook_catalog: Any = None,
-        plan_match_adjudicator: Any = None,
     ):
         """
         初始化节点
@@ -117,8 +113,6 @@ class EvidenceCollectorNode(WorkflowNode):
         self.holmes_service = holmes_service
         self.metrics = metrics
         self.runbook_catalog = runbook_catalog
-        self.plan_match_adjudicator = plan_match_adjudicator
-        self._plan_match_adjudication_enabled = bool(plan_match_adjudicator)
         self._logged_evidence_user_prompt = False
         self._early_stop_state = {
             "triggered": False,
@@ -222,7 +216,6 @@ class EvidenceCollectorNode(WorkflowNode):
                 "reason": "",
                 "required_levels": ["critical", "important"],
             }
-            self._plan_match_adjudication_enabled = bool(getattr(self, "plan_match_adjudicator", None))
             self._logged_evidence_user_prompt = False
             self._structured_plan_terminal_empty = False
             self._structured_plan_failure_reason = ""
@@ -1251,6 +1244,10 @@ class EvidenceCollectorNode(WorkflowNode):
                     )
                 )
                 if not remaining_plan:
+                    # 注意（架构决策 2026-08-04）：不在代码层做“反馈补采”控制。
+                    # 补证由 agent 在 ReAct 循环内根据真实工具结果自主决定
+                    # （见 EVIDENCE_COLLECTOR_PROMPT“补证由上一轮真实结果驱动”），
+                    # 唯一硬约束是 max_steps 与上下文预算；plan 只作参考与统计口径。
                     if has_mandatory_targets and not autonomous_mode:
                         refinement_response, refinement_events = (
                             self._run_post_case_evidence_refinement(
@@ -3716,30 +3713,6 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         })
 
     @classmethod
-    def _project_authority_pod_entity(
-        cls,
-        *,
-        raw_entity: Any,
-        event_scope: Optional[tuple[str, str]],
-        trusted_pod_uid: Optional[str],
-    ) -> Dict[str, Any]:
-        if not isinstance(raw_entity, dict) or not event_scope:
-            return {}
-        kind = cls._normalize_resource_kind(
-            raw_entity.get("kind") or "pod"
-        )
-        if kind != "pod":
-            return {}
-        projected = {
-            "kind": "Pod",
-            "namespace": event_scope[0],
-            "pod": event_scope[1],
-        }
-        if trusted_pod_uid:
-            projected["pod_uid"] = trusted_pod_uid
-        return projected
-
-    @classmethod
     def _with_trusted_pod_uid(
         cls,
         event: Dict[str, Any],
@@ -4846,7 +4819,6 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
 
         # ── 有 plan 时：正常匹配流程 ──
         matched_tool_indices = set()
-        adjudicated_matches = self._adjudicate_plan_tool_matches(evidence_plan, successful_tools)
 
         for plan_item in evidence_plan:
             plan_tool = (plan_item.get("tool") or "").lower()
@@ -4875,59 +4847,28 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             matched = False
             matched_result = None
             matched_tool = None
-            if adjudicated_matches is not None:
-                adjudicated_index = adjudicated_matches.get(str(item_id))
-                if adjudicated_index is not None and 0 <= adjudicated_index < len(successful_tools):
+            for ti, tool in enumerate(successful_tools):
+                if ti in matched_tool_indices:
+                    continue
+                tn = tool["tool_name"].lower()
+                if self._tool_result_matches_plan(
+                    plan_tool=plan_tool,
+                    plan_cmd=plan_cmd,
+                    plan_desc=plan_desc,
+                    tool_name=tn,
+                    result=tool.get("result", ""),
+                    structured=tool.get("structured") or {},
+                    tool_args=tool.get("tool_args") or {},
+                    plan_intent=plan_intent,
+                    plan_tool_args=plan_tool_args,
+                    plan_target_scope=plan_target_scope,
+                    acceptable_tools=acceptable_tools,
+                ):
                     matched = True
-                    matched_tool = successful_tools[adjudicated_index]
-                    matched_result = matched_tool["result"]
-                    matched_tool_indices.add(adjudicated_index)
-                else:
-                    for ti, tool in enumerate(successful_tools):
-                        if ti in matched_tool_indices:
-                            continue
-                        tn = tool["tool_name"].lower()
-                        if self._tool_result_matches_plan(
-                            plan_tool=plan_tool,
-                            plan_cmd=plan_cmd,
-                            plan_desc=plan_desc,
-                            tool_name=tn,
-                            result=tool.get("result", ""),
-                            structured=tool.get("structured") or {},
-                            tool_args=tool.get("tool_args") or {},
-                            plan_intent=plan_intent,
-                            plan_tool_args=plan_tool_args,
-                            plan_target_scope=plan_target_scope,
-                            acceptable_tools=acceptable_tools,
-                        ):
-                            matched = True
-                            matched_tool = tool
-                            matched_result = tool["result"]
-                            matched_tool_indices.add(ti)
-                            break
-            else:
-                for ti, tool in enumerate(successful_tools):
-                    if ti in matched_tool_indices:
-                        continue
-                    tn = tool["tool_name"].lower()
-                    if self._tool_result_matches_plan(
-                        plan_tool=plan_tool,
-                        plan_cmd=plan_cmd,
-                        plan_desc=plan_desc,
-                        tool_name=tn,
-                        result=tool.get("result", ""),
-                        structured=tool.get("structured") or {},
-                        tool_args=tool.get("tool_args") or {},
-                        plan_intent=plan_intent,
-                        plan_tool_args=plan_tool_args,
-                        plan_target_scope=plan_target_scope,
-                        acceptable_tools=acceptable_tools,
-                    ):
-                        matched = True
-                        matched_tool = tool
-                        matched_result = tool["result"]
-                        matched_tool_indices.add(ti)
-                        break
+                    matched_tool = tool
+                    matched_result = tool["result"]
+                    matched_tool_indices.add(ti)
+                    break
 
             outcome = "positive"
             source = "thinking_match" if matched else "planned"
@@ -5230,74 +5171,6 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             if candidate_rank > current_rank:
                 indexed[item_id] = item
         return indexed
-
-    def _adjudicate_plan_tool_matches(
-        self,
-        evidence_plan: List[Dict],
-        successful_tools: List[Dict[str, Any]],
-    ) -> Optional[Dict[str, int]]:
-        if not getattr(self, "_plan_match_adjudication_enabled", False):
-            return None
-        if not evidence_plan or not successful_tools:
-            return None
-
-        candidates = []
-        for index, tool in enumerate(successful_tools):
-            if tool["tool_name"].lower() in self._NON_EVIDENCE_TOOLS:
-                continue
-            candidates.append({
-                "index": index,
-                "tool_name": tool.get("tool_name", ""),
-                "tool_args": tool.get("tool_args") or {},
-                "structured": tool.get("structured") or {},
-                "result_preview": (tool.get("result") or "")[:1200],
-                "raw_ref": tool.get("raw_ref"),
-                "summary_ref": tool.get("summary_ref"),
-            })
-
-        if not candidates:
-            return None
-
-        adjudicator = getattr(self, "plan_match_adjudicator", None)
-        if not adjudicator:
-            return None
-
-        try:
-            data = adjudicator(evidence_plan, candidates)
-        except Exception as exc:
-            logger.warning("⚠️ [evidence] evidence_plan 对齐扩展失败，回退规则匹配: %s", exc)
-            return None
-
-        matches = data.get("matches") if isinstance(data, dict) else None
-        if not isinstance(matches, list):
-            return None
-
-        matched: Dict[str, int] = {}
-        used_tool_indices: set[int] = set()
-        for item in matches:
-            if not isinstance(item, dict) or item.get("matched") is not True:
-                continue
-            plan_id = str(item.get("plan_id") or "")
-            if not plan_id:
-                continue
-            try:
-                tool_index = int(item.get("tool_result_index"))
-            except (TypeError, ValueError):
-                continue
-            if tool_index < 0 or tool_index >= len(successful_tools) or tool_index in used_tool_indices:
-                continue
-            confidence = item.get("confidence", 0)
-            try:
-                if float(confidence) < 0.5:
-                    continue
-            except (TypeError, ValueError):
-                continue
-            matched[plan_id] = tool_index
-            used_tool_indices.add(tool_index)
-
-        if matched:
-            logger.info("📊 [evidence] 扩展 plan/tool 对齐命中 %d 项", len(matched))
-        return matched
 
     @staticmethod
     def _tool_result_matches_plan(
@@ -6182,76 +6055,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     }
                     provider_is_canonical = False
                     if ledger_input is not None:
-                        semantic_success = (
-                            query_semantic_success
-                            if is_observability_query
-                            else ev.get("semantic_success", True)
-                            is not False
-                        )
-                        if is_kubernetes_lifecycle and event_scope:
-                            authority_entity = {
-                                "kind": "Pod",
-                                "namespace": event_scope[0],
-                                "pod": event_scope[1],
-                            }
-                            if trusted_pod_uid:
-                                authority_entity["pod_uid"] = (
-                                    trusted_pod_uid
-                                )
-                            authority_context = {
-                                "semantic_success": semantic_success,
-                                "status": "kubernetes_observed",
-                                "coverage": "present",
-                                "source_system": "kubernetes",
-                                "entity": authority_entity,
-                                "evaluator_field_present": (
-                                    contains_forbidden_fact_fields(
-                                        raw_structured
-                                    )
-                                ),
-                            }
-                        else:
-                            raw_entity = raw_structured.get("entity")
-                            authority_context = {
-                                "semantic_success": semantic_success,
-                                "status": structured.get("status"),
-                                "coverage": structured.get("coverage"),
-                                "source_system": structured.get(
-                                    "source_system"
-                                ),
-                                "entity": self._project_authority_pod_entity(
-                                    raw_entity=raw_entity,
-                                    event_scope=event_scope,
-                                    trusted_pod_uid=trusted_pod_uid,
-                                ),
-                                "evaluator_field_present": (
-                                    contains_forbidden_fact_fields(
-                                        raw_entity
-                                    )
-                                    if native_ledger_input is not None
-                                    else contains_forbidden_fact_fields(
-                                        raw_structured
-                                    )
-                                ),
-                            }
-                        if trusted_pod_uid:
-                            authority_context["trusted_pod_uid"] = (
-                                trusted_pod_uid
-                            )
-                        item["authority_context"] = authority_context
-                        authority = evaluate_report_authority(
-                            ledger_input=ledger_input,
-                            tool_item=item,
-                        )
-
-                        provider_ledger = (
-                            normalize_fact_ledger(ledger_input)
-                            if (
-                                native_ledger_input is None
-                                or authority.authoritative
-                            )
-                            else None
-                        )
+                        provider_ledger = normalize_fact_ledger(ledger_input)
                         if (
                             provider_ledger is not None
                             and provider_ledger.source == "mcp_canonical"
@@ -6286,15 +6090,6 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                             item["fact_ledger"] = deepcopy(
                                 native_ledger_input
                             )
-                        provider_authority = evaluate_report_authority(
-                            ledger_input=item["fact_ledger"],
-                            tool_item=item,
-                        )
-                        attach_internal_report_authority(
-                            item,
-                            ledger_input=item["fact_ledger"],
-                            decision=provider_authority,
-                        )
                     if not provider_is_canonical:
                         agent_context = self._build_aiops_agent_context(
                             tool_name=tool_name,

@@ -122,12 +122,21 @@ def save_report(reports_dir: str, layer: Any, question: str, full_answer: str) -
 
 
 def extract_layer_from_report(text: str) -> str:
-    """从报告文本中提取实际层级（优先用 conclusion 的判断）"""
-    # 方法1: 表格格式 "| **问题层级** | L0 - xxx |"
+    """从报告文本中提取 Pod 异常状态标签（用于报告文件名前缀）。
+
+    层级映射已移除：优先提取新模板的 "Pod 异常状态" 行的第一个状态词；
+    兼容历史报告中的 "问题层级 L?" 格式。
+    """
+    m = re.search(
+        r'\|\s*\*{0,2}Pod\s*异常状态\*{0,2}\s*\|\s*\*{0,2}\s*([A-Za-z][A-Za-z0-9_-]*)',
+        text,
+    )
+    if m:
+        return m.group(1)
+    # 历史报告兼容："| **问题层级** | L0 - xxx |" 或 "层级: L0"
     m = re.search(r'\|\s*\*{0,2}问题层级\*{0,2}\s*\|\s*\*{0,2}\s*(L[0-4]|QUERY)', text, re.IGNORECASE)
     if m:
         return m.group(1).upper()
-    # 方法2: "**层级**: L0" 或 "- **层级**: L0" 或 "层级: L0"
     m = re.search(r'\*{0,2}层级\*{0,2}[：:\s]*\*{0,2}\s*(L[0-4]|QUERY)', text, re.IGNORECASE)
     if m:
         return m.group(1).upper()

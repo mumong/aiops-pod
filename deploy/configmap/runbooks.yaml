@@ -202,6 +202,12 @@ data:
     du -sh /var/lib/kubelet/pods/ 2>/dev/null | sort -hr | head -10
     ```
 
+    ## 补证提示（结果不足时继续挖掘）
+    - Evicted Message 未指明超限资源时：用 describe pod 原文 + `kubectl describe node` Conditions/Allocated resources 再确认一次，不要凭状态猜资源类型。
+    - 怀疑本地临时存储超限但只有单点数据时：`execute_pod_promql` 用 range 查询 `container_fs_usage_bytes`/ephemeral storage 相关指标，时间窗覆盖驱逐前。
+    - 节点压力证据不足时：补查节点事件时间线（EvictionThresholdMet/NodeHasDiskPressure），与 Pod 驱逐时间对齐。
+    - 容器 lastState 出现 OOMKilled 时切换 pod-oomkilled，不要在本 runbook 内继续。
+
     ## 判定规则
 
     | 条件 | 结论 | 置信度 |
@@ -301,6 +307,11 @@ data:
     kubectl get pods -n kube-system -o wide
     kubectl describe node <node-name>
     ```
+
+    ## 补证提示（结果不足时继续挖掘）
+    - FailedMount/FailedAttachVolume 事件原文被截断时：重查 events 并读取完整 Message，再决定分支（PVC 未 Bound / nodeAffinity / Multi-Attach / Secret/ConfigMap 缺失）。
+    - 只确认了 Pod 侧异常时：补 `kubectl_get_yaml` 看 volumes/volumeMounts 引用，再 describe 对应 PVC/PV/StorageClass 完成链路闭环。
+    - 该场景容器通常未启动：应用日志/Trace 为空是预期结果，如实记录，不要为凑维度反复查询。
 
     ## 判定规则
     | 条件 | 结论 | 置信度 |
@@ -745,6 +756,11 @@ data:
     kubectl get pods -A --field-selector status.phase=Pending | head -20
     ```
 
+    ## 补证提示（结果不足时继续挖掘）
+    - FailedScheduling 原文只有摘要时：重查 describe pod events 拿完整 "0/N nodes are available" 明细，按明细逐项分流（资源/taint/亲和/端口）。
+    - 判"资源不足"但缺数据时：`execute_pod_promql` 查节点 allocatable 与 requests 对比（如 `kube_node_status_allocatable`、`kube_pod_container_resource_requests`），确认差多少。
+    - Pending Pod 无 IP、未启动：日志/Trace 为空是预期，记录后不再重复查询。
+
     ## 判定规则
 
     | 条件 | 结论 | 置信度 |
@@ -787,6 +803,11 @@ data:
     4. `kubectl describe pod <pod> -n <namespace>`: 查看 NodeLost/Unreachable 相关事件。
     5. `kubectl get node <node> -o yaml`: 查看 Ready condition 的 lastHeartbeatTime、lastTransitionTime、reason、message。
     6. 如果 Node 当前 Ready=True 且 Pod 不再 Unknown，应按当前 Pod 状态切换到其他 runbook。
+
+    ## 补证提示（结果不足时继续挖掘）
+    - 只看到 Pod Unknown 时：必须补 Node 当前 Ready 状态与 taint；Node 已恢复 Ready 则历史 Unknown 是噪音。
+    - 需要判断"何时失联/是否闪断"时：`execute_pod_promql` 用 range 查询 `kube_node_status_condition{condition="Ready"}`，覆盖异常时间窗。
+    - kubelet 心跳证据不足时：describe node 看 Conditions 的 lastHeartbeatTime/lastTransitionTime，与 Pod Unknown 时间对齐。
 
     ## 判定规则
     | 条件 | 结论 | 置信度 |
@@ -834,6 +855,11 @@ data:
     5. 禁止把历史 Event 当成当前证据；必须以当前 `kubectl get pod` 仍能查到对象为前提。
     6. 检查 spec.terminationGracePeriodSeconds 和 lifecycle.preStop，判断是否仍在正常宽限期内。
 
+    ## 补证提示（结果不足时继续挖掘）
+    - 判卡死前先确认时间：deletionTimestamp 距今未超过 terminationGracePeriodSeconds 的不算卡死，如实记录等待中。
+    - 事件/表格数据不足以定分支时：`kubectl_get_yaml` 确认 metadata.finalizers、deletionTimestamp、preStop/grace 配置的真实值。
+    - 怀疑节点原因时：补查所在 Node Ready 状态与 kubelet 事件；节点失联的 Terminating 与 finalizer 卡住处理方式不同。
+
     ## 判定规则
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
@@ -876,6 +902,12 @@ data:
     3. `kubectl get pod <pod> -n <namespace> -o yaml`: 查看 command/args/image/resources。
     4. `kubectl get events -n <namespace> --field-selector involvedObject.name=<pod> --sort-by='.lastTimestamp'`: 查看 BackOff、probe failed、Killing。
     5. 如果日志指向配置缺失，应切换为 `ConfigError`。
+
+    ## 补证提示（结果不足时继续挖掘）
+    - Exit Code 只有数值时：先用 previous logs 找崩溃原文；kubectl previous logs 为空再用 `query_pod_logs` 按 pod_uid + 崩溃时间窗查采集侧日志，两者都空才记录日志缺失。
+    - 重启次数只有单点时：`execute_pod_promql` 用 range 查询 `kube_pod_container_status_restarts_total`，确认是持续崩溃还是已收敛。
+    - 日志给出 trace ID 或错误接口时：`query_pod_tracing` 按 trace_id/request_resource 关联故障前请求，确认是否业务流量触发。
+    - 出现 OOMKilled/Exit 137 切 pod-oomkilled；出现配置类报错切 pod-config-error。
 
     ## 判定规则
     | 条件 | 结论 | 置信度 |
@@ -922,6 +954,11 @@ data:
     5. `kubectl get node <node> -o wide` 和 `kubectl describe node <node>`: 确认 Node Ready、NetworkUnavailable、容器运行时状态。
     6. 如果事件指向 CNI 配置或 IPAM，继续检查网络插件日志。
 
+    ## 补证提示（结果不足时继续挖掘）
+    - FailedCreatePodSandBox 原文被截断时：重查 events 完整 Message，按原文分流 CNI（IP 分配/插件）与 runtime（containerd/镜像）问题。
+    - 单 Pod 证据不足以定节点面问题时：查同节点其他 Pod 是否同样沙箱失败，确认是节点级还是 Pod 级。
+    - 沙箱未建成，容器未启动：应用日志/Trace 为空是预期，记录后转向节点/CNI 侧证据。
+
     ## 判定规则
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
@@ -961,6 +998,11 @@ data:
     3. `kubectl logs <pod> -n <namespace> --tail=200`: 查看应用健康接口或启动错误。
     4. `kubectl get pod <pod> -n <namespace> -o yaml`: 查看 readinessProbe/livenessProbe/startupProbe 的 path、port、scheme、timeoutSeconds、periodSeconds、failureThreshold、initialDelaySeconds。
     5. 如用户反馈服务不可用，检查 Service Endpoints/EndpointSlice 是否包含该 Pod，确认 ready=false 还是 selector 错误。
+
+    ## 补证提示（结果不足时继续挖掘）
+    - probe 失败事件只有次数时：读 describe events 里探测失败原文（连接拒绝/超时/HTTP 状态码），区分进程未监听、端口错配、依赖未就绪。
+    - 应用侧原因不明时：`query_pod_logs` 按探测路径/端口/启动关键词与失败时间窗查日志；`query_pod_tracing` 看探测或业务请求的真实响应码与时延。
+    - 判断"一直失败还是偶发抖动"时：`execute_pod_promql` 用 range 查询 ready 状态或重启计数，覆盖失败时间窗。
 
     ## 判定规则
     | 条件 | 结论 | 置信度 |

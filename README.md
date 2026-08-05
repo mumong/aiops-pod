@@ -728,14 +728,13 @@ metrics:
 | 工作流执行器 | `app/core/workflow/executor.py` | 执行 LangGraph，发出节点生命周期和流式事件 |
 | 工作流状态 | `app/core/workflow/state.py` | 定义 `WorkflowState`，承载节点间结构化字段 |
 | 结构化 schema | `app/core/workflow/schemas.py` | 定义 Layer、Handoff、Query、Evidence、RCA 等 Pydantic contract |
-| 工作流节点 | `app/core/workflow/nodes/` | layer、evidence、rca、conclusion 四个节点实现 |
-| 报告展示 | `app/core/workflow/report_presentation.py` | 通用维度投影、source-backed observation 归一化和 AI 事实引用校验 |
-| Context 管理 | `app/core/context/` | context archive、token budget、observation summary、usage probe |
+| 工作流节点 | `app/core/workflow/nodes/` | layer、evidence、rca、conclusion 四个节点实现；conclusion 使用 `CONCLUSION_FORMATTER_PROMPT` 富模板单次生成人类可读报告 |
+| Context 管理 | `app/core/context/` | context archive、token budget、observation summary |
 | 修复执行 | `app/core/remediation/` | 修复计划解析、审批、deterministic/react 执行 |
 | 多集群联邦 | `app/core/federation/` | 子集群注册、广播查询、Agent-to-Agent、报告聚合 |
 | Runbook | `app/core/runbook/` | Runbook catalog 加载与管理 |
-| MCP 管理 | `app/core/mcp/` | MCP 状态管理和兼容补丁 |
-| Holmes 兼容层 | `app/core/holmes/` | artifacts、streaming、config loader、工具日志补丁 |
+| MCP 管理 | `app/core/mcp/` | 本地 MCP 子进程 auto-start（可选）与状态端点 |
+| Holmes 兼容层 | `app/core/holmes/` | artifacts、streaming、config loader |
 | 配置与部署 | `deploy/` | Kubernetes YAML、Secret、ConfigMap、RBAC |
 
 ### 8.2 工作流节点文件
@@ -877,13 +876,14 @@ curl http://<node-ip>:30800/api/v1/mcp/status
 .venv/bin/python -m pytest -q tests/unit/workflow
 ```
 
-Fact Ledger authority、报告和修复安全的 focused 回归：
+Fact Ledger、最终报告和修复安全的 focused 回归：
 
 ```bash
 .venv/bin/python -m pytest -q \
   tests/unit/aicall/test_observation_processing.py \
   tests/unit/workflow/test_fact_contract.py \
   tests/unit/workflow/test_context_handoff.py \
+  tests/unit/workflow/test_conclusion_formatter.py \
   tests/unit/workflow/test_ask_conclusion_remediation_json.py \
   tests/unit/remediation/test_plans.py
 ```
@@ -901,22 +901,25 @@ Fact Ledger authority、报告和修复安全的 focused 回归：
 | `app/core/context/` | context archive、token budget、工具 observation 摘要 |
 | `app/core/mcp/` | MCP server 状态管理 |
 | `deploy/` | Kubernetes 部署资源 |
-| `docs/` | 架构、上下文、流式输出、修复审批等详细文档 |
-| `specs/` | Speckit 功能规格和任务 |
+| `docs/` | 架构、上下文、流式输出、修复审批等详细文档（只保留当前设计与实现） |
 | `test/` | E2E 场景和数据集 |
+| `test/pod-anomaly-cases/` | Pod 异常测试 case 库（c01-c11，源自 aiopsdata 仓库）：`make case-list / case-deploy CASE=c07 / case-validate / case-ask / case-clean` 快速部署异常场景并评判 aiops 诊断效果 |
 | `tests/unit/` | 单元测试 |
 
 ## 12. 参考文档
 
-- `docs/ARCHITECTURE.md`
-- `docs/GUIDE.md`
-- `docs/aiops-observability-mcp-design.md`
-- `docs/aiops-traced-oom-test-environment.md`
-- `docs/aiops-observability-sprint-test-guide.md`
-- `docs/remediation-usage.md`
-- `docs/human-readable-diagnostic-reports.md`
-- `docs/prompt-governance.md`
-- `docs/workflow-structured-runtime-evolution-2026-05-09.md`
-- `docs/上下文管理设计与实现.md`
-- `docs/工作流上下文流转说明.md`
-- `docs/流式输出设计与演进.md`
+docs/ 只保留当前设计与实现的文档（历史演进/复盘/计划类文档已清理）：
+
+- `docs/ARCHITECTURE.md` — 架构说明
+- `docs/GUIDE.md` — 部署与运维
+- `docs/接口设计与实现.md` — API 设计
+- `docs/human-readable-diagnostic-reports.md` — 最终诊断报告设计（conclusion 富模板）
+- `docs/prompt-governance.md` — Prompt 管理规则
+- `docs/aiops-observability-mcp-design.md` — 真实可观测性数据与 MCP 使用
+- `docs/上下文管理设计与实现.md` — 上下文管理（archive / budget / observation）
+- `docs/工作流上下文流转说明.md` — 节点间上下文流转
+- `docs/流式输出设计与演进.md` — 流式输出设计
+- `docs/quality-metrics.md` — 质量指标口径
+- `docs/remediation-usage.md` — 修复执行与人工审批
+- `docs/tool-observation-archive-and-summary-strategy.md` — 工具 observation 与归档策略
+- `docs/aiops-traced-oom-test-environment.md` / `docs/aiops-traced-config-crashloop-test-environment.md` — 测试环境搭建

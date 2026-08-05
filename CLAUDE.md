@@ -31,7 +31,7 @@ layer（问题定位） → [条件路由] → evidence（证据采集） → rc
 - 每个节点独立，有自己的 prompt 和 LLM 调用
 - QUERY 模式（非故障查询）走 `layer → evidence → conclusion`
 - HEALTHY 模式（集群健康）走 `layer → conclusion`
-- 诊断模式（L0-L4）走完整流程
+- 诊断模式（ABNORMAL，存在异常 Pod）走完整流程；异常分类由 pod_status_keyword / pod_abnormal_type 表达，L0-L4 层级映射已移除
 
 ### SSE 事件流
 
@@ -192,6 +192,17 @@ def _analyze_with_llm(self, ...) -> tuple:
 | 2026-03-24 | 置信度保底 80% | 有工具证据+有结论 → 保底 80%（prompt + executor 后置修正） |
 | 2026-03-24 | 性能统计简化 | 各节点百分比以总耗时为分母（加起来≈100%），去掉 LLM/工具百分比 |
 | 2026-04-08 | layer_full_analysis 数据流修复 | 两阶段架构中阶段1完整分析文本（含工具输出）被阶段2精简JSON丢弃，导致下游evidence/rca"证据不足"。新增 `layer_full_analysis` state 字段传递完整数据 |
+| 2026-08-04 | conclusion 第一性原理精简 | conclusion 节点从 8697 行重写为 ~660 行：恢复 main 分支人类可读富模板 `CONCLUSION_FORMATTER_PROMPT`（📊概览/🔍现象/🕵️证据链/🎯根因/🛠️修复/📋验证），单次 `call_simple` 纯文本生成；删除 fact 标记语义草稿协议、`report_presentation.py` 确定性渲染器、12 步正则矫正链、kubectl 写命令语义授权引擎。格式稳定性靠富模板而非事后矫正（小模型友好） |
+| 2026-08-04 | 真实工具数据升级为报告核心 | conclusion 的工具数据段改用 thinking 事件的完整 `result`（observation 摘要，单条 1500 字符、最多 24 条），不再是 300 字符 preview；用户消息固定 5 段：问题/阶段1定位/阶段2证据摘要/阶段3根因/工具真实数据 + REMEDIATION_PLAN_PROMPT |
+| 2026-08-04 | 删除 report-authority 指纹机制 | `evaluate_report_authority`/`attach_internal_report_authority`/`select_authoritative_fact_ledgers` 及指纹绑定全部移除；`tool_item_allows_fact_ledger_projection` 退化为纯结构校验。fact ledger 可信度由 normalize/validate 保证 |
+| 2026-08-04 | 删除 RCA limitations 措辞重写 | `validate_rca_claims` 不再对 logging-gap/trace-gap 措辞做正则重写（~500 行），limitations 保持 LLM 原文，事实可信度由 fact-id 校验保证 |
+| 2026-08-04 | 死代码清理 | 删除：`skills/{engine,rules,evidence}.py`（规则引擎，无人引用）、`context/usage_probe.py`（全部调用点禁用）、`mcp/mcp_patch.py`、`holmes/tool_logging_patch.py`（HolmesGPT 工具链已被 AICall 取代）、evidence 的 `plan_match_adjudicator`（从未接线）、schemas 中 `ConclusionOutput`/`EvidenceMatch*`/`ReportAuthorityDecision`/`EvidenceLimitation` |
+| 2026-08-04 | 证据表带类型列 | 报告模板"已采集证据+证据关联分析"合并为"真实采集证据结果"：每行标注类型（Metric/Logging/Tracing/Topology/K8s Event/K8s State/K8s Config），Metric/Logging/Tracing 采到必须逐条入表 |
+| 2026-08-04 | 补证归属 agent 自主（架构决策） | 补采**不做代码层控制**：evidence agent 在 ReAct 循环内根据真实工具结果自主决定是否继续补证（prompt："补证由上一轮真实结果驱动"），硬约束只有 max_steps 与上下文预算。plan 只作参考与完整度统计口径，不主导采集。曾实现过代码驱动的补采外层循环，同日按此决策移除 |
+| 2026-08-04 | 移除 L0-L4 层级映射 | layer 节点只判定 `HEALTHY / ABNORMAL` + 异常 Pod 状态分析（pod_status_keyword/pod_abnormal_type）；状态→层级映射表、compatible_layers、层级展示全部移除。Layer 枚举保留 L0-L4 仅作历史输入兼容（解析时归一化为 ABNORMAL）。报告概览显示"Pod 异常状态"而非"问题层级" |
+| 2026-08-05 | 工具数据去重键修复 | `_build_tool_data_section` 去重键从"工具名+结果前80字符"改为"工具名+调用参数+结果前缀"：可观测性工具结果共享相同 OBSERVABILITY_QUERY 契约头，旧键把补采结果（trace_id 定向 span、range 趋势）误判为重复丢弃 |
+| 2026-08-05 | 集成 pod-anomaly-cases 测试库 | aiopsdata 的 c01-c11 异常 case 库拷入 `test/pod-anomaly-cases/`；Makefile 新增 case-list/case-deploy/case-validate/case-ask/case-deploy-all/case-clean。c07 config-error 非 OOM 场景实测通过：正确排除 OOM、根因"缺失关键配置"95% 置信度，报告含全五维真实数据与 trace_id |
+| 2026-08-05 | 可观测性真实值结构化直通（第一性原理） | conclusion 的可观测性工具数据改从 `ev[structured].facts` 结构化提取真实值（`_render_observability_structured`），而非拍平文本盲截断：metric 渲染 `name=value unit（趋势）`、tracing 渲染 `请求→响应码 src→dst trace_id`、logging 渲染日志原文；QUERY DSL 噪声丢弃，截断只丢整条低价值事实、绝不砍值；coverage=empty 如实呈现。修复了 metric 数值(302)被截断、tracing flow 未进 summary 而只显示 coverage/query_succeeded 元状态的问题。干净环境 c06/c09 实测：`restarts_total=4 count`、`GET /work→200 trace_id=...` 真实值进证据表 |
 
 ---
 

@@ -468,7 +468,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
     ) -> tuple:
         """lite 模式：AICall.call_simple 直接调用（不带工具），避免重复采集"""
         try:
-            layer_str = layer.value if layer else "L2"
+            layer_str = layer.value if layer else "ABNORMAL"
             system_prompt = self._get_rca_prompt().format(
                 layer=layer_str,
                 evidence_summary="证据上下文只在 user message 中提供，system prompt 不承载动态证据。"
@@ -543,7 +543,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
     ) -> tuple:
         """full 模式：仍使用 RCAOutput Pydantic schema，不调用工具、不解析手写结构化文本。"""
         try:
-            layer_str = layer.value if layer else "L2"
+            layer_str = layer.value if layer else "ABNORMAL"
 
             system_prompt = self._get_rca_prompt().format(
                 layer=layer_str,
@@ -671,7 +671,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         reason: str,
     ) -> Dict:
         """LLM 不可用或未返回有效结构化结果时的通用低置信度回退。"""
-        layer_str = layer.value if layer else "L2"
+        layer_str = layer.value if layer else "ABNORMAL"
         question_short = truncate_question(question)
         return {
             "diagnostic_status": "inconclusive",
@@ -749,7 +749,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         is_query = layer == Layer.QUERY
 
         return DeterministicDecision(
-            layer=layer or Layer.L2,
+            layer=layer or Layer.ABNORMAL,
             scenario=rca_result.get("phenomenon", "")[:50],
             category="DataQuery" if is_query else "LLMAnalysis",
             confidence=confidence,

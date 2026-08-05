@@ -586,7 +586,7 @@ class LayerClassifierNode(WorkflowNode):
                 thinking_events = []
 
             # 解析层级
-            layer = self._parse_layer(layer_result.get("layer", "L2"))
+            layer = self._parse_layer(layer_result.get("layer", "ABNORMAL"))
 
             # 解析多层级（多问题并存）
             raw_layers = layer_result.get("layers", [])
@@ -982,19 +982,14 @@ class LayerClassifierNode(WorkflowNode):
         if not self._handoff_has_active_abnormalities(layer_handoff):
             return layer, layers
 
-        corrected_layers = self._layers_from_issue_groups(layer_handoff.get("issue_groups") or [])
-        if not corrected_layers:
-            compatible = self._compatible_layer_for_abnormal_type(layer_handoff.get("pod_abnormal_type", ""))
-            if compatible:
-                corrected_layers = [self._parse_layer(compatible)]
-        if not corrected_layers:
-            corrected_layers = [Layer.L2]
+        # 层级映射已移除：存在活跃异常时统一修正为 ABNORMAL
+        corrected_layers = [Layer.ABNORMAL]
 
         corrected_layer = corrected_layers[0]
         corrected_layer_values = [item.value for item in corrected_layers]
         reason_suffix = (
             "系统确定性保护：当前真实 kubectl 工具结果仍包含异常对象，"
-            f"拒绝将 layer 输出为 HEALTHY，按异常组兼容层修正为 {corrected_layer.value}。"
+            f"拒绝将 layer 输出为 HEALTHY，修正为 {corrected_layer.value}。"
         )
         original_reason = self._pick_text(layer_result.get("reasoning"))
 
@@ -1031,18 +1026,6 @@ class LayerClassifierNode(WorkflowNode):
         if layer_handoff.get("abnormal_pods"):
             return True
         return bool(layer_handoff.get("issue_groups"))
-
-    def _layers_from_issue_groups(self, issue_groups: List[Dict[str, Any]]) -> List[Layer]:
-        result: List[Layer] = []
-        seen = set()
-        for group in issue_groups or []:
-            for value in group.get("compatible_layers") or []:
-                parsed = self._parse_layer(str(value))
-                if parsed in {Layer.HEALTHY, Layer.QUERY} or parsed.value in seen:
-                    continue
-                seen.add(parsed.value)
-                result.append(parsed)
-        return result
 
     @classmethod
     def _merge_current_abnormal_pods(
@@ -1134,13 +1117,12 @@ class LayerClassifierNode(WorkflowNode):
                 default_pod_abnormal_type=default_pod_abnormal_type,
                 layer_result=layer_result,
             )
-            compatible_layer = cls._compatible_layer_for_abnormal_type(pod_abnormal_type)
             entities = group["entities"]
             groups.append({
                 "group_id": f"g{index}",
                 "status_keywords": statuses,
                 "pod_abnormal_type": pod_abnormal_type,
-                "compatible_layers": [compatible_layer] if compatible_layer else [],
+                "compatible_layers": [],
                 "entities": entities,
                 "evidence_plan": [],
                 "possible_scenarios": cls._default_scenarios_for_abnormal_type(pod_abnormal_type),
@@ -1229,23 +1211,6 @@ class LayerClassifierNode(WorkflowNode):
         return cls._pick_text(default_pod_abnormal_type, layer_result.get("pod_abnormal_type"), "Unknown")
 
     @classmethod
-    def _compatible_layer_for_abnormal_type(cls, pod_abnormal_type: str) -> str:
-        mapping = {
-            "Evicted": "L0",
-            "VolumeMountFailed": "L0",
-            "PendingUnschedulable": "L1",
-            "NodeLostOrUnknown": "L1",
-            "TerminatingStuck": "L1",
-            "OOMKilled": "L2",
-            "CrashLoopBackOffRuntime": "L2",
-            "ImagePullFailed": "L3",
-            "SandboxCreateFailed": "L3",
-            "ConfigError": "L4",
-            "NotReadyProbeFailed": "L4",
-        }
-        return mapping.get(pod_abnormal_type, "")
-
-    @classmethod
     def _extract_current_abnormal_pods_from_events(cls, thinking_events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Extract active abnormal Pods from the current `kubectl get pods -A` table summary."""
         pods: List[Dict[str, Any]] = []
@@ -1270,18 +1235,24 @@ class LayerClassifierNode(WorkflowNode):
                     continue
                 namespace, name, ready, status = parts[0], parts[1], parts[2], parts[3]
                 is_recent_restart = row_text in recent_restart_rows
-                if is_recent_restart:
-                    status = "RecentRestart"
-                elif cls._is_normal_resource_status(status):
-                    continue
+                ready_incomplete = False
                 if "/" in ready:
                     current, desired = ready.split("/", 1)
-                    if (
-                        current == desired
-                        and status.lower() == "running"
-                        and not is_recent_restart
-                    ):
-                        continue
+                    ready_incomplete = (
+                        current.isdigit()
+                        and desired.isdigit()
+                        and current != desired
+                    )
+                if is_recent_restart:
+                    status = "RecentRestart"
+                elif status.lower() in {"completed", "succeeded"}:
+                    continue
+                elif ready_incomplete and status.lower() == "running":
+                    # readiness 探针失败：STATUS 仍是 Running 但 READY 0/1，
+                    # 必须保留为异常并显式表达真实信号
+                    status = "NotReady"
+                elif cls._is_normal_resource_status(status):
+                    continue
                 key = (namespace, name)
                 if key in seen:
                     continue
@@ -1322,9 +1293,21 @@ class LayerClassifierNode(WorkflowNode):
                 parts = row_text.split()
                 if len(parts) < 4:
                     continue
-                status = parts[3]
+                ready, status = parts[2], parts[3]
+                ready_incomplete = False
+                if "/" in ready:
+                    current, desired = ready.split("/", 1)
+                    ready_incomplete = (
+                        current.isdigit()
+                        and desired.isdigit()
+                        and current != desired
+                    )
                 if row_text in recent_restart_rows:
                     status = "RecentRestart"
+                elif status.lower() in {"completed", "succeeded"}:
+                    continue
+                elif ready_incomplete and status.lower() == "running":
+                    status = "NotReady"
                 elif cls._is_normal_resource_status(status):
                     continue
                 selected_rows.append(row_text)
@@ -1835,7 +1818,7 @@ class LayerClassifierNode(WorkflowNode):
         if not isinstance(result, dict):
             return False
         layer = str(result.get("layer") or "").upper()
-        if layer not in {"QUERY", "HEALTHY", "L0", "L1", "L2", "L3", "L4"}:
+        if layer not in {"QUERY", "HEALTHY", "ABNORMAL", "L0", "L1", "L2", "L3", "L4"}:
             return False
         if layer == "QUERY":
             query_result = result.get("query_result")
@@ -1866,23 +1849,19 @@ class LayerClassifierNode(WorkflowNode):
     def _analyze_with_rules(self, question: str) -> Dict:
         """无 LLM 时的低置信度兜底分类，避免使用人工关键词规则主导分类。"""
         return {
-            "layer": "L2",
-            "layer_name": "工作负载层",
+            "layer": "ABNORMAL",
+            "layer_name": "",
             "confidence": 0.1,
-            "reasoning": "LLM 不可用，无法完成基于问题和环境的可靠定层，使用低置信度默认层级兜底",
+            "reasoning": "LLM 不可用，无法完成基于问题和环境的可靠定位，按异常诊断低置信度兜底",
             "key_entities": [],
             "possible_scenarios": []
         }
 
     def _parse_layer(self, layer_str: str) -> Layer:
-        """解析层级字符串为 Layer 枚举"""
-        layer_map = {
-            "HEALTHY": Layer.HEALTHY,
-            "QUERY": Layer.QUERY,
-            "L0": Layer.L0,
-            "L1": Layer.L1,
-            "L2": Layer.L2,
-            "L3": Layer.L3,
-            "L4": Layer.L4,
-        }
-        return layer_map.get(layer_str.upper(), Layer.L2)
+        """解析模式判定字符串：HEALTHY / QUERY / 其余（含历史 L0-L4）均为 ABNORMAL。"""
+        value = (layer_str or "").strip().upper()
+        if value == "HEALTHY":
+            return Layer.HEALTHY
+        if value == "QUERY":
+            return Layer.QUERY
+        return Layer.ABNORMAL

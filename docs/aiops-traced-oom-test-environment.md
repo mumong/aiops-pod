@@ -172,8 +172,8 @@ Tracing 包含两层：DeepFlow 网络流，以及使用 Logging/DeepFlow 中真
 
 ### 5.2 真实采集命令
 
-先按 [Sprint 测试指南](aiops-observability-sprint-test-guide.md) 的 3.2 节建立
-Prometheus、Elasticsearch 通道，并设置
+先建立 Prometheus、Elasticsearch 访问通道（如 `kubectl port-forward` 到
+对应服务），并设置
 `PROMETHEUS_URL`、`ELASTICSEARCH_URL`、认证信息和
 `DEEPFLOW_CLICKHOUSE_URL`。
 

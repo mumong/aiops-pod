@@ -1,0 +1,104 @@
+{
+  "schema_version": "aiops.pod-anomaly-catalog.v1",
+  "cases": [
+    {
+      "id": "c01", "name": "pending-unschedulable", "directory": "cases/pending-unschedulable",
+      "namespace": "aiops-case-01", "safe": true, "runtime": false,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "apply",
+      "status_gate": {"phase": ["Pending"], "event_reasons": ["FailedScheduling"]},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "empty", "deepflow": "absent", "tempo": "absent"},
+      "evidence_examples": ["kube_pod_status_phase Pending", "FailedScheduling event"],
+      "timeout_seconds": 180, "cleanup": {"namespace": "aiops-case-01"}
+    },
+    {
+      "id": "c02", "name": "imagepull-failed", "directory": "cases/imagepull-failed",
+      "namespace": "aiops-case-02", "safe": true, "runtime": false,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "apply",
+      "status_gate": {"waiting_reasons": ["ErrImagePull", "ImagePullBackOff"], "event_reasons": ["Failed"]},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "empty", "deepflow": "absent", "tempo": "absent"},
+      "evidence_examples": ["container waiting reason", "image pull event"],
+      "timeout_seconds": 240, "cleanup": {"namespace": "aiops-case-02"}
+    },
+    {
+      "id": "c03", "name": "volume-mount-failed", "directory": "cases/volume-mount-failed",
+      "namespace": "aiops-case-03", "safe": true, "runtime": false,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "apply",
+      "status_gate": {"phase": ["Pending"], "event_reasons": ["FailedMount"]},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "empty", "deepflow": "absent", "tempo": "absent"},
+      "evidence_examples": ["FailedMount event", "unmounted volume status"],
+      "timeout_seconds": 240, "cleanup": {"namespace": "aiops-case-03"}
+    },
+    {
+      "id": "c04", "name": "createcontainer-config-error", "directory": "cases/createcontainer-config-error",
+      "namespace": "aiops-case-04", "safe": true, "runtime": false,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "apply",
+      "status_gate": {"waiting_reasons": ["CreateContainerConfigError"]},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "empty", "deepflow": "absent", "tempo": "absent"},
+      "evidence_examples": ["CreateContainerConfigError waiting reason", "missing Secret key event"],
+      "timeout_seconds": 180, "cleanup": {"namespace": "aiops-case-04"}
+    },
+    {
+      "id": "c05", "name": "sandbox-create-failed", "directory": "cases/sandbox-create-failed",
+      "namespace": "aiops-case-05", "safe": true, "runtime": false,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "apply",
+      "status_gate": {"phase": ["Pending"], "event_reasons": ["FailedCreatePodSandBox"]},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "empty", "deepflow": "absent", "tempo": "absent"},
+      "evidence_examples": ["FailedCreatePodSandBox event", "RuntimeClass handler detail"],
+      "timeout_seconds": 240, "cleanup": {"namespace": "aiops-case-05"}
+    },
+    {
+      "id": "c06", "name": "crashloop-runtime", "directory": "cases/crashloop-runtime",
+      "namespace": "aiops-case-06", "safe": true, "runtime": true,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "traffic",
+      "status_gate": {"waiting_reasons": ["CrashLoopBackOff"], "terminated_exit_codes": [2], "minimum_restarts": 1},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "present", "deepflow": "present", "tempo": "present"},
+      "evidence_examples": ["restart counter and exit 2", "pre-exit log, L7 flow and span"],
+      "timeout_seconds": 300, "cleanup": {"namespace": "aiops-case-06"}
+    },
+    {
+      "id": "c07", "name": "config-error-traced", "directory": "cases/config-error-traced",
+      "namespace": "aiops-case-07", "safe": true, "runtime": true,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "traffic",
+      "status_gate": {"waiting_reasons": ["CrashLoopBackOff"], "terminated_exit_codes": [78], "minimum_restarts": 1},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "present", "deepflow": "present", "tempo": "present"},
+      "evidence_examples": ["HTTP 500 CONFIG_MISSING", "shared trace ID in log, flow and span"],
+      "timeout_seconds": 300, "cleanup": {"namespace": "aiops-case-07"}
+    },
+    {
+      "id": "c08", "name": "oomkilled-traced", "directory": "cases/oomkilled-traced",
+      "namespace": "aiops-case-08", "safe": true, "runtime": true,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "traffic",
+      "status_gate": {"terminated_reasons": ["OOMKilled"], "terminated_exit_codes": [137], "minimum_restarts": 1},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "present", "deepflow": "present", "tempo": "present"},
+      "evidence_examples": ["memory working-set growth and limit", "allocation logs and pre-kill flow/span"],
+      "timeout_seconds": 360, "cleanup": {"namespace": "aiops-case-08"}
+    },
+    {
+      "id": "c09", "name": "readiness-probe-failed", "directory": "cases/readiness-probe-failed",
+      "namespace": "aiops-case-09", "safe": true, "runtime": true,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "traffic",
+      "status_gate": {"phase": ["Running"], "ready": false, "event_reasons": ["Unhealthy"]},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "present", "deepflow": "present", "tempo": "present"},
+      "evidence_examples": ["Ready=False", "503 flow, structured log and error span"],
+      "timeout_seconds": 240, "cleanup": {"namespace": "aiops-case-09"}
+    },
+    {
+      "id": "c10", "name": "liveness-probe-failed", "directory": "cases/liveness-probe-failed",
+      "namespace": "aiops-case-10", "safe": true, "runtime": true,
+      "workload_kind": "Deployment", "workload_name": "workload", "container": "app", "trigger": "traffic",
+      "status_gate": {"event_reasons": ["Unhealthy"], "minimum_restarts": 1},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "present", "deepflow": "present", "tempo": "present"},
+      "evidence_examples": ["liveness probe event and restart", "pre-restart logs, flow and spans"],
+      "timeout_seconds": 300, "cleanup": {"namespace": "aiops-case-10"}
+    },
+    {
+      "id": "c11", "name": "terminating-stuck", "directory": "cases/terminating-stuck",
+      "namespace": "aiops-case-11", "safe": true, "runtime": true,
+      "workload_kind": "Pod", "workload_name": "workload", "container": "app", "trigger": "delete-pod-after-ready",
+      "status_gate": {"deletion_timestamp": true, "finalizers": ["aiops.lab/hold"]},
+      "coverage": {"kubernetes": "present", "prometheus": "present", "elasticsearch": "present", "deepflow": "present", "tempo": "present"},
+      "evidence_examples": ["deletionTimestamp with finalizer", "pre-delete logs, flow and spans"],
+      "timeout_seconds": 240, "cleanup": {"namespace": "aiops-case-11", "release_finalizer": "pod/workload"}
+    }
+  ]
+}

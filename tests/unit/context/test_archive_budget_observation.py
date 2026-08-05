@@ -327,61 +327,6 @@ def test_fetch_runbook_structured_metadata_includes_requested_runbook_id(tmp_pat
     assert observation["structured"]["runbook_name"] == "pod-terminating-stuck"
 
 
-def test_context_budget_uses_provider_usage_probe_for_input_ratio(monkeypatch, caplog):
-    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
-    monkeypatch.setenv("AIOPS_CONTEXT_USAGE_PROBE", "true")
-    monkeypatch.delenv("AIOPS_TIKTOKEN_ENCODING", raising=False)
-    monkeypatch.delenv("AIOPS_TOKENIZER_JSON_PATH", raising=False)
-
-    class _ProbeResult:
-        prompt_tokens = 16000
-        total_tokens = 16001
-        completion_tokens = 1
-        source = "usage_probe:/chat/completions"
-        accuracy = "exact"
-        error = ""
-
-    captured = {}
-
-    class _Probe:
-        def __init__(self, api_base, api_key="", timeout=30.0):
-            captured["api_base"] = api_base
-            captured["api_key"] = api_key
-
-        def count_prompt_tokens(self, model, messages, tools=None):
-            captured["model"] = model
-            captured["messages"] = messages
-            captured["tools"] = tools
-            return _ProbeResult()
-
-    monkeypatch.setattr("app.core.context.budget.OpenAIUsageProbe", _Probe)
-
-    estimator = ContextBudgetEstimator()
-    budget = estimator.estimate(
-        node_id="evidence",
-        model="openai/Qwen3-32B-AWQ",
-        system_prompt="系统",
-        user_message="用户",
-        api_base="http://llm.example/v1",
-        api_key="sk-test",
-    )
-
-    assert budget["provider_prompt_tokens"] == 16000
-    assert budget["provider_input_usage_ratio"] == 0.5
-    assert captured["messages"] == [
-        {"role": "system", "content": "系统"},
-        {"role": "user", "content": "用户"},
-    ]
-
-    with caplog.at_level(logging.INFO, logger="app.core.context.budget"):
-        estimator.log(budget)
-
-    text = "\n".join(record.getMessage() for record in caplog.records)
-    assert "input_tokens=16000" in text
-    assert "input_usage=50%" in text
-    assert "input_source=usage_probe:/chat/completions" in text
-
-
 def test_context_budget_estimator_reports_component_percentages(monkeypatch):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "1000")
     estimator = ContextBudgetEstimator()
@@ -773,3 +718,18 @@ def test_observation_processor_context_guard_truncates_runbook_without_summarize
     assert len(processed["summary"]) <= 300
     assert "完整内容见 raw_ref" in processed["summary"]
     assert processed["processor"] == "runbook+passthrough_full+context_guard_truncate"
+
+
+def test_table_row_running_not_ready_is_abnormal():
+    """observation 表格摘要：0/1 Running 行必须入选异常行；Completed 0/1 不算。"""
+    from app.core.context.observation import ObservationProcessor
+    proc = ObservationProcessor.__new__(ObservationProcessor)
+    header_cols = ["NAMESPACE", "NAME", "READY", "STATUS", "RESTARTS", "AGE"]
+    status_indexes = {i for i, c in enumerate(header_cols) if c in {"READY", "STATUS", "REASON", "PHASE"}}
+    pure_status_indexes = {i for i, c in enumerate(header_cols) if c in {"STATUS", "REASON", "PHASE"}}
+    row_not_ready = "aiops-case-09  workload-x  0/1  Running  0  5m"
+    row_healthy = "kube-system  coredns-abc  1/1  Running  0  10d"
+    row_completed = "batch  job-xyz  0/1  Completed  0  1h"
+    assert proc._table_row_is_abnormal(row_not_ready, status_indexes, pure_status_indexes, set()) is True
+    assert proc._table_row_is_abnormal(row_healthy, status_indexes, pure_status_indexes, set()) is False
+    assert proc._table_row_is_abnormal(row_completed, status_indexes, pure_status_indexes, set()) is False

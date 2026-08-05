@@ -16,17 +16,6 @@ from .manager import (
 )
 
 
-def patch_mcp_toolset():
-    from .mcp_patch import patch_mcp_toolset as _patch_mcp_toolset
-
-    return _patch_mcp_toolset()
-
-
-def unpatch_mcp_toolset():
-    from .mcp_patch import unpatch_mcp_toolset as _unpatch_mcp_toolset
-
-    return _unpatch_mcp_toolset()
-
 __all__ = [
     "MCPServerInfo",
     "MCPServerManager",
@@ -34,7 +23,5 @@ __all__ = [
     "auto_start_mcp_servers",
     "shutdown_mcp_servers",
     "shutdown_mcp_servers_sync",
-    "patch_mcp_toolset",
-    "unpatch_mcp_toolset",
 ]
 

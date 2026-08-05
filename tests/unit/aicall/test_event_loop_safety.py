@@ -640,39 +640,6 @@ def test_call_simple_does_not_retry_other_api_errors(monkeypatch):
     assert len(created) == 1
 
 
-def test_call_simple_budget_observation_does_not_issue_usage_probe(
-    monkeypatch,
-):
-    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
-    monkeypatch.setenv("AIOPS_CONTEXT_USAGE_PROBE", "true")
-    ai = AICall(
-        model="openai/Qwen3.6-35B-A3B",
-        api_key="sk-test",
-        api_base="http://llm.example/v1",
-    )
-
-    class _ForbiddenProbe:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError(
-                "budget observation must not issue a provider probe"
-            )
-
-    class _Model:
-        def bind(self, **kwargs):
-            return self
-
-        def invoke(self, messages, config=None):
-            return AIMessage(content="ok")
-
-    monkeypatch.setattr(
-        "app.core.context.budget.OpenAIUsageProbe",
-        _ForbiddenProbe,
-    )
-    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
-
-    assert ai.call_simple("system", "question") == "ok"
-
-
 def test_call_simple_hard_guard_bounds_provider_input_and_archives_budget(
     tmp_path,
     monkeypatch,
@@ -2316,68 +2283,6 @@ def test_call_structured_hard_guard_rejects_oversized_static_contract_before_pro
     assert provider_calls == []
 
 
-def test_call_structured_hard_guard_never_uses_completion_probe(
-    monkeypatch,
-):
-    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
-    monkeypatch.setenv("AIOPS_CONTEXT_USAGE_PROBE", "true")
-    ai = AICall(
-        model="openai/Qwen3.6-35B-A3B",
-        api_key="sk-test",
-        api_base="http://llm.example/v1",
-        context_compaction_config={
-            "hard_guard_enabled": True,
-            "hard_guard_input_ratio": 0.72,
-            "hard_guard_safety_tokens": 2000,
-        },
-    )
-    class _ForbiddenProbe:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError(
-                "completion-based token probe must not run inside hard guard"
-            )
-
-    monkeypatch.setattr(
-        "app.core.context.budget.OpenAIUsageProbe",
-        _ForbiddenProbe,
-    )
-
-    captured = {}
-    class _StructuredModel:
-        def invoke(self, messages, config=None):
-            captured["question"] = messages[-1].content
-            return EvidencePlanOutput(
-                layer="L3",
-                evidence_plan=[],
-                collection_strategy="bounded-without-probe",
-            )
-
-    class _Model:
-        def bind(self, **kwargs):
-            return self
-
-        def with_structured_output(self, schema, **kwargs):
-            return _StructuredModel()
-
-    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
-    question = (
-        "HEAD\n"
-        + ("oversized raw provider probe input " * 6500)
-        + "\nTAIL"
-    )
-
-    parsed, _raw = ai.call_structured(
-        "system",
-        question,
-        EvidencePlanOutput,
-        node_id="rca",
-        max_tokens=6000,
-    )
-
-    assert isinstance(parsed, EvidencePlanOutput)
-    assert len(captured["question"]) < len(question)
-
-
 def test_call_structured_hard_guard_fails_closed_and_archives_unknown_window(
     tmp_path,
     monkeypatch,
@@ -2424,82 +2329,6 @@ def test_call_structured_hard_guard_fails_closed_and_archives_unknown_window(
     archived = json.loads(pre_guard_path.read_text())
     assert archived["hard_guard"]["enabled"] is True
     assert archived["hard_guard"]["error"] == "context_window_unavailable"
-
-
-def test_call_structured_hard_guard_uses_conservative_utf8_count_for_cjk(
-    monkeypatch,
-):
-    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
-    monkeypatch.setenv("AIOPS_CONTEXT_USAGE_PROBE", "true")
-    ai = AICall(
-        model="openai/Qwen3.6-35B-A3B",
-        api_key="sk-test",
-        api_base="http://llm.example/v1",
-        context_compaction_config={
-            "hard_guard_enabled": True,
-            "hard_guard_input_ratio": 0.72,
-            "hard_guard_safety_tokens": 2000,
-            "hard_guard_preserve_tail_tokens": 1200,
-        },
-    )
-    class _ForbiddenProbe:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError(
-                "hard guard must use local tokenizer or conservative count"
-            )
-
-    monkeypatch.setattr(
-        "app.core.context.budget.OpenAIUsageProbe",
-        _ForbiddenProbe,
-    )
-    captured = {}
-
-    class _StructuredModel:
-        def invoke(self, messages, config=None):
-            captured["question"] = messages[-1].content
-            return EvidencePlanOutput(
-                layer="L3",
-                evidence_plan=[],
-                collection_strategy="conservative-local-count",
-            )
-
-    class _Model:
-        def bind(self, **kwargs):
-            return self
-
-        def with_structured_output(self, schema, **kwargs):
-            return _StructuredModel()
-
-    monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
-    question = (
-        "HEAD preserve conservative local evidence\n"
-        + ("本地估算必须保守计算中文内容，不能依赖补发请求计数。" * 2000)
-        + "\nTAIL preserve structured output requirements"
-    )
-
-    parsed, _raw = ai.call_structured(
-        "system",
-        question,
-        EvidencePlanOutput,
-        node_id="rca",
-        max_tokens=6000,
-    )
-
-    assert isinstance(parsed, EvidencePlanOutput)
-    assert len(captured["question"]) < len(question)
-    assert captured["question"].startswith("HEAD preserve")
-    assert captured["question"].endswith(
-        "TAIL preserve structured output requirements"
-    )
-    schema_tokens = count_tokens(
-        EvidencePlanOutput.model_json_schema(),
-        model=ai.model_str,
-    )["tokens"]
-    assert (
-        count_tokens("system", model=ai.model_str)["tokens"]
-        + count_tokens(captured["question"], model=ai.model_str)["tokens"]
-        + schema_tokens
-    ) <= 23040
 
 
 def test_call_with_expect_json_interrupts_on_valid_json_message():

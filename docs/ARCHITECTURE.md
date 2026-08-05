@@ -102,9 +102,9 @@
 
 #### layer
 
-- 判定 `HEALTHY / L0 / L1 / L2 / L3 / L4`
-- 提取关键实体
-- 提取可能场景
+- 判定 `HEALTHY / ABNORMAL`（L0-L4 层级映射已移除）
+- 识别异常 Pod 的状态关键字（pod_status_keyword）与归一化异常类型（pod_abnormal_type）
+- 提取关键实体与可能场景
 
 #### evidence
 
@@ -120,8 +120,12 @@
 
 #### conclusion
 
-- 汇总前三个节点输出
-- 生成最终报告
+- 汇总前三个节点输出和工具真实数据（metrics / logging / tracing / kubectl）
+- 单次 `AICall.call_simple` 调用，system prompt 是 `CONCLUSION_FORMATTER_PROMPT` 人类可读富模板
+  （📊 诊断概览 / 🔍 现象描述 / 🕵️ 证据链 / 🎯 根因分析 / 🛠️ 修复建议 / 📋 验证步骤）
+- 报告结构稳定性来自富模板本身，不做事后正则矫正或二次渲染
+- LLM 失败或返回空时回退到确定性模板；HEALTHY / QUERY direct 走无 LLM 快速路径
+- 细节见 [docs/human-readable-diagnostic-reports.md](/root/huhu/agent/combine-aiops-mcp/robusta/docs/human-readable-diagnostic-reports.md)
 
 ### `/query`
 

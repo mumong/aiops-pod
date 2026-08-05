@@ -1,81 +1,67 @@
-# 人类可读、证据可核验的诊断报告
+# 人类可读、以真实数据为核心的诊断报告
 
-`/ask` 的 Fact Ledger 路径同时服务两类读者：正文供运维人员快速决策，机器附录供程序校验和事后审计。正文不是 Ledger 的字段转储，附录也不承担解释任务。
+`/ask` 的最终报告由 conclusion 节点单次 LLM 调用生成：
+system prompt 是 `app/core/prompts.py` 中的 `CONCLUSION_FORMATTER_PROMPT` 富模板，
+用户消息注入前三个阶段的分析结果和工具采集的真实可观测性数据。
+报告的结构稳定性来自这份富模板本身，不再依赖任何事后正则矫正或确定性重渲染。
 
-## 报告边界
+> 历史说明：早期版本采用「LLM 语义草稿 + `<!-- facts:id -->` 标记 +
+> `report_presentation.py` 确定性渲染 + 12 步正则矫正链」的架构，
+> 对小模型不友好且输出不稳定，已于 2026-08-04 移除。
 
-正文固定包含诊断概览、现象描述、关键证据、可观测性摘要、证据关联与因果链、根因结论、修复建议、验证步骤和注意事项。
+## 报告模板
 
-- 正文使用 `namespace/name` 等可读名称，不显示 Fact ID、内部 entity ID 或 JSON。
-- 精确状态、数值、单位、来源和因果关系只能来自 validated FactRecord 或通过校验的 source-backed observation。
-- AI 可以解释“证据说明什么”，但不能改变事实、补算精确值或扩大因果范围。
-- `机器可核验附录` 保留全部已验证事实、根因引用、coverage 限制和合同版本。
+`CONCLUSION_FORMATTER_PROMPT` 固定输出以下章节（Markdown）：
 
-## 混合数据源优先级
+1. `## 📊 诊断概览` — Pod 异常状态、分类、置信度、证据完整度表格
+2. `## 🔍 现象描述` — 用户报告 + 关键实体表格
+3. `## 🕵️ 证据链` — "真实采集证据结果"表（每行标注类型：Metric / Logging / Tracing / Topology / K8s Event / K8s State / K8s Config，含**原始数据列**）+ 紧跟的证据关联分析 + 缺失证据（同样带类型列）
+4. `## 🎯 根因分析` — ASCII 因果链 + 引用证据编号的根因结论
+5. `## 🛠️ 修复建议` — 可直接执行的命令，按优先级排序
+6. `## 📋 验证步骤` — 命令 + 预期结果表格
+7. `## ⚠️ 注意事项`
+8. `## 🧩 结构化修复计划` — 由 `REMEDIATION_PLAN_PROMPT` 约定的 JSON block，
+   供 post-diagnosis remediation executor 解析（`app/core/remediation/plans.py`）
 
-可观测性按 Metrics、Logging、Tracing、Kubernetes 和 Topology 等通用维度组织，不按故障类型选择渲染路径。
+## 真实数据如何进入报告
 
-一个 provider 的空结果只描述该 provider，不代表整个维度没有数据：
+conclusion 的用户消息固定 5 段（`conclusion_formatter.py`）：
 
-- Elasticsearch 为空、Kubernetes previous logs 有有效内容时，Logging 为“部分数据”，展示真实日志信号。
-- Tempo 为空、DeepFlow 有 flow 时，Tracing 为“部分数据”，展示请求、响应码、耗时和 trace ID。
-- 只有该维度没有任何 substantive signal 时，才显示“查询完成，当前窗口未发现匹配记录”。
+| 段落 | 来源 | 说明 |
+|------|------|------|
+| 用户问题 | `state["question"]` | 报告必须开头直接回答 |
+| 阶段1：问题定位 | `layer_handoff`（回退 `layer_analysis`） | 异常状态/实体/场景 |
+| 阶段2：证据采集摘要 | `evidence_analysis` JSON 压缩 | 完成度、清单、缺失项 |
+| 阶段3：根因分析 | `rca_analysis` JSON 压缩 | 根因、因果链、置信度（经 fact-id 校验） |
+| 工具采集的真实数据 | `thinking_events` 中 `tool_result` 的完整 `result` | metrics / logging / tracing / kubectl 的 observation 摘要，单条 ≤1500 字符、最多 24 条 |
 
-`semantic_success=true` 只是 observation 的必要条件。工具还必须属于已知日志工具，且 `structured.selected_lines` 非空。JSON 日志中的 `message`、`event`、`path` 和带 `_mib`、`_bytes`、`_ms`、`_us` 等单位后缀的字段会被通用归一化；原始归档引用仍留在附录数据中。
+防幻觉边界由三层保证（都不修改 LLM 散文）：
 
-## AI 叙述的事实约束
+1. **采集层**：`ObservationProcessor` 把工具原始输出压缩为有界真实摘要并归档，
+   可观测性工具产出标准 `FactRecord`/`FactLedger`。
+2. **RCA 层**：`validate_rca_claims`（`fact_contract.py`）校验根因引用的 fact-id
+   必须真实存在，无效引用会把结论降级为 inconclusive。
+3. **模板层**：`CONCLUSION_FORMATTER_PROMPT` 明确要求"只用真实数据、缺就写缺"，
+   证据链原始数据列只能摘自输入的工具真实数据。
 
-模型生成的事实段落使用隐藏引用：
+## 快速路径与回退
 
-```markdown
-容器状态为 **CrashLoopBackOff**。 <!-- facts:fact-123456789abc -->
-```
-
-渲染器只保留满足以下条件的段落，并在展示前删除注释：
-
-1. 引用的 Fact ID 全部存在。
-2. 普通观察段只能引用本轮已验证事实。
-3. 因果链和根因段只能引用 `claim_validation.valid_supporting_fact_ids`。
-4. 文中的精确数字、单位、哈希和代码字面量能在所引用事实中找到。
-
-不满足条件的 AI 叙述会被丢弃，并由通用、可读的确定性描述兜底。Logging 和 Tracing 等背景信号可以解释现场，但不会自动升级为根因证据。
-
-## 扩展新的 Pod 场景
-
-新增场景时扩展事实和来源合同，不新增 `if OOMKilled`、`if ImagePullBackOff` 一类报告分支。
-
-推荐顺序：
-
-1. 数据源发布标准 `FactRecord`，设置 dimension、fact_type、attribute、value、source_system 和 evidence_refs。
-2. 优先复用通用 value 字段，例如 `message`、`reason`、`status`、`request_type`、`request_resource`、`response_code`、`duration_us`、`trace_id`。
-3. 新字段确有跨场景价值时，在 `report_presentation.py` 增加字段级归一化，并用至少两个无关异常场景验证。
-4. coverage 只表达数据源能力；不得用空 coverage 覆盖同维度的真实信号。
-5. 因果结论仍通过 claim validation 和实体范围校验，不由展示代码猜测。
-
-这种扩展方式同样适用于配置错误、镜像拉取失败、调度失败、探针失败、运行时崩溃和后续新增的 Pod 异常。
+- HEALTHY：确定性健康摘要，不调 LLM。
+- QUERY direct：直接渲染上游 `query_result` 结构化表格，不调 LLM。
+- QUERY（LLM 路径）：短 JSON schema（`QueryConclusionOutput`）总结查询结果。
+- 诊断路径 LLM 失败或返回空：`_format_with_template` 确定性回退，
+  直接展示三个阶段的真实结果。
 
 ## 修复安全合同
 
-报告展示能力不改变修复授权。没有 typed remediation policy 时始终输出：
-
-```json
-{
-  "fix_type": "manual_only",
-  "requires_human_approval": true,
-  "actions": []
-}
-```
-
-来源证据中的容量值可以显示，但不会因此变成推荐资源目标，也不会授权 Kubernetes 写操作。
+`REMEDIATION_PLAN_PROMPT` 要求所有写动作 `requires_human_approval=true`，
+executor 在执行前中断等待审批（`workflow.remediation.mode: review`）。
+不适合自动修复时输出 `"remediation_available": false` 和空 actions。
 
 ## 回归验证
 
-本地回放 `tests/fixtures/observability/a006_human_report_replay.json` 覆盖 ES 空结果、Kubernetes previous logs 和 DeepFlow flow 共存的情况。它不依赖历史 agent-loop 目录、集群、MCP 或 LLM。
-
 ```bash
 pytest -q \
-  tests/unit/workflow/test_report_presentation.py \
-  tests/unit/workflow/test_fast_paths.py::test_a006_replay_shows_previous_logs_and_deepflow_in_human_body \
-  tests/unit/workflow/test_ask_conclusion_remediation_json.py \
+  tests/unit/workflow \
   tests/unit/remediation/test_plans.py
 ```

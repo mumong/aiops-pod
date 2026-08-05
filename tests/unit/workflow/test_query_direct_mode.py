@@ -11,7 +11,7 @@ from app.core.workflow.executor import WorkflowExecutor
 from app.core.workflow.graph import _make_layer_router
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
-from app.core.workflow.schemas import ConclusionOutput, LayerOutput
+from app.core.workflow.schemas import LayerOutput
 
 
 def test_layer_router_query_direct_goes_to_conclusion():
@@ -332,7 +332,7 @@ def test_layer_execute_does_not_persist_query_result_for_non_query_mode():
 
     result = node.execute({"question": "我的集群有什么问题"})
 
-    assert result["layer"] == Layer.L2
+    assert result["layer"] == Layer.ABNORMAL
     assert "query_result" not in result
 
 

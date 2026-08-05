@@ -20,14 +20,11 @@ from app.core.paths import get_project_root
 from app.core.environment import get_config_file_path
 from app.core.holmes.streaming import create_sse_message_cn, format_duration
 from app.core.holmes.config_loader import load_holmes_config_from_yaml
-from app.core.holmes.tool_logging_patch import apply_tool_result_logging_patch
 from app.core.federation import get_federation_coordinator, FederationCoordinator, get_federation_agent, FederationAgent
 from app.core.aicall import AICall
 
 logger = logging.getLogger(__name__)
 
-# 使每次工具调用的输出与错误写入 app 日志，便于调试 MCP
-apply_tool_result_logging_patch()
 
 
 def _short_cell(value: Any, max_chars: int = 80) -> str:

@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: workload
+  labels:
+    app.kubernetes.io/name: workload
+    aiops.lab/case-id: c11
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "8080"
+  finalizers:
+    - aiops.lab/hold
+spec:
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 10
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: xnet.registry.io:8443/observability/python:3-alpine
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "/opt/aiops/server.py"]
+      ports:
+        - {name: http, containerPort: 8080}
+      env:
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        - {name: FAILURE_MODE, value: normal}
+        - {name: OTLP_HTTP_ENDPOINT, value: "http://lgtm.monitor.svc:4318/v1/traces"}
+        - {name: OTEL_SERVICE_NAME, value: aiops-lab-workload}
+        - name: POD_NAME
+          valueFrom:
+            fieldRef: {fieldPath: metadata.name}
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef: {fieldPath: metadata.namespace}
+      readinessProbe:
+        httpGet: {path: /ready, port: http}
+        initialDelaySeconds: 2
+        periodSeconds: 2
+      resources:
+        requests: {cpu: 20m, memory: 24Mi}
+        limits: {cpu: 200m, memory: 96Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      volumeMounts:
+        - {name: code, mountPath: /opt/aiops, readOnly: true}
+  volumes:
+    - name: code
+      configMap: {name: workload-code}

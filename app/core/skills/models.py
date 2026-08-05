@@ -15,14 +15,21 @@ from typing import Any, Dict, List, Optional
 
 
 class Layer(str, Enum):
-    """诊断层级"""
+    """诊断模式判定
+
+    当前语义：HEALTHY（无异常）/ QUERY（直接查询）/ ABNORMAL（存在异常 Pod，
+    进入完整诊断链路）。异常的具体分类由 pod_status_keyword / pod_abnormal_type
+    表达，不再做 L0-L4 层级归因。
+    L0-L4 仅作为历史兼容值保留（旧输入仍可解析），运行时等同 ABNORMAL。
+    """
     HEALTHY = "HEALTHY"  # 集群健康，无异常
     QUERY = "QUERY"  # 直接查询（非故障诊断）
-    L0 = "L0"  # 基础设施层
-    L1 = "L1"  # 集群与节点层
-    L2 = "L2"  # 工作负载层
-    L3 = "L3"  # 服务与网络层
-    L4 = "L4"  # 应用层
+    ABNORMAL = "ABNORMAL"  # 存在异常 Pod，进入完整诊断链路
+    L0 = "L0"  # 兼容保留（deprecated）
+    L1 = "L1"  # 兼容保留（deprecated）
+    L2 = "L2"  # 兼容保留（deprecated）
+    L3 = "L3"  # 兼容保留（deprecated）
+    L4 = "L4"  # 兼容保留（deprecated）
 
 
 class Confidence(str, Enum):

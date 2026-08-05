@@ -32,20 +32,6 @@ FactTypeName = Literal[
 FactDirectness = Literal["direct", "derived", "related_context"]
 FactConfidence = Literal["high", "medium", "low", "weak"]
 FactStrength = Literal["critical", "strong", "supporting", "context"]
-ReportAuthorityMode = Literal[
-    "canonical",
-    "trusted_legacy",
-    "legacy_compatibility",
-    "rejected",
-]
-EvidenceLimitationCode = Literal[
-    "sampled_interval_unknown",
-    "representative_trace_only",
-    "availability_unmeasured",
-    "capacity_policy_missing",
-    "topology_relation_only",
-    "partial_coverage",
-]
 EvidenceToolName = Literal[
     "kubectl_describe",
     "kubectl_get_by_name",
@@ -439,25 +425,26 @@ class FactLedger(BaseModel):
         return self
 
 
-class ReportAuthorityDecision(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    mode: ReportAuthorityMode
-    authoritative: bool
-    ledger_case_id: str = ""
-    tool_name: str | None = None
-    reasons: tuple[str, ...] = ()
-    source: str = ""
-    legacy_contract: bool = False
+_CONFIDENCE_WORDS = {
+    "high": 0.9, "高": 0.9,
+    "medium": 0.6, "中": 0.6,
+    "low": 0.3, "低": 0.3,
+    "weak": 0.2,
+}
 
 
-class EvidenceLimitation(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    code: EvidenceLimitationCode
-    applies_to: tuple[str, ...] = ()
-    statement: str = Field(min_length=1)
-    source_basis: tuple[str, ...] = ()
+def _coerce_confidence(value: Any) -> Any:
+    """小模型容错：把 'high'/'高' 等字符串置信度归一化为数值。"""
+    if isinstance(value, str):
+        text = value.strip().lower().rstrip("%")
+        if text in _CONFIDENCE_WORDS:
+            return _CONFIDENCE_WORDS[text]
+        try:
+            parsed = float(text)
+            return parsed / 100 if parsed > 1 else parsed
+        except ValueError:
+            return 0.5
+    return value
 
 
 class RCAHypothesis(BaseModel):
@@ -469,19 +456,31 @@ class RCAHypothesis(BaseModel):
     unknowns: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_loose_model_output(cls, value: Any) -> Any:
+        """小模型容错：补齐缺失的 id/summary，字符串置信度归一化。
 
-class EvidenceMatchItem(BaseModel):
-    plan_id: str = Field(min_length=1)
-    tool_result_index: int | None = None
-    matched: bool
-    confidence: float = Field(ge=0.0, le=1.0)
-    reason: str = ""
-
-
-class EvidenceMatchOutput(BaseModel):
-    matches: list[EvidenceMatchItem] = Field(default_factory=list)
-    unmatched_plan_ids: list[str] = Field(default_factory=list)
-    unplanned_tool_result_indexes: list[int] = Field(default_factory=list)
+        c03 实测：模型输出的 hypothesis 缺 hypothesis_id/summary 且
+        confidence 为 'high'，整个 RCA 因此校验失败退化为 inconclusive。
+        hypothesis 是辅助字段，宽松归一化优于整体作废。
+        """
+        if not isinstance(value, dict):
+            return value
+        item = dict(value)
+        item["confidence"] = _coerce_confidence(item.get("confidence", 0.5))
+        if not str(item.get("hypothesis_id") or "").strip():
+            item["hypothesis_id"] = "h-auto"
+        if not str(item.get("summary") or "").strip():
+            fallback = (
+                item.get("statement")
+                or item.get("root_cause")
+                or item.get("description")
+                or item.get("entity_id")
+                or "unnamed hypothesis"
+            )
+            item["summary"] = str(fallback)
+        return item
 
 
 class EvidenceCollectionOutput(BaseModel):
@@ -558,6 +557,15 @@ class RCAOutput(BaseModel):
     limitations: str = ""
     llm_raw_analysis: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_loose_confidence(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "confidence" in value:
+            item = dict(value)
+            item["confidence"] = _coerce_confidence(item.get("confidence"))
+            return item
+        return value
+
     @model_validator(mode="after")
     def require_and_normalize_root_cause(self) -> "RCAOutput":
         root = (self.root_cause or "").strip()
@@ -576,38 +584,6 @@ class RCAOutput(BaseModel):
         if not (self.confidence_reason or "").strip():
             raise ValueError("RCA output requires confidence_reason")
         return self
-
-
-class ConclusionOutput(BaseModel):
-    title: str = ""
-    diagnosis_overview: dict[str, Any] = Field(default_factory=dict)
-    evidence_chain: list[dict[str, Any]] = Field(default_factory=list)
-    root_cause: str = ""
-    impact: str = ""
-    recommendations: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
-    markdown_report: str = Field(min_length=1)
-
-    @field_validator("markdown_report")
-    @classmethod
-    def validate_markdown_report_format(cls, value: str) -> str:
-        text = value.strip()
-        text = cls._normalize_flattened_markdown(text)
-        if "##" not in text:
-            raise ValueError("markdown_report must contain Markdown section headings")
-        return text
-
-    @staticmethod
-    def _normalize_flattened_markdown(text: str) -> str:
-        normalized = text
-        normalized = re.sub(r"---\s*(?=##)", "---\n", normalized)
-        normalized = re.sub(r"\s+(?=#{2,6}\s)", "\n\n", normalized)
-        normalized = re.sub(r"(?m)^(#{2,6}\s[^|\n]+?)\s+(\|)", r"\1\n\2", normalized)
-        normalized = re.sub(r"\|\s*\|(?=\s*(?:[-: ]+\|)+)", "|\n|", normalized)
-        normalized = re.sub(r"\|\s*\|(?=\s*(?:\*\*|`|[^|\s]))", "|\n|", normalized)
-        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-        normalized = re.sub(r"^---\n\n+(?=##)", "---\n", normalized)
-        return normalized.strip()
 
 
 class QueryConclusionOutput(BaseModel):

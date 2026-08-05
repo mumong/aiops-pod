@@ -2123,7 +2123,18 @@ class ObservationProcessor:
             return True
         if pure_status_text:
             normalized = pure_status_text.strip().lower()
-            if normalized in {"running", "completed", "succeeded", "ready", "bound", "active"}:
+            if normalized in {"completed", "succeeded"}:
+                return False
+            # READY 未就绪（如 0/1）即为异常：readiness 探针失败时
+            # STATUS 列仍显示 Running，不能只看状态关键字（c09 实测教训）。
+            ready_indexes = status_indexes - pure_status_indexes
+            ready_text = " ".join(
+                cells[idx] for idx in ready_indexes if idx < len(cells)
+            )
+            ready_match = re.search(r"\b(\d+)/(\d+)\b", ready_text)
+            if ready_match and int(ready_match.group(1)) < int(ready_match.group(2)):
+                return True
+            if normalized in {"running", "ready", "bound", "active"}:
                 return False
             return True
         return bool(re.search(

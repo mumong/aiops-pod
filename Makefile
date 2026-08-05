@@ -59,3 +59,47 @@ logs:
 sync-version:
 	@echo "Syncing version to $(DOCKER_TAG)..."
 	sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
+
+# ============================================================
+# Pod 异常测试 Case 库（test/pod-anomaly-cases，源自 aiopsdata 仓库）
+# 用法:
+#   make case-list                  # 列出全部 case（id/名称/维度覆盖）
+#   make case-deploy CASE=c07       # 部署单个 case
+#   make case-validate CASE=c07     # 等待异常成立并验收遥测
+#   make case-ask CASE=c07          # 对该 case 的 namespace 跑 /ask 定向诊断并保存报告
+#   make case-deploy-all            # 部署全部非破坏性 case
+#   make case-clean                 # 清理全部 case namespace（先安全释放 c11 finalizer）
+# ============================================================
+CASES_DIR := test/pod-anomaly-cases
+
+case-list:
+	@python3 -c "import json; cases=json.load(open('$(CASES_DIR)/catalog.yaml'))['cases']; \
+	print(f\"{'ID':<5}{'名称':<32}{'NS':<15}{'runtime':<9}覆盖(k8s/prom/es/deepflow/tempo)\"); \
+	[print(f\"{c['id']:<5}{c['name']:<32}{c['namespace']:<15}{str(c['runtime']):<9}\" \
+	+ '/'.join(c['coverage'][k] for k in ('kubernetes','prometheus','elasticsearch','deepflow','tempo'))) for c in cases]"
+
+case-deploy:
+	@test -n "$(CASE)" || (echo "用法: make case-deploy CASE=c07" && exit 1)
+	@dir=$$(python3 -c "import json; cases=json.load(open('$(CASES_DIR)/catalog.yaml'))['cases']; \
+	print(next(c['directory'] for c in cases if c['id']=='$(CASE)'))"); \
+	echo "🚀 部署 $(CASE): $$dir"; kubectl apply -k $(CASES_DIR)/$$dir
+
+case-validate:
+	@test -n "$(CASE)" || (echo "用法: make case-validate CASE=c07" && exit 1)
+	$(CASES_DIR)/scripts/validate.sh --case $(CASE) --wait
+
+case-ask:
+	@test -n "$(CASE)" || (echo "用法: make case-ask CASE=c07" && exit 1)
+	@ns=$$(python3 -c "import json; cases=json.load(open('$(CASES_DIR)/catalog.yaml'))['cases']; \
+	print(next(c['namespace'] for c in cases if c['id']=='$(CASE)'))"); \
+	pod=$$(kubectl get pods -n aiops -l app=aiops-copilot -o jsonpath='{.items[0].metadata.name}'); \
+	q=$$(python3 -c "import urllib.parse; print(urllib.parse.quote('请诊断 $$ns 命名空间中的异常 Pod，为什么异常？'))"); \
+	out=reports/case-$(CASE)-$$(date +%Y%m%d_%H%M%S).txt; mkdir -p reports; \
+	echo "🩺 对 $$ns 执行 /ask，报告将保存到 $$out"; \
+	kubectl exec -n aiops $$pod -- sh -c "curl -s --max-time 1500 'http://localhost:8000/ask?q='$$q'&format=text&stream=true'" | tee $$out | tail -80
+
+case-deploy-all:
+	$(CASES_DIR)/scripts/deploy-safe.sh
+
+case-clean:
+	$(CASES_DIR)/scripts/cleanup.sh
