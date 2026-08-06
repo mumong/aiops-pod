@@ -19,6 +19,10 @@ from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
+from app.core.workflow.nodes.parallel_evidence import (
+    ParallelEvidenceNode,
+    extract_abnormal_groups,
+)
 from app.core.skills.models import Layer
 
 logger = logging.getLogger(__name__)
@@ -27,6 +31,7 @@ logger = logging.getLogger(__name__)
 NODE_REGISTRY = {
     "layer": (LayerClassifierNode, "问题定位"),
     "evidence": (EvidenceCollectorNode, "证据采集"),
+    "parallel_evidence": (ParallelEvidenceNode, "并发证据采集"),
     "rca": (RootCauseAnalyzerNode, "根因分析"),
     "conclusion": (ConclusionFormatterNode, "汇总总结"),
 }
@@ -110,6 +115,7 @@ def build_diagnosis_workflow(
     runbook_catalog: Any = None,
     node_config: Optional[Dict[str, bool]] = None,
     query_mode: str = "full",
+    parallel_config: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     """
     构建诊断工作流图（支持节点启用/禁用）
@@ -128,6 +134,19 @@ def build_diagnosis_workflow(
 
     workflow = StateGraph(WorkflowState)
 
+    # 多异常并发扇出配置（异常组 > threshold 时走 parallel_evidence）
+    parallel_cfg = parallel_config or {}
+    parallel_enabled = (
+        bool(parallel_cfg.get("enabled", True))
+        and "evidence" in enabled
+        and "layer" in enabled
+    )
+    parallel_threshold = 2
+    try:
+        parallel_threshold = max(1, int(parallel_cfg.get("threshold", 2)))
+    except (TypeError, ValueError):
+        pass
+
     # 创建并添加启用的节点
     node_instances = []
     for node_id in enabled:
@@ -135,6 +154,13 @@ def build_diagnosis_workflow(
         node = cls(holmes_service, metrics, runbook_catalog)
         node_instances.append(node)
         workflow.add_node(node_id, _wrap_node_execute(node))
+
+    if parallel_enabled:
+        parallel_node = ParallelEvidenceNode(holmes_service, metrics, runbook_catalog)
+        node_instances.append(parallel_node)
+        workflow.add_node("parallel_evidence", _wrap_node_execute(parallel_node))
+        # 并发采集完成后直达 conclusion（每组的单独分析即该组 RCA，跳过全局 rca）
+        workflow.add_edge("parallel_evidence", "conclusion")
 
     # 设置入口点
     workflow.set_entry_point(enabled[0])
@@ -146,11 +172,17 @@ def build_diagnosis_workflow(
         next_node = enabled[i + 1]
 
         if node_id == "layer" and layer_enabled:
-            # layer 节点有条件路由：HEALTHY 直达 conclusion，其余进入 evidence
+            # layer 节点有条件路由：HEALTHY 直达 conclusion；异常组 > threshold
+            # 走 parallel_evidence 并发扇出；其余进入 evidence
             workflow.add_conditional_edges(
                 "layer",
-                _make_layer_router(enabled, query_mode=query_mode),
-                _make_layer_route_map(enabled),
+                _make_layer_router(
+                    enabled,
+                    query_mode=query_mode,
+                    parallel_enabled=parallel_enabled,
+                    parallel_threshold=parallel_threshold,
+                ),
+                _make_layer_route_map(enabled, parallel_enabled=parallel_enabled),
             )
         elif node_id == "evidence" and evidence_enabled:
             # evidence 节点有条件路由：QUERY 直达 conclusion，其余进入下一个分析节点
@@ -168,7 +200,12 @@ def build_diagnosis_workflow(
     return workflow.compile(), node_instances
 
 
-def _make_layer_router(enabled: list, query_mode: str = "full"):
+def _make_layer_router(
+    enabled: list,
+    query_mode: str = "full",
+    parallel_enabled: bool = False,
+    parallel_threshold: int = 2,
+):
     """创建 layer 节点的条件路由函数"""
     def router(state: WorkflowState) -> str:
         layer = state.get("layer")
@@ -183,19 +220,30 @@ def _make_layer_router(enabled: list, query_mode: str = "full"):
             next_node = enabled[idx + 1] if idx + 1 < len(enabled) else "conclusion"
             logger.info("🚀 QUERY 模式：进入 %s", next_node)
             return next_node
+        # 多异常扇出：异常组数量超过阈值时每组独立并发采集
+        if parallel_enabled:
+            groups = extract_abnormal_groups(state.get("layer_handoff"))
+            if len(groups) > parallel_threshold:
+                logger.info(
+                    "🚀 多异常并发模式：检出 %d 组 > 阈值 %d，进入 parallel_evidence",
+                    len(groups), parallel_threshold,
+                )
+                return "parallel_evidence"
         # 找 layer 之后的下一个节点
         idx = enabled.index("layer")
         return enabled[idx + 1] if idx + 1 < len(enabled) else "conclusion"
     return router
 
 
-def _make_layer_route_map(enabled: list) -> dict:
+def _make_layer_route_map(enabled: list, parallel_enabled: bool = False) -> dict:
     """创建 layer 路由的目标映射"""
     route_map = {"conclusion": "conclusion"}
     idx = enabled.index("layer")
     if idx + 1 < len(enabled):
         next_node = enabled[idx + 1]
         route_map[next_node] = next_node
+    if parallel_enabled:
+        route_map["parallel_evidence"] = "parallel_evidence"
     return route_map
 
 

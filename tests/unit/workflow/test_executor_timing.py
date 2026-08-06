@@ -151,7 +151,7 @@ def test_executor_preserves_setup_error_before_worker_creation(monkeypatch):
     node = _FailingNode("rca")
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
-        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
             _DummyWorkflow([node]),
             [node],
         ),
@@ -173,7 +173,7 @@ def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
 
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
-        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
             _DummyWorkflow(nodes),
             nodes,
         ),
@@ -204,7 +204,7 @@ def test_executor_propagates_langfuse_session_at_workflow_boundary(monkeypatch):
 
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
-        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
             _DummyWorkflow(nodes),
             nodes,
         ),
@@ -235,7 +235,7 @@ def test_executor_assigns_same_run_id_to_all_four_nodes_without_ai_call(monkeypa
 
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
-        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
             _NoopWorkflow(),
             nodes,
         ),
@@ -270,7 +270,7 @@ def test_executor_assigns_same_run_id_and_ai_call_to_all_four_nodes(monkeypatch)
 
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
-        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
             _NoopWorkflow(),
             nodes,
         ),
@@ -418,7 +418,7 @@ def test_executor_emits_heartbeat_when_workflow_is_idle(monkeypatch):
     monkeypatch.setenv("WORKFLOW_STREAM_HEARTBEAT_SECONDS", "0.02")
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
-        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full": (
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
             _SlowWorkflow(node),
             [node],
         ),

@@ -33,7 +33,7 @@ conclusion 的用户消息固定 5 段（`conclusion_formatter.py`）：
 | 阶段1：问题定位 | `layer_handoff`（回退 `layer_analysis`） | 异常状态/实体/场景 |
 | 阶段2：证据采集摘要 | `evidence_analysis` JSON 压缩 | 完成度、清单、缺失项 |
 | 阶段3：根因分析 | `rca_analysis` JSON 压缩 | 根因、因果链、置信度（经 fact-id 校验） |
-| 工具采集的真实数据 | `thinking_events` 中 `tool_result` 的完整 `result` | metrics / logging / tracing / kubectl 的 observation 摘要，单条 ≤1500 字符、最多 24 条 |
+| 工具采集的真实数据 | `thinking_events` 中 `tool_result` 事件 | **可观测性工具**从 `ev[structured].facts` 结构化提取真实值（metric `name=value unit（趋势）`、tracing `请求→响应码 + trace_id`、logging 日志原文；QUERY DSL 噪声丢弃，超限只丢整条事实、绝不砍值，`coverage=empty` 如实呈现）；**K8s 等工具**用 `result` 文本头尾保护截断（单条 ≤1500 字符）；总量最多 24 条 |
 
 防幻觉边界由三层保证（都不修改 LLM 散文）：
 

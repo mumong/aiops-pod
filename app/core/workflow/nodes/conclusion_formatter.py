@@ -29,6 +29,7 @@ from app.core.workflow.schemas import QueryConclusionOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
 from app.core.prompts import (
+    MULTI_GROUP_CONCLUSION_PROMPT,
     REMEDIATION_PLAN_PROMPT,
     get_conclusion_mode_instruction,
     get_workflow_prompt,
@@ -103,6 +104,8 @@ class ConclusionFormatterNode(WorkflowNode):
             query_result = state.get("query_result")
             thinking_events = state.get("thinking_events", [])
 
+            group_results = state.get("group_results")
+
             if layer == Layer.HEALTHY:
                 conclusion = self._format_healthy_fast_path(
                     question=question,
@@ -111,6 +114,13 @@ class ConclusionFormatterNode(WorkflowNode):
                 )
             elif layer == Layer.QUERY and self._get_query_mode() == "direct" and query_result:
                 conclusion = self._render_query_result(query_result)
+            elif group_results:
+                # 多异常并发模式：LLM 读各组摘要写结论 + 代码确定性拼接真实数据
+                conclusion = self._generate_multi_group_report(
+                    question=question,
+                    group_results=group_results,
+                    conclusion_max_tokens=state.get("conclusion_max_tokens"),
+                )
             elif getattr(self, "ai_call", None) is not None:
                 tool_data_text = self._build_tool_data_section(thinking_events)
                 conclusion = self._generate_with_llm(
@@ -771,6 +781,131 @@ class ConclusionFormatterNode(WorkflowNode):
         self._conclusion_thinking = thinking_events or []
         content = structured.markdown_report if structured is not None else ""
         return self._strip_think_blocks(content or "")
+
+    # ------------------------------------------------------------------
+    # 多异常并发模式：LLM 读摘要写结论 + 代码确定性拼接真实数据
+    # ------------------------------------------------------------------
+    def _generate_multi_group_report(
+        self,
+        *,
+        question: str,
+        group_results: List[Dict[str, Any]],
+        conclusion_max_tokens: Optional[int] = None,
+    ) -> str:
+        """多异常报告：结论/现象/关键逻辑由 LLM 基于各组摘要整理，
+        结构化真实数据由代码确定性拼接在报告后（永不因组多而丢失）。"""
+        max_tokens = self._resolve_conclusion_max_tokens(
+            layer=None, requested=conclusion_max_tokens,
+        )
+
+        # ---- LLM 部分：每组紧凑摘要 → 结论叙述 ----
+        group_sections = []
+        for r in group_results:
+            gid = r.get("group_id", "?")
+            entities = ", ".join(
+                f"{e.get('namespace', '')}/{e.get('name', '')}"
+                for e in (r.get("entities") or []) if isinstance(e, dict)
+            ) or "?"
+            statuses = "/".join(r.get("status_keywords") or []) or "?"
+            summary = str(r.get("summary") or "").strip() or "（该组无分析摘要）"
+            collection = str(r.get("collection_summary") or "").strip()
+            error = r.get("error")
+            lines = [
+                f"## 组 {gid}",
+                f"- 实体: {entities}",
+                f"- 异常状态: {statuses} | 类型: {r.get('pod_abnormal_type') or '未归类'}",
+            ]
+            if collection:
+                lines.append(f"- 采集情况: {collection[:220]}")
+            if error:
+                lines.append(f"- ⚠️ 该组采集失败: {error}")
+            lines.append(f"- 该组分析摘要:\n{summary}")
+            group_sections.append("\n".join(lines))
+
+        user_message = (
+            f"# 用户问题\n{question}\n\n"
+            f"# 各异常组独立采集分析结果（共 {len(group_results)} 组）\n\n"
+            + "\n\n".join(group_sections)
+            + "\n\n# 指令\n请基于以上各组摘要，按 system prompt 的结构生成多异常诊断报告。"
+            f"\n\n{REMEDIATION_PLAN_PROMPT}"
+        )
+
+        ai_call = getattr(self, "ai_call", None)
+        narrative = ""
+        if ai_call is not None:
+            logger.info(
+                "📍 [conclusion] 多异常模式 | %d 组, max_tokens=%d",
+                len(group_results), max_tokens,
+            )
+            self._archive_node_input({
+                "node": self.node_id,
+                "mode": "multi_group",
+                "question": question,
+                "user_message": user_message,
+                "group_count": len(group_results),
+                "max_tokens": max_tokens,
+            })
+            narrative = self._strip_think_blocks(
+                ai_call.call_simple(
+                    system_prompt=MULTI_GROUP_CONCLUSION_PROMPT,
+                    question=user_message,
+                    max_tokens=max_tokens,
+                ) or ""
+            )
+        if not narrative.strip():
+            # 回退：确定性组装各组摘要
+            narrative = self._format_multi_group_fallback(question, group_results)
+
+        # ---- 代码确定性部分：各组结构化真实数据（永不丢失） ----
+        evidence_sections = ["## 📋 各异常组真实采集证据（结构化，系统确定性拼接）"]
+        for r in group_results:
+            gid = r.get("group_id", "?")
+            entities = ", ".join(
+                f"{e.get('namespace', '')}/{e.get('name', '')}"
+                for e in (r.get("entities") or []) if isinstance(e, dict)
+            )
+            evidence_sections.append(
+                f"\n### 组 {gid}: {entities} — {r.get('pod_abnormal_type') or '/'.join(r.get('status_keywords') or [])}"
+            )
+            events = r.get("thinking_events") or []
+            rendered = self._build_tool_data_section(events) if events else ""
+            if rendered:
+                evidence_sections.append(rendered)
+            else:
+                evidence_sections.append("（该组无已归档的工具真实数据）")
+            archive_ref = r.get("archive_run_id")
+            if archive_ref:
+                evidence_sections.append(f"*完整归档: context_archives/{archive_ref}*")
+
+        return narrative.rstrip() + "\n\n---\n\n" + "\n".join(evidence_sections)
+
+    @staticmethod
+    def _format_multi_group_fallback(
+        question: str,
+        group_results: List[Dict[str, Any]],
+    ) -> str:
+        """LLM 不可用时的多组确定性回退：直接罗列各组摘要。"""
+        lines = [
+            "# 🔬 集群多异常诊断报告（确定性回退模板）",
+            "",
+            f"> 用户问题：{question}",
+            "",
+            f"检测到 {len(group_results)} 个独立异常组：",
+            "",
+        ]
+        for r in group_results:
+            entities = ", ".join(
+                f"{e.get('namespace', '')}/{e.get('name', '')}"
+                for e in (r.get("entities") or []) if isinstance(e, dict)
+            )
+            lines.append(
+                f"## 异常组 {r.get('group_id', '?')}: {entities} — "
+                f"{r.get('pod_abnormal_type') or '/'.join(r.get('status_keywords') or [])}"
+            )
+            lines.append("")
+            lines.append(str(r.get("summary") or "（无分析摘要）"))
+            lines.append("")
+        return "\n".join(lines)
 
     @staticmethod
     def _strip_think_blocks(content: str) -> str:

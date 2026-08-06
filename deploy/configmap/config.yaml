@@ -195,6 +195,13 @@ data:
         # 补证策略（架构决策）：不在代码层做补采控制。agent 在 ReAct 循环内
         # 根据真实工具结果自主决定是否继续补证，硬约束只有 max_steps 与
         # 上下文预算（context_compaction / 80% 硬顶）。
+        # 多异常并发扇出：layer 检出异常组 > threshold 时，每组一个独立
+        # evidence context 并发采集+单组分析（不随 N 塌缩）；≤ threshold 走
+        # 原单 context 逻辑。conclusion 确定性拼接结构化真实数据 + LLM 读摘要写结论。
+        parallel:
+          enabled: true
+          threshold: 2        # 异常组 > 2 才并发；≤2 保持现有单 context 逻辑
+          max_concurrency: 3  # 同时并发的组数上限（1-8）
 
       conclusion:
         # 最终报告输出 token 上限；query 短答，diagnosis 完整报告。

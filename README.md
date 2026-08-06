@@ -888,6 +888,74 @@ Fact Ledger、最终报告和修复安全的 focused 回归：
   tests/unit/remediation/test_plans.py
 ```
 
+### 10.4 异常 Case 测试（创建 / 诊断 / 清理）
+
+`test/pod-anomaly-cases/` 内置 11 个可重复部署的 Pod 异常场景（c01-c11），用于评判
+aiops 的自主根因分析。两大族：
+
+- **控制面 case（c01-c05）**：容器不会启动（Pending/ImagePull/VolumeMount/ConfigError/Sandbox）。
+  只有 K8s 状态/事件和 kube-state 指标；**没有应用日志和 Trace 是正常结果**，报告应诚实写空。
+- **运行态 case（c06-c11）**：应用真实运行并接收流量（CrashLoop/ConfigTraced/OOM/Readiness/Liveness/Terminating）。
+  产生全五维真实数据：Prometheus 指标、ES 日志、DeepFlow Flow、Tempo Span（同一请求共享 trace_id）。
+
+#### 创建异常 case
+
+```bash
+make case-list                # 查看全部 case（id / 名称 / namespace / 维度覆盖预期）
+make case-deploy CASE=c08     # 部署单个 case（如 c08 OOM）
+```
+
+部署后需等待异常成立和遥测积累：控制面 case 约 1-2 分钟；运行态 case 约 3 分钟
+（需要 traffic-driver 驱动出真实指标/日志/Trace）。可用 `kubectl get pods -n aiops-case-08 -w` 观察。
+
+c11（Terminating 卡死）需要手动触发删除：
+
+```bash
+make case-deploy CASE=c11
+kubectl -n aiops-case-11 wait --for=condition=Ready pod/workload --timeout=180s
+kubectl -n aiops-case-11 logs pod/workload --tail=20     # 确认已有 http_request 日志
+kubectl -n aiops-case-11 delete pod workload --wait=false
+```
+
+#### 诊断与评判
+
+```bash
+make case-ask CASE=c08        # 定向诊断该 case 的 namespace，报告存 reports/case-c08-*.txt
+```
+
+或直接问集群级问题（适合多异常混合测试）：
+
+```bash
+curl "http://<node-ip>:30800/ask?q=我的集群现在有哪些异常Pod？分别是什么原因？&format=text&stream=true"
+```
+
+审报告重点：`真实采集证据结果` 表中 Metric/Logging/Tracing 行是否为**真实值**
+（数值+趋势 / 日志原文 / `请求 → 响应码 + trace_id`），而非 coverage/status 元状态；
+控制面 case 的空维度是否诚实标注。
+
+#### 多异常混合测试
+
+同时部署 2 个 case 后用集群级提问，验证多异常组输出（每组独立分类、根因、修复建议）：
+
+```bash
+make case-deploy CASE=c06
+make case-deploy CASE=c09
+# 等 3 分钟后集群级提问（见上）
+```
+
+⚠️ **当前建议最多 2 个 case 同时测试**：小模型上下文/注意力被多异常组分摊，
+实测 2 组时证据表已可能丢失 Metric 行（数据采到了但没入表），更多组会进一步降质。
+
+#### 清理异常 case
+
+```bash
+kubectl delete namespace aiops-case-08          # 清理单个 case（推荐日常用）
+make case-clean                                 # ⚠️ 清理全部 aiops-case-* namespace
+                                                #（会先安全释放 c11 finalizer 再删）
+```
+
+case 清单/编排细节/离线验收脚本见 [test/pod-anomaly-cases/README.md](test/pod-anomaly-cases/README.md)。
+
 ## 11. 关键目录
 
 | 路径 | 说明 |
@@ -922,4 +990,4 @@ docs/ 只保留当前设计与实现的文档（历史演进/复盘/计划类文
 - `docs/quality-metrics.md` — 质量指标口径
 - `docs/remediation-usage.md` — 修复执行与人工审批
 - `docs/tool-observation-archive-and-summary-strategy.md` — 工具 observation 与归档策略
-- `docs/aiops-traced-oom-test-environment.md` / `docs/aiops-traced-config-crashloop-test-environment.md` — 测试环境搭建
+- `test/pod-anomaly-cases/README.md` — 异常 case 库（c01-c11）编排与验收细节（快速上手见本 README §10.4）

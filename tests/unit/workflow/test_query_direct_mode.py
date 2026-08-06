@@ -1087,7 +1087,7 @@ def test_executor_does_not_propagate_ambient_query_mode_to_nodes(monkeypatch):
         def stream(self, initial_state):
             return iter([])
 
-    def _fake_build_workflow(holmes_service, metrics, runbook_catalog, node_config=None, query_mode="full"):
+    def _fake_build_workflow(holmes_service, metrics, runbook_catalog, node_config=None, query_mode="full", **_kw):
         captured["query_mode"] = query_mode
         node = SimpleNamespace(
             node_id="layer",

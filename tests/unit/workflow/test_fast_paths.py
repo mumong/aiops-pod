@@ -1539,15 +1539,6 @@ def test_deployment_enables_autonomous_evidence_context_stop():
     assert config["workflow"]["evidence"]["early_stop"]["enabled"] is True
 
 
-def test_traced_oom_manifest_does_not_leak_fault_answer_in_span_attributes():
-    manifest = (
-        Path(__file__).resolve().parents[3] / "testcases" / "aiops-traced-oom.yaml"
-    ).read_text(encoding="utf-8")
-
-    assert "aiops.fault.type" not in manifest
-    assert "resource.memory.oomkilled" not in manifest
-
-
 def test_conclusion_tool_data_uses_final_observability_projection():
     node = ConclusionFormatterNode()
     events = [

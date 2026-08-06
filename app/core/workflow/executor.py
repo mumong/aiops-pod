@@ -205,10 +205,15 @@ class WorkflowExecutor:
         wf_config.pop("query_mode", None)
         if workflow_overrides and "query_mode" in workflow_overrides:
             wf_config["query_mode"] = query_mode
+        evidence_cfg = wf_config.get("evidence", {}) if isinstance(wf_config, dict) else {}
+        parallel_config = (
+            evidence_cfg.get("parallel", {}) if isinstance(evidence_cfg, dict) else {}
+        )
         workflow, node_instances = build_diagnosis_workflow(
             self.holmes_service, metrics, self.runbook_catalog,
             node_config=node_config,
             query_mode=query_mode,
+            parallel_config=parallel_config,
         )
 
         # Propagate per-request metadata to every node. `current_run_id` must
