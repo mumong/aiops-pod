@@ -1388,6 +1388,69 @@ def test_layer_guard_rejects_healthy_when_current_tool_scan_has_abnormal_pods():
     assert handoff["current_abnormal_summary"]["total_abnormal"] == 1
 
 
+def test_layer_guard_keeps_healthy_when_scan_is_clean_despite_llm_noise_fields():
+    """真实缺陷复现（run 77a5dd3e44ee411d）：集群扫描 61 Pod 全 Running、
+    total_abnormal=0，LLM 判定 HEALTHY 正确，但把历史重启的控制面 Pod
+    手填进 abnormal_pods。守卫只能信确定性扫描信号，不得用 LLM 手写
+    字段推翻正确的 HEALTHY 判定。"""
+    node = LayerClassifierNode()
+    layer_result = {
+        "layer": "HEALTHY",
+        "derived_layer": "HEALTHY",
+        "layers": ["HEALTHY"],
+        "confidence": 0.5,
+        "reasoning": "61 pods all Running, 0 abnormal, 0 recent restarts",
+        "abnormal_pods": [
+            {"name": "etcd-master", "namespace": "kube-system"},
+            {"name": "kube-apiserver-master", "namespace": "kube-system"},
+            {"name": "calico-node", "namespace": "kube-system"},
+        ],
+        "abnormal_groups": [{
+            "group_id": "g1",
+            "status_keywords": ["Unknown"],
+            "pod_abnormal_type": "Unknown",
+            "entities": [
+                {"kind": "Pod", "namespace": "kube-system", "name": "etcd-master"},
+            ],
+        }],
+        "pod_status_keyword": "",
+        "pod_abnormal_type": "",
+    }
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "kubectl_get_by_kind_in_cluster",
+            "structured": {
+                "header": "NAMESPACE NAME READY STATUS RESTARTS AGE IP NODE LABELS",
+                "status_counts": {"Running": 61},
+                "selected_rows": [],
+                "recent_restart_rows": [],
+            },
+            "result": "Pod table: all Running",
+        }
+    ]
+    handoff = node._build_layer_handoff(
+        question="我的集群现在有什么问题",
+        layer_result=layer_result,
+        layer=Layer.HEALTHY,
+        layers=[Layer.HEALTHY],
+        thinking_events=events,
+    )
+
+    layer, layers = node._guard_healthy_with_active_abnormalities(
+        layer_result=layer_result,
+        layer_handoff=handoff,
+        layer=Layer.HEALTHY,
+        layers=[Layer.HEALTHY],
+    )
+
+    assert layer == Layer.HEALTHY
+    assert layers == [Layer.HEALTHY]
+    assert layer_result["layer"] == "HEALTHY"
+    assert handoff.get("layer") != "ABNORMAL"
+
+
 def test_layer_handoff_merges_current_scan_when_lite_output_omits_secondary_issue():
     node = LayerClassifierNode()
     layer_result = {

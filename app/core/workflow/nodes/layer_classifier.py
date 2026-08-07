@@ -1015,17 +1015,17 @@ class LayerClassifierNode(WorkflowNode):
 
     @staticmethod
     def _handoff_has_active_abnormalities(layer_handoff: Dict[str, Any]) -> bool:
+        """只依据确定性扫描信号判定，LLM 手写字段（abnormal_pods/issue_groups）
+        不得作为推翻 HEALTHY 的依据：LLM 可能把历史重启等"值得留意"的对象
+        误填进异常字段，而真实表格解析（total_abnormal/selected_rows）已经
+        包含 RecentRestart/NotReady 等全部当前异常。"""
         summary = layer_handoff.get("current_abnormal_summary") or {}
         try:
             if int(summary.get("total_abnormal") or 0) > 0:
                 return True
         except (TypeError, ValueError):
             pass
-        if summary.get("selected_rows"):
-            return True
-        if layer_handoff.get("abnormal_pods"):
-            return True
-        return bool(layer_handoff.get("issue_groups"))
+        return bool(summary.get("selected_rows"))
 
     @classmethod
     def _merge_current_abnormal_pods(
