@@ -525,6 +525,27 @@ class EvidenceCollectionOutput(BaseModel):
     early_stop: dict[str, Any] = Field(default_factory=dict)
 
 
+class EntityDiagnosisSummary(BaseModel):
+    """Fact-linked diagnosis for exactly one scoped abnormal entity."""
+
+    namespace: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    status: str = ""
+    phenomenon: str = ""
+    root_cause: str = "证据不足"
+    causal_chain: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    supporting_fact_ids: list[str] = Field(default_factory=list)
+    contradicting_fact_ids: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+
+
+class GroupDiagnosisSummaryOutput(BaseModel):
+    """Structured per-entity analysis emitted by one parallel evidence group."""
+
+    entities: list[EntityDiagnosisSummary] = Field(default_factory=list)
+
+
 class ContextCompactionSummary(BaseModel):
     process_summary: list[str] = Field(default_factory=list)
     evidence_plan: list[dict[str, Any]] = Field(default_factory=list)

@@ -7,10 +7,12 @@ from pydantic import ValidationError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from app.core.workflow.schemas import (
+    EntityDiagnosisSummary,
     EvidenceCollectionOutput,
     EvidencePlanOutput,
     FactLedger,
     FactRecord,
+    GroupDiagnosisSummaryOutput,
     LayerHandoff,
     LayerOutput,
     QueryResult,
@@ -570,3 +572,38 @@ def test_rca_hypothesis_normalizes_loose_small_model_output():
         "confidence_reason": "FailedMount 事件明确",
     })
     assert out.confidence == 0.9
+
+
+def test_group_diagnosis_schema_preserves_per_entity_fact_links():
+    parsed = GroupDiagnosisSummaryOutput.model_validate({
+        "entities": [{
+            "namespace": "aiops-case-09",
+            "name": "workload-abc",
+            "status": "Running / Ready=False",
+            "phenomenon": "readiness probe HTTP 503",
+            "root_cause": "dependency unavailable",
+            "causal_chain": [
+                "dependency unavailable",
+                "GET /work -> HTTP 503",
+                "Ready=False",
+            ],
+            "confidence": 0.96,
+            "supporting_fact_ids": ["fact-log-503", "fact-flow-503"],
+            "contradicting_fact_ids": [],
+            "unknowns": [],
+        }],
+    })
+
+    entity = parsed.entities[0]
+    assert entity.namespace == "aiops-case-09"
+    assert entity.root_cause == "dependency unavailable"
+    assert entity.supporting_fact_ids == ["fact-log-503", "fact-flow-503"]
+
+
+def test_entity_diagnosis_schema_rejects_empty_name_and_invalid_confidence():
+    with pytest.raises(ValidationError):
+        EntityDiagnosisSummary.model_validate({
+            "namespace": "aiops-case-09",
+            "name": "",
+            "confidence": 1.2,
+        })

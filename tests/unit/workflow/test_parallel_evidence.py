@@ -196,3 +196,224 @@ def test_group_state_key_entities_are_dicts_for_evidence_planner():
     # 复现 evidence planner 的取值不崩溃
     rendered = [f"{e.get('type', '')}: {e.get('value', '')}" for e in scoped["key_entities"]]
     assert all("/" in r for r in rendered)
+
+
+def test_group_result_legacy_fallback_prefers_full_content_over_500_char_preview():
+    group = _handoff(1)["issue_groups"][0]
+    decisive = "dependency unavailable -> HTTP 503 -> Ready=False"
+    result = ParallelEvidenceNode._build_group_result(
+        "g1",
+        group,
+        {
+            "evidence_analysis": json.dumps({"collection_summary": "采集完成"}),
+            "thinking_events": [{
+                "type": "ai_message",
+                "content": "x" * 500,
+                "full_content": "x" * 700 + decisive,
+            }],
+        },
+        "run1",
+    )
+
+    assert decisive in result["summary"]
+    assert result["legacy_text_fallback"] is True
+
+
+def test_parallel_result_contains_four_dimensions_for_every_entity(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.workflow.nodes.parallel_evidence.EvidenceCollectorNode",
+        _FakeCollector,
+    )
+    node = ParallelEvidenceNode()
+    node.workflow_config_override = {"evidence": {"parallel": {"max_concurrency": 2}}}
+    node.tools = []
+    result = node.execute({
+        "question": "诊断",
+        "run_id": "run-dimensions",
+        "layer": Layer.ABNORMAL,
+        "layer_handoff": _handoff(3),
+        "thinking_events": [],
+    })
+
+    for group_result in result["group_results"]:
+        entity = group_result["entities"][0]
+        key = f"{entity['namespace']}/{entity['name']}"
+        assert set(group_result["dimension_evidence_by_entity"][key]) >= {
+            "kubernetes", "metrics", "logging", "tracing",
+        }
+
+
+def test_structured_group_diagnosis_keeps_merged_entity_roots_separate(monkeypatch):
+    class _MergedCollector(_FakeCollector):
+        def execute(self, state):
+            entities = state["layer_handoff"]["issue_groups"][0]["entities"]
+            events = []
+            for entity, fact_id, message in (
+                (entities[0], "fact-c06", "exit 2 runtime process exiting"),
+                (entities[1], "fact-c10", "liveness HTTP 500 kubelet restart exit 137"),
+            ):
+                events.append({
+                    "type": "tool_result", "status": "success", "semantic_success": True,
+                    "tool_name": "query_pod_logs",
+                    "tool_args": {
+                        "namespace": entity["namespace"], "pod": entity["name"],
+                        "purpose": "根因日志",
+                    },
+                    "structured": {
+                        "status": "query_succeeded", "dimension": "logging",
+                        "coverage": "present", "source_system": "elasticsearch",
+                        "entity": {
+                            "namespace": entity["namespace"], "pod": entity["name"],
+                            "pod_uid": f"uid-{fact_id}", "pod_ip": "172.16.1.9",
+                        },
+                        "fact_ledger": {
+                            "records": [{
+                                "fact_id": fact_id,
+                                "entity_id": f"k8s.pod:{entity['namespace']}/{entity['name']}:uid",
+                                "entity_kind": "Pod", "namespace": entity["namespace"],
+                                "entity_name": entity["name"], "dimension": "logging",
+                                "fact_type": "log", "attribute": "log.message",
+                                "value": message, "source_system": "elasticsearch",
+                                "evidence_refs": [f"ref-{fact_id}"],
+                            }],
+                        },
+                    },
+                })
+            return {
+                "evidence_analysis": json.dumps({"collection_summary": "采集完成"}),
+                "thinking_events": events,
+            }
+
+    class _StructuredAI:
+        def call_structured(self, **kwargs):
+            schema = kwargs["schema"]
+            return schema.model_validate({
+                "entities": [
+                    {
+                        "namespace": "aiops-case-06", "name": "crash",
+                        "status": "CrashLoopBackOff", "phenomenon": "exit 2",
+                        "root_cause": "runtime process exited",
+                        "causal_chain": ["runtime error", "exit 2", "restart"],
+                        "confidence": 0.9, "supporting_fact_ids": ["fact-c06"],
+                    },
+                    {
+                        "namespace": "aiops-case-10", "name": "probe",
+                        "status": "RecentRestart", "phenomenon": "liveness HTTP 500",
+                        "root_cause": "liveness probe failure",
+                        "causal_chain": ["HTTP 500", "kubelet restart"],
+                        "confidence": 0.9, "supporting_fact_ids": ["fact-c10"],
+                    },
+                ],
+            }), "structured"
+
+    handoff = {
+        "layer": "ABNORMAL",
+        "issue_groups": [{
+            "group_id": "g1", "status_keywords": ["CrashLoopBackOff", "RecentRestart"],
+            "pod_abnormal_type": "RuntimeFailure",
+            "entities": [
+                {"kind": "Pod", "namespace": "aiops-case-06", "name": "crash"},
+                {"kind": "Pod", "namespace": "aiops-case-10", "name": "probe"},
+            ],
+        }],
+    }
+    monkeypatch.setattr(
+        "app.core.workflow.nodes.parallel_evidence.EvidenceCollectorNode",
+        _MergedCollector,
+    )
+    node = ParallelEvidenceNode()
+    node.ai_call = _StructuredAI()
+    node.tools = []
+    result = node.execute({
+        "question": "诊断", "run_id": "run-merged", "layer": Layer.ABNORMAL,
+        "layer_handoff": handoff, "thinking_events": [],
+    })
+
+    summaries = {
+        f"{item['namespace']}/{item['name']}": item
+        for item in result["group_results"][0]["entity_summaries"]
+    }
+    assert summaries["aiops-case-06/crash"]["supporting_fact_ids"] == ["fact-c06"]
+    assert summaries["aiops-case-10/probe"]["supporting_fact_ids"] == ["fact-c10"]
+    assert "OOM" not in summaries["aiops-case-10/probe"]["root_cause"]
+
+
+def test_multi_group_report_renders_readable_four_dimension_entity_card():
+    class _AI:
+        def call_simple(self, **kwargs):
+            return "# 多异常诊断结论\n\n已按实体完成分析。"
+
+    node = ConclusionFormatterNode()
+    node.ai_call = _AI()
+    dimensions = {
+        "kubernetes": {
+            "dimension": "kubernetes", "status": "present", "source_systems": ["kubernetes"],
+            "query_count": 2, "present_query_count": 2, "empty_query_count": 0,
+            "facts": [{"fact_id": "fact-k8s", "source_system": "kubernetes",
+                       "value": "Ready=False; readiness probe HTTP 503", "evidence_refs": []}],
+            "limitations": [],
+        },
+        "metrics": {
+            "dimension": "metrics", "status": "present", "source_systems": ["prometheus"],
+            "query_count": 1, "present_query_count": 1, "empty_query_count": 0,
+            "facts": [{"fact_id": "fact-metric", "source_system": "prometheus",
+                       "value": "kube_pod_container_status_ready = 0", "evidence_refs": ["metric-ref"]}],
+            "limitations": [],
+        },
+        "logging": {
+            "dimension": "logging", "status": "present", "source_systems": ["elasticsearch"],
+            "query_count": 2, "present_query_count": 1, "empty_query_count": 1,
+            "facts": [{"fact_id": "fact-log", "source_system": "elasticsearch",
+                       "value": "dependency unavailable -> HTTP 503", "evidence_refs": ["log-ref"]}],
+            "limitations": ["另有 1 次补充查询未命中，但不覆盖已采集真实事实"],
+        },
+        "tracing": {
+            "dimension": "tracing", "status": "present", "source_systems": ["deepflow", "tempo"],
+            "query_count": 1, "present_query_count": 1, "empty_query_count": 0,
+            "facts": [{"fact_id": "fact-trace", "source_system": "deepflow",
+                       "value": "GET /work -> HTTP 503 trace_id=abc", "evidence_refs": ["trace-ref"]}],
+            "limitations": [],
+        },
+    }
+    group_results = [{
+        "group_id": "g7", "pod_abnormal_type": "NotReadyProbeFailed",
+        "status_keywords": ["NotReady"],
+        "entities": [{"kind": "Pod", "namespace": "aiops-case-09", "name": "workload"}],
+        "entity_summaries": [{
+            "namespace": "aiops-case-09", "name": "workload",
+            "status": "Running / Ready=False", "phenomenon": "readiness probe HTTP 503",
+            "root_cause": "dependency unavailable",
+            "causal_chain": ["dependency unavailable", "HTTP 503", "Ready=False"],
+            "confidence": 0.96,
+            "supporting_fact_ids": ["fact-log", "fact-trace"],
+            "contradicting_fact_ids": [], "unknowns": [],
+        }],
+        "dimension_evidence_by_entity": {"aiops-case-09/workload": dimensions},
+        "summary": "legacy summary must not be authoritative",
+        "collection_summary": "采集完成", "completeness": 1.0,
+        "thinking_events": [{
+            "type": "tool_result", "status": "success", "tool_name": "query_pod_logs",
+            "node": "evidence", "tool_args": {"namespace": "aiops-case-09", "pod": "workload"},
+            "structured": {"dimension": "logging", "coverage": "present", "facts": [{
+                "name": "log.message", "dimension": "logging",
+                "value": "dependency unavailable", "source_system": "elasticsearch",
+            }]},
+        }],
+        "archive_run_id": "run-g7", "error": None,
+    }]
+
+    report = node.execute({
+        "question": "检查异常", "layer": Layer.ABNORMAL,
+        "group_results": group_results, "thinking_events": [],
+    })["conclusion"]
+
+    assert "## 异常组 g7 · aiops-case-09/workload" in report
+    assert "**根因**：dependency unavailable" in report
+    assert "| Kubernetes | present |" in report
+    assert "| Metrics | present |" in report
+    assert "| Logging | present |" in report
+    assert "| Tracing | present |" in report
+    assert "GET /work -> HTTP 503 trace_id=abc" in report
+    assert "补充查询未命中" in report
+    assert "<details>" in report and "逐工具原始证据" in report
+    assert "run-g7" in report

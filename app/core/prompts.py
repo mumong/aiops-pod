@@ -619,6 +619,23 @@ agent 完成真实数据采集和单组分析。你的任务：基于各组摘�
 4. 完整的结构化真实采集证据由系统在报告后附加，你不需要复述证据表
 """
 
+
+GROUP_EVIDENCE_SUMMARY_PROMPT = """
+你是 Kubernetes 单组证据分析器。输入包含本组允许分析的实体，以及按实体和
+Kubernetes/Metrics/Logging/Tracing 聚合的真实事实。
+
+输出必须严格符合 GroupDiagnosisSummaryOutput：
+1. 输入中的每个实体恰好输出一条，namespace/name 必须逐字一致，不能新增实体。
+2. 每个实体只能引用它自己名下出现的 fact_id，禁止跨实体复用退出码、OOM、日志、
+   指标、探针或 Trace 事实。
+3. phenomenon、root_cause、causal_chain 只能由 supporting_fact_ids 支撑；证据不足时
+   root_cause 写“证据不足”，并把缺口写入 unknowns。
+4. exit code 137 只有在 Kubernetes 明确给出 Reason=OOMKilled 时才能判断 OOM；普通
+   Error/137、探针 Killing 或删除期间终止都不能写 OOMKilled。
+5. coverage=empty/absent/not_applicable 是证据边界，不是根因。
+6. 不输出 Markdown，不输出修复命令，只返回 Pydantic 结构化对象。
+"""
+
 REMEDIATION_PLAN_PROMPT = """
 在报告末尾额外输出一个 `## 🧩 结构化修复计划` 区块，必须包含一个 JSON fenced block。
 

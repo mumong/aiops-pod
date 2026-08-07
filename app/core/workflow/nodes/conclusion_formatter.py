@@ -819,7 +819,16 @@ class ConclusionFormatterNode(WorkflowNode):
                 lines.append(f"- 采集情况: {collection[:220]}")
             if error:
                 lines.append(f"- ⚠️ 该组采集失败: {error}")
-            lines.append(f"- 该组分析摘要:\n{summary}")
+            entity_summaries = r.get("entity_summaries") or []
+            dimensions = r.get("dimension_evidence_by_entity") or {}
+            if entity_summaries:
+                lines.append("- 结构化实体诊断与维度事实:")
+                lines.append(json.dumps({
+                    "entities": entity_summaries,
+                    "dimension_evidence_by_entity": dimensions,
+                }, ensure_ascii=False, separators=(",", ":"), default=str))
+            else:
+                lines.append(f"- 该组分析摘要（兼容旧数据）:\n{summary}")
             group_sections.append("\n".join(lines))
 
         user_message = (
@@ -856,17 +865,17 @@ class ConclusionFormatterNode(WorkflowNode):
             # 回退：确定性组装各组摘要
             narrative = self._format_multi_group_fallback(question, group_results)
 
-        # ---- 代码确定性部分：各组结构化真实数据（永不丢失） ----
-        evidence_sections = ["## 📋 各异常组真实采集证据（结构化，系统确定性拼接）"]
+        # ---- 代码确定性部分：可读实体卡片 + 折叠逐工具原始证据 ----
+        entity_cards = self._render_multi_group_entity_cards(group_results)
+        evidence_sections = ["## 🔎 逐工具原始证据与归档"]
         for r in group_results:
             gid = r.get("group_id", "?")
             entities = ", ".join(
                 f"{e.get('namespace', '')}/{e.get('name', '')}"
                 for e in (r.get("entities") or []) if isinstance(e, dict)
             )
-            evidence_sections.append(
-                f"\n### 组 {gid}: {entities} — {r.get('pod_abnormal_type') or '/'.join(r.get('status_keywords') or [])}"
-            )
+            title = f"组 {gid}: {entities} — {r.get('pod_abnormal_type') or '/'.join(r.get('status_keywords') or [])}"
+            evidence_sections.append(f"\n<details>\n<summary>{title} · 逐工具原始证据</summary>\n")
             events = r.get("thinking_events") or []
             rendered = self._build_tool_data_section(events) if events else ""
             if rendered:
@@ -876,8 +885,106 @@ class ConclusionFormatterNode(WorkflowNode):
             archive_ref = r.get("archive_run_id")
             if archive_ref:
                 evidence_sections.append(f"*完整归档: context_archives/{archive_ref}*")
+            evidence_sections.append("</details>")
 
-        return narrative.rstrip() + "\n\n---\n\n" + "\n".join(evidence_sections)
+        sections = [narrative.rstrip()]
+        if entity_cards:
+            sections.extend(["---", entity_cards])
+        sections.extend(["---", "\n".join(evidence_sections)])
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _multi_group_table_cell(value: Any) -> str:
+        text = str(value or "-").replace("\n", " ").replace("|", "\\|")
+        return text
+
+    @classmethod
+    def _render_multi_group_entity_cards(
+        cls,
+        group_results: List[Dict[str, Any]],
+    ) -> str:
+        """Render every entity and required evidence dimension deterministically."""
+        dimension_labels = {
+            "kubernetes": "Kubernetes",
+            "metrics": "Metrics",
+            "logging": "Logging",
+            "tracing": "Tracing",
+        }
+        dimension_roles = {
+            "kubernetes": "确认生命周期、状态和事件",
+            "metrics": "量化状态、资源和变化趋势",
+            "logging": "确认应用或容器错误原文",
+            "tracing": "串联请求、响应与 Trace",
+        }
+        sections = ["# 📊 各异常实体结构化诊断"]
+        rendered_count = 0
+        for group in group_results:
+            gid = str(group.get("group_id") or "?")
+            dimensions_by_entity = group.get("dimension_evidence_by_entity") or {}
+            for entity in group.get("entity_summaries") or []:
+                if not isinstance(entity, dict):
+                    continue
+                key = f"{entity.get('namespace', '')}/{entity.get('name', '')}"
+                dimensions = dimensions_by_entity.get(key) or {}
+                rendered_count += 1
+                sections.extend([
+                    f"## 异常组 {gid} · {key}",
+                    "",
+                    f"**状态**：{entity.get('status') or '未归类'}",
+                    "",
+                    f"**现象**：{entity.get('phenomenon') or '未提取'}",
+                    "",
+                    f"**根因**：{entity.get('root_cause') or '证据不足'}",
+                    "",
+                    "**关键逻辑**：" + (
+                        " → ".join(str(item) for item in (entity.get("causal_chain") or []))
+                        or "证据不足，尚未形成完整因果链"
+                    ),
+                    "",
+                    f"**置信度**：{float(entity.get('confidence') or 0):.0%}",
+                    "",
+                    "| 维度 | 状态 | 真实结果 | 诊断作用 |",
+                    "|---|---|---|---|",
+                ])
+                all_limitations = []
+                for dimension in ("kubernetes", "metrics", "logging", "tracing"):
+                    summary = dimensions.get(dimension) or {}
+                    facts = [
+                        item for item in (summary.get("facts") or [])
+                        if isinstance(item, dict)
+                    ]
+                    fact_text = "<br>".join(
+                        f"[{item.get('source_system') or 'unknown'}] {item.get('value') or '-'}"
+                        for item in facts[:3]
+                    ) or "未采集到真实事实"
+                    sections.append(
+                        "| {label} | {status} | {facts} | {role} |".format(
+                            label=dimension_labels[dimension],
+                            status=cls._multi_group_table_cell(summary.get("status") or "absent"),
+                            facts=cls._multi_group_table_cell(fact_text),
+                            role=dimension_roles[dimension],
+                        )
+                    )
+                    all_limitations.extend(
+                        f"{dimension_labels[dimension]}：{item}"
+                        for item in (summary.get("limitations") or [])
+                        if str(item).strip()
+                    )
+                if all_limitations:
+                    sections.extend([
+                        "",
+                        "**采集边界**：",
+                        "",
+                        *[f"- {item}" for item in all_limitations],
+                    ])
+                unknowns = [str(item) for item in (entity.get("unknowns") or []) if str(item).strip()]
+                if unknowns:
+                    sections.extend(["", "**未决问题**：", "", *[f"- {item}" for item in unknowns]])
+                archive_ref = group.get("archive_run_id")
+                if archive_ref:
+                    sections.extend(["", f"*完整归档：`context_archives/{archive_ref}`*"])
+                sections.append("")
+        return "\n".join(sections).strip() if rendered_count else ""
 
     @staticmethod
     def _format_multi_group_fallback(

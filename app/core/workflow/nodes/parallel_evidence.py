@@ -19,7 +19,10 @@ from typing import Any, Dict, List, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
+from app.core.workflow.group_evidence import aggregate_group_evidence
+from app.core.workflow.schemas import GroupDiagnosisSummaryOutput
 from app.core.workflow.state import WorkflowState
+from app.core.prompts import GROUP_EVIDENCE_SUMMARY_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +124,9 @@ class ParallelEvidenceNode(WorkflowNode):
             logger.info("📍 [parallel_evidence:%s] 开始采集 | 实体=%s",
                         gid, self._group_entity_labels(group))
             group_state = collector.execute(scoped_state)
-            return self._build_group_result(gid, group, group_state, run_id)
+            result = self._build_group_result(gid, group, group_state, run_id)
+            self._attach_structured_diagnosis(result, group)
+            return result
 
         max_workers = min(self._max_concurrency(), len(groups))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -286,6 +291,7 @@ class ParallelEvidenceNode(WorkflowNode):
         """从组的 evidence 执行结果提炼落盘引用 + 摘要。"""
         evidence_analysis = group_state.get("evidence_analysis") or "{}"
         summary = ""
+        legacy_text_fallback = False
         collection_summary = ""
         completeness = None
         try:
@@ -299,10 +305,19 @@ class ParallelEvidenceNode(WorkflowNode):
         if not summary:
             # 回退：用最后一条 ai_message 作为组分析
             for ev in reversed(group_state.get("thinking_events") or []):
-                if ev.get("type") == "ai_message" and str(ev.get("content") or "").strip():
-                    summary = str(ev.get("content")).strip()
+                full = str(ev.get("full_content") or "").strip()
+                preview = str(ev.get("content") or "").strip()
+                if ev.get("type") == "ai_message" and (full or preview):
+                    summary = full or preview
+                    legacy_text_fallback = True
                     break
         summary = summary[:_GROUP_SUMMARY_CHAR_LIMIT]
+
+        dimension_evidence = aggregate_group_evidence(
+            group.get("entities") or [],
+            group_state.get("thinking_events") or [],
+            status_keywords=group.get("status_keywords") or [],
+        )
 
         return {
             "group_id": gid,
@@ -310,6 +325,9 @@ class ParallelEvidenceNode(WorkflowNode):
             "status_keywords": group.get("status_keywords") or [],
             "entities": group.get("entities") or [],
             "summary": summary,
+            "legacy_text_fallback": legacy_text_fallback,
+            "entity_summaries": [],
+            "dimension_evidence_by_entity": dimension_evidence,
             "collection_summary": collection_summary,
             "completeness": completeness,
             "evidence_analysis": evidence_analysis,
@@ -317,3 +335,105 @@ class ParallelEvidenceNode(WorkflowNode):
             "archive_run_id": f"{run_id}-{gid}" if run_id else "",
             "error": None,
         }
+
+    @staticmethod
+    def _deterministic_entity_summary(
+        entity: Dict[str, Any],
+        group: Dict[str, Any],
+        dimensions: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        facts = [
+            fact
+            for dimension in dimensions.values()
+            for fact in (dimension.get("facts") or [])
+            if isinstance(fact, dict)
+        ]
+        phenomenon = str(facts[0].get("value") or "") if facts else "未采集到可用于归因的真实事实"
+        return {
+            "namespace": str(entity.get("namespace") or ""),
+            "name": str(entity.get("name") or ""),
+            "status": "/".join(group.get("status_keywords") or []),
+            "phenomenon": phenomenon,
+            "root_cause": "证据不足",
+            "causal_chain": [],
+            "confidence": 0.0,
+            "supporting_fact_ids": [],
+            "contradicting_fact_ids": [],
+            "unknowns": ["结构化单组分析不可用，请查看各维度真实事实和归档"],
+        }
+
+    def _attach_structured_diagnosis(
+        self,
+        result: Dict[str, Any],
+        group: Dict[str, Any],
+    ) -> None:
+        """Extract one fact-linked diagnosis per entity and validate its scope."""
+        entities = [item for item in (group.get("entities") or []) if isinstance(item, dict)]
+        dimensions_by_entity = result.get("dimension_evidence_by_entity") or {}
+        allowed_entities = {
+            f"{item.get('namespace', '')}/{item.get('name', '')}": item
+            for item in entities
+        }
+        allowed_fact_ids = {
+            key: {
+                str(fact.get("fact_id"))
+                for dimension in (dimensions_by_entity.get(key) or {}).values()
+                for fact in (dimension.get("facts") or [])
+                if isinstance(fact, dict) and fact.get("fact_id")
+            }
+            for key in allowed_entities
+        }
+
+        parsed = None
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is not None and hasattr(ai_call, "call_structured"):
+            prompt_payload = {
+                "group_id": result.get("group_id"),
+                "entities": entities,
+                "dimension_evidence_by_entity": dimensions_by_entity,
+            }
+            try:
+                parsed, _raw = ai_call.call_structured(
+                    system_prompt=GROUP_EVIDENCE_SUMMARY_PROMPT,
+                    question=json.dumps(prompt_payload, ensure_ascii=False, default=str),
+                    schema=GroupDiagnosisSummaryOutput,
+                    node_id=self.node_id,
+                    run_id=result.get("archive_run_id") or "",
+                    max_tokens=2048,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "⚠️ [parallel_evidence:%s] 结构化单组分析失败，使用确定性回退: %s",
+                    result.get("group_id"), exc,
+                )
+
+        by_key: Dict[str, Dict[str, Any]] = {}
+        if parsed is not None:
+            for item in parsed.entities:
+                data = item.model_dump(mode="json")
+                key = f"{data.get('namespace', '')}/{data.get('name', '')}"
+                if key not in allowed_entities or key in by_key:
+                    continue
+                valid_ids = allowed_fact_ids.get(key, set())
+                data["supporting_fact_ids"] = [
+                    fact_id for fact_id in data.get("supporting_fact_ids") or []
+                    if fact_id in valid_ids
+                ]
+                data["contradicting_fact_ids"] = [
+                    fact_id for fact_id in data.get("contradicting_fact_ids") or []
+                    if fact_id in valid_ids
+                ]
+                if not data["supporting_fact_ids"]:
+                    data["root_cause"] = "证据不足"
+                    data["confidence"] = 0.0
+                    data.setdefault("unknowns", []).append("模型结论没有当前实体的有效 fact_id 支撑")
+                by_key[key] = data
+
+        for key, entity in allowed_entities.items():
+            if key not in by_key:
+                by_key[key] = self._deterministic_entity_summary(
+                    entity,
+                    group,
+                    dimensions_by_entity.get(key) or {},
+                )
+        result["entity_summaries"] = [by_key[key] for key in allowed_entities]

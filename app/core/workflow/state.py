@@ -54,6 +54,7 @@ class WorkflowState(TypedDict, total=False):
     # 每组独立 evidence context 采集+单组分析的结果列表，conclusion 据此
     # 确定性拼接真实数据 + LLM 读摘要写结论。非并发模式为 None。
     group_results: Optional[List[Dict[str, Any]]]
+    structured_group_diagnosis: Optional[Dict[str, Any]]
     evidence_items: List[EvidenceItem]   # 已采集证据
     tool_results: List[Dict]             # 工具调用结果
     evidence_completeness: Optional[float]  # 证据完整度 [0, 1]
