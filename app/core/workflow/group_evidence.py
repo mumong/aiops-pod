@@ -119,6 +119,73 @@ def _render_fact_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _format_metric_number(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number == int(number):
+        return str(int(number))
+    return f"{number:g}"
+
+
+def _humanize_bytes(value: Any) -> Optional[str]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number >= 1024 ** 3:
+        return f"≈{number / 1024 ** 3:.1f} GiB"
+    if number >= 1024 ** 2:
+        return f"≈{number / 1024 ** 2:.1f} MiB"
+    return None
+
+
+def _render_metric_fact(record: Mapping[str, Any]) -> Optional[str]:
+    """Render metric facts as `name=value unit（趋势）` instead of a bare number."""
+    if str(record.get("dimension") or "").strip().lower() != "metrics":
+        return None
+    name = str(record.get("name") or record.get("attribute") or "").strip()
+    if not name or name.lower() == "value":
+        return None
+
+    rendered = f"{name}={_format_metric_number(record.get('value'))}"
+    unit = str(record.get("unit") or "").strip()
+    if unit:
+        rendered += f" {unit}"
+
+    annotations: List[str] = []
+    if unit == "bytes":
+        humanized = _humanize_bytes(record.get("value"))
+        if humanized:
+            annotations.append(humanized)
+
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    stats = record.get("stats") if isinstance(record.get("stats"), Mapping) else metadata.get("stats")
+    if isinstance(stats, Mapping) and stats.get("first") is not None and stats.get("last") is not None:
+        try:
+            first, last = float(stats["first"]), float(stats["last"])
+            low = float(stats.get("min", first))
+            high = float(stats.get("max", last))
+        except (TypeError, ValueError):
+            first = last = low = high = None
+        if first is not None:
+            if first == last == low == high:
+                annotations.append("持平")
+            elif last > first:
+                annotations.append(f"上升 {_format_metric_number(first)} → {_format_metric_number(last)}")
+            elif last < first:
+                annotations.append(f"下降 {_format_metric_number(first)} → {_format_metric_number(last)}")
+            else:
+                annotations.append(
+                    f"波动 min={_format_metric_number(low)} max={_format_metric_number(high)}"
+                )
+
+    if annotations:
+        rendered += "（" + "，".join(annotations) + "）"
+    return rendered
+
+
 def _records_from_structured(structured: Mapping[str, Any]) -> List[Mapping[str, Any]]:
     ledger = structured.get("fact_ledger") if isinstance(structured.get("fact_ledger"), Mapping) else {}
     records = ledger.get("records") if isinstance(ledger.get("records"), list) else []
@@ -142,7 +209,7 @@ def _compact_fact(record: Mapping[str, Any], *, fallback_seed: str) -> Dict[str,
     return {
         "fact_id": fact_id,
         "source_system": str(record.get("source_system") or "unknown"),
-        "value": _render_fact_value(record.get("value")),
+        "value": _render_metric_fact(record) or _render_fact_value(record.get("value")),
         "evidence_refs": refs,
     }
 
@@ -152,11 +219,17 @@ def _append_unique_facts(target: Dict[str, Any], facts: Iterable[Dict[str, Any]]
         (str(item.get("fact_id") or ""), tuple(item.get("evidence_refs") or []))
         for item in target["facts"]
     }
+    seen_rendered = {
+        (str(item.get("source_system") or ""), str(item.get("value") or ""))
+        for item in target["facts"]
+    }
     for fact in facts:
         key = (str(fact.get("fact_id") or ""), tuple(fact.get("evidence_refs") or []))
-        if key in seen:
+        rendered_key = (str(fact.get("source_system") or ""), str(fact.get("value") or ""))
+        if key in seen or rendered_key in seen_rendered:
             continue
         seen.add(key)
+        seen_rendered.add(rendered_key)
         target["facts"].append(fact)
 
 

@@ -21,6 +21,9 @@ def _obs_event(tool, dimension, coverage, *, namespace, pod, facts=None, purpose
             "strength": "strong",
             "evidence_refs": fact.get("evidence_refs", []),
         })
+        for optional_key in ("name", "unit", "stats", "metadata"):
+            if optional_key in fact:
+                records[-1][optional_key] = fact[optional_key]
     return {
         "type": "tool_result",
         "status": "success",
@@ -161,6 +164,114 @@ def test_pending_entity_marks_application_telemetry_not_applicable():
     assert dimensions["tracing"]["status"] == "not_applicable"
     assert dimensions["tracing"]["facts"] == []
     assert "容器未启动" in " ".join(dimensions["tracing"]["limitations"])
+
+
+def test_metric_fact_renders_name_unit_and_flat_trend():
+    """Ledger-shaped record: metric name in `attribute`, trend in `metadata.stats`."""
+    entity = {"kind": "Pod", "namespace": "aiops-case-09", "name": "workload"}
+    events = [
+        _obs_event(
+            "execute_pod_promql", "metrics", "present",
+            namespace="aiops-case-09", pod="workload",
+            facts=[{
+                "fact_id": "fact-metric-restarts",
+                "source_system": "prometheus",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_container_status_restarts_total",
+                "value": "0",
+                "unit": "count",
+                "metadata": {"stats": {"first": 0.0, "min": 0.0, "max": 0.0, "last": 0.0}},
+                "evidence_refs": ["metric-ref-restarts"],
+            }],
+        ),
+    ]
+
+    result = aggregate_group_evidence([entity], events)
+    facts = result["aiops-case-09/workload"]["metrics"]["facts"]
+
+    assert facts[0]["value"] == "kube_pod_container_status_restarts_total=0 count（持平）"
+
+
+def test_metric_fact_humanizes_bytes_and_shows_rising_trend():
+    """facts-shaped record: metric name in `name`, trend in top-level `stats`."""
+    entity = {"kind": "Pod", "namespace": "aiops-case-10", "name": "workload"}
+    events = [
+        _obs_event(
+            "execute_pod_promql", "metrics", "present",
+            namespace="aiops-case-10", pod="workload",
+            facts=[{
+                "fact_id": "fact-metric-memory",
+                "source_system": "prometheus",
+                "fact_type": "measurement",
+                "name": "container_memory_working_set_bytes",
+                "value": "15421440",
+                "unit": "bytes",
+                "stats": {"first": 10485760.0, "min": 10485760.0, "max": 15421440.0, "last": 15421440.0},
+                "evidence_refs": ["metric-ref-memory"],
+            }],
+        ),
+    ]
+
+    result = aggregate_group_evidence([entity], events)
+    rendered = result["aiops-case-10/workload"]["metrics"]["facts"][0]["value"]
+
+    assert rendered.startswith("container_memory_working_set_bytes=15421440 bytes")
+    assert "≈14.7 MiB" in rendered
+    assert "上升 10485760 → 15421440" in rendered
+
+
+def test_identical_metric_rows_from_repeat_queries_collapse():
+    entity = {"kind": "Pod", "namespace": "aiops-case-10", "name": "workload"}
+    metric_fact = {
+        "source_system": "prometheus",
+        "fact_type": "measurement",
+        "attribute": "container_memory_working_set_bytes",
+        "value": "15421440",
+        "unit": "bytes",
+        "metadata": {"stats": {"first": 15421440.0, "min": 15421440.0, "max": 15421440.0, "last": 15421440.0}},
+    }
+    events = [
+        _obs_event(
+            "execute_pod_promql", "metrics", "present",
+            namespace="aiops-case-10", pod="workload",
+            facts=[{**metric_fact, "fact_id": "fact-mem-a", "evidence_refs": ["ref-a"]}],
+        ),
+        _obs_event(
+            "execute_pod_promql", "metrics", "present",
+            namespace="aiops-case-10", pod="workload",
+            facts=[{**metric_fact, "fact_id": "fact-mem-b", "evidence_refs": ["ref-b"]}],
+        ),
+    ]
+
+    result = aggregate_group_evidence([entity], events)
+    facts = result["aiops-case-10/workload"]["metrics"]["facts"]
+
+    assert len(facts) == 1
+    assert facts[0]["fact_id"] == "fact-mem-a"
+
+
+def test_non_metric_fact_rendering_is_unchanged_by_metric_branch():
+    """Logging record with generic `attribute` must not become 'log.message=...'."""
+    entity = {"kind": "Pod", "namespace": "aiops-case-09", "name": "workload"}
+    events = [
+        _obs_event(
+            "query_pod_logs", "logging", "present",
+            namespace="aiops-case-09", pod="workload",
+            facts=[{
+                "fact_id": "fact-log-503",
+                "source_system": "elasticsearch",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "dependency unavailable http_status=503",
+                "evidence_refs": ["log-ref-503"],
+            }],
+        ),
+    ]
+
+    result = aggregate_group_evidence([entity], events)
+    rendered = result["aiops-case-09/workload"]["logging"]["facts"][0]["value"]
+
+    assert rendered == "dependency unavailable http_status=503"
 
 
 def test_event_target_accepts_pod_name_and_primary_entity_contracts():
