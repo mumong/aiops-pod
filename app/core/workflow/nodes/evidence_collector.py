@@ -1229,9 +1229,6 @@ class EvidenceCollectorNode(WorkflowNode):
                     if event.get("type") == "tool_result"
                 )
 
-                if self._early_stop_state.get("reason") == "context_budget_stop":
-                    break
-
                 remaining_plan = (
                     self._remaining_unattempted_autonomous_items(
                         evidence_plan,
@@ -1243,6 +1240,19 @@ class EvidenceCollectorNode(WorkflowNode):
                         all_thinking_events,
                     )
                 )
+                if self._early_stop_state.get("reason") == "context_budget_stop":
+                    if not (first_round_gate and remaining_plan):
+                        break
+                    logger.info(
+                        "🔄 [evidence] 当前 ReAct round 达到上下文预算，"
+                        "使用全新 context 继续 %d 个未尝试首轮门控项",
+                        len(remaining_plan),
+                    )
+                    self._early_stop_state = {
+                        "triggered": False,
+                        "reason": "",
+                        "required_levels": ["critical", "important"],
+                    }
                 if not remaining_plan:
                     # 注意（架构决策 2026-08-04）：不在代码层做“反馈补采”控制。
                     # 补证由 agent 在 ReAct 循环内根据真实工具结果自主决定
@@ -1395,6 +1405,9 @@ class EvidenceCollectorNode(WorkflowNode):
                         "# 已完成首轮采集摘要（不要用相同参数重复调用）\n"
                         f"{completed_summary}\n"
                     )
+                blocked_tool_names = self._blocked_tools_for_preplanned_execution(
+                    remaining_plan
+                )
         finally:
             self._active_evidence_plan = None
 

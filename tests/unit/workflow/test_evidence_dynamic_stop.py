@@ -2684,6 +2684,108 @@ def test_autonomous_execution_uses_context_guard_and_leaves_follow_up_to_qwen():
     }
 
 
+def test_autonomous_first_round_gate_resumes_in_fresh_context_after_budget_stop():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {"enabled": True},
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name="kubectl_describe"),
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+        SimpleNamespace(name="query_pod_topology"),
+    ]
+    calls = []
+
+    def _fake_call_llm(question, system_prompt, **kwargs):
+        calls.append({"question": question, **kwargs})
+        if len(calls) == 1:
+            node._early_stop_state = {
+                "triggered": True,
+                "reason": "context_budget_stop",
+                "context_usage_ratio": 0.88,
+                "uncollected_targets": [
+                    "demo/api:execute_pod_promql",
+                    "demo/api:query_pod_logs",
+                    "demo/api:query_pod_tracing",
+                    "demo/api:query_pod_topology",
+                ],
+            }
+            return SimpleNamespace(result="Kubernetes context exhausted"), [{
+                "type": "tool_result",
+                "status": "success",
+                "tool_name": "kubectl_describe",
+                "tool_args": {"kind": "pod", "namespace": "demo", "name": "api"},
+                "result": "Pod Running but Ready=False",
+                "structured": {"status": "describe_succeeded"},
+                "context_usage_ratio": 0.88,
+            }]
+
+        events = []
+        for tool_name, dimension in (
+            ("execute_pod_promql", "metrics"),
+            ("query_pod_logs", "logging"),
+            ("query_pod_tracing", "tracing"),
+            ("query_pod_topology", "topology"),
+        ):
+            events.append({
+                "type": "tool_result",
+                "status": "success",
+                "tool_name": tool_name,
+                "tool_args": {
+                    "namespace": "demo", "pod": "api",
+                    "purpose": f"collect {dimension}",
+                },
+                "result": f"coverage=empty dimension={dimension}",
+                "structured": {
+                    "coverage": "empty", "dimension": dimension,
+                    "entity": {"namespace": "demo", "pod": "api"},
+                },
+                "context_usage_ratio": 0.2,
+            })
+        return SimpleNamespace(result="all first-round gates attempted"), events
+
+    node._call_llm = _fake_call_llm
+
+    _, events, _ = node._execute_existing_evidence_plan(
+        question="检查异常 Pod",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "abnormal_pods": [{
+                "kind": "Pod", "namespace": "demo", "name": "api",
+                "status": "NotReady",
+            }],
+        }),
+        context_archive_ref="",
+        layer_archive_ref={},
+        evidence_plan=[{
+            "id": "describe",
+            "description": "确认 Pod 当前状态",
+            "level": "critical",
+            "tool": "kubectl_describe",
+            "tool_args": {"kind": "pod", "namespace": "demo", "name": "api"},
+            "purpose": "确认生命周期状态",
+        }],
+        failure_reason="执行首轮门控",
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["tool_result_sequence_start"] == 1
+    assert "继续执行尚未尝试的首轮" in calls[1]["question"]
+    assert "kubectl_describe" in calls[1]["blocked_tool_names"]
+    assert {
+        event["tool_name"]
+        for event in events
+        if event.get("tool_name") in EvidenceCollectorNode._OBSERVABILITY_QUERY_TOOLS
+    } == EvidenceCollectorNode._OBSERVABILITY_QUERY_TOOLS
+
+
 def test_evidence_system_prompt_prioritizes_live_observability_independent_of_user_wording():
     assert "用户是否显式提到" in EVIDENCE_COLLECTOR_PROMPT
     assert "实时可观测性证据" in EVIDENCE_COLLECTOR_PROMPT
@@ -8413,4 +8515,3 @@ def test_a029_first_round_reports_seven_present_but_stops_after_all_attempts():
         diagnostic_stats["diagnostic_evidence_missing"]
     )
     assert remaining == []
-
