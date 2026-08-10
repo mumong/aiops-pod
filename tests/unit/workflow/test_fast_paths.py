@@ -1213,11 +1213,27 @@ def test_query_direct_prompt_boundaries_are_explicit():
         "涉及 Prometheus 指标查询时，必须先调用 `fetch_runbook`",
         "禁止跳过 runbook 直接调用 Prometheus 探索或自创 PromQL",
         "runbook 中已有直接适用模板时，必须优先逐字复用标准 PromQL",
+        "execute_prometheus_instant_query",
+        "execute_prometheus_range_query",
+        "execute_pod_promql",
         "一旦已经获得回答用户问题所需的关键数据，立即停止采集并输出 JSON",
     ]
 
     for phrase in expected_phrases:
         assert phrase in direct_prompt
+
+
+def test_query_prometheus_runbook_declares_query_and_pod_diagnosis_tool_boundary():
+    configmap = yaml.safe_load(
+        Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8")
+    )
+    query_runbook = configmap["data"]["private-k8s-query-promql-reference.md"]
+
+    assert "/query" in query_runbook
+    assert "/ask" in query_runbook
+    assert "execute_prometheus_instant_query" in query_runbook
+    assert "execute_prometheus_range_query" in query_runbook
+    assert "execute_pod_promql" in query_runbook
 
 
 def test_deployed_workflow_disables_layer_early_stop_by_default():
@@ -1241,6 +1257,17 @@ def test_deployed_config_enables_autonomous_observability_and_disables_compatibi
     assert autonomous["enabled"] is True
     assert autonomous["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8100/sse"
     assert autonomous["config"]["mode"] == "sse"
+
+    prometheus = app_config["mcp_servers"]["prometheus_tool"]
+    assert prometheus["enabled"] is True
+    assert (
+        prometheus["config"]["url"]
+        == "http://mcp-server-manager.mcp.svc.cluster.local:8095/sse"
+    )
+    assert prometheus["config"]["mode"] == "sse"
+    assert "/query" in prometheus["description"]
+    assert "/ask" in prometheus["description"]
+    assert "execute_pod_promql" in prometheus["description"]
 
     coarse = app_config["mcp_servers"]["aiops-case-coarse"]
     assert coarse["enabled"] is False
@@ -1755,5 +1782,4 @@ if (
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-
 

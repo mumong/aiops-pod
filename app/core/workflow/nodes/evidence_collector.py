@@ -80,6 +80,16 @@ class EvidenceCollectorNode(WorkflowNode):
         "query_pod_topology",
     )
     _OBSERVABILITY_QUERY_TOOLS = set(_OBSERVABILITY_QUERY_ORDER)
+    _QUERY_ONLY_PROMETHEUS_TOOLS = {
+        "list_prometheus_rules",
+        "get_metric_names",
+        "get_label_values",
+        "get_all_labels",
+        "get_series",
+        "get_metric_metadata",
+        "execute_prometheus_instant_query",
+        "execute_prometheus_range_query",
+    }
     _KUBERNETES_LIFECYCLE_AUTHORITY_TOOLS = {
         "kubectl_describe",
         "kubectl_get_yaml",
@@ -1845,6 +1855,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 for name in (item.get("acceptable_tools") or [])
                 if str(name or "").strip()
             )
+
+        # The general Prometheus MCP is intentionally reserved for /query.
+        # Pod diagnosis must use execute_pod_promql so every selector remains
+        # bound to the exact namespace/pod evidence scope.  A model-generated
+        # plan cannot override this workflow boundary.
+        allowed_tools.difference_update(self._QUERY_ONLY_PROMETHEUS_TOOLS)
 
         return {
             str(getattr(tool, "name", "") or "")

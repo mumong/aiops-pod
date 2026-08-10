@@ -1316,6 +1316,46 @@ def test_autonomous_preplanned_execution_keeps_unplanned_generic_query_tools_for
     assert "collect_aiops_case" in blocked
 
 
+def test_query_only_prometheus_tools_stay_blocked_from_pod_evidence_even_if_planned():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+        }
+    }
+    query_only_tools = {
+        "list_prometheus_rules",
+        "get_metric_names",
+        "get_label_values",
+        "get_all_labels",
+        "get_series",
+        "get_metric_metadata",
+        "execute_prometheus_instant_query",
+        "execute_prometheus_range_query",
+    }
+    node.tools = [
+        *(SimpleNamespace(name=name) for name in sorted(query_only_tools)),
+        SimpleNamespace(name="execute_pod_promql"),
+    ]
+
+    blocked = node._blocked_tools_for_preplanned_execution([
+        {
+            "tool": "execute_prometheus_instant_query",
+            "acceptable_tools": [
+                "execute_prometheus_instant_query",
+                "execute_prometheus_range_query",
+            ],
+        },
+        {
+            "tool": "execute_pod_promql",
+            "acceptable_tools": ["execute_pod_promql"],
+        },
+    ])
+
+    assert query_only_tools.issubset(blocked)
+    assert "execute_pod_promql" not in blocked
+
+
 def test_autonomous_plan_uses_one_structured_call_then_generic_gate_for_missing_dimensions():
     node = EvidenceCollectorNode()
     node.workflow_config_override = {

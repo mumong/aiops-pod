@@ -178,7 +178,10 @@ def test_autonomous_observability_runtime_switches_are_deployed():
     )
     assert servers["aiops-case-coarse"]["enabled"] is False
     assert servers["aiops-observability-fine"]["enabled"] is False
-    assert servers["prometheus_tool"]["enabled"] is False
+    assert servers["prometheus_tool"]["enabled"] is True
+    assert "/query" in servers["prometheus_tool"]["description"]
+    assert "/ask" in servers["prometheus_tool"]["description"]
+    assert "execute_pod_promql" in servers["prometheus_tool"]["description"]
     assert config["workflow"]["evidence"]["observability_mode"] == "autonomous"
     assert (
         config["workflow"]["evidence"]["observability_first_round_gate"]["enabled"]

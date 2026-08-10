@@ -192,6 +192,8 @@ LAYER_QUERY_DIRECT_PROMPT = """# 目标：用真实工具直接回答窄查询
 - 禁止把“已经发出的工具调用都返回了”当成“用户问题已完整回答”
 - 失败、空结果或维度不匹配写入 `missing`，不用其他指标替代；附带指标不进主结果。
 - 禁用 `kubectl top`，资源使用率必须用 Prometheus
+- node/cluster 通用指标只使用 `execute_prometheus_instant_query` 或 `execute_prometheus_range_query`
+- `execute_pod_promql` 要求精确 namespace/pod scope，只供 `/ask` Pod 异常诊断使用，不得用于 node/cluster Query
 - 只要涉及 Prometheus 指标查询，优先调用 `fetch_runbook` 获取 `private-k8s-query-promql-reference.md` 作为查询参考
 - 涉及 Prometheus 指标查询时，必须先调用 `fetch_runbook` 获取 `private-k8s-query-promql-reference.md`；禁止跳过 runbook 直接调用 Prometheus 探索或自创 PromQL
 - runbook 中已有直接适用模板时，必须优先逐字复用标准 PromQL；如果需要调整，只允许做用户明确要求的维度/过滤条件变更，并在摘要中说明
