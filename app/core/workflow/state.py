@@ -53,7 +53,10 @@ class WorkflowState(TypedDict, total=False):
     # 多异常并发模式（异常组 > 阈值时由 parallel_evidence 节点填充）：
     # 每组独立 evidence context 采集+单组分析的结果列表，conclusion 据此
     # 确定性拼接真实数据 + LLM 读摘要写结论。非并发模式为 None。
+    parallel_lane_inventory: Optional[List[Dict[str, Any]]]
     group_results: Optional[List[Dict[str, Any]]]
+    authoritative_lane_artifacts: Optional[List[Dict[str, Any]]]
+    entity_evidence_snapshot: Optional[Dict[str, Any]]
     structured_group_diagnosis: Optional[Dict[str, Any]]
     evidence_items: List[EvidenceItem]   # 已采集证据
     tool_results: List[Dict]             # 工具调用结果
@@ -69,6 +72,9 @@ class WorkflowState(TypedDict, total=False):
     root_cause: Optional[str]            # 根因结论
     causal_chain: Optional[Dict[str, str]]  # 因果链
     rca_analysis: Optional[str]          # LLM 完整分析（JSON 字符串）
+    rca_input_projection: Optional[Dict[str, Any]]
+    rca_attempts: Optional[List[Dict[str, Any]]]
+    claim_validation: Optional[Dict[str, Any]]
     primary_runbook_id: Optional[str]    # AI 判定的核心 Runbook（与诊断结论最匹配的）
     
     # ========== 节点4 输出：汇总总结 ==========

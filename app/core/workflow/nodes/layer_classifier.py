@@ -49,6 +49,8 @@ class LayerClassifierNode(WorkflowNode):
         "kubectl_get_by_name",
         "fetch_runbook",
     }
+    _DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    _DNS_SUBDOMAIN = r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?"
 
     def __init__(self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None):
         """
@@ -499,13 +501,17 @@ class LayerClassifierNode(WorkflowNode):
             return started_call_ids.issubset(result_call_ids)
         return False
 
-    @staticmethod
+    @classmethod
     def _should_stop_explicit_pod_early(
+        cls,
         question: str,
         thinking_events: List[Dict[str, Any]],
     ) -> bool:
-        """Stop full diagnosis after the explicitly requested Pod is verified."""
-        question_text = str(question or "").lower()
+        """Stop only after every explicitly requested Pod has a real result."""
+        expected = set(cls._extract_explicit_pod_targets(question, []))
+        if not expected:
+            return False
+        completed = set()
         for event in thinking_events or []:
             if (
                 event.get("type") != "tool_result"
@@ -523,13 +529,10 @@ class LayerClassifierNode(WorkflowNode):
             if kind not in {"pod", "pods"} or not name or not namespace:
                 continue
             result = str(event.get("result") or event.get("result_preview") or "").lower()
-            if (
-                name in question_text
-                and namespace in question_text
-                and name in result
-            ):
-                return True
-        return False
+            target = (namespace, name)
+            if target in expected and name in result:
+                completed.add(target)
+        return expected.issubset(completed)
 
     def _build_query_direct_failure_result(
         self,
@@ -800,7 +803,15 @@ class LayerClassifierNode(WorkflowNode):
     ) -> Dict[str, Any]:
         """Build a compact structured handoff for downstream nodes."""
         active_entities = self._normalize_entities(layer_result.get("key_entities", []))
-        explicit_pod_scope = self._get_explicit_pod_scope(question, active_entities)
+        explicit_pod_scopes = self._extract_explicit_pod_targets(
+            question,
+            active_entities,
+        )
+        explicit_pod_scope_set = set(explicit_pod_scopes)
+        explicit_pod_observations = self._extract_explicit_pod_observations_from_events(
+            thinking_events,
+            explicit_pod_scopes,
+        )
         abnormal_pods = self._normalize_abnormal_pods(
             layer_result.get("abnormal_pods"),
             active_entities,
@@ -808,21 +819,43 @@ class LayerClassifierNode(WorkflowNode):
         )
         current_abnormal_pods = self._extract_current_abnormal_pods_from_events(thinking_events)
         current_abnormal_summary = self._extract_current_abnormal_summary_from_events(thinking_events)
-        if explicit_pod_scope:
+        if explicit_pod_scopes:
             current_abnormal_pods = [
                 pod
                 for pod in current_abnormal_pods
-                if self._pod_matches_scope(pod, explicit_pod_scope)
+                if self._pod_matches_any_scope(pod, explicit_pod_scope_set)
             ]
             abnormal_pods = [
                 pod
                 for pod in abnormal_pods
-                if self._pod_matches_scope(pod, explicit_pod_scope)
+                if self._pod_matches_any_scope(pod, explicit_pod_scope_set)
             ]
-            current_abnormal_summary = self._scope_abnormal_summary_to_pod(
+            current_abnormal_summary = self._scope_abnormal_summary_to_pods(
                 current_abnormal_summary,
-                explicit_pod_scope,
+                explicit_pod_scope_set,
             )
+            explicit_abnormal_pods = [
+                {
+                    "namespace": observation["namespace"],
+                    "name": observation["name"],
+                    "status": observation["status"],
+                }
+                for observation in explicit_pod_observations
+                if observation.get("state") == "abnormal"
+                and observation.get("status")
+            ]
+            if explicit_pod_observations:
+                # A concrete per-target lookup is authoritative for the target.
+                # Do not let model-written abnormal_pods resurrect a Pod that the
+                # real lookup observed as healthy, missing, failed, or unknown.
+                abnormal_pods = self._merge_abnormal_pod_sets(
+                    current_abnormal_pods,
+                    explicit_abnormal_pods,
+                )
+                current_abnormal_summary = self._build_explicit_pod_abnormal_summary(
+                    explicit_pod_observations,
+                    current_abnormal_pods,
+                )
         if current_abnormal_pods:
             abnormal_pods = self._merge_current_abnormal_pods(abnormal_pods, current_abnormal_pods)
         active_signals = []
@@ -836,7 +869,7 @@ class LayerClassifierNode(WorkflowNode):
                 rb_id = self._extract_runbook_id(ev)
                 if rb_id and rb_id not in matched_runbooks:
                     matched_runbooks.append(rb_id)
-            if explicit_pod_scope and tool_name == "kubectl_get_by_kind_in_cluster":
+            if explicit_pod_scopes and tool_name == "kubectl_get_by_kind_in_cluster":
                 continue
 
             signal = ev.get("result", "") or ev.get("result_preview", "")
@@ -864,11 +897,22 @@ class LayerClassifierNode(WorkflowNode):
             default_pod_abnormal_type=pod_abnormal_type,
             layer_result=layer_result,
         )
-        if explicit_pod_scope:
+        if explicit_pod_scopes:
+            # The user's explicit target inventory defines total fan-in. A Pod
+            # that is stable, unavailable, or unparsed in one lookup must still
+            # receive a terminal lane instead of silently reducing N.
+            issue_groups = self._build_explicit_pod_issue_groups(
+                targets=explicit_pod_scopes,
+                observations=explicit_pod_observations,
+                abnormal_pods=abnormal_pods,
+                default_pod_abnormal_type=pod_abnormal_type,
+                layer_result=layer_result,
+            )
+        if explicit_pod_scopes:
             must_verify = [
-                "本轮仅验证用户明确指定的 namespace + Pod；全局扫描中的其他异常只作为背景",
-                "确认目标 Pod 当前仍存在于指定 namespace",
-                "确认目标 Pod 的 active_signals 仍能被真实工具结果验证",
+                "本轮仅验证用户明确指定的 namespace + Pod 列表；全局扫描中的其他异常只作为背景",
+                "逐一确认每个目标 Pod 当前仍存在于指定 namespace",
+                "逐一确认每个目标 Pod 的 active_signals 仍能被真实工具结果验证",
                 "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
             ]
         else:
@@ -882,12 +926,17 @@ class LayerClassifierNode(WorkflowNode):
             ]
         handoff = {
             "diagnosis_scope": (
-                "explicit_pod"
-                if explicit_pod_scope
+                "explicit_pod" if len(explicit_pod_scopes) == 1
+                else "explicit_pods" if explicit_pod_scopes
                 else "current_state_only"
                 if "之前" in question or "当前" in question or "现在" in question
                 else "question_scope"
             ),
+            "explicit_pod_targets": [
+                {"namespace": namespace, "name": name}
+                for namespace, name in explicit_pod_scopes
+            ],
+            "explicit_pod_observations": explicit_pod_observations,
             "layer": layer_value,
             "derived_layer": self._pick_text(layer_result.get("derived_layer"), layer_value),
             "layers": [l.value if hasattr(l, "value") else str(l) for l in layers],
@@ -922,16 +971,80 @@ class LayerClassifierNode(WorkflowNode):
         question: str,
         active_entities: List[Dict[str, Any]],
     ) -> Optional[tuple[str, str]]:
+        candidates = cls._extract_explicit_pod_targets(question, active_entities)
+        return candidates[0] if len(candidates) == 1 else None
+
+    @classmethod
+    def _extract_explicit_pod_targets(
+        cls,
+        question: str,
+        active_entities: List[Dict[str, Any]],
+    ) -> List[tuple[str, str]]:
+        """Extract ordered explicit namespace/Pod targets without diagnosis rules.
+
+        Both the standard ``namespace/pod`` notation and natural-language
+        ``namespace X ... Pod Y`` notation are accepted. Pydantic-extracted Pod
+        entities are only a fallback when the request contains no complete
+        pair. Once the user supplied namespace/Pod pairs, model extraction must
+        not add cross-clause combinations.
+        """
         text = str(question or "").lower()
-        candidates = []
+        positioned: List[tuple[int, str, str]] = []
+        slash_pattern = re.compile(
+            rf"(?<![a-z0-9./-])({cls._DNS_SUBDOMAIN})/({cls._DNS_SUBDOMAIN})(?![a-z0-9./-])"
+        )
+        namespace_then_pod = re.compile(
+            rf"\bnamespace\s*[:=]?\s*({cls._DNS_SUBDOMAIN})"
+            rf"\s*(?:中|内|下|里|中的|内的|下的|里的|,|，|\s)*"
+            rf"(?:pod)\s*[:=]?\s*({cls._DNS_SUBDOMAIN})\b",
+            re.IGNORECASE,
+        )
+        pod_then_namespace = re.compile(
+            rf"\bpod\s*[:=]?\s*({cls._DNS_SUBDOMAIN})"
+            rf"\s*(?:位于|属于|在)\s*"
+            rf"(?:namespace)\s*[:=]?\s*({cls._DNS_SUBDOMAIN})\b",
+            re.IGNORECASE,
+        )
+        for match in slash_pattern.finditer(text):
+            namespace, name = match.group(1), match.group(2)
+            if namespace.isdigit() and name.isdigit():
+                continue
+            positioned.append((match.start(), namespace, name))
+        for match in namespace_then_pod.finditer(text):
+            positioned.append((match.start(), match.group(1), match.group(2)))
+        for match in pod_then_namespace.finditer(text):
+            positioned.append((match.start(), match.group(2), match.group(1)))
+
+        positioned.sort(key=lambda item: item[0])
+        targets: List[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(namespace: Any, name: Any) -> None:
+            target = (
+                cls._pick_text(namespace).lower(),
+                cls._pick_text(name).lower(),
+            )
+            if not all(target) or target in seen:
+                return
+            if not re.fullmatch(cls._DNS_SUBDOMAIN, target[0]):
+                return
+            if not re.fullmatch(cls._DNS_SUBDOMAIN, target[1]):
+                return
+            seen.add(target)
+            targets.append(target)
+
+        for _, namespace, name in positioned:
+            add(namespace, name)
+        if targets:
+            return targets
         for entity in active_entities or []:
             if str(entity.get("type") or "").strip().lower() != "pod":
                 continue
-            namespace = cls._pick_text(entity.get("namespace")).lower()
-            name = cls._pick_text(entity.get("name"), entity.get("value")).lower()
-            if namespace and name and namespace in text and name in text:
-                candidates.append((namespace, name))
-        return candidates[0] if len(candidates) == 1 else None
+            add(
+                entity.get("namespace"),
+                cls._pick_text(entity.get("name"), entity.get("value")),
+            )
+        return targets
 
     @classmethod
     def _pod_matches_scope(
@@ -946,20 +1059,202 @@ class LayerClassifierNode(WorkflowNode):
         )
 
     @classmethod
-    def _scope_abnormal_summary_to_pod(
+    def _pod_matches_any_scope(
+        cls,
+        pod: Dict[str, Any],
+        scopes: set[tuple[str, str]],
+    ) -> bool:
+        target = (
+            cls._pick_text(pod.get("namespace")).lower(),
+            cls._pick_text(pod.get("name")).lower(),
+        )
+        return target in scopes
+
+    @classmethod
+    def _extract_explicit_pod_observations_from_events(
+        cls,
+        thinking_events: List[Dict[str, Any]],
+        targets: List[tuple[str, str]],
+    ) -> List[Dict[str, Any]]:
+        """Build one factual terminal observation per explicitly requested Pod."""
+        target_set = set(targets)
+        observations: Dict[tuple[str, str], Dict[str, Any]] = {}
+        rank = {"error": 0, "unknown": 1, "healthy": 2, "abnormal": 2}
+        for event in thinking_events or []:
+            if event.get("type") != "tool_result":
+                continue
+            if event.get("tool_name") != "kubectl_get_by_name":
+                continue
+            tool_args = event.get("tool_args") or {}
+            if not isinstance(tool_args, dict):
+                continue
+            kind = cls._pick_text(tool_args.get("kind")).lower()
+            namespace = cls._pick_text(tool_args.get("namespace")).lower()
+            name = cls._pick_text(tool_args.get("name")).lower()
+            target = (namespace, name)
+            if kind not in {"pod", "pods"} or target not in target_set:
+                continue
+
+            result = str(event.get("result") or event.get("result_preview") or "")
+            observation: Dict[str, Any] = {
+                "namespace": namespace,
+                "name": name,
+                "state": "error",
+                "status": "",
+                "ready": "",
+                "observed": False,
+                "semantic_success": bool(
+                    event.get("status") == "success"
+                    and event.get("semantic_success", True) is not False
+                ),
+                "raw_ref": event.get("raw_ref"),
+                "structured_ref": event.get("structured_ref"),
+                "summary_ref": event.get("summary_ref"),
+            }
+            if not observation["semantic_success"]:
+                observation["error"] = cls._compact_signal(result, limit=300)
+            else:
+                ready, status, row = cls._parse_explicit_pod_table_result(
+                    name=name,
+                    result=result,
+                    structured=event.get("structured") or {},
+                )
+                if status.lower() == "running" and cls._ready_is_incomplete(ready):
+                    status = "NotReady"
+                observation.update({
+                    "ready": ready,
+                    "status": status,
+                    "row": row,
+                    "observed": bool(status),
+                    "state": cls._classify_explicit_pod_observation(ready, status),
+                })
+                if not status:
+                    observation["error"] = "工具成功返回，但未能从结果中解析 Pod READY/STATUS"
+
+            previous = observations.get(target)
+            if previous is None or rank.get(observation["state"], 0) >= rank.get(
+                previous.get("state", "error"), 0
+            ):
+                observations[target] = observation
+
+        return [observations[target] for target in targets if target in observations]
+
+    @classmethod
+    def _parse_explicit_pod_table_result(
+        cls,
+        *,
+        name: str,
+        result: str,
+        structured: Any,
+    ) -> tuple[str, str, str]:
+        """Parse READY/STATUS from a generic kubectl Pod table response."""
+        candidate_lines: List[str] = []
+        recent_restart_rows: set[str] = set()
+        if isinstance(structured, dict):
+            recent_restart_rows = {
+                str(row).strip()
+                for row in (structured.get("recent_restart_rows") or [])
+                if str(row).strip()
+            }
+            candidate_lines.extend(
+                str(row).strip()
+                for row in (structured.get("selected_rows") or [])
+                if str(row).strip()
+            )
+        candidate_lines.extend(
+            line.strip() for line in str(result or "").splitlines() if line.strip()
+        )
+
+        header_indexes: Optional[tuple[int, int, int]] = None
+        for line in candidate_lines:
+            columns = re.split(r"\s+", line.strip())
+            upper = [column.upper() for column in columns]
+            if "NAME" in upper and "STATUS" in upper:
+                name_index = upper.index("NAME")
+                ready_index = upper.index("READY") if "READY" in upper else -1
+                status_index = upper.index("STATUS")
+                header_indexes = (name_index, ready_index, status_index)
+                continue
+            if header_indexes is not None:
+                name_index, ready_index, status_index = header_indexes
+                if len(columns) <= max(name_index, status_index, ready_index):
+                    continue
+                if columns[name_index].lower() != name:
+                    continue
+                ready = columns[ready_index] if ready_index >= 0 else ""
+                status = columns[status_index]
+                if line in recent_restart_rows:
+                    status = "RecentRestart"
+                return ready, status, line
+
+        escaped_name = re.escape(name)
+        row_pattern = re.compile(
+            rf"(?:^|\s){escaped_name}\s+(\d+/\d+)\s+([^\s]+)",
+            re.IGNORECASE,
+        )
+        for line in candidate_lines:
+            match = row_pattern.search(line)
+            if match:
+                status = (
+                    "RecentRestart"
+                    if line in recent_restart_rows
+                    else match.group(2)
+                )
+                return match.group(1), status, line
+        return "", "", ""
+
+    @classmethod
+    def _classify_explicit_pod_observation(cls, ready: str, status: str) -> str:
+        status_text = cls._pick_text(status)
+        if not status_text:
+            return "unknown"
+        if status_text.lower() == "running" and cls._ready_is_incomplete(ready):
+            return "abnormal"
+        if cls._is_normal_resource_status(status_text):
+            return "healthy"
+        return "abnormal"
+
+    @staticmethod
+    def _ready_is_incomplete(ready: str) -> bool:
+        match = re.fullmatch(r"(\d+)/(\d+)", str(ready or "").strip())
+        if not match:
+            return False
+        return int(match.group(1)) != int(match.group(2))
+
+    @classmethod
+    def _merge_abnormal_pod_sets(
+        cls,
+        *pod_sets: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        merged: Dict[tuple[str, str], Dict[str, Any]] = {}
+        order: List[tuple[str, str]] = []
+        for pods in pod_sets:
+            for pod in pods or []:
+                key = (
+                    cls._pick_text(pod.get("namespace")),
+                    cls._pick_text(pod.get("name")),
+                )
+                if not all(key):
+                    continue
+                if key not in merged:
+                    order.append(key)
+                merged[key] = {**merged.get(key, {}), **pod}
+        return [merged[key] for key in order]
+
+    @classmethod
+    def _scope_abnormal_summary_to_pods(
         cls,
         summary: Dict[str, Any],
-        scope: tuple[str, str],
+        scopes: set[tuple[str, str]],
     ) -> Dict[str, Any]:
         scoped = dict(summary or {})
-        namespace, name = scope
         selected_rows = []
         status_counts: Dict[str, int] = {}
         for row in scoped.get("selected_rows") or []:
             parts = str(row).split()
             if len(parts) < 4:
                 continue
-            if parts[0].lower() != namespace or parts[1].lower() != name:
+            if (parts[0].lower(), parts[1].lower()) not in scopes:
                 continue
             selected_rows.append(str(row))
             status = parts[3]
@@ -968,6 +1263,61 @@ class LayerClassifierNode(WorkflowNode):
         scoped["status_counts"] = status_counts
         scoped["total_abnormal"] = len(selected_rows)
         return scoped
+
+    @classmethod
+    def _scope_abnormal_summary_to_pod(
+        cls,
+        summary: Dict[str, Any],
+        scope: tuple[str, str],
+    ) -> Dict[str, Any]:
+        """Backward-compatible one-target wrapper."""
+        return cls._scope_abnormal_summary_to_pods(summary, {scope})
+
+    @classmethod
+    def _build_explicit_pod_abnormal_summary(
+        cls,
+        observations: List[Dict[str, Any]],
+        global_abnormal_pods: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        abnormal_pods = cls._merge_abnormal_pod_sets(
+            global_abnormal_pods,
+            [
+                {
+                    "namespace": observation.get("namespace"),
+                    "name": observation.get("name"),
+                    "status": observation.get("status"),
+                    "ready": observation.get("ready"),
+                    "row": observation.get("row"),
+                }
+                for observation in observations
+                if observation.get("state") == "abnormal"
+            ],
+        )
+        status_counts: Dict[str, int] = {}
+        selected_rows: List[str] = []
+        for pod in abnormal_pods:
+            status = cls._pick_text(pod.get("status"), "Unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            row = cls._pick_text(pod.get("row"))
+            if not row:
+                row = " ".join(filter(None, [
+                    cls._pick_text(pod.get("namespace")),
+                    cls._pick_text(pod.get("name")),
+                    cls._pick_text(pod.get("ready")),
+                    status,
+                ]))
+            selected_rows.append(row)
+
+        first_observation = next(iter(observations or []), {})
+        return {
+            "source": "kubectl_get_by_name",
+            "status_counts": status_counts,
+            "total_abnormal": len(abnormal_pods),
+            "selected_rows": selected_rows,
+            "raw_ref": first_observation.get("raw_ref"),
+            "summary_ref": first_observation.get("summary_ref"),
+            "structured_ref": first_observation.get("structured_ref"),
+        }
 
     def _guard_healthy_with_active_abnormalities(
         self,
@@ -1130,6 +1480,75 @@ class LayerClassifierNode(WorkflowNode):
 
         for index, group in enumerate(groups, start=1):
             group["group_id"] = f"g{index}"
+        return groups
+
+    @classmethod
+    def _build_explicit_pod_issue_groups(
+        cls,
+        *,
+        targets: List[tuple[str, str]],
+        observations: List[Dict[str, Any]],
+        abnormal_pods: List[Dict[str, Any]],
+        default_pod_abnormal_type: str,
+        layer_result: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Build exactly one ordered lane for every explicit target.
+
+        This is an identity and coverage contract. It neither decides a root
+        cause nor branches on a particular workload or anomaly.
+        """
+        observations_by_target = {
+            (
+                cls._pick_text(item.get("namespace")).lower(),
+                cls._pick_text(item.get("name")).lower(),
+            ): item
+            for item in observations or []
+            if isinstance(item, dict)
+        }
+        abnormal_by_target = {
+            (
+                cls._pick_text(item.get("namespace")).lower(),
+                cls._pick_text(item.get("name")).lower(),
+            ): item
+            for item in abnormal_pods or []
+            if isinstance(item, dict)
+        }
+        groups: List[Dict[str, Any]] = []
+        for index, target in enumerate(targets, start=1):
+            namespace, name = target
+            observation = observations_by_target.get(target) or {}
+            abnormal = abnormal_by_target.get(target) or {}
+            status = cls._pick_text(
+                observation.get("status"),
+                abnormal.get("status"),
+                "Unknown",
+            )
+            state = cls._pick_text(observation.get("state"), "unknown").lower()
+            if state == "healthy":
+                diagnosis_type = "CurrentStateVerification"
+            elif state in {"error", "unknown"} and target not in abnormal_by_target:
+                diagnosis_type = "ObservationUnavailable"
+            else:
+                diagnosis_type = cls._derive_group_abnormal_type(
+                    statuses=[status],
+                    default_pod_abnormal_type=default_pod_abnormal_type,
+                    layer_result=layer_result,
+                )
+            groups.append({
+                "group_id": f"g{index}",
+                "status_keywords": [status],
+                "pod_abnormal_type": diagnosis_type,
+                "compatible_layers": [],
+                "entities": [{
+                    "kind": "Pod",
+                    "namespace": namespace,
+                    "name": name,
+                }],
+                "evidence_plan": [],
+                "possible_scenarios": cls._default_scenarios_for_abnormal_type(
+                    diagnosis_type
+                ),
+            })
         return groups
 
     @staticmethod
@@ -1489,6 +1908,85 @@ class LayerClassifierNode(WorkflowNode):
             return match.group(1) or match.group(2) or ""
         return ""
 
+    def _run_explicit_pod_location_baseline(
+        self,
+        question: str,
+    ) -> List[Dict[str, Any]]:
+        """Resolve every explicit Pod once before the Layer ReAct session."""
+        if self._is_direct_query_mode():
+            return []
+        targets = self._extract_explicit_pod_targets(question, [])
+        if not targets:
+            return []
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is None or not hasattr(ai_call, "execute_tool_batch"):
+            logger.warning(
+                "⚠️ [layer] 无可用 execute_tool_batch，显式 Pod 定位交由 ReAct"
+            )
+            return []
+        requests = [
+            {
+                "tool_name": "kubectl_get_by_name",
+                "tool_args": {
+                    "kind": "pod",
+                    "namespace": namespace,
+                    "name": name,
+                },
+            }
+            for namespace, name in targets
+        ]
+        logger.info(
+            "🚦 [layer] ReAct 前并行定位显式 Pod: targets=%d",
+            len(requests),
+        )
+        return ai_call.execute_tool_batch(
+            tool_requests=requests,
+            tools=getattr(self, "tools", []) or [],
+            stream_queue=getattr(self, "_event_queue", None),
+            node_id=self.node_id,
+            run_id=getattr(self, "current_run_id", ""),
+            cancel_event=getattr(self, "cancel_event", None),
+            max_workers=len(requests),
+        )
+
+    @staticmethod
+    def _append_explicit_pod_baseline_handoff(
+        question: str,
+        baseline_events: List[Dict[str, Any]],
+    ) -> str:
+        observations = []
+        for event in baseline_events or []:
+            if event.get("type") != "tool_result":
+                continue
+            observations.append({
+                "tool_name": event.get("tool_name"),
+                "tool_args": event.get("tool_args") or {},
+                "status": event.get("status"),
+                "semantic_success": event.get("semantic_success"),
+                "structured": event.get("structured"),
+                "summary": event.get("result") or "",
+                "raw_ref": event.get("raw_ref"),
+                "structured_ref": event.get("structured_ref"),
+                "summary_ref": event.get("summary_ref"),
+            })
+        payload = json.dumps(
+            {
+                "contract_version": "aiops.layer-explicit-pod-baseline.v1",
+                "observations": observations,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        return (
+            f"{question.rstrip()}\n\n"
+            "# 代码预采集的显式 Pod 定位结果\n"
+            "以下结果已经按用户给出的 namespace/Pod 列表真实并行执行。"
+            "它们是目标清单与当前状态事实，不是根因结论。不得遗漏目标，"
+            "也不要机械重复相同查询；如结果失败或信息不足，可继续自主调用只读工具调查。\n"
+            f"{payload}\n"
+        )
+
     def _analyze_with_llm(self, question: str) -> tuple:
         """使用 LLM 分析 Pod 异常状态。
 
@@ -1513,17 +2011,24 @@ class LayerClassifierNode(WorkflowNode):
                 early_stop_enabled,
                 explicit_pod_early_stop_enabled,
             )
+            baseline_events = self._run_explicit_pod_location_baseline(question)
+            thinking_events.extend(baseline_events)
+            agent_question = (
+                self._append_explicit_pod_baseline_handoff(question, baseline_events)
+                if baseline_events
+                else question
+            )
             if self._is_direct_query_mode() and early_stop_enabled:
                 stop_checker = self._should_stop_query_direct_early
             elif explicit_pod_early_stop_enabled:
                 stop_checker = lambda events: self._should_stop_explicit_pod_early(
                     question,
-                    events,
+                    [*baseline_events, *events],
                 )
             else:
                 stop_checker = None
-            response, thinking_events = self._call_llm(
-                question,
+            response, react_events = self._call_llm(
+                agent_question,
                 self._get_layer_prompt(),
                 expect_json=self._is_direct_query_mode(),
                 json_validator=(
@@ -1531,14 +2036,23 @@ class LayerClassifierNode(WorkflowNode):
                     if self._is_direct_query_mode()
                     else None
                 ),
-                skip_remediation_policy=self._is_direct_query_mode(),
+                # Layer only locates current abnormal entities.  Remediation
+                # policy belongs to the report/remediation stages and distracts
+                # this lightweight locator.
+                skip_remediation_policy=True,
                 blocked_tool_names=(
                     self.QUERY_DIRECT_BLOCKED_TOOLS
                     if self._is_direct_query_mode()
                     else self._get_layer_blocked_tool_names()
                 ),
                 stop_checker=stop_checker,
+                tool_result_sequence_start=sum(
+                    1
+                    for event in baseline_events
+                    if event.get("type") == "tool_result"
+                ),
             )
+            thinking_events.extend(react_events or [])
 
             stage1_text = (response.result or "") if response else ""
             if not stage1_text:

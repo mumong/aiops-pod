@@ -560,9 +560,15 @@ def _normalize_record(value: Any) -> FactRecord | None:
 def _record_priority(record: FactRecord) -> tuple[Any, ...]:
     semantic_priority = (
         0
-        if record.attribute == "container.last_terminated_reason"
+        if record.attribute in {
+            "container.waiting_reason",
+            "container.waiting_message",
+            "container.last_terminated_reason",
+            "container.last_terminated_message",
+            "event.message",
+        }
         else 1
-        if record.attribute == "container.last_exit_code"
+        if record.attribute in {"container.last_exit_code", "pod.condition"}
         else 2
         if record.fact_type == "configuration"
         else 3
@@ -778,6 +784,7 @@ def _legacy_record(
     timestamp: Any = None,
     start: Any = None,
     end: Any = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> FactRecord | None:
     if _contains_evaluator_fields(value):
         return None
@@ -804,6 +811,11 @@ def _legacy_record(
         "confidence": confidence,
         "strength": strength,
         "evidence_refs": refs,
+        "metadata": (
+            deepcopy(dict(metadata))
+            if isinstance(metadata, Mapping)
+            else {}
+        ),
     }
     payload["fact_id"] = _fact_id(payload)
     return _normalize_record(payload)
@@ -1641,6 +1653,9 @@ def build_kubernetes_lifecycle_fact_ledger(
         value: Any,
         fact_type: str = "state",
         unit: Any = None,
+        source_path: str = "",
+        evidence_role: str = "symptom",
+        timestamp: Any = None,
     ) -> None:
         record = _legacy_record(
             entity_id=entity_id,
@@ -1655,19 +1670,37 @@ def build_kubernetes_lifecycle_fact_ledger(
             directness="direct",
             confidence="high",
             strength="strong",
+            timestamp=timestamp,
+            metadata={
+                key: item
+                for key, item in {
+                    "source_path": source_path,
+                    "evidence_role": evidence_role,
+                }.items()
+                if item
+            },
         )
         if record is not None:
             records.append(record)
 
     phase = str(structured.get("phase") or "").strip()
     if phase:
-        add_record(attribute="pod.phase", value={"phase": phase})
+        add_record(
+            attribute="pod.phase",
+            value={"phase": phase},
+            source_path="status.phase",
+        )
 
     status = str(structured.get("status") or "").strip()
     internal_statuses = {
         "command_failed",
+        "describe_summarized",
+        "events_found",
         "extract_failed",
         "json_summarized",
+        "kept_small_output",
+        "logs_summarized",
+        "pod_described",
         "query_parse_failed",
         "query_rejected",
         "query_succeeded",
@@ -1676,7 +1709,50 @@ def build_kubernetes_lifecycle_fact_ledger(
         "yaml_summarized",
     }
     if status and status.lower() not in internal_statuses:
-        add_record(attribute="pod.status", value={"status": status})
+        add_record(
+            attribute="pod.status",
+            value={"status": status},
+            source_path="status",
+        )
+
+    conditions = [
+        item
+        for item in (
+            structured.get("conditions")
+            if isinstance(structured.get("conditions"), list)
+            else []
+        )
+        if isinstance(item, Mapping)
+    ]
+    for index, condition in enumerate(conditions):
+        condition_type = str(condition.get("type") or "").strip()
+        condition_status = str(condition.get("status") or "").strip()
+        if not condition_type and not condition_status:
+            continue
+        reason = str(condition.get("reason") or "").strip()
+        message = str(condition.get("message") or "").strip()[:2048]
+        add_record(
+            attribute="pod.condition",
+            value={
+                key: item
+                for key, item in {
+                    "type": condition_type,
+                    "status": condition_status,
+                    "reason": reason,
+                    "message": message,
+                }.items()
+                if item
+            },
+            source_path=f"status.conditions[{index}]",
+            # A Pod condition reports lifecycle impact. Its reason/message is
+            # valuable supporting evidence, but the condition itself is not a
+            # generic root cause. More direct events/logs retain causal roles.
+            evidence_role="symptom",
+            timestamp=(
+                condition.get("lastTransitionTime")
+                or condition.get("last_transition_time")
+            ),
+        )
 
     spec_containers = [
         item
@@ -1730,7 +1806,50 @@ def build_kubernetes_lifecycle_fact_ledger(
                     },
                     fact_type="configuration",
                     unit="kubernetes_quantity",
+                    source_path=(
+                        f"spec.containers[{container_name}]"
+                        f".resources.{resource_group}.{resource_name}"
+                    ),
+                    evidence_role="context",
                 )
+
+        for env_index, env in enumerate(container.get("env") or []):
+            if not isinstance(env, Mapping):
+                continue
+            value_from = (
+                env.get("valueFrom")
+                if isinstance(env.get("valueFrom"), Mapping)
+                else env.get("value_from")
+                if isinstance(env.get("value_from"), Mapping)
+                else {}
+            )
+            for ref_key, kind in (
+                ("secretKeyRef", "Secret"),
+                ("configMapKeyRef", "ConfigMap"),
+                ("secret_key_ref", "Secret"),
+                ("config_map_key_ref", "ConfigMap"),
+            ):
+                ref = value_from.get(ref_key)
+                if not isinstance(ref, Mapping) or not ref.get("name"):
+                    continue
+                add_record(
+                    attribute="container.environment_reference",
+                    value={
+                        "container": container_name,
+                        "environment": str(env.get("name") or ""),
+                        "kind": kind,
+                        "name": str(ref.get("name")),
+                        "key": str(ref.get("key") or ""),
+                        "optional": bool(ref.get("optional", False)),
+                    },
+                    fact_type="configuration",
+                    source_path=(
+                        f"spec.containers[{container_name}].env[{env_index}]"
+                        f".valueFrom.{ref_key}"
+                    ),
+                    evidence_role="context",
+                )
+                break
 
     lifecycle_containers = status_containers or spec_containers
     for container in lifecycle_containers:
@@ -1738,16 +1857,32 @@ def build_kubernetes_lifecycle_fact_ledger(
         if not container_name:
             continue
 
+        last_state_mapping = (
+            container.get("lastState")
+            if isinstance(container.get("lastState"), Mapping)
+            else container.get("last_state")
+            if isinstance(container.get("last_state"), Mapping)
+            else {}
+        )
+        state_mapping = (
+            container.get("state")
+            if isinstance(container.get("state"), Mapping)
+            else {}
+        )
         last_terminated = (
             container.get("lastTerminated")
             if isinstance(container.get("lastTerminated"), Mapping)
             else container.get("last_terminated")
             if isinstance(container.get("last_terminated"), Mapping)
+            else last_state_mapping.get("terminated")
+            if isinstance(last_state_mapping.get("terminated"), Mapping)
             else {}
         )
         current_terminated = (
             container.get("terminated")
             if isinstance(container.get("terminated"), Mapping)
+            else state_mapping.get("terminated")
+            if isinstance(state_mapping.get("terminated"), Mapping)
             else {}
         )
         terminated = last_terminated or current_terminated
@@ -1756,7 +1891,11 @@ def build_kubernetes_lifecycle_fact_ledger(
             or container.get("lastState")
             or ""
         ).strip()
-        current_state = str(container.get("state") or "").strip()
+        current_state = (
+            ""
+            if state_mapping
+            else str(container.get("state") or "").strip()
+        )
         is_terminated = (
             bool(terminated)
             or last_state.lower() == "terminated"
@@ -1773,6 +1912,26 @@ def build_kubernetes_lifecycle_fact_ledger(
             add_record(
                 attribute="container.last_terminated_reason",
                 value={"container": container_name, "reason": reason},
+                source_path=(
+                    f"status.containerStatuses[{container_name}]"
+                    ".lastState.terminated.reason"
+                ),
+                evidence_role="causal_candidate",
+            )
+
+        terminated_message = str(terminated.get("message") or "").strip()[:2048]
+        if terminated_message:
+            add_record(
+                attribute="container.last_terminated_message",
+                value={
+                    "container": container_name,
+                    "message": terminated_message,
+                },
+                source_path=(
+                    f"status.containerStatuses[{container_name}]"
+                    ".lastState.terminated.message"
+                ),
+                evidence_role="causal_candidate",
             )
 
         exit_code = _integer_value(
@@ -1788,6 +1947,40 @@ def build_kubernetes_lifecycle_fact_ledger(
             add_record(
                 attribute="container.last_exit_code",
                 value={"container": container_name, "exit_code": exit_code},
+                source_path=(
+                    f"status.containerStatuses[{container_name}]"
+                    ".lastState.terminated.exitCode"
+                ),
+            )
+
+        waiting = (
+            container.get("waiting")
+            if isinstance(container.get("waiting"), Mapping)
+            else state_mapping.get("waiting")
+            if isinstance(state_mapping.get("waiting"), Mapping)
+            else {}
+        )
+        waiting_reason = str(waiting.get("reason") or "").strip()
+        if waiting_reason:
+            add_record(
+                attribute="container.waiting_reason",
+                value={"container": container_name, "reason": waiting_reason},
+                source_path=(
+                    f"status.containerStatuses[{container_name}]"
+                    ".state.waiting.reason"
+                ),
+                evidence_role="causal_candidate",
+            )
+        waiting_message = str(waiting.get("message") or "").strip()[:2048]
+        if waiting_message:
+            add_record(
+                attribute="container.waiting_message",
+                value={"container": container_name, "message": waiting_message},
+                source_path=(
+                    f"status.containerStatuses[{container_name}]"
+                    ".state.waiting.message"
+                ),
+                evidence_role="causal_candidate",
             )
 
         restart_count = _integer_value(
@@ -1804,7 +1997,84 @@ def build_kubernetes_lifecycle_fact_ledger(
                 },
                 fact_type="measurement",
                 unit="count",
+                source_path=(
+                    f"status.containerStatuses[{container_name}].restartCount"
+                ),
             )
+
+    event_seen: set[str] = set()
+    event_index = 0
+    for event_field in ("events", "selected_events", "key_events"):
+        candidates = (
+            structured.get(event_field)
+            if isinstance(structured.get(event_field), list)
+            else []
+        )
+        for item in candidates:
+            if isinstance(item, Mapping):
+                event_type = str(item.get("type") or "").strip()
+                reason = str(item.get("reason") or "").strip()
+                message = str(item.get("message") or "").strip()[:2048]
+                source = item.get("source")
+                if isinstance(source, Mapping):
+                    source = source.get("component") or source.get("host")
+                source = str(source or item.get("from") or "").strip()
+                timestamp = (
+                    item.get("lastTimestamp")
+                    or item.get("eventTime")
+                    or item.get("firstTimestamp")
+                    or item.get("timestamp")
+                )
+            else:
+                text = str(item or "").strip()
+                normalized_header = " ".join(text.lower().split())
+                if (
+                    not text
+                    or (
+                        "last seen" in normalized_header
+                        and "type" in normalized_header
+                        and "reason" in normalized_header
+                        and "message" in normalized_header
+                    )
+                ):
+                    continue
+                event_type = ""
+                reason = ""
+                message = text[:2048]
+                source = ""
+                timestamp = None
+            signature = _json_dumps({
+                "type": event_type,
+                "reason": reason,
+                "message": message,
+                "source": source,
+                "timestamp": timestamp,
+            })
+            if not message or signature in event_seen:
+                continue
+            event_seen.add(signature)
+            add_record(
+                attribute="event.message",
+                value={
+                    key: value
+                    for key, value in {
+                        "type": event_type,
+                        "reason": reason,
+                        "message": message,
+                        "source": source,
+                    }.items()
+                    if value
+                },
+                fact_type="event",
+                source_path=f"{event_field}[{event_index}]",
+                evidence_role=(
+                    "causal_candidate"
+                    if event_type.lower() == "warning" or reason
+                    else "context"
+                ),
+                timestamp=timestamp,
+            )
+            event_index += 1
 
     selected, truncated = _select_records(records)
     if not selected:
@@ -3275,6 +3545,8 @@ def _correct_unique_fact_id_prefixes(
 def validate_rca_claims(
     value: Mapping[str, Any] | RCAOutput,
     ledgers: Sequence[FactLedger | Mapping[str, Any]],
+    *,
+    authoritative_entity_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Validate model fact references and downgrade unsupported diagnoses."""
     mismatched_fact_ids, collision_fact_ids = _ledger_identity_diagnostics(ledgers)
@@ -3299,6 +3571,16 @@ def validate_rca_claims(
             if record.fact_id not in collision_fact_ids:
                 record_index[record.fact_id] = record
 
+    authoritative_scope = list(dict.fromkeys(
+        str(entity_id).strip()
+        for entity_id in (authoritative_entity_ids or [])
+        if str(entity_id or "").strip()
+    ))
+    validation_scope = authoritative_scope or scope_entities
+    single_authoritative_entity = (
+        authoritative_scope[0] if len(authoritative_scope) == 1 else ""
+    )
+
     parsed = RCAOutput.model_validate(
         _correct_unique_fact_id_prefixes(
             value,
@@ -3318,9 +3600,19 @@ def validate_rca_claims(
     supported_entities: set[str] = set()
     valid_supporting: list[str] = []
     valid_contradicting: list[str] = []
+    model_entity_overrides: list[dict[str, str]] = []
+    supporting_fact_promotions: list[dict[str, Any]] = []
 
     for hypothesis in parsed.hypotheses:
-        entity_id = str(hypothesis.entity_id or "").strip()
+        model_entity_id = str(hypothesis.entity_id or "").strip()
+        entity_id = model_entity_id
+        if single_authoritative_entity:
+            entity_id = single_authoritative_entity
+            if model_entity_id and model_entity_id != entity_id:
+                model_entity_overrides.append({
+                    "model_entity_id": model_entity_id,
+                    "authoritative_entity_id": entity_id,
+                })
         referenced_records = [
             record_index[fact_id]
             for fact_id in [
@@ -3353,7 +3645,7 @@ def validate_rca_claims(
                 reasons.append(
                     f"unresolvable entity scope for hypothesis {hypothesis.hypothesis_id}"
                 )
-        elif entity_id not in scope_entities:
+        elif entity_id not in validation_scope:
             _append_unique(
                 invalid_hypothesis_scopes,
                 [hypothesis.hypothesis_id],
@@ -3409,6 +3701,38 @@ def validate_rca_claims(
             "contradicting_fact_ids": hypothesis_contradicting,
         })
 
+    # Small models commonly place valid Fact IDs at RCA top level but omit the
+    # same IDs from their sole hypothesis. For one authoritative entity and one
+    # hypothesis the mapping is unambiguous, so normalize that structural
+    # omission without inventing a claim or choosing between hypotheses.
+    if (
+        len(validation_scope) == 1
+        and len(valid_hypotheses) == 1
+        and not valid_hypotheses[0].get("supporting_fact_ids")
+    ):
+        hypothesis = valid_hypotheses[0]
+        entity_id = str(hypothesis.get("entity_id") or "").strip()
+        promoted: list[str] = []
+        for fact_id in parsed.supporting_fact_ids:
+            record = record_index.get(fact_id)
+            if (
+                record is not None
+                and entity_id
+                and _in_entity_scope(record, entity_id)
+                and _support_quality(record)
+            ):
+                _append_unique(promoted, [fact_id])
+        if promoted:
+            hypothesis["supporting_fact_ids"] = promoted
+            _append_unique(valid_supporting, promoted)
+            supported_entities.add(entity_id)
+            supporting_fact_promotions.append({
+                "hypothesis_id": str(hypothesis.get("hypothesis_id") or ""),
+                "entity_id": entity_id,
+                "fact_ids": promoted,
+                "source": "top_level_supporting_fact_ids",
+            })
+
     top_level_refs = [
         *parsed.supporting_fact_ids,
         *parsed.contradicting_fact_ids,
@@ -3420,21 +3744,13 @@ def validate_rca_claims(
 
     required_entities = [
         entity_id
-        for entity_id in scope_entities
+        for entity_id in validation_scope
         if entity_id.lower().startswith("k8s.pod:")
-    ] or list(scope_entities)
+    ] or list(validation_scope)
     downgrade_reasons: list[str] = []
     if parsed.diagnostic_status == "diagnosed":
         if not valid_supporting:
             downgrade_reasons.append("no valid supporting facts remain")
-        if invalid_fact_ids:
-            downgrade_reasons.append(
-                "one or more fact references failed validation"
-            )
-        if invalid_hypothesis_scopes:
-            downgrade_reasons.append(
-                "one or more hypotheses have invalid entity scope"
-            )
         for entity_id in required_entities:
             if entity_id not in supported_entities:
                 downgrade_reasons.append(
@@ -3470,13 +3786,33 @@ def validate_rca_claims(
             else validation_limit
         )
 
+    reference_valid = not reasons and not invalid_fact_ids
+    diagnosis_publishable = (
+        result["diagnostic_status"] == "diagnosed"
+        and not should_downgrade
+        and bool(valid_supporting)
+        and all(entity_id in supported_entities for entity_id in required_entities)
+    )
     result["claim_validation"] = {
-        "valid": not reasons and not invalid_fact_ids,
+        # `valid` remains a compatibility alias for reference validity. It is
+        # deliberately not the publication decision: a supported diagnosis
+        # may contain an audited extra bad reference, while an inconclusive
+        # result may have perfectly valid references.
+        "valid": reference_valid,
+        "reference_valid": reference_valid,
+        # A model may attach an extra weak/unknown reference to an otherwise
+        # source-backed diagnosis. Invalid references are removed and audited,
+        # but they are fatal only when no valid supported hypothesis remains
+        # for the authoritative entity scope.
+        "diagnosis_supported": diagnosis_publishable,
+        "diagnosis_publishable": diagnosis_publishable,
         "diagnostic_status": result["diagnostic_status"],
         "valid_supporting_fact_ids": valid_supporting,
         "valid_contradicting_fact_ids": valid_contradicting,
         "invalid_fact_ids": invalid_fact_ids,
         "reasons": reasons,
+        "model_entity_overrides": model_entity_overrides,
+        "supporting_fact_promotions": supporting_fact_promotions,
         "legacy_contract": any(ledger.legacy_contract for ledger in normalized_ledgers),
     }
     return result

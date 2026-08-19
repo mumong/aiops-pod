@@ -52,6 +52,19 @@ def test_context_archive_writes_node_handoff_and_io(tmp_path):
     assert json.loads((tmp_path / "run-io" / "handoff" / "evidence-to-rca.json").read_text())["summary"] == "evidence ready"
 
 
+def test_context_archive_atomic_json_returns_reloadable_digest(tmp_path):
+    archive = ContextArchive(run_id="run-atomic", root=str(tmp_path))
+
+    ref = archive.write_json_atomic("lane/value.json", {"value": "真实证据"})
+
+    path = tmp_path / "run-atomic" / "lane" / "value.json"
+    assert ref["path"] == str(path)
+    assert ref["bytes"] == path.stat().st_size
+    assert len(ref["sha256"]) == 64
+    assert json.loads(path.read_text(encoding="utf-8")) == {"value": "真实证据"}
+    assert list(path.parent.glob(".*.tmp")) == []
+
+
 def test_archive_root_prefers_reports_subdir_when_default_parent_is_not_writable(tmp_path, monkeypatch):
     default_root = tmp_path / "aiops" / "context_archives"
     reports_root = tmp_path / "aiops" / "reports"

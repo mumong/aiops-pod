@@ -116,6 +116,30 @@ class WorkflowNode(ABC):
             )
         except Exception as exc:
             logger.warning("⚠️ [%s] 写入 node input archive 失败: %s", self.node_id, exc)
+
+    def _archive_node_output(
+        self,
+        payload: Any,
+        *,
+        artifact_name: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically archive one named node output and return its digest ref."""
+        run_id = getattr(self, "current_run_id", "")
+        if not run_id:
+            return None
+        safe_name = artifact_name or f"{self.node_id}.output"
+        try:
+            return ContextArchive(run_id=run_id).write_json_atomic(
+                f"node_outputs/{safe_name}.json",
+                payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "⚠️ [%s] 写入 node output archive 失败: %s",
+                self.node_id,
+                exc,
+            )
+            return None
     
     def get_required_fields(self) -> List[str]:
         """

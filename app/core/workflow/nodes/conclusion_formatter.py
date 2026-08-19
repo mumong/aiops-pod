@@ -18,18 +18,19 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from dataclasses import asdict
+from typing import Any, Dict, List, Mapping, Optional
 
 from app.core.workflow.fact_contract import (
     OBSERVABILITY_QUERY_TOOLS,
     project_final_observability_events,
 )
+from app.core.remediation.plans import extract_remediation_plan
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import QueryConclusionOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
 from app.core.prompts import (
-    MULTI_GROUP_CONCLUSION_PROMPT,
     REMEDIATION_PLAN_PROMPT,
     get_conclusion_mode_instruction,
     get_workflow_prompt,
@@ -121,6 +122,56 @@ class ConclusionFormatterNode(WorkflowNode):
                     group_results=group_results,
                     conclusion_max_tokens=state.get("conclusion_max_tokens"),
                 )
+            elif layer != Layer.QUERY:
+                authoritative_report = self._render_single_authoritative_report(
+                    question=question,
+                    state=state,
+                    rca_analysis=rca_analysis,
+                )
+                formal_rca = self._parse_formal_rca(rca_analysis)
+                conclusion = authoritative_report
+                if (
+                    self._formal_rca_is_valid(formal_rca)
+                    and getattr(self, "ai_call", None) is not None
+                ):
+                    supplemental = self._generate_with_llm(
+                        question=question,
+                        layer_analysis=layer_analysis,
+                        evidence_analysis=evidence_analysis,
+                        rca_analysis=rca_analysis,
+                        conclusion_max_tokens=state.get("conclusion_max_tokens"),
+                        layer=layer,
+                        tool_data_text=self._build_tool_data_section(
+                            thinking_events
+                        ),
+                        query_result=query_result,
+                    )
+                    if supplemental.strip():
+                        conclusion += (
+                            "\n\n---\n\n## 补充说明与修复建议（非事实权威）\n\n"
+                            + supplemental.strip()
+                        )
+                elif (
+                    not formal_rca
+                    and getattr(self, "ai_call", None) is not None
+                ):
+                    supplemental = self._generate_with_llm(
+                        question=question,
+                        layer_analysis=layer_analysis,
+                        evidence_analysis=evidence_analysis,
+                        rca_analysis=rca_analysis,
+                        conclusion_max_tokens=state.get("conclusion_max_tokens"),
+                        layer=layer,
+                        tool_data_text=self._build_tool_data_section(
+                            thinking_events
+                        ),
+                        query_result=query_result,
+                    )
+                    plan_only = self._render_structured_remediation_only(
+                        supplemental
+                    )
+                    if plan_only:
+                        conclusion += "\n\n---\n\n" + plan_only
             elif getattr(self, "ai_call", None) is not None:
                 tool_data_text = self._build_tool_data_section(thinking_events)
                 conclusion = self._generate_with_llm(
@@ -518,6 +569,187 @@ class ConclusionFormatterNode(WorkflowNode):
         text = "\n".join(lines) if lines else "（无结构化根因分析）"
         return text[:_SECTION_CHAR_LIMITS["rca"]]
 
+    @staticmethod
+    def _parse_formal_rca(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        try:
+            parsed = json.loads(value) if value else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @classmethod
+    def _formal_rca_is_valid(cls, rca: Mapping[str, Any]) -> bool:
+        claim = rca.get("claim_validation")
+        return (
+            str(rca.get("diagnostic_status") or "") == "diagnosed"
+            and isinstance(claim, dict)
+            and claim.get("valid") is True
+            and bool(rca.get("supporting_fact_ids"))
+        )
+
+    @classmethod
+    def _render_single_authoritative_report(
+        cls,
+        *,
+        question: str,
+        state: WorkflowState,
+        rca_analysis: Any,
+    ) -> str:
+        """Render one diagnosis without granting narrative text fact authority."""
+        rca = cls._parse_formal_rca(rca_analysis)
+        valid = cls._formal_rca_is_valid(rca)
+        status = "diagnosed" if valid else "inconclusive"
+        claim = (
+            rca.get("claim_validation")
+            if isinstance(rca.get("claim_validation"), dict)
+            else {}
+        )
+        rca_input = (
+            state.get("rca_input_projection")
+            if isinstance(state.get("rca_input_projection"), dict)
+            else {}
+        )
+        selected_facts = [
+            fact
+            for fact in (rca_input.get("selected_facts") or [])
+            if isinstance(fact, dict)
+        ]
+        snapshot = (
+            state.get("entity_evidence_snapshot")
+            if isinstance(state.get("entity_evidence_snapshot"), dict)
+            else {}
+        )
+        dimension_evidence = (
+            snapshot.get("dimension_evidence_by_entity")
+            if isinstance(snapshot.get("dimension_evidence_by_entity"), dict)
+            else {}
+        )
+        root_cause = (
+            str(
+                rca.get("root_cause_summary")
+                or rca.get("root_cause")
+                or "证据不足"
+            )
+            if valid
+            else "证据不足"
+        )
+        supporting_ids = [
+            str(fact_id)
+            for fact_id in (rca.get("supporting_fact_ids") or [])
+        ] if valid else []
+        lines = [
+            "# 🔬 单实体诊断报告（确定性事实权威）",
+            "",
+            f"> 用户问题：{question}",
+            "",
+            f"diagnostic_status: {status}",
+            f"claim_validation: {'valid' if valid else 'invalid'}",
+            f"root_cause: {root_cause}",
+            f"confidence: {float(rca.get('confidence') or 0.0):.0%}",
+        ]
+        entity_ids = [
+            str(item)
+            for item in (rca_input.get("authoritative_entity_ids") or [])
+            if str(item).strip()
+        ]
+        if entity_ids:
+            lines.append("authoritative_entities: " + ", ".join(entity_ids))
+        lines.append(
+            "supporting_fact_ids: "
+            + (", ".join(supporting_ids) if supporting_ids else "[]")
+        )
+        reasons = [
+            str(item)
+            for item in [
+                *(claim.get("reasons") or []),
+                *(rca.get("unknowns") or []),
+            ]
+            if str(item).strip()
+        ]
+        if reasons:
+            lines.extend([
+                "",
+                "## 校验边界",
+                *[f"- {item}" for item in dict.fromkeys(reasons)],
+            ])
+
+        lines.extend([
+            "",
+            "## 可观测性真实事实",
+            "",
+            "| 维度 | 状态 | 真实结果 |",
+            "|---|---|---|",
+        ])
+        for dimension in ("kubernetes", "metrics", "logging", "tracing"):
+            facts = [
+                fact
+                for fact in selected_facts
+                if str(fact.get("dimension") or "") == dimension
+            ]
+            rendered = "<br>".join(
+                "[{source}] {value} `(fact_id={fact_id})`".format(
+                    source=fact.get("source_system") or "unknown",
+                    value=cls._display_fact_with_semantics(fact),
+                    fact_id=fact.get("fact_id") or "unknown",
+                )
+                for fact in facts
+            ) or "未选择到可展示的真实事实"
+            observed_statuses = [
+                str(dimensions.get(dimension, {}).get("status") or "")
+                for dimensions in dimension_evidence.values()
+                if isinstance(dimensions, dict)
+                and isinstance(dimensions.get(dimension), dict)
+            ]
+            status_priority = (
+                "present",
+                "error",
+                "unknown",
+                "absent",
+                "not_applicable",
+                "unselected",
+            )
+            dimension_status = next(
+                (
+                    status
+                    for status in status_priority
+                    if status in observed_statuses
+                ),
+                "unselected",
+            )
+            if facts:
+                dimension_status = "present"
+            lines.append(
+                "| {dimension} | {status} | {facts} |".format(
+                    dimension=dimension,
+                    status=dimension_status,
+                    facts=cls._multi_group_table_cell(rendered),
+                )
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_structured_remediation_only(content: str) -> str:
+        """Retain the typed remediation contract, never an unvalidated diagnosis."""
+        try:
+            plan = extract_remediation_plan(content or "")
+        except Exception as exc:
+            logger.warning(
+                "⚠️ [conclusion] 丢弃无效结构化修复计划: %s",
+                exc,
+            )
+            return ""
+        if plan is None:
+            return ""
+        payload = asdict(plan)
+        return (
+            "## 🧩 结构化修复计划（不构成根因证据）\n\n"
+            "```json\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+            + "\n```"
+        )
+
     # ------------------------------------------------------------------
     # LLM 生成
     # ------------------------------------------------------------------
@@ -783,7 +1015,7 @@ class ConclusionFormatterNode(WorkflowNode):
         return self._strip_think_blocks(content or "")
 
     # ------------------------------------------------------------------
-    # 多异常并发模式：LLM 读摘要写结论 + 代码确定性拼接真实数据
+    # 多异常并发模式：正式组级 RCA + 代码确定性拼接真实数据
     # ------------------------------------------------------------------
     def _generate_multi_group_report(
         self,
@@ -792,78 +1024,10 @@ class ConclusionFormatterNode(WorkflowNode):
         group_results: List[Dict[str, Any]],
         conclusion_max_tokens: Optional[int] = None,
     ) -> str:
-        """多异常报告：结论/现象/关键逻辑由 LLM 基于各组摘要整理，
-        结构化真实数据由代码确定性拼接在报告后（永不因组多而丢失）。"""
-        max_tokens = self._resolve_conclusion_max_tokens(
-            layer=None, requested=conclusion_max_tokens,
-        )
-
-        # ---- LLM 部分：每组紧凑摘要 → 结论叙述 ----
-        group_sections = []
-        for r in group_results:
-            gid = r.get("group_id", "?")
-            entities = ", ".join(
-                f"{e.get('namespace', '')}/{e.get('name', '')}"
-                for e in (r.get("entities") or []) if isinstance(e, dict)
-            ) or "?"
-            statuses = "/".join(r.get("status_keywords") or []) or "?"
-            summary = str(r.get("summary") or "").strip() or "（该组无分析摘要）"
-            collection = str(r.get("collection_summary") or "").strip()
-            error = r.get("error")
-            lines = [
-                f"## 组 {gid}",
-                f"- 实体: {entities}",
-                f"- 异常状态: {statuses} | 类型: {r.get('pod_abnormal_type') or '未归类'}",
-            ]
-            if collection:
-                lines.append(f"- 采集情况: {collection[:220]}")
-            if error:
-                lines.append(f"- ⚠️ 该组采集失败: {error}")
-            entity_summaries = r.get("entity_summaries") or []
-            dimensions = r.get("dimension_evidence_by_entity") or {}
-            if entity_summaries:
-                lines.append("- 结构化实体诊断与维度事实:")
-                lines.append(json.dumps({
-                    "entities": entity_summaries,
-                    "dimension_evidence_by_entity": dimensions,
-                }, ensure_ascii=False, separators=(",", ":"), default=str))
-            else:
-                lines.append(f"- 该组分析摘要（兼容旧数据）:\n{summary}")
-            group_sections.append("\n".join(lines))
-
-        user_message = (
-            f"# 用户问题\n{question}\n\n"
-            f"# 各异常组独立采集分析结果（共 {len(group_results)} 组）\n\n"
-            + "\n\n".join(group_sections)
-            + "\n\n# 指令\n请基于以上各组摘要，按 system prompt 的结构生成多异常诊断报告。"
-            f"\n\n{REMEDIATION_PLAN_PROMPT}"
-        )
-
-        ai_call = getattr(self, "ai_call", None)
-        narrative = ""
-        if ai_call is not None:
-            logger.info(
-                "📍 [conclusion] 多异常模式 | %d 组, max_tokens=%d",
-                len(group_results), max_tokens,
-            )
-            self._archive_node_input({
-                "node": self.node_id,
-                "mode": "multi_group",
-                "question": question,
-                "user_message": user_message,
-                "group_count": len(group_results),
-                "max_tokens": max_tokens,
-            })
-            narrative = self._strip_think_blocks(
-                ai_call.call_simple(
-                    system_prompt=MULTI_GROUP_CONCLUSION_PROMPT,
-                    question=user_message,
-                    max_tokens=max_tokens,
-                ) or ""
-            )
-        if not narrative.strip():
-            # 回退：确定性组装各组摘要
-            narrative = self._format_multi_group_fallback(question, group_results)
+        """Fan in validated group diagnoses without a second RCA authority."""
+        del conclusion_max_tokens  # Multi-group output is deterministic and token-independent.
+        group_results = self._project_formal_group_authority(group_results)
+        narrative = self._format_multi_group_fallback(question, group_results)
 
         # ---- 代码确定性部分：可读实体卡片 + 折叠逐工具原始证据 ----
         entity_cards = self._render_multi_group_entity_cards(group_results)
@@ -892,6 +1056,74 @@ class ConclusionFormatterNode(WorkflowNode):
             sections.extend(["---", entity_cards])
         sections.extend(["---", "\n".join(evidence_sections)])
         return "\n\n".join(sections)
+
+    @classmethod
+    def _project_formal_group_authority(
+        cls,
+        group_results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Replace group narrative claims with the validated formal RCA fields."""
+        projected_groups: List[Dict[str, Any]] = []
+        for group in group_results:
+            projected = dict(group)
+            rca = cls._parse_formal_rca(group.get("rca_analysis"))
+            valid = cls._formal_rca_is_valid(rca)
+            claim = (
+                rca.get("claim_validation")
+                if isinstance(rca.get("claim_validation"), dict)
+                else {}
+            )
+            reasons = list(dict.fromkeys(
+                str(item)
+                for item in [
+                    *(claim.get("reasons") or []),
+                    *(rca.get("unknowns") or []),
+                ]
+                if str(item).strip()
+            ))
+            entities = []
+            for entity in group.get("entity_summaries") or []:
+                if not isinstance(entity, dict):
+                    continue
+                item = dict(entity)
+                if valid:
+                    item.update({
+                        "diagnostic_status": "diagnosed",
+                        "root_cause": str(
+                            rca.get("root_cause_summary")
+                            or rca.get("root_cause")
+                            or "证据不足"
+                        ),
+                        "confidence": float(rca.get("confidence") or 0.0),
+                        "supporting_fact_ids": list(
+                            rca.get("supporting_fact_ids") or []
+                        ),
+                        "contradicting_fact_ids": list(
+                            rca.get("contradicting_fact_ids") or []
+                        ),
+                        "claim_validation": claim,
+                    })
+                else:
+                    item.update({
+                        "diagnostic_status": "inconclusive",
+                        "root_cause": "证据不足",
+                        "causal_chain": [],
+                        "confidence": min(
+                            float(rca.get("confidence") or 0.0),
+                            0.49,
+                        ),
+                        "supporting_fact_ids": [],
+                        "contradicting_fact_ids": [],
+                        "unknowns": reasons or ["正式 RCA claim validation 未通过"],
+                        "claim_validation": claim or {"valid": False},
+                    })
+                entities.append(item)
+            projected["entity_summaries"] = entities
+            projected["diagnostic_status"] = (
+                "diagnosed" if valid else "inconclusive"
+            )
+            projected_groups.append(projected)
+        return projected_groups
 
     @staticmethod
     def _multi_group_table_cell(value: Any) -> str:
@@ -953,10 +1185,18 @@ class ConclusionFormatterNode(WorkflowNode):
                         item for item in (summary.get("facts") or [])
                         if isinstance(item, dict)
                     ]
+                    ordered_facts = cls._select_multi_group_display_facts(facts, entity)
                     fact_text = "<br>".join(
-                        f"[{item.get('source_system') or 'unknown'}] {item.get('value') or '-'}"
-                        for item in facts[:3]
+                        "[{source}] {value} `(fact_id={fact_id})`".format(
+                            source=item.get("source_system") or "unknown",
+                            value=cls._display_fact_with_semantics(item),
+                            fact_id=item.get("fact_id") or "unknown",
+                        )
+                        for item in ordered_facts
                     ) or "未采集到真实事实"
+                    omitted = len(facts) - len(ordered_facts)
+                    if omitted > 0:
+                        fact_text += f"<br>…另有 {omitted} 条上下文事实见完整归档"
                     sections.append(
                         "| {label} | {status} | {facts} | {role} |".format(
                             label=dimension_labels[dimension],
@@ -986,14 +1226,97 @@ class ConclusionFormatterNode(WorkflowNode):
                 sections.append("")
         return "\n".join(sections).strip() if rendered_count else ""
 
+    @classmethod
+    def _display_fact_with_semantics(cls, fact: Dict[str, Any]) -> str:
+        value = (
+            fact.get("display_value")
+            or cls._compact_value(fact.get("value"))
+            or "-"
+        )
+        metadata = fact.get("metadata") if isinstance(fact.get("metadata"), dict) else {}
+        role = str(
+            fact.get("evidence_role")
+            or metadata.get("evidence_role")
+            or ""
+        ).strip().lower()
+        if role == "negative_observation":
+            return f"[负向观测/排除] {value}"
+        if role == "symptom" and "restart" in str(fact.get("attribute") or "").lower():
+            return f"[症状/持续性] {value}"
+        return str(value)
+
+    @staticmethod
+    def _fact_quality_rank(fact: Dict[str, Any]) -> tuple[int, int, int, int]:
+        metadata = fact.get("metadata") if isinstance(fact.get("metadata"), dict) else {}
+        evidence_role = {
+            "causal_candidate": 0,
+            "symptom": 1,
+            "contradicting": 2,
+            "negative_observation": 3,
+            "context": 4,
+        }.get(str(
+            fact.get("evidence_role")
+            or metadata.get("evidence_role")
+            or ""
+        ).lower(), 2)
+        strength = {
+            "critical": 0,
+            "strong": 1,
+            "supporting": 2,
+            "context": 3,
+        }.get(str(fact.get("strength") or "").lower(), 4)
+        directness = {
+            "direct": 0,
+            "derived": 1,
+            "related_context": 2,
+        }.get(str(fact.get("directness") or "").lower(), 3)
+        confidence = {
+            "high": 0,
+            "medium": 1,
+            "low": 2,
+            "weak": 3,
+        }.get(str(fact.get("confidence") or "").lower(), 4)
+        return evidence_role, strength, directness, confidence
+
+    @classmethod
+    def _select_multi_group_display_facts(
+        cls,
+        facts: List[Dict[str, Any]],
+        entity: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Show every RCA reference first, then at most three context facts."""
+        supporting = [str(item) for item in entity.get("supporting_fact_ids") or []]
+        contradicting = [str(item) for item in entity.get("contradicting_fact_ids") or []]
+        reference_order = {
+            fact_id: (0, index)
+            for index, fact_id in enumerate(supporting)
+        }
+        reference_order.update({
+            fact_id: (1, index)
+            for index, fact_id in enumerate(contradicting)
+            if fact_id not in reference_order
+        })
+
+        referenced: List[tuple[tuple[int, int], int, Dict[str, Any]]] = []
+        context: List[tuple[tuple[int, int, int, int], int, Dict[str, Any]]] = []
+        for index, fact in enumerate(facts):
+            fact_id = str(fact.get("fact_id") or "")
+            if fact_id in reference_order:
+                referenced.append((reference_order[fact_id], index, fact))
+            else:
+                context.append((cls._fact_quality_rank(fact), index, fact))
+        referenced.sort(key=lambda item: (item[0], item[1]))
+        context.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in referenced] + [item[2] for item in context[:3]]
+
     @staticmethod
     def _format_multi_group_fallback(
         question: str,
         group_results: List[Dict[str, Any]],
     ) -> str:
-        """LLM 不可用时的多组确定性回退：直接罗列各组摘要。"""
+        """Authoritative deterministic overview of validated group diagnoses."""
         lines = [
-            "# 🔬 集群多异常诊断报告（确定性回退模板）",
+            "# 🔬 集群多异常诊断报告（确定性汇总）",
             "",
             f"> 用户问题：{question}",
             "",
@@ -1005,12 +1328,25 @@ class ConclusionFormatterNode(WorkflowNode):
                 f"{e.get('namespace', '')}/{e.get('name', '')}"
                 for e in (r.get("entities") or []) if isinstance(e, dict)
             )
-            lines.append(
-                f"## 异常组 {r.get('group_id', '?')}: {entities} — "
-                f"{r.get('pod_abnormal_type') or '/'.join(r.get('status_keywords') or [])}"
-            )
+            lines.append(f"## 异常组 {r.get('group_id', '?')}: {entities}")
             lines.append("")
-            lines.append(str(r.get("summary") or "（无分析摘要）"))
+            if r.get("error"):
+                lines.append(f"- 状态：采集失败 — {r['error']}")
+            summaries = [
+                item for item in (r.get("entity_summaries") or [])
+                if isinstance(item, dict)
+            ]
+            if summaries:
+                for entity in summaries:
+                    key = f"{entity.get('namespace', '')}/{entity.get('name', '')}"
+                    status = entity.get("diagnostic_status") or r.get("diagnostic_status") or "inconclusive"
+                    confidence = float(entity.get("confidence") or 0.0)
+                    lines.append(
+                        f"- `{key}` | {status} | {entity.get('root_cause') or '证据不足'} "
+                        f"| 置信度 {confidence:.0%}"
+                    )
+            else:
+                lines.append(str(r.get("summary") or "（无分析摘要）"))
             lines.append("")
         return "\n".join(lines)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from app.core.workflow.fact_contract import OBSERVABILITY_QUERY_TOOL_DIMENSIONS
@@ -26,6 +27,23 @@ _PRE_RUNTIME_STATUSES = {
     "failedcreatepodsandbox",
 }
 
+_METRIC_IDENTITY_LABELS = {
+    "__name__",
+    "container",
+    "endpoint",
+    "id",
+    "image",
+    "instance",
+    "job",
+    "metrics_path",
+    "name",
+    "namespace",
+    "node",
+    "pod",
+    "service",
+    "uid",
+}
+
 
 def _entity_key(namespace: Any, name: Any) -> str:
     return f"{str(namespace or '').strip()}/{str(name or '').strip()}"
@@ -34,7 +52,7 @@ def _entity_key(namespace: Any, name: Any) -> str:
 def _empty_dimension(dimension: str) -> Dict[str, Any]:
     return {
         "dimension": dimension,
-        "status": "absent",
+        "status": "unselected",
         "source_systems": [],
         "query_count": 0,
         "present_query_count": 0,
@@ -161,6 +179,17 @@ def _render_metric_fact(record: Mapping[str, Any]) -> Optional[str]:
             annotations.append(humanized)
 
     metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    labels = metadata.get("labels") if isinstance(metadata.get("labels"), Mapping) else {}
+    semantic_labels = [
+        f"{key}={labels[key]}"
+        for key in sorted(labels)
+        if key not in _METRIC_IDENTITY_LABELS and labels[key] not in (None, "")
+    ]
+    if semantic_labels:
+        annotations.extend(semantic_labels[:8])
+        if len(semantic_labels) > 8:
+            annotations.append(f"另有 {len(semantic_labels) - 8} 个标签")
+
     stats = record.get("stats") if isinstance(record.get("stats"), Mapping) else metadata.get("stats")
     if isinstance(stats, Mapping) and stats.get("first") is not None and stats.get("last") is not None:
         try:
@@ -195,7 +224,25 @@ def _records_from_structured(structured: Mapping[str, Any]) -> List[Mapping[str,
     return [item for item in facts if isinstance(item, Mapping)]
 
 
+def _display_fact_value(record: Mapping[str, Any]) -> str:
+    metric = _render_metric_fact(record)
+    if metric:
+        return metric
+    rendered = _render_fact_value(record.get("value"))
+    if str(record.get("dimension") or "").strip().lower() == "kubernetes":
+        attribute = str(record.get("attribute") or "").strip()
+        if attribute:
+            return f"{attribute}={rendered}"
+    return rendered
+
+
 def _compact_fact(record: Mapping[str, Any], *, fallback_seed: str) -> Dict[str, Any]:
+    """Preserve the complete canonical record and add a presentation value.
+
+    Unknown record fields are intentionally forwarded.  Multi-group handoff
+    consumers can therefore learn new canonical extensions without changing
+    this projector, while the report still has a compact readable value.
+    """
     refs = record.get("evidence_refs") or record.get("ref") or record.get("evidence_ref") or []
     if isinstance(refs, str):
         refs = [refs]
@@ -206,12 +253,14 @@ def _compact_fact(record: Mapping[str, Any], *, fallback_seed: str) -> Dict[str,
             (fallback_seed + json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)).encode("utf-8")
         ).hexdigest()[:12]
         fact_id = f"fact-derived-{digest}"
-    return {
+    fact = deepcopy(dict(record))
+    fact.update({
         "fact_id": fact_id,
         "source_system": str(record.get("source_system") or "unknown"),
-        "value": _render_metric_fact(record) or _render_fact_value(record.get("value")),
         "evidence_refs": refs,
-    }
+        "display_value": _display_fact_value(record),
+    })
+    return fact
 
 
 def _append_unique_facts(target: Dict[str, Any], facts: Iterable[Dict[str, Any]]) -> None:
@@ -220,12 +269,18 @@ def _append_unique_facts(target: Dict[str, Any], facts: Iterable[Dict[str, Any]]
         for item in target["facts"]
     }
     seen_rendered = {
-        (str(item.get("source_system") or ""), str(item.get("value") or ""))
+        (
+            str(item.get("source_system") or ""),
+            str(item.get("display_value") or item.get("value") or ""),
+        )
         for item in target["facts"]
     }
     for fact in facts:
         key = (str(fact.get("fact_id") or ""), tuple(fact.get("evidence_refs") or []))
-        rendered_key = (str(fact.get("source_system") or ""), str(fact.get("value") or ""))
+        rendered_key = (
+            str(fact.get("source_system") or ""),
+            str(fact.get("display_value") or fact.get("value") or ""),
+        )
         if key in seen or rendered_key in seen_rendered:
             continue
         seen.add(key)
@@ -258,6 +313,7 @@ def _kubernetes_fact_rows(event: Mapping[str, Any]) -> List[Dict[str, Any]]:
             "fact_id": f"fact-k8s-{digest}",
             "source_system": "kubernetes",
             "value": value,
+            "display_value": value,
             "evidence_refs": [],
         })
     return rows
@@ -267,13 +323,11 @@ def _finalize_status(summary: Dict[str, Any]) -> None:
     statuses = summary.pop("_query_statuses", [])
     if summary["facts"] or summary["present_query_count"]:
         summary["status"] = "present"
-    elif any(status in {"weak", "partial"} for status in statuses):
-        summary["status"] = "weak"
+    elif any(status in {"weak", "partial", "unknown"} for status in statuses):
+        summary["status"] = "unknown"
     elif statuses and all(status == "error" for status in statuses):
         summary["status"] = "error"
-    elif "empty" in statuses:
-        summary["status"] = "empty"
-    elif "absent" in statuses:
+    elif any(status in {"empty", "absent"} for status in statuses):
         summary["status"] = "absent"
 
     if summary["status"] == "present" and summary["empty_query_count"]:
@@ -286,8 +340,15 @@ def aggregate_group_evidence(
     entities: List[Dict[str, Any]],
     events: List[Dict[str, Any]],
     status_keywords: Optional[List[str]] = None,
+    *,
+    include_event_facts: bool = True,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Aggregate independent tool observations without last-query-wins loss."""
+    """Aggregate independent observations without last-query-wins loss.
+
+    ``include_event_facts=False`` is used by the authoritative snapshot path:
+    thinking events then contribute query coverage and limitations only.  The
+    diagnostic facts themselves come exclusively from normalized Fact Ledgers.
+    """
     result: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for entity in entities or []:
         key = _entity_key(entity.get("namespace"), entity.get("name"))
@@ -308,16 +369,26 @@ def aggregate_group_evidence(
             continue
         tool = str(event.get("tool_name") or "").strip().lower()
         structured = event.get("structured") if isinstance(event.get("structured"), Mapping) else {}
-        dimension = str(structured.get("dimension") or OBSERVABILITY_QUERY_TOOL_DIMENSIONS.get(tool) or "").lower()
+        dimension = str(
+            structured.get("dimension")
+            or OBSERVABILITY_QUERY_TOOL_DIMENSIONS.get(tool)
+            or ("kubernetes" if tool.startswith("kubectl_") else "")
+        ).lower()
 
-        if dimension in {"metrics", "logging", "tracing"}:
+        if dimension in REQUIRED_DIMENSIONS:
             summary = result[entity_key][dimension]
-            coverage = str(structured.get("coverage") or "empty").strip().lower()
-            records = _records_from_structured(structured)
+            records = _records_from_structured(structured) if include_event_facts else []
             facts = [
                 _compact_fact(record, fallback_seed=f"{entity_key}:{dimension}:{index}")
                 for record in records
+                if str(record.get("dimension") or dimension).strip().lower() == dimension
             ]
+            if include_event_facts and dimension == "kubernetes" and not facts:
+                facts = _kubernetes_fact_rows(event)
+            coverage = str(
+                structured.get("coverage")
+                or ("present" if facts or dimension == "kubernetes" else "empty")
+            ).strip().lower()
             summary["query_count"] += 1
             summary["_query_statuses"].append(coverage)
             if facts or coverage == "present":
@@ -330,14 +401,6 @@ def aggregate_group_evidence(
                 if str(limitation).strip() and str(limitation) not in summary["limitations"]:
                     summary["limitations"].append(str(limitation))
             continue
-
-        if tool.startswith("kubectl_") or dimension == "kubernetes":
-            summary = result[entity_key]["kubernetes"]
-            summary["query_count"] += 1
-            summary["present_query_count"] += 1
-            summary["_query_statuses"].append("present")
-            summary["source_systems"] = ["kubernetes"]
-            _append_unique_facts(summary, _kubernetes_fact_rows(event))
 
     normalized_statuses = {str(item).strip().lower() for item in (status_keywords or [])}
     is_pre_runtime = bool(normalized_statuses & _PRE_RUNTIME_STATUSES)

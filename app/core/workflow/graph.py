@@ -21,6 +21,7 @@ from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.parallel_evidence import (
     ParallelEvidenceNode,
+    expand_groups_to_entity_lanes,
     extract_abnormal_groups,
 )
 from app.core.skills.models import Layer
@@ -134,16 +135,18 @@ def build_diagnosis_workflow(
 
     workflow = StateGraph(WorkflowState)
 
-    # 多异常并发扇出配置（异常组 > threshold 时走 parallel_evidence）
+    # Pod 诊断 lane 扇出配置。默认 threshold=0，使单异常与多异常共享
+    # 同一条「每 Pod 一 lane」事实/RCA/归档契约；保留正数 threshold 仅用于
+    # 需要兼容旧共享 evidence 路径的部署。
     parallel_cfg = parallel_config or {}
     parallel_enabled = (
         bool(parallel_cfg.get("enabled", True))
         and "evidence" in enabled
         and "layer" in enabled
     )
-    parallel_threshold = 2
+    parallel_threshold = 0
     try:
-        parallel_threshold = max(1, int(parallel_cfg.get("threshold", 2)))
+        parallel_threshold = max(0, int(parallel_cfg.get("threshold", 0)))
     except (TypeError, ValueError):
         pass
 
@@ -172,8 +175,8 @@ def build_diagnosis_workflow(
         next_node = enabled[i + 1]
 
         if node_id == "layer" and layer_enabled:
-            # layer 节点有条件路由：HEALTHY 直达 conclusion；异常组 > threshold
-            # 走 parallel_evidence 并发扇出；其余进入 evidence
+            # layer 节点有条件路由：HEALTHY 直达 conclusion；异常 Pod 默认
+            # 全部走 parallel_evidence，每个 Pod 一条 lane。
             workflow.add_conditional_edges(
                 "layer",
                 _make_layer_router(
@@ -204,14 +207,11 @@ def _make_layer_router(
     enabled: list,
     query_mode: str = "full",
     parallel_enabled: bool = False,
-    parallel_threshold: int = 2,
+    parallel_threshold: int = 0,
 ):
     """创建 layer 节点的条件路由函数"""
     def router(state: WorkflowState) -> str:
         layer = state.get("layer")
-        if layer == Layer.HEALTHY:
-            logger.info("🚀 HEALTHY 模式：直接到 conclusion")
-            return "conclusion"
         if layer == Layer.QUERY:
             if str(query_mode or "full").strip().lower() == "direct":
                 logger.info("🚀 QUERY direct 模式：直接到 conclusion")
@@ -220,13 +220,32 @@ def _make_layer_router(
             next_node = enabled[idx + 1] if idx + 1 < len(enabled) else "conclusion"
             logger.info("🚀 QUERY 模式：进入 %s", next_node)
             return next_node
-        # 多异常扇出：异常组数量超过阈值时每组独立并发采集
+        # Explicit diagnosis targets define an N-target total-fan-in contract,
+        # even when one instantaneous lookup is healthy. Route them before the
+        # general HEALTHY fast path so requested targets cannot disappear.
+        handoff = state.get("layer_handoff") or {}
+        if parallel_enabled and handoff.get("explicit_pod_targets"):
+            groups = extract_abnormal_groups(handoff)
+            lane_count = len(expand_groups_to_entity_lanes(groups))
+            if lane_count > parallel_threshold:
+                logger.info(
+                    "🚀 显式 Pod 并发模式：%d 个目标 lanes > 阈值 %d，进入 parallel_evidence",
+                    lane_count,
+                    parallel_threshold,
+                )
+                return "parallel_evidence"
+        if layer == Layer.HEALTHY:
+            logger.info("🚀 HEALTHY 模式：直接到 conclusion")
+            return "conclusion"
+        # 按原子 Pod lane 数量判断，避免粗粒度 Layer 分组把多个 Pod 压成
+        # 一组；默认阈值 0，因此 N=1/3/5/10 使用同一诊断路径。
         if parallel_enabled:
             groups = extract_abnormal_groups(state.get("layer_handoff"))
-            if len(groups) > parallel_threshold:
+            lane_count = len(expand_groups_to_entity_lanes(groups))
+            if lane_count > parallel_threshold:
                 logger.info(
-                    "🚀 多异常并发模式：检出 %d 组 > 阈值 %d，进入 parallel_evidence",
-                    len(groups), parallel_threshold,
+                    "🚀 多异常并发模式：检出 %d 组/%d Pod lanes > 阈值 %d，进入 parallel_evidence",
+                    len(groups), lane_count, parallel_threshold,
                 )
                 return "parallel_evidence"
         # 找 layer 之后的下一个节点

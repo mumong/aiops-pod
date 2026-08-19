@@ -829,6 +829,84 @@ def test_validate_rca_claims_accepts_one_supported_hypothesis_per_entity():
     assert {item["entity_id"] for item in result["hypotheses"]} == {entity_a, entity_b}
 
 
+def test_single_lane_claim_uses_authoritative_entity_not_model_uid():
+    authoritative = "k8s.pod:demo/api:uid-authoritative"
+    mutated = "k8s.pod:demo/api:uid-authoritativf"
+    fact = _fact("single-lane", authoritative)
+    ledger = FactLedger.model_validate(
+        _ledger("single-lane", authoritative, [fact])
+    )
+    claim = _diagnosed_claim(
+        [
+            {
+                "hypothesis_id": "hyp-single",
+                "entity_id": mutated,
+                "summary": "Evidence-backed candidate",
+                "supporting_fact_ids": [fact["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.86,
+            }
+        ],
+        [fact["fact_id"]],
+    )
+
+    result = validate_rca_claims(
+        claim,
+        [ledger],
+        authoritative_entity_ids=[authoritative],
+    )
+
+    assert result["diagnostic_status"] == "diagnosed"
+    assert result["hypotheses"][0]["entity_id"] == authoritative
+    assert result["claim_validation"]["model_entity_overrides"] == [
+        {
+            "model_entity_id": mutated,
+            "authoritative_entity_id": authoritative,
+        }
+    ]
+
+
+def test_authoritative_lane_still_rejects_foreign_fact():
+    authoritative = "k8s.pod:demo/api:uid-authoritative"
+    foreign = "k8s.pod:demo/other:uid-foreign"
+    lane_fact = _fact("lane-fact", authoritative)
+    foreign_fact = _fact("foreign-fact", foreign)
+    ledgers = [
+        FactLedger.model_validate(
+            _ledger("lane", authoritative, [lane_fact])
+        ),
+        FactLedger.model_validate(
+            _ledger("foreign", foreign, [foreign_fact])
+        ),
+    ]
+    claim = _diagnosed_claim(
+        [
+            {
+                "hypothesis_id": "hyp-foreign",
+                "entity_id": authoritative,
+                "summary": "Foreign evidence must not cross the lane",
+                "supporting_fact_ids": [foreign_fact["fact_id"]],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "confidence": 0.86,
+            }
+        ],
+        [foreign_fact["fact_id"]],
+    )
+
+    result = validate_rca_claims(
+        claim,
+        ledgers,
+        authoritative_entity_ids=[authoritative],
+    )
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert foreign_fact["fact_id"] in result["claim_validation"][
+        "invalid_fact_ids"
+    ]
+
+
 def test_a026_specific_log_window_and_field_gaps_remain_verbatim():
     entity_with_logs = "k8s.pod:demo/orders-api-abc123def0-x1y2z:uid-a"
     log_fact = _fact(
@@ -1638,7 +1716,7 @@ def test_validate_rca_claims_allows_multiple_supported_hypotheses_for_entity():
     assert all(item["entity_id"] == entity_id for item in result["hypotheses"])
 
 
-def test_validate_rca_claims_downgrades_when_any_hypothesis_is_invalid():
+def test_validate_rca_claims_keeps_supported_diagnosis_and_drops_invalid_extra():
     entity_id = "k8s.pod:demo/api:uid-a"
     record = _fact("valid-candidate", entity_id)
     ledger = FactLedger.model_validate(
@@ -1669,9 +1747,83 @@ def test_validate_rca_claims_downgrades_when_any_hypothesis_is_invalid():
 
     result = validate_rca_claims(claim, [ledger])
 
-    assert result["diagnostic_status"] == "inconclusive"
+    assert result["diagnostic_status"] == "diagnosed"
     assert result["claim_validation"]["valid"] is False
+    assert result["claim_validation"]["reference_valid"] is False
+    assert result["claim_validation"]["diagnosis_supported"] is True
+    assert result["claim_validation"]["diagnosis_publishable"] is True
+    assert result["supporting_fact_ids"] == [record["fact_id"]]
     assert "fact-ffffffffffff" in result["claim_validation"]["invalid_fact_ids"]
+
+
+def test_validate_rca_claims_keeps_reference_validity_separate_from_publication():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("valid-inconclusive-reference", entity_id)
+    ledger = FactLedger.model_validate(
+        _ledger("case-inconclusive", entity_id, [record])
+    )
+    claim = _diagnosed_claim(
+        [{
+            "hypothesis_id": "hyp-open",
+            "entity_id": entity_id,
+            "summary": "Observed fact does not yet prove one root cause",
+            "supporting_fact_ids": [record["fact_id"]],
+            "contradicting_fact_ids": [],
+            "unknowns": ["causal mechanism remains open"],
+            "confidence": 0.4,
+        }],
+        [record["fact_id"]],
+    )
+    claim["diagnostic_status"] = "inconclusive"
+    claim["root_cause"] = "Evidence is insufficient for one root cause"
+    claim["root_cause_summary"] = claim["root_cause"]
+    claim["confidence"] = 0.4
+
+    result = validate_rca_claims(claim, [ledger])
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert result["claim_validation"]["valid"] is True
+    assert result["claim_validation"]["reference_valid"] is True
+    assert result["claim_validation"]["diagnosis_supported"] is False
+    assert result["claim_validation"]["diagnosis_publishable"] is False
+
+
+def test_validate_rca_claims_promotes_top_level_support_to_sole_hypothesis():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("top-level-only-support", entity_id)
+    ledger = FactLedger.model_validate(
+        _ledger("case-top-level-only", entity_id, [record])
+    )
+    claim = _diagnosed_claim(
+        [{
+            "hypothesis_id": "hyp-sole",
+            "entity_id": entity_id,
+            "summary": "Source-backed candidate",
+            "supporting_fact_ids": [],
+            "contradicting_fact_ids": [],
+            "unknowns": [],
+            "confidence": 0.88,
+        }],
+        [record["fact_id"]],
+    )
+
+    result = validate_rca_claims(
+        claim,
+        [ledger],
+        authoritative_entity_ids=[entity_id],
+    )
+
+    assert result["diagnostic_status"] == "diagnosed"
+    assert result["supporting_fact_ids"] == [record["fact_id"]]
+    assert result["hypotheses"][0]["supporting_fact_ids"] == [
+        record["fact_id"]
+    ]
+    assert result["claim_validation"]["supporting_fact_promotions"] == [{
+        "hypothesis_id": "hyp-sole",
+        "entity_id": entity_id,
+        "fact_ids": [record["fact_id"]],
+        "source": "top_level_supporting_fact_ids",
+    }]
 
 
 def test_validate_rca_claims_rejects_ambiguous_inferred_entity():
@@ -2016,9 +2168,9 @@ def test_rca_prompt_matches_generic_fact_support_threshold():
     assert "必须且只能有一个 hypothesis" not in ROOT_CAUSE_ANALYZER_PROMPT
     assert "每个当前 scope entity 必须恰好有一个 hypothesis" not in ROOT_CAUSE_ANALYZER_PROMPT
     assert "必须恰好有一个 hypothesis" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "每个 required abnormal Pod 必须至少有一个通过引用校验的 hypothesis" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "同一 entity 允许有多个独立 hypothesis" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "`entity_id` 可省略，但只能由引用事实唯一推断" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "每个 hypothesis 必须绑定 authoritative entity" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "一个主要 hypothesis 足够" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "只有确有独立候选时才增加" in ROOT_CAUSE_ANALYZER_PROMPT
     assert '"entity_id": "当前 Fact Ledger scope 中的 entity_id"' not in ROOT_CAUSE_ANALYZER_PROMPT
     assert "strength=critical/strong" not in ROOT_CAUSE_ANALYZER_PROMPT
 
@@ -2066,6 +2218,117 @@ def test_kubernetes_lifecycle_adapter_preserves_last_reason_and_exit_code():
         "/archive/kubectl-describe.raw" in record.evidence_refs
         for record in records.values()
     )
+
+
+def test_kubernetes_lifecycle_adapter_preserves_generic_causal_source_fields():
+    ledger = build_kubernetes_lifecycle_fact_ledger({
+        "name": "workload",
+        "namespace": "demo",
+        "uid": "uid-workload",
+        "status": "describe_summarized",
+        "phase": "Pending",
+        "conditions": [{
+            "type": "Ready",
+            "status": "False",
+            "reason": "ContainersNotReady",
+            "message": "containers with unready status: [app]",
+        }],
+        "containers": [{
+            "name": "app",
+            "env": [{
+                "name": "INPUT",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": "workload-input",
+                        "key": "unavailable-key",
+                        "optional": False,
+                    },
+                },
+            }],
+        }],
+        "containerStatuses": [{
+            "name": "app",
+            "state": {
+                "waiting": {
+                    "reason": "CreateContainerConfigError",
+                    "message": (
+                        "couldn't find key unavailable-key in Secret "
+                        "demo/workload-input"
+                    ),
+                },
+            },
+            "lastState": {
+                "terminated": {
+                    "reason": "Error",
+                    "message": "previous process failed",
+                    "exitCode": 2,
+                },
+            },
+            "restartCount": 3,
+        }],
+        "selected_events": [{
+            "type": "Warning",
+            "reason": "FailedMount",
+            "message": "MountVolume.SetUp failed for volume workload-config",
+            "source": "kubelet",
+            "lastTimestamp": "2026-08-17T01:02:03Z",
+        }],
+        "evidence_refs": ["archive://kubernetes/workload/describe"],
+    })
+
+    assert ledger is not None
+    by_attribute = {}
+    for record in ledger.records:
+        by_attribute.setdefault(record.attribute, []).append(record)
+
+    assert by_attribute["container.waiting_reason"][0].value["reason"] == (
+        "CreateContainerConfigError"
+    )
+    assert "unavailable-key" in by_attribute[
+        "container.waiting_message"
+    ][0].value["message"]
+    assert by_attribute["pod.condition"][0].value["status"] == "False"
+    assert by_attribute["event.message"][0].value["reason"] == "FailedMount"
+    assert by_attribute["event.message"][0].timestamp == "2026-08-17T01:02:03Z"
+    assert by_attribute["container.environment_reference"][0].value == {
+        "container": "app",
+        "environment": "INPUT",
+        "kind": "Secret",
+        "name": "workload-input",
+        "key": "unavailable-key",
+        "optional": False,
+    }
+    assert all(
+        record.metadata.get("source_path")
+        for attribute in (
+            "container.waiting_reason",
+            "container.waiting_message",
+            "pod.condition",
+            "event.message",
+            "container.environment_reference",
+        )
+        for record in by_attribute[attribute]
+    )
+    assert {
+        record.metadata.get("evidence_role")
+        for record in by_attribute["container.waiting_message"]
+    } == {"causal_candidate"}
+    serialized = ledger.model_dump_json()
+    assert "describe_summarized" not in serialized
+
+
+def test_kubernetes_lifecycle_adapter_drops_event_table_headers_and_internal_status():
+    ledger = build_kubernetes_lifecycle_fact_ledger({
+        "name": "workload",
+        "namespace": "demo",
+        "status": "events_found",
+        "selected_events": [
+            "LAST SEEN   TYPE      REASON        OBJECT          MESSAGE",
+        ],
+        "evidence_refs": ["archive://kubernetes/workload/events"],
+    })
+
+    assert ledger is None
 
 
 def test_kubernetes_lifecycle_adapter_preserves_container_resource_quantities():
@@ -3228,5 +3491,3 @@ def test_a029_fact_id_prefix_rejects_short_ambiguous_and_unknown(
 
     assert result["diagnostic_status"] == "inconclusive"
     assert reference in result["claim_validation"]["invalid_fact_ids"]
-
-

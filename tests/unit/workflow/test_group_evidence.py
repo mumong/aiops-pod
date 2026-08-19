@@ -1,4 +1,8 @@
+import json
+
+from app.core.workflow.fact_contract import _canonical_fact_id
 from app.core.workflow.group_evidence import aggregate_group_evidence
+import app.core.workflow.entity_evidence_snapshot as snapshot_module
 
 
 def _obs_event(tool, dimension, coverage, *, namespace, pod, facts=None, purpose="query"):
@@ -166,6 +170,40 @@ def test_pending_entity_marks_application_telemetry_not_applicable():
     assert "容器未启动" in " ".join(dimensions["tracing"]["limitations"])
 
 
+def test_dimension_states_distinguish_unselected_absent_and_unknown():
+    entity = {"kind": "Pod", "namespace": "demo", "name": "workload"}
+    no_query = aggregate_group_evidence([entity], [])
+    assert no_query["demo/workload"]["metrics"]["status"] == "unselected"
+
+    empty = aggregate_group_evidence([entity], [{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "execute_pod_promql",
+        "tool_args": {"namespace": "demo", "pod": "workload"},
+        "structured": {
+            "dimension": "metrics",
+            "coverage": "empty",
+            "entity": {"namespace": "demo", "pod": "workload"},
+        },
+    }])
+    assert empty["demo/workload"]["metrics"]["status"] == "absent"
+
+    partial = aggregate_group_evidence([entity], [{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "query_pod_logs",
+        "tool_args": {"namespace": "demo", "pod": "workload"},
+        "structured": {
+            "dimension": "logging",
+            "coverage": "partial",
+            "entity": {"namespace": "demo", "pod": "workload"},
+        },
+    }])
+    assert partial["demo/workload"]["logging"]["status"] == "unknown"
+
+
 def test_metric_fact_renders_name_unit_and_flat_trend():
     """Ledger-shaped record: metric name in `attribute`, trend in `metadata.stats`."""
     entity = {"kind": "Pod", "namespace": "aiops-case-09", "name": "workload"}
@@ -189,7 +227,8 @@ def test_metric_fact_renders_name_unit_and_flat_trend():
     result = aggregate_group_evidence([entity], events)
     facts = result["aiops-case-09/workload"]["metrics"]["facts"]
 
-    assert facts[0]["value"] == "kube_pod_container_status_restarts_total=0 count（持平）"
+    assert facts[0]["value"] == "0"
+    assert facts[0]["display_value"] == "kube_pod_container_status_restarts_total=0 count（持平）"
 
 
 def test_metric_fact_humanizes_bytes_and_shows_rising_trend():
@@ -213,7 +252,7 @@ def test_metric_fact_humanizes_bytes_and_shows_rising_trend():
     ]
 
     result = aggregate_group_evidence([entity], events)
-    rendered = result["aiops-case-10/workload"]["metrics"]["facts"][0]["value"]
+    rendered = result["aiops-case-10/workload"]["metrics"]["facts"][0]["display_value"]
 
     assert rendered.startswith("container_memory_working_set_bytes=15421440 bytes")
     assert "≈14.7 MiB" in rendered
@@ -307,3 +346,306 @@ def test_event_target_accepts_pod_name_and_primary_entity_contracts():
 
     assert dimensions["logging"]["facts"][0]["fact_id"] == "fact-pod-name"
     assert dimensions["tracing"]["facts"][0]["fact_id"] == "fact-primary-entity"
+
+
+def test_kubernetes_fact_ledger_preserves_resource_limit_and_canonical_fields():
+    entity = {"kind": "Pod", "namespace": "aiops-case-08", "name": "workload"}
+    event = {
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "tool_args": {
+            "kind": "pod",
+            "namespace": "aiops-case-08",
+            "name": "workload",
+        },
+        "structured": {
+            "dimension": "kubernetes",
+            "status": "pod_described",
+            "selected_events": ["Back-off restarting failed container"],
+            "fact_ledger": {
+                "contract_version": "aiops.fact-ledger.v1",
+                "case_id": "kubernetes-lifecycle-test",
+                "scope_entity_ids": ["k8s.pod:aiops-case-08/workload:uid"],
+                "records": [{
+                    "fact_id": "fact-resource-limit-memory",
+                    "entity_id": "k8s.pod:aiops-case-08/workload:uid",
+                    "entity_kind": "Pod",
+                    "namespace": "aiops-case-08",
+                    "entity_name": "workload",
+                    "dimension": "kubernetes",
+                    "fact_type": "configuration",
+                    "attribute": "container.resource_limit.memory",
+                    "value": {"container": "app", "value": "64Mi"},
+                    "unit": "kubernetes_quantity",
+                    "source_system": "kubernetes",
+                    "directness": "direct",
+                    "confidence": "high",
+                    "strength": "strong",
+                    "evidence_refs": ["structured://describe"],
+                    "metadata": {"source_path": "spec.containers[0].resources.limits.memory"},
+                    "schema_extension": {"type_url": "example.dev/k8s-resource/v1"},
+                }],
+                "record_count": 1,
+                "truncated": False,
+                "source": "mcp_canonical",
+                "legacy_contract": False,
+            },
+        },
+    }
+
+    result = aggregate_group_evidence([entity], [event])
+    facts = result["aiops-case-08/workload"]["kubernetes"]["facts"]
+
+    assert [fact["fact_id"] for fact in facts] == ["fact-resource-limit-memory"]
+    assert facts[0]["attribute"] == "container.resource_limit.memory"
+    assert facts[0]["value"] == {"container": "app", "value": "64Mi"}
+    assert facts[0]["metadata"]["source_path"].endswith("limits.memory")
+    assert facts[0]["schema_extension"]["type_url"] == "example.dev/k8s-resource/v1"
+    assert facts[0]["display_value"].startswith("container.resource_limit.memory=")
+    assert "64Mi" in facts[0]["display_value"]
+
+
+def test_metric_projection_preserves_labels_timestamp_and_unknown_extensions():
+    entity = {"kind": "Pod", "namespace": "aiops-case-08", "name": "workload"}
+    event = _obs_event(
+        "execute_pod_promql",
+        "metrics",
+        "present",
+        namespace="aiops-case-08",
+        pod="workload",
+        facts=[{
+            "fact_id": "fact-terminated-reason",
+            "source_system": "prometheus",
+            "fact_type": "measurement",
+            "attribute": "kube_pod_container_status_last_terminated_reason",
+            "value": "1",
+            "unit": "unitless",
+            "metadata": {
+                "labels": {
+                    "namespace": "aiops-case-08",
+                    "pod": "workload",
+                    "container": "app",
+                    "reason": "OOMKilled",
+                },
+                "stats": {"first": 1.0, "min": 1.0, "max": 1.0, "last": 1.0},
+            },
+            "evidence_refs": ["metric://terminated-reason"],
+        }],
+    )
+    record = event["structured"]["fact_ledger"]["records"][0]
+    record["timestamp"] = "2026-08-14T08:00:00Z"
+    record["schema_extension"] = {"type_url": "example.dev/prom-series/v2"}
+
+    result = aggregate_group_evidence([entity], [event])
+    fact = result["aiops-case-08/workload"]["metrics"]["facts"][0]
+
+    assert fact["metadata"]["labels"]["reason"] == "OOMKilled"
+    assert fact["timestamp"] == "2026-08-14T08:00:00Z"
+    assert fact["schema_extension"]["type_url"] == "example.dev/prom-series/v2"
+    assert "reason=OOMKilled" in fact["display_value"]
+
+
+def test_zero_valued_categorical_metric_is_a_negative_observation():
+    record = {
+        "dimension": "metrics",
+        "fact_type": "measurement",
+        "attribute": "kube_pod_status_reason",
+        "value": "0",
+        "metadata": {
+            "labels": {
+                "namespace": "demo",
+                "pod": "workload",
+                "reason": "NodeLost",
+            },
+        },
+        "directness": "direct",
+        "confidence": "high",
+    }
+
+    assert snapshot_module.classify_fact_evidence_role(record) == (
+        "negative_observation"
+    )
+
+
+def test_explicit_context_role_is_not_overridden_by_generic_event_heuristic():
+    record = {
+        "dimension": "kubernetes",
+        "fact_type": "event",
+        "attribute": "event.message",
+        "value": {
+            "type": "Warning",
+            "reason": "Failed",
+            "message": "source reported a failure",
+        },
+        "directness": "direct",
+        "confidence": "high",
+        "strength": "strong",
+        "metadata": {"evidence_role": "context"},
+    }
+
+    assert snapshot_module.classify_fact_evidence_role(record) == "context"
+
+
+def test_direct_strong_warning_event_without_explicit_role_is_causal_candidate():
+    record = {
+        "dimension": "kubernetes",
+        "fact_type": "event",
+        "attribute": "event.message",
+        "value": {
+            "type": "Warning",
+            "reason": "Failed",
+            "message": "source reported a failure",
+        },
+        "directness": "direct",
+        "confidence": "high",
+        "strength": "strong",
+        "metadata": {},
+    }
+
+    assert snapshot_module.classify_fact_evidence_role(record) == (
+        "causal_candidate"
+    )
+
+
+def test_top_level_explicit_role_survives_reclassification():
+    record = {
+        "dimension": "kubernetes",
+        "fact_type": "configuration",
+        "attribute": "container.resources.limits.memory",
+        "value": "64Mi",
+        "directness": "direct",
+        "confidence": "high",
+        "strength": "strong",
+        "evidence_role": "context",
+        "metadata": {"evidence_role": "causal_candidate"},
+    }
+
+    assert snapshot_module.classify_fact_evidence_role(record) == "context"
+
+
+def test_snapshot_manifest_retains_causal_and_direct_dimension_facts():
+    entity_id = "k8s.pod:demo/workload:uid-workload"
+    records = []
+    fact_specs = [
+        (
+            "kubernetes",
+            "event",
+            "event.message",
+            {"type": "Warning", "reason": "Failed", "message": "failure"},
+        ),
+        ("metrics", "measurement", "resource.value", 91),
+        ("logging", "log", "log.message", "runtime failure"),
+        (
+            "tracing",
+            "span",
+            "application_span",
+            {"status_code": "ERROR", "http_status": 500},
+        ),
+    ]
+    for dimension, fact_type, attribute, value in fact_specs:
+        record = {
+            "entity_id": entity_id,
+            "entity_kind": "Pod",
+            "namespace": "demo",
+            "entity_name": "workload",
+            "dimension": dimension,
+            "fact_type": fact_type,
+            "attribute": attribute,
+            "value": value,
+            "source_system": dimension,
+            "directness": "direct",
+            "confidence": "high",
+            "strength": "strong",
+            "evidence_refs": [f"archive://{dimension}"],
+        }
+        record["fact_id"] = _canonical_fact_id(record)
+        records.append(record)
+    ledger = {
+        "contract_version": "aiops.fact-ledger.v1",
+        "case_id": "generic-four-dimension-ledger",
+        "scope_entity_ids": [entity_id],
+        "records": records,
+        "record_count": len(records),
+        "truncated": False,
+        "source": "mcp_canonical",
+        "legacy_contract": False,
+    }
+
+    snapshot = snapshot_module.build_entity_evidence_snapshot(
+        entities=[{"kind": "Pod", "namespace": "demo", "name": "workload"}],
+        evidence_analysis=json.dumps({"tool_data": [{"fact_ledger": ledger}]}),
+        thinking_events=[],
+    )
+    manifest = snapshot.to_handoff()["selection_manifest"]
+
+    assert set(manifest["eligible_support_fact_ids"]) <= set(
+        manifest["rca_input_fact_ids"]
+    )
+    assert set(manifest["required_context_fact_ids"]) <= set(
+        manifest["rca_input_fact_ids"]
+    )
+    assert set(manifest["rca_input_fact_ids"]).isdisjoint(
+        manifest["omitted_fact_ids"]
+    )
+    selected_dimensions = {
+        snapshot.fact_index[fact_id]["dimension"]
+        for fact_id in manifest["rca_input_fact_ids"]
+    }
+    assert selected_dimensions == {"kubernetes", "metrics", "logging", "tracing"}
+
+
+def test_authoritative_snapshot_preserves_valid_unknown_record_extensions():
+    entity_id = "k8s.pod:demo/workload:uid-workload"
+    record = {
+        "entity_id": entity_id,
+        "entity_kind": "Pod",
+        "namespace": "demo",
+        "entity_name": "workload",
+        "dimension": "metrics",
+        "fact_type": "measurement",
+        "attribute": "container_memory_working_set_bytes",
+        "value": "67108864",
+        "unit": "bytes",
+        "source_system": "prometheus",
+        "directness": "direct",
+        "confidence": "high",
+        "strength": "strong",
+        "evidence_refs": ["prometheus://query/memory"],
+    }
+    record["fact_id"] = _canonical_fact_id(record)
+    record["schema_extension"] = {
+        "type_url": "example.dev/prom-series/v2",
+        "identity_fields": ["namespace", "pod", "container", "uid"],
+    }
+    ledger = {
+        "contract_version": "aiops.fact-ledger.v1",
+        "case_id": "future-compatible-ledger",
+        "scope_entity_ids": [entity_id],
+        "records": [record],
+        "record_count": 1,
+        "truncated": False,
+        "source": "mcp_canonical",
+        "legacy_contract": False,
+    }
+
+    snapshot = snapshot_module.build_entity_evidence_snapshot(
+        entities=[{"kind": "Pod", "namespace": "demo", "name": "workload"}],
+        evidence_analysis=json.dumps({
+            "tool_data": [{
+                "tool": "execute_pod_promql",
+                "status": "success",
+                "fact_ledger": ledger,
+            }],
+        }),
+        thinking_events=[],
+    )
+    fact = snapshot.dimension_evidence_by_entity[
+        "demo/workload"
+    ]["metrics"]["facts"][0]
+
+    assert fact["schema_extension"]["type_url"] == (
+        "example.dev/prom-series/v2"
+    )
+    assert fact["schema_extension"]["identity_fields"][-1] == "uid"

@@ -204,6 +204,8 @@ class LayerOutput(BaseModel):
 
 class LayerHandoff(BaseModel):
     diagnosis_scope: str = "question_scope"
+    explicit_pod_targets: list[PodRef] = Field(default_factory=list)
+    explicit_pod_observations: list[dict[str, Any]] = Field(default_factory=list)
     layer: str = ""
     derived_layer: str = ""
     layers: list[str] = Field(default_factory=list)

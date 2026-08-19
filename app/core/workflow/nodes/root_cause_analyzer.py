@@ -30,6 +30,11 @@ from app.core.workflow.fact_contract import (
     select_tool_data_for_rca,
     validate_rca_claims,
 )
+from app.core.workflow.entity_evidence_snapshot import (
+    build_entity_evidence_snapshot,
+    build_selection_manifest,
+    classify_fact_evidence_role,
+)
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import RCAOutput
 from app.core.workflow.state import WorkflowState
@@ -112,35 +117,118 @@ class RootCauseAnalyzerNode(WorkflowNode):
                         f"evidence_analysis长度={len(evidence_analysis)}, "
                         f"layer_handoff长度={len(json.dumps(state.get('layer_handoff') or {}, ensure_ascii=False, default=str))}")
 
-            evidence_summary = self._build_rca_context(state)
-            rca_result = None
+            entity_evidence_snapshot = self._resolve_entity_evidence_snapshot(
+                state,
+                evidence_analysis,
+            )
+            state_with_rca_input = {
+                **state,
+                "entity_evidence_snapshot": entity_evidence_snapshot,
+            }
+            rca_input = self._build_rca_input_projection(
+                state_with_rca_input,
+                evidence_analysis,
+            )
+            state_with_rca_input["rca_input_projection"] = rca_input
+            evidence_summary = self._build_rca_context(state_with_rca_input)
+            self._archive_node_input({
+                "node": self.node_id,
+                "question": question,
+                "layer": layer.value if isinstance(layer, Layer) else layer,
+                "rca_input_projection": rca_input,
+                "evidence_summary": evidence_summary,
+            })
             thinking_events = []
 
             # 使用 LLM 分析
             ai_call = getattr(self, 'ai_call', None)
-            if rca_result is not None:
-                pass
-            elif ai_call is not None:
-                rca_result, thinking_events = self._analyze_with_llm(
+            if ai_call is not None:
+                raw_result, thinking_events = self._analyze_with_llm(
                     question, layer, evidence_summary
                 )
             else:
                 # 无 LLM 时仅保留通用低置信度兜底
                 logger.info("⚠️ 无 LLM 服务，使用通用低置信度兜底")
-                rca_result = self._build_llm_fallback(
+                raw_result = self._build_llm_fallback(
                     question=question,
                     layer=layer,
                     reason="LLM 不可用，无法完成可靠根因分析",
                 )
                 thinking_events = []
 
-            rca_result = self._validate_rca_result_against_evidence(
-                rca_result or {},
+            attempts: List[Dict[str, Any]] = []
+            self._archive_node_output(
+                raw_result or {},
+                artifact_name="rca.attempt-1.model",
+            )
+            validated_result = self._validate_rca_result_against_evidence(
+                raw_result or {},
                 evidence_analysis,
                 question=question,
                 layer=layer,
             )
-            rca_result = self._sanitize_rca_result(rca_result)
+            self._archive_node_output(
+                validated_result,
+                artifact_name="rca.attempt-1.validated",
+            )
+            attempts.append({
+                "attempt": 1,
+                "model_output": raw_result or {},
+                "validated_output": validated_result,
+            })
+
+            if self._should_repair_rca(validated_result, rca_input):
+                repair_context = self._build_rca_repair_context(
+                    rca_input,
+                    validated_result,
+                )
+                repaired_raw, repair_events = self._analyze_with_llm(
+                    question,
+                    layer,
+                    repair_context,
+                )
+                thinking_events.extend(repair_events or [])
+                self._archive_node_output(
+                    repaired_raw or {},
+                    artifact_name="rca.attempt-2.model",
+                )
+                repaired_validated = self._validate_rca_result_against_evidence(
+                    repaired_raw or {},
+                    evidence_analysis,
+                    question=question,
+                    layer=layer,
+                )
+                self._archive_node_output(
+                    repaired_validated,
+                    artifact_name="rca.attempt-2.validated",
+                )
+                attempts.append({
+                    "attempt": 2,
+                    "model_output": repaired_raw or {},
+                    "validated_output": repaired_validated,
+                })
+                validated_result = repaired_validated
+
+            rca_result = self._sanitize_rca_result(validated_result)
+            claim_validation = (
+                rca_result.get("claim_validation")
+                if isinstance(rca_result.get("claim_validation"), dict)
+                else {
+                    "valid": False,
+                    "diagnostic_status": rca_result.get(
+                        "diagnostic_status", "inconclusive"
+                    ),
+                    "reasons": ["formal claim validation was not available"],
+                }
+            )
+            self._archive_node_output(
+                rca_result,
+                artifact_name="rca.output",
+            )
+            self._archive_node_output(
+                claim_validation,
+                artifact_name="claim_validation.output",
+            )
             
             # 构建决策对象
             decision = self._build_decision(layer, evidence_items, rca_result)
@@ -150,6 +238,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "root_cause": rca_result.get("root_cause", ""),
                 "causal_chain": rca_result.get("causal_chain", {}),
                 "rca_analysis": json.dumps(rca_result, ensure_ascii=False),
+                "rca_input_projection": rca_input,
+                "rca_attempts": attempts,
+                "claim_validation": claim_validation,
+                "entity_evidence_snapshot": entity_evidence_snapshot,
                 # AI 判定的核心 Runbook（从 primary_runbooks 列表取第一个）
                 "primary_runbook_id": ", ".join(rca_result.get("primary_runbooks", []) or []) or None,
             })
@@ -173,6 +265,202 @@ class RootCauseAnalyzerNode(WorkflowNode):
             self._save_thinking(state, new_state, [])
 
         return new_state
+
+    @staticmethod
+    def _resolve_entity_evidence_snapshot(
+        state: WorkflowState,
+        evidence_analysis: Any,
+    ) -> Dict[str, Any]:
+        existing = state.get("entity_evidence_snapshot")
+        if (
+            isinstance(existing, Mapping)
+            and existing.get("contract_version")
+            == "aiops.entity-evidence-snapshot.v1"
+        ):
+            return dict(existing)
+        ledgers = extract_fact_ledgers_from_evidence_analysis(evidence_analysis)
+        entities: List[Dict[str, Any]] = []
+        seen = set()
+        for ledger in ledgers:
+            for record in ledger.records:
+                namespace = str(record.namespace or "").strip()
+                name = str(record.entity_name or "").strip()
+                key = (namespace, name)
+                if not namespace or not name or key in seen:
+                    continue
+                seen.add(key)
+                entities.append({
+                    "kind": record.entity_kind or "Pod",
+                    "namespace": namespace,
+                    "name": name,
+                })
+        if not entities:
+            return {}
+        return build_entity_evidence_snapshot(
+            entities=entities,
+            evidence_analysis=evidence_analysis,
+            thinking_events=state.get("thinking_events") or [],
+        ).to_handoff()
+
+    def _build_rca_input_projection(
+        self,
+        state: WorkflowState,
+        evidence_analysis: Any,
+    ) -> Dict[str, Any]:
+        """Create one code-owned, record-complete RCA handoff."""
+        snapshot = (
+            state.get("entity_evidence_snapshot")
+            if isinstance(state.get("entity_evidence_snapshot"), Mapping)
+            else {}
+        )
+        snapshot_fact_index = (
+            snapshot.get("fact_index")
+            if isinstance(snapshot.get("fact_index"), Mapping)
+            else {}
+        )
+        if snapshot.get("contract_version") == "aiops.entity-evidence-snapshot.v1":
+            # A lane snapshot has already applied the authoritative entity
+            # boundary. Re-expanding from the collector's unscoped ledgers here
+            # would reintroduce sibling Pod facts into this lane.
+            fact_index = {
+                str(fact_id): dict(record)
+                for fact_id, record in snapshot_fact_index.items()
+                if isinstance(record, Mapping)
+            }
+            authoritative_entity_ids = list(dict.fromkeys(
+                str(record.get("entity_id") or "").strip()
+                for record in fact_index.values()
+                if str(record.get("entity_id") or "").lower().startswith(
+                    "k8s.pod:"
+                )
+            ))
+            if not authoritative_entity_ids:
+                authoritative_entity_ids = list(dict.fromkeys(
+                    str(entity_id)
+                    for ledger in (snapshot.get("fact_ledgers") or [])
+                    if isinstance(ledger, Mapping)
+                    for entity_id in (ledger.get("scope_entity_ids") or [])
+                    if str(entity_id).lower().startswith("k8s.pod:")
+                ))
+        else:
+            ledgers = extract_fact_ledgers_from_evidence_analysis(
+                evidence_analysis
+            )
+            authoritative_entity_ids = list(dict.fromkeys(
+                entity_id
+                for ledger in ledgers
+                for entity_id in ledger.scope_entity_ids
+                if str(entity_id).lower().startswith("k8s.pod:")
+            ))
+            fact_index: Dict[str, Dict[str, Any]] = {}
+            for ledger in ledgers:
+                for record in ledger.records:
+                    payload = record.model_dump(mode="json", exclude_none=True)
+                    payload["evidence_role"] = classify_fact_evidence_role(
+                        payload
+                    )
+                    fact_index[record.fact_id] = payload
+        raw_manifest = snapshot.get("selection_manifest")
+        if isinstance(raw_manifest, Mapping):
+            manifest = dict(raw_manifest)
+        else:
+            manifest = build_selection_manifest(
+                fact_index,
+                max_facts=48,
+            ).to_dict()
+
+        selected_fact_ids = [
+            str(fact_id)
+            for fact_id in manifest["rca_input_fact_ids"]
+            if str(fact_id) in fact_index
+        ]
+        return {
+            "contract_version": "aiops.rca-input-projection.v1",
+            "authoritative_entity_ids": authoritative_entity_ids,
+            "selection_manifest": manifest,
+            "selected_facts": [
+                fact_index[fact_id] for fact_id in selected_fact_ids
+            ],
+            "snapshot_contract_version": snapshot.get("contract_version"),
+            "snapshot_limitations": list(snapshot.get("limitations") or []),
+        }
+
+    def _should_repair_rca(
+        self,
+        validated_result: Mapping[str, Any],
+        rca_input: Mapping[str, Any],
+    ) -> bool:
+        if bool(getattr(self, "disable_internal_repair", False)):
+            return False
+        if getattr(self, "ai_call", None) is None:
+            return False
+        cancel_event = getattr(self, "cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        manifest = rca_input.get("selection_manifest")
+        eligible = (
+            manifest.get("eligible_support_fact_ids")
+            if isinstance(manifest, Mapping)
+            else []
+        )
+        if not eligible:
+            return False
+        claim = validated_result.get("claim_validation")
+        claim_valid = bool(claim.get("valid")) if isinstance(claim, Mapping) else False
+        return (
+            str(validated_result.get("diagnostic_status") or "inconclusive")
+            == "inconclusive"
+            or not claim_valid
+        )
+
+    @staticmethod
+    def _build_rca_repair_context(
+        rca_input: Mapping[str, Any],
+        first_result: Mapping[str, Any],
+    ) -> str:
+        manifest = (
+            rca_input.get("selection_manifest")
+            if isinstance(rca_input.get("selection_manifest"), Mapping)
+            else {}
+        )
+        eligible_ids = set(manifest.get("eligible_support_fact_ids") or [])
+        required_ids = set(manifest.get("required_context_fact_ids") or [])
+        selected_facts = [
+            fact
+            for fact in (rca_input.get("selected_facts") or [])
+            if isinstance(fact, Mapping)
+        ]
+        claim = (
+            first_result.get("claim_validation")
+            if isinstance(first_result.get("claim_validation"), Mapping)
+            else {}
+        )
+        repair_payload = {
+            "contract_version": "aiops.rca-repair-input.v1",
+            "authoritative_entity_ids": list(
+                rca_input.get("authoritative_entity_ids") or []
+            ),
+            "eligible_support_facts": [
+                fact
+                for fact in selected_facts
+                if str(fact.get("fact_id") or "") in eligible_ids
+            ],
+            "required_context_facts": [
+                fact
+                for fact in selected_facts
+                if str(fact.get("fact_id") or "") in required_ids
+            ],
+            "validation_reasons": list(claim.get("reasons") or []),
+            "invalid_fact_ids": list(claim.get("invalid_fact_ids") or []),
+            "instruction": (
+                "Repair the RCA once. Use only the exact authoritative entity IDs "
+                "and Fact IDs in this payload. Return RCAOutput; do not collect data."
+            ),
+        }
+        return "## AIOps Fact Ledger — constrained repair\n" + bounded_json_dumps(
+            repair_payload,
+            max_chars=RCA_CONTEXT_MAX_CHARS - 48,
+        )
 
     def _build_evidence_summary(
         self,
@@ -208,6 +496,16 @@ class RootCauseAnalyzerNode(WorkflowNode):
             "# 问题定位结构化交接 layer_handoff",
             compact_handoff,
         ]
+        rca_input_projection = state.get("rca_input_projection")
+        if isinstance(rca_input_projection, Mapping):
+            parts.extend([
+                "",
+                "# 代码权威 RCA 输入投影",
+                bounded_json_dumps(
+                    rca_input_projection,
+                    max_chars=RCA_FACT_LEDGER_MAX_CHARS,
+                ),
+            ])
         if fact_ledgers:
             parts.extend([
                 "",
@@ -481,16 +779,6 @@ class RootCauseAnalyzerNode(WorkflowNode):
 {evidence_summary}
 
 请直接基于以上证据进行根因分析，并通过 RCAOutput Pydantic schema 生成结构化结果。"""
-            self._archive_node_input({
-                "node": self.node_id,
-                "mode": "lite",
-                "question": question,
-                "user_message": user_message,
-                "evidence_summary": evidence_summary,
-                "system_prompt_chars": len(system_prompt),
-                "user_message_chars": len(user_message),
-            })
-
             start_time = time.time()
 
             ai_call = getattr(self, 'ai_call', None)
@@ -710,8 +998,18 @@ class RootCauseAnalyzerNode(WorkflowNode):
             )
             or fact_ledgers
         )
+        authoritative_entity_ids = list(dict.fromkeys(
+            entity_id
+            for ledger in fact_ledgers
+            for entity_id in ledger.scope_entity_ids
+            if str(entity_id).lower().startswith("k8s.pod:")
+        ))
         try:
-            return validate_rca_claims(rca_result, validation_ledgers)
+            return validate_rca_claims(
+                rca_result,
+                validation_ledgers,
+                authoritative_entity_ids=authoritative_entity_ids,
+            )
         except Exception as exc:
             logger.warning("⚠️ [rca] Fact Ledger 引用校验失败，降级为 inconclusive: %s", exc)
             fallback = self._build_llm_fallback(

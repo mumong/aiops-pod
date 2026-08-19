@@ -48,12 +48,19 @@ def _diagnosis_state():
         "rca_analysis": json.dumps({
             "diagnostic_status": "diagnosed",
             "root_cause": "内存限制 256Mi 不足导致 OOMKilled",
+            "supporting_fact_ids": ["fact-source1234"],
             "confidence": 0.85,
             "confidence_reason": "Exit Code 137 + memory limit 证据",
             "causal_chain": {
                 "trigger": "内存需求超限",
                 "mechanism": "cgroup OOM Killer",
                 "manifestation": "CrashLoopBackOff",
+            },
+            "claim_validation": {
+                "valid": True,
+                "valid_supporting_fact_ids": ["fact-source1234"],
+                "invalid_fact_ids": [],
+                "reasons": [],
             },
         }),
         "thinking_events": [
@@ -88,7 +95,13 @@ def test_diagnosis_prompt_contains_rich_template_and_real_tool_data():
 
     new_state = node.execute(_diagnosis_state())
 
-    assert new_state["conclusion"].startswith("## 📊 诊断概览")
+    assert new_state["conclusion"].startswith(
+        "# 🔬 单实体诊断报告（确定性事实权威）"
+    )
+    assert "## 补充说明与修复建议（非事实权威）" in new_state[
+        "conclusion"
+    ]
+    assert "## 📊 诊断概览" in new_state["conclusion"]
     assert len(ai.calls) == 1
 
     user = ai.calls[0]["user"]
@@ -136,7 +149,8 @@ def test_empty_llm_response_falls_back_to_deterministic_template():
     new_state = node.execute(_diagnosis_state())
 
     conclusion = new_state["conclusion"]
-    assert "确定性回退模板" in conclusion
+    assert "单实体诊断报告（确定性事实权威）" in conclusion
+    assert "diagnostic_status: diagnosed" in conclusion
     assert "内存限制 256Mi 不足" in conclusion
 
 

@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 import app.core.workflow.fact_contract as fact_contract_module
 from app.core.skills.models import Layer
+from app.core.workflow.entity_evidence_snapshot import build_selection_manifest
 from app.core.workflow.schemas import EvidenceCollectionOutput, RCAOutput
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
@@ -567,11 +568,10 @@ def test_evidence_user_message_consumes_layer_matched_runbooks_without_hardcoded
         layer_handoff=json.dumps(layer_handoff, ensure_ascii=False),
     )
 
-    assert "# Runbook 语义匹配要求" in message
-    assert "evidence_plan 阶段不要重新选择 runbook" in message
+    assert "# Runbook 上下文" in message
+    assert "不在 plan 阶段重新选择" in message
     assert "pod_status_keyword" in message
     assert "pod_abnormal_type" in message
-    assert "matched_runbooks" in message
     assert "evidence_plan 第一项必须是 fetch_runbook" not in message
     assert "recommended_runbooks" not in message
 
@@ -1337,6 +1337,197 @@ def test_layer_handoff_explicit_pod_scope_excludes_unrelated_global_abnormalitie
     assert handoff["current_abnormal_summary"]["selected_rows"] == [
         f"{target_namespace} {target_pod} 0/1 CrashLoopBackOff 9 35m"
     ]
+
+
+def test_layer_handoff_builds_all_explicit_pod_lanes_from_real_named_results():
+    node = LayerClassifierNode()
+    targets = [
+        ("team-a", "api-a", "ImagePullBackOff"),
+        ("team-b", "api-b", "CrashLoopBackOff"),
+        ("team-c", "api-c", "Pending"),
+    ]
+    question = "请诊断 " + " ".join(
+        f"{namespace}/{name}" for namespace, name, _ in targets
+    )
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": namespace,
+                "name": name,
+            },
+            "result": f"NAME READY STATUS RESTARTS AGE\n{name} 0/1 {status} 3 10m",
+            "raw_ref": f"raw/{name}",
+        }
+        for namespace, name, status in reversed(targets)
+    ]
+    events.append({
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_get_by_kind_in_cluster",
+        "structured": {
+            "header": "NAMESPACE NAME READY STATUS RESTARTS AGE",
+            "selected_rows": ["unrelated noisy-pod 0/1 Pending 0 2m"],
+            "status_counts": {"Pending": 1},
+        },
+        "result": "global scan",
+    })
+    layer_result = {
+        "layer": "L2",
+        "derived_layer": "L2",
+        "confidence": 0.8,
+        "reasoning": "三个显式目标需要诊断",
+        "key_entities": [],
+        "abnormal_pods": [
+            {"namespace": "unrelated", "name": "invented", "status": "Pending"}
+        ],
+        "pod_status_keyword": "Pending",
+        "pod_abnormal_type": "Unknown",
+    }
+
+    handoff = node._build_layer_handoff(
+        question=question,
+        layer_result=layer_result,
+        layer=Layer.L2,
+        layers=[Layer.L2],
+        thinking_events=events,
+    )
+
+    assert handoff["diagnosis_scope"] == "explicit_pods"
+    assert handoff["explicit_pod_targets"] == [
+        {"namespace": namespace, "name": name}
+        for namespace, name, _ in targets
+    ]
+    assert {
+        (pod["namespace"], pod["name"], pod["status"])
+        for pod in handoff["abnormal_pods"]
+    } == set(targets)
+    assert len(handoff["explicit_pod_observations"]) == 3
+    assert handoff["current_abnormal_summary"]["total_abnormal"] == 3
+    assert all(
+        entity["namespace"] != "unrelated"
+        for group in handoff["issue_groups"]
+        for entity in group["entities"]
+    )
+
+
+def test_layer_handoff_does_not_fabricate_failed_or_healthy_explicit_targets():
+    node = LayerClassifierNode()
+    question = "请诊断 team-a/api-a team-b/api-b team-c/api-c"
+    events = [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {"kind": "pod", "namespace": "team-a", "name": "api-a"},
+            "result": "NAME READY STATUS\napi-a 1/1 Running",
+        },
+        {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {"kind": "pod", "namespace": "team-b", "name": "api-b"},
+            "result": "NAME READY STATUS\napi-b 0/1 Running",
+        },
+        {
+            "type": "tool_result",
+            "status": "error",
+            "semantic_success": False,
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {"kind": "pod", "namespace": "team-c", "name": "api-c"},
+            "result": "Error from server (NotFound)",
+        },
+    ]
+    layer_result = {
+        "layer": "L2",
+        "derived_layer": "L2",
+        "confidence": 0.8,
+        "reasoning": "模型字段不具权威性",
+        "abnormal_pods": [
+            {"namespace": "team-a", "name": "api-a", "status": "CrashLoopBackOff"},
+            {"namespace": "team-c", "name": "api-c", "status": "Pending"},
+        ],
+        "pod_status_keyword": "Pending",
+        "pod_abnormal_type": "Unknown",
+    }
+
+    handoff = node._build_layer_handoff(
+        question=question,
+        layer_result=layer_result,
+        layer=Layer.L2,
+        layers=[Layer.L2],
+        thinking_events=events,
+    )
+
+    assert handoff["abnormal_pods"] == [
+        {"namespace": "team-b", "name": "api-b", "status": "NotReady"}
+    ]
+    states = {
+        (item["namespace"], item["name"]): item["state"]
+        for item in handoff["explicit_pod_observations"]
+    }
+    assert states == {
+        ("team-a", "api-a"): "healthy",
+        ("team-b", "api-b"): "abnormal",
+        ("team-c", "api-c"): "error",
+    }
+    assert [
+        (group["entities"][0]["namespace"], group["entities"][0]["name"])
+        for group in handoff["issue_groups"]
+    ] == [
+        ("team-a", "api-a"),
+        ("team-b", "api-b"),
+        ("team-c", "api-c"),
+    ]
+
+
+def test_layer_explicit_running_pod_with_recent_restart_gets_terminal_lane():
+    node = LayerClassifierNode()
+    row = "api-a 1/1 Running 5 (91s ago) 4m"
+    handoff = node._build_layer_handoff(
+        question="请诊断 namespace team-a 中 Pod api-a",
+        layer_result={
+            "layer": "L2",
+            "reasoning": "当前表格需要结构化判定",
+            "abnormal_pods": [],
+            "pod_abnormal_type": "Unknown",
+        },
+        layer=Layer.L2,
+        layers=[Layer.L2],
+        thinking_events=[{
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": True,
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": "team-a",
+                "name": "api-a",
+            },
+            "result": f"NAME READY STATUS RESTARTS AGE\n{row}",
+            "structured": {
+                "selected_rows": [row],
+                "recent_restart_rows": [row],
+            },
+        }],
+    )
+
+    assert handoff["explicit_pod_observations"][0]["state"] == "abnormal"
+    assert handoff["explicit_pod_observations"][0]["status"] == "RecentRestart"
+    assert handoff["abnormal_pods"] == [{
+        "namespace": "team-a",
+        "name": "api-a",
+        "status": "RecentRestart",
+    }]
+    assert len(handoff["issue_groups"]) == 1
+    assert handoff["issue_groups"][0]["status_keywords"] == ["RecentRestart"]
 
 
 def test_layer_guard_rejects_healthy_when_current_tool_scan_has_abnormal_pods():
@@ -2533,6 +2724,54 @@ def test_rca_execute_validates_fact_references_before_handoff():
     assert result["root_cause"] != "Unsupported model claim"
 
 
+def test_rca_derives_single_lane_authoritative_identity_from_ledgers():
+    node = RootCauseAnalyzerNode()
+    authoritative = "k8s.pod:demo/api:uid-authoritative"
+    mutated = "k8s.pod:demo/api:uid-authoritativf"
+    fact_record = _canonical_fact_record(entity_id=authoritative)
+    evidence_analysis = json.dumps({
+        "tool_data": [
+            _internally_authorized_tool_item({
+                "contract_version": "aiops.fact-ledger.v1",
+                "case_id": "single-authoritative-lane",
+                "scope_entity_ids": [authoritative],
+                "records": [fact_record],
+                "record_count": 1,
+                "truncated": False,
+                "source": "mcp_canonical",
+                "legacy_contract": False,
+            })
+        ]
+    })
+    claim = {
+        "diagnostic_status": "diagnosed",
+        "root_cause": "Evidence-backed candidate",
+        "supporting_fact_ids": [fact_record["fact_id"]],
+        "hypotheses": [{
+            "hypothesis_id": "hyp-single",
+            "entity_id": mutated,
+            "summary": "Evidence-backed candidate",
+            "supporting_fact_ids": [fact_record["fact_id"]],
+            "confidence": 0.9,
+        }],
+        "confidence": 0.9,
+        "confidence_reason": "Direct source-backed fact",
+    }
+
+    result = node._validate_rca_result_against_evidence(
+        claim,
+        evidence_analysis,
+        question="What is wrong?",
+        layer=Layer.L2,
+    )
+
+    assert result["diagnostic_status"] == "diagnosed"
+    assert result["hypotheses"][0]["entity_id"] == authoritative
+    assert result["claim_validation"]["model_entity_overrides"][0][
+        "model_entity_id"
+    ] == mutated
+
+
 def test_rca_validation_preserves_cross_ledger_collision_diagnostics(
     monkeypatch,
 ):
@@ -2963,3 +3202,491 @@ def test_layer_extracts_running_but_not_ready_pod_as_abnormal():
     assert any("workload-5f4fb9ff45-fhgnk" in row for row in summary["selected_rows"])
     assert not any("coredns" in row for row in summary["selected_rows"])
     assert not any("job-done" in row for row in summary["selected_rows"])
+
+
+def _selection_fact(
+    fact_id,
+    *,
+    dimension,
+    value,
+    evidence_role="symptom",
+    confidence="high",
+    strength="strong",
+    fact_type="measurement",
+    attribute="observation.value",
+    directness="direct",
+):
+    return {
+        "fact_id": fact_id,
+        "entity_id": "k8s.pod:scope/unit:uid-1",
+        "entity_kind": "Pod",
+        "namespace": "scope",
+        "entity_name": "unit",
+        "dimension": dimension,
+        "fact_type": fact_type,
+        "attribute": attribute,
+        "value": value,
+        "source_system": f"source-{dimension}",
+        "directness": directness,
+        "confidence": confidence,
+        "strength": strength,
+        "evidence_role": evidence_role,
+    }
+
+
+def test_selection_manifest_overflow_v2_is_deterministic_and_accounts_for_all_facts():
+    dimensions = ("kubernetes", "metrics", "logging", "tracing")
+    records = [
+        _selection_fact(
+            f"fact-{dimension}-{index:02d}",
+            dimension=dimension,
+            value={"sample": index},
+            evidence_role="causal_candidate" if index == 0 else "symptom",
+        )
+        for dimension in dimensions
+        for index in range(16)
+    ]
+    fact_index = {record["fact_id"]: record for record in records}
+
+    manifest = build_selection_manifest(fact_index, max_facts=48).to_dict()
+    reversed_manifest = build_selection_manifest(
+        dict(reversed(list(fact_index.items()))),
+        max_facts=48,
+    ).to_dict()
+
+    assert manifest == reversed_manifest
+    assert manifest["contract_version"] == "aiops.selection-manifest.v2"
+    assert manifest["max_facts"] == 48
+    assert manifest["total_fact_count"] == 64
+    assert manifest["overflowed"] is True
+    assert len(manifest["rca_input_fact_ids"]) == 48
+    selected = set(manifest["rca_input_fact_ids"])
+    omitted = set(manifest["omitted_fact_ids"])
+    assert selected.isdisjoint(omitted)
+    assert selected | omitted == set(fact_index)
+    assert {
+        fact_index[fact_id]["dimension"]
+        for fact_id in manifest["rca_input_fact_ids"]
+    } >= set(dimensions)
+    assert set(manifest) >= {
+        "eligible_support_fact_ids",
+        "direct_causal_candidate_fact_ids",
+        "required_context_fact_ids",
+        "rca_input_fact_ids",
+        "omitted_fact_ids",
+        "omission_reasons",
+        "representative_of",
+        "unselected_higher_priority_causal_fact_ids",
+    }
+    assert set(manifest["eligible_support_fact_ids"]) <= selected
+    assert set(manifest["direct_causal_candidate_fact_ids"]) <= selected
+    assert set(manifest["required_context_fact_ids"]) <= selected
+
+
+def test_selection_manifest_overflow_preserves_required_dimensions_under_extra_dimension_pressure():
+    records = [
+        _selection_fact(
+            f"fact-{dimension}",
+            dimension=dimension,
+            value={"sample": dimension},
+            evidence_role=(
+                "symptom" if dimension == "tracing" else "causal_candidate"
+            ),
+        )
+        for dimension in (
+            "kubernetes",
+            "metrics",
+            "logging",
+            "tracing",
+            "topology",
+        )
+    ]
+    fact_index = {record["fact_id"]: record for record in records}
+
+    manifest = build_selection_manifest(fact_index, max_facts=4).to_dict()
+
+    assert {
+        fact_index[fact_id]["dimension"]
+        for fact_id in manifest["rca_input_fact_ids"]
+    } == {"kubernetes", "metrics", "logging", "tracing"}
+
+
+@pytest.mark.parametrize("max_facts", [1, 2, 3])
+def test_selection_manifest_overflow_small_budget_prefers_direct_causal_signature(
+    max_facts,
+):
+    records = [
+        _selection_fact(
+            f"fact-{dimension}-symptom",
+            dimension=dimension,
+            value={"sample": dimension},
+            confidence="medium",
+            strength="context",
+            directness="derived",
+        )
+        for dimension in ("kubernetes", "metrics", "logging")
+    ]
+    records.append(_selection_fact(
+        "fact-tracing-causal",
+        dimension="tracing",
+        value={"sample": "causal"},
+        evidence_role="causal_candidate",
+    ))
+    fact_index = {record["fact_id"]: record for record in records}
+
+    manifest = build_selection_manifest(
+        fact_index,
+        max_facts=max_facts,
+    ).to_dict()
+
+    assert "fact-tracing-causal" in manifest["rca_input_fact_ids"]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected_fact_id"),
+    [
+        (
+            {
+                "fact_id": "fact-direct-strong",
+                "dimension": "tracing",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+            },
+            {
+                "fact_id": "fact-derived-critical",
+                "dimension": "logging",
+                "directness": "derived",
+                "confidence": "high",
+                "strength": "critical",
+            },
+            "fact-direct-strong",
+        ),
+        (
+            {
+                "fact_id": "fact-high-supporting",
+                "dimension": "tracing",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "supporting",
+            },
+            {
+                "fact_id": "fact-medium-critical",
+                "dimension": "logging",
+                "directness": "direct",
+                "confidence": "medium",
+                "strength": "critical",
+            },
+            "fact-high-supporting",
+        ),
+        (
+            {
+                "fact_id": "fact-tracing-tie",
+                "dimension": "tracing",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+            },
+            {
+                "fact_id": "fact-kubernetes-tie",
+                "dimension": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+            },
+            "fact-kubernetes-tie",
+        ),
+        (
+            {
+                "fact_id": "fact-z-tie",
+                "dimension": "logging",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+            },
+            {
+                "fact_id": "fact-a-tie",
+                "dimension": "logging",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+            },
+            "fact-a-tie",
+        ),
+    ],
+)
+def test_selection_manifest_overflow_causal_phase_priority_matrix(
+    first,
+    second,
+    expected_fact_id,
+):
+    records = [
+        _selection_fact(
+            item["fact_id"],
+            dimension=item["dimension"],
+            value={"sample": item["fact_id"]},
+            evidence_role="causal_candidate",
+            directness=item["directness"],
+            confidence=item["confidence"],
+            strength=item["strength"],
+        )
+        for item in (first, second)
+    ]
+
+    manifests = [
+        build_selection_manifest(
+            {record["fact_id"]: record for record in ordered_records},
+            max_facts=1,
+        ).to_dict()
+        for ordered_records in (records, list(reversed(records)))
+    ]
+
+    assert [
+        manifest["rca_input_fact_ids"]
+        for manifest in manifests
+    ] == [[expected_fact_id], [expected_fact_id]]
+
+
+@pytest.mark.parametrize(
+    (
+        "causal_directness",
+        "causal_confidence",
+        "causal_strength",
+        "counter_role",
+        "expected_fact_id",
+        "expected_unselected_causal",
+    ),
+    [
+        (
+            "derived",
+            "high",
+            "critical",
+            "contradicting",
+            "fact-direct-counter",
+            [],
+        ),
+        (
+            "related_context",
+            "high",
+            "critical",
+            "negative_observation",
+            "fact-direct-counter",
+            [],
+        ),
+        (
+            "direct",
+            "low",
+            "critical",
+            "contradicting",
+            "fact-direct-counter",
+            [],
+        ),
+        (
+            "direct",
+            "medium",
+            "strong",
+            "contradicting",
+            "fact-causal",
+            [],
+        ),
+        (
+            "direct",
+            "medium",
+            "supporting",
+            "causal_candidate",
+            "fact-direct-counter",
+            ["fact-causal"],
+        ),
+    ],
+)
+def test_selection_manifest_overflow_phase_eligibility_matrix(
+    causal_directness,
+    causal_confidence,
+    causal_strength,
+    counter_role,
+    expected_fact_id,
+    expected_unselected_causal,
+):
+    records = [
+        _selection_fact(
+            "fact-causal",
+            dimension="logging",
+            value={"sample": "causal"},
+            evidence_role="causal_candidate",
+            directness=causal_directness,
+            confidence=causal_confidence,
+            strength=causal_strength,
+        ),
+        _selection_fact(
+            "fact-direct-counter",
+            dimension="tracing",
+            value={"sample": "counter"},
+            evidence_role=counter_role,
+            directness="direct",
+            confidence="high",
+            strength="strong",
+        ),
+    ]
+
+    manifests = [
+        build_selection_manifest(
+            {record["fact_id"]: record for record in ordered_records},
+            max_facts=1,
+        ).to_dict()
+        for ordered_records in (records, list(reversed(records)))
+    ]
+
+    assert [
+        manifest["rca_input_fact_ids"]
+        for manifest in manifests
+    ] == [[expected_fact_id], [expected_fact_id]]
+    assert [
+        manifest["unselected_higher_priority_causal_fact_ids"]
+        for manifest in manifests
+    ] == [expected_unselected_causal, expected_unselected_causal]
+
+
+def test_selection_manifest_overflow_represents_distinct_causal_signature_before_second_value():
+    records = [
+        _selection_fact(
+            "fact-shared-a",
+            dimension="logging",
+            value={"sample": 1},
+            evidence_role="causal_candidate",
+            attribute="observation.shared",
+        ),
+        _selection_fact(
+            "fact-shared-b",
+            dimension="logging",
+            value={"sample": 2},
+            evidence_role="causal_candidate",
+            attribute="observation.shared",
+        ),
+        _selection_fact(
+            "fact-distinct",
+            dimension="logging",
+            value={"sample": 3},
+            evidence_role="causal_candidate",
+            confidence="medium",
+            strength="supporting",
+            attribute="observation.distinct",
+        ),
+    ]
+    fact_index = {record["fact_id"]: record for record in records}
+
+    bounded = build_selection_manifest(fact_index, max_facts=2).to_dict()
+    ordered = build_selection_manifest(fact_index, max_facts=3).to_dict()
+
+    assert set(bounded["rca_input_fact_ids"]) == {
+        "fact-shared-a",
+        "fact-distinct",
+    }
+    assert ordered["rca_input_fact_ids"].index("fact-distinct") < (
+        ordered["rca_input_fact_ids"].index("fact-shared-b")
+    )
+
+
+def test_selection_manifest_overflow_preserves_required_dimensions_when_coverage_is_feasible():
+    records = [
+        _selection_fact(
+            f"fact-{dimension}-symptom",
+            dimension=dimension,
+            value={"sample": dimension},
+            confidence="medium",
+            strength="context",
+            directness="derived",
+        )
+        for dimension in ("kubernetes", "metrics", "logging", "tracing")
+    ]
+    records.extend(
+        _selection_fact(
+            f"fact-topology-causal-{index}",
+            dimension="topology",
+            value={"sample": index},
+            evidence_role="causal_candidate",
+            attribute=f"observation.causal-{index}",
+        )
+        for index in range(3)
+    )
+    fact_index = {record["fact_id"]: record for record in records}
+
+    manifest = build_selection_manifest(fact_index, max_facts=4).to_dict()
+
+    assert {
+        fact_index[fact_id]["dimension"]
+        for fact_id in manifest["rca_input_fact_ids"]
+    } == {"kubernetes", "metrics", "logging", "tracing"}
+
+
+def test_selection_manifest_equivalent_observations_keep_one_projection_representative():
+    equivalent_ids = ["fact-equivalent-a", "fact-equivalent-b", "fact-equivalent-c"]
+    fact_index = {
+        "fact-equivalent-a": _selection_fact(
+            "fact-equivalent-a",
+            dimension="metrics",
+            value={"sample": 7},
+            confidence="high",
+            strength="strong",
+        ),
+        "fact-equivalent-b": _selection_fact(
+            "fact-equivalent-b",
+            dimension="metrics",
+            value={"sample": 7},
+            confidence="medium",
+            strength="supporting",
+        ),
+        "fact-equivalent-c": _selection_fact(
+            "fact-equivalent-c",
+            dimension="metrics",
+            value={"sample": 7},
+            confidence="low",
+            strength="context",
+        ),
+    }
+    fact_index["fact-distinct"] = _selection_fact(
+        "fact-distinct",
+        dimension="logging",
+        value={"sample": 8},
+    )
+    original = json.loads(json.dumps(fact_index))
+
+    manifest = build_selection_manifest(fact_index, max_facts=2).to_dict()
+
+    selected_equivalent = set(equivalent_ids) & set(
+        manifest["rca_input_fact_ids"]
+    )
+    omitted_equivalent = set(equivalent_ids) & set(manifest["omitted_fact_ids"])
+    assert selected_equivalent == {"fact-equivalent-a"}
+    assert omitted_equivalent == {
+        "fact-equivalent-b",
+        "fact-equivalent-c",
+    }
+    assert set(manifest["eligible_support_fact_ids"]) <= set(
+        manifest["rca_input_fact_ids"]
+    )
+    assert {
+        fact_id: manifest["omission_reasons"][fact_id]
+        for fact_id in omitted_equivalent
+    } == {
+        fact_id: "equivalent_observation"
+        for fact_id in omitted_equivalent
+    }
+    assert fact_index == original
+
+
+def test_selection_manifest_equivalent_representative_maps_to_complete_class():
+    equivalent_ids = ["fact-equivalent-a", "fact-equivalent-b", "fact-equivalent-c"]
+    fact_index = {
+        fact_id: _selection_fact(
+            fact_id,
+            dimension="metrics",
+            value={"sample": 7},
+        )
+        for fact_id in equivalent_ids
+    }
+
+    manifest = build_selection_manifest(fact_index, max_facts=1).to_dict()
+
+    assert manifest["representative_of"] == {
+        "fact-equivalent-a": equivalent_ids,
+    }

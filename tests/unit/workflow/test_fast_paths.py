@@ -121,6 +121,60 @@ def test_healthy_conclusion_uses_deterministic_fast_path():
     assert "所有 Pod Running" in result["conclusion"]
 
 
+def test_single_path_inconclusive_rca_cannot_publish_narrative_diagnosis():
+    node = ConclusionFormatterNode()
+    node.ai_call = _RecordingAICall(
+        "root cause is definitely unsupported, confidence 99%"
+    )
+    state = {
+        "question": "What is wrong?",
+        "layer": Layer.L2,
+        "rca_analysis": json.dumps({
+            "diagnostic_status": "inconclusive",
+            "root_cause": "Current facts are insufficient",
+            "confidence": 0.2,
+            "confidence_reason": "invalid Fact reference",
+            "supporting_fact_ids": [],
+            "unknowns": ["source-backed cause is not established"],
+            "claim_validation": {
+                "valid": False,
+                "reasons": ["unknown supporting fact reference"],
+            },
+        }),
+        "rca_input_projection": {
+            "authoritative_entity_ids": ["k8s.pod:demo/api:uid-a"],
+            "selected_facts": [{
+                "fact_id": "fact-abc12345",
+                "dimension": "logging",
+                "source_system": "elasticsearch",
+                "value": "real observed symptom",
+            }],
+        },
+        "entity_evidence_snapshot": {
+            "contract_version": "aiops.entity-evidence-snapshot.v1",
+            "dimension_evidence_by_entity": {
+                "demo/api": {
+                    "kubernetes": {"status": "unselected", "facts": []},
+                    "metrics": {"status": "error", "facts": []},
+                    "logging": {"status": "present", "facts": []},
+                    "tracing": {"status": "absent", "facts": []},
+                }
+            },
+        },
+        "thinking_events": [],
+    }
+
+    report = node.execute(state)["conclusion"]
+
+    assert "diagnostic_status: inconclusive" in report
+    assert "unknown supporting fact reference" in report
+    assert "real observed symptom" in report
+    assert "| metrics | error |" in report
+    assert "| tracing | absent |" in report
+    assert "confidence 99%" not in report
+    assert node.ai_call.calls == []
+
+
 def test_layer_stage1_text_is_always_revalidated_with_pydantic_and_keeps_full_analysis():
     node = LayerClassifierNode()
     stage1_text = "用户在直接查询异常 Pod 列表，工具结果显示 default/pod-a CrashLoopBackOff。"
@@ -958,10 +1012,10 @@ def test_conclusion_token_budget_defaults_to_model_window(monkeypatch):
 
 def test_layer_prompt_is_diagnosis_and_healthy_only():
     expected_phrases = [
-        "这个节点只服务于诊断类和健康检查类请求",
-        "这个节点只服务于诊断类和健康检查类请求，负责输出 `HEALTHY / ABNORMAL`",
-        "你只负责“定位分析”，不负责完整证据采集",
-        "详细证据采集、深度验证、更多工具调用统一交给下游 evidence 节点",
+        "# 唯一职责：定位当前异常实体",
+        "`HEALTHY / ABNORMAL`",
+        "不分析根因",
+        "交给 Evidence 节点",
     ]
 
     for phrase in expected_phrases:
@@ -971,12 +1025,9 @@ def test_layer_prompt_is_diagnosis_and_healthy_only():
 
 def test_layer_prompt_requires_event_validation_against_current_state():
     expected_phrases = [
-        "events 只能作为辅助证据",
-        "当前环境中的活跃异常对象",
-        "如果 Warning 事件指向某个 Pod/Node/Workload",
-        "该事件视为历史噪音",
-        "不要把“曾经发生过异常”当成“当前仍有故障”",
-        "Events 禁止向 `abnormal_pods` 添加当前 Pod 扫描中不存在的 Pod",
+        "以当前 Pod 状态为准",
+        "事件只用于辅助定位",
+        "不能把已消失或已恢复对象加入当前异常列表",
     ]
 
     for phrase in expected_phrases:
@@ -985,11 +1036,10 @@ def test_layer_prompt_requires_event_validation_against_current_state():
 
 def test_layer_prompt_defines_health_baseline_and_efficiency_rules():
     expected_phrases = [
-        "健康检查不能只看 Pod Running",
-        "Pod Running/Ready 只是信号之一，不等于整体健康",
-        "Node / Workload / Service-EndPoints / Storage / Events",
-        "不要为了健康检查默认做全量扫描",
-        "只有在当前问题或当前信号指向某一资源面时，才扩展到该资源面",
+        "不能仅凭 STATUS 判健康",
+        "同时检查 Ready",
+        "得到全部目标的当前状态",
+        "立即停止",
     ]
 
     for phrase in expected_phrases:
@@ -998,12 +1048,11 @@ def test_layer_prompt_defines_health_baseline_and_efficiency_rules():
 
 def test_layer_prompt_is_pod_abnormal_first():
     expected_phrases = [
-        "第一目标是识别当前异常 Pod 的状态关键字",
+        "哪些 Pod 当前异常",
         "abnormal_pods",
         "abnormal_groups",
         "pod_status_keyword",
         "pod_abnormal_type",
-        "Pending / CrashLoopBackOff / ImagePullBackOff / OOMKilled / Evicted",
     ]
 
     for phrase in expected_phrases:
@@ -1012,12 +1061,9 @@ def test_layer_prompt_is_pod_abnormal_first():
 
 def test_layer_prompt_requires_global_abnormal_pod_scan_first():
     expected_phrases = [
-        "首轮必须先做全局 Pod 状态扫描",
-        "kubectl_get_by_kind_in_cluster(kind=\"Pod\")",
-        "kubectl get pods -A",
-        "排除 `STATUS=Running`、`STATUS=Completed`、`STATUS=Succeeded`",
-        "第一个真实工具调用必须优先获取全局 Pod 列表",
-        "必须先过滤掉 Running / Completed / Succeeded",
+        "未指定范围时先获取集群 Pod 列表",
+        "`Running / Completed / Succeeded`",
+        "其余当前非正常状态均保留",
     ]
 
     for phrase in expected_phrases:
@@ -1026,9 +1072,8 @@ def test_layer_prompt_requires_global_abnormal_pod_scan_first():
 
 def test_layer_prompt_keeps_explicit_pod_request_in_scope():
     expected_phrases = [
-        "用户指定了 namespace 或具体 Pod 时，诊断范围严格限定在该目标",
-        "不得加入 abnormal_pods / issue_groups",
-        "只有问整个集群",
+        "指定 namespace/Pod 时只处理这些目标",
+        "尊重用户范围",
     ]
 
     for phrase in expected_phrases:
@@ -1124,23 +1169,157 @@ def test_layer_explicit_pod_stop_checker_ignores_global_or_failed_results():
     ) is False
 
 
+def test_layer_explicit_multi_pod_stop_waits_for_total_fan_in_in_any_order():
+    node = LayerClassifierNode()
+    targets = [
+        ("team-a", "api-a"),
+        ("team-b", "api-b"),
+        ("team-c", "api-c"),
+    ]
+    question = "请诊断 " + " ".join(
+        f"{namespace}/{name}" for namespace, name in targets
+    )
+
+    def result(namespace, name, *, semantic_success=True):
+        return {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": semantic_success,
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {
+                "kind": "pod",
+                "namespace": namespace,
+                "name": name,
+            },
+            "result": f"NAME READY STATUS\n{name} 0/1 Pending",
+        }
+
+    events = [result(*targets[2]), result(*targets[0])]
+    assert node._should_stop_explicit_pod_early(question, events) is False
+    assert node._should_stop_explicit_pod_early(
+        question,
+        [*events, result(*targets[1])],
+    ) is True
+    assert node._should_stop_explicit_pod_early(
+        question,
+        [*events, result(*targets[1], semantic_success=False)],
+    ) is False
+
+
+def test_layer_extracts_ordered_explicit_pod_targets_from_supported_notation():
+    targets = LayerClassifierNode._extract_explicit_pod_targets(
+        "请诊断 team-a/api-a、namespace team-b 中 Pod api-b，Pod api-c 位于 namespace team-c",
+        [
+            {"type": "Pod", "namespace": "team-d", "name": "api-d"},
+            {"type": "Pod", "namespace": "team-a", "name": "api-a"},
+        ],
+    )
+
+    assert targets == [
+        ("team-a", "api-a"),
+        ("team-b", "api-b"),
+        ("team-c", "api-c"),
+    ]
+
+
+def test_layer_extracts_five_natural_language_pairs_atomically():
+    question = (
+        "请分别诊断：namespace ns-01 中 Pod pod-a；"
+        "namespace ns-02 中 Pod pod-b；"
+        "namespace ns-04 中 Pod pod-c；"
+        "namespace ns-06 中 Pod pod-d；"
+        "namespace ns-09 中 Pod pod-e。"
+    )
+
+    targets = LayerClassifierNode._extract_explicit_pod_targets(
+        question,
+        [
+            # Model extraction must not cross-pair or extend explicit text.
+            {"type": "Pod", "namespace": "ns-02", "name": "pod-a"},
+            {"type": "Pod", "namespace": "ns-extra", "name": "pod-extra"},
+        ],
+    )
+
+    assert targets == [
+        ("ns-01", "pod-a"),
+        ("ns-02", "pod-b"),
+        ("ns-04", "pod-c"),
+        ("ns-06", "pod-d"),
+        ("ns-09", "pod-e"),
+    ]
+
+
+def test_layer_runs_one_parallel_named_lookup_per_explicit_pod():
+    captured = {}
+
+    class _BatchAICall:
+        def execute_tool_batch(self, **kwargs):
+            captured.update(kwargs)
+            return [{"type": "tool_result", "status": "success"}]
+
+    node = LayerClassifierNode()
+    node.ai_call = _BatchAICall()
+    node.tools = [object()]
+    node.current_run_id = "run-layer-fan-in"
+
+    events = node._run_explicit_pod_location_baseline(
+        "请诊断 team-a/api-a team-b/api-b team-c/api-c"
+    )
+
+    assert events == [{"type": "tool_result", "status": "success"}]
+    assert captured["tool_requests"] == [
+        {
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {"kind": "pod", "namespace": "team-a", "name": "api-a"},
+        },
+        {
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {"kind": "pod", "namespace": "team-b", "name": "api-b"},
+        },
+        {
+            "tool_name": "kubectl_get_by_name",
+            "tool_args": {"kind": "pod", "namespace": "team-c", "name": "api-c"},
+        },
+    ]
+    assert captured["max_workers"] == 3
+    assert captured["run_id"] == "run-layer-fan-in"
+
+
+def test_layer_runs_exactly_five_baseline_calls_for_five_clauses():
+    captured = {}
+
+    class _BatchAICall:
+        def execute_tool_batch(self, **kwargs):
+            captured.update(kwargs)
+            return []
+
+    node = LayerClassifierNode()
+    node.ai_call = _BatchAICall()
+    node.tools = [object()]
+    node.current_run_id = "run-five-targets"
+    question = "；".join(
+        f"namespace ns-{index:02d} 中 Pod pod-{index}"
+        for index in range(1, 6)
+    )
+
+    node._run_explicit_pod_location_baseline(question)
+
+    assert len(captured["tool_requests"]) == 5
+    assert [
+        (request["tool_args"]["namespace"], request["tool_args"]["name"])
+        for request in captured["tool_requests"]
+    ] == [
+        (f"ns-{index:02d}", f"pod-{index}")
+        for index in range(1, 6)
+    ]
+
+
 def test_layer_prompt_defines_pod_abnormal_type_taxonomy_and_derived_layer():
     expected_phrases = [
-        "不需要做 L0-L4 层级归因",
         "pod_status_keyword",
         "status_category",
-        "Evicted",
-        "VolumeMountFailed",
-        "PendingUnschedulable",
-        "NodeLostOrUnknown",
-        "TerminatingStuck",
-        "OOMKilled",
-        "CrashLoopBackOffRuntime",
-        "ImagePullFailed",
-        "SandboxCreateFailed",
-        "ConfigError",
-        "NotReadyProbeFailed",
-        "CrashLoopBackOff 只是状态关键字，不是最终异常类型",
+        "轻量 `pod_abnormal_type` 归一化",
+        "状态之外证据不足时保持通用类型",
     ]
 
     for phrase in expected_phrases:
@@ -1150,13 +1329,11 @@ def test_layer_prompt_defines_pod_abnormal_type_taxonomy_and_derived_layer():
 def test_layer_extract_prompt_preserves_pod_abnormal_type_taxonomy():
     extract_prompt = get_workflow_prompt("layer_extract")
     expected_phrases = [
-        "Pod 异常状态优先",
-        "HEALTHY / ABNORMAL",
-        "status_category",
-        "VolumeMountFailed",
-        "PendingUnschedulable",
-        "SandboxCreateFailed",
-        "NotReadyProbeFailed",
+        "只做当前状态提取",
+        "`ABNORMAL`",
+        "`HEALTHY`",
+        "`pod_abnormal_type`",
+        "无法细分时保留通用状态类型",
     ]
 
     for phrase in expected_phrases:
@@ -1171,11 +1348,11 @@ def test_layer_prompt_does_not_rely_on_general_health_runbooks():
 def test_layer_extract_prompt_is_current_state_first():
     extract_prompt = get_workflow_prompt("layer_extract")
     expected_phrases = [
-        "当前仍异常的 Pod",
-        "pod_status_keyword",
-        "pod_abnormal_type",
-        "历史 event",
-        "HEALTHY",
+        "当前仍异常的全部 Pod",
+        "状态关键字",
+        "`pod_abnormal_type`",
+        "历史事件",
+        "`HEALTHY`",
     ]
 
     for phrase in expected_phrases:
@@ -1185,14 +1362,14 @@ def test_layer_extract_prompt_is_current_state_first():
 def test_rca_prompt_includes_json_contract_for_text_fallback():
     rca_prompt = get_workflow_prompt("rca")
     expected_phrases = [
-        "如果 native structured output 不可用",
-        "只输出一个 JSON 对象",
-        '"root_cause_summary"',
-        '"confidence"',
-        '"primary_runbooks"',
-        '"alternative_causes"',
-        "不要输出 Markdown",
-        "不要输出代码块围栏",
+        "# RCAOutput 合同",
+        "root_cause_summary",
+        "`confidence` 必须是 0.0-1.0 数字",
+        "primary_runbooks",
+        "alternative_causes",
+        "不输出 Markdown、代码块或额外说明",
+        "`limitations` 不能是数组",
+        "`evidence_analysis` 不能是对象",
     ]
 
     for phrase in expected_phrases:
@@ -1291,10 +1468,9 @@ def test_query_evidence_normalization_prompt_is_disabled():
 
 def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
     expected_phrases = [
-        "### Runbook 使用原则",
-        "优先调用 fetch_runbook 获取参考",
-        "只允许使用与 Pod 异常状态直接相关的 runbook",
-        "runbook 选择必须按 Pod 异常类型匹配",
+        "# Runbook",
+        "只为已定位的异常类型选择直接相关 Runbook",
+        "Runbook 是下游调查参考，不是当前环境证据",
     ]
 
     for phrase in expected_phrases:
@@ -1303,11 +1479,9 @@ def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
 
 def test_layer_prompt_delegates_distinct_runbook_selection_to_qwen_without_duplicates():
     expected_phrases = [
-        "由你根据每个异常 Pod 的当前状态和异常类型自主选择",
-        "多个独立异常类型需要调用多个对应 runbook",
-        "同一个 runbook 在本节点内最多调用一次",
-        "不能因为多个 Pod 都显示 CrashLoopBackOff 就只选择一个 runbook",
-        "每个已识别的独立异常类型已经获得匹配 runbook",
+        "只为已定位的异常类型选择",
+        "同一 Runbook 最多获取一次",
+        "无法可靠匹配时不强行选择",
     ]
 
     for phrase in expected_phrases:
@@ -1316,22 +1490,13 @@ def test_layer_prompt_delegates_distinct_runbook_selection_to_qwen_without_dupli
 
 def test_evidence_prompt_requires_pod_handoff_and_autonomous_observability_contract():
     expected_phrases = [
-        "abnormal_pods",
-        "abnormal_groups",
-        "pod_status_keyword",
-        "pod_abnormal_type",
-        "核心任务",
-        "找证据",
-        "layer_handoff.matched_runbooks",
-        "不要在 evidence 阶段重新选择 runbook",
-        "异常 Pod 返回 NotFound",
-        "execute_pod_promql",
-        "query_pod_logs",
-        "query_pod_tracing",
-        "每个通用查询都必须填写明确 `purpose`",
-        "首轮门控",
-        "不保证每个维度都有数据",
-        "三维首轮结果返回后",
+        "# 唯一职责：为当前作用域采集根因证据",
+        "`layer_handoff` 指定的实体",
+        "真实工具结果",
+        "Kubernetes、Metrics、Logging、Tracing、Topology",
+        "每次补证必须有新的明确 `purpose`",
+        "NotFound、空结果、命令失败和身份冲突也要保留",
+        "不为了维度齐全",
     ]
 
     for phrase in expected_phrases:
@@ -1347,14 +1512,14 @@ def test_workflow_prompts_default_to_chinese_and_support_english_switch():
     zh_prompt = get_workflow_prompt("layer")
     en_prompt = get_workflow_prompt("layer", prompt_language="en")
 
-    assert "诊断类和健康检查类请求" in zh_prompt
+    assert "唯一职责：定位当前异常实体" in zh_prompt
     assert en_prompt == zh_prompt
 
 
 def test_english_layer_prompt_is_diagnosis_and_healthy_only():
     en_prompt = get_workflow_prompt("layer", prompt_language="en")
 
-    assert "诊断类和健康检查类请求" in en_prompt
+    assert "唯一职责：定位当前异常实体" in en_prompt
     assert "If QUERY" not in en_prompt
     assert '"layer": "HEALTHY/L0/L1/L2/L3/L4/QUERY"' not in en_prompt
 
@@ -1437,30 +1602,27 @@ def test_holmes_service_i18n_getters_preserve_default_behavior_and_allow_overrid
 
 
 def test_autonomous_observability_uses_model_selected_query_contract():
-    """Qwen selects scoped queries while the legacy coarse helper remains available."""
+    """The agent selects scoped follow-ups without fault-specific routing."""
     from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 
     assert not hasattr(EvidenceCollectorNode, "_inject_aiops_case_plan_item")
     assert hasattr(EvidenceCollectorNode, "_ensure_mandatory_aiops_case_plan")
-    assert "MCP 只校验 Pod scope 并执行，不按异常类型选择固定指标" in EVIDENCE_COLLECTOR_PROMPT
-    assert "补证由上一轮真实结果驱动" in EVIDENCE_COLLECTOR_PROMPT
-    assert "不使用固定工具顺序，也不按故障类型写死工具链" in EVIDENCE_COLLECTOR_PROMPT
-    assert "evidence 上下文使用率达到 80% 后必须停止新增工具调用" in EVIDENCE_COLLECTOR_PROMPT
+    assert "不按故障类型使用固定工具链" in EVIDENCE_COLLECTOR_PROMPT
+    assert "每次补证必须有新的明确 `purpose`" in EVIDENCE_COLLECTOR_PROMPT
+    assert "上下文使用率达到 80% 时停止新增采集" in EVIDENCE_COLLECTOR_PROMPT
+    assert "Qwen" not in EVIDENCE_COLLECTOR_PROMPT
     assert "mandatory" not in EVIDENCE_COLLECTOR_PROMPT
 
 
 def test_aiops_prompts_preserve_exact_observability_and_causality():
-    assert "facts/samples/query/evidence_refs" in EVIDENCE_COLLECTOR_PROMPT
-    assert "DeepFlow flow 与 Tempo span 是不同证据" in EVIDENCE_COLLECTOR_PROMPT
-    assert "coverage=present 只表示命中真实数据，不自动等于根因成立" in EVIDENCE_COLLECTOR_PROMPT
-    assert "empty/absent/weak/error 是明确的数据边界" in EVIDENCE_COLLECTOR_PROMPT
-    assert "决定性 Fact 的原始 value 必须逐字保留" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "facts、samples、query、原始错误和 evidence_refs" in EVIDENCE_COLLECTOR_PROMPT
+    assert "DeepFlow flow 与 Tempo span 分开解释" in EVIDENCE_COLLECTOR_PROMPT
+    assert "`coverage=present` 只表示命中数据" in EVIDENCE_COLLECTOR_PROMPT
+    assert "`empty/absent/weak/error` 表示数据边界" in EVIDENCE_COLLECTOR_PROMPT
+    assert "原始数值、单位、状态、错误文本和标识符保持原意" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "完整 trace_id" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "Tempo span attributes" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "不得把 direct/high 降级为 weak" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "不同 trace_id 不得合并" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "duration_us=0" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "不能推断请求无响应或失败" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "related_context、coverage-only、low/weak 不能独立支撑确诊" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "不为凑齐 Metrics、Logging、Tracing、Topology" in ROOT_CAUSE_ANALYZER_PROMPT
     # 结论富模板：只依赖真实数据，不复述旧版事实合同措辞
     assert "只用真实" in CONCLUSION_FORMATTER_PROMPT
     assert "禁止编造" in CONCLUSION_FORMATTER_PROMPT
@@ -1514,10 +1676,10 @@ def test_runtime_prompts_encode_tasks_not_prompt_methodology():
 
 def test_rca_and_conclusion_prompts_require_verbatim_per_pod_observability():
     rca_phrases = [
-        "每个异常 Pod 都必须独立形成证据分析和根因结论",
-        "至少引用一条最有判别力的日志 message 原文",
-        "决定性 Fact 的原始 value 必须逐字保留",
-        "不能只写抽象故障标签",
+        "锁定 authoritative entity",
+        "只使用该实体的 Fact",
+        "每一步都必须能回指 Fact ID",
+        "原始数值、单位、状态、错误文本和标识符保持原意",
     ]
 
     for phrase in rca_phrases:
@@ -1537,24 +1699,27 @@ def test_active_rca_and_conclusion_prompts_are_fixture_free():
         assert forbidden not in active_prompts
 
     for phrase in (
-        "决定性 Fact 的原始 value 必须逐字保留",
-        "只有完整 trace_id 完全相同的记录才能合并",
-        "topology relationship、source、target、directness、confidence",
+        "原始数值、单位、状态、错误文本和标识符保持原意",
+        "只有完整 trace_id 相同时",
+        "属于同一实体的 `fact_id`",
     ):
         assert phrase in ROOT_CAUSE_ANALYZER_PROMPT
 
 
 def test_prompts_refine_runbooks_after_live_evidence_and_preserve_topology_semantics():
-    evidence_phrases = [
-        "拿到 Kubernetes 与通用可观测性查询的真实结果后",
-        "补充更具体的 runbook",
-        "同一 runbook 在整个诊断流程中只允许调用一次",
-        "多个独立异常类型可以分别补充不同 runbook",
-    ]
-    for phrase in evidence_phrases:
-        assert phrase in EVIDENCE_COLLECTOR_PROMPT
+    assert "计划、Runbook 和归档不是证据" in EVIDENCE_COLLECTOR_PROMPT
+    assert "不为了维度齐全" in EVIDENCE_COLLECTOR_PROMPT
+    assert "补充更具体的 runbook" not in EVIDENCE_COLLECTOR_PROMPT
     assert "拿到 `collect_aiops_case` 的真实结果后" not in EVIDENCE_COLLECTOR_PROMPT
     assert "通用 CrashLoop runbook" not in EVIDENCE_COLLECTOR_PROMPT
+
+
+def test_diagnostic_prompts_are_focused_and_bounded():
+    assert len(LAYER_CLASSIFIER_PROMPT) < 1200
+    assert len(EVIDENCE_COLLECTOR_PROMPT) < 1200
+    assert len(ROOT_CAUSE_ANALYZER_PROMPT) < 2000
+    assert "最终根因报告或修复方案" in EVIDENCE_COLLECTOR_PROMPT
+    assert "根本原因 → 失败机制 → 直接失败 → 当前现象" in ROOT_CAUSE_ANALYZER_PROMPT
 
 
 def test_deployment_enables_autonomous_evidence_context_stop():
@@ -1782,4 +1947,3 @@ if (
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-

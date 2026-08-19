@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>当前 AIOps 诊断架构</title>
+  <style>
+    :root{color-scheme:dark;--bg:#07111f;--panel:#0d1b2d;--line:#263a52;--text:#e8f0fa;--muted:#92a5ba;--accent:#38bdf8;--active:#173b55}
+    [data-theme="light"]{color-scheme:light;--bg:#eef3f8;--panel:#fff;--line:#cad5e2;--text:#132238;--muted:#5c6f85;--accent:#0369a1;--active:#dceefa}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+    header{height:58px;display:flex;align-items:center;gap:16px;padding:0 18px;background:var(--panel);border-bottom:1px solid var(--line)}
+    h1{font-size:17px;margin:0;white-space:nowrap}.subtitle{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .toolbar{margin-left:auto;display:flex;gap:8px}.toolbar button,.nav button{border:1px solid var(--line);background:transparent;color:var(--text);border-radius:7px;cursor:pointer}
+    .toolbar button{padding:7px 10px}.workspace{height:calc(100vh - 58px);display:grid;grid-template-columns:minmax(360px,46%) 1fr;gap:1px;background:var(--line)}
+    .pane{min-width:0;background:var(--panel);display:flex;flex-direction:column}.pane-title{height:44px;padding:0 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);font-weight:650}
+    .hint{font-weight:400;color:var(--muted);font-size:11px}.nav{display:flex;gap:6px;overflow-x:auto;padding:8px 10px;border-bottom:1px solid var(--line)}
+    .nav button{flex:0 0 auto;padding:6px 9px;font-size:12px}.nav button.active{background:var(--active);border-color:var(--accent);color:var(--accent)}
+    iframe{display:block;width:100%;height:100%;border:0;background:#fff}.frame-wrap{flex:1;min-height:0}
+    @media(max-width:900px){header{height:auto;min-height:58px;flex-wrap:wrap;padding:10px 14px}.subtitle{order:3;width:100%}.workspace{height:auto;grid-template-columns:1fr}.pane{height:78vh}.pane:first-child{height:90vh}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>当前 AIOps 诊断全链路架构</h1>
+    <div class="subtitle">当前实现 · 工具返回 · 截断压缩 · 结构化 handoff · c04/c08/c09 真实运行归因</div>
+    <div class="toolbar">
+      <button id="openDiagram" type="button">新窗口打开图</button>
+      <button id="theme" type="button">切换主题</button>
+    </div>
+  </header>
+  <main class="workspace">
+    <section class="pane">
+      <div class="pane-title">架构正文 <span class="hint">可滚动、搜索和复制</span></div>
+      <div class="frame-wrap"><iframe id="documentFrame" title="架构正文" src="current-aiops-diagnosis-architecture-rendered.html"></iframe></div>
+    </section>
+    <section class="pane">
+      <div class="pane-title">交互式架构图 <span class="hint">图内支持明暗主题与 PNG/JPEG/WebP/SVG 导出</span></div>
+      <nav class="nav" id="diagramNav" aria-label="架构图列表"></nav>
+      <div class="frame-wrap"><iframe id="diagramFrame" title="架构图"></iframe></div>
+    </section>
+  </main>
+  <script>
+    const diagrams = [
+      ['部署拓扑','architecture/current-aiops-diagnosis/01-deployment-topology.html'],
+      ['/ask 时序','architecture/current-aiops-diagnosis/02-request-sequence.html'],
+      ['工作流路由','architecture/current-aiops-diagnosis/03-workflow-routing.html'],
+      ['数据与 Handoff','architecture/current-aiops-diagnosis/04-observation-dataflow.html'],
+      ['截断与预算','architecture/current-aiops-diagnosis/05-context-budget-lifecycle.html'],
+      ['真实 Case','architecture/current-aiops-diagnosis/06-runtime-cases.html']
+    ];
+    const nav = document.getElementById('diagramNav');
+    const diagramFrame = document.getElementById('diagramFrame');
+    let selected = 3;
+    function selectDiagram(index){
+      selected=index; diagramFrame.src=diagrams[index][1];
+      [...nav.children].forEach((button,i)=>button.classList.toggle('active',i===index));
+    }
+    diagrams.forEach(([label],index)=>{const button=document.createElement('button');button.textContent=label;button.onclick=()=>selectDiagram(index);nav.appendChild(button)});
+    selectDiagram(selected);
+    document.getElementById('openDiagram').onclick=()=>window.open(diagrams[selected][1],'_blank','noopener');
+    document.getElementById('theme').onclick=()=>{
+      const root=document.documentElement;root.dataset.theme=root.dataset.theme==='dark'?'light':'dark';
+      try{diagramFrame.contentWindow.Archify?.theme?.toggle()}catch(_){/* same-origin diagram may still be loading */}
+    };
+    document.getElementById('documentFrame').addEventListener('load',event=>{
+      const doc=event.currentTarget.contentDocument;if(!doc)return;
+      const style=doc.createElement('style');
+      style.textContent=`body{max-width:980px;margin:0 auto;padding:28px 34px 80px;color:#172033;background:#fff;font:15px/1.72 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}h1,h2,h3{line-height:1.3;scroll-margin-top:20px}h1{font-size:30px}h2{margin-top:42px;padding-bottom:9px;border-bottom:1px solid #d9e1ea}h3{margin-top:28px}a{color:#0369a1}pre{overflow:auto;padding:14px;border-radius:8px;background:#0d1726;color:#dbeafe;font-size:12px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}p code,li code,td code{padding:2px 5px;border-radius:4px;background:#edf2f7;color:#9f1239}table{display:block;overflow:auto;border-collapse:collapse;width:100%}th,td{padding:9px 11px;border:1px solid #d7e0ea;text-align:left;vertical-align:top}blockquote{margin-left:0;padding:2px 16px;border-left:4px solid #38bdf8;color:#52657a;background:#f4f8fb}`;
+      doc.head.appendChild(style);
+    });
+  </script>
+</body>
+</html>

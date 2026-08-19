@@ -874,10 +874,10 @@ def test_evidence_user_prompt_uses_pydantic_plan_contract_instead_of_in_band_jso
     assert "EvidencePlanOutput" in message or "Pydantic evidence_plan" in message
     assert "第一条 assistant 消息必须只输出 evidence_plan JSON" not in message
     assert "在输出 evidence_plan JSON 之前，禁止调用任何工具" not in message
-    assert "必须调用至少一个 critical 或 important 级真实工具" in message
-    assert "evidence_plan 阶段不要重新选择 runbook" in message
+    assert "至少执行一个 critical/important 项" in message
+    assert "不在 plan 阶段重新选择" in message
     assert "evidence_plan 第一项必须是 fetch_runbook" not in message
-    assert "Pod 异常状态的证据" in message
+    assert "支持、反驳或限定候选原因" in message
 
 
 def test_evidence_user_prompt_prioritizes_live_observability_for_broad_multi_pod_question():
@@ -1025,20 +1025,14 @@ def test_autonomous_guidance_requires_first_round_three_dimensions_then_allows_f
     )
 
     guidance = message.rsplit("# 自主可观测性组合查询", 1)[1]
-    assert "execute_pod_promql" in guidance
-    assert "query_pod_logs" in guidance
-    assert "query_pod_tracing" in guidance
-    assert "query_pod_topology" in guidance
-    assert "Kubernetes" in guidance
+    for dimension in ("Kubernetes", "Metrics", "Logging", "Tracing", "Topology"):
+        assert dimension in guidance
     assert "purpose" in guidance
-    assert "改变根因判断" in guidance
-    assert "继续补证" in guidance
-    assert "首轮门控" in guidance
-    assert "四个工具都必须真实执行一次" in guidance
-    assert "empty/absent/weak/error" in guidance
-    assert "门控完成后" in guidance
+    assert "少量补证" in guidance
+    assert "首轮查询" in guidance
+    assert "present、empty、absent、weak 或 error" in guidance
+    assert "不追求维度齐全" in guidance
     assert "collect_aiops_case" not in guidance
-    assert "没有固定顺序" in guidance
     assert "必须按固定顺序" not in guidance
     assert "80%" in guidance
 
@@ -2827,15 +2821,11 @@ def test_autonomous_first_round_gate_resumes_in_fresh_context_after_budget_stop(
 
 
 def test_evidence_system_prompt_prioritizes_live_observability_independent_of_user_wording():
-    assert "用户是否显式提到" in EVIDENCE_COLLECTOR_PROMPT
-    assert "实时可观测性证据" in EVIDENCE_COLLECTOR_PROMPT
-    assert "每个已确认异常 Pod" in EVIDENCE_COLLECTOR_PROMPT
-    assert "execute_pod_promql" in EVIDENCE_COLLECTOR_PROMPT
-    assert "query_pod_logs" in EVIDENCE_COLLECTOR_PROMPT
-    assert "query_pod_tracing" in EVIDENCE_COLLECTOR_PROMPT
-    assert "三个通用工具" in EVIDENCE_COLLECTOR_PROMPT
-    assert "不保证每个维度都有数据" in EVIDENCE_COLLECTOR_PROMPT
-    assert "补证由上一轮真实结果驱动" in EVIDENCE_COLLECTOR_PROMPT
+    assert "真实工具结果" in EVIDENCE_COLLECTOR_PROMPT
+    assert "Kubernetes、Metrics、Logging、Tracing、Topology" in EVIDENCE_COLLECTOR_PROMPT
+    assert "关键歧义、冲突" in EVIDENCE_COLLECTOR_PROMPT
+    assert "新的明确 `purpose`" in EVIDENCE_COLLECTOR_PROMPT
+    assert "不为了维度齐全" in EVIDENCE_COLLECTOR_PROMPT
     assert "80%" in EVIDENCE_COLLECTOR_PROMPT
     assert "若单一 kubectl 事实已足够回答问题" not in EVIDENCE_COLLECTOR_PROMPT
 
@@ -5332,9 +5322,8 @@ def test_evidence_existing_plan_prompt_includes_pydantic_tool_args():
 
     assert "tool_args=" in message
     assert '"resource_type": "pod"' in message
-    assert "应优先复用其中的 namespace/name/kind 等目标参数" in message
-    assert "选择更符合诊断意图的真实工具" in message
-    assert "kubectl_get_yaml" in message
+    assert "保持计划中的实体范围" in message
+    assert "按 purpose 选择语义正确的只读工具" in message
 
 
 def test_plan_completeness_uses_countable_planned_items_not_extra_layer_inventory():

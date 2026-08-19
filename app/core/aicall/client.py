@@ -10,6 +10,7 @@
     result, events = ai.call(system_prompt, question, tools=tools, max_steps=10)
     text = ai.call_simple(system_prompt, question)
 """
+import asyncio
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import queue
 import re
 import time
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1508,6 +1510,183 @@ class AICall:
                     node_id or "?", total_ms / 1000, result.iterations, tool_call_count,
                     len(final_content))
         return result, thinking_events
+
+    def execute_tool_batch(
+        self,
+        *,
+        tool_requests: List[Dict[str, Any]],
+        tools: List[Any],
+        stream_queue: Optional[queue.Queue] = None,
+        node_id: str = "",
+        run_id: str = "",
+        cancel_event: Optional[Any] = None,
+        max_workers: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Execute a bounded, code-owned read-only tool baseline in parallel.
+
+        This method deliberately does not ask a model to choose or schedule the
+        supplied calls.  It still sends every raw result through the same
+        ObservationProcessor and ContextArchive path as a normal ReAct tool
+        call, so baseline evidence has identical source refs and structured
+        semantics.  Returned events are ordered by request order even though
+        the underlying I/O runs concurrently.
+        """
+        requests = [
+            dict(request)
+            for request in (tool_requests or [])
+            if isinstance(request, dict)
+            and str(request.get("tool_name") or "").strip()
+        ]
+        if not requests:
+            return []
+
+        tool_index = {
+            str(getattr(tool, "name", "") or "").strip(): tool
+            for tool in (tools or [])
+            if str(getattr(tool, "name", "") or "").strip()
+        }
+        events: List[Dict[str, Any]] = []
+        for sequence, request in enumerate(requests, start=1):
+            self._push(
+                stream_queue,
+                node_id,
+                events,
+                type="tool_start",
+                tool_name=str(request["tool_name"]),
+                tool_args=dict(request.get("tool_args") or {}),
+                tool_call_id=f"baseline-{sequence}-{request['tool_name']}",
+                tool_sequence=sequence,
+                iteration=0,
+                execution_phase="pre_react_baseline",
+            )
+
+        def invoke(request: Dict[str, Any]) -> Dict[str, Any]:
+            started_at = time.time()
+            tool_name = str(request.get("tool_name") or "")
+            tool = tool_index.get(tool_name)
+            if cancel_event is not None and cancel_event.is_set():
+                return {
+                    "status": "error",
+                    "content": json.dumps({
+                        "status": "cancelled",
+                        "semantic_success": False,
+                        "error": "diagnosis cancelled before baseline tool execution",
+                    }, ensure_ascii=False),
+                    "duration_seconds": 0.0,
+                }
+            if tool is None:
+                return {
+                    "status": "error",
+                    "content": json.dumps({
+                        "status": "tool_unavailable",
+                        "semantic_success": False,
+                        "error": f"tool not loaded: {tool_name}",
+                    }, ensure_ascii=False),
+                    "duration_seconds": 0.0,
+                }
+            try:
+                args = dict(request.get("tool_args") or {})
+                if hasattr(tool, "invoke"):
+                    try:
+                        value = tool.invoke(args)
+                    except NotImplementedError:
+                        if not hasattr(tool, "ainvoke"):
+                            raise
+                        # MCP StructuredTools are commonly async-only.  Each
+                        # baseline request owns a worker thread, so it is safe
+                        # to run its coroutine in a private event loop here.
+                        value = asyncio.run(tool.ainvoke(args))
+                elif hasattr(tool, "ainvoke"):
+                    value = asyncio.run(tool.ainvoke(args))
+                elif callable(tool):
+                    value = tool(**args)
+                else:
+                    raise TypeError(f"tool is not invokable: {tool_name}")
+                if hasattr(value, "content"):
+                    value = value.content
+                content = (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(value, ensure_ascii=False, default=str)
+                )
+                return {
+                    "status": "success",
+                    "content": content,
+                    "duration_seconds": time.time() - started_at,
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "status": "error",
+                    "content": json.dumps({
+                        "status": "tool_error",
+                        "semantic_success": False,
+                        "error": {
+                            "type": type(exc).__name__,
+                            "message": str(exc) or type(exc).__name__,
+                        },
+                    }, ensure_ascii=False),
+                    "duration_seconds": time.time() - started_at,
+                }
+
+        worker_count = max(1, min(
+            int(max_workers or len(requests)),
+            len(requests),
+        ))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = [pool.submit(invoke, request) for request in requests]
+            outcomes = [future.result() for future in futures]
+
+        processor = self._build_observation_processor()
+        prior_observations: List[str] = []
+        for sequence, (request, outcome) in enumerate(
+            zip(requests, outcomes),
+            start=1,
+        ):
+            tool_name = str(request["tool_name"])
+            tool_args = dict(request.get("tool_args") or {})
+            observation = self._process_tool_observation(
+                processor=processor,
+                run_id=run_id,
+                node_id=node_id,
+                sequence=sequence,
+                tool_name=tool_name,
+                tool_content=str(outcome["content"]),
+                prior_tool_observations=prior_observations,
+                tool_args=tool_args,
+            )
+            summary = str(observation.get("summary") or outcome["content"])
+            prior_observations.append(summary)
+            if outcome["status"] == "error":
+                observation["semantic_success"] = False
+            event = {
+                "type": "tool_result",
+                "tool_name": tool_name,
+                "tool_call_id": f"baseline-{sequence}-{tool_name}",
+                "tool_sequence": sequence,
+                "tool_args": tool_args,
+                "status": outcome["status"],
+                "result_preview": summary[:200],
+                "result": summary,
+                "raw_ref": observation.get("raw_ref"),
+                "structured_ref": observation.get("structured_ref"),
+                "summary_ref": observation.get("summary_ref"),
+                "raw_chars": observation.get(
+                    "raw_chars", len(str(outcome["content"]))
+                ),
+                "summary_chars": observation.get(
+                    "summary_chars", len(summary)
+                ),
+                "semantic_success": observation.get("semantic_success", True),
+                "structured": observation.get("structured"),
+                "observation_processed": observation.get("processed", False),
+                "observation_processor": observation.get("processor", ""),
+                "context_usage_ratio": observation.get("context_usage_ratio"),
+                "duration_seconds": outcome["duration_seconds"],
+                "iteration": 0,
+                "execution_phase": "pre_react_baseline",
+            }
+            self._push(stream_queue, node_id, events, **event)
+        return events
 
     # ------------------------------------------------------------------
     # Private helpers

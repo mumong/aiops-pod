@@ -79,6 +79,15 @@ class EvidenceCollectorNode(WorkflowNode):
         "query_pod_tracing",
         "query_pod_topology",
     )
+    # Code-owned pre-ReAct baseline is intentionally limited to the three
+    # observability signals. Kubernetes identity/lifecycle is already supplied
+    # by Layer and remains available to the autonomous agent for verification;
+    # topology is an optional follow-up, not a mandatory baseline dimension.
+    _PRE_REACT_BASELINE_TOOLS = (
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+    )
     _OBSERVABILITY_QUERY_TOOLS = set(_OBSERVABILITY_QUERY_ORDER)
     _QUERY_ONLY_PROMETHEUS_TOOLS = {
         "list_prometheus_rules",
@@ -907,13 +916,9 @@ class EvidenceCollectorNode(WorkflowNode):
 
             if strict_mode:
                 system_prompt += (
-                    "\n\n# 上一轮结果被系统拒绝（必须遵守）\n"
+                    "\n\n# 本轮最低要求\n"
                     f"- 失败原因：{failure_reason or '上一轮只返回计划，没有执行工具'}\n"
-                    "- 本轮至少执行一条 critical 或 important 级工具调用后，系统才会接受你的结果。\n"
-                    "- 在出现真实 tool_result 之前，禁止输出任何“采集完成/证据充分/可以下结论”的表述。\n"
-                    "- 计划不是证据，工具名不是证据，command 字段不是证据；只有 tool_result 才是证据。\n"
-                    "- 禁止只输出 evidence_plan 就结束。\n"
-                    "- 在没有真实 tool_result 之前，不要声称“已采集完成”“完整度 100%”或“证据充分”。\n"
+                    "- 至少执行一条 critical/important 只读工具；没有真实 tool_result 时不得声称采集完成。\n"
                 )
 
             user_message = self._build_evidence_user_message(
@@ -1032,9 +1037,7 @@ class EvidenceCollectorNode(WorkflowNode):
         plan_prompt = (
             system_prompt.rstrip()
             + "\n\n# 结构化计划生成模式\n"
-            + "- 只生成 evidence_plan，不调用工具。\n"
-            + "- 必须使用 Pydantic 结构化输出契约 EvidencePlanOutput。\n"
-            + "- 不要输出自然语言总结，不要把工具结果当证据。\n"
+            + "只生成最小 `EvidencePlanOutput`，不调用工具、不总结结论。每个计划项只表达一个待验证问题。\n"
         )
         llm_start = time.time()
         try:
@@ -1189,6 +1192,53 @@ class EvidenceCollectorNode(WorkflowNode):
         )
         self._active_evidence_plan = evidence_plan
         try:
+            if bool(getattr(self, "single_react_session", False)):
+                # Parallel diagnosis owns at most two complete ReAct agents.
+                # Each agent receives one uninterrupted AICall max_steps
+                # budget: no mandatory-gate stop checker, outer retry, fresh
+                # context refill, refinement, or reconciliation is started by
+                # this collector invocation.
+                baseline_events = self._run_pre_react_observability_baseline(
+                    evidence_plan
+                )
+                all_thinking_events.extend(baseline_events)
+                if baseline_events:
+                    user_message = self._append_baseline_handoff(
+                        user_message,
+                        baseline_events,
+                    )
+                baseline_result_count = sum(
+                    1
+                    for event in baseline_events
+                    if event.get("type") == "tool_result"
+                )
+                response, round_events = self._call_llm(
+                    user_message,
+                    system_prompt,
+                    stop_checker=None,
+                    tool_result_sequence_start=baseline_result_count,
+                    blocked_tool_names=blocked_tool_names,
+                    skip_remediation_policy=True,
+                )
+                all_thinking_events.extend(round_events or [])
+                if response and response.result:
+                    llm_text_parts.append(response.result)
+                llm_text = "\n".join(llm_text_parts)
+                if self._has_effective_tool_evidence(all_thinking_events):
+                    logger.info(
+                        "📋 [evidence] 单次完整 ReAct session 完成: plan=%d, tool_events=%d",
+                        len(evidence_plan),
+                        sum(
+                            1 for event in all_thinking_events
+                            if event.get("type") == "tool_result"
+                        ),
+                    )
+                    return evidence_plan, all_thinking_events, llm_text
+                logger.warning(
+                    "⚠️ [evidence] 单次完整 ReAct session 未产生有效工具结果"
+                )
+                return evidence_plan, all_thinking_events, llm_text
+
             while True:
                 prior_attempted = (
                     self._attempted_autonomous_observability_gate_items(
@@ -1229,6 +1279,7 @@ class EvidenceCollectorNode(WorkflowNode):
                     ),
                     tool_result_sequence_start=tool_result_sequence_start,
                     blocked_tool_names=blocked_tool_names,
+                    skip_remediation_policy=True,
                 )
                 all_thinking_events.extend(round_events)
                 if response and response.result:
@@ -1827,6 +1878,110 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         return fetched
 
 
+    def _run_pre_react_observability_baseline(
+        self,
+        evidence_plan: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Run one source-backed Metrics/Logging/Tracing baseline before ReAct.
+
+        The structured plan still owns query parameters.  Code only schedules
+        one scoped call per Pod and dimension concurrently, so this introduces
+        no Case/status/metric-name branching.  A retry collector receives the
+        first attempt's facts and can investigate freely without mechanically
+        repeating the baseline.
+        """
+        if not bool(getattr(self, "run_observability_baseline", True)):
+            return []
+        if not self._is_observability_first_round_gate_enabled():
+            return []
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is None or not hasattr(ai_call, "execute_tool_batch"):
+            logger.warning(
+                "⚠️ [evidence] 无可用 execute_tool_batch，跳过代码级首轮三维 baseline"
+            )
+            return []
+
+        requests: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in evidence_plan or []:
+            if not isinstance(item, dict):
+                continue
+            tool_name = self._normalize_plan_text(item.get("tool"))
+            if tool_name not in self._PRE_REACT_BASELINE_TOOLS:
+                continue
+            target = self._extract_plan_pod_target(item)
+            if not target:
+                continue
+            key = (target[0], target[1], tool_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            requests.append({
+                "tool_name": tool_name,
+                "tool_args": dict(item.get("tool_args") or {}),
+                "plan_item_id": str(item.get("id") or ""),
+                "purpose": str(item.get("purpose") or ""),
+            })
+        if not requests:
+            return []
+
+        logger.info(
+            "🚦 [evidence] ReAct 前并行执行三维 baseline: calls=%d targets=%d",
+            len(requests),
+            len({
+                (request["tool_args"].get("namespace"), request["tool_args"].get("pod"))
+                for request in requests
+            }),
+        )
+        return ai_call.execute_tool_batch(
+            tool_requests=requests,
+            tools=getattr(self, "tools", []) or [],
+            stream_queue=getattr(self, "_event_queue", None),
+            node_id=self.node_id,
+            run_id=getattr(self, "current_run_id", ""),
+            cancel_event=getattr(self, "cancel_event", None),
+            max_workers=len(requests),
+        )
+
+    @staticmethod
+    def _append_baseline_handoff(
+        user_message: str,
+        baseline_events: List[Dict[str, Any]],
+    ) -> str:
+        """Give ReAct the processed baseline without making it a conclusion."""
+        observations = []
+        for event in baseline_events:
+            if event.get("type") != "tool_result":
+                continue
+            observations.append({
+                "tool_name": event.get("tool_name"),
+                "tool_args": event.get("tool_args") or {},
+                "status": event.get("status"),
+                "semantic_success": event.get("semantic_success"),
+                "structured": event.get("structured"),
+                "summary": event.get("result") or "",
+                "raw_ref": event.get("raw_ref"),
+                "structured_ref": event.get("structured_ref"),
+                "summary_ref": event.get("summary_ref"),
+            })
+        payload = json.dumps(
+            {
+                "contract_version": "aiops.pre-react-observability-baseline.v1",
+                "observations": observations,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        return (
+            f"{user_message.rstrip()}\n\n"
+            "# 代码预采集的三维可观测性 baseline\n"
+            "以下是 ReAct 启动前已真实并行执行的 Metrics、Logging、Tracing "
+            "工具结果，不是根因结论。先比较这些事实与 Kubernetes 生命周期，"
+            "再自主决定需要调用哪些只读工具继续调查；不要机械重复完全相同的查询。\n"
+            f"{payload}\n"
+        )
+
     def _blocked_tools_for_preplanned_execution(
         self,
         evidence_plan: List[Dict[str, Any]],
@@ -2097,7 +2252,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     ) -> str:
         strict_section = ""
         if existing_plan:
-            plan_lines = ["# 既有 evidence_plan（系统注入，禁止重写）"]
+            plan_lines = []
             for item in existing_plan:
                 if not isinstance(item, dict):
                     continue
@@ -2113,8 +2268,8 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 )
             strict_section = f"""
 
-# 既有 evidence_plan（本轮不要重写）
-上一轮已生成有效 Pydantic evidence_plan，但没有执行真实工具。本轮必须沿用下列计划，直接调用工具采证，不要重新输出 evidence_plan。
+# 既有 evidence_plan
+直接执行以下计划，不重新规划：
 {chr(10).join(plan_lines)}
 - {failure_reason or '请直接按既有计划执行工具'}
 """
@@ -2123,8 +2278,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
 
 # 上一轮结果被系统拒绝
 - 失败原因：{failure_reason or '上一轮只返回计划，没有执行工具'}
-- 本轮必须先调用至少一个 critical 或 important 级真实工具。
-- 没有 tool_result 前禁止输出“证据充分/采集完成/完整度 100%”。
+- 至少执行一个 critical/important 只读工具；没有 tool_result 时不得声称采集完成。
 """
         archive_refs = layer_archive_ref or {}
         archive_lines = []
@@ -2170,6 +2324,21 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             )
             if case_guidance:
                 message = f"{message.rstrip()}\n\n{case_guidance}\n"
+        retry_context = handoff_obj.get("diagnosis_retry")
+        if isinstance(retry_context, dict):
+            retry_payload = json.dumps(
+                retry_context,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+            message = (
+                f"{message.rstrip()}\n\n"
+                "# 第二次完整 ReAct 诊断上下文\n"
+                "根据门禁反馈重新调查未解决的问题。保留已有有效事实，必要时用只读工具补证；"
+                "可以放弃第一次判断，不要只修 JSON，也不要重复完全相同的查询。\n"
+                f"{retry_payload[:18000]}\n"
+            )
         return message
 
     @classmethod
@@ -2196,26 +2365,10 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             return (
                 "# 自主可观测性组合查询\n"
                 f"- 上游已确认的异常 Pod 候选：{rendered_targets}。\n"
-                "- 先使用 Kubernetes 只读工具确认当前生命周期、容器状态、事件和实体身份；"
-                "Kubernetes 事实与可观测性查询应组合使用。\n"
-                "- 首轮门控对每个异常 Pod 都包含 Metrics、Logging、Tracing、Topology 四个通用查询；"
-                "四个工具都必须真实执行一次，并在工具参数中填写明确 `purpose`，"
-                "说明结果如何改变根因判断。\n"
-                "- Metrics 使用 `execute_pod_promql`，由 Qwen 根据待验证问题选择 Pod 精确作用域的 PromQL；"
-                "Logging 使用 `query_pod_logs`，由 Qwen 选择关键词、级别、容器、trace ID 和时间窗；"
-                "Tracing 使用 `query_pod_tracing`，由 Qwen 选择方向、协议、状态码、时延、对端、资源或 trace ID；"
-                "Topology 使用 `query_pod_topology`，获取来源可核验的控制器、Service、节点和容器关系。\n"
-                "- 首轮只保证真实尝试，不要求四个维度都有数据；容器尚未启动、Pod 无 IP、应用无插桩"
-                "或后端查询失败时，必须如实保留 empty/absent/weak/error，不能跳过或编造。\n"
-                "- 门控完成后先比较四维真实返回与 Kubernetes 事实；仍有关键歧义、冲突、时间窗不足"
-                "或样本不能回答 purpose 时，可使用新的 `purpose` 和更精确条件继续补证；"
-                "查询没有固定顺序，Qwen 根据上一轮真实结果自主决定下一步。\n"
-                "- kubectl 日志用于发现错误原文、HTTP path 和 trace_id；容器真实运行过且日志出现决定性业务原文时，"
-                "优先用 `query_pod_logs` 以同一实体和时间窗做 ES/Filebeat 结构化核验。\n"
-                "- 真实证据出现有效 trace_id 或 HTTP path 且 Pod 有 IP 时，判断 `query_pod_tracing` 是否能验证"
-                "调用关系、错误传播或影响面；有诊断增益时按线索查询，无增益时可不调用并说明边界。\n"
-                "- Runbook 只提供值得验证的问题和查询构造建议，不是固定工具序列，也不能替代真实 tool_result。\n"
-                "- 上下文使用率达到 80% 后停止新增采集，明确列出未采集 Pod/维度，不得把它们写成已验证结论。"
+                "- 代码已安排 Kubernetes 与 Metrics、Logging、Tracing、Topology 首轮查询；真实执行并保持精确实体范围。\n"
+                "- 首轮结果可能是 present、empty、absent、weak 或 error；先判断它们是否回答各自 purpose。\n"
+                "- 仍有关键歧义或冲突时，用新的 purpose 自主选择少量补证；没有诊断增益时停止，不追求维度齐全。\n"
+                "- 只在完整 trace_id 一致时关联日志、Flow 和 Span；上下文使用率达到 80% 时停止新增采集。"
             )
         return (
             "# 实时可观测性证据优先\n"
@@ -2225,7 +2378,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             "这是 Pod 级高信息密度入口，可一次返回 Kubernetes、Metrics、Logging、Tracing 和 Topology。\n"
             "- coarse 结果足够时避免重复采集；coverage 缺失、冲突、error、absent 或工具不可用时，"
             "kubectl/Prometheus 等细粒度工具才作为补证和降级路径。\n"
-            "- Qwen 负责真实执行、理解 coverage 和选择必要补证，但不能跳过 mandatory coarse 项后直接推论。\n"
+            "- Agent 负责真实执行、理解 coverage 和选择必要补证，但不能跳过 mandatory coarse 项后直接推论。\n"
             "- 上下文使用率达到 80% 后停止新增采集，明确列出未采集 Pod，不得把它们写成已验证结论。"
         )
 
@@ -2540,6 +2693,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             "issue_groups",
             "current_abnormal_summary",
             "matched_runbooks",
+            "diagnosis_retry",
         }
         compact = {
             key: EvidenceCollectorNode._strip_archive_refs(handoff[key])

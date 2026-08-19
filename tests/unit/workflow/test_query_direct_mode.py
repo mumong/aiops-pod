@@ -121,7 +121,7 @@ def test_query_conclusion_uses_query_specific_local_rendering():
     assert "| node1 | 1% |" in result["conclusion"]
 
 
-def test_diagnosis_conclusion_uses_plain_markdown_by_default():
+def test_diagnosis_without_formal_rca_does_not_publish_plain_markdown_claim():
     node = ConclusionFormatterNode(holmes_service=SimpleNamespace())
     node.workflow_config_override = {
         "conclusion": {"max_tokens": {"query": 1024, "diagnosis": 4096}},
@@ -157,7 +157,8 @@ def test_diagnosis_conclusion_uses_plain_markdown_by_default():
     assert node.ai_call.simple_calls[0]["max_tokens"] == 4096
     assert "CONCLUSION_FORMATTER_PROMPT" not in node.ai_call.simple_calls[0]["system_prompt"]
     assert node.ai_call.structured_calls == []
-    assert "## 📊 诊断概览" in result["conclusion"]
+    assert "diagnostic_status: inconclusive" in result["conclusion"]
+    assert "ImagePullBackOff" not in result["conclusion"]
 
 
 def test_query_conclusion_normalizes_legacy_string_fields():

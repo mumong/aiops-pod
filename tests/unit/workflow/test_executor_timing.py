@@ -17,6 +17,7 @@ from app.core.workflow.metrics import WorkflowMetrics
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
+from app.core.workflow.nodes.parallel_evidence import _ScopedParallelEventQueue
 from app.core.workflow.schemas import EvidencePlanOutput, LayerOutput
 
 
@@ -341,9 +342,227 @@ def test_executor_evidence_snapshot_is_json_serializable():
     assert snapshot["evidence_items"][0]["id"] == "e1"
     assert snapshot["evidence_items"][0]["level"] == "critical"
     assert snapshot["evidence_items"][1]["collected"] is False
-
-    import json
     json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_executor_parallel_snapshot_contains_ordered_reloadable_group_index():
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    groups = []
+    for index in (3, 1, 2):
+        groups.append({
+            "group_id": f"g{index}",
+            "presentation_index": index - 1,
+            "entities": [{"namespace": f"ns-{index}", "name": "pod"}],
+            "diagnostic_status": "diagnosed",
+            "lane_diagnosis_artifact_ref": {
+                "path": f"/archive/g{index}/artifact.json",
+                "sha256": str(index) * 64,
+                "bytes": 100,
+            },
+            "lane_diagnosis_artifact": {
+                "artifact_refs": {
+                    "snapshot": {
+                        "path": f"/archive/g{index}/snapshot.json",
+                        "sha256": str(index) * 64,
+                        "bytes": 50,
+                    }
+                }
+            },
+        })
+
+    snapshot = executor._extract_state_snapshot(
+        {
+            "parallel_lane_inventory": [
+                {
+                    "group_id": f"g{index}",
+                    "presentation_index": index - 1,
+                    "entities": [{"namespace": f"ns-{index}", "name": "pod"}],
+                }
+                for index in (1, 2, 3)
+            ],
+            "group_results": groups,
+        },
+        "parallel_evidence",
+    )
+
+    assert snapshot["contract_version"] == (
+        "aiops.parallel-evidence-output.v2"
+    )
+    assert snapshot["group_count"] == 3
+    assert snapshot["expected_group_count"] == 3
+    assert snapshot["terminal_group_count"] == 3
+    assert snapshot["join_complete"] is True
+    assert snapshot["diagnosed_count"] == 3
+    assert snapshot["inconclusive_count"] == 0
+    assert snapshot["error_count"] == 0
+    assert snapshot["errors"] == []
+    assert [item["group_id"] for item in snapshot["groups"]] == [
+        "g1", "g2", "g3"
+    ]
+    assert all(item["artifact_ref"] for item in snapshot["groups"])
+    json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_executor_parallel_snapshot_reports_non_total_join_deterministically():
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    artifact_ref = {
+        "path": "/archive/g/artifact.json",
+        "sha256": "1" * 64,
+        "bytes": 100,
+    }
+    snapshot = executor._extract_state_snapshot(
+        {
+            "parallel_lane_inventory": [
+                {"group_id": "g1", "presentation_index": 0, "entities": []},
+                {"group_id": "g2", "presentation_index": 1, "entities": []},
+                {"group_id": "g3", "presentation_index": 2, "entities": []},
+            ],
+            "group_results": [
+                {
+                    "group_id": "g1",
+                    "presentation_index": 0,
+                    "terminal_status": "diagnosed",
+                    "lane_diagnosis_artifact_ref": artifact_ref,
+                },
+                {
+                    "group_id": "g1",
+                    "presentation_index": 0,
+                    "terminal_status": "diagnosed",
+                    "lane_diagnosis_artifact_ref": artifact_ref,
+                },
+                {
+                    "group_id": "g4",
+                    "presentation_index": 3,
+                    "terminal_status": "error",
+                    "lane_diagnosis_artifact_ref": artifact_ref,
+                },
+            ],
+        },
+        "parallel_evidence",
+    )
+
+    assert snapshot["join_complete"] is False
+    assert snapshot["expected_group_count"] == 3
+    assert snapshot["terminal_group_count"] == 2
+    assert snapshot["errors"] == [
+        "duplicate terminal group IDs: g1",
+        "missing terminal group IDs: g2,g3",
+        "unexpected terminal group IDs: g4",
+    ]
+
+
+def test_executor_parallel_snapshot_requires_every_lane_artifact_ref():
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+    snapshot = executor._extract_state_snapshot(
+        {
+            "parallel_lane_inventory": [
+                {"group_id": "g1", "presentation_index": 0, "entities": []},
+            ],
+            "group_results": [
+                {
+                    "group_id": "g1",
+                    "presentation_index": 0,
+                    "terminal_status": "inconclusive",
+                },
+            ],
+        },
+        "parallel_evidence",
+    )
+
+    assert snapshot["join_complete"] is False
+    assert snapshot["errors"] == ["missing lane artifact refs: g1"]
+
+
+class _ParallelLifecycleWorkflow:
+    def __init__(self, node):
+        self._node = node
+
+    def stream(self, initial_state):
+        event_queue = self._node._event_queue
+        now = time.time()
+        event_queue.put((
+            "node_lifecycle",
+            {
+                "phase": "start",
+                "node": "parallel_evidence",
+                "node_name": "parallel-evidence-name",
+                "ts": now,
+            },
+        ))
+        scoped_queue = _ScopedParallelEventQueue(
+            event_queue,
+            group_id="g3",
+            entities=[{"kind": "Pod", "namespace": "ns", "name": "pod"}],
+        )
+        scoped_queue.put((
+            "thinking",
+            {
+                "type": "ai_message",
+                "node": "rca",
+                "content": "lane analysis",
+            },
+        ))
+        state_update = {
+            "group_results": [{
+                "group_id": "g3",
+                "presentation_index": 0,
+                "entities": [{"kind": "Pod", "namespace": "ns", "name": "pod"}],
+                "diagnostic_status": "diagnosed",
+            }],
+        }
+        event_queue.put((
+            "node_lifecycle",
+            {
+                "phase": "end",
+                "node": "parallel_evidence",
+                "node_name": "parallel-evidence-name",
+                "ts": now + 0.01,
+                "success": True,
+                "state_update": state_update,
+            },
+        ))
+        yield {"parallel_evidence": state_update}
+
+
+def test_executor_archives_parallel_group_state_only_after_lifecycle_end(monkeypatch):
+    node = _DummyNode("parallel_evidence")
+    archives = []
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow",
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
+            _ParallelLifecycleWorkflow(node),
+            [node],
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.workflow.executor.create_log_listener",
+        lambda: _DummyLogListener(),
+    )
+    monkeypatch.setattr(
+        WorkflowExecutor,
+        "_save_report",
+        lambda self, layer, question, full_answer: None,
+    )
+    monkeypatch.setattr(
+        WorkflowExecutor,
+        "_archive_node_transition",
+        lambda self, run_id, node_name, state, snapshot, handoff: archives.append({
+            "node": node_name,
+            "state": dict(state),
+            "snapshot": snapshot,
+        }),
+    )
+
+    events = list(WorkflowExecutor(
+        holmes_service=_DummyHolmesService(),
+    ).execute_stream("parallel lifecycle"))
+
+    thinking = next(event for event in events if event.get("type") == "thinking")
+    assert thinking["node"] == "parallel_evidence"
+    assert thinking["lane_stage"] == "rca"
+    assert [archive["node"] for archive in archives] == ["parallel_evidence"]
+    assert archives[0]["snapshot"]["group_count"] == 1
+    assert archives[0]["state"]["group_results"][0]["group_id"] == "g3"
 
 
 def test_executor_evidence_handoff_summary_uses_structured_plan_counts():

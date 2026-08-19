@@ -7,8 +7,10 @@ state. This keeps LangGraph state and downstream prompts small.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -59,6 +61,48 @@ class ContextArchive:
             encoding="utf-8",
         )
         return str(path)
+
+    def write_json_atomic(self, relative_path: str, data: Any) -> Dict[str, Any]:
+        """Durably replace a JSON artifact and return its integrity metadata."""
+        path = self.root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        ).encode("utf-8")
+        temporary_path: Optional[str] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                dir=path.parent,
+                delete=False,
+            ) as handle:
+                temporary_path = handle.name
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            temporary_path = None
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+        return {
+            "path": str(path),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "bytes": len(payload),
+        }
 
     def write_layer_artifacts(self, full_analysis: str, handoff: Dict[str, Any]) -> Dict[str, str]:
         full_ref = self.write_text("layer/full_analysis.md", full_analysis or "")

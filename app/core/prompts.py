@@ -111,45 +111,24 @@ L4:应用层 L3:服务网络层 L2:工作负载层 L1:集群节点层 L0:基础�
 # - 只用于诊断/健康检查定层，不处理 QUERY
 # ----------------------------------------------------------------------------
 LAYER_CLASSIFIER_PROMPT = """
-# 目标：定位当前异常 Pod 并生成状态分析
-- 这个节点只服务于诊断类和健康检查类请求，负责输出 `HEALTHY / ABNORMAL`。
-- 第一目标是识别当前异常 Pod 的状态关键字（pod_status_keyword）并归一化异常类型（pod_abnormal_type）；不需要做 L0-L4 层级归因。
-- 你只负责“定位分析”，不负责完整证据采集；详细证据采集、深度验证、更多工具调用统一交给下游 evidence 节点。
-- 自然语言只供 `LayerOutput` Pydantic 提取；不写最终报告、修复命令、evidence plan 或手写结构化对象。
-- 必须围绕全部 `abnormal_pods / abnormal_groups`，不用 `primary_pod` 代替并发异常。
+# 唯一职责：定位当前异常实体
+只回答三件事：哪些 Pod 当前异常、它们表现为什么状态、如何拆成独立异常组。输出 `HEALTHY / ABNORMAL`，不分析根因，不深度采证，不写报告或修复方案。
 
-### Runbook 使用原则
-- 优先调用 fetch_runbook 获取参考；只允许使用与 Pod 异常状态直接相关的 runbook。
-- runbook 选择必须按 Pod 异常类型匹配。
-- 由你根据每个异常 Pod 的当前状态和异常类型自主选择，不按 Pod 名、namespace 或标签硬编码。
-- 多个独立异常类型需要调用多个对应 runbook；同一个 runbook 在本节点内最多调用一次。
-- 不能因为多个 Pod 都显示 CrashLoopBackOff 就只选择一个 runbook。
-- runbook 只作为定位参考，不是真实环境证据。
+# 定位步骤
+1. 尊重用户范围：指定 namespace/Pod 时只处理这些目标；未指定范围时先获取集群 Pod 列表。
+2. 以当前 Pod 状态为准。事件只用于辅助定位，不能把已消失或已恢复对象加入当前异常列表。
+3. `Running / Completed / Succeeded` 不能仅凭 STATUS 判健康；同时检查 Ready。其余当前非正常状态均保留。
+4. 为每个当前异常 Pod 填写 `pod_status_keyword`，再做轻量 `pod_abnormal_type` 归一化。状态之外证据不足时保持通用类型，不在本节点追查根因。
+5. 每个独立异常形成一个 `abnormal_group`；不得用一个主 Pod 代替其他异常 Pod。
 
-## 动作与停止
-- 首轮必须先做全局 Pod 状态扫描。
-- 第一个真实工具调用必须优先获取全局 Pod 列表：`kubectl_get_by_kind_in_cluster(kind="Pod")` 或等价 `kubectl get pods -A`。
-- 用户指定了 namespace 或具体 Pod 时，诊断范围严格限定在该目标；其他 namespace/Pod 的异常只作为集群背景，不得加入 abnormal_pods / issue_groups，也不得对其做任何 describe、日志、指标、事件或可观测性查询。只有问整个集群（未限定任何 namespace）时才纳入全部异常 Pod。
-- 一旦已得到 `abnormal_pods + abnormal_groups + pod_status_keyword + pod_abnormal_type`，并且每个已识别的独立异常类型已经获得匹配 runbook，或当前轻量证据不足以可靠选择更多 runbook，立即停止工具调用，把深度采证交给 evidence。
-- layer 只用全局扫描、匹配 runbook 和必要的一次轻量状态确认；不做批量 describe、日志、Prometheus 或长链路排查。
+# Runbook
+只为已定位的异常类型选择直接相关 Runbook；同一 Runbook 最多获取一次。Runbook 是下游调查参考，不是当前环境证据。无法可靠匹配时不强行选择。
 
-## 当前事实与健康边界
-- 必须先过滤掉 Running / Completed / Succeeded；排除 `STATUS=Running`、`STATUS=Completed`、`STATUS=Succeeded`。
-- 保留所有非正常状态，例如 Pending / CrashLoopBackOff / ImagePullBackOff / OOMKilled / Evicted / ErrImagePull / Error / CreateContainerConfigError / ContainerCreating / Terminating / Unknown / NotReady。
-- events 只能作为辅助证据，判断必须以当前环境中的活跃异常对象为最高优先级。
-- 如果 Warning 事件指向某个 Pod/Node/Workload，必须再用当前状态确认该对象仍存在且当前仍异常。
-- 如果事件对象已不存在或当前状态已恢复正常，该事件视为历史噪音；不要把“曾经发生过异常”当成“当前仍有故障”。
-- Events 禁止向 `abnormal_pods` 添加当前 Pod 扫描中不存在的 Pod。
-- 健康检查不能只看 Pod Running；Pod Running/Ready 只是信号之一，不等于整体健康。
-- 需要理解 Node / Workload / Service-EndPoints / Storage / Events，但不要为了健康检查默认做全量扫描；只有在当前问题或当前信号指向某一资源面时，才扩展到该资源面。
+# 停止条件
+得到全部目标的当前状态、异常组和必要 Runbook 后立即停止。日志、Metrics、Tracing、详细事件和配置验证交给 Evidence 节点。
 
-## 异常类型归一化
-- 常见类型示例：Evicted、VolumeMountFailed、PendingUnschedulable、NodeLostOrUnknown、TerminatingStuck、OOMKilled、CrashLoopBackOffRuntime、ImagePullFailed、SandboxCreateFailed、ConfigError、NotReadyProbeFailed；遇到列表之外的异常按真实状态如实归一化，不强行套已知类型。
-- CrashLoopBackOff 只是状态关键字，不是最终异常类型；需结合退出码、日志等轻量信号归一化。
-- 多异常并存时，每个独立异常一个 abnormal_group，逐组给出状态关键字与异常类型。
-
-## 输出
-`LayerOutput` 覆盖 `layer（HEALTHY/ABNORMAL） / confidence / reasoning`、全部当前 `abnormal_pods / abnormal_groups`、`pod_status_keyword / pod_abnormal_type / status_category`、`key_entities / possible_scenarios`。
+# 输出合同
+仅生成 `LayerOutput`：`layer / confidence / reasoning / abnormal_pods / abnormal_groups / pod_status_keyword / pod_abnormal_type / status_category / key_entities / possible_scenarios`。
 """
 
 
@@ -159,19 +138,14 @@ LAYER_CLASSIFIER_PROMPT = """
 # - `/ask` 接口
 # - layer 节点工具调用结束后，用 Pydantic 从已有分析文本里提取结构化定层结果
 # ----------------------------------------------------------------------------
-LAYER_EXTRACT_PROMPT = """# 目标
-根据已有分析生成 `LayerOutput`；不要调用工具。
+LAYER_EXTRACT_PROMPT = """根据已有工具分析生成 `LayerOutput`；不要调用工具或补充新事实。
 
-# 权威与输出
-- Pod 异常状态优先：先识别当前仍异常的 Pod，再识别 pod_status_keyword，再归一化 pod_abnormal_type。
-- `layer` 只能是 `HEALTHY / ABNORMAL`：存在活跃异常输出 ABNORMAL，无实际异常且健康信号充分时输出 HEALTHY。
-- 输出全部当前 `abnormal_pods / abnormal_groups`、`pod_status_keyword / pod_abnormal_type / status_category`；不输出 QUERY、完整诊断或新证据。
-- 当前环境中的活跃异常对象优先；历史 event 只能辅助，只有历史 event 而当前无异常时输出 HEALTHY。Pod Running/Ready 只是健康信号之一，不等于整体健康。
-
-# 异常类型归一化
-- 常见类型示例：Evicted、VolumeMountFailed、PendingUnschedulable、NodeLostOrUnknown、TerminatingStuck、OOMKilled、CrashLoopBackOffRuntime、ImagePullFailed、SandboxCreateFailed、ConfigError、NotReadyProbeFailed；列表之外的异常按真实状态如实归一化。
-- CrashLoopBackOff 只是状态关键字，不是最终异常类型；必须结合 OOM、退出码、日志、配置、probe 证据归一化。
-- 字段语义以 `LayerOutput` schema 为准，只保留可验证事实和判断依据。"""
+只做当前状态提取：
+1. 先保留用户范围内当前仍异常的全部 Pod，再填写状态关键字和异常组。
+2. 有活跃异常输出 `ABNORMAL`；没有活跃异常且当前健康信号充分时输出 `HEALTHY`。
+3. 历史事件不能把已消失或已恢复的对象变成当前异常。
+4. `pod_abnormal_type` 只做证据允许的轻量归一化；无法细分时保留通用状态类型。
+5. 只输出 `LayerOutput` schema 中的定位字段，不输出根因、采证计划或报告。"""
 
 # ----------------------------------------------------------------------------
 # LAYER_QUERY_DIRECT_PROMPT
@@ -234,68 +208,41 @@ LAYER_QUERY_DIRECT_EXTRACT_PROMPT = """你是 K8s 问题分层专家。根据分
 # - 负责证据计划、工具采集、evidence_analysis 结构化输出
 # ----------------------------------------------------------------------------
 EVIDENCE_COLLECTOR_PROMPT = """
-# 核心任务：找证据
-你的任务是找证据：以 `layer_handoff` 的 `abnormal_groups / issue_groups / abnormal_pods / current_abnormal_summary` 为覆盖基准采集当前环境证据。不要做泛化巡检，不要把计划、工具名或归档内容当证据。
+# 唯一职责：为当前作用域采集根因证据
+只调查 `layer_handoff` 指定的实体。根据真实工具结果回答：哪些事实支持候选原因、哪些事实反驳它、还缺什么。不要写最终根因报告或修复方案。
 
-# 权威与覆盖
-- 采证计划由 `EvidencePlanOutput` Pydantic schema 生成；执行既有计划并调用至少一个 critical/important 真实只读工具。计划、runbook、archive 不是证据；最终分析只能基于真实 tool_result。
-- 必须把 `current_abnormal_summary.status_counts` 与 `issue_groups` 当作审查核心。
-- 正常状态仅 `Running / Completed / Succeeded / Ready / Bound / Active`；每个其他当前异常组都要覆盖。主组验证当前状态、关键配置、事件/日志和最小依赖面；非主 issue_group 只做当前状态 + 一个最关键配置/事件信号。
-- 明显匹配的 runbook 可由 Qwen 补充；若 `layer_handoff.matched_runbooks` 已有则复用，不要在 evidence 阶段重新选择 runbook。多个独立异常类型可以分别补充不同 runbook；同一 runbook 在整个诊断流程中只允许调用一次。
+# 工作方式
+1. 执行代码提供的首轮计划，取得 Kubernetes、Metrics、Logging、Tracing、Topology 的真实结果。计划、Runbook 和归档不是证据。
+2. 先确认实体身份和当前生命周期，再比较各维度是否回答了本轮 `purpose`。
+3. 仍有关键歧义、冲突、时间窗不匹配或空结果无法回答问题时，自主选择少量只读工具补证。每次补证必须有新的明确 `purpose`；不按故障类型使用固定工具链。
+4. 证据足够时立即停止；补证后仍不足则如实记录缺口。上下文使用率达到 80% 时停止新增采集。
 
-# evidence_plan 结构化契约
-证据计划是 `EvidenceCollectionOutput` 的一部分，由 Pydantic response_format 产生和校验；本 prompt 不提供结构化示例。
-计划项语义：id、description、level、tool、command、purpose；tool 必须是 Available tools 中真实存在的工具名。
+# 证据边界
+- 只把真实 `tool_result` 中的 facts、samples、query、原始错误和 evidence_refs 当证据。
+- `coverage=present` 只表示命中数据；`empty/absent/weak/error` 表示数据边界，均不能被改写成根因。
+- 保持 namespace、Pod、UID 和资源类型不变；NotFound、空结果、命令失败和身份冲突也要保留。
+- 不为了维度齐全而重复查询或引用无关事实。只有能够支持、反驳或限定候选原因的数据才是高价值证据。
+- DeepFlow flow 与 Tempo span 分开解释；只有完整 trace_id 一致时才能关联。
 
-# 实时可观测性证据
-- 实时环境工具结果是诊断事实的首选来源；Runbook、Pod 名称、标签和模型经验只用于提出待验证假设，不能替代真实证据。
-- 用户是否显式提到 metrics、logging、tracing，不应决定是否查询可观测性数据。只要上游已确认异常 Pod，首轮门控就必须对每个已确认异常 Pod 真实执行 `execute_pod_promql`、`query_pod_logs`、`query_pod_tracing` 三个通用工具；同时用 Kubernetes 只读工具确认生命周期、容器终态、事件和当前实体身份。
-- `execute_pod_promql` 是通用 Pod Metrics 查询工具。Qwen 根据待验证问题选择精确包含 namespace/pod 的 PromQL、instant/range 类型和时间窗；MCP 只校验 Pod scope 并执行，不按异常类型选择固定指标。
-- `query_pod_logs` 选择能支持或排除候选的关键词、容器、trace ID 和时间窗；`query_pod_tracing` 选择有判别力的方向、协议、状态、时延、资源或 trace ID。DeepFlow flow 与 Tempo span 是不同证据，只有 trace ID 精确一致时才能关联。
-- 每个通用查询都必须填写明确 `purpose`，说明该查询要验证什么、什么结果会改变当前根因判断。禁止使用“查看一下”“全面检查”这类无判定标准的目的。
-- 首轮门控只保证三个通用工具都产生真实 `tool_result`，不保证每个维度都有数据；保留工具返回的 present/empty/absent/weak/error，不能预计无数据就跳过或编造。
-- 三维首轮结果返回后，把「诊断目标」和「现有真实结果」放在一起对照：每个待验证问题，现有数据是否足以回答？先分析 Kubernetes 与 Metrics、Logging、Tracing 的一致性和缺口。仍有关键歧义、冲突、时间窗不足或样本不能回答 purpose 时，用新的 purpose 和更精确的过滤条件继续挖掘；证据已经充分时可以停止。补证由上一轮真实结果驱动，不使用固定工具顺序，也不按故障类型写死工具链。
-- 常见的"结果不足"信号（看到就值得再挖一次）：instant 单点指标回答不了增长/趋势类 purpose（改 range + 覆盖异常时间窗）；日志窗口没覆盖崩溃/异常时刻或命中为空（调时间窗/容器/关键词）；Trace 命中过宽或为空（加方向/协议/状态码/时延过滤）；两个维度互相矛盾（补第三个维度交叉验证）。
-- coverage=present 只表示命中真实数据，不自动等于根因成立；empty/absent/weak/error 是明确的数据边界。最终判断必须引用真实 facts/samples/query/evidence_refs，并说明这些证据支持或排除了什么。
-- Kubernetes lifecycle/Reason/Last State/Events 与 Prometheus、ES/Filebeat、DeepFlow/Tempo 互相校验，任何维度都不能补造另一维度的事实。
-
-# 工具选择、冲突与停止
-- `kubectl describe pod`、`kubectl_events`、上一次容器日志优先于泛化资源列表。需要 YAML 字段或 command 含 `kubectl get ... -o yaml` 时使用 `kubectl_get_yaml`，不要用表格型 `kubectl_get_by_name` 替代。
-- `tool/tool_args` 与 command/purpose/evidence_type 冲突时按诊断意图选择真实工具；未封装的只读 kubectl 用 `run_bash_command`，不创造工具名。
-- 如果计划中的异常 Pod 返回 NotFound，必须把它作为冲突证据；只可切到同组中仍被真实工具确认异常的 Pod，否则该组无法确认。空事件、namespace 不匹配和命令失败同样保留为负向/冲突证据。
-- 不把 raw_ref、summary_ref、structured_ref、archive_ref 等路径当采证任务；不重复相同工具和参数。禁用 `kubectl top`，资源使用率用 Prometheus。
-- 停止前自检（目标 ↔ 现有结果）：逐条对照用户问题和每个 critical/important purpose，确认已有真实结果足以回答再停止；发现上面列的"结果不足"信号时，优先调整参数再挖一次而不是直接结束。允许不完美：调整后仍拿不到就如实记录缺口，不硬凑。
-- critical/important purpose 已回答，或 evidence 上下文使用率达到 80% 后必须停止新增工具调用；保留未采集 Pod，未采集目标不得进入已验证结论。
-
-# 输入
-- 已判定兼容分类：{layer}
-- 可能场景：{possible_scenarios}
-- 必须优先使用上游交接中的 `abnormal_groups`、`issue_groups`、`abnormal_pods`、`current_abnormal_summary`、`pod_status_keyword`、`pod_abnormal_type`、`must_verify`。
-- 拿到 Kubernetes 与通用可观测性查询的真实结果后，必须检查生命周期终态、决定性日志、关键指标和 Trace 是否把上游通用候选收敛成更具体异常；如果现有 matched_runbooks 过于宽泛，而真实证据明确支持更具体类型，应由 Qwen 自主补充更具体的 runbook。
+# 当前输入
+- 分类：{layer}
+- 上游候选：{possible_scenarios}
 
 # 输出
-完成工具调用后，只简短说明已采集、未采集和冲突证据；没有 tool_result 时禁止写采集结论。
+工具调用完成后，仅简短说明已采集事实、冲突和缺口；不得手写结构化合同。
 """
 
-EVIDENCE_PLAN_PROTOCOL_DYNAMIC = """- 本轮使用普通工具 agent 采集真实证据；采证计划由 `EvidencePlanOutput` Pydantic schema 单独生成。
-- 必须先在内部形成最小采证意图，再直接调用真实工具；必须调用至少一个 critical 或 important 级真实工具。
-- LLM 必须自己决定并调用工具；计划不是证据。
-- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+EVIDENCE_PLAN_PROTOCOL_DYNAMIC = """- 用 `EvidencePlanOutput` 生成最小采证计划，然后调用真实只读工具执行。
+- 计划只描述待验证问题，不是证据；tool 必须来自 Available tools。
+- 至少执行一个 critical/important 项，未封装的只读 kubectl 使用 `run_bash_command`。"""
 
-EVIDENCE_PLAN_PROTOCOL_PREPLANNED = """- 采证计划已由 `EvidencePlanOutput` Pydantic schema 单独生成；执行阶段不要重写 evidence_plan。
-- 如果本轮进入工具执行，必须调用至少一个 critical 或 important 级真实工具。
-- LLM 必须自己决定并调用工具；计划不是证据。
-- 如果计划中的 tool/tool_args 与 command/purpose/evidence_type 冲突，优先满足 command/purpose 的诊断语义；例如 `kubectl get ... -o yaml` 应使用 `kubectl_get_yaml`，不要用表格型 `kubectl_get_by_name` 替代。
-- 后续工具调用必须尽量逐项完成 Pydantic plan 中的项目，最终消息不要新增未写入 plan 的“已采集计划项”。
-- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+EVIDENCE_PLAN_PROTOCOL_PREPLANNED = """- 直接执行已有 `EvidencePlanOutput`，不要重写计划。
+- 优先满足每项 purpose；工具不适合时选择 Available tools 中语义正确的只读工具。
+- 只把实际完成的 tool_result 记为已采集，至少执行一个 critical/important 项。"""
 
-EVIDENCE_PLAN_PROTOCOL_EXISTING = """- 本轮已有 Pydantic evidence_plan，禁止重新输出或改写 evidence_plan。
-- 直接按既有 evidence_plan 调用至少一个 critical 或 important 级真实工具。
-- 如果计划项提供 tool_args，应优先复用其中的 namespace/name/kind 等目标参数；但当 tool/tool_args 与 command/purpose/evidence_type 冲突时，必须选择更符合诊断意图的真实工具。
-- 特别规则：command 含 `kubectl get ... -o yaml`，或 purpose/evidence_type 要求检查 `finalizers/deletionTimestamp/preStop/lifecycle/terminationGracePeriodSeconds/spec/status` 时，应使用 `kubectl_get_yaml` 或等价只读 YAML 命令，不要用 `kubectl_get_by_name` 表格结果替代。
-- LLM 必须自己决定并调用工具；计划不是证据。
-- 工具调用必须尽量逐项完成既有计划，最终消息不要新增未写入 plan 的“已采集计划项”。
-- evidence_plan 中的 tool 字段必须是 Available tools 中真实存在的工具名。不要自行创造 kubectl_logs 等不存在的工具；需要执行未封装的只读 kubectl 命令时使用 run_bash_command。"""
+EVIDENCE_PLAN_PROTOCOL_EXISTING = """- 直接执行已有 evidence_plan，不重新规划。
+- 保持计划中的实体范围，按 purpose 选择语义正确的只读工具。
+- 只把实际完成的 tool_result 记为已采集；不要新增虚假的已完成项。"""
 
 EVIDENCE_USER_MESSAGE_TEMPLATE = """# 用户原始问题
 {question}
@@ -307,28 +254,20 @@ EVIDENCE_USER_MESSAGE_TEMPLATE = """# 用户原始问题
 
 {matched_runbook_context}
 
-# Runbook 语义匹配要求
-- evidence_plan 阶段不要重新选择 runbook；只使用上游 layer 阶段真实调用并写入 matched_runbooks 的 runbook 上下文。
-- 如果上方存在“Layer 已确认 Runbook 上下文”，必须把其中关键检查点转化为 kubectl/prometheus 等真实环境验证步骤。
-- 如果上游没有 matched_runbooks，不要在 plan 阶段臆测 runbook；按 layer_handoff 的当前异常组直接规划真实环境证据。
-- runbook 是参考知识，不是真实环境证据；reference/runbook 步骤不计入 critical/important 完整度。
+# Runbook 上下文
+只把上游已获取的 Runbook 当作待验证问题的参考；它不是当前环境证据，也不在 plan 阶段重新选择。
 
-# 归档上下文（非采证主线）
+# 归档上下文
 {archive_section}
 
 # 当前节点职责
-你是 evidence 节点。核心任务是找证据：为上游定位出的 Pod 异常状态的证据提供真实环境验证。你必须以 layer_handoff 的 abnormal_groups、issue_groups、abnormal_pods、current_abnormal_summary 为覆盖基准调用真实只读工具采集证据。
+只为当前 `layer_handoff` 作用域采集能够支持、反驳或限定候选原因的真实证据。
 
 # 强约束
 {plan_protocol}
-- 如果 layer_handoff 提供 abnormal_groups/issue_groups，evidence_plan 应优先覆盖每个当前异常组的最小关键证据；不要只围绕单个 Pod 而完全忽略其他异常组。
-- 影响范围最大的异常组做完整验证；其他异常组做最小验证。单个 Pod 不能替代 abnormal_pods/abnormal_groups 的覆盖要求。
-- 对非主要影响面的 issue_group 只做最小验证：当前状态 + 一个最关键配置/事件信号即可，不要展开成长链路。
-- 必须把 current_abnormal_summary.status_counts 作为审查核心；非 Running/Completed/Succeeded/Ready/Bound/Active 的状态都需要至少最小验证。
-- 必须优先围绕影响范围最大的异常组验证它为什么进入当前 pod_status_keyword / pod_abnormal_type；不要把采证范围收缩成单个 Pod，也不要先做大范围无关集群扫描。
-- 必须保持 namespace、Pod、Service、Node、资源类型不漂移。
-- 如果工具结果显示对象不存在、namespace 不匹配、事件为空、命令失败，必须把它视为冲突或负向证据；当计划目的就是验证对象是否缺失或错误是否存在时，`NotFound` / `FailedMount` / `FailedScheduling` / `ImagePullBackOff` / `OOMKilled` 等负向结果算作已采集证据。
-- 不要把 context_archive_ref、archive_ref、raw_ref、summary_ref、structured_ref 等路径当作采证任务；默认不要计划读取归档文件。
+- 保持 namespace、Pod、UID 和资源类型不漂移。
+- NotFound、空结果、命令失败和身份不一致属于真实边界，不得忽略。
+- 不读取归档代替实时工具，不把路径、计划或 Runbook 当证据。
 {strict_section}
 # 输出
 {output_instruction}"""
@@ -371,40 +310,38 @@ TOOL_OBSERVATION_SUMMARIZER_PROMPT = """
 # - 只分析上游证据，不做新一轮取数
 # ----------------------------------------------------------------------------
 ROOT_CAUSE_ANALYZER_PROMPT = """
-# 目标：仅用上游证据生成 RCAOutput
-- 不调用任何工具；数据采集属于 evidence 节点。证据不足就输出 inconclusive，不编造或模糊描述。
-- 按 `abnormal_groups / issue_groups` 汇总根因，不用单个 Pod 替代其他 abnormal_pods/issue_groups。
-- 每个异常 Pod 都必须独立形成证据分析和根因结论；即使多个 Pod 都显示同一个 STATUS，也不能合并成一个笼统根因。
-- 根因对应当前 Pod 状态；历史 Events/archive 只能解释当前仍存在且仍异常的 Pod。
+# 唯一职责：判断当前现象的根本原因
+只使用输入中的 Fact Ledger，不调用工具，不重新采集或复述完整报告。
 
-# Fact Ledger 权威边界
-- 输入含 `AIOps Fact Ledger` 时，只引用当前 ledger 中真实存在的 `fact_id`，不猜测、改写或跨实体复用。
-- 每个 required abnormal Pod 必须至少有一个通过引用校验的 hypothesis；同一 entity 允许有多个独立 hypothesis。每个 hypothesis 必须填写 supporting/contradicting fact IDs、unknowns 和 confidence；`entity_id` 可省略，但只能由引用事实唯一推断，歧义或无法推断时必须输出 inconclusive。
-- `diagnostic_status=diagnosed` 必须至少有一个属于同一 entity、direct 且 confidence=medium/high 的 supporting fact；非 direct 且非 related-context 的事实只有在 confidence=high 时才可支撑 diagnosed，strength 不能独立授权结论。不存在、跨实体、coverage-only、`confidence=low/weak` 或 `related_context` 的引用不能支撑 diagnosed。
-- 无有效支持事实、引用校验失败或只有 weak/related-context 背景时，必须输出 `diagnostic_status=inconclusive`，并在 unknowns/limitations 中说明缺口。
+# 根因定义
+`phenomenon` 是当前可见异常；`root_cause` 是证据支持的、能够解释该现象的最上游可行动条件。状态、错误码、探针失败和重启通常只是现象或直接失败；只有没有更上游证据时才按证据边界表述，不能猜测。
 
-# 证据保真
-- 决定性 Fact 的原始 value 必须逐字保留，包括数值、单位、状态、错误文本、标识符和 evidence_refs；不得用模型熟悉的示例值或抽象标签替换当前 Fact。
-- `dimension_details` 必须引用决定性的 metric 值/单位、日志 message 原文、DeepFlow request/response/duration/完整 trace_id、Tempo span attributes 和 topology relationship，不只写 count/coverage。
-- 每个异常 Pod 的 `evidence_analysis.raw_data` 至少引用一条最有判别力的日志 message 原文，并尽量同时给出关键指标数值、Kubernetes 终态、DeepFlow 请求和 Tempo span；不能只写抽象故障标签。
-- Trace 必须按来源分别关联：只有完整 trace_id 完全相同的记录才能合并为同一次请求；不同 trace_id 不得合并，只能分别描述为各自来源和时间窗口内的事实。
-- DeepFlow `duration_us=0` 只表示该字段返回值为 0 或采集器未提供可信时延；没有 response_code、error 或超时原文时，不能推断请求无响应或失败。
-- 必须逐字保留 topology relationship、source、target、directness、confidence；不得把 direct/high 降级为 weak，不反转边，也不从缺失边推导状态。Topology 和 Node 级 related context 只能表达其实际关系与强度。
+# 推理步骤
+1. 锁定 authoritative entity，只使用该实体的 Fact。
+2. 区分现象事实与原因事实，排除仅表示 coverage 或普通背景的 Fact。
+3. 构建最短链路：根本原因 → 失败机制 → 直接失败 → 当前现象。每一步都必须能回指 Fact ID。
+4. 选择最上游且可行动的受支持原因；存在强冲突或缺少原因事实时输出 `inconclusive`。
+5. 不为凑齐 Metrics、Logging、Tracing、Topology 而引用无关或弱事实。
 
-# 输入
+# 引用边界
+- 只引用当前 ledger 中真实存在、属于同一实体的 `fact_id`。
+- `diagnosed` 至少需要一个 direct 且 confidence=medium/high 的有效 supporting Fact；related_context、coverage-only、low/weak 不能独立支撑确诊。
+- 只有完整 trace_id 相同时才能把不同来源记录关联为同一次请求。
+- 原始数值、单位、状态、错误文本和标识符保持原意，不用示例或经验替换。
+
+# 当前输入
 - 异常判定：{layer}
-- 已采集证据：
-{evidence_summary}
+- 已采集证据：{evidence_summary}
 
-# 分析与置信度
-1. 清点同实体事实与冲突；2. 解释证据含义；3. 只关联同实体、同窗口或同完整 trace_id；4. 构建根因→传导→直接原因→现象；5. 按有效支持事实评估置信度。
-- Fact Ledger 存在时，“调用过工具”不提高 confidence；inconclusive 保持低置信度。QUERY 模式不做因果链。
-
-# 输出
-- 仅由 `RCAOutput` Pydantic schema 生成和校验。覆盖 `"diagnostic_status"`、`"phenomenon"`、`"root_cause"`、`"root_cause_summary"`、`"supporting_fact_ids"`、`"contradicting_fact_ids"`、`"unknowns"`、`"hypotheses"`、`"confidence"`、`"confidence_reason"`、`"evidence_inventory"`、`"evidence_analysis"`、`"causal_chain"`、`"primary_runbooks"`、`"alternative_causes"`、`"limitations"`。
-- root_cause/root_cause_summary 至少一个非空；root_cause_summary 引用具体证据和值。confidence 为 0.0-1.0 数字；inventory/analysis/hypotheses 为数组，causal_chain 为对象；raw_data 只放 1-3 行关键摘录。
-- Fact Ledger 引用必须来自当前 ledger 且与 hypothesis 实体一致；weak/related-context/coverage-only 或无有效支持时必须 inconclusive。primary_runbooks 只填上游实际参考项。
-- 如果 native structured output 不可用，你必须只输出一个 JSON 对象，并能被 `RCAOutput` 直接解析；不要输出 Markdown，不要输出代码块围栏或解释性前后缀。
+# RCAOutput 合同
+- `diagnostic_status`：`diagnosed` 或 `inconclusive`。
+- `phenomenon / root_cause / root_cause_summary / confidence_reason / limitations / llm_raw_analysis` 必须是字符串；`limitations` 不能是数组。
+- `evidence_inventory / evidence_analysis / supporting_fact_ids / contradicting_fact_ids / unknowns / hypotheses / primary_runbooks / alternative_causes` 必须是数组；`evidence_analysis` 不能是对象。
+- `causal_chain` 必须是对象，优先使用 `trigger / mechanism / manifestation` 表达最短链路。
+- 每个 hypothesis 必须绑定 authoritative entity，并填写自己的 supporting/contradicting Fact IDs、unknowns 和 confidence；一个主要 hypothesis 足够，只有确有独立候选时才增加。
+- `confidence` 必须是 0.0-1.0 数字；`claim_validation` 留空对象，由代码验证器填写。
+- `evidence_inventory` 和 `evidence_analysis` 只保留支撑因果判断的少量关键项，不复制完整 Fact Ledger。
+- 仅生成可被 `RCAOutput` 解析的对象，不输出 Markdown、代码块或额外说明。
 """
 
 # ----------------------------------------------------------------------------
