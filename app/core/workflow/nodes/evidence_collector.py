@@ -30,6 +30,7 @@ from app.core.context.archive import ContextArchive
 from app.core.workflow.diagnosis_state import (
     DiagnosisSubmission,
     EvidenceSlotDiagnosisSubmission,
+    authoritative_entity_ids_from_ledgers,
     bind_evidence_slots,
     submission_to_rca,
 )
@@ -2141,12 +2142,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     def _authoritative_snapshot_entity_ids(
         snapshot: EntityEvidenceSnapshot,
     ) -> List[str]:
-        return list(dict.fromkeys(
-            str(entity_id)
-            for ledger in snapshot.fact_ledgers
-            for entity_id in ledger.scope_entity_ids
-            if str(entity_id).strip()
-        ))
+        return authoritative_entity_ids_from_ledgers(snapshot.fact_ledgers)
 
 
     def _diagnosis_submission_is_acceptable(

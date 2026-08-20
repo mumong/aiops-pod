@@ -154,6 +154,52 @@ def _entity_id(entity: Mapping[str, Any]) -> str:
     return f"{base}:{uid}" if uid else base
 
 
+def authoritative_entity_ids_from_ledgers(
+    ledgers: Sequence[Any],
+) -> List[str]:
+    """Resolve a name-only Pod scope to its unique source-backed UID.
+
+    Layer discovery can establish only ``namespace/name`` while a later
+    Kubernetes observation records the immutable Pod UID.  Prefer that UID
+    only when the current snapshot contains exactly one matching identity;
+    retain the name-only scope when no UID is available or generations are
+    ambiguous so validation continues to fail closed.
+    """
+
+    def values(item: Any, key: str) -> Any:
+        if isinstance(item, Mapping):
+            return item.get(key)
+        return getattr(item, key, None)
+
+    scope_ids = list(
+        dict.fromkeys(
+            str(entity_id).strip()
+            for ledger in ledgers
+            for entity_id in (values(ledger, "scope_entity_ids") or [])
+            if str(entity_id).strip()
+        )
+    )
+    record_ids = {
+        str(entity_id).strip()
+        for ledger in ledgers
+        for record in (values(ledger, "records") or [])
+        if (entity_id := values(record, "entity_id"))
+        and str(entity_id).strip()
+    }
+
+    resolved: List[str] = []
+    for scope_id in scope_ids:
+        prefix = f"{scope_id}:"
+        candidates = {
+            record_id
+            for record_id in record_ids
+            if scope_id.lower().startswith("k8s.pod:")
+            and record_id.startswith(prefix)
+        }
+        resolved.append(next(iter(candidates)) if len(candidates) == 1 else scope_id)
+    return list(dict.fromkeys(resolved))
+
+
 def _inconclusive_rca(reason: str, *, unknowns: Sequence[str] = ()) -> Dict[str, Any]:
     reasons = list(dict.fromkeys([
         str(item).strip()
@@ -314,13 +360,9 @@ class LaneDiagnosisState:
 
     @property
     def authoritative_entity_ids(self) -> List[str]:
-        ids = list(dict.fromkeys(
-            str(entity_id)
-            for ledger in self.snapshot_handoff.get("fact_ledgers") or []
-            if isinstance(ledger, Mapping)
-            for entity_id in (ledger.get("scope_entity_ids") or [])
-            if str(entity_id).strip()
-        ))
+        ids = authoritative_entity_ids_from_ledgers(
+            self.snapshot_handoff.get("fact_ledgers") or []
+        )
         if ids:
             return ids
         return list(dict.fromkeys(

@@ -4,6 +4,7 @@ from app.core.workflow.diagnosis_state import (
     DiagnosisSubmission,
     EvidenceSlotDiagnosisSubmission,
     LaneDiagnosisState,
+    authoritative_entity_ids_from_ledgers,
     bind_evidence_slots,
 )
 from app.core.workflow.fact_contract import _canonical_fact_id
@@ -74,6 +75,53 @@ def _group_state(ledger: dict, *, tool: str, dimension: str) -> dict:
             },
         }],
     }
+
+
+def test_authoritative_entity_scope_prefers_one_source_backed_pod_uid():
+    ledger, _fact_id = _ledger(
+        namespace="demo",
+        pod="api",
+        uid="uid-current",
+        dimension="kubernetes",
+        fact_type="event",
+        attribute="event.reason",
+        value="Failed",
+        source_system="kubernetes",
+    )
+    ledger["scope_entity_ids"] = ["k8s.pod:demo/api"]
+
+    assert authoritative_entity_ids_from_ledgers([ledger]) == [
+        "k8s.pod:demo/api:uid-current"
+    ]
+
+
+def test_authoritative_entity_scope_keeps_name_only_when_uid_is_ambiguous():
+    first, _fact_id = _ledger(
+        namespace="demo",
+        pod="api",
+        uid="uid-old",
+        dimension="kubernetes",
+        fact_type="event",
+        attribute="event.reason",
+        value="Failed",
+        source_system="kubernetes",
+    )
+    second, _fact_id = _ledger(
+        namespace="demo",
+        pod="api",
+        uid="uid-current",
+        dimension="logging",
+        fact_type="log",
+        attribute="log.message",
+        value="failed",
+        source_system="elasticsearch",
+    )
+    first["scope_entity_ids"] = ["k8s.pod:demo/api"]
+    second["scope_entity_ids"] = ["k8s.pod:demo/api"]
+
+    assert authoritative_entity_ids_from_ledgers([first, second]) == [
+        "k8s.pod:demo/api"
+    ]
 
 
 def test_lane_diagnosis_state_preserves_first_attempt_facts_on_retry():
