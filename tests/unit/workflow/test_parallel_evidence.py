@@ -147,16 +147,6 @@ def test_parallel_evidence_fans_out_per_group(monkeypatch):
     node.workflow_config_override = {"evidence": {"parallel": {"max_concurrency": 3}}}
     node.ai_call = object()
     node.tools = []
-    monkeypatch.setattr(
-        node,
-        "_minimum_rca_gate",
-        lambda result, update: {
-            "verdict": "pass",
-            "failure_codes": [],
-            "reasons": [],
-            "focus_fact_ids": [],
-        },
-    )
     state = {
         "question": "集群有哪些异常？", "run_id": "run1",
         "layer": Layer.ABNORMAL, "layer_handoff": _handoff(3),
@@ -374,7 +364,6 @@ def test_parallel_result_contains_four_dimensions_for_every_entity(monkeypatch):
 
 def test_formal_group_rca_keeps_merged_entity_roots_separate(monkeypatch):
     fact_ids = {}
-    diagnosis_agent_scopes = []
 
     class _MergedCollector(_FakeCollector):
         def execute(self, state):
@@ -386,9 +375,6 @@ def test_formal_group_rca_keeps_merged_entity_roots_separate(monkeypatch):
                 "aiops-case-10": "liveness HTTP 500 kubelet restart exit 137",
             }
             for entity in entities:
-                diagnosis_agent_scopes.append(
-                    (entity["namespace"], entity["name"])
-                )
                 message = messages[entity["namespace"]]
                 entity_id = f"k8s.pod:{entity['namespace']}/{entity['name']}:uid"
                 record = {
@@ -436,7 +422,26 @@ def test_formal_group_rca_keeps_merged_entity_roots_separate(monkeypatch):
                         "fact_ledger": ledger,
                     },
                 })
-            entity = entities[0]
+            return {
+                "evidence_analysis": json.dumps({
+                    "collection_summary": "采集完成",
+                    "tool_data": tool_data,
+                }),
+                "thinking_events": events,
+            }
+
+    formal_rca_inputs = []
+
+    class _FormalRCA:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def set_event_queue(self, queue):
+            self.queue = queue
+
+        def execute(self, state):
+            formal_rca_inputs.append(state)
+            entity = state["layer_handoff"]["issue_groups"][0]["entities"][0]
             fact_id = fact_ids[entity["namespace"]]
             root = (
                 "runtime process exited with code 2"
@@ -444,22 +449,26 @@ def test_formal_group_rca_keeps_merged_entity_roots_separate(monkeypatch):
                 else "liveness probe returned HTTP 500"
             )
             return {
-                "evidence_analysis": json.dumps({
-                    "collection_summary": "采集完成",
-                    "tool_data": tool_data,
-                }),
-                "thinking_events": events,
-                "diagnosis_submission": {
+                "root_cause": root,
+                "causal_chain": {},
+                "rca_analysis": json.dumps({
                     "diagnostic_status": "diagnosed",
                     "phenomenon": "one runtime symptom",
                     "root_cause": root,
-                    "causal_chain": [root, "runtime failure"],
+                    "root_cause_summary": root,
                     "supporting_fact_ids": [fact_id],
                     "contradicting_fact_ids": [],
                     "unknowns": [],
+                    "hypotheses": [],
                     "confidence": 0.88,
-                    "confidence_reason": "source-backed per-entity fact",
-                },
+                    "confidence_reason": "validated per-entity fact references",
+                    "claim_validation": {
+                        "valid": True,
+                        "valid_supporting_fact_ids": [fact_id],
+                        "invalid_fact_ids": [],
+                    },
+                }),
+                "thinking_events": state.get("thinking_events", []),
             }
 
     handoff = {
@@ -477,6 +486,8 @@ def test_formal_group_rca_keeps_merged_entity_roots_separate(monkeypatch):
         "app.core.workflow.nodes.parallel_evidence.EvidenceCollectorNode",
         _MergedCollector,
     )
+    import app.core.workflow.nodes.parallel_evidence as parallel_module
+    monkeypatch.setattr(parallel_module, "RootCauseAnalyzerNode", _FormalRCA, raising=False)
     node = ParallelEvidenceNode()
     node.ai_call = object()
     node.tools = []
@@ -497,7 +508,7 @@ def test_formal_group_rca_keeps_merged_entity_roots_separate(monkeypatch):
         fact_ids["aiops-case-10"]
     ]
     assert "OOM" not in summaries["aiops-case-10/probe"]["root_cause"]
-    assert len(diagnosis_agent_scopes) == 2
+    assert len(formal_rca_inputs) == 2
     assert all(
         group_result["diagnostic_status"] == "diagnosed"
         for group_result in result["group_results"]
@@ -508,12 +519,13 @@ def test_formal_group_rca_keeps_merged_entity_roots_separate(monkeypatch):
     )
 
 
-def test_multi_entity_issue_group_executes_one_diagnosis_agent_per_pod(
+def test_multi_entity_issue_group_executes_one_collector_and_rca_per_pod(
     monkeypatch,
     tmp_path,
 ):
     monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
     collector_scopes = []
+    rca_scopes = []
 
     class _AtomicCollector:
         def __init__(self, *args, **kwargs):
@@ -563,21 +575,37 @@ def test_multi_entity_issue_group_executes_one_diagnosis_agent_per_pod(
                     }],
                 }),
                 "thinking_events": [],
-                "diagnosis_submission": {
-                    "diagnostic_status": "diagnosed",
-                    "phenomenon": "abnormal Pod",
-                    "root_cause": f"root for {entity['name']}",
-                    "causal_chain": [
-                        f"source-backed failure for {entity['name']}",
-                        "abnormal Pod",
-                    ],
-                    "supporting_fact_ids": [record["fact_id"]],
-                    "contradicting_fact_ids": [],
-                    "unknowns": [],
-                    "confidence": 0.9,
-                    "confidence_reason": "source-backed",
-                },
             }
+
+    class _AtomicRCA:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def set_event_queue(self, queue):
+            self.queue = queue
+
+        def execute(self, state):
+            entity = state["layer_handoff"]["issue_groups"][0]["entities"][0]
+            rca_scopes.append((entity["namespace"], entity["name"]))
+            analysis = json.loads(state["evidence_analysis"])
+            fact_id = analysis["tool_data"][0]["fact_ledger"]["records"][0]["fact_id"]
+            return {"rca_analysis": json.dumps({
+                "diagnostic_status": "diagnosed",
+                "phenomenon": "abnormal Pod",
+                "root_cause": f"root for {entity['name']}",
+                "root_cause_summary": f"root for {entity['name']}",
+                "supporting_fact_ids": [fact_id],
+                "contradicting_fact_ids": [],
+                "unknowns": [],
+                "hypotheses": [],
+                "confidence": 0.9,
+                "confidence_reason": "source-backed",
+                "claim_validation": {
+                    "valid": True,
+                    "valid_supporting_fact_ids": [fact_id],
+                    "invalid_fact_ids": [],
+                },
+            })}
 
     handoff = {
         "layer": "ABNORMAL",
@@ -595,6 +623,9 @@ def test_multi_entity_issue_group_executes_one_diagnosis_agent_per_pod(
         "app.core.workflow.nodes.parallel_evidence.EvidenceCollectorNode",
         _AtomicCollector,
     )
+    import app.core.workflow.nodes.parallel_evidence as parallel_module
+    monkeypatch.setattr(parallel_module, "RootCauseAnalyzerNode", _AtomicRCA)
+
     node = ParallelEvidenceNode()
     node.ai_call = object()
     node.tools = []
@@ -608,7 +639,7 @@ def test_multi_entity_issue_group_executes_one_diagnosis_agent_per_pod(
 
     expected = {("case-03", "failed-mount"), ("case-05", "sandbox")}
     assert set(collector_scopes) == expected
-    assert len(collector_scopes) == 2
+    assert set(rca_scopes) == expected
     assert len(result["group_results"]) == 2
     assert all(len(item["entities"]) == 1 for item in result["group_results"])
     assert {
@@ -1073,22 +1104,34 @@ def test_parallel_middle_worker_exception_persists_error_lane_in_order(
                 "thinking_events": [],
             }
 
+    class _InconclusiveRCA:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def set_event_queue(self, queue):
+            self.queue = queue
+
+        def execute(self, state):
+            return {
+                "rca_analysis": json.dumps({
+                    "diagnostic_status": "inconclusive",
+                    "supporting_fact_ids": [],
+                    "contradicting_fact_ids": [],
+                    "unknowns": ["no causal facts"],
+                    "claim_validation": {"valid": False},
+                }),
+            }
+
     monkeypatch.setattr(
         "app.core.workflow.nodes.parallel_evidence.EvidenceCollectorNode",
         _MiddleFailingCollector,
     )
+    monkeypatch.setattr(
+        "app.core.workflow.nodes.parallel_evidence.RootCauseAnalyzerNode",
+        _InconclusiveRCA,
+    )
     node = ParallelEvidenceNode()
     node.tools = []
-    monkeypatch.setattr(
-        node,
-        "_minimum_rca_gate",
-        lambda result, update: {
-            "verdict": "pass",
-            "failure_codes": [],
-            "reasons": [],
-            "focus_fact_ids": [],
-        },
-    )
 
     result = node.execute({
         "question": "diagnose all lanes",

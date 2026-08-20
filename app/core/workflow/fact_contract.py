@@ -3322,37 +3322,8 @@ def _typed_topology_endpoints(record: FactRecord) -> set[str]:
     return {source, target}
 
 
-def _pod_entity_identity(entity_id: str) -> tuple[str, str] | None:
-    value = str(entity_id or "").strip()
-    prefix = "k8s.pod:"
-    if not value.lower().startswith(prefix):
-        return None
-    remainder = value[len(prefix):]
-    base, separator, uid = remainder.rpartition(":")
-    if separator and "/" in base and uid:
-        return f"{prefix}{base}", uid
-    if "/" in remainder:
-        return value, ""
-    return None
-
-
-def _same_pod_scope(left: str, right: str) -> bool:
-    left_identity = _pod_entity_identity(left)
-    right_identity = _pod_entity_identity(right)
-    if left_identity is None or right_identity is None:
-        return False
-    left_base, left_uid = left_identity
-    right_base, right_uid = right_identity
-    return left_base == right_base and (
-        not left_uid or not right_uid or left_uid == right_uid
-    )
-
-
 def _in_entity_scope(record: FactRecord, entity_id: str) -> bool:
-    if record.entity_id == entity_id or _same_pod_scope(
-        record.entity_id,
-        entity_id,
-    ):
+    if record.entity_id == entity_id:
         return True
     return (
         record.dimension == "topology"
