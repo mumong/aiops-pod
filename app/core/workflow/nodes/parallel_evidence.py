@@ -3,9 +3,10 @@
 设计（2026-08-05 用户拍板，2026-08-18 收敛）：
 - layer 检出的每个异常 Pod 都走本节点；默认 N=1 也进入同一 lane 契约。
 - 每个异常组一条独立流水线（全新 context + 完整 max_steps 预算）：
-  EvidenceCollectorNode 采集后复用正式 RootCauseAnalyzerNode，结果落盘到
+  一个工具型 Diagnosis Agent 在同一 ReAct 内自主采集并提交最小诊断，
+  代码拥有的 LaneDiagnosisState 追加保存事实并校验引用，结果落盘到
   每组独立归档 {run_id}-gN。
-- 不做全局 RCA：每组 formal RCA 是该组唯一根因权威；本节点之后直达
+- 不做第二个 model-only RCA：每组已验证 Diagnosis 是该组唯一根因权威；本节点之后直达
   conclusion，由其确定性拼接已校验诊断与结构化真实数据。
 
 N 阶梯实测依据：单 context evidence 在 N=5 降级、N=10 完全塌缩
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
-from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
+from app.core.workflow.diagnosis_state import LaneDiagnosisState
 from app.core.workflow.entity_evidence_snapshot import (
     build_entity_evidence_snapshot,
 )
@@ -241,6 +242,11 @@ class ParallelEvidenceNode(WorkflowNode):
                     group=group,
                     gid=gid,
                 )
+                lane_state = LaneDiagnosisState(
+                    group_id=gid,
+                    entities=group.get("entities") or [],
+                    status_keywords=group.get("status_keywords") or [],
+                )
                 attempt_records: List[Dict[str, Any]] = []
 
                 def execute_attempt(
@@ -271,47 +277,45 @@ class ParallelEvidenceNode(WorkflowNode):
                         if attempt == 1
                         else "evidence_projection_retry"
                     )
-                    attempt_result = self._build_group_result(
-                        gid,
-                        group,
-                        attempt_group_state,
-                        run_id,
-                    )
-                    stage = "rca" if attempt == 1 else "rca_retry"
-                    rca = self._build_group_rca(
-                        gid,
-                        run_id,
-                        group,
+                    lane_state.record_attempt(
                         attempt=attempt,
-                    )
-                    rca_state: WorkflowState = {
-                        **attempt_state,
-                        **attempt_group_state,
-                        "entity_evidence_snapshot": attempt_result[
-                            "entity_evidence_snapshot"
-                        ],
-                    }
-                    attempt_rca_update = rca.execute(rca_state)
-                    gate = self._minimum_rca_gate(
-                        attempt_result,
-                        attempt_rca_update,
-                    )
-                    attempt_records.append({
-                        "diagnosis_attempt": attempt,
-                        "collector_archive_run_id": getattr(
+                        group_state=attempt_group_state,
+                        submission=attempt_group_state.get(
+                            "diagnosis_submission"
+                        ),
+                        collector_archive_run_id=getattr(
                             collector,
                             "current_run_id",
                             "",
                         ),
+                    )
+                    stable_group_state = lane_state.to_group_state()
+                    attempt_result = self._build_group_result(
+                        gid,
+                        group,
+                        stable_group_state,
+                        run_id,
+                    )
+                    attempt_result["diagnosis_state"] = lane_state.to_handoff()
+                    stage = (
+                        "diagnosis_validation"
+                        if attempt == 1
+                        else "diagnosis_validation_retry"
+                    )
+                    attempt_rca_update = lane_state.rca_update()
+                    gate = self._minimum_rca_gate(
+                        attempt_result,
+                        attempt_rca_update,
+                    )
+                    attempt_record = lane_state.attempts[-1]
+                    attempt_records.append({
+                        **attempt_record,
                         "minimum_rca_gate": gate,
-                        "rca_attempts": list(
-                            attempt_rca_update.get("rca_attempts") or []
-                        ),
                     })
                     return (
                         attempt_result,
                         attempt_rca_update,
-                        attempt_group_state,
+                        stable_group_state,
                         gate,
                     )
 
@@ -322,9 +326,7 @@ class ParallelEvidenceNode(WorkflowNode):
                 if gate.get("verdict") == "retry":
                     retry_state = self._build_retry_group_state(
                         scoped_state=scoped_state,
-                        group_state=group_state,
-                        result=result,
-                        rca_update=rca_update,
+                        lane_state=lane_state,
                         feedback=gate,
                     )
                     result, rca_update, group_state, gate = execute_attempt(
@@ -336,6 +338,10 @@ class ParallelEvidenceNode(WorkflowNode):
                             rca_update,
                             gate,
                         )
+                        if isinstance(result.get("diagnosis_state"), dict):
+                            result["diagnosis_state"][
+                                "diagnostic_status"
+                            ] = "inconclusive"
 
                 rca_update["rca_attempts"] = attempt_records
                 stage = "diagnosis_projection"
@@ -431,6 +437,11 @@ class ParallelEvidenceNode(WorkflowNode):
             for result in group_results
             if isinstance(result.get("lane_diagnosis_artifact"), dict)
         ]
+        new_state["lane_diagnosis_states"] = [
+            copy.deepcopy(result.get("diagnosis_state"))
+            for result in group_results
+            if isinstance(result.get("diagnosis_state"), dict)
+        ]
         # 兼容下游统计口径：合并各组 evidence 完整度的简单平均
         completeness = [
             r.get("completeness") for r in group_results
@@ -467,6 +478,7 @@ class ParallelEvidenceNode(WorkflowNode):
         # agent may use all of its max_steps; code does not start fresh
         # contexts to refill that budget or stop it after a mandatory subset.
         collector.single_react_session = True
+        collector.require_diagnosis_submission = True
         collector.run_observability_baseline = attempt == 1
         # 每组独立归档目录 {run_id}-gN，避免并发工具序号冲突
         attempt_suffix = "" if attempt == 1 else f"-retry{attempt}"
@@ -482,39 +494,6 @@ class ParallelEvidenceNode(WorkflowNode):
                 entities=group.get("entities") or [],
             ))
         return collector
-
-    def _build_group_rca(
-        self,
-        gid: str,
-        run_id: str,
-        group: Dict[str, Any],
-        *,
-        attempt: int = 1,
-    ) -> RootCauseAnalyzerNode:
-        """Build the same formal RCA node used by the single-anomaly path."""
-        rca = RootCauseAnalyzerNode(
-            self.holmes_service,
-            self.metrics,
-            self.runbook_catalog,
-        )
-        rca.ai_call = getattr(self, "ai_call", None)
-        rca.tools = getattr(self, "tools", []) or []
-        rca.workflow_config_override = getattr(self, "workflow_config_override", None)
-        rca.cancel_event = getattr(self, "cancel_event", None)
-        # A failed minimum gate is repaired by a fresh, tool-capable ReAct
-        # attempt.  Do not spend another model-only RCA repair inside the same
-        # attempt.
-        rca.disable_internal_repair = True
-        attempt_suffix = "" if attempt == 1 else f"-retry{attempt}"
-        rca.current_run_id = f"{run_id}-{gid}{attempt_suffix}" if run_id else ""
-        queue = getattr(self, "_event_queue", None)
-        if queue is not None:
-            rca.set_event_queue(_ScopedParallelEventQueue(
-                queue,
-                group_id=gid,
-                entities=group.get("entities") or [],
-            ))
-        return rca
 
     @classmethod
     def _minimum_rca_gate(
@@ -610,6 +589,36 @@ class ParallelEvidenceNode(WorkflowNode):
 
         failure_codes: List[str] = []
         reasons: List[str] = []
+        fact_index = (
+            snapshot.get("fact_index")
+            if isinstance(snapshot.get("fact_index"), Mapping)
+            else {}
+        )
+        if not fact_index:
+            failure_codes.append("NO_AUTHORITATIVE_FACTS")
+            reasons.append(
+                "lane has no authoritative Fact Ledger records for claim validation"
+            )
+        diagnosis_state = (
+            result.get("diagnosis_state")
+            if isinstance(result.get("diagnosis_state"), Mapping)
+            else {}
+        )
+        attempt_records = rca_update.get("rca_attempts") or []
+        latest_attempt = (
+            attempt_records[-1]
+            if attempt_records and isinstance(attempt_records[-1], Mapping)
+            else {}
+        )
+        if (
+            diagnosis_state
+            and latest_attempt
+            and latest_attempt.get("submission_received") is False
+        ):
+            failure_codes.append("DIAGNOSIS_SUBMISSION_MISSING")
+            reasons.append(
+                "tool-capable diagnosis agent did not submit the structured diagnosis contract"
+            )
         diagnostic_status = str(
             rca.get("diagnostic_status") or "inconclusive"
         ).lower()
@@ -664,56 +673,17 @@ class ParallelEvidenceNode(WorkflowNode):
         cls,
         *,
         scoped_state: Mapping[str, Any],
-        group_state: Mapping[str, Any],
-        result: Mapping[str, Any],
-        rca_update: Mapping[str, Any],
+        lane_state: LaneDiagnosisState,
         feedback: Mapping[str, Any],
     ) -> WorkflowState:
-        """Create a fresh ReAct context with structured prior-result handoff."""
+        """Create a fresh ReAct context from the code-owned lane state."""
         retry_state: WorkflowState = copy.deepcopy(dict(scoped_state))
         retry_handoff = copy.deepcopy(
             scoped_state.get("layer_handoff")
             if isinstance(scoped_state.get("layer_handoff"), Mapping)
             else {}
         )
-        snapshot = (
-            result.get("entity_evidence_snapshot")
-            if isinstance(result.get("entity_evidence_snapshot"), Mapping)
-            else {}
-        )
-        fact_index = (
-            snapshot.get("fact_index")
-            if isinstance(snapshot.get("fact_index"), Mapping)
-            else {}
-        )
-        manifest = (
-            snapshot.get("selection_manifest")
-            if isinstance(snapshot.get("selection_manifest"), Mapping)
-            else {}
-        )
-        selected_ids = [
-            str(fact_id)
-            for fact_id in (manifest.get("rca_input_fact_ids") or [])
-            if str(fact_id) in fact_index
-        ]
-        retry_handoff["diagnosis_retry"] = {
-            "contract_version": "aiops.react-diagnosis-retry.v1",
-            "attempt": 2,
-            "instruction": (
-                "Start one fresh ReAct investigation focused on the failed "
-                "gate. Keep valid facts, collect only missing evidence, and "
-                "do not merely repair JSON."
-            ),
-            "validation_feedback": dict(feedback),
-            "previous_rca": cls._parse_rca_analysis(
-                rca_update.get("rca_analysis") or "{}"
-            ),
-            "selection_manifest": dict(manifest),
-            "selected_facts": [
-                dict(fact_index[fact_id]) for fact_id in selected_ids
-                if isinstance(fact_index.get(fact_id), Mapping)
-            ],
-        }
+        retry_handoff["diagnosis_retry"] = lane_state.retry_handoff(feedback)
         retry_state["layer_handoff"] = retry_handoff
         retry_state["layer_analysis"] = json.dumps(
             retry_handoff,
@@ -724,15 +694,13 @@ class ParallelEvidenceNode(WorkflowNode):
             f"{scoped_state.get('question', '')}\n"
             "（第一次诊断未通过最小证据门禁；请用一次新的完整 ReAct 调查解决反馈中的缺口。）"
         )
-        retry_state["thinking_events"] = [
-            copy.deepcopy(event)
-            for event in (group_state.get("thinking_events") or [])
-            if isinstance(event, Mapping) and event.get("type") == "tool_result"
-        ]
-        retry_state["evidence_analysis"] = group_state.get(
-            "evidence_analysis",
-            "{}",
-        )
+        # The append-only LaneDiagnosisState remains authoritative. Replaying
+        # every raw event into a fresh model context caused 100%+ context
+        # budgets and duplicate tool calls; the compact retry_handoff above
+        # already carries the selected Facts and validation focus.
+        retry_state["thinking_events"] = []
+        retry_state["evidence_analysis"] = "{}"
+        retry_state["lane_diagnosis_state"] = lane_state.to_handoff()
         return retry_state
 
     @classmethod

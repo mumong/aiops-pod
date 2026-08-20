@@ -56,8 +56,11 @@ class WorkflowState(TypedDict, total=False):
     parallel_lane_inventory: Optional[List[Dict[str, Any]]]
     group_results: Optional[List[Dict[str, Any]]]
     authoritative_lane_artifacts: Optional[List[Dict[str, Any]]]
+    lane_diagnosis_states: Optional[List[Dict[str, Any]]]
+    lane_diagnosis_state: Optional[Dict[str, Any]]
     entity_evidence_snapshot: Optional[Dict[str, Any]]
     structured_group_diagnosis: Optional[Dict[str, Any]]
+    diagnosis_submission: Optional[Dict[str, Any]]
     evidence_items: List[EvidenceItem]   # 已采集证据
     tool_results: List[Dict]             # 工具调用结果
     evidence_completeness: Optional[float]  # 证据完整度 [0, 1]

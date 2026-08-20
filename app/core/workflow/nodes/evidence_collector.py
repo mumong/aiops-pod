@@ -24,9 +24,19 @@ import time
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from app.core.context.archive import ContextArchive
+from app.core.workflow.diagnosis_state import (
+    DiagnosisSubmission,
+    EvidenceSlotDiagnosisSubmission,
+    bind_evidence_slots,
+    submission_to_rca,
+)
+from app.core.workflow.entity_evidence_snapshot import (
+    EntityEvidenceSnapshot,
+    build_entity_evidence_snapshot,
+)
 from app.core.workflow.fact_contract import (
     build_kubernetes_lifecycle_fact_ledger,
     build_observability_query_fact_ledger,
@@ -37,12 +47,14 @@ from app.core.workflow.fact_contract import (
     normalize_case_fact_ledger,
     normalize_fact_ledger,
     project_final_observability_events,
+    validate_rca_claims,
 )
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import EvidenceCollectionOutput, EvidencePlanOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
 from app.core.prompts import (
+    AUTONOMOUS_DIAGNOSIS_AGENT_PROMPT,
     EVIDENCE_PLAN_PROTOCOL_DYNAMIC,
     EVIDENCE_PLAN_PROTOCOL_EXISTING,
     EVIDENCE_PLAN_PROTOCOL_PREPLANNED,
@@ -79,11 +91,12 @@ class EvidenceCollectorNode(WorkflowNode):
         "query_pod_tracing",
         "query_pod_topology",
     )
-    # Code-owned pre-ReAct baseline is intentionally limited to the three
-    # observability signals. Kubernetes identity/lifecycle is already supplied
-    # by Layer and remains available to the autonomous agent for verification;
-    # topology is an optional follow-up, not a mandatory baseline dimension.
+    # Code-owned pre-ReAct baseline covers Kubernetes lifecycle plus the three
+    # observability signals. Layer only establishes identity and coarse status;
+    # describe is the generic source of container state, events and config.
+    # Topology remains an optional follow-up rather than a baseline dimension.
     _PRE_REACT_BASELINE_TOOLS = (
+        "kubectl_describe",
         "execute_pod_promql",
         "query_pod_logs",
         "query_pod_tracing",
@@ -102,6 +115,41 @@ class EvidenceCollectorNode(WorkflowNode):
     _KUBERNETES_LIFECYCLE_AUTHORITY_TOOLS = {
         "kubectl_describe",
         "kubectl_get_yaml",
+    }
+    _AUTONOMOUS_DIAGNOSIS_TOOLS = {
+        "fetch_runbook",
+        "get_aiops_case_evidence",
+        "query_aiops_k8s_snapshot",
+        "query_aiops_metrics",
+        "query_aiops_logs",
+        "query_aiops_deepflow_flows",
+        "build_aiops_topology",
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+        "kubectl_describe",
+        "kubectl_events",
+        "kubectl_get",
+        "kubectl_get_pod",
+        "kubectl_get_yaml",
+        "kubectl_get_by_name",
+        "kubectl_get_by_kind_in_namespace",
+        "kubectl_get_by_kind_in_cluster",
+        "kubectl_find_resource",
+        "kubectl_container_logs",
+        "kubectl_container_previous_logs",
+        "kubectl_logs",
+        "kubectl_previous_logs",
+        "kubectl_logs_all_containers",
+        "kubectl_previous_logs_all_containers",
+        "kubectl_logs_grep",
+        "kubectl_logs_all_containers_grep",
+        "kubectl_top_pods",
+        "kubectl_top_nodes",
+        "kubectl_lineage_parents",
+        "kubectl_lineage_children",
+        "kubectl_verify",
     }
     _DNS1123_LABEL_RE = re.compile(
         r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
@@ -217,6 +265,7 @@ class EvidenceCollectorNode(WorkflowNode):
         new_state: WorkflowState = {
             "current_node": self.node_id,
         }
+        self._diagnosis_submission = None
 
         try:
             question = state.get("question", "")
@@ -253,7 +302,11 @@ class EvidenceCollectorNode(WorkflowNode):
                 evidence_plan=evidence_plan,
                 thinking_events=thinking_events,
             )
-            if retry_reason and not self._structured_plan_terminal_empty:
+            if (
+                retry_reason
+                and not self._structured_plan_terminal_empty
+                and not bool(getattr(self, "single_react_session", False))
+            ):
                 retry_existing_plan = (
                     evidence_plan
                     if self._plan_exists_without_tool_results(retry_reason)
@@ -484,6 +537,9 @@ class EvidenceCollectorNode(WorkflowNode):
                 "evidence_facts": evidence_facts,
                 "evidence_conflicts": evidence_conflicts,
                 "missing_evidence": missing_evidence,
+                "diagnosis_submission": deepcopy(
+                    getattr(self, "_diagnosis_submission", None)
+                ),
                 "query_result": self._build_query_result(
                     question=question,
                     layer=layer,
@@ -518,6 +574,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 "evidence_analysis": "{}",
                 "evidence_completeness": 0.0,
                 "tool_results": [],
+                "diagnosis_submission": None,
             })
             self._save_thinking(state, new_state, [])
 
@@ -881,6 +938,50 @@ class EvidenceCollectorNode(WorkflowNode):
             return [], [], ""
         try:
             layer_str = layer.value if layer else "L2"
+            if bool(getattr(self, "require_diagnosis_submission", False)):
+                # A Pod lane already has authoritative identity from Layer.
+                # Code schedules the generic lifecycle + three-signal starting
+                # point; the single Diagnosis Agent remains free to select any
+                # existing read-only diagnostic tool after seeing the results.
+                # No separate planning model is needed in this path.
+                handoff_for_plan = self._parse_handoff_json(layer_analysis)
+                evidence_plan = self._build_structured_plan_fallback(
+                    handoff_for_plan
+                )
+                if self._is_observability_first_round_gate_enabled():
+                    evidence_plan = self._ensure_autonomous_observability_gate_plan(
+                        evidence_plan,
+                        handoff_for_plan,
+                    )
+                    evidence_plan = [
+                        item
+                        for item in evidence_plan
+                        if self._normalize_plan_text(item.get("tool"))
+                        in {
+                            "kubectl_describe",
+                            *self._PRE_REACT_BASELINE_TOOLS,
+                        }
+                    ]
+                if not evidence_plan:
+                    self._structured_plan_terminal_empty = True
+                    self._structured_plan_failure_reason = (
+                        self._STRUCTURED_PLAN_TERMINAL_REASON
+                    )
+                    return [], [], ""
+                return self._execute_existing_evidence_plan(
+                    question=question,
+                    layer=layer,
+                    possible_scenarios=possible_scenarios,
+                    key_entities=key_entities,
+                    layer_analysis=layer_analysis,
+                    context_archive_ref=context_archive_ref,
+                    layer_archive_ref=layer_archive_ref,
+                    evidence_plan=evidence_plan,
+                    failure_reason=(
+                        "代码已根据权威 Pod 身份建立通用 lifecycle 与三维 baseline；"
+                        "请自主调查并提交诊断"
+                    ),
+                )
             # possible_scenarios 可能是 str 列表或 dict 列表（含 scenario/probability 字段）
             if possible_scenarios:
                 parts = []
@@ -1123,7 +1224,10 @@ class EvidenceCollectorNode(WorkflowNode):
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
         layer_str = layer.value if layer else "L2"
         parsed_layer_handoff = self._parse_handoff_json(layer_analysis)
-        if self._is_observability_first_round_gate_enabled():
+        if (
+            self._is_observability_first_round_gate_enabled()
+            and not bool(getattr(self, "require_diagnosis_submission", False))
+        ):
             evidence_plan = self._ensure_autonomous_observability_gate_plan(
                 evidence_plan,
                 parsed_layer_handoff,
@@ -1139,13 +1243,19 @@ class EvidenceCollectorNode(WorkflowNode):
         else:
             scenarios_str = "未知"
 
-        system_prompt = get_workflow_prompt(
-            "evidence",
-            prompt_language=self._get_prompt_language(),
-        ).format(
-            layer=layer_str,
-            possible_scenarios=scenarios_str,
+        diagnosis_agent = bool(
+            getattr(self, "require_diagnosis_submission", False)
         )
+        if diagnosis_agent:
+            system_prompt = AUTONOMOUS_DIAGNOSIS_AGENT_PROMPT
+        else:
+            system_prompt = get_workflow_prompt(
+                "evidence",
+                prompt_language=self._get_prompt_language(),
+            ).format(
+                layer=layer_str,
+                possible_scenarios=scenarios_str,
+            )
         if key_entities:
             entities_str = "\n".join([
                 f"  - {e.get('type', '')}: {e.get('value', e.get('name', ''))}"
@@ -1169,6 +1279,13 @@ class EvidenceCollectorNode(WorkflowNode):
                 else "legacy"
             ),
         )
+        if diagnosis_agent:
+            user_message = (
+                f"{user_message.rstrip()}\n\n"
+                "# 本轮完成条件\n"
+                "在自主调查结束时必须通过 DiagnosisSubmission 结构化合同提交"
+                "现象、根因、最短因果链和真实 Fact ID；不要只返回自然语言摘要。\n"
+            )
 
         legacy_early_stop_enabled = self._is_early_stop_enabled(default=True)
         autonomous_mode = self._is_autonomous_observability_enabled()
@@ -1202,6 +1319,23 @@ class EvidenceCollectorNode(WorkflowNode):
                     evidence_plan
                 )
                 all_thinking_events.extend(baseline_events)
+                if diagnosis_agent and baseline_events:
+                    fast_submission = self._try_compact_fact_diagnosis(
+                        events=baseline_events,
+                        phase="baseline",
+                        max_attempts=2,
+                    )
+                    if fast_submission is not None:
+                        self._diagnosis_submission = (
+                            fast_submission.model_dump(mode="json")
+                        )
+                        logger.info(
+                            "⚡ [evidence] 四维 baseline 已形成可发布诊断，"
+                            "跳过工具型 ReAct"
+                        )
+                        return evidence_plan, all_thinking_events, (
+                            fast_submission.model_dump_json()
+                        )
                 if baseline_events:
                     user_message = self._append_baseline_handoff(
                         user_message,
@@ -1212,17 +1346,82 @@ class EvidenceCollectorNode(WorkflowNode):
                     for event in baseline_events
                     if event.get("type") == "tool_result"
                 )
-                response, round_events = self._call_llm(
-                    user_message,
-                    system_prompt,
-                    stop_checker=None,
-                    tool_result_sequence_start=baseline_result_count,
-                    blocked_tool_names=blocked_tool_names,
-                    skip_remediation_policy=True,
-                )
+                if diagnosis_agent:
+                    structured, response, round_events = self._call_structured_agent(
+                        question=user_message,
+                        system_prompt=system_prompt,
+                        schema=DiagnosisSubmission,
+                        use_tools=True,
+                        stop_checker=None,
+                        tool_result_sequence_start=baseline_result_count,
+                        blocked_tool_names=blocked_tool_names,
+                        skip_remediation_policy=True,
+                    )
+                    if structured is None and response is not None:
+                        extractor = getattr(
+                            getattr(self, "ai_call", None),
+                            "extract_json_payload",
+                            None,
+                        )
+                        parsed = (
+                            extractor(response.result or "")
+                            if callable(extractor)
+                            else None
+                        )
+                        try:
+                            structured = (
+                                DiagnosisSubmission.model_validate(parsed)
+                                if isinstance(parsed, dict)
+                                else None
+                            )
+                        except Exception:
+                            structured = None
+                else:
+                    response, round_events = self._call_llm(
+                        user_message,
+                        system_prompt,
+                        stop_checker=None,
+                        tool_result_sequence_start=baseline_result_count,
+                        blocked_tool_names=blocked_tool_names,
+                        skip_remediation_policy=True,
+                    )
                 all_thinking_events.extend(round_events or [])
                 if response and response.result:
                     llm_text_parts.append(response.result)
+                if diagnosis_agent:
+                    selected_submission = (
+                        structured
+                        if isinstance(structured, DiagnosisSubmission)
+                        else None
+                    )
+                    if not self._diagnosis_submission_is_acceptable(
+                        selected_submission,
+                        all_thinking_events,
+                    ):
+                        semantic_hint: Dict[str, Any] = {}
+                        if selected_submission is not None:
+                            semantic_hint = selected_submission.model_dump(
+                                mode="json"
+                            )
+                        elif response is not None and response.result:
+                            semantic_hint = {
+                                "agent_output": str(response.result)[:2000]
+                            }
+                        repaired = self._try_compact_fact_diagnosis(
+                            events=all_thinking_events,
+                            phase="post_react_binding",
+                            semantic_hint=semantic_hint,
+                        )
+                        if repaired is not None:
+                            selected_submission = repaired
+                            logger.info(
+                                "🔗 [evidence] 代码已将紧凑证据槽位绑定为权威 Fact ID"
+                            )
+                    self._diagnosis_submission = (
+                        selected_submission.model_dump(mode="json")
+                        if selected_submission is not None
+                        else None
+                    )
                 llm_text = "\n".join(llm_text_parts)
                 if self._has_effective_tool_evidence(all_thinking_events):
                     logger.info(
@@ -1858,6 +2057,306 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         }
 
 
+    def _diagnosis_snapshot_from_events(
+        self,
+        events: List[Dict[str, Any]],
+    ) -> Optional[EntityEvidenceSnapshot]:
+        """Build one bounded authoritative snapshot from collected events."""
+        entities: List[Dict[str, str]] = []
+        seen_entities: set[tuple[str, str]] = set()
+        for event in events or []:
+            if event.get("type") != "tool_result":
+                continue
+            target = self._extract_tool_event_pod_target(
+                event,
+                require_consistent=False,
+            )
+            if not target or target in seen_entities:
+                continue
+            seen_entities.add(target)
+            entities.append({
+                "kind": "Pod",
+                "namespace": target[0],
+                "name": target[1],
+            })
+        if not entities:
+            return None
+        tool_data = self._extract_tool_data_from_thinking(events)
+        if not tool_data:
+            return None
+        try:
+            return build_entity_evidence_snapshot(
+                entities=entities,
+                evidence_analysis={"tool_data": tool_data},
+                thinking_events=events,
+            )
+        except Exception as exc:
+            logger.warning(
+                "⚠️ [evidence] 无法从当前工具事实建立紧凑诊断快照: %s",
+                exc,
+            )
+            return None
+
+
+    @staticmethod
+    def _compact_diagnosis_catalog(
+        snapshot: EntityEvidenceSnapshot,
+        *,
+        limit: int = 20,
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """Project deterministic 1-based slots for a small-model contract."""
+        manifest = snapshot.selection_manifest.to_dict()
+        ordered_ids = list(dict.fromkeys([
+            *(manifest.get("direct_causal_candidate_fact_ids") or []),
+            *(manifest.get("required_context_fact_ids") or []),
+            *(manifest.get("eligible_support_fact_ids") or []),
+            *(manifest.get("rca_input_fact_ids") or []),
+        ]))
+        slot_fact_ids: List[str] = []
+        catalogue: List[Dict[str, Any]] = []
+        for fact_id in ordered_ids:
+            fact = snapshot.fact_index.get(str(fact_id))
+            if not isinstance(fact, Mapping):
+                continue
+            slot_fact_ids.append(str(fact_id))
+            display = str(
+                fact.get("display_value")
+                or f"{fact.get('attribute')}={fact.get('value')}"
+            )
+            catalogue.append({
+                "slot": len(slot_fact_ids),
+                "dimension": fact.get("dimension"),
+                "evidence_role": fact.get("evidence_role"),
+                "attribute": fact.get("attribute"),
+                "value": display[:600],
+                "directness": fact.get("directness"),
+                "confidence": fact.get("confidence"),
+            })
+            if len(slot_fact_ids) >= max(1, int(limit)):
+                break
+        return slot_fact_ids, catalogue
+
+
+    @staticmethod
+    def _authoritative_snapshot_entity_ids(
+        snapshot: EntityEvidenceSnapshot,
+    ) -> List[str]:
+        return list(dict.fromkeys(
+            str(entity_id)
+            for ledger in snapshot.fact_ledgers
+            for entity_id in ledger.scope_entity_ids
+            if str(entity_id).strip()
+        ))
+
+
+    def _diagnosis_submission_is_acceptable(
+        self,
+        submission: Optional[DiagnosisSubmission],
+        events: List[Dict[str, Any]],
+    ) -> bool:
+        """Check references and the minimum generic causal-support boundary."""
+        accepted, _reasons = self._diagnosis_submission_acceptance(
+            submission,
+            events,
+        )
+        return accepted
+
+
+    def _diagnosis_submission_acceptance(
+        self,
+        submission: Optional[DiagnosisSubmission],
+        events: List[Dict[str, Any]],
+    ) -> tuple[bool, List[str]]:
+        """Return the generic publishability verdict and bounded feedback.
+
+        The feedback describes contract failures only.  It never chooses a
+        root cause, metric, Case, or evidence Fact for the model.
+        """
+        if submission is None:
+            return False, ["未返回可解析的结构化诊断"]
+        snapshot = self._diagnosis_snapshot_from_events(events)
+        if snapshot is None or not snapshot.fact_ledgers:
+            return False, ["当前没有可校验的权威事实账本"]
+        causal_ids = set(
+            snapshot.selection_manifest.direct_causal_candidate_fact_ids
+        )
+        if submission.diagnostic_status == "inconclusive":
+            if causal_ids:
+                return False, [
+                    "事实目录含有直接因果候选，不能在未引用它们时提交 inconclusive"
+                ]
+            return True, []
+        try:
+            validated = validate_rca_claims(
+                submission_to_rca(
+                    submission,
+                    authoritative_entity_ids=(
+                        self._authoritative_snapshot_entity_ids(snapshot)
+                    ),
+                ),
+                snapshot.fact_ledgers,
+                authoritative_entity_ids=(
+                    self._authoritative_snapshot_entity_ids(snapshot)
+                ),
+            )
+        except Exception as exc:
+            return False, [f"结构化诊断校验失败: {type(exc).__name__}"]
+        claim = (
+            validated.get("claim_validation")
+            if isinstance(validated.get("claim_validation"), Mapping)
+            else {}
+        )
+        valid_support = set(claim.get("valid_supporting_fact_ids") or [])
+        accepted = bool(
+            claim.get("diagnosis_publishable") is True
+            and valid_support
+            and (not causal_ids or valid_support & causal_ids)
+        )
+        if accepted:
+            return True, []
+        reasons = [
+            str(reason).strip()
+            for reason in (claim.get("reasons") or [])
+            if str(reason).strip()
+        ]
+        if not valid_support:
+            reasons.append("至少选择一个可校验的支撑证据槽位")
+        if causal_ids and not valid_support & causal_ids:
+            reasons.append("支撑证据必须包含至少一个 causal_candidate 槽位")
+        if claim.get("diagnosis_publishable") is not True:
+            reasons.append("当前提交尚未达到可发布诊断合同")
+        return False, list(dict.fromkeys(reasons))[:6]
+
+
+    def _try_compact_fact_diagnosis(
+        self,
+        *,
+        events: List[Dict[str, Any]],
+        phase: str,
+        semantic_hint: Optional[Mapping[str, Any]] = None,
+        max_attempts: int = 1,
+    ) -> Optional[DiagnosisSubmission]:
+        """Use a compact no-tool call, then bind slots to Fact IDs in code.
+
+        This path only runs when code already sees direct causal candidates.
+        It never chooses a Case, metric name or root cause in Python.
+        """
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is None or not hasattr(ai_call, "call_structured"):
+            return None
+        snapshot = self._diagnosis_snapshot_from_events(events)
+        if snapshot is None or not snapshot.fact_ledgers:
+            return None
+        if not snapshot.selection_manifest.direct_causal_candidate_fact_ids:
+            return None
+        slot_fact_ids, catalogue = self._compact_diagnosis_catalog(snapshot)
+        if not slot_fact_ids:
+            return None
+        entities = [
+            {
+                "namespace": entity.get("namespace"),
+                "name": entity.get("name"),
+            }
+            for entity in snapshot.entities
+        ]
+        system_prompt = """
+# 唯一职责：从给定事实形成紧凑诊断并选择证据槽位
+输入只包含当前 Pod 的真实结构化事实。不得调用工具，也不得使用输入外信息。
+判断最上游、可行动且被事实支持的原因，并输出最短的 原因→机制→现象 因果链。
+supporting_evidence_slots 与 contradicting_evidence_slots 只能填写 facts 中存在的
+正整数 slot；不要输出、编造或改写 Fact ID。diagnosed 必须至少选择一个
+causal_candidate，并同时选择支撑根因关键条件的 configuration/context（若存在）。
+如果事实只能描述现象而不能支持原因，提交 inconclusive 并写明缺口。
+phenomenon、root_cause、causal_chain、unknowns、confidence_reason 等所有面向用户的
+文字字段必须使用简体中文；Pod 名、命名空间、指标名、状态名和原始错误可保留原文。
+""".strip()
+        previous_diagnosis = dict(semantic_hint or {})
+        validation_feedback: List[str] = []
+        attempts = max(1, int(max_attempts))
+        for attempt in range(1, attempts + 1):
+            question = json.dumps({
+                "contract_version": "aiops.compact-diagnosis-input.v1",
+                "entities": entities,
+                "facts": catalogue,
+                "previous_semantic_diagnosis": previous_diagnosis,
+                "validation_feedback": validation_feedback,
+                "attempt": attempt,
+                "max_attempts": attempts,
+            }, ensure_ascii=False, separators=(",", ":"), default=str)
+            start = time.time()
+            structured: Optional[EvidenceSlotDiagnosisSubmission] = None
+            try:
+                candidate, _raw = ai_call.call_structured(
+                    system_prompt=system_prompt,
+                    question=question,
+                    schema=EvidenceSlotDiagnosisSubmission,
+                    node_id=(
+                        f"evidence_{phase}"
+                        if attempt == 1
+                        else f"evidence_{phase}_retry"
+                    ),
+                    run_id=getattr(self, "current_run_id", ""),
+                    max_tokens=1800,
+                )
+                if isinstance(candidate, EvidenceSlotDiagnosisSubmission):
+                    structured = candidate
+            except Exception as exc:
+                validation_feedback = [
+                    f"上次调用未返回有效结构: {type(exc).__name__}"
+                ]
+                logger.warning(
+                    "⚠️ [evidence] 紧凑诊断阶段 %s 第 %d/%d 次未返回有效结构: %s",
+                    phase,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+            finally:
+                if self.metrics:
+                    self.metrics.record_llm_call(
+                        self.node_id,
+                        (time.time() - start) * 1000,
+                    )
+            if structured is None:
+                if not validation_feedback:
+                    validation_feedback = ["上次响应无法解析为结构化诊断合同"]
+            else:
+                previous_diagnosis = structured.model_dump(mode="json")
+                try:
+                    bound = bind_evidence_slots(
+                        structured,
+                        slot_fact_ids=slot_fact_ids,
+                    )
+                except ValueError as exc:
+                    validation_feedback = [str(exc)]
+                    logger.warning(
+                        "⚠️ [evidence] 紧凑诊断阶段 %s 第 %d/%d 次槽位非法: %s",
+                        phase,
+                        attempt,
+                        attempts,
+                        exc,
+                    )
+                else:
+                    accepted, validation_feedback = (
+                        self._diagnosis_submission_acceptance(bound, events)
+                    )
+                    if accepted:
+                        return bound
+                    logger.warning(
+                        "⚠️ [evidence] 紧凑诊断阶段 %s 第 %d/%d 次未通过: %s",
+                        phase,
+                        attempt,
+                        attempts,
+                        "；".join(validation_feedback) or "未知合同错误",
+                    )
+            if attempt < attempts:
+                logger.info(
+                    "🔁 [evidence] baseline 事实已足够，使用代码校验反馈进行第 %d 次紧凑诊断",
+                    attempt + 1,
+                )
+        return None
+
+
     @staticmethod
     def _fetched_runbook_ids(
         thinking_events: List[Dict[str, Any]],
@@ -1882,7 +2381,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         self,
         evidence_plan: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Run one source-backed Metrics/Logging/Tracing baseline before ReAct.
+        """Run one source-backed lifecycle + three-signal baseline before ReAct.
 
         The structured plan still owns query parameters.  Code only schedules
         one scoped call per Pod and dimension concurrently, so this introduces
@@ -1926,7 +2425,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             return []
 
         logger.info(
-            "🚦 [evidence] ReAct 前并行执行三维 baseline: calls=%d targets=%d",
+            "🚦 [evidence] ReAct 前并行执行四维 baseline: calls=%d targets=%d",
             len(requests),
             len({
                 (request["tool_args"].get("namespace"), request["tool_args"].get("pod"))
@@ -1943,31 +2442,40 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             max_workers=len(requests),
         )
 
-    @staticmethod
     def _append_baseline_handoff(
+        self,
         user_message: str,
         baseline_events: List[Dict[str, Any]],
     ) -> str:
-        """Give ReAct the processed baseline without making it a conclusion."""
+        """Give ReAct a compact baseline without replaying raw tool payloads."""
         observations = []
         for event in baseline_events:
             if event.get("type") != "tool_result":
                 continue
             observations.append({
                 "tool_name": event.get("tool_name"),
-                "tool_args": event.get("tool_args") or {},
                 "status": event.get("status"),
                 "semantic_success": event.get("semantic_success"),
-                "structured": event.get("structured"),
-                "summary": event.get("result") or "",
+                "summary": str(event.get("result") or "")[:600],
                 "raw_ref": event.get("raw_ref"),
                 "structured_ref": event.get("structured_ref"),
                 "summary_ref": event.get("summary_ref"),
             })
+        compact_facts: List[Dict[str, Any]] = []
+        snapshot = self._diagnosis_snapshot_from_events(baseline_events)
+        if snapshot is not None:
+            slot_fact_ids, catalogue = self._compact_diagnosis_catalog(
+                snapshot
+            )
+            compact_facts = [
+                {**fact, "fact_id": slot_fact_ids[index]}
+                for index, fact in enumerate(catalogue)
+            ]
         payload = json.dumps(
             {
-                "contract_version": "aiops.pre-react-observability-baseline.v1",
+                "contract_version": "aiops.pre-react-baseline.v2",
                 "observations": observations,
+                "facts": compact_facts,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -1975,9 +2483,9 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         )
         return (
             f"{user_message.rstrip()}\n\n"
-            "# 代码预采集的三维可观测性 baseline\n"
-            "以下是 ReAct 启动前已真实并行执行的 Metrics、Logging、Tracing "
-            "工具结果，不是根因结论。先比较这些事实与 Kubernetes 生命周期，"
+            "# 代码预采集的 Kubernetes 与三维可观测性 baseline\n"
+            "以下是 ReAct 启动前已真实并行执行的生命周期、Metrics、Logging、"
+            "Tracing 紧凑事实，不是根因结论。"
             "再自主决定需要调用哪些只读工具继续调查；不要机械重复完全相同的查询。\n"
             f"{payload}\n"
         )
@@ -1988,6 +2496,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     ) -> set[str]:
         """Limit execution to tools declared by the structured evidence plan."""
         allowed_tools = {"fetch_runbook"}
+        if bool(getattr(self, "require_diagnosis_submission", False)):
+            # The lane's core Agent must be able to choose among the existing
+            # read-only diagnostic tools after seeing baseline results.  Write
+            # tools and arbitrary shell execution remain unavailable unless a
+            # separate workflow explicitly plans them.
+            allowed_tools.update(self._AUTONOMOUS_DIAGNOSIS_TOOLS)
         if self._is_autonomous_observability_enabled():
             allowed_tools.update(self._OBSERVABILITY_QUERY_TOOLS)
         if any(
