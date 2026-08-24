@@ -81,6 +81,19 @@ def test_parallel_lane_concurrency_defaults_to_all_discovered_lanes():
     assert node._max_concurrency(10) == 10
 
 
+def test_parallel_group_rca_disables_internal_repair():
+    node = ParallelEvidenceNode()
+
+    rca = node._build_group_rca(
+        "g1",
+        "run-1",
+        {"entities": [{"kind": "Pod", "namespace": "demo", "name": "api"}]},
+    )
+
+    assert rca.disable_internal_repair is True
+    assert rca.current_run_id == "run-1-g1"
+
+
 def test_minimum_rca_gate_retries_when_diagnosed_uses_no_causal_candidate():
     node = ParallelEvidenceNode()
     result = {

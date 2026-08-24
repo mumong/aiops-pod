@@ -72,7 +72,7 @@ data:
           "type": "procedure",
           "layer": "L2",
           "update_date": "2026-04-13",
-          "description": "pod_abnormal_type=OOMKilled, 兼容归因=L2 — 当前 Pod CrashLoopBackOff/Error 且容器 Last State Reason=OOMKilled；用于区分 memory limit 过低、应用内存泄漏/峰值、memory-backed emptyDir、cgroup OOM 与节点 OS 级 OOM。关键证据：containerStatuses.lastState.reason=OOMKilled、exitCode=137、resources.limits.memory、previous logs；若 Pod Reason=Evicted 切换 pod-evicted",
+          "description": "pod_abnormal_type=OOMKilled, 兼容归因=L2 — 当前 Pod CrashLoopBackOff/Error 且容器 Last State Reason=OOMKilled；用于区分 memory limit 过低、应用内存泄漏/峰值、memory-backed emptyDir、cgroup OOM 与节点 OS 级 OOM。关键证据：containerStatuses.lastState.reason=OOMKilled、resources.limits.memory、previous logs；exitCode=137 只表示 SIGKILL，不能单独证明 OOM；若 Pod Reason=Evicted 切换 pod-evicted",
           "link": "pod-oomkilled.md",
           "operations": [
             "诊断",
@@ -84,7 +84,7 @@ data:
           "type": "procedure",
           "layer": "L2",
           "update_date": "2026-04-28",
-          "description": "pod_abnormal_type=CrashLoopBackOffRuntime, 兼容归因=L2 — 当前 Pod STATUS=CrashLoopBackOff 且不是 OOM/配置缺失/镜像拉取；用于区分进程退出、exit(0) 快速退出、command/args 错误、权限或 executable 缺失、磁盘满/端口冲突、依赖异常、livenessProbe 杀死容器。关键证据：Last State exitCode 非 137、BackOff、previous logs、Killing/Liveness probe failed",
+          "description": "pod_abnormal_type=CrashLoopBackOffRuntime, 兼容归因=L2 — 当前 Pod STATUS=CrashLoopBackOff 且没有已确认的 OOMKilled/配置缺失/镜像拉取证据；用于区分进程退出、exit(0) 快速退出、command/args 错误、权限或 executable 缺失、磁盘满/端口冲突、依赖异常、livenessProbe 杀死容器。关键证据：Last State Reason、BackOff、previous logs、Killing/Liveness probe failed；exitCode=137 也可由探针或其他 SIGKILL 产生，不得单独归因 OOM",
           "link": "pod-crashloop-runtime.md",
           "operations": [
             "诊断",
@@ -220,7 +220,8 @@ data:
     | Reason=Evicted + NoExecute taint not-ready/unreachable | 节点不可达或 NotReady 后的 taint 驱逐 | 高 |
     | df 显示 Use% >= 95% + ENOSPC 错误 | 节点磁盘空间耗尽 | 高 |
     | Inode 使用率 >= 95% | Inode 耗尽 | 高 |
-    | container Last State=OOMKilled / exitCode=137 | 不是 Evicted 根因，应切换 OOMKilled | 高 |
+    | container Last State Reason=OOMKilled | 不是 Evicted 根因，应进入 OOMKilled 调查 | 高 |
+    | exitCode=137 但 Reason 非 OOMKilled | 只能确认 SIGKILL，继续比对探针 Killing、人工终止、节点 OOM 和 cgroup OOM 证据 | 待验证 |
 
     ## 标准修复建议
     - Pod 级 ephemeral-storage/emptyDir 超限: 优先清理应用临时文件、降低日志落盘量，或提高容器 `ephemeral-storage` limit / emptyDir `sizeLimit` 后重建 Pod；验证 `kubectl describe pod` 不再出现 Evicted Message。
@@ -334,7 +335,7 @@ data:
     - nodeAffinity/可用区冲突: 调整 Pod nodeSelector/affinity 到 PV 可用节点，或重新创建符合可用区的卷；验证 Pod 绑定节点与 PV nodeAffinity 一致。
     - CSI/NFS/hostPath 错误: 修复后端服务、权限、路径或 CSI DaemonSet；验证 Events 不再持续产生 FailedMount/FailedAttachVolume。
   pod-oomkilled.md: |
-    # Pod OOMKilled (Exit Code 137)
+    # Pod OOMKilled（以 Last State Reason 为准）
 
     > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory
 
@@ -346,6 +347,8 @@ data:
     | Describe | terminated.reason=OOMKilled, exitCode=137 |
     | Last State | OOMKilled |
     | 排除项 | 如果 Pod Reason=Evicted，应按 Evicted 处理；OOMKilled 必须来自 containerStatuses/Last State |
+
+    `exitCode=137` 只表示进程收到 SIGKILL。探针失败后 kubelet 强制终止、人工 kill、节点级 OOM 和 cgroup OOM 都可能产生 137；没有 `terminated.reason=OOMKilled` 或明确 cgroup/kernel OOM 事件时，不得单独按 OOM 归因。
 
     ## 诊断问题
     - 容器是否真实到达 memory limit，还是节点级 OOM、Evicted 或人工终止？
@@ -430,7 +433,8 @@ data:
 
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
-    | terminated.reason=OOMKilled 或 exitCode=137 + 非 Evicted | OOMKilled | 高 |
+    | terminated.reason=OOMKilled | 容器 OOMKilled 终态 | 高 |
+    | exitCode=137 且 Reason 非 OOMKilled | SIGKILL，需用探针/Killing、cgroup、kernel 或人工终止证据继续区分 | 待验证 |
     | 日志含 "Cannot allocate memory" / "Java heap space" | 内存不足 | 高 |
     | OOMKilled + limits.memory 很低或低于历史峰值 | 内存 limit 过低 | 高 |
     | OOMKilled + memory-backed emptyDir 大量写入 | tmpfs/emptyDir 占用内存导致 OOM | 中 |
@@ -571,7 +575,7 @@ data:
     | Init 容器错误 | `Init:*`、initContainer Waiting/Terminated，先检查 initContainer 的 image/env/volume/command/logs |
     | 应用配置错误 | 容器已启动后退出，日志含 `missing required`、`config validation failed`、`bootstrap` |
     | Describe | `Last State: Terminated`，`Exit Code: 42` 或其他非 137 业务退出码 |
-    | 排除 OOM | 无 `OOMKilled`、无 `Exit Code 137` |
+    | 排除 OOM | 无 `terminated.reason=OOMKilled`、无 cgroup/kernel OOM 事件；`Exit Code 137` 单独不作为 OOM 证据 |
     | 排除拉镜像失败 | 无 `ImagePullBackOff`、容器实际已启动并输出业务日志 |
     | 排除驱逐 | 无 `Evicted`、无 `disk pressure`、无 `ENOSPC` |
 
@@ -668,7 +672,8 @@ data:
     | CreateContainerError + command/args/executable file not found | 容器启动命令或镜像入口配置错误 | 高 |
     | Exit Code 非 137 + 无 OOMKilled + 日志为业务配置错误 | ConfigError | 高 |
     | Secret/ConfigMap not found 但来自 volume 引用 | 应切换到 VolumeMountFailed | 高 |
-    | Last State=OOMKilled 或 Exit Code=137 | 应切换到 OOMKilled runbook | 高 |
+    | Last State Reason=OOMKilled | 应切换到 OOMKilled runbook | 高 |
+    | Exit Code=137 但 Reason 非 OOMKilled | 保留当前候选，检查 probe Killing、节点/cgroup OOM 或人工 SIGKILL | 待验证 |
     | STATUS=ImagePullBackOff / ErrImagePull | 应切换到 ImagePullFailed runbook | 高 |
     | Reason=Evicted 或 Message 含 disk pressure/ENOSPC | 应切换到 Evicted runbook | 高 |
 
@@ -884,7 +889,7 @@ data:
     ## 状态识别
     - Pod 状态: `CrashLoopBackOff`
     - Last State: Terminated
-    - Exit Code 非 137，且没有明确 ConfigMap/Secret/env 缺失信号
+    - 没有已确认的 `terminated.reason=OOMKilled`；Exit Code 137 本身仍可能属于探针或其他 SIGKILL
 
     ## 典型原因
     - command/args 错误、入口进程启动失败、二进制或脚本不存在。
@@ -907,7 +912,7 @@ data:
     - Exit Code 只有数值时：先用 previous logs 找崩溃原文；kubectl previous logs 为空再用 `query_pod_logs` 按 pod_uid + 崩溃时间窗查采集侧日志，两者都空才记录日志缺失。
     - 重启次数只有单点时：`execute_pod_promql` 用 range 查询 `kube_pod_container_status_restarts_total`，确认是持续崩溃还是已收敛。
     - 日志给出 trace ID 或错误接口时：`query_pod_tracing` 按 trace_id/request_resource 关联故障前请求，确认是否业务流量触发。
-    - 出现 OOMKilled/Exit 137 切 pod-oomkilled；出现配置类报错切 pod-config-error。
+    - 只有 Last State Reason=OOMKilled 或明确 cgroup/kernel OOM 证据才切 pod-oomkilled；Exit 137 单独保留为 SIGKILL 待分流；出现配置类报错切 pod-config-error。
 
     ## 判定规则
     | 条件 | 结论 | 置信度 |
@@ -919,7 +924,8 @@ data:
     | CrashLoopBackOff + Address already in use | 容器内端口冲突或进程重复启动 | 高 |
     | CrashLoopBackOff + Liveness probe failed + Last State 被 Killing | livenessProbe 配置或健康检查异常导致重启 | 中 |
     | CrashLoopBackOff + permission denied / executable not found | 启动命令、权限或镜像内容错误 | 高 |
-    | CrashLoopBackOff + OOMKilled/137 | 应切换到 OOMKilled runbook | 高 |
+    | CrashLoopBackOff + Last State Reason=OOMKilled | 应切换到 OOMKilled runbook | 高 |
+    | CrashLoopBackOff + Liveness probe failed + Killing + Exit Code 137 | 优先按探针触发的 SIGKILL 分析，不得单独归因 OOM | 高 |
     | CrashLoopBackOff + 配置校验失败/缺配置 | 应切换到 ConfigError runbook | 高 |
     | 容器 Running 但 READY 0/1 且无重启 | 应切换到 NotReadyProbeFailed | 高 |
 
@@ -1276,7 +1282,7 @@ data:
     ### 小模型执行原则
     - Runbook 是 guide，不是全量巡检清单；不要把每个常见原因都转成 evidence_plan。
     - 先拿最高信息密度证据：`kubectl describe pod`、`kubectl get events`、`kubectl logs --previous`、`kubectl get pod -o yaml`。
-    - 看到明确错误原文后按分支停止扩展：例如 `configmap not found` 只验证 ConfigMap/Pod volume 引用，不再查 PVC；`FailedScheduling` 只分析调度原因，不再查镜像；`OOMKilled/exitCode=137` 只分析内存，不再泛化到配置错误。
+    - 看到明确错误原文后按分支停止扩展：例如 `configmap not found` 只验证 ConfigMap/Pod volume 引用，不再查 PVC；`FailedScheduling` 只分析调度原因，不再查镜像；只有 `terminated.reason=OOMKilled` 或明确 cgroup/kernel OOM 事件才收敛到内存分析，`exitCode=137` 单独必须继续区分 SIGKILL 来源。
     - `NotFound`、空事件、命令失败不是“没证据”；如果它正好回答了检查目的，应作为负向证据纳入证据完整度。
     - 日志和 Events 是当前根因方向的主证据，普通资源列表只是辅助证据。
 

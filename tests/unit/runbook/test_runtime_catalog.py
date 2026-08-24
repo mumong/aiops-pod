@@ -68,3 +68,24 @@ def test_runtime_runbooks_do_not_expose_legacy_operation_layer_language():
 
     for phrase in forbidden_phrases:
         assert phrase not in text
+
+
+def test_exit_137_alone_is_not_forced_to_oomkilled():
+    configmap = Path("deploy/configmap/runbooks.yaml")
+    text = configmap.read_text(encoding="utf-8")
+
+    forbidden_oom_shortcuts = [
+        "Last State=OOMKilled 或 Exit Code=137",
+        "terminated.reason=OOMKilled 或 exitCode=137",
+        "OOMKilled/exitCode=137",
+        "OOMKilled/137",
+    ]
+    for phrase in forbidden_oom_shortcuts:
+        assert phrase not in text
+
+    assert "exitCode=137 只表示 SIGKILL，不能单独证明 OOM" in text
+    assert "`Exit Code 137` 单独不作为 OOM 证据" in text
+    assert (
+        "CrashLoopBackOff + Liveness probe failed + Killing + Exit Code 137"
+        in text
+    )

@@ -1424,6 +1424,15 @@ def test_deployed_workflow_disables_layer_early_stop_by_default():
     assert layer_early_stop["explicit_pod_enabled"] is True
 
 
+def test_deployed_workflow_disables_rca_validation():
+    configmap = yaml.safe_load(
+        Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")
+    )
+    app_config = yaml.safe_load(configmap["data"]["config.yaml"])
+
+    assert app_config["workflow"]["rca_validation"]["enabled"] is False
+
+
 def test_deployed_config_enables_autonomous_observability_and_disables_compatibility_servers():
     configmap = yaml.safe_load(
         Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")

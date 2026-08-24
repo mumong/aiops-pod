@@ -509,9 +509,10 @@ class ParallelEvidenceNode(WorkflowNode):
         rca.tools = []
         rca.workflow_config_override = getattr(self, "workflow_config_override", None)
         rca.cancel_event = getattr(self, "cancel_event", None)
-        # Structural/fact-binding misses are repaired once against the same
-        # immutable snapshot. They must not trigger another evidence ReAct.
-        rca.disable_internal_repair = False
+        # RCA validation and publication repair are intentionally disabled.
+        # Preserve the first model-authored analysis instead of replacing it
+        # with a second structure-oriented answer.
+        rca.disable_internal_repair = True
         attempt_suffix = "" if attempt == 1 else f"-retry{attempt}"
         rca.current_run_id = f"{run_id}-{gid}{attempt_suffix}" if run_id else ""
         queue = getattr(self, "_event_queue", None)
