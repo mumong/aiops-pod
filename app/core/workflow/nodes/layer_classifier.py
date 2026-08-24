@@ -1552,49 +1552,16 @@ class LayerClassifierNode(WorkflowNode):
         return groups
 
     @staticmethod
-    def _default_scenarios_for_abnormal_type(pod_abnormal_type: str) -> List[Dict[str, str]]:
-        mapping = {
-            "ImagePullFailed": [
-                {"scenario": "镜像地址或 tag 不存在", "probability": "中", "reason": "需通过 Events/镜像地址验证"},
-                {"scenario": "imagePullSecret 缺失或认证失败", "probability": "中", "reason": "需验证 Pod spec 与 Secret"},
-                {"scenario": "节点到镜像仓库网络不可达", "probability": "中", "reason": "需验证 registry 连通性、DNS 或 TLS"},
-            ],
-            "TerminatingStuck": [
-                {"scenario": "finalizer 未清理", "probability": "中", "reason": "需验证 metadata.finalizers 与 deletionTimestamp"},
-                {"scenario": "kubelet 无响应或节点侧删除流程卡住", "probability": "中", "reason": "需验证 Pod 所在节点状态和事件"},
-                {"scenario": "卷卸载或 detach 流程卡住", "probability": "中", "reason": "需验证 volumes、PVC/PV 和相关事件"},
-            ],
-            "OOMKilled": [
-                {"scenario": "容器内存限制过低", "probability": "中", "reason": "需验证 Last State/ExitCode/resources"},
-                {"scenario": "应用内存使用异常", "probability": "中", "reason": "需验证日志和重启历史"},
-            ],
-            "CrashLoopBackOffRuntime": [
-                {"scenario": "容器启动命令或进程异常退出", "probability": "中", "reason": "需验证 describe/logs/exitCode"},
-                {"scenario": "应用启动依赖或配置异常", "probability": "中", "reason": "需验证日志和环境配置"},
-            ],
-            "PendingUnschedulable": [
-                {"scenario": "资源不足导致无法调度", "probability": "中", "reason": "需验证 FailedScheduling 事件"},
-                {"scenario": "taint/nodeSelector/affinity 不匹配", "probability": "中", "reason": "需验证 Pod spec 和 Node 条件"},
-                {"scenario": "PVC 未绑定或卷依赖未满足", "probability": "中", "reason": "需验证 PVC/PV 状态"},
-            ],
-            "Evicted": [
-                {"scenario": "节点资源压力驱逐", "probability": "中", "reason": "需验证 eviction message 和 Node pressure"},
-            ],
-            "VolumeMountFailed": [
-                {"scenario": "Secret/ConfigMap volume 引用缺失", "probability": "中", "reason": "先验证 FailedMount 事件原文和 Pod spec volumes；命中 not found 后不要泛化查 PVC"},
-                {"scenario": "PVC/PV/StorageClass 绑定或亲和性异常", "probability": "中", "reason": "仅当 Events/spec 指向 PVC/PV 时验证 PVC/PV/StorageClass"},
-                {"scenario": "CSI/NFS/hostPath 挂载链路异常", "probability": "中", "reason": "仅当 Events 指向 timeout/access denied/hostPath/CSI 时扩展"},
-            ],
-            "ConfigError": [
-                {"scenario": "ConfigMap/Secret/env 配置缺失", "probability": "中", "reason": "需验证 Pod spec、事件和配置对象"},
-            ],
-            "NotReadyProbeFailed": [
-                {"scenario": "readiness/liveness/startup probe 失败", "probability": "中", "reason": "需验证 probe 配置、事件和日志"},
-            ],
-        }
-        return mapping.get(pod_abnormal_type, [
-            {"scenario": f"{pod_abnormal_type or 'Unknown'} 待验证", "probability": "低", "reason": "需基于当前状态和事件做最小验证"}
-        ])
+    def _default_scenarios_for_abnormal_type(
+        pod_abnormal_type: str,
+    ) -> List[Dict[str, str]]:
+        """Return one neutral investigation question, never a root-cause prior."""
+        status_family = str(pod_abnormal_type or "Unknown").strip() or "Unknown"
+        return [{
+            "scenario": f"{status_family} 的直接原因待验证",
+            "probability": "未知",
+            "reason": "当前阶段只定位异常；根因必须由后续实时 canonical facts 确认",
+        }]
 
     @classmethod
     def _normalize_status_family(cls, status: str) -> str:

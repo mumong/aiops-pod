@@ -953,17 +953,17 @@ def test_conclusion_llm_prompt_includes_structured_diagnosis_context():
     assert "# 用户问题" in prompt
     assert "# 阶段1：问题定位" in prompt
     assert "# 阶段2：证据采集摘要" in prompt
-    assert "- 采集完成度: 1/2 (50%)" in prompt
+    assert "采集完成度" not in prompt
     assert "获取 Pod 事件" in prompt
     assert "获取 Pod YAML" in prompt
     assert "- 缺失原因: e2(获取 Pod YAML): 已规划但工具执行失败或无匹配结果" in prompt
     assert "# 阶段3：根因分析" in prompt
     assert "- 根因结论: 节点出口网络超时导致镜像拉取失败" in prompt
-    assert "- 置信度: 84%" in prompt
+    assert "- 置信度:" not in prompt
     assert "- 局限性: 未验证节点出口网络" in prompt
     assert "# 工具采集的真实数据" in prompt
-    assert "verify_command 禁止使用当前异常 Pod 的固定名称" in prompt
-    assert "kubectl rollout status deployment/<name>" in prompt
+    assert "不输出修复建议或验证步骤" in prompt
+    assert "kubectl rollout status deployment/<name>" not in prompt
 
 
 def test_conclusion_prompt_does_not_inject_collection_statistics_block():
@@ -1470,7 +1470,7 @@ def test_layer_prompts_prioritize_runbook_as_high_priority_reference():
     expected_phrases = [
         "# Runbook",
         "只为已定位的异常类型选择直接相关 Runbook",
-        "Runbook 是下游调查参考，不是当前环境证据",
+        "Runbook 只提供待验证问题",
     ]
 
     for phrase in expected_phrases:
@@ -1575,7 +1575,7 @@ def test_conclusion_prompt_supports_independent_response_language():
         response_language="en",
     )
 
-    assert "## 📊 诊断概览" in prompt
+    assert "## 📊 异常概览与现象" in prompt
     assert "All user-facing final report text must be in English." in prompt
 
 
@@ -1632,14 +1632,13 @@ def test_conclusion_prompt_is_human_focused_and_grounded():
     prompt = CONCLUSION_FORMATTER_PROMPT
 
     for heading in (
-        "## 📊 诊断概览",
-        "## 🔍 现象描述",
-        "## 🕵️ 证据链",
+        "## 📊 异常概览与现象",
+        "## 🕵️ 证据内容 · <组号>",
         "## 🎯 根因分析",
-        "## 🛠️ 修复建议",
-        "## 📋 验证步骤",
     ):
         assert heading in prompt
+    assert "## 🛠️ 修复建议" not in prompt
+    assert "## 📋 验证步骤" not in prompt
     assert "只用真实" in prompt
     assert "禁止编造" in prompt
 
@@ -1704,6 +1703,21 @@ def test_active_rca_and_conclusion_prompts_are_fixture_free():
         "属于同一实体的 `fact_id`",
     ):
         assert phrase in ROOT_CAUSE_ANALYZER_PROMPT
+
+
+def test_active_rca_and_conclusion_prompts_have_no_fault_specific_anchor():
+    active = ROOT_CAUSE_ANALYZER_PROMPT + CONCLUSION_FORMATTER_PROMPT
+    for fault_specific in (
+        "OOMKilled",
+        "ImagePullBackOff",
+        "CrashLoopBackOff",
+        "Exit Code 137",
+        "96Mi",
+        "finalizer",
+    ):
+        assert fault_specific not in active
+    assert "明确原因、失败事件和原始错误优先" in active
+    assert "Runbook、候选场景" in active
 
 
 def test_prompts_refine_runbooks_after_live_evidence_and_preserve_topology_semantics():

@@ -17,7 +17,7 @@ from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 
 
 class _CapturingAICall:
-    def __init__(self, response="## 📊 诊断概览\n\n(模拟报告)"):
+    def __init__(self, response="## 📊 异常概览与现象\n\n(模拟报告)"):
         self.response = response
         self.calls = []
 
@@ -95,13 +95,8 @@ def test_diagnosis_prompt_contains_rich_template_and_real_tool_data():
 
     new_state = node.execute(_diagnosis_state())
 
-    assert new_state["conclusion"].startswith(
-        "# 🔬 单实体诊断报告（确定性事实权威）"
-    )
-    assert "## 补充说明与修复建议（非事实权威）" in new_state[
-        "conclusion"
-    ]
-    assert "## 📊 诊断概览" in new_state["conclusion"]
+    assert new_state["conclusion"] == "## 📊 异常概览与现象\n\n(模拟报告)"
+    assert "修复建议" not in new_state["conclusion"]
     assert len(ai.calls) == 1
 
     user = ai.calls[0]["user"]
@@ -116,19 +111,44 @@ def test_diagnosis_prompt_contains_rich_template_and_real_tool_data():
     # 完整 result 注入，而不是截断的 result_preview
     assert "Reason: OOMKilled, Exit Code: 137" in user
     assert "restartCount: 12" in user
-    # 修复计划指令（REMEDIATION_PLAN_PROMPT）
-    assert "结构化修复计划" in user
+    assert "不输出修复建议或验证步骤" in user
 
     system = ai.calls[0]["system"]
     for section in [
-        "## 📊 诊断概览",
-        "## 🔍 现象描述",
-        "## 🕵️ 证据链",
+        "## 📊 异常概览与现象",
+        "## 🕵️ 证据内容 · <组号>",
         "## 🎯 根因分析",
-        "## 🛠️ 修复建议",
-        "## 📋 验证步骤",
     ]:
         assert section in system, f"富模板缺少章节: {section}"
+    assert "## 🛠️ 修复建议" not in system
+    assert "## 📋 验证步骤" not in system
+
+
+def test_validation_disabled_rca_flows_to_conclusion_prompt():
+    ai = _CapturingAICall()
+    node = ConclusionFormatterNode()
+    node.ai_call = ai
+    state = _diagnosis_state()
+    state["rca_analysis"] = json.dumps({
+        "diagnostic_status": "diagnosed",
+        "root_cause": "CONFIG_MISSING 导致 exit 78 和 CrashLoopBackOff",
+        "root_cause_summary": "CONFIG_MISSING 导致 exit 78 和 CrashLoopBackOff",
+        "supporting_fact_ids": [],
+        "hypotheses": [],
+        "confidence": 0.95,
+        "confidence_reason": "日志、退出码与等待状态一致",
+        "claim_validation": {
+            "enabled": False,
+            "skipped": True,
+            "valid": None,
+        },
+    })
+
+    result = node.execute(state)
+
+    assert result["conclusion"] == "## 📊 异常概览与现象\n\n(模拟报告)"
+    assert len(ai.calls) == 1
+    assert "CONFIG_MISSING 导致 exit 78" in ai.calls[0]["user"]
 
 
 def test_observability_data_without_projection_metadata_is_not_dropped():
@@ -149,8 +169,7 @@ def test_empty_llm_response_falls_back_to_deterministic_template():
     new_state = node.execute(_diagnosis_state())
 
     conclusion = new_state["conclusion"]
-    assert "单实体诊断报告（确定性事实权威）" in conclusion
-    assert "diagnostic_status: diagnosed" in conclusion
+    assert "确定性回退模板" in conclusion
     assert "内存限制 256Mi 不足" in conclusion
 
 

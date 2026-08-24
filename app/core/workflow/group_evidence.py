@@ -191,7 +191,18 @@ def _render_metric_fact(record: Mapping[str, Any]) -> Optional[str]:
             annotations.append(f"另有 {len(semantic_labels) - 8} 个标签")
 
     stats = record.get("stats") if isinstance(record.get("stats"), Mapping) else metadata.get("stats")
-    if isinstance(stats, Mapping) and stats.get("first") is not None and stats.get("last") is not None:
+    trend_evaluable = bool(
+        record.get("trend_evaluable", metadata.get("trend_evaluable", False))
+    )
+    sample_count = record.get("sample_count", metadata.get("sample_count", 0))
+    if (
+        trend_evaluable
+        and isinstance(sample_count, (int, float))
+        and sample_count >= 2
+        and isinstance(stats, Mapping)
+        and stats.get("first") is not None
+        and stats.get("last") is not None
+    ):
         try:
             first, last = float(stats["first"]), float(stats["last"])
             low = float(stats.get("min", first))
@@ -199,13 +210,11 @@ def _render_metric_fact(record: Mapping[str, Any]) -> Optional[str]:
         except (TypeError, ValueError):
             first = last = low = high = None
         if first is not None:
-            if first == last == low == high:
-                annotations.append("持平")
-            elif last > first:
+            if last > first:
                 annotations.append(f"上升 {_format_metric_number(first)} → {_format_metric_number(last)}")
             elif last < first:
                 annotations.append(f"下降 {_format_metric_number(first)} → {_format_metric_number(last)}")
-            else:
+            elif low != high:
                 annotations.append(
                     f"波动 min={_format_metric_number(low)} max={_format_metric_number(high)}"
                 )

@@ -173,7 +173,7 @@ def test_minimum_rca_gate_does_not_require_every_supporting_symptom():
     assert gate["focus_fact_ids"] == []
 
 
-def test_parallel_validation_failure_starts_fresh_full_react_attempt(monkeypatch):
+def test_parallel_validation_failure_does_not_recollect_or_overwrite(monkeypatch):
     collector_states: list[dict] = []
     collector_instances: list[object] = []
     rca_calls: list[dict] = []
@@ -258,22 +258,18 @@ def test_parallel_validation_failure_starts_fresh_full_react_attempt(monkeypatch
 
     node = ParallelEvidenceNode()
     node.tools = []
+    node.workflow_config_override = {
+        "rca_validation": {"enabled": True}
+    }
     gate_calls = 0
 
     def _gate(result, rca_update):
         nonlocal gate_calls
         gate_calls += 1
-        if gate_calls == 1:
-            return {
-                "verdict": "retry",
-                "failure_codes": ["PRIMARY_CAUSAL_SUPPORT_MISSING"],
-                "reasons": ["first attempt missed decisive evidence"],
-                "focus_fact_ids": [],
-            }
         return {
-            "verdict": "pass",
-            "failure_codes": [],
-            "reasons": [],
+            "verdict": "retry",
+            "failure_codes": ["PRIMARY_CAUSAL_SUPPORT_MISSING"],
+            "reasons": ["RCA did not bind decisive evidence"],
             "focus_fact_ids": [],
         }
 
@@ -300,20 +296,91 @@ def test_parallel_validation_failure_starts_fresh_full_react_attempt(monkeypatch
     })
 
     assert len(output["group_results"]) == 1
-    assert len(collector_states) == 2
-    assert len(rca_calls) == 2
+    assert len(collector_states) == 1
+    assert len(rca_calls) == 1
+    assert gate_calls == 1
     assert collector_states[0]["thinking_events"] == []
-    assert collector_states[1]["thinking_events"]
-    retry_context = collector_states[1]["layer_handoff"]["diagnosis_retry"]
-    assert retry_context["attempt"] == 2
-    assert retry_context["validation_feedback"]["failure_codes"] == [
-        "PRIMARY_CAUSAL_SUPPORT_MISSING"
-    ]
     assert all(instance.single_react_session for instance in collector_instances)
     assert [instance.run_observability_baseline for instance in collector_instances] == [
         True,
-        False,
     ]
+
+
+def test_parallel_default_skips_gate_and_runs_one_rca_attempt(monkeypatch):
+    collector_calls = 0
+    rca_calls = 0
+
+    class _Collector:
+        current_run_id = "run-default-g1"
+
+        def execute(self, state):
+            nonlocal collector_calls
+            collector_calls += 1
+            return {"evidence_analysis": "{}", "thinking_events": []}
+
+    class _RCA:
+        def execute(self, state):
+            nonlocal rca_calls
+            rca_calls += 1
+            return {
+                "rca_analysis": json.dumps({
+                    "diagnostic_status": "diagnosed",
+                    "root_cause": "model-only diagnosis",
+                    "confidence": 0.9,
+                    "claim_validation": {
+                        "enabled": False,
+                        "skipped": True,
+                        "valid": None,
+                    },
+                }),
+                "rca_attempts": [],
+            }
+
+    node = ParallelEvidenceNode()
+    monkeypatch.setattr(node, "_build_group_collector", lambda *a, **k: _Collector())
+    monkeypatch.setattr(node, "_build_group_rca", lambda *a, **k: _RCA())
+    monkeypatch.setattr(
+        node,
+        "_build_group_result",
+        lambda gid, group, state, run_id: {
+            "group_id": gid,
+            "parent_group_id": gid,
+            "presentation_index": 0,
+            "entities": group["entities"],
+            "entity_evidence_snapshot": {},
+            "thinking_events": [],
+            "archive_run_id": f"{run_id}-{gid}",
+        },
+    )
+    monkeypatch.setattr(
+        node,
+        "_minimum_rca_gate",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("gate must not run when validation is disabled")
+        ),
+    )
+    monkeypatch.setattr(
+        node,
+        "_attach_validated_diagnosis",
+        lambda result, group, update: result.update({
+            "diagnostic_status": "diagnosed",
+            "rca_analysis": update["rca_analysis"],
+            "summary": "model-only diagnosis",
+        }),
+    )
+    monkeypatch.setattr(node, "_persist_lane_diagnosis_artifact", lambda *a: None)
+
+    output = node.execute({
+        "question": "diagnose",
+        "run_id": "run-default",
+        "layer": Layer.ABNORMAL,
+        "layer_handoff": _handoff(1),
+        "thinking_events": [],
+    })
+
+    assert collector_calls == 1
+    assert rca_calls == 1
+    assert len(output["group_results"]) == 1
 
 
 def test_parallel_collector_uses_one_full_react_session_without_early_stop(

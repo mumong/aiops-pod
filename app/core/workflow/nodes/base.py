@@ -219,6 +219,65 @@ class WorkflowNode(ABC):
             return self._parse_bool_config(runtime_cfg.get("fallback_enabled"), default)
         return default
 
+    def _is_rca_validation_enabled(self, default: bool = True) -> bool:
+        """Whether RCA fact binding, claim validation and gate retries run.
+
+        Semantic fact binding is enabled by default and is independent from
+        tolerant structured-output recovery. Deployments may explicitly opt
+        out through the environment or ``workflow.rca_validation.enabled``.
+        """
+        for env_key in (
+            "WORKFLOW_RCA_VALIDATION_ENABLED",
+            "AIOPS_WORKFLOW_RCA_VALIDATION_ENABLED",
+        ):
+            if env_key in os.environ:
+                return self._parse_bool_config(os.getenv(env_key), default)
+
+        wf_config = self._get_workflow_config()
+        validation_cfg = (
+            wf_config.get("rca_validation", {})
+            if isinstance(wf_config, dict)
+            else {}
+        )
+        if isinstance(validation_cfg, dict) and "enabled" in validation_cfg:
+            return self._parse_bool_config(
+                validation_cfg.get("enabled"),
+                default,
+            )
+        if isinstance(validation_cfg, (bool, str, int)):
+            return self._parse_bool_config(validation_cfg, default)
+        return default
+
+    def _get_rca_structured_output_mode(self, default: str = "tolerant") -> str:
+        """Return RCA structured-output handling mode.
+
+        ``tolerant`` preserves a valid core diagnosis when optional nested
+        fields have a repairable shape/type mismatch. ``strict`` keeps the
+        original all-or-nothing Pydantic boundary.
+        """
+        for env_key in (
+            "WORKFLOW_RCA_STRUCTURED_OUTPUT_MODE",
+            "AIOPS_WORKFLOW_RCA_STRUCTURED_OUTPUT_MODE",
+        ):
+            value = os.getenv(env_key)
+            if value is not None:
+                mode = str(value).strip().lower()
+                return mode if mode in {"strict", "tolerant"} else default
+
+        wf_config = self._get_workflow_config()
+        output_cfg = (
+            wf_config.get("rca_structured_output", {})
+            if isinstance(wf_config, dict)
+            else {}
+        )
+        if isinstance(output_cfg, dict):
+            mode = str(output_cfg.get("mode") or default).strip().lower()
+            return mode if mode in {"strict", "tolerant"} else default
+        if isinstance(output_cfg, str):
+            mode = output_cfg.strip().lower()
+            return mode if mode in {"strict", "tolerant"} else default
+        return default
+
     def should_inject_runbook_catalog(self) -> bool:
         """节点是否需要在 prompt 中注入 runbook catalog。"""
         return True

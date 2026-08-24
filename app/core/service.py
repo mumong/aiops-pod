@@ -1114,8 +1114,6 @@ class HolmesService:
                     yield emit("🎯 诊断报告")
                     yield emit("=" * 70)
                     yield emit("")
-                    yield emit("## 📋 节点四：汇总总结")
-                    yield emit("-" * 70)
                     yield emit(node_outputs["conclusion"])
                     yield emit("")
                     final_report_emitted = True
@@ -1162,8 +1160,6 @@ class HolmesService:
             yield emit("=" * 70)
             yield emit("")
             if node_outputs["conclusion"]:
-                yield emit("## 📋 节点四：汇总总结")
-                yield emit("-" * 70)
                 yield emit(node_outputs["conclusion"])
                 yield emit("")
 

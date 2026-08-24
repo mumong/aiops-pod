@@ -1335,6 +1335,9 @@ class AICall:
                                 "summary_chars": observation.get("summary_chars", len(bounded_content)),
                                 "semantic_success": observation.get("semantic_success", True),
                                 "structured": observation.get("structured"),
+                                "observation_audit": observation.get(
+                                    "observation_audit", {}
+                                ),
                                 "deduplicated": deduplicated,
                                 "original_tool_call_id": original_tool_call_id,
                             })
@@ -1355,6 +1358,62 @@ class AICall:
                                         observation.get("raw_chars", len(tool_content)),
                                         observation.get("summary_chars", len(bounded_content)),
                                         observation.get("processor", "unknown"))
+                            projection_audit = observation.get("observation_audit")
+                            if isinstance(projection_audit, dict) and projection_audit:
+                                projection_budget = (
+                                    projection_audit.get("budget")
+                                    if isinstance(projection_audit.get("budget"), dict)
+                                    else {}
+                                )
+                                logger.info(
+                                    "   🔎 [AICall] observability projection | node=%s tool=%s evidence=%d selected=%d omitted=%d patterns=%d/%d budget=%d/%d stop=%s unattempted=%d strategy=%s raw_ref=%s",
+                                    node_id or "?",
+                                    tool_name,
+                                    projection_audit.get("evidence_total", 0),
+                                    projection_audit.get("evidence_selected", 0),
+                                    projection_audit.get("evidence_omitted", 0),
+                                    projection_audit.get("semantic_patterns_selected", 0),
+                                    projection_audit.get("semantic_patterns_total", 0),
+                                    projection_budget.get("final_summary_chars", 0),
+                                    projection_budget.get("max_chars", 0),
+                                    projection_budget.get("selection_terminated_by", "unknown"),
+                                    projection_budget.get("candidates_unattempted", 0),
+                                    projection_audit.get("strategy", "unknown"),
+                                    observation.get("raw_ref") or "unavailable",
+                                )
+                                if projection_audit.get("evidence_omitted", 0):
+                                    logger.warning(
+                                        "   📦 [AICall] evidence kept outside model context | node=%s tool=%s omitted=%d retrievable_raw_ref=%s",
+                                        node_id or "?",
+                                        tool_name,
+                                        projection_audit.get("evidence_omitted", 0),
+                                        observation.get("raw_ref") or "unavailable",
+                                    )
+                                if projection_audit.get("semantic_patterns_omitted", 0):
+                                    logger.warning(
+                                        "   🧭 [AICall] observability semantic coverage gap | node=%s tool=%s omitted_patterns=%d first_rejected=%s omitted_pattern_preview=%s omitted_profiles=%s",
+                                        node_id or "?",
+                                        tool_name,
+                                        projection_audit.get("semantic_patterns_omitted", 0),
+                                        json.dumps(
+                                            projection_budget.get("first_rejected"),
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                            default=str,
+                                        )[:1200],
+                                        json.dumps(
+                                            projection_audit.get("omitted_pattern_preview", []),
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                            default=str,
+                                        )[:1200],
+                                        json.dumps(
+                                            projection_audit.get("omitted_profile_counts", {}),
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                            default=str,
+                                        )[:1200],
+                                    )
                             context_usage_ratio = observation.get("context_usage_ratio")
                             if isinstance(context_usage_ratio, (int, float)) and context_usage_ratio >= 0.8:
                                 logger.warning(
@@ -1387,6 +1446,9 @@ class AICall:
                                 "structured": observation.get("structured"),
                                 "observation_processed": observation.get("processed", False),
                                 "observation_processor": observation.get("processor", ""),
+                                "observation_audit": observation.get(
+                                    "observation_audit", {}
+                                ),
                                 "context_usage_ratio": observation.get("context_usage_ratio"),
                                 "iteration": iteration,
                             }

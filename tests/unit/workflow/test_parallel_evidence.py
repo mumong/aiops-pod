@@ -163,13 +163,13 @@ def test_parallel_evidence_fans_out_per_group(monkeypatch):
     assert all("OOMKilled" in r["summary"] for r in gr)
 
 
-def test_conclusion_multi_group_deterministic_assembly_preserves_all_groups():
-    """conclusion 多组模式：代码拼接正式 RCA 与真实数据，一组都不能丢。"""
+def test_conclusion_multi_group_agent_receives_all_groups_and_real_facts():
+    """多组 conclusion 由 Agent 表达，但每组 canonical fact 都必须到达。"""
     calls = []
 
     class _AI:
         def call_simple(self, system_prompt, question, max_tokens=None):
-            calls.append(question)
+            calls.append({"system": system_prompt, "user": question})
             return "## 📊 集群多异常诊断概览\n（LLM 写的结论）"
 
     node = ConclusionFormatterNode()
@@ -181,6 +181,33 @@ def test_conclusion_multi_group_deterministic_assembly_preserves_all_groups():
             "entities": [{"namespace": f"ns-{i}", "name": f"pod-{i}"}],
             "summary": f"ns-{i} 根因内存超限",
             "collection_summary": "采集完成",
+            "rca_analysis": json.dumps({
+                "diagnostic_status": "diagnosed",
+                "root_cause": f"ns-{i} 根因内存超限",
+                "confidence": 0.9,
+                "supporting_fact_ids": [],
+                "claim_validation": {"enabled": False, "skipped": True},
+            }),
+            "entity_summaries": [{
+                "namespace": f"ns-{i}", "name": f"pod-{i}",
+                "status": "CrashLoopBackOff",
+                "root_cause": f"ns-{i} 根因内存超限",
+                "confidence": 0.9,
+            }],
+            "dimension_evidence_by_entity": {
+                f"ns-{i}/pod-{i}": {
+                    "metrics": {
+                        "status": "present", "source_systems": ["prometheus"],
+                        "query_count": 1,
+                        "facts": [{
+                            "fact_id": f"fact-metric-{i}",
+                            "source_system": "prometheus", "dimension": "metrics",
+                            "attribute": "container_memory_working_set_bytes",
+                            "value": f"{i}0000", "unit": "bytes",
+                        }],
+                    },
+                },
+            },
             "thinking_events": [{
                 "type": "tool_result", "status": "success",
                 "tool_name": "execute_pod_promql",
@@ -201,14 +228,17 @@ def test_conclusion_multi_group_deterministic_assembly_preserves_all_groups():
     }
     result = node.execute(state)
     report = result["conclusion"]
-    # 多组结论不得由另一个 LLM 重判或覆盖正式组级 RCA
-    assert calls == []
-    # 三组真实 metric 值都被代码确定性拼接进报告（一组不丢）
-    assert "10000" in report and "20000" in report and "30000" in report
-    # 各组归档引用都在
+    assert len(calls) == 1
+    user = calls[0]["user"]
+    assert "10000" in user and "20000" in user and "30000" in user
     for i in range(1, 4):
-        assert f"run1-g{i}" in report
-    assert "集群多异常诊断" in report
+        assert f"ns-{i}/pod-{i}" in user
+        assert f"fact-metric-{i}" in user
+    assert "## 🕵️ 证据内容 · <组号>" in calls[0]["system"]
+    assert calls[0]["system"] == node._get_conclusion_prompt()
+    assert "修复建议、kubectl 写命令、验证步骤" in calls[0]["system"]
+    assert "逐工具原始证据与归档" not in report
+    assert report == "## 📊 集群多异常诊断概览\n（LLM 写的结论）"
 
 
 def test_conclusion_multi_group_fallback_when_llm_unavailable():
@@ -275,9 +305,8 @@ def test_parallel_report_uses_only_validated_selected_rca():
     })["conclusion"]
 
     assert "证据不足" in report
-    assert "invalid fact ownership" in report
     assert "unsupported model root" not in report
-    assert "real symptom" in report
+    assert "逐工具原始证据与归档" not in report
 
 
 def test_group_state_key_entities_are_dicts_for_evidence_planner():
@@ -667,8 +696,11 @@ def test_multi_entity_issue_group_executes_one_collector_and_rca_per_pod(
 
 
 def test_multi_group_report_renders_readable_four_dimension_entity_card():
+    calls = []
+
     class _AI:
         def call_simple(self, **kwargs):
+            calls.append(kwargs)
             return "# 多异常诊断结论\n\n已按实体完成分析。"
 
     node = ConclusionFormatterNode()
@@ -749,20 +781,27 @@ def test_multi_group_report_renders_readable_four_dimension_entity_card():
         "group_results": group_results, "thinking_events": [],
     })["conclusion"]
 
-    assert "## 异常组 g7 · aiops-case-09/workload" in report
-    assert "**根因**：dependency unavailable" in report
-    assert "| Kubernetes | present |" in report
-    assert "| Metrics | present |" in report
-    assert "| Logging | present |" in report
-    assert "| Tracing | present |" in report
-    assert "GET /work -> HTTP 503 trace_id=abc" in report
-    assert "补充查询未命中" in report
-    assert "<details>" in report and "逐工具原始证据" in report
-    assert "run-g7" in report
+    assert report == "# 多异常诊断结论\n\n已按实体完成分析。"
+    assert len(calls) == 1
+    user = calls[0]["question"]
+    assert "aiops-case-09/workload" in user
+    assert "dependency unavailable" in user
+    assert "kube_pod_container_status_ready = 0" in user
+    assert "GET /work -> HTTP 503 trace_id=abc" in user
+    assert "补充查询未命中" in user
+    assert "逐工具原始证据" not in report
 
 
-def test_multi_group_entity_card_ranks_all_rca_referenced_facts_before_context():
+def test_multi_group_agent_context_does_not_depend_on_rca_supporting_fact_ids():
+    calls = []
+
+    class _AI:
+        def call_simple(self, **kwargs):
+            calls.append(kwargs)
+            return "# 富文本诊断报告"
+
     node = ConclusionFormatterNode()
+    node.ai_call = _AI()
     dimensions = {
         dimension: {
             "dimension": dimension,
@@ -840,10 +879,166 @@ def test_multi_group_entity_card_ranks_all_rca_referenced_facts_before_context()
         "thinking_events": [],
     })["conclusion"]
 
-    decisive_index = report.index("reason=OOMKilled")
-    context_index = report.index("restarts_total=10")
-    assert decisive_index < context_index
-    assert "fact-decisive-reason" in report
+    assert report == "# 富文本诊断报告"
+    user = calls[0]["question"]
+    assert "fact-decisive-reason" in user
+    assert "fact-context-restarts" in user
+    assert "OOMKilled" in user
+    assert '"display_value"' not in user
+    assert "count（持平）" not in user
+
+
+def test_multi_group_agent_context_semantically_compacts_repeated_observability_facts():
+    log_facts = []
+    flow_facts = []
+    for index, allocated in enumerate((18, 30, 46, 62)):
+        trace_id = f"trace-{index}"
+        log_facts.append({
+            "fact_id": f"fact-log-{index}",
+            "source_system": "elasticsearch",
+            "dimension": "logging",
+            "fact_type": "log",
+            "attribute": "log.message",
+            "timestamp": f"2026-08-24T02:40:{index:02d}Z",
+            "value": json.dumps({
+                "event": "http_request",
+                "level": "info",
+                "message": "memory allocation advanced",
+                "http_status": 200,
+                "path": "/work",
+                "duration_ms": 1.0 + index,
+                "trace_id": trace_id,
+                "span_id": f"span-{index}",
+                "allocated_mib": allocated,
+            }),
+            "display_value": f"HTTP 200 trace_id={trace_id}",
+        })
+        flow_facts.append({
+            "fact_id": f"fact-flow-{index}",
+            "source_system": "deepflow",
+            "dimension": "tracing",
+            "fact_type": "flow",
+            "attribute": "l7_flow",
+            "timestamp": f"2026-08-24 10:40:{index:02d}",
+            "value": {
+                "protocol": "HTTP",
+                "request_type": "GET",
+                "request_resource": "/work",
+                "response_code": 200,
+                "response_status": 0,
+                "duration_us": 10000 + index,
+                "trace_id": trace_id,
+            },
+        })
+    span = {
+        "fact_id": "fact-span",
+        "source_system": "tempo",
+        "dimension": "tracing",
+        "fact_type": "span",
+        "attribute": "application_span",
+        "value": {
+            "name": "GET /work",
+            "attributes": {
+                "aiops.observed_mode": "oom_growth",
+                "http.response.status_code": 200,
+            },
+            "trace_id": "trace-3",
+        },
+    }
+    dimensions = {
+        "kubernetes": {"status": "present", "facts": [{
+            "fact_id": "fact-oom",
+            "source_system": "kubernetes",
+            "dimension": "kubernetes",
+            "fact_type": "state",
+            "attribute": "container.last_terminated_reason",
+            "value": {"container": "app", "reason": "OOMKilled"},
+        }]},
+        "metrics": {"status": "present", "facts": [{
+            "fact_id": "fact-memory",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "fact_type": "measurement",
+            "attribute": "container_memory_working_set_bytes",
+            "value": "61972480",
+            "unit": "bytes",
+            "display_value": "≈59.1 MiB（持平）",
+            "metadata": {
+                "labels": {
+                    "__name__": "container_memory_working_set_bytes",
+                    "namespace": "aiops-case-08",
+                    "pod": "workload",
+                    "container": "app",
+                },
+                "sample_count": 1,
+                "trend_evaluable": False,
+                "stats": {"first": 61972480, "last": 61972480},
+            },
+        }]},
+        "logging": {"status": "present", "facts": log_facts},
+        "tracing": {"status": "present", "facts": [*flow_facts, span]},
+    }
+    all_ids = [
+        "fact-oom", "fact-memory", "fact-span",
+        *[fact["fact_id"] for fact in log_facts],
+        *[fact["fact_id"] for fact in flow_facts],
+    ]
+    group = {
+        "group_id": "g1",
+        "entities": [{"kind": "Pod", "namespace": "aiops-case-08", "name": "workload"}],
+        "entity_summaries": [{
+            "namespace": "aiops-case-08",
+            "name": "workload",
+            "status": "CrashLoopBackOff",
+            "phenomenon": "OOMKilled",
+        }],
+        "dimension_evidence_by_entity": {"aiops-case-08/workload": dimensions},
+        "entity_evidence_snapshot": {
+            "selection_manifest": {"rca_input_fact_ids": all_ids, "total_fact_count": len(all_ids)},
+        },
+        "rca_analysis": json.dumps({
+            "diagnostic_status": "diagnosed",
+            "root_cause": "memory growth exceeded the 64Mi limit",
+            "confidence": 0.95,
+            "supporting_fact_ids": [],
+            "llm_raw_analysis": "duplicate raw narrative " * 100,
+        }),
+        "thinking_events": [{
+            "type": "tool_result",
+            "status": "error",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {"purpose": "memory trend", "query": "container_memory_working_set_bytes"},
+            "error": "Prometheus query timeout",
+        }],
+    }
+
+    context = ConclusionFormatterNode._build_multi_group_report_context(
+        "为什么 OOM？", [group]
+    )
+    entity = context["groups"][0]["entities"][0]
+    logging_facts = entity["dimensions"]["logging"]["facts"]
+    tracing_facts = entity["dimensions"]["tracing"]["facts"]
+
+    assert context["contract_version"] == "aiops.conclusion-agent-context.v2"
+    assert len(logging_facts) == 1
+    assert logging_facts[0]["aggregation"] == "repeated_log_pattern"
+    assert logging_facts[0]["occurrence_count"] == 4
+    assert logging_facts[0]["numeric_fields"]["allocated_mib"] == {
+        "first": 18, "last": 62, "min": 18.0, "max": 62.0,
+    }
+    assert logging_facts[0]["trace_ids"] == [
+        "trace-0", "trace-1", "trace-2", "trace-3"
+    ]
+    assert len(tracing_facts) == 2
+    assert any(fact.get("aggregation") == "equivalent_l7_flows" for fact in tracing_facts)
+    assert any("oom_growth" in json.dumps(fact) for fact in tracing_facts)
+    assert context["groups"][0]["failed_tool_attempts"][0]["tool"] == "execute_pod_promql"
+    serialized = json.dumps(context, ensure_ascii=False)
+    assert "Prometheus query timeout" in serialized
+    assert "container_memory_working_set_bytes" in serialized
+    assert "display_value" not in serialized
+    assert "持平" not in serialized
+    assert "duplicate raw narrative" not in serialized
 
 
 def test_multi_group_entity_card_labels_negative_observation_after_causal_facts():

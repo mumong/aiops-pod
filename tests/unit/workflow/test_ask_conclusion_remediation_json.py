@@ -157,9 +157,8 @@ kubectl delete pod terminating-stuck -n aiops-e2e --grace-period=0 --force
 
     plan = extract_remediation_plan(result["conclusion"])
 
-    assert plan is not None
-    assert plan.remediation_available is False
-    assert plan.actions == []
+    assert plan is None
+    assert "kubectl delete pod" not in result["conclusion"]
 
 
 def test_ask_conclusion_requires_upstream_finalizer_evidence_not_report_claims_only():
@@ -199,9 +198,8 @@ kubectl patch pod terminating-stuck -n aiops-e2e -p '{"metadata":{"finalizers":n
 
     plan = extract_remediation_plan(result["conclusion"])
 
-    assert plan is not None
-    assert plan.remediation_available is False
-    assert plan.actions == []
+    assert plan is None
+    assert "kubectl patch pod" not in result["conclusion"]
 
 
 def test_query_direct_render_does_not_invoke_ask_remediation_normalization():
@@ -232,5 +230,4 @@ def test_query_direct_render_does_not_invoke_ask_remediation_normalization():
 
     assert "## 📊 查询结果" in result["conclusion"]
     assert "node1" in result["conclusion"]
-
 

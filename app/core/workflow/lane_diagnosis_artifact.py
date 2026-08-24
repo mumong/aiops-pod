@@ -267,17 +267,26 @@ class LaneDiagnosisArtifactWriter:
             "diagnosis_publishable",
             claim_validation.get("diagnosis_supported"),
         )
+        validation_disabled = claim_validation.get("enabled") is False
         # Artifacts written before the semantic split only carried `valid`.
         # Preserve their diagnosed-path meaning while new artifacts use the
         # explicit publication signal.
         if diagnosis_publishable is None and terminal_status == "diagnosed":
             diagnosis_publishable = reference_valid
-        if terminal_status == "diagnosed" and diagnosis_publishable is not True:
+        if (
+            terminal_status == "diagnosed"
+            and not validation_disabled
+            and diagnosis_publishable is not True
+        ):
             raise ValueError(
                 "lane artifact cross-component mismatch: diagnosed terminal "
                 "requires claim_validation.diagnosis_publishable=true"
             )
-        if terminal_status != "diagnosed" and diagnosis_publishable is True:
+        if (
+            terminal_status != "diagnosed"
+            and not validation_disabled
+            and diagnosis_publishable is True
+        ):
             raise ValueError(
                 "lane artifact cross-component mismatch: non-diagnosed terminal "
                 "cannot publish claim_validation.diagnosis_publishable=true"

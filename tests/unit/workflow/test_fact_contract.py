@@ -149,6 +149,11 @@ def _diagnosed_claim(
         "contradicting_fact_ids": [],
         "unknowns": [],
         "hypotheses": hypotheses,
+        "causal_chain": {
+            "trigger": "Evidence-backed cause",
+            "mechanism": "Observed failure mechanism",
+            "manifestation": "Scoped entity is abnormal",
+        },
         "confidence": 0.86,
         "confidence_reason": "Current-scope direct facts support each hypothesis",
     }
@@ -1033,6 +1038,63 @@ def test_validate_rca_claims_downgrades_unknown_fact_reference():
     assert result["supporting_fact_ids"] == []
     assert result["claim_validation"]["invalid_fact_ids"] == ["fact-ffffffffffff"]
     assert result["confidence"] < 0.5
+
+
+def test_validate_rca_claims_downgrades_only_unpublished_claim_content():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("observed symptom", entity_id)
+    ledger = FactLedger.model_validate(_ledger("case-a", entity_id, [record]))
+    claim = _diagnosed_claim([], [])
+    claim.update({
+        "phenomenon": "Pod restarted after an observed failure",
+        "root_cause": "Unsupported model-authored mechanism",
+        "root_cause_summary": "Unsupported model-authored mechanism",
+        "evidence_analysis": [{
+            "fact_id": record["fact_id"],
+            "relevance": "Observed symptom remains useful context",
+            "role": "symptom",
+        }],
+        "llm_raw_analysis": "original model analysis is retained for audit",
+    })
+
+    result = validate_rca_claims(claim, [ledger])
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert result["phenomenon"] == claim["phenomenon"]
+    assert result["evidence_analysis"] == claim["evidence_analysis"]
+    assert result["llm_raw_analysis"] == claim["llm_raw_analysis"]
+    assert result["causal_chain"] == {}
+    assert result["root_cause"] == "现有事实不足以发布经过校验的根因结论"
+    assert result["claim_validation"]["rejected_claim"]["root_cause"] == (
+        "Unsupported model-authored mechanism"
+    )
+    assert result["claim_validation"]["diagnosis_publishable"] is False
+
+
+def test_validate_rca_claims_requires_evidence_bound_causal_chain():
+    entity_id = "k8s.pod:demo/api:uid-a"
+    record = _fact("direct cause", entity_id)
+    ledger = FactLedger.model_validate(_ledger("case-a", entity_id, [record]))
+    claim = _diagnosed_claim(
+        [{
+            "hypothesis_id": "hyp-a",
+            "entity_id": entity_id,
+            "summary": "Evidence-backed candidate",
+            "supporting_fact_ids": [record["fact_id"]],
+            "contradicting_fact_ids": [],
+            "unknowns": [],
+            "confidence": 0.8,
+        }],
+        [record["fact_id"]],
+    )
+    claim["causal_chain"] = {}
+
+    result = validate_rca_claims(claim, [ledger])
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert "no evidence-bound causal chain was provided" in result[
+        "claim_validation"
+    ]["reasons"]
 
 
 def test_validate_rca_claims_downgrades_cross_entity_reference():
@@ -2315,6 +2377,29 @@ def test_kubernetes_lifecycle_adapter_preserves_generic_causal_source_fields():
     } == {"causal_candidate"}
     serialized = ledger.model_dump_json()
     assert "describe_summarized" not in serialized
+
+
+def test_kubernetes_lifecycle_adapter_parses_describe_event_rows_as_causal():
+    event_text = (
+        "Warning  Unhealthy  36s (x4 over 81s)  kubelet  "
+        "Liveness probe failed: HTTP probe failed with statuscode: 500"
+    )
+    ledger = build_kubernetes_lifecycle_fact_ledger({
+        "name": "workload",
+        "namespace": "demo",
+        "selected_events": [event_text],
+        "evidence_refs": ["archive://kubernetes/workload/describe"],
+    })
+
+    assert ledger is not None
+    event = next(
+        record for record in ledger.records
+        if record.attribute == "event.message"
+    )
+    assert event.value["type"] == "Warning"
+    assert event.value["reason"] == "Unhealthy"
+    assert event.value["message"] == event_text
+    assert event.metadata["evidence_role"] == "causal_candidate"
 
 
 def test_kubernetes_lifecycle_adapter_drops_event_table_headers_and_internal_status():

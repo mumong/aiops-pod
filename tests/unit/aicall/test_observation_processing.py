@@ -578,6 +578,236 @@ def test_aicall_mutates_tool_message_to_bounded_observation(tmp_path, monkeypatc
     assert events[0]["observation_processed"] is True
 
 
+def test_aicall_observability_toolmessage_matches_summary_and_raw_is_pageable(
+    tmp_path,
+    monkeypatch,
+):
+    from app.core.aicall.builtin_tools import ReadContextArchiveTool
+
+    ai = AICall(
+        model="openai/test",
+        api_key="sk-test",
+        observation_summary_max_chars=3000,
+    )
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    records = []
+    facts = []
+    samples = []
+    for index in range(20):
+        ref = f"log-demo-api-{index}"
+        value = json.dumps(
+            {
+                "event": "dependency_check" if index < 19 else "termination_snapshot",
+                "level": "error" if index < 19 else "info",
+                "message": (
+                    f"dependency unavailable attempt={index}"
+                    if index < 19
+                    else "application was serving normally before termination"
+                ),
+                "http_status": 503 if index < 19 else 200,
+                "trace_id": f"trace-{index:02d}",
+                "unknown_epoch": index,
+            },
+            ensure_ascii=False,
+        )
+        raw_ref = {
+            "source_system": "elasticsearch",
+            "index": ".ds-filebeat-2026.08.20-000001",
+            "document_id": f"doc-{index}",
+        }
+        records.append(
+            _canonical_fact_record(
+                entity_id="k8s.pod:demo/api:uid-api",
+                entity_kind="Pod",
+                namespace="demo",
+                entity_name="api",
+                dimension="logging",
+                fact_type="log",
+                attribute="log.message",
+                value=value,
+                source_system="elasticsearch",
+                directness="direct",
+                confidence="high",
+                strength="strong",
+                evidence_refs=[ref],
+                timestamp=f"2026-08-20T08:20:{index:02d}Z",
+                metadata={
+                    "raw_ref": raw_ref,
+                    "value_original_length": len(value),
+                    "value_truncated": False,
+                },
+            )
+        )
+        facts.append(
+            {
+                "ref": ref,
+                "source_system": "elasticsearch",
+                "dimension": "logging",
+                "name": "log.message",
+                "value": value,
+                "pod_uid": "uid-api",
+                "raw_ref": raw_ref,
+                "directness": "direct",
+            }
+        )
+        samples.append(
+            {
+                "ref": ref,
+                "timestamp": f"2026-08-20T08:20:{index:02d}Z",
+                "message": value,
+                "container": "api",
+                "pod_uid": "uid-api",
+                "message_original_length": len(value),
+                "message_truncated": False,
+                "raw_ref": raw_ref,
+            }
+        )
+
+    full_dsl = {
+        "query": {"bool": {"filter": [{"term": {"kubernetes.pod.uid": "uid-api"}}]}},
+        "_source": ["@timestamp", "message", "kubernetes"],
+        "debug_padding": "must-not-reach-qwen-" * 300,
+    }
+    payload = {
+        "ok": True,
+        "status": "query_succeeded",
+        "source_system": "elasticsearch",
+        "dimension": "logging",
+        "entity": {
+            "kind": "Pod",
+            "namespace": "demo",
+            "pod": "api",
+            "pod_uid": "uid-api",
+            "containers": ["api"],
+            "lifecycle_changed": False,
+        },
+        "coverage": "present",
+        "directness": "direct",
+        "purpose": "inspect representative log evidence without choosing a root cause",
+        "query": {
+            "identity_basis": "pod_uid",
+            "time_range": {
+                "start": "2026-08-20T08:00:00Z",
+                "end": "2026-08-20T08:30:00Z",
+            },
+            "dsl": full_dsl,
+            "dsl_sha256": "dsl-hash-42",
+            "backend_total": {"value": 20, "relation": "eq"},
+        },
+        "facts": facts,
+        "samples": samples,
+        "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-toolmessage-logs",
+            "scope_entity_ids": ["k8s.pod:demo/api:uid-api"],
+            "records": records,
+            "record_count": 20,
+            "truncated": False,
+            "source": "mcp_canonical",
+            "legacy_contract": False,
+        },
+        "counts": {
+            "matched": 20,
+            "retrieved": 20,
+            "normalized": 20,
+            "returned": 20,
+            "dropped": 0,
+        },
+        "truncation": {"truncated": False, "stages": []},
+        "truncated": False,
+        "limits": {"max_records": 20, "response_serialization": "lossless"},
+        "serialization": {
+            "policy": "lossless",
+            "response_truncated": False,
+            "serialized_bytes": 20000,
+        },
+        "evidence_refs": [item["ref"] for item in facts],
+    }
+    raw = json.dumps(payload, ensure_ascii=False)
+    msg = ToolMessage(
+        content=raw,
+        tool_call_id="tc-observability",
+        name="query_pod_logs",
+    )
+
+    class _CompletedFuture:
+        def result(self, timeout=None):
+            return None
+
+    class _Executor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn):
+            fn()
+            return _CompletedFuture()
+
+    class _Agent:
+        async def astream(self, *args, **kwargs):
+            yield ("updates", {"tools": {"messages": [msg]}})
+
+    monkeypatch.setattr(
+        "langchain.agents.create_agent",
+        lambda **kwargs: _Agent(),
+    )
+    monkeypatch.setattr(
+        "concurrent.futures.ThreadPoolExecutor",
+        lambda max_workers=1: _Executor(),
+    )
+    tool = type(
+        "T",
+        (),
+        {"name": "query_pod_logs", "description": "d", "args_schema": None},
+    )()
+
+    result, events = ai.call(
+        "system",
+        "inspect the pod",
+        tools=[tool],
+        node_id="evidence",
+        run_id="run-observability-toolmessage",
+        max_steps=2,
+    )
+
+    additional = msg.additional_kwargs
+    summary_path = Path(additional["aiops_summary_ref"])
+    raw_path = Path(additional["aiops_raw_ref"])
+    structured_path = Path(additional["aiops_structured_ref"])
+    summary = json.loads(msg.content)
+
+    assert msg.content == summary_path.read_text(encoding="utf-8")
+    assert raw_path.read_text(encoding="utf-8") == raw
+    assert json.loads(structured_path.read_text(encoding="utf-8"))["fact_ledger"] == payload["fact_ledger"]
+    assert len(msg.content) <= 3000
+    assert "must-not-reach-qwen" not in msg.content
+    assert summary["contract_version"] == "aiops.observation.v1"
+    assert summary["retrieval"]["raw_ref"] == str(raw_path)
+    assert summary["retrieval"]["mcp_response_complete"] is True
+    assert summary["summary_selection"]["omitted"] > 0
+    assert any(item.get("http_status") == 503 for item in summary["evidence"])
+    assert any(item.get("http_status") == 200 for item in summary["evidence"])
+    assert all(item.get("container") == "api" for item in summary["evidence"])
+    assert result.tool_calls[0]["result"] == msg.content
+    assert result.tool_calls[0]["raw_ref"] == str(raw_path)
+    assert events[0]["observation_audit"]["evidence_total"] == 20
+    assert events[0]["observation_audit"]["evidence_omitted"] > 0
+
+    reader = ReadContextArchiveTool(
+        allowed_roots=[str(tmp_path)],
+        default_length=600,
+        max_length=1200,
+    )
+    first_page = reader._run(str(raw_path), offset=0, length=600)
+    assert "[truncated]" in first_page
+    assert "next_offset=600" in first_page
+    second_page = reader._run(str(raw_path), offset=600, length=600)
+    assert "offset: 600" in second_page
+    assert first_page != second_page
+
+
 def test_aicall_tool_result_event_includes_context_usage_ratio(tmp_path, monkeypatch):
     ai = AICall(model="openai/test", api_key="sk-test")
     monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
@@ -3259,7 +3489,7 @@ def test_observation_processor_keeps_generic_query_negative_states_distinct(tmp_
         )
 
         assert processed["structured"]["coverage"] == coverage
-        assert f"coverage={coverage}" in processed["summary"]
+        assert json.loads(processed["summary"])["coverage"] == coverage
         assert processed["structured"]["telemetry"]["deepflow"]["coverage"] == coverage
         if coverage == "error":
             assert processed["semantic_success"] is False

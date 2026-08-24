@@ -143,6 +143,32 @@ def test_lane_artifact_allows_publishable_diagnosis_with_audited_bad_reference(
     assert loaded["claim_validation"]["diagnosis_publishable"] is True
 
 
+def test_lane_artifact_allows_diagnosis_when_validation_is_explicitly_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    writer, artifact = _persist_artifact(
+        tmp_path,
+        monkeypatch,
+        terminal_status="diagnosed",
+        selected_rca={
+            "diagnostic_status": "diagnosed",
+            "root_cause": "model selected root cause",
+            "supporting_fact_ids": [],
+        },
+        claim_validation={
+            "enabled": False,
+            "skipped": True,
+            "valid": None,
+        },
+    )
+
+    loaded = writer.reload_and_verify(artifact)
+
+    assert loaded["artifact"]["terminal_status"] == "diagnosed"
+    assert loaded["claim_validation"]["enabled"] is False
+
+
 def test_lane_artifact_reload_rejects_digest_mismatch(tmp_path, monkeypatch):
     writer, artifact = _persist_artifact(tmp_path, monkeypatch)
     snapshot_path = artifact["artifact_refs"]["snapshot"]["path"]

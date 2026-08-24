@@ -57,6 +57,7 @@ RCA_FACT_LEDGER_MAX_CHARS = 24000
 RCA_QUALITY_MAX_CHARS = 4000
 RCA_SUPPLEMENTARY_MAX_CHARS = 7000
 RCA_AUXILIARY_MAX_CHARS = 3000
+RCA_RAW_OUTPUT_MAX_CHARS = 12000
 
 
 class RootCauseAnalyzerNode(WorkflowNode):
@@ -161,12 +162,20 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 raw_result or {},
                 artifact_name="rca.attempt-1.model",
             )
-            validated_result = self._validate_rca_result_against_evidence(
-                raw_result or {},
-                evidence_analysis,
-                question=question,
-                layer=layer,
-            )
+            validation_enabled = self._is_rca_validation_enabled(default=True)
+            if validation_enabled:
+                validated_result = self._validate_rca_result_against_evidence(
+                    raw_result or {},
+                    evidence_analysis,
+                    question=question,
+                    layer=layer,
+                )
+            else:
+                logger.info(
+                    "⏭️ [rca] 事实绑定与 claim validation 已关闭；"
+                    "直接采用本次 LLM RCA"
+                )
+                validated_result = dict(raw_result or {})
             self._archive_node_output(
                 validated_result,
                 artifact_name="rca.attempt-1.validated",
@@ -177,7 +186,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "validated_output": validated_result,
             })
 
-            if self._should_repair_rca(validated_result, rca_input):
+            if validation_enabled and self._should_repair_rca(
+                validated_result,
+                rca_input,
+            ):
                 repair_context = self._build_rca_repair_context(
                     rca_input,
                     validated_result,
@@ -207,20 +219,39 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     "model_output": repaired_raw or {},
                     "validated_output": repaired_validated,
                 })
-                validated_result = repaired_validated
+                validated_result = self._select_preferred_rca_result(
+                    validated_result,
+                    repaired_validated,
+                )
 
             rca_result = self._sanitize_rca_result(validated_result)
-            claim_validation = (
-                rca_result.get("claim_validation")
-                if isinstance(rca_result.get("claim_validation"), dict)
-                else {
-                    "valid": False,
+            if validation_enabled:
+                claim_validation = (
+                    rca_result.get("claim_validation")
+                    if isinstance(rca_result.get("claim_validation"), dict)
+                    else {
+                        "enabled": True,
+                        "valid": False,
+                        "diagnostic_status": rca_result.get(
+                            "diagnostic_status", "inconclusive"
+                        ),
+                        "reasons": ["formal claim validation was not available"],
+                    }
+                )
+                claim_validation.setdefault("enabled", True)
+            else:
+                claim_validation = {
+                    "enabled": False,
+                    "skipped": True,
+                    "valid": None,
                     "diagnostic_status": rca_result.get(
                         "diagnostic_status", "inconclusive"
                     ),
-                    "reasons": ["formal claim validation was not available"],
+                    "reasons": [
+                        "RCA fact binding and publication validation disabled by configuration"
+                    ],
                 }
-            )
+                rca_result["claim_validation"] = claim_validation
             self._archive_node_output(
                 rca_result,
                 artifact_name="rca.output",
@@ -406,12 +437,45 @@ class RootCauseAnalyzerNode(WorkflowNode):
         if not eligible:
             return False
         claim = validated_result.get("claim_validation")
-        claim_valid = bool(claim.get("valid")) if isinstance(claim, Mapping) else False
+        diagnosis_publishable = (
+            bool(
+                claim.get(
+                    "diagnosis_publishable",
+                    claim.get("diagnosis_supported", False),
+                )
+            )
+            if isinstance(claim, Mapping)
+            else False
+        )
         return (
             str(validated_result.get("diagnostic_status") or "inconclusive")
             == "inconclusive"
-            or not claim_valid
+            or not diagnosis_publishable
         )
+
+    @staticmethod
+    def _select_preferred_rca_result(
+        first: Mapping[str, Any],
+        repaired: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Use a repair only when it improves claim publication quality."""
+        def score(value: Mapping[str, Any]) -> tuple[int, int, int]:
+            claim = (
+                value.get("claim_validation")
+                if isinstance(value.get("claim_validation"), Mapping)
+                else {}
+            )
+            publishable = bool(
+                claim.get(
+                    "diagnosis_publishable",
+                    claim.get("diagnosis_supported", False),
+                )
+            )
+            valid_support = len(claim.get("valid_supporting_fact_ids") or [])
+            diagnosed = str(value.get("diagnostic_status") or "") == "diagnosed"
+            return (int(publishable), valid_support, int(diagnosed))
+
+        return dict(repaired if score(repaired) > score(first) else first)
 
     @staticmethod
     def _build_rca_repair_context(
@@ -440,6 +504,15 @@ class RootCauseAnalyzerNode(WorkflowNode):
             "authoritative_entity_ids": list(
                 rca_input.get("authoritative_entity_ids") or []
             ),
+            "previous_claim": (
+                claim.get("rejected_claim")
+                if isinstance(claim.get("rejected_claim"), Mapping)
+                else {
+                    "phenomenon": first_result.get("phenomenon"),
+                    "root_cause": first_result.get("root_cause"),
+                    "causal_chain": first_result.get("causal_chain") or {},
+                }
+            ),
             "eligible_support_facts": [
                 fact
                 for fact in selected_facts
@@ -453,8 +526,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
             "validation_reasons": list(claim.get("reasons") or []),
             "invalid_fact_ids": list(claim.get("invalid_fact_ids") or []),
             "instruction": (
-                "Repair the RCA once. Use only the exact authoritative entity IDs "
-                "and Fact IDs in this payload. Return RCAOutput; do not collect data."
+                "只修复 RCA 发布合同，不重新采集。若 previous_claim 的语义被事实支持，"
+                "保留其内容并用本 payload 中精确 fact_id 填写顶层 supporting_fact_ids、"
+                "唯一 hypothesis 及 evidence_analysis；causal_chain 至少填写 trigger、"
+                "mechanism、manifestation。若不受支持则输出 inconclusive。"
             ),
         }
         return "## AIOps Fact Ledger — constrained repair\n" + bounded_json_dumps(
@@ -591,16 +666,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
             "layer",
             "derived_layer",
             "layers",
-            "confidence",
             "primary_pod",
             "pod_status_keyword",
-            "pod_abnormal_type",
-            "status_category",
             "abnormal_pods",
-            "active_entities",
-            "active_signals",
-            "possible_scenarios",
-            "matched_runbooks",
             "must_verify",
             "do_not_change",
         )
@@ -608,22 +676,19 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if handoff.get(key) not in (None, {}, []):
                 compact[key] = handoff.get(key)
 
-        primary_problem = str(
-            handoff.get("primary_problem")
-            or handoff.get("reasoning")
-            or ""
-        ).strip()
-        if primary_problem:
-            compact["primary_problem"] = cls._compact_text_value(
-                primary_problem,
-                limit=1200,
-            )
-
         issue_groups = handoff.get("issue_groups")
         if not isinstance(issue_groups, list):
             issue_groups = handoff.get("abnormal_groups")
         if isinstance(issue_groups, list) and issue_groups:
-            compact["issue_groups"] = issue_groups
+            compact["issue_groups"] = [
+                {
+                    key: group.get(key)
+                    for key in ("group_id", "status_keywords", "entities")
+                    if group.get(key) not in (None, "", [], {})
+                }
+                for group in issue_groups
+                if isinstance(group, dict)
+            ]
 
         current_summary = handoff.get("current_abnormal_summary")
         if isinstance(current_summary, dict):
@@ -807,6 +872,16 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if parsed:
                 return parsed, thinking_events
 
+            recovered = self._recover_tolerant_rca_output(
+                (response.result if response is not None else "") or "",
+            )
+            if recovered is not None:
+                logger.warning(
+                    "⚠️ [rca] Pydantic 整体校验失败；tolerant 模式已保留核心 RCA，warnings=%s",
+                    recovered.get("parse_warnings") or [],
+                )
+                return recovered, thinking_events
+
             logger.warning("⚠️ [rca] lite 模式未返回合法 Pydantic RCAOutput，使用通用低置信度兜底")
             return self._build_llm_fallback(
                 question=question,
@@ -863,6 +938,17 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if structured is not None:
                 return structured.model_dump(), thinking_events
 
+            recovered = self._recover_tolerant_rca_output(
+                (response.result if response is not None else "") or "",
+            )
+            if recovered is not None:
+                logger.warning(
+                    "⚠️ [rca] full 模式 Pydantic 整体校验失败；"
+                    "tolerant 模式已保留核心 RCA，warnings=%s",
+                    recovered.get("parse_warnings") or [],
+                )
+                return recovered, thinking_events
+
             return self._build_llm_fallback(
                 question=question,
                 layer=layer,
@@ -886,6 +972,245 @@ class RootCauseAnalyzerNode(WorkflowNode):
         except Exception as exc:
             logger.warning("⚠️ [rca] RCA 结构化校验失败: %s", exc)
             return None
+
+    @staticmethod
+    def _tolerant_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (list, tuple)):
+            return "；".join(
+                str(item).strip() for item in value if str(item).strip()
+            )
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False, default=str)
+        return str(value).strip()
+
+    @staticmethod
+    def _tolerant_string_list(value: Any, *, fact_ids: bool = False) -> List[str]:
+        if value is None:
+            return []
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        normalized: List[str] = []
+        for item in values:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            if fact_ids:
+                matches = re.findall(r"fact-[A-Za-z0-9]+", text)
+                if matches:
+                    normalized.extend(matches)
+                    continue
+            normalized.append(text)
+        return list(dict.fromkeys(normalized))
+
+    @classmethod
+    def _normalize_tolerant_dict_items(
+        cls,
+        value: Any,
+        *,
+        field_name: str,
+        warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+        values = value if isinstance(value, list) else [value]
+        if not isinstance(value, list):
+            warnings.append(f"{field_name}: expected array; wrapped input as array")
+        normalized: List[Dict[str, Any]] = []
+        for index, item in enumerate(values):
+            if isinstance(item, dict):
+                normalized.append(dict(item))
+                continue
+            text = cls._tolerant_text(item)
+            if not text:
+                warnings.append(f"{field_name}.{index}: empty non-object item dropped")
+                continue
+            warnings.append(f"{field_name}.{index}: string item normalized to object")
+            if field_name == "evidence_analysis":
+                fact_matches = re.findall(r"fact-[A-Za-z0-9]+", text)
+                entry: Dict[str, Any] = {
+                    "relevance": text,
+                    "role": "supporting_context",
+                }
+                if fact_matches:
+                    entry["fact_id"] = fact_matches[0]
+                    if len(fact_matches) > 1:
+                        entry["fact_ids"] = list(dict.fromkeys(fact_matches))
+                normalized.append(entry)
+            else:
+                normalized.append({"summary": text})
+        return normalized
+
+    @classmethod
+    def _normalize_tolerant_hypotheses(
+        cls,
+        value: Any,
+        warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+        values = value if isinstance(value, list) else [value]
+        if not isinstance(value, list):
+            warnings.append("hypotheses: expected array; wrapped input as array")
+        normalized: List[Dict[str, Any]] = []
+        for index, item in enumerate(values):
+            if isinstance(item, dict):
+                normalized.append(dict(item))
+                continue
+            text = cls._tolerant_text(item)
+            if not text:
+                warnings.append(f"hypotheses.{index}: empty item dropped")
+                continue
+            warnings.append(f"hypotheses.{index}: string item normalized to object")
+            normalized.append({
+                "hypothesis_id": f"h-recovered-{index + 1}",
+                "summary": text,
+                "confidence": 0.5,
+            })
+        return normalized
+
+    def _recover_tolerant_rca_output(self, raw: str) -> Optional[Dict[str, Any]]:
+        """Recover a publishable core RCA from repairable JSON shape drift.
+
+        This does not infer a root cause from arbitrary prose. It only salvages
+        an already-present root_cause/root_cause_summary from a parsed JSON
+        object, normalizes optional fields, then re-validates the result.
+        """
+        if self._get_rca_structured_output_mode(default="tolerant") != "tolerant":
+            return None
+
+        from app.core.aicall.client import AICall
+
+        parsed = AICall.extract_json_payload(raw)
+        if not isinstance(parsed, dict):
+            return None
+
+        payload = dict(parsed)
+        warnings: List[str] = []
+        root_cause = self._tolerant_text(
+            payload.get("root_cause_summary") or payload.get("root_cause")
+        )
+        if not root_cause:
+            # Content-first mode still needs one explicit model-authored core
+            # claim; arbitrary narrative is not promoted into a diagnosis.
+            return None
+
+        for field_name in (
+            "phenomenon",
+            "root_cause",
+            "root_cause_summary",
+            "confidence_reason",
+            "limitations",
+            "llm_raw_analysis",
+        ):
+            if field_name in payload:
+                original = payload.get(field_name)
+                normalized = self._tolerant_text(original)
+                if not isinstance(original, str):
+                    warnings.append(f"{field_name}: normalized to string")
+                payload[field_name] = normalized
+
+        payload["root_cause"] = root_cause
+        payload["root_cause_summary"] = root_cause
+        if payload.get("diagnostic_status") not in {"diagnosed", "inconclusive"}:
+            payload["diagnostic_status"] = "inconclusive"
+            warnings.append("diagnostic_status: missing/invalid; defaulted to inconclusive")
+
+        confidence = payload.get("confidence")
+        if confidence is None:
+            payload["confidence"] = 0.5
+            warnings.append("confidence: missing; defaulted to 0.5")
+        elif isinstance(confidence, (int, float)) and confidence > 1:
+            payload["confidence"] = min(float(confidence) / 100.0, 1.0)
+            warnings.append("confidence: percentage normalized to 0.0-1.0")
+
+        if not self._tolerant_text(payload.get("confidence_reason")):
+            payload["confidence_reason"] = (
+                "保留模型已给出的根因内容；辅助结构字段经过确定性容错恢复"
+            )
+            warnings.append("confidence_reason: missing; recovery reason inserted")
+
+        payload["evidence_inventory"] = self._normalize_tolerant_dict_items(
+            payload.get("evidence_inventory"),
+            field_name="evidence_inventory",
+            warnings=warnings,
+        )
+        payload["evidence_analysis"] = self._normalize_tolerant_dict_items(
+            payload.get("evidence_analysis"),
+            field_name="evidence_analysis",
+            warnings=warnings,
+        )
+        payload["hypotheses"] = self._normalize_tolerant_hypotheses(
+            payload.get("hypotheses"), warnings
+        )
+
+        for field_name in (
+            "supporting_fact_ids",
+            "contradicting_fact_ids",
+        ):
+            original = payload.get(field_name)
+            if original is not None and not isinstance(original, list):
+                warnings.append(f"{field_name}: normalized to string array")
+            payload[field_name] = self._tolerant_string_list(
+                original, fact_ids=True
+            )
+        for field_name in ("unknowns", "primary_runbooks"):
+            original = payload.get(field_name)
+            if original is not None and not isinstance(original, list):
+                warnings.append(f"{field_name}: normalized to string array")
+            payload[field_name] = self._tolerant_string_list(original)
+
+        causal_chain = payload.get("causal_chain")
+        if not isinstance(causal_chain, dict):
+            causal_text = self._tolerant_text(causal_chain)
+            payload["causal_chain"] = (
+                {"mechanism": causal_text} if causal_text else {}
+            )
+            if causal_chain is not None:
+                warnings.append("causal_chain: normalized to object")
+        if not isinstance(payload.get("claim_validation"), dict):
+            payload["claim_validation"] = {}
+            warnings.append("claim_validation: normalized to object")
+        if not isinstance(payload.get("alternative_causes"), list):
+            alternative = payload.get("alternative_causes")
+            payload["alternative_causes"] = [] if alternative is None else [alternative]
+            if alternative is not None:
+                warnings.append("alternative_causes: normalized to array")
+
+        if not self._tolerant_text(payload.get("llm_raw_analysis")):
+            payload["llm_raw_analysis"] = raw[:RCA_RAW_OUTPUT_MAX_CHARS]
+            warnings.append("llm_raw_analysis: preserved from raw structured response")
+
+        try:
+            recovered = RCAOutput.model_validate(payload).model_dump()
+        except Exception as exc:
+            logger.warning("⚠️ [rca] tolerant 字段归一化后仍未通过校验: %s", exc)
+            # Drop every optional complex field, but retain the explicit
+            # model-authored core claim and raw output for later inspection.
+            minimal = {
+                "diagnostic_status": payload.get("diagnostic_status", "inconclusive"),
+                "phenomenon": self._tolerant_text(payload.get("phenomenon")),
+                "root_cause": root_cause,
+                "root_cause_summary": root_cause,
+                "confidence": payload.get("confidence", 0.5),
+                "confidence_reason": payload.get("confidence_reason"),
+                "llm_raw_analysis": raw[:RCA_RAW_OUTPUT_MAX_CHARS],
+            }
+            try:
+                recovered = RCAOutput.model_validate(minimal).model_dump()
+                warnings.append(
+                    "optional_fields: unrecoverable fields dropped; core RCA preserved"
+                )
+            except Exception as core_exc:
+                logger.warning("⚠️ [rca] tolerant 核心 RCA 仍未通过校验: %s", core_exc)
+                return None
+
+        recovered["structured_quality"] = "partial"
+        recovered["structured_output_mode"] = "tolerant"
+        recovered["parse_warnings"] = list(dict.fromkeys(warnings))
+        return recovered
 
     @classmethod
     def _compact_text_value(cls, value: Any, limit: int = RCA_TEXT_FIELD_LIMIT) -> Any:
@@ -1011,24 +1336,49 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 authoritative_entity_ids=authoritative_entity_ids,
             )
         except Exception as exc:
-            logger.warning("⚠️ [rca] Fact Ledger 引用校验失败，降级为 inconclusive: %s", exc)
-            fallback = self._build_llm_fallback(
-                question=question,
-                layer=layer,
-                reason=f"RCA 结构化输出或事实引用校验失败: {exc}",
+            logger.warning(
+                "⚠️ [rca] Fact Ledger 引用校验失败，仅降级根因 claim: %s",
+                exc,
             )
-            fallback["claim_validation"] = {
+            preserved = self._sanitize_rca_result(rca_result)
+            rejected_claim = {
+                "phenomenon": preserved.get("phenomenon"),
+                "root_cause": preserved.get("root_cause"),
+                "root_cause_summary": preserved.get("root_cause_summary"),
+                "causal_chain": preserved.get("causal_chain") or {},
+                "confidence": preserved.get("confidence"),
+                "confidence_reason": preserved.get("confidence_reason"),
+            }
+            reason = f"RCA 事实引用校验执行失败: {exc}"
+            preserved.update({
+                "diagnostic_status": "inconclusive",
+                "root_cause": "现有事实不足以发布经过校验的根因结论",
+                "root_cause_summary": "现有事实不足以发布经过校验的根因结论",
+                "causal_chain": {},
+                "confidence": min(float(preserved.get("confidence") or 0.0), 0.49),
+                "confidence_reason": reason,
+            })
+            unknowns = list(preserved.get("unknowns") or [])
+            if reason not in unknowns:
+                unknowns.append(reason)
+            preserved["unknowns"] = unknowns
+            preserved["claim_validation"] = {
+                "enabled": True,
                 "valid": False,
+                "reference_valid": False,
+                "diagnosis_supported": False,
+                "diagnosis_publishable": False,
                 "diagnostic_status": "inconclusive",
                 "valid_supporting_fact_ids": [],
                 "valid_contradicting_fact_ids": [],
                 "invalid_fact_ids": [],
                 "reasons": [str(exc)],
+                "rejected_claim": rejected_claim,
                 "legacy_contract": any(
                     ledger.legacy_contract for ledger in fact_ledgers
                 ),
             }
-            return fallback
+            return preserved
     
     def _build_decision(
         self,

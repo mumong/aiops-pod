@@ -292,10 +292,24 @@ class ParallelEvidenceNode(WorkflowNode):
                         ],
                     }
                     attempt_rca_update = rca.execute(rca_state)
-                    gate = self._minimum_rca_gate(
-                        attempt_result,
-                        attempt_rca_update,
-                    )
+                    if self._is_rca_validation_enabled(default=True):
+                        gate = self._minimum_rca_gate(
+                            attempt_result,
+                            attempt_rca_update,
+                        )
+                    else:
+                        gate = {
+                            "contract_version": "aiops.minimum-rca-gate.v1",
+                            "enabled": False,
+                            "verdict": "pass",
+                            "failure_codes": [],
+                            "reasons": [
+                                "minimum RCA gate disabled by configuration"
+                            ],
+                            "focus_fact_ids": [],
+                            "valid_supporting_fact_ids": [],
+                            "valid_contradicting_fact_ids": [],
+                        }
                     attempt_records.append({
                         "diagnosis_attempt": attempt,
                         "collector_archive_run_id": getattr(
@@ -319,23 +333,15 @@ class ParallelEvidenceNode(WorkflowNode):
                     1,
                     scoped_state,
                 )
-                if gate.get("verdict") == "retry":
-                    retry_state = self._build_retry_group_state(
-                        scoped_state=scoped_state,
-                        group_state=group_state,
-                        result=result,
-                        rca_update=rca_update,
-                        feedback=gate,
+                if gate.get("verdict") != "pass":
+                    # RCA already received one constrained, fact-ID-only repair
+                    # opportunity inside the same evidence snapshot. Re-running
+                    # the full collector cannot repair an output-contract miss
+                    # and used to overwrite better first-attempt evidence.
+                    rca_update = self._force_inconclusive_rca(
+                        rca_update,
+                        gate,
                     )
-                    result, rca_update, group_state, gate = execute_attempt(
-                        2,
-                        retry_state,
-                    )
-                    if gate.get("verdict") != "pass":
-                        rca_update = self._force_inconclusive_rca(
-                            rca_update,
-                            gate,
-                        )
 
                 rca_update["rca_attempts"] = attempt_records
                 stage = "diagnosis_projection"
@@ -498,13 +504,14 @@ class ParallelEvidenceNode(WorkflowNode):
             self.runbook_catalog,
         )
         rca.ai_call = getattr(self, "ai_call", None)
-        rca.tools = getattr(self, "tools", []) or []
+        # RCA is a model-only reasoning stage. Evidence tools belong only to
+        # EvidenceCollectorNode, even if the parent node owns a tool registry.
+        rca.tools = []
         rca.workflow_config_override = getattr(self, "workflow_config_override", None)
         rca.cancel_event = getattr(self, "cancel_event", None)
-        # A failed minimum gate is repaired by a fresh, tool-capable ReAct
-        # attempt.  Do not spend another model-only RCA repair inside the same
-        # attempt.
-        rca.disable_internal_repair = True
+        # Structural/fact-binding misses are repaired once against the same
+        # immutable snapshot. They must not trigger another evidence ReAct.
+        rca.disable_internal_repair = False
         attempt_suffix = "" if attempt == 1 else f"-retry{attempt}"
         rca.current_run_id = f"{run_id}-{gid}{attempt_suffix}" if run_id else ""
         queue = getattr(self, "_event_queue", None)
@@ -741,17 +748,18 @@ class ParallelEvidenceNode(WorkflowNode):
         rca_update: Mapping[str, Any],
         feedback: Mapping[str, Any],
     ) -> Dict[str, Any]:
-        """Fail closed after the second complete ReAct attempt."""
+        """Fail closed after snapshot-bound RCA and its one repair attempt."""
         update = copy.deepcopy(dict(rca_update))
         parsed = cls._parse_rca_analysis(update.get("rca_analysis") or "{}")
         reasons = [
             str(item) for item in (feedback.get("reasons") or [])
             if str(item).strip()
-        ] or ["second ReAct attempt did not pass the minimum RCA gate"]
+        ] or ["snapshot-bound RCA did not pass the minimum publication gate"]
         parsed.update({
             "diagnostic_status": "inconclusive",
-            "root_cause": "证据不足，第二次完整调查仍未形成可发布根因",
-            "root_cause_summary": "证据不足，第二次完整调查仍未形成可发布根因",
+            "root_cause": "现有事实未形成可发布的根因结论",
+            "root_cause_summary": "现有事实未形成可发布的根因结论",
+            "causal_chain": {},
             "confidence": min(float(parsed.get("confidence") or 0.0), 0.49),
         })
         parsed["unknowns"] = list(dict.fromkeys([
@@ -766,6 +774,9 @@ class ParallelEvidenceNode(WorkflowNode):
         parsed["claim_validation"] = {
             **dict(claim),
             "valid": False,
+            "reference_valid": False,
+            "diagnosis_supported": False,
+            "diagnosis_publishable": False,
             "diagnostic_status": "inconclusive",
             "reasons": list(dict.fromkeys([
                 *(claim.get("reasons") or []),
@@ -1044,8 +1055,8 @@ class ParallelEvidenceNode(WorkflowNode):
             projected.append(entity)
         return projected or entities
 
-    @staticmethod
     def _persist_lane_diagnosis_artifact(
+        self,
         result: Dict[str, Any],
         rca_update: Mapping[str, Any],
     ) -> None:
@@ -1258,7 +1269,11 @@ class ParallelEvidenceNode(WorkflowNode):
                 str(fact_id) for fact_id in source.get("contradicting_fact_ids") or []
                 if fact_owner.get(str(fact_id)) == key
             ]
-            entity_diagnosed = diagnostic_status == "diagnosed" and bool(supporting)
+            validation_enabled = self._is_rca_validation_enabled(default=True)
+            entity_diagnosed = (
+                diagnostic_status == "diagnosed"
+                and (bool(supporting) or not validation_enabled)
+            )
             if not source or not entity_diagnosed:
                 fallback = self._deterministic_entity_summary(
                     entity,

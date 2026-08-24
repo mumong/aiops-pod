@@ -21,6 +21,11 @@ from app.core.workflow.fact_contract import (
 )
 
 from .archive import ContextArchive, get_archive_root
+from .observability_projection import (
+    CONTRACT_VERSION as OBSERVABILITY_PROJECTION_VERSION,
+    project_observability_payload,
+    render_observability_summary,
+)
 
 
 Summarizer = Callable[[str, str, str], Optional[str]]
@@ -178,7 +183,8 @@ class ObservationProcessor:
             if over_context_threshold and len(summary) < before_len and "+llm" not in processor:
                 processor = f"{processor}+context_guard_truncate"
 
-        refs = ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
+        archive = ContextArchive(run_id=run_id, root=self.archive_root)
+        refs = archive.write_tool_artifact(
             node_id=node_id,
             sequence=sequence,
             tool_name=tool,
@@ -186,6 +192,42 @@ class ObservationProcessor:
             structured=structured,
             summary=summary,
         )
+        observation_audit: Dict[str, Any] = {}
+        if (
+            tool in self.OBSERVABILITY_QUERY_TOOLS
+            and structured.get("contract_version")
+            == OBSERVABILITY_PROJECTION_VERSION
+        ):
+            truncation = (
+                structured.get("truncation")
+                if isinstance(structured.get("truncation"), dict)
+                else {}
+            )
+            structured["retrieval"] = {
+                "available": True,
+                "tool": "read_context_archive",
+                "raw_ref": refs.get("raw_ref"),
+                "scope": "complete_mcp_response",
+                "mcp_response_complete": truncation.get(
+                    "mcp_response_truncated"
+                )
+                is not True,
+            }
+            summary, observation_audit = render_observability_summary(
+                structured,
+                self.max_observation_chars,
+            )
+            structured["agent_projection"] = observation_audit
+            # Rewrite the same deterministic artifact paths so structured and
+            # summary both carry the retrievable reference Agent actually saw.
+            refs = archive.write_tool_artifact(
+                node_id=node_id,
+                sequence=sequence,
+                tool_name=tool,
+                raw=raw,
+                structured=structured,
+                summary=summary,
+            )
         return {
             "tool": tool,
             "status": "success",
@@ -196,6 +238,7 @@ class ObservationProcessor:
             "summary_chars": len(summary),
             "processed": True,
             "processor": processor,
+            "observation_audit": observation_audit,
             "context_usage_ratio": context_usage_ratio,
             **refs,
         }
@@ -319,52 +362,16 @@ class ObservationProcessor:
                 "observability_query_parse_failed",
             )
 
-        allowed_keys = [
-            "ok",
-            "status",
-            "source_system",
-            "dimension",
-            "entity",
-            "purpose",
-            "coverage",
-            "directness",
-            "query",
-            "facts",
-            "samples",
-            "flows",
-            "spans",
-            "correlations",
-            "telemetry",
-            "limitations",
-            "evidence_refs",
-            "truncated",
-            "limits",
-            "error",
-            "result_type",
-            "raw_series_count",
-            "series_count",
-            "series",
-            "entities",
-            "edges",
-            "topology_summary",
-            "fact_ledger",
-        ]
-        structured = {
-            key: payload[key]
-            for key in allowed_keys
-            if key in payload and payload.get(key) is not None
-        }
-        structured["tool"] = tool
-        structured.setdefault("status", "query_succeeded")
-        structured.setdefault("coverage", "error" if payload.get("ok") is False else "empty")
-        structured.setdefault("facts", [])
-        structured.setdefault("samples", [])
-        structured.setdefault("evidence_refs", [])
-        if normalized_ledger is not None:
-            structured["fact_ledger"] = payload["fact_ledger"]
-
-        summary = self._build_observability_query_summary(structured)
-        return structured, summary, "observability_query"
+        projection = project_observability_payload(
+            payload,
+            tool=tool,
+            max_chars=self.max_observation_chars,
+        )
+        return (
+            projection["structured"],
+            projection["summary"],
+            "observability_query",
+        )
 
     @classmethod
     def _has_source_backed_observability_fact(
@@ -372,6 +379,16 @@ class ObservationProcessor:
         payload: Dict[str, Any],
     ) -> bool:
         default_source = str(payload.get("source_system") or "").strip()
+        for fact in payload.get("evidence") or []:
+            if not isinstance(fact, dict):
+                continue
+            refs = fact.get("evidence_refs") or []
+            if fact.get("id"):
+                refs = [*refs, fact.get("id")]
+            if any(str(ref or "").strip() for ref in refs) and str(
+                fact.get("source_system") or default_source
+            ).strip():
+                return True
         for fact in payload.get("facts") or []:
             if not isinstance(fact, dict):
                 continue
@@ -465,113 +482,6 @@ class ObservationProcessor:
                 errors.append("invalid_success_contract")
 
         return errors
-
-    def _build_observability_query_summary(
-        self,
-        structured: Dict[str, Any],
-    ) -> str:
-        lines: list[str] = []
-
-        def compact(value: Any, limit: int = 900) -> str:
-            if value is None:
-                return ""
-            if isinstance(value, (dict, list)):
-                text = json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
-                )
-            else:
-                text = str(value)
-            text = text.replace("\n", " ").strip()
-            return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
-
-        def add(label: str, value: Any, limit: int = 900) -> None:
-            text = compact(value, limit)
-            if not text:
-                return
-            line = f"{label}={text}"
-            projected = len("\n".join([*lines, line]))
-            if projected <= self.max_observation_chars:
-                lines.append(line)
-
-        entity = structured.get("entity")
-        if not isinstance(entity, dict):
-            entity = {}
-        add(
-            "OBSERVABILITY_QUERY",
-            {
-                "tool": structured.get("tool"),
-                "status": structured.get("status"),
-                "source_system": structured.get("source_system"),
-                "dimension": structured.get("dimension"),
-                "coverage": structured.get("coverage"),
-                "directness": structured.get("directness"),
-            },
-            500,
-        )
-        add(
-            "ENTITY",
-            {
-                key: entity.get(key)
-                for key in (
-                    "kind",
-                    "namespace",
-                    "pod",
-                    "pod_uid",
-                    "pod_ip",
-                    "node",
-                    "containers",
-                )
-                if entity.get(key) not in (None, "", [], {})
-            },
-            500,
-        )
-        add("PURPOSE", structured.get("purpose"), 500)
-        add("QUERY", structured.get("query"), 1000)
-
-        telemetry = structured.get("telemetry")
-        if isinstance(telemetry, dict):
-            add("TELEMETRY", telemetry, 600)
-
-        add("TOPOLOGY_SUMMARY", structured.get("topology_summary"), 600)
-        for index, item in enumerate((structured.get("entities") or [])[:8], start=1):
-            add(f"ENTITY_NODE[{index}]", item, 700)
-        for index, item in enumerate((structured.get("edges") or [])[:8], start=1):
-            add(f"TOPOLOGY_EDGE[{index}]", item, 900)
-
-        fact_ledger = normalize_fact_ledger(
-            structured.get("fact_ledger")
-        )
-        if fact_ledger is not None:
-            add(
-                "FACT_LEDGER",
-                fact_ledger.model_dump(
-                    mode="json",
-                    exclude_none=True,
-                ),
-                3200,
-            )
-        else:
-            for index, fact in enumerate(
-                (structured.get("facts") or [])[:6],
-                start=1,
-            ):
-                add(f"FACT[{index}]", fact, 1000)
-        for index, sample in enumerate((structured.get("samples") or [])[:4], start=1):
-            add(f"SAMPLE[{index}]", sample, 1200)
-
-        if not structured.get("samples"):
-            for key, limit in (("flows", 3), ("spans", 2), ("correlations", 2)):
-                for index, item in enumerate((structured.get(key) or [])[:limit], start=1):
-                    add(f"{key.upper()}[{index}]", item, 900)
-
-        add("LIMITATIONS", structured.get("limitations"), 500)
-        add("EVIDENCE_REFS", structured.get("evidence_refs"), 700)
-        if isinstance(structured.get("error"), dict):
-            add("ERROR", structured.get("error"), 700)
-        return "\n".join(lines)
 
     def _extract_aiops_case(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
         try:

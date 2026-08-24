@@ -25,7 +25,14 @@ def _obs_event(tool, dimension, coverage, *, namespace, pod, facts=None, purpose
             "strength": "strong",
             "evidence_refs": fact.get("evidence_refs", []),
         })
-        for optional_key in ("name", "unit", "stats", "metadata"):
+        for optional_key in (
+            "name",
+            "unit",
+            "stats",
+            "metadata",
+            "sample_count",
+            "trend_evaluable",
+        ):
             if optional_key in fact:
                 records[-1][optional_key] = fact[optional_key]
     return {
@@ -228,7 +235,7 @@ def test_metric_fact_renders_name_unit_and_flat_trend():
     facts = result["aiops-case-09/workload"]["metrics"]["facts"]
 
     assert facts[0]["value"] == "0"
-    assert facts[0]["display_value"] == "kube_pod_container_status_restarts_total=0 count（持平）"
+    assert facts[0]["display_value"] == "kube_pod_container_status_restarts_total=0 count"
 
 
 def test_metric_fact_humanizes_bytes_and_shows_rising_trend():
@@ -243,9 +250,11 @@ def test_metric_fact_humanizes_bytes_and_shows_rising_trend():
                 "source_system": "prometheus",
                 "fact_type": "measurement",
                 "name": "container_memory_working_set_bytes",
-                "value": "15421440",
-                "unit": "bytes",
-                "stats": {"first": 10485760.0, "min": 10485760.0, "max": 15421440.0, "last": 15421440.0},
+                    "value": "15421440",
+                    "unit": "bytes",
+                    "sample_count": 2,
+                    "trend_evaluable": True,
+                    "stats": {"first": 10485760.0, "min": 10485760.0, "max": 15421440.0, "last": 15421440.0},
                 "evidence_refs": ["metric-ref-memory"],
             }],
         ),

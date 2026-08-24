@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time
+from collections import defaultdict
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -31,7 +32,6 @@ from app.core.workflow.schemas import QueryConclusionOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
 from app.core.prompts import (
-    REMEDIATION_PLAN_PROMPT,
     get_conclusion_mode_instruction,
     get_workflow_prompt,
 )
@@ -116,25 +116,20 @@ class ConclusionFormatterNode(WorkflowNode):
             elif layer == Layer.QUERY and self._get_query_mode() == "direct" and query_result:
                 conclusion = self._render_query_result(query_result)
             elif group_results:
-                # 多异常并发模式：LLM 读各组摘要写结论 + 代码确定性拼接真实数据
+                # N=1 与 N>1 使用同一份 canonical facts 和同一富文本合同。
                 conclusion = self._generate_multi_group_report(
                     question=question,
                     group_results=group_results,
                     conclusion_max_tokens=state.get("conclusion_max_tokens"),
                 )
             elif layer != Layer.QUERY:
-                authoritative_report = self._render_single_authoritative_report(
-                    question=question,
-                    state=state,
-                    rca_analysis=rca_analysis,
-                )
                 formal_rca = self._parse_formal_rca(rca_analysis)
-                conclusion = authoritative_report
-                if (
-                    self._formal_rca_is_valid(formal_rca)
-                    and getattr(self, "ai_call", None) is not None
-                ):
-                    supplemental = self._generate_with_llm(
+                can_use_report_agent = (
+                    getattr(self, "ai_call", None) is not None
+                    and self._formal_rca_is_valid(formal_rca)
+                )
+                if can_use_report_agent:
+                    conclusion = self._generate_with_llm(
                         question=question,
                         layer_analysis=layer_analysis,
                         evidence_analysis=evidence_analysis,
@@ -146,32 +141,12 @@ class ConclusionFormatterNode(WorkflowNode):
                         ),
                         query_result=query_result,
                     )
-                    if supplemental.strip():
-                        conclusion += (
-                            "\n\n---\n\n## 补充说明与修复建议（非事实权威）\n\n"
-                            + supplemental.strip()
-                        )
-                elif (
-                    not formal_rca
-                    and getattr(self, "ai_call", None) is not None
-                ):
-                    supplemental = self._generate_with_llm(
+                else:
+                    conclusion = self._render_single_authoritative_report(
                         question=question,
-                        layer_analysis=layer_analysis,
-                        evidence_analysis=evidence_analysis,
+                        state=state,
                         rca_analysis=rca_analysis,
-                        conclusion_max_tokens=state.get("conclusion_max_tokens"),
-                        layer=layer,
-                        tool_data_text=self._build_tool_data_section(
-                            thinking_events
-                        ),
-                        query_result=query_result,
                     )
-                    plan_only = self._render_structured_remediation_only(
-                        supplemental
-                    )
-                    if plan_only:
-                        conclusion += "\n\n---\n\n" + plan_only
             elif getattr(self, "ai_call", None) is not None:
                 tool_data_text = self._build_tool_data_section(thinking_events)
                 conclusion = self._generate_with_llm(
@@ -476,19 +451,6 @@ class ConclusionFormatterNode(WorkflowNode):
             return text[:_SECTION_CHAR_LIMITS["evidence"]]
 
         lines: List[str] = []
-        plan_total = data.get("plan_total")
-        plan_collected = data.get("plan_collected")
-        completeness = data.get("plan_completeness")
-        if plan_total is not None:
-            pct = f"{float(completeness or 0):.0%}"
-            lines.append(f"- 采集完成度: {plan_collected}/{plan_total} ({pct})")
-        sufficiency = data.get("diagnostic_sufficiency_label") or ""
-        if sufficiency:
-            lines.append(f"- 诊断充分度: {sufficiency}")
-        summary = (data.get("collection_summary") or "").strip()
-        if summary:
-            lines.append(f"- 采集总结: {summary}")
-
         inventory = data.get("evidence_inventory") or []
         if inventory:
             lines.append("- 已采集证据清单:")
@@ -535,16 +497,6 @@ class ConclusionFormatterNode(WorkflowNode):
         root_cause = (data.get("root_cause") or "").strip()
         if root_cause:
             lines.append(f"- 根因结论: {root_cause}")
-        confidence = data.get("confidence")
-        if confidence is not None:
-            try:
-                lines.append(f"- 置信度: {float(confidence):.0%}")
-            except (TypeError, ValueError):
-                pass
-        reason = (data.get("confidence_reason") or "").strip()
-        if reason:
-            lines.append(f"- 置信依据: {reason[:300]}")
-
         causal_chain = data.get("causal_chain") or {}
         if isinstance(causal_chain, dict) and causal_chain:
             lines.append("- 因果链:")
@@ -582,11 +534,34 @@ class ConclusionFormatterNode(WorkflowNode):
     @classmethod
     def _formal_rca_is_valid(cls, rca: Mapping[str, Any]) -> bool:
         claim = rca.get("claim_validation")
+        validation_disabled = (
+            isinstance(claim, dict) and claim.get("enabled") is False
+        )
+        if validation_disabled:
+            return (
+                str(rca.get("diagnostic_status") or "") == "diagnosed"
+                and bool(
+                    str(
+                        rca.get("root_cause_summary")
+                        or rca.get("root_cause")
+                        or ""
+                    ).strip()
+                )
+            )
+        if not isinstance(claim, dict):
+            return False
+        publishable = claim.get(
+            "diagnosis_publishable",
+            claim.get("diagnosis_supported"),
+        )
+        if publishable is None:
+            publishable = (
+                claim.get("valid") is True
+                and bool(rca.get("supporting_fact_ids"))
+            )
         return (
             str(rca.get("diagnostic_status") or "") == "diagnosed"
-            and isinstance(claim, dict)
-            and claim.get("valid") is True
-            and bool(rca.get("supporting_fact_ids"))
+            and publishable is True
         )
 
     @classmethod
@@ -782,6 +757,26 @@ class ConclusionFormatterNode(WorkflowNode):
         wf_config = getattr(self, "workflow_config_override", None) or {}
         return str(wf_config.get("query_mode", "full")).strip().lower() or "full"
 
+    def _get_conclusion_config(self) -> Dict[str, Any]:
+        workflow_config = self._get_workflow_config()
+        if not isinstance(workflow_config, dict):
+            return {}
+        conclusion_config = workflow_config.get("conclusion")
+        return conclusion_config if isinstance(conclusion_config, dict) else {}
+
+    def _get_conclusion_presentation_mode(self) -> str:
+        """Use the report agent by default; deterministic cards are opt-in only."""
+        mode = str(
+            self._get_conclusion_config().get("presentation_mode") or "agent"
+        ).strip().lower()
+        return mode if mode in {"agent", "deterministic"} else "agent"
+
+    def _include_raw_evidence_appendix(self) -> bool:
+        """Raw tool output remains archived and is not duplicated in reports by default."""
+        return bool(
+            self._get_conclusion_config().get("include_raw_evidence_appendix", False)
+        )
+
     def _resolve_conclusion_max_tokens(
         self,
         *,
@@ -860,14 +855,9 @@ class ConclusionFormatterNode(WorkflowNode):
         rca_summary = self._build_rca_summary(rca_analysis)
         tool_section = tool_data_text[:_SECTION_CHAR_LIMITS["tool_data"]]
 
-        instruction = f"""# 指令
-请基于以上三个阶段的分析结果和工具真实数据，严格按照 system prompt 中的报告模板生成最终诊断报告。
-
-⚠️ 最重要的规则：用户的原始问题是「{question}」，报告必须首先回答这个问题。
-- 如果用户问的是数据/指标（如 CPU、内存、磁盘），报告开头先用表格展示查到的实际数据，再展开诊断
-- 证据链表格的「原始数据」列必须摘自「工具采集的真实数据」段落，禁止编造
-
-{REMEDIATION_PLAN_PROMPT}"""
+        instruction = f"""# 任务
+用户的原始问题是「{question}」。只按 system prompt 中唯一的报告结构组织输入事实；
+证据表的“真实原始结果”必须摘自工具数据，不输出修复建议或验证步骤。"""
 
         system_prompt_text = self._get_conclusion_prompt()
 
@@ -1024,37 +1014,851 @@ class ConclusionFormatterNode(WorkflowNode):
         group_results: List[Dict[str, Any]],
         conclusion_max_tokens: Optional[int] = None,
     ) -> str:
-        """Fan in validated group diagnoses without a second RCA authority."""
-        del conclusion_max_tokens  # Multi-group output is deterministic and token-independent.
+        """Let the report agent explain canonical group facts in human language.
+
+        Root causes and facts remain authoritative structured inputs.  The
+        conclusion model controls only presentation: evidence selection,
+        wording, cross-dimension correlation, and Markdown layout.
+        """
         group_results = self._project_formal_group_authority(group_results)
+
+        if self._get_conclusion_presentation_mode() == "agent":
+            try:
+                report = self._generate_multi_group_report_with_agent(
+                    question=question,
+                    group_results=group_results,
+                    conclusion_max_tokens=conclusion_max_tokens,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "[conclusion] multi-group report agent failed; using minimal fallback: %s",
+                    exc,
+                )
+                report = ""
+            if report.strip():
+                return report.strip()
+
+        return self._generate_multi_group_deterministic_fallback(
+            question=question,
+            group_results=group_results,
+        )
+
+    @staticmethod
+    def _parse_json_object(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        if not isinstance(value, str) or not value.strip():
+            return {}
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _canonical_fact_for_report_agent(fact: Mapping[str, Any]) -> Dict[str, Any]:
+        """Forward raw fact semantics without generating presentation prose."""
+        raw_value = fact.get("value")
+        if isinstance(raw_value, str):
+            stripped = raw_value.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    raw_value = json.loads(stripped)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+
+        payload: Dict[str, Any] = {}
+        for key in (
+            "fact_id",
+            "dimension",
+            "fact_type",
+            "attribute",
+            "source_system",
+            "timestamp",
+            "unit",
+            "evidence_role",
+        ):
+            value = fact.get(key)
+            if value not in (None, "", [], {}):
+                payload[key] = value
+        payload["value"] = raw_value
+
+        metadata = fact.get("metadata") if isinstance(fact.get("metadata"), Mapping) else {}
+        report_metadata = {
+            key: metadata[key]
+            for key in (
+                "labels",
+                "stats",
+                "sample_count",
+                "trend_evaluable",
+                "pattern_count",
+                "pattern_exemplar",
+                "trace_id",
+                "span_id",
+            )
+            if metadata.get(key) not in (None, "", [], {})
+        }
+        if report_metadata:
+            payload["metadata"] = report_metadata
+        return payload
+
+    @staticmethod
+    def _json_signature(value: Any) -> str:
+        """Return a stable signature for structural grouping only."""
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return str(value)
+
+    @staticmethod
+    def _numeric_value(value: Any) -> Optional[float]:
+        if isinstance(value, bool):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _ordered_unique(values: List[Any], *, limit: Optional[int] = None) -> List[Any]:
+        result: List[Any] = []
+        seen = set()
+        for value in values:
+            if value in (None, ""):
+                continue
+            signature = str(value)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            result.append(value)
+            if limit is not None and len(result) >= limit:
+                break
+        return result
+
+    @classmethod
+    def _deduplicate_report_facts(
+        cls,
+        facts: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Collapse exact semantic duplicates without choosing report evidence."""
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for fact in facts:
+            semantic = {
+                key: value
+                for key, value in fact.items()
+                if key not in {"fact_id", "timestamp"}
+            }
+            buckets[cls._json_signature(semantic)].append(fact)
+
+        compacted: List[Dict[str, Any]] = []
+        for bucket in buckets.values():
+            if len(bucket) == 1:
+                compacted.append(bucket[0])
+                continue
+            item = {
+                key: value
+                for key, value in bucket[0].items()
+                if key not in {"fact_id", "timestamp"}
+            }
+            item["aggregation"] = "exact_semantic_duplicates"
+            item["occurrence_count"] = len(bucket)
+            item["fact_ids"] = cls._ordered_unique(
+                [fact.get("fact_id") for fact in bucket]
+            )
+            timestamps = sorted(
+                str(fact.get("timestamp"))
+                for fact in bucket
+                if fact.get("timestamp") not in (None, "")
+            )
+            if timestamps:
+                item["time_range"] = {
+                    "first": timestamps[0],
+                    "last": timestamps[-1],
+                }
+            compacted.append(item)
+        return compacted
+
+    @classmethod
+    def _compact_metric_facts(
+        cls,
+        facts: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Keep metric semantics while removing repeated entity labels and zero siblings."""
+        redundant_labels = {
+            "__name__", "namespace", "pod", "uid", "instance", "job",
+            "endpoint", "prometheus", "prometheus_replica",
+        }
+        normalized: List[Dict[str, Any]] = []
+        for source in facts:
+            fact = dict(source)
+            metadata = dict(fact.get("metadata") or {})
+            labels = metadata.get("labels")
+            if isinstance(labels, Mapping):
+                labels = {
+                    key: value
+                    for key, value in labels.items()
+                    if key not in redundant_labels
+                }
+                if labels:
+                    metadata["labels"] = labels
+                else:
+                    metadata.pop("labels", None)
+
+            sample_count = cls._parse_positive_int(metadata.get("sample_count"))
+            if not metadata.get("trend_evaluable") and (sample_count or 0) <= 1:
+                # first=last=min=max on an instant sample is duplicate data, not a trend.
+                metadata.pop("stats", None)
+            if metadata:
+                fact["metadata"] = metadata
+            else:
+                fact.pop("metadata", None)
+            normalized.append(fact)
+
+        zero_buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        passthrough: List[Dict[str, Any]] = []
+        for fact in normalized:
+            numeric = cls._numeric_value(fact.get("value"))
+            if numeric != 0:
+                passthrough.append(fact)
+                continue
+            signature = cls._json_signature({
+                "source_system": fact.get("source_system"),
+                "fact_type": fact.get("fact_type"),
+                "attribute": fact.get("attribute"),
+                "unit": fact.get("unit"),
+                "evidence_role": fact.get("evidence_role"),
+            })
+            zero_buckets[signature].append(fact)
+
+        for bucket in zero_buckets.values():
+            if len(bucket) == 1:
+                passthrough.append(bucket[0])
+                continue
+            first = bucket[0]
+            grouped = {
+                key: first[key]
+                for key in (
+                    "source_system", "fact_type", "attribute", "unit", "evidence_role"
+                )
+                if first.get(key) not in (None, "")
+            }
+            grouped.update({
+                "aggregation": "zero_valued_series",
+                "value": 0,
+                "series_count": len(bucket),
+                "series_labels": [
+                    fact.get("metadata", {}).get("labels") or {}
+                    for fact in bucket
+                ],
+                "fact_ids": cls._ordered_unique(
+                    [fact.get("fact_id") for fact in bucket]
+                ),
+                "metadata": {
+                    "sample_count_per_series": [
+                        fact.get("metadata", {}).get("sample_count")
+                        for fact in bucket
+                    ],
+                    "trend_evaluable": False,
+                },
+            })
+            passthrough.append(grouped)
+        return cls._deduplicate_report_facts(passthrough)
+
+    @classmethod
+    def _compact_kubernetes_facts(
+        cls,
+        facts: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Group same-attribute Kubernetes records while retaining every value."""
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for fact in cls._deduplicate_report_facts(facts):
+            signature = cls._json_signature({
+                "source_system": fact.get("source_system"),
+                "fact_type": fact.get("fact_type"),
+                "attribute": fact.get("attribute"),
+                "evidence_role": fact.get("evidence_role"),
+            })
+            buckets[signature].append(fact)
+
+        compacted: List[Dict[str, Any]] = []
+        for bucket in buckets.values():
+            if len(bucket) == 1:
+                compacted.append(bucket[0])
+                continue
+            first = bucket[0]
+            compacted.append({
+                **{
+                    key: first[key]
+                    for key in (
+                        "source_system", "fact_type", "attribute", "evidence_role"
+                    )
+                    if first.get(key) not in (None, "")
+                },
+                "aggregation": "same_attribute_records",
+                "record_count": len(bucket),
+                "records": [
+                    {
+                        key: fact[key]
+                        for key in ("fact_id", "fact_ids", "timestamp", "value", "metadata")
+                        if fact.get(key) not in (None, "", [], {})
+                    }
+                    for fact in bucket
+                ],
+            })
+        return compacted
+
+    @classmethod
+    def _compact_log_facts(
+        cls,
+        facts: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Aggregate repeated structured log records without writing display prose."""
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        unstructured: List[Dict[str, Any]] = []
+        identity_keys = {
+            "timestamp", "trace_id", "span_id", "parent_span_id", "case_run_id",
+            "duration_ms", "duration_us", "pod",
+        }
+        status_keys = {
+            "http_status", "status", "status_code", "response_code", "exit_code", "code",
+        }
+
+        for fact in facts:
+            value = fact.get("value")
+            if not isinstance(value, Mapping):
+                unstructured.append(fact)
+                continue
+            pattern: Dict[str, Any] = {}
+            dynamic_numeric: Dict[str, Any] = {}
+            for key, item in value.items():
+                if key in identity_keys:
+                    continue
+                numeric = cls._numeric_value(item)
+                if numeric is not None and key not in status_keys:
+                    dynamic_numeric[key] = item
+                else:
+                    pattern[key] = item
+            signature = cls._json_signature({
+                "source_system": fact.get("source_system"),
+                "attribute": fact.get("attribute"),
+                "pattern": pattern,
+            })
+            buckets[signature].append({
+                "fact": fact,
+                "pattern": pattern,
+                "dynamic_numeric": dynamic_numeric,
+                "trace_id": value.get("trace_id")
+                or (fact.get("metadata") or {}).get("trace_id"),
+            })
+
+        compacted = cls._deduplicate_report_facts(unstructured)
+        for bucket in buckets.values():
+            bucket.sort(key=lambda item: str(item["fact"].get("timestamp") or ""))
+            first_fact = bucket[0]["fact"]
+            numeric_fields: Dict[str, Dict[str, Any]] = {}
+            numeric_keys = cls._ordered_unique([
+                key
+                for item in bucket
+                for key in item["dynamic_numeric"].keys()
+            ])
+            for key in numeric_keys:
+                ordered = [
+                    item["dynamic_numeric"].get(key)
+                    for item in bucket
+                    if cls._numeric_value(item["dynamic_numeric"].get(key)) is not None
+                ]
+                if not ordered:
+                    continue
+                numeric = [cls._numeric_value(value) for value in ordered]
+                numeric_fields[key] = {
+                    "first": ordered[0],
+                    "last": ordered[-1],
+                    "min": min(numeric),
+                    "max": max(numeric),
+                }
+            timestamps = [
+                str(item["fact"].get("timestamp"))
+                for item in bucket
+                if item["fact"].get("timestamp") not in (None, "")
+            ]
+            aggregated: Dict[str, Any] = {
+                "aggregation": "repeated_log_pattern",
+                "source_system": first_fact.get("source_system"),
+                "fact_type": first_fact.get("fact_type"),
+                "attribute": first_fact.get("attribute"),
+                "pattern": bucket[0]["pattern"],
+                "occurrence_count": len(bucket),
+                "fact_ids": cls._ordered_unique(
+                    [item["fact"].get("fact_id") for item in bucket]
+                ),
+                "trace_ids": cls._ordered_unique(
+                    [item.get("trace_id") for item in bucket], limit=12
+                ),
+            }
+            if timestamps:
+                aggregated["time_range"] = {
+                    "first": timestamps[0],
+                    "last": timestamps[-1],
+                }
+            if numeric_fields:
+                aggregated["numeric_fields"] = numeric_fields
+            compacted.append({
+                key: value
+                for key, value in aggregated.items()
+                if value not in (None, "", [], {})
+            })
+        return compacted
+
+    @classmethod
+    def _compact_tracing_facts(
+        cls,
+        facts: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Aggregate equivalent network flows; preserve application spans separately."""
+        flow_buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        spans_and_other: List[Dict[str, Any]] = []
+        for fact in facts:
+            value = fact.get("value")
+            is_flow = (
+                str(fact.get("fact_type") or "").lower() == "flow"
+                or str(fact.get("attribute") or "").lower() == "l7_flow"
+            )
+            if not is_flow or not isinstance(value, Mapping):
+                spans_and_other.append(fact)
+                continue
+            pattern = {
+                key: value.get(key)
+                for key in (
+                    "protocol", "request_type", "request_resource", "response_code",
+                    "response_status", "src_ip", "dst_ip",
+                )
+                if value.get(key) not in (None, "")
+            }
+            signature = cls._json_signature({
+                "source_system": fact.get("source_system"),
+                "attribute": fact.get("attribute"),
+                "pattern": pattern,
+            })
+            flow_buckets[signature].append({"fact": fact, "pattern": pattern})
+
+        compacted = cls._deduplicate_report_facts(spans_and_other)
+        for bucket in flow_buckets.values():
+            bucket.sort(key=lambda item: str(item["fact"].get("timestamp") or ""))
+            first_fact = bucket[0]["fact"]
+            durations = []
+            for item in bucket:
+                duration = cls._numeric_value(item["fact"].get("value", {}).get("duration_us"))
+                if duration is not None:
+                    durations.append(duration)
+            timestamps = [
+                str(item["fact"].get("timestamp"))
+                for item in bucket
+                if item["fact"].get("timestamp") not in (None, "")
+            ]
+            trace_ids = cls._ordered_unique([
+                item["fact"].get("value", {}).get("trace_id")
+                or (item["fact"].get("metadata") or {}).get("trace_id")
+                for item in bucket
+            ], limit=12)
+            aggregated: Dict[str, Any] = {
+                "aggregation": "equivalent_l7_flows",
+                "source_system": first_fact.get("source_system"),
+                "fact_type": "flow",
+                "attribute": first_fact.get("attribute"),
+                "flow": bucket[0]["pattern"],
+                "occurrence_count": len(bucket),
+                "fact_ids": cls._ordered_unique(
+                    [item["fact"].get("fact_id") for item in bucket]
+                ),
+                "trace_ids": trace_ids,
+            }
+            if timestamps:
+                aggregated["time_range"] = {
+                    "first": timestamps[0],
+                    "last": timestamps[-1],
+                }
+            if durations:
+                aggregated["duration_us"] = {
+                    "min": min(durations),
+                    "max": max(durations),
+                }
+            compacted.append({
+                key: value
+                for key, value in aggregated.items()
+                if value not in (None, "", [], {})
+            })
+        return compacted
+
+    @classmethod
+    def _compact_facts_for_report_agent(
+        cls,
+        dimension: str,
+        facts: List[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        canonical = [cls._canonical_fact_for_report_agent(fact) for fact in facts]
+        if dimension == "metrics":
+            return cls._compact_metric_facts(canonical)
+        if dimension == "logging":
+            return cls._compact_log_facts(canonical)
+        if dimension == "tracing":
+            return cls._compact_tracing_facts(canonical)
+        if dimension == "kubernetes":
+            return cls._compact_kubernetes_facts(canonical)
+        return cls._deduplicate_report_facts(canonical)
+
+    @classmethod
+    def _failed_tool_attempts_for_report_agent(
+        cls,
+        events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        failures: List[Dict[str, Any]] = []
+        for event in events or []:
+            if not isinstance(event, dict) or event.get("type") != "tool_result":
+                continue
+            structured = event.get("structured") if isinstance(event.get("structured"), dict) else {}
+            coverage = str(structured.get("coverage") or "").strip().lower()
+            structured_status = str(structured.get("status") or "").strip().lower()
+            failed = (
+                event.get("status") != "success"
+                or coverage == "error"
+                or structured_status.endswith("failed")
+                or structured_status in {"tool_error", "query_parse_failed", "command_failed"}
+            )
+            if not failed:
+                continue
+            failure = {
+                "tool": event.get("tool_name") or "unknown",
+                "status": structured.get("status") or event.get("status") or "error",
+                "coverage": structured.get("coverage") or "error",
+                "arguments": event.get("tool_args") or {},
+            }
+            detail = (
+                structured.get("raw_preview")
+                or structured.get("error")
+                or event.get("error")
+                or event.get("result_preview")
+                or event.get("result")
+            )
+            if detail not in (None, ""):
+                failure["detail"] = str(detail)[:1000]
+            failures.append(failure)
+
+        # Retries often repeat the same backend error. Preserve retry count and
+        # purposes, rather than spending report context on duplicate payloads.
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for failure in failures:
+            signature = cls._json_signature({
+                "tool": failure.get("tool"),
+                "status": failure.get("status"),
+                "coverage": failure.get("coverage"),
+                "detail": failure.get("detail"),
+            })
+            buckets[signature].append(failure)
+        compacted: List[Dict[str, Any]] = []
+        for bucket in buckets.values():
+            item = dict(bucket[0])
+            if len(bucket) > 1:
+                item["attempt_count"] = len(bucket)
+                item["arguments"] = [
+                    failure.get("arguments") or {}
+                    for failure in bucket
+                ]
+            compacted.append(item)
+        return compacted
+
+    @classmethod
+    def _build_multi_group_report_context(
+        cls,
+        question: str,
+        group_results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build an evidence-rich, presentation-neutral report contract.
+
+        The snapshot's RCA input manifest is independent from the RCA model's
+        optional supporting_fact_ids.  It bounds context while preserving all
+        facts that were already made available to root-cause analysis.
+        """
+        groups: List[Dict[str, Any]] = []
+        for group in group_results:
+            snapshot = (
+                group.get("entity_evidence_snapshot")
+                if isinstance(group.get("entity_evidence_snapshot"), dict)
+                else {}
+            )
+            manifest = (
+                snapshot.get("selection_manifest")
+                if isinstance(snapshot.get("selection_manifest"), dict)
+                else {}
+            )
+            selected_ids = [
+                str(item)
+                for item in (manifest.get("rca_input_fact_ids") or [])
+                if str(item).strip()
+            ]
+            selected_set = set(selected_ids)
+            dimensions_by_entity = (
+                group.get("dimension_evidence_by_entity")
+                if isinstance(group.get("dimension_evidence_by_entity"), dict)
+                else {}
+            )
+
+            entities: List[Dict[str, Any]] = []
+            summaries = {
+                f"{item.get('namespace', '')}/{item.get('name', '')}": item
+                for item in (group.get("entity_summaries") or [])
+                if isinstance(item, dict)
+            }
+            authoritative_entities = [
+                item for item in (group.get("entities") or []) if isinstance(item, dict)
+            ]
+            entity_keys = list(dict.fromkeys([
+                *summaries.keys(),
+                *[
+                    f"{item.get('namespace', '')}/{item.get('name', '')}"
+                    for item in authoritative_entities
+                ],
+            ]))
+            for entity_key in entity_keys:
+                dimension_payload: Dict[str, Any] = {}
+                for dimension in ("kubernetes", "metrics", "logging", "tracing"):
+                    summary = (
+                        dimensions_by_entity.get(entity_key, {}).get(dimension, {})
+                        if isinstance(dimensions_by_entity.get(entity_key), dict)
+                        else {}
+                    )
+                    all_facts = [
+                        fact for fact in (summary.get("facts") or [])
+                        if isinstance(fact, dict)
+                    ]
+                    visible_facts = (
+                        [fact for fact in all_facts if str(fact.get("fact_id") or "") in selected_set]
+                        if selected_set
+                        else all_facts
+                    )
+                    compact_facts = cls._compact_facts_for_report_agent(
+                        dimension,
+                        visible_facts,
+                    )
+                    dimension_payload[dimension] = {
+                        "status": summary.get("status") or "unselected",
+                        "source_systems": summary.get("source_systems") or [],
+                        "limitations": summary.get("limitations") or [],
+                        "facts": compact_facts,
+                    }
+                raw_entity_summary = summaries.get(entity_key) or {}
+                entity_summary = {
+                    key: raw_entity_summary[key]
+                    for key in (
+                        "namespace", "name", "status", "diagnostic_status",
+                        "phenomenon", "unknowns", "limitations",
+                    )
+                    if raw_entity_summary.get(key) not in (None, "", [], {})
+                }
+                entities.append({
+                    "entity": entity_key,
+                    "diagnosis": entity_summary,
+                    "dimensions": dimension_payload,
+                })
+
+            evidence_analysis = cls._parse_json_object(group.get("evidence_analysis"))
+            collection = {
+                key: evidence_analysis[key]
+                for key in (
+                    "missing_reasons",
+                    "unresolved_questions",
+                )
+                if evidence_analysis.get(key) not in (None, "", [], {})
+            }
+            source_coverage = evidence_analysis.get("source_coverage")
+            if isinstance(source_coverage, dict):
+                query_buckets: Dict[str, Dict[str, Any]] = {}
+                for query in source_coverage.get("queries") or []:
+                    if not isinstance(query, dict):
+                        continue
+                    compact_query = {
+                        key: query[key]
+                        for key in (
+                            "tool",
+                            "source_system",
+                            "dimension",
+                            "coverage",
+                            "directness",
+                        )
+                        if query.get(key) not in (None, "", [], {})
+                    }
+                    signature = cls._json_signature(compact_query)
+                    if signature not in query_buckets:
+                        query_buckets[signature] = {
+                            **compact_query,
+                            "query_count": 0,
+                        }
+                    query_buckets[signature]["query_count"] += 1
+                compact_queries = list(query_buckets.values())
+                if compact_queries:
+                    collection["source_coverage"] = {"queries": compact_queries}
+            formal_rca = cls._parse_formal_rca(group.get("rca_analysis"))
+            formal_rca_payload = {
+                key: formal_rca[key]
+                for key in (
+                    "diagnostic_status",
+                    "root_cause",
+                    "causal_chain",
+                    "limitations",
+                    "unknowns",
+                )
+                if formal_rca.get(key) not in (None, "", [], {})
+            }
+            formal_rca_payload["supporting_fact_ids_hint"] = list(
+                formal_rca.get("supporting_fact_ids") or []
+            )
+            claim_validation = (
+                formal_rca.get("claim_validation")
+                if isinstance(formal_rca.get("claim_validation"), dict)
+                else {}
+            )
+            publication_value = claim_validation.get(
+                "diagnosis_publishable",
+                claim_validation.get("diagnosis_supported"),
+            )
+            if publication_value is None:
+                publication_value = (
+                    claim_validation.get("enabled") is False
+                    and formal_rca.get("diagnostic_status") == "diagnosed"
+                )
+            formal_rca_payload["publication"] = {
+                "diagnosis_publishable": bool(publication_value),
+                "reasons": list(claim_validation.get("reasons") or []),
+            }
+
+            groups.append({
+                "group_id": group.get("group_id") or "?",
+                "entities": entities,
+                "formal_rca": formal_rca_payload,
+                "collection": collection,
+                "failed_tool_attempts": cls._failed_tool_attempts_for_report_agent(
+                    group.get("thinking_events") or []
+                ),
+            })
+        return {
+            "contract_version": "aiops.conclusion-agent-context.v2",
+            "fact_encoding": {
+                "authority": "canonical normalized facts",
+                "aggregation": (
+                    "repeated logs and equivalent L7 flows may be structurally grouped; "
+                    "counts, time ranges, numeric ranges, trace_ids and fact_ids remain explicit"
+                ),
+                "trend_rule": (
+                    "metric trend is valid only when trend_evaluable=true and sample_count>=2"
+                ),
+            },
+            "question": question,
+            "group_count": len(groups),
+            "groups": groups,
+        }
+
+    def _generate_multi_group_report_with_agent(
+        self,
+        *,
+        question: str,
+        group_results: List[Dict[str, Any]],
+        conclusion_max_tokens: Optional[int],
+    ) -> str:
+        ai_call = getattr(self, "ai_call", None)
+        if ai_call is None:
+            raise RuntimeError("[conclusion] ai_call 未设置，无法生成多组富文本报告")
+
+        max_tokens = self._resolve_conclusion_max_tokens(
+            layer=Layer.ABNORMAL,
+            requested=conclusion_max_tokens,
+        )
+        context = self._build_multi_group_report_context(question, group_results)
+        context_json = json.dumps(context, ensure_ascii=False, default=str)
+        system_prompt = self._get_conclusion_prompt()
+        user_message = f"""# 用户问题
+{question}
+
+# 结构化诊断与真实事实
+下面 JSON 是本轮报告的唯一事实来源。普通 fact 的 `value` 以及聚合 fact 的 `pattern/flow/records/numeric_fields`、labels、stats、timestamp、trace_ids 均来自原始规范化事实；聚合只合并重复记录，不改变事实含义。不要复述 JSON 结构，要把它组织成人类可读的诊断报告。
+
+{context_json}
+
+# 任务
+严格使用 system prompt 中唯一的富文本结构；覆盖全部异常组，由你选择并组织高价值真实证据。
+"""
+        estimated_tokens = self._estimate_tokens(system_prompt + user_message)
+        input_budget = self._resolve_context_token_budget(output_reserved=max_tokens)
+        logger.info(
+            "📦 [conclusion] multi-group semantic context | estimated=%d budget=%d groups=%d",
+            estimated_tokens,
+            input_budget,
+            len(group_results),
+        )
+        if estimated_tokens > input_budget:
+            logger.warning(
+                "[conclusion] semantic report context exceeds model input budget "
+                "(estimated=%d budget=%d); preserving group facts without blind truncation",
+                estimated_tokens,
+                input_budget,
+            )
+        self._archive_node_input({
+            "node": self.node_id,
+            "question": question,
+            "user_message": user_message,
+            "system_prompt_chars": len(system_prompt),
+            "user_message_chars": len(user_message),
+            "max_tokens": max_tokens,
+            "structured_method": "unified_agent_markdown",
+            "report_context_contract": context["contract_version"],
+            "estimated_input_tokens": estimated_tokens,
+            "input_token_budget": input_budget,
+        })
+        start_time = time.time()
+        content = ai_call.call_simple(
+            system_prompt=system_prompt,
+            question=user_message,
+            max_tokens=max_tokens,
+        )
+        if self.metrics:
+            self.metrics.record_llm_call(
+                "conclusion",
+                (time.time() - start_time) * 1000,
+            )
+        return self._strip_think_blocks(content or "")
+
+    def _generate_multi_group_deterministic_fallback(
+        self,
+        *,
+        question: str,
+        group_results: List[Dict[str, Any]],
+    ) -> str:
+        """Minimal availability fallback; rich deterministic cards are opt-in."""
         narrative = self._format_multi_group_fallback(question, group_results)
+        if self._get_conclusion_presentation_mode() != "deterministic":
+            return narrative
 
         # ---- 代码确定性部分：可读实体卡片 + 折叠逐工具原始证据 ----
         entity_cards = self._render_multi_group_entity_cards(group_results)
-        evidence_sections = ["## 🔎 逐工具原始证据与归档"]
-        for r in group_results:
-            gid = r.get("group_id", "?")
-            entities = ", ".join(
-                f"{e.get('namespace', '')}/{e.get('name', '')}"
-                for e in (r.get("entities") or []) if isinstance(e, dict)
-            )
-            title = f"组 {gid}: {entities} — {r.get('pod_abnormal_type') or '/'.join(r.get('status_keywords') or [])}"
-            evidence_sections.append(f"\n<details>\n<summary>{title} · 逐工具原始证据</summary>\n")
-            events = r.get("thinking_events") or []
-            rendered = self._build_tool_data_section(events) if events else ""
-            if rendered:
-                evidence_sections.append(rendered)
-            else:
-                evidence_sections.append("（该组无已归档的工具真实数据）")
-            archive_ref = r.get("archive_run_id")
-            if archive_ref:
-                evidence_sections.append(f"*完整归档: context_archives/{archive_ref}*")
-            evidence_sections.append("</details>")
-
         sections = [narrative.rstrip()]
         if entity_cards:
             sections.extend(["---", entity_cards])
-        sections.extend(["---", "\n".join(evidence_sections)])
+        if self._include_raw_evidence_appendix():
+            evidence_sections = ["## 🔎 逐工具原始证据与归档"]
+            for r in group_results:
+                gid = r.get("group_id", "?")
+                entities = ", ".join(
+                    f"{e.get('namespace', '')}/{e.get('name', '')}"
+                    for e in (r.get("entities") or []) if isinstance(e, dict)
+                )
+                title = f"组 {gid}: {entities} — {r.get('pod_abnormal_type') or '/'.join(r.get('status_keywords') or [])}"
+                evidence_sections.append(f"\n<details>\n<summary>{title} · 逐工具原始证据</summary>\n")
+                events = r.get("thinking_events") or []
+                rendered = self._build_tool_data_section(events) if events else ""
+                evidence_sections.append(rendered or "（该组无已归档的工具真实数据）")
+                archive_ref = r.get("archive_run_id")
+                if archive_ref:
+                    evidence_sections.append(f"*完整归档: context_archives/{archive_ref}*")
+                evidence_sections.append("</details>")
+            sections.extend(["---", "\n".join(evidence_sections)])
         return "\n\n".join(sections)
 
     @classmethod

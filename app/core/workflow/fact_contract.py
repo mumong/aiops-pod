@@ -2038,8 +2038,13 @@ def build_kubernetes_lifecycle_fact_ledger(
                     )
                 ):
                     continue
-                event_type = ""
-                reason = ""
+                event_row = re.match(
+                    r"^(Normal|Warning)\s+(\S+)\s+.+$",
+                    text,
+                    flags=re.IGNORECASE,
+                )
+                event_type = event_row.group(1) if event_row else ""
+                reason = event_row.group(2) if event_row else ""
                 message = text[:2048]
                 source = ""
                 timestamp = None
@@ -3751,6 +3756,8 @@ def validate_rca_claims(
     if parsed.diagnostic_status == "diagnosed":
         if not valid_supporting:
             downgrade_reasons.append("no valid supporting facts remain")
+        if not parsed.causal_chain:
+            downgrade_reasons.append("no evidence-bound causal chain was provided")
         for entity_id in required_entities:
             if entity_id not in supported_entities:
                 downgrade_reasons.append(
@@ -3770,11 +3777,21 @@ def validate_rca_claims(
     # 早期版本在此对 limitations/trace-gap 措辞做正则重写（过度设计，已移除）：
     # RCA 的 limitations 保持 LLM 原文，可信度由 fact-id 校验保证。
 
+    rejected_claim: dict[str, Any] = {}
     if should_downgrade:
-        generic_summary = "Current facts are insufficient for a validated root-cause conclusion"
+        rejected_claim = {
+            "phenomenon": result.get("phenomenon"),
+            "root_cause": result.get("root_cause"),
+            "root_cause_summary": result.get("root_cause_summary"),
+            "causal_chain": deepcopy(result.get("causal_chain") or {}),
+            "confidence": result.get("confidence"),
+            "confidence_reason": result.get("confidence_reason"),
+        }
+        generic_summary = "现有事实不足以发布经过校验的根因结论"
         result["diagnostic_status"] = "inconclusive"
         result["root_cause"] = generic_summary
         result["root_cause_summary"] = generic_summary
+        result["causal_chain"] = {}
         result["confidence"] = min(float(result.get("confidence") or 0.0), 0.49)
         result["confidence_reason"] = "; ".join(reasons)
         _append_unique(result["unknowns"], reasons)
@@ -3811,6 +3828,10 @@ def validate_rca_claims(
         "valid_contradicting_fact_ids": valid_contradicting,
         "invalid_fact_ids": invalid_fact_ids,
         "reasons": reasons,
+        # Preserve the model-authored claim for audit without publishing it as
+        # the formal root cause. Phenomenon, evidence analysis and raw model
+        # text remain in their original top-level fields.
+        "rejected_claim": rejected_claim,
         "model_entity_overrides": model_entity_overrides,
         "supporting_fact_promotions": supporting_fact_promotions,
         "legacy_contract": any(ledger.legacy_contract for ledger in normalized_ledgers),

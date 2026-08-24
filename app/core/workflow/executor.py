@@ -621,15 +621,10 @@ class WorkflowExecutor:
             # 完成指标记录
             metrics.finish()
             
-            # 构建最终答案（包含性能统计）
+            # 最终报告只保留 Conclusion 的诊断内容。性能与调用统计仍在
+            # metrics/event 中提供，不再追加到面向用户的根因报告。
             conclusion = final_state.get("conclusion_formatted") or final_state.get("conclusion") or ""
-            
-            # 添加性能统计和指标到报告末尾
-            stats_block = metrics.format_stats_block()
-            from app.core.workflow.metrics import METRICS_ENABLED
-            metrics_block = metrics.format_metrics_block(enabled=METRICS_ENABLED)
-
-            full_answer = f"{conclusion}\n{stats_block}\n{metrics_block}"
+            full_answer = conclusion
 
             # 保存诊断报告到 reports/ 目录
             layer = final_state.get("layer")

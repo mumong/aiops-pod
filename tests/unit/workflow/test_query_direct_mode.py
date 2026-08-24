@@ -154,8 +154,7 @@ def test_diagnosis_without_formal_rca_does_not_publish_plain_markdown_claim():
         "rca_analysis": "{}",
     })
 
-    assert node.ai_call.simple_calls[0]["max_tokens"] == 4096
-    assert "CONCLUSION_FORMATTER_PROMPT" not in node.ai_call.simple_calls[0]["system_prompt"]
+    assert node.ai_call.simple_calls == []
     assert node.ai_call.structured_calls == []
     assert "diagnostic_status: inconclusive" in result["conclusion"]
     assert "ImagePullBackOff" not in result["conclusion"]

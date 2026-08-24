@@ -492,6 +492,105 @@ def test_rca_lite_does_not_call_llm_twice_when_structured_validation_fails():
     assert "不符合 RCA 结构化输出合同" in result["confidence_reason"]
 
 
+def test_rca_lite_tolerant_mode_preserves_core_when_optional_item_types_drift():
+    node = RootCauseAnalyzerNode()
+    node.ai_call = object()
+    node.workflow_config_override = {
+        "rca_structured_output": {"mode": "tolerant"},
+    }
+    raw = json.dumps({
+        "diagnostic_status": "diagnosed",
+        "phenomenon": "Pod repeatedly restarts",
+        "root_cause": "64Mi memory limit is exceeded, causing OOMKilled/exit 137",
+        "confidence": 0.95,
+        "confidence_reason": "OOMKilled, exit 137 and the 64Mi limit agree",
+        "evidence_analysis": [
+            "fact-3032c71db879 proves OOMKilled",
+            "fact-0a844375e876 proves the memory limit is 64Mi",
+        ],
+        "supporting_fact_ids": [
+            "fact-3032c71db879",
+            "fact-0a844375e876",
+        ],
+    })
+
+    def _fake_call_structured_agent(*args, **kwargs):
+        return None, SimpleNamespace(result=raw), []
+
+    node._call_structured_agent = _fake_call_structured_agent
+
+    result, _events = node._analyze_with_llm_lite(
+        question="Why is the Pod restarting?",
+        layer=Layer.L3,
+        evidence_summary="# verified facts\nOOMKilled exit 137 limit 64Mi",
+    )
+
+    assert result["diagnostic_status"] == "diagnosed"
+    assert result["root_cause"] == (
+        "64Mi memory limit is exceeded, causing OOMKilled/exit 137"
+    )
+    assert result["structured_quality"] == "partial"
+    assert result["structured_output_mode"] == "tolerant"
+    assert result["evidence_analysis"] == [
+        {
+            "relevance": "fact-3032c71db879 proves OOMKilled",
+            "role": "supporting_context",
+            "fact_id": "fact-3032c71db879",
+        },
+        {
+            "relevance": "fact-0a844375e876 proves the memory limit is 64Mi",
+            "role": "supporting_context",
+            "fact_id": "fact-0a844375e876",
+        },
+    ]
+    assert any(
+        warning.startswith("evidence_analysis.0: string item normalized")
+        for warning in result["parse_warnings"]
+    )
+    assert raw in result["llm_raw_analysis"]
+
+
+def test_rca_lite_strict_mode_keeps_all_or_nothing_fallback():
+    node = RootCauseAnalyzerNode()
+    node.ai_call = object()
+    node.workflow_config_override = {
+        "rca_structured_output": {"mode": "strict"},
+    }
+    raw = json.dumps({
+        "root_cause": "OOMKilled after exceeding 64Mi",
+        "confidence": 0.95,
+        "confidence_reason": "fact-backed",
+        "evidence_analysis": ["fact-3032c71db879 proves OOMKilled"],
+    })
+
+    node._call_structured_agent = lambda *args, **kwargs: (
+        None,
+        SimpleNamespace(result=raw),
+        [],
+    )
+
+    result, _events = node._analyze_with_llm_lite(
+        question="Why is the Pod restarting?",
+        layer=Layer.L3,
+        evidence_summary="# verified facts\nOOMKilled exit 137 limit 64Mi",
+    )
+
+    assert result["diagnostic_status"] == "inconclusive"
+    assert result["confidence"] <= 0.2
+    assert "无法基于 LLM 输出确定根本原因" in result["root_cause"]
+
+
+def test_rca_structured_output_mode_supports_config_and_environment(monkeypatch):
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_structured_output": {"mode": "strict"},
+    }
+    assert node._get_rca_structured_output_mode() == "strict"
+
+    monkeypatch.setenv("AIOPS_WORKFLOW_RCA_STRUCTURED_OUTPUT_MODE", "tolerant")
+    assert node._get_rca_structured_output_mode() == "tolerant"
+
+
 def test_evidence_prompt_uses_layer_handoff_in_user_message_not_system_prompt(monkeypatch):
     node = EvidenceCollectorNode()
     node.workflow_config_override = {"evidence": {"agent_structured_output": False}}
@@ -692,7 +791,7 @@ def test_rca_summary_prefers_layer_handoff_over_full_layer_text():
 
     summary = node._build_rca_context(state)
 
-    assert "ImagePullBackOff x509" in summary
+    assert "ImagePullBackOff x509" not in summary
     assert "SHOULD_NOT_APPEAR" not in summary
 
 
@@ -803,6 +902,49 @@ def test_rca_handoff_keeps_thirty_abnormal_pod_identities_within_budget():
 
     assert len(compact_handoff) <= RCA_HANDOFF_MAX_CHARS
     assert parsed["abnormal_pod_entity_index"] == abnormal_pods
+
+
+def test_rca_handoff_excludes_runbook_and_layer_root_cause_priors():
+    rendered = RootCauseAnalyzerNode._compact_layer_handoff_for_rca({
+        "layer": "ABNORMAL",
+        "primary_problem": "model guessed a resource failure",
+        "pod_abnormal_type": "model-specific-cause",
+        "status_category": "model-category",
+        "possible_scenarios": [{
+            "scenario": "model candidate",
+            "probability": "High",
+        }],
+        "matched_runbooks": ["fault-specific-runbook.md"],
+        "abnormal_pods": [{
+            "namespace": "demo",
+            "name": "api",
+            "status": "Running",
+            "uid": "uid-api",
+        }],
+        "issue_groups": [{
+            "group_id": "g1",
+            "status_keywords": ["Running"],
+            "pod_abnormal_type": "model-specific-cause",
+            "possible_scenarios": ["model candidate"],
+            "entities": [{"kind": "Pod", "namespace": "demo", "name": "api"}],
+        }],
+    })
+    payload = json.loads(rendered)
+
+    assert payload["abnormal_pod_entity_index"][0]["name"] == "api"
+    assert payload["issue_groups"] == [{
+        "group_id": "g1",
+        "status_keywords": ["Running"],
+        "entities": [{"kind": "Pod", "namespace": "demo", "name": "api"}],
+    }]
+    for forbidden in (
+        "primary_problem",
+        "pod_abnormal_type",
+        "status_category",
+        "possible_scenarios",
+        "matched_runbooks",
+    ):
+        assert forbidden not in rendered
 
 
 def test_rca_handoff_rejects_identity_index_that_cannot_fit_budget():
@@ -1201,7 +1343,8 @@ def test_layer_handoff_builds_issue_groups_from_current_abnormal_pods():
     assert terminating_group["pod_abnormal_type"] == "TerminatingStuck"
     assert terminating_group["compatible_layers"] == []
     assert terminating_group["possible_scenarios"]
-    assert any("finalizer" in item["scenario"].lower() for item in terminating_group["possible_scenarios"])
+    assert terminating_group["possible_scenarios"][0]["probability"] == "未知"
+    assert "直接原因待验证" in terminating_group["possible_scenarios"][0]["scenario"]
     assert terminating_group["entities"] == [
         {"kind": "Pod", "namespace": "aiops-e2e", "name": "terminating-stuck"}
     ]
@@ -2661,6 +2804,9 @@ def test_rca_persisted_no_ledger_aiops_item_uses_one_representation():
 
 def test_rca_execute_validates_fact_references_before_handoff():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_validation": {"enabled": True}
+    }
     node.ai_call = object()
     node._save_thinking = lambda state, new_state, thinking_events: None
     entity_id = "k8s.pod:demo/api:uid-a"
@@ -2754,6 +2900,11 @@ def test_rca_derives_single_lane_authoritative_identity_from_ledgers():
             "supporting_fact_ids": [fact_record["fact_id"]],
             "confidence": 0.9,
         }],
+        "causal_chain": {
+            "trigger": "Evidence-backed candidate",
+            "mechanism": "Observed failure mechanism",
+            "manifestation": "Scoped entity is abnormal",
+        },
         "confidence": 0.9,
         "confidence_reason": "Direct source-backed fact",
     }
@@ -2844,6 +2995,11 @@ def test_rca_validation_preserves_cross_ledger_collision_diagnostics(
                 "confidence": 0.9,
             }
         ],
+        "causal_chain": {
+            "trigger": "Topology-backed candidate",
+            "mechanism": "Observed relationship",
+            "manifestation": "Scoped entity is abnormal",
+        },
         "confidence": 0.9,
         "confidence_reason": "Claimed support",
     }
@@ -2939,6 +3095,11 @@ def _validate_topology_record_through_rca(
                 "confidence": 0.9,
             }
         ],
+        "causal_chain": {
+            "trigger": "Topology-backed candidate",
+            "mechanism": "Observed relationship",
+            "manifestation": "Scoped entity is abnormal",
+        },
         "confidence": 0.9,
         "confidence_reason": "Claimed complete typed topology support",
     }

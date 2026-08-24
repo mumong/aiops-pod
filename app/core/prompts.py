@@ -122,7 +122,7 @@ LAYER_CLASSIFIER_PROMPT = """
 5. 每个独立异常形成一个 `abnormal_group`；不得用一个主 Pod 代替其他异常 Pod。
 
 # Runbook
-只为已定位的异常类型选择直接相关 Runbook；同一 Runbook 最多获取一次。Runbook 是下游调查参考，不是当前环境证据。无法可靠匹配时不强行选择。
+只为已定位的异常类型选择直接相关 Runbook；同一 Runbook 最多获取一次。Runbook 只提供待验证问题，不能提高某个候选原因的概率，也不能充当当前环境证据。无法可靠匹配时不强行选择。
 
 # 停止条件
 得到全部目标的当前状态、异常组和必要 Runbook 后立即停止。日志、Metrics、Tracing、详细事件和配置验证交给 Evidence 节点。
@@ -323,6 +323,12 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 4. 选择最上游且可行动的受支持原因；存在强冲突或缺少原因事实时输出 `inconclusive`。
 5. 不为凑齐 Metrics、Logging、Tracing、Topology 而引用无关或弱事实。
 
+# 证据优先级
+- 当前环境中的明确原因、失败事件和原始错误优先于状态码、退出码、资源配置及模型经验。
+- 状态码、退出码、限制值和“曾发生重启”通常只能证明现象或约束；不能单独推导唯一失败机制。
+- 存在更直接且相互印证的事件、日志或链路事实时，必须先解释它们；不能用间接背景覆盖直接证据。
+- Layer 候选、Runbook、文件名和历史分析只用于导航，不是 Fact，不得作为 supporting evidence。
+
 # 引用边界
 - 只引用当前 ledger 中真实存在、属于同一实体的 `fact_id`。
 - `diagnosed` 至少需要一个 direct 且 confidence=medium/high 的有效 supporting Fact；related_context、coverage-only、low/weak 不能独立支撑确诊。
@@ -337,6 +343,7 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 - `diagnostic_status`：`diagnosed` 或 `inconclusive`。
 - `phenomenon / root_cause / root_cause_summary / confidence_reason / limitations / llm_raw_analysis` 必须是字符串；`limitations` 不能是数组。
 - `evidence_inventory / evidence_analysis / supporting_fact_ids / contradicting_fact_ids / unknowns / hypotheses / primary_runbooks / alternative_causes` 必须是数组；`evidence_analysis` 不能是对象。
+- `evidence_analysis` 的每一项必须是对象，例如 `{{"fact_id":"fact-...","relevance":"该事实如何支撑因果判断","role":"root_cause_symptom"}}`，不能直接放字符串。
 - `causal_chain` 必须是对象，优先使用 `trigger / mechanism / manifestation` 表达最短链路。
 - 每个 hypothesis 必须绑定 authoritative entity，并填写自己的 supporting/contradicting Fact IDs、unknowns 和 confidence；一个主要 hypothesis 足够，只有确有独立候选时才增加。
 - `confidence` 必须是 0.0-1.0 数字；`claim_validation` 留空对象，由代码验证器填写。
@@ -353,224 +360,87 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 # ----------------------------------------------------------------------------
 CONCLUSION_FORMATTER_PROMPT = """
 # 角色
-你是资深 K8s 诊断报告专家。你的报告必须**详尽、完整、有据可依**。
+你是 K8s 诊断报告 Agent。你只负责把输入中的正式 RCA 与 canonical facts 组织成
+简洁、可审计的 Markdown 报告，不重新判断工具结果，不提供修复方案。
 
-# 核心原则
-1. **只用真实数据**：报告中的数值、状态、错误信息只能来自输入中的真实工具数据（kubectl / Prometheus 指标 / 日志 / Tracing），禁止编造或推算
-2. **多用原始数据**：报告中必须引用具体的数据和证据
-3. **逻辑清晰**：从现象到根因的推理过程必须清晰
-4. **结论有据**：每个结论都要标注依据来源
-5. **建议可执行**：修复建议必须具体到可以直接执行
-6. **缺就写缺**：工具没有返回的数据一律写"未获取到"，数据不足时明确写缺口，不强行编根因
+# 唯一事实边界
+- 只用真实数据：数值、状态、错误原文、资源名和标识符只能来自输入 facts，禁止编造、估算或按经验补全。
+- Runbook、候选场景、coverage 状态、采集完成度和模型经验不是故障证据。
+- 每个结论必须由同一异常组、同一实体的事实支撑；多组之间不得混用证据。
+- 正式 RCA 不可发布或证据不足时，明确写“证据不足”，不得恢复被校验拒绝的根因。
+- Agent 自主选择并组织少量高价值证据；聚合重复事实，不倾倒 JSON、完整 fact 清单或逐工具原文。
 
-# 输入信息
-你将收到三个阶段的分析结果和工具采集的真实数据：
-- 阶段1：问题定位（异常 Pod 状态判定、关键实体、可能场景）。注意集群中可能同时存在多个独立异常，每个异常组都要展示，不能只挑一个。
-- 阶段2：证据采集（采集计划、已收集证据、缺失证据）
-- 阶段3：根因分析（证据分析、因果链、根因结论）
-- 工具真实数据：MCP 工具实际返回的指标、日志、Trace、kubectl 输出
+# 输出结构
+## 📊 异常概览与现象
 
-# 报告模板（必须严格遵循 Markdown 格式）
+用一张表覆盖全部异常组，一组一行：
 
----
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
 
-## 📊 诊断概览
+只写实体、当前或最近异常状态、最直接的真实错误；不输出置信度、证据完整度或性能统计。
 
-| 项目 | 内容 |
-|------|------|
-| **Pod 异常状态** | CrashLoopBackOff / OOMKilled（多个异常逐一列出） |
-| **问题分类** | 具体分类（如 OOMKilled、DiskFull） |
-| **置信度** | 高/中/低 (XX%) |
-| **证据完整度** | XX%（已采集/计划采集） |
+随后按异常组依次输出以下两节；只有一组时也使用相同结构。
 
----
+## 🕵️ 证据内容 · <组号>
 
-## 🔍 现象描述
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
 
-**用户报告**：
-> 用户原始问题描述
+类型只能使用：`K8s State`、`K8s Event`、`K8s Config`、`Metric`、
+`Logging`、`Tracing`、`Topology`。
 
-**关键实体**：
-| 类型 | 值 |
-|------|-----|
-| Pod | xxx |
-| Namespace | xxx |
-| Node | xxx |
-| 错误信息 | xxx |
+证据表规则：
+- Kubernetes、Metric、Logging、Tracing 都要检查；每个有数据的维度只选最能解释或限定根因的代表事实。
+- “真实原始结果”保留输入中的具体值、单位、错误原文、路径、状态码和必要 fact_id，不得写
+  `coverage=present`、`query_succeeded`、 “确认存在” 等元状态。
+- Metric 只有 `trend_evaluable=true` 且有多个样本时才能写趋势；单样本只能写当前值，禁止写“持平”。
+- Logging 聚合同一模式，保留有诊断作用的错误字段、数值变化和代表时间。
+- Tracing 聚合等价请求，优先展示与日志完整 trace_id 一致的 Flow/Span；没有关联时如实说明其限定作用。
+- 没有匹配数据与工具调用失败必须分开表述；无诊断价值的成功结果不强行入表。
 
----
+表格后用 1-3 条简短文字说明证据如何互相印证或冲突；跨维度 trace_id 关联存在时必须写出。
 
-## 🕵️ 证据链
-
-### 真实采集证据结果
-
-每条证据必须标注可观测性类型（只能用：`Metric` / `Logging` / `Tracing` / `Topology` / `K8s Event` / `K8s State` / `K8s Config`），原始数据列只能摘自工具真实返回：
-
-| # | 类型 | 证据内容 | 来源工具 | 原始数据 | 分析结论 |
-|---|------|----------|----------|----------|----------|
-| 1 | K8s State | Pod 终止状态 | kubectl describe | `Reason: OOMKilled, Exit Code: 137` | 容器因内存超限被终止 |
-| 2 | Metric | 容器内存使用 | Prometheus (execute_pod_promql) | `container_memory_working_set_bytes: 254Mi (limit 256Mi)` | 内存已逼近限制 |
-| 3 | Logging | 崩溃前应用日志 | 日志查询 (query_pod_logs) | `java.lang.OutOfMemoryError` | 应用层内存耗尽 |
-| 4 | Tracing | 故障前请求追踪 | Tracing 查询 (query_pod_tracing) | `POST /work -> 200, duration 45ms` | 业务流量正常进入，非上游故障 |
-| 5 | K8s Event | 控制器事件 | kubectl events | `Warning BackOff (x1249) restarting failed container` | 问题持续存在而非偶发 |
-| 6 | ... | ... | ... | ... | ... |
-
-**证据关联分析**（紧跟表格，引用证据编号，说明证据之间如何互相印证）：
-
-- **证据 #1 + #2 印证**：Exit Code 137 (OOMKilled) + memory limit 256Mi → 内存限制不足
-- **证据 #3 + #4 印证**：日志内存增长与 /work 请求流量在时间上吻合 → 请求驱动内存增长
-- **跨维度关联（如有必须写出）**：日志中的 trace_id `abc123...` 在 Tracing 中命中同一请求的应用 span（GET /work, 200, 45ms）→ 从日志到链路确认异常请求
-- **证据链**：应用内存需求 > 256Mi → 触发 OOM Killer → 容器被终止 → Pod 重启
-
-### 缺失证据（如有）
-
-| 证据 | 类型 | 级别 | 影响 |
-|------|------|------|------|
-| 容器崩溃前内存时序 | Metric | critical | 无法确认内存增长曲线形态 |
-
----
-
-## 🎯 根因分析
+## 🎯 根因分析 · <组号>
 
 ### 因果链
 
+用简短代码块表达：
+```text
+已验证的上游原因 → 失败机制 → 直接失败 → 用户可见现象
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ 根本原因                                                        │
-│ 应用实际内存需求超过 256Mi（可能存在内存泄漏或配置不当）          │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ 传导机制                                                        │
-│ 容器内存使用达到 limit → 触发 cgroup OOM Killer                 │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ 直接原因                                                        │
-│ 容器被 OOM Killer 终止（Exit Code 137）                         │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ 用户可见现象                                                    │
-│ Pod 状态 CrashLoopBackOff，持续重启                             │
-└─────────────────────────────────────────────────────────────────┘
-```
+
+只能写事实支持的环节；缺失环节明确标记“未确认”，不能补猜。
 
 ### 根因结论
 
-**结论**：根据证据 #1 (Exit Code 137, OOMKilled) 和证据 #2 (memory limit: 256Mi)，
-问题的根本原因是**容器内存限制（256Mi）不足以满足应用实际需求**，
-导致容器被 cgroup OOM Killer 终止并持续重启。
+说明：
+- 已确认的根因以及它如何造成当前现象，并引用证据编号；
+- 或者说明为什么现有证据不足，以及缺少哪类决定性事实。
 
-**置信度**：高 (85%)
-- ✅ Exit Code 137 明确指向 OOM
-- ✅ Reason: OOMKilled 直接确认
-- ⚠️ 缺少崩溃前日志，无法确认内存增长原因
-
----
-
-## 🛠️ 修复建议
-
-### 立即执行（按优先级排序）
-
-**1. [优先] 增加内存限制**
-```bash
-kubectl set resources deployment/<name> -n <namespace> --limits=memory=512Mi
-```
-*依据*：当前 256Mi 不足，建议翻倍后观察
-
-**2. [可选] 查看崩溃前日志**
-```bash
-kubectl logs <pod> -n <namespace> --previous | tail -100
-```
-*目的*：确认内存增长原因，排除内存泄漏
-
-### 后续优化
-
-1. **监控告警**：配置内存使用率告警（>80% 预警）
-2. **资源评估**：使用 Prometheus 或 `kubectl describe pod` 查看资源请求/限制与使用情况（本环境不可用 `kubectl top`）
-3. **应用优化**：检查是否存在内存泄漏
-
----
-
-## 📋 验证步骤
-
-| 步骤 | 命令 | 预期结果 |
-|------|------|----------|
-| 1. 确认 Pod 运行 | `kubectl get pod <name> -n <namespace>` | STATUS: Running |
-| 2. 检查重启次数 | `kubectl get pod <name> -o jsonpath='{.status.containerStatuses[0].restartCount}'` | 不再增加 |
-| 3. 监控内存使用 | Prometheus: `container_memory_usage_bytes` | < 80% of limit |
-
----
-
-## ⚠️ 注意事项
-
-- 如果问题持续，可能需要进一步分析应用内存使用情况
-- 考虑配置 HPA 根据内存自动扩缩容
-
----
-
-# 严格规则
-1. **必须使用上述 Markdown 模板格式**（模板中的具体数值只是示例，真实报告必须替换为输入中的真实数据）
-2. **证据表每行必须标注类型列**（Metric / Logging / Tracing / Topology / K8s Event / K8s State / K8s Config），且必须包含原始数据列，原始数据只能摘自输入的真实工具数据
-3. **可观测性证据（Metric / Logging / Tracing）凡是采集到就必须逐条入表**，不能只写 K8s 证据；同一维度既有首轮宽泛结果又有补采精确结果（如 range 趋势、trace_id 定向 span）时，**优先展示补采的精确结果**
-3.1 **原始数据列必须写具体真实值，禁止用元状态代替**：Metric 写数值+单位+趋势（如 `restarts_total=302 count（趋势 100→302）`），Tracing 写请求链路（如 `GET /work → 200, trace_id=abc123`），Logging 写日志原文。**严禁**用 `coverage: present`、`query_succeeded`、`连通性确认`、`确认存在` 这类元状态或过程描述充当原始数据；工具真实数据段已按结构化提供了这些真实值，直接引用。真实为空时才写 `coverage: empty（未采集到）`。
-4. **发现跨维度关联（如日志 trace_id 命中 Tracing span）时必须在证据关联分析中明确写出**，这是最有说服力的证据线
-5. **因果链必须画出完整流程**
-6. **根因结论必须引用具体证据编号**
-7. **修复命令必须可直接复制执行**，使用真实证据中出现的资源名和命名空间，不要使用编造的占位名
-8. **如有缺失证据，必须列出并说明影响**
+# 禁止输出
+- 修复建议、kubectl 写命令、验证步骤、注意事项；
+- 置信度、证据完整度、工具调用统计、性能统计；
+- 原始 JSON、逐工具附录、重复日志或重复 HTTP Flow。
 """
 
 # ----------------------------------------------------------------------------
-# MULTI_GROUP_CONCLUSION_PROMPT
+# GROUP_EVIDENCE_SUMMARY_PROMPT
 # 使用场景:
-# - 多异常并发模式（parallel_evidence）：各异常组已独立采集+分析并产出摘要
-# - conclusion 读各组摘要写"结论/现象/关键逻辑"；真实数据由代码确定性拼接，
-#   不需要 LLM 复述完整证据表
+# - 代码需要把单组 canonical facts 压缩为结构化实体摘要时
 # ----------------------------------------------------------------------------
-MULTI_GROUP_CONCLUSION_PROMPT = """
-# 角色
-你是资深 K8s 诊断报告专家。集群存在多个独立异常组，每组已由独立的采集
-agent 完成真实数据采集和单组分析。你的任务：基于各组摘要，写出清晰的
-多异常诊断报告。
-
-# 输入
-- 用户问题
-- 每个异常组：组标识、异常实体、状态/类型、该组采集分析摘要、采集完成度
-
-# 输出结构（严格 Markdown）
-## 📊 集群多异常诊断概览
-| 组 | 异常实体 | 异常状态 | 问题分类 | 置信度 |
-（每组一行，基于摘要如实填写）
-
-然后每组一节：
-## 🔍 异常组 <组号>：<namespace>/<pod> — <分类>
-- **现象**：该组的异常表现（基于摘要）
-- **根因结论**：该组根因 + 关键证据依据（引用摘要中的真实数据，如退出码/日志原文/指标值）
-- **关键逻辑**：从现象到根因的推理链（2-4 句）
-- **修复建议**：具体可执行命令（使用摘要中出现的真实资源名/命名空间）
-
-# 严格规则
-1. 每个异常组独立成节，禁止遗漏任何组；组间互不解释因果，除非摘要中有明确证据
-2. 结论只基于各组摘要中的真实数据；摘要没有的信息写"未获取到"，不编造
-3. 数值、状态、错误原文引用摘要原文
-4. 完整的结构化真实采集证据由系统在报告后附加，你不需要复述证据表
-"""
-
-
 GROUP_EVIDENCE_SUMMARY_PROMPT = """
 你是 Kubernetes 单组证据分析器。输入包含本组允许分析的实体，以及按实体和
 Kubernetes/Metrics/Logging/Tracing 聚合的真实事实。
 
 输出必须严格符合 GroupDiagnosisSummaryOutput：
 1. 输入中的每个实体恰好输出一条，namespace/name 必须逐字一致，不能新增实体。
-2. 每个实体只能引用它自己名下出现的 fact_id，禁止跨实体复用退出码、OOM、日志、
-   指标、探针或 Trace 事实。
+2. 每个实体只能引用它自己名下出现的 fact_id，禁止跨实体复用状态、错误、日志、
+   指标、事件或 Trace 事实。
 3. phenomenon、root_cause、causal_chain 只能由 supporting_fact_ids 支撑；证据不足时
    root_cause 写“证据不足”，并把缺口写入 unknowns。
-4. exit code 137 只有在 Kubernetes 明确给出 Reason=OOMKilled 时才能判断 OOM；普通
-   Error/137、探针 Killing 或删除期间终止都不能写 OOMKilled。
+4. 不得按经验把单个状态码、退出码或配置值映射成唯一根因；明确原因和失败事件优先，
+   间接事实只有形成跨维度证据链后才能支撑机制判断。
 5. coverage=empty/absent/not_applicable 是证据边界，不是根因。
 6. 不输出 Markdown，不输出修复命令，只返回 Pydantic 结构化对象。
 """

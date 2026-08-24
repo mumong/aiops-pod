@@ -89,6 +89,11 @@ def _valid_claim():
             "supporting_fact_ids": [record["fact_id"]],
             "confidence": 0.86,
         }],
+        "causal_chain": {
+            "trigger": "Evidence-backed cause",
+            "mechanism": "Observed failure mechanism",
+            "manifestation": "Scoped entity is abnormal",
+        },
         "confidence": 0.86,
         "confidence_reason": "Direct source-backed fact",
     }
@@ -101,9 +106,18 @@ def _invalid_claim():
     return claim
 
 
-def _configured_node(tmp_path, monkeypatch, outputs):
+def _configured_node(
+    tmp_path,
+    monkeypatch,
+    outputs,
+    *,
+    validation_enabled=True,
+):
     monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_validation": {"enabled": validation_enabled}
+    }
     node.current_run_id = "run-g1"
     node.ai_call = object()
     node._save_thinking = lambda state, new_state, thinking_events: None
@@ -117,6 +131,34 @@ def _configured_node(tmp_path, monkeypatch, outputs):
     node._analyze_with_llm = analyze
     node.analysis_calls = calls
     return node
+
+
+def test_rca_validation_disabled_keeps_first_model_result(
+    tmp_path,
+    monkeypatch,
+):
+    node = _configured_node(
+        tmp_path,
+        monkeypatch,
+        [_invalid_claim(), _valid_claim()],
+        validation_enabled=False,
+    )
+
+    result = node.execute(_state())
+    rca = json.loads(result["rca_analysis"])
+
+    assert len(node.analysis_calls) == 1
+    assert rca["diagnostic_status"] == "diagnosed"
+    assert rca["root_cause"] == "Evidence-backed candidate"
+    assert rca["claim_validation"] == {
+        "enabled": False,
+        "skipped": True,
+        "valid": None,
+        "diagnostic_status": "diagnosed",
+        "reasons": [
+            "RCA fact binding and publication validation disabled by configuration"
+        ],
+    }
 
 
 def test_rca_persists_input_model_output_validated_output_and_claim(
@@ -175,6 +217,32 @@ def test_rca_does_not_retry_source_absence_or_retry_more_than_once(
     result = twice.execute(_state())
     assert json.loads(result["rca_analysis"])["diagnostic_status"] == "inconclusive"
     assert len(twice.analysis_calls) == 2
+
+
+def test_rca_repair_cannot_replace_a_better_first_attempt():
+    first = {
+        "diagnostic_status": "inconclusive",
+        "phenomenon": "useful first-attempt phenomenon",
+        "claim_validation": {
+            "diagnosis_publishable": False,
+            "valid_supporting_fact_ids": ["fact-a"],
+        },
+    }
+    repaired = {
+        "diagnostic_status": "inconclusive",
+        "phenomenon": "worse repair",
+        "claim_validation": {
+            "diagnosis_publishable": False,
+            "valid_supporting_fact_ids": [],
+        },
+    }
+
+    selected = RootCauseAnalyzerNode._select_preferred_rca_result(
+        first,
+        repaired,
+    )
+
+    assert selected["phenomenon"] == "useful first-attempt phenomenon"
 
 
 def test_single_path_builds_same_authoritative_snapshot_when_not_precomputed(
