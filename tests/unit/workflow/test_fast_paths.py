@@ -1359,17 +1359,15 @@ def test_layer_extract_prompt_is_current_state_first():
         assert phrase in extract_prompt
 
 
-def test_rca_prompt_includes_json_contract_for_text_fallback():
+def test_rca_prompt_delegates_shape_to_small_runtime_schema():
     rca_prompt = get_workflow_prompt("rca")
     expected_phrases = [
-        "# RCAOutput 合同",
-        "root_cause_summary",
-        "`confidence` 必须是 0.0-1.0 数字",
-        "primary_runbooks",
-        "alternative_causes",
+        "# 输出",
+        "运行时 Pydantic schema",
+        "关键证据字段",
+        "少量真实原始观察",
+        "不为了结构完整生成假设清单",
         "不输出 Markdown、代码块或额外说明",
-        "`limitations` 不能是数组",
-        "`evidence_analysis` 不能是对象",
     ]
 
     for phrase in expected_phrases:
@@ -1440,6 +1438,7 @@ def test_deployed_workflow_disables_rca_validation():
         ["include_evidence_llm_analysis"]
         is True
     )
+    assert app_config["workflow"]["rca_structured_output"]["schema"] == "compact"
 
 
 def test_deployed_config_enables_autonomous_observability_and_disables_compatibility_servers():

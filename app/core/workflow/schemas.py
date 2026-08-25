@@ -560,6 +560,32 @@ class ContextCompactionSummary(BaseModel):
     next_focus: list[str] = Field(default_factory=list)
 
 
+class RCACompactOutput(BaseModel):
+    """Small model-facing RCA contract used by narrative evidence mode.
+
+    The workflow expands this object into the legacy RCAOutput shape after the
+    provider call.  Keeping compatibility expansion out of the provider schema
+    prevents audit-only fields from consuming model attention.
+    """
+
+    diagnostic_status: Literal["diagnosed", "inconclusive"] = "diagnosed"
+    phenomenon: str = ""
+    root_cause: str = Field(min_length=1)
+    causal_chain: list[str] = Field(default_factory=list, max_length=4)
+    key_evidence: list[str] = Field(default_factory=list, max_length=8)
+    unknowns: list[str] = Field(default_factory=list, max_length=6)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_loose_confidence(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "confidence" in value:
+            item = dict(value)
+            item["confidence"] = _coerce_confidence(item.get("confidence"))
+            return item
+        return value
+
+
 class RCAOutput(BaseModel):
     diagnostic_status: Literal["diagnosed", "inconclusive"] = "diagnosed"
     phenomenon: str = ""

@@ -13,18 +13,124 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import app.core.workflow.fact_contract as fact_contract_module
 from app.core.skills.models import Layer
 from app.core.workflow.entity_evidence_snapshot import build_selection_manifest
-from app.core.workflow.schemas import EvidenceCollectionOutput, RCAOutput
+from app.core.workflow.schemas import (
+    EvidenceCollectionOutput,
+    RCACompactOutput,
+    RCAOutput,
+)
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.nodes.root_cause_analyzer import (
     RCA_CONTEXT_MAX_CHARS,
     RCA_HANDOFF_MAX_CHARS,
+    RCA_NARRATIVE_CONTEXT_MAX_CHARS,
     RCA_QUALITY_MAX_CHARS,
     RCA_SUPPLEMENTARY_MAX_CHARS,
     RCA_TOOL_CONTEXT_MAX_CHARS,
     RootCauseAnalyzerNode,
 )
+
+
+def test_compact_rca_schema_is_materially_smaller_than_legacy_contract():
+    compact = json.dumps(
+        RCACompactOutput.model_json_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    legacy = json.dumps(
+        RCAOutput.model_json_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    assert len(compact) < len(legacy) * 0.6
+    assert "key_evidence" in compact
+    assert "hypotheses" not in compact
+    assert "evidence_inventory" not in compact
+    assert "claim_validation" not in compact
+
+
+def test_compact_rca_output_expands_to_legacy_internal_shape():
+    node = RootCauseAnalyzerNode()
+    compact = RCACompactOutput.model_validate({
+        "diagnostic_status": "diagnosed",
+        "phenomenon": "Pod repeatedly restarts",
+        "root_cause": "The /health handler returns HTTP 500",
+        "causal_chain": [
+            "FAILURE_MODE=liveness_fail",
+            "/health returns 500",
+            "liveness restart",
+        ],
+        "key_evidence": [
+            "[kubectl_events] Liveness probe failed with statuscode: 500 "
+            "| role=supports | fact_id=fact-probe"
+        ],
+        "unknowns": [],
+        "confidence": 0.9,
+    })
+
+    expanded = node._expand_model_rca_output(compact)
+
+    assert expanded["root_cause"] == "The /health handler returns HTTP 500"
+    assert expanded["supporting_fact_ids"] == ["fact-probe"]
+    assert expanded["evidence_analysis"][0]["raw_evidence"].startswith(
+        "Liveness probe failed"
+    )
+    assert expanded["structured_output_schema"] == "compact"
+    assert expanded["hypotheses"] == []
+
+
+def test_narrative_rca_selects_compact_model_schema_from_config():
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_structured_output": {"schema": "compact"},
+    }
+
+    assert node._model_rca_schema() is RCACompactOutput
+
+
+def test_rca_lite_sends_compact_schema_to_provider_and_expands_result():
+    captured = {}
+
+    class FakeAICall:
+        def call_structured(self, **kwargs):
+            captured.update(kwargs)
+            schema = kwargs["schema"]
+            return schema.model_validate({
+                "diagnostic_status": "diagnosed",
+                "phenomenon": "Pod restarts",
+                "root_cause": "Probe endpoint returns HTTP 500",
+                "causal_chain": [
+                    "failure mode enabled",
+                    "/health returns 500",
+                    "kubelet restarts container",
+                ],
+                "key_evidence": [
+                    "[kubectl_events] Liveness probe failed: HTTP 500 "
+                    "| role=supports"
+                ],
+                "unknowns": [],
+                "confidence": 0.9,
+            }), "{}"
+
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_mode": "lite",
+        "rca_structured_output": {"schema": "compact"},
+    }
+    node.ai_call = FakeAICall()
+
+    result, _events = node._analyze_with_llm_lite(
+        "why does it restart?",
+        Layer.L2,
+        "source-backed evidence",
+    )
+
+    assert captured["schema"] is RCACompactOutput
+    assert result["structured_output_schema"] == "compact"
+    assert result["root_cause"] == "Probe endpoint returns HTTP 500"
+    assert result["evidence_analysis"][0]["source"] == "kubectl_events"
 
 
 def _canonical_fact_record(**overrides):
@@ -2561,6 +2667,119 @@ def test_narrative_rca_context_ignores_fact_ledger_authority_and_keeps_tools():
     assert "Probe /health returned HTTP 500" in context
     assert "QUERY_FACT source_system=elasticsearch" in context
     assert "GET /work returned 200" in context
+
+
+def test_narrative_rca_context_drops_repeated_evidence_and_coverage_projection():
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {
+            "fact_ledger_enabled": False,
+            "include_evidence_llm_analysis": True,
+        },
+        "rca_structured_output": {"schema": "compact"},
+    }
+    context = node._build_rca_context({
+        "layer_handoff": {
+            "diagnosis_scope": "single_group",
+            "abnormal_pods": [{
+                "namespace": "demo",
+                "name": "api",
+                "status": "CrashLoopBackOff",
+                "uid": "uid-a",
+            }],
+            "current_abnormal_summary": {
+                "selected_rows": ["LOW_VALUE_DUPLICATE_SELECTED_ROW"],
+            },
+        },
+        "evidence_items": [SimpleNamespace(
+            collected=True,
+            description="LOW_VALUE_DUPLICATE_EVIDENCE_ITEM",
+            value="coverage=present",
+        )],
+        "evidence_analysis": json.dumps({
+            "source_coverage": {"marker": "LOW_VALUE_COVERAGE_CONTRACT"},
+            "llm_analysis": "Probe /health returned HTTP 500.",
+            "tool_data": [{
+                "tool": "kubectl_events",
+                "dimension": "kubernetes",
+                "status": "success",
+                "coverage": "present",
+                "agent_facts": "Liveness probe failed: HTTP 500",
+            }],
+        }),
+    })
+
+    assert "Probe /health returned HTTP 500" in context
+    assert "Liveness probe failed: HTTP 500" in context
+    assert "LOW_VALUE_DUPLICATE_SELECTED_ROW" not in context
+    assert "LOW_VALUE_DUPLICATE_EVIDENCE_ITEM" not in context
+    assert "LOW_VALUE_COVERAGE_CONTRACT" not in context
+    assert "# 证据采集结果" not in context
+    assert len(context) <= RCA_NARRATIVE_CONTEXT_MAX_CHARS
+
+
+def test_narrative_tool_selection_deduplicates_and_caps_each_dimension():
+    node = RootCauseAnalyzerNode()
+    tool_data = [
+        {
+            "tool": "execute_pod_promql",
+            "dimension": "metrics",
+            "status": "error",
+            "semantic_success": False,
+            "data": "missing required promql",
+        },
+        {
+            "tool": "execute_pod_promql",
+            "dimension": "metrics",
+            "status": "success",
+            "semantic_success": True,
+            "coverage": "present",
+            "agent_facts": "METRIC memory=40Mi timestamp=2026-08-25T01:00:00Z",
+        },
+        {
+            "tool": "execute_pod_promql",
+            "dimension": "metrics",
+            "status": "success",
+            "semantic_success": True,
+            "coverage": "present",
+            "agent_facts": "METRIC memory=40Mi timestamp=2026-08-25T01:01:00Z",
+        },
+        {
+            "tool": "execute_pod_promql",
+            "dimension": "metrics",
+            "status": "success",
+            "semantic_success": True,
+            "coverage": "present",
+            "agent_facts": "METRIC memory_limit=64Mi",
+        },
+        {
+            "tool": "execute_pod_promql",
+            "dimension": "metrics",
+            "status": "success",
+            "semantic_success": True,
+            "coverage": "present",
+            "agent_facts": "METRIC restart_count=8",
+        },
+        *[
+            {
+                "tool": "query_pod_logs",
+                "dimension": "logging",
+                "status": "success",
+                "semantic_success": True,
+                "coverage": "present",
+                "agent_facts": f"LOG pattern-{index}",
+            }
+            for index in range(4)
+        ],
+    ]
+
+    selected = node._select_narrative_tool_data(tool_data, limit=10)
+    dimensions = [node._narrative_tool_dimension(item) for item in selected]
+
+    assert dimensions.count("metrics") == 2
+    assert dimensions.count("logging") == 2
+    assert not any(item.get("status") == "error" for item in selected)
+    assert len(selected) == 4
 
 
 def test_rca_context_excludes_llm_analysis_when_fact_ledger_exists():

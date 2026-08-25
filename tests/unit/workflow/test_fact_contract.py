@@ -2235,8 +2235,9 @@ def test_rca_prompt_matches_narrative_tool_evidence_contract():
     assert "每个当前 scope entity 必须恰好有一个 hypothesis" not in ROOT_CAUSE_ANALYZER_PROMPT
     assert "必须恰好有一个 hypothesis" not in ROOT_CAUSE_ANALYZER_PROMPT
     assert "每个 hypothesis 必须绑定 authoritative entity" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "一个主要 hypothesis 足够" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "只有确有独立候选时才增加" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "一个主要 hypothesis 足够" not in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "只有确有独立候选时才增加" not in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "不为了结构完整生成假设清单" in ROOT_CAUSE_ANALYZER_PROMPT
     assert '"entity_id": "当前 Fact Ledger scope 中的 entity_id"' not in ROOT_CAUSE_ANALYZER_PROMPT
     assert "strength=critical/strong" not in ROOT_CAUSE_ANALYZER_PROMPT
 

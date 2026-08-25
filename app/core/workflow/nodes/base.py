@@ -278,6 +278,35 @@ class WorkflowNode(ABC):
             return mode if mode in {"strict", "tolerant"} else default
         return default
 
+    def _get_rca_output_schema_mode(self, default: str = "full") -> str:
+        """Return the model-facing RCA schema size.
+
+        ``compact`` asks the model only for the diagnosis, shortest causal
+        chain, selected source observations and unknowns.  The node expands it
+        to the legacy internal RCAOutput after the call. ``full`` preserves the
+        previous provider contract for deployments that still use Fact Ledger
+        claim validation.
+        """
+        for env_key in (
+            "WORKFLOW_RCA_OUTPUT_SCHEMA",
+            "AIOPS_WORKFLOW_RCA_OUTPUT_SCHEMA",
+        ):
+            value = os.getenv(env_key)
+            if value is not None:
+                mode = str(value).strip().lower()
+                return mode if mode in {"compact", "full"} else default
+
+        wf_config = self._get_workflow_config()
+        output_cfg = (
+            wf_config.get("rca_structured_output", {})
+            if isinstance(wf_config, dict)
+            else {}
+        )
+        if isinstance(output_cfg, dict):
+            mode = str(output_cfg.get("schema") or default).strip().lower()
+            return mode if mode in {"compact", "full"} else default
+        return default
+
     def _is_rca_fact_ledger_context_enabled(
         self,
         default: bool = True,

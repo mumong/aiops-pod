@@ -36,7 +36,7 @@ from app.core.workflow.entity_evidence_snapshot import (
     classify_fact_evidence_role,
 )
 from app.core.workflow.nodes.base import WorkflowNode
-from app.core.workflow.schemas import RCAOutput
+from app.core.workflow.schemas import RCACompactOutput, RCAOutput
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import (
     Layer, DeterministicDecision, EvidenceItem,
@@ -53,6 +53,11 @@ RCA_LIST_LIMIT = 12
 RCA_CONTEXT_MAX_CHARS = 52000
 RCA_HANDOFF_MAX_CHARS = 7000
 RCA_TOOL_CONTEXT_MAX_CHARS = 36000
+RCA_NARRATIVE_CONTEXT_MAX_CHARS = 22000
+RCA_NARRATIVE_HANDOFF_MAX_CHARS = 4000
+RCA_NARRATIVE_TOOL_CONTEXT_MAX_CHARS = 12000
+RCA_NARRATIVE_ANALYSIS_MAX_CHARS = 2800
+RCA_NARRATIVE_AUXILIARY_MAX_CHARS = 1400
 RCA_FACT_LEDGER_MAX_CHARS = 24000
 RCA_QUALITY_MAX_CHARS = 4000
 RCA_SUPPLEMENTARY_MAX_CHARS = 7000
@@ -587,12 +592,33 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if fact_ledger_context_enabled
             else []
         )
+        context_cap = (
+            RCA_CONTEXT_MAX_CHARS
+            if fact_ledger_context_enabled
+            else RCA_NARRATIVE_CONTEXT_MAX_CHARS
+        )
+        tool_context_cap = (
+            RCA_TOOL_CONTEXT_MAX_CHARS
+            if fact_ledger_context_enabled
+            else RCA_NARRATIVE_TOOL_CONTEXT_MAX_CHARS
+        )
+        auxiliary_cap = (
+            RCA_AUXILIARY_MAX_CHARS
+            if fact_ledger_context_enabled
+            else RCA_NARRATIVE_AUXILIARY_MAX_CHARS
+        )
         layer_handoff = state.get("layer_handoff")
         if not layer_handoff:
             layer_handoff = self._layer_analysis_to_handoff(state.get("layer_analysis", ""))
 
         compact_handoff = self._compact_layer_handoff_for_rca(
-            layer_handoff or {}
+            layer_handoff or {},
+            max_chars=(
+                RCA_HANDOFF_MAX_CHARS
+                if fact_ledger_context_enabled
+                else RCA_NARRATIVE_HANDOFF_MAX_CHARS
+            ),
+            include_abnormal_summary=fact_ledger_context_enabled,
         )
         parts = [
             "# 问题定位结构化交接 layer_handoff",
@@ -617,14 +643,21 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "# Fact Ledger 证据合同",
                 "Fact Ledger 是 AIOps 根因分析的主证据输入；只能引用当前 ledger 中的 fact_id。",
             ])
-        else:
+        elif fact_ledger_context_enabled:
             parts.extend([
                 "",
                 "# 证据采集结果",
                 self._build_evidence_summary(
                     evidence_items,
-                    max_chars=RCA_AUXILIARY_MAX_CHARS,
+                    max_chars=auxiliary_cap,
                 ),
+            ])
+        else:
+            parts.extend([
+                "",
+                "# RCA 输入模式",
+                "Evidence Agent 因果交接 + 去重后的真实工具观察；"
+                "evidence_items、coverage 和 Fact Ledger 投影未重复注入。",
             ])
 
         facts = state.get("evidence_facts") or []
@@ -645,7 +678,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "# 冲突/负向证据",
                 bounded_json_dumps(
                     conflicts,
-                    max_chars=RCA_AUXILIARY_MAX_CHARS,
+                    max_chars=auxiliary_cap,
                 ),
             ])
         if missing:
@@ -654,7 +687,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "# 缺失证据",
                 bounded_json_dumps(
                     missing,
-                    max_chars=RCA_AUXILIARY_MAX_CHARS,
+                    max_chars=auxiliary_cap,
                 ),
             ])
 
@@ -662,8 +695,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
         remaining_chars = max(
             2,
             min(
-                RCA_TOOL_CONTEXT_MAX_CHARS,
-                RCA_CONTEXT_MAX_CHARS - len(base_context) - 32,
+                tool_context_cap,
+                context_cap - len(base_context) - 32,
             ),
         )
         extra_data = self._extract_tool_data_for_rca(
@@ -674,17 +707,23 @@ class RootCauseAnalyzerNode(WorkflowNode):
             parts.extend(["", "# 工具采集摘要", extra_data])
 
         context = "\n".join(parts)
-        if len(context) > RCA_CONTEXT_MAX_CHARS:
+        if len(context) > context_cap:
             logger.warning(
                 "⚠️ [rca] section budgets exceeded final context cap: %d > %d",
                 len(context),
-                RCA_CONTEXT_MAX_CHARS,
+                context_cap,
             )
-            context = context[:RCA_CONTEXT_MAX_CHARS]
+            context = context[:context_cap]
         return context
 
     @classmethod
-    def _compact_layer_handoff_for_rca(cls, value: Any) -> str:
+    def _compact_layer_handoff_for_rca(
+        cls,
+        value: Any,
+        *,
+        max_chars: int = RCA_HANDOFF_MAX_CHARS,
+        include_abnormal_summary: bool = True,
+    ) -> str:
         """Keep RCA-relevant handoff fields without repeated model reasoning."""
         handoff = dict(value) if isinstance(value, dict) else {}
         abnormal_pod_entity_index = cls._build_abnormal_pod_entity_index(
@@ -721,7 +760,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
             ]
 
         current_summary = handoff.get("current_abnormal_summary")
-        if isinstance(current_summary, dict):
+        if include_abnormal_summary and isinstance(current_summary, dict):
             compact["current_abnormal_summary"] = {
                 key: current_summary.get(key)
                 for key in (
@@ -736,7 +775,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         if not abnormal_pod_entity_index:
             return bounded_json_dumps(
                 compact,
-                max_chars=RCA_HANDOFF_MAX_CHARS,
+                max_chars=max_chars,
             )
 
         compact.pop("abnormal_pods", None)
@@ -747,13 +786,13 @@ class RootCauseAnalyzerNode(WorkflowNode):
             separators=(",", ":"),
             default=str,
         )
-        if len(entity_index_text) > RCA_HANDOFF_MAX_CHARS:
+        if len(entity_index_text) > max_chars:
             raise ValueError(
                 "abnormal Pod identity index exceeds RCA handoff budget: "
-                f"{len(entity_index_text)} > {RCA_HANDOFF_MAX_CHARS}"
+                f"{len(entity_index_text)} > {max_chars}"
             )
 
-        detail_budget = RCA_HANDOFF_MAX_CHARS - len(entity_index_text) + 1
+        detail_budget = max_chars - len(entity_index_text) + 1
         compact_detail_text = bounded_json_dumps(
             compact,
             max_chars=detail_budget,
@@ -853,6 +892,125 @@ class RootCauseAnalyzerNode(WorkflowNode):
         else:
             return self._analyze_with_llm_full(question, layer, evidence_summary)
 
+    def _model_rca_schema(self) -> type:
+        return (
+            RCACompactOutput
+            if self._get_rca_output_schema_mode(default="full") == "compact"
+            else RCAOutput
+        )
+
+    @staticmethod
+    def _rca_schema_contract(schema: type) -> str:
+        if schema is RCACompactOutput:
+            return """
+
+# 精简输出合同
+只填写运行时 RCACompactOutput：现象、根因、最短因果链、置信度、未知项，
+以及最多 8 条 key_evidence。causal_chain 按“上游原因 → 机制 → 直接失败 → 现象”
+写成字符串数组。每条 key_evidence 使用 `[来源工具] 真实具体值或错误原文 | `
+`role=supports/contradicts/limits | fact_id=输入中的ID`；没有 fact_id 就省略。
+不要复制采集计划、coverage、完整工具响应或重复事实。"""
+        return """
+
+# 完整输出合同
+按运行时 RCAOutput schema 填写；只保留少量高价值 evidence_analysis，
+不要为了填满辅助字段复制工具结果。"""
+
+    @staticmethod
+    def _expand_model_rca_output(structured: Any) -> Dict[str, Any]:
+        """Expand the compact provider contract into the stable internal one."""
+        if isinstance(structured, RCACompactOutput):
+            compact = structured.model_dump()
+            evidence_analysis: List[Dict[str, Any]] = []
+            supporting_fact_ids: List[str] = []
+            contradicting_fact_ids: List[str] = []
+            for item in compact.get("key_evidence") or []:
+                evidence_text = str(item or "").strip()
+                source_match = re.match(r"^\[([^\]]+)\]", evidence_text)
+                fact_match = re.search(r"\bfact-[a-zA-Z0-9._:-]+\b", evidence_text)
+                role_match = re.search(
+                    r"\brole\s*=\s*(supports|contradicts|limits)\b",
+                    evidence_text,
+                    re.IGNORECASE,
+                )
+                fact_id = fact_match.group(0) if fact_match else ""
+                role = role_match.group(1).lower() if role_match else "supports"
+                observation = re.sub(r"^\[[^\]]+\]\s*", "", evidence_text)
+                observation = re.split(
+                    r"\s*\|\s*(?:role|fact_id)\s*=",
+                    observation,
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )[0].strip()
+                evidence_analysis.append({
+                    "fact_id": fact_id,
+                    "source": source_match.group(1).strip() if source_match else "",
+                    "raw_evidence": observation,
+                    "relevance": observation,
+                    "role": role,
+                })
+                if fact_id and role == "supports":
+                    supporting_fact_ids.append(fact_id)
+                elif fact_id and role == "contradicts":
+                    contradicting_fact_ids.append(fact_id)
+
+            chain_steps = [
+                str(step).strip()
+                for step in (compact.get("causal_chain") or [])
+                if str(step).strip()
+            ]
+            chain_keys = ("trigger", "mechanism", "direct_failure", "manifestation")
+            chain = {
+                key: step
+                for key, step in zip(chain_keys, chain_steps)
+            }
+            root_cause = str(compact.get("root_cause") or "").strip()
+            confidence = float(compact.get("confidence") or 0.0)
+            expanded = RCAOutput.model_validate({
+                "diagnostic_status": compact.get("diagnostic_status"),
+                "phenomenon": compact.get("phenomenon") or "",
+                "root_cause": root_cause,
+                "root_cause_summary": root_cause,
+                "causal_chain": chain,
+                "evidence_analysis": evidence_analysis,
+                "supporting_fact_ids": list(dict.fromkeys(supporting_fact_ids)),
+                "contradicting_fact_ids": list(dict.fromkeys(contradicting_fact_ids)),
+                "unknowns": compact.get("unknowns") or [],
+                "confidence": confidence,
+                "confidence_reason": (
+                    f"模型基于 {len(evidence_analysis)} 条关键真实观察形成结论"
+                ),
+            }).model_dump()
+            expanded["structured_output_schema"] = "compact"
+            return expanded
+        if isinstance(structured, RCAOutput):
+            expanded = structured.model_dump()
+            expanded["structured_output_schema"] = "full"
+            return expanded
+        return {}
+
+    def _recover_model_rca_output(
+        self,
+        raw: str,
+        schema: type,
+    ) -> Optional[Dict[str, Any]]:
+        if schema is RCACompactOutput:
+            from app.core.aicall.client import AICall
+
+            parsed = AICall.extract_json_payload(raw)
+            if isinstance(parsed, dict):
+                try:
+                    return self._expand_model_rca_output(
+                        RCACompactOutput.model_validate(parsed)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "⚠️ [rca] compact RCA 结构校验失败: %s",
+                        exc,
+                    )
+            return None
+        return self._recover_tolerant_rca_output(raw)
+
     def _analyze_with_llm_lite(
         self,
         question: str,
@@ -866,6 +1024,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 layer=layer_str,
                 evidence_summary="证据上下文只在 user message 中提供，system prompt 不承载动态证据。"
             )
+            schema = self._model_rca_schema()
+            system_prompt += self._rca_schema_contract(schema)
 
             user_message = f"""# 用户问题
 {question}
@@ -873,7 +1033,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
 # 已采集证据
 {evidence_summary}
 
-请直接基于以上证据进行根因分析，并通过 RCAOutput Pydantic schema 生成结构化结果。"""
+请直接基于以上证据进行根因分析，并通过运行时 Pydantic schema 生成结构化结果。"""
             start_time = time.time()
 
             ai_call = getattr(self, 'ai_call', None)
@@ -882,13 +1042,13 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
             logger.info("📍 [rca] Pydantic structured lite 模式开始")
             structured, response, thinking_events = self._call_structured_agent(
-                schema=RCAOutput,
+                schema=schema,
                 system_prompt=system_prompt,
                 question=user_message,
                 use_tools=False,
                 allow_text_fallback=True,
             )
-            parsed = structured.model_dump() if structured is not None else None
+            parsed = self._expand_model_rca_output(structured)
             content = response.result if response is not None else ""
 
             duration_ms = (time.time() - start_time) * 1000
@@ -902,8 +1062,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if parsed:
                 return parsed, thinking_events
 
-            recovered = self._recover_tolerant_rca_output(
+            recovered = self._recover_model_rca_output(
                 (response.result if response is not None else "") or "",
+                schema,
             )
             if recovered is not None:
                 logger.warning(
@@ -912,7 +1073,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 )
                 return recovered, thinking_events
 
-            logger.warning("⚠️ [rca] lite 模式未返回合法 Pydantic RCAOutput，使用通用低置信度兜底")
+            logger.warning("⚠️ [rca] lite 模式未返回合法 Pydantic RCA，使用通用低置信度兜底")
             return self._build_llm_fallback(
                 question=question,
                 layer=layer,
@@ -942,6 +1103,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 layer=layer_str,
                 evidence_summary=evidence_summary
             )
+            schema = self._model_rca_schema()
+            system_prompt += self._rca_schema_contract(schema)
 
             # 告诉 LLM 不要重复采集数据，基于已有证据分析
             system_prompt += """
@@ -957,19 +1120,20 @@ class RootCauseAnalyzerNode(WorkflowNode):
 # 已采集证据
 {evidence_summary}
 
-请直接基于以上证据进行根因分析，并通过 RCAOutput Pydantic schema 生成结构化结果。"""
+请直接基于以上证据进行根因分析，并通过运行时 Pydantic schema 生成结构化结果。"""
             structured, response, thinking_events = self._call_structured_agent(
-                schema=RCAOutput,
+                schema=schema,
                 system_prompt=system_prompt,
                 question=user_message,
                 use_tools=False,
                 allow_text_fallback=True,
             )
             if structured is not None:
-                return structured.model_dump(), thinking_events
+                return self._expand_model_rca_output(structured), thinking_events
 
-            recovered = self._recover_tolerant_rca_output(
+            recovered = self._recover_model_rca_output(
                 (response.result if response is not None else "") or "",
+                schema,
             )
             if recovered is not None:
                 logger.warning(
@@ -1538,6 +1702,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if max_chars < 2:
                 return ""
             sections: List[tuple[str, str]] = []
+            fact_ledger_context_enabled = (
+                self._is_rca_fact_ledger_context_enabled(default=True)
+            )
 
             quality_keys = (
                 "source_coverage",
@@ -1550,7 +1717,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 key: data.get(key)
                 for key in quality_keys
             }
-            if any(
+            if fact_ledger_context_enabled and any(
                 value not in (None, {}, [])
                 for value in quality_values.values()
             ):
@@ -1572,9 +1739,6 @@ class RootCauseAnalyzerNode(WorkflowNode):
             tool_data = data.get("tool_data", [])
             if not isinstance(tool_data, list):
                 tool_data = []
-            fact_ledger_context_enabled = (
-                self._is_rca_fact_ledger_context_enabled(default=True)
-            )
             selected_tool_data = (
                 select_tool_data_for_rca(
                     tool_data,
@@ -1583,7 +1747,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 if fact_ledger_context_enabled
                 else self._select_narrative_tool_data(
                     tool_data,
-                    limit=16,
+                    limit=10,
                 )
             )
             fact_ledgers = extract_fact_ledgers_from_tool_data(
@@ -1651,7 +1815,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
             ):
                 sections.append((
                     "## LLM 证据分析",
-                    self._compact_text_value(llm_analysis, limit=5000),
+                    self._compact_text_value(
+                        llm_analysis,
+                        limit=RCA_NARRATIVE_ANALYSIS_MAX_CHARS,
+                    ),
                 ))
 
             # 2. MCP 工具的原始输出
@@ -1682,19 +1849,101 @@ class RootCauseAnalyzerNode(WorkflowNode):
             return ""
 
     @staticmethod
+    def _narrative_tool_dimension(item: Mapping[str, Any]) -> str:
+        explicit = str(item.get("dimension") or "").strip().lower()
+        tool = re.sub(
+            r"[^a-z0-9]",
+            "",
+            str(item.get("tool") or "").lower(),
+        )
+        value = f"{explicit} {tool}"
+        if any(token in value for token in ("metric", "promql", "prometheus")):
+            return "metrics"
+        if any(token in value for token in ("logging", "logs", "elasticsearch")):
+            return "logging"
+        if any(token in value for token in ("tracing", "trace", "tempo", "deepflow")):
+            return "tracing"
+        if "topology" in value:
+            return "topology"
+        if any(token in value for token in ("kubernetes", "kubectl", "k8s")):
+            return "kubernetes"
+        return explicit or "other"
+
+    @classmethod
+    def _narrative_tool_representation(cls, item: Mapping[str, Any]) -> str:
+        value = (
+            item.get("agent_facts")
+            or item.get("agent_context")
+            or item.get("data")
+            or ""
+        )
+        if isinstance(value, (dict, list)):
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        return str(value).strip()
+
+    @classmethod
+    def _narrative_tool_signature(cls, item: Mapping[str, Any]) -> str:
+        representation = cls._narrative_tool_representation(item).lower()
+        representation = re.sub(
+            r"\b(?:fact_id|evidence_ref|raw_ref|structured_ref|summary_ref)"
+            r"\s*[=:]\s*[^\s,;]+",
+            "",
+            representation,
+        )
+        representation = re.sub(
+            r"\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z?\b",
+            "<timestamp>",
+            representation,
+        )
+        representation = re.sub(r"\s+", " ", representation).strip()
+        return "|".join((
+            cls._narrative_tool_dimension(item),
+            re.sub(r"[^a-z0-9]", "", str(item.get("tool") or "").lower()),
+            representation,
+        ))
+
+    @classmethod
+    def _narrative_tool_score(cls, item: Mapping[str, Any], index: int) -> tuple:
+        status = str(item.get("status") or "").lower()
+        coverage = str(item.get("coverage") or "").lower()
+        representation = cls._narrative_tool_representation(item)
+        failed = (
+            status in {"error", "failed", "tool_error", "query_parse_failed"}
+            or item.get("semantic_success") is False
+            or coverage in {"error", "failed", "tool_error", "query_parse_failed"}
+        )
+        present = coverage in {"present", "partial"}
+        return (
+            0 if failed else 1,
+            1 if present else 0,
+            1 if item.get("agent_facts") else 0,
+            min(len(representation), 2400),
+            index,
+        )
+
+    @classmethod
     def _select_narrative_tool_data(
+        cls,
         tool_data: List[Dict[str, Any]],
         *,
         limit: int,
     ) -> List[Dict[str, Any]]:
-        """Select bounded real tool summaries without ledger projection.
+        """Select diverse real observations without repeated audit metadata.
 
         The Fact Ledger selector intentionally removes duplicate canonical
         representations. Narrative RCA needs the opposite representation:
-        keep agent_facts/agent_context/data and remove the ledger itself.
+        keep agent_facts/agent_context/data and remove the ledger itself. Exact
+        semantic repeats are collapsed, recovered failures are omitted, and a
+        per-dimension cap prevents one noisy source from consuming the context.
         """
-        selected: List[Dict[str, Any]] = []
-        for item in tool_data or []:
+        candidates: Dict[str, tuple[tuple, int, Dict[str, Any]]] = {}
+        for index, item in enumerate(tool_data or []):
             if not isinstance(item, Mapping) or item.get("deduplicated") is True:
                 continue
             tool_name = re.sub(
@@ -1706,10 +1955,48 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 continue
             copied = dict(item)
             copied.pop("fact_ledger", None)
-            selected.append(copied)
-            if len(selected) >= max(0, limit):
-                break
-        return selected
+            signature = cls._narrative_tool_signature(copied)
+            score = cls._narrative_tool_score(copied, index)
+            existing = candidates.get(signature)
+            if existing is None or score > existing[0]:
+                candidates[signature] = (score, index, copied)
+
+        by_dimension: Dict[str, List[tuple[tuple, int, Dict[str, Any]]]] = {}
+        for candidate in candidates.values():
+            dimension = cls._narrative_tool_dimension(candidate[2])
+            by_dimension.setdefault(dimension, []).append(candidate)
+
+        dimension_caps = {
+            "kubernetes": 3,
+            "metrics": 2,
+            "logging": 2,
+            "tracing": 2,
+            "topology": 1,
+            "other": 1,
+        }
+        selected: List[tuple[int, Dict[str, Any]]] = []
+        dimension_order = (
+            "kubernetes", "metrics", "logging", "tracing", "topology", "other"
+        )
+        for dimension in (*dimension_order, *sorted(set(by_dimension) - set(dimension_order))):
+            values = by_dimension.get(dimension) or []
+            if not values:
+                continue
+            successful = [value for value in values if value[0][0] == 1]
+            if successful:
+                values = successful
+            values.sort(key=lambda value: value[0], reverse=True)
+            cap = dimension_caps.get(dimension, 1)
+            selected.extend((index, item) for _score, index, item in values[:cap])
+
+        selected.sort(key=lambda value: value[0])
+        bounded = [item for _index, item in selected[:max(0, limit)]]
+        logger.info(
+            "📦 [rca] narrative 工具选择: %d → %d items",
+            len(tool_data or []),
+            len(bounded),
+        )
+        return bounded
 
     @classmethod
     def _compact_supplementary_tool_data(
