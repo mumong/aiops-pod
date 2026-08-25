@@ -1686,7 +1686,9 @@ def test_conclusion_prompt_is_human_focused_and_grounded():
     assert "只用真实" in prompt
     assert "禁止编造" in prompt
     assert "含 `numeric_fields` 时，必须展示 first/last 或 min/max" in prompt
-    assert "State/Event/Metric 只保留最直接的一行或合并一行" in prompt
+    assert "每个维度至少展示一条代表证据" in prompt
+    assert "不得仅因与 Kubernetes 部分重复而整维省略" in prompt
+    assert "不得写成“单个请求内部”" in prompt
 
 
 def test_active_workflow_prompts_stay_within_attention_budgets():

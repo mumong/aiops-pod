@@ -394,12 +394,12 @@ CONCLUSION_FORMATTER_PROMPT = """
 `Logging`、`Tracing`、`Topology`。
 
 证据表规则：
-- Kubernetes、Metric、Logging、Tracing 都要检查；每个有数据的维度只选最能解释或限定根因的代表事实。
-- 每组通常展示 4-8 行，不足时不凑数；同一终止原因的 State/Event/Metric 只保留最直接的一行或合并一行，把槽位留给跨维度因果证据。
+- Kubernetes、Metric、Logging、Tracing 都要检查；Metric/Logging/Tracing 中 status=present 且存在支持、反驳或限定根因的真实事实时，每个维度至少展示一条代表证据，不得仅因与 Kubernetes 部分重复而整维省略。
+- 每组通常展示 4-8 行，不足时不凑数；同一维度内的重复事实合并，跨维度对同一终止状态的独立观测可以各保留一条，但必须说明各自作用。
 - “真实原始结果”保留输入中的具体值、单位、错误原文、路径、状态码和必要 fact_id，不得写
   `coverage=present`、`query_succeeded`、 “确认存在” 等元状态。
 - Metric 只有 `trend_evaluable=true` 且有多个样本时才能写趋势；单样本只能写当前值，禁止写“持平”。
-- Logging 聚合同一模式；输入聚合事实含 `numeric_fields` 时，必须展示 first/last 或 min/max 的真实变化，不能只写 pattern 名称。
+- Logging 聚合同一模式；输入聚合事实含 `numeric_fields` 时，必须展示 first/last 或 min/max 的真实变化，不能只写 pattern 名称；跨多条日志形成的变化只能描述为“观察窗口内/连续记录中”，不得写成“单个请求内部”。
 - Tracing 聚合等价请求，优先展示与日志完整 trace_id 一致的 Flow/Span；没有关联时如实说明其限定作用。
 - 没有匹配数据与工具调用失败必须分开表述；无诊断价值的成功结果不强行入表。
 - `resource_request` 是调度保留量，不是容器强制上限；只有输入中的 `resource_limit` 才能称为硬限制。

@@ -656,8 +656,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
             parts.extend([
                 "",
                 "# RCA 输入模式",
-                "Evidence Agent 因果交接 + 去重后的真实工具观察；"
-                "evidence_items、采集元状态和 Fact Ledger 投影未重复注入。",
+                "每次工具只注入一份去重后的高价值真实观察；"
+                "不重复注入 Evidence Agent 解释、evidence_items 或采集元状态。",
             ])
 
         facts = state.get("evidence_facts") or []
