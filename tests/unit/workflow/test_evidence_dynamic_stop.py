@@ -1103,6 +1103,70 @@ def test_autonomous_gate_fallback_adds_generic_four_dimensions_without_scenario_
     assert "scenario" not in serialized
 
 
+def test_autonomous_gate_completes_required_promql_args_on_reused_plan_item():
+    node = EvidenceCollectorNode()
+    node.tools = [
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+        SimpleNamespace(name="query_pod_topology"),
+    ]
+    model_plan = [{
+        "id": "model-metrics",
+        "description": "查询 Pod 指标",
+        "level": "critical",
+        "tool": "execute_pod_promql",
+        "command": "query Pod metrics",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "确认 Pod 指标",
+        },
+        "purpose": "确认 Pod 指标",
+    }]
+
+    gated = node._ensure_autonomous_observability_gate_plan(
+        model_plan,
+        {"abnormal_pods": [{"namespace": "demo", "name": "api"}]},
+    )
+    metrics_item = next(
+        item for item in gated if item["tool"] == "execute_pod_promql"
+    )
+
+    assert metrics_item["id"] == "model-metrics"
+    assert metrics_item["tool_args"]["namespace"] == "demo"
+    assert metrics_item["tool_args"]["pod"] == "api"
+    assert metrics_item["tool_args"]["query_type"] == "instant"
+    assert 'namespace="demo"' in metrics_item["tool_args"]["promql"]
+    assert 'pod="api"' in metrics_item["tool_args"]["promql"]
+
+
+def test_baseline_handoff_requires_corrected_retry_after_tool_error():
+    rendered = EvidenceCollectorNode._append_baseline_handoff(
+        "original request",
+        [{
+            "type": "tool_result",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {"namespace": "demo", "pod": "api"},
+            "status": "error",
+            "semantic_success": False,
+            "result": "execute_pod_promql invalid contract",
+            "structured": {
+                "status": "query_parse_failed",
+                "coverage": "error",
+                "raw_preview": (
+                    "Input validation error: 'promql' is a required property"
+                ),
+            },
+        }],
+    )
+
+    assert '"required_follow_up"' in rendered
+    assert "'promql' is a required property" in rendered
+    assert "修正参数并继续调用" in rendered
+    assert "不得把本次失败写成无匹配数据" in rendered
+
+
 def test_autonomous_gate_does_not_bind_active_only_pod_to_nonempty_plan():
     node = EvidenceCollectorNode()
     model_plan = [{
@@ -6691,6 +6755,42 @@ def test_evidence_matches_real_pod_describe_events_and_previous_logs_tools():
         "logs": True,
     }
     assert all(item.source == "thinking_match" for item in items)
+
+
+def test_previous_logs_plan_matches_when_namespace_flag_precedes_pod():
+    node = EvidenceCollectorNode()
+    plan = [{
+        "id": "previous-logs",
+        "description": "获取崩溃前日志",
+        "level": "critical",
+        "tool": "kubectl_previous_logs",
+        "command": (
+            "kubectl logs -n aiops-case-10 workload-abc "
+            "--previous --tail=200"
+        ),
+    }]
+    events = [{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_container_previous_logs",
+        "tool_args": {
+            "namespace": "aiops-case-10",
+            "pod_name": "workload-abc",
+            "container_name": "app",
+        },
+        "result": "GET /work HTTP 200",
+        "structured": {
+            "status": "logs_summarized",
+            "line_count": 19,
+        },
+    }]
+
+    items = node._build_evidence_items_from_thinking(plan, events)
+
+    assert len(items) == 1
+    assert items[0].collected is True
+    assert items[0].source == "thinking_match"
 
 
 def test_post_case_refinement_uses_real_refs_and_only_aiops_detail_tools():

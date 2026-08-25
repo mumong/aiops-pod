@@ -215,11 +215,15 @@ EVIDENCE_COLLECTOR_PROMPT = """
 1. 执行代码提供的首轮计划，取得 Kubernetes、Metrics、Logging、Tracing、Topology 的真实结果。计划、Runbook 和归档不是证据。
 2. 先确认实体身份和当前生命周期，再比较各维度是否回答了本轮 `purpose`。
 3. 仍有关键歧义、冲突、时间窗不匹配或空结果无法回答问题时，自主选择少量只读工具补证。每次补证必须有新的明确 `purpose`；不按故障类型使用固定工具链。
-4. 证据足够时立即停止；补证后仍不足则如实记录缺口。上下文使用率达到 80% 时停止新增采集。
+4. 任一关键工具返回参数校验错误、调用失败或不可解析结果时，先阅读原始错误，修正缺失/错误参数后继续调用；不得因为其他维度已有结果就忽略失败维度。相同错误修正重试一次后仍失败，才记录为工具失败。
+5. Metrics instant 只有单点或为空而本轮 purpose 需要趋势时，改用覆盖异常窗口的 range 查询；Logging/Tracing 宽泛或为空时，按真实路径、错误码、容器、trace_id 或时间窗缩小后补查。不得原样重复无效查询。
+6. 每次补采保留之前已经成功的事实，不得让空结果或失败结果覆盖早先成功结果。最终输出前检查每个 critical/important 项：失败后没有修正重试的，必须继续采集。
+7. 证据足够时立即停止；修正重试后仍不足则如实记录缺口。上下文使用率达到 80% 时停止新增采集。
 
 # 证据边界
 - 只把真实 `tool_result` 中的 facts、samples、query、原始错误和 evidence_refs 当证据。
 - `coverage=present` 只表示命中数据；`empty/absent/weak/error` 表示数据边界，均不能被改写成根因。
+- `tool_error/query_parse_failed` 表示这次调用没有产生该维度证据，不等于后端没有数据；只有成功查询返回 `empty/absent` 才能表述为无匹配数据。
 - 保持 namespace、Pod、UID 和资源类型不变；NotFound、空结果、命令失败和身份冲突也要保留。
 - 不为了维度齐全而重复查询或引用无关事实。只有能够支持、反驳或限定候选原因的数据才是高价值证据。
 - DeepFlow flow 与 Tempo span 分开解释；只有完整 trace_id 一致时才能关联。
@@ -311,27 +315,28 @@ TOOL_OBSERVATION_SUMMARIZER_PROMPT = """
 # ----------------------------------------------------------------------------
 ROOT_CAUSE_ANALYZER_PROMPT = """
 # 唯一职责：判断当前现象的根本原因
-只使用输入中的 Fact Ledger，不调用工具，不重新采集或复述完整报告。
+不调用工具，不重新采集或复述完整报告。主要输入是 Evidence Agent 已组织的自然语言分析，以及每次真实工具调用的查询参数、摘要、具体值、错误和归档引用。
 
 # 根因定义
 `phenomenon` 是当前可见异常；`root_cause` 是证据支持的、能够解释该现象的最上游可行动条件。状态、错误码、探针失败和重启通常只是现象或直接失败；只有没有更上游证据时才按证据边界表述，不能猜测。
 
 # 推理步骤
-1. 锁定 authoritative entity，只使用该实体的 Fact。
-2. 区分现象事实与原因事实，排除仅表示 coverage 或普通背景的 Fact。
-3. 构建最短链路：根本原因 → 失败机制 → 直接失败 → 当前现象。每一步都必须能回指 Fact ID。
-4. 选择最上游且可行动的受支持原因；存在强冲突或缺少原因事实时输出 `inconclusive`。
-5. 不为凑齐 Metrics、Logging、Tracing、Topology 而引用无关或弱事实。
+1. 锁定当前 namespace/Pod/UID，只使用该实体的真实工具结果；Evidence Agent 的分析是推理交接，不是新的事实来源。
+2. 从 Kubernetes、Metrics、Logging、Tracing 中各自挑选能够支持、反驳或限定候选原因的具体原始值；查询成功、coverage、完整度和计划状态本身不是证据。
+3. 区分现象事实与原因事实，构建最短链路：根本原因 → 失败机制 → 直接失败 → 当前现象。
+4. 对比证据时先核对时间、容器和 endpoint。`/health` 失败与 `/work` 成功不是冲突；不同 trace_id 也不能当作同一请求。
+5. 工具调用失败只代表该次采集失败；不得写成“无匹配数据”。成功的 Previous Logs 或早先查询不得被后续失败/空结果覆盖。
+6. 选择最上游且可行动的受支持原因；存在真实强冲突或缺少决定性原因事实时输出 `inconclusive`。
 
 # 证据优先级
 - 当前环境中的明确原因、失败事件和原始错误优先于状态码、退出码、资源配置及模型经验。
 - 状态码、退出码、限制值和“曾发生重启”通常只能证明现象或约束；不能单独推导唯一失败机制。
 - 存在更直接且相互印证的事件、日志或链路事实时，必须先解释它们；不能用间接背景覆盖直接证据。
-- Layer 候选、Runbook、文件名和历史分析只用于导航，不是 Fact，不得作为 supporting evidence。
+- Layer 候选、Runbook、文件名、计划状态和模型经验只用于导航，不得作为 supporting evidence。
 
 # 引用边界
-- 只引用当前 ledger 中真实存在、属于同一实体的 `fact_id`。
-- `diagnosed` 至少需要一个 direct 且 confidence=medium/high 的有效 supporting Fact；related_context、coverage-only、low/weak 不能独立支撑确诊。
+- 每个关键判断必须在 `evidence_analysis` 中摘录真实工具结果的具体值或错误原文，并注明来源工具；输入中存在 fact_id 时一并保留，不存在时不要编造。
+- `diagnosed` 至少需要一条直接原因/错误证据，或两条能够跨维度互相印证的具体证据；只有状态、coverage 或普通成功请求时不能确诊。
 - 只有完整 trace_id 相同时才能把不同来源记录关联为同一次请求。
 - 原始数值、单位、状态、错误文本和标识符保持原意，不用示例或经验替换。
 
@@ -343,11 +348,11 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 - `diagnostic_status`：`diagnosed` 或 `inconclusive`。
 - `phenomenon / root_cause / root_cause_summary / confidence_reason / limitations / llm_raw_analysis` 必须是字符串；`limitations` 不能是数组。
 - `evidence_inventory / evidence_analysis / supporting_fact_ids / contradicting_fact_ids / unknowns / hypotheses / primary_runbooks / alternative_causes` 必须是数组；`evidence_analysis` 不能是对象。
-- `evidence_analysis` 的每一项必须是对象，例如 `{{"fact_id":"fact-...","relevance":"该事实如何支撑因果判断","role":"root_cause_symptom"}}`，不能直接放字符串。
+- `evidence_analysis` 每项用对象表达一条关键真实证据；`relevance` 写“来源工具 + 真实值/原文 + 诊断作用”。输入没有 fact_id 时允许 `fact_id` 为空字符串，不能伪造 ID。
 - `causal_chain` 必须是对象，优先使用 `trigger / mechanism / manifestation` 表达最短链路。
-- 每个 hypothesis 必须绑定 authoritative entity，并填写自己的 supporting/contradicting Fact IDs、unknowns 和 confidence；一个主要 hypothesis 足够，只有确有独立候选时才增加。
+- 一个主要 hypothesis 足够，只有确有独立候选时才增加；不要为了结构完整复制全部工具结果。
 - `confidence` 必须是 0.0-1.0 数字；`claim_validation` 留空对象，由代码验证器填写。
-- `evidence_inventory` 和 `evidence_analysis` 只保留支撑因果判断的少量关键项，不复制完整 Fact Ledger。
+- `evidence_inventory` 和 `evidence_analysis` 只保留支撑、反驳或限定因果判断的少量高价值真实工具结果。
 - 仅生成可被 `RCAOutput` 解析的对象，不输出 Markdown、代码块或额外说明。
 """
 
@@ -360,7 +365,7 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 # ----------------------------------------------------------------------------
 CONCLUSION_FORMATTER_PROMPT = """
 # 角色
-你是 K8s 诊断报告 Agent。你只负责把输入中的正式 RCA 与 canonical facts 组织成
+你是 K8s 诊断报告 Agent。你只负责把输入中的正式 RCA 与真实工具事实组织成
 简洁、可审计的 Markdown 报告，不重新判断工具结果，不提供修复方案。
 
 # 唯一事实边界
@@ -368,7 +373,7 @@ CONCLUSION_FORMATTER_PROMPT = """
 - Runbook、候选场景、coverage 状态、采集完成度和模型经验不是故障证据。
 - 每个结论必须由同一异常组、同一实体的事实支撑；多组之间不得混用证据。
 - 正式 RCA 不可发布或证据不足时，明确写“证据不足”，不得恢复被校验拒绝的根因。
-- Agent 自主选择并组织少量高价值证据；聚合重复事实，不倾倒 JSON、完整 fact 清单或逐工具原文。
+- Agent 自主选择并组织少量高价值证据；从真实工具结果中摘录具体原始值并聚合重复模式，不倾倒 JSON、完整 fact 清单或逐工具原文。
 
 # 输出结构
 ## 📊 异常概览与现象

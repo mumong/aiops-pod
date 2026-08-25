@@ -278,6 +278,61 @@ class WorkflowNode(ABC):
             return mode if mode in {"strict", "tolerant"} else default
         return default
 
+    def _is_rca_fact_ledger_context_enabled(
+        self,
+        default: bool = True,
+    ) -> bool:
+        """Whether RCA receives the authoritative Fact Ledger projection.
+
+        This switch controls only the RCA reasoning context. Canonical facts
+        may still be retained for audit archives and the final report's
+        source-backed evidence table.
+        """
+        for env_key in (
+            "WORKFLOW_RCA_FACT_LEDGER_CONTEXT_ENABLED",
+            "AIOPS_WORKFLOW_RCA_FACT_LEDGER_CONTEXT_ENABLED",
+        ):
+            if env_key in os.environ:
+                return self._parse_bool_config(os.getenv(env_key), default)
+
+        wf_config = self._get_workflow_config()
+        context_cfg = (
+            wf_config.get("rca_context", {})
+            if isinstance(wf_config, dict)
+            else {}
+        )
+        if isinstance(context_cfg, dict) and "fact_ledger_enabled" in context_cfg:
+            return self._parse_bool_config(
+                context_cfg.get("fact_ledger_enabled"),
+                default,
+            )
+        return default
+
+    def _is_rca_evidence_analysis_enabled(
+        self,
+        default: bool = False,
+    ) -> bool:
+        """Whether Evidence Agent natural-language analysis reaches RCA."""
+        for env_key in (
+            "WORKFLOW_RCA_EVIDENCE_ANALYSIS_ENABLED",
+            "AIOPS_WORKFLOW_RCA_EVIDENCE_ANALYSIS_ENABLED",
+        ):
+            if env_key in os.environ:
+                return self._parse_bool_config(os.getenv(env_key), default)
+
+        wf_config = self._get_workflow_config()
+        context_cfg = (
+            wf_config.get("rca_context", {})
+            if isinstance(wf_config, dict)
+            else {}
+        )
+        if isinstance(context_cfg, dict) and "include_evidence_llm_analysis" in context_cfg:
+            return self._parse_bool_config(
+                context_cfg.get("include_evidence_llm_analysis"),
+                default,
+            )
+        return default
+
     def should_inject_runbook_catalog(self) -> bool:
         """节点是否需要在 prompt 中注入 runbook catalog。"""
         return True

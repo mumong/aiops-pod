@@ -716,7 +716,8 @@ class EvidenceCollectorNode(WorkflowNode):
                 )
 
         handoff_payload = dict(full_payload)
-        handoff_payload.pop("llm_analysis", None)
+        if not self._is_rca_evidence_analysis_enabled(default=False):
+            handoff_payload.pop("llm_analysis", None)
         return json.dumps(
             handoff_payload,
             ensure_ascii=False,
@@ -1950,24 +1951,52 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     ) -> str:
         """Give ReAct the processed baseline without making it a conclusion."""
         observations = []
+        required_follow_up = []
         for event in baseline_events:
             if event.get("type") != "tool_result":
                 continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
             observations.append({
                 "tool_name": event.get("tool_name"),
                 "tool_args": event.get("tool_args") or {},
                 "status": event.get("status"),
                 "semantic_success": event.get("semantic_success"),
-                "structured": event.get("structured"),
+                "structured": structured,
                 "summary": event.get("result") or "",
                 "raw_ref": event.get("raw_ref"),
                 "structured_ref": event.get("structured_ref"),
                 "summary_ref": event.get("summary_ref"),
             })
+            structured_status = str(structured.get("status") or "").lower()
+            if (
+                event.get("status") != "success"
+                or event.get("semantic_success") is False
+                or structured_status
+                in {"tool_error", "query_parse_failed", "query_rejected"}
+            ):
+                required_follow_up.append({
+                    "tool_name": event.get("tool_name"),
+                    "failed_tool_args": event.get("tool_args") or {},
+                    "error": (
+                        structured.get("raw_preview")
+                        or structured.get("error")
+                        or event.get("result")
+                        or "tool call failed"
+                    ),
+                    "instruction": (
+                        "检查错误并补齐/修正参数后重新调用；"
+                        "不得把本次失败写成无匹配数据"
+                    ),
+                })
         payload = json.dumps(
             {
                 "contract_version": "aiops.pre-react-observability-baseline.v1",
                 "observations": observations,
+                "required_follow_up": required_follow_up,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -1978,7 +2007,8 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             "# 代码预采集的三维可观测性 baseline\n"
             "以下是 ReAct 启动前已真实并行执行的 Metrics、Logging、Tracing "
             "工具结果，不是根因结论。先比较这些事实与 Kubernetes 生命周期，"
-            "再自主决定需要调用哪些只读工具继续调查；不要机械重复完全相同的查询。\n"
+            "再自主决定需要调用哪些只读工具继续调查；required_follow_up 中的失败"
+            "必须先修正参数并继续调用，不要机械重复完全相同的查询。\n"
             f"{payload}\n"
         )
 
@@ -2049,6 +2079,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         gate_items: List[Dict[str, Any]] = []
         for target_index, (namespace, pod) in enumerate(targets, start=1):
             for tool_name in self._OBSERVABILITY_QUERY_ORDER:
+                default_item = self._build_autonomous_observability_gate_item(
+                    namespace=namespace,
+                    pod=pod,
+                    tool_name=tool_name,
+                    target_index=target_index,
+                )
                 existing_index = next(
                     (
                         index
@@ -2064,12 +2100,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     item = dict(plan[existing_index])
                     selected_indexes.add(existing_index)
                 else:
-                    item = self._build_autonomous_observability_gate_item(
-                        namespace=namespace,
-                        pod=pod,
-                        tool_name=tool_name,
-                        target_index=target_index,
-                    )
+                    item = default_item
                     logger.info(
                         "🧭 [evidence] 补入首轮可观测门控项: %s/%s:%s",
                         namespace,
@@ -2078,6 +2109,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     )
 
                 args = dict(item.get("tool_args") or {})
+                default_args = dict(default_item.get("tool_args") or {})
+                # A model-authored plan may select the right tool while
+                # omitting required MCP arguments. Keep explicit choices and
+                # only fill missing fields from the generic Pod-scoped call.
+                for key, value in default_args.items():
+                    args.setdefault(key, value)
                 args.setdefault("namespace", namespace)
                 args.setdefault("pod", pod)
                 args.setdefault(
@@ -3155,9 +3192,38 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         if event_match and tool == "kubectl_events":
             pod_name = pod_name or event_match.group(1).strip("'\"").lower()
 
-        logs_match = re.search(r"\bkubectl\s+logs\s+([A-Za-z0-9_.-]+)", command, re.IGNORECASE)
-        if logs_match:
-            pod_name = pod_name or logs_match.group(1).lower()
+        logs_match = re.search(
+            r"\bkubectl\s+logs\b([^|;&]*)",
+            command,
+            re.IGNORECASE,
+        )
+        if logs_match and not pod_name:
+            try:
+                log_args = shlex.split(logs_match.group(1))
+            except ValueError:
+                log_args = logs_match.group(1).split()
+            value_flags = {
+                "-n",
+                "--namespace",
+                "-c",
+                "--container",
+                "--tail",
+                "--since",
+                "--since-time",
+                "--limit-bytes",
+            }
+            skip_next = False
+            for token in log_args:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if token in value_flags:
+                    skip_next = True
+                    continue
+                if token.startswith("-"):
+                    continue
+                pod_name = token.removeprefix("pod/").lower()
+                break
 
         resource_target = cls._extract_plan_resource_target(command)
         if resource_target.get("kind") == "pod":
@@ -6273,7 +6339,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                             item["fact_ledger"] = deepcopy(
                                 native_ledger_input
                             )
-                    if not provider_is_canonical:
+                    narrative_rca_context = (
+                        not self._is_rca_fact_ledger_context_enabled(
+                            default=True
+                        )
+                    )
+                    if not provider_is_canonical or narrative_rca_context:
                         agent_context = self._build_aiops_agent_context(
                             tool_name=tool_name,
                             structured=structured,

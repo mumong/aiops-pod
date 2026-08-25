@@ -262,6 +262,40 @@ def test_t017_evidence_provider_item_uses_one_canonical_ledger_projection():
     assert events == archived_copy
 
 
+def test_narrative_rca_handoff_keeps_canonical_tool_agent_facts():
+    sentinel, _, ledger, structured, _ = _t017_canonical_stage_fixture()
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "rca_context": {
+            "fact_ledger_enabled": False,
+            "include_evidence_llm_analysis": True,
+        }
+    }
+    events = [{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "query_pod_logs",
+        "tool_args": {
+            "namespace": "demo",
+            "pod": "api",
+            "purpose": "capture projection sentinel",
+        },
+        "result": "real query summary containing " + sentinel,
+        "structured": structured,
+        "raw_ref": "/archive/t017-stage.raw",
+        "structured_ref": "/archive/t017-stage.structured.json",
+        "summary_ref": "/archive/t017-stage.summary",
+    }]
+
+    tool_data = node._extract_tool_data_from_thinking(events)
+
+    assert len(tool_data) == 1
+    assert tool_data[0]["fact_ledger"]["case_id"] == ledger["case_id"]
+    assert sentinel in tool_data[0]["agent_facts"]
+    assert sentinel in tool_data[0]["data"]
+
+
 def test_t017_rca_provider_context_uses_one_canonical_ledger_projection():
     sentinel, record, _, _, duplicated_item = _t017_canonical_stage_fixture()
 
@@ -2447,6 +2481,86 @@ def test_evidence_handoff_excludes_llm_analysis_while_full_archive_retains_it(
     assert "llm_analysis" not in handoff
     assert "309GB" not in handoff_json
     assert handoff["tool_data"] == output.tool_data
+
+
+def test_evidence_handoff_keeps_llm_analysis_for_narrative_rca_context(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "rca_context": {
+            "fact_ledger_enabled": False,
+            "include_evidence_llm_analysis": True,
+        }
+    }
+    node.current_run_id = "evidence-narrative-handoff"
+    output = EvidenceCollectionOutput.model_validate({
+        "tool_data": [{"tool": "kubectl_describe", "data": "probe failed"}],
+        "llm_analysis": (
+            "Liveness /health returned HTTP 500 while /work remained 200."
+        ),
+        "collection_summary": "Collected source-backed evidence.",
+        "plan_total": 1,
+        "plan_collected": 1,
+        "plan_completeness": 1.0,
+        "environment_evidence_total": 1,
+        "environment_evidence_collected": 1,
+        "environment_evidence_completeness": 1.0,
+    })
+
+    handoff = json.loads(node._publish_evidence_analysis(output))
+
+    assert handoff["llm_analysis"].startswith("Liveness /health")
+    assert handoff["tool_data"] == output.tool_data
+
+
+def test_narrative_rca_context_ignores_fact_ledger_authority_and_keeps_tools():
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {
+            "fact_ledger_enabled": False,
+            "include_evidence_llm_analysis": True,
+        }
+    }
+    entity_id = "k8s.pod:demo/api:uid-a"
+    fact_record = _canonical_fact_record(
+        entity_id=entity_id,
+        value={"message": "GET /work returned 200"},
+        evidence_refs=["logs:work-200"],
+    )
+    evidence_analysis = json.dumps({
+        "llm_analysis": (
+            "Probe /health returned HTTP 500; /work HTTP 200 is a different "
+            "endpoint and does not contradict the probe failure."
+        ),
+        "tool_data": [_internally_authorized_tool_item(
+            {
+                "contract_version": "aiops.fact-ledger.v1",
+                "case_id": "case-narrative",
+                "scope_entity_ids": [entity_id],
+                "records": [fact_record],
+                "record_count": 1,
+                "truncated": False,
+                "source": "mcp_canonical",
+                "legacy_contract": False,
+            },
+            tool="query_pod_logs",
+            agent_facts=(
+                "QUERY_FACT source_system=elasticsearch "
+                "value=GET /work returned 200 ref=logs:work-200"
+            ),
+        )],
+    }, ensure_ascii=False)
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "## AIOps Fact Ledger" not in context
+    assert "LLM 证据分析" in context
+    assert "Probe /health returned HTTP 500" in context
+    assert "QUERY_FACT source_system=elasticsearch" in context
+    assert "GET /work returned 200" in context
 
 
 def test_rca_context_excludes_llm_analysis_when_fact_ledger_exists():

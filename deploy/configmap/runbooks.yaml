@@ -368,6 +368,14 @@ data:
     - `query_pod_tracing`: purpose 应明确为验证“哪个接口/调用方与故障前负载相关”；可按 request resource、错误状态码、时延、peer 或已从日志得到的 trace ID 缩小范围。
     - 第一轮只有单点指标、宽泛日志或孤立 flow 时，使用新的 purpose 缩小时间窗或过滤条件继续补证；不要重复同一查询。
 
+    以下只示范正确参数形状，`<namespace>/<pod>/<container>/<trace_id>` 必须替换为当前真实实体；指标、关键词和路径仍由当前证据决定，不是固定故障路由：
+    ```json
+    {"tool":"execute_pod_promql","namespace":"<namespace>","pod":"<pod>","purpose":"验证故障前 working set 是否持续逼近内存上限","promql":"container_memory_working_set_bytes{namespace=\"<namespace>\",pod=\"<pod>\",container=\"<container>\"}","query_type":"range","window_minutes":60,"step":"30s"}
+    {"tool":"query_pod_logs","namespace":"<namespace>","pod":"<pod>","container":"<container>","purpose":"验证故障前是否存在真实内存增长或分配异常","window_minutes":60,"keywords":["memory","allocate","heap","GC","OOM"],"keyword_mode":"any","max_records":20}
+    {"tool":"query_pod_tracing","namespace":"<namespace>","pod":"<pod>","purpose":"关联日志中的真实 trace_id，确认哪类请求与内存增长同窗","window_minutes":60,"trace_id":"<trace_id>","include_tempo":true,"max_records":20}
+    ```
+    若 range 仍为空，先检查 metric 名和 namespace/pod/container labels，再用修正后的新 purpose 重试一次；工具参数错误与成功查询为空必须分开记录。
+
     ## 证据边界
     - `terminated.reason=OOMKilled` 或明确 cgroup OOM 事件是故障类型主证据；内存曲线只说明逼近 limit 的过程。
     - working set 接近 limit 支持内存压力，但单个采样点不能证明泄漏；至少需要趋势、重复周期或日志/Trace 行为相互印证。
@@ -914,6 +922,15 @@ data:
     - 日志给出 trace ID 或错误接口时：`query_pod_tracing` 按 trace_id/request_resource 关联故障前请求，确认是否业务流量触发。
     - 只有 Last State Reason=OOMKilled 或明确 cgroup/kernel OOM 证据才切 pod-oomkilled；Exit 137 单独保留为 SIGKILL 待分流；出现配置类报错切 pod-config-error。
 
+    ## Liveness 场景可观测查询示例
+    以下是参数形状示例，不代表所有 CrashLoop 都必须查询这些数据。先从 Pod YAML/describe 读取真实 probe path、container 和异常时间窗，再替换占位符：
+    ```json
+    {"tool":"execute_pod_promql","namespace":"<namespace>","pod":"<pod>","purpose":"验证探针失败窗口内 restartCount 是否继续增长","promql":"kube_pod_container_status_restarts_total{namespace=\"<namespace>\",pod=\"<pod>\",container=\"<container>\"}","query_type":"range","window_minutes":60,"step":"30s"}
+    {"tool":"query_pod_logs","namespace":"<namespace>","pod":"<pod>","container":"<container>","purpose":"查找真实健康检查路径在失败窗口内的应用响应","window_minutes":60,"keywords":["<probe-path>"],"keyword_mode":"phrase","max_records":20}
+    {"tool":"query_pod_tracing","namespace":"<namespace>","pod":"<pod>","purpose":"验证真实健康检查路径的响应码和时延","window_minutes":60,"request_resource":"<probe-path>","response_codes":[500],"include_tempo":true,"max_records":20}
+    ```
+    kubelet 探针不一定被应用日志或 Trace 采集；Logging/Tracing empty 不能反驳 Kubernetes Event。`/health` 失败与 `/work` 成功属于不同 endpoint，不得写成证据冲突。
+
     ## 判定规则
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
@@ -1009,6 +1026,8 @@ data:
     - probe 失败事件只有次数时：读 describe events 里探测失败原文（连接拒绝/超时/HTTP 状态码），区分进程未监听、端口错配、依赖未就绪。
     - 应用侧原因不明时：`query_pod_logs` 按探测路径/端口/启动关键词与失败时间窗查日志；`query_pod_tracing` 看探测或业务请求的真实响应码与时延。
     - 判断"一直失败还是偶发抖动"时：`execute_pod_promql` 用 range 查询 ready 状态或重启计数，覆盖失败时间窗。
+    - 查询参数必须同时包含 namespace、pod、purpose、promql、query_type；参数校验失败时修正后继续调用，不能把失败写成 Metrics 空数据。
+    - 可参考 `pod-crashloop-runtime.md` 的 Liveness 参数形状，用 Pod YAML 中真实 probe path 替换 `<probe-path>`；不同 endpoint 的成功与失败不能直接判为冲突。
 
     ## 判定规则
     | 条件 | 结论 | 置信度 |

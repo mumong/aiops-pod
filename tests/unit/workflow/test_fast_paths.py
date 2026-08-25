@@ -1431,6 +1431,15 @@ def test_deployed_workflow_disables_rca_validation():
     app_config = yaml.safe_load(configmap["data"]["config.yaml"])
 
     assert app_config["workflow"]["rca_validation"]["enabled"] is False
+    assert (
+        app_config["workflow"]["rca_context"]["fact_ledger_enabled"]
+        is False
+    )
+    assert (
+        app_config["workflow"]["rca_context"]
+        ["include_evidence_llm_analysis"]
+        is True
+    )
 
 
 def test_deployed_config_enables_autonomous_observability_and_disables_compatibility_servers():
@@ -1630,8 +1639,8 @@ def test_aiops_prompts_preserve_exact_observability_and_causality():
     assert "`empty/absent/weak/error` 表示数据边界" in EVIDENCE_COLLECTOR_PROMPT
     assert "原始数值、单位、状态、错误文本和标识符保持原意" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "完整 trace_id" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "related_context、coverage-only、low/weak 不能独立支撑确诊" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "不为凑齐 Metrics、Logging、Tracing、Topology" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "查询成功、coverage、完整度和计划状态本身不是证据" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "只有状态、coverage 或普通成功请求时不能确诊" in ROOT_CAUSE_ANALYZER_PROMPT
     # 结论富模板：只依赖真实数据，不复述旧版事实合同措辞
     assert "只用真实" in CONCLUSION_FORMATTER_PROMPT
     assert "禁止编造" in CONCLUSION_FORMATTER_PROMPT
@@ -1684,9 +1693,9 @@ def test_runtime_prompts_encode_tasks_not_prompt_methodology():
 
 def test_rca_and_conclusion_prompts_require_verbatim_per_pod_observability():
     rca_phrases = [
-        "锁定 authoritative entity",
-        "只使用该实体的 Fact",
-        "每一步都必须能回指 Fact ID",
+        "锁定当前 namespace/Pod/UID",
+        "只使用该实体的真实工具结果",
+        "来源工具 + 真实值/原文 + 诊断作用",
         "原始数值、单位、状态、错误文本和标识符保持原意",
     ]
 
@@ -1709,7 +1718,7 @@ def test_active_rca_and_conclusion_prompts_are_fixture_free():
     for phrase in (
         "原始数值、单位、状态、错误文本和标识符保持原意",
         "只有完整 trace_id 相同时",
-        "属于同一实体的 `fact_id`",
+        "输入中存在 fact_id 时一并保留",
     ):
         assert phrase in ROOT_CAUSE_ANALYZER_PROMPT
 

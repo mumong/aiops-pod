@@ -126,19 +126,37 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 **state,
                 "entity_evidence_snapshot": entity_evidence_snapshot,
             }
-            rca_input = self._build_rca_input_projection(
-                state_with_rca_input,
-                evidence_analysis,
+            fact_ledger_context_enabled = (
+                self._is_rca_fact_ledger_context_enabled(default=True)
             )
-            state_with_rca_input["rca_input_projection"] = rca_input
+            if fact_ledger_context_enabled:
+                rca_input = self._build_rca_input_projection(
+                    state_with_rca_input,
+                    evidence_analysis,
+                )
+                state_with_rca_input["rca_input_projection"] = rca_input
+            else:
+                rca_input = {}
+                state_with_rca_input.pop("rca_input_projection", None)
+                logger.info(
+                    "⏭️ [rca] Fact Ledger 权威上下文已关闭；"
+                    "使用 Evidence Agent 分析与真实工具摘要"
+                )
             evidence_summary = self._build_rca_context(state_with_rca_input)
-            self._archive_node_input({
+            archived_input = {
                 "node": self.node_id,
                 "question": question,
                 "layer": layer.value if isinstance(layer, Layer) else layer,
-                "rca_input_projection": rca_input,
+                "rca_context_mode": (
+                    "fact_ledger"
+                    if fact_ledger_context_enabled
+                    else "evidence_narrative"
+                ),
                 "evidence_summary": evidence_summary,
-            })
+            }
+            if fact_ledger_context_enabled:
+                archived_input["rca_input_projection"] = rca_input
+            self._archive_node_input(archived_input)
             thinking_events = []
 
             # 使用 LLM 分析
@@ -264,18 +282,20 @@ class RootCauseAnalyzerNode(WorkflowNode):
             # 构建决策对象
             decision = self._build_decision(layer, evidence_items, rca_result)
             
-            new_state.update({
+            rca_state_update = {
                 "deterministic_decision": decision,
                 "root_cause": rca_result.get("root_cause", ""),
                 "causal_chain": rca_result.get("causal_chain", {}),
                 "rca_analysis": json.dumps(rca_result, ensure_ascii=False),
-                "rca_input_projection": rca_input,
                 "rca_attempts": attempts,
                 "claim_validation": claim_validation,
                 "entity_evidence_snapshot": entity_evidence_snapshot,
                 # AI 判定的核心 Runbook（从 primary_runbooks 列表取第一个）
                 "primary_runbook_id": ", ".join(rca_result.get("primary_runbooks", []) or []) or None,
-            })
+            }
+            if fact_ledger_context_enabled:
+                rca_state_update["rca_input_projection"] = rca_input
+            new_state.update(rca_state_update)
 
             # 存入 thinking_events（带 node 标记）
             self._save_thinking(state, new_state, thinking_events)
@@ -559,7 +579,14 @@ class RootCauseAnalyzerNode(WorkflowNode):
         """Build compact RCA input from handoff + bounded evidence facts."""
         evidence_items = state.get("evidence_items", [])
         evidence_analysis = state.get("evidence_analysis", "{}")
-        fact_ledgers = extract_fact_ledgers_from_evidence_analysis(evidence_analysis)
+        fact_ledger_context_enabled = (
+            self._is_rca_fact_ledger_context_enabled(default=True)
+        )
+        fact_ledgers = (
+            extract_fact_ledgers_from_evidence_analysis(evidence_analysis)
+            if fact_ledger_context_enabled
+            else []
+        )
         layer_handoff = state.get("layer_handoff")
         if not layer_handoff:
             layer_handoff = self._layer_analysis_to_handoff(state.get("layer_analysis", ""))
@@ -572,7 +599,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
             compact_handoff,
         ]
         rca_input_projection = state.get("rca_input_projection")
-        if isinstance(rca_input_projection, Mapping):
+        if (
+            fact_ledger_context_enabled
+            and isinstance(rca_input_projection, Mapping)
+        ):
             parts.extend([
                 "",
                 "# 代码权威 RCA 输入投影",
@@ -600,7 +630,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         facts = state.get("evidence_facts") or []
         conflicts = state.get("evidence_conflicts") or []
         missing = state.get("missing_evidence") or []
-        if facts and not fact_ledgers:
+        if facts and not fact_ledgers and fact_ledger_context_enabled:
             parts.extend([
                 "",
                 "# 已验证事实",
@@ -1542,15 +1572,28 @@ class RootCauseAnalyzerNode(WorkflowNode):
             tool_data = data.get("tool_data", [])
             if not isinstance(tool_data, list):
                 tool_data = []
-            selected_tool_data = select_tool_data_for_rca(
-                tool_data,
-                supplementary_limit=10,
+            fact_ledger_context_enabled = (
+                self._is_rca_fact_ledger_context_enabled(default=True)
+            )
+            selected_tool_data = (
+                select_tool_data_for_rca(
+                    tool_data,
+                    supplementary_limit=10,
+                )
+                if fact_ledger_context_enabled
+                else self._select_narrative_tool_data(
+                    tool_data,
+                    limit=16,
+                )
             )
             fact_ledgers = extract_fact_ledgers_from_tool_data(
                 selected_tool_data
             )
 
-            if fact_ledgers:
+            if (
+                fact_ledgers
+                and fact_ledger_context_enabled
+            ):
                 ledger_budget = min(
                     RCA_FACT_LEDGER_MAX_CHARS,
                     max(
@@ -1599,10 +1642,16 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
             # 1. LLM 的分析文本（包含工具调用结果的总结）
             llm_analysis = data.get("llm_analysis", "")
-            if llm_analysis:
+            if (
+                llm_analysis
+                and (
+                    self._is_rca_evidence_analysis_enabled(default=False)
+                    or not fact_ledgers
+                )
+            ):
                 sections.append((
                     "## LLM 证据分析",
-                    self._compact_text_value(llm_analysis, limit=2000),
+                    self._compact_text_value(llm_analysis, limit=5000),
                 ))
 
             # 2. MCP 工具的原始输出
@@ -1631,6 +1680,36 @@ class RootCauseAnalyzerNode(WorkflowNode):
             )
         except (json.JSONDecodeError, TypeError):
             return ""
+
+    @staticmethod
+    def _select_narrative_tool_data(
+        tool_data: List[Dict[str, Any]],
+        *,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Select bounded real tool summaries without ledger projection.
+
+        The Fact Ledger selector intentionally removes duplicate canonical
+        representations. Narrative RCA needs the opposite representation:
+        keep agent_facts/agent_context/data and remove the ledger itself.
+        """
+        selected: List[Dict[str, Any]] = []
+        for item in tool_data or []:
+            if not isinstance(item, Mapping) or item.get("deduplicated") is True:
+                continue
+            tool_name = re.sub(
+                r"[^a-z0-9]",
+                "",
+                str(item.get("tool") or "").lower(),
+            )
+            if tool_name in {"readcontextarchive", "fetchrunbook"}:
+                continue
+            copied = dict(item)
+            copied.pop("fact_ledger", None)
+            selected.append(copied)
+            if len(selected) >= max(0, limit):
+                break
+        return selected
 
     @classmethod
     def _compact_supplementary_tool_data(
