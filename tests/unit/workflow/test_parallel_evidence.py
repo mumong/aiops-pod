@@ -1041,6 +1041,97 @@ def test_multi_group_agent_context_semantically_compacts_repeated_observability_
     assert "duplicate raw narrative" not in serialized
 
 
+def test_multi_group_agent_context_reads_selected_facts_from_snapshot_index():
+    """Independent summary deduplication must not erase an RCA-selected fact."""
+    entity_key = "aiops-case-08/workload"
+    selected_limit = {
+        "fact_id": "fact-limit-selected",
+        "entity_id": "k8s.pod:aiops-case-08/workload:uid-1",
+        "entity_kind": "Pod",
+        "namespace": "aiops-case-08",
+        "entity_name": "workload",
+        "source_system": "kubernetes",
+        "dimension": "kubernetes",
+        "fact_type": "configuration",
+        "attribute": "container.resource_limit.memory",
+        "value": {"container": "app", "value": "64Mi"},
+        "evidence_role": "context",
+    }
+    selected_request = {
+        **selected_limit,
+        "fact_id": "fact-request-selected",
+        "attribute": "container.resource_request.memory",
+        "value": {"container": "app", "value": "24Mi"},
+    }
+    # The display summary retained an equivalent limit observation from a
+    # different tool.  Its ID is intentionally absent from the manifest.
+    summary_limit = {
+        **selected_limit,
+        "fact_id": "fact-limit-summary-equivalent",
+    }
+    group = {
+        "group_id": "g1",
+        "entities": [{
+            "kind": "Pod",
+            "namespace": "aiops-case-08",
+            "name": "workload",
+        }],
+        "entity_summaries": [{
+            "namespace": "aiops-case-08",
+            "name": "workload",
+            "status": "CrashLoopBackOff",
+            "phenomenon": "OOMKilled",
+        }],
+        "dimension_evidence_by_entity": {
+            entity_key: {
+                "kubernetes": {
+                    "status": "present",
+                    "facts": [summary_limit, selected_request],
+                },
+                "metrics": {"status": "unselected", "facts": []},
+                "logging": {"status": "unselected", "facts": []},
+                "tracing": {"status": "unselected", "facts": []},
+            }
+        },
+        "entity_evidence_snapshot": {
+            "fact_index": {
+                selected_limit["fact_id"]: selected_limit,
+                selected_request["fact_id"]: selected_request,
+                summary_limit["fact_id"]: summary_limit,
+            },
+            "selection_manifest": {
+                "rca_input_fact_ids": [
+                    selected_limit["fact_id"],
+                    selected_request["fact_id"],
+                ]
+            },
+        },
+        "rca_analysis": json.dumps({
+            "diagnostic_status": "diagnosed",
+            "root_cause": "memory use exceeded the 64Mi limit",
+        }),
+    }
+
+    context = ConclusionFormatterNode._build_multi_group_report_context(
+        "为什么 OOM？", [group]
+    )
+    facts = context["groups"][0]["entities"][0]["dimensions"][
+        "kubernetes"
+    ]["facts"]
+
+    by_attribute = {fact["attribute"]: fact for fact in facts}
+    assert by_attribute["container.resource_limit.memory"]["fact_id"] == (
+        "fact-limit-selected"
+    )
+    assert by_attribute["container.resource_limit.memory"]["value"] == {
+        "container": "app", "value": "64Mi",
+    }
+    assert by_attribute["container.resource_request.memory"]["value"] == {
+        "container": "app", "value": "24Mi",
+    }
+    assert "fact-limit-summary-equivalent" not in json.dumps(context)
+
+
 def test_multi_group_entity_card_labels_negative_observation_after_causal_facts():
     facts = [
         {

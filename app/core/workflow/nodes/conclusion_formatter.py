@@ -1596,6 +1596,34 @@ class ConclusionFormatterNode(WorkflowNode):
                 if str(item).strip()
             ]
             selected_set = set(selected_ids)
+            fact_index = (
+                snapshot.get("fact_index")
+                if isinstance(snapshot.get("fact_index"), dict)
+                else {}
+            )
+            selected_facts_by_entity_dimension: Dict[
+                str, Dict[str, List[Dict[str, Any]]]
+            ] = defaultdict(lambda: defaultdict(list))
+            for fact_id in selected_ids:
+                fact = fact_index.get(fact_id)
+                if not isinstance(fact, dict):
+                    continue
+                namespace = str(fact.get("namespace") or "").strip()
+                name = str(fact.get("entity_name") or "").strip()
+                entity_id = str(fact.get("entity_id") or "").strip()
+                if (not namespace or not name) and entity_id.lower().startswith(
+                    "k8s.pod:"
+                ):
+                    scoped = entity_id[len("k8s.pod:"):]
+                    parsed_namespace, separator, remainder = scoped.partition("/")
+                    parsed_name = remainder.split(":", 1)[0] if separator else ""
+                    namespace = namespace or parsed_namespace
+                    name = name or parsed_name
+                dimension = str(fact.get("dimension") or "").strip().lower()
+                if namespace and name and dimension:
+                    selected_facts_by_entity_dimension[
+                        f"{namespace}/{name}"
+                    ][dimension].append(dict(fact))
             dimensions_by_entity = (
                 group.get("dimension_evidence_by_entity")
                 if isinstance(group.get("dimension_evidence_by_entity"), dict)
@@ -1630,11 +1658,27 @@ class ConclusionFormatterNode(WorkflowNode):
                         fact for fact in (summary.get("facts") or [])
                         if isinstance(fact, dict)
                     ]
-                    visible_facts = (
-                        [fact for fact in all_facts if str(fact.get("fact_id") or "") in selected_set]
-                        if selected_set
-                        else all_facts
+                    authoritative_selected_facts = (
+                        selected_facts_by_entity_dimension
+                        .get(entity_key, {})
+                        .get(dimension, [])
                     )
+                    if selected_set and fact_index:
+                        # The snapshot fact index and selection manifest are the
+                        # RCA authority.  The dimension summary independently
+                        # deduplicates equivalent observations for display and
+                        # can retain a different equivalent fact_id.  Intersecting
+                        # those two projections by ID silently drops valid facts.
+                        visible_facts = authoritative_selected_facts
+                    elif selected_set:
+                        # Backward compatibility for older snapshots that did
+                        # not persist a fact_index.
+                        visible_facts = [
+                            fact for fact in all_facts
+                            if str(fact.get("fact_id") or "") in selected_set
+                        ]
+                    else:
+                        visible_facts = all_facts
                     compact_facts = cls._compact_facts_for_report_agent(
                         dimension,
                         visible_facts,
