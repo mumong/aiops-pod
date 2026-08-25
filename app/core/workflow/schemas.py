@@ -572,7 +572,7 @@ class RCACompactOutput(BaseModel):
     phenomenon: str = ""
     root_cause: str = Field(min_length=1)
     causal_chain: list[str] = Field(default_factory=list, max_length=4)
-    key_evidence: list[str] = Field(default_factory=list, max_length=8)
+    key_evidence: list[str] = Field(min_length=1, max_length=8)
     unknowns: list[str] = Field(default_factory=list, max_length=6)
     confidence: float = Field(ge=0.0, le=1.0)
 

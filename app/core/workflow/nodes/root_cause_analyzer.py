@@ -657,7 +657,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "",
                 "# RCA 输入模式",
                 "Evidence Agent 因果交接 + 去重后的真实工具观察；"
-                "evidence_items、coverage 和 Fact Ledger 投影未重复注入。",
+                "evidence_items、采集元状态和 Fact Ledger 投影未重复注入。",
             ])
 
         facts = state.get("evidence_facts") or []
@@ -1887,6 +1887,23 @@ class RootCauseAnalyzerNode(WorkflowNode):
             )
         return str(value).strip()
 
+    @staticmethod
+    def _sanitize_narrative_agent_facts(value: Any) -> str:
+        """Remove collection metadata while retaining source and raw values."""
+        lines: List[str] = []
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("OBSERVABILITY_QUERY"):
+                line = re.sub(
+                    r"\s+(?:status|coverage|directness)=[^\s]+",
+                    "",
+                    line,
+                )
+            lines.append(line)
+        return "\n".join(lines)
+
     @classmethod
     def _narrative_tool_signature(cls, item: Mapping[str, Any]) -> str:
         representation = cls._narrative_tool_representation(item).lower()
@@ -1955,6 +1972,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 continue
             copied = dict(item)
             copied.pop("fact_ledger", None)
+            if copied.get("agent_facts"):
+                copied["agent_facts"] = cls._sanitize_narrative_agent_facts(
+                    copied.get("agent_facts")
+                )
             signature = cls._narrative_tool_signature(copied)
             score = cls._narrative_tool_score(copied, index)
             existing = candidates.get(signature)

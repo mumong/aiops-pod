@@ -49,6 +49,7 @@ def test_compact_rca_schema_is_materially_smaller_than_legacy_contract():
     assert "hypotheses" not in compact
     assert "evidence_inventory" not in compact
     assert "claim_validation" not in compact
+    assert "key_evidence" in RCACompactOutput.model_json_schema()["required"]
 
 
 def test_compact_rca_output_expands_to_legacy_internal_shape():
@@ -2704,7 +2705,11 @@ def test_narrative_rca_context_drops_repeated_evidence_and_coverage_projection()
                 "dimension": "kubernetes",
                 "status": "success",
                 "coverage": "present",
-                "agent_facts": "Liveness probe failed: HTTP 500",
+                "agent_facts": (
+                    "OBSERVABILITY_QUERY tool=kubectl_events "
+                    "status=query_succeeded coverage=present directness=direct\n"
+                    "QUERY_FACT value=Liveness probe failed: HTTP 500"
+                ),
             }],
         }),
     })
@@ -2714,6 +2719,8 @@ def test_narrative_rca_context_drops_repeated_evidence_and_coverage_projection()
     assert "LOW_VALUE_DUPLICATE_SELECTED_ROW" not in context
     assert "LOW_VALUE_DUPLICATE_EVIDENCE_ITEM" not in context
     assert "LOW_VALUE_COVERAGE_CONTRACT" not in context
+    assert "coverage=present" not in context
+    assert "status=query_succeeded" not in context
     assert "# 证据采集结果" not in context
     assert len(context) <= RCA_NARRATIVE_CONTEXT_MAX_CHARS
 

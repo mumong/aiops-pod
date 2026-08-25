@@ -1944,14 +1944,36 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             max_workers=len(requests),
         )
 
-    @staticmethod
+    @classmethod
     def _append_baseline_handoff(
+        cls,
         user_message: str,
         baseline_events: List[Dict[str, Any]],
     ) -> str:
-        """Give ReAct the processed baseline without making it a conclusion."""
+        """Give ReAct a bounded fact projection, never the canonical ledger.
+
+        Full MCP structured responses are already archived. Re-injecting their
+        Fact Ledger here duplicates tens of kilobytes of logs/flows before the
+        agent starts. The ReAct handoff keeps query identity, bounded
+        agent-readable facts, errors and archive references only.
+        """
         observations = []
         required_follow_up = []
+
+        def bound_lines(value: Any, max_chars: int) -> str:
+            selected: List[str] = []
+            used = 0
+            for line in str(value or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                addition = len(line) + (1 if selected else 0)
+                if used + addition > max_chars:
+                    break
+                selected.append(line)
+                used += addition
+            return "\n".join(selected)
+
         for event in baseline_events:
             if event.get("type") != "tool_result":
                 continue
@@ -1960,16 +1982,52 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 if isinstance(event.get("structured"), dict)
                 else {}
             )
-            observations.append({
+            tool_name = str(event.get("tool_name") or "")
+            agent_facts = (
+                event.get("agent_facts")
+                or cls._build_aiops_agent_facts(tool_name, structured)
+                or ""
+            )
+            agent_facts = bound_lines(agent_facts, 6500)
+            has_value_facts = any(
+                line.startswith((
+                    "QUERY_FACT ",
+                    "METRIC ",
+                    "LOG ",
+                    "DEEPFLOW ",
+                    "TEMPO ",
+                    "TOPOLOGY ",
+                    "QUERY_LIMITATIONS ",
+                ))
+                for line in agent_facts.splitlines()
+            )
+            observation = {
                 "tool_name": event.get("tool_name"),
                 "tool_args": event.get("tool_args") or {},
                 "status": event.get("status"),
                 "semantic_success": event.get("semantic_success"),
-                "structured": structured,
-                "summary": event.get("result") or "",
+                "source_system": structured.get("source_system"),
+                "dimension": structured.get("dimension"),
+                "coverage": structured.get("coverage"),
+                "purpose": structured.get("purpose"),
+                "entity": structured.get("entity"),
+                "executed_query": structured.get("query"),
+                "agent_facts": agent_facts,
+                "limitations": structured.get("limitations"),
+                "error": structured.get("error"),
                 "raw_ref": event.get("raw_ref"),
                 "structured_ref": event.get("structured_ref"),
                 "summary_ref": event.get("summary_ref"),
+            }
+            if not has_value_facts:
+                observation["summary"] = bound_lines(
+                    event.get("result") or "",
+                    1600,
+                )
+            observations.append({
+                key: value
+                for key, value in observation.items()
+                if value not in (None, "", [], {})
             })
             structured_status = str(structured.get("status") or "").lower()
             if (
@@ -1981,12 +2039,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 required_follow_up.append({
                     "tool_name": event.get("tool_name"),
                     "failed_tool_args": event.get("tool_args") or {},
-                    "error": (
+                    "error": str(
                         structured.get("raw_preview")
                         or structured.get("error")
                         or event.get("result")
                         or "tool call failed"
-                    ),
+                    )[:1600],
                     "instruction": (
                         "检查错误并补齐/修正参数后重新调用；"
                         "不得把本次失败写成无匹配数据"

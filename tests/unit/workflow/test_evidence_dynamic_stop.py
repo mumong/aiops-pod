@@ -1167,6 +1167,51 @@ def test_baseline_handoff_requires_corrected_retry_after_tool_error():
     assert "不得把本次失败写成无匹配数据" in rendered
 
 
+def test_baseline_handoff_excludes_full_fact_ledger_and_keeps_bounded_facts():
+    rendered = EvidenceCollectorNode._append_baseline_handoff(
+        "original request",
+        [{
+            "type": "tool_result",
+            "tool_name": "query_pod_logs",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "purpose": "inspect failure logs",
+            },
+            "status": "success",
+            "semantic_success": True,
+            "result": "FULL_RESULT_MARKER" * 10000,
+            "structured": {
+                "status": "success",
+                "source_system": "elasticsearch",
+                "dimension": "logging",
+                "coverage": "present",
+                "purpose": "inspect failure logs",
+                "entity": {"namespace": "demo", "pod": "api"},
+                "query": {"keywords": ["CONFIG_MISSING"]},
+                "facts": [{
+                    "ref": "log-1",
+                    "source_system": "elasticsearch",
+                    "name": "log.message",
+                    "value": "CONFIG_MISSING caused exit 78",
+                }],
+                "fact_ledger": {
+                    "records": [{"value": "LEDGER_BULK_MARKER" * 10000}],
+                },
+            },
+            "raw_ref": "tools/001.raw.txt",
+            "structured_ref": "tools/001.structured.json",
+        }],
+    )
+
+    assert "CONFIG_MISSING caused exit 78" in rendered
+    assert "LEDGER_BULK_MARKER" not in rendered
+    assert "FULL_RESULT_MARKER" not in rendered
+    assert '"fact_ledger"' not in rendered
+    assert "tools/001.structured.json" in rendered
+    assert len(rendered) < 12000
+
+
 def test_autonomous_gate_does_not_bind_active_only_pod_to_nonempty_plan():
     node = EvidenceCollectorNode()
     model_plan = [{
