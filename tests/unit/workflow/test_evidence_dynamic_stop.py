@@ -6104,6 +6104,9 @@ def test_evidence_legacy_context_raises_when_mandatory_identity_exceeds_budget()
 
 def test_evidence_tool_data_attaches_bounded_valid_fact_ledger_json():
     node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     entity_id = "k8s.pod:demo/api:uid-a"
     records = [
         _canonical_fact_record(

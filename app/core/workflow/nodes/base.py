@@ -219,12 +219,11 @@ class WorkflowNode(ABC):
             return self._parse_bool_config(runtime_cfg.get("fallback_enabled"), default)
         return default
 
-    def _is_rca_validation_enabled(self, default: bool = True) -> bool:
+    def _is_rca_validation_enabled(self, default: bool = False) -> bool:
         """Whether RCA fact binding, claim validation and gate retries run.
 
-        Semantic fact binding is enabled by default and is independent from
-        tolerant structured-output recovery. Deployments may explicitly opt
-        out through the environment or ``workflow.rca_validation.enabled``.
+        Validation is opt-in. The default narrative RCA path preserves the
+        first model result and never starts a claim-gate repair implicitly.
         """
         for env_key in (
             "WORKFLOW_RCA_VALIDATION_ENABLED",
@@ -278,7 +277,7 @@ class WorkflowNode(ABC):
             return mode if mode in {"strict", "tolerant"} else default
         return default
 
-    def _get_rca_output_schema_mode(self, default: str = "full") -> str:
+    def _get_rca_output_schema_mode(self, default: str = "compact") -> str:
         """Return the model-facing RCA schema size.
 
         ``compact`` asks the model only for the diagnosis, shortest causal
@@ -309,13 +308,12 @@ class WorkflowNode(ABC):
 
     def _is_rca_fact_ledger_context_enabled(
         self,
-        default: bool = True,
+        default: bool = False,
     ) -> bool:
         """Whether RCA receives the authoritative Fact Ledger projection.
 
-        This switch controls only the RCA reasoning context. Canonical facts
-        may still be retained for audit archives and the final report's
-        source-backed evidence table.
+        This is opt-in and controls only RCA reasoning context. Canonical facts
+        remain available to audit archives and the final report evidence table.
         """
         for env_key in (
             "WORKFLOW_RCA_FACT_LEDGER_CONTEXT_ENABLED",
@@ -339,7 +337,7 @@ class WorkflowNode(ABC):
 
     def _is_rca_evidence_analysis_enabled(
         self,
-        default: bool = False,
+        default: bool = True,
     ) -> bool:
         """Whether Evidence Agent natural-language analysis reaches RCA."""
         for env_key in (

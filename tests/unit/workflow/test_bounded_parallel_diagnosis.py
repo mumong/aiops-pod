@@ -553,3 +553,222 @@ def test_parallel_collector_hands_code_owned_three_signal_baseline_to_react(
     assert "source-backed-query_pod_logs" in llm_calls[0]["question"]
     assert sum(event["type"] == "tool_result" for event in events) == 3
     assert text == "agent completed"
+
+
+def test_parallel_collector_retries_failed_baseline_dimension_once(monkeypatch):
+    node = EvidenceCollectorNode()
+    node.single_react_session = True
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {
+                "enabled": True,
+                "retry_failed_once": True,
+            },
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name=name)
+        for name in EvidenceCollectorNode._PRE_REACT_BASELINE_TOOLS
+    ]
+    baseline_events = [
+        {
+            "type": "tool_result",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {"namespace": "demo", "pod": "api"},
+            "status": "error",
+            "semantic_success": False,
+            "result": "Input validation error: promql is required",
+            "structured": {
+                "status": "query_parse_failed",
+                "coverage": "error",
+                "raw_preview": "'promql' is a required property",
+            },
+        },
+        {
+            "type": "tool_result",
+            "tool_name": "query_pod_logs",
+            "tool_args": {"namespace": "demo", "pod": "api"},
+            "status": "success",
+            "semantic_success": True,
+            "result": "LOG http_status=500 path=/health",
+            "structured": {"coverage": "present"},
+        },
+        {
+            "type": "tool_result",
+            "tool_name": "query_pod_tracing",
+            "tool_args": {"namespace": "demo", "pod": "api"},
+            "status": "success",
+            "semantic_success": True,
+            "result": "TEMPO GET /health status=500",
+            "structured": {"coverage": "present"},
+        },
+    ]
+    monkeypatch.setattr(
+        node,
+        "_run_pre_react_observability_baseline",
+        lambda plan: baseline_events,
+    )
+    calls = []
+
+    def _call_llm(question, system_prompt, **kwargs):
+        calls.append({"question": question, **kwargs})
+        if len(calls) == 1:
+            return SimpleNamespace(result="other dimensions collected"), []
+        return SimpleNamespace(result="metrics retry collected"), [{
+            "type": "tool_result",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "promql": 'container_memory_working_set_bytes{namespace="demo",pod="api"}',
+                "query_type": "range",
+            },
+            "status": "success",
+            "semantic_success": True,
+            "result": "METRIC value=50331648 unit=bytes",
+            "structured": {"status": "query_succeeded", "coverage": "present"},
+        }]
+
+    monkeypatch.setattr(node, "_call_llm", _call_llm)
+    plan = [
+        node._build_autonomous_observability_gate_item(
+            namespace="demo",
+            pod="api",
+            tool_name=tool_name,
+            target_index=1,
+        )
+        for tool_name in EvidenceCollectorNode._PRE_REACT_BASELINE_TOOLS
+    ]
+
+    _plan, events, text = node._execute_existing_evidence_plan(
+        question="diagnose",
+        layer=Layer.ABNORMAL,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "abnormal_pods": [{"namespace": "demo", "name": "api"}],
+        }),
+        context_archive_ref="",
+        layer_archive_ref={},
+        evidence_plan=plan,
+        failure_reason="",
+    )
+
+    assert len(calls) == 2
+    assert "action=repair_failed_observability_once" in calls[1]["question"]
+    assert "'promql' is a required property" in calls[1]["question"]
+    assert calls[1]["tool_result_sequence_start"] == 3
+    assert sum(event.get("type") == "tool_result" for event in events) == 4
+    assert text == "other dimensions collected\nmetrics retry collected"
+
+
+def test_parallel_collector_does_not_retry_when_agent_already_recovered_failure(
+    monkeypatch,
+):
+    node = EvidenceCollectorNode()
+    node.single_react_session = True
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {
+                "enabled": True,
+                "retry_failed_once": True,
+            },
+        }
+    }
+    node.tools = []
+    failed = {
+        "type": "tool_result",
+        "tool_name": "execute_pod_promql",
+        "tool_args": {"namespace": "demo", "pod": "api"},
+        "status": "error",
+        "semantic_success": False,
+        "result": "promql is required",
+        "structured": {"status": "query_parse_failed", "coverage": "error"},
+    }
+    monkeypatch.setattr(
+        node,
+        "_run_pre_react_observability_baseline",
+        lambda plan: [failed],
+    )
+    calls = []
+
+    def _call_llm(question, system_prompt, **kwargs):
+        calls.append(question)
+        return SimpleNamespace(result="recovered"), [{
+            "type": "tool_result",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "promql": "up",
+            },
+            "status": "success",
+            "semantic_success": True,
+            "result": "empty result",
+            "structured": {"status": "query_succeeded", "coverage": "empty"},
+        }]
+
+    monkeypatch.setattr(node, "_call_llm", _call_llm)
+    node._execute_existing_evidence_plan(
+        question="diagnose",
+        layer=Layer.ABNORMAL,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis="{}",
+        context_archive_ref="",
+        layer_archive_ref={},
+        evidence_plan=[],
+        failure_reason="",
+    )
+
+    assert len(calls) == 1
+
+
+def test_parallel_collector_does_not_retry_successful_empty_baseline(monkeypatch):
+    node = EvidenceCollectorNode()
+    node.single_react_session = True
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {
+                "enabled": True,
+                "retry_failed_once": True,
+            },
+        }
+    }
+    node.tools = []
+    monkeypatch.setattr(
+        node,
+        "_run_pre_react_observability_baseline",
+        lambda plan: [{
+            "type": "tool_result",
+            "tool_name": "query_pod_logs",
+            "tool_args": {"namespace": "demo", "pod": "api"},
+            "status": "success",
+            "semantic_success": True,
+            "result": "no matching logs",
+            "structured": {"status": "query_succeeded", "coverage": "empty"},
+        }],
+    )
+    calls = []
+
+    def _call_llm(question, system_prompt, **kwargs):
+        calls.append(question)
+        return SimpleNamespace(result="empty is a boundary"), []
+
+    monkeypatch.setattr(node, "_call_llm", _call_llm)
+    node._execute_existing_evidence_plan(
+        question="diagnose",
+        layer=Layer.ABNORMAL,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis="{}",
+        context_archive_ref="",
+        layer_archive_ref={},
+        evidence_plan=[],
+        failure_reason="",
+    )
+
+    assert len(calls) == 1

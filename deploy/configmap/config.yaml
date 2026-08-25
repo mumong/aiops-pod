@@ -206,11 +206,13 @@ data:
         # 三维返回后仍由 Qwen 自主决定是否使用更精确参数继续补证。
         observability_first_round_gate:
           enabled: true
+          # 首轮某维是工具执行/参数错误时，Evidence Agent 只续跑一次以修正参数。
+          # 成功但 empty/absent 不重试；这不是 RCA repair，也不会覆盖首次 RCA。
+          retry_failed_once: true
         early_stop:
           enabled: true
-        # 补证策略（架构决策）：不在代码层做补采控制。agent 在 ReAct 循环内
-        # 根据真实工具结果自主决定是否继续补证，硬约束只有 max_steps 与
-        # 上下文预算（context_compaction / 80% 硬顶）。
+        # 补证策略：诊断性补采仍由 Agent 在 ReAct 内自主决定；代码只对首轮
+        # 工具执行/参数失败提供一次协议恢复，不按故障类型选择查询或根因。
         # Pod lane 扇出：默认所有异常 Pod（含 N=1）都使用同一独立
         # evidence + formal RCA + artifact 契约，不随 N 变化切换数据路径。
         parallel:

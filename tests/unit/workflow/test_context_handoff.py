@@ -347,7 +347,11 @@ def test_t017_evidence_provider_item_uses_one_canonical_ledger_projection():
     events = [query_event, independent_uid_event]
     archived_copy = json.loads(json.dumps(events))
 
-    tool_data = EvidenceCollectorNode()._extract_tool_data_from_thinking(events)
+    collector = EvidenceCollectorNode()
+    collector.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
+    tool_data = collector._extract_tool_data_from_thinking(events)
     item = next(
         value for value in tool_data
         if value.get("tool") == "query_pod_logs"
@@ -405,8 +409,12 @@ def test_narrative_rca_handoff_keeps_canonical_tool_agent_facts():
 
 def test_t017_rca_provider_context_uses_one_canonical_ledger_projection():
     sentinel, record, _, _, duplicated_item = _t017_canonical_stage_fixture()
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
 
-    context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+    context = node._extract_tool_data_for_rca(
         json.dumps({"tool_data": [duplicated_item]}, ensure_ascii=False),
         max_chars=12000,
     )
@@ -414,6 +422,24 @@ def test_t017_rca_provider_context_uses_one_canonical_ledger_projection():
     assert context.count(sentinel) == 1
     assert context.count(record["fact_id"]) == 1
     assert context.count('"contract_version":"aiops.fact-ledger.v1"') == 1
+
+
+def test_rca_defaults_to_narrative_context_without_ledger_or_validation():
+    sentinel, _, _, _, duplicated_item = _t017_canonical_stage_fixture()
+    node = RootCauseAnalyzerNode()
+    evidence_analysis = json.dumps({
+        "llm_analysis": "Evidence Agent identified the concrete probe failure.",
+        "tool_data": [duplicated_item],
+    }, ensure_ascii=False)
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert node._is_rca_fact_ledger_context_enabled() is False
+    assert node._is_rca_validation_enabled() is False
+    assert node._get_rca_output_schema_mode() == "compact"
+    assert "## AIOps Fact Ledger" not in context
+    assert "Evidence Agent identified the concrete probe failure" in context
+    assert sentinel in context
 
 
 def test_layer_execute_archives_full_analysis_and_publishes_handoff(tmp_path, monkeypatch):
@@ -542,6 +568,9 @@ def test_rca_lite_puts_evidence_context_only_in_user_message(monkeypatch):
 
 def test_rca_lite_prefers_structured_output_when_available():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_structured_output": {"schema": "full"},
+    }
     captured = {}
     parsed = RCAOutput.model_validate({
         "phenomenon": "Pod ImagePullBackOff",
@@ -580,6 +609,9 @@ def test_rca_lite_prefers_structured_output_when_available():
 
 def test_rca_lite_uses_structured_agent_runtime():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_structured_output": {"schema": "full"},
+    }
     captured = {}
     parsed = RCAOutput.model_validate({
         "phenomenon": "Pod ImagePullBackOff",
@@ -637,7 +669,7 @@ def test_rca_lite_tolerant_mode_preserves_core_when_optional_item_types_drift():
     node = RootCauseAnalyzerNode()
     node.ai_call = object()
     node.workflow_config_override = {
-        "rca_structured_output": {"mode": "tolerant"},
+        "rca_structured_output": {"mode": "tolerant", "schema": "full"},
     }
     raw = json.dumps({
         "diagnostic_status": "diagnosed",
@@ -1111,6 +1143,9 @@ def test_rca_handoff_rejects_identity_index_that_cannot_fit_budget():
 
 def test_rca_context_bounds_multi_entity_real_observability_evidence():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     tool_data = []
     expected_entities = []
     expected_direct_fact_ids = []
@@ -1236,6 +1271,9 @@ def test_rca_context_bounds_multi_entity_real_observability_evidence():
 
 def test_rca_supplementary_tool_context_uses_shared_budget():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     evidence_analysis = json.dumps({
         "tool_data": [
             _internally_authorized_agent_context_item(
@@ -1278,6 +1316,10 @@ def test_rca_supplementary_tool_context_uses_shared_budget():
 
 
 def test_rca_generic_query_ledgers_keep_decisive_facts_across_dimensions():
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     entity = {
         "kind": "Pod",
         "namespace": "demo",
@@ -1368,7 +1410,7 @@ def test_rca_generic_query_ledgers_keep_decisive_facts_across_dimensions():
         ),
     ]
 
-    context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+    context = node._extract_tool_data_for_rca(
         json.dumps({"tool_data": tool_data}),
         max_chars=12000,
     )
@@ -2284,6 +2326,9 @@ def test_rca_context_prefers_deterministic_aiops_agent_facts():
 
 def test_rca_supplementary_semantic_groups_share_single_budget():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     evidence_analysis = json.dumps({
         "tool_data": [
             {
@@ -2366,6 +2411,9 @@ def test_rca_execute_sanitizes_large_evidence_fields_before_handoff():
 
 def test_rca_context_includes_evidence_quality_contract():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     evidence_analysis = json.dumps({
         "source_coverage": {
             "cases": [
@@ -2493,6 +2541,9 @@ def test_conclusion_uses_handoff_not_full_layer_analysis():
 
 def test_rca_context_uses_fact_ledgers_without_duplicate_aiops_representations():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     entity_id = "k8s.pod:demo/api:uid-a"
     fact_record = _canonical_fact_record(entity_id=entity_id)
     evidence_analysis = json.dumps({
@@ -2543,6 +2594,9 @@ def test_evidence_handoff_excludes_llm_analysis_while_full_archive_retains_it(
 ):
     monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
     node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "rca_context": {"include_evidence_llm_analysis": False},
+    }
     node.current_run_id = "evidence-authority-boundary"
     output = EvidenceCollectionOutput.model_validate({
         "tool_data": [
@@ -2791,6 +2845,12 @@ def test_narrative_tool_selection_deduplicates_and_caps_each_dimension():
 
 def test_rca_context_excludes_llm_analysis_when_fact_ledger_exists():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {
+            "fact_ledger_enabled": True,
+            "include_evidence_llm_analysis": False,
+        },
+    }
     entity_id = "k8s.pod:demo/api:uid-a"
     fact_record = _canonical_fact_record(
         entity_id=entity_id,
@@ -2841,6 +2901,13 @@ def test_rca_context_keeps_llm_analysis_for_legacy_input_without_fact_ledger():
 
 def test_rca_provider_input_excludes_llm_analysis_when_fact_ledger_exists():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {
+            "fact_ledger_enabled": True,
+            "include_evidence_llm_analysis": False,
+        },
+        "rca_structured_output": {"schema": "full"},
+    }
     entity_id = "k8s.pod:demo/api:uid-a"
     fact_record = _canonical_fact_record(
         entity_id=entity_id,
@@ -2911,6 +2978,9 @@ def test_rca_provider_input_excludes_llm_analysis_when_fact_ledger_exists():
 
 def test_rca_mixed_ledger_and_legacy_supplementary_preserves_case_identity():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     canonical_entity = "k8s.pod:demo/canonical-api:uid-canonical"
     canonical_fact = _canonical_fact_record(
         entity_id=canonical_entity,
@@ -2960,6 +3030,9 @@ def test_rca_mixed_ledger_and_legacy_supplementary_preserves_case_identity():
 
 def test_rca_multiple_legacy_cases_preserve_every_identity_under_shared_budget():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     tool_data = []
     for index in range(10):
         tool_data.append({
@@ -2991,6 +3064,10 @@ def test_rca_multiple_legacy_cases_preserve_every_identity_under_shared_budget()
 
 
 def test_rca_more_than_supplementary_limit_preserves_every_identity_with_ledger():
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     canonical_entity = "k8s.pod:demo/canonical-api:uid-canonical"
     tool_data = [
         {
@@ -3024,7 +3101,7 @@ def test_rca_more_than_supplementary_limit_preserves_every_identity_with_ledger(
             "agent_facts": f"FACT_OVER_LIMIT_{index}",
         })
 
-    context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+    context = node._extract_tool_data_for_rca(
         json.dumps({"tool_data": tool_data})
     )
 
@@ -3039,6 +3116,10 @@ def test_rca_more_than_supplementary_limit_preserves_every_identity_with_ledger(
 
 
 def test_rca_more_than_supplementary_limit_preserves_every_identity_without_ledger():
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_context": {"fact_ledger_enabled": True},
+    }
     tool_data = []
     for index in range(12):
         tool_data.append({
@@ -3055,7 +3136,7 @@ def test_rca_more_than_supplementary_limit_preserves_every_identity_without_ledg
             "agent_facts": f"FACT_NO_LEDGER_{index}",
         })
 
-    context = RootCauseAnalyzerNode()._extract_tool_data_for_rca(
+    context = node._extract_tool_data_for_rca(
         json.dumps({"tool_data": tool_data})
     )
 

@@ -132,7 +132,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "entity_evidence_snapshot": entity_evidence_snapshot,
             }
             fact_ledger_context_enabled = (
-                self._is_rca_fact_ledger_context_enabled(default=True)
+                self._is_rca_fact_ledger_context_enabled(default=False)
             )
             if fact_ledger_context_enabled:
                 rca_input = self._build_rca_input_projection(
@@ -185,7 +185,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 raw_result or {},
                 artifact_name="rca.attempt-1.model",
             )
-            validation_enabled = self._is_rca_validation_enabled(default=True)
+            validation_enabled = self._is_rca_validation_enabled(default=False)
             if validation_enabled:
                 validated_result = self._validate_rca_result_against_evidence(
                     raw_result or {},
@@ -585,7 +585,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
         evidence_items = state.get("evidence_items", [])
         evidence_analysis = state.get("evidence_analysis", "{}")
         fact_ledger_context_enabled = (
-            self._is_rca_fact_ledger_context_enabled(default=True)
+            self._is_rca_fact_ledger_context_enabled(default=False)
         )
         fact_ledgers = (
             extract_fact_ledgers_from_evidence_analysis(evidence_analysis)
@@ -895,7 +895,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
     def _model_rca_schema(self) -> type:
         return (
             RCACompactOutput
-            if self._get_rca_output_schema_mode(default="full") == "compact"
+            if self._get_rca_output_schema_mode(default="compact") == "compact"
             else RCAOutput
         )
 
@@ -1703,7 +1703,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 return ""
             sections: List[tuple[str, str]] = []
             fact_ledger_context_enabled = (
-                self._is_rca_fact_ledger_context_enabled(default=True)
+                self._is_rca_fact_ledger_context_enabled(default=False)
             )
 
             quality_keys = (
@@ -1750,8 +1750,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     limit=10,
                 )
             )
-            fact_ledgers = extract_fact_ledgers_from_tool_data(
-                selected_tool_data
+            fact_ledgers = (
+                extract_fact_ledgers_from_tool_data(selected_tool_data)
+                if fact_ledger_context_enabled
+                else []
             )
 
             if (
@@ -1809,7 +1811,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
             if (
                 llm_analysis
                 and (
-                    self._is_rca_evidence_analysis_enabled(default=False)
+                    self._is_rca_evidence_analysis_enabled(default=True)
                     or not fact_ledgers
                 )
             ):

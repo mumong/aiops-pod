@@ -171,6 +171,27 @@ class EvidenceCollectorNode(WorkflowNode):
             return self._parse_bool_config(gate.get("enabled"), True)
         return True
 
+    def _is_observability_failed_retry_enabled(self) -> bool:
+        """Whether one failed baseline dimension gets a bounded agent retry.
+
+        This is protocol recovery, not diagnostic refinement: it only runs when
+        a real Metrics/Logging/Tracing call failed to execute. A successful
+        query with empty/absent coverage is a valid data boundary and does not
+        trigger this retry.
+        """
+        if not self._is_observability_first_round_gate_enabled():
+            return False
+        workflow = self._get_workflow_config()
+        evidence = workflow.get("evidence", {}) if isinstance(workflow, dict) else {}
+        gate = (
+            evidence.get("observability_first_round_gate", {})
+            if isinstance(evidence, dict)
+            else {}
+        )
+        if isinstance(gate, dict) and "retry_failed_once" in gate:
+            return self._parse_bool_config(gate.get("retry_failed_once"), True)
+        return True
+
     @staticmethod
     def _has_semantic_tool_success(thinking_events: List[Dict[str, Any]]) -> bool:
         return any(
@@ -716,7 +737,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 )
 
         handoff_payload = dict(full_payload)
-        if not self._is_rca_evidence_analysis_enabled(default=False):
+        if not self._is_rca_evidence_analysis_enabled(default=True):
             handoff_payload.pop("llm_analysis", None)
         return json.dumps(
             handoff_payload,
@@ -1224,6 +1245,49 @@ class EvidenceCollectorNode(WorkflowNode):
                 all_thinking_events.extend(round_events or [])
                 if response and response.result:
                     llm_text_parts.append(response.result)
+                unresolved_failures = self._unresolved_baseline_failures(
+                    baseline_events,
+                    round_events or [],
+                )
+                if (
+                    unresolved_failures
+                    and self._is_observability_failed_retry_enabled()
+                ):
+                    retry_message = self._build_failed_baseline_retry_message(
+                        question=question,
+                        failures=unresolved_failures,
+                    )
+                    retry_sequence_start = sum(
+                        1
+                        for event in all_thinking_events
+                        if event.get("type") == "tool_result"
+                    )
+                    logger.warning(
+                        "🔁 [evidence] 首轮三维调用仍有 %d 个执行失败；"
+                        "启动一次参数修正续跑",
+                        len(unresolved_failures),
+                    )
+                    retry_response, retry_events = self._call_llm(
+                        retry_message,
+                        system_prompt,
+                        stop_checker=None,
+                        tool_result_sequence_start=retry_sequence_start,
+                        blocked_tool_names=blocked_tool_names,
+                        skip_remediation_policy=True,
+                    )
+                    all_thinking_events.extend(retry_events or [])
+                    if retry_response and retry_response.result:
+                        llm_text_parts.append(retry_response.result)
+                    still_failed = self._unresolved_baseline_failures(
+                        baseline_events,
+                        [*(round_events or []), *(retry_events or [])],
+                    )
+                    if still_failed:
+                        logger.warning(
+                            "⚠️ [evidence] 参数修正续跑后仍有 %d 个维度执行失败；"
+                            "保留真实错误边界，不再无限重试",
+                            len(still_failed),
+                        )
                 llm_text = "\n".join(llm_text_parts)
                 if self._has_effective_tool_evidence(all_thinking_events):
                     logger.info(
@@ -2067,6 +2131,101 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             "工具结果，不是根因结论。先比较这些事实与 Kubernetes 生命周期，"
             "再自主决定需要调用哪些只读工具继续调查；required_follow_up 中的失败"
             "必须先修正参数并继续调用，不要机械重复完全相同的查询。\n"
+            f"{payload}\n"
+        )
+
+    @classmethod
+    def _observability_call_failed(cls, event: Dict[str, Any]) -> bool:
+        if event.get("type") != "tool_result":
+            return False
+        tool_name = str(event.get("tool_name") or "").strip().lower()
+        if tool_name not in cls._PRE_REACT_BASELINE_TOOLS:
+            return False
+        structured = (
+            event.get("structured")
+            if isinstance(event.get("structured"), dict)
+            else {}
+        )
+        structured_status = str(structured.get("status") or "").strip().lower()
+        coverage = str(structured.get("coverage") or "").strip().lower()
+        return (
+            event.get("status") != "success"
+            or event.get("semantic_success") is False
+            or structured_status
+            in {"tool_error", "query_parse_failed", "query_rejected", "command_failed"}
+            or coverage in {"error", "failed", "tool_error", "query_parse_failed"}
+        )
+
+    @classmethod
+    def _observability_call_succeeded(cls, event: Dict[str, Any]) -> bool:
+        return (
+            event.get("type") == "tool_result"
+            and event.get("deduplicated") is not True
+            and str(event.get("tool_name") or "").strip().lower()
+            in cls._PRE_REACT_BASELINE_TOOLS
+            and not cls._observability_call_failed(event)
+        )
+
+    @classmethod
+    def _unresolved_baseline_failures(
+        cls,
+        baseline_events: List[Dict[str, Any]],
+        later_events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Return failed baseline calls not recovered by the same scoped tool."""
+        failed: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        for event in baseline_events or []:
+            if not cls._observability_call_failed(event):
+                continue
+            tool_name = str(event.get("tool_name") or "").strip().lower()
+            target = cls._extract_tool_event_pod_target(event) or ("", "")
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            failed[(target[0], target[1], tool_name)] = {
+                "namespace": target[0],
+                "pod": target[1],
+                "tool_name": tool_name,
+                "failed_tool_args": dict(event.get("tool_args") or {}),
+                "error": str(
+                    structured.get("raw_preview")
+                    or structured.get("error")
+                    or event.get("result")
+                    or "tool call failed"
+                )[:1600],
+            }
+
+        for event in later_events or []:
+            if not cls._observability_call_succeeded(event):
+                continue
+            tool_name = str(event.get("tool_name") or "").strip().lower()
+            target = cls._extract_tool_event_pod_target(event) or ("", "")
+            failed.pop((target[0], target[1], tool_name), None)
+        return list(failed.values())
+
+    @staticmethod
+    def _build_failed_baseline_retry_message(
+        *,
+        question: str,
+        failures: List[Dict[str, Any]],
+    ) -> str:
+        payload = json.dumps(
+            {"failed_calls": failures},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        return (
+            "# action=repair_failed_observability_once\n"
+            f"用户问题：{question}\n\n"
+            "下面调用是首轮 Metrics/Logging/Tracing 的真实执行失败，不是无匹配数据。"
+            "本轮只处理这些失败：阅读原始错误和当前工具 schema，补齐或修正参数后，"
+            "对同一 namespace/Pod 调用对应工具一次。不得原样重复完全相同的错误参数，"
+            "不得因为其他维度已有结果而直接总结，也不要调用无关工具。成功但结果为空"
+            "属于有效数据边界；修正后仍失败则保留原始错误并停止。必须先实际调用工具，"
+            "再简短说明结果。\n"
             f"{payload}\n"
         )
 
@@ -6399,7 +6558,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                             )
                     narrative_rca_context = (
                         not self._is_rca_fact_ledger_context_enabled(
-                            default=True
+                            default=False
                         )
                     )
                     if not provider_is_canonical or narrative_rca_context:

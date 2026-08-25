@@ -116,7 +116,9 @@ def _configured_node(
     monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
     node = RootCauseAnalyzerNode()
     node.workflow_config_override = {
-        "rca_validation": {"enabled": validation_enabled}
+        "rca_validation": {"enabled": validation_enabled},
+        "rca_context": {"fact_ledger_enabled": True},
+        "rca_structured_output": {"schema": "full"},
     }
     node.current_run_id = "run-g1"
     node.ai_call = object()

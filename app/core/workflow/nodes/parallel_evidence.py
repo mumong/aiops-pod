@@ -292,7 +292,7 @@ class ParallelEvidenceNode(WorkflowNode):
                         ],
                     }
                     attempt_rca_update = rca.execute(rca_state)
-                    if self._is_rca_validation_enabled(default=True):
+                    if self._is_rca_validation_enabled(default=False):
                         gate = self._minimum_rca_gate(
                             attempt_result,
                             attempt_rca_update,
@@ -1270,7 +1270,7 @@ class ParallelEvidenceNode(WorkflowNode):
                 str(fact_id) for fact_id in source.get("contradicting_fact_ids") or []
                 if fact_owner.get(str(fact_id)) == key
             ]
-            validation_enabled = self._is_rca_validation_enabled(default=True)
+            validation_enabled = self._is_rca_validation_enabled(default=False)
             entity_diagnosed = (
                 diagnostic_status == "diagnosed"
                 and (bool(supporting) or not validation_enabled)

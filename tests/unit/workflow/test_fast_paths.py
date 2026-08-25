@@ -836,6 +836,9 @@ def test_rca_lite_mode_no_output_uses_generic_llm_fallback():
 
 def test_rca_lite_mode_enables_text_fallback_after_native_structured_failure():
     node = RootCauseAnalyzerNode()
+    node.workflow_config_override = {
+        "rca_structured_output": {"schema": "full"},
+    }
     node.ai_call = object()
     captured = {}
 
@@ -1439,6 +1442,30 @@ def test_deployed_workflow_disables_rca_validation():
         is True
     )
     assert app_config["workflow"]["rca_structured_output"]["schema"] == "compact"
+    assert (
+        app_config["workflow"]["evidence"]
+        ["observability_first_round_gate"]["retry_failed_once"]
+        is True
+    )
+
+
+def test_oom_and_liveness_runbooks_contain_scoped_query_shape_examples():
+    configmap = yaml.safe_load(
+        Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8")
+    )
+    oom = configmap["data"]["pod-oomkilled.md"]
+    crashloop = configmap["data"]["pod-crashloop-runtime.md"]
+
+    for runbook in (oom, crashloop):
+        assert '"tool":"execute_pod_promql"' in runbook
+        assert '"query_type":"range"' in runbook
+        assert '"tool":"query_pod_logs"' in runbook
+        assert '"tool":"query_pod_tracing"' in runbook
+        assert '"purpose":' in runbook
+    assert "container_memory_working_set_bytes" in oom
+    assert '"trace_id":"<trace_id>"' in oom
+    assert '"request_resource":"<probe-path>"' in crashloop
+    assert "不同 endpoint" in crashloop
 
 
 def test_deployed_config_enables_autonomous_observability_and_disables_compatibility_servers():
