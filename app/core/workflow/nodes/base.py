@@ -337,9 +337,15 @@ class WorkflowNode(ABC):
 
     def _is_rca_evidence_analysis_enabled(
         self,
-        default: bool = True,
+        default: bool = False,
     ) -> bool:
-        """Whether Evidence Agent natural-language analysis reaches RCA."""
+        """Whether Evidence Agent natural-language analysis reaches RCA.
+
+        The default is intentionally off.  RCA already receives the real tool
+        observations and should form its own diagnosis from those observations;
+        copying the collector's prose into the same prompt repeats facts and can
+        preserve an earlier, incomplete interpretation after follow-up queries.
+        """
         for env_key in (
             "WORKFLOW_RCA_EVIDENCE_ANALYSIS_ENABLED",
             "AIOPS_WORKFLOW_RCA_EVIDENCE_ANALYSIS_ENABLED",

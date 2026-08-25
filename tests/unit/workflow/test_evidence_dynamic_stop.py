@@ -8492,11 +8492,12 @@ def test_transport_only_query_is_excluded_from_final_downstream_state():
             "source_system": "prometheus",
             "dimension": "metrics",
             "purpose": "确认内存趋势",
-            "coverage": "error",
-            "directness": "",
-            "evidence_refs": [],
-        }
-    ]
+                "coverage": "error",
+                "directness": "",
+                "evidence_refs": [],
+                "error": "invalid_time_range",
+            }
+        ]
     tool_data = node._extract_tool_data_from_thinking(events)
     rendered = json.dumps(tool_data, ensure_ascii=False)
     assert "invalid_time_range" in rendered

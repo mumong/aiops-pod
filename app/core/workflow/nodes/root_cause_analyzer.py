@@ -1806,13 +1806,16 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     max_chars=max_chars,
                 )
 
-            # 1. LLM 的分析文本（包含工具调用结果的总结）
+            # Evidence Agent prose is optional and disabled in production.
+            # RCA should normally reason from the real tool observations below;
+            # retaining both representations repeats facts and can preserve an
+            # interpretation made before a later follow-up query completed.
             llm_analysis = data.get("llm_analysis", "")
             if (
                 llm_analysis
                 and (
-                    self._is_rca_evidence_analysis_enabled(default=True)
-                    or not fact_ledgers
+                    self._is_rca_evidence_analysis_enabled(default=False)
+                    or not selected_tool_data
                 )
             ):
                 sections.append((
@@ -1823,7 +1826,19 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     ),
                 ))
 
-            # 2. MCP 工具的原始输出
+            failure_boundaries = self._narrative_failure_boundaries(data)
+            if failure_boundaries:
+                sections.append((
+                    "## 工具失败边界",
+                    bounded_json_dumps(
+                        failure_boundaries,
+                        max_chars=RCA_NARRATIVE_AUXILIARY_MAX_CHARS,
+                    ),
+                ))
+
+            # Every selected tool contributes exactly one representation.  For
+            # observability tools this is the already information-ranked MCP
+            # summary, not the much larger agent_facts/agent_context copies.
             if selected_tool_data:
                 current_size = sum(
                     len(title) + len(content) + 4
@@ -1873,12 +1888,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
     @classmethod
     def _narrative_tool_representation(cls, item: Mapping[str, Any]) -> str:
-        value = (
-            item.get("agent_facts")
-            or item.get("agent_context")
-            or item.get("data")
-            or ""
-        )
+        value = cls._narrative_tool_observation(item)
         if isinstance(value, (dict, list)):
             return json.dumps(
                 value,
@@ -1888,6 +1898,176 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 default=str,
             )
         return str(value).strip()
+
+    @classmethod
+    def _narrative_tool_observation(cls, item: Mapping[str, Any]) -> Any:
+        """Return the single model-facing representation for one tool call.
+
+        ``data`` is the bounded summary that the tool adapter actually returned
+        to the Evidence Agent.  In particular, observability ``data`` is the
+        semantic, pattern-diverse ``aiops.observation.v1`` projection.  The old
+        order preferred ``agent_facts`` (up to ~10K per call), re-expanded zero
+        states and repeated logs, then head-truncated later dimensions.
+
+        ``collect_aiops_case`` is a disabled legacy adapter whose data field can
+        be only a coarse status line; keep its deterministic agent_facts as a
+        compatibility fallback.  No fault or workload names are involved.
+        """
+        tool = re.sub(
+            r"[^a-z0-9]",
+            "",
+            str(item.get("tool") or "").lower(),
+        )
+        data = item.get("data")
+        data_text = str(data or "").lstrip()
+        parsed_data: Any = data
+        if isinstance(data, str) and data_text.startswith("{"):
+            try:
+                parsed_data = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                parsed_data = data
+        if (
+            isinstance(parsed_data, Mapping)
+            and parsed_data.get("contract_version") == "aiops.observation.v1"
+        ) or data_text.startswith(
+            '{"contract_version":"aiops.observation.v1"'
+        ):
+            return data
+        if tool.startswith("kubectl") and data not in (None, "", [], {}):
+            return data
+        if tool == "collectaiopscase" and item.get("agent_facts"):
+            return item.get("agent_facts")
+        return (
+            item.get("agent_facts")
+            or item.get("agent_context")
+            or item.get("data")
+            or ""
+        )
+
+    @classmethod
+    def _compact_narrative_tool_observation(
+        cls,
+        item: Mapping[str, Any],
+    ) -> str:
+        """Compact one observation without discarding selected evidence units."""
+        value = cls._narrative_tool_observation(item)
+        parsed: Any = value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return cls._compact_text_to_chars(
+                    value,
+                    max_chars=1600,
+                )
+        if not isinstance(parsed, Mapping):
+            return json.dumps(
+                parsed,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        if parsed.get("contract_version") != "aiops.observation.v1":
+            return json.dumps(
+                parsed,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+
+        compact: Dict[str, Any] = {
+            key: parsed.get(key)
+            for key in (
+                "tool",
+                "source_system",
+                "dimension",
+                "entity",
+                "window",
+                "query_ref",
+                "evidence",
+                "limitations",
+            )
+            if parsed.get(key) not in (None, "", [], {})
+        }
+        status = str(parsed.get("status") or "").strip().lower()
+        coverage = str(parsed.get("coverage") or "").strip().lower()
+        if status not in {"", "query_succeeded"}:
+            compact["status"] = parsed.get("status")
+        if coverage not in {"", "present"}:
+            compact["coverage"] = parsed.get("coverage")
+
+        truncation = (
+            parsed.get("truncation")
+            if isinstance(parsed.get("truncation"), Mapping)
+            else {}
+        )
+        if truncation.get("truncated") or truncation.get("reasons"):
+            compact["truncation"] = {
+                key: truncation.get(key)
+                for key in (
+                    "truncated",
+                    "source_or_collection_truncated",
+                    "mcp_response_truncated",
+                    "reasons",
+                )
+                if truncation.get(key) not in (None, "", [], {})
+            }
+        retrieval = (
+            parsed.get("retrieval")
+            if isinstance(parsed.get("retrieval"), Mapping)
+            else {}
+        )
+        raw_ref = str(
+            retrieval.get("raw_ref") or item.get("raw_ref") or ""
+        ).strip()
+        if raw_ref:
+            compact["raw_ref"] = raw_ref
+        return json.dumps(
+            compact,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+
+    @staticmethod
+    def _narrative_failure_boundaries(
+        evidence_payload: Mapping[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Keep failed queries as collection boundaries, never as empty data."""
+        coverage = (
+            evidence_payload.get("source_coverage")
+            if isinstance(evidence_payload.get("source_coverage"), Mapping)
+            else {}
+        )
+        failures: List[Dict[str, Any]] = []
+        for query in coverage.get("queries") or []:
+            if not isinstance(query, Mapping):
+                continue
+            query_coverage = str(query.get("coverage") or "").lower()
+            if query_coverage not in {
+                "error",
+                "failed",
+                "tool_error",
+                "query_parse_failed",
+            }:
+                continue
+            failures.append({
+                key: query.get(key)
+                for key in (
+                    "tool",
+                    "target",
+                    "dimension",
+                    "purpose",
+                    "coverage",
+                    "error",
+                    "raw_ref",
+                )
+                if query.get(key) not in (None, "", [], {})
+            })
+        return failures[:6]
 
     @staticmethod
     def _sanitize_narrative_agent_facts(value: Any) -> str:
@@ -1932,6 +2112,26 @@ class RootCauseAnalyzerNode(WorkflowNode):
         status = str(item.get("status") or "").lower()
         coverage = str(item.get("coverage") or "").lower()
         representation = cls._narrative_tool_representation(item)
+        tool = re.sub(
+            r"[^a-z0-9]",
+            "",
+            str(item.get("tool") or "").lower(),
+        )
+        observation_summary = False
+        data = item.get("data")
+        if isinstance(data, Mapping):
+            observation_summary = (
+                data.get("contract_version") == "aiops.observation.v1"
+            )
+        elif isinstance(data, str):
+            observation_summary = "aiops.observation.v1" in data[:160]
+        representation_quality = (
+            3
+            if observation_summary
+            else 2
+            if tool == "kubectlpreviouslogs"
+            else 1
+        )
         failed = (
             status in {"error", "failed", "tool_error", "query_parse_failed"}
             or item.get("semantic_success") is False
@@ -1941,9 +2141,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
         return (
             0 if failed else 1,
             1 if present else 0,
-            1 if item.get("agent_facts") else 0,
-            min(len(representation), 2400),
+            representation_quality,
             index,
+            min(len(representation), 2400),
         )
 
     @classmethod
@@ -1955,11 +2155,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
     ) -> List[Dict[str, Any]]:
         """Select diverse real observations without repeated audit metadata.
 
-        The Fact Ledger selector intentionally removes duplicate canonical
-        representations. Narrative RCA needs the opposite representation:
-        keep agent_facts/agent_context/data and remove the ledger itself. Exact
-        semantic repeats are collapsed, recovered failures are omitted, and a
-        per-dimension cap prevents one noisy source from consuming the context.
+        Exact semantic repeats are collapsed, recovered failures are represented
+        once in the collection-boundary section, and a per-dimension cap keeps
+        one noisy source from consuming the context.  Later successful follow-up
+        queries rank ahead of earlier broad queries when the cap is reached.
         """
         candidates: Dict[str, tuple[tuple, int, Dict[str, Any]]] = {}
         for index, item in enumerate(tool_data or []):
@@ -1974,7 +2173,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 continue
             copied = dict(item)
             copied.pop("fact_ledger", None)
-            if copied.get("agent_facts"):
+            if copied.get("agent_facts") and not copied.get("data"):
                 copied["agent_facts"] = cls._sanitize_narrative_agent_facts(
                     copied.get("agent_facts")
                 )
@@ -2199,61 +2398,6 @@ class RootCauseAnalyzerNode(WorkflowNode):
         *,
         max_chars: int,
     ) -> List[tuple[str, str]]:
-        fact_blocks: List[str] = []
-        context_blocks: List[str] = []
-        raw_blocks: List[str] = []
-
-        for index, item in enumerate(items, 1):
-            tool = str(item.get("tool") or "unknown")
-            if item.get("agent_facts"):
-                fact_parts = [f"[{tool}]"]
-                fact_parts.append(str(item.get("agent_facts")).strip())
-                fact_blocks.append("\n".join(fact_parts))
-                continue
-            if item.get("agent_context"):
-                context = item.get("agent_context")
-                if isinstance(context, str):
-                    try:
-                        context = json.loads(context)
-                    except (json.JSONDecodeError, TypeError):
-                        context = context.strip()
-                if isinstance(context, (dict, list)):
-                    context = json.dumps(
-                        context,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        indent=2,
-                        default=str,
-                    )
-                context_blocks.append(f"[{tool}]\n{context}")
-                continue
-            raw = cls._compact_text_value(
-                item.get("data", ""),
-                limit=500,
-            )
-            if raw:
-                raw_blocks.append(f"{index}. [{tool}]: {raw}")
-
-        optional_groups = [
-            (
-                "## AIOps 确定性可观测事实",
-                "\n".join(fact_blocks),
-            ),
-            (
-                "## AIOps 结构化可观测性上下文",
-                "\n".join(context_blocks),
-            ),
-            (
-                "## 工具原始输出",
-                "\n".join(raw_blocks),
-            ),
-        ]
-        optional_groups = [
-            (title, content)
-            for title, content in optional_groups
-            if content
-        ]
-
         groups: List[tuple[str, str]] = []
         identity_index = cls._build_supplementary_identity_index(items)
         if identity_index:
@@ -2273,28 +2417,23 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 )
             groups.append((identity_title, identity_text))
 
-        if not optional_groups:
-            return groups
-
-        used_chars = sum(
-            len(title) + 1 + len(content)
-            for title, content in groups
-        )
-        if groups:
-            used_chars += len(groups) - 1
-
-        selected_optional: List[tuple[str, str]] = []
-        for title, content in optional_groups:
-            minimum_addition = (1 if groups or selected_optional else 0) + len(title) + 2
-            if used_chars + minimum_addition > max_chars:
+        observations: List[tuple[str, str, int]] = []
+        for index, item in enumerate(items, 1):
+            content = cls._compact_narrative_tool_observation(item)
+            if not content:
                 continue
-            selected_optional.append((title, content))
-            used_chars += minimum_addition
+            tool = str(item.get("tool") or "unknown")
+            dimension = cls._narrative_tool_dimension(item)
+            title = f"## 真实工具观察 {index} · {tool} · {dimension}"
+            weight = 3 if dimension in {"metrics", "logging", "tracing"} else 1
+            observations.append((title, content, weight))
 
-        if not selected_optional:
+        if not observations:
             return groups
 
-        all_groups = groups + selected_optional
+        all_groups = groups + [
+            (title, content) for title, content, _weight in observations
+        ]
         fixed_chars = (
             sum(len(title) + 1 for title, _content in all_groups)
             + len(all_groups)
@@ -2306,22 +2445,47 @@ class RootCauseAnalyzerNode(WorkflowNode):
             for title, content in groups
             if title == "## AIOps 补充实体索引"
         )
-        optional_content_budget = content_budget - identity_content_chars
-        if optional_content_budget < len(selected_optional):
+        observation_budget = content_budget - identity_content_chars
+        if observation_budget < len(observations):
             return groups
 
-        base_share = optional_content_budget // len(selected_optional)
+        # Give every selected tool a visible minimum before distributing the
+        # remaining space.  Metrics/Logging/Tracing receive a larger share than
+        # short Kubernetes/Topology summaries, but no dimension can consume the
+        # entire prefix and push later tools past a head truncation boundary.
+        minimum_share = min(240, observation_budget // len(observations))
         allocations = [
-            min(len(content), base_share)
-            for _title, content in selected_optional
+            min(len(content), minimum_share)
+            for _title, content, _weight in observations
         ]
-        remaining = optional_content_budget - sum(allocations)
-        for index, (_title, content) in enumerate(selected_optional):
-            if remaining <= 0:
+        remaining = observation_budget - sum(allocations)
+        active = {
+            index
+            for index, (_title, content, _weight) in enumerate(observations)
+            if allocations[index] < len(content)
+        }
+        while remaining > 0 and active:
+            total_weight = sum(observations[index][2] for index in active)
+            progressed = False
+            for index in list(active):
+                content = observations[index][1]
+                weight = observations[index][2]
+                fair_share = max(1, remaining * weight // max(1, total_weight))
+                extra = min(
+                    len(content) - allocations[index],
+                    fair_share,
+                    remaining,
+                )
+                if extra:
+                    allocations[index] += extra
+                    remaining -= extra
+                    progressed = True
+                if allocations[index] >= len(content):
+                    active.discard(index)
+                if remaining <= 0:
+                    break
+            if not progressed:
                 break
-            extra = min(len(content) - allocations[index], remaining)
-            allocations[index] += extra
-            remaining -= extra
 
         groups.extend([
             (
@@ -2331,7 +2495,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
                     max_chars=allocations[index],
                 ),
             )
-            for index, (title, content) in enumerate(selected_optional)
+            for index, (title, content, _weight) in enumerate(observations)
+            if allocations[index] > 0
         ])
         if not groups:
             return []

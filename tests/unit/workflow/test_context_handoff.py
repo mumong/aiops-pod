@@ -438,7 +438,8 @@ def test_rca_defaults_to_narrative_context_without_ledger_or_validation():
     assert node._is_rca_validation_enabled() is False
     assert node._get_rca_output_schema_mode() == "compact"
     assert "## AIOps Fact Ledger" not in context
-    assert "Evidence Agent identified the concrete probe failure" in context
+    assert "Evidence Agent identified the concrete probe failure" not in context
+    assert "真实工具观察" in context
     assert sentinel in context
 
 
@@ -2269,7 +2270,7 @@ def test_rca_context_includes_aiops_agent_context():
 
     context = node._extract_tool_data_for_rca(evidence_analysis)
 
-    assert "AIOps 结构化可观测性上下文" in context
+    assert "真实工具观察" in context
     assert "42ea12f3f50fe8b2e759a221ff0f3f4a" in context
     assert "aiops.allocated_mib.before" in context
     assert "Pod --calls--> Pod" in context
@@ -2315,7 +2316,7 @@ def test_rca_context_prefers_deterministic_aiops_agent_facts():
 
     context = node._extract_tool_data_for_rca(evidence_analysis)
 
-    assert "AIOps 确定性可观测事实" in context
+    assert "真实工具观察" in context
     assert "duration_us=0" in context
     assert "4faac0ec561b6b6febe9e0d73dc68a86" in context
     assert 'relationship="Pod --calls--> Pod"' in context
@@ -2351,9 +2352,7 @@ def test_rca_supplementary_semantic_groups_share_single_budget():
 
     context = node._extract_tool_data_for_rca(evidence_analysis)
 
-    assert "## AIOps 确定性可观测事实" in context
-    assert "## AIOps 结构化可观测性上下文" in context
-    assert "## 工具原始输出" in context
+    assert context.count("## 真实工具观察") == 3
     assert "FACT_MARKER" in context
     assert "CONTEXT_MARKER" in context
     assert "RAW_MARKER" in context
@@ -2843,6 +2842,113 @@ def test_narrative_tool_selection_deduplicates_and_caps_each_dimension():
     assert len(selected) == 4
 
 
+def test_narrative_rca_prefers_bounded_observation_over_expanded_agent_facts():
+    node = RootCauseAnalyzerNode()
+    observation = {
+        "contract_version": "aiops.observation.v1",
+        "tool": "execute_pod_promql",
+        "source_system": "prometheus",
+        "dimension": "metrics",
+        "status": "query_succeeded",
+        "coverage": "present",
+        "entity": {"namespace": "demo", "pod": "api"},
+        "evidence": [
+            {
+                "id": "fact-active-restart",
+                "metric": "kube_pod_container_status_restarts_total",
+                "value": "8",
+                "unit": "count",
+                "sample_count": 1,
+                "trend_evaluable": False,
+            }
+        ],
+        "retrieval": {"raw_ref": "/archive/metrics.raw"},
+    }
+    evidence_analysis = json.dumps({
+        "llm_analysis": "DUPLICATE_EVIDENCE_AGENT_OPINION",
+        "tool_data": [{
+            "tool": "execute_pod_promql",
+            "semantic_success": True,
+            "data": json.dumps(observation),
+            "agent_facts": (
+                "QUERY_FACT name=kube_pod_status_phase value=0 phase=Failed\n"
+                "LOW_VALUE_EXPANDED_AGENT_FACTS"
+            ),
+        }],
+    })
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "kube_pod_container_status_restarts_total" in context
+    assert "fact-active-restart" in context
+    assert "/archive/metrics.raw" in context
+    assert "kube_pod_status_phase value=0" not in context
+    assert "LOW_VALUE_EXPANDED_AGENT_FACTS" not in context
+    assert "DUPLICATE_EVIDENCE_AGENT_OPINION" not in context
+
+
+def test_narrative_rca_fair_budget_keeps_every_selected_tool_visible():
+    node = RootCauseAnalyzerNode()
+    items = [
+        {
+            "tool": "execute_pod_promql",
+            "data": "METRIC_SENTINEL " + ("metric-value " * 1000),
+        },
+        {
+            "tool": "query_pod_logs",
+            "data": "LOGGING_SENTINEL " + ("log-value " * 1000),
+        },
+        {
+            "tool": "query_pod_tracing",
+            "data": "TRACING_SENTINEL " + ("trace-value " * 1000),
+        },
+        {
+            "tool": "kubectl_events",
+            "data": "KUBERNETES_SENTINEL " + ("event-value " * 1000),
+        },
+    ]
+
+    sections = node._compact_supplementary_tool_sections(
+        items,
+        max_chars=2200,
+    )
+    rendered = "\n".join(f"{title}\n{content}" for title, content in sections)
+
+    assert len(rendered) <= 2200
+    assert "METRIC_SENTINEL" in rendered
+    assert "LOGGING_SENTINEL" in rendered
+    assert "TRACING_SENTINEL" in rendered
+    assert "KUBERNETES_SENTINEL" in rendered
+
+
+def test_narrative_rca_preserves_failed_query_as_boundary_not_empty_data():
+    node = RootCauseAnalyzerNode()
+    evidence_analysis = json.dumps({
+        "source_coverage": {
+            "queries": [{
+                "tool": "query_pod_tracing",
+                "target": "demo/api",
+                "dimension": "tracing",
+                "purpose": "query /health failures",
+                "coverage": "error",
+                "error": "missing required request_resource",
+                "raw_ref": "/archive/tracing-error.raw",
+            }]
+        },
+        "tool_data": [{
+            "tool": "kubectl_events",
+            "data": "Liveness probe failed: HTTP 500",
+        }],
+    })
+
+    context = node._extract_tool_data_for_rca(evidence_analysis)
+
+    assert "## 工具失败边界" in context
+    assert "missing required request_resource" in context
+    assert "/archive/tracing-error.raw" in context
+    assert "Liveness probe failed: HTTP 500" in context
+
+
 def test_rca_context_excludes_llm_analysis_when_fact_ledger_exists():
     node = RootCauseAnalyzerNode()
     node.workflow_config_override = {
@@ -3216,7 +3322,7 @@ def test_rca_persisted_no_ledger_aiops_item_uses_one_representation():
 
     context = node._extract_tool_data_for_rca(evidence_analysis)
 
-    assert "AIOps 确定性可观测事实" in context
+    assert "真实工具观察" in context
     assert "TEXT FACT REPRESENTATION" in context
     assert "STRUCTURED CONTEXT REPRESENTATION" not in context
     assert "RAW REPRESENTATION" not in context
@@ -3743,7 +3849,7 @@ def test_evidence_to_rca_legacy_context_preserves_mandatory_identity_under_budge
         "uid": "uid-a",
     }
     assert "case-identity-envelope" in rca_context
-    assert "AIOps 确定性可观测事实" in rca_context
+    assert "真实工具观察" in rca_context
     assert "ENTITY kind=Pod" in rca_context
     assert '"case_id":"case-identity-envelope"' in rca_context
     assert '"kind":"Pod"' in rca_context

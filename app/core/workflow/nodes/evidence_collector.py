@@ -737,7 +737,7 @@ class EvidenceCollectorNode(WorkflowNode):
                 )
 
         handoff_payload = dict(full_payload)
-        if not self._is_rca_evidence_analysis_enabled(default=True):
+        if not self._is_rca_evidence_analysis_enabled(default=False):
             handoff_payload.pop("llm_analysis", None)
         return json.dumps(
             handoff_payload,
@@ -4541,7 +4541,8 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             target = cls._extract_tool_event_pod_target(event)
             dimension = str(structured.get("dimension") or "").strip().lower()
             purpose = str(structured.get("purpose") or "").strip()
-            queries.append({
+            query_coverage = str(structured.get("coverage") or "")
+            query_record = {
                 "target": (
                     f"{target[0]}/{target[1]}"
                     if target
@@ -4551,12 +4552,27 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 "source_system": str(structured.get("source_system") or ""),
                 "dimension": dimension,
                 "purpose": purpose,
-                "coverage": str(structured.get("coverage") or ""),
+                "coverage": query_coverage,
                 "directness": str(structured.get("directness") or ""),
                 "evidence_refs": list(
                     structured.get("evidence_refs") or []
                 )[:20],
-            })
+            }
+            if (
+                event.get("status") != "success"
+                or event.get("semantic_success") is False
+                or query_coverage.lower()
+                in {"error", "failed", "tool_error", "query_parse_failed"}
+            ):
+                query_record["error"] = str(
+                    structured.get("raw_preview")
+                    or structured.get("error")
+                    or event.get("result")
+                    or ""
+                )[:1200]
+                if event.get("raw_ref"):
+                    query_record["raw_ref"] = str(event.get("raw_ref"))
+            queries.append(query_record)
 
         for event in thinking_events or []:
             tool_name = str(event.get("tool_name") or "").lower()
