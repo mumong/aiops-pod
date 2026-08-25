@@ -161,12 +161,12 @@ data:
       # 直接保留第一次模型分析，不触发校验降级或结构导向的二次 repair。
       rca_validation:
         enabled: false
-      # RCA 推理上下文：关闭 Fact Ledger 权威投影，也不重复注入 Evidence
-      # Agent 的解释性文字；RCA 直接读取每次工具唯一的一份真实高价值摘要。
-      # Canonical facts 和 Evidence 原文仍保留在审计归档和报告层。
+      # RCA 推理上下文：关闭 Fact Ledger/selected_facts 权威投影。
+      # Evidence Agent 的自然语言分析作为有界推理草稿，同时只注入每次工具
+      # 唯一的一份真实高价值摘要；原始值仍以工具观察为唯一事实来源。
       rca_context:
         fact_ledger_enabled: false
-        include_evidence_llm_analysis: false
+        include_evidence_llm_analysis: true
       # RCA 结构化输出：tolerant=辅助字段类型错误时保留核心根因；
       # strict=任一 Pydantic 字段错误即整体判为 inconclusive。
       rca_structured_output:
@@ -207,13 +207,13 @@ data:
         # 三维返回后仍由 Qwen 自主决定是否使用更精确参数继续补证。
         observability_first_round_gate:
           enabled: true
-          # 首轮某维是工具执行/参数错误时，Evidence Agent 只续跑一次以修正参数。
+          # 任一轮某维是工具执行/参数错误时，Evidence Agent 只续跑一次以修正参数。
           # 成功但 empty/absent 不重试；这不是 RCA repair，也不会覆盖首次 RCA。
           retry_failed_once: true
         early_stop:
           enabled: true
-        # 补证策略：诊断性补采仍由 Agent 在 ReAct 内自主决定；代码只对首轮
-        # 工具执行/参数失败提供一次协议恢复，不按故障类型选择查询或根因。
+        # 补证策略：诊断性补采仍由 Agent 在 ReAct 内自主决定；代码只对本 lane
+        # 最终未恢复的工具执行/参数失败提供一次协议恢复，不按故障类型选择查询或根因。
         # Pod lane 扇出：默认所有异常 Pod（含 N=1）都使用同一独立
         # evidence + formal RCA + artifact 契约，不随 N 变化切换数据路径。
         parallel:

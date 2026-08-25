@@ -374,6 +374,7 @@ data:
     {"tool":"query_pod_logs","namespace":"<namespace>","pod":"<pod>","container":"<container>","purpose":"验证故障前是否存在真实内存增长或分配异常","window_minutes":60,"keywords":["memory","allocate","heap","GC","OOM"],"keyword_mode":"any","max_records":20}
     {"tool":"query_pod_tracing","namespace":"<namespace>","pod":"<pod>","purpose":"关联日志中的真实 trace_id，确认哪类请求与内存增长同窗","window_minutes":60,"trace_id":"<trace_id>","include_tempo":true,"max_records":20}
     ```
+    `purpose` 只说明诊断意图，不会自动生成过滤条件。调用后必须核对工具返回的实际 query：PromQL 工具必须同时包含顶层 `namespace`、`pod`、`purpose`；日志定向查询的 `keywords` 不能仍为空；Tracing 定向查询必须真实带入 `trace_id` 或 `request_resource`。参数未生效或工具报错时修正一次，其他维度继续采集，不得让单个失败终止整批。
     若 range 仍为空，先检查 metric 名和 namespace/pod/container labels，再用修正后的新 purpose 重试一次；工具参数错误与成功查询为空必须分开记录。
 
     ## 证据边界
@@ -929,6 +930,7 @@ data:
     {"tool":"query_pod_logs","namespace":"<namespace>","pod":"<pod>","container":"<container>","purpose":"查找真实健康检查路径在失败窗口内的应用响应","window_minutes":60,"keywords":["<probe-path>"],"keyword_mode":"phrase","max_records":20}
     {"tool":"query_pod_tracing","namespace":"<namespace>","pod":"<pod>","purpose":"验证真实健康检查路径的响应码和时延","window_minutes":60,"request_resource":"<probe-path>","response_codes":[500],"include_tempo":true,"max_records":20}
     ```
+    `purpose` 只是说明，不会自动变成过滤条件。调用后必须检查实际 query：PromQL 工具要有顶层 `namespace`、`pod`、`purpose`；日志返回 query 的 `keywords` 应包含真实 probe path；Tracing 返回 filters 的 `request_resource/response_codes` 应与调用参数一致。参数错误或过滤未生效时只修正一次，同时继续其余维度；成功 empty 与工具失败必须分开记录。
     kubelet 探针不一定被应用日志或 Trace 采集；Logging/Tracing empty 不能反驳 Kubernetes Event。`/health` 失败与 `/work` 成功属于不同 endpoint，不得写成证据冲突。
 
     ## 判定规则

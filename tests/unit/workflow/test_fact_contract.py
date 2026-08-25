@@ -2226,7 +2226,7 @@ def test_compact_fact_ledgers_json_retains_identity_index_for_many_cases():
 def test_rca_prompt_matches_narrative_tool_evidence_contract():
     assert "每次真实工具调用唯一的一份高价值摘要" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "工具失败边界和归档引用" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "不要依赖 Evidence Agent 的先验结论" in ROOT_CAUSE_ANALYZER_PROMPT
+    assert "自然语言分析只帮助组织推理，不是事实来源" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "采集计划、Runbook 和上游判断不是新的事实来源" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "Metrics 必须保留指标名、真实值、单位" in ROOT_CAUSE_ANALYZER_PROMPT
     assert "工具调用失败只代表该次采集失败" in ROOT_CAUSE_ANALYZER_PROMPT

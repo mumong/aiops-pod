@@ -1439,7 +1439,7 @@ def test_deployed_workflow_disables_rca_validation():
     assert (
         app_config["workflow"]["rca_context"]
         ["include_evidence_llm_analysis"]
-        is False
+        is True
     )
     assert app_config["workflow"]["rca_structured_output"]["schema"] == "compact"
     assert (

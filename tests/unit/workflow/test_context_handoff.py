@@ -2842,6 +2842,155 @@ def test_narrative_tool_selection_deduplicates_and_caps_each_dimension():
     assert len(selected) == 4
 
 
+def test_narrative_signature_collapses_instance_ids_but_keeps_endpoint_status():
+    node = RootCauseAnalyzerNode()
+
+    def observation(path, status, trace_id, timestamp):
+        return {
+            "contract_version": "aiops.observation.v1",
+            "tool": "query_pod_tracing",
+            "dimension": "tracing",
+            "entity": {"namespace": "demo", "pod": "api", "pod_uid": trace_id},
+            "window": {"start": timestamp, "end": timestamp},
+            "evidence": [{
+                "id": f"fact-{trace_id[:12]}",
+                "trace_type": "flow",
+                "source_system": "deepflow",
+                "data": {
+                    "request_type": "GET",
+                    "request_resource": path,
+                    "response_code": status,
+                    "trace_id": trace_id,
+                    "span_id": trace_id[:16],
+                    "timestamp": timestamp,
+                    "duration_us": "1234",
+                },
+            }],
+            "retrieval": {"raw_ref": f"/archive/{trace_id}.raw"},
+        }
+
+    work_a = {
+        "tool": "query_pod_tracing",
+        "data": json.dumps(observation(
+            "/work",
+            200,
+            "11111111111111111111111111111111",
+            "2026-08-25T01:00:00Z",
+        )),
+    }
+    work_b = {
+        "tool": "query_pod_tracing",
+        "data": json.dumps(observation(
+            "/work",
+            200,
+            "22222222222222222222222222222222",
+            "2026-08-25T01:01:00Z",
+        )),
+    }
+    health_500 = {
+        "tool": "query_pod_tracing",
+        "data": json.dumps(observation(
+            "/health",
+            500,
+            "33333333333333333333333333333333",
+            "2026-08-25T01:02:00Z",
+        )),
+    }
+
+    assert node._narrative_tool_signature(work_a) == (
+        node._narrative_tool_signature(work_b)
+    )
+    assert node._narrative_tool_signature(work_a) != (
+        node._narrative_tool_signature(health_500)
+    )
+
+
+def test_narrative_rca_uses_compact_kubernetes_lifecycle_context():
+    evidence = EvidenceCollectorNode()
+    evidence.workflow_config_override = {
+        "rca_context": {
+            "fact_ledger_enabled": False,
+            "include_evidence_llm_analysis": True,
+        }
+    }
+    tool_data = evidence._extract_tool_data_from_thinking([{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_describe",
+        "result": "HEAD_ONLY " + ("low-value-line " * 600),
+        "raw_ref": "/archive/describe.raw",
+        "structured_ref": "/archive/describe.structured.json",
+        "summary_ref": "/archive/describe.summary.txt",
+        "structured": {
+            "name": "api",
+            "namespace": "demo",
+            "status": "Running",
+            "node": "node-a",
+            "primary_entity": {
+                "kind": "Pod",
+                "namespace": "demo",
+                "name": "api",
+                "uid": "uid-a",
+            },
+            "containers": [{
+                "name": "app",
+                "state": "Waiting",
+                "reason": "Error",
+                "last_state": "Terminated",
+                "exit_code": "137",
+                "restart_count": "5",
+                "resources": {"limits": {"memory": "96Mi"}},
+                "liveness": "http-get http://:http/health",
+                "environment": "FAILURE_MODE: liveness_fail",
+            }],
+            "events": [
+                "Warning Unhealthy Liveness probe failed: HTTP 500",
+                "Warning BackOff restarting failed container app",
+            ],
+        },
+    }])
+    item = tool_data[0]
+    parsed = json.loads(item["agent_context"])
+    node = RootCauseAnalyzerNode()
+    node.workflow_config_override = evidence.workflow_config_override
+    context = node._extract_tool_data_for_rca(json.dumps({
+        "llm_analysis": (
+            "The /health probe returns HTTP 500; Exit 137 alone does not prove OOM."
+        ),
+        "tool_data": tool_data,
+    }))
+
+    assert parsed["containers"][0]["liveness"].endswith("/health")
+    assert "FAILURE_MODE: liveness_fail" in item["agent_context"]
+    assert "## LLM 证据分析" in context
+    assert "Exit 137 alone does not prove OOM" in context
+    assert "http://:http/health" in context
+    assert "Liveness probe failed: HTTP 500" in context
+    assert "low-value-line" not in context
+    assert "## AIOps Fact Ledger" not in context
+    assert "selected_facts" not in context
+
+
+def test_kubernetes_lifecycle_context_keeps_parser_fallback_signals():
+    context = EvidenceCollectorNode._build_aiops_agent_context(
+        "kubectl_describe",
+        {
+            "containers": [],
+            "events": [],
+            "signals": [
+                "Pod demo/api: FAILURE_MODE=liveness_fail; "
+                "Liveness probe /health failed with HTTP 500; Exit Code 137"
+            ],
+        },
+    )
+
+    assert "FAILURE_MODE=liveness_fail" in context
+    assert "/health" in context
+    assert "HTTP 500" in context
+    assert "Exit Code 137" in context
+
+
 def test_narrative_rca_prefers_bounded_observation_over_expanded_agent_facts():
     node = RootCauseAnalyzerNode()
     observation = {

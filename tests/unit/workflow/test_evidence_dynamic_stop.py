@@ -1167,6 +1167,107 @@ def test_baseline_handoff_requires_corrected_retry_after_tool_error():
     assert "不得把本次失败写成无匹配数据" in rendered
 
 
+def test_single_react_session_repairs_unresolved_follow_up_failure_once():
+    node = EvidenceCollectorNode()
+    node.single_react_session = True
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "observability_first_round_gate": {
+                "enabled": True,
+                "retry_failed_once": True,
+            },
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name="execute_pod_promql"),
+        SimpleNamespace(name="query_pod_logs"),
+        SimpleNamespace(name="query_pod_tracing"),
+    ]
+
+    def event(tool, *, purpose, success=True, error=""):
+        dimension = {
+            "execute_pod_promql": "metrics",
+            "query_pod_logs": "logging",
+            "query_pod_tracing": "tracing",
+        }[tool]
+        args = {
+            "pod": "api",
+            "purpose": purpose,
+        }
+        if success:
+            args["namespace"] = "demo"
+        return {
+            "type": "tool_result",
+            "status": "success",
+            "semantic_success": success,
+            "tool_name": tool,
+            "tool_args": args,
+            "result": "query returned evidence" if success else error,
+            "structured": {
+                "status": "query_succeeded" if success else "query_rejected",
+                "coverage": "present" if success else "error",
+                "dimension": dimension,
+                "entity": {"namespace": "demo", "pod": "api"},
+                "error": error,
+            },
+        }
+
+    baseline = [
+        event("execute_pod_promql", purpose="baseline metrics"),
+        event("query_pod_logs", purpose="baseline logs"),
+        event("query_pod_tracing", purpose="baseline tracing"),
+    ]
+    node._run_pre_react_observability_baseline = lambda _plan: baseline
+    calls = []
+
+    def fake_call(question, system_prompt, **kwargs):
+        calls.append(question)
+        if len(calls) == 1:
+            return SimpleNamespace(result="继续分析其他维度"), [
+                event("query_pod_logs", purpose="focused logs"),
+                event(
+                    "execute_pod_promql",
+                    purpose="focused range metrics",
+                    success=False,
+                    error="namespace is required as a top-level argument",
+                ),
+                event("query_pod_tracing", purpose="focused tracing"),
+            ]
+        return SimpleNamespace(result="参数已修正"), [
+            event("execute_pod_promql", purpose="focused range metrics retry"),
+        ]
+
+    node._call_llm = fake_call
+    _, events, _ = node._execute_existing_evidence_plan(
+        question="检查 demo/api",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "abnormal_pods": [{"namespace": "demo", "name": "api"}],
+        }),
+        context_archive_ref="",
+        layer_archive_ref={},
+        evidence_plan=[],
+        failure_reason="test follow-up recovery",
+    )
+
+    assert len(calls) == 2
+    assert "action=repair_failed_observability_once" in calls[1]
+    assert "namespace is required as a top-level argument" in calls[1]
+    assert {
+        item["tool_name"]
+        for item in events
+        if item.get("semantic_success") is True
+    } >= {
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+    }
+    assert node._unresolved_observability_failures(events) == []
+
+
 def test_baseline_handoff_excludes_full_fact_ledger_and_keeps_bounded_facts():
     rendered = EvidenceCollectorNode._append_baseline_handoff(
         "original request",

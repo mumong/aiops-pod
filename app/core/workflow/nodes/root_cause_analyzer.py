@@ -656,8 +656,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
             parts.extend([
                 "",
                 "# RCA 输入模式",
-                "每次工具只注入一份去重后的高价值真实观察；"
-                "不重复注入 Evidence Agent 解释、evidence_items 或采集元状态。",
+                "Evidence Agent 的自然语言分析仅作为推理草稿；每个数值、状态、"
+                "错误原文和最终判断仍必须由下方去重后的真实工具观察支撑。"
+                "不注入 Fact Ledger、selected_facts、evidence_items 或采集元状态。",
             ])
 
         facts = state.get("evidence_facts") or []
@@ -1933,8 +1934,12 @@ class RootCauseAnalyzerNode(WorkflowNode):
             '{"contract_version":"aiops.observation.v1"'
         ):
             return data
-        if tool.startswith("kubectl") and data not in (None, "", [], {}):
-            return data
+        if tool.startswith("kubectl"):
+            # Kubernetes adapters may return a readable summary whose leading
+            # characters omit later lifecycle fields such as probes or env.
+            # EvidenceCollector builds one bounded structured representation
+            # for those tools; prefer it while keeping raw output archived.
+            return item.get("agent_context") or item.get("agent_facts") or data
         if tool == "collectaiopscase" and item.get("agent_facts"):
             return item.get("agent_facts")
         return (
@@ -2088,7 +2093,105 @@ class RootCauseAnalyzerNode(WorkflowNode):
 
     @classmethod
     def _narrative_tool_signature(cls, item: Mapping[str, Any]) -> str:
-        representation = cls._narrative_tool_representation(item).lower()
+        value = cls._narrative_tool_observation(item)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        volatile_keys = {
+            "case_run_id",
+            "counts",
+            "document_id",
+            "duration_ms",
+            "duration_us",
+            "end",
+            "evidence_refs",
+            "fact_id",
+            "hash",
+            "id",
+            "observed_at",
+            "pattern_exemplar",
+            "pod_uid",
+            "query_ref",
+            "raw_ref",
+            "ref",
+            "retrieval",
+            "span_id",
+            "start",
+            "structured_ref",
+            "summary_ref",
+            "summary_selection",
+            "syscall_trace_id_request",
+            "syscall_trace_id_response",
+            "timestamp",
+            "trace_id",
+            "window",
+        }
+
+        def semantic(value_to_clean: Any) -> Any:
+            if isinstance(value_to_clean, Mapping):
+                return {
+                    str(key): semantic(nested)
+                    for key, nested in sorted(
+                        value_to_clean.items(),
+                        key=lambda pair: str(pair[0]),
+                    )
+                    if str(key).strip().lower() not in volatile_keys
+                    and str(key).strip().lower() != "purpose"
+                }
+            if isinstance(value_to_clean, list):
+                cleaned_items = [semantic(nested) for nested in value_to_clean]
+                unique: Dict[str, Any] = {}
+                for nested in cleaned_items:
+                    key = json.dumps(
+                        nested,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    unique[key] = nested
+                return [unique[key] for key in sorted(unique)]
+            if isinstance(value_to_clean, str):
+                stripped = value_to_clean.strip()
+                if stripped.startswith(("{", "[")):
+                    try:
+                        return semantic(json.loads(stripped))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                stripped = re.sub(
+                    r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b",
+                    "<uuid>",
+                    stripped,
+                    flags=re.IGNORECASE,
+                )
+                stripped = re.sub(
+                    r"\b[0-9a-f]{16,32}\b",
+                    "<id>",
+                    stripped,
+                    flags=re.IGNORECASE,
+                )
+                stripped = re.sub(
+                    r"\b\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}(?:\.\d+)?z?\b",
+                    "<timestamp>",
+                    stripped,
+                    flags=re.IGNORECASE,
+                )
+                return " ".join(stripped.split())
+            return value_to_clean
+
+        if isinstance(value, (Mapping, list)):
+            representation = json.dumps(
+                semantic(value),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).lower()
+        else:
+            representation = str(semantic(value)).lower()
         representation = re.sub(
             r"\b(?:fact_id|evidence_ref|raw_ref|structured_ref|summary_ref)"
             r"\s*[=:]\s*[^\s,;]+",

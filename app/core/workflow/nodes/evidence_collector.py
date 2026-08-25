@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.context.archive import ContextArchive
 from app.core.workflow.fact_contract import (
+    bounded_json_dumps,
     build_kubernetes_lifecycle_fact_ledger,
     build_observability_query_fact_ledger,
     compact_aiops_legacy_context_json,
@@ -1245,15 +1246,19 @@ class EvidenceCollectorNode(WorkflowNode):
                 all_thinking_events.extend(round_events or [])
                 if response and response.result:
                     llm_text_parts.append(response.result)
-                unresolved_failures = self._unresolved_baseline_failures(
-                    baseline_events,
-                    round_events or [],
+                # Inspect the whole lane, not only the pre-ReAct baseline.
+                # A parameter error raised by a focused follow-up query must
+                # receive the same single protocol-recovery opportunity as a
+                # baseline error.  Successful empty/absent observations are
+                # valid boundaries and therefore never enter this list.
+                unresolved_failures = self._unresolved_observability_failures(
+                    all_thinking_events,
                 )
                 if (
                     unresolved_failures
                     and self._is_observability_failed_retry_enabled()
                 ):
-                    retry_message = self._build_failed_baseline_retry_message(
+                    retry_message = self._build_failed_observability_retry_message(
                         question=question,
                         failures=unresolved_failures,
                     )
@@ -1263,7 +1268,7 @@ class EvidenceCollectorNode(WorkflowNode):
                         if event.get("type") == "tool_result"
                     )
                     logger.warning(
-                        "🔁 [evidence] 首轮三维调用仍有 %d 个执行失败；"
+                        "🔁 [evidence] 可观测性调用仍有 %d 个执行失败；"
                         "启动一次参数修正续跑",
                         len(unresolved_failures),
                     )
@@ -1278,9 +1283,8 @@ class EvidenceCollectorNode(WorkflowNode):
                     all_thinking_events.extend(retry_events or [])
                     if retry_response and retry_response.result:
                         llm_text_parts.append(retry_response.result)
-                    still_failed = self._unresolved_baseline_failures(
-                        baseline_events,
-                        [*(round_events or []), *(retry_events or [])],
+                    still_failed = self._unresolved_observability_failures(
+                        all_thinking_events,
                     )
                     if still_failed:
                         logger.warning(
@@ -2139,7 +2143,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         if event.get("type") != "tool_result":
             return False
         tool_name = str(event.get("tool_name") or "").strip().lower()
-        if tool_name not in cls._PRE_REACT_BASELINE_TOOLS:
+        if tool_name not in cls._OBSERVABILITY_QUERY_TOOLS:
             return False
         structured = (
             event.get("structured")
@@ -2162,7 +2166,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             event.get("type") == "tool_result"
             and event.get("deduplicated") is not True
             and str(event.get("tool_name") or "").strip().lower()
-            in cls._PRE_REACT_BASELINE_TOOLS
+            in cls._OBSERVABILITY_QUERY_TOOLS
             and not cls._observability_call_failed(event)
         )
 
@@ -2205,8 +2209,107 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             failed.pop((target[0], target[1], tool_name), None)
         return list(failed.values())
 
+    @classmethod
+    def _unresolved_observability_failures(
+        cls,
+        events: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Return final unresolved query failures across the complete lane.
+
+        A later successful call of the same scoped tool recovers an earlier
+        failure even when the rejected request omitted one required scope
+        field.  Conversely, a later parameter failure remains unresolved even
+        if the pre-ReAct baseline for that dimension succeeded.  This keeps the
+        retry generic and independent of fault type, metric name, or endpoint.
+        """
+        unresolved: List[Dict[str, Any]] = []
+
+        def scope(event: Dict[str, Any]) -> tuple[str, str]:
+            target = cls._extract_tool_event_pod_target(event)
+            if target:
+                return target
+            args = (
+                event.get("tool_args")
+                if isinstance(event.get("tool_args"), dict)
+                else {}
+            )
+            return (
+                str(
+                    args.get("namespace")
+                    or args.get("target_namespace")
+                    or ""
+                ).strip().lower(),
+                str(
+                    args.get("pod")
+                    or args.get("pod_name")
+                    or args.get("target_pod")
+                    or args.get("target_pod_name")
+                    or ""
+                ).strip().lower(),
+            )
+
+        def matches(
+            item: Dict[str, Any],
+            *,
+            tool_name: str,
+            namespace: str,
+            pod: str,
+        ) -> bool:
+            if item.get("tool_name") != tool_name:
+                return False
+            item_namespace = str(item.get("namespace") or "").lower()
+            item_pod = str(item.get("pod") or "").lower()
+            namespace_matches = (
+                not item_namespace
+                or not namespace
+                or item_namespace == namespace
+            )
+            pod_matches = not item_pod or not pod or item_pod == pod
+            return namespace_matches and pod_matches
+
+        for event in events or []:
+            if (
+                event.get("type") != "tool_result"
+                or event.get("deduplicated") is True
+            ):
+                continue
+            tool_name = str(event.get("tool_name") or "").strip().lower()
+            if tool_name not in cls._OBSERVABILITY_QUERY_TOOLS:
+                continue
+            namespace, pod = scope(event)
+            unresolved = [
+                item
+                for item in unresolved
+                if not matches(
+                    item,
+                    tool_name=tool_name,
+                    namespace=namespace,
+                    pod=pod,
+                )
+            ]
+            if not cls._observability_call_failed(event):
+                continue
+            structured = (
+                event.get("structured")
+                if isinstance(event.get("structured"), dict)
+                else {}
+            )
+            unresolved.append({
+                "namespace": namespace,
+                "pod": pod,
+                "tool_name": tool_name,
+                "failed_tool_args": dict(event.get("tool_args") or {}),
+                "error": str(
+                    structured.get("raw_preview")
+                    or structured.get("error")
+                    or event.get("result")
+                    or "tool call failed"
+                )[:1600],
+            })
+        return unresolved
+
     @staticmethod
-    def _build_failed_baseline_retry_message(
+    def _build_failed_observability_retry_message(
         *,
         question: str,
         failures: List[Dict[str, Any]],
@@ -2220,7 +2323,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         return (
             "# action=repair_failed_observability_once\n"
             f"用户问题：{question}\n\n"
-            "下面调用是首轮 Metrics/Logging/Tracing 的真实执行失败，不是无匹配数据。"
+            "下面调用是 Metrics/Logging/Tracing/Topology 的真实执行失败，不是无匹配数据。"
             "本轮只处理这些失败：阅读原始错误和当前工具 schema，补齐或修正参数后，"
             "对同一 namespace/Pod 调用对应工具一次。不得原样重复完全相同的错误参数，"
             "不得因为其他维度已有结果而直接总结，也不要调用无关工具。成功但结果为空"
@@ -2228,6 +2331,10 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             "再简短说明结果。\n"
             f"{payload}\n"
         )
+
+    # Compatibility aliases for older callers/tests.  Runtime recovery uses
+    # the complete-lane helpers above.
+    _build_failed_baseline_retry_message = _build_failed_observability_retry_message
 
     def _blocked_tools_for_preplanned_execution(
         self,
@@ -7110,6 +7217,170 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 separators=(",", ":"),
                 default=str,
             )
+
+        if normalized_tool in EvidenceCollectorNode._KUBERNETES_LIFECYCLE_AUTHORITY_TOOLS:
+            if not isinstance(structured, dict):
+                return ""
+
+            def compact_mapping(
+                value: Any,
+                keys: tuple[str, ...],
+            ) -> Dict[str, Any]:
+                if not isinstance(value, dict):
+                    return {}
+                return {
+                    key: value.get(key)
+                    for key in keys
+                    if value.get(key) not in (None, "", [], {})
+                }
+
+            def compact_env(value: Any) -> Any:
+                if isinstance(value, str):
+                    return value[:1600]
+                if not isinstance(value, list):
+                    return value
+                return [
+                    compact_mapping(
+                        item,
+                        ("name", "value", "valueFrom", "value_from"),
+                    )
+                    for item in value[:20]
+                    if isinstance(item, dict)
+                ]
+
+            def compact_container(value: Any) -> Dict[str, Any]:
+                if not isinstance(value, dict):
+                    return {}
+                result = compact_mapping(
+                    value,
+                    (
+                        "name",
+                        "image",
+                        "imageID",
+                        "command",
+                        "args",
+                        "state",
+                        "waiting",
+                        "running",
+                        "reason",
+                        "last_state",
+                        "lastState",
+                        "last_terminated",
+                        "lastTerminated",
+                        "terminated",
+                        "exit_code",
+                        "last_exit_code",
+                        "ready",
+                        "started",
+                        "restart_count",
+                        "restartCount",
+                        "resources",
+                        "liveness",
+                        "livenessProbe",
+                        "readiness",
+                        "readinessProbe",
+                        "startup",
+                        "startupProbe",
+                    ),
+                )
+                environment = value.get("env", value.get("environment"))
+                environment = compact_env(environment)
+                if environment not in (None, "", [], {}):
+                    result["environment"] = environment
+                return result
+
+            payload: Dict[str, Any] = {
+                "source_system": "kubernetes",
+                "dimension": "kubernetes",
+            }
+            primary = compact_mapping(
+                structured.get("primary_entity"),
+                ("kind", "namespace", "name", "uid"),
+            )
+            if not primary:
+                primary = {
+                    key: value
+                    for key, value in {
+                        "kind": "Pod",
+                        "namespace": structured.get("namespace"),
+                        "name": structured.get("name"),
+                        "uid": structured.get("uid"),
+                    }.items()
+                    if value not in (None, "")
+                }
+            if primary:
+                payload["entity"] = primary
+            for key in ("status", "phase", "node"):
+                if structured.get(key) not in (None, ""):
+                    payload[key] = structured.get(key)
+
+            for source_key, target_key in (
+                ("containers", "containers"),
+                ("containerStatuses", "container_statuses"),
+                ("initContainers", "init_containers"),
+                ("init_containers", "init_containers"),
+            ):
+                values = structured.get(source_key)
+                if not isinstance(values, list):
+                    continue
+                compacted = [
+                    container
+                    for item in values[:8]
+                    if (container := compact_container(item))
+                ]
+                if compacted:
+                    payload[target_key] = compacted
+
+            conditions = structured.get("conditions")
+            if isinstance(conditions, list):
+                compacted_conditions = [
+                    compact_mapping(
+                        item,
+                        ("type", "status", "reason", "message"),
+                    )
+                    for item in conditions[:6]
+                    if isinstance(item, dict)
+                ]
+                compacted_conditions = [
+                    item for item in compacted_conditions if item
+                ]
+                if compacted_conditions:
+                    payload["conditions"] = compacted_conditions
+
+            events = structured.get("events")
+            if not isinstance(events, list) or not events:
+                events = structured.get("key_events")
+            if not isinstance(events, list) or not events:
+                events = structured.get("signals")
+            if isinstance(events, list):
+                compacted_events = [
+                    str(item)[:1200]
+                    for item in events[:10]
+                    if str(item).strip()
+                ]
+                if compacted_events:
+                    payload["events"] = compacted_events
+
+            scheduling = compact_mapping(
+                structured.get("scheduling"),
+                ("node_selectors", "node_selector", "affinity", "tolerations"),
+            )
+            if not scheduling:
+                scheduling = compact_mapping(
+                    structured,
+                    (
+                        "nodeName",
+                        "nodeSelector",
+                        "affinity",
+                        "affinity_present",
+                        "tolerations",
+                    ),
+                )
+            if scheduling:
+                payload["scheduling"] = scheduling
+            if len(payload) <= 2:
+                return ""
+            return bounded_json_dumps(payload, max_chars=8000)
 
         if normalized_tool not in {
             "collect_aiops_case",
