@@ -59,9 +59,10 @@ docker run --rm --name aiops-a2a-test-agent \
 `http://127.0.0.1:8001`。Linux 可使用可路由的宿主机 IP，或者将两个容器放入同一
 Docker network 并使用运维 Adapter 的容器名。
 
-## 2.1 按项目标准方式部署到 Kubernetes
+## 2.1 与正式部署的边界
 
-测试 Agent 已纳入本仓库统一 `VERSION` 发布闭环。修改一次 `VERSION` 后执行：
+测试 Agent 是模拟“别人的 Agent”的独立验收工具，不进入正式 Kubernetes 部署。
+项目标准命令只发布主 Agent 和同 Pod 的 A2A sidecar：
 
 ```bash
 make delete
@@ -70,25 +71,8 @@ make push
 make deploy
 ```
 
-上述命令会使用同一个版本构建、推送并部署：
-
-- `aiops-copilot`：主 Agent，Pod 端口 8000，NodePort 30800。
-- `aiops-a2a-adapter`：主 Agent 同 Pod sidecar，端口 8001，NodePort 30801。
-- `aiops-a2a-test-agent`：独立 Deployment，端口 8002，NodePort 30802。
-
-`make deploy` 默认读取 Kubernetes 第一个 Node 的 InternalIP，写入两个 Agent Card 的
-外部 URL。使用 Ingress、VIP 或其他 Node 时可以覆盖：
-
-```bash
-make deploy \
-  A2A_PUBLIC_HOST=10.2.0.48 \
-  A2A_PUBLIC_URL=https://aiops-a2a.example.com \
-  A2A_TEST_AGENT_PUBLIC_URL=https://aiops-a2a-test.example.com
-```
-
-MCP Stander 和 Frontend 仍由各自仓库独立发布。测试 Agent 委派给运维 Agent 后，运维
-Agent 仍按现有配置调用 `mcp-server-manager.mcp.svc.cluster.local`，Frontend 仍通过
-`/api -> aiops-copilot:8000` 工作，A2A 接入不会替换这两条链路。
+测试 Agent 仅在需要验收 Agent-to-Agent 链路时，通过上一节的 Docker 命令临时启动，
+测试完成即可停止。MCP Stander 和 Frontend 的部署方式不变。
 
 ## 3. 检查双 Agent
 
@@ -99,12 +83,10 @@ curl -fsS http://127.0.0.1:8002/.well-known/agent-card.json | jq
 curl -fsS http://127.0.0.1:8002/ready | jq
 ```
 
-Kubernetes 部署后从集群外验证：
+运维 Agent 部署后从集群外验证：
 
 ```bash
 curl -fsS http://NODE_IP:30801/.well-known/agent-card.json | jq
-curl -fsS http://NODE_IP:30802/.well-known/agent-card.json | jq
-curl -fsS http://NODE_IP:30802/ready | jq
 ```
 
 `/ready` 会通过官方 SDK 发现下游 Agent。正常结果中同时包含：

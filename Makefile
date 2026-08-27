@@ -13,12 +13,11 @@ VERSION ?= $(shell cat VERSION)
 DOCKER_TAG := $(VERSION)
 A2A_PUBLIC_HOST ?= $(shell kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
 A2A_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30801
-A2A_TEST_AGENT_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30802
 
 .PHONY: build build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
 	case-list case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean
 
-build: build-main build-a2a build-a2a-test-agent
+build: build-main build-a2a
 
 build-main:
 	@echo "Building $(DOCKER_NAME):$(DOCKER_TAG)..."
@@ -32,9 +31,9 @@ build-a2a-test-agent:
 	@echo "Building $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)..."
 	docker build --build-arg VERSION=$(DOCKER_TAG) -f Dockerfile.a2a-test-agent -t $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG) .
 
-build-all: build
+build-all: build build-a2a-test-agent
 
-push: push-main push-a2a push-a2a-test-agent
+push: push-main push-a2a
 
 push-main:
 	@echo "Pushing $(DOCKER_NAME):$(DOCKER_TAG)..."
@@ -48,7 +47,7 @@ push-a2a-test-agent:
 	@echo "Pushing $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)..."
 	docker push $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)
 
-push-all: push
+push-all: push push-a2a-test-agent
 
 test-a2a:
 	@test -x .venv-a2a/bin/python || (echo "先执行: python3 -m venv .venv-a2a && .venv-a2a/bin/pip install -r requirements.a2a-dev.txt" && exit 1)
@@ -57,17 +56,14 @@ test-a2a:
 # 通用部署（不修改 federation 配置，直接应用当前 configmap）
 deploy:
 	@test -n "$(A2A_PUBLIC_HOST)" || (echo "无法自动获取 Node InternalIP；请设置 A2A_PUBLIC_HOST=<可访问IP>" && exit 1)
-	@echo "Deploying AIOps and A2A images with version $(DOCKER_TAG)..."
+	@echo "Deploying AIOps Pod (main container + A2A sidecar) with version $(DOCKER_TAG)..."
 	@sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
 	@sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_IMAGE_NAME):.*|image: $(A2A_DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
-	@sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_TEST_AGENT_IMAGE_NAME):.*|image: $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)|' deploy/a2a-test-agent.yaml
 	@sed -i '/- name: A2A_PUBLIC_URL/{n;s|^\([[:space:]]*\)value:.*|\1value: "$(A2A_PUBLIC_URL)"|;}' deploy/k8s-simple.yaml
-	@sed -i '/- name: TEST_AGENT_PUBLIC_URL/{n;s|^\([[:space:]]*\)value:.*|\1value: "$(A2A_TEST_AGENT_PUBLIC_URL)"|;}' deploy/a2a-test-agent.yaml
 	@kubectl create namespace aiops --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f deploy/ --recursive
 	@echo "Waiting for rollout to complete..."
 	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s
-	kubectl rollout status deployment/aiops-a2a-test-agent -n aiops --timeout=300s
 
 # 主集群部署：federation.enabled = true，然后 deploy
 deploy-master:
@@ -85,7 +81,7 @@ deploy-slave:
 
 delete:
 	@echo "Deleting app resources only (keeping namespace, PVC and PV)..."
-	kubectl delete deployment/aiops-copilot deployment/aiops-a2a-test-agent service/aiops-copilot service/aiops-a2a-test-agent -n aiops --ignore-not-found
+	kubectl delete deployment/aiops-copilot service/aiops-copilot -n aiops --ignore-not-found
 	kubectl delete -f deploy/rbac.yaml --ignore-not-found
 	kubectl delete -f deploy/secrets/ --recursive --ignore-not-found
 	kubectl delete -f deploy/configmap/ --recursive --ignore-not-found
@@ -93,9 +89,7 @@ delete:
 restart:
 	@echo "Restarting pods..."
 	kubectl rollout restart deployment/aiops-copilot -n aiops
-	kubectl rollout restart deployment/aiops-a2a-test-agent -n aiops
 	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s
-	kubectl rollout status deployment/aiops-a2a-test-agent -n aiops --timeout=300s
 
 logs:
 	kubectl logs -f deployment/aiops-copilot -n aiops
@@ -104,7 +98,6 @@ sync-version:
 	@echo "Syncing version to $(DOCKER_TAG)..."
 	sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
 	sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_IMAGE_NAME):.*|image: $(A2A_DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
-	sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_TEST_AGENT_IMAGE_NAME):.*|image: $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)|' deploy/a2a-test-agent.yaml
 
 # ============================================================
 # Pod 异常测试 Case 库（test/pod-anomaly-cases，源自 aiopsdata 仓库）
