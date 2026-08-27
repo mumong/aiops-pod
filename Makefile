@@ -6,11 +6,13 @@ IMAGE_NAME := aiops-copilot
 DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME)
 A2A_IMAGE_NAME := aiops-a2a-adapter
 A2A_DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_IMAGE_NAME)
+A2A_TEST_AGENT_IMAGE_NAME := aiops-a2a-test-agent
+A2A_TEST_AGENT_DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_TEST_AGENT_IMAGE_NAME)
 
 VERSION ?= $(shell cat VERSION)
 DOCKER_TAG := $(VERSION)
 
-.PHONY: build build-a2a build-all push push-a2a push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
+.PHONY: build build-a2a build-a2a-test-agent build-all push push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
 	case-list case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean
 
 build:
@@ -21,6 +23,10 @@ build-a2a:
 	@echo "Building $(A2A_DOCKER_NAME):$(DOCKER_TAG)..."
 	docker build --build-arg VERSION=$(DOCKER_TAG) -f Dockerfile.a2a -t $(A2A_DOCKER_NAME):$(DOCKER_TAG) .
 
+build-a2a-test-agent:
+	@echo "Building $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)..."
+	docker build --build-arg VERSION=$(DOCKER_TAG) -f Dockerfile.a2a-test-agent -t $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG) .
+
 build-all: build build-a2a
 
 push:
@@ -30,6 +36,10 @@ push:
 push-a2a:
 	@echo "Pushing $(A2A_DOCKER_NAME):$(DOCKER_TAG)..."
 	docker push $(A2A_DOCKER_NAME):$(DOCKER_TAG)
+
+push-a2a-test-agent:
+	@echo "Pushing $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)..."
+	docker push $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)
 
 push-all: push push-a2a
 
