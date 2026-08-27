@@ -834,7 +834,9 @@ class ParallelEvidenceNode(WorkflowNode):
             "pod_status_keyword": (status_keywords[0] if status_keywords else ""),
             "pod_abnormal_type": group.get("pod_abnormal_type", ""),
             "possible_scenarios": group.get("possible_scenarios") or [],
-            "matched_runbooks": handoff.get("matched_runbooks") or [],
+            # Layer binds fetched Runbooks to anomaly groups before fan-out.
+            # Never copy the global union into every independent lane.
+            "matched_runbooks": group.get("matched_runbooks") or [],
             "must_verify": [
                 f"只诊断本组实体 {self._group_entity_labels(group)}，"
                 "不要采集其他 namespace/Pod 的证据",

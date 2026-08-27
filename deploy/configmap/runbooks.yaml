@@ -370,6 +370,9 @@ data:
 
     以下只示范正确参数形状，`<namespace>/<pod>/<container>/<trace_id>` 必须替换为当前真实实体；指标、关键词和路径仍由当前证据决定，不是固定故障路由：
     ```json
+    {"tool":"execute_pod_promql","namespace":"<namespace>","pod":"<pod>","purpose":"确认容器当前内存硬限制","promql":"kube_pod_container_resource_limits{namespace=\"<namespace>\",pod=\"<pod>\",container=\"<container>\",resource=\"memory\"}","query_type":"instant"}
+    {"tool":"execute_pod_promql","namespace":"<namespace>","pod":"<pod>","purpose":"确认最近一小时重启计数是否持续增加","promql":"kube_pod_container_status_restarts_total{namespace=\"<namespace>\",pod=\"<pod>\",container=\"<container>\"}","query_type":"range","window_minutes":60,"step":"1m"}
+    {"tool":"execute_pod_promql","namespace":"<namespace>","pod":"<pod>","purpose":"确认最近终止原因是否明确为 OOMKilled","promql":"kube_pod_container_status_last_terminated_reason{namespace=\"<namespace>\",pod=\"<pod>\",container=\"<container>\",reason=\"OOMKilled\"}","query_type":"instant"}
     {"tool":"execute_pod_promql","namespace":"<namespace>","pod":"<pod>","purpose":"验证故障前 working set 是否持续逼近内存上限","promql":"container_memory_working_set_bytes{namespace=\"<namespace>\",pod=\"<pod>\",container=\"<container>\"}","query_type":"range","window_minutes":60,"step":"30s"}
     {"tool":"query_pod_logs","namespace":"<namespace>","pod":"<pod>","container":"<container>","purpose":"验证故障前是否存在真实内存增长或分配异常","window_minutes":60,"keywords":["memory","allocate","heap","GC","OOM"],"keyword_mode":"any","max_records":20}
     {"tool":"query_pod_tracing","namespace":"<namespace>","pod":"<pod>","purpose":"关联日志中的真实 trace_id，确认哪类请求与内存增长同窗","window_minutes":60,"trace_id":"<trace_id>","include_tempo":true,"max_records":20}
@@ -873,6 +876,15 @@ data:
     - 判卡死前先确认时间：deletionTimestamp 距今未超过 terminationGracePeriodSeconds 的不算卡死，如实记录等待中。
     - 事件/表格数据不足以定分支时：`kubectl_get_yaml` 确认 metadata.finalizers、deletionTimestamp、preStop/grace 配置的真实值。
     - 怀疑节点原因时：补查所在 Node Ready 状态与 kubelet 事件；节点失联的 Terminating 与 finalizer 卡住处理方式不同。
+
+    ## 8100 专项查询参考（非强制）
+    Terminating 的主证据始终是当前 Pod YAML 中的 `deletionTimestamp`、`metadata.finalizers`、`terminationGracePeriodSeconds` 和 `lifecycle.preStop`。以下 8100 调用只用于补充持续时间、排除重启型故障或理解拓扑，不能替代上述原文；占位符必须替换为真实实体，并以工具 schema 为准。
+    ```json
+    {"tool":"execute_pod_promql","namespace":"<namespace>","pod":"<pod>","purpose":"辅助确认 Pod 删除时间戳是否仍存在","promql":"kube_pod_deletion_timestamp{namespace=\"<namespace>\",pod=\"<pod>\"}","query_type":"instant"}
+    {"tool":"execute_pod_promql","namespace":"<namespace>","pod":"<pod>","purpose":"排除同一时间窗内持续重启造成的状态混淆","promql":"kube_pod_container_status_restarts_total{namespace=\"<namespace>\",pod=\"<pod>\"}","query_type":"range","window_minutes":60,"step":"1m"}
+    {"tool":"query_pod_topology","namespace":"<namespace>","pod":"<pod>","purpose":"确认 Pod 的 owner、node 与 service 关系，定位删除链路相关对象"}
+    ```
+    只有 YAML/preStop、应用退出日志或真实业务线索指向退出过程时，才进一步查询 Logging/Tracing；不要为了三维齐全对 Terminating Pod 盲目查询。
 
     ## 判定规则
     | 条件 | 结论 | 置信度 |

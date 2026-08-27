@@ -187,6 +187,10 @@ def test_autonomous_observability_runtime_switches_are_deployed():
         config["workflow"]["evidence"]["observability_first_round_gate"]["enabled"]
         is True
     )
+    assert (
+        config["workflow"]["evidence"]["pre_react_observability_baseline"]["enabled"]
+        is True
+    )
     assert config["workflow"]["evidence"]["early_stop"]["enabled"] is True
     assert config["workflow"]["context_compaction"]["trigger_ratio"] == 0.70
 

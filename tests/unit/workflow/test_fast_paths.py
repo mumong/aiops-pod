@@ -1144,6 +1144,47 @@ def test_layer_explicit_pod_stop_checker_stops_after_target_pod_status():
     assert node._should_stop_explicit_pod_early(question, events) is True
 
 
+def test_layer_explicit_pod_stop_waits_for_model_selected_runbook_result():
+    question = "请诊断 aiops-case-08/workload"
+    baseline = [{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "kubectl_get_by_name",
+        "tool_args": {
+            "kind": "pod",
+            "namespace": "aiops-case-08",
+            "name": "workload",
+        },
+        "result": "workload 0/1 CrashLoopBackOff",
+    }]
+    started = [{
+        "type": "tool_start",
+        "tool_name": "fetch_runbook",
+        "tool_call_id": "call-runbook",
+    }]
+    completed = [{
+        "type": "tool_result",
+        "status": "success",
+        "semantic_success": True,
+        "tool_name": "fetch_runbook",
+        "tool_call_id": "call-runbook",
+        "tool_args": {"runbook_id": "pod-crashloop-runtime.md"},
+        "result": "runbook content",
+    }]
+
+    assert LayerClassifierNode._should_stop_explicit_pod_after_react(
+        question=question,
+        baseline_events=baseline,
+        react_events=started,
+    ) is False
+    assert LayerClassifierNode._should_stop_explicit_pod_after_react(
+        question=question,
+        baseline_events=baseline,
+        react_events=[*started, *completed],
+    ) is True
+
+
 def test_layer_explicit_pod_stop_checker_ignores_global_or_failed_results():
     node = LayerClassifierNode()
     question = "我的集群现在有什么问题？"
@@ -1222,6 +1263,78 @@ def test_layer_extracts_ordered_explicit_pod_targets_from_supported_notation():
         ("team-a", "api-a"),
         ("team-b", "api-b"),
         ("team-c", "api-c"),
+    ]
+
+
+def test_layer_normalizes_each_pod_with_its_preceding_namespace_only():
+    entities = LayerClassifierNode._normalize_entities([
+        {"type": "namespace", "name": "team-a"},
+        {"type": "pod", "name": "api-a"},
+        {"type": "namespace", "name": "team-b"},
+        {"type": "pod", "name": "api-b"},
+        {"type": "namespace", "name": "team-c"},
+        {"type": "pod", "name": "api-c"},
+    ])
+
+    assert LayerClassifierNode._extract_explicit_pod_targets("", entities) == [
+        ("team-a", "api-a"),
+        ("team-b", "api-b"),
+        ("team-c", "api-c"),
+    ]
+
+
+def test_layer_binds_fetched_runbooks_to_each_lane_without_global_broadcast():
+    catalog = SimpleNamespace(catalog=[
+        SimpleNamespace(
+            link="pod-config-error.md",
+            description="pod_abnormal_type=ConfigError — CreateContainerConfigError / Secret key missing",
+        ),
+        SimpleNamespace(
+            link="pod-oomkilled.md",
+            description="pod_abnormal_type=OOMKilled — CrashLoopBackOff with Last State OOMKilled",
+        ),
+        SimpleNamespace(
+            link="pod-crashloop-runtime.md",
+            description="pod_abnormal_type=CrashLoopBackOffRuntime — CrashLoopBackOff runtime investigation",
+        ),
+        SimpleNamespace(
+            link="pod-terminating-stuck.md",
+            description="pod_abnormal_type=TerminatingStuck — Terminating with deletionTimestamp/finalizers",
+        ),
+    ])
+    node = LayerClassifierNode(runbook_catalog=catalog)
+    groups = [
+        {
+            "group_id": "g1",
+            "status_keywords": ["CreateContainerConfigError"],
+            "pod_abnormal_type": "ConfigError",
+            "entities": [{"kind": "Pod", "namespace": "c04", "name": "app"}],
+        },
+        {
+            "group_id": "g2",
+            "status_keywords": ["Running"],
+            "pod_abnormal_type": "CurrentStateVerification",
+            "entities": [{"kind": "Pod", "namespace": "c08", "name": "app"}],
+        },
+        {
+            "group_id": "g3",
+            "status_keywords": ["Terminating"],
+            "pod_abnormal_type": "TerminatingStuck",
+            "entities": [{"kind": "Pod", "namespace": "c11", "name": "app"}],
+        },
+    ]
+
+    bound = node._bind_runbooks_to_issue_groups(groups, [
+        "pod-config-error.md",
+        "pod-oomkilled.md",
+        "pod-crashloop-runtime.md",
+        "pod-terminating-stuck.md",
+    ])
+
+    assert [group["matched_runbooks"] for group in bound] == [
+        ["pod-config-error.md"],
+        ["pod-oomkilled.md", "pod-crashloop-runtime.md"],
+        ["pod-terminating-stuck.md"],
     ]
 
 
@@ -1447,6 +1560,11 @@ def test_deployed_workflow_disables_rca_validation():
         ["observability_first_round_gate"]["retry_failed_once"]
         is True
     )
+    assert (
+        app_config["workflow"]["evidence"]
+        ["pre_react_observability_baseline"]["enabled"]
+        is True
+    )
 
 
 def test_oom_and_liveness_runbooks_contain_scoped_query_shape_examples():
@@ -1455,6 +1573,7 @@ def test_oom_and_liveness_runbooks_contain_scoped_query_shape_examples():
     )
     oom = configmap["data"]["pod-oomkilled.md"]
     crashloop = configmap["data"]["pod-crashloop-runtime.md"]
+    terminating = configmap["data"]["pod-terminating-stuck.md"]
 
     for runbook in (oom, crashloop):
         assert '"tool":"execute_pod_promql"' in runbook
@@ -1463,9 +1582,14 @@ def test_oom_and_liveness_runbooks_contain_scoped_query_shape_examples():
         assert '"tool":"query_pod_tracing"' in runbook
         assert '"purpose":' in runbook
     assert "container_memory_working_set_bytes" in oom
+    assert "kube_pod_container_resource_limits" in oom
+    assert "kube_pod_container_status_last_terminated_reason" in oom
     assert '"trace_id":"<trace_id>"' in oom
     assert '"request_resource":"<probe-path>"' in crashloop
     assert "不同 endpoint" in crashloop
+    assert "8100 专项查询参考（非强制）" in terminating
+    assert "kube_pod_deletion_timestamp" in terminating
+    assert '"tool":"query_pod_topology"' in terminating
 
 
 def test_deployed_config_enables_autonomous_observability_and_disables_compatibility_servers():

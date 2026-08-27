@@ -534,6 +534,42 @@ class LayerClassifierNode(WorkflowNode):
                 completed.add(target)
         return expected.issubset(completed)
 
+    @classmethod
+    def _should_stop_explicit_pod_after_react(
+        cls,
+        *,
+        question: str,
+        baseline_events: List[Dict[str, Any]],
+        react_events: List[Dict[str, Any]],
+    ) -> bool:
+        """Wait for model-selected tools before ending explicit-Pod Layer."""
+        terminal_results = [
+            event
+            for event in (react_events or [])
+            if event.get("type") == "tool_result"
+        ]
+        if not terminal_results:
+            return False
+
+        started_ids = {
+            str(event.get("tool_call_id") or "")
+            for event in (react_events or [])
+            if event.get("type") == "tool_start"
+            and str(event.get("tool_call_id") or "")
+        }
+        terminal_ids = {
+            str(event.get("tool_call_id") or "")
+            for event in terminal_results
+            if str(event.get("tool_call_id") or "")
+        }
+        if started_ids and not started_ids.issubset(terminal_ids):
+            return False
+
+        return cls._should_stop_explicit_pod_early(
+            question,
+            [*(baseline_events or []), *(react_events or [])],
+        )
+
     def _build_query_direct_failure_result(
         self,
         question: str,
@@ -908,6 +944,10 @@ class LayerClassifierNode(WorkflowNode):
                 default_pod_abnormal_type=pod_abnormal_type,
                 layer_result=layer_result,
             )
+        issue_groups = self._bind_runbooks_to_issue_groups(
+            issue_groups,
+            matched_runbooks,
+        )
         if explicit_pod_scopes:
             must_verify = [
                 "本轮仅验证用户明确指定的 namespace + Pod 列表；全局扫描中的其他异常只作为背景",
@@ -1551,6 +1591,150 @@ class LayerClassifierNode(WorkflowNode):
             })
         return groups
 
+    def _bind_runbooks_to_issue_groups(
+        self,
+        groups: List[Dict[str, Any]],
+        fetched_runbooks: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Bind Layer-fetched Runbooks to lanes using authored ownership first.
+
+        The fallback compares generic catalog metadata (abnormal type/status),
+        not fault-specific code branches. Ambiguous ties remain available to
+        each matching lane; unrelated global Runbooks are never broadcast.
+        """
+        fetched = [
+            self._normalize_runbook_id(item)
+            for item in (fetched_runbooks or [])
+            if self._normalize_runbook_id(item)
+        ]
+        fetched = list(dict.fromkeys(fetched))
+        if not groups:
+            return groups
+        if not fetched:
+            for group in groups:
+                group["matched_runbooks"] = []
+            return groups
+
+        metadata = self._runbook_binding_metadata(fetched)
+        scores_by_runbook: Dict[str, List[tuple[int, int]]] = {
+            runbook_id: [] for runbook_id in fetched
+        }
+        for group_index, group in enumerate(groups):
+            authored = {
+                self._normalize_runbook_id(item)
+                for item in (group.get("matched_runbooks") or [])
+                if self._normalize_runbook_id(item)
+            }
+            group["matched_runbooks"] = [
+                runbook_id for runbook_id in fetched if runbook_id in authored
+            ]
+            if group["matched_runbooks"]:
+                continue
+            signals = [
+                str(group.get("pod_abnormal_type") or ""),
+                *(str(item) for item in (group.get("status_keywords") or [])),
+            ]
+            normalized_signals = [
+                (self._normalize_binding_text(item), item)
+                for item in signals
+                if self._normalize_binding_text(item)
+            ]
+            for runbook_id in fetched:
+                meta = metadata.get(runbook_id, {})
+                declared = self._normalize_binding_text(meta.get("abnormal_type", ""))
+                score = 0
+                for signal, raw_signal in normalized_signals:
+                    if declared and signal == declared:
+                        score = max(score, 100)
+                    elif len(signal) >= 4 and self._binding_text_contains(
+                        meta.get("description", ""),
+                        raw_signal,
+                    ):
+                        score = max(score, 40)
+                if score:
+                    scores_by_runbook[runbook_id].append((group_index, score))
+
+        for runbook_id, candidates in scores_by_runbook.items():
+            if any(
+                runbook_id in (group.get("matched_runbooks") or [])
+                for group in groups
+            ):
+                continue
+            if not candidates and len(groups) == 1:
+                groups[0].setdefault("matched_runbooks", []).append(runbook_id)
+                continue
+            if not candidates:
+                continue
+            best = max(score for _, score in candidates)
+            for group_index, score in candidates:
+                if score == best:
+                    groups[group_index].setdefault("matched_runbooks", []).append(
+                        runbook_id
+                    )
+
+        assigned = {
+            runbook_id
+            for group in groups
+            for runbook_id in (group.get("matched_runbooks") or [])
+        }
+        remaining = [item for item in fetched if item not in assigned]
+        unbound_groups = [
+            group for group in groups if not (group.get("matched_runbooks") or [])
+        ]
+        if remaining and len(unbound_groups) == 1:
+            # Layer fetched these references, every other anomaly group has a
+            # metadata-bound owner, and exactly one lane remains. Preserve the
+            # set-difference ownership instead of dropping references merely
+            # because a sampling instant normalized that lane to Running.
+            unbound_groups[0]["matched_runbooks"] = remaining
+        return groups
+
+    @staticmethod
+    def _normalize_runbook_id(value: Any) -> str:
+        text = str(value or "").strip().rsplit("/", 1)[-1]
+        if not text:
+            return ""
+        return text if text.endswith(".md") else f"{text}.md"
+
+    @staticmethod
+    def _normalize_binding_text(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    @staticmethod
+    def _binding_text_contains(description: Any, signal: Any) -> bool:
+        raw_signal = str(signal or "").strip().lower()
+        if not raw_signal:
+            return False
+        return bool(re.search(
+            rf"(?<![a-z0-9]){re.escape(raw_signal)}(?![a-z0-9])",
+            str(description or "").lower(),
+        ))
+
+    def _runbook_binding_metadata(
+        self,
+        runbook_ids: List[str],
+    ) -> Dict[str, Dict[str, str]]:
+        wanted = set(runbook_ids)
+        result: Dict[str, Dict[str, str]] = {}
+        catalog = getattr(self.runbook_catalog, "catalog", []) or []
+        for entry in catalog:
+            runbook_id = self._normalize_runbook_id(
+                getattr(entry, "link", "") or getattr(entry, "id", "")
+            )
+            if runbook_id not in wanted:
+                continue
+            description = str(getattr(entry, "description", "") or "")
+            match = re.search(
+                r"pod_abnormal_type\s*=\s*([^,，\s]+)",
+                description,
+                flags=re.IGNORECASE,
+            )
+            result[runbook_id] = {
+                "description": description,
+                "abnormal_type": match.group(1) if match else "",
+            }
+        return result
+
     @staticmethod
     def _default_scenarios_for_abnormal_type(
         pod_abnormal_type: str,
@@ -1741,15 +1925,16 @@ class LayerClassifierNode(WorkflowNode):
                 item = {"type": etype, "name": value}
                 if namespace:
                     item["namespace"] = namespace
-                normalized.append(item)
                 if etype.lower() == "namespace" and value:
                     current_namespace = value
+                elif current_namespace and not namespace:
+                    # Namespace/Pod entities are emitted in textual order.
+                    # Bind a Pod only to the namespace that precedes it; never
+                    # backfill every Pod with the final namespace in the list.
+                    item["namespace"] = current_namespace
+                normalized.append(item)
             else:
                 normalized.append({"type": "Unknown", "name": str(entity)})
-        if current_namespace:
-            for item in normalized:
-                if item.get("type", "").lower() != "namespace" and "namespace" not in item:
-                    item["namespace"] = current_namespace
         return normalized
 
     @classmethod
@@ -1988,9 +2173,10 @@ class LayerClassifierNode(WorkflowNode):
             if self._is_direct_query_mode() and early_stop_enabled:
                 stop_checker = self._should_stop_query_direct_early
             elif explicit_pod_early_stop_enabled:
-                stop_checker = lambda events: self._should_stop_explicit_pod_early(
-                    question,
-                    [*baseline_events, *events],
+                stop_checker = lambda events: self._should_stop_explicit_pod_after_react(
+                    question=question,
+                    baseline_events=baseline_events,
+                    react_events=events,
                 )
             else:
                 stop_checker = None

@@ -555,6 +555,80 @@ def test_parallel_collector_hands_code_owned_three_signal_baseline_to_react(
     assert text == "agent completed"
 
 
+def test_parallel_collector_can_disable_only_pre_react_baseline(monkeypatch):
+    class _BatchAICall:
+        def execute_tool_batch(self, **kwargs):
+            raise AssertionError("pre-ReAct baseline must not execute")
+
+    node = EvidenceCollectorNode()
+    node.single_react_session = True
+    node.ai_call = _BatchAICall()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "pre_react_observability_baseline": {"enabled": False},
+            "observability_first_round_gate": {
+                "enabled": True,
+                "retry_failed_once": True,
+            },
+        }
+    }
+    node.tools = [
+        SimpleNamespace(name=name)
+        for name in EvidenceCollectorNode._PRE_REACT_BASELINE_TOOLS
+    ]
+    llm_calls: list[dict] = []
+
+    def _call_llm(question, system_prompt, **kwargs):
+        llm_calls.append({"question": question, **kwargs})
+        return SimpleNamespace(result="agent explored autonomously"), [{
+            "type": "tool_result",
+            "tool_name": "execute_pod_promql",
+            "tool_args": {
+                "namespace": "demo",
+                "pod": "api",
+                "promql": 'container_memory_working_set_bytes{namespace="demo",pod="api"}',
+            },
+            "status": "success",
+            "semantic_success": True,
+            "result": "50331648 bytes",
+        }]
+
+    monkeypatch.setattr(node, "_call_llm", _call_llm)
+    plan = [
+        node._build_autonomous_observability_gate_item(
+            namespace="demo",
+            pod="api",
+            tool_name=tool_name,
+            target_index=1,
+        )
+        for tool_name in EvidenceCollectorNode._PRE_REACT_BASELINE_TOOLS
+    ]
+
+    _plan, events, text = node._execute_existing_evidence_plan(
+        question="diagnose",
+        layer=Layer.ABNORMAL,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "layer": "ABNORMAL",
+            "abnormal_pods": [{"namespace": "demo", "name": "api"}],
+        }),
+        context_archive_ref="",
+        layer_archive_ref={},
+        evidence_plan=plan,
+        failure_reason="",
+    )
+
+    assert node._is_observability_first_round_gate_enabled() is True
+    assert node._is_observability_failed_retry_enabled() is True
+    assert len(llm_calls) == 1
+    assert "aiops.pre-react-observability-baseline.v1" not in llm_calls[0]["question"]
+    assert llm_calls[0]["tool_result_sequence_start"] == 0
+    assert [event["tool_name"] for event in events] == ["execute_pod_promql"]
+    assert text == "agent explored autonomously"
+
+
 def test_parallel_collector_retries_failed_baseline_dimension_once(monkeypatch):
     node = EvidenceCollectorNode()
     node.single_react_session = True

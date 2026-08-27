@@ -158,6 +158,13 @@ class EvidenceCollectorNode(WorkflowNode):
         mode = evidence.get("observability_mode") if isinstance(evidence, dict) else None
         return str(mode or "").strip().lower() == "autonomous"
 
+    def should_inject_runbook_catalog(self) -> bool:
+        # Layer already selected the relevant Runbook(s). Evidence receives
+        # only the current lane's bounded Runbook sections through
+        # layer_handoff; injecting the full global catalog here would repeat
+        # unrelated fault families in every parallel lane.
+        return False
+
     def _is_observability_first_round_gate_enabled(self) -> bool:
         if not self._is_autonomous_observability_enabled():
             return False
@@ -170,6 +177,24 @@ class EvidenceCollectorNode(WorkflowNode):
         )
         if isinstance(gate, dict) and "enabled" in gate:
             return self._parse_bool_config(gate.get("enabled"), True)
+        return True
+
+    def _is_pre_react_observability_baseline_enabled(self) -> bool:
+        """Whether code executes the planned observability calls before ReAct.
+
+        This switch is deliberately independent from the first-round gate:
+        disabling the pre-ReAct batch must not remove observability tools,
+        alter the evidence plan, or disable protocol recovery.
+        """
+        workflow = self._get_workflow_config()
+        evidence = workflow.get("evidence", {}) if isinstance(workflow, dict) else {}
+        baseline = (
+            evidence.get("pre_react_observability_baseline", {})
+            if isinstance(evidence, dict)
+            else {}
+        )
+        if isinstance(baseline, dict) and "enabled" in baseline:
+            return self._parse_bool_config(baseline.get("enabled"), True)
         return True
 
     def _is_observability_failed_retry_enabled(self) -> bool:
@@ -1961,6 +1986,11 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         """
         if not bool(getattr(self, "run_observability_baseline", True)):
             return []
+        if not self._is_pre_react_observability_baseline_enabled():
+            logger.info(
+                "🧪 [evidence] 配置已关闭 ReAct 前三维 baseline；由 Agent 自主选择查询工具"
+            )
+            return []
         if not self._is_observability_first_round_gate_enabled():
             return []
         ai_call = getattr(self, "ai_call", None)
@@ -2728,6 +2758,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 f"- 上游已确认的异常 Pod 候选：{rendered_targets}。\n"
                 "- 代码已安排 Kubernetes 与 Metrics、Logging、Tracing、Topology 首轮查询；真实执行并保持精确实体范围。\n"
                 "- 首轮结果可能是 present、empty、absent、weak 或 error；先判断它们是否回答各自 purpose。\n"
+                "- Runbook 查询示例仅供参数形状参考，必须替换真实实体、异常时间窗和 purpose，并以工具 schema 为准。\n"
                 "- 仍有关键歧义或冲突时，用新的 purpose 自主选择少量补证；没有诊断增益时停止，不追求维度齐全。\n"
                 "- 只在完整 trace_id 一致时关联日志、Flow 和 Span；上下文使用率达到 80% 时停止新增采集。"
             )
@@ -3180,7 +3211,11 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         title = next((line for line in lines if line.startswith("# ")), "").strip()
         wanted_headings = (
             "Evidence 节点推荐计划",
+            "8100 专项查询参考",
+            "专项查询参考",
+            "补证提示",
             "必查项",
+            "查询构造建议",
             "判定规则",
             "状态识别",
             "典型原因",
@@ -3189,13 +3224,16 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         i = 0
         while i < len(lines):
             line = lines[i]
-            heading = line.strip().lstrip("#").strip()
+            match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+            heading = match.group(2).strip() if match else ""
             if any(key in heading for key in wanted_headings):
+                level = len(match.group(1)) if match else 6
                 block = [line.rstrip()]
                 i += 1
                 while i < len(lines):
                     nxt = lines[i]
-                    if nxt.startswith("# "):
+                    next_heading = re.match(r"^(#{1,6})\s+", nxt)
+                    if next_heading and len(next_heading.group(1)) <= level:
                         break
                     block.append(nxt.rstrip())
                     i += 1

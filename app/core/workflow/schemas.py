@@ -152,6 +152,7 @@ class IssueGroup(BaseModel):
     entities: list[GroupEntity] = Field(default_factory=list)
     evidence_plan: list[dict[str, Any]] = Field(default_factory=list)
     possible_scenarios: list[ScenarioItem] = Field(default_factory=list)
+    matched_runbooks: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
