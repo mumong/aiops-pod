@@ -216,11 +216,11 @@ asyncio.run(main())
 
 ## 5. Docker 与 Kubernetes
 
-构建并推送两个独立镜像：
+按项目标准发布流程构建并推送主 Agent、A2A Adapter 和 A2A 测试 Agent：
 
 ```bash
-make build-all
-make push-all
+make build
+make push
 make deploy
 ```
 
