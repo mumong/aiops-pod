@@ -4,25 +4,44 @@ IMAGE_REPOSITORY := xnet.registry.io:8443
 PROJECT := xnet-cloud
 IMAGE_NAME := aiops-copilot
 DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME)
+A2A_IMAGE_NAME := aiops-a2a-adapter
+A2A_DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_IMAGE_NAME)
 
 VERSION ?= $(shell cat VERSION)
 DOCKER_TAG := $(VERSION)
 
-.PHONY: build push deploy deploy-master deploy-slave delete restart logs sync-version \
+.PHONY: build build-a2a build-all push push-a2a push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
 	case-list case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean
 
 build:
 	@echo "Building $(DOCKER_NAME):$(DOCKER_TAG)..."
 	docker build -t $(DOCKER_NAME):$(DOCKER_TAG) .
 
+build-a2a:
+	@echo "Building $(A2A_DOCKER_NAME):$(DOCKER_TAG)..."
+	docker build --build-arg VERSION=$(DOCKER_TAG) -f Dockerfile.a2a -t $(A2A_DOCKER_NAME):$(DOCKER_TAG) .
+
+build-all: build build-a2a
+
 push:
 	@echo "Pushing $(DOCKER_NAME):$(DOCKER_TAG)..."
 	docker push $(DOCKER_NAME):$(DOCKER_TAG)
 
+push-a2a:
+	@echo "Pushing $(A2A_DOCKER_NAME):$(DOCKER_TAG)..."
+	docker push $(A2A_DOCKER_NAME):$(DOCKER_TAG)
+
+push-all: push push-a2a
+
+test-a2a:
+	@test -x .venv-a2a/bin/python || (echo "先执行: python3 -m venv .venv-a2a && .venv-a2a/bin/pip install -r requirements.a2a-dev.txt" && exit 1)
+	.venv-a2a/bin/python -m pytest -q tests/a2a
+
 # 通用部署（不修改 federation 配置，直接应用当前 configmap）
 deploy:
-	@echo "Deploying $(DOCKER_NAME):$(DOCKER_TAG)..."
+	@echo "Deploying $(DOCKER_NAME):$(DOCKER_TAG) with $(A2A_DOCKER_NAME):$(DOCKER_TAG)..."
 	@sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
+	@sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_IMAGE_NAME):.*|image: $(A2A_DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
 	@kubectl create namespace aiops --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f deploy/ --recursive
 	@echo "Waiting for rollout to complete..."
@@ -60,6 +79,7 @@ logs:
 sync-version:
 	@echo "Syncing version to $(DOCKER_TAG)..."
 	sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
+	sed -i 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_IMAGE_NAME):.*|image: $(A2A_DOCKER_NAME):$(DOCKER_TAG)|' deploy/k8s-simple.yaml
 
 # ============================================================
 # Pod 异常测试 Case 库（test/pod-anomaly-cases，源自 aiopsdata 仓库）

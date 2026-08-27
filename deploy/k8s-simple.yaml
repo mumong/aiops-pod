@@ -100,6 +100,55 @@ spec:
             limits:
               memory: "2Gi"
               cpu: "1000m"
+        # Official Agent2Agent Protocol v0.3.0 adapter. It runs in an isolated
+        # image because a2a-sdk 0.3.25 requires httpx>=0.28.1 while
+        # holmesgpt 0.21.0 requires httpx<0.28.
+        - name: a2a-adapter
+          image: xnet.registry.io:8443/xnet-cloud/aiops-a2a-adapter:11.0.150
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: a2a
+              containerPort: 8001
+          env:
+            - name: A2A_BACKEND_URL
+              value: "http://127.0.0.1:8000"
+            # Agent Card 中对其他 Agent 公布的协议地址。若调用方在集群外，
+            # 部署时改为可访问的网关或 NodePort URL，例如 http://HOST:30801。
+            - name: A2A_PUBLIC_URL
+              value: "http://aiops-copilot.aiops.svc.cluster.local:8001"
+            - name: A2A_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aiops-secret
+                  key: A2A_API_TOKEN
+                  optional: true
+            - name: LOG_LEVEL
+              valueFrom:
+                secretKeyRef:
+                  name: aiops-secret
+                  key: LOG_LEVEL
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: a2a
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: a2a
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: "96Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
       volumes:
         - name: config-volume
           configMap:
@@ -136,7 +185,12 @@ spec:
   selector:
     app: aiops-copilot
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000
       nodePort: 30800
+    - name: a2a
+      port: 8001
+      targetPort: 8001
+      nodePort: 30801
   type: NodePort
