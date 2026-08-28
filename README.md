@@ -492,6 +492,16 @@ typed Remediation Policy Contract 时只允许人工复核和只读验证。
 | `/artifacts/{artifact_id}` | 查看大输出 artifact | 工具输出被截断时 |
 | `/q/{question}` | 兼容快捷入口 | 不推荐作为正式入口 |
 
+### 6.1.1 标准 Agent2Agent（A2A）Server
+
+独立 A2A Adapter 使用官方 `a2a-sdk==0.3.25`，实现 A2A Protocol v0.3.0
+的 Agent Card、JSON-RPC、SSE、Task 查询与取消。它通过 localhost 调用现有
+`/ask` 和 `/query`，不会改变 HolmesGPT/MCP 诊断运行时。
+
+- Agent Card：`http://HOST:30801/.well-known/agent-card.json`
+- A2A JSON-RPC：`POST http://HOST:30801/`
+- 完整调用、鉴权和部署示例：[docs/a2a-server.md](docs/a2a-server.md)
+
 ### 6.2 常用示例
 
 单集群诊断：
