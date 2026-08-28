@@ -64,6 +64,11 @@ deploy:
 	kubectl apply -f deploy/ --recursive
 	@echo "Waiting for rollout to complete..."
 	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s
+	@if kubectl get deployment/aiops-copilot-frontend -n aiops >/dev/null 2>&1; then \
+		echo "Refreshing frontend DNS after backend Service recreation..."; \
+		kubectl rollout restart deployment/aiops-copilot-frontend -n aiops; \
+		kubectl rollout status deployment/aiops-copilot-frontend -n aiops --timeout=300s; \
+	fi
 
 # 主集群部署：federation.enabled = true，然后 deploy
 deploy-master:
