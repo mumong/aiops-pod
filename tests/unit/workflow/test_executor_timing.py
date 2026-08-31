@@ -199,6 +199,48 @@ def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
     assert node_metrics["conclusion"]["duration_ms"] > node_metrics["rca"]["duration_ms"]
 
 
+def test_executor_appends_deterministic_timing_and_runbook_trace(monkeypatch):
+    nodes = [_DummyNode("rca"), _DummyNode("conclusion")]
+
+    class _RunbookLogListener(_DummyLogListener):
+        def get_runbook_summary(self):
+            return {
+                "matched": True,
+                "runbook_ids": ["pod-oomkilled"],
+            }
+
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow",
+        lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
+            _DummyWorkflow(nodes),
+            nodes,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.workflow.executor.create_log_listener",
+        lambda: _RunbookLogListener(),
+    )
+    monkeypatch.setattr(
+        WorkflowExecutor,
+        "_save_report",
+        lambda self, layer, question, full_answer: None,
+    )
+    monkeypatch.setattr("app.core.workflow.metrics.METRICS_ENABLED", False)
+
+    events = list(WorkflowExecutor(
+        holmes_service=_DummyHolmesService(),
+    ).execute_stream("timing and runbook trace"))
+    final_event = next(event for event in events if event.get("type") == "final")
+    answer = final_event["answer"]
+
+    assert answer.startswith("simulated conclusion")
+    assert "## 📊 性能统计" in answer
+    assert "├─ 总耗时:" in answer
+    assert "📋 诊断追踪" in answer
+    assert "- **参考 Runbook**: pod-oomkilled" in answer
+    assert "## 📈 质量指标" not in answer
+
+
 def test_executor_propagates_langfuse_session_at_workflow_boundary(monkeypatch):
     langfuse_calls = _install_fake_langfuse(monkeypatch)
     nodes = [_DummyNode("rca"), _DummyNode("conclusion")]

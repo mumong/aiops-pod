@@ -621,10 +621,16 @@ class WorkflowExecutor:
             # 完成指标记录
             metrics.finish()
             
-            # 最终报告只保留 Conclusion 的诊断内容。性能与调用统计仍在
-            # metrics/event 中提供，不再追加到面向用户的根因报告。
+            # Conclusion 只负责根因报告正文；Runbook 使用与执行耗时来自
+            # 确定性 WorkflowMetrics，在工作流全部结束后统一追加。质量评分
+            # 是否展示仍由 METRICS_ENABLED 控制，避免让 LLM 编造运行统计。
             conclusion = final_state.get("conclusion_formatted") or final_state.get("conclusion") or ""
-            full_answer = conclusion
+
+            stats_block = metrics.format_stats_block()
+            from app.core.workflow.metrics import METRICS_ENABLED
+            metrics_block = metrics.format_metrics_block(enabled=METRICS_ENABLED)
+
+            full_answer = f"{conclusion}\n{stats_block}\n{metrics_block}"
 
             # 保存诊断报告到 reports/ 目录
             layer = final_state.get("layer")
