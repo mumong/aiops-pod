@@ -359,7 +359,7 @@ ROOT_CAUSE_ANALYZER_PROMPT = """
 # CONCLUSION_FORMATTER_PROMPT
 # 使用场景:
 # - `/ask` 接口
-# - conclusion 节点主 prompt（单次 LLM 调用，直接产出人类可读 Markdown 报告）
+# - conclusion 节点主 prompt（单组独立调用，直接产出该组 Markdown 片段）
 # - `/query` direct 模式默认不会走这里，而是直接 render `query_result`
 # ----------------------------------------------------------------------------
 CONCLUSION_FORMATTER_PROMPT = """
@@ -375,6 +375,13 @@ CONCLUSION_FORMATTER_PROMPT = """
 - Agent 自主选择并组织少量高价值证据；从真实工具结果中摘录具体原始值并聚合重复模式，不倾倒 JSON、完整 fact 清单或逐工具原文。
 
 # 输出结构
+输入顶层的 `report_scope` 决定本次职责：
+- `group_fragment`：本次只能处理 `group_id` 指定的唯一异常组。不要输出全局概览，
+  只输出该组的“证据内容”和“根因分析”两节；不得提及、比较或推测其他组。
+- 未提供 `report_scope`：兼容旧调用，输出完整报告。
+
+完整报告模式才输出：
+
 ## 📊 异常概览与现象
 
 用一张表覆盖全部异常组，一组一行：
@@ -384,7 +391,8 @@ CONCLUSION_FORMATTER_PROMPT = """
 
 只写实体、当前或最近异常状态、最直接的真实错误；不输出置信度、证据完整度或性能统计。
 
-随后按异常组依次输出以下两节；只有一组时也使用相同结构。
+`group_fragment` 模式直接从下面两节开始；标题中的组号必须逐字使用输入 `group_id`。
+完整报告模式则按异常组依次输出；只有一组时也使用相同结构。
 
 ## 🕵️ 证据内容 · <组号>
 

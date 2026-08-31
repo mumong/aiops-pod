@@ -1417,7 +1417,7 @@ def test_autonomous_gate_remaining_items_are_tracked_per_dimension_not_only_per_
     ]
 
 
-def test_autonomous_preplanned_execution_allows_kubernetes_and_generic_query_tools():
+def test_preplanned_execution_keeps_complete_registered_diagnostic_tool_catalog_visible():
     node = EvidenceCollectorNode()
     node.workflow_config_override = {
         "evidence": {
@@ -1432,6 +1432,10 @@ def test_autonomous_preplanned_execution_allows_kubernetes_and_generic_query_too
         SimpleNamespace(name="query_pod_topology"),
         SimpleNamespace(name="collect_aiops_case"),
         SimpleNamespace(name="query_aiops_metrics"),
+        SimpleNamespace(name="fetch_runbook"),
+        SimpleNamespace(name="kubectl_get_yaml"),
+        SimpleNamespace(name="kubectl_logs"),
+        SimpleNamespace(name="run_bash_command"),
     ]
     structured_plan = EvidencePlanOutput.model_validate({
         "layer": "L3",
@@ -1475,12 +1479,7 @@ def test_autonomous_preplanned_execution_allows_kubernetes_and_generic_query_too
         item.model_dump() for item in structured_plan.evidence_plan
     ])
 
-    assert "kubectl_describe" not in blocked
-    assert "execute_pod_promql" not in blocked
-    assert "query_pod_logs" not in blocked
-    assert "query_pod_tracing" not in blocked
-    assert "collect_aiops_case" in blocked
-    assert "query_aiops_metrics" in blocked
+    assert blocked == set()
 
 
 def test_autonomous_preplanned_execution_keeps_unplanned_generic_query_tools_for_follow_up():
@@ -1513,14 +1512,10 @@ def test_autonomous_preplanned_execution_keeps_unplanned_generic_query_tools_for
         "acceptable_tools": ["execute_pod_promql"],
     }])
 
-    assert "execute_pod_promql" not in blocked
-    assert "query_pod_logs" not in blocked
-    assert "query_pod_tracing" not in blocked
-    assert "kubectl_describe" in blocked
-    assert "collect_aiops_case" in blocked
+    assert blocked == set()
 
 
-def test_query_only_prometheus_tools_stay_blocked_from_pod_evidence_even_if_planned():
+def test_preplanned_execution_does_not_hide_registered_prometheus_tools():
     node = EvidenceCollectorNode()
     node.workflow_config_override = {
         "evidence": {
@@ -1556,8 +1551,7 @@ def test_query_only_prometheus_tools_stay_blocked_from_pod_evidence_even_if_plan
         },
     ])
 
-    assert query_only_tools.issubset(blocked)
-    assert "execute_pod_promql" not in blocked
+    assert blocked == set()
 
 
 def test_autonomous_plan_uses_one_structured_call_then_generic_gate_for_missing_dimensions():
@@ -3022,7 +3016,7 @@ def test_autonomous_first_round_gate_resumes_in_fresh_context_after_budget_stop(
     assert len(calls) == 2
     assert calls[1]["tool_result_sequence_start"] == 1
     assert "继续执行尚未尝试的首轮" in calls[1]["question"]
-    assert "kubectl_describe" in calls[1]["blocked_tool_names"]
+    assert calls[1]["blocked_tool_names"] == set()
     assert {
         event["tool_name"]
         for event in events
@@ -3216,6 +3210,48 @@ def test_evidence_plan_is_generated_with_structured_output_before_tool_execution
     assert events[0]["tool_name"] == "kubectl_events"
 
 
+def test_react_only_skips_structured_plan_and_hides_internal_baseline_schedule():
+    node = EvidenceCollectorNode()
+    node.workflow_config_override = {
+        "evidence": {
+            "observability_mode": "autonomous",
+            "planning_mode": "react_only",
+        }
+    }
+    captured = {}
+
+    def _unexpected_plan_call(**_kwargs):
+        raise AssertionError("react_only must not call EvidencePlanOutput LLM")
+
+    def _capture_execution(**kwargs):
+        captured.update(kwargs)
+        return kwargs["evidence_plan"], [], "agent explored"
+
+    node._generate_structured_evidence_plan = _unexpected_plan_call
+    node._execute_existing_evidence_plan = _capture_execution
+
+    plan, events, text = node._plan_evidence_with_llm(
+        question="诊断指定 Pod",
+        layer=Layer.L3,
+        possible_scenarios=[],
+        key_entities=[],
+        layer_analysis=json.dumps({
+            "layer": "L3",
+            "abnormal_pods": [{
+                "namespace": "demo",
+                "name": "api-123",
+                "status": "CrashLoopBackOff",
+            }],
+        }),
+    )
+
+    assert node._get_evidence_planning_mode() == "react_only"
+    assert captured["expose_plan_to_agent"] is False
+    assert [item["tool"] for item in plan] == ["kubectl_describe"]
+    assert events == []
+    assert text == "agent explored"
+
+
 def test_evidence_preplanned_execution_collects_tools_without_agent_response_schema():
     node = EvidenceCollectorNode()
     captured = {}
@@ -3343,19 +3379,7 @@ def test_evidence_preplanned_execution_blocks_tools_outside_the_plan():
 
     collection_blocked = captured[0]["blocked_tool_names"]
     reconciliation_blocked = captured[1]["blocked_tool_names"]
-    assert collection_blocked >= {
-        "kubectl_get_by_kind_in_namespace",
-        "query_aiops_metrics",
-        "TodoWrite",
-        "read_context_archive",
-    }
-    assert "get_aiops_case_evidence" not in collection_blocked
-    assert collection_blocked.isdisjoint({
-        "collect_aiops_case",
-        "kubectl_get_yaml",
-        "kubectl_describe",
-        "fetch_runbook",
-    })
+    assert collection_blocked == set()
     assert "fetch_runbook" not in reconciliation_blocked
     assert "collect_aiops_case" in reconciliation_blocked
 
@@ -3550,7 +3574,7 @@ def test_evidence_waits_for_post_case_reconciliation_when_all_mandatory_cases_ar
     assert node._early_stop_state["post_case_reconciliation"] is False
 
 
-def test_preplanned_case_execution_allows_bounded_detail_evidence_tool():
+def test_preplanned_case_execution_keeps_all_registered_tools_visible():
     node = EvidenceCollectorNode()
     node.tools = [
         SimpleNamespace(name="collect_aiops_case"),
@@ -3565,9 +3589,7 @@ def test_preplanned_case_execution_allows_bounded_detail_evidence_tool():
         }
     ])
 
-    assert "collect_aiops_case" not in blocked
-    assert "get_aiops_case_evidence" not in blocked
-    assert "kubectl_get_yaml" in blocked
+    assert blocked == set()
 
 
 def test_diagnostic_coverage_counts_real_dimension_details_not_only_case_success():

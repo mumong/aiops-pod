@@ -338,7 +338,13 @@ class EvidencePlanItem(BaseModel):
     purpose: str = ""
     evidence_type: str = ""
     target_scope: str = ""
-    acceptable_tools: list[EvidenceToolName] = Field(default_factory=list)
+    acceptable_tools: list[EvidenceToolName] = Field(
+        default_factory=list,
+        description=(
+            "可用于完成该证据意图的推荐工具；仅用于计划匹配，"
+            "不限制 Evidence ReAct Agent 的已注册工具可见性。"
+        ),
+    )
     counts_for_completeness: bool = True
 
 

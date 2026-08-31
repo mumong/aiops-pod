@@ -3,7 +3,7 @@
 
 职责：
 - 整合前3个节点的分析结果和工具真实数据
-- 单次 LLM 调用生成人类可读的最终诊断报告（CONCLUSION_FORMATTER_PROMPT 富模板）
+- 多异常时每组独立并发生成报告片段，再由代码按组顺序确定性拼接
 - 输出：conclusion, conclusion_formatted
 
 设计（第一性原理精简版）：
@@ -19,6 +19,7 @@ import os
 import re
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -776,6 +777,42 @@ class ConclusionFormatterNode(WorkflowNode):
         return bool(
             self._get_conclusion_config().get("include_raw_evidence_appendix", False)
         )
+
+    def _conclusion_lane_concurrency(self, group_count: int) -> int:
+        """Return group-fragment fan-out concurrency.
+
+        Zero or an omitted value means one worker per group. Provider-side
+        admission control remains authoritative; deployments may set a
+        positive ``lane_concurrency`` when they need an explicit local cap.
+        """
+        discovered = max(1, int(group_count or 1))
+        value = self._get_conclusion_config().get("lane_concurrency", 0)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return discovered
+        if parsed <= 0:
+            return discovered
+        return max(1, min(parsed, discovered))
+
+    def _resolve_group_conclusion_max_tokens(
+        self,
+        *,
+        requested: Optional[int],
+    ) -> int:
+        """Resolve the output budget for one independently rendered group."""
+        cap = _get_conclusion_max_tokens_cap()
+        max_tokens_cfg = self._get_conclusion_config().get("max_tokens")
+        configured: Optional[int] = None
+        if isinstance(max_tokens_cfg, dict):
+            configured = self._parse_positive_int(
+                max_tokens_cfg.get("group_diagnosis")
+                or max_tokens_cfg.get("diagnosis")
+            )
+        else:
+            configured = self._parse_positive_int(max_tokens_cfg)
+        selected = self._parse_positive_int(requested) or configured or 4096
+        return min(selected, cap)
 
     def _resolve_conclusion_max_tokens(
         self,
@@ -1571,6 +1608,8 @@ class ConclusionFormatterNode(WorkflowNode):
         cls,
         question: str,
         group_results: List[Dict[str, Any]],
+        *,
+        report_scope: str = "full_report",
     ) -> Dict[str, Any]:
         """Build an evidence-rich, presentation-neutral report contract.
 
@@ -1784,7 +1823,13 @@ class ConclusionFormatterNode(WorkflowNode):
                 ),
             })
         return {
-            "contract_version": "aiops.conclusion-agent-context.v2",
+            "contract_version": "aiops.conclusion-agent-context.v3",
+            "report_scope": report_scope,
+            "group_id": (
+                str(groups[0].get("group_id") or "?")
+                if report_scope == "group_fragment" and len(groups) == 1
+                else None
+            ),
             "fact_encoding": {
                 "authority": "canonical normalized facts",
                 "aggregation": (
@@ -1807,67 +1852,339 @@ class ConclusionFormatterNode(WorkflowNode):
         group_results: List[Dict[str, Any]],
         conclusion_max_tokens: Optional[int],
     ) -> str:
+        """Render isolated group fragments concurrently and join by input order."""
         ai_call = getattr(self, "ai_call", None)
         if ai_call is None:
             raise RuntimeError("[conclusion] ai_call 未设置，无法生成多组富文本报告")
 
-        max_tokens = self._resolve_conclusion_max_tokens(
-            layer=Layer.ABNORMAL,
+        if not group_results:
+            return ""
+        max_tokens = self._resolve_group_conclusion_max_tokens(
             requested=conclusion_max_tokens,
         )
-        context = self._build_multi_group_report_context(question, group_results)
-        context_json = json.dumps(context, ensure_ascii=False, default=str)
         system_prompt = self._get_conclusion_prompt()
-        user_message = f"""# 用户问题
+        fragments: List[Optional[str]] = [None] * len(group_results)
+        call_audits: List[Optional[Dict[str, Any]]] = [None] * len(group_results)
+
+        def render_group(index: int, group: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+            gid = str(group.get("group_id") or f"g{index + 1}")
+            context = self._build_multi_group_report_context(
+                question,
+                [group],
+                report_scope="group_fragment",
+            )
+            context_json = json.dumps(context, ensure_ascii=False, default=str)
+            user_message = f"""# 用户问题
 {question}
 
-# 结构化诊断与真实事实
-下面 JSON 是本轮报告的唯一事实来源。普通 fact 的 `value` 以及聚合 fact 的 `pattern/flow/records/numeric_fields`、labels、stats、timestamp、trace_ids 均来自原始规范化事实；聚合只合并重复记录，不改变事实含义。不要复述 JSON 结构，要把它组织成人类可读的诊断报告。
+# 当前唯一异常组
+本次调用只负责异常组 `{gid}`。下面 JSON 是本组唯一事实来源；你看不到也不得推测其他组。
+普通 fact 的 `value` 以及聚合 fact 的 `pattern/flow/records/numeric_fields`、labels、stats、timestamp、trace_ids 均来自原始规范化事实；聚合只合并重复记录，不改变事实含义。
 
 {context_json}
 
 # 任务
-严格使用 system prompt 中唯一的富文本结构；覆盖全部异常组，由你选择并组织高价值真实证据。
+只输出以下两个 Markdown 区块，组号必须是 `{gid}`：
+1. `## 🕵️ 证据内容 · {gid}`
+2. `## 🎯 根因分析 · {gid}`
+不要输出全局概览，不要提及其他异常组，不要附加修复建议或原始 JSON。
 """
-        estimated_tokens = self._estimate_tokens(system_prompt + user_message)
-        input_budget = self._resolve_context_token_budget(output_reserved=max_tokens)
-        logger.info(
-            "📦 [conclusion] multi-group semantic context | estimated=%d budget=%d groups=%d",
-            estimated_tokens,
-            input_budget,
-            len(group_results),
-        )
-        if estimated_tokens > input_budget:
-            logger.warning(
-                "[conclusion] semantic report context exceeds model input budget "
-                "(estimated=%d budget=%d); preserving group facts without blind truncation",
+            estimated_tokens = self._estimate_tokens(system_prompt + user_message)
+            input_budget = self._resolve_context_token_budget(
+                output_reserved=max_tokens
+            )
+            logger.info(
+                "📦 [conclusion:%s] group fragment context | estimated=%d budget=%d",
+                gid,
                 estimated_tokens,
                 input_budget,
             )
+            if estimated_tokens > input_budget:
+                logger.warning(
+                    "[conclusion:%s] group context exceeds model input budget "
+                    "(estimated=%d budget=%d); preserving canonical facts",
+                    gid,
+                    estimated_tokens,
+                    input_budget,
+                )
+            started = time.time()
+            content = ai_call.call_simple(
+                system_prompt=system_prompt,
+                question=user_message,
+                max_tokens=max_tokens,
+            )
+            duration_ms = (time.time() - started) * 1000
+            if self.metrics:
+                self.metrics.record_llm_call("conclusion", duration_ms)
+            fragment = self._normalize_group_report_fragment(
+                content or "",
+                group_id=gid,
+            )
+            if not fragment:
+                raise ValueError("model output missing required group sections")
+            return fragment, {
+                "group_id": gid,
+                "user_message": user_message,
+                "system_prompt_chars": len(system_prompt),
+                "user_message_chars": len(user_message),
+                "estimated_input_tokens": estimated_tokens,
+                "input_token_budget": input_budget,
+                "max_tokens": max_tokens,
+                "duration_ms": duration_ms,
+                "status": "success",
+            }
+
+        max_workers = self._conclusion_lane_concurrency(len(group_results))
+        logger.info(
+            "🚀 [conclusion] group fragments 并发开始: groups=%d workers=%d",
+            len(group_results),
+            max_workers,
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(render_group, index, group): index
+                for index, group in enumerate(group_results)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                group = group_results[index]
+                gid = str(group.get("group_id") or f"g{index + 1}")
+                try:
+                    fragment, audit = future.result()
+                    fragments[index] = fragment
+                    call_audits[index] = audit
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "[conclusion:%s] group fragment failed; using group fallback: %s",
+                        gid,
+                        exc,
+                    )
+                    fragments[index] = self._render_group_fragment_fallback(group)
+                    call_audits[index] = {
+                        "group_id": gid,
+                        "status": "fallback",
+                        "error": str(exc) or exc.__class__.__name__,
+                        "max_tokens": max_tokens,
+                    }
+
         self._archive_node_input({
             "node": self.node_id,
             "question": question,
-            "user_message": user_message,
-            "system_prompt_chars": len(system_prompt),
-            "user_message_chars": len(user_message),
-            "max_tokens": max_tokens,
-            "structured_method": "unified_agent_markdown",
-            "report_context_contract": context["contract_version"],
-            "estimated_input_tokens": estimated_tokens,
-            "input_token_budget": input_budget,
+            "structured_method": "parallel_group_markdown",
+            "group_count": len(group_results),
+            "max_workers": max_workers,
+            "group_calls": [item for item in call_audits if item is not None],
         })
-        start_time = time.time()
-        content = ai_call.call_simple(
-            system_prompt=system_prompt,
-            question=user_message,
-            max_tokens=max_tokens,
+        overview = self._render_multi_group_overview(question, group_results)
+        ordered_fragments = [
+            fragment.strip()
+            for fragment in fragments
+            if isinstance(fragment, str) and fragment.strip()
+        ]
+        return "\n\n---\n\n".join([overview, *ordered_fragments]).strip()
+
+    @classmethod
+    def _normalize_group_report_fragment(
+        cls,
+        content: str,
+        *,
+        group_id: str,
+    ) -> str:
+        """Accept only the two group-scoped Markdown sections."""
+        cleaned = cls._strip_think_blocks(content or "")
+        evidence_pattern = re.compile(r"(?m)^#{2,4}\s*🕵️\s*证据内容[^\n]*$")
+        root_pattern = re.compile(r"(?m)^#{2,4}\s*🎯\s*根因分析[^\n]*$")
+        evidence_matches = list(evidence_pattern.finditer(cleaned))
+        root_matches = list(root_pattern.finditer(cleaned))
+        if len(evidence_matches) != 1 or len(root_matches) != 1:
+            return ""
+        if evidence_matches[0].start() >= root_matches[0].start():
+            return ""
+        fragment = cleaned[evidence_matches[0].start():].strip()
+        fragment = evidence_pattern.sub(
+            f"## 🕵️ 证据内容 · {group_id}", fragment, count=1
         )
-        if self.metrics:
-            self.metrics.record_llm_call(
-                "conclusion",
-                (time.time() - start_time) * 1000,
+        fragment = root_pattern.sub(
+            f"## 🎯 根因分析 · {group_id}", fragment, count=1
+        )
+        return fragment.strip()
+
+    @classmethod
+    def _render_multi_group_overview(
+        cls,
+        question: str,
+        group_results: List[Dict[str, Any]],
+    ) -> str:
+        """Render the global overview without another model call."""
+        _ = question
+        lines = [
+            "## 📊 异常概览与现象",
+            "",
+            "| 组 | 异常实体 | 异常状态 | 关键错误信息 |",
+            "|---|---|---|---|",
+        ]
+        for index, group in enumerate(group_results):
+            gid = str(group.get("group_id") or f"g{index + 1}")
+            entities = [
+                item for item in (group.get("entity_summaries") or [])
+                if isinstance(item, dict)
+            ] or [
+                item for item in (group.get("entities") or [])
+                if isinstance(item, dict)
+            ]
+            entity_values = list(dict.fromkeys(
+                f"{item.get('namespace', '')}/{item.get('name', '')}".strip("/")
+                for item in entities
+                if item.get("namespace") or item.get("name")
+            ))
+            statuses = list(dict.fromkeys(
+                str(item.get("status") or "").strip()
+                for item in entities
+                if str(item.get("status") or "").strip()
+            )) or [
+                str(item).strip()
+                for item in (group.get("status_keywords") or [])
+                if str(item).strip()
+            ]
+            phenomena = list(dict.fromkeys(
+                str(item.get("phenomenon") or "").strip()
+                for item in entities
+                if str(item.get("phenomenon") or "").strip()
+            ))
+            if group.get("error"):
+                phenomena.insert(0, str(group.get("error")))
+            if not phenomena:
+                phenomena = ["未提取到直接错误原文"]
+            lines.append(
+                "| {gid} | {entities} | {statuses} | {phenomena} |".format(
+                    gid=cls._multi_group_table_cell(gid),
+                    entities=cls._multi_group_table_cell(
+                        ", ".join(f"`{value}`" for value in entity_values) or "-"
+                    ),
+                    statuses=cls._multi_group_table_cell(
+                        ", ".join(statuses) or "Unknown"
+                    ),
+                    phenomena=cls._multi_group_table_cell("; ".join(phenomena)),
+                )
             )
-        return self._strip_think_blocks(content or "")
+        return "\n".join(lines)
+
+    @classmethod
+    def _render_group_fragment_fallback(
+        cls,
+        group: Dict[str, Any],
+    ) -> str:
+        """Render one authoritative group when its presentation call fails."""
+        gid = str(group.get("group_id") or "?")
+        dimension_specs = {
+            "kubernetes": ("K8s State", "确认生命周期、状态、事件或配置"),
+            "metrics": ("Metric", "量化资源、状态或变化"),
+            "logging": ("Logging", "保留应用或容器错误原文"),
+            "tracing": ("Tracing", "关联请求、响应与 Trace"),
+        }
+        entity_summaries = [
+            item for item in (group.get("entity_summaries") or [])
+            if isinstance(item, dict)
+        ]
+        dimensions_by_entity = (
+            group.get("dimension_evidence_by_entity")
+            if isinstance(group.get("dimension_evidence_by_entity"), dict)
+            else {}
+        )
+        rows: List[str] = []
+        evidence_index = 0
+        for entity in entity_summaries:
+            entity_key = f"{entity.get('namespace', '')}/{entity.get('name', '')}"
+            dimensions = (
+                dimensions_by_entity.get(entity_key)
+                if isinstance(dimensions_by_entity.get(entity_key), dict)
+                else {}
+            )
+            for dimension, (label, role) in dimension_specs.items():
+                summary = dimensions.get(dimension) or {}
+                facts = [
+                    item for item in (summary.get("facts") or [])
+                    if isinstance(item, dict)
+                ]
+                selected = cls._select_multi_group_display_facts(facts, entity)
+                for fact in selected:
+                    if evidence_index >= 8:
+                        break
+                    evidence_index += 1
+                    fact_id = str(fact.get("fact_id") or "").strip()
+                    value = cls._display_fact_with_semantics(fact)
+                    if fact_id:
+                        value = f"{value} (fact_id={fact_id})"
+                    rows.append(
+                        "| {index} | {label} | {source} | `{value}` | {role} |".format(
+                            index=evidence_index,
+                            label=label,
+                            source=cls._multi_group_table_cell(
+                                fact.get("source_system") or "unknown"
+                            ),
+                            value=cls._multi_group_table_cell(value).replace("`", "'"),
+                            role=role,
+                        )
+                    )
+                if evidence_index >= 8:
+                    break
+            if evidence_index >= 8:
+                break
+
+        if not rows:
+            error = str(group.get("error") or "未采集到可支撑根因的真实事实")
+            rows.append(
+                "| 1 | K8s State | workflow | `{}` | 明确当前证据边界 |".format(
+                    cls._multi_group_table_cell(error).replace("`", "'")
+                )
+            )
+
+        rca = cls._parse_formal_rca(group.get("rca_analysis"))
+        root_causes = list(dict.fromkeys(
+            str(item.get("root_cause") or "").strip()
+            for item in entity_summaries
+            if str(item.get("root_cause") or "").strip()
+        ))
+        root_cause = "；".join(root_causes) or str(
+            rca.get("root_cause_summary") or rca.get("root_cause") or "证据不足"
+        )
+        chain_parts: List[str] = []
+        raw_chain = rca.get("causal_chain")
+        if isinstance(raw_chain, dict):
+            chain_parts = [
+                str(raw_chain.get(key) or "").strip()
+                for key in ("trigger", "mechanism", "direct_cause", "manifestation")
+                if str(raw_chain.get(key) or "").strip()
+            ]
+        elif isinstance(raw_chain, list):
+            chain_parts = [str(item).strip() for item in raw_chain if str(item).strip()]
+        if not chain_parts:
+            for entity in entity_summaries:
+                value = entity.get("causal_chain")
+                if isinstance(value, list):
+                    chain_parts.extend(
+                        str(item).strip() for item in value if str(item).strip()
+                    )
+        chain = " → ".join(dict.fromkeys(chain_parts)) or "未确认"
+        return "\n".join([
+            f"## 🕵️ 证据内容 · {gid}",
+            "",
+            "| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |",
+            "|---|---|---|---|---|",
+            *rows,
+            "",
+            f"## 🎯 根因分析 · {gid}",
+            "",
+            "### 因果链",
+            "",
+            "```text",
+            chain,
+            "```",
+            "",
+            "### 根因结论",
+            "",
+            root_cause,
+        ]).strip()
 
     def _generate_multi_group_deterministic_fallback(
         self,
@@ -1875,16 +2192,14 @@ class ConclusionFormatterNode(WorkflowNode):
         question: str,
         group_results: List[Dict[str, Any]],
     ) -> str:
-        """Minimal availability fallback; rich deterministic cards are opt-in."""
-        narrative = self._format_multi_group_fallback(question, group_results)
-        if self._get_conclusion_presentation_mode() != "deterministic":
-            return narrative
-
-        # ---- 代码确定性部分：可读实体卡片 + 折叠逐工具原始证据 ----
-        entity_cards = self._render_multi_group_entity_cards(group_results)
-        sections = [narrative.rstrip()]
-        if entity_cards:
-            sections.extend(["---", entity_cards])
+        """Render the same report shape without any presentation model."""
+        sections = [
+            self._render_multi_group_overview(question, group_results),
+            *[
+                self._render_group_fragment_fallback(group)
+                for group in group_results
+            ],
+        ]
         if self._include_raw_evidence_appendix():
             evidence_sections = ["## 🔎 逐工具原始证据与归档"]
             for r in group_results:
@@ -1902,8 +2217,10 @@ class ConclusionFormatterNode(WorkflowNode):
                 if archive_ref:
                     evidence_sections.append(f"*完整归档: context_archives/{archive_ref}*")
                 evidence_sections.append("</details>")
-            sections.extend(["---", "\n".join(evidence_sections)])
-        return "\n\n".join(sections)
+            sections.append("\n".join(evidence_sections))
+        return "\n\n---\n\n".join(
+            section.strip() for section in sections if section.strip()
+        )
 
     @classmethod
     def _project_formal_group_authority(

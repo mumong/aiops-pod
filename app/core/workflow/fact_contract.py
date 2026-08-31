@@ -2805,9 +2805,9 @@ def _single_aiops_representation(
 def select_tool_data_for_rca(
     tool_data: Sequence[Mapping[str, Any]],
     *,
-    supplementary_limit: int = 10,
+    supplementary_limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep every case ledger before applying a limit to supplementary tools."""
+    """Keep every case ledger and, by default, every supplementary tool."""
     case_items: list[dict[str, Any]] = []
     supplementary: list[dict[str, Any]] = []
     for item in tool_data or []:
@@ -2869,7 +2869,11 @@ def select_tool_data_for_rca(
                     supplementary.append(projected)
             else:
                 supplementary.append(copied)
-    detail_limit = max(0, supplementary_limit)
+    detail_limit = (
+        len(supplementary)
+        if supplementary_limit is None
+        else max(0, supplementary_limit)
+    )
     selected_supplementary = supplementary[:detail_limit]
     for item in supplementary[detail_limit:]:
         identity_envelope = item.get("identity_envelope")

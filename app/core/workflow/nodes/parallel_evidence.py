@@ -6,7 +6,7 @@
   EvidenceCollectorNode 采集后复用正式 RootCauseAnalyzerNode，结果落盘到
   每组独立归档 {run_id}-gN。
 - 不做全局 RCA：每组 formal RCA 是该组唯一根因权威；本节点之后直达
-  conclusion，由其确定性拼接已校验诊断与结构化真实数据。
+  conclusion，每组独立生成富文本片段，再由代码按 presentation_index 拼接。
 
 N 阶梯实测依据：单 context evidence 在 N=5 降级、N=10 完全塌缩
 （35 项计划 0 执行）；每组独立 context 是唯一不随 N 退化的路径。

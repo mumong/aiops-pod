@@ -25,6 +25,7 @@ from app.core.workflow.nodes.root_cause_analyzer import (
     RCA_CONTEXT_MAX_CHARS,
     RCA_HANDOFF_MAX_CHARS,
     RCA_NARRATIVE_CONTEXT_MAX_CHARS,
+    RCA_NARRATIVE_TOOL_CONTEXT_MAX_CHARS,
     RCA_QUALITY_MAX_CHARS,
     RCA_SUPPLEMENTARY_MAX_CHARS,
     RCA_TOOL_CONTEXT_MAX_CHARS,
@@ -2189,7 +2190,7 @@ def test_evidence_does_not_count_archive_reads_as_positive_evidence():
     assert evidence_items[0].collected is False
 
 
-def test_rca_context_filters_archive_and_runbook_tool_outputs():
+def test_rca_context_keeps_deliberate_archive_reads_but_filters_runbook_guidance():
     node = RootCauseAnalyzerNode()
     evidence_analysis = json.dumps({
         "llm_analysis": "",
@@ -2202,7 +2203,7 @@ def test_rca_context_filters_archive_and_runbook_tool_outputs():
 
     context = node._extract_tool_data_for_rca(evidence_analysis)
 
-    assert "old-pod BackOff" not in context
+    assert "old-pod BackOff" in context
     assert "OOM runbook" not in context
     assert "kubectl_get_yaml" in context
     assert "kind: Pod" in context
@@ -2778,7 +2779,7 @@ def test_narrative_rca_context_drops_repeated_evidence_and_coverage_projection()
     assert len(context) <= RCA_NARRATIVE_CONTEXT_MAX_CHARS
 
 
-def test_narrative_tool_selection_deduplicates_and_caps_each_dimension():
+def test_narrative_tool_selection_keeps_every_observation_without_dimension_caps():
     node = RootCauseAnalyzerNode()
     tool_data = [
         {
@@ -2831,15 +2832,83 @@ def test_narrative_tool_selection_deduplicates_and_caps_each_dimension():
             }
             for index in range(4)
         ],
+        {
+            "tool": "read_context_archive",
+            "dimension": "other",
+            "status": "success",
+            "semantic_success": True,
+            "data": "allocated_mib=48 recovered from archived log chunk",
+        },
     ]
 
-    selected = node._select_narrative_tool_data(tool_data, limit=10)
+    selected = node._select_narrative_tool_data(tool_data)
     dimensions = [node._narrative_tool_dimension(item) for item in selected]
 
-    assert dimensions.count("metrics") == 2
-    assert dimensions.count("logging") == 2
-    assert not any(item.get("status") == "error" for item in selected)
-    assert len(selected) == 4
+    assert dimensions.count("metrics") == 5
+    assert dimensions.count("logging") == 4
+    assert dimensions.count("other") == 1
+    assert any(item.get("status") == "error" for item in selected)
+    assert len(selected) == len(tool_data) == 10
+
+
+def test_narrative_rca_context_keeps_late_specialist_result_after_old_total_cap():
+    node = RootCauseAnalyzerNode()
+    tool_data = []
+    dimensions = ("kubernetes", "metrics", "logging", "tracing", "topology")
+    tools = {
+        "kubernetes": "kubectl_describe",
+        "metrics": "execute_pod_promql",
+        "logging": "query_pod_logs",
+        "tracing": "query_pod_tracing",
+        "topology": "query_pod_topology",
+    }
+    for index in range(25):
+        dimension = dimensions[index % len(dimensions)]
+        tool_data.append({
+            "tool": tools[dimension],
+            "dimension": dimension,
+            "status": "success",
+            "semantic_success": True,
+            "data": f"REAL_OBSERVATION_{index}",
+            "raw_ref": f"/archive/tool-{index}.raw.json",
+            "summary_ref": f"/archive/tool-{index}.summary.txt",
+        })
+    tool_data[-1]["data"] += " memory_limit=64Mi allocated_mib=48"
+
+    context = node._extract_tool_data_for_rca(
+        json.dumps({"tool_data": tool_data})
+    )
+
+    assert len(context) <= RCA_NARRATIVE_TOOL_CONTEXT_MAX_CHARS
+    for index in range(25):
+        assert f"REAL_OBSERVATION_{index}" in context
+    assert "memory_limit=64Mi allocated_mib=48" in context
+    assert context.count("## 真实工具观察") == 25
+
+
+def test_narrative_kubernetes_observation_prefers_tool_summary_over_lossy_agent_context():
+    node = RootCauseAnalyzerNode()
+    item = {
+        "tool": "kubectl_get_yaml",
+        "data": (
+            "kubectl_get_yaml 关键字段摘要:\n"
+            "deletionTimestamp: 2026-08-26T08:51:13Z\n"
+            "deletionGracePeriodSeconds: 0\n"
+            "finalizers: aiops.lab/hold"
+        ),
+        "agent_context": json.dumps({
+            "status": "yaml_summarized",
+            "phase": "Running",
+        }),
+        "raw_ref": "/archive/pod.raw.txt",
+        "structured_ref": "/archive/pod.structured.json",
+        "summary_ref": "/archive/pod.summary.txt",
+    }
+
+    observation = node._narrative_tool_observation(item)
+
+    assert "finalizers: aiops.lab/hold" in observation
+    assert "deletionGracePeriodSeconds: 0" in observation
 
 
 def test_narrative_signature_collapses_instance_ids_but_keeps_endpoint_status():
@@ -3366,8 +3435,8 @@ def test_rca_more_than_supplementary_limit_preserves_every_identity_with_ledger(
         assert f"pod-{index}" in context
         assert f"uid-{index}" in context
     assert "FACT_OVER_LIMIT_9" in context
-    assert "FACT_OVER_LIMIT_10" not in context
-    assert "FACT_OVER_LIMIT_11" not in context
+    assert "FACT_OVER_LIMIT_10" in context
+    assert "FACT_OVER_LIMIT_11" in context
 
 
 def test_rca_more_than_supplementary_limit_preserves_every_identity_without_ledger():
@@ -3401,8 +3470,8 @@ def test_rca_more_than_supplementary_limit_preserves_every_identity_without_ledg
         assert f"pod-{index}" in context
         assert f"uid-{index}" in context
     assert "FACT_NO_LEDGER_9" in context
-    assert "FACT_NO_LEDGER_10" not in context
-    assert "FACT_NO_LEDGER_11" not in context
+    assert "FACT_NO_LEDGER_10" in context
+    assert "FACT_NO_LEDGER_11" in context
 
 
 def test_rca_supplementary_identity_index_fails_when_minimum_cannot_fit():

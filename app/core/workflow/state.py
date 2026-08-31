@@ -51,8 +51,8 @@ class WorkflowState(TypedDict, total=False):
     
     # ========== 节点2 输出：证据链 ==========
     # 多异常并发模式（异常组 > 阈值时由 parallel_evidence 节点填充）：
-    # 每组独立 evidence context 采集+单组分析的结果列表，conclusion 据此
-    # 确定性拼接真实数据 + LLM 读摘要写结论。非并发模式为 None。
+    # 每组独立 evidence context 采集+单组分析的结果列表；conclusion 为每组
+    # 启动隔离的富文本调用，并由代码按稳定组序拼接。非并发模式为 None。
     parallel_lane_inventory: Optional[List[Dict[str, Any]]]
     group_results: Optional[List[Dict[str, Any]]]
     authoritative_lane_artifacts: Optional[List[Dict[str, Any]]]

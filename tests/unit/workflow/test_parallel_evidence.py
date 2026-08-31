@@ -1,5 +1,8 @@
 """多异常并发 evidence 扇出 + conclusion 确定性拼接回归测试。"""
 import json
+import re
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +31,64 @@ def _handoff(n_groups):
             for i in range(1, n_groups + 1)
         ],
     }
+
+
+def _conclusion_group(gid: str) -> dict:
+    return {
+        "group_id": gid,
+        "status_keywords": ["CrashLoopBackOff"],
+        "entities": [{"kind": "Pod", "namespace": f"ns-{gid}", "name": f"pod-{gid}"}],
+        "entity_summaries": [{
+            "namespace": f"ns-{gid}",
+            "name": f"pod-{gid}",
+            "status": "CrashLoopBackOff",
+            "phenomenon": f"{gid}-error",
+            "root_cause": f"{gid}-root",
+            "causal_chain": [f"{gid}-trigger", f"{gid}-failure"],
+            "supporting_fact_ids": [f"fact-{gid}"],
+        }],
+        "dimension_evidence_by_entity": {
+            f"ns-{gid}/pod-{gid}": {
+                "kubernetes": {
+                    "status": "present",
+                    "facts": [{
+                        "fact_id": f"fact-{gid}",
+                        "source_system": "kubernetes",
+                        "dimension": "kubernetes",
+                        "value": f"{gid}-error",
+                    }],
+                },
+            },
+        },
+        "rca_analysis": json.dumps({
+            "diagnostic_status": "diagnosed",
+            "root_cause": f"{gid}-root",
+            "root_cause_summary": f"{gid}-root",
+            "causal_chain": {
+                "trigger": f"{gid}-trigger",
+                "mechanism": f"{gid}-failure",
+            },
+            "supporting_fact_ids": [f"fact-{gid}"],
+            "claim_validation": {
+                "valid": True,
+                "valid_supporting_fact_ids": [f"fact-{gid}"],
+                "reasons": [],
+            },
+        }),
+        "thinking_events": [],
+    }
+
+
+def _valid_group_fragment(gid: str) -> str:
+    return (
+        f"## 🕵️ 证据内容 · {gid}\n\n"
+        "| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |\n"
+        "|---|---|---|---|---|\n"
+        f"| 1 | K8s State | kubernetes | `{gid}-error` | 本组证据 |\n\n"
+        f"## 🎯 根因分析 · {gid}\n\n"
+        f"### 因果链\n\n```text\n{gid}-trigger → {gid}-failure\n```\n\n"
+        f"### 根因结论\n\n{gid}-root"
+    )
 
 
 def test_extract_abnormal_groups_from_issue_groups_and_pod_fallback():
@@ -163,14 +224,23 @@ def test_parallel_evidence_fans_out_per_group(monkeypatch):
     assert all("OOMKilled" in r["summary"] for r in gr)
 
 
-def test_conclusion_multi_group_agent_receives_all_groups_and_real_facts():
-    """多组 conclusion 由 Agent 表达，但每组 canonical fact 都必须到达。"""
+def test_conclusion_agents_receive_only_their_group_and_join_in_group_order():
+    """Each conclusion lane sees one group and code joins stable group order."""
     calls = []
 
     class _AI:
         def call_simple(self, system_prompt, question, max_tokens=None):
             calls.append({"system": system_prompt, "user": question})
-            return "## 📊 集群多异常诊断概览\n（LLM 写的结论）"
+            gid = re.search(r"组号必须是 `([^`]+)`", question).group(1)
+            return (
+                f"## 🕵️ 证据内容 · {gid}\n\n"
+                f"| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |\n"
+                f"|---|---|---|---|---|\n"
+                f"| 1 | Metric | prometheus | `{gid}-metric` | 本组证据 |\n\n"
+                f"## 🎯 根因分析 · {gid}\n\n"
+                f"### 因果链\n\n```text\n{gid}-cause → failure\n```\n\n"
+                f"### 根因结论\n\n{gid}-root"
+            )
 
     node = ConclusionFormatterNode()
     node.ai_call = _AI()
@@ -228,17 +298,29 @@ def test_conclusion_multi_group_agent_receives_all_groups_and_real_facts():
     }
     result = node.execute(state)
     report = result["conclusion"]
-    assert len(calls) == 1
-    user = calls[0]["user"]
-    assert "10000" in user and "20000" in user and "30000" in user
+    assert len(calls) == 3
+    calls_by_gid = {
+        re.search(r"组号必须是 `([^`]+)`", call["user"]).group(1): call
+        for call in calls
+    }
+    assert set(calls_by_gid) == {"g1", "g2", "g3"}
     for i in range(1, 4):
+        user = calls_by_gid[f"g{i}"]["user"]
         assert f"ns-{i}/pod-{i}" in user
         assert f"fact-metric-{i}" in user
-    assert "## 🕵️ 证据内容 · <组号>" in calls[0]["system"]
-    assert calls[0]["system"] == node._get_conclusion_prompt()
-    assert "修复建议、kubectl 写命令、验证步骤" in calls[0]["system"]
+        assert f"{i}0000" in user
+        for other in {1, 2, 3} - {i}:
+            assert f"ns-{other}/pod-{other}" not in user
+            assert f"fact-metric-{other}" not in user
+    assert all(
+        call["system"] == node._get_conclusion_prompt()
+        for call in calls
+    )
+    assert "## 📊 异常概览与现象" in report
+    assert report.count("## 📊 异常概览与现象") == 1
+    assert report.index("证据内容 · g1") < report.index("证据内容 · g2")
+    assert report.index("证据内容 · g2") < report.index("证据内容 · g3")
     assert "逐工具原始证据与归档" not in report
-    assert report == "## 📊 集群多异常诊断概览\n（LLM 写的结论）"
 
 
 def test_conclusion_multi_group_fallback_when_llm_unavailable():
@@ -254,8 +336,85 @@ def test_conclusion_multi_group_fallback_when_llm_unavailable():
         "question": "?", "layer": Layer.ABNORMAL,
         "group_results": group_results, "thinking_events": [],
     })
-    assert "确定性汇总" in result["conclusion"]
-    assert "ns-1 根因内存超限" in result["conclusion"]
+    assert "## 📊 异常概览与现象" in result["conclusion"]
+    assert "## 🕵️ 证据内容 · g1" in result["conclusion"]
+    assert "## 🎯 根因分析 · g1" in result["conclusion"]
+    assert "证据不足" in result["conclusion"]
+    assert "ns-1 根因内存超限" not in result["conclusion"]
+
+
+def test_conclusion_group_fragments_execute_concurrently_but_join_stably():
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    completion_order = []
+
+    class _AI:
+        def call_simple(self, *, question, **_kwargs):
+            nonlocal active, max_active
+            gid = re.search(r"组号必须是 `([^`]+)`", question).group(1)
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep({"g1": 0.08, "g2": 0.01, "g3": 0.04}[gid])
+            with lock:
+                active -= 1
+                completion_order.append(gid)
+            return _valid_group_fragment(gid)
+
+    node = ConclusionFormatterNode()
+    node.ai_call = _AI()
+    node.workflow_config_override = {
+        "conclusion": {"lane_concurrency": 0}
+    }
+    report = node.execute({
+        "question": "检查异常",
+        "layer": Layer.ABNORMAL,
+        "group_results": [
+            _conclusion_group("g1"),
+            _conclusion_group("g2"),
+            _conclusion_group("g3"),
+        ],
+        "thinking_events": [],
+    })["conclusion"]
+
+    assert max_active >= 2
+    assert completion_order != ["g1", "g2", "g3"]
+    assert report.index("证据内容 · g1") < report.index("证据内容 · g2")
+    assert report.index("证据内容 · g2") < report.index("证据内容 · g3")
+    assert report.count("## 📊 异常概览与现象") == 1
+
+
+def test_conclusion_group_failure_degrades_only_that_group():
+    calls = []
+
+    class _AI:
+        def call_simple(self, *, question, **_kwargs):
+            gid = re.search(r"组号必须是 `([^`]+)`", question).group(1)
+            calls.append(gid)
+            if gid == "g2":
+                raise RuntimeError("group presentation failed")
+            return _valid_group_fragment(gid)
+
+    node = ConclusionFormatterNode()
+    node.ai_call = _AI()
+    report = node.execute({
+        "question": "检查异常",
+        "layer": Layer.ABNORMAL,
+        "group_results": [
+            _conclusion_group("g1"),
+            _conclusion_group("g2"),
+            _conclusion_group("g3"),
+        ],
+        "thinking_events": [],
+    })["conclusion"]
+
+    assert set(calls) == {"g1", "g2", "g3"}
+    assert "g1-root" in report
+    assert "g2-root" in report
+    assert "g3-root" in report
+    assert report.count("## 🕵️ 证据内容 · g2") == 1
+    assert report.count("## 🎯 根因分析 · g2") == 1
 
 
 def test_parallel_report_uses_only_validated_selected_rca():
@@ -701,7 +860,15 @@ def test_multi_group_report_renders_readable_four_dimension_entity_card():
     class _AI:
         def call_simple(self, **kwargs):
             calls.append(kwargs)
-            return "# 多异常诊断结论\n\n已按实体完成分析。"
+            return (
+                "## 🕵️ 证据内容 · g7\n\n"
+                "| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |\n"
+                "|---|---|---|---|---|\n"
+                "| 1 | Logging | elasticsearch | `dependency unavailable` | 根因证据 |\n\n"
+                "## 🎯 根因分析 · g7\n\n"
+                "### 因果链\n\n```text\ndependency unavailable → HTTP 503\n```\n\n"
+                "### 根因结论\n\ndependency unavailable"
+            )
 
     node = ConclusionFormatterNode()
     node.ai_call = _AI()
@@ -781,7 +948,9 @@ def test_multi_group_report_renders_readable_four_dimension_entity_card():
         "group_results": group_results, "thinking_events": [],
     })["conclusion"]
 
-    assert report == "# 多异常诊断结论\n\n已按实体完成分析。"
+    assert "## 📊 异常概览与现象" in report
+    assert "## 🕵️ 证据内容 · g7" in report
+    assert "## 🎯 根因分析 · g7" in report
     assert len(calls) == 1
     user = calls[0]["question"]
     assert "aiops-case-09/workload" in user
@@ -798,7 +967,15 @@ def test_multi_group_agent_context_does_not_depend_on_rca_supporting_fact_ids():
     class _AI:
         def call_simple(self, **kwargs):
             calls.append(kwargs)
-            return "# 富文本诊断报告"
+            return (
+                "## 🕵️ 证据内容 · g1\n\n"
+                "| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |\n"
+                "|---|---|---|---|---|\n"
+                "| 1 | Metric | prometheus | `OOMKilled=1` | 直接原因 |\n\n"
+                "## 🎯 根因分析 · g1\n\n"
+                "### 因果链\n\n```text\nOOMKilled → restart\n```\n\n"
+                "### 根因结论\n\nmemory limit exceeded"
+            )
 
     node = ConclusionFormatterNode()
     node.ai_call = _AI()
@@ -879,7 +1056,8 @@ def test_multi_group_agent_context_does_not_depend_on_rca_supporting_fact_ids():
         "thinking_events": [],
     })["conclusion"]
 
-    assert report == "# 富文本诊断报告"
+    assert "## 📊 异常概览与现象" in report
+    assert "## 🕵️ 证据内容 · g1" in report
     user = calls[0]["question"]
     assert "fact-decisive-reason" in user
     assert "fact-context-restarts" in user
@@ -1019,7 +1197,7 @@ def test_multi_group_agent_context_semantically_compacts_repeated_observability_
     logging_facts = entity["dimensions"]["logging"]["facts"]
     tracing_facts = entity["dimensions"]["tracing"]["facts"]
 
-    assert context["contract_version"] == "aiops.conclusion-agent-context.v2"
+    assert context["contract_version"] == "aiops.conclusion-agent-context.v3"
     assert len(logging_facts) == 1
     assert logging_facts[0]["aggregation"] == "repeated_log_pattern"
     assert logging_facts[0]["occurrence_count"] == 4

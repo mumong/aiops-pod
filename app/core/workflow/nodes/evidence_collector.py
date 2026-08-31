@@ -197,6 +197,20 @@ class EvidenceCollectorNode(WorkflowNode):
             return self._parse_bool_config(baseline.get("enabled"), True)
         return True
 
+    def _get_evidence_planning_mode(self) -> str:
+        """Return the experiment-safe Evidence planning mode.
+
+        ``structured`` preserves the production path: a separate structured
+        LLM call creates ``EvidencePlanOutput`` before ReAct. ``react_only``
+        skips that call, builds only the code-owned baseline schedule from the
+        confirmed lane Pod, and leaves all diagnostic follow-up decisions to
+        the ReAct agent. Both modes therefore receive the same baseline tools.
+        """
+        workflow = self._get_workflow_config()
+        evidence = workflow.get("evidence", {}) if isinstance(workflow, dict) else {}
+        mode = str(evidence.get("planning_mode") or "structured").strip().lower()
+        return mode if mode in {"structured", "react_only"} else "structured"
+
     def _is_observability_failed_retry_enabled(self) -> bool:
         """Whether one failed baseline dimension gets a bounded agent retry.
 
@@ -924,9 +938,6 @@ class EvidenceCollectorNode(WorkflowNode):
             (evidence_plan_list, intermediate_events_list, llm_result_text)
             llm_result_text: LLM 的完整输出文本（包含工具调用结果和分析）
         """
-        if getattr(self, 'ai_call', None) is None:
-            logger.warning("⚠️ [evidence] ai_call 未设置，无法生成 Pydantic evidence_plan")
-            return [], [], ""
         try:
             layer_str = layer.value if layer else "L2"
             # possible_scenarios 可能是 str 列表或 dict 列表（含 scenario/probability 字段）
@@ -1027,12 +1038,53 @@ class EvidenceCollectorNode(WorkflowNode):
                     failure_reason=failure_reason or "沿用既有 Pydantic evidence_plan 执行采证",
                 )
 
+            handoff_for_plan = self._parse_handoff_json(layer_analysis)
+            planning_mode = self._get_evidence_planning_mode()
+            if planning_mode == "react_only":
+                evidence_plan = self._build_structured_plan_fallback(
+                    handoff_for_plan
+                )
+                evidence_plan = self._prepare_evidence_plan(
+                    evidence_plan,
+                    handoff_for_plan,
+                )
+                if not evidence_plan:
+                    self._structured_plan_terminal_empty = True
+                    self._structured_plan_failure_reason = (
+                        self._STRUCTURED_PLAN_TERMINAL_REASON
+                    )
+                    logger.warning(
+                        "react_only planning 找不到已确认 Pod，拒绝进入工具执行"
+                    )
+                    return [], [], ""
+                logger.info(
+                    "🧪 [evidence] planning_mode=react_only: "
+                    "跳过 EvidencePlanOutput LLM，使用同一代码级 baseline 后自主 ReAct"
+                )
+                return self._execute_existing_evidence_plan(
+                    question=question,
+                    layer=layer,
+                    possible_scenarios=possible_scenarios,
+                    key_entities=key_entities,
+                    layer_analysis=layer_analysis,
+                    context_archive_ref=context_archive_ref,
+                    layer_archive_ref=layer_archive_ref,
+                    evidence_plan=evidence_plan,
+                    failure_reason="代码级 baseline 已安排，直接根据真实结果自主补查",
+                    expose_plan_to_agent=False,
+                )
+
+            if getattr(self, "ai_call", None) is None:
+                logger.warning(
+                    "⚠️ [evidence] ai_call 未设置，无法生成 Pydantic evidence_plan"
+                )
+                return [], [], ""
+
             evidence_plan, plan_raw = self._generate_structured_evidence_plan(
                 system_prompt=system_prompt,
                 user_message=user_message,
                 layer_str=layer_str,
             )
-            handoff_for_plan = self._parse_handoff_json(layer_analysis)
             evidence_plan = self._prepare_evidence_plan(
                 evidence_plan,
                 handoff_for_plan,
@@ -1168,6 +1220,7 @@ class EvidenceCollectorNode(WorkflowNode):
         layer_archive_ref: Optional[Dict[str, Any]],
         evidence_plan: List[Dict[str, Any]],
         failure_reason: str,
+        expose_plan_to_agent: bool = True,
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
         layer_str = layer.value if layer else "L2"
         parsed_layer_handoff = self._parse_handoff_json(layer_analysis)
@@ -1209,8 +1262,10 @@ class EvidenceCollectorNode(WorkflowNode):
             layer_archive_ref=layer_archive_ref or {},
             strict_mode=False,
             failure_reason=failure_reason,
-            existing_plan=evidence_plan,
-            plan_mode="preplanned_execution",
+            existing_plan=evidence_plan if expose_plan_to_agent else None,
+            plan_mode=(
+                "preplanned_execution" if expose_plan_to_agent else "react_only"
+            ),
             observability_mode=(
                 "autonomous"
                 if self._is_autonomous_observability_enabled()
@@ -1235,8 +1290,10 @@ class EvidenceCollectorNode(WorkflowNode):
         remaining_plan = list(evidence_plan)
         stalled_rounds = 0
         tool_result_sequence_start = 0
-        blocked_tool_names = self._blocked_tools_for_preplanned_execution(
-            evidence_plan
+        blocked_tool_names = (
+            self._blocked_tools_for_preplanned_execution(evidence_plan)
+            if expose_plan_to_agent
+            else set()
         )
         self._active_evidence_plan = evidence_plan
         try:
@@ -2370,44 +2427,16 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         self,
         evidence_plan: List[Dict[str, Any]],
     ) -> set[str]:
-        """Limit execution to tools declared by the structured evidence plan."""
-        allowed_tools = {"fetch_runbook"}
-        if self._is_autonomous_observability_enabled():
-            allowed_tools.update(self._OBSERVABILITY_QUERY_TOOLS)
-        if any(
-            isinstance(item, dict)
-            and (
-                item.get("source") == "mandatory_live_observability"
-                or self._normalize_plan_text(item.get("tool")) == "collect_aiops_case"
-            )
-            for item in (evidence_plan or [])
-        ):
-            allowed_tools.add("get_aiops_case_evidence")
-        for item in evidence_plan or []:
-            if not isinstance(item, dict):
-                continue
-            tool_name = str(item.get("tool") or "").strip().lower()
-            if tool_name:
-                allowed_tools.add(tool_name)
-            allowed_tools.update(
-                str(name or "").strip().lower()
-                for name in (item.get("acceptable_tools") or [])
-                if str(name or "").strip()
-            )
+        """Keep the complete registered tool set visible during ReAct.
 
-        # The general Prometheus MCP is intentionally reserved for /query.
-        # Pod diagnosis must use execute_pod_promql so every selector remains
-        # bound to the exact namespace/pod evidence scope.  A model-generated
-        # plan cannot override this workflow boundary.
-        allowed_tools.difference_update(self._QUERY_ONLY_PROMETHEUS_TOOLS)
-
-        return {
-            str(getattr(tool, "name", "") or "")
-            for tool in (getattr(self, "tools", []) or [])
-            if str(getattr(tool, "name", "") or "").strip()
-            and str(getattr(tool, "name", "") or "").strip().lower()
-            not in allowed_tools
-        }
+        ``tool`` and ``acceptable_tools`` in EvidencePlanOutput are planning
+        hints, not an authorization allow-list.  Tool registration and the
+        runtime read/write policy remain the authority; a possibly incomplete
+        LLM plan must not hide Runbook, Kubernetes, Metrics, Logging, Tracing,
+        Topology, or Shell diagnostics needed for a later specialist query.
+        """
+        _ = evidence_plan
+        return set()
 
     def _ensure_autonomous_observability_gate_plan(
         self,
@@ -2687,6 +2716,12 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             plan_protocol = EVIDENCE_PLAN_PROTOCOL_EXISTING
         elif plan_mode == "preplanned_execution":
             plan_protocol = EVIDENCE_PLAN_PROTOCOL_PREPLANNED
+        elif plan_mode == "react_only":
+            plan_protocol = (
+                "- 代码会在 ReAct 前提供同一组 Metrics、Logging、Tracing baseline 真实结果。\n"
+                "- 不生成或复述 evidence_plan；根据 baseline 尚未回答的关键问题，"
+                "自主选择少量只读工具专项补查。"
+            )
         else:
             plan_protocol = EVIDENCE_PLAN_PROTOCOL_DYNAMIC
         handoff_obj = EvidenceCollectorNode._parse_handoff_json(layer_handoff)

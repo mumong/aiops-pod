@@ -53,14 +53,14 @@ RCA_LIST_LIMIT = 12
 RCA_CONTEXT_MAX_CHARS = 52000
 RCA_HANDOFF_MAX_CHARS = 7000
 RCA_TOOL_CONTEXT_MAX_CHARS = 36000
-RCA_NARRATIVE_CONTEXT_MAX_CHARS = 22000
+RCA_NARRATIVE_CONTEXT_MAX_CHARS = 52000
 RCA_NARRATIVE_HANDOFF_MAX_CHARS = 4000
-RCA_NARRATIVE_TOOL_CONTEXT_MAX_CHARS = 12000
+RCA_NARRATIVE_TOOL_CONTEXT_MAX_CHARS = 36000
 RCA_NARRATIVE_ANALYSIS_MAX_CHARS = 2800
 RCA_NARRATIVE_AUXILIARY_MAX_CHARS = 1400
 RCA_FACT_LEDGER_MAX_CHARS = 24000
 RCA_QUALITY_MAX_CHARS = 4000
-RCA_SUPPLEMENTARY_MAX_CHARS = 7000
+RCA_SUPPLEMENTARY_MAX_CHARS = 36000
 RCA_AUXILIARY_MAX_CHARS = 3000
 RCA_RAW_OUTPUT_MAX_CHARS = 12000
 
@@ -1743,12 +1743,10 @@ class RootCauseAnalyzerNode(WorkflowNode):
             selected_tool_data = (
                 select_tool_data_for_rca(
                     tool_data,
-                    supplementary_limit=10,
                 )
                 if fact_ledger_context_enabled
                 else self._select_narrative_tool_data(
                     tool_data,
-                    limit=10,
                 )
             )
             fact_ledgers = (
@@ -1935,11 +1933,14 @@ class RootCauseAnalyzerNode(WorkflowNode):
         ):
             return data
         if tool.startswith("kubectl"):
-            # Kubernetes adapters may return a readable summary whose leading
-            # characters omit later lifecycle fields such as probes or env.
-            # EvidenceCollector builds one bounded structured representation
-            # for those tools; prefer it while keeping raw output archived.
-            return item.get("agent_context") or item.get("agent_facts") or data
+            # Kubernetes MCP data is already the tool-authored bounded summary
+            # and can contain lifecycle fields (for example deletionTimestamp
+            # and finalizers) that a workflow-owned whitelist cannot anticipate.
+            # Prefer that extensible summary and keep agent_context only as a
+            # compatibility fallback; the complete payload remains archived.
+            if tool == "kubectlgetyaml":
+                return data or item.get("agent_context") or item.get("agent_facts")
+            return item.get("agent_context") or data or item.get("agent_facts")
         if tool == "collectaiopscase" and item.get("agent_facts"):
             return item.get("agent_facts")
         return (
@@ -2253,18 +2254,21 @@ class RootCauseAnalyzerNode(WorkflowNode):
     def _select_narrative_tool_data(
         cls,
         tool_data: List[Dict[str, Any]],
-        *,
-        limit: int,
     ) -> List[Dict[str, Any]]:
-        """Select diverse real observations without repeated audit metadata.
+        """Keep every real tool observation in original execution order.
 
-        Exact semantic repeats are collapsed, recovered failures are represented
-        once in the collection-boundary section, and a per-dimension cap keeps
-        one noisy source from consuming the context.  Later successful follow-up
-        queries rank ahead of earlier broad queries when the cap is reached.
+        MCP summaries are already the bounded working representation and every
+        item retains archive references.  RCA must therefore not apply another
+        per-dimension or total-count selection step: later specialist queries
+        often contain the decisive evidence that an earlier baseline lacks.
+        Events explicitly marked as replay duplicates remain excluded. Archive
+        reads are retained because they are deliberate recovery of detail that
+        was omitted from an inline summary. Runbook retrieval remains excluded
+        from the fact section because it is diagnostic guidance, not a live
+        observation.
         """
-        candidates: Dict[str, tuple[tuple, int, Dict[str, Any]]] = {}
-        for index, item in enumerate(tool_data or []):
+        selected: List[Dict[str, Any]] = []
+        for item in tool_data or []:
             if not isinstance(item, Mapping) or item.get("deduplicated") is True:
                 continue
             tool_name = re.sub(
@@ -2272,7 +2276,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 "",
                 str(item.get("tool") or "").lower(),
             )
-            if tool_name in {"readcontextarchive", "fetchrunbook"}:
+            if tool_name == "fetchrunbook":
                 continue
             copied = dict(item)
             copied.pop("fact_ledger", None)
@@ -2280,48 +2284,13 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 copied["agent_facts"] = cls._sanitize_narrative_agent_facts(
                     copied.get("agent_facts")
                 )
-            signature = cls._narrative_tool_signature(copied)
-            score = cls._narrative_tool_score(copied, index)
-            existing = candidates.get(signature)
-            if existing is None or score > existing[0]:
-                candidates[signature] = (score, index, copied)
-
-        by_dimension: Dict[str, List[tuple[tuple, int, Dict[str, Any]]]] = {}
-        for candidate in candidates.values():
-            dimension = cls._narrative_tool_dimension(candidate[2])
-            by_dimension.setdefault(dimension, []).append(candidate)
-
-        dimension_caps = {
-            "kubernetes": 3,
-            "metrics": 2,
-            "logging": 2,
-            "tracing": 2,
-            "topology": 1,
-            "other": 1,
-        }
-        selected: List[tuple[int, Dict[str, Any]]] = []
-        dimension_order = (
-            "kubernetes", "metrics", "logging", "tracing", "topology", "other"
-        )
-        for dimension in (*dimension_order, *sorted(set(by_dimension) - set(dimension_order))):
-            values = by_dimension.get(dimension) or []
-            if not values:
-                continue
-            successful = [value for value in values if value[0][0] == 1]
-            if successful:
-                values = successful
-            values.sort(key=lambda value: value[0], reverse=True)
-            cap = dimension_caps.get(dimension, 1)
-            selected.extend((index, item) for _score, index, item in values[:cap])
-
-        selected.sort(key=lambda value: value[0])
-        bounded = [item for _index, item in selected[:max(0, limit)]]
+            selected.append(copied)
         logger.info(
-            "📦 [rca] narrative 工具选择: %d → %d items",
+            "📦 [rca] narrative 工具交接（无数量裁剪）: %d → %d items",
             len(tool_data or []),
-            len(bounded),
+            len(selected),
         )
-        return bounded
+        return selected
 
     @classmethod
     def _compact_supplementary_tool_data(
