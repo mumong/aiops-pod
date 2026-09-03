@@ -607,6 +607,12 @@ class WorkflowExecutor:
             if runbook_summary["matched"]:
                 metrics.runbook_matched = True
                 metrics.runbook_id = ", ".join(runbook_summary["runbook_ids"])
+                for runbook_id in runbook_summary["runbook_ids"]:
+                    normalized = str(runbook_id or "").strip()
+                    if normalized.endswith(".md"):
+                        normalized = normalized[:-3]
+                    if normalized and normalized not in metrics.fetched_runbooks:
+                        metrics.fetched_runbooks.append(normalized)
                 logger.info(f"   Runbook 使用(日志): {metrics.runbook_id}")
 
             # 补充：从 log_listener 的工具调用记录补充 metrics 统计

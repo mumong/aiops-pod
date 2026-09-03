@@ -1,0 +1,501 @@
+defaults:
+  question: "我的集群有什么问题？"
+  settle_after_gate_seconds: 20
+
+scenarios:
+  - id: c01
+    name: "Pending：节点选择器不匹配"
+    anomaly_type: PendingUnschedulable
+    fault_scenario: "nodeSelector 无匹配节点"
+    members: [c01]
+    expected_runbooks: [pod-pending-unschedulable]
+    expected_evidence:
+      - id: pending-state
+        description: "Pod 当前 Pending/Unschedulable 状态"
+        weight: 1
+        dimensions: [kubernetes]
+        include_any: [Pending, Unschedulable]
+      - id: failed-scheduling-selector-event
+        description: "FailedScheduling 原文明确节点选择器或亲和性不匹配"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [FailedScheduling]
+        include_any: ["didn't match", "node affinity/selector", nodeSelector, 节点选择器]
+      - id: node-selector-config
+        description: "Pod 配置中存在不可满足的 nodeSelector"
+        weight: 2
+        dimensions: [kubernetes]
+        tools_any: ["*yaml*", "*describe*", "*jq*", "run_bash_command"]
+        include_all: ["aiops.lab/unavailable"]
+        include_any: [nodeSelector, "true"]
+      - id: pending-metric
+        description: "Prometheus 状态指标确认 Pending 持续性"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        include_all: [kube_pod_status_phase]
+        include_any: [Pending, phase]
+    expected_root_causes:
+      - id: node-selector-mismatch
+        include_all: [aiops.lab/unavailable]
+        include_any: ["node affinity/selector", nodeSelector, "didn't match", 节点选择器, 节点标签选择器, 调度约束]
+        exclude_any: [OOMKilled, ImagePullBackOff, FailedMount]
+
+  - id: c02
+    name: "ImagePullBackOff：镜像仓库不可解析"
+    anomaly_type: ImagePullFailed
+    fault_scenario: "无效镜像仓库 registry.invalid"
+    members: [c02]
+    expected_runbooks: [pod-imagepull-failed]
+    expected_evidence:
+      - id: image-pull-waiting-state
+        description: "容器 Waiting Reason 为 ErrImagePull/ImagePullBackOff"
+        weight: 1
+        dimensions: [kubernetes]
+        include_any: [ErrImagePull, ImagePullBackOff]
+      - id: image-pull-error-event
+        description: "镜像拉取事件包含 registry.invalid 的真实错误"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [registry.invalid]
+        include_any: ["Failed to pull image", "no such host", ErrImagePull, ImagePullBackOff]
+      - id: configured-image
+        description: "Pod 配置确认实际镜像地址"
+        weight: 2
+        dimensions: [kubernetes]
+        tools_any: ["*yaml*", "*describe*", "*jq*", "run_bash_command"]
+        include_all: ["registry.invalid/aiops/workload:missing"]
+      - id: image-pull-metric
+        description: "Prometheus waiting reason 指标确认异常仍存在"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        include_any: [kube_pod_container_status_waiting_reason, ImagePullBackOff, ErrImagePull]
+    expected_root_causes:
+      - id: invalid-image-registry
+        include_all: [registry.invalid]
+        include_any: [ErrImagePull, ImagePullBackOff, "Failed to pull image", "no such host", 镜像仓库]
+        exclude_any: [OOMKilled, FailedMount, unavailable-key]
+
+  - id: c03
+    name: "FailedMount：ConfigMap 不存在"
+    anomaly_type: VolumeMountFailed
+    fault_scenario: "ConfigMap 卷引用不存在"
+    members: [c03]
+    expected_runbooks: [pod-volume-mount-failed]
+    expected_evidence:
+      - id: pending-container-state
+        description: "Pod 处于 Pending/ContainerCreating"
+        weight: 1
+        dimensions: [kubernetes]
+        include_any: [Pending, ContainerCreating]
+      - id: failed-mount-event
+        description: "FailedMount 事件指向 unavailable-config"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [FailedMount, unavailable-config]
+        include_any: [ConfigMap, "not found", 不存在]
+      - id: volume-config-reference
+        description: "Pod volume 配置引用 unavailable-config"
+        weight: 2
+        dimensions: [kubernetes]
+        tools_any: ["*yaml*", "*describe*", "*jq*", "run_bash_command"]
+        include_all: [unavailable-config]
+        include_any: [configMap, volume]
+      - id: missing-configmap-check
+        description: "直接查询确认目标 ConfigMap 不存在"
+        weight: 1
+        allow_negative: true
+        dimensions: [kubernetes]
+        tools_any: ["*get*", "*describe*", "run_bash_command"]
+        include_all: [unavailable-config]
+        include_any: [NotFound, "not found", 不存在]
+      - id: pending-metric
+        description: "Prometheus 状态指标确认 Pending 持续性"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        include_any: [kube_pod_status_phase, Pending]
+    expected_root_causes:
+      - id: missing-volume-configmap
+        include_all: [unavailable-config]
+        include_any: [FailedMount, ConfigMap, "not found", 不存在, 卷挂载]
+        exclude_any: [OOMKilled, ImagePullBackOff, unavailable-key]
+
+  - id: c04
+    name: "CreateContainerConfigError：Secret key 缺失"
+    anomaly_type: ConfigError
+    fault_scenario: "Secret key unavailable-key 缺失"
+    members: [c04]
+    expected_runbooks: [pod-config-error]
+    expected_evidence:
+      - id: create-container-config-error-state
+        description: "容器 Waiting Reason 为 CreateContainerConfigError"
+        weight: 1
+        dimensions: [kubernetes]
+        include_all: [CreateContainerConfigError]
+      - id: missing-secret-key-event
+        description: "事件原文明确 Secret 缺少 unavailable-key"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [unavailable-key]
+        include_any: ["couldn't find key", "could not find key", "key not found", 缺失]
+      - id: secret-key-reference
+        description: "Pod 配置实际引用 Secret 的 unavailable-key"
+        weight: 1
+        dimensions: [kubernetes]
+        tools_any: ["*yaml*", "*describe*", "*jq*", "run_bash_command"]
+        include_all: [secret, unavailable-key]
+      - id: secret-material-check
+        description: "直接读取 Secret 后确认只存在 available-key"
+        weight: 1
+        dimensions: [kubernetes]
+        tools_any: ["*secret*", "*yaml*", "*jq*", "run_bash_command"]
+        include_all: [available-key]
+      - id: config-error-metric
+        description: "Prometheus waiting reason 指标确认配置错误状态"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        include_any: [kube_pod_container_status_waiting_reason, CreateContainerConfigError]
+    expected_root_causes:
+      - id: secret-key-missing
+        include_all: [secret, unavailable-key]
+        include_any: ["couldn't find key", CreateContainerConfigError, 缺少, 缺失, 不存在, 不包含]
+        exclude_any: [OOMKilled, ImagePullBackOff, unavailable-config]
+        aliases:
+          "couldn't find key": ["could not find key", "key not found", "找不到 key", "key 缺失"]
+
+  - id: c05
+    name: "FailedCreatePodSandBox：Multus 网络附件不存在"
+    anomaly_type: SandboxCreateFailed
+    fault_scenario: "Multus NetworkAttachmentDefinition 不存在"
+    members: [c05]
+    expected_runbooks: [pod-sandbox-create-failed]
+    expected_evidence:
+      - id: sandbox-pending-state
+        description: "Pod 尚未完成 Sandbox 创建"
+        weight: 1
+        dimensions: [kubernetes]
+        include_any: [Pending, ContainerCreating]
+      - id: failed-create-sandbox-event
+        description: "FailedCreatePodSandBox 事件原文"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [FailedCreatePodSandBox]
+      - id: missing-network-attachment
+        description: "事件明确 unavailable-network/NetworkAttachmentDefinition 不存在"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [unavailable-network]
+        include_any: [NetworkAttachmentDefinition, Multus, "network attachment", "not found"]
+      - id: network-annotation-config
+        description: "Pod 配置真实引用 unavailable-network"
+        weight: 1
+        dimensions: [kubernetes]
+        tools_any: ["*yaml*", "*describe*", "*jq*", "run_bash_command"]
+        include_all: [unavailable-network]
+        include_any: ["k8s.v1.cni.cncf.io/networks", Multus]
+      - id: cni-scope-check
+        description: "补查 CNI/节点范围以区分 Pod 配置与集群级 CNI 故障"
+        weight: 1
+        required: false
+        dimensions: [kubernetes, topology]
+        include_any: [CNI, Multus, calico, NetworkUnavailable]
+    expected_root_causes:
+      - id: missing-network-attachment
+        include_all: [unavailable-network]
+        include_any: [FailedCreatePodSandBox, Multus, NetworkAttachmentDefinition, "network attachment", CNI, 网络附件]
+        exclude_any: [OOMKilled, ImagePullBackOff, RuntimeClass]
+
+  - id: c06
+    name: "CrashLoopBackOff：应用进程以退出码 2 终止"
+    anomaly_type: CrashLoopBackOffRuntime
+    fault_scenario: "应用进程非零退出（Exit Code 2）"
+    members: [c06]
+    expected_runbooks: [pod-crashloop-runtime]
+    expected_evidence:
+      - id: crashloop-state
+        description: "CrashLoopBackOff 与重启事实"
+        weight: 1
+        dimensions: [kubernetes]
+        include_all: [CrashLoopBackOff]
+        include_any: [restart, BackOff, 重启]
+      - id: exit-code-2
+        description: "上次容器终止退出码为 2"
+        weight: 2
+        dimensions: [kubernetes]
+        include_any: ["Exit Code: 2", "exit_code\": 2", "exitCode=2", "退出码 2"]
+      - id: previous-runtime-log
+        description: "崩溃前日志包含 runtime process exiting"
+        weight: 2
+        dimensions: [logging]
+        include_all: ["runtime process exiting"]
+      - id: work-request-failure
+        description: "日志或 Trace 显示 /work 故障请求"
+        weight: 1
+        dimensions: [logging, tracing]
+        include_all: ["/work"]
+        include_any: [500, error]
+      - id: restart-trend
+        description: "Prometheus range 指标确认重启计数增长"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        attributes_any: [kube_pod_container_status_restarts_total]
+        require_trend_evaluable: true
+      - id: work-trace
+        description: "Tracing 关联 /work 请求"
+        weight: 1
+        required: false
+        dimensions: [tracing]
+        include_all: ["/work"]
+    expected_root_causes:
+      - id: runtime-exit-2
+        include_all: ["Exit Code 2"]
+        include_any: ["runtime process exiting", CrashLoopBackOff, 非零退出, 应用进程, "/work"]
+        exclude_any: [OOMKilled, CONFIG_MISSING, liveness]
+        aliases:
+          "Exit Code 2": ["Exit Code: 2", "exitCode=2", "exit code 2", "退出码 2", "退出码为 2"]
+
+  - id: c07
+    name: "CrashLoopBackOff：应用启动配置缺失"
+    anomaly_type: ConfigError
+    fault_scenario: "CONFIG_MISSING 后以 Exit Code 78 退出"
+    members: [c07]
+    expected_runbooks: [pod-config-error, pod-crashloop-runtime]
+    expected_evidence:
+      - id: config-crashloop-state
+        description: "CrashLoopBackOff 且 Exit Code 78"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [CrashLoopBackOff]
+        include_any: ["Exit Code: 78", "exit_code\": 78", "exitCode=78", "退出码 78"]
+      - id: config-missing-log
+        description: "应用日志原文包含 CONFIG_MISSING"
+        weight: 2
+        dimensions: [logging]
+        include_all: [CONFIG_MISSING]
+      - id: work-http-500
+        description: "日志或 Trace 确认 /work 返回 HTTP 500"
+        weight: 1
+        dimensions: [logging, tracing]
+        include_all: ["/work"]
+        include_any: [500, CONFIG_MISSING]
+      - id: log-trace-correlation
+        description: "Logging 与 Tracing 通过同一 trace_id 关联"
+        weight: 2
+        required: false
+        dimensions: [logging, tracing]
+        correlate_by: trace_id
+        correlation_dimensions: [logging, tracing]
+      - id: restart-trend
+        description: "Prometheus range 指标确认重启计数增长"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        attributes_any: [kube_pod_container_status_restarts_total]
+        require_trend_evaluable: true
+    expected_root_causes:
+      - id: traced-config-missing
+        include_all: [CONFIG_MISSING]
+        include_any: ["Exit Code 78", "HTTP 500", 配置缺失, config, "/work"]
+        exclude_any: [OOMKilled, readiness, liveness]
+        aliases:
+          "Exit Code 78": ["Exit Code: 78", "exitCode=78", "exit code 78", "退出码 78", "退出码为 78"]
+
+  - id: c08
+    name: "OOMKilled：请求驱动内存增长超过 64Mi"
+    anomaly_type: OOMKilled
+    fault_scenario: "请求驱动内存增长超过 64Mi limit"
+    members: [c08]
+    expected_runbooks: [pod-oomkilled]
+    expected_evidence:
+      - id: oom-terminal-state
+        description: "Kubernetes 同时确认 OOMKilled 与 Exit Code 137"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [OOMKilled]
+        include_any: ["Exit Code: 137", "exit_code\": 137", "exitCode=137", "退出码 137"]
+      - id: memory-limit-64mi
+        description: "真实容器内存限制为 64Mi/67108864 bytes"
+        weight: 2
+        dimensions: [kubernetes, metrics]
+        include_any: [64Mi, 67108864]
+      - id: memory-working-set-trend
+        description: "Prometheus range 指标展示 working set 有效时序"
+        weight: 2
+        dimensions: [metrics]
+        attributes_any: [container_memory_working_set_bytes]
+        require_trend_evaluable: true
+      - id: allocation-log-growth
+        description: "日志中 allocated_mib 至少出现两个不同值"
+        weight: 1
+        dimensions: [logging]
+        include_all: [allocated_mib]
+        distinct_value_key: allocated_mib
+        min_distinct_values: 2
+      - id: work-request-trace
+        description: "Tracing 确认 /work 请求进入目标 Pod"
+        weight: 1
+        required: false
+        dimensions: [tracing]
+        include_all: ["/work"]
+    expected_root_causes:
+      - id: oom-memory-limit
+        include_all: [OOMKilled, 64Mi]
+        include_any: ["Exit Code 137", "memory limit", 内存限制, 内存持续增长, "/work", allocated_mib]
+        exclude_any: [CONFIG_MISSING, "secret key", liveness]
+        aliases:
+          OOMKilled: ["OOM Killer", "OOM kill", "OOM 杀除", "因 OOM 被终止", "内核触发 OOM"]
+          64Mi: ["64 MiB", 64MiB, "67108864 bytes"]
+          "Exit Code 137": ["Exit Code: 137", "exitCode=137", "exit code 137", "退出码 137", "退出码为 137"]
+
+  - id: c09
+    name: "NotReady：Readiness 探针返回 503"
+    anomaly_type: NotReadyProbeFailed
+    fault_scenario: "readinessProbe /ready 返回 HTTP 503"
+    members: [c09]
+    expected_runbooks: [pod-notready-probe-failed]
+    expected_evidence:
+      - id: not-ready-state
+        description: "Pod Running 但 Ready=False/ContainersNotReady"
+        weight: 1
+        dimensions: [kubernetes]
+        include_any: ["Ready: False", "Ready\": false", ContainersNotReady, "0/1"]
+      - id: readiness-503-event
+        description: "Readiness probe 事件明确 HTTP 503"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [readiness]
+        include_any: ["HTTP probe failed with statuscode: 503", "HTTP 503", "status code 503"]
+      - id: readiness-probe-config
+        description: "Pod YAML 中 readinessProbe 路径为 /ready"
+        weight: 2
+        dimensions: [kubernetes]
+        tools_any: ["*yaml*", "*describe*", "*jq*", "run_bash_command"]
+        include_all: [readinessProbe, "/ready"]
+      - id: readiness-log
+        description: "应用日志记录 /ready 503 或 dependency unavailable"
+        weight: 1
+        dimensions: [logging]
+        include_any: ["/ready", "dependency unavailable"]
+        min_observations: 1
+      - id: readiness-trace
+        description: "Tracing 记录 /ready HTTP 503"
+        weight: 1
+        required: false
+        dimensions: [tracing]
+        include_all: ["/ready", "503"]
+      - id: ready-metric-trend
+        description: "Prometheus range 指标确认 Ready 状态持续异常"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        include_any: [kube_pod_status_ready, kube_pod_container_status_ready]
+        require_trend_evaluable: true
+    expected_root_causes:
+      - id: readiness-probe-503
+        include_all: [readiness, "/ready"]
+        include_any: ["Readiness probe failed", readinessProbe, "HTTP 503", "dependency unavailable", 就绪探针]
+        exclude_any: [liveness, OOMKilled, ImagePullBackOff, "错误的路径 /ready", "wrong path /ready"]
+        aliases:
+          readiness: [Readiness, readinessProbe, "/ready", 就绪探针, 健康检查端点]
+
+  - id: c10
+    name: "容器重启：Liveness 探针 /health 返回 500"
+    anomaly_type: NotReadyProbeFailed
+    fault_scenario: "livenessProbe /health 返回 HTTP 500"
+    members: [c10]
+    expected_runbooks: [pod-notready-probe-failed, pod-crashloop-runtime]
+    expected_evidence:
+      - id: liveness-500-event
+        description: "Liveness probe 事件明确 HTTP 500"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [liveness]
+        include_any: ["HTTP probe failed with statuscode: 500", "HTTP 500", "status code 500"]
+      - id: liveness-probe-config
+        description: "Pod YAML 中 livenessProbe 路径为 /health"
+        weight: 2
+        dimensions: [kubernetes]
+        tools_any: ["*yaml*", "*describe*", "*jq*", "run_bash_command"]
+        include_all: [livenessProbe, "/health"]
+      - id: liveness-restart
+        description: "探针失败伴随 Killing/重启事实"
+        weight: 1
+        dimensions: [kubernetes]
+        include_any: [Killing, restart, BackOff, "Exit Code: 137"]
+      - id: health-log
+        description: "应用日志记录 /health HTTP 500"
+        weight: 1
+        required: false
+        dimensions: [logging]
+        include_all: ["/health"]
+        include_any: [500, liveness_fail]
+      - id: health-trace
+        description: "Tracing 记录 /health HTTP 500"
+        weight: 1
+        required: false
+        dimensions: [tracing]
+        include_all: ["/health", "500"]
+      - id: restart-trend
+        description: "Prometheus range 指标确认重启计数增长"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        attributes_any: [kube_pod_container_status_restarts_total]
+        require_trend_evaluable: true
+    expected_root_causes:
+      - id: liveness-probe-500
+        include_all: [liveness, "/health"]
+        include_any: ["Liveness probe failed", livenessProbe, "HTTP 500", 健康检查, 存活探针]
+        exclude_any: [readiness, OOMKilled, ImagePullBackOff]
+        aliases:
+          liveness: [Liveness, livenessProbe, 存活探针]
+
+  - id: c11
+    name: "Terminating：自定义 finalizer 阻塞删除"
+    anomaly_type: TerminatingStuck
+    fault_scenario: "finalizer aiops.lab/hold 阻塞删除"
+    members: [c11]
+    expected_runbooks: [pod-terminating-stuck]
+    expected_evidence:
+      - id: deletion-timestamp
+        description: "Pod 当前 deletionTimestamp 已设置且对象仍存在"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [deletionTimestamp]
+      - id: blocking-finalizer
+        description: "Pod YAML 包含 aiops.lab/hold finalizer"
+        weight: 2
+        dimensions: [kubernetes]
+        include_all: [finalizer, aiops.lab/hold]
+      - id: terminating-duration
+        description: "当前 Pod 长时间处于 Terminating"
+        weight: 1
+        dimensions: [kubernetes]
+        include_all: [Terminating]
+      - id: termination-config
+        description: "检查 terminationGracePeriodSeconds/preStop 以排除正常宽限期"
+        weight: 1
+        dimensions: [kubernetes]
+        tools_any: ["*yaml*", "*describe*", "*jq*", "run_bash_command"]
+        include_any: [terminationGracePeriodSeconds, preStop]
+      - id: node-state-check
+        description: "检查所在 Node Ready 状态以排除节点失联"
+        weight: 1
+        required: false
+        dimensions: [kubernetes, topology]
+        include_any: ["Ready", scheduled_on, node]
+      - id: deletion-timestamp-metric
+        description: "Prometheus 指标辅助确认删除时间戳仍存在"
+        weight: 1
+        required: false
+        dimensions: [metrics]
+        include_all: [kube_pod_deletion_timestamp]
+    expected_root_causes:
+      - id: finalizer-stuck
+        include_all: [finalizer, aiops.lab/hold]
+        include_any: [deletionTimestamp, Terminating, 删除流程, 清理逻辑]
+        exclude_any: [OOMKilled, ImagePullBackOff, terminationGracePeriodSeconds]

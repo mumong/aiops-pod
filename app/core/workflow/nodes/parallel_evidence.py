@@ -15,6 +15,8 @@ N 阶梯实测依据：单 context evidence 在 N=5 降级、N=10 完全塌缩
 import copy
 import json
 import logging
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -228,11 +230,20 @@ class ParallelEvidenceNode(WorkflowNode):
             return new_state
 
         results: List[Optional[Dict[str, Any]]] = [None] * len(groups)
+        lane_timings: List[Dict[str, Any]] = [dict() for _ in groups]
         merged_thinking: List[Dict[str, Any]] = []
 
         def run_group(index: int, group: Dict[str, Any]) -> Dict[str, Any]:
             gid = str(group.get("group_id") or f"g{index + 1}")
             stage = "lane_setup"
+            lane_started = time.monotonic()
+            lane_timings[index] = {
+                "group_id": gid,
+                "entities": copy.deepcopy(group.get("entities") or []),
+                "evidence_duration_ms": 0.0,
+                "rca_duration_ms": 0.0,
+                "total_duration_ms": 0.0,
+            }
             try:
                 scoped_state = self._build_group_state(
                     question=question,
@@ -265,7 +276,13 @@ class ParallelEvidenceNode(WorkflowNode):
                         if attempt == 1
                         else "evidence_collection_retry"
                     )
-                    attempt_group_state = collector.execute(attempt_state)
+                    evidence_started = time.monotonic()
+                    try:
+                        attempt_group_state = collector.execute(attempt_state)
+                    finally:
+                        lane_timings[index]["evidence_duration_ms"] += (
+                            time.monotonic() - evidence_started
+                        ) * 1000
                     stage = (
                         "evidence_projection"
                         if attempt == 1
@@ -291,7 +308,13 @@ class ParallelEvidenceNode(WorkflowNode):
                             "entity_evidence_snapshot"
                         ],
                     }
-                    attempt_rca_update = rca.execute(rca_state)
+                    rca_started = time.monotonic()
+                    try:
+                        attempt_rca_update = rca.execute(rca_state)
+                    finally:
+                        lane_timings[index]["rca_duration_ms"] += (
+                            time.monotonic() - rca_started
+                        ) * 1000
                     if self._is_rca_validation_enabled(default=False):
                         gate = self._minimum_rca_gate(
                             attempt_result,
@@ -348,9 +371,14 @@ class ParallelEvidenceNode(WorkflowNode):
                 self._attach_validated_diagnosis(result, group, rca_update)
                 stage = "artifact_persistence"
                 self._persist_lane_diagnosis_artifact(result, rca_update)
+                result["lane_timing"] = lane_timings[index]
                 return result
             except Exception as exc:  # noqa: BLE001
                 raise _LaneExecutionFailure(stage, exc) from exc
+            finally:
+                lane_timings[index]["total_duration_ms"] = (
+                    time.monotonic() - lane_started
+                ) * 1000
 
         def record_error_lane(index: int, stage: str, message: str) -> None:
             group = groups[index]
@@ -362,6 +390,7 @@ class ParallelEvidenceNode(WorkflowNode):
                 stage=stage,
                 message=message,
             )
+            error_result["lane_timing"] = lane_timings[index]
             new_state.setdefault("errors", []).append(
                 f"parallel_evidence:{gid}:{stage}: {message}"
             )
@@ -914,6 +943,15 @@ class ParallelEvidenceNode(WorkflowNode):
             status_keywords=group.get("status_keywords") or [],
         )
         snapshot_handoff = snapshot.to_handoff()
+        runbooks_used = ParallelEvidenceNode._successful_fetched_runbooks(
+            group_state.get("thinking_events") or [],
+        )
+        for runbook_id in group.get("matched_runbooks") or []:
+            normalized = ParallelEvidenceNode._normalize_runbook_id(runbook_id)
+            if normalized and normalized not in runbooks_used:
+                # Layer only writes successfully fetched Runbooks into
+                # matched_runbooks, already scoped to this lane.
+                runbooks_used.append(normalized)
 
         return {
             "group_id": gid,
@@ -933,9 +971,52 @@ class ParallelEvidenceNode(WorkflowNode):
             "completeness": completeness,
             "evidence_analysis": evidence_analysis,
             "thinking_events": group_state.get("thinking_events") or [],
+            "runbooks_used": runbooks_used,
             "archive_run_id": f"{run_id}-{gid}" if run_id else "",
             "error": None,
         }
+
+    @staticmethod
+    def _normalize_runbook_id(value: Any) -> str:
+        runbook_id = str(value or "").strip().rsplit("/", 1)[-1]
+        return re.sub(r"\.md$", "", runbook_id, flags=re.IGNORECASE)
+
+    @staticmethod
+    def _successful_fetched_runbooks(
+        thinking_events: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Return only Runbooks whose fetch_runbook call succeeded."""
+        pending: Dict[str, str] = {}
+        fetched: List[str] = []
+        for event in thinking_events:
+            if str(event.get("tool_name") or "").casefold() != "fetch_runbook":
+                continue
+            call_id = str(event.get("tool_call_id") or "").strip()
+            tool_args = event.get("tool_args") or {}
+            runbook_id = ""
+            if isinstance(tool_args, dict):
+                runbook_id = ParallelEvidenceNode._normalize_runbook_id(
+                    tool_args.get("runbook_id") or tool_args.get("id")
+                )
+            if event.get("type") == "tool_start":
+                if call_id and runbook_id:
+                    pending[call_id] = runbook_id
+                continue
+            if event.get("type") != "tool_result" or event.get("status") != "success":
+                continue
+            runbook_id = runbook_id or pending.get(call_id, "")
+            if not runbook_id:
+                preview = str(
+                    event.get("result_preview") or event.get("result") or ""
+                )
+                match = re.search(r"([\w][\w.-]*\.md)\b", preview)
+                if match:
+                    runbook_id = ParallelEvidenceNode._normalize_runbook_id(
+                        match.group(1)
+                    )
+            if runbook_id and runbook_id not in fetched:
+                fetched.append(runbook_id)
+        return fetched
 
     @staticmethod
     def _build_terminal_error_result(
@@ -980,6 +1061,11 @@ class ParallelEvidenceNode(WorkflowNode):
             "entity_evidence_snapshot": snapshot,
             "evidence_analysis": "{}",
             "thinking_events": [],
+            "runbooks_used": [
+                ParallelEvidenceNode._normalize_runbook_id(runbook_id)
+                for runbook_id in (group.get("matched_runbooks") or [])
+                if ParallelEvidenceNode._normalize_runbook_id(runbook_id)
+            ],
             "archive_run_id": f"{run_id}-{gid}" if run_id else "",
         }
 

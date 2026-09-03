@@ -236,8 +236,10 @@ def test_executor_appends_deterministic_timing_and_runbook_trace(monkeypatch):
     assert answer.startswith("simulated conclusion")
     assert "## 📊 性能统计" in answer
     assert "├─ 总耗时:" in answer
-    assert "📋 诊断追踪" in answer
-    assert "- **参考 Runbook**: pod-oomkilled" in answer
+    assert "📋 Runbook 参考" in answer
+    assert "- **未归属 lane**: pod-oomkilled" in answer
+    assert "LLM 调用" not in answer
+    assert "工具调用" not in answer
     assert "## 📈 质量指标" not in answer
 
 
@@ -851,6 +853,31 @@ def test_metrics_stats_block_has_balanced_code_fence():
     assert "```text" in result
 
 
+def test_metrics_stats_block_shows_parallel_lane_wall_times():
+    metrics = WorkflowMetrics(run_id="lane-times")
+    metrics.end_time = metrics.start_time + 12
+    parallel = metrics.start_node(
+        "parallel_evidence",
+        "并发证据采集",
+        start_ts=metrics.start_time + 1,
+    )
+    parallel.finish(end_ts=metrics.start_time + 11)
+    metrics.lane_timings = [{
+        "group_id": "g1",
+        "entities": [{"namespace": "demo", "name": "oom-pod"}],
+        "total_duration_ms": 9000,
+        "evidence_duration_ms": 6000,
+        "rca_duration_ms": 2500,
+    }]
+
+    stats = metrics.format_stats_block()
+
+    assert "并发证据采集: 10.0s" in stats
+    assert "g1 demo/oom-pod: 9.0s (Evidence 6.0s, RCA 2.5s)" in stats
+    assert "LLM 调用" not in stats
+    assert "工具调用" not in stats
+
+
 def test_rollout_status_verification_is_not_treated_as_write_advice():
     report = """
 ## 验证步骤
@@ -984,8 +1011,8 @@ def test_metrics_separates_parallel_tool_cumulative_and_wall_time():
     assert metrics.total_tool_duration_ms == pytest.approx(20000.0)
     assert metrics.tool_wall_duration_ms == pytest.approx(10000.0)
     stats = metrics.format_stats_block()
-    assert "累计耗时 20.0s" in stats
-    assert "并行关键路径 10.0s" in stats
+    assert "累计耗时" not in stats
+    assert "并行关键路径" not in stats
 
 
 def test_metrics_reports_requests_executions_dedup_and_unfinished_separately():
@@ -1041,10 +1068,10 @@ def test_metrics_reports_requests_executions_dedup_and_unfinished_separately():
     assert metrics.failed_tool_calls == 1
     assert metrics.total_tool_duration_ms == pytest.approx(1000.0)
     stats = metrics.format_stats_block()
-    assert "请求 3" in stats
-    assert "实际执行 1" in stats
-    assert "去重 1" in stats
-    assert "失败/未完成 1" in stats
+    assert "请求 3" not in stats
+    assert "实际执行 1" not in stats
+    assert "去重 1" not in stats
+    assert "失败/未完成 1" not in stats
 
 
 def test_metrics_uses_provider_model_duration_instead_of_agent_wall_time():

@@ -489,7 +489,7 @@ data:
     - `execute_pod_promql`: 优先考虑 `kube_pod_container_status_waiting_reason`、container ready/started 和 restart 状态；按 namespace/pod/container/reason 精确过滤，验证异常是否仍然存在。
     - `query_pod_logs`: 仅在有实际产生日志的 init、sidecar 或 previous container 时使用，purpose 必须说明要验证哪个组件；不要宽泛搜索不存在的主容器业务日志。
     - `query_pod_tracing`: 只有目标 Pod 已分配 IP 且曾提供业务流量时使用；如果无 Pod IP 或容器从未启动，应接受 empty/absent，不继续构造无意义链路查询。
-    - registry/DNS/TLS 连通性由 Kubernetes Events 和批准的只读网络探测验证，不要用应用 Trace 推断镜像仓库可达性。
+    - registry/DNS/TLS 连通性优先依据 Kubernetes Events 中的原始错误判断，不要用应用 Trace 推断镜像仓库可达性。
 
     ## 证据边界
     - Events 中 `manifest unknown`、`unauthorized`、`x509`、timeout 等原文通常是最决定性的证据。
@@ -539,27 +539,12 @@ data:
     - `Too Many Requests` / rate limit: 镜像仓库限流，需认证、镜像缓存或私有代理仓库。
     - 长时间只有 `Pulling image` 无后续失败事件: 关注镜像体积、节点带宽、运行时并发拉取限制、kubelet `registryPullQPS` / `registryBurst` 配置。
 
-    ### Step 5: 主动验证镜像仓库连通性
-    可用只读命令验证节点或集群内到镜像仓库的 HTTPS 连通性，例如：
-    ```bash
-    curl -v --connect-timeout 10 https://registry-1.docker.io/v2/
-    ```
-    判读规则：
-    - 返回 `200/401/403`：说明 HTTPS 网络可达；`401/403` 通常是认证/权限语义，不是网络不可达。
-    - `curl: (28) Operation timed out`、`Connection timed out`、`i/o timeout`、`命令执行超时`：这是诊断事实，表示镜像仓库网络不可达或链路被阻断，不应当仅视为“工具执行失败”。
-    - `Could not resolve host`：DNS 解析失败。
-    - `connection refused/reset`：目标端口不可达、被中间设备拒绝或连接被重置。
-    - `x509`：TLS 证书信任问题。
-
-
-
     ## 判定规则
 
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
     | Events 含 connection refused/timeout | 镜像仓库网络不可达 | 高 |
     | Events 含 context canceled | 镜像拉取连接被取消，优先检查网络、仓库响应、运行时超时和并发拉取 | 中 |
-    | 主动 curl/wget registry 超时或命令执行超时 | 镜像仓库网络不可达 | 高 |
     | Events 含 manifest unknown/not found | 镜像或 tag 不存在 | 高 |
     | Events 含 unauthorized/no basic auth | 认证失败（缺少或错误的 imagePullSecret） | 高 |
     | Events 含 pull access denied/insufficient_scope | 仓库权限不足或镜像路径错误 | 高 |
@@ -570,7 +555,7 @@ data:
     ## 标准修复建议
     - manifest unknown/not found 或 invalid reference: 修正镜像仓库、路径、tag 或 digest，重新发布工作负载；验证 Events 出现 Pulling 后成功 Created/Started。
     - unauthorized/no basic auth/pull access denied: 创建或修正同 namespace 的 `kubernetes.io/dockerconfigjson` Secret，并通过 `imagePullSecrets` 或 ServiceAccount 引用；验证 describe 不再出现认证错误。
-    - timeout/connection refused/DNS/x509: 修复节点到 registry 的网络、DNS、代理或证书信任；验证节点或诊断 Pod 能访问 registry HTTPS 端点。
+    - timeout/connection refused/DNS/x509: 修复节点到 registry 的网络、DNS、代理或证书信任；验证新的 Kubernetes Events 不再出现对应错误。
     - Too Many Requests/rate limit: 使用认证、私有镜像缓存或内部代理仓库；验证后续拉取不再被限流。
     - 长时间 Pulling: 检查镜像体积、节点带宽和运行时并发限制；优先优化镜像或预热缓存，不要误判为配置错误。
   pod-config-error.md: |

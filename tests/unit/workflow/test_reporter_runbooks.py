@@ -145,22 +145,79 @@ def test_reporter_detects_query_runbook_from_tool_start_args_when_result_preview
     assert metrics.runbook_id == "private-k8s-query-promql-reference"
 
 
-def test_metrics_trace_excludes_primary_runbooks_from_reference_list():
+def test_reporter_projects_lane_timing_and_fetched_runbooks_from_group_results():
+    metrics = WorkflowMetrics(run_id="r-lanes", question="检查两个 Pod")
+    state = {
+        "layer": Layer.L2,
+        "conclusion": "两个 lane 已完成诊断。",
+        "rca_analysis": "",
+        "evidence_analysis": "",
+        "group_results": [{
+            "group_id": "g1",
+            "presentation_index": 0,
+            "entities": [{"namespace": "demo", "name": "oom-pod"}],
+            "runbooks_used": ["pod-crashloop-runtime", "pod-oomkilled.md"],
+            "lane_timing": {
+                "total_duration_ms": 9000,
+                "evidence_duration_ms": 6000,
+                "rca_duration_ms": 2500,
+            },
+        }],
+        "thinking_events": [{
+            "type": "tool_start",
+            "tool_name": "fetch_runbook",
+            "tool_call_id": "rb-1",
+            "tool_args": {"runbook_id": "pod-oomkilled.md"},
+        }, {
+            "type": "tool_result",
+            "status": "success",
+            "tool_name": "fetch_runbook",
+            "tool_call_id": "rb-1",
+            "result_preview": "<runbook>\n# L2 Pod OOMKilled (Exit Code 137)",
+        }],
+        "evidence_items": [],
+        "tool_results": [],
+        "llm_calls": 1,
+    }
+
+    update_metrics_from_state(metrics, state, runbook_catalog=_make_catalog())
+
+    assert metrics.lane_timings[0]["group_id"] == "g1"
+    assert metrics.lane_timings[0]["total_duration_ms"] == 9000
+    assert metrics.runbooks_by_lane[0]["runbooks"] == [
+        "pod-crashloop-runtime",
+        "pod-oomkilled",
+    ]
+    assert metrics.fetched_runbooks == ["pod-oomkilled"]
+
+
+def test_metrics_trace_lists_every_fetched_runbook_by_lane_without_ranking():
     metrics = WorkflowMetrics(run_id="r5", question="我的集群有什么问题")
     metrics.runbook_matched = True
     metrics.primary_runbook = "pod-oomkilled, pod-config-error"
-    metrics.runbook_id = (
-        "pod-oomkilled, pod-config-error, pod-crashloop-runtime"
-    )
+    metrics.fetched_runbooks = [
+        "pod-oomkilled",
+        "pod-config-error",
+        "pod-crashloop-runtime",
+    ]
+    metrics.runbooks_by_lane = [{
+        "group_id": "g1",
+        "entities": [{"namespace": "demo", "name": "oom-pod"}],
+        "runbooks": ["pod-crashloop-runtime", "pod-oomkilled"],
+    }]
 
     trace = metrics.format_metrics_block(enabled=False)
 
-    assert "- **核心 Runbook**: pod-oomkilled, pod-config-error" in trace
-    assert "- **参考 Runbook**: pod-crashloop-runtime" in trace
+    assert "📋 Runbook 参考" in trace
     assert (
-        "- **参考 Runbook**: pod-oomkilled, pod-config-error, "
-        "pod-crashloop-runtime"
-    ) not in trace
+        "- **g1 demo/oom-pod**: pod-crashloop-runtime, pod-oomkilled"
+        in trace
+    )
+    assert "- **未归属 lane**: pod-config-error" in trace
+    assert "核心 Runbook" not in trace
+    assert "参考 Runbook" not in trace
+    assert "工具调用" not in trace
+    assert "LLM 调用" not in trace
 
 
 def test_autonomous_observability_runtime_switches_are_deployed():

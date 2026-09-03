@@ -123,6 +123,9 @@ class WorkflowMetrics:
     runbook_matched: bool = False
     runbook_id: Optional[str] = None
     primary_runbook: Optional[str] = None  # 核心参考 Runbook（与诊断结论强相关）
+    fetched_runbooks: List[str] = field(default_factory=list)
+    runbooks_by_lane: List[Dict[str, Any]] = field(default_factory=list)
+    lane_timings: List[Dict[str, Any]] = field(default_factory=list)
     root_cause_confidence: float = 0.0
 
     # 评分明细（可解释性）
@@ -495,7 +498,7 @@ class WorkflowMetrics:
         }
     
     def format_stats_block(self) -> str:
-        """格式化性能统计块（用于输出）"""
+        """只展示总耗时、顶层节点和并发诊断 lane 的 wall time。"""
         lines = []
         lines.append("")
         lines.append("---")
@@ -515,29 +518,51 @@ class WorkflowMetrics:
         lines.append("```text")
         lines.append(f"├─ 总耗时: {total_str}")
 
-        # 各节点耗时（百分比以总耗时为分母，加起来≈100%）
-        total_ms = self.total_duration_seconds * 1000
-        for node_id, node in self.nodes.items():
+        visible_nodes = [
+            (node_id, node)
+            for node_id, node in self.nodes.items()
+            if node._finished and node.duration_ms > 0
+        ]
+        for node_index, (node_id, node) in enumerate(visible_nodes):
             node_s = node.duration_ms / 1000
-            node_pct = (node.duration_ms / total_ms * 100) if total_ms > 0 else 0
-            status = "✅" if node.success else "❌"
-            lines.append(f"├─ {node.node_name}: {node_s:.1f}s ({node_pct:.0f}%) {status}")
-
-        # LLM 和工具调用次数（简洁，不显示百分比）
-        lines.append(f"├─ LLM 调用: {self.total_llm_calls} 次")
-        lines.append(
-            f"└─ 工具调用: 请求 {self.total_tool_calls}，"
-            f"实际执行 {self.executed_tool_calls}，"
-            f"去重 {self.deduplicated_tool_calls}，"
-            f"成功响应 {self.successful_tool_calls}，"
-            f"失败/未完成 {self.failed_tool_calls}，"
-            f"累计耗时 {self.total_tool_duration_ms / 1000:.1f}s，"
-            f"并行关键路径 {self.tool_wall_duration_ms / 1000:.1f}s）"
-        )
+            is_last_node = node_index == len(visible_nodes) - 1
+            prefix = "└─" if is_last_node else "├─"
+            lines.append(f"{prefix} {node.node_name}: {node_s:.1f}s")
+            if node_id != "parallel_evidence":
+                continue
+            child_prefix = "   " if is_last_node else "│  "
+            for lane_index, lane in enumerate(self.lane_timings):
+                lane_last = lane_index == len(self.lane_timings) - 1
+                branch = "└─" if lane_last else "├─"
+                group_id = str(lane.get("group_id") or f"g{lane_index + 1}")
+                entity = self._lane_entity_label(lane)
+                total = float(lane.get("total_duration_ms") or 0) / 1000
+                evidence = float(lane.get("evidence_duration_ms") or 0) / 1000
+                rca = float(lane.get("rca_duration_ms") or 0) / 1000
+                detail = f"Evidence {evidence:.1f}s, RCA {rca:.1f}s"
+                label = f"{group_id} {entity}".strip()
+                lines.append(
+                    f"{child_prefix}{branch} {label}: {total:.1f}s "
+                    f"({detail})"
+                )
         lines.append("```")
         lines.append("")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _lane_entity_label(lane: Dict[str, Any]) -> str:
+        entities = lane.get("entities") or []
+        labels = []
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            namespace = str(entity.get("namespace") or "").strip()
+            name = str(entity.get("name") or "").strip()
+            label = f"{namespace}/{name}".strip("/")
+            if label:
+                labels.append(label)
+        return ", ".join(labels)
     
     def format_metrics_block(self, enabled: bool = True) -> str:
         """格式化指标达标情况（用于输出）
@@ -633,35 +658,30 @@ class WorkflowMetrics:
                     )
                 lines.append("")
 
-        # 诊断追踪（始终输出）
-        lines.append("📋 诊断追踪")
+        # 实际成功 fetch 的 Runbook（始终输出；不区分核心/参考）
+        lines.append("📋 Runbook 参考")
         lines.append("")
-        if self.primary_runbook:
-            lines.append(f"- **核心 Runbook**: {self.primary_runbook}")
-        primary_runbooks = {
-            item.strip()
-            for item in str(self.primary_runbook or "").split(",")
-            if item.strip()
-        }
-        reference_runbooks = [
-            item.strip()
-            for item in str(self.runbook_id or "").split(",")
-            if item.strip() and item.strip() not in primary_runbooks
-        ]
-        runbook_display = (
-            ", ".join(reference_runbooks)
-            if self.runbook_matched and reference_runbooks
-            else "无"
-        )
-        lines.append(f"- **参考 Runbook**: {runbook_display}")
-        lines.append(
-            f"- **工具调用**: 请求 {self.total_tool_calls}，"
-            f"实际执行 {self.executed_tool_calls}，"
-            f"去重 {self.deduplicated_tool_calls}，"
-            f"成功响应 {self.successful_tool_calls}，"
-            f"失败/未完成 {self.failed_tool_calls}）"
-        )
-        lines.append(f"- **LLM 调用**: {self.total_llm_calls} 次")
+        assigned = set()
+        rendered_lane = False
+        for lane in self.runbooks_by_lane:
+            runbooks = [
+                str(item).strip()
+                for item in (lane.get("runbooks") or [])
+                if str(item).strip()
+            ]
+            if not runbooks:
+                continue
+            assigned.update(runbooks)
+            group_id = str(lane.get("group_id") or "lane")
+            entity = self._lane_entity_label(lane)
+            label = f"{group_id} {entity}".strip()
+            lines.append(f"- **{label}**: {', '.join(runbooks)}")
+            rendered_lane = True
+        unassigned = [rb for rb in self.fetched_runbooks if rb not in assigned]
+        if unassigned:
+            lines.append(f"- **未归属 lane**: {', '.join(unassigned)}")
+        if not rendered_lane and not unassigned:
+            lines.append("- 未调用 Runbook")
         lines.append("")
 
         return "\n".join(lines)

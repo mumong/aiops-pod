@@ -1677,3 +1677,33 @@ def test_parallel_error_artifact_persistence_failure_is_not_claimed_successful(
     assert "lane_diagnosis_artifact_ref" not in failed
     assert result["authoritative_lane_artifacts"] == []
     assert any("archive unavailable" in message for message in result["errors"])
+
+
+def test_parallel_evidence_only_records_successful_fetched_runbooks():
+    events = [{
+        "type": "tool_start",
+        "tool_name": "fetch_runbook",
+        "tool_call_id": "ok",
+        "tool_args": {"runbook_id": "pod-oomkilled.md"},
+    }, {
+        "type": "tool_result",
+        "tool_name": "fetch_runbook",
+        "tool_call_id": "ok",
+        "status": "success",
+        "result_preview": "<runbook># OOMKilled</runbook>",
+    }, {
+        "type": "tool_start",
+        "tool_name": "fetch_runbook",
+        "tool_call_id": "failed",
+        "tool_args": {"runbook_id": "pod-config-error.md"},
+    }, {
+        "type": "tool_result",
+        "tool_name": "fetch_runbook",
+        "tool_call_id": "failed",
+        "status": "error",
+        "result_preview": "not found",
+    }]
+
+    assert ParallelEvidenceNode._successful_fetched_runbooks(events) == [
+        "pod-oomkilled"
+    ]

@@ -193,6 +193,38 @@ def update_metrics_from_state(
     # Runbook 提取（从所有文本内容中搜索，不再依赖 tool_call_details）
     # ================================================================
     runbook_lookup = _build_runbook_lookup(runbook_catalog)
+    ordered_groups = sorted(
+        [
+            group
+            for group in (state.get("group_results") or [])
+            if isinstance(group, dict)
+        ],
+        key=lambda group: (
+            int(group.get("presentation_index") or 0),
+            str(group.get("group_id") or ""),
+        ),
+    )
+    metrics.lane_timings = []
+    metrics.runbooks_by_lane = []
+    for group in ordered_groups:
+        timing = group.get("lane_timing") or {}
+        if isinstance(timing, dict) and timing:
+            metrics.lane_timings.append({
+                **timing,
+                "group_id": str(group.get("group_id") or ""),
+                "entities": group.get("entities") or [],
+            })
+        lane_runbooks: List[str] = []
+        for runbook in group.get("runbooks_used") or []:
+            canonical = _canonicalize_runbook_name(str(runbook), runbook_lookup)
+            canonical = canonical or re.sub(r"\.md$", "", str(runbook).strip())
+            if canonical and canonical not in lane_runbooks:
+                lane_runbooks.append(canonical)
+        metrics.runbooks_by_lane.append({
+            "group_id": str(group.get("group_id") or ""),
+            "entities": group.get("entities") or [],
+            "runbooks": lane_runbooks,
+        })
     runbook_ids: Set[str] = set()
     runbook_names: List[str] = []
 
@@ -240,6 +272,7 @@ def update_metrics_from_state(
                 fname = m.group(1)
                 if fname not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
                     runbook_ids.add(fname)
+                    successful_fetched_runbook_ids.add(fname)
             # 提取 runbook 标题（如 "# L2 OOMKilled（Exit Code 137）"）
             title_match = re.search(r'#\s+(.+?)(?:\n|$)', preview)
             if title_match:
@@ -316,6 +349,13 @@ def update_metrics_from_state(
             if canonical and canonical not in canonical_refs:
                 canonical_refs.append(canonical)
 
+        metrics.fetched_runbooks = []
+        for fetched_id in sorted(successful_fetched_runbook_ids):
+            canonical = _canonicalize_runbook_name(fetched_id, runbook_lookup)
+            canonical = canonical or re.sub(r"\.md$", "", fetched_id.strip())
+            if canonical and canonical not in metrics.fetched_runbooks:
+                metrics.fetched_runbooks.append(canonical)
+
         # 方法3: 如果 AI 没给出合法核心 runbook，则在唯一合法参考 runbook 场景下回退为该 runbook
         if not primary_runbooks and len(canonical_refs) == 1:
             primary_runbooks.append(canonical_refs[0])
@@ -346,6 +386,7 @@ def update_metrics_from_state(
         metrics.runbook_matched = False
         metrics.runbook_id = None
         metrics.primary_runbook = None
+        metrics.fetched_runbooks = []
 
     # ================================================================
     # Runbook 覆盖率（多维度加权评分）
