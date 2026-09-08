@@ -1,0 +1,269 @@
+{
+  "success": true,
+  "run_id": "45686443629f424d",
+  "elapsed_seconds": 111.204,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 0,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 0,
+    "recall": 0.0,
+    "precision": 0.0,
+    "matches": [
+      {
+        "expectation_id": "liveness-probe-500",
+        "matched": false,
+        "group": "g1",
+        "matched_all": [
+          "liveness"
+        ],
+        "matched_any": [
+          "Liveness probe failed",
+          "HTTP 500",
+          "健康检查"
+        ],
+        "missing_all": [
+          "/health"
+        ],
+        "missing_any": [],
+        "conflicts": [
+          "OOMKilled"
+        ]
+      }
+    ],
+    "unexpected_claim_groups": [
+      "g1"
+    ]
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认根因为 **App 容器进程发生异常终止（退出码 137 / SIGKILL），导致 Liveness 探针检查失败（HTTP 500），从而触发容器重启循环。**\n\n- **现象支撑**：容器 `app` 的最终退出码为 `137`（对应 Linux 信号 `9 (SIGKILL)`），且 Kubernetes 事件明确记录“Liveness probe failed: HTTP probe failed with statuscode: 500”。这表明探针在探测时应用未能成功响应健康检查（返回了 500），随后进程被操作系统强制杀死。\n- **证据关联**：证据 1、3、5 确认了 CrashLoopBackOff 状态；证据 2、4 确立了 137 退出码与探针失败的直接关联。\n\n**说明**：虽然配置了 96Mi 的内存限制（证据 6），这通常是导致 OOMKiller（137）的常见原因，但输入事实中未包含内存使用量超过限制的指标（如 `OOMKilled` 状态的 explicit reason 或内存峰值 Metric），且日志显示应用曾返回 200。因此，具体导致 137 的信号（是内存不足触发的 OOM，还是应用内部逻辑触发的系统级 kill）缺乏决定性事实。但进程异常终止并导致探针失败这一根因已得到充分证实。\n\n---",
+      "full_section": "### 因果链\n\n```text\n应用进程异常响应/终止 → Liveness 探针收到 HTTP 500 → 触发 OOMKiller 或系统级强制终止 → 退出码 137 (SIGKILL) → 用户可见 Pod 持续 CrashLoopBackOff 及 Liveness 失败\n```\n\n### 根因结论\n\n已确认根因为 **App 容器进程发生异常终止（退出码 137 / SIGKILL），导致 Liveness 探针检查失败（HTTP 500），从而触发容器重启循环。**\n\n- **现象支撑**：容器 `app` 的最终退出码为 `137`（对应 Linux 信号 `9 (SIGKILL)`），且 Kubernetes 事件明确记录“Liveness probe failed: HTTP probe failed with statuscode: 500”。这表明探针在探测时应用未能成功响应健康检查（返回了 500），随后进程被操作系统强制杀死。\n- **证据关联**：证据 1、3、5 确认了 CrashLoopBackOff 状态；证据 2、4 确立了 137 退出码与探针失败的直接关联。\n\n**说明**：虽然配置了 96Mi 的内存限制（证据 6），这通常是导致 OOMKiller（137）的常见原因，但输入事实中未包含内存使用量超过限制的指标（如 `OOMKilled` 状态的 explicit reason 或内存峰值 Metric），且日志显示应用曾返回 200。因此，具体导致 137 的信号（是内存不足触发的 OOM，还是应用内部逻辑触发的系统级 kill）缺乏决定性事实。但进程异常终止并导致探针失败这一根因已得到充分证实。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime",
+      "pod-crashloopbackoff",
+      "pod-oomkilled",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [
+      {
+        "lane": "45686443629f424d-g1",
+        "collected": 6,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/45686443629f424d-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [
+      {
+        "lane": "45686443629f424d-g1",
+        "collected": 6,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/45686443629f424d-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 3,
+    "planned": 8,
+    "completeness": 0.375,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "liveness-500-event",
+        "description": "Liveness probe 事件明确 HTTP 500",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-56924b1ecb24",
+          "/tmp/aiops/reports/context_archives/45686443629f424d-g1/tools/006-evidence-kubectl_events.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 34,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "liveness-probe-config",
+        "description": "Pod YAML 中 livenessProbe 路径为 /health",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "livenessProbe",
+          "/health"
+        ],
+        "missing_any": [],
+        "observation_count": 33,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "liveness-restart",
+        "description": "探针失败伴随 Killing/重启事实",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-c0d917fa285b",
+          "/tmp/aiops/reports/context_archives/45686443629f424d-g1/tools/006-evidence-kubectl_events.structured.json",
+          "fact-be37e7c4022c",
+          "/tmp/aiops/reports/context_archives/45686443629f424d-g1/tools/004-evidence-kubectl_describe.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 34,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "health-log",
+        "description": "应用日志记录 /health HTTP 500",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "/health"
+        ],
+        "missing_any": [
+          "500",
+          "liveness_fail"
+        ],
+        "observation_count": 10,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "health-trace",
+        "description": "Tracing 记录 /health HTTP 500",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "tracing"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "/health",
+          "500"
+        ],
+        "missing_any": [],
+        "observation_count": 11,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "restart-trend",
+        "description": "Prometheus range 指标确认重启计数增长",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 1,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 36,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

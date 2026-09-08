@@ -1,0 +1,273 @@
+{
+  "success": true,
+  "run_id": "68d656ea67be48fe",
+  "elapsed_seconds": 138.14,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "traced-config-missing",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "CONFIG_MISSING"
+        ],
+        "matched_any": [
+          "Exit Code 78",
+          "/work"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因是**应用进程在启动阶段的配置校验逻辑检测到了缺失的必选配置（触发 `CONFIG_MISSING` 事件），导致程序主动调用 `sys.exit(78)` 退出**。\n\n*   **现象支撑**：K8s 容器状态显示退出码为 `78`（Fact 1），且 Kubernetes Event 记录了大量 BackOff 重启事件（Fact 2）。\n*   **应用层根因**：Elasticsearch 日志聚合显示在 `/work` 路径反复出现 `CONFIG_MISSING` 错误（Fact 4），Tracing 数据也通过 `aiops.observed_mode: config_missing_exit` 属性证实了这一路径上的拒绝行为（Fact 5）。\n*   **已知未知**：现有事实未指明 `workload-code` ConfigMap 中具体缺失的键名（如特定的 Key 或环境变量），因此根因定位在应用层的校验逻辑触发，而非具体的缺失参数名称。\n\n---",
+      "full_section": "### 因果链\n\n```text\n应用启动配置校验失败 (CONFIG_MISSING) → 应用主动执行 sys.exit(78) 终止 → 容器退出码非 0 触发 K8s 重启策略 → CrashLoopBackOff 导致 Pod 不断重启\n```\n\n### 根因结论\n\n已确认的根因是**应用进程在启动阶段的配置校验逻辑检测到了缺失的必选配置（触发 `CONFIG_MISSING` 事件），导致程序主动调用 `sys.exit(78)` 退出**。\n\n*   **现象支撑**：K8s 容器状态显示退出码为 `78`（Fact 1），且 Kubernetes Event 记录了大量 BackOff 重启事件（Fact 2）。\n*   **应用层根因**：Elasticsearch 日志聚合显示在 `/work` 路径反复出现 `CONFIG_MISSING` 错误（Fact 4），Tracing 数据也通过 `aiops.observed_mode: config_missing_exit` 属性证实了这一路径上的拒绝行为（Fact 5）。\n*   **已知未知**：现有事实未指明 `workload-code` ConfigMap 中具体缺失的键名（如特定的 Key 或环境变量），因此根因定位在应用层的校验逻辑触发，而非具体的缺失参数名称。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-config-error",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [
+      {
+        "lane": "68d656ea67be48fe-g1",
+        "collected": 6,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/68d656ea67be48fe-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [
+      {
+        "lane": "68d656ea67be48fe-g1",
+        "collected": 6,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/68d656ea67be48fe-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "config-crashloop-state",
+        "description": "CrashLoopBackOff 且 Exit Code 78",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-5d51759b7322",
+          "/tmp/aiops/reports/context_archives/68d656ea67be48fe-g1/tools/005-evidence-kubectl_describe.structured.json",
+          "fact-21d20787b50c",
+          "/tmp/aiops/reports/context_archives/68d656ea67be48fe-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+          "fact-4e14d462095d",
+          "fact-e634436c995f"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 31,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "config-missing-log",
+        "description": "应用日志原文包含 CONFIG_MISSING",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [
+          "fact-0dc0c3413a3d",
+          "fact-0f27003945a0",
+          "fact-10f71ea16c45",
+          "fact-1b017ad5bf63",
+          "fact-39995165787c",
+          "fact-4f644c8f51d2",
+          "fact-5c1f4e8b8b14",
+          "fact-5f37195242d0",
+          "/tmp/aiops/reports/context_archives/68d656ea67be48fe-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "/tmp/aiops/reports/context_archives/68d656ea67be48fe-g1/tools/011-evidence-query_pod_logs.structured.json",
+          "/tmp/aiops/reports/context_archives/68d656ea67be48fe-g1/tools/004-evidence-kubectl_logs.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 19,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "work-http-500",
+        "description": "日志或 Trace 确认 /work 返回 HTTP 500",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-0dc0c3413a3d",
+          "fact-0f27003945a0",
+          "fact-10f71ea16c45",
+          "fact-1b017ad5bf63",
+          "fact-39995165787c",
+          "fact-4f644c8f51d2",
+          "fact-5c1f4e8b8b14",
+          "fact-5f37195242d0",
+          "/tmp/aiops/reports/context_archives/68d656ea67be48fe-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "fact-08a030bdce00",
+          "fact-124bc51d98af",
+          "fact-13ec6fb0cab1"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 41,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "log-trace-correlation",
+        "description": "Logging 与 Tracing 通过同一 trace_id 关联",
+        "weight": 2,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-0f27003945a0",
+          "fact-10f71ea16c45",
+          "fact-4f644c8f51d2",
+          "fact-5f37195242d0",
+          "fact-08a030bdce00",
+          "fact-124bc51d98af",
+          "fact-1effcf90c0e1",
+          "fact-29a98385d08d",
+          "fact-496eeb2f9a4e",
+          "fact-514e80e89339",
+          "fact-5e8acb4f8f4b",
+          "fact-408947ed4dba"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 41,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "trace_id",
+        "correlation_dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "correlation_values": [
+          "\"263174d1b38221333d5a5faf14489ae4\"",
+          "\"3ddfc5552edd0447095df71a38794450\"",
+          "\"4711299e320bfb5314d2ef5c2910dc7a\"",
+          "\"65684c8c074b2b13bde640e742613caa\""
+        ]
+      },
+      {
+        "id": "restart-trend",
+        "description": "Prometheus range 指标确认重启计数增长",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 1,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 41,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

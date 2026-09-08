@@ -1,0 +1,259 @@
+{
+  "success": true,
+  "run_id": "d085d553e85e45ca",
+  "elapsed_seconds": 72.089,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 0,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 0,
+    "recall": 0.0,
+    "precision": 0.0,
+    "matches": [
+      {
+        "expectation_id": "finalizer-stuck",
+        "matched": false,
+        "group": "g1",
+        "matched_all": [
+          "finalizer",
+          "aiops.lab/hold"
+        ],
+        "matched_any": [
+          "Terminating"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [
+          "OOMKilled"
+        ]
+      }
+    ],
+    "unexpected_claim_groups": [
+      "g1"
+    ]
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认根因为：**Pod 对象被施加了自定义 Finalizer `aiops.lab/hold` 导致无法完成终止清理。**\n\n该 Finalizer 机制与容器因内存超限被 OOMKilled 后的状态清理流程冲突或未被正确解除（关联的自定义控制器未执行删除操作），导致 Kubernetes API Server 拒绝从集群中移除该 Pod 对象。证据 2（Exit Code 137）证实了应用层面的内存终止事件，而证据 1 和 4 证实了资源回收的阻塞点完全位于 Finalizer 层面，二者共同导致 Pod 长时间处于 Terminating 状态。\n\n---",
+      "full_section": "### 因果链\n\n```text\n自定义 Finalizer `aiops.lab/hold` 未被自动/手动移除 → 阻止 Pod 对象物理销毁与资源回收 → 容器 OOMKilled (Exit Code 137) 后 Pod 状态卡死在 Terminating → 用户/服务看到 Pod 不消失且应用未就绪\n```\n\n### 根因结论\n\n已确认根因为：**Pod 对象被施加了自定义 Finalizer `aiops.lab/hold` 导致无法完成终止清理。**\n\n该 Finalizer 机制与容器因内存超限被 OOMKilled 后的状态清理流程冲突或未被正确解除（关联的自定义控制器未执行删除操作），导致 Kubernetes API Server 拒绝从集群中移除该 Pod 对象。证据 2（Exit Code 137）证实了应用层面的内存终止事件，而证据 1 和 4 证实了资源回收的阻塞点完全位于 Finalizer 层面，二者共同导致 Pod 长时间处于 Terminating 状态。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-terminating-stuck"
+    ],
+    "found": [
+      "pod-terminating-stuck"
+    ],
+    "matched": [
+      "pod-terminating-stuck"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [
+      {
+        "lane": "d085d553e85e45ca-g1",
+        "collected": 6,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/d085d553e85e45ca-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [
+      {
+        "lane": "d085d553e85e45ca-g1",
+        "collected": 6,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/d085d553e85e45ca-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 4,
+    "planned": 8,
+    "completeness": 0.5,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "deletion-timestamp",
+        "description": "Pod 当前 deletionTimestamp 已设置且对象仍存在",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "/tmp/aiops/reports/context_archives/d085d553e85e45ca-g1/tools/004-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 14,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "blocking-finalizer",
+        "description": "Pod YAML 包含 aiops.lab/hold finalizer",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "finalizer"
+        ],
+        "missing_any": [],
+        "observation_count": 14,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "terminating-duration",
+        "description": "当前 Pod 长时间处于 Terminating",
+        "weight": 1,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "Terminating"
+        ],
+        "missing_any": [],
+        "observation_count": 14,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "termination-config",
+        "description": "检查 terminationGracePeriodSeconds/preStop 以排除正常宽限期",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "/tmp/aiops/reports/context_archives/d085d553e85e45ca-g1/tools/004-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 13,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "node-state-check",
+        "description": "检查所在 Node Ready 状态以排除节点失联",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "kubernetes",
+          "topology"
+        ],
+        "matched_refs": [
+          "fact-2d8e84bd5db5",
+          "/tmp/aiops/reports/context_archives/d085d553e85e45ca-g1/tools/004-evidence-kubectl_get_yaml.structured.json",
+          "fact-67b18d731151",
+          "/tmp/aiops/reports/context_archives/d085d553e85e45ca-g1/tools/006-evidence-query_pod_topology.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 18,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "deletion-timestamp-metric",
+        "description": "Prometheus 指标辅助确认删除时间戳仍存在",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "kube_pod_deletion_timestamp"
+        ],
+        "missing_any": [],
+        "observation_count": 7,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 6,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

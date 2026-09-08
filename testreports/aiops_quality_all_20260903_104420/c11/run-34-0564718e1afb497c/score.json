@@ -1,0 +1,258 @@
+{
+  "success": true,
+  "run_id": "0564718e1afb497c",
+  "elapsed_seconds": 94.732,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "finalizer-stuck",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "finalizer",
+          "aiops.lab/hold"
+        ],
+        "matched_any": [
+          "Terminating",
+          "清理逻辑"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**已确认的根因：容器异常终止导致 Pod 进入僵死删除状态。**\n容器 `app` 以 Exit Code 137 异常终止（证据 #4），且未发生重启（证据 #6），导致 Pod 处于 `Terminating` 阶段并被无限期挂起。Kubernetes 状态确认资源未被立即清理（证据 #1, #2）。\n\n**未确认的环节与决定性事实缺失：**\n1. **异常具体触发源未定：** 虽然 Exit 137 高度指向 OOM Kill 或 SIGKILL，但日志维度缺失（`status: absent`），且 Prometheus 缺失该 Pod 的历史资源使用率时序数据（工具调用失败且无其他数据），无法确认是否由 96Mi 的内存限制（证据 #5）引发。\n2. **资源挂死原因未定：** 诊断信息中指出可能存在 `aiops.lab/hold` finalizer 阻止删除，但当前事实中未直接包含该 finalizer 的元数据证据（仅作为诊断 `unknowns` 存在），且日志/追踪无法佐证控制器的清理逻辑状态。\n\n---",
+      "full_section": "### 因果链\n\n```text\n已验证的上游原因 → 失败机制 → 直接失败 → 用户可见现象\n容器异常终止 (Exit 137) → 容器不 Ready → Pod 进入 Terminating 挂起 → 删除操作被无限期挂起\n```\n\n### 根因结论\n\n**已确认的根因：容器异常终止导致 Pod 进入僵死删除状态。**\n容器 `app` 以 Exit Code 137 异常终止（证据 #4），且未发生重启（证据 #6），导致 Pod 处于 `Terminating` 阶段并被无限期挂起。Kubernetes 状态确认资源未被立即清理（证据 #1, #2）。\n\n**未确认的环节与决定性事实缺失：**\n1. **异常具体触发源未定：** 虽然 Exit 137 高度指向 OOM Kill 或 SIGKILL，但日志维度缺失（`status: absent`），且 Prometheus 缺失该 Pod 的历史资源使用率时序数据（工具调用失败且无其他数据），无法确认是否由 96Mi 的内存限制（证据 #5）引发。\n2. **资源挂死原因未定：** 诊断信息中指出可能存在 `aiops.lab/hold` finalizer 阻止删除，但当前事实中未直接包含该 finalizer 的元数据证据（仅作为诊断 `unknowns` 存在），且日志/追踪无法佐证控制器的清理逻辑状态。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-terminating-stuck"
+    ],
+    "found": [
+      "pod-terminating-stuck"
+    ],
+    "matched": [
+      "pod-terminating-stuck"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [
+      {
+        "lane": "0564718e1afb497c-g1",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/0564718e1afb497c-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [
+      {
+        "lane": "0564718e1afb497c-g1",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/0564718e1afb497c-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 5,
+    "planned": 8,
+    "completeness": 0.625,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "deletion-timestamp",
+        "description": "Pod 当前 deletionTimestamp 已设置且对象仍存在",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "/tmp/aiops/reports/context_archives/0564718e1afb497c-g1/tools/005-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 15,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "blocking-finalizer",
+        "description": "Pod YAML 包含 aiops.lab/hold finalizer",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "finalizer"
+        ],
+        "missing_any": [],
+        "observation_count": 15,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "terminating-duration",
+        "description": "当前 Pod 长时间处于 Terminating",
+        "weight": 1,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "Terminating"
+        ],
+        "missing_any": [],
+        "observation_count": 15,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "termination-config",
+        "description": "检查 terminationGracePeriodSeconds/preStop 以排除正常宽限期",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "/tmp/aiops/reports/context_archives/0564718e1afb497c-g1/tools/005-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 13,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "node-state-check",
+        "description": "检查所在 Node Ready 状态以排除节点失联",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "kubernetes",
+          "topology"
+        ],
+        "matched_refs": [
+          "fact-e0af127db09a",
+          "/tmp/aiops/reports/context_archives/0564718e1afb497c-g1/tools/005-evidence-kubectl_get_yaml.structured.json",
+          "/tmp/aiops/reports/context_archives/0564718e1afb497c-g1/tools/007-evidence-kubectl_get_by_name.structured.json",
+          "fact-fd52373d5fd1",
+          "/tmp/aiops/reports/context_archives/0564718e1afb497c-g1/tools/006-evidence-query_pod_topology.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 19,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "deletion-timestamp-metric",
+        "description": "Prometheus 指标辅助确认删除时间戳仍存在",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [
+          "fact-b072beeb82dc",
+          "/tmp/aiops/reports/context_archives/0564718e1afb497c-g1/tools/009-evidence-execute_pod_promql.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 8,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 34,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

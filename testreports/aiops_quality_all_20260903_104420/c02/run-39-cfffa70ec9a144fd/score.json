@@ -1,0 +1,214 @@
+{
+  "success": true,
+  "run_id": "cfffa70ec9a144fd",
+  "elapsed_seconds": 67.824,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "invalid-image-registry",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "registry.invalid"
+        ],
+        "matched_any": [
+          "ImagePullBackOff",
+          "镜像仓库"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因为 **Pod 配置了无效的镜像仓库域名**。\n\n具体机制是 Pod 的容器定义中指定了镜像地址 `registry.invalid/aiops/workload:missing`，其中 `registry.invalid` 为 RFC 2606 保留的无效域名 [证据 #2]。Kubelet 在尝试拉取该镜像时无法解析域名导致失败，进而进入 `ImagePullBackOff` 等待状态 [证据 #1, #3]。该配置错误直接导致容器无法启动，进而使 Pod 维持在 `Pending` 阶段 [证据 #4]。Prometheus 指标中 `waiting_reason` 为 `ImagePullBackOff` 的结果 [证据 #5] 进一步证实了这一结论。目前证据链完整，无缺失决定性事实。\n\n---",
+      "full_section": "### 因果链\n\n```text\n镜像配置包含保留域名 registry.invalid → DNS 解析失败，Kubelet 无法拉取镜像 → 触发指数退避策略 (ImagePullBackOff) → Pod 滞留 Pending 状态，用户可见容器未启动\n```\n\n### 根因结论\n\n已确认的根因为 **Pod 配置了无效的镜像仓库域名**。\n\n具体机制是 Pod 的容器定义中指定了镜像地址 `registry.invalid/aiops/workload:missing`，其中 `registry.invalid` 为 RFC 2606 保留的无效域名 [证据 #2]。Kubelet 在尝试拉取该镜像时无法解析域名导致失败，进而进入 `ImagePullBackOff` 等待状态 [证据 #1, #3]。该配置错误直接导致容器无法启动，进而使 Pod 维持在 `Pending` 阶段 [证据 #4]。Prometheus 指标中 `waiting_reason` 为 `ImagePullBackOff` 的结果 [证据 #5] 进一步证实了这一结论。目前证据链完整，无缺失决定性事实。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-imagepull-failed"
+    ],
+    "found": [
+      "pod-imagepull-failed",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-imagepull-failed"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 4,
+    "planned": 6,
+    "completeness": 0.6666666666666666,
+    "lanes": [
+      {
+        "lane": "cfffa70ec9a144fd-g1",
+        "collected": 4,
+        "planned": 6,
+        "source": "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 4,
+    "planned": 6,
+    "completeness": 0.6666666666666666,
+    "lanes": [
+      {
+        "lane": "cfffa70ec9a144fd-g1",
+        "collected": 4,
+        "planned": 6,
+        "source": "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 6,
+    "planned": 6,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "image-pull-waiting-state",
+        "description": "容器 Waiting Reason 为 ErrImagePull/ImagePullBackOff",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-109ab8af2661",
+          "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/tools/004-evidence-kubectl_get_yaml.structured.json",
+          "fact-8a9e583c9cd3",
+          "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/tools/005-evidence-kubectl_describe.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 27,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "image-pull-error-event",
+        "description": "镜像拉取事件包含 registry.invalid 的真实错误",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-18edfc771f73",
+          "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/tools/004-evidence-kubectl_get_yaml.structured.json",
+          "fact-81b970a67d84",
+          "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/tools/005-evidence-kubectl_describe.structured.json",
+          "fact-109ab8af2661",
+          "fact-8a9e583c9cd3"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 27,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "configured-image",
+        "description": "Pod 配置确认实际镜像地址",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-18edfc771f73",
+          "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/tools/004-evidence-kubectl_get_yaml.structured.json",
+          "fact-81b970a67d84",
+          "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/tools/005-evidence-kubectl_describe.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 27,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "image-pull-metric",
+        "description": "Prometheus waiting reason 指标确认异常仍存在",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [
+          "fact-0e0e7515c6cb",
+          "/tmp/aiops/reports/context_archives/cfffa70ec9a144fd-g1/tools/001-evidence-execute_pod_promql.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 8,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 39,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

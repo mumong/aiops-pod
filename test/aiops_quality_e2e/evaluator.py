@@ -20,11 +20,15 @@ NEGATION_MARKERS = (
     "排除",
     "不是",
     "并非",
+    "而非",
     "不属于",
     "无证据",
     "缺乏",
     "未发现",
     "未见",
+    "未显示",
+    "没有显示",
+    "未提供",
     "无法确认",
     "不能确认",
     "not ",
@@ -45,6 +49,13 @@ INCONCLUSIVE_MARKERS = (
     "root cause is unknown",
 )
 
+CONFLICT_NEGATION_MARKERS = (
+    "没有",
+    "不存在",
+    "缺少",
+    "缺失",
+)
+
 
 @dataclass(frozen=True)
 class RootCauseExpectation:
@@ -52,6 +63,9 @@ class RootCauseExpectation:
     include_all: tuple[str, ...] = ()
     include_any: tuple[str, ...] = ()
     exclude_any: tuple[str, ...] = ()
+    allow_negated: tuple[str, ...] = ()
+    mechanisms_any: tuple[str, ...] = ()
+    reject_patterns: tuple[str, ...] = ()
     aliases: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     @classmethod
@@ -67,6 +81,9 @@ class RootCauseExpectation:
             include_all=tuple(str(item) for item in (value.get("include_all") or [])),
             include_any=tuple(str(item) for item in (value.get("include_any") or [])),
             exclude_any=tuple(str(item) for item in (value.get("exclude_any") or [])),
+            allow_negated=tuple(str(item) for item in (value.get("allow_negated") or [])),
+            mechanisms_any=tuple(str(item) for item in (value.get("mechanisms_any") or [])),
+            reject_patterns=tuple(str(item) for item in (value.get("reject_patterns") or [])),
             aliases=aliases,
         )
 
@@ -89,6 +106,7 @@ class ExpectationMatch:
     missing_all: tuple[str, ...] = ()
     missing_any: tuple[str, ...] = ()
     conflicts: tuple[str, ...] = ()
+    failure_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -212,20 +230,78 @@ def _normalize_runbook_id(value: str) -> str:
     return normalized[:-3] if normalized.endswith(".md") else normalized
 
 
+def _runbook_ids_in_text(value: str) -> set[str]:
+    return {
+        _normalize_runbook_id(match.group(1))
+        for match in re.finditer(
+            r"(?i)(?<![a-z0-9_-])(pod-[a-z0-9][a-z0-9_.-]*)(?![a-z0-9_-])",
+            value or "",
+        )
+        if _normalize_runbook_id(match.group(1))
+    }
+
+
 def extract_runbook_ids(report: str) -> tuple[str, ...]:
-    """Extract exact runbook IDs from the final human-facing report.
+    """Extract IDs only from the final report's Runbook reference block.
 
     The current reporter emits IDs such as ``pod-config-error`` in its
     ``Runbook 参考`` block.  Matching the final report keeps this metric
-    auditable and avoids treating a runbook merely present in the global
-    catalog as selected by the diagnosis lane.
+    auditable.  Restricting extraction to that block avoids treating labels
+    such as ``pod-template-hash`` or IDs mentioned in unrelated prose as
+    selected Runbooks.
     """
 
     found: set[str] = set()
-    for match in re.finditer(r"(?i)(?<![a-z0-9_-])(pod-[a-z0-9][a-z0-9_.-]*)(?![a-z0-9_-])", report or ""):
-        runbook_id = _normalize_runbook_id(match.group(1))
-        if runbook_id:
-            found.add(runbook_id)
+    heading = re.compile(r"(?im)^\s*(?:#{1,6}\s*)?(?:📋\s*)?Runbook\s*参考\s*$")
+    for match in heading.finditer(report or ""):
+        start = match.end()
+        next_heading = re.search(r"(?m)^\s*#{1,6}\s+", (report or "")[start:])
+        end = start + next_heading.start() if next_heading else len(report or "")
+        for line in (report or "")[start:end].splitlines():
+            if re.match(r"^\s*[-*]\s+.*\bg[0-9]+\b.*[:：]", line):
+                found.update(_runbook_ids_in_text(re.split(r"[:：]", line, maxsplit=1)[-1]))
+    return tuple(sorted(found))
+
+
+def _structured_runbook_ids(value: Any, *, parent_key: str = "") -> set[str]:
+    """Read selected Runbook IDs from explicit structured fields only."""
+
+    selected_keys = {
+        "matched_runbooks",
+        "referenced_runbooks",
+        "runbook_ids",
+        "runbook_id",
+        "core_runbook",
+        "reference_runbooks",
+    }
+    found: set[str] = set()
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized_key = str(key).casefold()
+            if normalized_key in selected_keys:
+                found.update(_structured_runbook_ids(item, parent_key=normalized_key))
+            elif isinstance(item, (Mapping, list, tuple)):
+                found.update(_structured_runbook_ids(item, parent_key=normalized_key))
+        return found
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found.update(_structured_runbook_ids(item, parent_key=parent_key))
+        return found
+    if parent_key in selected_keys:
+        for runbook_id in _runbook_ids_in_text(str(value or "")):
+            if runbook_id != "pod-template-hash":
+                found.add(runbook_id)
+    return found
+
+
+def extract_structured_runbook_ids(observations: Sequence[str]) -> tuple[str, ...]:
+    found: set[str] = set()
+    for observation in observations:
+        try:
+            payload = json.loads(observation)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        found.update(_structured_runbook_ids(payload))
     return tuple(sorted(found))
 
 
@@ -240,7 +316,9 @@ def score_runbooks(
             item for item in (_normalize_runbook_id(value) for value in expected) if item
         )
     )
-    found_ids = extract_runbook_ids("\n".join((report, *observations)))
+    found_ids = tuple(
+        sorted(set(extract_runbook_ids(report)) | set(extract_structured_runbook_ids(observations)))
+    )
     found_set = set(found_ids)
     matched = tuple(item for item in expected_ids if item in found_set)
     coverage = len(matched) / len(expected_ids) if expected_ids else None
@@ -258,31 +336,43 @@ def _occurrences(text: str, phrase: str) -> Iterable[tuple[int, int]]:
     normalized_phrase = _normalize(phrase)
     if not normalized_phrase:
         return
-    if re.fullmatch(r"[a-z0-9_.:/-]+", normalized_phrase):
-        pattern = re.compile(
-            rf"(?<![a-z0-9_]){re.escape(normalized_phrase)}(?![a-z0-9_])",
-            re.IGNORECASE,
-        )
-        for match in pattern.finditer(normalized_text):
-            yield match.start(), match.end()
-        return
-    start = normalized_text.find(normalized_phrase)
-    while start >= 0:
-        yield start, start + len(normalized_phrase)
-        start = normalized_text.find(normalized_phrase, start + len(normalized_phrase))
+    # Apply token boundaries also to mixed phrases ("Exit Code 2", "退出码 2").
+    # Otherwise an exit code of 20/200 incorrectly satisfies the expected 2.
+    left = r"(?<![a-z0-9_])" if re.match(r"[a-z0-9_./]", normalized_phrase[0]) else ""
+    right = r"(?![a-z0-9_])" if re.match(r"[a-z0-9_]", normalized_phrase[-1]) else ""
+    pattern = re.compile(left + re.escape(normalized_phrase) + right, re.IGNORECASE)
+    for match in pattern.finditer(normalized_text):
+        yield match.start(), match.end()
 
 
-def _is_negated(text: str, start: int, end: int) -> bool:
+def _is_negated(
+    text: str, start: int, end: int, *, conflict_term: bool = False
+) -> bool:
     normalized = _normalize(text)
-    before = normalized[max(0, start - 40):start]
+    before = normalized[max(0, start - 48):start]
+    # Negation does not cross a sentence/clause boundary.  The previous broad
+    # character window incorrectly negated a later positive statement.
+    before = re.split(r"[。！？!?；;，,\n]", before)[-1]
     after = normalized[end:min(len(normalized), end + 18)]
+    # "无法排除 OOM" means OOM is still possible, not that it was excluded.
+    if re.search(r"(?:无法|不能|未能|尚未)\s*排除[^。！？!?；;\n]*$", before):
+        return False
     if any(marker in before for marker in NEGATION_MARKERS):
+        return True
+    if conflict_term and any(marker in before for marker in CONFLICT_NEGATION_MARKERS):
+        return True
+    if conflict_term and re.search(r"无\s*(?:kernel|内核)?\s*$", before, re.I):
         return True
     # Chinese reports frequently use the compact form ``非 OOMKilled``.
     # Treat only an immediately preceding ``非`` as negation; adding the
     # single character to NEGATION_MARKERS would incorrectly negate a term
     # whenever an unrelated ``非`` appeared anywhere in the 40-char window.
-    if re.search(r"非\s*$", before):
+    if re.search(r"非(?:标准的)?\s*$", before):
+        return True
+    # An explicit causal exclusion can separate 非 from its object, e.g.
+    # "非资源耗尽导致的 OOMKilled". Do not treat any preceding 非 as
+    # negation: "非零退出，实际为 OOMKilled" remains an affirmative claim.
+    if re.search(r"非(?:资源|内存)(?:耗尽|不足|超限)(?:所)?(?:导致|引发|触发)的?\s*$", before):
         return True
     # A few report forms place the negation after the term, for example
     # "OOMKilled 不是根因".  Keep this suffix window deliberately narrow so a
@@ -304,9 +394,20 @@ def _term_variants(expectation: RootCauseExpectation, term: str) -> tuple[str, .
 
 
 def _positive_term_present(text: str, expectation: RootCauseExpectation, term: str) -> bool:
+    allow_negated = term in expectation.allow_negated
     for variant in _term_variants(expectation, term):
         for start, end in _occurrences(text, variant):
-            if not _is_negated(text, start, end):
+            before = _normalize(text)[max(0, start - 48):start]
+            clause = re.split(r"[。！？!?；;，,\n]", before)[-1]
+            if re.search(
+                r"(?:可能(?:是|为|由)?|疑似|或许(?:是)?|假设(?:是)?|无法排除|不能排除|"
+                r"maybe|possibly|suspected)\s*(?:发生了?|存在)?\s*$", clause, re.I
+            ):
+                continue
+            absence_reference = allow_negated and bool(re.search(
+                r"(?:缺乏|缺少|不存在|未包含|没有)[^。；，]{0,18}$", before
+            )) and not re.search(r"排除|无法确认|不能确认|未提供|无证据", before)
+            if absence_reference or not _is_negated(text, start, end):
                 return True
     return False
 
@@ -314,7 +415,7 @@ def _positive_term_present(text: str, expectation: RootCauseExpectation, term: s
 def _conflicting_term_present(text: str, expectation: RootCauseExpectation, term: str) -> bool:
     for variant in _term_variants(expectation, term):
         for start, end in _occurrences(text, variant):
-            if not _is_negated(text, start, end):
+            if not _is_negated(text, start, end, conflict_term=True):
                 return True
     return False
 
@@ -329,8 +430,32 @@ def _claim_body(section: str) -> str:
     return section.strip()
 
 
+def _primary_claim_scope(claim: str) -> str:
+    """Return the asserted root paragraph, excluding later caveats/evidence."""
+
+    blocks = [item.strip() for item in re.split(r"\n\s*\n", claim or "") if item.strip()]
+    if not blocks:
+        return claim
+    primary: list[str] = []
+    caveat_heading = re.compile(
+        r"(?i)^\s*(?:[-*]\s*)?(?:\*{1,2})?"
+        r"(?:未确认|待确认|待核实|局限性|已知局限|缺失信息|缺失事实|排除与未确认|"
+        r"证据不足|unknown|limitation|caveat)"
+    )
+    for block in blocks:
+        if primary and caveat_heading.search(block):
+            break
+        primary.append(block)
+    return "\n\n".join(primary)
+
+
 def _claim_is_inconclusive(claim: str) -> bool:
     normalized = _normalize(claim)
+    if re.search(r"根因确认(?:失败|不成功)|根因(?:仍然|仍|最终)?(?:无法确认|不能确认|未确认)", normalized):
+        return True
+    first = re.split(r"[。\n]", normalized.lstrip("#*-：: "), maxsplit=1)[0]
+    if re.search(r"^(?:根因[：:]?\s*)?(?:可能|疑似|或许|怀疑)|^(?:证据不足|现有证据不足).*可能", first):
+        return True
     # A report may confirm the causal mechanism while explicitly leaving a
     # secondary detail unknown (for example, *which* dependency is down or
     # *why* an object was deleted).  That caveat must not erase the confirmed
@@ -338,7 +463,17 @@ def _claim_is_inconclusive(claim: str) -> bool:
     confirmed = (
         "已确认根因",
         "已确认的根因",
+        "已确认的直接根因",
+        "根因已确认",
+        "根因确认",
         "确认现象根因",
+        "证实了根因现象",
+        "确认了故障现象的直接原因",
+        "确凿证据表明故障根因",
+        "事实已确凿证明故障现象",
+        "已确认的事实",
+        "已确认现象",
+        "现有证据确认",
         "根本原因是",
         "root cause confirmed",
     )
@@ -429,21 +564,32 @@ def extract_root_claims(report: str) -> list[RootClaim]:
 
 
 def match_expectation(expectation: RootCauseExpectation, claim: RootClaim) -> ExpectationMatch:
+    primary_scope = _primary_claim_scope(claim.text)
     matched_all = tuple(
         term for term in expectation.include_all
-        if _positive_term_present(claim.text, expectation, term)
+        if _positive_term_present(primary_scope, expectation, term)
     )
     missing_all = tuple(term for term in expectation.include_all if term not in matched_all)
     matched_any = tuple(
         term for term in expectation.include_any
-        if _positive_term_present(claim.text, expectation, term)
+        if _positive_term_present(primary_scope, expectation, term)
     )
     missing_any = () if matched_any or not expectation.include_any else expectation.include_any
     conflicts = tuple(
         term for term in expectation.exclude_any
-        if _conflicting_term_present(claim.text, expectation, term)
+        if _conflicting_term_present(primary_scope, expectation, term)
     )
-    matched = not claim.inconclusive and not missing_all and not missing_any and not conflicts
+    normalized = _normalize(primary_scope)
+    reasons = []
+    if expectation.mechanisms_any and not any(
+        re.search(pattern, normalized, re.I) for pattern in expectation.mechanisms_any
+    ):
+        reasons.append("missing_causal_mechanism")
+    if any(re.search(pattern, normalized, re.I) for pattern in expectation.reject_patterns):
+        reasons.append("contradictory_causal_claim")
+    if claim.inconclusive:
+        reasons.append("inconclusive")
+    matched = not reasons and not missing_all and not missing_any and not conflicts
     return ExpectationMatch(
         expectation_id=expectation.id,
         matched=matched,
@@ -453,6 +599,7 @@ def match_expectation(expectation: RootCauseExpectation, claim: RootClaim) -> Ex
         missing_all=missing_all,
         missing_any=missing_any,
         conflicts=conflicts,
+        failure_reasons=tuple(reasons),
     )
 
 

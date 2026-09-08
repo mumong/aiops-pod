@@ -1,1003 +1,411 @@
-# K8s AIOps Pod 检测助手 / HolmesGPT Agent 项目指南
+# K8s AIOps Copilot
 
-> 当前正式部署以 `qwen-before-architecture` 分支为准。本文按当前实现更新，历史 README 中的旧模式说明只保留仍然有效的设计思想。
+面向 Kubernetes 的智能运维诊断助手。通过自然语言查询集群、定位异常 Pod，调用 MCP 工具获取现场数据，输出包含**异常现象、真实证据、根因分析、修复建议与未知项**的报告。
 
-## 目录
+本文按当前源码与部署清单介绍，不代表所有运行环境都已更新到相同版本。主要入口：[部署](#部署)、[使用](#使用)、[创建异常测试环境](#创建异常测试环境)、[三维数据采集](#本次更新三维可观测性采集)、[真实异常数据读法](#如何理解报告中的三维数据)、[更多 PromQL](#还能查询哪些-promql)、[日志与归档](#日志归档与-langfuse)。
 
-1. [项目概述](#1-项目概述)
-2. [完整部署指南](#2-完整部署指南)
-3. [架构总览](#3-架构总览)
-4. [核心能力](#4-核心能力)
-5. [工作流与数据流](#5-工作流与数据流)
-6. [API 使用](#6-api-使用)
-7. [核心配置](#7-核心配置)
-8. [核心模块](#8-核心模块)
-9. [节点开发指南](#9-节点开发指南)
-10. [运维与测试](#10-运维与测试)
-11. [关键目录](#11-关键目录)
-12. [参考文档](#12-参考文档)
+## 能做什么
 
-## 1. 项目概述
+- **Pod 故障诊断**：排查 Pending、镜像拉取失败、配置/挂载失败、CrashLoopBackOff、OOMKilled、探针失败、Terminating 卡住、节点失联与驱逐等问题。
+- **三维可观测性分析**：结合 Prometheus 指标、Elasticsearch 日志、DeepFlow 流量与 Tempo Span，验证故障假设和业务影响。
+- **日常查询**：查询 Pod 状态、节点/集群 CPU、内存及其他已接入 Prometheus 的指标。
+- **异常测试环境**：内置 c01～c11 案例，支持手动部署异常负载、验证遥测并发起诊断，便于体验和回归测试；创建资源由测试命令执行，不是诊断 Agent 自动创建。
+- **多 Pod、多集群**：每个目标 Pod 独立采证和分析，再汇总报告；支持联邦查询和标准 A2A 接入。
+- **证据回查**：保留工具响应、结构化结果和摘要，便于核对报告。修复执行模块已实现，**当前部署配置默认关闭**，报告仍可给出修复建议。
 
-### 1.1 项目定位
-
-**K8s AIOps Copilot** 是面向私有化 Kubernetes 环境的 AIOps Pod 专业检测助手。项目以 HolmesGPT Agent 为核心，结合 MCP 工具、Pod 异常 Runbook、Prometheus 可观测数据、LangGraph 工作流、多集群联邦和可选修复审批，为集群提供 Pod 异常检测、证据采集、根因分析、指标查询和修复计划能力。
-
-核心链路可以概括为：
+当前默认诊断流程：
 
 ```text
-用户自然语言问题
-  -> FastAPI 入口分流
-  -> 当前 Pod 状态扫描 / 指标查询
-  -> Pod 异常类型识别与异常组覆盖
-  -> MCP 工具采集真实证据
-  -> 结构化诊断 / 查询结果 / 修复计划
-  -> Markdown 报告 / 可审批修复计划
+/ask → 查询当前 Pod 状态、确定目标
+     → 每个 Pod 独立执行：证据规划 → 三维首轮采集 → 自主补查 → RCA 根因分析
+     → 按组生成报告并汇总
+/query → 直接调用查询工具 → 返回查询结果
 ```
 
-本项目不是单纯聊天机器人。它会通过 MCP 调用 Kubernetes、Prometheus、Bash、Helm、Runbook 等工具获取真实数据，再把工具证据组织成结构化诊断链路和最终报告。
+Agent 负责规划、解释和报告；MCP 负责查询真实数据。Kubernetes 当前状态与 Event 用于确认故障现场，历史事件、Runbook 和正常业务请求用于辅助分析。全局扫描未发现异常时可直接返回概览。
 
-### 1.2 适用问题
+三个项目分工：本仓库 `robusta` 是 Agent，`[mcpstander](../mcpstander/)` 实现工具和数据源访问，`[frountind](../frountind/README.md)` 是可选的聊天前端。Runbook 提供调查指导，不是现场证据，也不保证模型每次都能得到正确根因。
 
-本项目主要解决私有化 Kubernetes 环境里的日常运维诊断问题：
+## 部署
 
-- 当前集群是否存在异常。
-- Pod 为什么处于 `CrashLoopBackOff`、`ImagePullBackOff`、`OOMKilled`、`Terminating`、`Pending` 等状态。
-- CPU、内存、磁盘、网络等指标当前是多少。
-- 多个集群之间哪个集群异常更严重，或者哪个集群指标更高。
-- 故障诊断后，是否能生成可审批、可验证、可回滚的修复计划。
 
-### 1.3 完整系统组成
 
-完整智能运维助手由核心 Agent、MCP 工具集合、可观测性组件和可选前端组成：
+### 1. 准备依赖
 
-| 组件 | 地址 | 是否必需 | 作用 |
-| --- | --- | --- | --- |
-| HolmesGPT Agent | [holmegpt-agent](http://192.168.1.63/wanghuhu/holmegpt-agent) | 必需 | 本项目，负责 API、工作流、LLM 调用、报告生成、联邦聚合和修复审批 |
-| MCP 工具集合 | [mcpstander](http://192.168.1.63/wanghuhu/mcpstander) | 必需 | 第三方 MCP 工具集合，提供 Kubernetes、Prometheus、Bash、Helm、Runbook 等工具入口 |
-| 可观测性组件 | [observability](http://192.168.1.63/platform/observability) | 完整功能建议部署 | 为 `/query` 指标查询和诊断采证提供 Prometheus 数据支撑 |
-| 前端页面 | [aiops-frount](http://192.168.1.63/wanghuhu/aiops-frount) | 可选 | 提供可视化交互页面 |
+需要可访问目标集群的 `kubectl`、可用镜像仓库、LLM 服务，以及能为 Agent 的 20 GiB PVC 提供存储的默认 StorageClass 或匹配 PV。自行构建镜像时需要 Docker。
 
-Agent 和 MCP 工具集合需要部署在同一个集群中，Agent 才能通过配置中的 MCP SSE 地址调用工具。可观测性组件用于给 CPU、内存、磁盘、网络等指标查询提供数据支撑。
 
-### 1.4 核心价值
+| 组件                                    | 用途与接入要求                                                 |
+| ------------------------------------- | ------------------------------------------------------- |
+| 本仓库                                   | FastAPI + LangGraph 诊断服务；默认同 Pod 部署 A2A Adapter         |
+| [mcpstander](../mcpstander/README.md) | MCP 工具服务；默认部署在 `mcp` namespace                          |
+| Prometheus                            | 抓取 kube-state-metrics、kubelet/cAdvisor；业务指标需额外配置抓取      |
+| Filebeat + Elasticsearch              | 采集容器日志并保留 namespace、Pod、容器等 Kubernetes 元数据，建议保留 Pod UID |
+| DeepFlow + ClickHouse                 | 采集目标 Pod 的真实 L7 流量；查询 `flow_log.l7_flow_log`            |
+| Tempo + OTLP Collector                | 保存应用上报的 Span；完整应用链路需要埋点和 trace context 传播               |
+| 前端（可选）                                | `frountind` 连接 Agent HTTP/SSE 接口，也可直接使用 curl            |
 
-| 能力 | 说明 |
-| --- | --- |
-| Pod 异常专业检测 | 先扫描当前 Pod 状态，再识别 `pod_status_keyword`、`pod_abnormal_type` 和异常组 |
-| 当前态优先 | `abnormal_pods` 只能来自当前工具扫描；历史 Event 只能作为辅助，不替代当前状态 |
-| 异常组覆盖 | 基于 `abnormal_groups` / `current_abnormal_summary.status_counts` 覆盖并发异常，不只分析单个 Pod |
-| 证据驱动 | `evidence` 节点按计划调用真实工具，结论以当前工具结果、指标、事件、日志为依据 |
-| 权威事实合同 | 优先消费 `aiops.fact-ledger.v1`，只允许通过来源、实体、UID 和引用校验的 FactRecord 进入权威报告 |
-| 查询与诊断分流 | `/query` 走 direct 快路径，`/ask` 走完整诊断链路 |
-| Pod Runbook 知识库 | 模型可按 Pod 异常类型抓取对应 Runbook，辅助诊断和修复计划生成 |
-| MCP 扩展 | Kubernetes、Prometheus、Bash、Helm、Runbook 等能力通过 MCP SSE 接入 |
-| 多集群联邦 | 支持广播式多集群查询，也支持 Agent-to-Agent 智能路由查询 |
-| 上下文归档 | 工具原始输出、结构化摘要、节点输入输出、token budget、handoff 会落盘，便于复盘 |
-| 修复审批 | 诊断报告可生成 remediation plan；canonical Fact 路径在没有 typed policy 时固定为 `manual_only` 且 `actions=[]` |
 
-### 1.5 当前 Pod 异常检测模型
+**MCP 查询已有遥测，不负责安装采集器或生成业务数据。** 先部署可观测性后端并确认数据进入，再部署 MCP 和 Agent。已有平台可直接复用；本仓库不包含这些后端的安装 Chart。
 
-当前 `/ask` 的主线不是泛化集群巡检，而是 AIOps Pod 专业检测：
+### 2. 配置并部署 MCP
 
-```text
-全局 Pod 状态扫描
-  -> current_abnormal_summary
-  -> abnormal_pods
-  -> abnormal_groups / issue_groups
-  -> pod_status_keyword
-  -> pod_abnormal_type
-  -> matched_runbooks
-  -> layer_handoff
-```
+在同级的 `mcpstander` 目录修改 `deploy/configmap.yaml`。当前 Agent 主用 `aiops-observability-query`（端口 `8100`），通用 Prometheus 查询使用 `8095`。
 
-关键设计：
 
-- 第一优先级是当前仍存在的异常 Pod，而不是历史 Event 或旧报告。
-- `current_abnormal_summary.status_counts` 是下游 evidence 的覆盖基准。
-- 多类异常并发时，主异常组做完整验证，其他异常组至少做最小验证。
-- `layer` / `derived_layer` 仍在代码里保留为内部兼容字段，但不是产品说明里的主模型。
+| MCP 配置项                                                         | 需要核对的内容                                                                                         |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `PROMETHEUS_URL`                                                | 当前清单为 `http://observability-prometheus.monitor.svc:9090`；query 服务和通用 Prometheus 服务均需配置          |
+| `AIOPS_ES_EXEC_NAMESPACE` / `AIOPS_ES_SECRET_NAMESPACE`         | ES Pod 与凭据 Secret 所在 namespace，当前清单为 `monitor`                                                  |
+| `AIOPS_ES_EXEC_POD` / `AIOPS_ES_SECRET_NAME`                    | 默认 `elasticsearch-master-0` / `elasticsearch-master-credentials`；Secret 含 `username`、`password` |
+| `AIOPS_ES_INDEX`                                                | 默认 `filebeat-*`，按实际日志索引修改                                                                       |
+| `AIOPS_CLICKHOUSE_EXEC_NAMESPACE` / `AIOPS_CLICKHOUSE_EXEC_POD` | 当前 namespace 为 `monitor`，默认 Pod 为 `observability-clickhouse-0`                                  |
+| `AIOPS_TEMPO_EXEC_NAMESPACE` / `AIOPS_TEMPO_EXEC_SELECTOR`      | 当前 namespace 为 `monitor`，默认 selector 为 `app=lgtm`                                               |
 
-当前主线 Pod 异常类型来自 `deploy/configmap/runbooks.yaml`：
 
-| Pod 异常类型 | 典型状态 / 信号 | Runbook |
-| --- | --- | --- |
-| `Evicted` | `Evicted` / `Failed`，节点资源压力、临时存储、NoExecute 驱逐 | `pod-evicted.md` |
-| `VolumeMountFailed` | `Pending` / `ContainerCreating`，`FailedMount`、`FailedAttachVolume` | `pod-volume-mount-failed.md` |
-| `PendingUnschedulable` | `Pending`，`FailedScheduling`、资源不足、taint、affinity 不匹配 | `pod-pending-unschedulable.md` |
-| `NodeLostOrUnknown` | `Unknown`，Node `NotReady` / `Unknown`、kubelet 停止上报 | `pod-node-lost-unknown.md` |
-| `TerminatingStuck` | `Terminating`，`deletionTimestamp`、finalizer、kubelet/volume detach 卡住 | `pod-terminating-stuck.md` |
-| `OOMKilled` | `CrashLoopBackOff` / `Error`，Last State `OOMKilled`、exit code 137 | `pod-oomkilled.md` |
-| `CrashLoopBackOffRuntime` | `CrashLoopBackOff`，非 OOM、非镜像拉取、非配置缺失的容器反复退出 | `pod-crashloop-runtime.md` |
-| `ImagePullFailed` | `ImagePullBackOff` / `ErrImagePull` / `ImageInspectError` | `pod-imagepull-failed.md` |
-| `SandboxCreateFailed` | `ContainerCreating` / `FailedCreatePodSandBox`，CNI/IPAM/runtime sandbox 异常 | `pod-sandbox-create-failed.md` |
-| `ConfigError` | `CreateContainerConfigError` / `CreateContainerError` / 配置启动失败 | `pod-config-error.md` |
-| `NotReadyProbeFailed` | Running 但 READY 不满足，readiness/startup/liveness probe 失败 | `pod-notready-probe-failed.md` |
+当前默认通过 `kubectl exec` 进入 ES、ClickHouse、Tempo 所在 Pod 查询后端；修改后端 namespace 时，要同步修改 MCP 的 `deploy/rbac.yaml` 中对应 Role/RoleBinding。ES/ClickHouse 也有直连模式，配置入口见 [MCP RuntimeConfig](../mcpstander/servers/aiops_observability/config.py)。
 
-## 2. 完整部署指南
-
-### 2.1 部署顺序
-
-建议部署顺序：
-
-1. 部署 MCP 工具集合 `mcpstander`。
-2. 部署可观测性组件 `observability`，如果需要完整指标查询能力。
-3. 部署本项目 `holmegpt-agent`。
-4. 按需部署前端项目 `aiops-frount`。
-
-部署前需要配置各项目里的镜像仓库、集群访问参数、LLM 参数、MCP 地址、federation 子集群地址、前端后端地址等必要参数。
-
-### 2.2 部署 MCP 工具集合
-
-下载项目：
+当前 MCP RBAC 对集群资源授予 `get/list/watch`，另外仅在 `monitor` 授予 `pods/exec: create`，用于进入**已有后端 Pod**查询，并非授予 `pods: create`。不要为禁止创建临时 Pod 而同时撤销采集所需的 exec。exec 本身可以执行命令，仍应限制工具暴露、后端身份和权限；关闭修复流程也不等于所有工具天然只读。
 
 ```bash
-git clone http://192.168.1.63/wanghuhu/mcpstander
+cd ../mcpstander
+# 先配置后端地址、Pod/Secret 名称和镜像地址
+make deploy
+# 修改 MCP 配置后的更新
+make reload
+```
+
+
+
+### 3. 配置并部署 Agent
+
+回到本仓库，按实际环境修改：
+
+
+| 文件                                                           | 配置内容                                                                               |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `deploy/secrets/core.yaml`                                   | `LLM_API_KEY`、`LLM_MODEL`、`LLM_API_BASE`、`MODEL_CONTEXT_WINDOW`；可选 `A2A_API_TOKEN` |
+| [deploy/configmap/config.yaml](deploy/configmap/config.yaml) | MCP SSE 地址、工作流、语言、联邦子集群；单集群设置 `federation.enabled: false`                          |
+| [deploy/k8s-simple.yaml](deploy/k8s-simple.yaml)             | 主服务/A2A/initContainer 镜像、资源、PVC、NodePort                                           |
+| [Makefile](Makefile) / [VERSION](VERSION)                    | 构建推送仓库与镜像版本，需与部署清单的镜像前缀一致                                                          |
+
+
+LLM 需支持工具调用；`MODEL_CONTEXT_WINDOW` 填模型实际上下文容量。Secret 使用 `aiops` namespace、名称 `aiops-secret`，通过 `stringData` 填写上述配置；新环境缺少本地 Secret 文件时需先创建，勿提交真实凭据。
+
+默认 MCP 地址采用集群 DNS，例如 `http://mcp-server-manager.mcp.svc.cluster.local:8100/sse`。按此配置部署时，Agent 与 MCP 位于同一集群；跨集群接入需改成可达地址，并确认 MCP 查询的是目标集群。
+
+```bash
+
+#部署mcp服务
+下载mcp服务资源：git clone http://10.2.0.86/wanghuhu/mcpstander.git
 cd mcpstander
-```
 
-首次部署可在根目录执行：
-
-```bash
+# 部署mcp服务
 make deploy
-```
 
-重新部署或希望先删除旧资源时执行：
+# 部署aiops服
+下载aiops资源：git clone ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
 
-```bash
-make delete deploy
-```
-
-MCP 工具集合部署完成后，Agent 才能正常调用 Kubernetes、Prometheus、Bash、Helm、Runbook 等外部能力。
-
-### 2.3 部署可观测性组件
-
-如果需要 CPU、内存、磁盘、网络等指标查询能力，先部署可观测性组件。
-
-下载资源：
-
-```bash
-git clone http://192.168.1.63/platform/observability
-cd observability
-```
-
-在对应资源目录执行：
-
-```bash
-helm install observability ./ -n xnet --create-namespace
-```
-
-等待可观测性相关服务全部启动后，再部署或重启 Agent。
-
-### 2.4 部署 HolmesGPT Agent
-
-下载本项目：
-
-```bash
-git clone http://192.168.1.63/wanghuhu/holmegpt-agent
 cd holmegpt-agent
-git checkout qwen-before-architecture
-```
 
-关键配置文件：
-
-| 文件 | 作用 |
-| --- | --- |
-| `deploy/secrets/core.yaml` | LLM API Key、模型、API Base、上下文窗口、日志级别等敏感配置 |
-| `deploy/configmap/config.yaml` | MCP 地址、workflow、remediation、metrics、federation、i18n 等运行配置 |
-| `deploy/configmap/runbooks.yaml` | Runbook 知识库 |
-| `deploy/k8s-simple.yaml` | Agent Deployment、Service、PVC |
-| `deploy/rbac.yaml` | ServiceAccount 和 RBAC |
-
-#### 单节点运行
-
-```bash
-make delete deploy
-```
-
-#### 多集群主集群部署
-
-多集群模式下，需要先修改主集群 `deploy/configmap/config.yaml` 中的 `federation.sub_agents`，确保每个子集群 URL 都能被主集群 Pod 访问。
-
-```bash
-make delete deploy-master
-```
-
-#### 多集群子集群部署
-
-在其他被控制的子集群中执行：
-
-```bash
-make delete deploy-slave
-```
-
-子集群会关闭 federation，只提供单集群 `/ask` 和 `/query` 能力供主集群调用。
-
-#### 代码变更后的升级
-
-如果 Agent 代码发生变化，先修改 `VERSION` 中的版本号，再构建、推送并部署。
-
-主集群：
-
-```bash
-make delete build push deploy-master
-```
-
-子集群：
-
-```bash
-make delete build push deploy-slave
-```
-
-单节点：
-
-```bash
-make delete build push deploy
-```
-
-### 2.5 部署前端
-
-下载前端项目：
-
-```bash
-git clone http://192.168.1.63/wanghuhu/aiops-frount
-cd aiops-frount
-```
-
-在前端项目目录执行：
-
-```bash
-make delete deploy
-```
-
-前端需要配置后端 Agent 的访问地址，确保浏览器或网关能访问 `holmegpt-agent` 暴露的服务。
-
-### 2.6 部署验证
-
-检查 Agent：
-
-```bash
-kubectl get pods -n aiops
-kubectl get svc -n aiops
-curl http://<node-ip>:30800/health
-```
-
-检查 MCP 状态：
-
-```bash
-curl http://<node-ip>:30800/api/v1/mcp/status
-```
-
-执行一次诊断：
-
-```bash
-curl --no-buffer -G "http://<node-ip>:30800/ask" \
-  --data-urlencode "q=我的集群现在有什么问题？"
-```
-
-执行一次查询：
-
-```bash
-curl --no-buffer -G "http://<node-ip>:30800/query" \
-  --data-urlencode "q=集群 CPU 和内存使用率是多少？"
-```
-
-## 3. 架构总览
-
-### 3.1 当前正式架构
-
-当前服务对外是一个 FastAPI API Server，内部核心是：
-
-- AICall + LangGraph 工作流。
-- MCP 工具调用。
-- Runbook 知识库。
-- Context archive 和 token budget 管理。
-- 多集群 federation。
-- Post-diagnosis remediation。
-
-当前实现已经是 AICall + Workflow 唯一正式模式，不再通过旧 README 中的 `USE_WORKFLOW` 切换新旧执行模式。
-
-### 3.2 整体架构图
-
-```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ 用户 / 前端 / curl                                                           │
-│   /ask   /query   /federation/*   /remediation/approve                       │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ FastAPI API 层                                                               │
-│ app/api/routes.py                                                            │
-│ - 参数解析、GET/POST、text/SSE 流式响应                                      │
-│ - /ask 进入诊断链路，/query 进入 direct 查询链路                             │
-│ - /federation/* 进入多集群聚合或 Agent-to-Agent                              │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ HolmesService 服务编排层                                                     │
-│ app/core/service.py                                                          │
-│ - 加载 Secret / ConfigMap / Runbook                                          │
-│ - 初始化 AICall、MCP tools、federation、remediation                           │
-│ - 渲染终端和前端可读的流式输出                                                │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ LangGraph Workflow                                                           │
-│ layer -> evidence -> rca -> conclusion                                       │
-│ - WorkflowState 在节点间传递结构化字段                                       │
-│ - structured_runtime 使用 Pydantic schema 校验关键节点输出                   │
-│ - query direct 模式可以从 layer 直接到 conclusion                            │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │
-                         ┌─────────────┴─────────────┐
-                         ▼                           ▼
-┌──────────────────────────────────────┐ ┌─────────────────────────────────────┐
-│ MCP 工具集合                          │ │ 上下文与报告存储                    │
-│ mcpstander                            │ │ /tmp/aiops/reports                  │
-│ - Kubernetes / Prometheus / Bash       │ │ - context_archives                  │
-│ - Helm / Runbook / Connectivity        │ │ - saved reports                     │
-└──────────────────────────────────────┘ └─────────────────────────────────────┘
-                         │
-                         ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ Kubernetes 集群 / Prometheus / 外部工具 / 子集群 Agent                        │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 3.3 设计原则
-
-- LLM 负责理解意图、规划证据、解释现象和生成报告。
-- MCP 工具负责获取真实当前态数据。
-- 工作流负责把诊断拆成稳定阶段，避免简单查询走完整诊断链。
-- Pydantic schema 负责约束关键节点输出，fallback 负责兼容 OpenAI-compatible 网关不支持原生 structured output 的情况。
-- context archive 负责保存原始证据，最终报告只展示关键摘要和引用。
-- remediation 默认以审批优先，生产环境不要直接打开不受控自动写操作。
-
-## 4. 核心能力
-
-### 4.1 能力清单
-
-| 能力 | 当前实现 |
-| --- | --- |
-| 单集群诊断 | `/ask` 进入 `layer -> evidence -> rca -> conclusion` |
-| 单集群查询 | `/query` 进入 direct 快路径，适合指标、列表、状态查询 |
-| 多集群广播 | `/federation/ask`、`/federation/query` 并发调用配置中的子集群 |
-| Agent-to-Agent 联邦 | `/federation/ask/v2`、`/federation/query/v2` 由主 Agent 决定查询哪些子集群 |
-| MCP 工具调用 | 通过 `mcp_servers` 配置加载 Kubernetes、Prometheus、Bash、Helm、Runbook 等工具 |
-| Runbook 参考 | 模型可调用 Runbook 工具，最终报告区分核心 Runbook 和参考 Runbook |
-| 结构化运行时 | `LayerOutput`、`LayerHandoff`、`QueryResult`、Evidence/RCA 结构通过 Pydantic 校验 |
-| Canonical Fact Ledger | 保留 MCP canonical Ledger，严格门禁 trusted legacy adapter，并校验 RCA 引用的 Fact ID |
-| 权威报告 | 精确事实、coverage、限制和机器附录从 validated FactRecords 确定性渲染 |
-| 人类可读报告 | 正文解释证据且隐藏内部 ID；机器附录保留完整 Fact、引用和限制；混合 provider 下真实信号优先于单源空结果 |
-| 上下文治理 | observation summary、context compaction、context archive、token budget 日志 |
-| 32K 硬门禁 | 每次 provider-bound 请求在调用前校验，超限时先做确定性压缩或停止 |
-| 流式输出 | 支持 text 和 SSE，展示节点进度、工具调用、模型输出和最终报告 |
-| 修复审批 | `workflow.remediation` 控制 deterministic/react executor 和 review/auto mode |
-| 报告查看 | `/reports`、`/reports/{filename}` 查看已保存报告 |
-| 大输出查看 | `/artifacts/{artifact_id}` 获取被截断工具输出全文 |
-
-### 4.2 查询与诊断边界
-
-`/ask` 用于“为什么、分析原因、当前有什么异常、如何修复”这类诊断问题。
-
-`/query` 用于“是多少、列出来、对比指标、查看状态”这类窄查询问题。
-
-这个分流是当前架构最重要的边界之一：查询不应该因为进入完整 RCA 链路而变慢，诊断也不应该只返回一组指标而缺少证据链和根因分析。
-
-## 5. 工作流与数据流
-
-### 5.1 `/ask` 诊断链路
-
-```text
-question
-  -> layer      扫描当前 Pod 状态，识别异常 Pod、异常组和 pod_abnormal_type
-  -> evidence   围绕异常组制定证据计划，调用 MCP 工具验证当前状态
-  -> rca        基于 evidence 结构化事实收敛根因，默认 lite 模式不重复调工具
-  -> conclusion 汇总最终诊断报告，可输出结构化 remediation plan
-```
-
-| 节点 | 作用 | 关键输出 |
-| --- | --- | --- |
-| `layer` | 轻量扫描当前 Pod 状态，形成异常概览和 Pod 异常类型 | `current_abnormal_summary`、`abnormal_pods`、`abnormal_groups`、`pod_status_keyword`、`pod_abnormal_type`、`layer_handoff` |
-| `evidence` | 根据 `layer_handoff` 生成证据计划，按异常组调用 MCP 工具验证当前状态 | `evidence_items`、`tool_results`、`evidence_analysis`、`evidence_facts`、`evidence_conflicts` |
-| `rca` | 基于 evidence 结构化事实分析根因和因果链 | `root_cause`、`causal_chain`、`rca_analysis`、`primary_runbook_id` |
-| `conclusion` | 生成最终 Markdown 报告，并按需生成 remediation plan | `conclusion_formatted`、`remediation_plan`、`remediation_result` |
-
-`HEALTHY` 会从 `layer` 直接到 `conclusion`。这类问题不进入完整采证和 RCA，避免把健康态硬分析成故障。
-
-#### Canonical Fact Ledger authority
-
-MCP 原生 `source=mcp_canonical`、`legacy_contract=false` 的 Ledger 是首选路径。
-滚动升级期间，legacy 结果只有在来源、namespace/Pod、独立 Pod UID、
-evidence refs、Fact ID 和实体关系全部通过时才会标记为 `trusted_legacy`。
-其他结果保留为兼容或拒绝状态，不会把模型文本升级为精确事实。
-
-RCA 仍由模型形成 hypothesis 和 supporting Fact ID，但 Conclusion 只发布引用
-校验通过的 FactRecords。指标采样间隔、代表性 Trace、可用性未测量、容量策略
-缺失和拓扑因果边界由确定性代码生成。
-
-正文与机器附录的边界、混合来源优先级和通用扩展规则见
-[`docs/human-readable-diagnostic-reports.md`](docs/human-readable-diagnostic-reports.md)。
-
-### 5.2 `/query` 查询链路
-
-```text
-question
-  -> layer      direct query 模式下调用工具并产出 query_result
-  -> conclusion 本地渲染 query_result，不走完整诊断链
-```
-
-`/query` 的目标是快而窄：只查询用户关心的数据，不进入 evidence/RCA 诊断链。Prometheus 指标类查询依赖可观测性组件。
-
-### 5.3 多集群联邦链路
-
-当前有两类联邦入口：
-
-| 入口 | 模式 | 说明 |
-| --- | --- | --- |
-| `/federation/ask` | 广播诊断 | 并发调用所有 enabled 子集群的 `/ask`，再汇总 |
-| `/federation/query` | 广播查询 | 并发调用所有 enabled 子集群的 `/query`，再汇总 |
-| `/federation/ask/v2` | Agent-to-Agent 诊断 | 主 Agent 根据问题决定查询哪些子集群、调用哪些子任务 |
-| `/federation/query/v2` | Agent-to-Agent 查询 | 主 Agent 根据问题做跨集群查询和对比 |
-
-主集群开启 `federation.enabled=true` 并配置 `sub_agents`；子集群通过 `make deploy-slave` 关闭 federation，作为被调度 Agent 暴露单集群能力。
-
-### 5.4 修复执行链路
-
-修复是诊断之后的可选阶段，由 `workflow.remediation` 控制：
-
-```text
-诊断报告
-  -> remediation_plan
-  -> approval request
-  -> deterministic executor 或 react executor
-  -> verify
-  -> remediation_result
-```
-
-| 配置 | 说明 |
-| --- | --- |
-| `executor=deterministic` | 按报告中的结构化 plan 固定执行，适合明确命令序列 |
-| `executor=react` | LLM 根据真实 observation 多轮决策，适合需要边执行边验证的场景 |
-| `mode=review` | 计划和写动作需要人工审批，推荐生产环境使用 |
-| `mode=auto` | 自动执行安全校验通过的动作，生产环境谨慎使用 |
-
-旧环境变量或请求参数 `remediate` 不再控制修复执行，修复行为以 `workflow.remediation` 配置为准。
-对 canonical Fact Ledger 报告，上述执行配置不会覆盖证据合同：没有独立
-typed Remediation Policy Contract 时只允许人工复核和只读验证。
-
-## 6. API 使用
-
-### 6.1 端点列表
-
-| 端点 | 用途 | 推荐场景 |
-| --- | --- | --- |
-| `/ask` | 单集群诊断 | 故障分析、根因分析、修复建议 |
-| `/query` | 单集群查询 | 指标查询、资源列表、状态查看 |
-| `/federation/ask` | 多集群广播诊断 | 所有子集群都要诊断时 |
-| `/federation/query` | 多集群广播查询 | 所有子集群都要查询时 |
-| `/federation/ask/v2` | 多集群 Agent 诊断 | 需要主 Agent 自主选择子集群时 |
-| `/federation/query/v2` | 多集群 Agent 查询 | 需要跨集群对比或智能路由时 |
-| `/remediation/approve` | 修复审批接口 | `mode=review` 时审批 plan 或写动作 |
-| `/health` | 健康检查 | 部署验证 |
-| `/tools` | 工具列表 | 调试 |
-| `/tools/detail` | 工具详情和 schema | 二次开发、排障 |
-| `/api/v1/mcp/status` | MCP 状态 | 检查 MCP server 连接 |
-| `/runbooks` | Runbook 列表 | 调试 |
-| `/reports` | 查看已保存报告 | 联邦报告和历史报告查看 |
-| `/reports/{filename}` | 查看具体报告内容 | 报告详情 |
-| `/artifacts/{artifact_id}` | 查看大输出 artifact | 工具输出被截断时 |
-| `/q/{question}` | 兼容快捷入口 | 不推荐作为正式入口 |
-
-### 6.1.1 标准 Agent2Agent（A2A）Server
-
-独立 A2A Adapter 使用官方 `a2a-sdk==0.3.25`，实现 A2A Protocol v0.3.0
-的 Agent Card、JSON-RPC、SSE、Task 查询与取消。它通过 localhost 调用现有
-`/ask` 和 `/query`，不会改变 HolmesGPT/MCP 诊断运行时。
-
-- Agent Card：`http://HOST:30801/.well-known/agent-card.json`
-- A2A JSON-RPC：`POST http://HOST:30801/`
-- 完整调用、鉴权和部署示例：[docs/a2a-server.md](docs/a2a-server.md)
-
-### 6.2 常用示例
-
-单集群诊断：
-
-```bash
-curl --no-buffer -G "http://HOST:30800/ask" \
-  --data-urlencode "q=我的集群有什么问题？"
-```
-
-单集群查询：
-
-```bash
-curl --no-buffer -G "http://HOST:30800/query" \
-  --data-urlencode "q=集群 CPU 和内存使用率是多少，具体到每个 node"
-```
-
-多集群 Agent-to-Agent 诊断：
-
-```bash
-curl --no-buffer -G "http://HOST:30800/federation/ask/v2" \
-  --data-urlencode "q=main 集群和 cluster-24 现在分别有什么问题？"
-```
-
-多集群 Agent-to-Agent 查询：
-
-```bash
-curl --no-buffer -G "http://HOST:30800/federation/query/v2" \
-  --data-urlencode "q=对比 main 和 cluster-24 的 CPU 使用率"
-```
-
-人工审批修复动作：
-
-```bash
-curl -X POST "http://HOST:30800/remediation/approve" \
-  -d run_id=<run_id> \
-  -d approval_id=<approval_id> \
-  -d approved=true \
-  -d reviewer=operator
-```
-
-交互式修复客户端：
-
-```bash
-.venv/bin/python tools/aiops_remediate_chat.py --url http://HOST:30800 "我的集群有什么问题？"
-```
-
-## 7. 核心配置
-
-正式运行配置在 `deploy/configmap/config.yaml`，敏感配置在 `deploy/secrets/core.yaml`。
-
-### 7.1 Secret: LLM 连接配置
-
-`deploy/secrets/core.yaml` 主要配置：
-
-| 配置 | 说明 |
-| --- | --- |
-| `LLM_API_KEY` | LLM 网关 API Key |
-| `LLM_MODEL` | 模型名，例如 OpenAI-compatible Qwen、DeepSeek、Claude、OpenAI 等 |
-| `LLM_API_BASE` | OpenAI-compatible API Base，使用公网服务时可为空 |
-| `MODEL_CONTEXT_WINDOW` | 模型真实上下文窗口，用于 token budget 百分比计算 |
-| `AIOPS_CONTEXT_USAGE_PROBE` | 是否请求网关返回真实 prompt token 使用量 |
-| `AIOPS_TOKENIZER_JSON_PATH` | 可选，模型 tokenizer.json 路径 |
-| `AIOPS_TIKTOKEN_ENCODING` | 可选，tiktoken 编码名 |
-| `LOG_LEVEL` | 服务日志级别 |
-
-不要把真实 Key 写入 README、提交说明或问题记录中。切换模型时优先改 Secret，不要在 ConfigMap 里重复维护默认模型。
-
-### 7.2 ConfigMap: MCP Servers
-
-`mcp_servers` 定义 Agent 可用的外部工具入口。当前主力能力包括：
-
-- `k8s-mcp-service`：Kubernetes 资源查询、describe、logs、events、yaml、table 等。
-- `prometheus_tool`：PromQL 即时查询和范围查询。
-- `bash_tool`：bash 命令执行。
-- `helmcharts`：Helm list/status/values 等。
-- `core-investigation`：任务分解与规划。
-- `runbook`：Runbook 排障知识库。
-- `connectivity_check_tool`：TCP 连通性检查。
-
-示例：
-
-```yaml
-mcp_servers:
-  k8s-mcp-service:
-    description: "K8s MCP - kubectl get/describe/logs/events/yaml/table 等只读资源查询"
-    config:
-      url: "http://mcp-server-manager.mcp.svc.cluster.local:8093/sse"
-      mode: "sse"
-    enabled: true
-```
-
-`description` 会影响模型选择工具，修改工具用途时需要同步更新描述。
-
-### 7.3 ConfigMap: LLM transport
-
-Qwen/OpenAI-compatible 网关可以通过 `llm.extra_body` 配置 provider-specific 参数，例如模型思考开关：
-
-```yaml
-llm:
-  extra_body:
-    chat_template_kwargs:
-      enable_thinking: true
-```
-
-这个配置属于模型传输控制，不是工作流业务逻辑。
-
-### 7.4 ConfigMap: Workflow
-
-核心配置示例：
-
-```yaml
-workflow:
-  rca_mode: lite
-  nodes:
-    layer: true
-    evidence: true
-    rca: true
-    conclusion: true
-  max_steps:
-    layer: 15
-    evidence: 20
-    rca: 0
-    conclusion: 0
-  structured_runtime:
-    enabled: true
-    fallback_enabled: true
-```
-
-说明：
-
-- `rca_mode=lite`：RCA 不重复调工具，只基于已采集证据分析。
-- `max_steps` 直接作为 LangGraph recursion limit，模型到工具一轮通常会消耗多次 recursion。
-- `structured_runtime.enabled=true`：关键节点优先使用 Pydantic 结构化输出。
-- `structured_runtime.fallback_enabled=true`：OpenAI-compatible 网关不支持原生 structured output 时，可回退到文本 JSON 并继续用 Pydantic 校验。
-- `/ask` 和 `/query` 会在 API 层覆盖节点路径，`/query` 使用 direct 快路径。
-
-### 7.5 ConfigMap: Streaming 与 Context
-
-```yaml
-workflow:
-  think_stream:
-    mode: full
-    max_chars: 1200
-  observation_summary:
-    mode: rule
-    max_chars: 3000
-  context_compaction:
-    enabled: true
-    nodes:
-      - evidence
-    max_context_window: 35000
-    trigger_ratio: 0.70
-    max_compactions_per_call: 1
-    summary_max_tokens: 1200
-```
-
-说明：
-
-- `think_stream.mode` 控制 `<think>` 内容展示：`full`、`truncated`、`hidden`。
-- `observation_summary.mode=rule` 默认使用规则摘要，`ai` 会额外调用 LLM 摘要，成本更高。
-- `context_compaction` 控制 evidence 上下文超过阈值后的压缩策略。
-- context archive 默认落在 `/tmp/aiops/reports/context_archives`。
-
-### 7.6 ConfigMap: Remediation
-
-```yaml
-workflow:
-  remediation:
-    enabled: true
-    executor: react
-    mode: review
-    approval_timeout_seconds: 600
-    max_iterations: 10
-    max_write_actions: 10
-    max_duration_seconds: 900
-    verify_settle_seconds: 5
-```
-
-生产环境建议使用 `mode=review`。`mode=auto` 只适合受控测试或明确接受自动写动作风险的环境。
-
-### 7.7 ConfigMap: Federation
-
-主集群开启 federation，子集群关闭 federation。
-
-```yaml
-federation:
-  enabled: true
-  max_tokens_per_agent: 0
-  synthesis_timeout: 300
-  sub_agents:
-    - name: "main"
-      url: "http://localhost:8000"
-      description: "主集群"
-      enabled: true
-    - name: "cluster-24"
-      url: "http://10.2.0.24:30800"
-      description: "被管集群 10.2.0.24"
-      enabled: true
-```
-
-注意：
-
-- 主集群自身可以配置为 `http://localhost:8000`。
-- 子集群 URL 必须从主集群 Pod 内可访问。
-- 修改 federation 配置后需要重新应用 ConfigMap 并重启 Agent，或重新执行部署命令。
-
-### 7.8 ConfigMap: Metrics 与 i18n
-
-```yaml
-i18n:
-  prompt_language: zh
-  response_language: zh
-
-metrics:
-  enabled: false
-  thresholds:
-    mttr_seconds: 600
-    rca_confidence: 0.8
-    evidence_completeness: 0.9
-```
-
-`metrics.enabled=false` 时，最终输出默认只展示性能统计和诊断追踪；开启后会展示 MTTR、证据完整率、根因置信度、Runbook 匹配等质量指标。
-
-## 8. 核心模块
-
-### 8.1 模块职责
-
-| 模块 | 路径 | 职责 |
-| --- | --- | --- |
-| API 层 | `app/api/routes.py` | 注册 `/ask`、`/query`、`/federation/*`、`/health`、`/tools`、`/runbooks`、`/reports` 等端点 |
-| 服务编排 | `app/core/service.py` | 加载配置、初始化模型、加载 MCP 工具、执行工作流、渲染流式输出 |
-| LLM 调用 | `app/core/aicall/` | AICall、LangGraph Agent、工具封装、流式事件 |
-| 工作流图 | `app/core/workflow/graph.py` | 构建 `layer -> evidence -> rca -> conclusion` 图和条件路由 |
-| 工作流执行器 | `app/core/workflow/executor.py` | 执行 LangGraph，发出节点生命周期和流式事件 |
-| 工作流状态 | `app/core/workflow/state.py` | 定义 `WorkflowState`，承载节点间结构化字段 |
-| 结构化 schema | `app/core/workflow/schemas.py` | 定义 Layer、Handoff、Query、Evidence、RCA 等 Pydantic contract |
-| 工作流节点 | `app/core/workflow/nodes/` | layer、evidence、rca、conclusion 四个节点实现；conclusion 使用 `CONCLUSION_FORMATTER_PROMPT` 富模板单次生成人类可读报告 |
-| Context 管理 | `app/core/context/` | context archive、token budget、observation summary |
-| 修复执行 | `app/core/remediation/` | 修复计划解析、审批、deterministic/react 执行 |
-| 多集群联邦 | `app/core/federation/` | 子集群注册、广播查询、Agent-to-Agent、报告聚合 |
-| Runbook | `app/core/runbook/` | Runbook catalog 加载与管理 |
-| MCP 管理 | `app/core/mcp/` | 本地 MCP 子进程 auto-start（可选）与状态端点 |
-| Holmes 兼容层 | `app/core/holmes/` | artifacts、streaming、config loader |
-| 配置与部署 | `deploy/` | Kubernetes YAML、Secret、ConfigMap、RBAC |
-
-### 8.2 工作流节点文件
-
-```text
-app/core/workflow/nodes/
-├── base.py
-├── layer_classifier.py
-├── evidence_collector.py
-├── root_cause_analyzer.py
-└── conclusion_formatter.py
-```
-
-### 8.3 关键状态字段
-
-| 字段 | 来源 | 说明 |
-| --- | --- | --- |
-| `question` | API | 用户原始问题 |
-| `run_id` | executor | 当前执行 ID |
-| `layer` / `derived_layer` | layer | 内部兼容字段，用于保留历史路由/归因语义，不作为当前 README 主模型 |
-| `layer_handoff` | layer | 给 evidence/RCA/conclusion 的结构化交接信息 |
-| `current_abnormal_summary` | layer | 当前 Pod 异常概览，包含状态计数和代表行 |
-| `abnormal_pods` | layer | 当前扫描确认仍异常的 Pod 列表 |
-| `abnormal_groups` | layer | 当前异常组，按异常状态族聚合 |
-| `pod_status_keyword` | layer | 当前异常状态关键字，如 `ImagePullBackOff`、`CrashLoopBackOff`、`Terminating` |
-| `pod_abnormal_type` | layer | 归一化 Pod 异常类型，如 `ImagePullFailed`、`OOMKilled`、`TerminatingStuck` |
-| `status_category` | layer | Pod 异常类型的稳定分类，如 `image_registry`、`container_resource`、`lifecycle` |
-| `query_result` | layer | `/query` direct 模式结构化查询结果 |
-| `evidence_items` | evidence | 已采集证据 |
-| `tool_results` | evidence | 工具调用结果 |
-| `evidence_facts` | evidence | 已验证事实摘要 |
-| `root_cause` | rca | 根因结论 |
-| `causal_chain` | rca | 因果链 |
-| `primary_runbook_id` | rca | 核心 Runbook |
-| `conclusion_formatted` | conclusion | 最终 Markdown 报告 |
-| `remediation_plan` | conclusion | 结构化修复计划 |
-| `remediation_result` | remediation | 修复执行结果摘要 |
-| `context_archive_ref` | context | 当前 run 的归档目录引用 |
-| `tool_artifact_refs` | context | 工具 raw/structured/summary 归档引用 |
-
-## 9. 节点开发指南
-
-### 9.1 节点基类约定
-
-所有工作流节点都继承 `WorkflowNode`，核心约定是：
-
-- `node_id`：节点唯一标识，需要与 `graph.py` 中的节点 ID 一致。
-- `node_name`：节点显示名，用于日志和流式输出。
-- `get_required_fields()`：声明节点依赖的 `WorkflowState` 字段。
-- `execute(state)`：节点入口，负责错误处理和状态更新。
-- `_execute_impl(state)`：节点实际业务逻辑。
-
-节点只更新自己负责的字段，不直接修改无关状态。需要传递给下游的信息应放入结构化字段，例如 `layer_handoff`、`evidence_facts`、`query_result`。
-
-### 9.2 新增节点流程
-
-1. 在 `app/core/workflow/nodes/` 下创建新节点文件。
-2. 继承 `WorkflowNode`，实现 `node_id`、`node_name`、`get_required_fields()` 和 `_execute_impl()`。
-3. 如果节点有新的结构化输出，在 `app/core/workflow/schemas.py` 增加 Pydantic schema。
-4. 如果节点要给下游传递新字段，在 `app/core/workflow/state.py` 增加 `WorkflowState` 字段。
-5. 在 `app/core/prompts.py` 增加或更新节点 prompt。
-6. 在 `app/core/workflow/graph.py` 的 `NODE_REGISTRY`、节点顺序和条件路由中注册节点。
-7. 增加 focused unit tests，至少覆盖节点输入、结构化输出、失败 fallback 和路由行为。
-
-### 9.3 节点开发注意事项
-
-- 证据采集必须优先使用 MCP 工具当前返回，不把历史 event 直接当作当前故障。
-- 结构化输出必须经过 schema 校验，不能只依赖模型自然语言。
-- `/query` direct 路径不能引入 evidence/RCA 的额外延迟。
-- 大工具输出不要直接塞满下游上下文，应通过 artifact、summary、context archive 引用。
-- 写操作和修复执行必须走 remediation 审批与安全约束，不要在普通诊断节点里直接执行写动作。
-
-## 10. 运维与测试
-
-### 10.1 Make 命令
-
-Agent 项目目录常用命令：
-
-```bash
-make build
-make push
 make deploy
-make deploy-master
-make deploy-slave
-make delete
-make restart
-make logs
+
+aiops支持部署测试用case
+可在aiops的项目目录下执行以下命令。
+
+# 部署一个异常，例如 c08 OOMKilled
+make case-deploy CASE=c08
+
+  常用 Case：
+
+  c01  Pending / FailedScheduling
+  c02  ImagePullBackOff
+  c03  FailedMount
+  c04  CreateContainerConfigError
+  c05  FailedCreatePodSandBox
+  c06  CrashLoopBackOff / exit 2
+  c07  配置错误 / HTTP 500 / Trace
+  c08  OOMKilled / exit 137
+  c09  Running / Ready=False / HTTP 503
+  c10  Liveness 失败 / 重启
+  c11  Terminating / finalizer 卡死
+
+# (可选)部署前端服务
+下载前端frount资源：git clone ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
+cd aiops-frount
+
+make  deploy
 ```
 
-查看服务：
+`make deploy` 部署主服务及 A2A sidecar，不构建镜像。代码升级时先更新 `VERSION`，在相应仓库运行 `make build push`，再部署；Agent 会同时构建/推送主服务与 A2A 两个镜像。
+
+可选前端：在 `../frountind` 核对镜像与 `nginx.conf` 的后端地址后执行 `make deploy`，默认访问 `http://<node-ip>:30081`；修改前端代码需先 `make build push`。Agent API 为 `:30800`，A2A 为 `:30801`，不要混用。生产环境应通过鉴权网关、TLS 和网络访问控制接入，不要直接将诊断接口及工具结果暴露到公网。
+
+多集群：每个集群部署自己的 MCP/Agent；主集群配置 `federation.sub_agents` 后执行 `make deploy-master`，子集群执行 `make deploy-slave`。这两个目标会修改本地 federation 开关；标准 A2A 的配置和调用见 [A2A 指南](docs/a2a-server.md)。
+
+### 4. 验证服务
 
 ```bash
-kubectl get pods -n aiops
-kubectl get svc -n aiops
-curl http://<node-ip>:30800/health
+kubectl get pods,svc -n mcp
+kubectl get pods,svc,pvc -n aiops
+kubectl port-forward -n aiops svc/aiops-copilot 8000:8000 8001:8001
 ```
 
-查看日志：
+在另一终端执行：
 
 ```bash
-make logs
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/api/v1/mcp/status
+curl -fsS http://127.0.0.1:8000/tools/detail
+curl -fsS http://127.0.0.1:8001/.well-known/agent-card.json
 ```
 
-查看报告：
+确认工具列表包含 `execute_pod_promql`、`query_pod_logs`、`query_pod_tracing`。健康检查只验证服务入口，三维后端是否可用还需通过一次实际诊断验证。
+
+## 使用
+
+以下沿用端口转发地址；直接访问时替换为 `http://<node-ip>:30800`。
 
 ```bash
-curl http://<node-ip>:30800/reports
+# 集群级诊断
+curl -N -G http://127.0.0.1:8000/ask \
+  --data-urlencode 'q=我的集群有什么问题？'
+
+# 指定现场和调查目的，有助于模型选择合适的采证条件
+curl -N -G http://127.0.0.1:8000/ask \
+  --data-urlencode 'q=请诊断 production 命名空间的 api-xxx Pod，结合最近30分钟的内存趋势、重启、日志和请求链路分析原因。'
+
+# 日常指标查询
+curl -N -G http://127.0.0.1:8000/query \
+  --data-urlencode 'q=各节点当前 CPU 和内存使用率是多少？'
 ```
 
-查看 MCP 状态：
+`/ask`、`/query` 默认返回文本流；加 `--data-urlencode 'format=sse'` 获取前端事件流，`stream=false` 获取非流式结果。POST 使用表单参数 `q`，不是 JSON 请求体。
+
+
+| 入口                                                  | 用途                             |
+| --------------------------------------------------- | ------------------------------ |
+| `/ask` / `/query`                                   | 故障诊断 / 轻量查询                    |
+| `/federation/ask` / `/federation/query`             | 多集群广播查询                        |
+| `/federation/ask/v2` / `/federation/query/v2`       | 主 Agent 选择子集群查询；与标准 A2A 协议入口分开 |
+| `/reports`、`/reports/{filename}`                    | 查看已保存的报告                       |
+| `:30801/.well-known/agent-card.json`、`POST :30801/` | 标准 A2A 发现与 JSON-RPC 调用         |
+
+
+
+
+## 本次更新：三维可观测性采集
+
+
+
+### MCP 工具如何设计
+
+当前默认启用 **自主组合查询**（`observability_mode: autonomous`）。模型提供“要验证什么”以及查询条件，工具负责实体校验、构造查询、访问后端和返回带来源的事实。旧 `collect_aiops_case` 粗粒度接口和 fine 工具仍保留，但 Agent 默认不启用。
+
+与预设场景采集相比，当前 `8100` 接口不按 c01～c11 或故障名称选择固定查询：**模型决定调查问题，MCP 执行有范围约束的真实查询**。本次说明的重点是自主查询、三维首轮采集，以及“查询结果 → 完整 MCP 响应 → 模型摘要”的分层处理，不是新增一个自动判定根因的规则引擎。
+
+
+| 维度 / 工具                     | 真实数据来源                                               | 模型可选择的查询条件                            |
+| --------------------------- | ---------------------------------------------------- | ------------------------------------- |
+| Metric：`execute_pod_promql` | Prometheus `/api/v1/query` 或 `/api/v1/query_range`   | PromQL、instant/range、时间窗、step         |
+| Logging：`query_pod_logs`    | Elasticsearch `filebeat-*` 日志                        | 容器、关键词、级别、trace_id、时间窗、条数             |
+| Tracing：`query_pod_tracing` | DeepFlow ClickHouse L7 Flow；按 trace_id 补查 Tempo Span | 入站/出站、协议、响应码、最小时延、对端 IP、请求路径、trace_id |
+| 辅助：`query_pod_topology`     | 实时 Kubernetes 对象关系                                   | 目标 Pod 的控制器、Service selector、节点和容器关系  |
+
+
+工具共同要求精确的 `namespace`、`pod`、`purpose`，可传 `pod_uid` 防止同名 Pod 重建后串用数据。PromQL 每个向量选择器必须包含精确 namespace/pod；日志优先匹配 UID，退回名称和时间窗时标明身份限制；DeepFlow 按 Pod IP 和时间窗约束查询。Flow 与应用 Span 分开保留，只有相同有效 `trace_id` 才能建立对应关联。
+
+**为什么 Logs / Tracing 不需要模型写查询语言？** 模型传 `keywords`、`response_codes` 等参数，MCP 的 `logs.build_query_body` 组合时间、实体与关键词过滤生成 ES DSL；`tracing.build_deepflow_sql` 组合目标 Pod IP、方向、路径、响应码生成 SQL。模型仍需选择有诊断价值的条件，但不用自行处理后端字段兼容与 SQL 拼接。`execute_pod_promql` 则验证作用域后将模型提供的表达式提交给 Prometheus，不替模型选择指标。
+
+### 数据怎样进入报告
+
+1. **确定目标**：查询 Kubernetes 当前状态，将目标拆成独立 Pod 诊断任务；单 Pod 与多 Pod 使用同一套采证和 RCA 流程。
+2. **计划与首轮采集**：当前 `planning_mode: structured` 单独调用模型生成 `EvidencePlanOutput` 并做结构校验，再将整理后的计划通过 `# 既有 evidence_plan` 注入 Evidence 执行阶段的用户消息。自主模式下未获得有效计划时，代码可使用最小 Pod Describe 兜底计划；因此归档中的计划不一定全部来自模型。代码在 ReAct 前执行三维首轮查询，缺少相应查询时补通用基线：Pod phase/等待原因/上次终止原因/重启快照、最近 30 分钟日志与 Flow/Span（默认各最多 20 条）。Topology 可用于补查，不属于代码强制执行的三维基线。
+3. **按问题补查**：模型看到真实结果后决定换 PromQL、查询趋势、过滤错误日志、追踪某个请求等。基线不是按故障类型写死的完整排障流程，也不保证第一轮就取得决定性证据。
+4. **完整返回与归档**：MCP 在查询限额内完整序列化结果，已取消旧的最终 6 KiB 响应裁剪。Agent 先保存原始 MCP 响应，再规范化、去重、选择代表记录，生成有预算限制的模型摘要；未进入摘要的内容可通过 `read_context_archive` 回查。
+5. **分析和展示**：每个 Pod 进行正式 RCA，报告按组汇总真实事实。重复日志聚成相同模式，对数值字段计算 first/last/min/max；相同协议、路径、响应码和端点的 Flow 聚合耗时 min/max，应用 Span 另行保留。
+
+“完整返回”仍受查询窗口和条数约束：Pod 查询窗口最长 120 分钟；PromQL 最多 20 条序列、每序列保留最多 20 个样本，范围查询最多 500 个评估点；日志/链路的 `max_records` 最多 50。指标统计使用后端本次返回的该序列完整采样点，展示点可能抽样；日志和 Flow 汇总仅代表参与聚合的记录。
+
+结果包含来源、实体、时间、查询目的、事实、引用、`coverage`、计数与截断信息。`present` 表示查到了数据；`empty/absent` 表示这次条件下没有数据；`error` 表示查询失败，`partial` 表示仅部分结果可用。**采集成功或三维齐全，不等于根因已证实。** 成功但空的结果不会触发代码级失败重试；模型仍可根据调查目的调整条件补查。
+
+当前配置关闭 RCA 的 Fact Ledger 推理投影和 claim 级发布校验，不能将报告视为逐条通过严格因果校验的结论。复核时应对照原始观察和明确的未知项。
+
+可选 `planning_mode: react_only` 会跳过独立 Plan 模型调用，使用代码基线后由 Evidence 自主调查；它不是当前默认值。Pydantic 校验保证结构可消费，不等于结论的语义与因果关系已验证。
+
+### 如何理解报告中的三维数据
+
+下面摘录的是历史测试中**真实工具归档**的关键字段，不是模拟返回或仅引用 LLM 结论。两组来自不同运行，分别说明诊断价值，不能拼成同一次故障的证据链；重新部署后 Pod 名称、时间和数值会变化。
+
+#### 示例 A：c08 OOMKilled——确认终止原因，观察内存增长行为
+
+Run ID：`142581aaee584211-g1`；目标：`aiops-case-08/workload-5c9c7b6489-wmjhr`。
+
+
+| 维度 / 工具                       | 真实结果摘录                                                                                                                                       | 诊断价值与边界                                                                                             |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Metric / `execute_pod_promql` | `kube_pod_container_status_last_terminated_reason{container="app",reason="OOMKilled"}=1`；`restarts_total=15`；采样时间 `2026-09-07T17:33:31.822Z` | 目标容器上次终止原因被记录为 OOMKilled，并已有重启。它比仅看退出码 137 更直接；这是状态快照，不是内存峰值或趋势。                                    |
+| Logging / `query_pod_logs`    | `message="memory allocation advanced"`、`path="/work"`；20 条按时间排列的日志中 `allocated_mib=10,12,14,…,48`，UTC 时间为 `17:32:11.625–17:32:49.785`（同日）    | 观察到应用记录的分配量持续增加，为内存增长假设提供依据。first=10、last=48、min=10、max=48；这是应用字段，不是容器 RSS，也不能声称“已测到超过 64Mi 的内存峰值”。 |
+
+
+同次 `kubectl_describe` 还返回 `Reason: OOMKilled` 和 `Limits memory: 64Mi`。这些观测支持“存在 OOM 终止与应用分配增长行为”；要定位泄漏位置、证明实际峰值及超限过程，仍应补充应用容器的内存 range 指标或内核/cgroup 事件。
+
+来源定位：该 Run 归档 `tools/001-evidence-execute_pod_promql.*`、`002-evidence-query_pod_logs.*`、`004-evidence-kubectl_describe.*`；OOM 指标事实 ID 为 `fact-be0455d7f7b6`。
+
+#### 示例 B：c09 NotReady——对齐错误日志、网络请求和应用 Span
+
+Run ID：`54e91f6cd7884be0-g1`；目标：`aiops-case-09/workload-5f4fb9ff45-7b77l`。下列三条共享 `trace_id=11a813a37537d619dac9ad9dd14dd35a`：
+
+
+| 维度 / 来源                 | 真实结果摘录                                                                                            | 诊断价值与边界                                                                                                       |
+| ----------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Logging / Elasticsearch | `message="dependency unavailable"`、`http_status=503`、`path="/work"`；时间 `2026-09-07T20:05:41.040Z` | 应用确实记录了业务请求失败，比只展示一条 200 更能说明影响。但消息本身没有确定哪个依赖出了什么故障。                                                          |
+| Tracing / DeepFlow      | `HTTP GET /work`、`response_code=503`、`duration_us=10129`                                          | 网络侧也观察到了错误响应；本条耗时为 **10.129 ms**，不是延迟百分位，也不能仅凭它判断超时。                                                          |
+| Tracing / Tempo         | Span `GET /work`，`http.response.status_code=503`；开始时间 `2026-09-07T20:05:41.039542Z`               | 与日志/Flow 有相同 trace ID 的应用 Span 可辅助核对同一链路；此次返回标为 `related_context`，Flow 与 Span 的 ID、观测范围仍需分别核对，不能据此宣称完整调用链已采齐。 |
+
+
+同次 Kubernetes Describe 返回 `Readiness: /ready` 和 `Readiness probe failed … statuscode: 503`，用于确认探针失败。上表证明的是 `/work` **业务请求失败**，不能替代 `/ready` 的探针证据。DeepFlow 原始时间文本未带时区，跨源时间比较应先核对时区，不直接比较字符串。
+
+来源定位：该 Run 归档 `tools/002-evidence-query_pod_logs.*`、`003-evidence-query_pod_tracing.*`、`004-evidence-kubectl_describe.*`；日志事实 ID 为 `fact-e3724443a973`。归档路径读法见[日志与归档](#日志归档与-langfuse)。历史文件属于原测试环境，不随源码克隆自动获得。
+
+这些数值的来源链路是：**K8s 状态 → kube-state-metrics → Prometheus**；**应用 stdout JSON → Filebeat → ES**；**真实网络请求 → DeepFlow → ClickHouse**。有埋点时，应用另外通过 OTLP 上报 Span 到 Tempo。
+
+正常结果也有价值，但解释范围不同：`restarts_total=0` 只是该采样点的计数；`allocated_mib=0` 不代表容器内存为 0；`/work=200` 不代表所有接口健康；Flow 耗时 min/max 只代表所返回记录，不是 P95/P99。上面的例子展示工具能够提供的诊断信息，**不是承诺每次 Agent 都会采到相同证据**。
+
+其中 `/work` 和 `allocated_mib` 来自本仓库的[测试应用](test/pod-anomaly-cases/base/telemetry-app/app-configmap.yaml)：`allocated_mib` 记录测试程序累计保留的分配量，主要在 `oom_growth` 模式递增。生产应用是否有该字段取决于自身日志，不是 MCP 自造的指标。报告中的 `http_status: 200` 是业务日志字段；工具 `query.http_status` 则可能是后端查询 HTTP 状态，两者不能混用。
+
+保留正常值是为了判断影响范围。例如 Pod 已进入 Terminating，而部分 `/work` 仍成功，说明删除状态与业务进程停止并非同步；应继续看 `deletionTimestamp`、finalizer 和控制器，而不能因为 HTTP 200 就判定 Pod 健康。OOM 调查则应补充内存趋势、资源 limit 与 `OOMKilled` 终态；重启次数和成功请求本身不能证明内存耗尽。
+
+对于 c10，`/work` **返回 200 与** `/health` **探针返回 500 可以同时成立**，它们不是同一个接口。应核对 `Liveness probe failed` 和 `Container ... failed liveness probe, will be restarted` 事件来确认重启机制；退出码 137 仅表示 SIGKILL，不能单独推出 OOM。基础采集返回正常业务请求，可能只是窗口内这些记录被选中，需要围绕故障接口继续补查。
+
+跨维度分析先对齐 **Pod/容器身份与时间窗**，日志和 Span/Flow 的同请求关联再核对 **trace_id**。不同 trace_id 的两个 200 可以各自作为观察事实，不能拼成同一条调用链。容器尚未启动的镜像、调度或配置故障，缺少应用日志/Trace 是合理结果，应以 K8s 状态与事件继续调查。
+
+### 还能查询哪些 PromQL
+
+**可以自主构造 PromQL，不限于重启次数。** `/ask` 的 Pod 诊断使用 `execute_pod_promql`，支持聚合、`rate`、`increase`、即时与范围查询；表达式仍须满足精确 Pod 范围和时间限制。实际可用指标取决于 Prometheus 已抓取的 exporter 和标签。
+
+以下将 `production`、`api-xxx`、`app` 替换为实际 namespace、Pod、容器：
+
+
+| 调查目的           | PromQL 示例                                                                                                                                                                                                     | 读法                                                          |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| 最近 30 分钟重启增量   | `increase(kube_pod_container_status_restarts_total{namespace="production",pod="api-xxx",container="app"}[30m])`                                                                                               | 窗口计数增量，可能因外推为小数；不等同于当前累计值                                   |
+| 内存工作集趋势        | `container_memory_working_set_bytes{namespace="production",pod="api-xxx",container="app"}`                                                                                                                    | 使用 range 查询观察变化，bytes ÷ 1048576 为 MiB；与 Pod 配置中的内存 limit 对照 |
+| 最近 5 分钟 CPU 用量 | `rate(container_cpu_usage_seconds_total{namespace="production",pod="api-xxx",container="app"}[5m])`                                                                                                           | 单位为 CPU 核，0.5 表示约半核，不是节点 CPU 百分比                            |
+| CPU 限流比例       | `rate(container_cpu_cfs_throttled_periods_total{namespace="production",pod="api-xxx",container="app"}[5m]) / rate(container_cpu_cfs_periods_total{namespace="production",pod="api-xxx",container="app"}[5m])` | 被限流周期占比，需结合 CPU limit 和业务延迟解释                               |
+| 容器是否就绪         | `kube_pod_container_status_ready{namespace="production",pod="api-xxx",container="app"}`                                                                                                                       | 0/1 状态，可与探针失败事件及对应探针路径的请求对照                                 |
+
+
+一次 MCP 范围查询参数示例（供 MCP 客户端调用，**不是** `/ask` 的 HTTP JSON body）：
+
+```json
+{
+  "namespace": "production",
+  "pod": "api-xxx",
+  "purpose": "检查异常前30分钟应用容器内存是否持续增长",
+  "promql": "container_memory_working_set_bytes{namespace=\"production\",pod=\"api-xxx\",container=\"app\"}",
+  "query_type": "range",
+  "window_minutes": 30,
+  "step": "30s"
+}
+```
+
+即时查询普通 gauge 只有一个快照，不能据此声称有增长趋势；`increase(...[30m])` 等表达式虽然可以即时执行，但计算本身已引用历史样本。查询返回空数组也不等于数值 0，应检查指标名称、标签、抓取配置和时间窗。
+
+节点/集群查询走 `/query`，使用通用 `execute_prometheus_instant_query`、`execute_prometheus_range_query`，还可用 `get_metric_names`、`get_metric_metadata`、`get_label_values`、`get_series` 发现指标和标签。应用 QPS、错误率、延迟直方图同样可以查询，前提是应用已暴露并被抓取；Pod 工具要求这些序列带精确的 `namespace`、`pod` 标签。
+
+### 日志和链路如何继续补查
+
+以下是 MCP 工具参数示例，替换目标后通过 MCP 客户端调用；普通用户在 `/ask` 中表达相同调查目的即可，模型是否采用这些条件需查看实际工具调用。
+
+```json
+{
+  "namespace": "production", "pod": "api-xxx",
+  "purpose": "查找最近30分钟健康检查接口相关的应用日志",
+  "window_minutes": 30, "keywords": ["/health"],
+  "keyword_mode": "phrase", "max_records": 20
+}
+```
+
+上例用于 `query_pod_logs`；它检索已进入 ES 的日志，不会让未记录探针请求的应用凭空产生日志。链路可以进一步使用 `query_pod_tracing`：
+
+```json
+{
+  "namespace": "production", "pod": "api-xxx",
+  "purpose": "核对健康检查入站请求是否返回500",
+  "window_minutes": 30, "direction": "inbound",
+  "request_resource": "/health", "response_codes": [500],
+  "include_tempo": true, "max_records": 20
+}
+```
+
+DeepFlow 返回匹配的网络 Flow；发现有效 `trace_id` 时可继续查询 Tempo。`include_tempo: true` 不是“必定得到 Span”：没有有效 trace ID 或应用未埋点时，需看 `source_coverage` 中的未执行/缺失原因。查询出站慢调用则可改用 `direction: outbound`、`min_duration_us`、`peer_ip` 等条件。**支持丰富查询，不等于模型每次都会主动构造合适的查询。**
+
+## 验证与排查
+
+
+
+### 创建异常测试环境
+
+本仓库支持自己创建可复现的异常 Pod，再观察三维数据和 Agent 诊断。**仅在专用测试集群执行**：命令使用当前 kubectl context，操作者需有资源创建/删除权限。先完成前述可观测平台部署；Case 只创建测试负载，不会安装 Prometheus、ES、DeepFlow 或 Tempo。
 
 ```bash
-curl http://<node-ip>:30800/api/v1/mcp/status
+# 1. 确认目标集群，查看可用异常
+kubectl config current-context
+make case-list
+
+# 2. 部署一个异常，例如 c08 OOMKilled（在 robusta 根目录运行）
+make case-deploy CASE=c08
+
+# 3. 等待故障与真实遥测成立，不要把刚创建成功当作故障已复现
+make case-validate CASE=c08
+kubectl get pods -n aiops-case-08
+
+# 4. 对该案例诊断，输出到 reports/case-c08-*.txt
+make case-ask CASE=c08
+
+# 5. 验证结束后，仅清理本次创建的 c08 专用 namespace
+kubectl delete namespace aiops-case-08
 ```
 
-### 10.2 本地开发
+也可以部署后在前端直接问“我的集群有什么问题？”，或使用上面的 `/ask` 命令做集群级诊断；`make case-ask` 是定向到该 Case namespace 的便捷入口。运行态案例通过测试应用与流量生成器产生真实日志、指标和 Span，结果随采集时机变化。
 
-本仓库使用 Python 3.12。当前环境中建议使用项目虚拟环境：
+其他案例可替换 `CASE=cNN`：c01 调度、c02 镜像、c03 挂载、c04 配置、c05 Sandbox、c06 运行时退出、c07 应用配置退出、c09 Readiness、c10 Liveness、c11 删除卡住。先核对案例中的测试镜像、遥测后端地址和验证器配置；c05 需要 Multus，c11 还需在产生流量后触发删除，不能只 apply。
 
-```bash
-.venv/bin/python run.py
+需要同时体验全部 c01～c11 时，可运行 `make case-deploy-errors`（含 c11 删除触发，**不执行遥测验收**）；`make case-deploy-all` 会部署全部非破坏性案例并执行验收。确认这些 namespace 都属于测试资源后，再用 `make case-clean` 清理全部案例；它会先释放 c11 finalizer，并删除 `aiops-case-01`～`aiops-case-11`，不要用于存有其他资源的同名 namespace。
+
+案例说明见 [Pod 异常实验库](test/pod-anomaly-cases/README.md)，批量盲测、断点续跑与评分见 [E2E 质量测试](test/aiops_quality_e2e/README.md)。测试应用产生真实流量和遥测；评分器的标准答案不注入诊断 Agent。
+
+### 日志、归档与 Langfuse
+
+Agent 日志：`kubectl logs -n aiops deployment/aiops-copilot -c aiops-copilot -f`。部署清单将报告写入 PVC，**容器内**目录如下；宿主机物理路径由存储系统决定，不要照搬其他环境的 `/data/redis/...`。
+
+```text
+/tmp/aiops/reports/
+├─ *.md                           最终报告，/reports 接口列出这些文件
+└─ context_archives/
+   ├─ <run_id>/                   主流程：Layer、汇总报告
+   └─ <run_id>-g1/                第一个 Pod 诊断组；多组还有 g2、g3
+      ├─ tools/*.raw.txt          Agent 收到的原始 MCP 响应（仍受源端查询限额约束）
+      ├─ tools/*.structured.json  标准化结果、canonical facts 与覆盖元数据
+      ├─ tools/*.summary.txt      提供给模型的工具摘要
+      ├─ node_inputs/            节点归档输入
+      ├─ node_outputs/           Evidence/RCA 输出；evidence.full.json 含实际计划
+      └─ budget/                 上下文预算、压缩与 guard 记录
 ```
 
-如果本地没有 `CONFIG_FILE`，服务会尝试读取 `config/config.yaml`；Kubernetes 部署时使用 `/app/config-override/config.yaml`。
+前端工具卡片展开的是工具摘要，`raw_ref`、`structured_ref`、`summary_ref` 指向归档，不是浏览器可直接打开的 HTTP URL。相同 JSON 外壳表示统一观察合同，不表示三个工具查到了相同数据；对照 `source_system`、`evidence`、时间、`coverage`、计数与截断字段。
 
-### 10.3 Focused unit tests
+启用 Langfuse 上报后，主 Run ID 看定位/汇总，`<run_id>-g1` 看该组采证/RCA；计划调用查 `workflow-evidence_plan`，执行阶段模型 Input 中搜索 `既有 evidence_plan`。两条 Session 属于同一次诊断，不是重复运行。注意 `node_inputs/evidence.input.json` 记录在规划前，不是注入既有计划后的完整执行消息。Fact ID 是回查标识，不是“已验证正确”的标志。
 
-常用 focused unit tests：
 
-```bash
-.venv/bin/python -m pytest -q \
-  tests/unit/workflow/test_fast_paths.py \
-  tests/unit/workflow/test_query_direct_mode.py
-```
+| 现象              | 优先检查                                                           |
+| --------------- | -------------------------------------------------------------- |
+| 工具列表缺少三维查询工具    | Agent 的 `mcp_servers` 开关、MCP `8100/sse` 连通性及部署版本               |
+| Metric 返回 empty | kube-state-metrics/cAdvisor 抓取、指标名与 namespace/pod/container 标签 |
+| 日志/链路查询报错       | 后端 Pod/Secret/selector、`monitor` namespace 的 exec RBAC、ES 索引   |
+| 日志/链路查成功但为空     | 容器是否启动、是否有流量、采集延迟、时间窗、DeepFlow 覆盖和应用埋点                         |
+| 有三维数据但根因仍不清楚    | 数据是否回答本次诊断目的；补查故障时段、具体容器/接口及决定性 K8s 事件                         |
 
-结构化 fallback 相关场景可参考：
 
-```bash
-.venv/bin/python -m pytest -q tests/unit/workflow
-```
-
-Fact Ledger、最终报告和修复安全的 focused 回归：
-
-```bash
-.venv/bin/python -m pytest -q \
-  tests/unit/aicall/test_observation_processing.py \
-  tests/unit/workflow/test_fact_contract.py \
-  tests/unit/workflow/test_context_handoff.py \
-  tests/unit/workflow/test_conclusion_formatter.py \
-  tests/unit/workflow/test_ask_conclusion_remediation_json.py \
-  tests/unit/remediation/test_plans.py
-```
-
-### 10.4 异常 Case 测试（创建 / 诊断 / 清理）
-
-`test/pod-anomaly-cases/` 内置 11 个可重复部署的 Pod 异常场景（c01-c11），用于评判
-aiops 的自主根因分析。两大族：
-
-- **控制面 case（c01-c05）**：容器不会启动（Pending/ImagePull/VolumeMount/ConfigError/Sandbox）。
-  只有 K8s 状态/事件和 kube-state 指标；**没有应用日志和 Trace 是正常结果**，报告应诚实写空。
-- **运行态 case（c06-c11）**：应用真实运行并接收流量（CrashLoop/ConfigTraced/OOM/Readiness/Liveness/Terminating）。
-  产生全五维真实数据：Prometheus 指标、ES 日志、DeepFlow Flow、Tempo Span（同一请求共享 trace_id）。
-
-#### 创建异常 case
-
-```bash
-make case-list                # 查看全部 case（id / 名称 / namespace / 维度覆盖预期）
-make case-deploy CASE=c08     # 部署单个 case（如 c08 OOM）
-```
-
-部署后需等待异常成立和遥测积累：控制面 case 约 1-2 分钟；运行态 case 约 3 分钟
-（需要 traffic-driver 驱动出真实指标/日志/Trace）。可用 `kubectl get pods -n aiops-case-08 -w` 观察。
-
-c11（Terminating 卡死）需要手动触发删除：
-
-```bash
-make case-deploy CASE=c11
-kubectl -n aiops-case-11 wait --for=condition=Ready pod/workload --timeout=180s
-kubectl -n aiops-case-11 logs pod/workload --tail=20     # 确认已有 http_request 日志
-kubectl -n aiops-case-11 delete pod workload --wait=false
-```
-
-#### 诊断与评判
-
-```bash
-make case-ask CASE=c08        # 定向诊断该 case 的 namespace，报告存 reports/case-c08-*.txt
-```
-
-或直接问集群级问题（适合多异常混合测试）：
-
-```bash
-curl "http://<node-ip>:30800/ask?q=我的集群现在有哪些异常Pod？分别是什么原因？&format=text&stream=true"
-```
-
-审报告重点：`真实采集证据结果` 表中 Metric/Logging/Tracing 行是否为**真实值**
-（数值+趋势 / 日志原文 / `请求 → 响应码 + trace_id`），而非 coverage/status 元状态；
-控制面 case 的空维度是否诚实标注。
-
-#### 多异常混合测试
-
-同时部署 2 个 case 后用集群级提问，验证多异常组输出（每组独立分类、根因、修复建议）：
-
-```bash
-make case-deploy CASE=c06
-make case-deploy CASE=c09
-# 等 3 分钟后集群级提问（见上）
-```
-
-⚠️ **当前建议最多 2 个 case 同时测试**：小模型上下文/注意力被多异常组分摊，
-实测 2 组时证据表已可能丢失 Metric 行（数据采到了但没入表），更多组会进一步降质。
-
-#### 清理异常 case
-
-```bash
-kubectl delete namespace aiops-case-08          # 清理单个 case（推荐日常用）
-make case-clean                                 # ⚠️ 清理全部 aiops-case-* namespace
-                                                #（会先安全释放 c11 finalizer 再删）
-```
-
-case 清单/编排细节/离线验收脚本见 [test/pod-anomaly-cases/README.md](test/pod-anomaly-cases/README.md)。
-
-## 11. 关键目录
-
-| 路径 | 说明 |
-| --- | --- |
-| `app/api/routes.py` | API 路由 |
-| `app/core/service.py` | 服务初始化、工作流执行、文本流渲染 |
-| `app/core/aicall/` | LLM 和 LangGraph Agent 调用封装 |
-| `app/core/workflow/` | LangGraph 工作流、节点、schema、metrics |
-| `app/core/remediation/` | 修复计划解析、审批和执行 |
-| `app/core/federation/` | 多集群联邦查询 |
-| `app/core/context/` | context archive、token budget、工具 observation 摘要 |
-| `app/core/mcp/` | MCP server 状态管理 |
-| `deploy/` | Kubernetes 部署资源 |
-| `docs/` | 架构、上下文、流式输出、修复审批等详细文档（只保留当前设计与实现） |
-| `test/` | E2E 场景和数据集 |
-| `test/pod-anomaly-cases/` | Pod 异常测试 case 库（c01-c11，源自 aiopsdata 仓库）：`make case-list / case-deploy CASE=c07 / case-validate / case-ask / case-clean` 快速部署异常场景并评判 aiops 诊断效果 |
-| `tests/unit/` | 单元测试 |
-
-## 12. 参考文档
-
-docs/ 只保留当前设计与实现的文档（历史演进/复盘/计划类文档已清理）：
-
-- `docs/ARCHITECTURE.md` — 架构说明
-- `docs/GUIDE.md` — 部署与运维
-- `docs/接口设计与实现.md` — API 设计
-- `docs/human-readable-diagnostic-reports.md` — 最终诊断报告设计（conclusion 富模板）
-- `docs/prompt-governance.md` — Prompt 管理规则
-- `docs/aiops-observability-mcp-design.md` — 真实可观测性数据与 MCP 使用
-- `docs/上下文管理设计与实现.md` — 上下文管理（archive / budget / observation）
-- `docs/工作流上下文流转说明.md` — 节点间上下文流转
-- `docs/流式输出设计与演进.md` — 流式输出设计
-- `docs/quality-metrics.md` — 质量指标口径
-- `docs/remediation-usage.md` — 修复执行与人工审批
-- `docs/tool-observation-archive-and-summary-strategy.md` — 工具 observation 与归档策略
-- `test/pod-anomaly-cases/README.md` — 异常 case 库（c01-c11）编排与验收细节（快速上手见本 README §10.4）
+维护者源码入口：[工作流路由](app/core/workflow/graph.py)、[三维采证](app/core/workflow/nodes/evidence_collector.py)、[模型摘要投影](app/core/context/observability_projection.py)、[报告聚合](app/core/workflow/nodes/conclusion_formatter.py)、[MCP 工具参数定义](../mcpstander/servers/holmes_tools/aiops_observability_query.py)、[MCP 查询实现](../mcpstander/servers/aiops_observability/query/)。

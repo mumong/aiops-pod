@@ -1,0 +1,220 @@
+{
+  "success": true,
+  "run_id": "94c16f53cd594862",
+  "elapsed_seconds": 591.977,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "node-selector-mismatch",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "aiops.lab/unavailable"
+        ],
+        "matched_any": [
+          "nodeSelector"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**已确认的根因**是 Pod 配置了不可满足的 `nodeSelector`（或节点亲和性）条件（具体为 `aiops.lab/unavailable=true`），而集群内所有节点均缺失该 Label。\n\n该配置导致 Kubernetes 调度器在调度阶段永久过滤了所有候选节点，且由于无可用节点，预抢占机制也无法生效（证据 #1, #2, #3）。这与 Pod 长期处于 `Pending` 状态且 `PodScheduled` 条件为 `False`（证据 #3, #4, #5）的现象完全吻合。现有的 Kubernetes 状态与事件证据已经充分且闭环，无需额外的日志或拓扑数据即可确定根因。\n\n---",
+      "full_section": "### 因果链\n\n```text\nPod 配置了不可满足的 nodeSelector (aiops.lab/unavailable=true) → 调度器过滤全部 3 个节点（均未设置该标签） → 调度器返回 FailedScheduling 且预抢占无效 → Pod 永久处于 Pending (Unschedulable) 状态\n```\n\n### 根因结论\n\n**已确认的根因**是 Pod 配置了不可满足的 `nodeSelector`（或节点亲和性）条件（具体为 `aiops.lab/unavailable=true`），而集群内所有节点均缺失该 Label。\n\n该配置导致 Kubernetes 调度器在调度阶段永久过滤了所有候选节点，且由于无可用节点，预抢占机制也无法生效（证据 #1, #2, #3）。这与 Pod 长期处于 `Pending` 状态且 `PodScheduled` 条件为 `False`（证据 #3, #4, #5）的现象完全吻合。现有的 Kubernetes 状态与事件证据已经充分且闭环，无需额外的日志或拓扑数据即可确定根因。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-pending-unschedulable"
+    ],
+    "found": [
+      "pod-pending-unschedulable",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-pending-unschedulable"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 2,
+    "planned": 5,
+    "completeness": 0.4,
+    "lanes": [
+      {
+        "lane": "94c16f53cd594862-g1",
+        "collected": 2,
+        "planned": 5,
+        "source": "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 2,
+    "planned": 5,
+    "completeness": 0.4,
+    "lanes": [
+      {
+        "lane": "94c16f53cd594862-g1",
+        "collected": 2,
+        "planned": 5,
+        "source": "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 6,
+    "planned": 6,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "pending-state",
+        "description": "Pod 当前 Pending/Unschedulable 状态",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-fd73b659f1a5",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/004-evidence-kubectl_describe.structured.json",
+          "fact-f06de7614b03",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/005-evidence-kubectl_get_yaml.structured.json",
+          "fact-42760c813b04",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/009-evidence-kubectl_describe.structured.json",
+          "fact-5a50fc6d4fee"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 24,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "failed-scheduling-selector-event",
+        "description": "FailedScheduling 原文明确节点选择器或亲和性不匹配",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-2928ce6028b9",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/004-evidence-kubectl_describe.structured.json",
+          "fact-51670d13ef24",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/009-evidence-kubectl_describe.structured.json",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/010-evidence-kubectl_events.structured.json",
+          "fact-5a50fc6d4fee",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/005-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 24,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "node-selector-config",
+        "description": "Pod 配置中存在不可满足的 nodeSelector",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/004-evidence-kubectl_describe.structured.json",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/005-evidence-kubectl_get_yaml.structured.json",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/009-evidence-kubectl_describe.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 22,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "pending-metric",
+        "description": "Prometheus 状态指标确认 Pending 持续性",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [
+          "fact-1033d9faafb1",
+          "fact-24819fdf5f71",
+          "fact-5fc405e8cca6",
+          "fact-712507e9d372",
+          "fact-c6432b91e490",
+          "/tmp/aiops/reports/context_archives/94c16f53cd594862-g1/tools/001-evidence-execute_pod_promql.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 6,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 25,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

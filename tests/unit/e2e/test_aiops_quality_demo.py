@@ -23,6 +23,7 @@ from run_quality_demo import (  # noqa: E402
     ARCHIVE_END,
     ARCHIVE_START,
     QUALITY_THRESHOLDS,
+    SCORING_VERSION,
     DiagnosisResult,
     _parse_archive_stdout,
     _sse_events,
@@ -33,6 +34,7 @@ from run_quality_demo import (  # noqa: E402
     launch_protected_worker,
     load_scenarios,
     protected_worker_command,
+    rescore_existing_report,
     run_diagnosis_once,
     select_scenarios,
 )
@@ -282,6 +284,104 @@ Pod 要求 `aiops.lab/unavailable=true`，但集群中没有节点具备该标�
     )
 
     assert score.passed is True
+
+
+def test_c01_missing_selector_label_is_not_misread_as_a_negated_root():
+    scenario = load_scenarios(DEMO_DIR / "demo_cases.yaml")["c01"]
+    report = """
+## 🎯 根因分析 · g1
+### 根因结论
+已确认根因：所有节点均缺乏标签 `aiops.lab/unavailable`，因此 Pod 的
+nodeSelector 无法匹配任何节点并持续 Pending。
+"""
+
+    score = score_root_causes(scenario.expected_root_causes, extract_root_claims(report))
+
+    assert score.passed is True
+
+
+def test_c04_secret_key_reference_error_real_wording_is_accepted():
+    scenario = load_scenarios(DEMO_DIR / "demo_cases.yaml")["c04"]
+    report = """
+## 🎯 根因分析 · g1
+### 根因结论
+已确认根因为 Secret 键名引用错误：Pod 请求 `unavailable-key`，但该 Secret
+实际数据中仅包含 `available-key`，导致 Kubelet 无法注入配置。
+"""
+
+    score = score_root_causes(scenario.expected_root_causes, extract_root_claims(report))
+
+    assert score.passed is True
+
+
+def test_c06_structured_exit_code_and_confirmed_direct_root_are_accepted():
+    scenario = load_scenarios(DEMO_DIR / "demo_cases.yaml")["c06"]
+    report = """
+## 🎯 根因分析 · g1
+### 根因结论
+**证据不足**以定位具体代码缺陷，但现有证据强有力地证实了根因现象为：
+应用处理 `/work` 时发生运行时错误并以 `exit_code: 2` 主动退出。
+"""
+
+    claims = extract_root_claims(report)
+    score = score_root_causes(scenario.expected_root_causes, claims)
+
+    assert claims[0].inconclusive is False
+    assert score.passed is True
+
+
+def test_c10_accepts_liveness_http_500_without_requiring_repeated_path():
+    scenario = load_scenarios(DEMO_DIR / "demo_cases.yaml")["c10"]
+    report = """
+## 🎯 根因分析 · g1
+### 根因结论
+已确认根因：应用 Liveness Probe 持续返回 HTTP 500，Kubelet 因探针失败
+终止容器并触发 CrashLoopBackOff。
+"""
+
+    score = score_root_causes(scenario.expected_root_causes, extract_root_claims(report))
+
+    assert score.passed is True
+
+
+def test_c10_does_not_accept_oom_or_probe_timeout_as_the_root():
+    scenario = load_scenarios(DEMO_DIR / "demo_cases.yaml")["c10"]
+    reports = [
+        """
+## 🎯 根因分析 · g1
+### 根因结论
+已确认根因为 96Mi 内存限制过低触发 OOM，Liveness Probe 返回 HTTP 500
+只是容器退出后的伴随现象。
+""",
+        """
+## 🎯 根因分析 · g1
+### 根因结论
+已确认根因：Liveness Probe 超时后杀死容器，当前未发现 HTTP 500 或 `/health`
+响应作为支撑。
+""",
+    ]
+
+    for report in reports:
+        score = score_root_causes(scenario.expected_root_causes, extract_root_claims(report))
+        assert score.passed is False
+
+
+def test_c10_secondary_unconfirmed_oom_detail_does_not_override_direct_root():
+    scenario = load_scenarios(DEMO_DIR / "demo_cases.yaml")["c10"]
+    report = """
+## 🎯 根因分析 · g1
+### 根因结论
+**已确认的直接根因：** Liveness Probe 持续收到 HTTP 状态码 500，Kubelet
+因此终止容器并触发重启。
+
+**未确认的业务根因：** 当前存在 96Mi 内存硬限制，但没有证据证明发生
+OOMKilled；它不改变上述直接根因。
+"""
+
+    score = score_root_causes(scenario.expected_root_causes, extract_root_claims(report))
+
+    assert score.passed is True
+    assert score.matches[0].conflicts == ()
 
 
 def test_confirmed_finalizer_root_is_not_negated_by_missing_oom_evidence():
@@ -941,8 +1041,67 @@ def test_evidence_summary_uses_arithmetic_mean_of_successful_run_rates(tmp_path)
     assert aggregate["evidence_completeness"] == expected
     assert aggregate["evidence_completeness"] != 20 / 29
     assert "70.1%" in console
-    assert "70.1%（4 次成功运行算术平均）" in markdown
-    assert "多次成功运行对每次完整度做算术平均" in console
+    assert "70.1%（1 个 Case 完整度算术平均）" in markdown
+    assert "每个 Case 先独立计算四项指标" in console
+
+
+def test_overall_quality_metrics_use_equal_weighted_case_arithmetic_mean(tmp_path):
+    def run(index, *, root_passed, runbook_coverage, evidence, elapsed):
+        expected_runbooks = ["pod-a", "pod-b"]
+        matched_count = round(runbook_coverage * len(expected_runbooks))
+        return {
+            "run_index": index,
+            "success": True,
+            "run_id": f"run-{index}",
+            "elapsed_seconds": elapsed,
+            "root_cause": {"passed": root_passed},
+            "runbook": {
+                "matched": expected_runbooks[:matched_count],
+                "expected": expected_runbooks,
+                "coverage": runbook_coverage,
+            },
+            "evidence": {
+                "collected": round(evidence * 10),
+                "planned": 10,
+                "completeness": evidence,
+            },
+        }
+
+    stats = {
+        "total_elapsed_seconds": 240.0,
+        "scenarios": [
+            {
+                "id": "c01",
+                "anomaly_type": "A",
+                "fault_scenario": "A",
+                "expected_runbooks": ["pod-a", "pod-b"],
+                "runs": [
+                    run(1, root_passed=True, runbook_coverage=1.0, evidence=1.0, elapsed=60.0)
+                ],
+            },
+            {
+                "id": "c02",
+                "anomaly_type": "B",
+                "fault_scenario": "B",
+                "expected_runbooks": ["pod-a", "pod-b"],
+                "runs": [
+                    run(1, root_passed=True, runbook_coverage=0.5, evidence=0.5, elapsed=120.0),
+                    run(2, root_passed=False, runbook_coverage=0.5, evidence=0.5, elapsed=120.0),
+                ],
+            },
+        ],
+    }
+
+    console = build_console_report(stats, tmp_path)
+    markdown = build_summary(stats)
+
+    # Case A is 100%, Case B is 50%; both Cases have equal overall weight.
+    assert "| 根因准确率 | >= 70% | 75.0% | ✅ |" in console
+    assert "| Runbook 覆盖率 | >= 70% | 75.0% | ✅ |" in console
+    assert "| 证据完整度 | >= 70% | 75.0% | ✅ |" in console
+    assert "根因准确率：75.0%（2 个 Case 准确率算术平均）" in markdown
+    assert "Runbook 覆盖率：75.0%（2 个 Case 覆盖率算术平均）" in markdown
+    assert "证据完整度：75.0%（2 个 Case 完整度算术平均）" in markdown
 
 
 def test_runbook_coverage_uses_exact_ids_from_final_report():
@@ -955,10 +1114,93 @@ def test_runbook_coverage_uses_exact_ids_from_final_report():
 
     score = score_runbooks(["pod-config-error", "pod-oomkilled"], report)
 
-    assert score.found == ("pod-config-error", "pod-oomkilled")
-    assert score.matched == ("pod-config-error", "pod-oomkilled")
-    assert score.coverage == 1.0
-    assert score.passed is True
+    assert score.found == ("pod-config-error",)
+    assert score.matched == ("pod-config-error",)
+    assert score.coverage == 0.5
+    assert score.passed is False
+
+
+def test_runbook_coverage_ignores_labels_and_runbook_body_cross_references():
+    report = """
+诊断对象标签为 pod-template-hash=abc123。
+
+📋 Runbook 参考
+
+- **g1 ns/pod**: pod-config-error
+"""
+    observations = [
+        "<runbook>正文建议另见 pod-oomkilled 与 pod-crashloop-runtime</runbook>",
+        json.dumps({"matched_runbooks": ["pod-config-error.md"]}),
+    ]
+
+    score = score_runbooks(
+        ["pod-config-error", "pod-oomkilled"], report, observations=observations
+    )
+
+    assert score.found == ("pod-config-error",)
+    assert score.coverage == 0.5
+    assert score.passed is False
+
+
+def test_rescore_existing_report_reuses_archives_without_changing_evidence(tmp_path):
+    scenarios = load_scenarios(DEMO_DIR / "demo_cases.yaml")
+    scenario = scenarios["c04"]
+    run_id = "archived-run"
+    run_dir = tmp_path / "c04" / f"run-01-{run_id}"
+    run_dir.mkdir(parents=True)
+    (run_dir / "report.md").write_text(
+        """
+## 🎯 根因分析 · g1
+### 根因结论
+已确认根因为 Secret 键名引用错误：Pod 请求 unavailable-key，但 Secret
+实际数据中仅包含 available-key。
+
+📋 Runbook 参考
+
+- **g1 aiops-case-04/workload**: pod-config-error
+""",
+        encoding="utf-8",
+    )
+    (run_dir / "events.json").write_text("[]", encoding="utf-8")
+    original_run = {
+        "run_index": 1,
+        "run_id": run_id,
+        "success": True,
+        "elapsed_seconds": 12.0,
+        "root_cause": {"passed": False},
+        "runbook": {"passed": False},
+        "evidence": {"collected": 3, "planned": 4, "completeness": 0.75},
+    }
+    (run_dir / "score.json").write_text(json.dumps(original_run), encoding="utf-8")
+    (tmp_path / "stats.json").write_text(
+        json.dumps(
+            {
+                "total_elapsed_seconds": 12.0,
+                "scenarios": [
+                    {
+                        "id": "c04",
+                        "name": scenario.name,
+                        "anomaly_type": scenario.anomaly_type,
+                        "fault_scenario": scenario.fault_scenario,
+                        "expected_runbooks": list(scenario.expected_runbooks),
+                        "runs": [original_run],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rescored = rescore_existing_report(tmp_path, scenarios, [scenario])
+    run = rescored["scenarios"][0]["runs"][0]
+
+    assert run["root_cause"]["passed"] is True
+    assert run["runbook"]["passed"] is True
+    assert run["evidence"]["completeness"] == 0.75
+    assert run["scoring_version"] == SCORING_VERSION
+    assert (Path(rescored["revision_dir"]) / "summary.md").is_file()
+    assert json.loads((run_dir / "score.json").read_text()) == original_run
+    assert json.loads((tmp_path / "stats.json").read_text())["scenarios"][0]["runs"][0] == original_run
 
 
 def test_confirmed_root_is_not_invalidated_by_an_unconfirmed_secondary_detail():

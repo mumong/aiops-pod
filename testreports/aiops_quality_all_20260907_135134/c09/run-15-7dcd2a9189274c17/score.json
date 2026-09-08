@@ -1,0 +1,267 @@
+{
+  "scoring_version": "2026-09-07.4",
+  "success": true,
+  "run_id": "7dcd2a9189274c17",
+  "elapsed_seconds": 93.335,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "readiness-probe-503",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "readiness",
+          "HTTP 503"
+        ],
+        "matched_any": [],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**已确认根因：应用服务 /ready 健康检查端点返回 HTTP 503 导致 Readiness Probe 持续失败。**\n应用已运行（Pod 状态 Running，无重启记录），其健康检查端点 `/ready` 由于依赖不可用（应用日志记录 `dependency unavailable`）返回了 HTTP 503 状态码，致使 Kubelet 判定探针失败，Pod 虽存活但被 Kubernetes 标记为 NotReady，无法接收服务流量。\n\n**待明确事实：**\n具体是哪一个上游依赖（如数据库、外部API）不可用导致了业务层抛出 503，当前证据链仅能确认业务层报错现象，未包含该依赖的详细故障信息。\n\n---",
+      "full_section": "### 因果链\n\n```text\n应用业务依赖不可用（如外部API/DB） → /ready 端点主动返回 HTTP 503 → Kubelet 探测失败移除 Pod Ready 条件 → Pod 保持 Running 但标记为 NotReady\n```\n\n### 根因结论\n\n**已确认根因：应用服务 /ready 健康检查端点返回 HTTP 503 导致 Readiness Probe 持续失败。**\n应用已运行（Pod 状态 Running，无重启记录），其健康检查端点 `/ready` 由于依赖不可用（应用日志记录 `dependency unavailable`）返回了 HTTP 503 状态码，致使 Kubelet 判定探针失败，Pod 虽存活但被 Kubernetes 标记为 NotReady，无法接收服务流量。\n\n**待明确事实：**\n具体是哪一个上游依赖（如数据库、外部API）不可用导致了业务层抛出 503，当前证据链仅能确认业务层报错现象，未包含该依赖的详细故障信息。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed"
+    ],
+    "found": [
+      "pod-notready-probe-failed"
+    ],
+    "matched": [
+      "pod-notready-probe-failed"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 4,
+    "planned": 5,
+    "completeness": 0.8,
+    "lanes": [
+      {
+        "lane": "7dcd2a9189274c17-g1",
+        "collected": 4,
+        "planned": 5,
+        "source": "/tmp/aiops/reports/context_archives/7dcd2a9189274c17-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 4,
+    "planned": 5,
+    "completeness": 0.8,
+    "lanes": [
+      {
+        "lane": "7dcd2a9189274c17-g1",
+        "collected": 4,
+        "planned": 5,
+        "source": "/tmp/aiops/reports/context_archives/7dcd2a9189274c17-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 3,
+    "planned": 8,
+    "completeness": 0.375,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "not-ready-state",
+        "description": "Pod Running 但 Ready=False/ContainersNotReady",
+        "weight": 1,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [
+          "Ready: False",
+          "Ready\": false",
+          "ContainersNotReady",
+          "0/1"
+        ],
+        "observation_count": 14,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "readiness-503-event",
+        "description": "Readiness probe 事件明确 HTTP 503",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-1632510ec704",
+          "fact-e3a44ae97edf"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 14,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "readiness-probe-config",
+        "description": "Pod YAML 中 readinessProbe 路径为 /ready",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "readinessProbe",
+          "/ready"
+        ],
+        "missing_any": [],
+        "observation_count": 14,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "readiness-log",
+        "description": "应用日志记录 /ready 503 或 dependency unavailable",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [
+          "fact-10c7e991d527",
+          "fact-1da910b3f616",
+          "fact-21669e570268",
+          "fact-5356e7a5f44e",
+          "fact-5f49111b5371",
+          "fact-667d4dea6f2c",
+          "fact-78ac416736e9",
+          "fact-797b3fcdf306",
+          "/tmp/aiops/reports/context_archives/7dcd2a9189274c17-g1/tools/002-evidence-query_pod_logs.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 9,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "readiness-trace",
+        "description": "Tracing 记录 /ready HTTP 503",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "tracing"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "/ready"
+        ],
+        "missing_any": [],
+        "observation_count": 15,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "ready-metric-trend",
+        "description": "Prometheus range 指标确认 Ready 状态持续异常",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [
+          "kube_pod_status_ready",
+          "kube_pod_container_status_ready"
+        ],
+        "observation_count": 7,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 15,
+  "logical_elapsed_seconds": 93.559,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

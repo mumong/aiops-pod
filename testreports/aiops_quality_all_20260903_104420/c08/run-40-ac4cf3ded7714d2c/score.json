@@ -1,0 +1,256 @@
+{
+  "success": true,
+  "run_id": "ac4cf3ded7714d2c",
+  "elapsed_seconds": 176.397,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "oom-memory-limit",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "OOMKilled",
+          "64Mi"
+        ],
+        "matched_any": [
+          "Exit Code 137",
+          "内存限制",
+          "allocated_mib"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因是 **容器内存限制配置过低（64Mi）且应用存在内存分配模式**（证据编号 3, 4, 1）。\n\n1. **直接原因**：容器内存硬限制仅为 64Mi (fact-72861dc4103b)。日志证据显示应用在处理请求时存在活跃的内存分配行为 (fact-401e574912c1)，其单窗口内记录的最大内存分配量 (allocated_mib max: 40Mi) 已接近限额上限。\n2. **结果**：当应用内存使用突破 64Mi 限制时，操作系统触发 OOM Killer 终止容器 (fact-42717c90a60f, exit code 137)，进而导致 Kubelet 反复重启容器并进入 CrashLoopBackOff 状态 (fact-a8493721c40f, fact-9d05b7f87451)。\n3. **结论**：故障源于资源配额与运行时实际需求的严重不匹配，低限额导致应用无法正常运行而频繁崩溃。\n\n---",
+      "full_section": "### 因果链\n\n```text\n容器 memory limit (64Mi) 配置过低 → 应用处理请求时分配的内存(峰值达40Mi)超限 → 触发Linux OOM Killer，容器以退出码137被杀 → 容器反复重启进入CrashLoopBackOff\n```\n\n### 根因结论\n\n已确认的根因是 **容器内存限制配置过低（64Mi）且应用存在内存分配模式**（证据编号 3, 4, 1）。\n\n1. **直接原因**：容器内存硬限制仅为 64Mi (fact-72861dc4103b)。日志证据显示应用在处理请求时存在活跃的内存分配行为 (fact-401e574912c1)，其单窗口内记录的最大内存分配量 (allocated_mib max: 40Mi) 已接近限额上限。\n2. **结果**：当应用内存使用突破 64Mi 限制时，操作系统触发 OOM Killer 终止容器 (fact-42717c90a60f, exit code 137)，进而导致 Kubelet 反复重启容器并进入 CrashLoopBackOff 状态 (fact-a8493721c40f, fact-9d05b7f87451)。\n3. **结论**：故障源于资源配额与运行时实际需求的严重不匹配，低限额导致应用无法正常运行而频繁崩溃。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-oomkilled"
+    ],
+    "found": [
+      "pod-crashloop-runtime",
+      "pod-oomkilled",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-oomkilled"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 7,
+    "planned": 9,
+    "completeness": 0.7777777777777778,
+    "lanes": [
+      {
+        "lane": "ac4cf3ded7714d2c-g1",
+        "collected": 7,
+        "planned": 9,
+        "source": "/tmp/aiops/reports/context_archives/ac4cf3ded7714d2c-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 7,
+    "planned": 9,
+    "completeness": 0.7777777777777778,
+    "lanes": [
+      {
+        "lane": "ac4cf3ded7714d2c-g1",
+        "collected": 7,
+        "planned": 9,
+        "source": "/tmp/aiops/reports/context_archives/ac4cf3ded7714d2c-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 6,
+    "planned": 8,
+    "completeness": 0.75,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "oom-terminal-state",
+        "description": "Kubernetes 同时确认 OOMKilled 与 Exit Code 137",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-473f77d3f801",
+          "fact-722576289c3b",
+          "/tmp/aiops/reports/context_archives/ac4cf3ded7714d2c-g1/tools/005-evidence-kubectl_describe.structured.json",
+          "fact-42717c90a60f",
+          "/tmp/aiops/reports/context_archives/ac4cf3ded7714d2c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+          "fact-f322b7cac9af",
+          "fact-4734de2b31ad",
+          "fact-168252c6d1e2"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 32,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "memory-limit-64mi",
+        "description": "真实容器内存限制为 64Mi/67108864 bytes",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes",
+          "metrics"
+        ],
+        "matched_refs": [
+          "fact-72861dc4103b",
+          "fact-cc7a3f0769c8"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 36,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "memory-working-set-trend",
+        "description": "Prometheus range 指标展示 working set 有效时序",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 0,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "allocation-log-growth",
+        "description": "日志中 allocated_mib 至少出现两个不同值",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [
+          "fact-05093fa1c8c8",
+          "fact-15a16e312d97",
+          "fact-1feccb30ff98",
+          "fact-2006301e29db",
+          "fact-24d5792f0ed2",
+          "fact-265d18be37c5",
+          "fact-401e574912c1",
+          "fact-4271c985e482",
+          "/tmp/aiops/reports/context_archives/ac4cf3ded7714d2c-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "/tmp/aiops/reports/context_archives/ac4cf3ded7714d2c-g1/tools/023-evidence-kubectl_logs.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 13,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "allocated_mib",
+        "distinct_value_count": 8,
+        "min_distinct_values": 2,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "work-request-trace",
+        "description": "Tracing 确认 /work 请求进入目标 Pod",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-03818307ab14",
+          "fact-1177e4f50fad",
+          "fact-12ace75e0316",
+          "fact-313acca276b6",
+          "fact-31fb9214a0cd",
+          "fact-371a3d1b823a",
+          "fact-40086a2c8606",
+          "fact-513cbda08cfd",
+          "fact-58f27fca682f",
+          "fact-05c813c0c49c",
+          "/tmp/aiops/reports/context_archives/ac4cf3ded7714d2c-g1/tools/003-evidence-query_pod_tracing.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 11,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 40,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

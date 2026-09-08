@@ -1,0 +1,235 @@
+{
+  "scoring_version": "2026-09-07.4",
+  "success": true,
+  "run_id": "d75794be65564052",
+  "elapsed_seconds": 65.169,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "missing-volume-configmap",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "unavailable-config"
+        ],
+        "matched_any": [
+          "FailedMount",
+          "ConfigMap",
+          "not found",
+          "不存在"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认根因为：Pod 规范中定义的 Volume `input` 引用了 ConfigMap `unavailable-config`，但该资源在 `aiops-case-03` 命名空间中不存在，导致 Kubelet 挂载卷失败。\n\n依据如下：\n1. **K8s Event** (行 2, 行 3) 明确捕获到 `FailedMount` 事件，提示 `configmap \"unavailable-config\" not found`，且该错误在 81 分钟内重复发生 (48次)，证明配置缺失是持续状态。\n2. **K8s State & Metrics** (行 1, 行 4) 提供了系统侧的佐证，Pod 一直滞留于 `Pending/ContainerCreating` 阶段，等待挂载操作完成。\n3. 不存在其他冲突的证据；Logging 与 Tracing 因容器未启动而无数据，符合“挂载失败导致容器未拉起”的因果逻辑。\n\n---",
+      "full_section": "### 因果链\n\n```text\nConfigMap 'unavailable-config' 缺失 → Kubelet 执行 MountVolume.SetUp 失败(Pod 状态 Pending) → 用户可见现象：容器处于 ContainerCreating 状态且长时间无法启动\n```\n\n### 根因结论\n\n已确认根因为：Pod 规范中定义的 Volume `input` 引用了 ConfigMap `unavailable-config`，但该资源在 `aiops-case-03` 命名空间中不存在，导致 Kubelet 挂载卷失败。\n\n依据如下：\n1. **K8s Event** (行 2, 行 3) 明确捕获到 `FailedMount` 事件，提示 `configmap \"unavailable-config\" not found`，且该错误在 81 分钟内重复发生 (48次)，证明配置缺失是持续状态。\n2. **K8s State & Metrics** (行 1, 行 4) 提供了系统侧的佐证，Pod 一直滞留于 `Pending/ContainerCreating` 阶段，等待挂载操作完成。\n3. 不存在其他冲突的证据；Logging 与 Tracing 因容器未启动而无数据，符合“挂载失败导致容器未拉起”的因果逻辑。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-volume-mount-failed"
+    ],
+    "found": [],
+    "matched": [],
+    "coverage": 0.0,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 5,
+    "planned": 6,
+    "completeness": 0.8333333333333334,
+    "lanes": [
+      {
+        "lane": "d75794be65564052-g1",
+        "collected": 5,
+        "planned": 6,
+        "source": "/tmp/aiops/reports/context_archives/d75794be65564052-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 5,
+    "planned": 6,
+    "completeness": 0.8333333333333334,
+    "lanes": [
+      {
+        "lane": "d75794be65564052-g1",
+        "collected": 5,
+        "planned": 6,
+        "source": "/tmp/aiops/reports/context_archives/d75794be65564052-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 7,
+    "planned": 7,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "pending-container-state",
+        "description": "Pod 处于 Pending/ContainerCreating",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-952b09d6b562"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 8,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "failed-mount-event",
+        "description": "FailedMount 事件指向 unavailable-config",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-54269c17b6b1",
+          "fact-d466eb816186"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 8,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "volume-config-reference",
+        "description": "Pod volume 配置引用 unavailable-config",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-54269c17b6b1"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 8,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "missing-configmap-check",
+        "description": "直接查询确认目标 ConfigMap 不存在",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-54269c17b6b1",
+          "/tmp/aiops/reports/context_archives/d75794be65564052-g1/tools/005-evidence-kubectl_describe.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 9,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "pending-metric",
+        "description": "Prometheus 状态指标确认 Pending 持续性",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [
+          "fact-19e8d99adb66",
+          "fact-24aa84abccc9",
+          "fact-254fe254ee13",
+          "fact-341418eb6dca",
+          "fact-c564555e9104",
+          "/tmp/aiops/reports/context_archives/d75794be65564052-g1/tools/001-evidence-execute_pod_promql.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 8,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 49,
+  "logical_elapsed_seconds": 65.414,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

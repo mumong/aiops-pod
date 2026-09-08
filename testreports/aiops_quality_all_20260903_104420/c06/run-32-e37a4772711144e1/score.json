@@ -1,0 +1,291 @@
+{
+  "success": true,
+  "run_id": "e37a4772711144e1",
+  "elapsed_seconds": 95.174,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 0,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 0,
+    "recall": 0.0,
+    "precision": 0.0,
+    "matches": [
+      {
+        "expectation_id": "runtime-exit-2",
+        "matched": false,
+        "group": "g1",
+        "matched_all": [
+          "Exit Code 2"
+        ],
+        "matched_any": [
+          "runtime process exiting",
+          "CrashLoopBackOff",
+          "/work"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [
+          "OOMKilled"
+        ]
+      }
+    ],
+    "unexpected_claim_groups": [
+      "g1"
+    ]
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**已确认根因**：应用逻辑错误导致 500 内部服务器错误并直接终止进程。\n\n证据链如下：\n1. **异常触发**：日志中记录了 5 次 `http_status=500` 且伴随 `runtime process exiting` 的明确错误信息（证据#5）；Tracing 数据显示了 4 次 `response_code=500` 的 HTTP 流（证据#8），且跨度时间较短（5-9ms），表明是在处理请求时发生的逻辑崩溃而非超时。\n2. **进程终止**：Kubernetes 状态显示容器退出码为 `2`（证据#1），通常表示程序执行错误；且没有 OOMKilled 等系统级终止特征，符合应用主动报错退出的特征。\n3. **结果与状态**：进程退出直接导致 Kubernetes 触发重启，并在短时间内（观察窗 88 分钟）重启了 21 次（证据#1, #7, #2），最终进入 CrashLoopBackOff 退避状态（证据#1, #4）。\n\n综上，非基础设施或资源限制（CPU/Memory 限制未被触发）问题，而是应用本身处理 `/work` 端点时发生了逻辑错误导致退出。\n\n---",
+      "full_section": "### 因果链\n\n```text\n应用业务逻辑缺陷（未处理特定条件） → 内部 HTTP 500 错误 → 进程直接退出 (exit code 2) → Kubernetes 重启策略触发 CrashLoopBackOff\n```\n\n### 根因结论\n\n**已确认根因**：应用逻辑错误导致 500 内部服务器错误并直接终止进程。\n\n证据链如下：\n1. **异常触发**：日志中记录了 5 次 `http_status=500` 且伴随 `runtime process exiting` 的明确错误信息（证据#5）；Tracing 数据显示了 4 次 `response_code=500` 的 HTTP 流（证据#8），且跨度时间较短（5-9ms），表明是在处理请求时发生的逻辑崩溃而非超时。\n2. **进程终止**：Kubernetes 状态显示容器退出码为 `2`（证据#1），通常表示程序执行错误；且没有 OOMKilled 等系统级终止特征，符合应用主动报错退出的特征。\n3. **结果与状态**：进程退出直接导致 Kubernetes 触发重启，并在短时间内（观察窗 88 分钟）重启了 21 次（证据#1, #7, #2），最终进入 CrashLoopBackOff 退避状态（证据#1, #4）。\n\n综上，非基础设施或资源限制（CPU/Memory 限制未被触发）问题，而是应用本身处理 `/work` 端点时发生了逻辑错误导致退出。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 3,
+    "planned": 5,
+    "completeness": 0.6,
+    "lanes": [
+      {
+        "lane": "e37a4772711144e1-g1",
+        "collected": 3,
+        "planned": 5,
+        "source": "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 3,
+    "planned": 5,
+    "completeness": 0.6,
+    "lanes": [
+      {
+        "lane": "e37a4772711144e1-g1",
+        "collected": 3,
+        "planned": 5,
+        "source": "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "crashloop-state",
+        "description": "CrashLoopBackOff 与重启事实",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-c299e8c8e6d6",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/006-evidence-kubectl_describe.structured.json",
+          "fact-35c39953b96e",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/008-evidence-kubectl_get_yaml.structured.json",
+          "fact-934a4f15f095",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/009-evidence-kubectl_events.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 32,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "exit-code-2",
+        "description": "上次容器终止退出码为 2",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-dfb20b1098dc",
+          "fact-0fcc59d1b8c0",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/008-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 32,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "previous-runtime-log",
+        "description": "崩溃前日志包含 runtime process exiting",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [
+          "fact-05ce3857b862",
+          "fact-224ba67bf929",
+          "fact-41d82ae5b969",
+          "fact-626f40fba010",
+          "fact-6efb8c4ef276",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/004-evidence-kubectl_logs.structured.json",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/007-evidence-kubectl_previous_logs.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 11,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "work-request-failure",
+        "description": "日志或 Trace 显示 /work 故障请求",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-05ce3857b862",
+          "fact-224ba67bf929",
+          "fact-245b2437d8ef",
+          "fact-3984ae5f5637",
+          "fact-41d82ae5b969",
+          "fact-4b0695546b77",
+          "fact-626f40fba010",
+          "fact-6efb8c4ef276",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "fact-0a3c7bbb65ae",
+          "fact-0b294f621470",
+          "fact-0c911a690683"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 22,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "restart-trend",
+        "description": "Prometheus range 指标确认重启计数增长",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 1,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "work-trace",
+        "description": "Tracing 关联 /work 请求",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-0a3c7bbb65ae",
+          "fact-0b294f621470",
+          "fact-0c911a690683",
+          "fact-2540a170ed35",
+          "fact-3131e8fb9d07",
+          "fact-41145b75929d",
+          "fact-4715524b43df",
+          "fact-7cc922125280",
+          "fact-9f4adc09c857",
+          "fact-55a8e42444ef",
+          "/tmp/aiops/reports/context_archives/e37a4772711144e1-g1/tools/003-evidence-query_pod_tracing.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 11,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 32,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

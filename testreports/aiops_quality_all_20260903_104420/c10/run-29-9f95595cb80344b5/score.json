@@ -1,0 +1,266 @@
+{
+  "success": true,
+  "run_id": "9f95595cb80344b5",
+  "elapsed_seconds": 124.519,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 0,
+    "diagnosed_claim_count": 0,
+    "matched_claim_count": 0,
+    "recall": 0.0,
+    "precision": 0.0,
+    "matches": [
+      {
+        "expectation_id": "liveness-probe-500",
+        "matched": false,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [],
+        "missing_all": [
+          "liveness",
+          "/health"
+        ],
+        "missing_any": [
+          "Liveness probe failed",
+          "livenessProbe",
+          "HTTP 500",
+          "健康检查",
+          "存活探针"
+        ],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**证据不足**。\n\n现有证据能够确认容器进程因非正常退出码 `137` (SIGKILL) 被终止，进而导致 Pod 进入 `CrashLoopBackOff` (证据 1, 2)。虽然 `137` 退出码常由 OOM Killer 引起，但以下关键决定性事实缺失或处于盲区：\n1. **内存峰值数据缺失**：Metric 数据 (证据 4) 显示当前采集到的内存值在 2-17Mi 之间，远低于配置的 `96Mi` Limit (证据 3)。由于重启间隔较长，未能捕获崩溃瞬间的内存峰值。\n2. **缺乏 OOM 日志**：Logging (证据 6) 和 Tracing (证据 7) 显示应用崩溃前的运行记录均正常（Status 200），未检测到 OOM 触发时的应用内内存分配异常或系统 OOM Killer 记录（通常需通过 `kubectl logs --previous` 获取，但事实来源中未包含该数据）。\n\n因此，无法确证是应用内存泄漏突破 Limit、宿主机级别强制杀进程（如节点压力），还是 Previous Logs 中缓冲的 OOM 信息未能采集到。确诊需要获取崩溃瞬间的 `Previous Logs` (排查 OOM) 或 `Pod YAML` (排查探针或启动配置)。\n\n---",
+      "full_section": "### 因果链\n\n```text\n容器内进程触发 SIGKILL (Exit Code 137) → Kubernetes 容器运行时终止容器 → 重启间隔指数退避 → Pod 进入 CrashLoopBackOff 状态\n```\n\n### 根因结论\n\n**证据不足**。\n\n现有证据能够确认容器进程因非正常退出码 `137` (SIGKILL) 被终止，进而导致 Pod 进入 `CrashLoopBackOff` (证据 1, 2)。虽然 `137` 退出码常由 OOM Killer 引起，但以下关键决定性事实缺失或处于盲区：\n1. **内存峰值数据缺失**：Metric 数据 (证据 4) 显示当前采集到的内存值在 2-17Mi 之间，远低于配置的 `96Mi` Limit (证据 3)。由于重启间隔较长，未能捕获崩溃瞬间的内存峰值。\n2. **缺乏 OOM 日志**：Logging (证据 6) 和 Tracing (证据 7) 显示应用崩溃前的运行记录均正常（Status 200），未检测到 OOM 触发时的应用内内存分配异常或系统 OOM Killer 记录（通常需通过 `kubectl logs --previous` 获取，但事实来源中未包含该数据）。\n\n因此，无法确证是应用内存泄漏突破 Limit、宿主机级别强制杀进程（如节点压力），还是 Previous Logs 中缓冲的 OOM 信息未能采集到。确诊需要获取崩溃瞬间的 `Previous Logs` (排查 OOM) 或 `Pod YAML` (排查探针或启动配置)。\n\n---",
+      "inconclusive": true
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime",
+      "pod-notready-probe-failed",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 6,
+    "planned": 8,
+    "completeness": 0.75,
+    "lanes": [
+      {
+        "lane": "9f95595cb80344b5-g1",
+        "collected": 6,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/9f95595cb80344b5-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 6,
+    "planned": 8,
+    "completeness": 0.75,
+    "lanes": [
+      {
+        "lane": "9f95595cb80344b5-g1",
+        "collected": 6,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/9f95595cb80344b5-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 8,
+    "completeness": 0.125,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "liveness-500-event",
+        "description": "Liveness probe 事件明确 HTTP 500",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [
+          "HTTP probe failed with statuscode: 500",
+          "HTTP 500",
+          "status code 500"
+        ],
+        "observation_count": 18,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "liveness-probe-config",
+        "description": "Pod YAML 中 livenessProbe 路径为 /health",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "livenessProbe",
+          "/health"
+        ],
+        "missing_any": [],
+        "observation_count": 17,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "liveness-restart",
+        "description": "探针失败伴随 Killing/重启事实",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "/tmp/aiops/reports/context_archives/9f95595cb80344b5-g1/tools/005-evidence-kubectl_describe.structured.json",
+          "fact-3c2aae25e8ff",
+          "fact-8b9fa7e3f350"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 18,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "health-log",
+        "description": "应用日志记录 /health HTTP 500",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "/health"
+        ],
+        "missing_any": [
+          "500",
+          "liveness_fail"
+        ],
+        "observation_count": 11,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "health-trace",
+        "description": "Tracing 记录 /health HTTP 500",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "tracing"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "/health",
+          "500"
+        ],
+        "missing_any": [],
+        "observation_count": 11,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "restart-trend",
+        "description": "Prometheus range 指标确认重启计数增长",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 1,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 29,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

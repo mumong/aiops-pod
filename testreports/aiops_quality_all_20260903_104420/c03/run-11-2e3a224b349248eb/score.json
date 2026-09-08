@@ -1,0 +1,260 @@
+{
+  "success": true,
+  "run_id": "2e3a224b349248eb",
+  "elapsed_seconds": 128.977,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "missing-volume-configmap",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "unavailable-config"
+        ],
+        "matched_any": [
+          "ConfigMap",
+          "not found",
+          "不存在"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因是：Pod 的卷配置引用了不存在的 ConfigMap `unavailable-config`。\n\n证据链闭环如下：\n1. **K8s Event**（证据 #1）明确记录了 `MountVolume.SetUp failed for volume \"input\" : configmap \"unavailable-config\" not found`，这是挂载失败的直接原因。\n2. **K8s State**（证据 #2）显示容器处于 `ContainerCreating` 状态且重启次数为 `0`，符合挂载配置缺失导致的启动前阻塞特征。\n3. **Metric**（证据 #4）与日志事件相互印证，证实该状态在观测期内持续存在。\n\n因此，集群中 Pod 的挂载失败完全由缺失的 ConfigMap 配置引起。\n\n---",
+      "full_section": "### 因果链\n\n```text\nConfigMap 'unavailable-config' 不存在 → 卷挂载失败 → 容器无法启动 → Pod 保持 Pending/ContainerCreating 状态\n```\n\n### 根因结论\n\n已确认的根因是：Pod 的卷配置引用了不存在的 ConfigMap `unavailable-config`。\n\n证据链闭环如下：\n1. **K8s Event**（证据 #1）明确记录了 `MountVolume.SetUp failed for volume \"input\" : configmap \"unavailable-config\" not found`，这是挂载失败的直接原因。\n2. **K8s State**（证据 #2）显示容器处于 `ContainerCreating` 状态且重启次数为 `0`，符合挂载配置缺失导致的启动前阻塞特征。\n3. **Metric**（证据 #4）与日志事件相互印证，证实该状态在观测期内持续存在。\n\n因此，集群中 Pod 的挂载失败完全由缺失的 ConfigMap 配置引起。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-volume-mount-failed"
+    ],
+    "found": [
+      "pod-template-hash",
+      "pod-volume-mount-failed"
+    ],
+    "matched": [
+      "pod-volume-mount-failed"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 5,
+    "planned": 6,
+    "completeness": 0.8333333333333334,
+    "lanes": [
+      {
+        "lane": "2e3a224b349248eb-g1",
+        "collected": 5,
+        "planned": 6,
+        "source": "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 5,
+    "planned": 6,
+    "completeness": 0.8333333333333334,
+    "lanes": [
+      {
+        "lane": "2e3a224b349248eb-g1",
+        "collected": 5,
+        "planned": 6,
+        "source": "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 7,
+    "planned": 7,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "pending-container-state",
+        "description": "Pod 处于 Pending/ContainerCreating",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-a738c91c145c",
+          "fact-cb69ffb9144c",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/005-evidence-kubectl_get_yaml.structured.json",
+          "fact-e4fb3e7f09c0",
+          "fact-e2981ef8b8e1",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/009-evidence-kubectl_get_yaml.structured.json",
+          "fact-3a2f43805970",
+          "fact-58c3fb7b9b4b",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/007-evidence-kubectl_get_by_name.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 41,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "failed-mount-event",
+        "description": "FailedMount 事件指向 unavailable-config",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-3c7210523c52",
+          "fact-cbc9e2da64ab",
+          "fact-66279c98dc2b",
+          "fact-b61af5f2ec1b",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/005-evidence-kubectl_get_yaml.structured.json",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/009-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 41,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "volume-config-reference",
+        "description": "Pod volume 配置引用 unavailable-config",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-cbc9e2da64ab",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/005-evidence-kubectl_get_yaml.structured.json",
+          "fact-b61af5f2ec1b",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/009-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 40,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "missing-configmap-check",
+        "description": "直接查询确认目标 ConfigMap 不存在",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-cbc9e2da64ab",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/004-evidence-kubectl_describe.structured.json",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/005-evidence-kubectl_get_yaml.structured.json",
+          "fact-b61af5f2ec1b",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/006-evidence-kubectl_describe.structured.json",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/009-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 43,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "pending-metric",
+        "description": "Prometheus 状态指标确认 Pending 持续性",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [
+          "fact-2559effcc923",
+          "fact-294df653e7e4",
+          "fact-2cbaec5a5ba6",
+          "fact-999c5de44dc6",
+          "fact-e45fa32becf2",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/001-evidence-execute_pod_promql.structured.json",
+          "fact-0fe53f24e1f8",
+          "fact-6b2d11ac7359",
+          "fact-a9645312f911",
+          "fact-b2eb7845275b",
+          "fact-fa8fcf2284bf",
+          "/tmp/aiops/reports/context_archives/2e3a224b349248eb-g1/tools/012-evidence-execute_pod_promql.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 14,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 11,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

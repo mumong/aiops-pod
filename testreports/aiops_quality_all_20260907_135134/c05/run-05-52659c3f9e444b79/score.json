@@ -1,0 +1,267 @@
+{
+  "scoring_version": "2026-09-07.4",
+  "success": true,
+  "run_id": "52659c3f9e444b79",
+  "elapsed_seconds": 612.79,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "missing-network-attachment",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "Multus"
+        ],
+        "matched_any": [
+          "unavailable-network",
+          "NoNetworkFound",
+          "网络附件"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认根因为 **Pod 配置错误引用了不存在的 Multus 网络附件定义**。\n\n集群中的 Pod `aiops-case-05/workload-5dbb5dcd6c-kbwsx` 在 Spec 中配置了名为 `unavailable-network` 的网络挂载，但该资源在 `aiops-case-05` 命名空间中并不存在。这导致 Kubernetes 调度器尝试通过 Multus CNI 插件创建网络时，插件因找不到目标定义而报错（`NoNetworkFound`），进而引发 `FailedCreatePodSandBox` 事件。由于网络配置是容器启动的前置条件，Pod 被永久阻塞在 `ContainerCreating` 状态，表现为 `ContainerCreating` 指标持续为 1。现有 K8s 事件与指标证据充分，排除其他资源瓶颈可能。\n\n---",
+      "full_section": "### 因果链\n\n```text\nPod 定义引用了不存在的 NetworkAttachmentDefinition 'unavailable-network' (K8s State/Config) \n→ Multus CNI 插件调用失败，无法创建网络沙箱 (K8s Event) \n→ kubelet 无法完成 Pod 容器初始化 (K8s State) \n→ Pod 永久卡在 ContainerCreating 状态 (User Phenomenon)\n```\n\n### 根因结论\n\n已确认根因为 **Pod 配置错误引用了不存在的 Multus 网络附件定义**。\n\n集群中的 Pod `aiops-case-05/workload-5dbb5dcd6c-kbwsx` 在 Spec 中配置了名为 `unavailable-network` 的网络挂载，但该资源在 `aiops-case-05` 命名空间中并不存在。这导致 Kubernetes 调度器尝试通过 Multus CNI 插件创建网络时，插件因找不到目标定义而报错（`NoNetworkFound`），进而引发 `FailedCreatePodSandBox` 事件。由于网络配置是容器启动的前置条件，Pod 被永久阻塞在 `ContainerCreating` 状态，表现为 `ContainerCreating` 指标持续为 1。现有 K8s 事件与指标证据充分，排除其他资源瓶颈可能。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-sandbox-create-failed"
+    ],
+    "found": [],
+    "matched": [],
+    "coverage": 0.0,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 4,
+    "planned": 5,
+    "completeness": 0.8,
+    "lanes": [
+      {
+        "lane": "52659c3f9e444b79-g1",
+        "collected": 4,
+        "planned": 5,
+        "source": "/tmp/aiops/reports/context_archives/52659c3f9e444b79-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 4,
+    "planned": 5,
+    "completeness": 0.8,
+    "lanes": [
+      {
+        "lane": "52659c3f9e444b79-g1",
+        "collected": 4,
+        "planned": 5,
+        "source": "/tmp/aiops/reports/context_archives/52659c3f9e444b79-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "sandbox-pending-state",
+        "description": "Pod 尚未完成 Sandbox 创建",
+        "weight": 1,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [
+          "Pending",
+          "ContainerCreating"
+        ],
+        "observation_count": 48,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "failed-create-sandbox-event",
+        "description": "FailedCreatePodSandBox 事件原文",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-12eaf28fe830",
+          "fact-22e2309033b5",
+          "fact-46fc83387b2c",
+          "fact-8b2961416b65",
+          "fact-99c14a5a9079",
+          "fact-a0a171ae5130"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 48,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "missing-network-attachment",
+        "description": "事件明确 unavailable-network/NetworkAttachmentDefinition 不存在",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-0acaf7445ebf",
+          "fact-12eaf28fe830",
+          "fact-15f2696f8c91",
+          "fact-19994305c2b3",
+          "fact-1d369636fe83",
+          "fact-1d4535b0419a",
+          "fact-1dd2eafc2428",
+          "fact-22e2309033b5",
+          "fact-232bdd7592e3",
+          "fact-281cae12b423",
+          "fact-2da61e5babd6",
+          "fact-3ad1b9bbc09c"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 48,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "network-annotation-config",
+        "description": "Pod 配置真实引用 unavailable-network",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-0acaf7445ebf",
+          "fact-12eaf28fe830",
+          "fact-15f2696f8c91",
+          "fact-19994305c2b3",
+          "fact-1d369636fe83",
+          "fact-1d4535b0419a",
+          "fact-1dd2eafc2428",
+          "fact-22e2309033b5",
+          "fact-232bdd7592e3",
+          "fact-281cae12b423",
+          "fact-2da61e5babd6",
+          "fact-3ad1b9bbc09c"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 48,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "cni-scope-check",
+        "description": "补查 CNI/节点范围以区分 Pod 配置与集群级 CNI 故障",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "kubernetes",
+          "topology"
+        ],
+        "matched_refs": [
+          "fact-0acaf7445ebf",
+          "fact-12eaf28fe830",
+          "fact-15f2696f8c91",
+          "fact-19994305c2b3",
+          "fact-1d369636fe83",
+          "fact-1d4535b0419a",
+          "fact-1dd2eafc2428",
+          "fact-22e2309033b5",
+          "fact-232bdd7592e3",
+          "fact-281cae12b423",
+          "fact-2da61e5babd6",
+          "fact-3ad1b9bbc09c"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 53,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 5,
+  "logical_elapsed_seconds": 613.131,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

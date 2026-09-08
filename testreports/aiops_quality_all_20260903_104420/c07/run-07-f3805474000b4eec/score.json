@@ -1,0 +1,271 @@
+{
+  "success": true,
+  "run_id": "f3805474000b4eec",
+  "elapsed_seconds": 87.204,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "traced-config-missing",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "CONFIG_MISSING"
+        ],
+        "matched_any": [
+          "Exit Code 78",
+          "HTTP 500",
+          "配置缺失",
+          "/work"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**已确认根因**：应用进程依赖的配置文件缺失（日志报错 `CONFIG_MISSING`）。当应用尝试处理 `/work` 请求时，因缺少关键配置抛出 HTTP 500 错误，并随即以退出码 78 异常退出。该非零退出码触发了 Kubernetes 的重启机制，导致 Pod 在启动和退出之间反复循环并最终进入 `CrashLoopBackOff` 状态。\n\n**未确认事项**：\n1. 缺失的配置文件的具体文件名或 ConfigMap 名称（需对比 Pod YAML 中 `volumes/configMap` 的引用与实际挂载情况）。\n2. 为何应用在启动阶段未立即检测到配置缺失，而是直到收到第一个请求（处理 `/work` 时）才触发退出逻辑。\n\n---",
+      "full_section": "### 因果链\n\n```text\n应用启动或请求处理逻辑中缺失关键配置文件 → HTTP 请求处理失败并返回 500 状态码 → 进程检测到配置缺失并主动退出（Exit Code 78） → Kubernetes 重启策略触发并进入 CrashLoopBackOff\n```\n\n### 根因结论\n\n**已确认根因**：应用进程依赖的配置文件缺失（日志报错 `CONFIG_MISSING`）。当应用尝试处理 `/work` 请求时，因缺少关键配置抛出 HTTP 500 错误，并随即以退出码 78 异常退出。该非零退出码触发了 Kubernetes 的重启机制，导致 Pod 在启动和退出之间反复循环并最终进入 `CrashLoopBackOff` 状态。\n\n**未确认事项**：\n1. 缺失的配置文件的具体文件名或 ConfigMap 名称（需对比 Pod YAML 中 `volumes/configMap` 的引用与实际挂载情况）。\n2. 为何应用在启动阶段未立即检测到配置缺失，而是直到收到第一个请求（处理 `/work` 时）才触发退出逻辑。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-config-error",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [
+      {
+        "lane": "f3805474000b4eec-g1",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/f3805474000b4eec-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [
+      {
+        "lane": "f3805474000b4eec-g1",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/f3805474000b4eec-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "config-crashloop-state",
+        "description": "CrashLoopBackOff 且 Exit Code 78",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-91d0c0d10733",
+          "/tmp/aiops/reports/context_archives/f3805474000b4eec-g1/tools/004-evidence-kubectl_describe.structured.json",
+          "fact-5e0ce35c0e08",
+          "/tmp/aiops/reports/context_archives/f3805474000b4eec-g1/tools/007-evidence-kubectl_get_yaml.structured.json",
+          "fact-5f11a83d1f35",
+          "fact-d8abf3f092a5"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 32,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "config-missing-log",
+        "description": "应用日志原文包含 CONFIG_MISSING",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [
+          "fact-0cabcafa8e13",
+          "fact-1dfce90a25bc",
+          "fact-2db01de6e07d",
+          "fact-604d69142d48",
+          "fact-7b4c61b0e635",
+          "fact-80033ababbae",
+          "fact-80ca2256235b",
+          "fact-818e283eb6b1",
+          "/tmp/aiops/reports/context_archives/f3805474000b4eec-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "/tmp/aiops/reports/context_archives/f3805474000b4eec-g1/tools/005-evidence-kubectl_previous_logs.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 10,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "work-http-500",
+        "description": "日志或 Trace 确认 /work 返回 HTTP 500",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-0cabcafa8e13",
+          "fact-1dfce90a25bc",
+          "fact-2db01de6e07d",
+          "fact-604d69142d48",
+          "fact-7b4c61b0e635",
+          "fact-80033ababbae",
+          "fact-80ca2256235b",
+          "fact-818e283eb6b1",
+          "/tmp/aiops/reports/context_archives/f3805474000b4eec-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "fact-03150229f37a",
+          "fact-0a693ca6607b",
+          "fact-0b6757dbf8f4"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 21,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "log-trace-correlation",
+        "description": "Logging 与 Tracing 通过同一 trace_id 关联",
+        "weight": 2,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-2db01de6e07d",
+          "fact-604d69142d48",
+          "fact-80ca2256235b",
+          "fact-818e283eb6b1",
+          "fact-03150229f37a",
+          "fact-0a693ca6607b",
+          "fact-0b6757dbf8f4",
+          "fact-20ebaf2ceb79",
+          "fact-638dde1d189f"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 21,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "trace_id",
+        "correlation_dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "correlation_values": [
+          "\"00db5ad8968e6bab18f669809ba8c613\"",
+          "\"1d3e3ac2e83ba2c98d762899d4db7ec5\"",
+          "\"afd42312eeb50407bb39853810c6cf9a\"",
+          "\"f48c7e87419b7354445998cd206bad03\""
+        ]
+      },
+      {
+        "id": "restart-trend",
+        "description": "Prometheus range 指标确认重启计数增长",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 1,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 7,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}

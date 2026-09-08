@@ -37,9 +37,15 @@ scenarios:
         include_any: [Pending, phase]
     expected_root_causes:
       - id: node-selector-mismatch
-        include_all: [aiops.lab/unavailable]
-        include_any: ["node affinity/selector", nodeSelector, "didn't match", 节点选择器, 节点标签选择器, 调度约束]
+        include_any: [aiops.lab/unavailable, "node affinity/selector", nodeSelector, "Node-Selector", "didn't match", 节点选择器, 节点标签选择器, 选择器约束]
         exclude_any: [OOMKilled, ImagePullBackOff, FailedMount]
+        allow_negated: [aiops.lab/unavailable]
+        mechanisms_any:
+          - '(?:节点|标签|选择器|selector|亲和性|约束).{0,80}(?:不匹配|未匹配|不满足|不存在|缺乏|缺少|缺失|均未|均不|不具备|无法匹配|无法找到|无法分配)'
+          - '(?:不匹配|未匹配|缺乏|缺少|不存在|不可满足|不满足).{0,40}(?:标签|selector|选择器|约束)'
+        reject_patterns:
+          - '(?:根因|实际原因|实际).{0,24}(?:cpu|资源不足|内存不足)'
+          - '(?:已排除|排除了)[^。；，,]{0,40}(?:selector|选择器|aiops\.lab/unavailable)'
 
   - id: c02
     name: "ImagePullBackOff：镜像仓库不可解析"
@@ -121,6 +127,7 @@ scenarios:
         include_all: [unavailable-config]
         include_any: [FailedMount, ConfigMap, "not found", 不存在, 卷挂载]
         exclude_any: [OOMKilled, ImagePullBackOff, unavailable-key]
+        allow_negated: [unavailable-config]
 
   - id: c04
     name: "CreateContainerConfigError：Secret key 缺失"
@@ -161,8 +168,9 @@ scenarios:
     expected_root_causes:
       - id: secret-key-missing
         include_all: [secret, unavailable-key]
-        include_any: ["couldn't find key", CreateContainerConfigError, 缺少, 缺失, 不存在, 不包含]
+        include_any: ["couldn't find key", CreateContainerConfigError, 缺少, 缺失, 不存在, 不包含, 仅包含, 键名引用错误]
         exclude_any: [OOMKilled, ImagePullBackOff, unavailable-config]
+        allow_negated: [unavailable-key]
         aliases:
           "couldn't find key": ["could not find key", "key not found", "找不到 key", "key 缺失"]
 
@@ -204,9 +212,16 @@ scenarios:
         include_any: [CNI, Multus, calico, NetworkUnavailable]
     expected_root_causes:
       - id: missing-network-attachment
-        include_all: [unavailable-network]
-        include_any: [FailedCreatePodSandBox, Multus, NetworkAttachmentDefinition, "network attachment", CNI, 网络附件]
+        include_all: [Multus]
+        include_any: [unavailable-network, NoNetworkFound, NetworkAttachmentDefinition, "network attachment", 网络附件]
         exclude_any: [OOMKilled, ImagePullBackOff, RuntimeClass]
+        allow_negated: [unavailable-network]
+        mechanisms_any:
+          - 'nonetworkfound|cannot find|not found|不存在|缺失|缺少|查找网络配置失败|找不到'
+        reject_patterns:
+          - '(?:根因|实际原因|实际).{0,40}(?:ipam|地址池|ip池).{0,20}(?:耗尽|不足)'
+        aliases:
+          Multus: ["Multus CNI"]
 
   - id: c06
     name: "CrashLoopBackOff：应用进程以退出码 2 终止"
@@ -256,7 +271,7 @@ scenarios:
         include_any: ["runtime process exiting", CrashLoopBackOff, 非零退出, 应用进程, "/work"]
         exclude_any: [OOMKilled, CONFIG_MISSING, liveness]
         aliases:
-          "Exit Code 2": ["Exit Code: 2", "exitCode=2", "exit code 2", "退出码 2", "退出码为 2"]
+          "Exit Code 2": ["Exit Code: 2", "exitCode=2", "exitCode 2", "exit_code: 2", "exit_code=2", "exit_code 2", "exit code 2", "退出码 2", "退出码为 2"]
 
   - id: c07
     name: "CrashLoopBackOff：应用启动配置缺失"
@@ -343,13 +358,13 @@ scenarios:
         include_all: ["/work"]
     expected_root_causes:
       - id: oom-memory-limit
-        include_all: [OOMKilled, 64Mi]
-        include_any: ["Exit Code 137", "memory limit", 内存限制, 内存持续增长, "/work", allocated_mib]
+        include_all: [OOMKilled]
+        include_any: [64Mi, "Exit Code 137", "memory limit", 内存限制, 内存硬限制, 内存持续增长, 内存泄漏, "/work", allocated_mib]
         exclude_any: [CONFIG_MISSING, "secret key", liveness]
         aliases:
-          OOMKilled: ["OOM Killer", "OOM kill", "OOM 杀除", "因 OOM 被终止", "内核触发 OOM"]
+          OOMKilled: [OOMKiller, "OOM Killer", "OOM kill", "OOM 杀除", "因 OOM 被终止", "内核触发 OOM", "OOM 保护机制", "OOM 机制"]
           64Mi: ["64 MiB", 64MiB, "67108864 bytes"]
-          "Exit Code 137": ["Exit Code: 137", "exitCode=137", "exit code 137", "退出码 137", "退出码为 137"]
+          "Exit Code 137": ["Exit Code: 137", "exitCode=137", "exit_code: 137", "exit_code=137", "exit code 137", "退出码 137", "退出码为 137"]
 
   - id: c09
     name: "NotReady：Readiness 探针返回 503"
@@ -396,11 +411,15 @@ scenarios:
         require_trend_evaluable: true
     expected_root_causes:
       - id: readiness-probe-503
-        include_all: [readiness, "/ready"]
-        include_any: ["Readiness probe failed", readinessProbe, "HTTP 503", "dependency unavailable", 就绪探针]
+        include_all: [readiness, "HTTP 503"]
         exclude_any: [liveness, OOMKilled, ImagePullBackOff, "错误的路径 /ready", "wrong path /ready"]
+        reject_patterns:
+          - '(?:readiness\s*(?:probe)?|就绪探针)\s*(?:状态|检测结果)?\s*(?:始终|仍然|仍|保持)?\s*(?:正常|成功|通过)'
+          - '(?:readiness|就绪探针)[^。；]{0,30}(?:配置|路径为|路径是|端点为|端点是)[^。；/]{0,12}/work'
+          - '/work[^。；]{0,100}(?:readiness|就绪探针)[^。；]{0,20}(?:探测|检测|检查)该(?:端点|路径)'
         aliases:
-          readiness: [Readiness, readinessProbe, "/ready", 就绪探针, 健康检查端点]
+          readiness: [Readiness, readinessProbe, "/ready", 就绪探针]
+          "HTTP 503": ["HTTP 状态码 503", "statuscode: 503", "返回 503", "503 状态码", "503 响应", "503 Service Unavailable"]
 
   - id: c10
     name: "容器重启：Liveness 探针 /health 返回 500"
@@ -448,9 +467,12 @@ scenarios:
         require_trend_evaluable: true
     expected_root_causes:
       - id: liveness-probe-500
-        include_all: [liveness, "/health"]
-        include_any: ["Liveness probe failed", livenessProbe, "HTTP 500", 健康检查, 存活探针]
-        exclude_any: [readiness, OOMKilled, ImagePullBackOff]
+        include_all: [liveness]
+        include_any: ["HTTP 500", "HTTP 状态码 500", "statuscode: 500", "状态码 500", "返回 500", "收到 500", "500 响应", "500 Internal Server Error"]
+        exclude_any: [readiness, OOMKilled, OOM, "Out of Memory", ImagePullBackOff, "/healthz"]
+        reject_patterns:
+          - '(?:liveness|存活探针|探针).{0,24}(?:配置|访问|探测|路径|端点|检查).{0,16}/work'
+          - '(?:根因|实际原因).{0,30}内存.{0,12}(?:过低|不足|受限|耗尽)'
         aliases:
           liveness: [Liveness, livenessProbe, 存活探针]
 
@@ -497,5 +519,6 @@ scenarios:
     expected_root_causes:
       - id: finalizer-stuck
         include_all: [finalizer, aiops.lab/hold]
-        include_any: [deletionTimestamp, Terminating, 删除流程, 清理逻辑]
-        exclude_any: [OOMKilled, ImagePullBackOff, terminationGracePeriodSeconds]
+        include_any: [deletionTimestamp, Terminating, 删除流程, 清理逻辑, 阻止删除, 无法删除]
+        exclude_any: [ImagePullBackOff, terminationGracePeriodSeconds]
+        allow_negated: [aiops.lab/hold]

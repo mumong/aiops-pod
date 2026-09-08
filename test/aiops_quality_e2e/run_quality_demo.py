@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -22,6 +24,8 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -64,10 +68,62 @@ QUALITY_THRESHOLDS = {
     "runbook_coverage": 0.7,
     "evidence_completeness": 0.7,
 }
+SCORING_VERSION = "2026-09-07.4"
 PROTECTED_WORKER_ENV = "AIOPS_QUALITY_PROTECTED_WORKER"
 PROTECTED_STATUS_ENV = "AIOPS_QUALITY_RUNNER_STATUS"
 RUNNER_LOG_NAME = "runner.log"
 RUNNER_STATUS_NAME = "runner.status.json"
+
+
+def scoring_manifest(cases_file: Optional[Path] = None) -> dict[str, Any]:
+    paths = [Path(__file__), HERE / "evaluator.py"]
+    return {"version": SCORING_VERSION, "sha256": {
+        **{p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},
+        "cases_file": hashlib.sha256((cases_file or HERE / "demo_cases.yaml").read_bytes()).hexdigest(),
+    }}
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Readers see the previous complete file or the next complete file."""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+@contextmanager
+def exclusive_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"another quality task holds {path}") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def assert_report_idle(output_dir: Path) -> None:
+    status_path = output_dir / RUNNER_STATUS_NAME
+    if not status_path.exists():
+        return
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    pid = int(status.get("pid") or 0)
+    if pid and pid != os.getpid() and status.get("status") == "running":
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except FileNotFoundError:
+            return
+        if b"run_quality_demo.py" in command:
+            raise RuntimeError(f"report is being written by worker {pid}; wait for completion")
 
 
 @dataclass(frozen=True)
@@ -766,7 +822,10 @@ def evidence_archive_from_kubectl(
         "kubectl", "-n", namespace, "exec", target,
         "-c", container, "--", "sh", "-c", shell_script, "sh", archive_root, run_id,
     ]
-    result = run_command(command, check=False, capture=True, timeout=60)
+    try:
+        result = run_command(command, check=False, capture=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return score_evidence_lanes([], source="missing", error=str(exc)), []
     if result.returncode != 0:
         error = (result.stderr or result.stdout or "kubectl archive read failed").strip()
         return score_evidence_lanes([], source="missing", error=error), []
@@ -801,6 +860,21 @@ def evidence_from_kubectl_archive(
     return score
 
 
+def _runbook_observations(
+    events: Sequence[Mapping[str, Any]], metrics: Mapping[str, Any]
+) -> list[str]:
+    observations: list[str] = []
+    for event in events:
+        if event.get("type") == "node_complete":
+            observations.append(
+                json.dumps(event.get("state_snapshot") or {}, ensure_ascii=False, default=str)
+            )
+    observations.append(
+        json.dumps(metrics.get("runbook_coverage") or {}, ensure_ascii=False, default=str)
+    )
+    return observations
+
+
 def _score_run(
     scenario: Scenario,
     diagnosis: DiagnosisResult,
@@ -810,23 +884,14 @@ def _score_run(
 ) -> dict[str, Any]:
     claims = extract_root_claims(diagnosis.answer)
     root_score = score_root_causes(scenario.expected_root_causes, claims)
-    runbook_observations: list[str] = []
-    for event in diagnosis.events:
-        if event.get("type") == "thinking" and event.get("tool_name") == "fetch_runbook":
-            runbook_observations.append(str(event.get("result_preview") or ""))
-        if event.get("type") == "node_complete":
-            runbook_observations.append(
-                json.dumps(event.get("state_snapshot") or {}, ensure_ascii=False, default=str)
-            )
-    runbook_observations.append(
-        json.dumps(diagnosis.metrics.get("runbook_coverage") or {}, ensure_ascii=False, default=str)
-    )
+    runbook_observations = _runbook_observations(diagnosis.events, diagnosis.metrics)
     runbook_score = score_runbooks(
         scenario.expected_runbooks,
         diagnosis.answer,
         observations=runbook_observations,
     )
     return {
+        "scoring_version": SCORING_VERSION,
         "success": True,
         "run_id": diagnosis.run_id,
         "elapsed_seconds": diagnosis.elapsed_seconds,
@@ -987,6 +1052,10 @@ def run_diagnosis_once(
         evidence_contract_audit=evidence_contract_audit,
     )
     scored["run_index"] = run_index
+    scored["logical_elapsed_seconds"] = round(time.monotonic() - run_started, 3)
+    scored["retry_elapsed_seconds"] = round(sum(
+        float(item["elapsed_seconds"]) for item in attempt_failures
+    ) + sum(retry_backoff * i for i in range(1, len(attempt_failures) + 1)), 3)
     scored["request_attempt_count"] = len(attempt_failures) + 1
     scored["request_attempt_failures"] = attempt_failures
     (run_dir / "score.json").write_text(
@@ -1037,6 +1106,16 @@ def _aggregate_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for run in successful
         if (run.get("evidence") or {}).get("completeness") is not None
     ]
+    runbook_values = []
+    for run in successful:
+        runbook = run.get("runbook") or {}
+        coverage = runbook.get("coverage")
+        if coverage is not None:
+            runbook_values.append(float(coverage))
+            continue
+        expected = len(runbook.get("expected") or [])
+        if expected:
+            runbook_values.append(len(runbook.get("matched") or []) / expected)
     mttr_values = [float(run.get("elapsed_seconds") or 0.0) for run in successful]
     return {
         "runs": len(runs),
@@ -1047,7 +1126,7 @@ def _aggregate_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "runbook_matched": runbook_matched,
         "runbook_expected": runbook_expected,
         "runbook_coverage": (
-            runbook_matched / runbook_expected if runbook_expected else None
+            sum(runbook_values) / len(runbook_values) if runbook_values else None
         ),
         "evidence_collected": evidence_collected,
         "evidence_planned": evidence_planned,
@@ -1061,6 +1140,51 @@ def _aggregate_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _aggregate_scenario_metrics(
+    scenarios: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Average independently calculated Case metrics with equal Case weight."""
+
+    aggregates = [
+        _aggregate_runs(
+            [run for run in scenario.get("runs") or [] if isinstance(run, Mapping)]
+        )
+        for scenario in scenarios
+    ]
+
+    def mean_of(metric: str) -> Optional[float]:
+        values = [
+            float(aggregate[metric])
+            for aggregate in aggregates
+            if aggregate.get(metric) is not None
+        ]
+        return sum(values) / len(values) if values else None
+
+    return {
+        "scenario_count": len(aggregates),
+        "root_accuracy": mean_of("root_accuracy"),
+        "runbook_coverage": mean_of("runbook_coverage"),
+        "evidence_completeness": mean_of("evidence_completeness"),
+        "avg_mttr_seconds": mean_of("avg_mttr_seconds"),
+    }
+
+
+def evaluation_warnings(stats: Mapping[str, Any]) -> list[str]:
+    warnings = []
+    if stats.get("rescore_complete") is False:
+        warnings.append("重评分不完整：包含旧评分或缺失/损坏归档；以下数值仅供审查，不能作为新版完整验收结果。")
+    for scenario in stats.get("scenarios") or []:
+        aggregate = _aggregate_runs(scenario.get("runs") or [])
+        if not aggregate["successful"]:
+            warnings.append(f"{scenario['id']} 无成功样本，未进入质量均值。")
+        elif aggregate["evidence_samples"] != aggregate["successful"]:
+            warnings.append(
+                f"{scenario['id']} 证据完整度有效样本 {aggregate['evidence_samples']}/{aggregate['successful']}；"
+                "缺失值未计入均值，不代表采集完成。"
+            )
+    return warnings
+
+
 def build_console_report(stats: Mapping[str, Any], output_dir: Path) -> str:
     """Build the final anomaly-oriented blind-test overview."""
 
@@ -1072,6 +1196,7 @@ def build_console_report(stats: Mapping[str, Any], output_dir: Path) -> str:
         if isinstance(run, Mapping)
     ]
     total = _aggregate_runs(all_runs)
+    quality = _aggregate_scenario_metrics(scenario_rows)
     total_elapsed = float(stats.get("total_elapsed_seconds") or 0.0)
     lines = [
         "",
@@ -1158,6 +1283,8 @@ def build_console_report(stats: Mapping[str, Any], output_dir: Path) -> str:
         )
 
     def status(value: Optional[float], threshold: float, *, less_than: bool = False) -> str:
+        if stats.get("rescore_complete") is False:
+            return "待复核"
         if value is None:
             return "N/A"
         passed = value < threshold if less_than else value >= threshold
@@ -1173,31 +1300,33 @@ def build_console_report(stats: Mapping[str, Any], output_dir: Path) -> str:
         "|---|---:|---:|---:|",
         (
             f"| MTTR | < {thresholds['mttr_seconds'] / 60:.0f}m | "
-            f"{_fmt_duration(total['avg_mttr_seconds'])} | "
-            f"{status(total['avg_mttr_seconds'], thresholds['mttr_seconds'], less_than=True)} |"
+            f"{_fmt_duration(quality['avg_mttr_seconds'])} | "
+            f"{status(quality['avg_mttr_seconds'], thresholds['mttr_seconds'], less_than=True)} |"
         ),
         (
             f"| 根因准确率 | >= {thresholds['root_cause_accuracy']:.0%} | "
-            f"{_fmt_rate(total['root_accuracy'])} | "
-            f"{status(total['root_accuracy'], thresholds['root_cause_accuracy'])} |"
+            f"{_fmt_rate(quality['root_accuracy'])} | "
+            f"{status(quality['root_accuracy'], thresholds['root_cause_accuracy'])} |"
         ),
         (
             f"| Runbook 覆盖率 | >= {thresholds['runbook_coverage']:.0%} | "
-            f"{_fmt_rate(total['runbook_coverage'])} | "
-            f"{status(total['runbook_coverage'], thresholds['runbook_coverage'])} |"
+            f"{_fmt_rate(quality['runbook_coverage'])} | "
+            f"{status(quality['runbook_coverage'], thresholds['runbook_coverage'])} |"
         ),
         (
             f"| 证据完整度 | >= {thresholds['evidence_completeness']:.0%} | "
-            f"{_fmt_rate(total['evidence_completeness'])} | "
-            f"{status(total['evidence_completeness'], thresholds['evidence_completeness'])} |"
+            f"{_fmt_rate(quality['evidence_completeness'])} | "
+            f"{status(quality['evidence_completeness'], thresholds['evidence_completeness'])} |"
         ),
         "",
         (
-            "证据口径: 单次运行按 Evidence Plan 计划项与实际成功采集项计算；"
-            "多次成功运行对每次完整度做算术平均。请求失败不进入分母。"
+            "总体口径: 每个 Case 先独立计算四项指标，再对各 Case 指标做算术平均；"
+            "各 Case 权重相同。单次证据完整度按 Evidence Plan 计划项与实际成功采集项计算，"
+            "请求失败不进入对应 Case 的指标分母。"
         ),
         f"📁 报告目录: {output_dir.resolve()}/",
     ])
+    lines.extend(f"⚠ {warning}" for warning in evaluation_warnings(stats))
     return "\n".join(lines)
 
 
@@ -1205,6 +1334,7 @@ def build_summary(stats: Mapping[str, Any]) -> str:
     lines = [
         "# 当前 AIOps 质量 Demo",
         "",
+        *[f"> ⚠ {warning}\n" for warning in evaluation_warnings(stats)],
         "| 场景 | 运行 | 状态 | 根因准确率 | Runbook | 证据完整度 | MTTR | Run ID |",
         "|---|---:|---|---:|---:|---:|---:|---|",
     ]
@@ -1231,48 +1361,287 @@ def build_summary(stats: Mapping[str, Any]) -> str:
             all_runs.append(run)
 
     successful = [run for run in all_runs if run.get("success")]
-    correct = sum(1 for run in successful if run["root_cause"]["passed"])
-    evidence_values = [
-        float((run.get("evidence") or {}).get("completeness"))
-        for run in successful
-        if (run.get("evidence") or {}).get("completeness") is not None
+    scenario_rows = [
+        scenario
+        for scenario in stats.get("scenarios") or []
+        if isinstance(scenario, Mapping)
     ]
-    runbook_matched = sum(len(run["runbook"]["matched"]) for run in successful)
-    runbook_expected = sum(len(run["runbook"]["expected"]) for run in successful)
-    root_accuracy = correct / len(successful) if successful else None
-    evidence_rate = sum(evidence_values) / len(evidence_values) if evidence_values else None
-    runbook_rate = runbook_matched / runbook_expected if runbook_expected else None
-    elapsed_values = [float(run.get("elapsed_seconds") or 0.0) for run in successful]
-    avg_mttr = sum(elapsed_values) / len(elapsed_values) if elapsed_values else None
+    quality = _aggregate_scenario_metrics(scenario_rows)
+    scenario_count = int(quality["scenario_count"])
     lines.extend([
         "",
         "## 四项质量指标汇总",
         "",
-        f"- MTTR：{'N/A' if avg_mttr is None else f'{avg_mttr:.1f}s'}（成功运行平均值）",
-        f"- 根因准确率：{_fmt_rate(root_accuracy)}（{correct}/{len(successful)}）",
-        f"- Runbook 覆盖率：{_fmt_rate(runbook_rate)}（{runbook_matched}/{runbook_expected}）",
-        f"- 证据完整度：{_fmt_rate(evidence_rate)}（{len(evidence_values)} 次成功运行算术平均）",
-        "- 证据口径：单次运行按 Evidence Plan 的 `plan_collected / plan_total` 计算；多次成功运行对每次完整度做算术平均。固定 Case 证据合同仅保留在 `evidence_contract_audit` 中供审计。",
+        f"- MTTR：{_fmt_duration(quality['avg_mttr_seconds'])}（{scenario_count} 个 Case 独立计算后算术平均）",
+        f"- 根因准确率：{_fmt_rate(quality['root_accuracy'])}（{scenario_count} 个 Case 准确率算术平均）",
+        f"- Runbook 覆盖率：{_fmt_rate(quality['runbook_coverage'])}（{scenario_count} 个 Case 覆盖率算术平均）",
+        f"- 证据完整度：{_fmt_rate(quality['evidence_completeness'])}（{scenario_count} 个 Case 完整度算术平均）",
+        "- 总体口径：每个 Case 先独立计算指标，再对各 Case 指标做算术平均，各 Case 权重相同。单次证据完整度按 Evidence Plan 的 `plan_collected / plan_total` 计算；Case 内对成功运行做算术平均。固定 Case 证据合同仅保留在 `evidence_contract_audit` 中供审计。",
         f"- 请求成功率：{_fmt_rate(len(successful) / len(all_runs) if all_runs else None)}（{len(successful)}/{len(all_runs)}，不混入上述四项指标分母）",
         "",
     ])
     return "\n".join(lines)
 
 
+def _md_cell(value: Any) -> str:
+    return str(value if value is not None else "-").replace("|", "\\|").replace("\n", " ")
+
+
+def _readme_metrics(aggregate: Mapping[str, Any], *, incomplete: bool = False) -> list[str]:
+    """Render existing scores only; this presentation layer never re-scores."""
+    rows = [
+        ("根因准确率", "root_accuracy", QUALITY_THRESHOLDS["root_cause_accuracy"], False),
+        ("Runbook 覆盖率", "runbook_coverage", QUALITY_THRESHOLDS["runbook_coverage"], False),
+        ("平均 MTTR", "avg_mttr_seconds", QUALITY_THRESHOLDS["mttr_seconds"], True),
+        ("证据完整度", "evidence_completeness", QUALITY_THRESHOLDS["evidence_completeness"], False),
+    ]
+    lines = ["| 指标 | 实际 | 阈值 | 状态 |", "|---|---:|---:|---|"]
+    for label, key, threshold, duration in rows:
+        value = aggregate.get(key)
+        formatted = _fmt_duration(value) if duration else _fmt_rate(value)
+        limit = f"< {threshold / 60:g}m" if duration else f">= {threshold:.0%}"
+        status = "N/A" if value is None else (
+            "✅" if (value < threshold if duration else value >= threshold) else "❌"
+        )
+        if incomplete:
+            status = "待复核"
+        lines.append(f"| {label} | {formatted} | {limit} | {status} |")
+    return lines
+
+
+def build_case_readme(
+    scenario: Mapping[str, Any], stats: Mapping[str, Any], output_dir: Path,
+) -> str:
+    cid = str(scenario["id"])
+    runs = sorted(scenario.get("runs") or [], key=lambda r: int(r.get("run_index") or 0))
+    aggregate = _aggregate_runs(runs)
+    source_dir = Path(stats.get("source_report_dir") or output_dir)
+    case_dir = output_dir / cid
+    lines = [
+        f"# {_md_cell(cid)} · {_md_cell(scenario.get('anomaly_type') or 'Unknown')}", "",
+        "[返回总体报告](../readme.md)", "",
+        f"具体故障：{_md_cell(scenario.get('fault_scenario') or scenario.get('name'))}", "",
+        f"期望 Runbook：{_md_cell(', '.join(scenario.get('expected_runbooks') or []) or 'N/A')}", "",
+        f"成功运行：{aggregate['successful']}/{aggregate['runs']}；"
+        f"证据完整度有效样本：{aggregate['evidence_samples']}/{aggregate['successful']}。", "",
+        "## 四项质量指标", "",
+        *_readme_metrics(aggregate, incomplete=stats.get("rescore_complete") is False), "",
+        "## 每次运行", "",
+        "以下是原脚本评分，不等于人工裁决；根因 0% 不自动代表 Agent 实际误诊。", "",
+        "| # | 请求 | 根因准确率 | Runbook 覆盖率 | 证据完整度 | MTTR | 原始报告 / Run ID |",
+        "|---|---|---:|---:|---:|---:|---|",
+    ]
+    for run in runs:
+        index = int(run.get("run_index") or 0)
+        rid = str(run.get("run_id") or "")
+        report = source_dir / cid / f"run-{index:02d}-{rid}" / "report.md"
+        report_label = _md_cell(rid or "-")
+        if rid and report.is_file():
+            target = Path(os.path.relpath(report, case_dir)).as_posix()
+            report_label = f"[{report_label}](<{target}>)"
+        if not run.get("success"):
+            lines.append(f"| {index} | ❌ | N/A | N/A | N/A | {_fmt_duration(run.get('elapsed_seconds'))} | {report_label} |")
+            continue
+        root = run.get("root_cause") or {}
+        rb = run.get("runbook") or {}
+        evidence = run.get("evidence") or {}
+        ev = _fmt_rate(evidence.get("completeness"))
+        if evidence.get("completeness") is not None:
+            ev += f" ({evidence.get('collected', 0)}/{evidence.get('planned', 0)})"
+        lines.append(
+            f"| {index} | ✅ | {_fmt_rate(float(bool(root.get('passed'))))} | "
+            f"{_fmt_rate(rb.get('coverage'))} | {ev} | {_fmt_duration(run.get('elapsed_seconds'))} | {report_label} |"
+        )
+    lines.extend(["", "## 统计说明", "",
+        "Case 内对成功运行的单次指标求算术平均。证据单次先按各 lane 的完成项/计划项计算，"
+        "再对每次完整度求平均；N/A 不进入均值。请求失败单列，不作为质量分数。",
+        "Runbook 覆盖不等于选用精确率；证据完整度是 Agent Plan 完成率，不是独立的事实充分性核验。", ""])
+    return "\n".join(lines)
+
+
+def build_readme(stats: Mapping[str, Any], output_dir: Path) -> str:
+    scenarios = stats.get("scenarios") or []
+    runs = [run for scenario in scenarios for run in scenario.get("runs") or []]
+    total = _aggregate_runs(runs)
+    lines = [
+        "# AIOps 异常 Case 质量报告", "",
+        f"任务状态：{_md_cell(stats.get('status') or '未记录')}；评分版本：{_md_cell(stats.get('scoring_version') or '未记录')}。", "",
+        f"场景数：{len(scenarios)}；已记录运行：{total['runs']} / 计划 {stats.get('planned_runs', '未记录')}；"
+        f"成功：{total['successful']}；失败：{total['failed']}。", "",
+        "以下保留脚本原始评分，不据此宣称已完成人工审查。", "",
+        "## 场景汇总", "",
+        "| Case | 异常类型 | 根因准确率 | Runbook 覆盖率 | 平均 MTTR | 证据完整度 | 成功运行 |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for scenario in scenarios:
+        a = _aggregate_runs(scenario.get("runs") or [])
+        cid = str(scenario["id"])
+        lines.append(
+            f"| [{_md_cell(cid)}]({cid}/readme.md) | {_md_cell(scenario.get('anomaly_type') or 'Unknown')} | "
+            f"{_fmt_rate(a['root_accuracy'])} | {_fmt_rate(a['runbook_coverage'])} | "
+            f"{_fmt_duration(a['avg_mttr_seconds'])} | {_fmt_rate(a['evidence_completeness'])} | "
+            f"{a['successful']}/{a['runs']} |"
+        )
+    lines.extend(["", "## 总体质量指标", "",
+        *_readme_metrics(_aggregate_scenario_metrics(scenarios), incomplete=stats.get("rescore_complete") is False), "",
+        "先在每个 Case 内按运行求算术平均，再对有有效值的 Case 等权平均；不把各 Case 的数量合并作分母。",
+        "单项通过不代表每个 Case 都通过，请同时查看上表和各 Case 明细。", ""])
+    for warning in evaluation_warnings(stats):
+        lines.extend([f"> ⚠ {warning}", ""])
+    if (output_dir / "manual_review.md").is_file():
+        lines.extend(["## 独立人工审查", "", "[查看逐份人工审查与评分差异](manual_review.md)。人工意见不覆盖上述原始分数。", ""])
+    return "\n".join(lines)
+
+
+def write_readme_reports(output_dir: Path, stats: Mapping[str, Any]) -> None:
+    """Publish Markdown views without modifying source scores or reports."""
+    scenarios = stats.get("scenarios") or []
+    for scenario in scenarios:
+        cid = str(scenario.get("id") or "")
+        if not SAFE_ID.fullmatch(cid) or cid in {".", ".."}:
+            raise ValueError(f"unsafe scenario id for report: {cid!r}")
+    for scenario in scenarios:
+        case_dir = output_dir / str(scenario["id"])
+        case_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write(case_dir / "readme.md", build_case_readme(scenario, stats, output_dir))
+    atomic_write(output_dir / "readme.md", build_readme(stats, output_dir))
+
+
 def write_checkpoint(output_dir: Path, stats: Mapping[str, Any]) -> None:
     """Persist aggregate state after every run for long benchmark jobs."""
 
-    (output_dir / "stats.json").write_text(
-        json.dumps(stats, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
+    atomic_write(output_dir / "stats.json", json.dumps(stats, ensure_ascii=False, indent=2, default=str))
+    atomic_write(output_dir / "summary.md", build_summary(stats))
+    atomic_write(output_dir / "overview.txt", build_console_report(stats, output_dir) + "\n")
+    write_readme_reports(output_dir, stats)
+
+
+def rescore_existing_report(
+    output_dir: Path,
+    scenarios: Mapping[str, Scenario],
+    selected: Sequence[Scenario],
+    *, cases_file: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Publish an independent scoring revision; preserve the source scores."""
+    with exclusive_lock(output_dir / ".quality.lock"):
+        assert_report_idle(output_dir)
+        return _rescore_existing_report(output_dir, scenarios, selected, cases_file=cases_file)
+
+
+def _rescore_existing_report(
+    output_dir: Path, scenarios: Mapping[str, Scenario], selected: Sequence[Scenario],
+    *, cases_file: Optional[Path] = None,
+) -> dict[str, Any]:
+
+    checkpoint_path = output_dir / "stats.json"
+    if not checkpoint_path.is_file():
+        raise SystemExit(f"missing checkpoint: {checkpoint_path}")
+    stats = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    if not isinstance(stats, dict):
+        raise SystemExit(f"invalid checkpoint: {checkpoint_path}")
+    source_dir = output_dir
+    output_dir = source_dir / "rescores" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    output_dir.mkdir(parents=True, exist_ok=False)
+
+    selected_ids = {scenario.id for scenario in selected}
+    manifest = scoring_manifest(cases_file)
+    rescored = 0
+    missing: list[str] = []
+    for scenario_stats in stats.get("scenarios") or []:
+        scenario_id = str(scenario_stats.get("id") or "")
+        if scenario_id not in selected_ids:
+            continue
+        scenario = scenarios.get(scenario_id)
+        if scenario is None:
+            continue
+        for run in scenario_stats.get("runs") or []:
+            if not run.get("success"):
+                continue
+            run_index = int(run.get("run_index") or 0)
+            run_id = str(run.get("run_id") or "")
+            run_dir = source_dir / scenario_id / f"run-{run_index:02d}-{run_id}"
+            report_path = run_dir / "report.md"
+            events_path = run_dir / "events.json"
+            score_path = run_dir / "score.json"
+            if not report_path.is_file() or not events_path.is_file():
+                missing.append(str(run_dir))
+                run["rescore_error"] = "missing report/events archive; original score retained"
+                continue
+
+            try:
+                report = report_path.read_text(encoding="utf-8")
+                events = json.loads(events_path.read_text(encoding="utf-8"))
+                if not isinstance(events, list):
+                    raise ValueError("events archive must be a list")
+                existing_score = json.loads(score_path.read_text(encoding="utf-8")) if score_path.is_file() else {}
+                if not isinstance(existing_score, dict):
+                    raise ValueError("score archive must be an object")
+            except (OSError, ValueError) as exc:
+                missing.append(str(run_dir))
+                run["rescore_error"] = f"invalid archive; original score retained: {exc}"
+                continue
+            metrics: Mapping[str, Any] = {}
+            for event in events:
+                if isinstance(event, Mapping) and event.get("type") == "final":
+                    candidate = event.get("metrics") or {}
+                    if isinstance(candidate, Mapping):
+                        metrics = candidate
+
+            claims = extract_root_claims(report)
+            root_score = score_root_causes(scenario.expected_root_causes, claims)
+            runbook_score = score_runbooks(
+                scenario.expected_runbooks,
+                report,
+                observations=_runbook_observations(
+                    [item for item in events if isinstance(item, Mapping)], metrics
+                ),
+            )
+            run["scoring_version"] = SCORING_VERSION
+            run["root_cause"] = asdict(root_score)
+            run["root_claims"] = [asdict(item) for item in claims]
+            run["runbook"] = asdict(runbook_score)
+            run.pop("rescore_error", None)
+            run["rescore_revision"] = output_dir.name
+            existing_score.update(run)
+            revision_dir = output_dir / scenario_id / run_dir.name
+            revision_dir.mkdir(parents=True)
+            existing_score["source_report"] = str(report_path.resolve())
+            atomic_write(revision_dir / "score.json", json.dumps(existing_score, ensure_ascii=False, indent=2, default=str))
+            rescored += 1
+
+    stats["scoring_version"] = SCORING_VERSION
+    stats["scoring_manifest"] = manifest
+    stats["rescore_scope"] = "root_cause_and_runbook_only; evidence retained from source"
+    stats["rescore_expectations"] = {
+        scenario.id: {"root_causes": [asdict(item) for item in scenario.expected_root_causes],
+                      "runbooks": list(scenario.expected_runbooks)}
+        for scenario in selected
+    }
+    stats["source_report_dir"] = str(source_dir.resolve())
+    stats["revision_dir"] = str(output_dir.resolve())
+    stats["rescore_complete"] = not missing and all(
+        run.get("rescore_revision") == output_dir.name
+        for scenario in stats.get("scenarios", []) for run in scenario.get("runs", [])
+        if run.get("success")
     )
-    (output_dir / "summary.md").write_text(build_summary(stats), encoding="utf-8")
-    (output_dir / "overview.txt").write_text(
-        build_console_report(stats, output_dir) + "\n", encoding="utf-8"
+    stats["rescored_at"] = datetime.now().isoformat()
+    stats["rescore_missing_archives"] = missing
+    write_checkpoint(output_dir, stats)
+    print(
+        f"Rescored {rescored} successful runs with scoring version {SCORING_VERSION}; "
+        f"missing archives={len(missing)}",
+        flush=True,
     )
+    print(build_console_report(stats, output_dir), flush=True)
+    return stats
 
 
 def main() -> None:
+    with ExitStack() as stack:
+        _main(stack)
+
+
+def _main(stack: ExitStack) -> None:
     session_started = time.monotonic()
     parser = argparse.ArgumentParser(description="Current AIOps root-cause/evidence quality demo")
     parser.add_argument(
@@ -1307,6 +1676,11 @@ def main() -> None:
         "--resume", action="store_true",
         help="resume missing run indexes from an existing output-dir checkpoint",
     )
+    parser.add_argument(
+        "--rescore-existing",
+        action="store_true",
+        help="re-score archived reports in --output-dir without calling or deploying AIOps",
+    )
     parser.add_argument("--reuse-existing", action="store_true", help="do not clean/apply anomaly cases")
     parser.add_argument("--keep-last", action="store_true", help="leave the final scenario deployed")
     parser.add_argument("--aiops-namespace", default="aiops")
@@ -1336,6 +1710,7 @@ def main() -> None:
         )
     catalog = load_catalog(Path(args.catalog))
     scenarios = load_scenarios(Path(args.cases_file))
+    manifest = scoring_manifest(Path(args.cases_file))
     try:
         selected = select_scenarios(scenarios, args.scenario)
     except ValueError as exc:
@@ -1351,10 +1726,27 @@ def main() -> None:
         if args.output_dir
         else default_output_dir(selected, timestamp=timestamp)
     )
+    if args.rescore_existing:
+        if not args.output_dir:
+            raise SystemExit("--rescore-existing requires --output-dir")
+        rescore_existing_report(output_dir, scenarios, selected, cases_file=Path(args.cases_file))
+        return
     output_dir.mkdir(parents=True, exist_ok=True)
     if not args.foreground and os.environ.get(PROTECTED_WORKER_ENV) != "1":
         raise SystemExit(launch_protected_worker(output_dir, sys.argv[1:]))
 
+    stack.enter_context(exclusive_lock(output_dir / ".quality.lock"))
+    assert_report_idle(output_dir)
+    # Lock by Kubernetes API server, independent of output directory or AIOps URL.
+    cluster = run_command([
+        "kubectl", "config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}"
+    ], capture=True, timeout=15).stdout.strip()
+    if not cluster:
+        raise RuntimeError("cannot determine cluster identity for test isolation")
+    key = hashlib.sha256(cluster.encode()).hexdigest()[:24]
+    stack.enter_context(exclusive_lock(Path(tempfile.gettempdir()) / f"aiops-quality-cluster-{key}.lock"))
+    if (output_dir / "stats.json").exists() and not args.resume:
+        raise RuntimeError("output directory already contains results; use --resume or a new directory")
     requests.get(f"{args.url.rstrip('/')}/health", timeout=10).raise_for_status()
     checkpoint_path = output_dir / "stats.json"
     if args.resume and checkpoint_path.exists():
@@ -1362,6 +1754,8 @@ def main() -> None:
         if not isinstance(loaded, dict):
             raise SystemExit(f"invalid checkpoint: {checkpoint_path}")
         stats: dict[str, Any] = loaded
+        if stats.get("scoring_manifest") != manifest:
+            raise RuntimeError("checkpoint scoring rules differ or were not recorded; use a new run and rescore old reports separately")
         stats["resumed_at"] = datetime.now().isoformat()
         stats["concurrency"] = args.concurrency
     else:
@@ -1369,6 +1763,8 @@ def main() -> None:
             "timestamp": datetime.now().isoformat(),
             "url": args.url,
             "concurrency": args.concurrency,
+            "scoring_version": SCORING_VERSION,
+            "scoring_manifest": manifest,
             "scenarios": [],
         }
     stats["selected_scenarios"] = [scenario.id for scenario in selected]
@@ -1394,6 +1790,7 @@ def main() -> None:
 
     environment_active = False
 
+    stats["status"] = "running"
     try:
         for scenario_index, scenario in enumerate(selected, start=1):
             print(f"\n[{scenario_index}/{len(selected)}] {scenario.id}: {scenario.name}", flush=True)
@@ -1488,13 +1885,20 @@ def main() -> None:
             if not args.reuse_existing and not (args.keep_last and scenario_index == len(selected)):
                 cleanup_catalog_namespaces(catalog)
                 environment_active = False
+        stats["status"] = "completed"
+    except BaseException as exc:
+        stats["status"] = "failed"
+        stats["error"] = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
         if environment_active and not args.reuse_existing and not args.keep_last:
             try:
                 cleanup_catalog_namespaces(catalog)
             except Exception as exc:
                 print(f"Final cleanup failed: {exc}", file=sys.stderr)
-        stats["completed_at"] = datetime.now().isoformat()
+        stats["finished_at"] = datetime.now().isoformat()
+        if stats["status"] == "completed":
+            stats["completed_at"] = stats["finished_at"]
         checkpoint()
         print(build_console_report(stats, output_dir), flush=True)
 

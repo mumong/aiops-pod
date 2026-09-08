@@ -1,0 +1,271 @@
+{
+  "success": true,
+  "run_id": "0354196260de4c5a",
+  "elapsed_seconds": 77.465,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "traced-config-missing",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [
+          "CONFIG_MISSING"
+        ],
+        "matched_any": [
+          "配置缺失",
+          "/work"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": []
+      }
+    ],
+    "unexpected_claim_groups": []
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**已确认根因：应用配置缺失（ConfigMissing）。**\n现有证据充分支持该结论：\n1. **直接证据**：Elasticsearch 日志中聚合了 8 次 `CONFIG_MISSING` 错误，且伴随 `http_status=500`，明确指出了缺失的是应用层面的配置项，而非系统级配置（如 Secret/ConfigMap 挂载失败）。\n2. **过程验证**：Tempo 和 DeepFlow 的链路数据显示，应用容器成功启动并处理了流量，但在请求 `/work` 时显式返回了 500 并带有 `config_missing_exit` 标记。这证实了故障点发生在应用内部逻辑执行阶段。\n3. **排除干扰**：监控指标显示内存分配始终为 0（`allocated_mib=0`），彻底排除了 OOMKilled 导致的 CrashLoopBackOff 可能性。\n\n综上，应用启动后能够正常响应，但因缺乏必要的配置参数，在特定接口调用时触发业务逻辑错误导致进程退出，从而陷入重启循环。\n\n---",
+      "full_section": "### 因果链\n```text\n应用必要配置缺失 (ConfigMissing) → /work 端点请求处理异常 (HTTP 500) → 进程异常退出 (Error Exit) → Pod 触发 CrashLoopBackOff 循环\n```\n\n### 根因结论\n**已确认根因：应用配置缺失（ConfigMissing）。**\n现有证据充分支持该结论：\n1. **直接证据**：Elasticsearch 日志中聚合了 8 次 `CONFIG_MISSING` 错误，且伴随 `http_status=500`，明确指出了缺失的是应用层面的配置项，而非系统级配置（如 Secret/ConfigMap 挂载失败）。\n2. **过程验证**：Tempo 和 DeepFlow 的链路数据显示，应用容器成功启动并处理了流量，但在请求 `/work` 时显式返回了 500 并带有 `config_missing_exit` 标记。这证实了故障点发生在应用内部逻辑执行阶段。\n3. **排除干扰**：监控指标显示内存分配始终为 0（`allocated_mib=0`），彻底排除了 OOMKilled 导致的 CrashLoopBackOff 可能性。\n\n综上，应用启动后能够正常响应，但因缺乏必要的配置参数，在特定接口调用时触发业务逻辑错误导致进程退出，从而陷入重启循环。\n\n---",
+      "inconclusive": false
+    }
+  ],
+  "runbook": {
+    "expected": [
+      "pod-config-error",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime",
+      "pod-template-hash"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 3,
+    "planned": 7,
+    "completeness": 0.42857142857142855,
+    "lanes": [
+      {
+        "lane": "0354196260de4c5a-g1",
+        "collected": 3,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/0354196260de4c5a-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 3,
+    "planned": 7,
+    "completeness": 0.42857142857142855,
+    "lanes": [
+      {
+        "lane": "0354196260de4c5a-g1",
+        "collected": 3,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/0354196260de4c5a-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 5,
+    "planned": 8,
+    "completeness": 0.625,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "config-crashloop-state",
+        "description": "CrashLoopBackOff 且 Exit Code 78",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "CrashLoopBackOff"
+        ],
+        "missing_any": [
+          "Exit Code: 78",
+          "exit_code\": 78",
+          "exitCode=78",
+          "退出码 78"
+        ],
+        "observation_count": 0,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "config-missing-log",
+        "description": "应用日志原文包含 CONFIG_MISSING",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [
+          "fact-0dc0c3413a3d",
+          "fact-0f27003945a0",
+          "fact-10f71ea16c45",
+          "fact-1b017ad5bf63",
+          "fact-39995165787c",
+          "fact-4f644c8f51d2",
+          "fact-5c1f4e8b8b14",
+          "fact-5f37195242d0",
+          "/tmp/aiops/reports/context_archives/0354196260de4c5a-g1/tools/002-evidence-query_pod_logs.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 9,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "work-http-500",
+        "description": "日志或 Trace 确认 /work 返回 HTTP 500",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-0dc0c3413a3d",
+          "fact-0f27003945a0",
+          "fact-10f71ea16c45",
+          "fact-1b017ad5bf63",
+          "fact-39995165787c",
+          "fact-4f644c8f51d2",
+          "fact-5c1f4e8b8b14",
+          "fact-5f37195242d0",
+          "/tmp/aiops/reports/context_archives/0354196260de4c5a-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "fact-08a030bdce00",
+          "fact-124bc51d98af",
+          "fact-13ec6fb0cab1"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 20,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "log-trace-correlation",
+        "description": "Logging 与 Tracing 通过同一 trace_id 关联",
+        "weight": 2,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "matched_refs": [
+          "fact-0f27003945a0",
+          "fact-10f71ea16c45",
+          "fact-4f644c8f51d2",
+          "fact-5f37195242d0",
+          "fact-08a030bdce00",
+          "fact-124bc51d98af",
+          "fact-1effcf90c0e1",
+          "fact-29a98385d08d",
+          "fact-496eeb2f9a4e",
+          "fact-514e80e89339",
+          "fact-5e8acb4f8f4b",
+          "fact-408947ed4dba"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 20,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "trace_id",
+        "correlation_dimensions": [
+          "logging",
+          "tracing"
+        ],
+        "correlation_values": [
+          "\"263174d1b38221333d5a5faf14489ae4\"",
+          "\"3ddfc5552edd0447095df71a38794450\"",
+          "\"4711299e320bfb5314d2ef5c2910dc7a\"",
+          "\"65684c8c074b2b13bde640e742613caa\""
+        ]
+      },
+      {
+        "id": "restart-trend",
+        "description": "Prometheus range 指标确认重启计数增长",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 1,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 40,
+  "request_attempt_count": 1,
+  "request_attempt_failures": []
+}
