@@ -1,0 +1,102 @@
+[run] run_id=5a9f42dbc2f6404f
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前是否存在异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[agent:layer] 集群中存在 1 个异常 Pod：`workload`（Namespace: `aiops-case-v09`），当前状态为 `CrashLoopBackOff`。
+
+为了进一步定位该 Pod 的异常类型（例如是 OOMKilled 还是配置错误等），我需要获取该 Pod 的详细标签和状态信息。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 12 (3m49s ago) 42m 172.16.104.2
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 12 (3m49s ago) 42m 172.16.104.2
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 12 (3m49s ago) 42m 172.16.104.2
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 12 (3m49s ago) 42m 172.16.104.2
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 12 (3m49s ago) 42m 172.16.104.2
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (13.3s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":35,"matched":55,"normalized":55,"retrieved":55,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entity":{
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先执行 kubectl_describe 和 kubectl get yaml 确认 Pod 状态、Exit Code 和命令配置，再结合已有 metrics、logging 结果做因果判断。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v09 creationTimestamp: 2026-09-11T14:11:24Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v09 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 2m23s (x179 over 42m) kubele
+[agent:parallel_evidence] ### 实体身份与生命周期
+
+- **Pod**: `aiops-case-v09/workload`, UID `5746c496-b67c-4906-aabb-e71359674305`, IP `172.16.104.20`, 节点 `node2`.
+- **容器**: 单容器 `app`, 镜像 `xnet.registry.io:8443/observability/python:3-alpine`.
+- **当前状态**: Pod phase `Running`, 但容器 `app` 处于 `Waiting (CrashLoopBackOff)`, `Ready=False`. 已重启 12 次.
+- **终态信息**: `Last State: Terminated`, `Reason: Error`, **Exit Code: 1**.
+
+---
+
+### 事实证据
+
+#### 1. Kubernetes 状态 (kubectl_describe / kubectl_get_yaml)
+- **支持证据**:
+    - 容器 `app` 处于 `CrashLoopBa
+[node:done] parallel_evidence / 并发证据采集 (33.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (6.0s)
+[final] run_id=5a9f42dbc2f6404f status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v09/workload` | CrashLoopBackOff | Pod aiops-case-v09/workload 处于 CrashLoopBackOff 状态，容器反复退出 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubernetes | `Warning BackOff ... Back-off restarting failed container app in pod workload_aiops-case-v09` | 确认容器已启动多次并触发退避重启机制 |
+| 2 | K8s State | kubernetes | `container.last_terminated_reason`: Error | 确认容器上次退出原因为非零退出或错误 |
+| 3 | Logging | elasticsearch | `FileNotFoundError: [Errno 2] No such file or directory: '/input/app.conf'` | 直接揭示容器进程因缺少配置文件 `/input/app.conf` 而崩溃退出 |
+
+上述证据链闭环：Kubernetes 报告容器因 Error 退出并进入 CrashLoopBackOff，日志明确指出错误发生在执行启动脚本读取 `/input/app.conf` 时，确认为文件缺失导致的启动失败。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+容器配置依赖挂载卷中的 `/input/app.conf` 文件 → 挂载卷（如 EmptyDir）中不存在该文件 → 进程启动时抛出 FileNotFoundError (Exit Code 1) → 容器反复崩溃，表现为 CrashLoopBackOff 状态
+```
+
+### 根因结论
+
+已确认根因：容器启动命令尝试读取不存在的配置文件 `/input/app.conf`。日志中记录的 `FileNotFoundError: [Errno 2] No such file or directory: '/input/app.conf'` 直接证实了容器进程在启动阶段即因文件缺失而崩溃退出。该退出行为导致 Kubernetes 不断重启容器，并最终触发 BackOff 退避机制，呈现为 CrashLoopBackOff 状态。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 52.4s
+├─ 问题定位: 13.3s
+├─ 并发证据采集: 33.0s
+│  └─ g1 aiops-case-v09/workload: 33.0s (Evidence 25.1s, RCA 7.8s)
+└─ 汇总总结: 6.0s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v09/workload**: pod-crashloop-runtime
+
+[run:end] run_id=5a9f42dbc2f6404f status=-

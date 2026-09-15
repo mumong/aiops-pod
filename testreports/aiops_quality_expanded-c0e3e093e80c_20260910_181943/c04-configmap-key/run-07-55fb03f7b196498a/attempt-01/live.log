@@ -1,0 +1,98 @@
+[run] run_id=55fb03f7b196498a
+[node:start] layer / 问题定位
+[agent:layer] 我将先获取集群中所有 Pod 的当前状态，以识别是否存在异常。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[agent:layer] 我发现集群中有一个 Pod 处于异常状态：`aiops-case-v11` 命名空间下的 `workload` Pod，状态为 `CreateContainerConfigError`。这通常意味着容器创建配置出错，比如缺失 ConfigMap/Secret 或配置项引用错误。
+
+我将获取对应的诊断手册 `pod-config-error.md` 以进行进一步分析。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ConfigError / 启动配置失败 > Pod异常类型: ConfigError | 典型状态: CreateContainerConfigError / CreateContainerError / CrashLoopBackOff | 兼容分类: config_bootstrap ## 场景识别 | 信号 | 关键特征 | |------|-----
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CreateContainerConfigError 0 24m 172.
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CreateContainerConfigError 0 24m 172.
+[tool:start] fetch_pod_details
+[tool:done] fetch_pod_details status=error fetch_pod_details 输出摘要: raw_chars=126 lines=1 Error: fetch_pod_details is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CreateContainerConfigError 0 24m 172.
+[tool:start] fetch_pod_details
+[tool:done] fetch_pod_details status=error fetch_pod_details 输出摘要: raw_chars=126 lines=1 Error: fetch_pod_details is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] execute_kubectl_cmd
+[node:done] layer / 问题定位 (17.7s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先执行计划中剩余的 Kubernetes 和 Topology 工具，与已有 PromQL/Logs/Tracing 结果整合。
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v11 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning Failed 22m (x12 over 24m) kubelet Error: couldn't find key
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 已采集事实
+
+| 维度 | 关键结果 |
+|------|----------|
+| **Kubernetes describe** | Pod `aiops-case-v11/workload` 当前 `Status: Pending`，容器 `app` 处于 `Waiting`，`Reason: CreateContainerConfigError`，Restart Count=0。kubelet 事件（22m 内 x12）明确报错：**`Error: couldn't find key unavailable-key in ConfigMap aiops-case-v11/workload-input`** |
+| **PromQL metrics** | `kube_pod_container_status_waiting_reason` 返回 `reason="CreateContainerConfigError"`，`kube_pod_status_phase=Pending`，`restarts_total=0`，无 last_terminated 记录。与 des
+[node:done] parallel_evidence / 并发证据采集 (24.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.6s)
+[final] run_id=55fb03f7b196498a status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v11/workload` | CreateContainerConfigError | Pod workload in aiops-case-v11 namespace stuck in Pending state with CreateContainerConfigError |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes (Pod) | status: Pending; container restart_count: 0 | 确认 Pod 处于未运行状态且未发生重启。 |
+| 2 | K8s Event | Kubernetes (kubelet) | Warning Failed: "Error: couldn't find key unavailable-key in ConfigMap aiops-case-v11/workload-input" (12 times over 24m) | 指出 Pod 无法启动的直接失败原因及缺失的 ConfigMap 键名。 |
+| 3 | Metric | Prometheus | kube_pod_container_status_waiting_reason=1 (label: CreateContainerConfigError) | 量化验证了当前处于配置错误的等待状态。 |
+| 4 | Metric | Prometheus | kube_pod_container_status_restarts_total=0 | 从指标层面佐证了容器未能启动，无重启行为。 |
+
+**证据印证说明：**
+Kubernetes 事件（#2）给出了明确的失败细节（找不到键 `unavailable-key`），这与 Waitting 原因（#3）完全吻合。两者共同证实了容器因环境配置错误（ConfigMap key 缺失）而无法拉起，进而导致 Pod 停留在 Pending 状态且无重启（#1, #4）。日志与追踪维度因容器未启动被标记为 `not_applicable`，属正常现象。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+ConfigMap 'workload-input' 缺少 'unavailable-key' 数据项 → Pod Spec 引用该不存在的键进行配置注入 → kubelet 在容器创建阶段解析失败 (CreateContainerConfigError) → 容器无法拉起，Pod 保持 Pending 状态
+```
+
+### 根因结论
+
+**已确认的根因**：Pod 规范中引用了 ConfigMap `aiops-case-v11/workload-input` 中名为 `unavailable-key` 的键，但该键在 ConfigMap 中实际不存在（证据 #2, #3）。这直接导致 kubelet 在启动容器时因无法解析环境变量或挂载数据而返回 `CreateContainerConfigError`。
+
+**未知项**：现有证据仅证明了键缺失的事实，无法判定是 Pod 规范中存在拼写错误，还是 ConfigMap 中的数据被意外删除。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 49.9s
+├─ 问题定位: 17.7s
+├─ 并发证据采集: 24.6s
+│  └─ g1 aiops-case-v11/workload: 24.6s (Evidence 17.5s, RCA 6.9s)
+└─ 汇总总结: 7.6s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v11/workload**: pod-config-error
+
+[run:end] run_id=55fb03f7b196498a status=-

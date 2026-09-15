@@ -1,0 +1,118 @@
+[run] run_id=3a5cbbc8804146a4
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前是否存在异常。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[agent:layer] 我发现集群中有一个 Pod 处于异常状态。接下来，我将获取该 Pod 的详细信息以判断其异常原因。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-68c557d875-gtzc8 0/1 Pending 0 50m <none> <none
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[agent:layer] 通过 `kubectl describe` 获取该 Pod 的详细事件和状态，以确认调度失败的具体原因。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-68c557d875-gtzc8 0/1 Pending 0 50m <none> <none
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-68c557d875-gtzc8 0/1 Pending 0 50m <none> <none
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-68c557d875-gtzc8 0/1 Pending 0 50m <none> <none
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-68c557d875-gtzc8 0/1 Pending 0 50m <none> <none
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (15.3s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我将根据已有的可观测性基线结果，继续执行 evidence_plan 中的关键 Kubernetes 工具。
+
+## 1. 分析已有基线事实
+
+**Metrics (Prometheus)**:
+- `kube_pod_status_phase` = 1 for phase="Pending" - **确认 Pod 当前处于 Pending 状态**。
+- 其他 phase (Running, Succeeded, Failed, Unknown) 均为 0。
+- 没有返回 `kube_pod_container_status_waiting_reason` 或 `kube_pod_container_status_last_terminated_reason` 数据，这是因为 Pod 尚未进入 ContainerCreating 状态，没有容器启动。这是符合预期的。
+
+**Logging (ES/Filebeat)**:
+- 30 分钟时间窗内无日志 (empty)。
+
+**Tracing (DeepFlow/Tempo)**:
+- 无 Flow 数据，原因是 `pod_ip`
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-68c557d875-gtzc8 namespace: aiops-case-01 creationTimestamp: 2026-09-10T10:19:45Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-68c557d875-gtzc8 namespace: aiops-case-01 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 50m default-scheduler 0/3 nodes are avail
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[agent:parallel_evidence] ## 3. 分析已采集证据
+
+### 核心事实梳理
+
+| 维度 | 事实 | 与候选原因的关系 |
+|------|------|------------------|
+| **Pod 状态** | `kubectl_describe` 和 PromQL `kube_pod_status_phase=1` (Pending) 一致，**确认 Pending 状态** | 确认异常存在 |
+| **Events** | `FailedScheduling  50m` → **"3 node(s) didn't match Pod's node affinity/selector"** (重复触发7次) | 直接指向**调度约束（NodeSelector/Affinity）不匹配** |
+| **Pod Spec** | `nodeSelector: {"aiops.lab/unavailable": "true"}` | Pod 被强制调度到标签包含 `aiops.lab/unavailable=true` 的节点 |
+| **集群节点** | 3 个节点 (master, node1,
+[node:done] parallel_evidence / 并发证据采集 (41.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.3s)
+[final] run_id=3a5cbbc8804146a4 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-01/workload-68c557d875-gtzc8` | Pending | Pod workload-68c557d875-gtzc8 in aiops-case-01 namespace is stuck in Pending state. |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | `kubernetes` | `pod.phase`: `Pending` (fact_id: fact-2cfdaa37dc76) | 确认 Pod 未被调度 |
+| 2 | K8s State | `kubernetes` | `pod.condition`: `PodScheduled=False`, reason=`Unschedulable` (fact_id: fact-7ad6aa22ab6d) | 确认调度器判定不可调度 |
+| 3 | K8s Event | `kubernetes` | `FailedScheduling`: `3 node(s) didn't match Pod's node affinity/selector` (fact_id: fact-59fdfd4fb40a) | 指出失败原因与节点亲和性/选择器不匹配 |
+| 4 | K8s Config | `kubernetes` | `container.resource_request.cpu`: `5m`; `resource_limit.cpu`: `50m` (fact_id: fact-2cdf8bfda276, fact-0916112b8331) | 确认资源请求量极低，排除资源不足导致的调度失败 |
+| 5 | K8s Config | `kubernetes` | `container.resource_request.memory`: `8Mi`; `resource_limit.memory`: `32Mi` (fact_id: fact-8527e7175da6, fact-2cfdaa37dc76) | 确认内存请求量极低，排除资源不足导致的调度失败 |
+| 6 | Metric | `prometheus` | `kube_pod_status_phase` (phase=Pending): `1` (fact_id: fact-cd9a60bc3b15) | 从监控角度验证 Pod 持续处于 Pending 状态 |
+| 7 | Metric | `prometheus` | `kube_pod_status_phase` (phase=Failed): `0` (fact_id: fact-339a933663ec) | 确认 Pod 未进入失败状态，仅为等待调度 |
+
+Kubernetes 事件明确指出了 `node affinity/selector` 不匹配是导致 `FailedScheduling` 的直接原因，同时低资源请求排除了资源短缺的可能性。Metrics 数据确认了状态持续未变。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 定义了 nodeSelector {aiops.lab/unavailable: true} → 集群中 master, node1, node2 均未包含该标签 → default-scheduler 评估 0/3 节点可用 → Pod 持续处于 Pending 状态
+```
+
+### 根因结论
+
+**已确认的根因：节点标签选择器不匹配（Label Selector Mismatch）。**
+
+Pod 的 `nodeSelector` 配置要求目标节点必须拥有 `aiops.lab/unavailable=true` 标签，但当前集群中所有 3 个可用节点（`master`, `node1`, `node2`）均不具备该标签。这导致 `default-scheduler` 在调度时无法找到满足亲和性条件的节点，从而拒绝调度。证据 1-4 充分印证了调度失败是由标签过滤而非资源耗尽引起的。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.1m
+├─ 问题定位: 15.3s
+├─ 并发证据采集: 41.4s
+│  └─ g1 aiops-case-01/workload-68c557d875-gtzc8: 41.4s (Evidence 34.3s, RCA 7.1s)
+└─ 汇总总结: 10.3s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-01/workload-68c557d875-gtzc8**: pod-pending-unschedulable
+
+[run:end] run_id=3a5cbbc8804146a4 status=-

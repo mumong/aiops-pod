@@ -1,0 +1,158 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "e9d29066273c459f",
+  "elapsed_seconds": 112.955,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "c10-timeout",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "liveness"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [],
+    "accuracy": 1.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因是 `container.resource_limit.memory` 设置为 `64Mi`，该值过低，导致容器启动后无法满足运行需求，触发了内核的 OOM Killer 机制。\n\n证据支撑如下：\n- **硬证据**：`fact-96d9ea1e4e67` 和 `fact-e49cea6ac71b` 明确记录了进程退出码为 137，这是 Linux 内核 OOM Killer 终止进程的标志性信号。\n- **现象印证**：`fact-b7f3177b2cb0` 记录了 Liveness Probe 的 \"context deadline exceeded\" 超时错误，`fact-3313b572508a` 的 Tracing 数据证实了该超时发生在请求发出后约 3 秒。结合 `fact-0491e62e6268` 中日志仍显示 200 状态码（表明进程在某个瞬间或请求完成时还存活，但随即崩溃或被 OOM 终止），说明在 Probe 等待响应返回期间，进程已被内核强行终止。\n- **持续故障**：`fact-1f0dca89267f` 和 `fact-2c39b810ba49` 确认了由此引发的 35 次重启和 CrashLoopBackOff 状态。\n\n因此，内存限制不足引发的 OOM 是导致当前集群异常的直接原因。\n\n---",
+      "full_section": "### 因果链\n\n```text\n容器内存硬限制 64Mi 过低 → 触发 OOM Killer 强制终止进程 (SIGKILL/Exit Code 137) → Liveness Probe 超时 (context deadline exceeded) → 容器反复重启至 CrashLoopBackOff\n```\n\n### 根因结论\n\n已确认的根因是 `container.resource_limit.memory` 设置为 `64Mi`，该值过低，导致容器启动后无法满足运行需求，触发了内核的 OOM Killer 机制。\n\n证据支撑如下：\n- **硬证据**：`fact-96d9ea1e4e67` 和 `fact-e49cea6ac71b` 明确记录了进程退出码为 137，这是 Linux 内核 OOM Killer 终止进程的标志性信号。\n- **现象印证**：`fact-b7f3177b2cb0` 记录了 Liveness Probe 的 \"context deadline exceeded\" 超时错误，`fact-3313b572508a` 的 Tracing 数据证实了该超时发生在请求发出后约 3 秒。结合 `fact-0491e62e6268` 中日志仍显示 200 状态码（表明进程在某个瞬间或请求完成时还存活，但随即崩溃或被 OOM 终止），说明在 Probe 等待响应返回期间，进程已被内核强行终止。\n- **持续故障**：`fact-1f0dca89267f` 和 `fact-2c39b810ba49` 确认了由此引发的 35 次重启和 CrashLoopBackOff 状态。\n\n因此，内存限制不足引发的 OOM 是导致当前集群异常的直接原因。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v17"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v17"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v17"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 8,
+    "planned": 8,
+    "completeness": 1.0,
+    "lanes": [
+      {
+        "lane": "e9d29066273c459f-g1",
+        "collected": 8,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/e9d29066273c459f-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 8,
+    "planned": 8,
+    "completeness": 1.0,
+    "lanes": [
+      {
+        "lane": "e9d29066273c459f-g1",
+        "collected": 8,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/e9d29066273c459f-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c10-timeout-kubernetes-observation",
+        "description": "c10-timeout-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-12df1c05453f",
+          "fact-2c39b810ba49",
+          "fact-cc233d2162e9",
+          "fact-6d96152f0dde",
+          "fact-772386e7019e",
+          "fact-f045540df82a",
+          "fact-f4c098970e70",
+          "fact-f57bb3aba99a",
+          "fact-38fb6137b506",
+          "fact-3b7e0055319a",
+          "fact-c060eb7e1cc6",
+          "fact-cd112ae3c3c7"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 34,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 43,
+  "logical_elapsed_seconds": 113.321,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

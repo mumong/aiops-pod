@@ -1,0 +1,104 @@
+[run] run_id=5ed9a76615e54074
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在的异常 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 集群中存在 1 个异常 Pod：
+- **Namespace**: `aiops-case-v12`
+- **Pod Name**: `workload`
+- **状态**: `Terminating`
+- **已运行时间**: 18s
+
+该 Pod 处于 `Terminating` 状态，符合 **`pod-terminating-stuck`** 的归因范围。我将获取对应的诊断手册以进行下一步分析。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[agent:layer] 我将获取该 Pod 的详细 YAML 信息，重点检查 `deletionTimestamp`、`finalizers` 以及 `terminationGracePeriodSeconds` 等关键字段。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.31 node2 <none>
+[agent:layer] 我发现刚才的命令只是输出了简要信息，需要获取 YAML 详细内容以查看 `deletionTimestamp` 和 `finalizers`。我将使用 `kubectl get` 的 `-o yaml` 选项。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.31 node2 <none>
+[agent:layer] 之前的 `kubectl_get_by_name` 工具似乎只返回了表格摘要。为了获取 `deletionTimestamp` 和 `finalizers` 等详细 YAML 信息，我需要确认该工具是否支持 `-o yaml` 参数，或者尝试获取节点状态以辅助判断。
+
+根据工具定义：`Run kubectl get <kind> <name> --show-labels -o wide.`，它似乎固定输出了 `wide` 格式。
+
+鉴于目前只有 1 个 Pod 处于异常状态 `Terminating`，且运行时间仅为 21 秒，属于极短期内的终止过程。根据 `pod-terminating-stuck.md` 的规则，如果 `deletionTimestamp` 存在时间小于 `terminationGracePeriodSeconds`，属于正常优雅终止窗口。
+
+由于无法直接通过当前工具获取 YAML 详细内容（如 `deletionTimestamp`、`finalizers`、`terminationGracePeriodSeconds`），且 Pod 运行时间极短（21s），我
+[node:done] layer / 问题定位 (28.1s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先确认实体当前状态和关键配置。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_describe
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v12 node: node2/10.2.0.50 status: Terminating (lasts <invalid>) 关键诊断行: Annotations: cni.projectcalico.org/containerID: 452fcde91
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v12 creationTimestamp: 2026-09-14T06:09:08Z deletionTimestamp: 2026-09-14T07:14:11Z deletionGracePeriodSeconds: 3900 finalizers:
+[agent:parallel_evidence] ### 已采集事实（本轮真实工具结果）
+
+- **实体身份与当前状态**：Pod `aiops-case-v12/workload`（UID `7872555d-068b-461f-bde4-bab42d1ce9c8`）仍然存在， nodeName=`node2`。`kubectl get pod`/YAML 显示 `phase: Running`，但 `kubectl describe` 报告 `status: Terminating`；这表明对象在 etcd 层面已标记删除（见 deletionTimestamp），kubelet 正在进行容器停止，但 Pod 对象尚未从 API 服务器移除。
+- **deletionTimestamp 与宽限期**：`deletionTimestamp: 2026-09-14T07:14:11Z`，`terminationGracePeriodSeconds: 3900`（65 分钟），`deletionGracePeriodSeconds: 3900`。kubelet 事件显示 `Stopping container app` 发生在 51 秒
+[node:done] parallel_evidence / 并发证据采集 (42.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.1s)
+[final] run_id=5ed9a76615e54074 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v12/workload` | Terminating | {'message': 'Annotations:               cni.projectcalico.org/containerID: 452fcde91bd677670f03e0437a9e28988cdb9a593d4579fb44710c72f4c213a1'} |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | 容器 `app` 重启计数为 0；Pod 处于 Terminating 状态 | 证明容器在生命周期内无异常崩溃重启，终止非由健康检查失败触发 |
+| 2 | K8s State | Kubernetes | Pod 处于 `Running` 阶段 | 确认 Pod 资源仍活跃，终止流程尚未最终清理资源 |
+| 3 | K8s Event | Kubernetes | `Normal Killing`, 51s前, `Stopping container app` | 确认控制面已发出终止指令，Kubelet 已介入开始停止流程 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_restarts_total` 为 0 | 佐证无应用内部进程崩溃导致的重启行为 |
+| 5 | Logging | Elasticsearch | `application started` (2026-09-14T06:09:17.703Z) | 确认应用已正常启动，但日志无终止或错误迹象 |
+
+**证据说明：**
+K8s 事件与状态确认删除指令已送达且被 Kubelet 响应（证据 2、3、4），但应用日志仅显示正常启动（证据 5）且重启计数为 0（证据 1）。所有维度均指向“应用仍在运行中未退出”，但未提供应用退出被阻塞的底层日志（如 PreStop 钩子执行情况），属于现象一致但机制未明示。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+已验证的上游原因：Pod 被触发删除（deletionTimestamp 存在） → 失败机制：应用进程持续阻塞等待 /state/teardown-requested 文件出现（未确认文件是否存在及是否写入） → 直接失败：容器拒绝退出直至 Grace Period (3900s) 超时 → 用户可见现象：Pod 长期处于 Terminating 状态
+```
+
+### 根因结论
+
+现有证据**不足**发布正式 RCA。虽然现象明确符合“等待外部信号文件”导致的终止卡死特征，但缺少以下关键事实以区分是“正常等待”还是“异常故障”：
+1. 信号文件 `/state/teardown-requested` 的实际存在状态；
+2. PreStop Hook 的具体执行上下文及是否正在运行；
+3. 发起删除的控制器或外部源是否完成了文件写入操作。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.3m
+├─ 问题定位: 28.1s
+├─ 并发证据采集: 42.6s
+│  └─ g1 aiops-case-v12/workload: 42.6s (Evidence 29.6s, RCA 12.9s)
+└─ 汇总总结: 8.1s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v12/workload**: pod-terminating-stuck
+
+[run:end] run_id=5ed9a76615e54074 status=-

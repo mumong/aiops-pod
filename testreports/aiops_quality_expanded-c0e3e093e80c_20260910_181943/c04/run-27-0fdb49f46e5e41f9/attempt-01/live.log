@@ -1,0 +1,127 @@
+[run] run_id=0fdb49f46e5e41f9
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-6584f97c76-h4lt9 0/1 CreateContainerC
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ConfigError / 启动配置失败 > Pod异常类型: ConfigError | 典型状态: CreateContainerConfigError / CreateContainerError / CrashLoopBackOff | 兼容分类: config_bootstrap ## 场景识别 | 信号 | 关键特征 | |------|-----
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-6584f97c76-h4lt9 0/1 CreateContainerC
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[tool:start] fetch_runbook
+[node:done] layer / 问题定位 (12.5s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 我已收到首轮可观测性 baseline 结果。现在分析并执行剩余的 Kubernetes 工具（describe 和 yaml），以获取 CreateContainerConfigError 的具体原因。
+
+**Baseline 摘要：**
+- **Metrics (Prometheus):** 确认 `kube_pod_container_status_waiting_reason=1` 且 `reason="CreateContainerConfigError"`，重启次数为 0，Phase 为 Pending。这确认了 Pod 一直处于等待配置状态，尚未启动。
+- **Logging (Elasticsearch):** 30 分钟窗口内无日志，符合 CreateContainerConfigError（容器未启动）的预期。
+- **Tracing (DeepFlow/Tempo):** 无流量记录，符合预期。
+
+接下来执行 `kubectl_describe` 和 `kubectl_get_yaml` 以定位具体的缺失配置资源。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-6584f97c76-h4lt9 namespace: aiops-case-04 creationTimestamp: 2026-09-10T14:52:05Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-6584f97c76-h4lt9 namespace: aiops-case-04 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning Failed 47m (x12 over 49m) kubelet Error: c
+[agent:parallel_evidence] 工具已返回 Pod YAML 和 describe 结果，核心事实已经非常清晰。接下来我需要验证 Secret 是否真的缺失该 key，并确认当前状态是否为持续异常。
+
+**首轮计划执行：**
+1.  ✅ 已获取 Pod YAML：确认 `phase=Pending`，`containerStatus.reason=CreateContainerConfigError`，`message="couldn't find key unavailable-key in Secret aiops-case-04/workload-input"`
+2.  ✅ 已获取 Pod Describe：确认事件 `Warning Failed ... Error: couldn't find key unavailable-key in Secret aiops-case-04/workload-input`
+3.  ➡️ 下一步：检查 Secret `aiops-case-04/workload-input` 是否存在及其 data 内容，以确认是否确实缺少 `unavailable-key`。
+
+让我
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 47m (x12 over 49m) Warning Failed Pod/workload-6584f97c76-h4lt9 Error: couldn't find key unavailable-key in Secret aiops-case-04/workload-input
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Secret name: workload-input namespace: aiops-case-04 type: Opaque data_keys: available-key has_dockerconfigjson: False docker_secret_type_valid: False
+[agent:parallel_evidence] 好，根据 baseline 和首轮工具的初步分析，Pod 因 `CreateContainerConfigError` 处于 `Pending` 状态。核心假设是 Secret `workload-input` 中确实缺少容器挂载或环境变量引用的 key `unavailable-key`。
+
+现在我已有了 Pod 的 YAML/Describe 和 Secret 的 YAML 摘要。接下来我需要：
+1. 验证 Pod 的 YAML 中，是否确实引用了 `workload-input` Secret 中的 `unavailable-key`。
+2. 验证 Secret `workload-input` 的 `data` 字段中，到底有哪些 key，确认缺少 `unavailable-key`。
+
+让我获取这两个资源的完整 YAML 来进行最终确认。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-6584f97c76-h4lt9 namespace: aiops-case-04 deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> terminationGracePeriodSecond
+[heartbeat] layer
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Secret name: None namespace: None type: Opaque data_keys: <none> has_dockerconfigjson: False docker_secret_type_valid: False
+[agent:parallel_evidence] 根据已采集的工具结果，针对 Pod `aiops-case-04/workload-6584f97c76-h4lt9` 的调查结果如下：
+
+### 1. 实体身份与当前状态
+*   **实体确认**：Pod `workload-6584f97c76-h4lt9` 存在于 `aiops-case-04` 命名空间，调度在 `node2`，标签 `aiops.lab/case-id=c04`，所有者为 `ReplicaSet/workload-6584f97c76`。
+*   **生命周期**：Pod 自 `2026-09-10T14:52:05Z` 创建，目前状态为 **Pending**，未删除。
+*   **当前异常**：容器状态仍为 **CreateContainerConfigError**，尚未恢复。
+
+### 2. 根因证据
+*   **异常原因**：Pod YAML 和 Events 均明确指出错误信息为 `couldn't find key unavailable-key in Secret aiops-case-04/workload-input`。
+*   **Sec
+[node:done] parallel_evidence / 并发证据采集 (61.1s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (11.9s)
+[final] run_id=0fdb49f46e5e41f9 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-04/workload-6584f97c76-h4lt9` | CreateContainerConfigError | Pod workload-6584f97c76-h4lt9 处于 Pending 状态，容器持续报错 CreateContainerConfigError 无法启动。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | `kubelet` | `Warning Failed 47m (x12 over 49m) kubelet Error: couldn't find key unavailable-key in Secret aiops-case-04/workload-input` (fact-5f3bb044d7d2) | 证明 kubelet 在挂载配置时明确报告了 Secret 键值缺失，直接定位到配置引用错误。 |
+| 2 | K8s State | `kubelet` | `container.waiting_message`: `couldn't find key unavailable-key in Secret aiops-case-04/workload-input` (fact-1d0bd3d4e906) | 容器等待状态详细错误信息，与 Event 消息一致，确认错误发生于容器配置阶段。 |
+| 3 | K8s State | `kubelet` | `container.waiting_reason`: `CreateContainerConfigError` (fact-65f78c62a2a0) | 确认故障类型为配置类错误，而非资源不足或容器内部逻辑错误。 |
+| 4 | Metric | `prometheus` | `kube_pod_container_status_waiting_reason{container="app", reason="CreateContainerConfigError"} = 1` (fact-324275e24c05) | 独立于 kubelet 日志，从集群监控视角验证了容器正卡在 `CreateContainerConfigError` 状态。 |
+| 5 | K8s State | `kubelet` | `pod.phase`: `Pending` (fact-72a2bdc49df4) | 宏观层面展示 Pod 始终无法完成初始化，因为基础容器配置无法加载。 |
+
+**证据印证关系：**
+Event (fact-5f3bb044d7d2) 与 Waiting Message (fact-1d0bd3d4e906) 在错误细节上完全重合，共同锁定了 `Secret` 中的键名错误；Metric (fact-324275e24c05) 的 `CreateContainerConfigError` 状态作为辅助验证，确认了集群层面监控到的异常与底层事件原因一致。
+
+## 🎯 根因分析 · g1
+
+```text
+Secret aiops-case-04/workload-input 中未包含请求的 key 'unavailable-key' → Kubelet 挂载 Secret 失败并抛出异常 → 容器启动被挂起，状态设为 CreateContainerConfigError → Pod 处于 Pending 状态，持续报错
+```
+
+### 根因结论
+**已确认的根因：** Pod `aiops-case-04/workload-6584f97c76-h4lt9` 在 YAML 中引用了 Secret `aiops-case-04/workload-input` 中不存在的 key `unavailable-key`。
+**形成机制：** Kubelet 在创建容器阶段尝试挂载 Secret 卷时，因找不到指定 key 而抛出 `Error: couldn't find key unavailable-key` (fact-5f3bb044d7d2)，导致容器配置加载失败，抛出 `CreateContainerConfigError` (fact-65f78c62a2a0)。
+**证据支持：** Kubernetes Event 与 Container Waiting Message 提供了完全一致且详细的错误原因描述（fact-5f3bb044d7d2, fact-1d0bd3d4e906），且 Metric 状态（fact-324275e24c05）独立确认了该异常状态。现有事实已充分闭环，证据充足。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.4m
+├─ 问题定位: 12.5s
+├─ 并发证据采集: 61.1s
+│  └─ g1 aiops-case-04/workload-6584f97c76-h4lt9: 61.1s (Evidence 53.7s, RCA 7.2s)
+└─ 汇总总结: 11.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-04/workload-6584f97c76-h4lt9**: pod-config-error, pod-notready-probe-failed, pod-crashloop-runtime, pod-pending-unschedulable
+
+[run:end] run_id=0fdb49f46e5e41f9 status=-

@@ -1,0 +1,216 @@
+[run] run_id=ea24139a961349b0
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前异常的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[agent:layer] 我发现集群中有一个 Pod 处于异常状态：
+
+*   **Namespace**: `aiops-case-v02`
+*   **Pod Name**: `workload`
+*   **Status**: `Pending`
+*   **Ready**: `0/1`
+
+为了进一步诊断这个 Pod 为何处于 Pending 状态（例如资源不足、调度策略限制等），我将获取其详细信息及相关的调度事件。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 28m <none> <none> <none> <none>
+[agent:layer] Pod `workload` 处于 `Pending` 状态，且 `NOMINATED NODE` 和 `IP` 均为空，这通常意味着调度器尚未成功将其调度到任何节点，或者调度条件尚未满足。根据 Pod 的异常状态 `Pending`，最相关的诊断手册是 `pod-pending-unschedulable.md`，用于区分资源不足、taint/toleration、nodeSelector/affinity 等调度问题。
+
+我将获取该 Runbook 以指导后续的诊断步骤。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[agent:layer] 集群中存在一个异常 Pod：
+
+*   **Namespace**: `aiops-case-v02`
+*   **Name**: `workload`
+*   **Status**: `Pending`
+*   **Readiness**: `0/1`
+*   **异常类型**: `PendingUnschedulable`
+
+该 Pod 尚未被调度到任何节点（Nominated Node 为空），且未获取到 IP。根据调度失败的常见原因，需要进一步检查调度事件（Events）以确认具体原因（如资源不足、亲和性不匹配、Taint 限制或 PVC 未绑定等）。
+
+当前识别出的异常组：
+*   **Group 1**: Pod `aiops-case-v02/workload` 处于 `Pending` 状态，疑似调度失败。
+
+接下来需要获取该 Pod 的详细描述（Describe）以查看 `FailedScheduling` 事件的具体信息。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 28m <none> <none> <none> <none>
+[agent:layer] `kubectl get` 命令输出中未显示 Events 信息。为了获取调度失败的详细原因（如 `FailedScheduling` 事件），需要查看 Pod 的详细描述。我将使用 `kubectl describe` 对应的工具逻辑（或通过 `kubectl_get_by_name` 尝试获取更多细节，但通常 `describe` 信息更全面。在此环境中，`kubectl_get_by_name` 似乎只返回类似 `get -o wide` 的摘要。为了获取 Events，我需要确认是否有其他工具或方法。查看可用工具，`kubectl_get_by_name` 的描述是 "Run kubectl get <kind> <name> --show-labels -o wide."，这确实不包含 Events。
+
+不过，通常在 K8s 诊断中，`Pending` 且无 `Nominated Node` 意味着调度器尚未决定将其调度到哪个节点，或者所有节点都因某些原因（资源、Taint、Affinity）被排除。
+
+由于工具限制，我无法直接执行 `kubectl describe`。但是
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[agent:layer] 集群中有 3 个节点 (`master`, `node1`, `node2`)，且全部处于 `Ready` 状态。这表明节点本身没有宕机或不可调度的明显硬件/网络故障。
+
+由于 `workload` Pod 处于 `Pending` 状态，且节点状态正常，问题很可能出在调度约束（如 `nodeSelector`、`affinity`、`tolerations`）、资源请求（Requests）过高或 PVC 绑定问题上。
+
+为了进一步诊断，我需要获取 `workload` Pod 的详细配置（YAML）以检查其资源请求和调度约束，以及获取其 Events 以查看 `FailedScheduling` 的具体原因。
+
+鉴于当前工具 `kubectl_get_by_name` 仅支持 `get ... -o wide`，无法直接获取 `describe` 事件或 `yaml` 配置。但是，我可以尝试检查该 Pod 所在命名空间下是否有相关的 PVC，或者尝试通过其他方式推断。
+
+不过，通常在这种受限工具环境中，如果无法直接获取 `describe`，可能需要依赖 `kubectl get p
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[agent:layer] 根据对集群状态的初步扫描，发现以下异常情况：
+
+### 1. 异常 Pod 定位
+*   **Namespace**: `aiops-case-v02`
+*   **Pod Name**: `workload`
+*   **当前状态**: `Pending`
+*   **Ready 状态**: `0/1`
+*   **节点分配**: 未分配 (`<none>`)
+*   **IP 地址**: 无 (`<none>`)
+
+### 2. 异常分析
+*   **Pod 状态关键词**: `Pending`
+*   **异常类型**: `PendingUnschedulable` (调度失败)
+*   **现象描述**: Pod `workload` 已经存在了 28 分钟，但一直处于 Pending 状态，未被调度到任何节点。集群中所有节点 (`master`, `node1`, `node2`) 均处于 `Ready` 状态，排除了节点宕机或网络隔离导致的整体调度失败。
+*   **可能原因**: 根据 Runbook `pod-pending-unschedulable.md`，可能的原
+[node:done] layer / 问题定位 (41.8s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我已经记录了前一轮的可观测性 baseline 结果。现在开始执行既有的 evidence_plan。
+
+首先，并行执行 kubectl_describe、kubernetes_get_yaml 和 query_pod_topology：
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v02 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 29m default-scheduler 0/3 nodes are available: 3 Insuffic
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v02 creationTimestamp: 2026-09-11T06:45:08Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 关键事实已经非常明确：
+
+- **Pod 状态**：phase=Pending，node=None，PodScheduled=False
+- **FailedScheduling 事件**：`0/3 nodes are available: 3 Insufficient memory`，持续 29 分钟
+- **资源请求**：Requests cpu=5m，Limits memory=1Pi（1 Pebibyte），没有 memory requests
+
+现在我需要补充验证一个关键点：节点是否真的存在 1Pi limit 导致的 memory 不足？这通常是由于 Pod 的 memory limit 设置过高（1Pi）导致 scheduler 在评估资源时认为无法满足。让我获取集群中节点的资源情况来验证：
+[tool:start] kubernetes_tabular_query
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"normalized":0,"returned":0,"serialized_series":0},"coverage":"error","dimension":"metrics","directness":"direct","entity":{"namespace":"aiops-case
+[tool:done] kubernetes_tabular_query status=success kubernetes_tabular_query 输出摘要: raw_chars=232 lines=3 Command failed (exit 1): kubectl get nodes --all-namespaces -o custom-columns='metadata.name,status.allocatable.cpu,status.allocatable.memory' erro
+[agent:parallel_evidence] 让我修正节点查询：
+[tool:start] kubernetes_tabular_query
+[tool:start] run_bash_command
+[tool:done] run_bash_command status=success {"success": true, "stdout": "master\t18\t32756540Ki\nnode1\t18\t32756532Ki\nnode2\t12\t16267680Ki\n", "stderr": "", "returncode": 0}
+[tool:done] kubernetes_tabular_query status=success kubernetes_tabular_query 表格摘要: rows=2 abnormal=0 recent_restarts=0 status_counts={} master 18 32756540Ki # 样例行 node1 18 32756532Ki node2 12 16267680Ki
+[agent:parallel_evidence] 现在我有全部关键事实了。
+
+---
+
+## 已采集事实
+
+1. **Pod 状态确认**：
+   - namespace=aiops-case-v02, pod=workload, UID=49f4b3a0-c450-44f9-8baf-ce88e4ed74c4
+   - phase=Pending, node=None, PodScheduled=False
+   - 容器：app, image=xnet.registry.io:8443/observability/python:3-alpine
+
+2. **调度事件（核心证据）**：
+   - 29分钟前和18分钟前分别触发 FailedScheduling
+   - 原文：`0/3 nodes are available: 3 Insufficient memory. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.`
+   - **所有 3 个节点**（master、node1、node2）均因 memory
+[agent:parallel_evidence] 我需要修复 execute_pod_promql 的调用参数。错误提示每个 PromQL 向量选择器必须包含精确的 namespace 和 pod 匹配器。让我重新构造 PromQL 查询。
+
+首先，让我先检查 Pod 的基本状态，然后修复 Prometheus 查询：
+[tool:start] kubectl_describe
+[tool:start] execute_pod_promql
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v02 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 29m default-scheduler 0/3 nodes are available: 3 Insuffic
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[agent:parallel_evidence] 现在我已经成功执行了 Pod 的状态查询。根据 kubectl_describe 的结果，Pod workload 当前状态为 Pending，原因是 `3 Insufficient memory`（3个节点内存不足）。
+
+PromQL 查询 `kube_pod_status_phase` 返回了 Pod 当前处于 Pending 状态（值为1），这证实了 Pod 还没有被调度到任何节点上。
+
+接下来，我需要更精确地查询节点资源情况来验证 Insufficient memory 的原因。让我查询节点的可分配内存情况：
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"projected_series":0,"raw_series":0,"retrieved":0,"returned":0,"serialized_series":0},"coverage":"empty","di
+[agent:parallel_evidence] 该指标没有匹配数据。让我尝试查询 Pod 的资源请求情况：
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] 关键发现！Pod 的 memory 请求量是 **1125899906842624 bytes**，这约等于 **1 PiB**（1 Pebibyte = 1,125,899,906,842,624 bytes）。
+
+这是极其异常的资源请求量！让我查询一下集群节点的可分配内存情况，以验证是否真的没有节点能满足这个请求：
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"projected_series":0,"raw_series":0,"retrieved":0,"returned":0,"serialized_series":0},"coverage":"empty","di
+[agent:parallel_evidence] 节点级别的指标无法通过 pod 作用域查询获取。让我尝试直接查询集群范围的节点资源：
+[tool:start] execute_prometheus_instant_query
+[tool:done] execute_prometheus_instant_query status=success {"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"kube_node_status_allocatable","container":"kube-state-metrics","endpoint":"http","instance":"172.16.219.120:8080","jo
+[agent:parallel_evidence] 现在我已经获得了完整的信息：
+
+## 采集到的事实
+
+1. **Pod 状态**：`workload` 当前处于 **Pending** 状态（未调度到任何节点）。
+2. **资源请求异常**：Pod 的内存请求量为 **1,125,899,906,842,624 bytes ≈ 1 PiB**（Pebibyte）。
+3. **集群节点可分配内存**：
+   - master: 33,542,696,960 bytes ≈ **31.25 GiB**
+   - node1: 33,542,688,768 bytes ≈ **31.25 GiB**
+   - node2: 16,658,104,320 bytes ≈ **15.5 GiB**
+4. **调度失败事件**：`default-scheduler` 报错 `0/3 nodes are available: 3 Insufficient memory`，且无 preemption 候选。
+
+## 结论
+
+**根因已确认**：Pod `aiops-case-v02/workload` 处于 Pending 状态，是因为其 memo
+[node:done] parallel_evidence / 并发证据采集 (68.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.5s)
+[final] run_id=ea24139a961349b0 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v02/workload` | Pending | Pod aiops-case-v02/workload status Pending, scheduling failed due to Insufficient memory across all 3 nodes |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | `pod.condition` | `PodScheduled` 状态为 `False`，原因 `Unschedulable`，消息 `0/3 nodes are available: 3 Insufficient memory` | 确认调度失败的具体原因为节点内存不足 |
+| 2 | K8s Config | `container.resource_request.memory` | 容器 `app` 请求了 `1Pi` 内存 (1,125,899,906,842,624 bytes) | 揭示了导致调度失败的异常资源需求 |
+| 3 | K8s Config | `container.resource_limit.memory` | 容器 `app` 设置了 `1Pi` 内存硬限制 | 证实该 Pod 意图占用极不合理的巨大内存 |
+| 4 | K8s Event | `event.message` | 调度器上报 `FailedScheduling`，记录显示过去 29 分钟内多次触发相同的内存不足告警 | 证明故障具有持续性和可复现性，非瞬时抖动 |
+| 5 | Metric | `kube_pod_container_resource_requests` | 容器 `app` 的内存请求指标值为 `1125899906842624` 字节 | 从监控系统视角独立印证了 Pod 资源请求量的配置事实 |
+
+**证据关联说明：**
+事实 2 和事实 5 分别从 Kubernetes API 配置与 Prometheus 指标两个独立维度，一致确认了 Pod 配置了 `1Pi` 的内存请求。这一异常配置直接触发了事实 1 中的调度器状态变更与事实 4 中持续发生的事件告警，构成了完整的调度失败证据链。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 配置了 1Pi 内存请求与限制 → 调度器评估所有节点 allocatable memory 均无法满足该量级需求 → 触发 Insufficient memory 失败机制 → Pod 卡在 Pending 状态并持续被调度器拒绝
+```
+
+### 根因结论
+
+已确认根因：**Pod 资源配置请求严重超出集群节点最大可用内存**。
+
+集群中所有节点的最大可用内存（约 31Gi）远小于 Pod 请求的内存量（1Pi）。调度器在对所有 3 个节点进行评估时，均判定内存资源不足（Insufficient memory），且由于资源量级差距巨大，不可能存在可抢占的 Victim，导致 Pod 持续处于 `Pending` 状态且无法调度。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 2.0m
+├─ 问题定位: 41.8s
+├─ 并发证据采集: 68.7s
+│  └─ g1 aiops-case-v02/workload: 68.7s (Evidence 58.4s, RCA 10.3s)
+└─ 汇总总结: 8.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v02/workload**: pod-pending-unschedulable
+
+[run:end] run_id=ea24139a961349b0 status=-

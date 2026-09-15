@@ -1,0 +1,137 @@
+[run] run_id=6b98a6bbcb6346b9
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 5 (95s ago) 4m54s 172.16.104.34
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 5 (95s ago) 4m54s 172.16.104.34
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 5 (95s ago) 4m54s 172.16.104.34
+[tool:start] kubectl_get_events_in_namespace
+[tool:done] kubectl_get_events_in_namespace status=error kubectl_get_events_in_namespace 输出摘要: raw_chars=140 lines=1 Error: kubectl_get_events_in_namespace is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success Events for 2 pods: 1 pod (workload) has BackOff restart loop; 1 pod (prometheus) has persistent Unhealthy probe failures. key_facts: ["Pod workload (ns: aiops-case-v15, node: node2, container: app) is
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (18.1s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"retrieved":6,"returned":6},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 首轮 Metrics、Logging、Tracing 结果已就绪，需要补充 Kubernetes 核心事实（describe、previous logs、yaml）来确认 CrashLoopBackOff 的具体原因。
+[tool:start] kubectl_describe
+[tool:start] kubectl_previous_logs
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 1 signals: 0 关键日志: startup allocation 256Mi
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v15 creationTimestamp: 2026-09-14T09:26:33Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v15 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff
+[agent:parallel_evidence] ## 证据结论（aiops-case-v15/workload）
+
+### 已确认事实
+| 维度 | 事实 |
+|------|------|
+| **Pod 状态** | 当前 phase=Running，但 `containersReady=False`，app container Waiting 原因=`CrashLoopBackOff`，重启 7 次 |
+| **上次退出** | Last State Terminated，Reason=`OOMKilled`，Exit Code=137，容器仅存活约 1 秒（Started 09:37:40 → Finished 09:37:41） |
+| **资源限制** | limits: cpu=100m, **memory=64Mi**；requests: cpu=5m, memory=8Mi |
+| **容器启动命令** | `python3 -u -c "import time; print('startup allocation 256Mi', flush=True); memory=bytearray(256*1024*102
+[node:done] parallel_evidence / 并发证据采集 (547.2s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.1s)
+[final] run_id=6b98a6bbcb6346b9 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v15/workload` | CrashLoopBackOff | Pod aiops-case-v15/workload处于CrashLoopBackOff状态，容器反复退出 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | K8s Event | Reason: OOMKilled | 确认 Pod 终止的直接原因是内核 OOM Killer 介入 |
+| 2 | K8s State | K8s State | container.last_terminated_reason: OOMKilled | 证实容器最后一次退出的终止信号 |
+| 3 | K8s State | K8s State | container.last_exit_code: 137 | 标准 OOM Killer 退出码，与 OOMKilled 现象一致 |
+| 4 | K8s State | K8s Config | container.resource_limit.memory: 64Mi | 容器被施加的硬内存限制（上限） |
+| 5 | K8s State | K8s Config | container.resource_request.memory: 8Mi | 容器申请的内存保留量 |
+| 6 | Logging | ES | log.message: "startup allocation 256Mi" | 证明应用进程在启动阶段试图分配 256Mi 内存，远超 64Mi 限制 |
+| 7 | Metric | Prometheus | kube_pod_container_status_restarts_total: 7 | 反映容器经历了持续且频繁的崩溃重启循环 |
+
+**证据互证说明：**
+Kubernetes 的 `OOMKilled` 状态、退出码 137 与日志中应用启动时申请 256Mi 内存的事实直接矛盾于 64Mi 的容器内存硬限制（Limit）。这种资源申请超过 Cgroup 硬限制的行为直接触发了内核 OOM Killer，导致进程被强制终止，进而引发重启计数器增长和 CrashLoopBackOff 状态。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+内存限制(64Mi) < 启动分配需求(256Mi) → 进程启动触发内核OOM Killer → 容器被强制终止(退出码137/OOMKilled) → Pod进入CrashLoopBackOff循环
+```
+
+### 根因结论
+
+**已确认的根因：** 容器启动时申请的内存（256Mi）超过了 Pod 配置的 `memory limit`（64Mi）。
+
+**分析说明：**
+根因在于配置的资源硬限制（`resource_limit.memory`: 64Mi）无法容纳应用进程启动阶段的内存申请（日志事实 6 显示 `startup allocation 256Mi`）。当应用进程尝试分配超出 cgroup 允许的上限时，Linux 内核 OOM Killer 介入并发送 SIGKILL 信号终止进程（证据 1, 2, 3）。由于配置为自动重启，容器不断经历崩溃与重启，从而表现为 CrashLoopBackOff 状态（证据 7）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 9.6m
+├─ 问题定位: 18.1s
+├─ 并发证据采集: 547.2s
+│  └─ g1 aiops-case-v15/workload: 547.2s (Evidence 539.4s, RCA 7.7s)
+└─ 汇总总结: 9.1s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v15/workload**: pod-crashloop-runtime
+
+[run:end] run_id=6b98a6bbcb6346b9 status=-

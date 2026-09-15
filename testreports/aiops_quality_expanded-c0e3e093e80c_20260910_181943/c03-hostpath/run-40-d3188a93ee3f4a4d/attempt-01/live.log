@@ -1,0 +1,115 @@
+[run] run_id=d3188a93ee3f4a4d
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以定位当前存在的异常 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[agent:layer] 集群中存在 1 个异常 Pod。我将获取该 Pod 的详细信息及标签，以进一步确定其异常类型。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 71m <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod VolumeMountFailed / 卷挂载失败 > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume ## 使用原则（给模型） - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。 - `kubectl
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 71m <none> node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 71m <none> node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 71m <none> node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 71m <none> node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 71m <none> node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 71m <none> node2 <none>
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (15.6s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] # 调查计划
+
+需要执行的补证计划：
+1. **plan-1-pod-describe**: 执行 `kubectl describe pod workload -n aiops-case-v06`，确认 Pod 状态及 Events 中的错误信息（FailedMount, FailedAttachVolume 等）。
+2. **plan-2-pod-yaml**: 执行 `kubectl get pod workload -n aiops-case-v06 -o yaml`，验证 Pod 的卷配置与事件是否匹配。
+3. **plan-3-related-pvc-describe**: 从 plan-2 结果中提取 PVC 名称，若存在则执行 `kubectl get pvc <pvc-name> -n aiops-case-v06 -o yaml`，确认 PVC 状态。
+4. **plan-4-node-scheduling**: 执行 `kubectl get nodes -o wide`，确认调度节点状态及 Affinity 匹配。
+5. **plan-7-observabili
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v06 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning FailedMount 7m5s (x40 over 72m) kubelet MountVolume.SetUp failed for volume "in
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v06 creationTimestamp: 2026-09-11T11:38:17Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 从 `describe` 结果中可以看到 Pod 引用的卷名称为 `input`，类型为 `HostPath`，路径为 `/var/lib/aiops-fixture-unavailable-7f394bef/input`。没有 PVC 资源，因此跳过 PVC 描述查询。
+
+**已采集事实与冲突分析：**
+
+1. **Kubernetes Pod 状态 (kubectl_describe & kubectl_get_yaml)**:
+   - Pod `workload` 处于 `Pending` 阶段，状态 `ContainerCreating`。
+   - **关键事件 (Events)**: 
+     - `Warning FailedMount` (7m5s, x40): `MountVolume.SetUp failed for volume "input" : hostPath type check failed: /var/lib/aiops-fixture-unavailable-7f394bef/input is not a directory`。
+     - `
+[node:done] parallel_evidence / 并发证据采集 (43.8s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.1s)
+[final] run_id=d3188a93ee3f4a4d status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v06/workload` | ContainerCreating | Pod workload 持续处于 ContainerCreating 状态，无法启动 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes (kubelet) | `Warning FailedMount 7m5s (x40 over 72m) kubelet MountVolume.SetUp failed for volume "input" : hostPath type check failed: /var/lib/aiops-fixture-unavailable-7f394bef/input is not a directory` | 直接证实 Pod 挂载卷失败的具体原因：宿主机节点路径检查不通过 |
+| 2 | K8s Event | Kubernetes (kubelet) | `Warning FailedMount 113s (x31 over 70m) kubelet Unable to attach or mount volumes: unmounted volumes=[input], unattached volumes=[input]: timed out waiting for the condition` | 补充证实挂载操作的长时序超时状态，支撑故障持续时间 |
+| 3 | K8s State | Kubernetes (Pod) | `status: Pending, phase: Pending, container: app reason: ContainerCreating` | 描述 Pod 的持续异常状态，与挂载失败的事实保持一致 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_waiting_reason{reason="ContainerCreating"} = 1` | 监控指标独立确认容器处于等待状态，与 K8s 状态吻合 |
+| 5 | Metric | Prometheus | `kube_pod_container_status_restarts_total{container="app"} = 0` | 排除应用运行中崩溃重启动画的可能，确认问题处于启动前置阶段 |
+
+**证据分析**：
+Kubernetes 的 `FailedMount` 事件明确指出了宿主机节点上 `/var/lib/aiops-fixture-unavailable-7f394bef/input` 路径缺失或类型错误（非目录），这是导致 `input` 卷挂载超时失败的根本原因。这一事实与 Pod 持续卡在 `ContainerCreating` 状态及 `kube_pod_container_status_waiting_reason` 指标完全吻合。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+宿主机 node2 路径 /var/lib/aiops-fixture-unavailable-7f394bef/input 缺失或类型错误 → kubelet 执行 MountVolume.SetUp 时 HostPath 类型检查失败 → Volume 'input' 挂载持续超时/失败 → Pod 持续处于 ContainerCreating 状态，无法启动
+```
+
+### 根因结论
+
+已确认的根因为：Pod 配置中引用的 HostPath 卷所对应的宿主机节点路径 (`/var/lib/aiops-fixture-unavailable-7f394bef/input`) 在调度目标节点 (`node2`) 上不存在，或者存在但并非目录类型。
+
+该缺失/错误直接导致了 `MountVolume.SetUp` 检查失败（证据 #1、#2），进而引发挂载操作超时失败，使得 Pod 无法完成存储卷挂载步骤，最终停滞在 `ContainerCreating` 状态（证据 #3）。Prometheus 指标独立证实了这一挂载依赖导致的等待现象（证据 #4）。
+
+缺失的确切事实为：该路径在 `node2` 上缺失的具体运维原因（如是否被清理脚本删除）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 15.6s
+├─ 并发证据采集: 43.8s
+│  └─ g1 aiops-case-v06/workload: 43.8s (Evidence 36.2s, RCA 7.5s)
+└─ 汇总总结: 10.1s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v06/workload**: pod-volume-mount-failed
+
+[run:end] run_id=d3188a93ee3f4a4d status=-

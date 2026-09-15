@@ -1,0 +1,164 @@
+[run] run_id=13d9a69a23aa403a
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在异常的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-79d9f8fd88-bsn84 0/1 CrashLoopBackOff 2
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-79d9f8fd88-bsn84 0/1 CrashLoopBackOff 2
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success Cluster events show deployment rollout in aiops-case-10 and monitoring issues in monitor namespace. Pod workload-79d9f8fd88-bsn84 is in CrashLoopBackOff due to liveness probe failures (HTTP 500). Pod
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'CrashLoopBackOff': 1} kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-79d9f8fd88-bsn84 0/1 CrashLoopBackOff 2
+[agent:layer] 根据集群诊断结果，当前存在的问题如下：
+
+### 1. 异常定位
+*   **异常 Pod**: `workload-79d9f8fd88-bsn84`
+*   **所属 Namespace**: `aiops-case-10`
+*   **当前状态**: `CrashLoopBackOff`
+*   **节点**: `node2`
+
+### 2. 异常状态关键字 (`pod_status_keyword`)
+`CrashLoopBackOff`
+
+### 3. 归一化异常类型 (`pod_abnormal_type`)
+**CrashLoopBackOffRuntime**
+
+**判定理由**：
+Pod 处于 `CrashLoopBackOff` 状态，根据事件证据，其根本原因是 **Liveness Probe 失败**（返回 HTTP 500），导致容器被强制杀死（Killing）。这符合 `pod-crashloop-runtime.md` 中描述的由探针导致的重启循环场景，而非镜像拉取失败、配置缺失或节点丢失等其他类型。
+
+### 4. 异常分组 (`abnormal_gro
+[node:done] layer / 问题定位 (33.7s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":143,"matched":163,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 我需要调查 Pod `aiops-case-10/workload-79d9f8fd88-bsn84` 的状态，判断其是否处于 CrashLoopBackOff，以及具体的根本原因。让我开始采集证据。
+
+**首轮计划：**
+1. 获取 Pod 描述和状态 - 确认当前状态、退出码、重启次数
+2. 获取 Pod 事件 - 查看重启原因和事件
+3. 获取 Pod 日志 - 查看崩溃前的错误
+4. 获取 Pod Topology - 了解所属工作负载和节点
+5. 获取 Pod Metrics - 查看资源使用
+6. 查询 Pod 日志和 Tracing（如果有）
+
+开始执行：
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-79d9f8fd88-bsn84 namespace: aiops-case-10 node: node2/10.2.0.50 status: Running 关键诊断行: Exit Code: 137 Warning Unhealthy 59m (x8 over 61m) kubelet
+[heartbeat] layer
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-79d9f8fd88-bsn84 namespace: aiops-case-10 creationTimestamp: 2026-09-11T02:37:39Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 59m (x8 over 61m) Warning Unhealthy Pod/workload-79d9f8fd88-bsn84 Liveness probe failed: HTTP probe failed with statuscode: 500 94s (x215 over 57m) Warning Ba
+[agent:parallel_evidence] 已确认 Pod 身份：`aiops-case-10/workload-79d9f8fd88-bsn84`，UID `50716f01-3d9a-4796-9128-20ec4c2de842`。当前 **Phase=Running**，但存在反复 Crash 的历史事实。
+
+**证据采集计划（首轮）：**
+1. **Kubernetes 状态确认**：通过 `kubectl_get_yaml`、`kubectl_events`、`kubectl_describe` 确认当前状态、重启次数、退出码及最近事件。（**已完成**）
+2. **崩溃前后日志**：采集最后一次崩溃的 `previous` 日志和容器崩溃时的 `crash` 日志，寻找 OOMKilled 或业务报错。（**待执行**）
+3. **Metrics 趋势**：通过 `execute_pod_promql` 查看该 Pod 在崩溃窗口（约 1 小时前至今）的内存使用趋势，验证是否触发 OOM。（**待执行**）
+4. **拓扑与上下文**：通过 `query_pod_topology` 确认其 Owner 及 Liven
+[tool:start] kubectl_previous_logs
+[tool:start] execute_pod_promql
+[tool:start] query_pod_topology
+[tool:done] kubectl_previous_logs status=success Pod workload-79d9f8fd88-bsn84 in service aiops-lab-workload logs show 20 consecutive successful HTTP requests to /work path with HTTP 200 status. All requests completed within ~2-3ms duration. key_fac
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":54,"normalized":18,"projected_series":18,"raw_series":54,"retrieved":54,"returned":18,"serialized_series":18},"coverage":"pre
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"retrieved":5,"returned":5},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 让我查看归档中的完整工具结果，以获取更详细的证据。
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success Pod workload-79d9f8fd88-bsn84 in aiops-case-10 on node2 is CrashLoopBackOff (Restart Count: 22) due to failed liveness probes (HTTP 500) and OOMKilled (Exit Code 137). The container was in Terminated
+[tool:done] read_context_archive status=success Pod workload-79d9f8fd88-bsn84 in aiops-case-10 namespace is currently Running on node2 (10.2.0.50), IP 172.16.104.17. It belongs to case c10, owned by ReplicaSet workload-79d9f8fd88. Container 'app' (
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=1135 lines=14 <context_archive> archive_path: /tmp/aiops/reports/context_archives/13d9a69a23aa403a-g1/tools/006-evidence-kubectl_events.raw.txt offset: 0 returned_
+[tool:done] read_context_archive status=success Previous logs for pod 'workload-79d9f8fd88-bsn84' (service: aiops-lab-workload) show normal HTTP requests to /work with status 200. key_facts: ["Pod: workload-79d9f8fd88-bsn84", "Service: aiops-lab-wo
+[tool:done] read_context_archive status=success Prometheus query for `container_memory_usage_bytes` on pod `workload-79d9f8fd88-bsn84` (container `app`) in namespace `aiops-case-10` succeeded. Retrieved memory usage samples for the time range 2026-
+[tool:done] read_context_archive status=success Query succeeded for Pod topology (aiops-case-10/workload-79d9f8fd88-bsn84) on node2. Full lineage established: Service->Pod->ReplicaSet->Deployment. Container 'app' identified. key_facts: ["Pod: workl
+[agent:parallel_evidence] 根据已有工具结果，对 `aiops-case-10/workload-79d9f8fd88-bsn84` 的 CrashLoopBackOffRuntime 根因证据分析如下：
+
+### 1. 实体身份确认
+*   **Pod**: `workload-79d9f8fd88-bsn84`
+*   **Namespace**: `aiops-case-10`
+*   **UID**: `50716f01-3d9a-4796-9128-20ec4c2de842`
+*   **节点**: `node2` (IP `10.2.0.50`)
+*   **容器**: `app` (`xnet.registry.io:8443/observability/python:3-alpine`)
+*   **当前状态**: `Running` (Ready), 但经历了 22 次重启。
+
+### 2. 支持候选原因的事实 (CrashLoopBackOffRuntime)
+*   **异常事件 (Events)**: Kubelet 报告了连续的 `Liveness probe failed: HTTP
+[node:done] parallel_evidence / 并发证据采集 (135.1s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.8s)
+[final] run_id=13d9a69a23aa403a status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-10/workload-79d9f8fd88-bsn84` | CrashLoopBackOff | {'message': 'cni.projectcalico.org/podIPs: 172.16.104.17/32'} |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | `container.last_terminated_reason: Error` (app) | 确认最近一次容器异常终止 |
+| 2 | K8s Event | Kubernetes | `Liveness probe failed: HTTP probe failed with statuscode: 500` (kubelet) | 明确展示触发容器被杀的直接事件是 Liveness Probe 失败 |
+| 3 | K8s State | Kubernetes | `container.last_exit_code: 137` (app) | 确认容器是被 SIGKILL (137) 终止 |
+| 4 | K8s Config | Kubernetes | `container.resource_limit.memory: 96Mi` | 提供判断资源限制的硬阈值 |
+| 5 | K8s Config | Kubernetes | `container.resource_request.memory: 24Mi` | 提供基线资源分配参考 |
+| 6 | Metric | Prometheus | `container_memory_usage_bytes`: 15433728 (14.6MB) @ 03:12, 3444736 (3.2MB) @ 03:38 | 采样点显示内存远低于 96Mi 硬限制，无法直接证实 OOM |
+| 7 | Logging | Elasticsearch | `event: http_request`, `http_status: 200`, `path: /work`, `service: aiops-lab-workload` | 确认业务请求本身在观测窗口内返回 200，未直接报错 |
+
+**证据关联说明：**
+- 证据 2 明确指出 Kubelet 探测失败（返回 500）是触发容器被杀死（证据 3）的**直接事件**。
+- 证据 1 确认容器最后的状态为 Error，与探测失败一致。
+- 证据 4、6 结合说明：虽然容器内存硬限制为 96Mi，但采集到的内存峰值仅约 15MB，存在 OOMKilled 推测的盲区。
+- 证据 7 显示业务层返回 200，说明应用进程在终止前可能正在处理正常请求，或该 500 是应用配置的 `FAILURE_MODE=liveness_fail` 导致的探针特定响应。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Liveness Probe 配置失败 (返回 500) → Kubelet 判定健康检查失败 → 触发容器 SIGKILL (Exit 137) → CrashLoopBackOff
+```
+
+### 根因结论
+
+**证据不足 (Inconclusive)**，无法确认是否为 OOMKilled。
+
+当前事实仅能证明容器因 **Liveness Probe 失败（返回 HTTP 500）** 被 Kubelet 杀死，并陷入重启循环。虽然终止码 137 常见于 OOM，但 Prometheus 采样的内存数据（最高 ~15MB）远未达到 `96Mi` 的硬限制，缺乏证实内存溢出的决定性事实。无法排除应用内部逻辑导致探针接口报错（如配置 `FAILURE_MODE=liveness_fail`）进而被正常杀死的场景。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 3.0m
+├─ 问题定位: 33.7s
+├─ 并发证据采集: 135.1s
+│  └─ g1 aiops-case-10/workload-79d9f8fd88-bsn84: 135.1s (Evidence 124.6s, RCA 10.3s)
+└─ 汇总总结: 10.8s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-10/workload-79d9f8fd88-bsn84**: pod-crashloop-runtime
+
+[run:end] run_id=13d9a69a23aa403a status=-

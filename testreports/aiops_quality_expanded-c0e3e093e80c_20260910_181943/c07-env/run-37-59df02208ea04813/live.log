@@ -1,0 +1,125 @@
+[run] run_id=59df02208ea04813
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别任何异常状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[agent:layer] 集群中发现一个异常 Pod：
+
+- **Namespace**: `aiops-case-v10`
+- **Pod Name**: `workload`
+- **Status**: `CrashLoopBackOff` (已重启 17 次)
+- **Ready**: `0/1`
+
+该 Pod 处于 `CrashLoopBackOff` 状态，可能由多种原因引起（如 OOMKilled、应用崩溃、配置错误等）。我需要获取该 Pod 的详细信息（包括 Events 和 Labels）来确定具体的异常类型。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 17 (82s ago) 63m 172.16.104.19
+[agent:layer] Pod `workload` 的状态是 `CrashLoopBackOff`。根据定义，这可能属于 `CrashLoopBackOffRuntime`（通用运行时崩溃）或 `OOMKilled`（内存溢出）。
+
+为了确定具体的 `pod_abnormal_type`，我需要检查容器的 `Last State` 是否包含 `OOMKilled` 信息。如果没有确凿的 OOMKilled 证据，则归类为 `CrashLoopBackOffRuntime`。
+
+由于 `kubectl get pod -o wide` 通常不直接显示 Last State 的详细信息（如 Reason），我需要获取更详细的信息。不过，根据指令，如果证据不足（例如无法直接看到 Last State Reason），应保持通用类型。
+
+但为了更准确，我通常会使用 `kubectl describe pod` 来查看 Events 和 Container Status。然而，可用的工具只有 `kubectl_get_by_name` (get --show-labels -o wide) 和 `kubectl_ge
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] ### LayerOutput
+
+```json
+{
+  "layer": "Diagnosis",
+  "confidence": "medium",
+  "reasoning": "集群中存在 1 个异常 Pod：aiops-case-v10/workload。该 Pod 状态为 CrashLoopBackOff，重启 17 次。根据当前信息，容器处于反复崩溃重启状态，无确凿证据指向 OOMKilled、镜像拉取失败或配置缺失等特定子类型，因此归类为通用的 CrashLoopBackOffRuntime。已获取对应诊断手册以备后续深度排查。",
+  "abnormal_pods": [
+    {
+      "pod_name": "workload",
+      "namespace": "aiops-case-v10",
+      "status_category": "ABNORMAL",
+      "pod_status_keyword": "CrashLoopBackOff",
+      "pod_abnormal_type": "CrashLoopBackOf
+[node:done] layer / 问题定位 (24.9s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"retrieved":6,"returned":6},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先执行既定的 Kubernetes 维度查询（describe、yaml、events、previous logs），与已采集的 Metrics/Logging/Topology baseline 一起验证 CrashLoopBackOff 的直接原因。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_previous_logs
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 4m25s (x281 over 64m) Warning BackOff Pod/workload Back-off restarting failed container app in pod workload_aiops-case-v10(d3e0dc86-6f8b-4f29-a50c-826bf2a1f1e6)
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v10 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 4m25s (x281 over 64m) kubelet Back
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 1 signals: 0 关键日志: APP_REQUIRED_CONFIG environment variable is missing
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v10 creationTimestamp: 2026-09-11T15:19:15Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] ## 已采集事实
+
+### Kubernetes 生命周期 & 配置
+- Pod `aiops-case-v10/workload` 当前 `phase=Running`，但容器状态为 `Waiting/CrashLoopBackOff`，`Ready=False`，重启次数 `17`。
+- `Last State`：`Terminated`，`Reason=Error`，**Exit Code=78**（非 137、非 0、非 OOMKilled）。
+- 容器启动 command 为一段 inline Python：读取环境变量 `APP_REQUIRED_CONFIG`，若为 None 则打印 `"APP_REQUIRED_CONFIG environment variable is missing"` 并 `sys.exit(78)`。
+- 容器 `Environment: <none>`：即该环境变量在 Pod 定义中**未设置**。
+- 资源限制：CPU 50m / 32Mi，无探针定义。
+
+### 事件
+- 仅见 `Back-off restarting failed co
+[node:done] parallel_evidence / 并发证据采集 (42.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.7s)
+[final] run_id=59df02208ea04813 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v10/workload` | CrashLoopBackOff | Pod aiops-case-v10/workload 处于 CrashLoopBackOff 状态，容器反复启动失败。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes | 容器 `app` 退出码 `78`，最后终止原因 `Error` | 确认容器进程异常终止，提供退出码关键线索 |
+| 2 | K8s State | kubernetes | `container.waiting_reason` 为 `CrashLoopBackOff`，等待原因包含 `back-off 5m0s restarting failed container=app` | 确认 K8s 调度器已观察到崩溃并进入指数退避循环 |
+| 3 | K8s State | kubernetes | Pod `aiops-case-v10/workload` (UID: `d3e0dc86...`) 状态 `Running` 但 `ContainersReady` 为 `False`，重启计数 `17` | 确认 Pod 处于反复重启的病态循环中 |
+| 4 | Logging | elasticsearch | 日志消息: `APP_REQUIRED_CONFIG environment variable is missing` | **直接证据**：捕获了应用层报错原因，指出缺失环境变量 |
+| 5 | Metric | prometheus | `kube_pod_container_status_restarts_total` 当前值 `17`，`status` 为 `CrashLoopBackOff` | 独立验证了容器重启次数与 K8s State 观测一致 |
+
+日志中记录的具体报错 `APP_REQUIRED_CONFIG environment variable is missing` 直接解释了容器以非 0 码（Exit Code 78）退出的原因。该日志模式在采集时即捕获到，与 K8s 层面的 `CrashLoopBackOff` 状态及 Metric 中的重启计数相互印证，排除了资源耗尽或网络不通等其他常见崩溃原因。
+
+## 🎯 根因分析 · g1
+
+```text
+Pod 定义缺失环境变量 APP_REQUIRED_CONFIG → 容器主进程启动脚本检测到变量为空执行 sys.exit(78) → 容器以 Error 状态终止且无重试退避 → Pod 进入 CrashLoopBackOff 状态
+```
+
+### 根因结论
+
+已确认的根因是 **应用配置文件缺失**：Pod 定义中未配置应用启动所必需的环境变量 `APP_REQUIRED_CONFIG`。
+
+证据如下：
+1. **直接报错**：日志采集事实（见证据 #4）明确记录了 `APP_REQUIRED_CONFIG environment variable is missing`，证明了应用启动脚本的校验逻辑触发了失败。
+2. **崩溃退出**：K8s State 事实（见证据 #1）显示容器退出码为 `78`，符合脚本中 `sys.exit()` 的默认行为特征，证实了进程并非因资源压力或 OOM 被系统强杀。
+3. **持续重试**：K8s 层面的 `CrashLoopBackOff` 状态与 Metric 中的 `restart_total=17`（见证据 #2、#5）共同反映了应用不断启动失败并触发 K8s 退避机制的循环。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.3m
+├─ 问题定位: 24.9s
+├─ 并发证据采集: 42.0s
+│  └─ g1 aiops-case-v10/workload: 42.0s (Evidence 33.1s, RCA 8.8s)
+└─ 汇总总结: 9.7s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v10/workload**: pod-crashloop-runtime
+
+[run:end] run_id=59df02208ea04813 status=-

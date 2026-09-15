@@ -1,0 +1,118 @@
+[run] run_id=f422404b42ac4015
+[node:start] layer / 问题定位
+[agent:layer] 我将检查集群中的Pod状态以识别当前存在的异常。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 66} NAMESPACE NAME READY STATUS REST
+[agent:layer] 发现1个异常Pod：`aiops-case-v16/workload`，状态为 `Running` 但 `READY` 为 `0/1`。我将获取该Pod的详细信息以确认异常类型。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Running 0 59m 172.16.104.33 node2 <none> <
+[agent:layer] Pod `workload` 虽然处于 `Running` 状态，但 `READY` 为 `0/1`，这通常意味着探针失败。我将获取其完整描述来确认探针状态。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Running 0 59m 172.16.104.33 node2 <none> <
+[agent:layer] 工具仅返回了摘要信息。为了确认 `READY 0/1` 的确切原因，我将调用 `fetch_runbook` 获取 `pod-notready-probe-failed.md` 的内容，以确认诊断步骤。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[agent:layer] ### LayerOutput
+
+- **layer**: 1
+- **confidence**: 高
+- **reasoning**: 遍历集群66个Pod，发现`aiops-case-v16/workload`状态为`Running`但`READY`为`0/1`。这种状态通常意味着容器进程虽然已启动，但健康检查（如Readiness Probe）未通过，属于典型的`NotReadyProbeFailed`异常类型。
+- **abnormal_pods**:
+  - `aiops-case-v16/workload`
+- **abnormal_groups**:
+  - `NotReadyProbeFailed`: 包含 `aiops-case-v16/workload` (当前状态: Running, READY 0/1)
+- **pod_status_keyword**: `Running`
+- **pod_abnormal_type**: `NotReadyProbeFailed`
+- **status_category**: `RUNNING_NOT_READY`
+- **k
+[node:done] layer / 问题定位 (21.3s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] I will execute the evidence plan for `aiops-case-v16/workload` by running `kubectl_describe`, `kubectl_get_yaml`, `kubectl_logs`, `kubectl_events`, and `query_pod_topology` in parallel to gather Kubernetes state, probe configurations, application logs, events, and topology.
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_logs
+[tool:start] kubectl_events
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v16 node: node2/10.2.0.50 status: Running 关键诊断行: Warning Unhealthy 31s (x768 over 60m) kubelet Readiness probe failed: Ge
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 31s (x768 over 60m) Warning Unhealthy Pod/workload Readiness probe failed: Get "http://172.16.104.33:18081/ready": dial tcp 172.16.104.33:18081: connect: connect
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v16 creationTimestamp: 2026-09-14T11:46:38Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 1 signals: 0 关键日志: listening on 18080
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 基于真实工具采集的证据，结论如下：
+
+### 实体与生命周期
+- **Pod**: `aiops-case-v16/workload`
+- **Phase**: `Running`
+- **Ready**: `False` (状态为 NotReady)
+- **容器**: `app`，重启次数 0，未发生 CrashLoopBackOff。
+- **Pod UID**: `12605456-2339-4da9-9d4d-5523d1196b72`
+
+### 支持根因的证据 (Probe Port Mismatch)
+1. **Probe 配置**: Readiness probe 被配置为访问 `http://:18081/ready` (port `18081`, path `/ready`)。
+2. **实际监听**: 容器日志显示 `listening on 18080`，YAML 中的 Command 确认为 `ThreadingHTTPServer(('0.0.0.0',18080),Handler)`，即应用实际监听的是 `18080` 端口。
+3. **错误事件**: 6
+[node:done] parallel_evidence / 并发证据采集 (39.1s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (11.7s)
+[final] run_id=f422404b42ac4015 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v16/workload` | NotReady | Pod `aiops-case-v16/workload` 持续处于 NotReady 状态 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Pod | `Pod` phase=Running, status=Running, `ContainersReady`=False, `Ready`=False, reason=ContainersNotReady (`fact-158f8bc57541`, `fact-a95bc03795b3`) | 确认 Pod 存活但应用服务未就绪 |
+| 2 | K8s State | Pod | 重启计数为 0 (`fact-506aaed66495`) | 排除因 CrashLoopBackOff 导致应用未启动的可能 |
+| 3 | K8s Event | kubelet | `Readiness probe failed: Get "http://172.16.104.33:18081/ready": dial tcp 172.16.104.33:18081: connect: connection refused` (`fact-76bf6cb08d55`) | 直接定位失败机制：连接被拒绝 |
+| 4 | K8s Config | Container | `resource_request.memory`=8Mi, `resource_request.cpu`=5m, `resource_limit.memory`=64Mi, `resource_limit.cpu`=200m (`fact-0f203a1010b4`, `fact-34eb4f0d0caf`, `fact-4e1352dd9015`, `fact-783ac2df0d38`) | 资源限制极低，排除了因 OOMKill 或 CPU 限制导致容器无法提供服务的可能 |
+| 5 | Metric | Prometheus | `kube_pod_container_status_restarts_total` = 0 (`fact-42b92d524850`) | 与 K8s 事件中的重启计数一致，确认容器正常运行中 |
+
+**证据说明：**
+K8s 状态表明 Pod 处于 `Running` 但 `Ready` 为 `False`（#1），且重启次数为 0（#2），说明容器成功启动并在运行。Prometheus 指标确认无重启发生（#5）。K8s 事件（#3）提供了决定性证据：kubelet 正在尝试连接 `172.16.104.33:18081` 并因 `connection refused` 而失败。配置数据（#4）显示资源充足且未耗尽，排除了资源瓶颈。综上，Pod 正在运行，但其健康检查探针因连接被拒而无法成功。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 配置（Probe）与应用实际监听端口、路径不一致 → 探针请求到达目标 IP/端口但无服务监听 → kubelet 持续报告 connection refused → Pod Ready 状态为 False，服务无法接收流量
+```
+
+### 根因结论
+
+已确认的根因是：**Readiness Probe 配置错误**。
+
+证据（#3）显示 `kubelet` 正试图连接端口 `18081` 和路径 `/ready`，但连接被拒绝。这表明应用容器确实在运行（#1, #2），但应用本身并未在探针指定的 `18081` 端口上监听，或者未在 `/ready` 路径上提供响应（可能是应用在 `18080` 端口或其他路径）。探针配置（`port=18081, path=/ready`）与实际运行中的应用服务地址/路径存在偏差，导致健康检查持续失败，进而使 Pod 处于 `NotReady` 状态。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 21.3s
+├─ 并发证据采集: 39.1s
+│  └─ g1 aiops-case-v16/workload: 39.1s (Evidence 28.5s, RCA 10.4s)
+└─ 汇总总结: 11.7s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v16/workload**: pod-notready-probe-failed
+
+[run:end] run_id=f422404b42ac4015 status=-

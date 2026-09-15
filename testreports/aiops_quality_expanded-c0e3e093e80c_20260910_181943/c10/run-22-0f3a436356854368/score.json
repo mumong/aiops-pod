@@ -1,0 +1,284 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "0f3a436356854368",
+  "elapsed_seconds": 174.835,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 0,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 0,
+    "recall": 0.0,
+    "precision": 0.0,
+    "matches": [
+      {
+        "expectation_id": "liveness-probe-500",
+        "matched": false,
+        "group": "g1",
+        "matched_all": [
+          "liveness"
+        ],
+        "matched_any": [
+          "statuscode: 500"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [
+          "OOM"
+        ],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [
+      "g1"
+    ],
+    "accuracy": 0.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**已确认根因**：Liveness Probe 配置的不合理（超时时间 1s 和周期 3s 过短），无法匹配应用实际的请求处理延迟。\n\n**分析**：\n1. **探针失败触发杀进程**：K8s Event 记录显示探针失败原因为 `HTTP probe failed with statuscode: 500`（证据 1），且 `Exit Code: 137`（证据 3）表明容器是被强制杀死的，这符合 kubelet 在探针失败时的默认行为。\n2. **应用本身无逻辑故障**：同期日志（证据 6）和链路追踪（证据 7）均显示正常的 HTTP 200 请求在处理 `/work` 路径，耗时在 15ms-24ms 之间，应用并未发生崩溃或 OOM 报错，说明 500 状态码是探针在应用繁忙或阻塞时触发的超时结果。\n3. **重启循环**：Metric 数据（证据 5）和 K8s 状态（证据 2）一致确认了容器因 Error 状态陷入重启循环，这是探针不断失败导致的直接后果。\n\n---",
+      "full_section": "### 因果链\n\n```text\nLiveness Probe 配置超时/周期过短 (1s/3s) → 探针请求处理延迟超过阈值返回 500 → kubelet 判定探针失败并执行 SIGKILL (Exit 137) → 容器进入 CrashLoopBackOff 循环\n```\n\n### 根因结论\n\n**已确认根因**：Liveness Probe 配置的不合理（超时时间 1s 和周期 3s 过短），无法匹配应用实际的请求处理延迟。\n\n**分析**：\n1. **探针失败触发杀进程**：K8s Event 记录显示探针失败原因为 `HTTP probe failed with statuscode: 500`（证据 1），且 `Exit Code: 137`（证据 3）表明容器是被强制杀死的，这符合 kubelet 在探针失败时的默认行为。\n2. **应用本身无逻辑故障**：同期日志（证据 6）和链路追踪（证据 7）均显示正常的 HTTP 200 请求在处理 `/work` 路径，耗时在 15ms-24ms 之间，应用并未发生崩溃或 OOM 报错，说明 500 状态码是探针在应用繁忙或阻塞时触发的超时结果。\n3. **重启循环**：Metric 数据（证据 5）和 K8s 状态（证据 2）一致确认了容器因 Error 状态陷入重启循环，这是探针不断失败导致的直接后果。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-10"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [],
+    "observed_namespaces": [
+      "aiops-case-10"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-oomkilled",
+      "pod-terminating-stuck"
+    ],
+    "matched": [],
+    "coverage": 0.0,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 5,
+    "planned": 9,
+    "completeness": 0.5555555555555556,
+    "lanes": [
+      {
+        "lane": "0f3a436356854368-g1",
+        "collected": 5,
+        "planned": 9,
+        "source": "/tmp/aiops/reports/context_archives/0f3a436356854368-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 5,
+    "planned": 9,
+    "completeness": 0.5555555555555556,
+    "lanes": [
+      {
+        "lane": "0f3a436356854368-g1",
+        "collected": 5,
+        "planned": 9,
+        "source": "/tmp/aiops/reports/context_archives/0f3a436356854368-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 3,
+    "planned": 8,
+    "completeness": 0.375,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "liveness-500-event",
+        "description": "Liveness probe 事件明确 HTTP 500",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-11c93f3ab110",
+          "fact-bc2135db50a9",
+          "/tmp/aiops/reports/context_archives/0f3a436356854368-g1/tools/007-evidence-kubectl_events.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 36,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "liveness-probe-config",
+        "description": "Pod YAML 中 livenessProbe 路径为 /health",
+        "weight": 2,
+        "required": true,
+        "matched": false,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "livenessProbe",
+          "/health"
+        ],
+        "missing_any": [],
+        "observation_count": 34,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "liveness-restart",
+        "description": "探针失败伴随 Killing/重启事实",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-bc2135db50a9",
+          "/tmp/aiops/reports/context_archives/0f3a436356854368-g1/tools/007-evidence-kubectl_events.structured.json",
+          "fact-3157f2402392",
+          "fact-f4a16afb0e9c",
+          "/tmp/aiops/reports/context_archives/0f3a436356854368-g1/tools/005-evidence-kubectl_describe.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 36,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "health-log",
+        "description": "应用日志记录 /health HTTP 500",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "logging"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "/health"
+        ],
+        "missing_any": [
+          "500",
+          "liveness_fail"
+        ],
+        "observation_count": 11,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "health-trace",
+        "description": "Tracing 记录 /health HTTP 500",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "tracing"
+        ],
+        "matched_refs": [],
+        "missing_all": [
+          "/health",
+          "500"
+        ],
+        "missing_any": [],
+        "observation_count": 11,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "restart-trend",
+        "description": "Prometheus range 指标确认重启计数增长",
+        "weight": 1,
+        "required": false,
+        "matched": false,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 1,
+        "min_observations": 1,
+        "trend_required": true,
+        "trend_matched": false,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 22,
+  "logical_elapsed_seconds": 175.174,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

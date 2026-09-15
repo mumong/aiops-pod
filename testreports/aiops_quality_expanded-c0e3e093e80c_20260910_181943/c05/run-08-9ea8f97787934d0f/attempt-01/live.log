@@ -1,0 +1,134 @@
+[run] run_id=9ea8f97787934d0f
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5dbb5dcd6c-bntfh 0/1 ContainerCreating 0 1
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5dbb5dcd6c-bntfh 0/1 ContainerCreating 0 1
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5dbb5dcd6c-bntfh 0/1 ContainerCreating 0 1
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (17.6s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我将执行首轮证据采集，使用真实工具验证 `aiops-case-05/workload-5dbb5dcd6c-bntfh` 处于 ContainerCreating 状态的原因。
+
+**首轮工具并行调用：**
+
+1. `kubectl_get_yaml`: 获取 Pod YAML，确认真实状态和事件
+2. `kubectl_events`: 获取该 Pod 的详细事件
+3. `kubectl_describe`: 获取 Pod 详细描述，查看容器状态和事件摘要
+4. `execute_pod_promql`: 已执行（由 pre-react 阶段完成），结果是 `kube_pod_container_status_waiting_reason=1` 且 `reason="ContainerCreating"`，Pod UID 为 `546ed0f3-c379-4bda-a2fe-3ffbf1b916a2`
+5. `query_pod_logs`: 已执行（由 pre-react 阶段完成），结果为 `empty`
+6. `query_pod_tracing`: 已执行（由 pre
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_events status=success Pod workload-5dbb5dcd6c-bntfh in namespace aiops-case-05 failed to create sandbox due to missing Multus network-attachment-definition 'unavailable-network'. key_facts: ["Pod: workload-5dbb5dcd6c-bntfh
+[tool:done] kubectl_describe status=success Pod workload-5dbb5dcd6c-bntfh in namespace aiops-case-05 is stuck in Pending state due to network configuration errors on node2. Multus CNI fails to find the required NetworkAttachmentDefinition 'unav
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-5dbb5dcd6c-bntfh namespace: aiops-case-05 creationTimestamp: 2026-09-10T16:26:26Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[tool:done] query_pod_topology status=error query_pod_topology 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[agent:parallel_evidence] **已获取事实汇总：**
+
+| 数据源 | 关键事实 |
+|--------|----------|
+| `kubectl_get_yaml` | Pod YAML 确认：phase=Pending, node=node2, containerStatus[app]=ContainerCreating, `imagePullSecrets: <absent>`, 没有 `securityContext` 等配置 |
+| `kubectl_events` | **核心错误**：`FailedCreatePodSandBox` 原因是 **`NoNetworkFound`** — 找不到 Multus `network-attachment-definition` `'unavailable-network'`。事件每分钟重复一次，从 16 分钟前到 12 分钟前 |
+| `kubectl_describe` | 确认 Pod 在 node2 上因网络配置错误卡在 Pending/ContainerCreating。注解 `k8s.v1.cni.cncf.io/networks: unav
+[agent:parallel_evidence] 我将首先尝试重新执行 query_pod_topology，因为之前的调用因连接关闭而失败。
+[tool:start] query_pod_topology
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":4,"normalized":4,"retrieved":4,"returned":4},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] query_pod_topology 调用成功。拓扑证据显示：
+
+- Pod `workload-5dbb5dcd6c-bntfh` 运行在 `node2` 节点上。
+- Pod 属于 ReplicaSet `workload-5dbb5dcd6c`，该 ReplicaSet 属于 Deployment `workload`。
+- Pod 包含一个名为 `app` 的容器。
+
+拓扑维度已覆盖，证据充足，不再需要额外补证。
+[node:done] parallel_evidence / 并发证据采集 (348.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.7s)
+[final] run_id=9ea8f97787934d0f status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-05/workload-5dbb5dcd6c-bntfh` | ContainerCreating | Pod workload-5dbb5dcd6c-bntfh 在 aiops-case-05 命名空间中卡在 ContainerCreating 状态，Pod Phase 为 Pending，且无法创建容器沙箱。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | multus | `Warning NoNetworkFound ... cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cncf.io "unavailable-network" not found` | 直接表明 Multus 插件找不到所需的网络定义资源，是导致失败的直接原因。 |
+| 2 | K8s Event | kubelet | `Warning FailedCreatePodSandBox ... Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox ... Multus: ... error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate ... "unavailable-network" not found` | 验证了容器沙箱创建因网络插件配置缺失而失败，证实了 `ContainerCreating` 卡住的具体机制。 |
+| 3 | K8s State | Kubelet | `container: "app", reason: "ContainerCreating"` | 确认应用容器 `app` 处于等待启动状态，与事件描述一致。 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_waiting_reason` (reason: `ContainerCreating`, value: `1`) | 从指标层面确认了 Pod 处于等待容器创建的状态，支持了现象描述。 |
+
+证据链闭合：Kubernetes 事件明确指出 `multus` 插件在尝试解析 `unavailable-network` 网络定义时返回 `not found` 错误，直接导致 `kubelet` 无法创建容器沙箱，进而使 Pod 维持在 `ContainerCreating` 状态。指标与状态事实佐证了这一现象的持续性。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+配置了引用不存在资源 'unavailable-network' 的网络注解 → Multus CNI 插件无法找到网络定义并抛出错误 → 容器沙箱创建失败 → Pod 卡在 ContainerCreating 状态
+```
+
+### 根因结论
+
+已确认的根因是 Pod 配置了引用名为 `unavailable-network` 的 Multus 网络注解，但该名称的 `NetworkAttachmentDefinition` 资源在 `aiops-case-05` 命名空间中不存在。这一配置缺失导致 Multus CNI 插件在初始化网络时无法获取所需的代理配置（证据 1、2），从而阻止了容器沙箱的成功创建，最终表现为 Pod 永远无法通过 `ContainerCreating` 阶段进入运行状态。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 6.2m
+├─ 问题定位: 17.6s
+├─ 并发证据采集: 348.4s
+│  └─ g1 aiops-case-05/workload-5dbb5dcd6c-bntfh: 348.4s (Evidence 341.1s, RCA 7.2s)
+└─ 汇总总结: 8.7s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-05/workload-5dbb5dcd6c-bntfh**: pod-imagepull-failed
+
+[run:end] run_id=9ea8f97787934d0f status=-

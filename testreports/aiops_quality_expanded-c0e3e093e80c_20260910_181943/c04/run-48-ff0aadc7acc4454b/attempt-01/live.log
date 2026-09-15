@@ -1,0 +1,126 @@
+[run] run_id=ff0aadc7acc4454b
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在的异常情况。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[agent:layer] 集群中检测到 1 个异常 Pod：
+
+*   **Pod**: `workload-6584f97c76-h4lt9` (Namespace: `aiops-case-04`)
+*   **状态**: `CreateContainerConfigError`
+*   **就绪情况**: `0/1`
+
+该 Pod 处于 `CreateContainerConfigError` 状态，通常由配置缺失（如 ConfigMap、Secret 未找到）或配置项键名错误引起。我将获取对应的诊断手册以辅助后续证据收集。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ConfigError / 启动配置失败 > Pod异常类型: ConfigError | 典型状态: CreateContainerConfigError / CreateContainerError / CrashLoopBackOff | 兼容分类: config_bootstrap ## 场景识别 | 信号 | 关键特征 | |------|-----
+[agent:layer] 我将检查异常 Pod 的详细状态和事件，以确认 `CreateContainerConfigError` 的具体原因（如缺失的 ConfigMap、Secret 或环境变量）。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-6584f97c76-h4lt9 0/1 CreateContainerC
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-6584f97c76-h4lt9 0/1 CreateContainerC
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-6584f97c76-h4lt9 0/1 CreateContainerC
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-6584f97c76-h4lt9 0/1 CreateContainerC
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-6584f97c76-h4lt9 0/1 CreateContainerC
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (17.6s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] # 1. 确认 Pod 身份与实时状态 (kubectl_describe)
+[tool:start] kubectl_describe
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-6584f97c76-h4lt9 namespace: aiops-case-04 node: node2/10.2.0.50 status: Pending 关键诊断行: Annotations: cni.projectcalico.org/containerID: e9690566e91643d819af00d7
+[agent:parallel_evidence] # 2. 检查 Pod 事件 (kubectl_events)
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: LAST SEEN TYPE REASON OBJECT MESSAGE 16s (x422 over 90m) Normal Pulled Pod/workload-6584f97c76-h4lt9 Container image "xnet.registr
+[agent:parallel_evidence] # 3. 提取 Pod 引用的所有 Secret (run_bash_command)
+[tool:start] run_bash_command
+[tool:done] run_bash_command status=success {"success": false, "stdout": "", "stderr": "/bin/bash: -c: line 1: unexpected EOF while looking for matching `''\n", "returncode": 2}
+[agent:parallel_evidence] # 4. 提取 Pod spec 中 Secret 引用并验证 Secret 内容
+[tool:start] run_bash_command
+[tool:done] run_bash_command status=success {"success": true, "stdout": "", "stderr": "", "returncode": 0}
+[tool:start] run_bash_command
+[tool:done] run_bash_command status=success {"success": true, "stdout": "[{\"name\":\"INPUT_VALUE\",\"valueFrom\":{\"secretKeyRef\":{\"key\":\"unavailable-key\",\"name\":\"workload-input\",\"optional\":false}}}]", "stderr": "", "returncode": 0}
+[tool:start] kubectl_describe
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-input namespace: aiops-case-04
+[agent:parallel_evidence] # 5. 确认 Secret "workload-input" 是否存在
+[tool:start] run_bash_command
+[tool:done] run_bash_command status=success {"success": true, "stdout": "NAME TYPE DATA AGE\nworkload-input Opaque 1 90m\n", "stderr": "", "returncode": 0}
+[agent:parallel_evidence] # 3. 提取 Pod 引用的所有 Secret (kubectl_get_yaml)
+
+我需要通过 YAML 查看完整的 Pod spec，以获取精确的 `secretKeyRef` 信息。
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-6584f97c76-h4lt9 namespace: aiops-case-04 creationTimestamp: 2026-09-10T14:52:05Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[agent:parallel_evidence] 根据已采集的真实工具结果，以下是对 `aiops-case-04/workload-6584f97c76-h4lt9` 的根因证据分析：
+
+### 1. 已确认事实 (Evidence)
+*   **Pod 状态持续异常**：Pod 仍处于 `Pending` 阶段，Container Status 为 `Waiting`，Reason 为 `CreateContainerConfigError`。
+*   **具体错误信息明确**：`kubectl_get_yaml` 返回的 `containerStatuses` 中 `message` 字段指出：`couldn't find key unavailable-key in Secret aiops-case-04/workload-input`。
+*   **配置不匹配**：
+    *   Pod 的 Container Spec (由 `jsonpath` 提取) 声明环境变量引用了 Secret `workload-input` 中的 key `unavailable-key` (`secretKeyRef.name: wor
+[node:done] parallel_evidence / 并发证据采集 (55.2s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.4s)
+[final] run_id=ff0aadc7acc4454b status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-04/workload-6584f97c76-h4lt9` | CreateContainerConfigError | Pod aiops-case-04/workload-6584f97c76-h4lt9 处于 Pending 状态，容器 `app` 因 CreateContainerConfigError 无法启动 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes | fact-2d0419e679ab: `container.waiting_message`="couldn't find key unavailable-key in Secret aiops-case-04/workload-input" | 确认故障直接原因：引用了不存在的 Secret Key |
+| 2 | K8s State | kubernetes | fact-9d59f588e7d6: `container.waiting_reason`="CreateContainerConfigError" | 确认 Pod 无法进入 Running 状态 |
+| 3 | K8s State | kubernetes | fact-27db43284b01: `pod.status`="Pending" | 确认 Pod 停留在调度/启动前阶段 |
+| 4 | Metric | prometheus | fact-4136c3177946: `kube_pod_container_status_waiting_reason`=1 (labels: `reason`="CreateContainerConfigError") | 独立观测到与 K8s 状态一致的等待原因 |
+| 5 | K8s State | kubernetes | fact-0d4e53f0d5ce: `ContainersReady`=False, `ContainersNotReady`, containers=[app] | 进一步印证容器因配置错误未能就绪 |
+| 6 | K8s State | kubernetes | fact-4d9c4563cbf0: `container.restart_count`=0 | 排除容器因业务逻辑崩溃导致的重启，确认启动阶段即失败 |
+
+**证据关联说明：**
+Kubernetes 核心状态与指标高度一致：`CreateContainerConfigError` 直接导致 Pod 处于 `Pending` 状态，且未发生任何重启。Metric 数据（fact-4136c3177946）在时间戳上与 K8s 状态相符，独立验证了等待原因并非网络或资源不足，而是明确的配置错误。Logging 和 Tracing 被标注为 `not_applicable`，符合容器未启动的物理限制。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Deployment 引用了不存在的 Secret Key (unavailable-key) → kubelet 无法解析并挂载配置 → 容器状态变为 CreateContainerConfigError → Pod 持续处于 Pending 状态
+```
+
+### 根因结论
+
+已确认的根因是 **Pod 配置中引用了不存在的 Secret Key**。
+
+具体而言，Pod `aiops-case-04/workload-6584f97c76-h4lt9` 的容器 `app` 在启动时，试图从 Secret `workload-input` 中读取 `unavailable-key` 作为配置（环境变量或挂载），但该 Key 实际上并不存在于该 Secret 中。这一配置错误直接触发了 `CreateContainerConfigError` 状态，导致容器无法启动，Pod 因此一直处于 `Pending` 阶段。该结论由 K8s 原生事件（fact-2d0419e679ab）和 Prometheus 指标（fact-4136c3177946）共同支撑，证据充分，无需补充日志或追踪数据。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.4m
+├─ 问题定位: 17.6s
+├─ 并发证据采集: 55.2s
+│  └─ g1 aiops-case-04/workload-6584f97c76-h4lt9: 55.2s (Evidence 45.8s, RCA 9.3s)
+└─ 汇总总结: 10.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-04/workload-6584f97c76-h4lt9**: pod-config-error
+
+[run:end] run_id=ff0aadc7acc4454b status=-

@@ -1,0 +1,128 @@
+[run] run_id=e2278b7951cf4740
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前的异常状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[agent:layer] 集群中发现一个异常 Pod：`workload-68c557d875-gtzc8` (Namespace: `aiops-case-01`)。
+
+**Pod 状态分析：**
+*   **名称**: `workload-68c557d875-gtzc8`
+*   **当前状态**: `Pending`
+*   **就绪状态**: `0/1`
+*   **异常类型归类**: `PendingUnschedulable` (待定/不可调度)
+
+为了进一步诊断其处于 Pending 状态的具体原因（例如资源不足、调度策略限制等），我需要获取该 Pod 的详细描述信息。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-68c557d875-gtzc8 0/1 Pending 0 54m <none> <none
+[agent:layer] 根据上一步获取的详细信息，该 Pod `workload-68c557d875-gtzc8` 处于 `Pending` 状态，且 `Nominated Node` 为空，这强烈暗示它是一个 `PendingUnschedulable` 类型的异常，通常由资源不足或调度策略导致。
+
+根据 Runbook 列表，对应的诊断手册是 `pod-pending-unschedulable.md`。我将获取该手册内容以指导后续的深度证据收集。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[agent:layer] 集群当前存在 **1 个** 异常 Pod，归类为 **Pending/Unschedulable** 异常。
+
+### 异常实体与状态
+| 命名空间 | Pod 名称 | 当前状态 | 就绪情况 | 异常类型 | 关键证据 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `aiops-case-01` | `workload-68c557d875-gtzc8` | `Pending` | `0/1` | `PendingUnschedulable` | `Nominated Node` 为空，未绑定节点 |
+
+### 初步分析
+该 Pod 处于 `Pending` 状态，表明调度器尚未将其绑定到任何工作节点（`NOMINATED NODE` 为空）。根据诊断手册，这种情况通常由以下原因之一引起：
+1.  **资源不足**：集群中所有节点均无法满足该 Pod 对 CPU、内存或存储资源的请求。
+2.  **调度约束不匹配**：Pod 的 `nodeSelector`、`affinity` 或 `tolerations` 与当前节点不兼容。
+[node:done] layer / 问题定位 (18.2s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我理解了任务。我需要针对 `aiops-case-01/workload-68c557d875-gtzc8` 这个 Pod 进行根因调查，它当前处于 Pending 状态，初步判断为 PendingUnschedulable。
+
+根据已有信息和 plan，我需要执行以下步骤：
+1. `kubectl_describe` 查看 Pod 详情和事件
+2. `kubectl_get_yaml` 查看 Pod 的资源请求和调度约束
+3. `kubectl_get_by_kind_in_cluster` 查看集群节点状态
+4. Metrics、Logging、Tracing、Topology 的首轮查询已执行（见 pre-react-observability-baseline）
+
+让我先执行 Kubernetes 相关的工具调用。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-68c557d875-gtzc8 namespace: aiops-case-01 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 55m default-scheduler 0/3 nodes are avail
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-68c557d875-gtzc8 namespace: aiops-case-01 creationTimestamp: 2026-09-10T10:19:45Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":3,"normalized":3,"retrieved":3,"returned":3},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 根据工具采集的结果，我来分析已确认的事实和根因判断：
+
+## 已确认事实
+
+### 1. Kubernetes Pod 状态与事件
+- **Pod 状态**: `Phase=Pending`，`nodeName=None`，未分配到任何节点
+- **PodScheduled Condition**: `status=False`，`reason=Unschedulable`
+- **调度事件**: `FailedScheduling` — 核心原因是 **"3 node(s) didn't match Pod's node affinity/selector"**
+
+### 2. Pod 调度约束（YAML 关键信息）
+- **nodeSelector**: `{"aiops.lab/unavailable": "true"}`
+- 该标签要求调度到打有 `aiops.lab/unavailable=true` 标签的节点上
+
+### 3. 集群节点状态
+- 集群共 3 个节点：`master`、`node1`、`node2`
+- **所有节点状态均为 `Ready`**
+- 节点标签
+[node:done] parallel_evidence / 并发证据采集 (39.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (4.8s)
+[final] run_id=e2278b7951cf4740 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-01/workload-68c557d875-gtzc8` | Pending | Pod 的 nodeSelector 配置 `aiops.lab/unavailable=true` 与集群节点标签不匹配，导致调度器无法将 Pod 分配到任何节点。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kube-state-metrics | `phase: Pending` | 确证 Pod 当前处于不可调度状态 |
+| 2 | K8s Event | default-scheduler | `FailedScheduling ... 3 node(s) didn't match Pod's node affinity/selector` | 提供调度的直接失败原因 |
+| 3 | K8s Config | Deployment Spec | `container.resource_request.cpu: 5m`, `memory: 8Mi` | 排除资源配额不足导致的调度失败 |
+
+Kubernetes 事件明确指出了调度失败的原因是由于亲和性/节点选择器不匹配（Node Affinity/Selector），而容器的资源请求非常低，因此排除了资源不足的因素。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+节点选择器配置错误 (nodeSelector) → 匹配不到任何集群节点 → 调度器无法分配 Pod → Pod 状态持续 Pending
+```
+
+### 根因结论
+
+已确认的根因为**节点选择器配置错误**：Pod 的 `nodeSelector` 配置了 `aiops.lab/unavailable=true`，而集群中的节点均不具备该标签，导致调度器在 3 个节点上均无法匹配成功。当前现象（Pod Pending）与该配置直接相关，证据充分。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.0m
+├─ 问题定位: 18.2s
+├─ 并发证据采集: 39.7s
+│  └─ g1 aiops-case-01/workload-68c557d875-gtzc8: 39.7s (Evidence 34.8s, RCA 4.8s)
+└─ 汇总总结: 4.8s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-01/workload-68c557d875-gtzc8**: pod-pending-unschedulable
+
+[run:end] run_id=e2278b7951cf4740 status=-

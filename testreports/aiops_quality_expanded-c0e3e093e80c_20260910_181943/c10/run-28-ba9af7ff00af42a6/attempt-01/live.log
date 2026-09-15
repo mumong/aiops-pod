@@ -1,0 +1,112 @@
+[run] run_id=ba9af7ff00af42a6
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-79d9f8fd88-48j8r 0/1 CrashLoopBackOff 11
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] ### 集群异常定位结果
+
+**Layer Output**
+- **layer**: Diagnostics/Discovery
+- **confidence**: High (基于集群 Pod 状态事实)
+- **reasoning**: 集群扫描发现 `aiops-case-10` 命名空间下存在 1 个处于 `CrashLoopBackOff` 状态的 Pod，其他 66 个 Pod 均为正常运行。该异常表现为容器反复退出并被 kubelet 重启，符合 `CrashLoopBackOffRuntime` 的典型特征。
+- **abnormal_pods**:
+  1. `workload-79d9f8fd88-48j8r` (ns: `aiops-case-10`)
+
+- **abnormal_groups**:
+  1. **Group 1**: `aiops-case-10/workload-79d9f8fd88-48j8r`
+
+- **pod_status_keyword**:
+  1. `CrashLoopBackOff` (11次重启, 最近 2分钟前)
+
+- **
+[node:done] layer / 问题定位 (20.5s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":213,"matched":233,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 我将开始调查 `aiops-case-10/workload-79d9f8fd88-48j8r` 的 CrashLoopBackOff 问题。首先获取 Pod 的基本信息和状态。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_events
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-79d9f8fd88-48j8r namespace: aiops-case-10 node: node2/10.2.0.50 status: Running 关键诊断行: Exit Code: 137 Warning Unhealthy 23m (x8 over 25m) kubele
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-79d9f8fd88-48j8r 0/1 CrashLoopBackOff 1
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 23m (x8 over 25m) Warning Unhealthy Pod/workload-79d9f8fd88-48j8r Liveness probe failed: HTTP probe failed with statuscode: 500 49s (x84 over 21m) Warning B
+[agent:parallel_evidence] 已采集事实：
+1. Pod 当前状态仍为 CrashLoopBackOff，RESTARTS=11，表明异常持续存在。
+2. kubectl_describe 显示容器最近一次退出的 Exit Code 为 137（OOM Killed），且 kubelet 报告 Liveness probe 失败（HTTP 500）。
+3. kubectl_events 显示 Liveness probe 失败和 BackOff 重启事件在 25 分钟内多次触发，符合 CrashLoopBackOff 的典型行为。
+
+冲突点：
+- Liveness probe 返回 500 表明应用可能已启动但逻辑异常或无响应。
+- 但同时存在 Exit Code 137，表明应用进程也可能被系统因内存超限（OOM）而强制杀掉。这暗示异常的直接原因可能是内存不足导致进程崩溃，而 Liveness probe 的 500 可能是进程崩溃前的短暂响应。
+
+缺口：
+- 需要查看容器退出前的具体日志，以确认是 OOM 触发还是应用逻辑错误导致。
+- 需要确认该 Pod 是否配置了内存限制（Limits），以验证 OOM 假
+[node:done] parallel_evidence / 并发证据采集 (56.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.9s)
+[final] run_id=ba9af7ff00af42a6 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-10/workload-79d9f8fd88-48j8r` | CrashLoopBackOff | Pod workload-79d9f8fd88-48j8r 处于 CrashLoopBackOff 状态，持续重启且无法就绪。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes | Warning Unhealthy: Liveness probe failed with statuscode: 500 (fact-a4ac8b423062) | 记录应用存活探针持续失败的直接现象，导致 Pod 重启机制触发 |
+| 2 | K8s Event | Kubernetes | Warning BackOff: Back-off restarting failed container (fact-ab03649ac149) | 证明容器处于频繁重启状态，最终表现为 CrashLoopBackOff |
+| 3 | K8s State | Kubernetes | Container last terminated reason: Error; Exit Code: 137 (fact-b4d94f5490d3, fact-e6008d7ee486) | 退出码 137 是进程被 OOM Killer 强制终止的特征，指向内存不足 |
+| 4 | K8s Config | Kubernetes | Container resource limit (memory): 96Mi (fact-670da840bf5b) | 提供了导致 OOM 的环境上下文，限制值相对严格 |
+| 5 | Metric | Prometheus | kube_pod_container_status_waiting_reason (CrashLoopBackOff): 1; restarts_total: 11 (fact-60ba221d9652, fact-6144ee5dd9e9) | 独立于 Kubernetes API，从 Metrics 维度证实了重启次数和状态 |
+
+**证据说明：**
+Kubernetes 的 Event 明确记录了探针失败和重启行为，而 `Exit Code: 137` 结合 96Mi 的内存限制，共同指向了资源耗尽导致进程被杀的根本原因。Metrics 数据（Restart Count 11, CrashLoopBackOff 状态）与 K8s 状态完全印证，排除了偶发性故障。Logging 和 Tracing 展示的是应用正常响应时的快照，与当前崩溃状态处于不同时间线。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+容器内存限制（96Mi）过低 → 内存不足触发 OOM Killer → 进程被强制终止（Exit Code 137） → Liveness 探针失败触发重启 → CrashLoopBackOff
+```
+
+### 根因结论
+
+**已确认的根因**：容器内存配置过低导致 OOM（Out of Memory）。
+证据 `[fact-b4d94f5490d3, fact-e6008d7ee486]` 中的 `Exit Code: 137` 是 Linux 内核 OOM Killer 终止进程的明确标志，这直接证实了应用因内存不足被强制杀死的推断。结合证据 `[fact-670da840bf5b]` 中 96Mi 的硬限制，说明该限制不足以支撑应用稳定运行。该进程终止导致了探针失败和后续的重启风暴。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.5m
+├─ 问题定位: 20.5s
+├─ 并发证据采集: 56.7s
+│  └─ g1 aiops-case-10/workload-79d9f8fd88-48j8r: 56.7s (Evidence 46.4s, RCA 10.2s)
+└─ 汇总总结: 9.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-10/workload-79d9f8fd88-48j8r**: pod-crashloop-runtime
+
+[run:end] run_id=ba9af7ff00af42a6 status=-

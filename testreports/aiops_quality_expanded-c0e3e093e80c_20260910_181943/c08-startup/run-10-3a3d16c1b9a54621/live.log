@@ -1,0 +1,281 @@
+[run] run_id=3a3d16c1b9a54621
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别任何处于异常状态的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=1 status_counts={'Running': 66} NAMESPACE NAME READY STATUS REST
+[agent:layer] 集群中有一个 Pod 处于异常状态：
+
+- **Pod 名称**: `workload`
+- **命名空间**: `aiops-case-v15`
+- **状态**: `Running`
+- **异常特征**: 重启次数为 9 次，最近一次重启在 5 分钟前。
+
+尽管 Pod 当前状态为 Running，但频繁的重启表明应用存在不稳定性。我将获取该 Pod 的详细信息以确认其当前的健康状态和可能的原因。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 OOMKilled 9 (5m11s ago) 21m 172.16.104.34 node2 <non
+[agent:layer] Pod `workload` 在 `aiops-case-v15` 命名空间中处于异常状态。
+
+### 异常详情：
+*   **Pod 名称**: `workload`
+*   **命名空间**: `aiops-case-v15`
+*   **状态**: `OOMKilled`
+*   **重启次数**: 9 次（最近一次 5 分钟前）
+*   **就绪状态**: `0/1` (未就绪)
+
+### 结论：
+该 Pod 因内存溢出被 Kill (OOMKilled)。
+
+### 下一步建议：
+根据 `pod_abnormal_type=OOMKilled`，我将获取对应的诊断手册 `pod-oomkilled.md` 以进行进一步诊断。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod OOMKilled（以 Last State Reason 为准） > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Cr
+[agent:layer] ### 集群异常诊断
+
+根据对集群中所有 Pod 的扫描，发现 **1 个** 异常 Pod，归类为 **OOMKilled** 类型。
+
+#### 1. 异常实体定位 (Abnormal Pods)
+
+| Pod 名称 | 命名空间 | 状态 (Status) | 关键症状 |
+| :--- | :--- | :--- | :--- |
+| `workload` | `aiops-case-v15` | **OOMKilled** | 重启 9 次，最近一次 5 分钟前；READY 为 0/1 |
+
+**状态分类 (Status Category)**: `ABNORMAL`
+
+#### 2. 异常组划分 (Abnormal Groups)
+
+*   **Group ID**: `group-1`
+*   **关联 Pod**: `aiops-case-v15/workload`
+*   **异常类型 (Pod Abnormal Type)**: `OOMKilled`
+*   **特征描述**: Pod 状态显示为 `OOMKilled`，且存在频繁重启历史，符合容器因内存超限被系
+[node:done] layer / 问题定位 (22.2s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"retrieved":7,"returned":7},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好，基线采集结果明确：
+1. **Metrics (prometheus)**: 确认 OOMKilled 终止原因、CrashLoopBackOff 等待原因、restarts=10。
+2. **Logging (ES)**: 命中 7 条日志，内容全是 `startup allocation 256Mi`，未包含真正的业务报错。需要重新按容器和 OOM/memory 关键词查询。
+3. **Tracing (DeepFlow/Tempo)**: 为空，因为 Pod 当前处于 CrashLoopBackOff 状态，无活跃 L7 流量。
+4. **Topology**: 待执行。
+5. **K8s Describe**: 待执行。
+
+现在开始执行首轮计划，并修正日志查询（指定 container 和 OOM/memory 关键词）。
+[tool:start] kubectl_describe
+[tool:start] query_pod_logs
+[tool:start] query_pod_topology
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v15 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"projected_series":2,"raw_series":2,"retrieved":2,"returned":2,"serialized_series":2},"coverage":"present","
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 好，首轮采集结果已全部返回。让我分析关键事实：
+
+1. **Kubernetes Describe**: 明确显示 Reason: OOMKilled, Exit Code: 137, CrashLoopBackOff, restarts=10。Memory limit: 64Mi, requests: 8Mi。
+2. **Prometheus Metrics**: memory limit = 67108864 bytes (64Mi), restarts_total = 10, working_set = 3334144 bytes (约 3.2Mi)。
+3. **Logging**: empty - 没有匹配到 OOM/memory/error 相关的日志。
+4. **Topology**: 已确认为 deployment/workload 所有，调度在 node2。
+
+现在我需要确认几个关键点：
+- PromQL 的 range query 返回了 trend_evaluable=false 的单个点，需要重新用 range query 获取 60 分钟内的趋势来确认 work
+[tool:start] execute_pod_promql
+[tool:start] kubectl_previous_logs
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 1 signals: 0 关键日志: startup allocation 256Mi
+[agent:parallel_evidence] 我将基于已有的工具结果进行证据整理，并补充必要的拓扑查询来完成诊断。让我先执行拓扑查询：
+[tool:start] query_pod_topology
+[tool:done] query_pod_topology status=success query_pod_topology 返回不完整或无效的 MCP contract: missing=evidence_refs,facts,limits,ok,purpose,query,samples,truncated
+[heartbeat] layer
+[agent:parallel_evidence] Let me read the detailed evidence files to get the complete picture.
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=3810 lines=90 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/004-evidence-kubectl_describe.raw.txt offset: 0 returne
+[tool:done] read_context_archive status=success Prometheus查询成功，获取到Pod workload在namespace aiops-case-v15下的memory limit和restart总数。 key_facts: ["Entity: Pod workload (namespace: aiops-case-v15, node: node2, container: app)", "Memory Limit (kube_pod_co
+[tool:done] read_context_archive status=success Prometheus 查询 `container_memory_working_set_bytes` 针对 Pod `workload` (ns: aiops-case-v15, container: app)，于 node2 返回 1 个样本。观测值 3334144 bytes (~3.18 MB)。因时间范围在 Pod 创建 (`2026-09-14T09:26:33Z`) 之前被截断，仅获取
+[tool:done] read_context_archive status=success Elasticsearch query for pod logs in namespace aiops-case-v15, pod workload, container app returned 0 hits for keywords memory, OOM, allocate, heap, exit, error, fatal. key_facts: ["Entity: Pod/workloa
+[tool:done] read_context_archive status=success k8s topology query for Pod 'workload' (ns: aiops-case-v15). Scheduled on 'node2', owns Container 'app'. Owner and Service relationships are empty. key_facts: ["Pod: workload (ns: aiops-case-v15, UID:
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=234 lines=8 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/010-evidence-kubectl_previous_logs.raw.txt offset: 0 retu
+[agent:parallel_evidence] 让我先重新获取该 Pod 的完整描述和事件，以验证其当前状态。
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:start] kubectl_previous_logs
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v15 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 105s (x140 over 31m) Warning BackOff Pod/workload Back-off restarting failed container app in pod workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 1 signals: 0 关键日志: startup allocation 256Mi
+[agent:parallel_evidence] Let me first verify the Pod's current identity and lifecycle by getting its YAML, then investigate the memory crash evidence.
+[tool:start] kubectl_get_yaml
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v15 creationTimestamp: 2026-09-14T09:26:33Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] Let me analyze the evidence collected so far for `aiops-case-v15/workload`.
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=660 lines=16 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/021-evidence-execute_pod_promql.structured.json offset:
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=660 lines=16 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/022-evidence-execute_pod_promql.structured.json offset:
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=660 lines=16 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/023-evidence-execute_pod_promql.structured.json offset:
+[agent:parallel_evidence] Let me first read the failed Prometheus query results to understand why they failed, then re-run them with correct parameters.
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=710 lines=17 read_context_archive 输出摘要: raw_chars=660 lines=16 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/023-ev
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=710 lines=17 read_context_archive 输出摘要: raw_chars=660 lines=16 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/022-ev
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=710 lines=17 read_context_archive 输出摘要: raw_chars=660 lines=16 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/021-ev
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=5035 lines=143 <context_archive> archive_path: /tmp/aiops/reports/context_archives/3a3d16c1b9a54621-g1/tools/024-evidence-kubectl_get_yaml.raw.txt offset: 0 return
+[agent:parallel_evidence] 之前多轮 execute_pod_promql 和 query_pod_topology 调用均因缺少 namespace 或输出不满足 contract schema 而失败。我已通过 read_context_archive 读取了 kubectl get -o yaml 的 Pod YAML 快照，确认实体信息：namespace=aiops-case-v15，name=workload，UID=da351bf0-c4ab-47a0-b24d-7c7a75950753，container 名 app，creationTimestamp=2026-09-14T09:26:33Z。
+
+现在我需要重新执行之前失败的关键查询：获取 OOM 前内存趋势、memory limit、重启次数。同时获取 Pod 事件和 logs 验证 OOMKilled 事实。
+[tool:start] kubectl_describe
+[tool:start] kubectl_previous_logs
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff Warning BackOff 105s (x140 over 31m) kubelet Back-off rest
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 5 signals: 0 关键日志: kubectl_previous_logs 日志摘要: lines: 1 signals: 0 关键日志: startup allocation 256Mi
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[agent:parallel_evidence] 我看到之前的 `execute_pod_promql` 调用因为缺少 `namespace` 参数而失败。让我重新执行这些 PromQL 查询，并补充缺失的 Metrics 证据。
+
+**本轮目的：**
+1. 验证 Pod 当前状态（是否仍在 CrashLoopBackOff）
+2. 获取 Memory Limit 和当前使用量，确认是否触发了 OOMKilled
+3. 获取重启次数，确认 OOMKilled 发生频率
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[agent:parallel_evidence] 我将修正参数后重新调用 execute_pod_promql。
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] Metrics 查询已成功。Memory limit 确认为 64MB（67108864 bytes）。现在我再查询重启次数：
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] 修复后两个 Metrics 查询均成功：
+
+1. **Memory Limit**: 64MB（67108864 bytes）— 容器确实有 64MB 内存限制。
+2. **重启次数**: 11 次 — 说明该 Pod 已经反复重启过 11 次，与 OOMKilled 反复发生的现象一致。
+
+**已采事实**：
+- Pod `aiops-case-v15/workload` (UID: da351bf0-c4ab-47a0-b24d-7c7a75950753) 容器 `app` 的 memory limit 为 64MB。
+- `kube_pod_container_status_restarts_total` = 11，表明 Pod 已重启 11 次。
+
+**冲突/缺口**：
+- 重启 11 次与 OOMKilled 候选原因**一致**，但尚未从 Prometheus 获取到当时的 **OOM 事件指标**（如 OOM kill 时间窗内的 memory 使用量峰值），也未有 Logging/Tracing 确认崩溃时的具体日志。
+- 缺少确认 Pod **当前状态**（是否仍在
+[node:done] parallel_evidence / 并发证据采集 (676.2s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (14.1s)
+[final] run_id=3a3d16c1b9a54621 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v15/workload` | OOMKilled | Pod aiops-case-v15/workload 处于 CrashLoopBackOff 状态，反复被 OOMKilled |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | `container.last_terminated_reason` | `OOMKilled` (fact-087d5062ec80) | 确认 Pod 被终止的根本原因是内存超限 |
+| 2 | K8s Config | `container.resource_limit.memory` | `64Mi` (fact-2da266265e6b) | 确认容器的内存硬限制为 64Mi |
+| 3 | K8s Config | `container.resource_request.memory` | `8Mi` (fact-1a1e63143f75) | 确认容器的内存请求为 8Mi，远低于 Limit |
+| 4 | Logging | `log.message` | `startup allocation 256Mi` (fact-0e0f3b5f125d) | 记录应用启动时申请 256Mi 内存，直接证实资源需求超过硬限制 |
+| 5 | K8s State | `container.last_exit_code` | `137` (fact-032c33c35f66) | 确认退出码 137，符合 OOM Killer 的信号特征 (128+9) |
+| 6 | K8s Event | `event.message` | `Back-off restarting failed container app` (fact-4bd7601bb6ba) | 确认容器正在经历 CrashLoopBackOff 循环 |
+| 7 | Metric | `container_memory_working_set_bytes` | 3334144 bytes (~3.18Mi) (fact-bc5944aecb99) | 采集时内存驻留量未触及限制，因 OOM 发生在启动瞬间且未保留持久指标 |
+| 8 | Metric | `kube_pod_container_resource_limits` | 67108864 bytes (64Mi) (fact-570a0df4623e) | 从 Prometheus 确认内存限制数值与 Kubernetes 配置一致 |
+
+**证据说明：**
+1.  **内存限制与应用行为的冲突**：配置证据显示容器的内存硬限制（Limit）为 64Mi（证据 #2, #8），而日志证据记录应用启动时分配了 256Mi 内存（证据 #4）。由于 256Mi 远大于 64Mi 的限制，该行为必然触发内核 OOM Killer。
+2.  **状态与日志的互相印证**：Kubernetes 状态显示 Pod 被 `OOMKilled` 且退出码为 `137`（证据 #1, #5），这与应用分配超大内存导致被杀的逻辑完全一致，同时也解释了当前的 `CrashLoopBackOff` 循环状态（证据 #6）。
+3.  **指标缺失的解释**：虽然 Prometheus 采集到内存驻留量较低（约 3.18Mi，证据 #7），但由于 `sample_count=1` 无法构建趋势，且 OOM 发生在分配内存的瞬间，导致在 OOM 发生前未能捕获逼近 64Mi 的内存峰值；但这并不妨碍基于配置和日志的确定性判断。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用启动分配 256Mi 内存 → 突破 64Mi memory limit → 触发内核 OOM Killer (exit_code 137) → CrashLoopBackOff
+```
+
+### 根因结论
+
+已确认根因为：**容器内存配置不足导致 OOMKilled**。
+
+具体而言，Pod `aiops-case-v15/workload` 的应用逻辑在启动时尝试分配 **256Mi** 内存（证据 #4），而 K8s 资源配置中该容器的 `memory limit` 仅为 **64Mi**（证据 #2）。这一资源缺口触发了 Linux 内核的 OOM Killer 机制，导致容器进程被强制终止（证据 #1, #5）。随后 Kubelet 根据重启策略不断重启容器，最终表现为 `CrashLoopBackOff` 状态（证据 #6, #9）。正式 RCA 结论与收集到的真实工具事实完全一致，无需其他补充证据。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 11.9m
+├─ 问题定位: 22.2s
+├─ 并发证据采集: 676.2s
+│  └─ g1 aiops-case-v15/workload: 676.2s (Evidence 667.3s, RCA 8.7s)
+└─ 汇总总结: 14.1s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v15/workload**: pod-oomkilled
+
+[run:end] run_id=3a3d16c1b9a54621 status=-

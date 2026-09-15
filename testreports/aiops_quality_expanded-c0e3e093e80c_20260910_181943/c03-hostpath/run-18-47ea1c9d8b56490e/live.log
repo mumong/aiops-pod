@@ -1,0 +1,125 @@
+[run] run_id=47ea1c9d8b56490e
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前是否存在异常状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[agent:layer] 集群中发现一个异常 Pod。
+
+**异常 Pod 详情：**
+*   **Namespace:** `aiops-case-v06`
+*   **Name:** `workload`
+*   **Status:** `ContainerCreating`
+*   **Node:** `node2`
+
+该 Pod 卡在 `ContainerCreating` 阶段，通常意味着容器运行时准备阶段（如拉取镜像、创建沙箱、挂载卷等）遇到阻滞。为了确定具体原因，我将获取该 Pod 的详细标签和状态信息，并根据初步现象获取相关的诊断手册。
+[tool:start] kubectl_get_by_name
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod SandboxCreateFailed / Pod sandbox 创建失败 > Pod异常类型: SandboxCreateFailed | 典型状态: ContainerCreating / FailedCreatePodSandBox | 兼容分类: sandbox_runtime ## 状态识别 - Events 含 `FailedCreatePodSa
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 29m <none> node2 <none>
+[agent:layer] 当前集群存在 **1 个** 异常 Pod，表现为 `ContainerCreating` 状态，无法分配 IP 地址，大概率属于 **SandboxCreateFailed** 类型（具体为 CNI 插件配置或 IPAM 问题）。
+
+### 异常摘要
+*   **异常 Pod**: `workload` (Namespace: `aiops-case-v06`)
+*   **异常类型**: `SandboxCreateFailed` (CNI/网络插件故障)
+*   **关键现象**: Pod 长时间卡在 `ContainerCreating`，且 `IP` 为 `<none>`。
+
+### LayerOutput
+
+```json
+{
+  "layer": "Layer1",
+  "confidence": "High",
+  "reasoning": "Pod 'workload' 处于 ContainerCreating 状态超过 29 分钟，且未获得 IP 地址。结合 Pod 标签 aiops.lab/case-id=v06 及状态特征，判定为沙箱创建失败。根据 Runboo
+[node:done] layer / 问题定位 (17.7s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 开始执行计划中的 Kubernetes 工具调用，同时结合已采集的观测性 baseline 进行分析。
+
+### 步骤 1-2: 获取 Pod 详细事件与 YAML 状态
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v06 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning FailedMount 3m3s (x21 over 29m) kubelet MountVolume.SetUp failed for
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v06 creationTimestamp: 2026-09-11T11:38:17Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] ### 步骤 3: 检查节点状态
+[tool:start] run_bash_command
+[tool:done] run_bash_command status=success {"success": true, "stdout": "True False", "stderr": "", "returncode": 0}
+[agent:parallel_evidence] ### 步骤 4: 拓扑关系确认
+[tool:start] query_pod_topology
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ---
+
+## 证据采集结论
+
+### 已确认事实
+
+| 维度 | 事实 |
+|------|------|
+| **Pod 状态** | `phase=Pending`，容器状态 `Waiting / reason=ContainerCreating`，未进入 Running。 |
+| **核心事件** | `FailedMount`: `hostPath type check failed: /var/lib/aiops-fixture-unavailable-7f394bef/input is not a directory`。 |
+| **卷配置** | Pod 定义了一个 `HostPath` 卷 `input`，指向宿主机路径 `/var/lib/aiops-fixture-unavailable-7f394bef/input`。 |
+| **节点状态** | 调度到 `node2`；节点 `Ready=True`，`NetworkUnavailable=False`，节点本身健康且网络正常。 |
+| **RuntimeClass** | YAML 中 **未设置** `r
+[node:done] parallel_evidence / 并发证据采集 (40.3s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.6s)
+[final] run_id=47ea1c9d8b56490e status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v06/workload` | ContainerCreating | Pod workload 处于 ContainerCreating 状态，挂载 HostPath 卷失败 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes | `hostPath type check failed: /var/lib/aiops-fixture-unavailable-7f394bef/input is not a directory` | 揭示挂载失败的直接原因：目标路径缺失或类型不符 |
+| 2 | K8s Event | Kubernetes | `timed out waiting for the condition` (unmounted volumes=[input]) | 证明挂载卷因上述原因导致 Pod 无法继续调度进入运行状态 |
+| 3 | K8s State | Kubernetes | Pod 状态 `Pending`，容器 `app` 等待原因 `ContainerCreating` | 确认异常处于挂载卷处理阶段，容器未启动 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_waiting_reason{reason="ContainerCreating"}` = 1 | 指标层面验证了容器处于因资源/环境未就绪而挂起的状态 |
+| 5 | Metric | Prometheus | `kube_pod_container_status_restarts_total` = 0 | 排除因应用崩溃导致的重启，故障发生在启动前置阶段 |
+
+**证据关联说明：**
+Kubernetes 事件（#1, #2）明确指出了挂载卷失败的根本原因是宿主机路径校验不通过；K8s 状态（#3）证实了该失败导致 Pod 停滞在 Pending 阶段。Metric 数据（#4, #5）从独立维度佐证了这一现象：等待原因指标为 ContainerCreating，且重启计数为 0，排除了其他类型的运行期异常。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+宿主机 node2 路径 /var/lib/aiops-fixture-unavailable-7f394bef/input 不存在非目录对象 → Kubelet 执行 hostPath 卷挂载前 type check 失败 → Pod 卷挂载阶段报错并超时 → Pod 卡在 Pending 状态，应用服务不可用
+```
+
+### 根因结论
+
+已确认的根因为 Pod 定义中 `HostPath` 卷指向的宿主机路径 `/var/lib/aiops-fixture-unavailable-7f394bef/input` 在调度目标节点（node2）上不存在或不是有效的目录，导致 Kubelet 在挂载卷的 `type check` 阶段直接失败（证据 #1, #2）。此失败阻断了容器的初始化流程，表现为 Pod 处于 `Pending` 且容器状态为 `ContainerCreating`（证据 #3, #4）。
+
+关于该路径缺失的具体运维背景（如是否被误删、路径配置错误等）当前无直接证据支持，标记为未确认。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.1m
+├─ 问题定位: 17.7s
+├─ 并发证据采集: 40.3s
+│  └─ g1 aiops-case-v06/workload: 40.3s (Evidence 31.8s, RCA 8.5s)
+└─ 汇总总结: 8.6s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v06/workload**: pod-sandbox-create-failed
+
+[run:end] run_id=47ea1c9d8b56490e status=-

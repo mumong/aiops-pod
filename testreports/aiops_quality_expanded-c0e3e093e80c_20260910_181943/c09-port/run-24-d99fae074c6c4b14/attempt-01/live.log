@@ -1,0 +1,126 @@
+[run] run_id=d99fae074c6c4b14
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 66} NAMESPACE NAME READY STATUS REST
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Running 0 46m 172.16.104.33 node2 <none> <
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[tool:start] kubectl_describe_pod
+[tool:done] kubectl_describe_pod status=error kubectl_describe_pod 输出摘要: raw_chars=129 lines=1 Error: kubectl_describe_pod is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Running 0 46m 172.16.104.33 node2 <none> <
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod OOMKilled（以 Last State Reason 为准） > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Cr
+[tool:start] fetch_runbook
+[node:done] layer / 问题定位 (13.6s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 我已经有 Prometheus、Logging、Tracing 的先验结果，需要补充执行计划中剩余的 kubectl_describe 和 query_pod_topology，以确认 NotReady 的真实状态和探针事件。
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v16 node: node2/10.2.0.50 status: Running 关键诊断行: Warning Unhealthy 112s (x576 over 46m) kubelet Readiness probe failed: G
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 我需要获取更多关于这个 Pod 的详细信息，包括其当前状态、事件、日志等。让我先获取 Pod 的详细描述。
+[tool:start] kubectl_describe
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Warning Unhealthy 112s (x576 over 46m) kubelet Readiness probe failed: Get "http://172.16.104.33:18081/ready": dial tcp 172.16.104.33:18081: connect: c
+[agent:parallel_evidence] 我已经有 kubectl_describe 和 query_pod_topology 的结果，现在需要获取 Pod 日志和 Trace 来确认应用层行为。让我执行后续的证据采集。
+[tool:start] TodoWrite
+[tool:done] TodoWrite status=success TodoWrite 输出摘要: raw_chars=374 lines=9 Investigation plan updated with 5 tasks. # CURRENT INVESTIGATION TASKS **Task Status**: 2 completed, 1 in progress, 2 pending [ ] [4] 获取 Pod Trace 确认服务请求情况 [ ] [5
+[agent:parallel_evidence] 我需要继续获取 Pod 日志和 Trace 信息，以确认 NotReady 的根本原因。让我先获取 Pod 日志。
+[tool:start] kubectl_logs
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 1 signals: 0 关键日志: listening on 18080
+[agent:parallel_evidence] 我需要根据已有事实补证，目前的关键缺口是：探针目标端口 18081 连接被拒，但日志显示应用监听在 18080，需要确认应用是否真的启动以及是否监听了 18080 端口。
+
+**补充采集 1：确认应用进程监听状态**
+[tool:start] kubectl_run_image
+[tool:done] kubectl_run_image status=success {"success": false, "stdout": "", "stderr": "/bin/bash: line 1: ss: command not found\n", "returncode": 127}
+[heartbeat] layer
+[agent:parallel_evidence] 根据已有工具结果，我需要对几个关键疑点做进一步确认：
+
+1. **日志只看到1行 `listening on 18080`** — 但 Readiness probe 请求的是 **18081** 端口。我需要确认应用到底是监听在 18080 还是 18081？日志中是否有更多上下文？
+2. **Readiness probe 失败的端口是 18081**，而日志显示 18080 — 这是明显的端口不匹配吗？
+3. 需要查看 **previous logs** 确认是否有更多启动日志（比如配置错误、切换端口等）。
+4. 需要确认容器名称和端口配置。
+
+让我先获取 more log 信息和容器配置：
+[tool:start] kubectl_previous_logs
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v16 creationTimestamp: 2026-09-14T11:46:38Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 输出摘要: raw_chars=183 lines=3 Command failed (exit 1): kubectl logs workload -n aiops-case-v16 --previous --tail=100 Error from server (BadRequest): previous terminated container "
+[agent:parallel_evidence] 根据已采集的事实，以下是对 `aiops-case-v16/workload` 的 NotReady 原因分析：
+
+### 1. 核心事实
+*   **当前状态**：Pod 处于 **Running** 阶段，但 Ready 状态为 **False**。
+*   **根因事件**：`kubectl describe` 明确显示 **576 次** Readiness Probe 失败，错误为 `dial tcp 172.16.104.33:18081: connect: connection refused`。这表明探针配置的端口（18081）未响应连接。
+*   **应用实际监听端口**：Pod YAML 显示容器启动命令为 Python http.server，输出日志为 `listening on 18080`，且当前应用日志确认为 `listening on 18080`。
+*   **重启历史**：`restarts=0` 且 `kubectl_previous_logs` 提示无 previous 已终止容器，说明该 Pod 自创建以来**从未发生过重启或崩溃**。
+
+##
+[node:done] parallel_evidence / 并发证据采集 (73.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.5s)
+[final] run_id=d99fae074c6c4b14 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v16/workload` | NotReady | Pod workload in aiops-case-v16 is NotReady due to persistent Readiness Probe failures |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | K8s | `Warning Unhealthy 112s (x576 over 46m)` kubelet `Readiness probe failed: Get "http://172.16.104.33:18081/ready": dial tcp 172.16.104.33:18081: connect: connection refused` | 确认 Probe 失败的具体错误信息，指向端口连接被拒绝 |
+| 2 | K8s State | K8s | Pod `aiops-case-v16/workload` 状态 `Running`，Ready 条件 `False` (`ContainersNotReady`)，重启次数 `0` | 确认容器处于运行态，但未就绪且无重启，排除了应用崩溃退出的可能性 |
+| 3 | K8s Config | K8s | Pod IP 配置为 `172.16.104.33` | 提供连接失败的 IP 地址上下文 |
+
+```text
+Readiness Probe 配置与 App 监听端口不一致 → 持续的连接被拒绝 (Connection refused) → 容器被标记为未就绪 → Pod 持续处于 NotReady 状态
+```
+
+**证据印证说明：**
+K8s Event 中记录的 `connection refused` (事实 #1) 直接解释了 K8s State 中容器未就绪的原因 (事实 #2)。在重启次数为 0 且容器状态为 Running 的前提下，连接被拒绝而非超时或应用层错误，强力支持了网络端口层面的配置不匹配（而非应用逻辑或网络策略阻塞）。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Readiness Probe 目标端口 (18081) 与 App 实际监听端口 (18080) 不一致 → 连接被目标主机拒绝 → 容器健康检查失败 → Pod 状态保持 NotReady
+```
+
+### 根因结论
+
+已确认根因为 **Readiness Probe 配置不匹配**：探针向端口 `18081` 发起探测，而应用程序实际在端口 `18080` 上运行。证据 `fact-d223dd7d9ff8` (kubelet 报错 `connection refused` at `18081`) 直接证实了探测端口的失败原因。由于应用进程在运行且未发生崩溃（重启次数为 0），该现象并非由资源耗尽或应用逻辑错误导致，确认为探针配置错误。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.6m
+├─ 问题定位: 13.6s
+├─ 并发证据采集: 73.6s
+│  └─ g1 aiops-case-v16/workload: 73.6s (Evidence 65.2s, RCA 8.3s)
+└─ 汇总总结: 8.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v16/workload**: pod-notready-probe-failed, pod-crashloop-runtime, pod-oomkilled
+
+[run:end] run_id=d99fae074c6c4b14 status=-

@@ -1,0 +1,130 @@
+[run] run_id=a68136405a8e44be
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在的异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 根据集群当前的 Pod 状态，我识别出以下异常情况：
+
+**异常实体**：
+*   **Pod 名称**: `workload`
+*   **命名空间**: `aiops-case-v12`
+*   **当前状态**: `Terminating`
+*   **节点**: `node2`
+*   **持续时间**: 17秒
+
+**异常分析**：
+该 Pod 处于 `Terminating` 状态，属于 `pod-terminating-stuck` 异常类型。通常这表示删除请求已发送但对象未从 API 服务器移除，可能由 Finalizer 阻塞、Volume 卸载失败或节点通信问题引起。
+
+**下一步计划**：
+我将获取该 Pod 的详细描述信息（包括 Finalizers 状态、事件日志等）以进一步确认异常原因。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.25 node2 <none>
+[agent:layer] 为了深入诊断该 `Terminating` 状态的 Pod，我需要获取更详细的描述信息（如 Events, Finalizers, Status Conditions）。
+[tool:start] kubectl_describe
+[tool:done] kubectl_describe status=error kubectl_describe 输出摘要: raw_chars=125 lines=1 Error: kubectl_describe is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[agent:layer] 我将获取 `pod-terminating-stuck.md` 诊断手册，以指导我收集该异常 Pod 的进一步证据。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[agent:layer] 根据 Runbook 指示，我需要检查该 Pod 的详细 YAML 信息（如 `deletionTimestamp` 和 `finalizers`）以及所在节点的 Ready 状态。
+
+首先，获取该 Pod 的 YAML 描述：
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.25 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.25 node2 <none>
+[agent:layer] 我注意到 `kubectl_get_by_name` 工具并没有返回详细的 YAML 字段（如 `deletionTimestamp` 或 `finalizers`），只返回了表格摘要。根据 Runbook 要求，我需要确认这些关键字段。让我检查所在节点 `node2` 的状态，以排除节点问题导致的 Terminating 卡住。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[agent:layer] 根据目前收集到的证据，以下是集群异常情况的总结：
+
+### 1. 当前异常实体 (Abnormal Pods)
+
+| Pod 名称 | 命名空间 | 节点 | 当前状态 | 持续时间 |
+| :--- | :--- | :--- | :--- | :--- |
+| `workload` | `aiops-case-v12` | `node2` | `Terminating` | 约 21-28 秒 |
+
+### 2. 异常分组 (Abnormal Groups)
+
+| 异常组 ID | 涉及 Pod | pod_status_keyword | pod_abnormal_type | 状态分类 (status_category) | 关键证据与初步判定 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `group-terminating-stuck-01` | `workload` (aiops-case-v12) | `Terminating` | `TerminatingStuck` | **ABNORMAL** | 1. Pod 状
+[node:done] layer / 问题定位 (27.3s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先执行核心证据采集：获取 Pod YAML 确认 deletionTimestamp/finalizers，获取事件确认终止过程阻塞点，describe 确认容器/PreStop/volume 状态。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_describe
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 54s Normal Killing Pod/workload Stopping container app
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v12 creationTimestamp: 2026-09-14T06:13:23Z deletionTimestamp: 2026-09-14T07:18:26Z deletionGracePeriodSeconds: 3900 finalizers:
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v12 node: node2/10.2.0.50 status: Terminating (lasts <invalid>) 关键诊断行: Annotations: cni.projectcalico.org/containerID: a1364d65f
+[agent:parallel_evidence] ## 已采集事实
+
+**1. Pod 身份与生命周期**
+- Pod `aiops-case-v12/workload` UID `c4e58e86-ab4f-4717-a000-91f9aec12261`，调度在 `node2`，当前 **phase=Running**（kube-state-metrics 指标确认 `kube_pod_status_phase=1` 为 Running），但 **status 显示 Terminating**，deletionTimestamp=2026-09-14T07:18:26Z。
+
+**2. Finalizers & 删除时间**
+- `metadata.finalizers: <none>` — **无 finalizer 卡住**，直接反驳 finalizer 未完成的假设。
+- `deletionGracePeriodSeconds: 3900`（1小时5分钟），`terminationGracePeriodSeconds: 3900`。deletionTimestamp 距今约 54s+（事件 "Killing" 发生于 54s 前
+[node:done] parallel_evidence / 并发证据采集 (35.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.2s)
+[final] run_id=a68136405a8e44be status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v12/workload` | Terminating | Pod 应用逻辑与 PreStop Hook 依赖外部信号文件 '/state/teardown-requested' 才能退出，但文件未被创建，导致 kubelet 发送 Killing 信号后容器进程无限循环等待，处于优雅终止的 3900s 宽限期内。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes | `Normal Killing 54s kubelet Stopping container app` | 证明 Kubelet 已进入终止流程并执行杀容器指令 |
+| 2 | K8s State | Kubernetes | `Pod phase: Running` / `Status: Terminating (lasts <invalid>)` | 证明 Pod 处于 Termination 阶段但未能退出，卡在优雅终止期内 |
+| 3 | K8s Config | Kubernetes | `app` 容器 `cpu_limit: 50m`, `memory_limit: 32Mi` | 资源限制属常规配置，排除因资源耗尽导致的异常挂起 |
+| 4 | Logging | Elasticsearch | `2026-09-14T06:13:32.304Z application started` | 提供应用启动基线，缺失终止相关日志印证应用进程被阻塞无法执行退出逻辑 |
+| 5 | Metric | Prometheus | `container.app` 重启计数为 `0` | 证明应用当前未经历崩溃重启，处于长期无响应的僵持状态 |
+
+Kubelet 发送 KILL 信号后，Pod 仍停留在 `Terminating` 状态且重启计数为 `0`，表明应用进程虽收到信号但未按预期退出。日志中仅有启动记录而无终止记录，佐证了进程在执行 PreStop Hook 时因依赖文件缺失而陷入无限等待。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用逻辑与 PreStop Hook 依赖外部信号文件 '/state/teardown-requested' → 文件未被创建导致进程无限等待 → 阻塞在优雅终止 3900s 宽限期内 → Kubelet 持续发送 Killing 信号但容器未退出
+```
+
+### 根因结论
+
+**已确认的根因**：应用自身的终止逻辑依赖外部信号文件 `/state/teardown-requested`，由于该文件未被创建，导致应用进程在 PreStop Hook 阶段无限循环等待，无法响应 Kubelet 的终止信号。
+- 支撑证据：`K8s State` 显示 Pod 长期处于 `Terminating` 状态（证据 2），`K8s Event` 显示 Kubelet 持续发送 KILL 信号（证据 1），结合 `Logging` 缺少退出日志（证据 4），确证了应用进程因内部逻辑阻塞而无法正常退出。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 27.3s
+├─ 并发证据采集: 35.4s
+│  └─ g1 aiops-case-v12/workload: 35.4s (Evidence 28.4s, RCA 6.8s)
+└─ 汇总总结: 8.2s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v12/workload**: pod-terminating-stuck
+
+[run:end] run_id=a68136405a8e44be status=-

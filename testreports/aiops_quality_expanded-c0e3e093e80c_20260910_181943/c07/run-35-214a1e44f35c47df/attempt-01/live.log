@@ -1,0 +1,120 @@
+[run] run_id=214a1e44f35c47df
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前存在的异常。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-dff5cbc6b-sjvxl 0/1 CrashLoopBackOff 16
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-dff5cbc6b-sjvxl 0/1 CrashLoopBackOff 16
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=4 abnormal=4 recent_restarts=0 status_counts={} NAMESPACE LAST SEEN TYPE REASON OBJECT SUBOBJECT SOURCE
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-dff5cbc6b-sjvxl 0/1 CrashLoopBackOff 16
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod OOMKilled（以 Last State Reason 为准） > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Cr
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-dff5cbc6b-sjvxl 0/1 CrashLoopBackOff 16
+[tool:start] fetch_runbook
+[heartbeat] layer
+[node:done] layer / 问题定位 (24.0s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":18,"normalized":18,"retrieved":18,"returned":18},"coverage":"present","dimension":"logging","directness":"direct","entity":{"
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 我将开始对 `aiops-case-07/workload-dff5cbc6b-sjvxl` 进行全面的 CrashLoopBackOff 诊断。首先获取 Pod 的基本信息和描述。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 2m18s (x264 over 62m) Warning BackOff Pod/workload-dff5cbc6b-sjvxl Back-off restarting failed container app in pod workload-dff5cbc6b-sjvxl_aiops-case-07(5c278abe-982
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-dff5cbc6b-sjvxl 0/1 CrashLoopBackOff 16
+[heartbeat] layer
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-dff5cbc6b-sjvxl namespace: aiops-case-07 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 2m18s (x264 over 62m)
+[agent:parallel_evidence] 已采集到 Pod 状态为 CrashLoopBackOff、kubelet 事件显示 Back-off restarting failed container app。需进一步获取容器启动失败原因及日志/Tracing 证据以判断直接原因。
+[tool:start] kubectl_logs
+[tool:start] kubectl_container_logs
+[tool:start] kubectl_previous_logs
+[tool:start] kubernetes_tabular_query
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 3 signals: 3 关键日志: {"timestamp":1789075749.7594993,"event":"http_request","level":"error","message":"CONFIG_MISSING","http_status":500,"path":"/work","duration_ms":0.004551,"
+[tool:done] kubectl_container_logs status=success kubectl_container_logs 日志摘要: lines: 3 signals: 3 关键日志: {"timestamp":1789075749.7594993,"event":"http_request","level":"error","message":"CONFIG_MISSING","http_status":500,"path":"/work","duration_ms":
+[tool:done] kubernetes_tabular_query status=success kubernetes_tabular_query 输出摘要: raw_chars=341 lines=3 Command failed (exit 1): kubectl get pods --all-namespaces -o custom-columns='metadata.name,status.phase,status.containerStatuses[*].lastState.term
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 3 signals: 3 关键日志: {"timestamp":1789075749.7594993,"event":"http_request","level":"error","message":"CONFIG_MISSING","http_status":500,"path":"/work","duration_ms":0
+[agent:parallel_evidence] 根据已有工具结果，针对 `aiops-case-07/workload-dff5cbc6b-sjvxl` 的调查事实和缺口如下：
+
+### 1. 已确认事实
+*   **身份与状态**：Pod `workload-dff5cbc6b-sjvxl` 运行在 `node2` 上，当前状态为 `CrashLoopBackOff`。容器重启了 16 次，最近一次重启在 3 分 20 秒前。
+*   **异常事件**：kubelet 记录了 `BackOff restarting failed container app`，表明主进程在退出后反复尝试启动并最终进入退避等待。
+*   **崩溃原因（根因证据）**：多次获取的日志（当前日志 `kubectl_logs`、指定容器日志 `kubectl_container_logs` 以及崩溃前的上次运行日志 `kubectl_previous_logs`）均返回了 3 行相同的关键记录：
+    *   日志级别为 `error`，事件为 `http_request`。
+    *   核心错误信息为 `CONFIG_MISSING`。
+    *
+[node:done] parallel_evidence / 并发证据采集 (50.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (14.1s)
+[final] run_id=214a1e44f35c47df status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-07/workload-dff5cbc6b-sjvxl` | CrashLoopBackOff | CrashLoopBackOff |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | Container `app` state: `CrashLoopBackOff`, restart count: `16`, last exit code: `78` (Fact IDs: fact-8b8b219e969c, fact-6f2e78ce4572, fact-f52e677296de) | 确认 Pod 处于重启循环，终止原因被标记为 Error |
+| 2 | K8s Event | Kubernetes | Warning `BackOff` 2m18s (x264 over 62m) for pod `workload-dff5cbc6b-sjvxl` (Fact ID: fact-bd1d8f2facf0) | 确认 Kubernetes 控制平面正在执行指数退避以抑制快速重启 |
+| 3 | Metric | Prometheus | `kube_pod_container_status_waiting_reason` value `1` (reason: `CrashLoopBackOff`) and `kube_pod_container_status_restarts_total` value `16` (Fact IDs: fact-2f137edd9273, fact-535292905775) | 独立数据源确认 Pod 等待状态及重启次数与 K8s 状态一致 |
+| 4 | Logging | Elasticsearch | Pattern `CONFIG_MISSING` (HTTP 500 on path `/work`, trace_ids: e.g., `2e59e3c2fc52501a861c255a760760c5`), occurring 8 times between 21:02:53Z and 21:23:51Z (Fact ID: fact-0dc98f941e4c) | 提供应用进程崩溃时的具体错误上下文 |
+| 5 | Tracing | Tempo/Deepflow | L7 Flow `GET /work` -> `500` with trace_ids matching logging (e.g., `2e59e3c2fc52501a861c255a760760c5`), span `aiops.observed_mode: config_missing_exit` (Fact IDs: fact-1475da77a435, fact-239265a728e1) | 跨维度关联日志 Trace ID，证明应用接收到请求后主动退出（Exit Code 78 对应 SIGUSR1/Terminated） |
+
+**证据印证说明：**
+1. K8s 状态（Fact 1, 2）证实了 Pod 反复崩溃且被系统退避；Metric（Fact 3）独立验证了该状态与重启计数。
+2. 日志（Fact 4）与 Tracing（Fact 5）通过完全一致的 `trace_id` 形成闭环，证明应用内部抛出 `CONFIG_MISSING` 错误并返回 HTTP 500。
+3. 应用错误码 500 及退出模式 `config_missing_exit` 解释了 K8s 观察到的 `Error` 终止原因与 Exit Code `78`。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用请求处理逻辑遇到 CONFIG_MISSING → 应用返回 HTTP 500 并抛出 CONFIG_MISSING → 主进程以 Exit Code 78 (SIGUSR1) 终止 → K8s 检测 Error 状态并触发 CrashLoopBackOff
+```
+
+### 根因结论
+
+已确认的根因：应用代码在请求处理期间由于配置缺失（`CONFIG_MISSING`）发生错误，主动返回 HTTP 500 并终止进程。
+
+*   证据 4、5 明确记录了请求 `GET /work` 返回 500 并包含 `CONFIG_MISSING` 错误模式。
+*   证据 1、2、3 显示该错误导致了应用进程以 `Error` 状态退出（Exit Code 78），进而引发 K8s 的 CrashLoopBackOff 机制。
+*   应用日志中记录的 `aiops.observed_mode: config_missing_exit` 直接印证了这是由特定配置缺失导致的预期内崩溃行为。
+
+缺失的决定性事实：具体缺失的配置键或文件名称，以及配置未能注入 Pod 的原因。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.5m
+├─ 问题定位: 24.0s
+├─ 并发证据采集: 50.7s
+│  └─ g1 aiops-case-07/workload-dff5cbc6b-sjvxl: 50.7s (Evidence 41.1s, RCA 9.5s)
+└─ 汇总总结: 14.1s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-07/workload-dff5cbc6b-sjvxl**: pod-crashloop-runtime, pod-oomkilled
+
+[run:end] run_id=214a1e44f35c47df status=-

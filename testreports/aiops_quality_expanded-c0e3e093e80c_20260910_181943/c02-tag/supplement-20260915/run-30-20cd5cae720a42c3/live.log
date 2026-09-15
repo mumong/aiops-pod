@@ -1,0 +1,112 @@
+[run] run_id=20cd5cae720a42c3
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前的异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'ImagePullBackOff': 1} NAMESPACE NAME
+[agent:layer] 根据集群 Pod 状态分析，当前存在一个异常实体：
+
+**异常摘要：**
+*   **异常 Pod**: `aiops-case-v07/workload`
+*   **状态**: `ImagePullBackOff`
+*   **归类**: 镜像拉取失败 (ImagePullFailed)
+
+该 Pod 处于 `ImagePullBackOff` 状态，通常表示容器运行时无法从镜像仓库拉取镜像。这可能是由于镜像名称/Tag 错误、仓库认证失败、网络问题或镜像仓库限流导致的。
+
+接下来我将获取 `ImagePullBackOff` 相关的诊断手册，以便进一步验证具体原因。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[agent:layer] 根据集群状态分析，当前存在一个异常实体，已定位异常组并获取相关 Runbook，准备进行根因排查。
+
+### 1. 异常定位 (LayerOutput)
+
+*   **Layer**: 2 (Pod)
+*   **Confidence**: High
+*   **Reasoning**: 集群中 65 个 Pod 正常，但 `aiops-case-v07` 命名空间下的 `workload` Pod 处于 `ImagePullBackOff` 状态，无法启动容器。根据 Runbook `pod-imagepull-failed.md`，下一步需检查该 Pod 的事件（Events）以确定具体的拉取失败原因（如镜像不存在、认证失败或网络超时）。
+
+### 2. 关键信息
+
+| 字段 | 值 |
+| :--- | :--- |
+| **abnormal_pods** | `aiops-case-v07/workload` |
+| **pod_status_keyword** | `ImagePullBackOff` |
+| **pod_abnormal_type** | `ImagePul
+[node:done] layer / 问题定位 (24.2s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 我将执行既有的 evidence_plan，先运行 `kubectl_describe` 确认 Pod 状态和事件，然后结合已有的 Metrics 结果进行判断。
+[tool:start] kubectl_describe
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v07 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning Failed 34m (x4 over 36m) kubelet Failed to pull image "regi
+[agent:parallel_evidence] ## 已采集事实、冲突与缺口
+
+### 事实
+1. **Pod 当前状态**: `aiops-case-v07/workload` 仍然处于 **Pending**，容器 `app` 处于 **Waiting**，**Reason: ImagePullBackOff**。生命周期未变化 (`lifecycle_changed=false`)。
+2. **Metrics 验证**: `kube_pod_container_status_waiting_reason{reason="ImagePullBackOff"}` = 1，`kube_pod_container_status_restarts_total` = 0，`kube_pod_status_phase=Pending` = 1。与 describe 结果一致。
+3. **Kubernetes Events (关键)**: 34 分钟前 kubelet 报错原文为：
+   > `Failed to pull image "registry.cn-hangzhou.aliyuncs.com/google_containers/p
+[node:done] parallel_evidence / 并发证据采集 (39.9s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.2s)
+[final] run_id=20cd5cae720a42c3 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v07/workload` | ImagePullBackOff | 镜像引用配置错误：容器映像 `registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908` 在仓库中不存在（返回 NotFound/manifest unknown），导致 kubelet 无法拉取 pause 辅助容器，Pod 持续处于 ImagePullBackOff 状态。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubernetes | `rpc error: code = NotFound desc = failed to pull ... pause:aiops-fixture-unavailable-20260908 ... not found` | 直接证明镜像注册表返回 404，确认为镜像引用配置错误 |
+| 2 | K8s Event | kubernetes | `Normal BackOff pulling image "registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908"` | 展示 kubelet 持续拉取失败并进入退避循环的状态 |
+| 3 | K8s State | kubernetes | `pod.status: Pending` | 描述 Pod 的当前生命周期状态 |
+| 4 | Metric | prometheus | `kube_pod_container_status_waiting_reason=1` (labels: `reason="ImagePullBackOff"`) | 独立确认等待原因为镜像拉取失败 |
+| 5 | Metric | prometheus | `kube_pod_container_status_restarts_total=0` (labels: `container="app"`) | 排除应用逻辑导致容器重启的可能性 |
+
+**证据分析：**
+- **K8s Event** 提供了最直接的证据：注册表明确返回 `code = NotFound`，结合 `BackOff` 事件表明这是一个持续存在的配置错误而非临时网络抖动。
+- **Metric** 中的 `ImagePullBackOff` 状态与 **K8s Event** 中的 `BackOff` 现象完全印证。
+- **Metric** 显示重启次数为 0，排除了应用侧异常崩溃，确认问题发生在启动前的镜像拉取阶段。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+镜像 Tag 错误/不存在 (registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908) → Registry 返回 NotFound 错误 → Kubelet 持续重试拉取并触发指数退避 (Back-off pulling image) → Pod 状态 Pending，容器 Waiting (ImagePullBackOff)
+```
+
+### 根因结论
+
+**已确认的根因：镜像引用配置错误。**
+
+容器映像 `registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908` 在仓库中不存在（返回 NotFound/manifest unknown）。这导致 kubelet 无法拉取 pause 辅助容器，引发容器持续处于 `ImagePullBackOff` 状态 [1, 2]。**Metric** 数据确认了 `ImagePullBackOff` 的等待原因且重启计数为 0，进一步排除了其他启动故障 [4, 5]。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 24.2s
+├─ 并发证据采集: 39.9s
+│  └─ g1 aiops-case-v07/workload: 39.9s (Evidence 31.2s, RCA 8.6s)
+└─ 汇总总结: 9.2s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v07/workload**: pod-imagepull-failed
+
+[run:end] run_id=20cd5cae720a42c3 status=-

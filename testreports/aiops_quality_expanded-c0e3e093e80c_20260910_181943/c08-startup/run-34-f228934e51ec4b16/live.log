@@ -1,0 +1,116 @@
+[run] run_id=f228934e51ec4b16
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 22 (103s ago) 89m 172.16.104.34
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] ### 1. 异常 Pod 定位
+当前集群中有 1 个 Pod 处于异常状态：
+- **Pod**: `workload`
+- **Namespace**: `aiops-case-v15`
+- **节点**: `node2`
+
+### 2. 状态与归一化类型
+该 Pod 当前状态如下：
+- **Pod Status**: `CrashLoopBackOff`
+- **Ready**: `0/1`
+- **Pod Status Keyword**: `CrashLoopBackOff`
+- **Pod Abnormal Type**: `CrashLoopBackOffRuntime`
+
+### 3. 异常组划分
+- **abnormal_group_1**: 
+  - **包含 Pod**: `aiops-case-v15/workload`
+  - **核心症状**: Pod 持续重启，状态显示为 `CrashLoopBackOff`，表明容器进程启动后反复崩溃或被探针杀死。
+
+### 4. 诊断指引
+根据 `pod-crashloop-runtime.md` 运行手册，建议进行以
+[node:done] layer / 问题定位 (17.9s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"retrieved":6,"returned":6},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 执行首批证据采集：Pod 描述、YAML、Previous Logs、Events、PromQL 基线、Logging 首轮、Tracing 首轮、Topology 首轮。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_logs
+[tool:start] kubectl_events
+[tool:start] query_pod_topology
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v15 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 1 signals: 0 关键日志: startup allocation 256Mi
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 13s (x418 over 90m) Warning BackOff Pod/workload Back-off restarting failed container app in pod workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v15 creationTimestamp: 2026-09-14T09:26:33Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] ## 已采集证据
+
+**Pod 生命周期与状态**
+- `kubectl_describe` 确认：Pod `aiops-case-v15/workload` 处于 `CrashLoopBackOff`，容器 `app` 当前 Waiting，**Last State Reason=OOMKilled**，**Exit Code=137**，重启次数 **22** 次。
+- Prometheus 基线（`execute_pod_promql`）印证：`kube_pod_container_status_waiting_reason=CrashLoopBackOff`、`kube_pod_container_status_last_terminated_reason=OOMKilled`、`kube_pod_container_status_restarts_total=22`。
+
+**资源配置与启动命令**
+- YAML/Describe 显示：容器镜像为 `python:3-alpine`，Command 为 `python3 -u -c "import time; print('s
+[node:done] parallel_evidence / 并发证据采集 (44.5s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.4s)
+[final] run_id=f228934e51ec4b16 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v15/workload` | CrashLoopBackOff | 容器启动命令申请的内存 (256Mi) 超过 Kubernetes 配置的 memory limit (64Mi)，导致 cgroup OOM Killer 强制终止进程 (Exit 137/OOMKilled)。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Config | `container.resource_limit.memory` | 64Mi | 确认容器内存硬限制 |
+| 2 | Logging | `startup allocation` | 256Mi | 确认启动指令实际申请内存 |
+| 3 | K8s State | `container.last_terminated_reason` | OOMKilled | 直接触发机制确认 |
+| 4 | K8s State | `container.last_exit_code` | 137 | 确认进程被内核强制终止 |
+| 5 | K8s State | `container.waiting_reason` | CrashLoopBackOff | 确认最终异常表现 |
+| 6 | K8s Event | `kubelet BackOff` | Back-off restarting failed container app in pod workload_aiops-case-v15 (da351bf0-c4ab-47a0-b24d-7c7a75950753) | 描述系统级重启行为 |
+| 7 | Metric | `kube_pod_container_status_last_terminated_reason` | 1 (reason: OOMKilled) | 从监控层侧面验证终止原因 |
+
+**证据说明：**
+日志与配置对比（事实 #1、#2）明确显示 64Mi 的内存上限无法满足 256Mi 的启动需求，这是触发故障的根本矛盾。K8s 状态事件（事实 #3、#4）与监控数据（事实 #7）共同印证了内核 OOM Killer 介入并发送 SIGKILL 导致容器终止。最终表现为 Kubernetes 控制器触发的指数退避重启循环（事实 #5、#6）。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+资源定义限制 (memory limit: 64Mi) 与 启动命令需求 (256Mi) 不匹配 → 进程启动分配 256Mi 内存触发 cgroup 硬限制 → 内核 OOM Killer 发送 SIGKILL 终止容器进程 (Exit Code: 137) → Pod 持续重启陷入 CrashLoopBackOff 状态
+```
+
+### 根因结论
+
+**已确认的根因：容器资源限制（64Mi）不足，导致内存溢出被终止（OOMKilled）。**
+
+Kubernetes 配置的 `memory limit` 为 `64Mi`（事实 #1），而日志明确记录启动命令申请内存高达 `256Mi`（事实 #2）。这导致容器启动瞬间触及 cgroup 内存硬限制，触发内核 OOM Killer 强制终止进程，返回 Exit Code 137（事实 #4）。Pod 状态随之进入 `CrashLoopBackOff`（事实 #5、#6），且 Metric 确认最近一次终止原因为 `OOMKilled`（事实 #7）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 17.9s
+├─ 并发证据采集: 44.5s
+│  └─ g1 aiops-case-v15/workload: 44.5s (Evidence 38.0s, RCA 6.3s)
+└─ 汇总总结: 9.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v15/workload**: pod-crashloop-runtime
+
+[run:end] run_id=f228934e51ec4b16 status=-

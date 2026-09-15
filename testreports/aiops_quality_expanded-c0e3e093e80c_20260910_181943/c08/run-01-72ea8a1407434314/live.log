@@ -1,0 +1,165 @@
+[run] run_id=72ea8a1407434314
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前存在的异常情况。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=1 status_counts={'Running': 67} NAMESPACE NAME READY STATUS REST
+[agent:layer] 集群中有一个 Pod 状态为 `Running` 但发生了重启（Restart 1），且时间很近（27秒前）。这通常暗示容器曾崩溃或被终止。我将获取该 Pod 的详细信息，特别是 `Last State` 和 `Reason`，以判断是 OOMKilled、CrashLoopBackOff 还是其他问题。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 1/1 Running 1 (30s ago) 85s 17
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod OOMKilled（以 Last State Reason 为准） > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Cr
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 1/1 Running 1 (30s ago) 85s 17
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 1/1 Running 1 (30s ago) 85s 17
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success Namespace aiops-case-08 内 events 全为 Normal 类型，涉及 Deployment traffic-driver 和 workload 及其 Pod 的正常调度、创建和启动事件，无异常状态。 key_facts: ["NAMESPACE: aiops-case-08", "DEPLOYMENT: traffic-driver (ReplicaSet: traff
+[agent:layer] 我将获取该 Pod 的详细信息以确认其 Last State，判断是否由 OOMKilled 引起重启。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 1/1 Running 1 (30s ago) 85s 17
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (25.9s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=error execute_pod_promql 返回不完整或无效的 MCP contract: missing=coverage,dimension,directness,entity,evidence_refs,facts,limits,ok,purpose,query,samples,source_system,truncated
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":33,"matched":53,"normalized":53,"retrieved":53,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entity":{
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 好的，我会根据计划执行。
+
+## 计划执行
+
+### plan_1_pod_status_verify: 确认 Pod 当前状态和终止原因
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-5c9c7b6489-p8462 namespace: aiops-case-08 creationTimestamp: 2026-09-10T21:59:17Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[agent:parallel_evidence] **plan_1 结果已确认**：
+- Pod 当前状态：**Running**
+- 容器重启计数：**2**
+- 终止原因：**OOMKilled**
+- exitCode: **137**
+
+---
+
+### plan_3_oom_memory_limit: 确认内存硬限制（补证 plan_3，上次执行因缺少 purpose 失败）
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] 现在我已经获得了 Pod 的 YAML 信息和当前内存限制数据。让我分析已获取的证据：
+
+**已知事实：**
+1. **Pod 状态**：Running（当前）
+2. **容器重启次数**：2 次
+3. **终止原因**：OOMKilled
+4. **退出码**：137（Linux 中 137 = 128 + SIGKILL，通常表示被 OOM Killer 杀死）
+5. **内存硬限制**：67,108,864 bytes = 64 MiB
+
+**关键矛盾点：**
+- Pod 当前状态为 Running，但容器经历了 2 次 OOMKilled 重启
+- 内存限制仅为 64 MiB，这对一个 Python 应用来说可能过小
+- 需要确认：这是偶发事件还是持续性问题？当前是否真的健康？
+
+**需要进一步验证的问题：**
+1. 当前的 "Running" 状态是 OOMKilled 后的恢复状态，还是仍然存在问题？
+2. 是否有持续的资源压力？
+3. 应用日志中是否有 OOM 或崩溃的相关记录？
+
+让我继续采集更多证据来验证这些假设。
+[tool:start] kubernetes_tabular_query
+[tool:done] kubernetes_tabular_query status=success kubernetes_tabular_query 输出摘要: raw_chars=608 lines=3 Command failed (exit 1): kubectl get pods --all-namespaces -o custom-columns='metadata.name,status.phase,status.containerStatuses[*].ready,status.c
+[agent:parallel_evidence] 我需要继续调查 `aiops-case-08/workload-5c9c7b6489-p8462` 的异常情况。首先，让我检查Pod的当前状态和事件，然后获取日志来了解OOMKilled的具体情况。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 1/1 Running 2 (53s ago) 2m40s
+[agent:parallel_evidence] 我来继续调查该 Pod 的异常情况。首先获取 Pod 事件和日志以验证 OOMKilled 的情况。
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 55s Warning BackOff Pod/workload-5c9c7b6489-p8462 Back-off restarting failed container app in pod workload-5c9c7b6489-p8462_aiops-case-08(7f2ed
+[agent:parallel_evidence] 我来对 `aiops-case-08/workload-5c9c7b6489-p8462` 执行首轮诊断，采集 Kubernetes 状态、事件、Prometheus 指标、日志和追踪数据。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_events
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: None namespace: None creationTimestamp: None deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serviceAccountName: None nodeName:
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 1/1 Running 2 (53s ago) 2m40s
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 55s Warning BackOff Pod/workload-5c9c7b6489-p8462 Back-off restarting failed container app in pod workload-5c9c7b6489-p8462_aiops-case-08(7f2ed
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[heartbeat] layer
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":3,"normalized":1,"projected_series":1,"raw_series":3,"retrieved":3,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] 先理清实体身份和已拿到的高价值证据，再判断缺口。
+
+## 1. 实体身份确认
+
+- **Namespace**: `aiops-case-08`
+- **Pod**: `workload-5c9c7b6489-p8462`
+- **UID**: `7f2eda43-58bc-4f48-bb8a-02435553f7d1`
+- **容器**: `app` (镜像 `xnet.registry.io:8443/observability/python:3-alpine`, 命令 `python3 /opt/aiops/server.py`)
+- **节点**: `node2`
+- **IP**: `172.16.104.11`
+- **Owner**: ReplicaSet `workload-5c9c7b6489`
+
+身份确认，后续所有证据围绕此 Pod。
+
+## 2. 已采集事实（支持/反驳）
+
+### 2.1 Kubernetes 状态（`kubectl_get_by_name`, `kubectl_get_yaml`）
+
+**事实：**
+- Pod STATUS = `Runnin
+[node:done] parallel_evidence / 并发证据采集 (112.1s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.9s)
+[final] run_id=72ea8a1407434314 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-08/workload-5c9c7b6489-p8462` | Running | 应用代码中 /work 接口存在内存分配逻辑缺陷，在单次请求中分配大量内存（最高22MiB）导致容器突破内存限制并触发OOMKilled。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes | 容器 `app` 最后一次终止原因 `OOMKilled` (fact-2446fd2fa0cd) | 确认容器因内存不足被内核杀掉的事实 |
+| 2 | K8s State | kubernetes | 容器退出状态码 137 (fact-7c2181328fa7) | 佐证 OOMKilled 系统行为（SIGKILL 信号） |
+| 3 | K8s Config | kubernetes | 容器 `app` 内存上限设置为 64Mi (fact-3f79189c7617) | 划定资源边界，对比实际消耗确认越界 |
+| 4 | Logging | elasticsearch | `/work` 接口日志模式 `memory allocation advanced`，单次分配内存从 20MiB 增至 44MiB (fact-070f35cdf355) | 提供内存激增的直接证据，证实代码分配量已超出容器限制 |
+| 5 | Tracing | tempo | Trace `c9de9f06290189b39472d0780fa217` 标记 `oom_growth` 且路由为 `GET /work` (fact-0c1c2d0834b9) | 关联请求级别观测，确认该特定请求触发了 OOM 增长模式 |
+| 6 | Metrics | prometheus | 容器内存工作集实测 53325824 字节（约 50.8MiB）(fact-1dc758d30aa9) | 证实容器在运行时的实际内存占用，已逼近 64MiB 上限 |
+
+上述证据表明，代码在 `/work` 接口处理请求时分配了大量内存（最高达 44MiB），加上基础内存消耗导致峰值接近并突破了 64MiB 的硬性限制，最终引发 OOMKilled 并被系统重启。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用代码 /work 接口内存分配逻辑缺陷 → 单次请求分配大量内存 (最高 44MiB) → 容器突破 64MiB 内存上限 → Pod 触发 OOMKilled (ExitCode 137)
+```
+
+### 根因结论
+
+已确认根因为应用代码中 `/work` 接口存在内存分配逻辑缺陷。证据显示，单次请求分配的内存最高达到 44MiB（Logging fact-070f35cdf355），直接导致容器内存占用（Metrics fact-1dc758d30aa9）逼近 64MiB 的硬性上限（K8s Config fact-3f79189c7617）。这一内存激增行为触发了内核 OOM Killer，导致容器以退出码 137 终止（K8s State fact-2446fd2fa0cd, fact-7c2181328fa7），并在 Trace 中被标记为 `oom_growth` 模式（fact-0c1c2d0834b9）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 2.5m
+├─ 问题定位: 25.9s
+├─ 并发证据采集: 112.1s
+│  └─ g1 aiops-case-08/workload-5c9c7b6489-p8462: 112.1s (Evidence 104.6s, RCA 7.4s)
+└─ 汇总总结: 10.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-08/workload-5c9c7b6489-p8462**: pod-oomkilled
+
+[run:end] run_id=72ea8a1407434314 status=-

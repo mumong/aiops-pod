@@ -1,0 +1,125 @@
+[run] run_id=2f42174d1cd4484b
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在的异常情况。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[agent:layer] 集群中发现一个异常 Pod：`workload-68c557d875-gtzc8`，处于 **Pending** 状态。
+
+我将获取该 Pod 的详细信息及标签，以便确定其归属的异常类型并匹配对应的诊断手册。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-68c557d875-gtzc8 0/1 Pending 0 81m <none> <none
+[agent:layer] Pod `workload-68c557d875-gtzc8` 处于 **Pending** 状态，且没有分配到节点（NODE 为 `<none>`）。根据 Runbook 定义，这属于 **PendingUnschedulable** 类型。
+
+我将获取 `pod-pending-unschedulable.md` 手册以进一步指导诊断步骤。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[agent:layer] ### 异常定位结果
+
+**异常摘要：**
+集群中 **1** 个 Pod 处于异常状态：
+- **异常实体**：`workload-68c557d875-gtzc8` (Namespace: `aiops-case-01`)
+- **当前状态**：`Pending`
+- **异常类型**：`PendingUnschedulable` (调度失败)
+
+**详细分析：**
+该 Pod 处于 `Pending` 状态且未分配到任何节点（`NODE: <none>`），符合 `PendingUnschedulable` 类型的特征。这通常由以下原因之一引起：
+1.  **资源不足**：集群中所有节点的 CPU 或内存不足以容纳该 Pod 的 `requests`。
+2.  **调度约束不匹配**：Pod 的 `nodeSelector`、`affinity` 或 `tolerations` 与现有节点不匹配。
+3.  **节点状态异常**：所有可用节点都处于 `NotReady`、`SchedulingDisabled` (Cordoned) 或存在其他无法调度的条件。
+
+**下一步诊断建议
+[node:done] layer / 问题定位 (17.2s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 我将执行既定的证据计划，首先并行获取 Kubernetes 层面的关键事实（describe、yaml、nodes），同时基于已有观测结果进行初步分析。
+
+### 1. 执行 Kubernetes 层面关键查询
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_get_by_kind_in_namespace
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-68c557d875-gtzc8 namespace: aiops-case-01 creationTimestamp: 2026-09-10T10:19:45Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-68c557d875-gtzc8 namespace: aiops-case-01 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 16m (x13 over 76m) default-scheduler 0/3 nodes are avai
+[tool:done] kubectl_get_by_kind_in_namespace status=success kubectl_get_by_kind_in_namespace 输出摘要: raw_chars=146 lines=4 Command failed (exit 1): kubectl get --show-labels -o wide nodes -n error: flag needs an argument: 'n' in -n See 'kubectl get --help' for
+[agent:parallel_evidence] Nodes 获取命令因 namespace 参数错误失败，重新执行获取集群节点状态：
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[agent:parallel_evidence] ### 2. 证据分析
+
+现在我已经获取了所有关键事实，可以得出结论：
+
+---
+
+## 证据结论
+
+### 实体身份
+- **Pod**: `aiops-case-01/workload-68c557d875-gtzc8`
+- **UID**: `840e1f30-952d-4886-9edd-e96097582f87`
+- **状态**: Pending (Prometheus 确认 phase=1 为 Pending，Running=0, Failed=0)
+
+### 支持"PendingUnschedulable"的事实
+
+1. **describe 事件**：`FailedScheduling` 持续 76 分钟（13 次重复），原文：**"0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector"**
+2. **Pod YAML**：存在显式 `nodeSelector: {"aiops.lab/unavailable": "true"}`
+3. **Pod Conditions
+[node:done] parallel_evidence / 并发证据采集 (32.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.4s)
+[final] run_id=2f42174d1cd4484b status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-01/workload-68c557d875-gtzc8` | Pending | Pod 配置了 nodeSelector {aiops.lab/unavailable: true}，但集群中所有可用节点均无此标签，导致调度器无法匹配任何节点。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Pod Condition (fact-7f4b43adc6b2) | `type: PodScheduled, status: False, reason: Unschedulable, message: 0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector.` | 证明 Pod 处于 Unschedulable 状态，且原因明确为节点亲和性/选择器不匹配。 |
+| 2 | K8s Event | Scheduler Event (fact-f37883b2aec5) | `Warning FailedScheduling 16m (x13 over 76m) default-scheduler 0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector.` | 调度器持续拒绝调度，反复报出相同的标签不匹配错误。 |
+| 3 | K8s Config | Pod Configuration (implied) | `nodeSelector {aiops.lab/unavailable: true}` | 提供导致调度失败的具体约束条件，即集群节点缺乏此特定标签。 |
+| 4 | Metric | kube_pod_status_phase (fact-91abdc56d839) | `phase: Pending, value: 1` | 验证 Pod 持续处于 Pending 状态的客观数据。 |
+
+上述证据链闭合：Pod 配置了 `aiops.lab/unavailable: true` 标签选择器，而集群所有可用节点均不满足该条件，导致调度器返回 `FailedScheduling` 事件且 Pod 状态锁定为 `Pending`。日志与追踪系统因容器未启动显示为空，符合调度阻塞的物理事实。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 配置了集群节点不存在的 nodeSelector标签 {aiops.lab/unavailable: true} → 调度器无法匹配任何节点 → FailedScheduling 事件触发 → Pod 持续处于 Pending 状态
+```
+
+### 根因结论
+
+已确认的根因是 **Pod 的 nodeSelector 配置与集群节点标签不匹配**。
+
+证据编号 #1 和 #2 明确显示所有 3 个可用节点均未匹配 Pod 的亲和性/选择器要求；证据 #3 指出具体的匹配标签 `aiops.lab/unavailable: true` 在集群中不存在。由于缺乏运行节点，Pod 无法进入 Scheduling 或 Running 阶段，进而导致 K8s State 层面表现为持续的 `Unschedulable` 和 `Pending` 状态。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 57.6s
+├─ 问题定位: 17.2s
+├─ 并发证据采集: 32.0s
+│  └─ g1 aiops-case-01/workload-68c557d875-gtzc8: 32.0s (Evidence 26.8s, RCA 5.1s)
+└─ 汇总总结: 8.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-01/workload-68c557d875-gtzc8**: pod-pending-unschedulable
+
+[run:end] run_id=2f42174d1cd4484b status=-

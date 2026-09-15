@@ -1,0 +1,114 @@
+[run] run_id=43ebfaa297254b5a
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前存在的异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 集群中存在一个处于 `Terminating` 状态的 Pod：`aiops-case-v13` 命名空间下的 `workload`。该 Pod 已停止响应删除请求，符合 `pod-terminating-stuck` 的特征。
+
+我将获取对应的诊断手册以进行下一步验证。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[agent:layer] 为了确认该异常的具体情况（如卡住原因），我需要获取该 Pod 的详细 YAML 信息和所在节点的 Ready 状态。
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 15s 172.16.104.27 node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 15s 172.16.104.27 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 15s 172.16.104.27 node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 15s 172.16.104.27 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 15s 172.16.104.27 node2 <none>
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (18.0s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先执行 YAML 和 describe，再根据结果决定是否补查节点。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_describe
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v13 creationTimestamp: 2026-09-14T07:02:52Z deletionTimestamp: 2026-09-14T08:08:02Z deletionGracePeriodSeconds: 3900 finalizers:
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v13 node: node2/10.2.0.50 status: Terminating (lasts <invalid>) 关键诊断行: Warning Unhealthy 32s (x2 over 34s) kubelet Readin
+[agent:parallel_evidence] 关键事实已出现且指向清晰：
+
+1) **Pod 仍存在且处于 Terminating**：
+- `kubectl get pod` 能查到该对象，说明不是"已删除"；
+- `describe` 显示 `status: Terminating`，但 `phase: Running`（YAML 也显示 phase=Running），容器仍在运行（State: Running, Ready: True, Restart Count: 0）；
+- Prometheus metrics 显示 `kube_pod_status_phase{phase="Running"}=1`、`restarts=0`，与 K8s 一致，排除重启混淆。
+
+2) **deletionTimestamp 存在但无 finalizers**：
+- `deletionTimestamp: 2026-09-14T08:08:02Z` 已设置；
+- `finalizers: <none>` —— 无 finalizer 卡住；
+- `terminationGracePeriodSeconds: 3900`（65 分钟），`d
+[node:done] parallel_evidence / 并发证据采集 (32.1s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.4s)
+[final] run_id=43ebfaa297254b5a status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v13/workload` | Terminating | 应用自定义信号处理逻辑阻塞优雅退出，导致 Pod 在 grace period 耗尽前无法终止 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | K8s Event | `Warning Unhealthy... Readiness probe failed: command "python3 -c import os; assert os.path.exists('/proc/1/status')" timed out` | 证实应用主进程处于挂起或阻塞状态，无法响应探针请求。 |
+| 2 | K8s State | K8s Event | `Normal Killing Stopping container app` | 表明 kubelet 已发送终止信号，进入终止流程。 |
+| 3 | Logging | Log | `SIGTERM received; waiting` | 提供核心证据：应用接收到 SIGTERM 后未退出，而是主动进入了等待状态。 |
+| 4 | Logging | Log | `application started` | 证实应用此前已成功启动并运行。 |
+| 5 | K8s State | K8s Config | Container Resource Limits: `cpu: 50m`, `memory: 32Mi` | 资源限制极低但属于合理配置范围，非导致挂起的主因。 |
+| 6 | K8s Event | K8s Event | `cni.projectcalico.org/podIP: 172.16.104.27/32` | 网络配置正常。 |
+| 7 | Metric | Prometheus | `kube_pod_container_status_restarts_total: 0` | 验证无历史重启记录，排除 OOM/Killed 导致的反复重启。 |
+| 8 | K8s State | K8s State | `pod.status: Terminating (lasts <invalid>)` | 确认 Pod 当前的异常滞留状态。 |
+
+**证据印证说明：**
+事实 1 和 事实 3 形成逻辑闭环：日志明确记录应用捕获 SIGTERM 后进入 `waiting` 状态，这直接导致事实 1 中探针检查 `/proc/1/status` 时超时。事实 2 表明底层 kubelet 仍按预期发送终止请求。事实 8 和事实 7 排除了其他故障模式（如重启循环或崩溃），确证这是一个由于应用代码逻辑阻塞引起的挂起问题。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用捕获 SIGTERM 并执行自定义信号处理逻辑 → 应用进入无限等待循环（非预期行为） → kubelet 的终止请求未被进程退出响应 → Pod 卡在 Terminating 状态且 Readiness Probe 超时
+```
+
+### 根因结论
+
+已确认的根因为：**应用自定义信号处理逻辑阻塞优雅退出**。
+
+*   **证据编号**：事实 3 (Logging: `SIGTERM received; waiting`)、事实 1 (K8s Event: `Readiness probe failed... timed out`)。
+*   **分析**：应用代码逻辑在接收到 SIGTERM 信号后未执行正常的清理和退出动作，而是陷入了等待状态（通常如等待外部文件或信号），导致容器进程未响应 kubelet 的优雅退出请求。
+*   **未决事项**：关于 grace period (3900s) 结束后 kubelet 是否会强制 kill 该进程，当前证据不足以确认，需观察更长时间窗口。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.0m
+├─ 问题定位: 18.0s
+├─ 并发证据采集: 32.1s
+│  └─ g1 aiops-case-v13/workload: 32.1s (Evidence 23.7s, RCA 8.4s)
+└─ 汇总总结: 10.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v13/workload**: pod-terminating-stuck
+
+[run:end] run_id=43ebfaa297254b5a status=-

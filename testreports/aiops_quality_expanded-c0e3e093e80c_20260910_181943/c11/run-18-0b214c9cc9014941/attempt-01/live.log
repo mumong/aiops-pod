@@ -1,0 +1,111 @@
+[run] run_id=0b214c9cc9014941
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前是否存在异常状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 检测到集群中存在 1 个状态异常的 Pod：`workload` (Namespace: `aiops-case-11`)，其当前状态为 `Terminating`。
+
+我将获取该 Pod 的详细信息（包括 Labels 和 Events 上下文），并匹配相关的 Runbook 进行进一步诊断。
+[tool:start] kubectl_get_by_name
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 28m 172.16.104.21 node2 <none>
+[agent:layer] 根据对集群的分析，目前检测到 1 个异常 Pod。以下是诊断结果：
+
+### 异常概况
+*   **异常 Pod**: `workload` (Namespace: `aiops-case-11`)
+*   **当前状态**: `Terminating`
+*   **异常组 (`abnormal_group`)**: `terminating-stuck`
+*   **归一化类型 (`pod_abnormal_type`)**: `TerminatingStuck` (L1)
+
+### 详细分析
+该 Pod 已处于 `Terminating` 状态长达 28 分钟。根据 Runbook `pod-terminating-stuck.md` 的指导，该状态通常由以下原因导致：
+1.  **Finalizer 卡住**: Pod 存在未完成的 `finalizers` 或 Owner 控制器未及时释放对象。
+2.  **节点问题**: Pod 所在节点 `node2` 出现 `NotReady` 或 `Unknown` 状态，导致 kubelet 无法执行容器停止和状态汇报。
+3.  **
+[node:done] layer / 问题定位 (14.5s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":4,"normalized":4,"retrieved":4,"returned":4},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 我需要执行既定证据计划。先并行执行 Kubernetes 层面的关键检查（YAML 获取、事件查询、节点状态），同时结合已有的可观测性基线结果进行分析。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_get_by_name
+[tool:start] query_pod_topology
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 23d v1.26.8 10.2.0.50 <no
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 29m Normal Killing Pod/workload Stopping container app
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-11 creationTimestamp: 2026-09-11T03:47:03Z deletionTimestamp: 2026-09-11T03:47:07Z deletionGracePeriodSeconds: 0 finalizers: aio
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":3,"normalized":3,"retrieved":3,"returned":3},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 已采集事实
+
+### 1. Pod YAML 关键事实（`kubectl get pod workload -n aiops-case-11 -o yaml`）
+
+- **deletionTimestamp**: `2026-09-11T03:47:07Z` — 已设置删除时间戳，距今约 30 分钟（当前 ~04:16Z）。
+- **metadata.finalizers**: `aiops.lab/hold` — 存在自定义 finalizer，这是 Terminating 的核心标志。
+- **deletionGracePeriodSeconds**: `0` — 宽限期为 0，意味着一旦删除请求发出，容器应立即被强制终止。
+- **terminationGracePeriodSeconds**: `10` — spec 定义 10 秒优雅终止。
+- **phase**: `Running`（但 `conditions.Ready=False`，`ContainersNotReady`）。
+- **containerStatuses.app**: `ready=False,
+[node:done] parallel_evidence / 并发证据采集 (42.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.4s)
+[final] run_id=0b214c9cc9014941 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-11/workload` | Terminating | Pod `aiops-case-11/workload` 处于 Terminating 状态的直接原因是存在未清除的自定义 finalizer `aiops.lab/hold`。容器 `app` 在 30 分钟前因 SIGKILL (exitCode 137) 强制终止，虽然容器进程已结束且节点状态正常，但对应的 finalizer 控制器未能响应并清理该标记，导致 Pod 对象在 etcd 中无法完成删除流程。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | `pod.phase` | `Running` (fact-b10eee537fd7) | 定义异常实体的当前核心状态 |
+| 2 | K8s State | `pod.condition` | `Ready=False` (reason: `ContainersNotReady`) (fact-133149537e19) | 确认可观测症状：容器未就绪 |
+| 3 | K8s Config | `container.resource_request` | memory: `24Mi`, cpu: `20m` (fact-13e75c1eb7d8, fact-1c06634fe31f) | 提供资源约束基线 |
+| 4 | K8s State | `container.last_terminated_reason` | `Error` (fact-f9249e781b53) | 确认异常退出状态 |
+| 5 | Metric | `kube_pod_container_status_restarts_total` | `0` (fact-b094ff6b23ac) | 佐证进程处于一次性崩溃/终止场景 |
+
+**证据说明：**
+1. **维度互补**：K8s State 通过 `ContainersNotReady` (fact-133149537e19) 和 `ExitCode 137` (fact-f2d166bace9f) 明确了底层容器已因强制信号终止。
+2. **因果排除**：Metric 显示 `restart_count=0` (fact-b094ff6b23ac)，结合 Log 中的 `allocated_mib=0` (fact-f6128af0681d)，排除了资源耗尽引发重启的可能，聚焦于“状态滞留”与“外部干预（SIGKILL）”两个独立环节。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+自定义 finalizer `aiops.lab/hold` 注册在 Pod 上 → Finalizer 控制器未能移除该标记 → Kubernetes API 对象无法完成删除流程 → Pod 状态滞留 Terminating
+```
+
+### 根因结论
+
+**已确认的根因**：Pod `aiops-case-11/workload` 处于 Terminating 状态是由于未清空的自定义 finalizer `aiops.lab/hold` 阻止了删除流程。
+**证据支持**：该结论完全由 K8s State 维度的 `phase` 滞留与 `container.last_terminated_reason` (fact-f9249e781b53) 共同支撑。同时，Metric (fact-b094ff6b23ac) 确认了无重启行为，验证了该 Pod 对象处于“已终止但未清理”的特殊滞留态，而非常规重启故障。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.1m
+├─ 问题定位: 14.5s
+├─ 并发证据采集: 42.7s
+│  └─ g1 aiops-case-11/workload: 42.7s (Evidence 32.7s, RCA 9.9s)
+└─ 汇总总结: 9.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-11/workload**: pod-terminating-stuck
+
+[run:end] run_id=0b214c9cc9014941 status=-

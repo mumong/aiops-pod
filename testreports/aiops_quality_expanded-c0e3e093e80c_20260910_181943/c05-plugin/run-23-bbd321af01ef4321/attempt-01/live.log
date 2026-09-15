@@ -1,0 +1,135 @@
+[run] run_id=bbd321af01ef4321
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态列表，以识别任何异常。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[agent:layer] 我定位到一个异常 Pod。现在获取该 Pod 的详细标签和状态信息。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 37m <none> node2 <none>
+[agent:layer] 根据集群分析，发现 1 个异常 Pod，表现为 `ContainerCreating` 状态，持续 37 分钟，这通常意味着镜像拉取失败、配置缺失或卷挂载受阻。我将获取相关 Runbook 以辅助后续诊断。
+[tool:start] fetch_runbook
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:done] fetch_runbook status=success <runbook> # Pod ConfigError / 启动配置失败 > Pod异常类型: ConfigError | 典型状态: CreateContainerConfigError / CreateContainerError / CrashLoopBackOff | 兼容分类: config_bootstrap ## 场景识别 | 信号 | 关键特征 | |------|-----
+[tool:start] LayerOutput
+[tool:done] LayerOutput status=error LayerOutput 输出摘要: raw_chars=120 lines=1 Error: LayerOutput is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 37m <none> node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 37m <none> node2 <none>
+[tool:start] LayerOutput
+[tool:done] LayerOutput status=error LayerOutput 输出摘要: raw_chars=120 lines=1 Error: LayerOutput is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[agent:layer] 根据对集群的全局扫描，发现 **1 个异常 Pod**：
+
+*   **异常实体**: `aiops-case-v14/workload`
+*   **当前状态**: `ContainerCreating` (0/1 Ready)
+*   **异常特征**: 该 Pod 自创建以来（37分钟前）一直处于 `ContainerCreating` 状态，未获得 IP 地址，且未触发重启。这种长时间挂起通常表明容器在启动前被阻塞。
+
+**可能的原因场景**：
+1.  **镜像拉取失败 (ImagePullFailed)**: 镜像名错误、标签不存在或认证凭据缺失。
+2.  **卷挂载阻塞 (VolumeMountFailed)**: 持久卷声明 (PVC) 未绑定或存储类问题。
+3.  **配置错误 (ConfigError)**: 缺失必需的 ConfigMap 或 Secret。
+
+已获取 `pod-imagepull-failed.md` 和 `pod-config-error.md` 诊断手册，供下一步深入排查使用。
+[node:done] layer / 问题定位 (25.0s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我将基于已有的可观测性 baseline 结果，执行 Kubernetes 关键工具来确认 Pod 状态、事件和配置，以定位 ContainerCreating 停滞的具体原因。
+
+**已有 Baseline 事实总结：**
+- **Metrics (prometheus)**: `kube_pod_container_status_waiting_reason` 值为 1, reason=ContainerCreating; 重启次数为 0; 无 Terminated 事件。Pod 当前确实处于 Pending/ContainerCreating 阶段，没有重启过。
+- **Logging (elasticsearch)**: 无日志记录 (empty)。
+- **Tracing (deepflow+tempo)**: 无流量记录 (empty)，原因是 Pod IP 为空 (pod_ip is empty)。
+
+这些结果已确认异常持续存在且 Pod 未启动，但未能解释**为什么**卡在 ContainerCreating。
+
+**下一步执行：**
+1. `kubectl de
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:start] kubectl_get_yaml
+[tool:start] query_pod_topology
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v14 creationTimestamp: 2026-09-14T08:11:57Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 38m Warning FailedCreatePodSandBox Pod/workload Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v14 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning FailedCreatePodSandBox 38m kubelet Failed to create
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 证据与结论
+
+### 已确认事实
+1. **Pod 状态**：`aiops-case-v14/workload` 当前处于 **Pending** 阶段，Waiting 原因为 `ContainerCreating`。
+2. **根因事件 (kubectl_describe & kubectl_events)**：
+   - `kubelet` 在 38 分钟前抛出 **`FailedCreatePodSandBox`** 警告事件。
+   - 原始错误为：`failed to setup network for sandbox`: **Multus CNI** 插件在尝试添加 secondary network (`secondary-net`) 时失败。
+   - 具体错误：`failed to find plugin "aiops-unavailable" in path [/opt/cni/bin /opt/cni/bin]`。
+3. **Pod 配置 (YAML)**：
+   - Pod 的注解中包含 `k8s.v1.cni.cncf.io/networks: seco
+[node:done] parallel_evidence / 并发证据采集 (48.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (12.3s)
+[final] run_id=bbd321af01ef4321 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v14/workload` | ContainerCreating | Pod aiops-case-v14/workload 卡在 ContainerCreating 状态 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | `fact-8a4afadd7f22` | `FailedCreatePodSandBox`: plugin type="multus" name="multus-cni-network" failed (add): error adding container to network "secondary-net": failed to find plugin "aiops-unavailable" in path | 确认故障直接原因：CNI 插件缺失导致网络沙箱创建失败 |
+| 2 | K8s Config | `fact-56d9bb9abf7d` | `Annotations: k8s.v1.cni.cncf.io/networks: secondary-net` | 指出 Pod 依赖二级网络插件 "secondary-net" |
+| 3 | K8s State | `fact-b257c3fa1cff` | Container "app" waiting_reason: `ContainerCreating` | 证实容器处于启动前等待阶段，未进入运行态 |
+| 4 | K8s State | `fact-412a43eb61fb` | Pod phase: `Pending` | 结合事件表明 Pod 调度成功但无法进入运行阶段 |
+| 5 | Metric | `fact-e9eeeb06d94d` | `kube_pod_container_status_waiting_reason{reason="ContainerCreating"}` = 1 | 独立量化验证 Pod 卡滞在 ContainerCreating 状态 |
+| 6 | Metric | `fact-6592e48318f8` | `kube_pod_status_phase{phase="Pending"}` = 1 | 独立量化验证 Pod 阶段停留在 Pending |
+| 7 | K8s Config | `fact-1211c1363cd7` | Container "app" resource_limit.memory: `32Mi` | 资源配置上下文（非故障原因） |
+| 8 | K8s Config | `fact-3b76435093be` | Container "app" resource_limit.cpu: `50m` | 资源配置上下文（非故障原因） |
+
+**证据印证：**
+- 维度 1 与 2 结合：Pod 声明使用 "secondary-net" 网络，Multus 在尝试附加该网络时因找不到插件 "aiops-unavailable" 而报错。
+- 维度 3、4 与 5、6 结合：K8s 原生状态（Pending/ContainerCreating）与 Prometheus 监控指标（Waiting Reason/Phase）完全一致，排除了单点数据异常。
+- Logging/Tracing 标记为 `not_applicable`，因为容器从未启动，这是 CNI 阶段失败的自然结果。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+节点 node2 CNI 插件路径下缺失插件 "aiops-unavailable" → Multus 无法为 secondary-net 附加网络 → kubelet 报 FailedCreatePodSandBox 错误 → Pod aiops-case-v14/workload 卡在 ContainerCreating 状态
+```
+
+### 根因结论
+
+已确认根因为 **CNI 插件缺失**。
+Pod YAML 中通过注解 `k8s.v1.cni.cncf.io/networks: secondary-net` 请求使用 "secondary-net" 网络，而负责处理该网络的 Multus CNI 插件在节点上找不到依赖的自定义插件 "aiops-unavailable"（`fact-8a4afadd7f22`）。这导致网络沙箱创建失败，Pod 无法完成初始化。
+Metric 数据（`fact-e9eeeb06d94d`, `fact-6592e48318f8`）独立验证了 Pod 持续处于 `ContainerCreating` 和 `Pending` 状态，与事件日志中的失败机制相互印证。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.4m
+├─ 问题定位: 25.0s
+├─ 并发证据采集: 48.0s
+│  └─ g1 aiops-case-v14/workload: 48.0s (Evidence 35.9s, RCA 11.0s)
+└─ 汇总总结: 12.3s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v14/workload**: pod-imagepull-failed, pod-config-error
+
+[run:end] run_id=bbd321af01ef4321 status=-

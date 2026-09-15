@@ -1,0 +1,113 @@
+[run] run_id=d71e4f17cb164ed0
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以便识别当前存在的异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'ImagePullBackOff': 1} NAMESPACE NAME
+[agent:layer] 根据集群状态检查，发现 1 个异常 Pod：
+
+*   **Namespace**: `aiops-case-v07`
+*   **Pod Name**: `workload`
+*   **当前状态**: `ImagePullBackOff`
+*   **异常表现**: 容器镜像拉取失败，导致 Pod 无法进入 Running 状态。
+
+该异常对应类型为 `ImagePullFailed`。我将获取对应的诊断手册以指导后续的证据采集。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[agent:layer] 集群中存在 1 个异常 Pod：
+
+### 异常概览
+*   **异常 Pod**: `aiops-case-v07/workload`
+*   **当前状态**: `ImagePullBackOff` (镜像拉取失败/重试中)
+*   **异常组 (abnormal_group)**: `group-1`
+*   **归一化类型**: `ImagePullFailed`
+
+### 诊断依据
+根据 Pod 状态和 Runbook 指引，该 Pod 卡在镜像拉取阶段。接下来需要获取详细事件（Events）以区分具体原因（如镜像不存在、认证失败或网络超时）。
+
+### LayerOutput 结构化输出
+```json
+{
+  "layer": "diagnosis",
+  "confidence": "high",
+  "reasoning": "检测到 1 个 Pod 处于 ImagePullBackOff 状态。根据状态机定义，该类型明确对应 ImagePullFailed 异常类型。已关联对应 Runbook 以指导后续的事件证据采集。",
+  "abnormal_pods": [
+[node:done] layer / 问题定位 (20.5s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] Let me execute the Kubernetes YAML and Events queries to confirm the Pod status and get detailed event information.
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] query_pod_topology
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 57m (x4 over 58m) Warning Failed Pod/workload Failed to pull image "registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v07 creationTimestamp: 2026-09-15T02:58:44Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 已采集事实与冲突
+
+| 维度 | 事实 | 对候选原因的支持/反驳 |
+|---|---|---|
+| **Pod 生命周期** | `Phase=Pending`, `containerStatus.app.ready=False, reason=ImagePullBackOff`, `restarts=0` | 支持 ImagePullBackOff 当前仍然存在 |
+| **Prometheus Metrics** | `kube_pod_status_phase{phase="Pending"}=1`, `kube_pod_container_status_waiting_reason{reason="ImagePullBackOff"}=1`, `kube_pod_container_status_restarts_total=0` | 与 K8s API 一致，确认异常未恢复 |
+| **K8s Events (核心证据)** | 57m 前首次出现 `Failed to pull image ... not found`；3m32s 起持续 `Back-off pu
+[node:done] parallel_evidence / 并发证据采集 (35.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.8s)
+[final] run_id=d71e4f17cb164ed0 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v07/workload` | ImagePullBackOff | Pod/workload in aiops-case-v07 is stuck in ImagePullBackOff |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | Container `app` waiting reason: `ImagePullBackOff` | 确认容器因镜像拉取失败而停滞 |
+| 2 | K8s State | Kubernetes | Container `app` waiting message: `Back-off pulling image "registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908"` | 指出导致失败的具体镜像及拉取回退行为 |
+| 3 | K8s State | Kubernetes | Pod `aiops-case-v07/workload` phase: `Pending`, condition `ContainersReady=False` (containers with unready status: [app]) | 证实 Pod 处于等待就绪状态 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_waiting_reason=1` (labels: container=app, reason=ImagePullBackOff) | 监控数据直接印证了 K8s 的 ImagePullBackOff 状态 |
+| 5 | Metric | Prometheus | `kube_pod_container_status_restarts_total=0` (container=app) | 排除启动后崩溃重启，确认问题存在于启动前 |
+
+**证据综述**：Kubernetes 状态（事实 1, 2）与 Prometheus 监控指标（事实 4）在维度上完全一致，均确认容器 `app` 处于 `ImagePullBackOff` 状态；Pod 处于 Pending 且重启数为 0（事实 3, 5），排除了运行时崩溃或调度资源不足的问题，证据链闭合指向镜像拉取环节。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+镜像 Tag 'aiops-fixture-unavailable-20260908' 在远程仓库不存在 → 容器运行时拉取镜像返回 NotFound 错误 → kubelet 将容器状态转为 ImagePullBackOff → Pod 保持 Pending 且不可用
+```
+
+### 根因结论
+
+已确认根因是**远程镜像仓库中缺失指定版本的镜像**。
+
+具体表现为：Pod `aiops-case-v07/workload` 中的容器 `app` 尝试拉取镜像 `registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908` 时失败。Kubernetes 状态（事实 2）明确指出拉取该特定 Tag 的镜像时进入 Back-off 状态；Metric 指标（事实 4）进一步佐证了该容器处于 ImagePullBackOff 状态。由于镜像在仓库端不存在（Manifest not found），容器无法启动，导致 Pod 始终卡在 Pending 阶段。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.1m
+├─ 问题定位: 20.5s
+├─ 并发证据采集: 35.0s
+│  └─ g1 aiops-case-v07/workload: 35.0s (Evidence 27.4s, RCA 7.5s)
+└─ 汇总总结: 8.8s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v07/workload**: pod-imagepull-failed
+
+[run:end] run_id=d71e4f17cb164ed0 status=-

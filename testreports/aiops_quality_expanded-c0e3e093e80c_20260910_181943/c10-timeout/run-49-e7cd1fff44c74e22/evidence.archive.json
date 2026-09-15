@@ -1,0 +1,1436 @@
+[
+  {
+    "source": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/node_outputs/evidence.full.json",
+    "payload": {
+      "evidence_plan": [
+        {
+          "id": "structured-plan-fallback-1",
+          "description": "确认目标 Pod 当前生命周期状态和事件",
+          "level": "critical",
+          "tool": "kubectl_describe",
+          "command": "kubectl describe pod workload -n aiops-case-v17",
+          "tool_args": {
+            "kind": "pod",
+            "name": "workload",
+            "namespace": "aiops-case-v17"
+          },
+          "purpose": "确认目标 Pod 的当前状态、容器终态和近期事件",
+          "evidence_type": "pod_lifecycle",
+          "target_scope": "aiops-case-v17/workload",
+          "acceptable_tools": [
+            "kubectl_describe"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-metrics",
+          "description": "首轮查询异常 Pod aiops-case-v17/workload 的metrics 真实数据",
+          "level": "critical",
+          "tool": "execute_pod_promql",
+          "command": "execute generic Pod lifecycle PromQL",
+          "tool_args": {
+            "namespace": "aiops-case-v17",
+            "pod": "workload",
+            "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+            "promql": "kube_pod_status_phase{namespace=\"aiops-case-v17\",pod=\"workload\"} or kube_pod_container_status_waiting_reason{namespace=\"aiops-case-v17\",pod=\"workload\"} or kube_pod_container_status_last_terminated_reason{namespace=\"aiops-case-v17\",pod=\"workload\"} or kube_pod_container_status_restarts_total{namespace=\"aiops-case-v17\",pod=\"workload\"}",
+            "query_type": "instant"
+          },
+          "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "execute_pod_promql"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-logging",
+          "description": "首轮查询异常 Pod aiops-case-v17/workload 的logging 真实数据",
+          "level": "critical",
+          "tool": "query_pod_logs",
+          "command": "query recent real Pod logs without preset fault keywords",
+          "tool_args": {
+            "namespace": "aiops-case-v17",
+            "pod": "workload",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+            "window_minutes": 30,
+            "max_records": 20,
+            "allow_name_fallback": true
+          },
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_logs"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-tracing",
+          "description": "首轮查询异常 Pod aiops-case-v17/workload 的tracing 真实数据",
+          "level": "critical",
+          "tool": "query_pod_tracing",
+          "command": "query recent real Pod flows and application spans",
+          "tool_args": {
+            "namespace": "aiops-case-v17",
+            "pod": "workload",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+            "window_minutes": 30,
+            "direction": "any",
+            "include_tempo": true,
+            "max_records": 20
+          },
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_tracing"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-topology",
+          "description": "首轮查询异常 Pod aiops-case-v17/workload 的topology 真实数据",
+          "level": "critical",
+          "tool": "query_pod_topology",
+          "command": "query source-backed Pod topology relationships",
+          "tool_args": {
+            "namespace": "aiops-case-v17",
+            "pod": "workload",
+            "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边"
+          },
+          "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_topology"
+          ],
+          "counts_for_completeness": true
+        }
+      ],
+      "tool_results": [],
+      "tool_data": [
+        {
+          "tool": "execute_pod_promql",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":0,\"matched\":7,\"normalized\":7,\"projected_series\":7,\"raw_series\":7,\"retrieved\":7,\"returned\":7,\"serialized_series\":7},\"coverage\":\"present\",\"dimension\":\"metrics\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-v17\",\"node\":\"node2\",\"pod\":\"workload\",\"pod_ip\":\"172.16.104.36\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"evidence\":[{\"confidence\":\"high\",\"directness\":\"direct\",\"id\":\"fact-ab92953689d5\",\"labels\":{\"container\":\"app\",\"reason\":\"Error\"},\"metric\":\"kube_pod_container_status_last_terminated_reason\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":1.0,\"last\":1.0,\"max\":1.0,\"min\":1.0},\"timestamp\":{\"utc\":\"2026-09-14T14:54:16.522000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"1\"},{\"confidence\":\"high\",\"directness\":\"direct\",\"id\":\"fact-23da38853bad\",\"labels\":{\"container\":\"app\"},\"metric\":\"kube_pod_container_status_restarts_total\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":40.0,\"last\":40.0,\"max\":40.0,\"min\":40.0},\"timestamp\":{\"utc\":\"2026-09-14T14:54:16.522000Z\"},\"trend_evaluable\":false,\"unit\":\"count\",\"value\":\"40\"},{\"confidence\":\"low\",\"directness\":\"related_context\",\"id\":\"fact-5a846297fe83\",\"labels\":{\"container\":\"kube-state-metrics\",\"phase\":\"Running\"},\"metric\":\"kube_pod_status_phase\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":1.0,\"last\":1.0,\"max\":1.0,\"min\":1.0},\"timestamp\":{\"utc\":\"2026-09-14T14:54:16.522000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"1\"},{\"confidence\":\"low\",\"directness\":\"related_context\",\"id\":\"fact-c29763034405\",\"labels\":{\"container\":\"kube-state-metrics\",\"phase\":\"Pending\"},\"metric\":\"kube_pod_status_phase\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":0.0,\"last\":0.0,\"max\":0.0,\"min\":0.0},\"timestamp\":{\"utc\":\"2026-09-14T14:54:16.522000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"0\"}],\"query_ref\":{\"debug_available\":true,\"hash\":\"37fc187026f67876\",\"metric_names\":[\"kube_pod_status_phase\",\"kube_pod_container_status_waiting_reason\",\"kube_pod_container_status_last_terminated_reason\",\"kube_pod_container_status_restarts_total\"],\"query_type\":\"instant\"},\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/001-evidence-execute_pod_promql.raw.txt\",\"tool\":\"read_context_archive\"},\"source_system\":\"prometheus\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":3,\"selected\":4,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"execute_pod_promql\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"source_or_collection_truncated\":false,\"truncated\":false}}",
+          "duration_s": 1.680082082748413,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/001-evidence-execute_pod_promql.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/001-evidence-execute_pod_promql.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/001-evidence-execute_pod_promql.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-8e8ce71ad38b",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-23da38853bad",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_container_status_restarts_total",
+                "value": "40",
+                "unit": "count",
+                "timestamp": "2026-09-14T14:54:16.522000Z",
+                "source_system": "prometheus",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "metric-aiops-case-v17-workload-20315d91a5cb"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_container_status_restarts_total",
+                    "container": "app",
+                    "namespace": "aiops-case-v17",
+                    "pod": "workload",
+                    "uid": "85aece07-6ffa-41db-9e5a-f351771a8864"
+                  },
+                  "sample_count": 1,
+                  "series_role": "application_container",
+                  "stats": {
+                    "first": 40.0,
+                    "last": 40.0,
+                    "max": 40.0,
+                    "min": 40.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-ab92953689d5",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_container_status_last_terminated_reason",
+                "value": "1",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T14:54:16.522000Z",
+                "source_system": "prometheus",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "metric-aiops-case-v17-workload-3675b9aa5e01"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_container_status_last_terminated_reason",
+                    "container": "app",
+                    "namespace": "aiops-case-v17",
+                    "pod": "workload",
+                    "reason": "Error",
+                    "uid": "85aece07-6ffa-41db-9e5a-f351771a8864"
+                  },
+                  "sample_count": 1,
+                  "series_role": "application_container",
+                  "stats": {
+                    "first": 1.0,
+                    "last": 1.0,
+                    "max": 1.0,
+                    "min": 1.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-5a846297fe83",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "1",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T14:54:16.522000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v17-workload-63c7fe8f7551"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v17",
+                    "phase": "Running",
+                    "pod": "workload",
+                    "uid": "85aece07-6ffa-41db-9e5a-f351771a8864"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 1.0,
+                    "last": 1.0,
+                    "max": 1.0,
+                    "min": 1.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-6179dc682b90",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T14:54:16.522000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v17-workload-4c19dca215a9"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v17",
+                    "phase": "Unknown",
+                    "pod": "workload",
+                    "uid": "85aece07-6ffa-41db-9e5a-f351771a8864"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-ac61ad2c23f6",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T14:54:16.522000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v17-workload-580ca6291474"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v17",
+                    "phase": "Succeeded",
+                    "pod": "workload",
+                    "uid": "85aece07-6ffa-41db-9e5a-f351771a8864"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-b52c0757064a",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T14:54:16.522000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v17-workload-fc5d1cb09792"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v17",
+                    "phase": "Failed",
+                    "pod": "workload",
+                    "uid": "85aece07-6ffa-41db-9e5a-f351771a8864"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-c29763034405",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T14:54:16.522000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v17-workload-5b6fe978360d"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v17",
+                    "phase": "Pending",
+                    "pod": "workload",
+                    "uid": "85aece07-6ffa-41db-9e5a-f351771a8864"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              }
+            ],
+            "record_count": 7,
+            "truncated": false,
+            "source": "mcp_canonical",
+            "legacy_contract": false
+          },
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":{\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"lifecycle_changed\":false,\"node\":\"node2\",\"pod_ip\":\"172.16.104.36\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线\",\"coverage\":\"present\",\"directness\":\"direct\",\"query\":{\"promql\":\"kube_pod_status_phase{namespace=\\\"aiops-case-v17\\\",pod=\\\"workload\\\"} or kube_pod_container_status_waiting_reason{namespace=\\\"aiops-case-v17\\\",pod=\\\"workload\\\"} or kube_pod_container_status_last_terminated_reason{namespace=\\\"aiops-case-v17\\\",pod=\\\"workload\\\"} or kube_pod_container_status_restarts_total{namespace=\\\"aiops-case-v17\\\",pod=\\\"workload\\\"}\",\"query_type\":\"instant\",\"http_status\":200,\"value_unit\":\"mixed\",\"trend_evaluable\":false},\"facts\":[{\"ref\":\"metric-aiops-case-v17-workload-3675b9aa5e01\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v17/workload/app\",\"observed_at\":\"2026-09-14T14:54:16.522000Z\",\"name\":\"kube_pod_container_status_last_terminated_reason\",\"value\":\"1\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_container_status_last_terminated_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"reason\":\"Error\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"ref\":\"metric-aiops-case-v17-workload-20315d91a5cb\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v17/workload/app\",\"observed_at\":\"2026-09-14T14:54:16.522000Z\",\"name\":\"kube_pod_container_status_restarts_total\",\"value\":\"40\",\"unit\":\"count\",\"labels\":{\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"stats\":{\"first\":40.0,\"min\":40.0,\"max\":40.0,\"last\":40.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"ref\":\"metric-aiops-case-v17-workload-fc5d1cb09792\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v17/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T14:54:16.522000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Failed\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-v17-workload-5b6fe978360d\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v17/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T14:54:16.522000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Pending\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-v17-workload-63c7fe8f7551\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v17/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T14:54:16.522000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"1\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Running\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-v17-workload-580ca6291474\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v17/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T14:54:16.522000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Succeeded\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-v17-workload-4c19dca215a9\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v17/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T14:54:16.522000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Unknown\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"}],\"samples\":[{\"metric\":{\"__name__\":\"kube_pod_container_status_last_terminated_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"reason\":\"Error\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"value\":[1789397656.522,\"1\"],\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"metric\":{\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"value\":[1789397656.522,\"40\"],\"stats\":{\"first\":40.0,\"min\":40.0,\"max\":40.0,\"last\":40.0},\"sample_count\":1,\"unit\":\"count\",\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Failed\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"value\":[1789397656.522,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Pending\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"value\":[1789397656.522,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Running\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"value\":[1789397656.522,\"1\"],\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Succeeded\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"value\":[1789397656.522,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Unknown\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"value\":[1789397656.522,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"}],\"evidence_refs\":[\"metric-aiops-case-v17-workload-3675b9aa5e01\",\"metric-aiops-case-v17-workload-20315d91a5cb\",\"metric-aiops-case-v17-workload-fc5d1cb09792\",\"metric-aiops-case-v17-workload-5b6fe978360d\",\"metric-aiops-case-v17-workload-63c7fe8f7551\",\"metric-aiops-case-v17-workload-580ca6291474\",\"metric-aiops-case-v17-workload-4c19dca215a9\"]}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=execute_pod_promql status=query_succeeded source_system=prometheus dimension=metrics coverage=present directness=direct purpose=\"首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线\"\nENTITY namespace=aiops-case-v17 pod=workload pod_uid=85aece07-6ffa-41db-9e5a-f351771a8864 pod_ip=172.16.104.36 node=node2\nEXECUTED_QUERY query={\"promql\":\"kube_pod_status_phase{namespace=\\\"aiops-case-v17\\\",pod=\\\"workload\\\"} or kube_pod_container_status_waiting_reason{namespace=\\\"aiops-case-v17\\\",pod=\\\"workload\\\"} or kube_pod_container_status_last_terminated_reason{namespace=\\\"aiops-case-v17\\\",pod=\\\"workload\\\"} or kube_pod_container_status_restarts_total{namespace=\\\"aiops-case-v17\\\",pod=\\\"workload\\\"}\",\"query_type\":\"instant\",\"http_status\":200,\"value_unit\":\"mixed\",\"trend_evaluable\":false}\nQUERY_FACT ref=metric-aiops-case-v17-workload-3675b9aa5e01 source_system=prometheus name=kube_pod_container_status_last_terminated_reason value=1 unit=unitless labels={\"__name__\":\"kube_pod_container_status_last_terminated_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"reason\":\"Error\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"} stats={\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0} sample_count=1 trend_evaluable=false series_role=application_container directness=direct\nQUERY_FACT ref=metric-aiops-case-v17-workload-20315d91a5cb source_system=prometheus name=kube_pod_container_status_restarts_total value=40 unit=count labels={\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"} stats={\"first\":40.0,\"min\":40.0,\"max\":40.0,\"last\":40.0} sample_count=1 trend_evaluable=false series_role=application_container directness=direct\nQUERY_FACT ref=metric-aiops-case-v17-workload-fc5d1cb09792 source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Failed\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-v17-workload-5b6fe978360d source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Pending\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-v17-workload-63c7fe8f7551 source_system=prometheus name=kube_pod_status_phase value=1 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Running\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"} stats={\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-v17-workload-580ca6291474 source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Succeeded\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-v17-workload-4c19dca215a9 source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v17\",\"phase\":\"Unknown\",\"pod\":\"workload\",\"uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_LIMITATIONS\nEVIDENCE_REFS values=[\"metric-aiops-case-v17-workload-3675b9aa5e01\",\"metric-aiops-case-v17-workload-20315d91a5cb\",\"metric-aiops-case-v17-workload-fc5d1cb09792\",\"metric-aiops-case-v17-workload-5b6fe978360d\",\"metric-aiops-case-v17-workload-63c7fe8f7551\",\"metric-aiops-case-v17-workload-580ca6291474\",\"metric-aiops-case-v17-workload-4c19dca215a9\"]"
+        },
+        {
+          "tool": "query_pod_logs",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":88,\"matched\":108,\"normalized\":100,\"retrieved\":100,\"returned\":20},\"coverage\":\"present\",\"dimension\":\"logging\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-v17\",\"node\":\"node2\",\"pod\":\"workload\",\"pod_ip\":\"172.16.104.36\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"evidence\":[{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-4492a8eceaba\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:23] \\\"GET /health HTTP/1.1\\\" 200 -\",\"pattern_count\":4,\"pattern_exemplar\":\"head\",\"raw_ref\":{\"document_id\":\"uCZkoKABK0ORzrInCFs-\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T14:48:23.596000Z\"}},{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-7e5b6679a988\",\"message\":\"listening on 18080\",\"pattern_count\":2,\"pattern_exemplar\":\"head\",\"raw_ref\":{\"document_id\":\"uSZkoKABK0ORzrInN1wD\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T14:48:34.212000Z\"}},{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-e0f50982148c\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:25] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"pattern_count\":14,\"pattern_exemplar\":\"head\",\"raw_ref\":{\"document_id\":\"0CZkoKABK0ORzrInE1v4\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T14:48:25.596000Z\"}},{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-0140c64f800f\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:53] \\\"GET /health HTTP/1.1\\\" 200 -\",\"pattern_count\":4,\"pattern_exemplar\":\"tail\",\"raw_ref\":{\"document_id\":\"BSZkoKABK0ORzrInfWFd\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T14:48:53.596000Z\"}}],\"query_ref\":{\"debug_available\":true,\"execution_count\":1,\"filters\":{\"keyword_mode\":\"any\"},\"hash\":\"b39e27aaa25f4787\",\"identity_basis\":\"pod_uid\",\"index\":\"filebeat-*\"},\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/002-evidence-query_pod_logs.raw.txt\",\"tool\":\"read_context_archive\"},\"source_system\":\"elasticsearch\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":16,\"selected\":4,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"query_pod_logs\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"reasons\":[\"max_hits\",\"max_records\",\"source_or_collection_limit\"],\"source_or_collection_truncated\":true,\"truncated\":true},\"window\":{\"end\":\"2026-09-14T14:54:15.662085Z\",\"start\":\"2026-09-14T14:24:15.662085Z\"}}",
+          "duration_s": 1.6777069568634033,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/002-evidence-query_pod_logs.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/002-evidence-query_pod_logs.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-4568514e010f",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-0140c64f800f",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:53] \"GET /health HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:53.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-6f4440a723f8"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "BSZkoKABK0ORzrInfWFd",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 65,
+                  "value_sha256": "8ac99db18a0cb5b0",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-01c48543d2f1",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:52] \"GET /ready HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:52.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-22da38d4fd4e"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "AyZkoKABK0ORzrIneWF0",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 64,
+                  "value_sha256": "3c117b935522894c",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-040234b05065",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:31] \"GET /ready HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:31.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-3566bdf03cd1"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "OCZkoKABK0ORzrInKFw8",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 64,
+                  "value_sha256": "6eacfce200ebca43",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-04bfe37389e0",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:49] \"GET /ready HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:49.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-391c899c0dfb"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "ZCZkoKABK0ORzrInbWC_",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 64,
+                  "value_sha256": "36694906655502c8",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-289aab017d20",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:54:10] \"GET /ready HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:54:10.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-10e152a912a2"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "8SZpoKABK0ORzrInVaDZ",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 64,
+                  "value_sha256": "240279c400a6934e",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-2ff90b5e717f",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:40] \"GET /ready HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:40.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-93f5d2ee30c9"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "ASZkoKABK0ORzrInTl92",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 64,
+                  "value_sha256": "cb686b5935cc6adb",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-36d6113b2377",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:34] \"GET /ready HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:34.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-cda34695e561"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "uiZkoKABK0ORzrInN1wD",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 64,
+                  "value_sha256": "10fea0d0b6c39765",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-4492a8eceaba",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:23] \"GET /health HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:23.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-d5e59c14614f"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "uCZkoKABK0ORzrInCFs-",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 65,
+                  "value_sha256": "680e7920f4c3fc6a",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-66f74799c86d",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:55] \"GET /ready HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:55.597Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-87de7b6020ac"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "ECZkoKABK0ORzrIniGFP",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 64,
+                  "value_sha256": "4b6a1d15f802a713",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-7060798de77f",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:28] \"GET /health HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:28.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-21d74d19a561"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "6CZkoKABK0ORzrInH1uw",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 65,
+                  "value_sha256": "97a32e2780348d95",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-71f6cc5fae7a",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:48] \"GET /health HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:48.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-54ed95fcd4db"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "ViZkoKABK0ORzrInaWDT",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 65,
+                  "value_sha256": "5d94769ae31eb2ef",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-785df87925ef",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "10.2.0.50 - - [14/Sep/2026 14:48:43] \"GET /ready HTTP/1.1\" 200 -",
+                "timestamp": "2026-09-14T14:48:43.596Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-c64db40681b4"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "EiZkoKABK0ORzrInWl8v",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 64,
+                  "value_sha256": "d8bc5c775f364a22",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-7e5b6679a988",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "listening on 18080",
+                "timestamp": "2026-09-14T14:48:34.212Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v17-workload-dc0aa5b75259"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "uSZkoKABK0ORzrInN1wD",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 18,
+                  "value_sha256": "8d0434d1fb4fc409",
+                  "value_truncated": false
+                }
+              }
+            ],
+            "record_count": 13,
+            "truncated": true,
+            "source": "mcp_canonical",
+            "legacy_contract": false
+          },
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":{\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"lifecycle_changed\":false,\"node\":\"node2\",\"pod_ip\":\"172.16.104.36\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID\",\"coverage\":\"present\",\"directness\":\"direct\",\"query\":{\"index\":\"filebeat-*\",\"identity_basis\":\"pod_uid\",\"uid_query_hits\":100,\"backend_total\":{\"value\":108,\"relation\":\"eq\"},\"time_range\":{\"start\":\"2026-09-14T14:24:15.662085Z\",\"end\":\"2026-09-14T14:54:15.662085Z\"},\"container\":null,\"keywords\":[],\"keyword_mode\":\"any\",\"levels\":[],\"trace_id\":null,\"dsl\":{\"size\":100,\"_source\":[\"@timestamp\",\"message\",\"log\",\"log.level\",\"level\",\"severity\",\"severity_text\",\"trace.id\",\"trace_id\",\"kubernetes.namespace\",\"kubernetes.namespace_name\",\"kubernetes.pod.name\",\"kubernetes.pod_name\",\"kubernetes.pod.uid\",\"kubernetes.container.name\",\"kubernetes.container_name\"],\"sort\":[{\"@timestamp\":\"desc\"}],\"query\":{\"bool\":{\"filter\":[{\"range\":{\"@timestamp\":{\"gte\":\"2026-09-14T14:24:15.662085Z\",\"lte\":\"2026-09-14T14:54:15.662085Z\"}}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.namespace\":\"aiops-case-v17\"}},{\"term\":{\"kubernetes.namespace_name\":\"aiops-case-v17\"}}],\"minimum_should_match\":1}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.pod.uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"}},{\"term\":{\"kubernetes.pod.uid.keyword\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"}}],\"minimum_should_match\":1}}],\"must\":[]}}},\"executions\":[{\"identity_basis\":\"pod_uid\",\"dsl_ref\":\"query.dsl\",\"hit_count\":100}],\"dsl_sha256\":\"b39e27aaa25f4787\"},\"facts\":[{\"ref\":\"log-aiops-case-v17-workload-10e152a912a2\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:54:10.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:54:10] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"240279c400a6934e\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"8SZpoKABK0ORzrInVaDZ\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-b2810253debf\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:54:07.597Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:54:07] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"1c8bf9bbdee57505\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"pSZpoKABK0ORzrInTKAP\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-54b912b69d7d\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:54:04.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:54:04] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"73f1cd2a6de13b16\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"-CZpoKABK0ORzrInQJ4S\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-e3c5a60b86a9\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:54:03.713Z\",\"name\":\"log.message\",\"value\":\"listening on 18080\",\"value_original_length\":18,\"value_sha256\":\"8d0434d1fb4fc409\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"9yZpoKABK0ORzrInQJ4S\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-87de7b6020ac\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:55.597Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:55] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"4b6a1d15f802a713\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ECZkoKABK0ORzrIniGFP\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-6f4440a723f8\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:53.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:53] \\\"GET /health HTTP/1.1\\\" 200 -\",\"value_original_length\":65,\"value_sha256\":\"8ac99db18a0cb5b0\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"BSZkoKABK0ORzrInfWFd\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-22da38d4fd4e\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:52.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:52] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"3c117b935522894c\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"AyZkoKABK0ORzrIneWF0\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-391c899c0dfb\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:49.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:49] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"36694906655502c8\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ZCZkoKABK0ORzrInbWC_\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-54ed95fcd4db\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:48.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:48] \\\"GET /health HTTP/1.1\\\" 200 -\",\"value_original_length\":65,\"value_sha256\":\"5d94769ae31eb2ef\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ViZkoKABK0ORzrInaWDT\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-52c1e7dcc6b9\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:46.595Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:46] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"06efd8a76cd316e2\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"KyZkoKABK0ORzrInZWDp\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-c64db40681b4\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:43.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:43] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"d8bc5c775f364a22\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"EiZkoKABK0ORzrInWl8v\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-93f5d2ee30c9\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:40.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:40] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"cb686b5935cc6adb\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ASZkoKABK0ORzrInTl92\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-ab298eb837a9\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:37.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:37] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"fdcc7af90fd3def2\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"NSZkoKABK0ORzrInQF0J\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-cda34695e561\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:34.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:34] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"10fea0d0b6c39765\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uiZkoKABK0ORzrInN1wD\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-dc0aa5b75259\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:34.212Z\",\"name\":\"log.message\",\"value\":\"listening on 18080\",\"value_original_length\":18,\"value_sha256\":\"8d0434d1fb4fc409\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uSZkoKABK0ORzrInN1wD\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-3566bdf03cd1\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:31.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:31] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"6eacfce200ebca43\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"OCZkoKABK0ORzrInKFw8\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-c67c6e0eb3ee\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:28.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:28] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"f232be83c70e3bf0\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"5yZkoKABK0ORzrInH1uw\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-21d74d19a561\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:28.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:28] \\\"GET /health HTTP/1.1\\\" 200 -\",\"value_original_length\":65,\"value_sha256\":\"97a32e2780348d95\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"6CZkoKABK0ORzrInH1uw\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-b9589f06b17e\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:25.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:25] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"value_original_length\":64,\"value_sha256\":\"1fd4bd0296176a81\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"0CZkoKABK0ORzrInE1v4\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v17-workload-d5e59c14614f\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v17/workload/app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"observed_at\":\"2026-09-14T14:48:23.596Z\",\"name\":\"log.message\",\"value\":\"10.2.0.50 - - [14/Sep/2026 14:48:23] \\\"GET /health HTTP/1.1\\\" 200 -\",\"value_original_length\":65,\"value_sha256\":\"680e7920f4c3fc6a\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uCZkoKABK0ORzrInCFs-\"},\"fields\":{},\"directness\":\"direct\"}],\"samples\":[{\"timestamp\":\"2026-09-14T14:54:10.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:54:10] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"240279c400a6934e\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"8SZpoKABK0ORzrInVaDZ\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-10e152a912a2\"},{\"timestamp\":\"2026-09-14T14:54:07.597Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:54:07] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"1c8bf9bbdee57505\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"pSZpoKABK0ORzrInTKAP\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-b2810253debf\"},{\"timestamp\":\"2026-09-14T14:54:04.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:54:04] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"73f1cd2a6de13b16\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"-CZpoKABK0ORzrInQJ4S\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-54b912b69d7d\"},{\"timestamp\":\"2026-09-14T14:54:03.713Z\",\"message\":\"listening on 18080\",\"message_original_length\":18,\"message_sha256\":\"8d0434d1fb4fc409\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"9yZpoKABK0ORzrInQJ4S\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-e3c5a60b86a9\"},{\"timestamp\":\"2026-09-14T14:48:55.597Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:55] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"4b6a1d15f802a713\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ECZkoKABK0ORzrIniGFP\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-87de7b6020ac\"},{\"timestamp\":\"2026-09-14T14:48:53.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:53] \\\"GET /health HTTP/1.1\\\" 200 -\",\"message_original_length\":65,\"message_sha256\":\"8ac99db18a0cb5b0\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"BSZkoKABK0ORzrInfWFd\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-6f4440a723f8\"},{\"timestamp\":\"2026-09-14T14:48:52.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:52] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"3c117b935522894c\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"AyZkoKABK0ORzrIneWF0\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-22da38d4fd4e\"},{\"timestamp\":\"2026-09-14T14:48:49.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:49] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"36694906655502c8\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ZCZkoKABK0ORzrInbWC_\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-391c899c0dfb\"},{\"timestamp\":\"2026-09-14T14:48:48.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:48] \\\"GET /health HTTP/1.1\\\" 200 -\",\"message_original_length\":65,\"message_sha256\":\"5d94769ae31eb2ef\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ViZkoKABK0ORzrInaWDT\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-54ed95fcd4db\"},{\"timestamp\":\"2026-09-14T14:48:46.595Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:46] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"06efd8a76cd316e2\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"KyZkoKABK0ORzrInZWDp\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-52c1e7dcc6b9\"},{\"timestamp\":\"2026-09-14T14:48:43.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:43] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"d8bc5c775f364a22\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"EiZkoKABK0ORzrInWl8v\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-c64db40681b4\"},{\"timestamp\":\"2026-09-14T14:48:40.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:40] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"cb686b5935cc6adb\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ASZkoKABK0ORzrInTl92\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-93f5d2ee30c9\"},{\"timestamp\":\"2026-09-14T14:48:37.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:37] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"fdcc7af90fd3def2\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"NSZkoKABK0ORzrInQF0J\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-ab298eb837a9\"},{\"timestamp\":\"2026-09-14T14:48:34.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:34] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"10fea0d0b6c39765\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uiZkoKABK0ORzrInN1wD\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-cda34695e561\"},{\"timestamp\":\"2026-09-14T14:48:34.212Z\",\"message\":\"listening on 18080\",\"message_original_length\":18,\"message_sha256\":\"8d0434d1fb4fc409\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uSZkoKABK0ORzrInN1wD\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-dc0aa5b75259\"},{\"timestamp\":\"2026-09-14T14:48:31.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:31] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"6eacfce200ebca43\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"OCZkoKABK0ORzrInKFw8\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-3566bdf03cd1\"},{\"timestamp\":\"2026-09-14T14:48:28.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:28] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"f232be83c70e3bf0\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"5yZkoKABK0ORzrInH1uw\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-c67c6e0eb3ee\"},{\"timestamp\":\"2026-09-14T14:48:28.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:28] \\\"GET /health HTTP/1.1\\\" 200 -\",\"message_original_length\":65,\"message_sha256\":\"97a32e2780348d95\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"6CZkoKABK0ORzrInH1uw\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-21d74d19a561\"},{\"timestamp\":\"2026-09-14T14:48:25.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:25] \\\"GET /ready HTTP/1.1\\\" 200 -\",\"message_original_length\":64,\"message_sha256\":\"1fd4bd0296176a81\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"0CZkoKABK0ORzrInE1v4\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-b9589f06b17e\"},{\"timestamp\":\"2026-09-14T14:48:23.596Z\",\"message\":\"10.2.0.50 - - [14/Sep/2026 14:48:23] \\\"GET /health HTTP/1.1\\\" 200 -\",\"message_original_length\":65,\"message_sha256\":\"680e7920f4c3fc6a\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uCZkoKABK0ORzrInCFs-\"},\"fields\":{},\"ref\":\"log-aiops-case-v17-workload-d5e59c14614f\"}],\"evidence_refs\":[\"log-aiops-case-v17-workload-10e152a912a2\",\"log-aiops-case-v17-workload-b2810253debf\",\"log-aiops-case-v17-workload-54b912b69d7d\",\"log-aiops-case-v17-workload-e3c5a60b86a9\",\"log-aiops-case-v17-workload-87de7b6020ac\",\"log-aiops-case-v17-workload-6f4440a723f8\",\"log-aiops-case-v17-workload-22da38d4fd4e\",\"log-aiops-case-v17-workload-391c899c0dfb\",\"log-aiops-case-v17-workload-54ed95fcd4db\",\"log-aiops-case-v17-workload-52c1e7dcc6b9\",\"log-aiops-case-v17-workload-c64db40681b4\",\"log-aiops-case-v17-workload-93f5d2ee30c9\",\"log-aiops-case-v17-workload-ab298eb837a9\",\"log-aiops-case-v17-workload-cda34695e561\",\"log-aiops-case-v17-workload-dc0aa5b75259\",\"log-aiops-case-v17-workload-3566bdf03cd1\",\"log-aiops-case-v17-workload-c67c6e0eb3ee\",\"log-aiops-case-v17-workload-21d74d19a561\",\"log-aiops-case-v17-workload-b9589f06b17e\",\"log-aiops-case-v17-workload-d5e59c14614f\"]}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=query_pod_logs status=query_succeeded source_system=elasticsearch dimension=logging coverage=present directness=direct purpose=\"首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID\"\nENTITY namespace=aiops-case-v17 pod=workload pod_uid=85aece07-6ffa-41db-9e5a-f351771a8864 pod_ip=172.16.104.36 node=node2\nEXECUTED_QUERY query={\"index\":\"filebeat-*\",\"identity_basis\":\"pod_uid\",\"uid_query_hits\":100,\"backend_total\":{\"value\":108,\"relation\":\"eq\"},\"time_range\":{\"start\":\"2026-09-14T14:24:15.662085Z\",\"end\":\"2026-09-14T14:54:15.662085Z\"},\"container\":null,\"keywords\":[],\"keyword_mode\":\"any\",\"levels\":[],\"trace_id\":null,\"dsl\":{\"size\":100,\"_source\":[\"@timestamp\",\"message\",\"log\",\"log.level\",\"level\",\"severity\",\"severity_text\",\"trace.id\",\"trace_id\",\"kubernetes.namespace\",\"kubernetes.namespace_name\",\"kubernetes.pod.name\",\"kubernetes.pod_name\",\"kubernetes.pod.uid\",\"kubernetes.container.name\",\"kubernetes.container_name\"],\"sort\":[{\"@timestamp\":\"desc\"}],\"query\":{\"bool\":{\"filter\":[{\"range\":{\"@timestamp\":{\"gte\":\"2026-09-14T14:24:15.662085Z\",\"lte\":\"2026-09-14T14:54:15.662085Z\"}}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.namespace\":\"aiops-case-v17\"}},{\"term\":{\"kubernetes.namespace_name\":\"aiops-case-v17\"}}],\"minimum_should_match\":1}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.pod.uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"}},{\"term\":{\"kubernetes.pod.uid.keyword\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"}}],\"minimum_should_match\":1}}],\"must\":[]}}},\"executions\":[{\"identity_basis\":\"pod_uid\",\"dsl_ref\":\"query.dsl\",\"hit_count\":100}],\"dsl_sha256\":\"b39e27aaa25f4787\"}\nQUERY_FACT ref=log-aiops-case-v17-workload-10e152a912a2 source_system=elasticsearch name=log.message value=\"10.2.0.50 - - [14/Sep/2026 14:54:10] \\\"GET /ready HTTP/1.1\\\" 200 -\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"8SZpoKABK0ORzrInVaDZ\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v17-workload-b2810253debf source_system=elasticsearch name=log.message value=\"10.2.0.50 - - [14/Sep/2026 14:54:07] \\\"GET /ready HTTP/1.1\\\" 200 -\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"pSZpoKABK0ORzrInTKAP\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v17-workload-54b912b69d7d source_system=elasticsearch name=log.message value=\"10.2.0.50 - - [14/Sep/2026 14:54:04] \\\"GET /ready HTTP/1.1\\\" 200 -\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"-CZpoKABK0ORzrInQJ4S\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v17-workload-e3c5a60b86a9 source_system=elasticsearch name=log.message value=\"listening on 18080\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"9yZpoKABK0ORzrInQJ4S\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v17-workload-87de7b6020ac source_system=elasticsearch name=log.message value=\"10.2.0.50 - - [14/Sep/2026 14:48:55] \\\"GET /ready HTTP/1.1\\\" 200 -\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ECZkoKABK0ORzrIniGFP\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v17-workload-6f4440a723f8 source_system=elasticsearch name=log.message value=\"10.2.0.50 - - [14/Sep/2026 14:48:53] \\\"GET /health HTTP/1.1\\\" 200 -\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"BSZkoKABK0ORzrInfWFd\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v17-workload-22da38d4fd4e source_system=elasticsearch name=log.message value=\"10.2.0.50 - - [14/Sep/2026 14:48:52] \\\"GET /ready HTTP/1.1\\\" 200 -\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"AyZkoKABK0ORzrIneWF0\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v17-workload-391c899c0dfb source_system=elasticsearch name=log.message value=\"10.2.0.50 - - [14/Sep/2026 14:48:49] \\\"GET /ready HTTP/1.1\\\" 200 -\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"ZCZkoKABK0ORzrInbWC_\"} directness=direct\nQUERY_LIMITATIONS\nEVIDENCE_REFS values=[\"log-aiops-case-v17-workload-10e152a912a2\",\"log-aiops-case-v17-workload-b2810253debf\",\"log-aiops-case-v17-workload-54b912b69d7d\",\"log-aiops-case-v17-workload-e3c5a60b86a9\",\"log-aiops-case-v17-workload-87de7b6020ac\",\"log-aiops-case-v17-workload-6f4440a723f8\",\"log-aiops-case-v17-workload-22da38d4fd4e\",\"log-aiops-case-v17-workload-391c899c0dfb\",\"log-aiops-case-v17-workload-54ed95fcd4db\",\"log-aiops-case-v17-workload-52c1e7dcc6b9\",\"log-aiops-case-v17-workload-c64db40681b4\",\"log-aiops-case-v17-workload-93f5d2ee30c9\",\"log-aiops-case-v17-workload-ab298eb837a9\",\"log-aiops-case-v17-workload-cda34695e561\",\"log-aiops-case-v17-workload-dc0aa5b75259\",\"log-aiops-case-v17-workload-3566bdf03cd1\",\"log-aiops-case-v17-workload-c67c6e0eb3ee\",\"log-aiops-case-v17-workload-21d74d19a561\",\"log-aiops-case-v17-workload-b9589f06b17e\",\"log-aiops-case-v17-workload-d5e59c14614f\"]"
+        },
+        {
+          "tool": "query_pod_tracing",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":0,\"ledger_flows\":20,\"ledger_spans\":0,\"matched\":20,\"normalized\":20,\"retrieved\":20,\"returned\":20,\"serialized_flows\":20,\"serialized_spans\":0},\"coverage\":\"present\",\"dimension\":\"tracing\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-v17\",\"node\":\"node2\",\"pod\":\"workload\",\"pod_ip\":\"172.16.104.36\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\"},\"evidence\":[{\"confidence\":\"high\",\"data\":{\"dst_ip\":\"172.16.104.36\",\"duration_us\":\"3001180\",\"protocol\":\"HTTP\",\"request_resource\":\"/health\",\"request_type\":\"GET\",\"response_code\":200,\"response_status\":0,\"span_id\":\"\",\"src_ip\":\"10.2.0.50\",\"timestamp\":{\"utc\":\"2026-09-14T14:24:38Z\"},\"trace_id\":\"\"},\"directness\":\"direct\",\"id\":\"fact-2d60ee94b02f\",\"pattern_count\":20,\"pattern_exemplar\":\"head\",\"source_system\":\"deepflow\",\"trace_type\":\"flow\"},{\"confidence\":\"high\",\"data\":{\"dst_ip\":\"172.16.104.36\",\"duration_us\":\"3001192\",\"protocol\":\"HTTP\",\"request_resource\":\"/health\",\"request_type\":\"GET\",\"response_code\":200,\"response_status\":0,\"span_id\":\"\",\"src_ip\":\"10.2.0.50\",\"timestamp\":{\"utc\":\"2026-09-14T14:48:53Z\"},\"trace_id\":\"\"},\"directness\":\"direct\",\"id\":\"fact-db948b680599\",\"pattern_count\":20,\"pattern_exemplar\":\"tail\",\"source_system\":\"deepflow\",\"trace_type\":\"flow\"},{\"confidence\":\"high\",\"data\":{\"dst_ip\":\"172.16.104.36\",\"duration_us\":\"3001868\",\"protocol\":\"HTTP\",\"request_resource\":\"/health\",\"request_type\":\"GET\",\"response_code\":200,\"response_status\":0,\"span_id\":\"\",\"src_ip\":\"10.2.0.50\",\"timestamp\":{\"utc\":\"2026-09-14T14:24:43Z\"},\"trace_id\":\"\"},\"directness\":\"direct\",\"id\":\"fact-5cbb85582df4\",\"pattern_count\":20,\"pattern_exemplar\":\"middle\",\"source_system\":\"deepflow\",\"trace_type\":\"flow\"},{\"confidence\":\"high\",\"data\":{\"dst_ip\":\"172.16.104.36\",\"duration_us\":\"3002166\",\"protocol\":\"HTTP\",\"request_resource\":\"/health\",\"request_type\":\"GET\",\"response_code\":200,\"response_status\":0,\"span_id\":\"\",\"src_ip\":\"10.2.0.50\",\"timestamp\":{\"utc\":\"2026-09-14T14:25:03Z\"},\"trace_id\":\"\"},\"directness\":\"direct\",\"id\":\"fact-e7e7f1f0e097\",\"pattern_count\":20,\"pattern_exemplar\":\"middle\",\"source_system\":\"deepflow\",\"trace_type\":\"flow\"}],\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/003-evidence-query_pod_tracing.raw.txt\",\"tool\":\"read_context_archive\"},\"source_coverage\":{\"deepflow\":{\"coverage\":\"present\",\"directness\":\"direct\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"reason\":\"no_valid_trace_ids\"}},\"source_system\":\"deepflow+tempo\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":16,\"selected\":4,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"query_pod_tracing\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"reasons\":[\"sql_limit_reached_possible_more_rows\",\"source_or_collection_limit\"],\"source_or_collection_truncated\":true,\"truncated\":true},\"window\":{\"end\":\"2026-09-14T14:54:15.123477Z\",\"start\":\"2026-09-14T14:24:15.123477Z\"}}",
+          "duration_s": 1.668835163116455,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/003-evidence-query_pod_tracing.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/003-evidence-query_pod_tracing.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/e7cd1fff44c74e22-g1/tools/003-evidence-query_pod_tracing.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-2bd5ae522589",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-032a854616ac",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001380",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:48:23",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:48:23",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-a77c8b1b5dbd"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-1135388ce255",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001192",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:36:38",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:36:38",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-7ab29d4d9328"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-1b5dce797c40",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001292",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:37:03",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:37:03",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-c617023d9188"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-2d60ee94b02f",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001180",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:24:38",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:24:38",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-a0c7da9828a7"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-3284a853d383",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001148",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:48:48",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:48:48",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-0cd72ec711a1"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-42a61f99ffeb",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001044",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:30:43",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:30:43",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-f70deb2d7244"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-5cbb85582df4",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001868",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:24:43",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:24:43",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-f0afa6efd5db"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-609035ebd29f",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001256",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:42:48",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:42:48",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-69bd753658f9"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-70db4dd3c41d",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001276",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:31:03",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:31:03",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-91251ca3c856"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-759fbd90188b",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001299",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:42:28",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:42:28",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-ad8c1171bef0"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-797c1b643532",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001101",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:42:53",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:42:53",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-f678b3328bdd"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              },
+              {
+                "fact_id": "fact-79f04ed2a9ee",
+                "entity_id": "k8s.pod:aiops-case-v17/workload:85aece07-6ffa-41db-9e5a-f351771a8864",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v17",
+                "entity_name": "workload",
+                "dimension": "tracing",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                  "dst_ip": "172.16.104.36",
+                  "duration_us": "3001715",
+                  "protocol": "HTTP",
+                  "request_resource": "/health",
+                  "request_type": "GET",
+                  "response_code": 200,
+                  "response_status": 0,
+                  "span_id": "",
+                  "src_ip": "10.2.0.50",
+                  "syscall_trace_id_request": "0",
+                  "syscall_trace_id_response": "0",
+                  "timestamp": "2026-09-14 22:42:23",
+                  "trace_id": ""
+                },
+                "timestamp": "2026-09-14 22:42:23",
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "deepflow-aiops-case-v17-workload-d336f1801196"
+                ],
+                "metadata": {
+                  "trace_id": ""
+                }
+              }
+            ],
+            "record_count": 12,
+            "truncated": true,
+            "source": "mcp_canonical",
+            "legacy_contract": false
+          },
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"deepflow+tempo\",\"dimension\":\"tracing\",\"entity\":{\"namespace\":\"aiops-case-v17\",\"pod\":\"workload\",\"pod_uid\":\"85aece07-6ffa-41db-9e5a-f351771a8864\",\"lifecycle_changed\":false,\"node\":\"node2\",\"pod_ip\":\"172.16.104.36\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID\",\"coverage\":\"present\",\"directness\":\"direct\",\"query\":{\"sql\":\"SELECT toString(flow.time) AS time, IPv4NumToString(ip4_0) AS src_ip, IPv4NumToString(ip4_1) AS dst_ip, l7_protocol_str, request_type, request_resource, response_code, response_status, response_duration, trace_id, span_id, toString(syscall_trace_id_request) AS syscall_trace_id_request, toString(syscall_trace_id_response) AS syscall_trace_id_response FROM flow_log.l7_flow_log AS flow WHERE flow.time >= toDateTime('2026-09-14 14:24:15', 'UTC') AND flow.time <= toDateTime('2026-09-14 14:54:15', 'UTC') AND (ip4_0 = '172.16.104.36' OR ip4_1 = '172.16.104.36') ORDER BY (trace_id != '') DESC, response_duration DESC, flow.time DESC LIMIT 20 FORMAT JSON\",\"filtered_match_count\":20,\"time_range\":{\"start\":\"2026-09-14T14:24:15.123477Z\",\"end\":\"2026-09-14T14:54:15.123477Z\"},\"pod_ip\":\"172.16.104.36\",\"direction\":\"any\",\"tempo_trace_ids\":[],\"invalid_tempo_trace_id_count\":0,\"tempo\":{}},\"facts\":[{\"ref\":\"deepflow-aiops-case-v17-workload-4cc93eae7ff0\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:25:03\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:25:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3002166\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-f0afa6efd5db\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:24:43\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:24:43\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001868\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-d336f1801196\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:42:23\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:42:23\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001715\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-cf28948070d6\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:36:58\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:36:58\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001659\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-a77c8b1b5dbd\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:48:23\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:48:23\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001380\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-ad8c1171bef0\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:42:28\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:42:28\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001299\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-c617023d9188\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:37:03\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:37:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001292\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-91251ca3c856\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:31:03\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:31:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001276\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-69bd753658f9\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:42:48\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:42:48\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001256\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-7f9aeb346a87\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:30:38\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:30:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001251\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-9dbe753c2404\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:48:28\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:48:28\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001242\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-ec2367e408e5\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:25:08\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:25:08\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001194\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-4dc2cd9343b1\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:48:53\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:48:53\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-7ab29d4d9328\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:36:38\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:36:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-b1f840c8afb1\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:36:33\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:36:33\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-a0c7da9828a7\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:24:38\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:24:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001180\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-0cd72ec711a1\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:48:48\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:48:48\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001148\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-f678b3328bdd\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:42:53\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:42:53\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001101\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-f70deb2d7244\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:30:43\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:30:43\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001044\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"},{\"ref\":\"deepflow-aiops-case-v17-workload-fdfe3f123ed2\",\"source_system\":\"deepflow\",\"dimension\":\"tracing\",\"entity\":\"aiops-case-v17/workload\",\"observed_at\":\"2026-09-14 22:31:08\",\"name\":\"l7_flow\",\"value\":{\"timestamp\":\"2026-09-14 22:31:08\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3000850\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},\"trace_id\":\"\",\"directness\":\"direct\"}],\"samples\":[{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:25:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3002166\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:24:43\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001868\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:42:23\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001715\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:36:58\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001659\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:48:23\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001380\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:42:28\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001299\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:37:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001292\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:31:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001276\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:42:48\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001256\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:30:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001251\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:48:28\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001242\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:25:08\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001194\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:48:53\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:36:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:36:33\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:24:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001180\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:48:48\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001148\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:42:53\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001101\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:30:43\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001044\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"type\":\"flow\",\"timestamp\":\"2026-09-14 22:31:08\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3000850\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"}],\"flows\":[{\"timestamp\":\"2026-09-14 22:25:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3002166\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:24:43\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001868\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:42:23\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001715\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:36:58\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001659\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:48:23\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001380\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:42:28\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001299\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:37:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001292\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:31:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001276\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:42:48\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001256\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:30:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001251\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:48:28\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001242\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:25:08\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001194\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:48:53\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:36:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:36:33\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001192\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:24:38\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001180\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:48:48\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001148\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:42:53\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001101\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:30:43\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001044\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"},{\"timestamp\":\"2026-09-14 22:31:08\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3000850\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"}],\"telemetry\":{\"deepflow\":{\"coverage\":\"present\",\"directness\":\"direct\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"query_meta\":{},\"reason\":\"no_valid_trace_ids\"}},\"evidence_refs\":[\"deepflow-aiops-case-v17-workload-4cc93eae7ff0\",\"deepflow-aiops-case-v17-workload-f0afa6efd5db\",\"deepflow-aiops-case-v17-workload-d336f1801196\",\"deepflow-aiops-case-v17-workload-cf28948070d6\",\"deepflow-aiops-case-v17-workload-a77c8b1b5dbd\",\"deepflow-aiops-case-v17-workload-ad8c1171bef0\",\"deepflow-aiops-case-v17-workload-c617023d9188\",\"deepflow-aiops-case-v17-workload-91251ca3c856\",\"deepflow-aiops-case-v17-workload-69bd753658f9\",\"deepflow-aiops-case-v17-workload-7f9aeb346a87\",\"deepflow-aiops-case-v17-workload-9dbe753c2404\",\"deepflow-aiops-case-v17-workload-ec2367e408e5\",\"deepflow-aiops-case-v17-workload-4dc2cd9343b1\",\"deepflow-aiops-case-v17-workload-7ab29d4d9328\",\"deepflow-aiops-case-v17-workload-b1f840c8afb1\",\"deepflow-aiops-case-v17-workload-a0c7da9828a7\",\"deepflow-aiops-case-v17-workload-0cd72ec711a1\",\"deepflow-aiops-case-v17-workload-f678b3328bdd\",\"deepflow-aiops-case-v17-workload-f70deb2d7244\",\"deepflow-aiops-case-v17-workload-fdfe3f123ed2\"]}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=query_pod_tracing status=query_succeeded source_system=deepflow+tempo dimension=tracing coverage=present directness=direct purpose=\"首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID\"\nENTITY namespace=aiops-case-v17 pod=workload pod_uid=85aece07-6ffa-41db-9e5a-f351771a8864 pod_ip=172.16.104.36 node=node2\nEXECUTED_QUERY query={\"sql\":\"SELECT toString(flow.time) AS time, IPv4NumToString(ip4_0) AS src_ip, IPv4NumToString(ip4_1) AS dst_ip, l7_protocol_str, request_type, request_resource, response_code, response_status, response_duration, trace_id, span_id, toString(syscall_trace_id_request) AS syscall_trace_id_request, toString(syscall_trace_id_response) AS syscall_trace_id_response FROM flow_log.l7_flow_log AS flow WHERE flow.time >= toDateTime('2026-09-14 14:24:15', 'UTC') AND flow.time <= toDateTime('2026-09-14 14:54:15', 'UTC') AND (ip4_0 = '172.16.104.36' OR ip4_1 = '172.16.104.36') ORDER BY (trace_id != '') DESC, response_duration DESC, flow.time DESC LIMIT 20 FORMAT JSON\",\"filtered_match_count\":20,\"time_range\":{\"start\":\"2026-09-14T14:24:15.123477Z\",\"end\":\"2026-09-14T14:54:15.123477Z\"},\"pod_ip\":\"172.16.104.36\",\"direction\":\"any\",\"tempo_trace_ids\":[],\"invalid_tempo_trace_id_count\":0,\"tempo\":{}}\nQUERY_FACT ref=deepflow-aiops-case-v17-workload-4cc93eae7ff0 source_system=deepflow name=l7_flow value={\"timestamp\":\"2026-09-14 22:25:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3002166\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"} directness=direct\nQUERY_FACT ref=deepflow-aiops-case-v17-workload-f0afa6efd5db source_system=deepflow name=l7_flow value={\"timestamp\":\"2026-09-14 22:24:43\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001868\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"} directness=direct\nQUERY_FACT ref=deepflow-aiops-case-v17-workload-d336f1801196 source_system=deepflow name=l7_flow value={\"timestamp\":\"2026-09-14 22:42:23\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001715\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"} directness=direct\nQUERY_FACT ref=deepflow-aiops-case-v17-workload-cf28948070d6 source_system=deepflow name=l7_flow value={\"timestamp\":\"2026-09-14 22:36:58\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001659\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"} directness=direct\nQUERY_FACT ref=deepflow-aiops-case-v17-workload-a77c8b1b5dbd source_system=deepflow name=l7_flow value={\"timestamp\":\"2026-09-14 22:48:23\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001380\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"} directness=direct\nQUERY_FACT ref=deepflow-aiops-case-v17-workload-ad8c1171bef0 source_system=deepflow name=l7_flow value={\"timestamp\":\"2026-09-14 22:42:28\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001299\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"} directness=direct\nQUERY_FACT ref=deepflow-aiops-case-v17-workload-c617023d9188 source_system=deepflow name=l7_flow value={\"timestamp\":\"2026-09-14 22:37:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001292\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"} directness=direct\nQUERY_FACT ref=deepflow-aiops-case-v17-workload-91251ca3c856 source_system=deepflow name=l7_flow value={\"timestamp\":\"2026-09-14 22:31:03\",\"src_ip\":\"10.2.0.50\",\"dst_ip\":\"172.16.104.36\",\"protocol\":\"HTTP\",\"request_type\":\"GET\",\"request_resource\":\"/health\",\"response_code\":200,\"response_status\":0,\"duration_us\":\"3001276\",\"trace_id\":\"\",\"span_id\":\"\",\"syscall_trace_id_request\":\"0\",\"syscall_trace_id_response\":\"0\"} directness=direct\nTELEMETRY sources={\"deepflow\":{\"coverage\":\"present\",\"directness\":\"direct\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"query_meta\":{},\"reason\":\"no_valid_trace_ids\"}}\nQUERY_LIMITATIONS\nEVIDENCE_REFS values=[\"deepflow-aiops-case-v17-workload-4cc93eae7ff0\",\"deepflow-aiops-case-v17-workload-f0afa6efd5db\",\"deepflow-aiops-case-v17-workload-d336f1801196\",\"deepflow-aiops-case-v17-workload-cf28948070d6\",\"deepflow-aiops-case-v17-workload-a77c8b1b5dbd\",\"deepflow-aiops-case-v17-workload-ad8c1171bef0\",\"deepflow-aiops-case-v17-workload-c617023d9188\",\"deepflow-aiops-case-v17-workload-91251ca3c856\",\"deepflow-aiops-case-v17-workload-69bd753658f9\",\"deepflow-aiops-case-v17-workload-7f9aeb346a87\",\"deepflow-aiops-case-v17-workload-9dbe753c2404\",\"deepflow-aiops-case-v17-workload-ec2367e408e5\",\"deepflow-aiops-case-v17-workload-4dc2cd9343b1\",\"deepflow-aiops-case-v17-workload-7ab29d4d9328\",\"deepflow-aiops-case-v17-workload-b1f840c8afb1\",\"deepflow-aiops-case-v17-workload-a0c7da9828a7\",\"deepflow-aiops-case-v17-workload-0cd72ec711a1\",\"deepflow-aiops-case-v17-workload-f678b3328bdd\",\"deepflow-aiops-case-v17-workload-f70deb2d7244\",\"deepflow-aiops-case-v17-workload-fdfe3f123ed2\"]"
+        }
+      ],
+      "llm_analysis": "好的，我已经收到了 ReAct 启动前预采集的 Metrics、Logging、Tracing 结果。这些是真实的环境事实，不是根因结论。\n\n**预采集事实总结：**\n1.  **Metrics (Prometheus):**\n    *   **Entity:** `aiops-case-v17/workload`, UID `85aece07-6ffa-41db-9e5a-f351771a8864`.\n    *   **Phase:** `kube_pod_status_phase` 为 Running (1)。\n    *   **Last Terminated:** `reason=\"Error\"`，值为 1。这确认了容器确实以错误状态终止过。\n    *   **Restarts:** `kube_pod_container_status_restarts_total` 为 40。这是一个很高的重启次数，与 CrashLoopBackOff 状态高度一致。\n2.  **Logging (Elasticsearch):**\n    *   **Coverage:** Present (108 条日志)。\n    *   **Content:** 主要是 HTTP 200 响应日志 (`GET /ready`, `GET /health`) 和 `listening on 18080`。\n    *   **Gap:** 当前日志窗内没有明显的错误日志、崩溃堆栈或 OOM 迹象。这可能意味着错误发生在更早的启动阶段，或者日志级别/采集配置只记录了应用访问日志。\n3.  **Tracing (DeepFlow):**\n    *   **Coverage:** Present (20 条 Flow)。\n    *   **Content:** 全部是 `GET /health` (HTTP 200)，来自 `10.2.0.50` (可能是 Prometheus/Healthcheck 服务)。没有业务流量。\n    *   **Gap:** 没有 trace_id，Tempo 无数据。无法通过应用调用链分析崩溃原因。\n\n**缺失的关键证据：**\n*   **Kubernetes Describe:** 还没执行。这是判断 CrashLoopBackOff 的直接原因（如 Exit Code, Last State Reason, OOMKilled, Liveness Probe Failed）的最核心事实。\n*   **Previous Logs:** 预采集的日志是当前窗口的，没有 `--previous` 日志。需要查看崩溃前的应用日志以确认退出原因。\n*   **Pod YAML:** 需要确认 command/args/resources/probe 配置。\n\n**下一步计划：**\n我将按照 evidence_plan 执行 `kubectl_describe`，并补充获取 `--previous` 日志和 Pod YAML。\n\n开始执行。\n<tool_code>\n# 1. 执行 kubectl_describe\nkubectl_describe(kind=\"pod\", name=\"workload\", namespace=\"aiops-case-v17\")\n</tool_code>\n<tool_code>\n# 2. 获取 previous logs\nkubectl_previous_logs(pod_name=\"workload\", namespace=\"aiops-case-v17\", tail=100)\n</tool_code>\n<tool_code>\n# 3. 获取 Pod YAML (command, args, resources, probes)\nkubectl_get_yaml(kind=\"pod\", name=\"workload\", namespace=\"aiops-case-v17\")\n</tool_code>\n<tool_code>\n# 4. 获取 events (BackOff, probe failed, Killing)\nkubectl_events(resource_type=\"pod\", resource_name=\"workload\", namespace=\"aiops-case-v17\")\n</tool_code>\n</tool_call>",
+      "plan_status": "ready",
+      "plan_failure_reason": "",
+      "collection_summary": "首轮可观测查询执行 3/4，完整度 75%；去重后证据计划 5 项，实际采集 3 项，未采集 2 项，完整度 60%；evidence 节点真实环境证据 3/5 项，完整度 60%；决定性多维证据 3/3 项，维度覆盖 100%，诊断充分度 80%（部分充分）；evidence 节点实际执行工具 3 个，其中核心 case 0 个、补充证据 3 个；已满足计划项 3 个，计划外补证 0 个",
+      "plan_total": 5,
+      "plan_collected": 3,
+      "plan_completeness": 0.6,
+      "environment_evidence_total": 5,
+      "environment_evidence_collected": 3,
+      "environment_evidence_completeness": 0.6,
+      "executed_tool_count": 3,
+      "matched_tool_count": 3,
+      "unplanned_tool_count": 0,
+      "case_tool_count": 0,
+      "supplemental_tool_count": 3,
+      "skipped_plan_count": 0,
+      "observability_target_total": 4,
+      "observability_target_collected": 3,
+      "observability_target_completeness": 0.75,
+      "diagnostic_evidence_total": 3,
+      "diagnostic_evidence_collected": 3,
+      "diagnostic_evidence_completeness": 1.0,
+      "diagnostic_evidence_missing": [],
+      "dimension_coverage_total": 3,
+      "dimension_coverage_collected": 3,
+      "dimension_coverage": 1.0,
+      "diagnostic_sufficiency": 0.7999999999999999,
+      "diagnostic_sufficiency_label": "部分充分",
+      "source_coverage": {
+        "cases": [],
+        "queries": [
+          {
+            "target": "aiops-case-v17/workload",
+            "tool": "execute_pod_promql",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+            "coverage": "present",
+            "directness": "direct",
+            "evidence_refs": [
+              "metric-aiops-case-v17-workload-3675b9aa5e01",
+              "metric-aiops-case-v17-workload-20315d91a5cb",
+              "metric-aiops-case-v17-workload-fc5d1cb09792",
+              "metric-aiops-case-v17-workload-5b6fe978360d",
+              "metric-aiops-case-v17-workload-63c7fe8f7551",
+              "metric-aiops-case-v17-workload-580ca6291474",
+              "metric-aiops-case-v17-workload-4c19dca215a9"
+            ]
+          },
+          {
+            "target": "aiops-case-v17/workload",
+            "tool": "query_pod_logs",
+            "source_system": "elasticsearch",
+            "dimension": "logging",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+            "coverage": "present",
+            "directness": "direct",
+            "evidence_refs": [
+              "log-aiops-case-v17-workload-10e152a912a2",
+              "log-aiops-case-v17-workload-b2810253debf",
+              "log-aiops-case-v17-workload-54b912b69d7d",
+              "log-aiops-case-v17-workload-e3c5a60b86a9",
+              "log-aiops-case-v17-workload-87de7b6020ac",
+              "log-aiops-case-v17-workload-6f4440a723f8",
+              "log-aiops-case-v17-workload-22da38d4fd4e",
+              "log-aiops-case-v17-workload-391c899c0dfb",
+              "log-aiops-case-v17-workload-54ed95fcd4db",
+              "log-aiops-case-v17-workload-52c1e7dcc6b9",
+              "log-aiops-case-v17-workload-c64db40681b4",
+              "log-aiops-case-v17-workload-93f5d2ee30c9",
+              "log-aiops-case-v17-workload-ab298eb837a9",
+              "log-aiops-case-v17-workload-cda34695e561",
+              "log-aiops-case-v17-workload-dc0aa5b75259",
+              "log-aiops-case-v17-workload-3566bdf03cd1",
+              "log-aiops-case-v17-workload-c67c6e0eb3ee",
+              "log-aiops-case-v17-workload-21d74d19a561",
+              "log-aiops-case-v17-workload-b9589f06b17e",
+              "log-aiops-case-v17-workload-d5e59c14614f"
+            ]
+          },
+          {
+            "target": "aiops-case-v17/workload",
+            "tool": "query_pod_tracing",
+            "source_system": "deepflow+tempo",
+            "dimension": "tracing",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+            "coverage": "present",
+            "directness": "direct",
+            "evidence_refs": [
+              "deepflow-aiops-case-v17-workload-4cc93eae7ff0",
+              "deepflow-aiops-case-v17-workload-f0afa6efd5db",
+              "deepflow-aiops-case-v17-workload-d336f1801196",
+              "deepflow-aiops-case-v17-workload-cf28948070d6",
+              "deepflow-aiops-case-v17-workload-a77c8b1b5dbd",
+              "deepflow-aiops-case-v17-workload-ad8c1171bef0",
+              "deepflow-aiops-case-v17-workload-c617023d9188",
+              "deepflow-aiops-case-v17-workload-91251ca3c856",
+              "deepflow-aiops-case-v17-workload-69bd753658f9",
+              "deepflow-aiops-case-v17-workload-7f9aeb346a87",
+              "deepflow-aiops-case-v17-workload-9dbe753c2404",
+              "deepflow-aiops-case-v17-workload-ec2367e408e5",
+              "deepflow-aiops-case-v17-workload-4dc2cd9343b1",
+              "deepflow-aiops-case-v17-workload-7ab29d4d9328",
+              "deepflow-aiops-case-v17-workload-b1f840c8afb1",
+              "deepflow-aiops-case-v17-workload-a0c7da9828a7",
+              "deepflow-aiops-case-v17-workload-0cd72ec711a1",
+              "deepflow-aiops-case-v17-workload-f678b3328bdd",
+              "deepflow-aiops-case-v17-workload-f70deb2d7244",
+              "deepflow-aiops-case-v17-workload-fdfe3f123ed2"
+            ]
+          }
+        ]
+      },
+      "case_target_coverage": {
+        "mode": "observability_first_round_gate",
+        "total": 4,
+        "collected": 3,
+        "rate": 0.75
+      },
+      "detail_retrieval": {
+        "evaluated": false,
+        "requested": 0,
+        "collected": 0,
+        "refs": []
+      },
+      "diagnostic_sufficiency_summary": {
+        "score": 0.7999999999999999,
+        "label": "部分充分"
+      },
+      "unresolved_questions": [],
+      "evidence_inventory": [
+        {
+          "id": "structured-plan-fallback-1",
+          "description": "确认目标 Pod 当前生命周期状态和事件",
+          "level": "critical",
+          "tool": "kubectl_describe",
+          "command": "kubectl describe pod workload -n aiops-case-v17",
+          "purpose": "确认目标 Pod 的当前状态、容器终态和近期事件",
+          "collected": false,
+          "source": "planned",
+          "outcome": "unknown"
+        },
+        {
+          "id": "observability-gate-1-metrics",
+          "description": "首轮查询异常 Pod aiops-case-v17/workload 的metrics 真实数据",
+          "level": "critical",
+          "tool": "execute_pod_promql",
+          "command": "execute generic Pod lifecycle PromQL",
+          "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-logging",
+          "description": "首轮查询异常 Pod aiops-case-v17/workload 的logging 真实数据",
+          "level": "critical",
+          "tool": "query_pod_logs",
+          "command": "query recent real Pod logs without preset fault keywords",
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-tracing",
+          "description": "首轮查询异常 Pod aiops-case-v17/workload 的tracing 真实数据",
+          "level": "critical",
+          "tool": "query_pod_tracing",
+          "command": "query recent real Pod flows and application spans",
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-topology",
+          "description": "首轮查询异常 Pod aiops-case-v17/workload 的topology 真实数据",
+          "level": "critical",
+          "tool": "query_pod_topology",
+          "command": "query source-backed Pod topology relationships",
+          "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边",
+          "collected": false,
+          "source": "planned",
+          "outcome": "unknown"
+        }
+      ],
+      "missing_reasons": [
+        "structured-plan-fallback-1(确认目标 Pod 当前生命周期状态和事件): 已规划但工具执行失败或无匹配结果",
+        "observability-gate-1-topology(首轮查询异常 Pod aiops-case-v17/workload 的topology 真实数据): 已规划但工具执行失败或无匹配结果"
+      ],
+      "early_stop": {
+        "triggered": false,
+        "reason": "",
+        "required_levels": [
+          "critical",
+          "important"
+        ]
+      }
+    }
+  }
+]

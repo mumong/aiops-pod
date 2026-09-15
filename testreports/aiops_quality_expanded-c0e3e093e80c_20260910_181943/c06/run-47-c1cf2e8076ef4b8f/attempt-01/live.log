@@ -1,0 +1,127 @@
+[run] run_id=c1cf2e8076ef4b8f
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以便检查是否有处于异常状态的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[agent:layer] 集群中检测到 1 个异常 Pod，状态为 `CrashLoopBackOff`。为了进一步定位原因，我将获取该 Pod 的详细信息。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-7679bcf76-n5vp8 0/1 CrashLoopBackOff 25
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-7679bcf76-n5vp8 0/1 CrashLoopBackOff 25
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod OOMKilled（以 Last State Reason 为准） > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Cr
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ConfigError / 启动配置失败 > Pod异常类型: ConfigError | 典型状态: CreateContainerConfigError / CreateContainerError / CrashLoopBackOff | 兼容分类: config_bootstrap ## 场景识别 | 信号 | 关键特征 | |------|-----
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[tool:start] fetch_runbook
+[node:done] layer / 问题定位 (12.7s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":12,"normalized":12,"retrieved":12,"returned":12},"coverage":"present","dimension":"logging","directness":"direct","entity":{"
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 我将开始调查 Pod `aiops-case-06/workload-7679bcf76-n5vp8` 的 CrashLoopBackOff 异常。首先获取 Pod 的当前状态和描述信息。
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 42s (x497 over 110m) Warning BackOff Pod/workload-7679bcf76-n5vp8 Back-off restarting failed container app in pod workload-7679bcf76-n5vp8_aiops-case-06(08e11260-3505
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-7679bcf76-n5vp8 namespace: aiops-case-06 node: node2/10.2.0.50 status: Running 关键诊断行: Warning BackOff 42s (x497 over 110m) kubelet Back-off restarting failed
+[agent:parallel_evidence] 我将采集该 Pod 的完整证据链，以判断其当前异常状态和 CrashLoopBackOff 的直接原因。
+
+**首轮采集计划：**
+1. `kubectl get yaml` - 获取 Pod 完整 YAML（含 restartCount 和 containerStatuses）
+2. `kubectl_previous_logs_all_containers` - 获取崩溃前最后一个周期的容器日志（tail=100）
+3. `kubectl_events` - 确认 BackOff 事件细节
+4. `kubectl_describe` - 确认当前状态和 RestartCount
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_previous_logs_all_containers
+[tool:start] kubectl_events
+[tool:start] kubectl_describe
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 42s (x497 over 110m) Warning BackOff Pod/workload-7679bcf76-n5vp8 Back-off restarting failed container app in pod workload-7679bcf76-n5vp8_aiops-case-06(08e11260-3505
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Warning BackOff 42s (x497 over 110m) kubelet Back-off restarting failed container app in pod workload-7679bcf76-n5vp8_aiops-case-06(08e11260-3505-495c-8224-2b91f27f02
+[tool:done] kubectl_get_yaml status=success Pod workload-7679bcf76-n5vp8 in namespace aiops-case-06 is stuck in CrashLoopBackOff with 26 restarts. Container 'app' (image xnet.registry.io:8443/observability/python:3-alpine) exits with code 2 and
+[tool:done] kubectl_previous_logs_all_containers status=success kubectl_previous_logs_all_containers 日志摘要: lines: 2 signals: 1 关键日志: {"timestamp":1789071757.1679068,"event":"http_request","level":"error","message":"runtime process exiting","http_status":500,"path"
+[agent:parallel_evidence] 根据已有工具结果，已采集以下关键事实，但还需要补充 Metrics 和 Topology 来确认当前状态是否仍为 CrashLoopBackOff 以及是否有资源/运行时层面的直接原因。我将先读取已落盘的 summary 以获取更完整的结构化信息，再决定是否需要新的工具调用。
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success Container 'app' in pod 'workload-7679bcf76-n5vp8' is in CrashLoopBackOff (Terminated/Error, Exit Code 2) with 26 restarts. A Warning BackOff event was emitted 497 times over 110m. key_facts: ["Pod: wo
+[agent:parallel_evidence] 根据已采集的上下文归档内容，整理关键事实、冲突与缺口如下：
+
+### 1. 实体身份与生命周期确认
+*   **实体**：Pod `workload-7679bcf76-n5vp8`，Namespace `aiops-case-06`，UID `08e11260-3505-495c-8224-2b91f27f029c`。
+*   **归属**：由 ReplicaSet `workload-7679bcf76` 控制，调度在 `node2` (10.2.0.50)。
+*   **状态**：Container `app` 处于 **CrashLoopBackOff**，已重启 **26 次**。
+*   **终止详情**：状态 `Terminated`，Reason `Error`，Exit Code `2`，因 `runtime_exit` 失败模式退出。
+
+### 2. 支持候选原因的证据 (CrashLoopBackOffRuntime)
+*   **Kubernetes 事实**：
+    *   `kubectl_get_yaml` 和 `read_context_archive
+[node:done] parallel_evidence / 并发证据采集 (84.3s)
+[node:start] conclusion / 汇总总结
+[heartbeat] conclusion
+[node:done] conclusion / 汇总总结 (15.4s)
+[final] run_id=c1cf2e8076ef4b8f status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-06/workload-7679bcf76-n5vp8` | CrashLoopBackOff | Pod workload-7679bcf76-n5vp8 处于 CrashLoopBackOff 状态，应用进程反复崩溃退出。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | `exit_code: 2`, `restart_count: 26`, `status: Running` (fact-01a1e0135f0e, fact-41a9183b70eb) | 记录容器进程异常退出的直接证据，证实启动失败已形成高频重启循环。 |
+| 2 | K8s Event | Kubernetes | `BackOff  42s (x497 over 110m)` 警告 kubelet 正在因容器反复崩溃而退避重启 (fact-706f2fc8c2eb) | 描述 Kubelet 观察到的现象，证明重启机制已触发退避逻辑。 |
+| 3 | K8s Event | Kubernetes | `cni.projectcalico.org/podIP: 172.16.104.6/32` (fact-ccc491ce68dd) | 确认 Pod 已成功完成初始化并获得网络环境，启动故障发生在容器启动后的运行阶段。 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_restarts_total` 从 14 跃升至 25，样本数 61，趋势可评估 (fact-f11bb6de936c) | 从时间维度印证了容器在过去一段时间内经历的高频重启行为。 |
+| 5 | Logging | Elasticsearch | 模式 `runtime process exiting` (http_status: 500)，出现 4 次，时间窗口 19:56:45 - 20:22:37 (fact-4f3ed62f80bf 等) | 核心异常日志，直接记录应用进程发生非正常终止行为。 |
+| 6 | Tracing | Tempo | Trace `086f3a098b97574a79236521c99cd28f`，Span `GET /work` 成功返回 200，标记 `aiops.observed_mode: runtime_exit` (fact-58f87e5fff20) | 关联追踪数据表明应用在处理请求后主动进入“运行时退出”模式，即使请求返回 200 也是预期的故障模拟行为。 |
+| 7 | Tracing | Deepflow | `GET /work` 对应 300/500 的等效 L7 Flow，响应码 500 (fact-1a4205fa8164 等) | 从 L7 流量视角佐证了服务在返回错误状态码（500）后进程退出，与日志 `http_status: 500` 一致。 |
+
+**证据说明：**
+K8s 状态显示进程以 Exit Code 2 退出并触发 BackOff，日志 `runtime process exiting` 精确描述了退出的具体原因。Tracing 数据中的 `aiops.observed_mode: runtime_exit` 标签将“请求完成”与“进程终止”这两个看似矛盾的现象（请求成功但进程随后退出）串联起来，证实这不是资源耗尽导致的 OOMKilled，而是应用内部逻辑控制的主动退出。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+环境变量配置 FAILURE_MODE=runtime_exit → 应用进程执行运行时退出逻辑 → 容器以 Exit Code 2 终止 (Terminated/Error) → Kubelet 触发 BackOff 重启导致 CrashLoopBackOff
+```
+
+### 根因结论
+
+已确认的根因是 **容器应用配置了故障注入模式（FAILURE_MODE=runtime_exit），导致进程以 Exit Code 2 主动异常退出**。
+
+该根因通过以下证据得到闭环印证：
+1. **日志与追踪的因果关联**：Logging 记录到 `runtime process exiting`，同时 Tracing (fact-58f87e5fff20) 确认在 `runtime_exit` 模式下应用主动终止。这排除了内存不足或依赖缺失导致的被动崩溃。
+2. **状态与事件的符合**：K8s 事件 (fact-706f2fc8c2eb) 报告了 `BackOff`，这是 Kubernetes 对高频异常终止（本例中由主动退出触发）的标准响应机制。
+3. **资源配置的非限制性**：Pod 配置了 24Mi/96Mi 的内存请求和限制 (fact-8e3cf701e172, fact-b8975eed5101)，且进程能成功处理 HTTP 请求，表明资源不是导致退出的原因，而是应用层面的逻辑退出行为导致了当前 CrashLoopBackOff 的现象。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.9m
+├─ 问题定位: 12.7s
+├─ 并发证据采集: 84.3s
+│  └─ g1 aiops-case-06/workload-7679bcf76-n5vp8: 84.3s (Evidence 73.9s, RCA 10.3s)
+└─ 汇总总结: 15.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-06/workload-7679bcf76-n5vp8**: pod-crashloop-runtime, pod-oomkilled, pod-config-error, pod-terminating-stuck
+
+[run:end] run_id=c1cf2e8076ef4b8f status=-

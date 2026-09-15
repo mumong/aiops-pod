@@ -1,0 +1,108 @@
+[run] run_id=8ecd3eb3caa8456c
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5b5fc86c8c-xn974 0/1 ContainerCreating 0
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod VolumeMountFailed / 卷挂载失败 > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume ## 使用原则（给模型） - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。 - `kubectl
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5b5fc86c8c-xn974 0/1 ContainerCreating 0
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5b5fc86c8c-xn974 0/1 ContainerCreating 0
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5b5fc86c8c-xn974 0/1 ContainerCreating 0
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5b5fc86c8c-xn974 0/1 ContainerCreating 0
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (16.6s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 收到预采集的 Prometheus 基线数据：Pod 处于 `Pending` (phase=1)，等待原因为 `ContainerCreating`，重启 0 次。日志和 Tracing 均无数据（日志因容器未启动，Tracing 因无 IP），符合预期。
+
+现在执行 Kubernetes 侧验证：获取 Pod YAML 以检查 volumes/events 原因，以及详细 events。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 4m6s (x60 over 109m) Warning FailedMount Pod/workload-5b5fc86c8c-xn974 MountVolume.SetUp failed for volume "input" : configmap "unavailable-config" not found 8m15s (
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-5b5fc86c8c-xn974 namespace: aiops-case-03 creationTimestamp: 2026-09-10T12:56:37Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[agent:parallel_evidence] ## 已采集事实与证据
+
+1.  **Pod 当前状态**：
+    *   **Phase**: `Pending` (Prometheus 确认 `kube_pod_status_phase=Pending=1`, `WaitingReason=ContainerCreating=1`)。
+    *   **节点**: `node2`。
+    *   **容器状态**: `app` 容器 `ready=False`, `reason=ContainerCreating`, `restarts=0`。
+
+2.  **根因证据 (Pod YAML)**：
+    *   Pod spec 定义了一个名为 `input` 的 volume，引用了 ConfigMap：`configMap: unavailable-config`。
+    *   该 ConfigMap 名称包含 `unavailable`，暗示其可能不存在。
+
+3.  **根因证据 (Events)**：
+    *   **`FailedMount`** 事件明确报错：`MountVolume.SetUp fai
+[node:done] parallel_evidence / 并发证据采集 (27.9s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.3s)
+[final] run_id=8ecd3eb3caa8456c status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-03/workload-5b5fc86c8c-xn974` | ContainerCreating | Pod aiops-case-03/workload-5b5fc86c8c-xn974 处于 ContainerCreating 状态 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | `pod.condition`: Initialized=True, PodScheduled=True, ContainersReady=False (ContainersNotReady), Ready=False | 确认 Pod 调度成功并进入等待容器创建阶段，但容器未完成就绪。 |
+| 2 | K8s State | Kubernetes | `container.waiting_reason`: ContainerCreating | 明确指出容器处于创建等待状态，排除了 CrashLoopBackOff 等运行后失败场景。 |
+| 3 | K8s Config | Kubernetes | `container.resource_request`: cpu="5m", memory="8Mi" | 提供资源请求背景，低资源配置通常不直接导致挂载阶段阻滞。 |
+| 4 | K8s Config | Kubernetes | `container.resource_limit`: cpu="50m", memory="32Mi" | 提供资源限制背景，仅作为状态参考，无直接因果关联。 |
+| 5 | Metric | Prometheus | `kube_pod_container_status_waiting_reason` (reason="ContainerCreating", value=1) | 观测证据：确认在 Prometheus 指标窗口内，容器确实卡在 ContainerCreating 阶段。 |
+| 6 | Metric | Prometheus | `kube_pod_status_phase` (phase="Pending", value=1) | 观测证据：确认 Pod 在指标层面也被标记为 Pending 状态，与 K8s 状态一致。 |
+| 7 | Metric | Prometheus | `kube_pod_container_status_restarts_total` (value=0) | 负面证据：排除了因容器崩溃重启导致的阻滞。 |
+| 8 | K8s Event | Kubernetes (RCA事实) | FailedMount (Volume 'input' 引用不存在的 ConfigMap 'unavailable-config') | **核心阻滞原因**：Kubelet 因无法找到 ConfigMap 而阻塞挂载，导致状态停滞。 |
+
+**证据分析说明：**
+Kubernetes 状态与 Prometheus 指标（Evidence 1, 2, 5, 6）高度一致，确认了容器处于 `ContainerCreating/Pending` 阶段且无重启历史。结合 K8s Event 中的具体报错事实，排除了资源不足或拉取失败的可能性，将阻滞原因锁定在卷挂载失败。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod Spec 引用 ConfigMap 'unavailable-config' → ConfigMap 不存在导致 FailedMount → kubelet 无法完成 Volume 挂载 → Pod 持续处于 ContainerCreating 状态
+```
+
+### 根因结论
+
+**已确认的根因：Pod 定义中的 Volume 'input' 挂载了一个不存在的 ConfigMap 'unavailable-config'。**
+
+**分析：**
+根据 K8s Event 及诊断数据，Pod 虽然成功调度（PodScheduled=True），但在启动容器前必须挂载卷。由于目标 ConfigMap `unavailable-config` 在命名空间 `aiops-case-03` 中不存在，Kubelet 的挂载操作失败（FailedMount）。这一阻塞机制导致容器无法完成初始化，从而使得 Pod 永远停留在 `ContainerCreating` 状态。证据 8 直接指出了缺失的资源对象，证据 1、2、5 和 6 提供了该状态持续存在的观测验证。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 54.8s
+├─ 问题定位: 16.6s
+├─ 并发证据采集: 27.9s
+│  └─ g1 aiops-case-03/workload-5b5fc86c8c-xn974: 27.9s (Evidence 21.1s, RCA 6.6s)
+└─ 汇总总结: 10.3s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-03/workload-5b5fc86c8c-xn974**: pod-volume-mount-failed
+
+[run:end] run_id=8ecd3eb3caa8456c status=-

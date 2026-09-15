@@ -1,0 +1,127 @@
+[run] run_id=13ef91b1eb8047e2
+[node:start] layer / 问题定位
+[agent:layer] 我将先获取当前集群中所有 Pod 的状态，以识别是否存在异常情况。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 66} NAMESPACE NAME READY STATUS REST
+[agent:layer] 检测到集群中存在 1 个异常 Pod：`aiops-case-v16` 命名空间下的 `workload` Pod。
+
+**异常特征分析：**
+- **名称**: `workload`
+- **命名空间**: `aiops-case-v16`
+- **状态**: `Running`
+- **就绪状态**: `0/1` (Ready)
+
+该 Pod 处于 `Running` 状态但容器未就绪（Ready=0/1），这通常意味着应用启动缓慢或探针（Probe）检查失败。这符合 `pod-notready-probe-failed.md` 的定义。
+
+接下来，我将获取相关的 Runbook 以便进行后续诊断。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[agent:layer] ### Layer 1: 异常定位与归组
+
+**异常结论**：
+当前集群中存在 **1 个异常 Pod**，表现为 `Running` 状态但容器未就绪（`Ready=0/1`）。
+
+**详细异常信息**：
+1.  **Pod**: `workload`
+    *   **命名空间**: `aiops-case-v16`
+    *   **节点**: `node2`
+    *   **当前状态**: `Running`
+    *   **就绪状态**: `0/1`
+    *   **异常关键词**: `NotReady`
+    *   **归一化类型**: `NotReadyProbeFailed`
+
+**分析说明**：
+该 Pod 虽然容器进程正在运行（Status=Running），但 Kubernetes 报告其未满足就绪条件（Ready=0/1）。根据 `pod-notready-probe-failed.md` 诊断手册，这通常由以下原因导致：
+1.  **探针配置错误**：ReadinessProbe、StartupProbe 或 LivenessProbe 的
+[node:done] layer / 问题定位 (20.4s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 我需要先执行 K8s 工具获取 Pod 状态、描述、YAML 和日志，然后结合已有的 Prometheus 结果进行分析。
+
+**步骤 1：获取 Pod 状态、描述、YAML 和日志**
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_logs
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v16 creationTimestamp: 2026-09-14T11:46:38Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 1 signals: 0 关键日志: listening on 18080
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Running 0 50m 172.16.104.33 node2 <none> <
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v16 node: node2/10.2.0.50 status: Running 关键诊断行: Warning Unhealthy 4m58s (x576 over 49m) kubelet Readiness probe failed:
+[agent:parallel_evidence] **步骤 2：获取 Topology 信息**
+[tool:start] query_pod_topology
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ---
+
+## 已采集事实
+
+### 1. Pod 当前状态
+- **Phase = Running**，**READY = 0/1**，Restart Count = 0，运行 50 分钟。
+- Conditions: `ContainersNotReady`（containers with unready status: [app]），`Ready=False`。
+- 没有 `CrashLoopBackOff`，容器状态为 `Running`，非终止状态。
+
+### 2. Readiness Probe 配置与实际端口不匹配（核心冲突）
+- **Probe 配置**: `http-get http://:18081/ready`，delay=5s, timeout=1s, period=5s, failureThreshold=1。
+- **应用实际监听**: 应用代码 `print('listening on 18080')` 并通过 `ThreadingHTTPServer(('0.0.0.0', 18080), ...)` 在 **18080** 端口启动。
+- **健康检查
+[node:done] parallel_evidence / 并发证据采集 (41.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.5s)
+[final] run_id=13ef91b1eb8047e2 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v16/workload` | NotReady | Readiness Probe 配置错误：探针指向端口 18081，但应用实际监听端口为 18080，导致持续连接拒绝。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | `phase=Running`, `Ready=False` (`reason: ContainersNotReady`) | 确认 Pod 已调度且容器正在运行，但因未满足就绪条件而被拒绝服务 |
+| 2 | K8s State | Kubernetes | `pod.status=Running`, `restart_count=0` | 排除应用启动崩溃或频繁重启的可能性 |
+| 3 | K8s Event | Kubernetes | `Warning Unhealthy: Readiness probe failed: Get "http://172.16.104.33:18081/ready": dial tcp 172.16.104.33:18081: connect: connection refused` | 直接证明健康检查请求被目标端口拒绝，确认为探针配置错误 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_restarts_total=0` | 独立确认容器无异常退出或重启事件，佐证非业务故障 |
+
+证据链表明：Pod 状态稳定在 `Running` 且无重启（证据 1, 2, 4），但 `kubelet` 持续报出连接拒绝错误（证据 3）。由于连接失败而非超时或 5xx 错误，且发生在健康检查阶段，直接指向探针配置（端口或路径）与容器实际监听端口不匹配。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+探针配置端口 (18081) ≠ 应用监听端口 (18080) → 连接拒绝 (Connection Refused) → 就绪探针连续失败 (Unhealthy Event) → Pod Ready=False (服务不可见)
+```
+
+### 根因结论
+
+**已确认的根因**：`Readiness Probe 配置错误`。
+
+Kubernetes 探针被配置为探测端口 **18081**，但应用实际监听在端口 **18080**。这导致 `kubelet` 发起的健康检查请求（证据 3）不断遭遇连接拒绝，致使容器状态始终不满足 `Ready=True`（证据 1），尽管应用本身运行正常且无崩溃（证据 2, 4）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 20.4s
+├─ 并发证据采集: 41.7s
+│  └─ g1 aiops-case-v16/workload: 41.7s (Evidence 36.0s, RCA 5.6s)
+└─ 汇总总结: 7.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v16/workload**: pod-notready-probe-failed
+
+[run:end] run_id=13ef91b1eb8047e2 status=-

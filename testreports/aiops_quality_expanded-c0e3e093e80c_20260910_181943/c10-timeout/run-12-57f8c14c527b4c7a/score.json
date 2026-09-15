@@ -1,0 +1,158 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "57f8c14c527b4c7a",
+  "elapsed_seconds": 111.319,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "c10-timeout",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "liveness"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [],
+    "accuracy": 1.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认根因为**应用同步阻塞导致 Liveness 探针超时**。\n- **证据支持**：追踪数据显示应用处理 `/health` 请求耗时约 `3s`（证据 #7），而集群 Liveness 探针超时阈值仅为 `1s`（证据 #1）。由于应用使用单线程架构，在处理阻塞任务期间无法响应探针请求，直接触发了 kubelet 的容器终止逻辑（证据 #4）。\n- **现象印证**：这一机制完美解释了为何 Pod 日志显示应用正常运行且能返回 `200 OK`（证据 #6），但状态却不断在 `Unhealthy`、`Killing` 和 `CrashLoopBackOff` 之间循环（证据 #2, #4）。\n\n---",
+      "full_section": "### 因果链\n\n```text\nPython应用使用单线程HTTP服务器且存在同步阻塞time.sleep(3) → Liveness探针在等待应用响应时触发1s超时 → kubelet因探针失败强制Kill容器(Exit Code 137) → 容器重启后重复阻塞形成CrashLoopBackOff\n```\n\n### 根因结论\n\n已确认根因为**应用同步阻塞导致 Liveness 探针超时**。\n- **证据支持**：追踪数据显示应用处理 `/health` 请求耗时约 `3s`（证据 #7），而集群 Liveness 探针超时阈值仅为 `1s`（证据 #1）。由于应用使用单线程架构，在处理阻塞任务期间无法响应探针请求，直接触发了 kubelet 的容器终止逻辑（证据 #4）。\n- **现象印证**：这一机制完美解释了为何 Pod 日志显示应用正常运行且能返回 `200 OK`（证据 #6），但状态却不断在 `Unhealthy`、`Killing` 和 `CrashLoopBackOff` 之间循环（证据 #2, #4）。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v17"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v17"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v17"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 5,
+    "planned": 8,
+    "completeness": 0.625,
+    "lanes": [
+      {
+        "lane": "57f8c14c527b4c7a-g1",
+        "collected": 5,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/57f8c14c527b4c7a-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 5,
+    "planned": 8,
+    "completeness": 0.625,
+    "lanes": [
+      {
+        "lane": "57f8c14c527b4c7a-g1",
+        "collected": 5,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/57f8c14c527b4c7a-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c10-timeout-kubernetes-observation",
+        "description": "c10-timeout-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-581a90f23da3",
+          "fact-b81e406bb87a",
+          "fact-bccf3c05dcd3",
+          "fact-282a4b44d292",
+          "fact-35fc4a29aa90",
+          "fact-61dc3857fcda",
+          "fact-7954d86bd4b0",
+          "fact-f46b5374f8af",
+          "fact-78589e2b4e72",
+          "fact-ca76cd822242",
+          "fact-d8ad97e88c95",
+          "fact-f8572204f441"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 36,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 12,
+  "logical_elapsed_seconds": 111.675,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

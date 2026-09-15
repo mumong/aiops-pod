@@ -1,0 +1,136 @@
+[run] run_id=5a467694c098455f
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前异常的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[agent:layer] 我识别到一个当前异常的 Pod。现在获取该 Pod 的详细信息以确认其状态关键字和归一化类型。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 70m <none> <none> <none> <none>
+[agent:layer] 根据集群状态分析，发现 1 个当前异常的 Pod。
+
+**LayerOutput:**
+```json
+{
+  "layer": "Localize",
+  "confidence": "high",
+  "reasoning": "集群扫描发现 1 个 Pod 处于 Pending 状态，其他 65 个 Pod 运行正常。Pending 状态且未绑定节点，通常由资源不足、调度策略或存储绑定问题引起。",
+  "abnormal_pods": [
+    {
+      "name": "workload",
+      "namespace": "aiops-case-v01",
+      "status": "Pending",
+      "abnormal_group_id": "group_pending_workload"
+    }
+  ],
+  "abnormal_groups": [
+    {
+      "id": "group_pending_workload",
+      "pod_count": 1,
+      "type": "PendingUnsc
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[agent:layer] 已识别出集群中的异常 Pod 及其所属异常组：
+
+1. **异常 Pod**：
+    - **Name**: `workload`
+    - **Namespace**: `aiops-case-v01`
+    - **Status**: `Pending`
+    - **Abnormal Group**: `group_pending_workload`
+
+2. **异常类型**：`PendingUnschedulable`
+
+3. **下一步**：
+    - 获取 `workload` Pod 的详细事件，以确认是否为调度失败（FailedScheduling）以及具体的失败原因（如资源不足、节点不匹配、PVC 未绑定等）。
+    - 检查集群中节点的可用性和状态。
+
+是否需要我继续获取 `workload` Pod 的事件详情以及节点状态以进行下一步的诊断？
+[node:done] layer / 问题定位 (18.2s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 首轮观测 baseline 已执行完毕。现根据结果执行 plan 中的 Kubernetes 关键查询，以确认调度失败的直接原因。
+
+**Baseline 事实回顾：**
+1.  **Metrics (Prometheus):** `kube_pod_status_phase` 确认 Pod `workload` 的 UID `6743bbac-5908-452b-a35b-5f6327fe8a58` 当前处于 **Pending** 阶段（值为 1），其他阶段均为 0。
+2.  **Logging (Elasticsearch):** 近 30 分钟无日志记录。对于 Pending 状态 Pod，未启动容器，无日志符合预期。
+3.  **Tracing (DeepFlow/Tempo):** `pod_ip` 为空（因为 Pod 未调度成功，无 IP），DeepFlow 和 Tempo 均无数据。符合预期。
+
+**下一步计划：** 获取 Pod 描述（含 Events）和 YAML 规范，以解释为什么处于 Pending 状态。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v01 creationTimestamp: 2026-09-11T05:28:07Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v01 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 10m (x12 over 65m) default-scheduler 0/3 nodes are available: 3 Insuffi
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[agent:parallel_evidence] 基于实时工具返回的证据，对 `aiops-case-v01/workload` 的调查结论如下：
+
+### 1. 核心事实与根因
+*   **状态确认：** Pod `workload` 当前处于 **Pending** 状态，Phase 为 `Pending`，`PodScheduled` 为 `False`。
+*   **直接原因：** 调度器 `default-scheduler` 反复报告 `FailedScheduling` 事件。
+*   **具体机制：** 错误原文明确指出 **"3 Insufficient cpu"**。集群中共有 3 个节点（master, node1, node2），均处于 `Ready` 状态，但全部无法满足该 Pod 的 CPU 请求或保留限制，导致 0/3 节点可用。
+*   **资源细节：** Pod 请求 `memory: 8Mi`，限制 `cpu: 100k` (0.1 core)、`memory: 32Mi`。这属于极低资源请求，通常集群应有空闲。"Insufficient cpu" 暗示节点实际可用 CPU 容量已被其他高资源需求的
+[node:done] parallel_evidence / 并发证据采集 (30.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.6s)
+[final] run_id=5a467694c098455f status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v01/workload` | Pending | Pod workload in aiops-case-v01 is stuck in Pending state due to FailedScheduling events. |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubernetes | `FailedScheduling 10m (x12 over 65m) ... 0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.` | 确认调度失败的确切原因，且集群内无节点资源满足条件也无法发生抢占。 |
+| 2 | K8s State | kubernetes | `PodScheduled=False, reason=Unschedulable, message="0/3 nodes are available: 3 Insufficient cpu"` | 描述 Pod 当前的阻塞状态与节点资源缺口事实。 |
+| 3 | K8s Config | kubernetes | `container="app", resource_request.cpu=100k, resource_limit.cpu=100k` | 提供 Pod 申请的资源上下文。 |
+| 4 | Metric | prometheus | `kube_pod_status_phase` (phase=Pending, value=1, sample_count=1) | 佐证 Pod 持续处于 Pending 阶段，未转为 Running。 |
+
+**证据印证说明：**
+1. Kubernetes 调度器事件（#1）与 Pod 状态（#2）在因果关系上完全一致，均指向集群 CPU 资源枯竭导致无法调度。
+2. Metric 监控数据（#4）从时间序列维度证实了 Pod 长期处于 Pending 状态未解除。
+3. 资源申请配置（#3）排除了因资源请求异常导致的不合理性，指向是集群整体分配能力不足。
+4. Logging/Tracing 因容器未启动（Pending），无法采集，仅依赖 K8s 层面数据即可形成闭环。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+集群节点总可用 CPU 不足 → 调度器无法找到满足 100k CPU 请求的节点且无抢占对象 → Pod 调度失败，PodScheduled=False → Pod 状态持续 Pending，业务无法运行
+```
+
+### 根因结论
+
+**已确认根因：集群节点 CPU 资源耗尽（Insufficient CPU resources available on cluster nodes）。**
+
+集群内 3 个节点均无法为 `aiops-case-v01/workload`（申请 100k CPU）分配资源，且不存在可被抢占的 Pod。该资源瓶颈直接导致调度器返回 `FailedScheduling` 事件，Pod 停留在 `Pending` 状态。虽然无法通过缺失的 Topology 数据定位具体是哪个业务占用了 CPU 或哪台节点压力最大，但“资源不足”是导致故障的明确根因。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 57.5s
+├─ 问题定位: 18.2s
+├─ 并发证据采集: 30.6s
+│  └─ g1 aiops-case-v01/workload: 30.6s (Evidence 23.2s, RCA 7.3s)
+└─ 汇总总结: 8.6s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v01/workload**: pod-pending-unschedulable
+
+[run:end] run_id=5a467694c098455f status=-

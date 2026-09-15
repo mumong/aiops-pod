@@ -1,0 +1,137 @@
+[run] run_id=7a95bb906d9a452f
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在的异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 集群中检测到一个异常 Pod：
+
+*   **异常实体**: `workload` (Namespace: `aiops-case-11`)
+*   **当前状态**: `Terminating`
+*   **状态特征**: Pod 卡在 Terminating 状态，已存在 96 分钟，未自动清理。
+
+这符合 **TerminatingStuck** 类型的异常特征。我将获取相关诊断手册以辅助确认该异常的潜在原因（如 Finalizer 卡住、Volume 卸载失败等）。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[agent:layer] 该 Pod 处于 `Terminating` 状态，根据 Runbook 定义，属于 `TerminatingStuck` 异常。
+
+### 1. 异常定位
+*   **异常 Pod**: `aiops-case-11/workload`
+*   **当前状态**: `Terminating`
+*   **异常组**: `TerminatingStuck`
+
+### 2. 根因初步分析 (根据 Runbook)
+Pod 已处于 `Terminating` 状态 96 分钟，通常意味着存在以下情况之一：
+1.  **Finalizer 卡住**: Pod 的 `metadata.finalizers` 字段非空，且对应的控制器或外部系统未能完成清理。
+2.  **节点失联**: Pod 所在节点 `node2` 可能处于 `NotReady` 或 `Unknown` 状态，导致 kubelet 无法完成容器停止。
+3.  **卷卸载失败**: CSI/NFS 等存储卷在卸载过程中卡住。
+4.  **优雅终止过长**: `preStop` 钩子或 `terminationGracePeri
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 96m 172.16.104.21 node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 23d v1.26.8 10.2.0.50 <no
+[agent:layer] Pod `workload` 在 `node2` 上处于 `Terminating` 状态已 96 分钟。节点 `node2` 当前状态为 `Ready`，排除了节点失联导致的卡死。
+
+为了确定 `TerminatingStuck` 的具体原因（如 Finalizer 卡住或卷卸载失败），需要查看 Pod 的详细信息（YAML）和事件。
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 96m 172.16.104.21 node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 96m 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 96m 172.16.104.21 node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 96m 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 96m 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 96m 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (27.1s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先执行 kubectl get/yaml/describe 确认实体当前状态，同时补查所属 Node 状态以区分“节点失联”与“finalizer/volume 卡住”。
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_describe
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 97m 172.16.104.21 node2 <none>
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-11 node: node2/10.2.0.50 status: Terminating (lasts 97m) 关键诊断行: Exit Code: 137 Annotations: cni.projectcalico.org/conta
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-11 creationTimestamp: 2026-09-11T03:47:03Z deletionTimestamp: 2026-09-11T03:47:07Z deletionGracePeriodSeconds: 0 finalizers: aio
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 23d v1.26.8 10.2.0.50 <no
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: node2 关键诊断行: volumes.kubernetes.io/controller-managed-attach-detach: true Taints: <none> 关键状态/事件: Lease: Failed to get lease: le
+[agent:parallel_evidence] ## 已采集事实
+
+1. **实体身份与生命周期**
+   - Pod `aiops-case-11/workload` 仍然存在（未被 Kubernetes 垃圾回收）。
+   - Pod UID：`98974b5c-1ddf-4f28-83ab-c916c5fb975d`，IP：`172.16.104.21`，调度在 `node2`。
+   - 容器 `app`：`State=Terminated`，Exit Code=137，Started `03:47:04`，Finished `03:47:18`（仅存活 14 秒），Restart Count=0。
+   - 容器当前 ready=False，Pod phase=Running（但 metadata.status.phase 与外部 `kubectl get` 看到的 STATUS=Terminating 一致，因为 deletion 流程已启动）。
+
+2. **Terminating 直接原因证据**
+   - `deletionTimestamp: 2026-09-11T03:47:07Z`，距当前已超过 **97 分钟
+[node:done] parallel_evidence / 并发证据采集 (39.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.8s)
+[final] run_id=7a95bb906d9a452f status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-11/workload` | Terminating | Pod aiops-case-11/workload 处于 Terminating 状态超过 97 分钟 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | pod.status | Terminating (lasts 97m) | 确认 Pod 长期处于终止阶段，证明删除流程被阻塞 |
+| 2 | K8s State | container.last_exit_code | 137 | 确认容器应用层曾发生异常（OOM 或系统 Kill） |
+| 3 | K8s Config | container.resource_limit.memory | 96Mi | 提供资源背景，137 退出码暗示资源耗尽可能性 |
+| 4 | Metric | kube_pod_container_status_restarts_total | 0 | 确认异常后未发生正常重启，Pod 仍挂起在删除队列中 |
+
+**证据分析：**
+Pod 处于 Terminating 状态超过 97 分钟（事实 1）且容器重启计数为 0（事实 4），结合退出码 137（事实 2）表明应用在最后一次异常后未重启，而是直接停留在删除阶段。资源限制 96Mi（事实 3）解释了应用崩溃的可能原因，但无法解释为何 Kubernetes 无法在应用结束后完成 Pod 对象的清理。这些事实共同指向了 Pod 生命周期中非应用层面的阻断行为。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+存在自定义 Finalizer 'aiops.lab/hold' → 控制器未完成关联外部资源的清理工作 → Pod 元数据中的 finalizers 字段未被 Kubernetes 清理 → API Server 拒绝移除 Terminating 状态的 Pod 对象
+```
+
+### 根因结论
+
+已确认根因为：自定义 Finalizer `aiops.lab/hold` 未被移除，导致 Kubernetes API Server 无法完成 Pod 对象的垃圾回收。
+
+Pod 对象因持有该 Finalizer，必须等待关联的外部资源清理控制器介入并完成清理工作。然而，证据显示截至观察时（97 分钟），该清理流程尚未完成，导致 API Server 拒绝执行删除动作，使 Pod 永久阻塞在 Terminating 状态。
+
+**缺失的决定性事实：**
+目前证据不足以说明“控制器未能完成清理”的具体原因（如控制器是否存活、是否存在死锁、或权限是否不足）。要完全定位阻塞环节，需要补充负责 `aiops.lab/hold` 清理的具体控制器（Controller/CRD）的状态及日志。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 27.1s
+├─ 并发证据采集: 39.4s
+│  └─ g1 aiops-case-11/workload: 39.4s (Evidence 30.0s, RCA 9.2s)
+└─ 汇总总结: 7.8s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-11/workload**: pod-terminating-stuck
+
+[run:end] run_id=7a95bb906d9a452f status=-

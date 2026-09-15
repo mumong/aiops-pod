@@ -1,0 +1,144 @@
+[run] run_id=8a9cf2182a174b18
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在的异常情况。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[agent:layer] 集群中发现一个异常 Pod：
+
+*   **Namespace**: `aiops-case-05`
+*   **Pod Name**: `workload-5dbb5dcd6c-bntfh`
+*   **Status**: `ContainerCreating`
+*   **Ready**: `0/1`
+
+该 Pod 卡在 `ContainerCreating` 状态，通常涉及镜像拉取、卷挂载或运行时配置问题。为了进一步诊断，我将获取该 Pod 的详细状态和事件信息。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5dbb5dcd6c-bntfh 0/1 ContainerCreating 0 8
+[agent:layer] Pod `workload-5dbb5dcd6c-bntfh` 处于 `ContainerCreating` 状态。由于 `ContainerCreating` 可能由多种原因引起（如镜像拉取失败、卷挂载失败、CNI 问题等），我需要检查是否有相关的 Runbook 可以提供诊断指导。
+
+根据常见的 Kubernetes 故障场景，`ContainerCreating` 常与 `ImagePullFailed` 或 `SandboxCreateFailed` 相关。考虑到这是一个特定的测试用例（`case-id=c05`），我将获取 `pod-imagepull-failed.md` 和 `pod-sandbox-create-failed.md` 两个 Runbook 来辅助诊断。
+[tool:start] fetch_runbook
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:done] fetch_runbook status=success <runbook> # Pod SandboxCreateFailed / Pod sandbox 创建失败 > Pod异常类型: SandboxCreateFailed | 典型状态: ContainerCreating / FailedCreatePodSandBox | 兼容分类: sandbox_runtime ## 状态识别 - Events 含 `FailedCreatePodSa
+[agent:layer] 当前集群中发现一个异常 Pod，状态为 `ContainerCreating`，尚未进入 `Running` 或报错终止状态。
+
+**异常定位：**
+
+*   **Pod 名称**: `workload-5dbb5dcd6c-bntfh`
+*   **Namespace**: `aiops-case-05`
+*   **当前状态**: `ContainerCreating` (0/1 Ready)
+*   **节点**: `node2`
+
+**分析：**
+该 Pod 卡在 `ContainerCreating` 阶段。这通常意味着容器运行时正在尝试创建沙箱（Sandbox），但可能因镜像拉取、网络插件（CNI）或卷挂载等原因受阻。由于尚未看到明确的 `FailedCreatePodSandBox` 或 `ImagePullBackOff` 状态，目前将其归类为通用的 `SandboxCreateFailed` 风险状态，需要进一步查看 Events 来确认具体卡点（如镜像拉取失败或 CNI 未就绪）。
+
+**下一步建议（Evidence 节点）：**
+需要获取该 Pod 的详细 Eve
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5dbb5dcd6c-bntfh 0/1 ContainerCreating 0 8
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod SandboxCreateFailed / Pod sandbox 创建失败 > Pod异常类型: SandboxCreateFailed | 典型状态: ContainerCreating / FailedCreatePodSandBox | 兼容分类: sandbox_runtime ## 状态识别 - Events 含 `FailedCreatePodSa
+[agent:layer] 集群中存在一个异常 Pod：
+
+**异常 Pod 列表：**
+
+| Pod Name | Namespace | Status | Ready | Key Entities |
+| :--- | :--- | :--- | :--- | :--- |
+| workload-5dbb5dcd6c-bntfh | aiops-case-05 | ContainerCreating | 0/1 | node2 |
+
+**异常分组：**
+
+*   **Abnormal Group 1:**
+    *   **Pod**: `workload-5dbb5dcd6c-bntfh` (Namespace: `aiops-case-05`)
+    *   **Status Keyword**: `ContainerCreating`
+    *   **Abnormal Type**: `SandboxCreateFailed` (候选，需根据 Events 最终确认为 `ImagePullFailed` 或其他)
+    *   **Status Category**: `RUNNING` (但
+[node:done] layer / 问题定位 (32.5s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我需要先执行既有的 evidence_plan，对 Pod `aiops-case-05/workload-5dbb5dcd6c-bntfh` 进行诊断。根据计划，我需要调用 Kubernetes、Metrics、Logging、Tracing 和 Topology 工具。
+
+不过，从预采集的结果来看，Logs 和 Tracing 都是空的（empty），这在 Pod 处于 ContainerCreating 阶段是预期的（容器尚未运行，无法产生日志或流量）。Prometheus 指标显示 Pod 处于 Pending 阶段，waiting_reason 是 ContainerCreating。
+
+现在我需要执行 Kubernetes 相关的诊断步骤：kubectl_describe（看事件）、kubectl_get_yaml（看规格）。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] query_pod_topology
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-5dbb5dcd6c-bntfh namespace: aiops-case-05 creationTimestamp: 2026-09-10T16:26:26Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[tool:done] kubectl_describe status=success Pod workload-5dbb5dcd6c-bntfh (aiops-case-05) is Pending due to Multus CNI failure: missing NetworkAttachmentDefinition 'unavailable-network'. key_facts: ["Pod: workload-5dbb5dcd6c-bntfh, NS: aiops-ca
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":4,"normalized":4,"retrieved":4,"returned":4},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 证据采集结论
+
+### 已确认事实
+
+1. **Kubernetes Events（关键证据）**：Pod `workload-5dbb5dcd6c-bntfh` 处于 **Pending** 状态，原因是 **Multus CNI failure: missing NetworkAttachmentDefinition 'unavailable-network'**。在 59 分钟前至 50 分钟前之间，反复出现警告：`multus cannot find network-attachment-definition (unavailable-network) in namespace (aiops-case-05)`。
+
+2. **Pod 规格验证**：
+   - Pod 的 `annotations` 中包含 `k8s.v1.cni.cncf.io/networks: unavailable-network`，表示 Pod 请求使用 Multus 附加网络 `unavailable-network`。
+   - **无 `imagePullSecrets`** 配置（排除了
+[node:done] parallel_evidence / 并发证据采集 (40.3s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (13.7s)
+[final] run_id=8a9cf2182a174b18 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-05/workload-5dbb5dcd6c-bntfh` | ContainerCreating | Pod workload-5dbb5dcd6c-bntfh stuck in ContainerCreating state on node2 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubernetes | `Warning FailedCreatePodSandBox ... kubelet (combined from similar events): Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox ... plugin type="multus" name="multus-cni-network" failed (add): Multus: ... error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cncf.io "unavailable-network" not found` (fact-5519e3cda05, 持续约 83m) | 核心失败原因：Kubelet 明确报告 Multus 插件在尝试获取网络委派时，发现命名空间 `aiops-case-05` 下的 `unavailable-network` 定义不存在，导致沙箱创建彻底失败。 |
+| 2 | K8s Event | kubernetes | 45 条 `Warning NoNetworkFound` 事件，由 `multus` 触发，内容均为 `cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cncf.io "unavailable-network" not found` (例如 fact-01aa833cf636 在 34m 前发生) | 佐证 Multus 控制器在 Pod 生命周期内反复尝试配置网络但均因缺少资源而失败，确认为持续性配置错误而非瞬时故障。 |
+| 3 | K8s State | kubernetes | `container.waiting_reason`: `ContainerCreating` (fact-910269f8d2e1) | 定义 Pod 的当前停滞状态，与 K8s Event 中的失败原因互为表里，确认 Pod 未完成初始化。 |
+| 4 | Metric | prometheus | `kube_pod_container_status_waiting_reason`: `1` (fact-9646a45492d3) | 指标确认当前 Pod 处于 Waiting 状态且原因为 `ContainerCreating`；由于仅有一个样本（`sample_count: 1`），无法评估该状态的趋势，仅作为当前状态快照。 |
+
+**证据互证说明：**
+1. **K8s Event** 提供了最完整的链路日志，明确指出 `FailedCreatePodSandBox` 是 `NoNetworkFound` 导致的，直接锁定了缺失的 `NetworkAttachmentDefinition`。
+2. **K8s State** 和 **Metric** 从状态维度验证了 Pod 确实因网络插件失败而停留在 `ContainerCreating` 阶段，未进入 `Running` 或 `Waiting` 的其他原因（如 `ImagePull`、`OOMKilled`）。
+3. Logging 与 Tracing 因容器未启动且无 Pod IP，属于物理上不适用，不构成证据冲突。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Deployment 声明了不存在的 Multus 网络 'unavailable-network' → Multus CNI 插件在命名空间 aiops-case-05 中找不到对应的 NetworkAttachmentDefinition 资源 → 网络沙箱（Pod Sandbox）创建失败（FailedCreatePodSandBox） → Pod 卡死在 ContainerCreating 状态
+```
+
+### 根因结论
+
+已确认根因为：**命名空间 `aiops-case-05` 中缺失 Multus 所需的 `NetworkAttachmentDefinition` 资源 `unavailable-network`**。
+
+*   **证据支撑**：Kubernetes Event 中的 `NoNetworkFound` 和 `FailedCreatePodSandBox` 明确指出了缺失的资源对象（`network-attachment-definitions.k8s.cncf.io "unavailable-network"` not found）。
+*   **现象解释**：由于网络初始化阶段失败，Kubelet 无法创建 Pod 沙箱，导致容器无法启动，Pod 持续维持在 `ContainerCreating` 状态（见 K8s State 和 Metric）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.4m
+├─ 问题定位: 32.5s
+├─ 并发证据采集: 40.3s
+│  └─ g1 aiops-case-05/workload-5dbb5dcd6c-bntfh: 40.3s (Evidence 33.1s, RCA 7.1s)
+└─ 汇总总结: 13.7s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-05/workload-5dbb5dcd6c-bntfh**: pod-imagepull-failed, pod-sandbox-create-failed
+
+[run:end] run_id=8a9cf2182a174b18 status=-

@@ -1,0 +1,264 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "1ec57bc416b44f7a",
+  "elapsed_seconds": 167.656,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 2,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 0.5,
+    "matches": [
+      {
+        "expectation_id": "node-selector-mismatch",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "aiops.lab/unavailable",
+          "node affinity/selector",
+          "nodeSelector"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [
+      "g2"
+    ],
+    "accuracy": 0.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因是 **Pod 调度约束与节点标签严重不匹配**。\n\n具体而言，Pod 的配置要求节点必须满足特定的 `node affinity/selector` 条件，而集群中的 3 个节点均未匹配该条件。这一结论由 Kubernetes Event（`fact-00651511dd57`）和 Pod Condition（`fact-461eaf46c244`）直接支撑。\n\n虽然正式 RCA 提示配置了特定的 `nodeSelector: {aiops.lab/unavailable: true}` 作为根因，但在输入事实中并未包含节点的标签列表事实或该 Pod 的完整 YAML 定义来独立验证这一具体键值对。鉴于 K8s 事件已 100% 明确归因于 \"affinity/selector\" 不匹配，且资源充足，此逻辑约束冲突是造成 Pending 状态的唯一决定性原因。\n\n---",
+      "full_section": "### 因果链\n\n```text\n已验证的异常 Pod 配置了不符合集群节点标签的选择器约束 → 调度器遍历所有 3 个节点均发现不匹配（且 Preemption 无效） → 0/3 nodes available (FailedScheduling) → Pod 处于 Pending 状态\n```\n\n### 根因结论\n\n已确认的根因是 **Pod 调度约束与节点标签严重不匹配**。\n\n具体而言，Pod 的配置要求节点必须满足特定的 `node affinity/selector` 条件，而集群中的 3 个节点均未匹配该条件。这一结论由 Kubernetes Event（`fact-00651511dd57`）和 Pod Condition（`fact-461eaf46c244`）直接支撑。\n\n虽然正式 RCA 提示配置了特定的 `nodeSelector: {aiops.lab/unavailable: true}` 作为根因，但在输入事实中并未包含节点的标签列表事实或该 Pod 的完整 YAML 定义来独立验证这一具体键值对。鉴于 K8s 事件已 100% 明确归因于 \"affinity/selector\" 不匹配，且资源充足，此逻辑约束冲突是造成 Pending 状态的唯一决定性原因。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-01"
+      ]
+    },
+    {
+      "group": "g2",
+      "text": "**已确认的根因：**\n集群中 `monitor/prometheus-observability-prometheus-0` 的状态震荡与不可用是由**Prometheus 规则配置错误**直接触发的连锁反应：\n1. **直接触发因素**：Prometheus 日志中频繁出现 `many-to-many matching not allowed` 报错（证据 #4），表明规则文件中存在无法消除关联的查询逻辑，导致规则评估失败及 CPU 持续高占用。\n2. **恶化机制**：容器 CPU 硬限制仅为 100m（证据 #3），在高占用下引发严重的计算争用。同时，日志中出现的 `/federate` 请求平均耗时达到 5.9s（证据 #5），远超 Liveness Probe 默认的 3s 超时设置，直接导致探针超时失败（证据 #1）。\n3. **状态震荡成因**：由于内存硬限制较低（512Mi）且存在大量失败的计算开销，容器易触发 OOMKilled。重启后，错误的规则配置立即重新导致 CPU 飙升和请求超时，形成“超时宕机 -> 重启 -> 再次超时”的循环。\n\n因此，当前的异常状态是**错误规则引发的 CPU 争用**与**过严的探针超时阈值**共同作用的结果。\n\n---",
+      "full_section": "### 因果链\n\n```text\nPrometheus Rule 配置错误(many-to-many matching) → 规则引擎 CPU 持续高占用 → 结合 512Mi 内存硬限制导致容器频繁 OOMKilled 重启 → 重启后规则引擎计算激增导致 /federate 请求耗时 > 3s → Liveness Probe 请求因 3s 超时设置被拒绝 (Client.Timeout exceeded) → 容器反复重启与状态震荡\n```\n\n### 根因结论\n\n**已确认的根因：**\n集群中 `monitor/prometheus-observability-prometheus-0` 的状态震荡与不可用是由**Prometheus 规则配置错误**直接触发的连锁反应：\n1. **直接触发因素**：Prometheus 日志中频繁出现 `many-to-many matching not allowed` 报错（证据 #4），表明规则文件中存在无法消除关联的查询逻辑，导致规则评估失败及 CPU 持续高占用。\n2. **恶化机制**：容器 CPU 硬限制仅为 100m（证据 #3），在高占用下引发严重的计算争用。同时，日志中出现的 `/federate` 请求平均耗时达到 5.9s（证据 #5），远超 Liveness Probe 默认的 3s 超时设置，直接导致探针超时失败（证据 #1）。\n3. **状态震荡成因**：由于内存硬限制较低（512Mi）且存在大量失败的计算开销，容器易触发 OOMKilled。重启后，错误的规则配置立即重新导致 CPU 飙升和请求超时，形成“超时宕机 -> 重启 -> 再次超时”的循环。\n\n因此，当前的异常状态是**错误规则引发的 CPU 争用**与**过严的探针超时阈值**共同作用的结果。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "monitor"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [],
+    "observed_namespaces": [
+      "aiops-case-01",
+      "monitor"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-pending-unschedulable"
+    ],
+    "found": [
+      "pod-pending-unschedulable"
+    ],
+    "matched": [
+      "pod-pending-unschedulable"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 12,
+    "planned": 15,
+    "completeness": 0.8,
+    "lanes": [
+      {
+        "lane": "1ec57bc416b44f7a-g1",
+        "collected": 5,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/node_outputs/evidence.full.json"
+      },
+      {
+        "lane": "1ec57bc416b44f7a-g2",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g2/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 12,
+    "planned": 15,
+    "completeness": 0.8,
+    "lanes": [
+      {
+        "lane": "1ec57bc416b44f7a-g1",
+        "collected": 5,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/node_outputs/evidence.full.json"
+      },
+      {
+        "lane": "1ec57bc416b44f7a-g2",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g2/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 6,
+    "planned": 6,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "pending-state",
+        "description": "Pod 当前 Pending/Unschedulable 状态",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-f4934d0df339",
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/tools/004-evidence-kubectl_get_yaml.structured.json",
+          "fact-f186b8396c2b",
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/tools/005-evidence-kubectl_describe.structured.json",
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g2/tools/019-evidence-kubernetes_tabular_query.structured.json",
+          "fact-461eaf46c244"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 35,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "failed-scheduling-selector-event",
+        "description": "FailedScheduling 原文明确节点选择器或亲和性不匹配",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-00651511dd57",
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/tools/005-evidence-kubectl_describe.structured.json",
+          "fact-461eaf46c244",
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/tools/004-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 35,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "node-selector-config",
+        "description": "Pod 配置中存在不可满足的 nodeSelector",
+        "weight": 2,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/tools/004-evidence-kubectl_get_yaml.structured.json",
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/tools/005-evidence-kubectl_describe.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 32,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      },
+      {
+        "id": "pending-metric",
+        "description": "Prometheus 状态指标确认 Pending 持续性",
+        "weight": 1,
+        "required": false,
+        "matched": true,
+        "dimensions": [
+          "metrics"
+        ],
+        "matched_refs": [
+          "fact-773ab38d6ad1",
+          "fact-9a1832aef330",
+          "fact-abab03acfecd",
+          "fact-dad679269db8",
+          "fact-ef5cabb17d61",
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g1/tools/001-evidence-execute_pod_promql.structured.json",
+          "fact-0e1dbd4b5bf9",
+          "fact-10fde542523f",
+          "fact-37898c5b2c17",
+          "fact-867a332be33c",
+          "fact-8c8a5d5a3c51",
+          "/tmp/aiops/reports/context_archives/1ec57bc416b44f7a-g2/tools/001-evidence-execute_pod_promql.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 15,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 48,
+  "logical_elapsed_seconds": 167.932,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "fixture_valid": true
+}

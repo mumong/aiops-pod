@@ -1,0 +1,117 @@
+[run] run_id=0d93bb31ea3c4278
+[node:start] layer / 问题定位
+[agent:layer] 我将为您检查集群中所有 Pod 的当前状态，以识别任何异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[agent:layer] 我发现集群中有 1 个 Pod 处于异常状态：`workload` (Namespace: `aiops-case-v01`)，其状态为 `Pending`。
+
+现在我将检查该 Pod 的详细信息及标签，以进一步确认其异常类型并选择合适的诊断手册。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 22m <none> <none> <none> <none>
+[agent:layer] 该 Pod 处于 `Pending` 状态，且没有分配到节点（Node 为 `<none>`）。这符合“未调度”或“调度失败”的特征。根据诊断手册定义，应使用 `pod-pending-unschedulable.md` 来排查资源不足、节点亲和性、Taint/Toleration 或 PVC 绑定等问题。
+
+现在获取相应的诊断手册。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[agent:layer] **异常定位总结**
+
+*   **异常实体**: `workload` (Namespace: `aiops-case-v01`)
+*   **当前状态**: `Pending` (未调度，未分配节点)
+*   **异常类型**: `PendingUnschedulable`
+
+该 Pod 处于 `Pending` 状态且没有分配到任何节点，符合 `PendingUnschedulable` 的异常特征。建议根据 `pod-pending-unschedulable.md` 手册，进一步检查该 Pod 的 `FailedScheduling` 事件原因（如资源不足、节点亲和性不匹配、Taint/Toleration 限制或 PVC 未绑定等）。
+
+**LayerOutput**:
+```json
+{
+  "layer": "Layer1",
+  "confidence": "High",
+  "reasoning": "集群中共有 66 个 Pod，其中 65 个运行正常，1 个 Pod (workload) 处于 Pending 状态且未分配节点，符合未调度/调度失败的特征。",
+[node:done] layer / 问题定位 (23.1s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 我已收到前一轮的预采集结果。现在执行 kubectl_describe（确认 Pod 状态和事件）和 query_pod_topology（获取控制器/节点关系），以补充 Metrics/Logs/Tracing 的空结果。
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v01 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 22m default-scheduler 0/3 nodes are available: 3 Insuffic
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 已采集事实
+
+1.  **Pod 身份与状态**
+    *   `aiops-case-v01/workload` (UID: `6743bbac-5908-452b-a35b-5f6327fe8a58`) 目前处于 **Pending** 状态，`node: <none>`。
+    *   Metrics 确认 `kube_pod_status_phase=1` 仅对应 `Pending`，无 `Running` 或 `Failed` 记录。
+
+2.  **FailedScheduling 事件原文 (根因证据)**
+    *   `kubectl_describe` 显示：`0/3 nodes are available: 3 Insufficient cpu.`
+    *   预emption 检查：`No preemption victims found for incoming pod.`
+    *   这意味着集群 3 个节点均因 **CPU 资源不足** 而无法调度该 Pod。
+
+3.  **Pod 资源需求**
+    *   容器 `app` 请求 (
+[node:done] parallel_evidence / 并发证据采集 (28.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.4s)
+[final] run_id=0d93bb31ea3c4278 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v01/workload` | Pending | Pod aiops-case-v01/workload 处于 Pending 状态，未分配到节点。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubernetes (fact-45c4f2407b84) | `Warning FailedScheduling 22m ... 0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod.` | 核心异常证据：明确指调度失败原因为集群全节点（3/3）CPU 不足且无法抢占 |
+| 2 | K8s State | kubernetes (fact-ad41e4e12263) | `pod.status: Pending` | 确认异常现象：Pod 持续处于 Pending 状态，未分配到节点 |
+| 3 | K8s Config | kubernetes (fact-0a6015defa67) | `container.resource_request.cpu: 100k` | 提供上下文：目标容器申请的 CPU 资源量为 0.1 Core |
+| 4 | K8s Config | kubernetes (fact-de4111dda351) | `container.resource_limit.cpu: 100k` | 提供上下文：容器 CPU 上限同样限制为 100k |
+| 5 | Metric | prometheus (fact-904b7c670995) | `kube_pod_status_phase: 1` (labels: `phase: Pending`) | 辅助验证：通过 Metric 数据侧面印证 Pod 处于 Pending 生命周期 |
+
+**证据说明：**
+K8s Event 的 `FailedScheduling` 信息直接解释了 Pod (fact-45c4f2407b84) 无法启动的原因，即所有可用节点均报 `Insufficient cpu`。同时，状态为 `Pending` 的 Event (fact-ad41e4e12263) 与 Prometheus 采集到的 `Pending` 状态指标 (fact-904b7c670995) 形成了多维度的互相印证，证实了 Pod 未得到资源分配的事实。由于日志与追踪维度均标注为 `not_applicable`（容器未启动），本次诊断主要依赖 K8s 事件与状态事实。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+集群 3 个节点 CPU 资源不足 → 默认调度器执行调度判断并触发 FailedScheduling → Pod 持续 Pending，无法分配节点 → 应用容器未启动
+```
+
+### 根因结论
+
+**已确认的根因：**
+集群内所有节点（3/3）的 CPU 可用资源无法满足 Pod 的调度需求。证据 (fact-45c4f2407b84) 明确显示调度器报出 `3 Insufficient cpu` 且无抢占方案，导致 Pod 始终处于 `Pending` 状态（fact-ad41e4e12263）。
+
+**未确认事项（证据不足）：**
+*   节点 CPU 不足的具体诱因（如系统预留过高、其他业务 Pod 占用等）在当前采集中未明确展示。
+*   集群整体的 CPU 供需平衡全貌未完全评估。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.0m
+├─ 问题定位: 23.1s
+├─ 并发证据采集: 28.7s
+│  └─ g1 aiops-case-v01/workload: 28.7s (Evidence 20.7s, RCA 7.9s)
+└─ 汇总总结: 10.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v01/workload**: pod-pending-unschedulable
+
+[run:end] run_id=0d93bb31ea3c4278 status=-

@@ -1,0 +1,117 @@
+[run] run_id=900592be57ab4109
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 6 (4m29s ago) 10m 172.16.104.30
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success kubectl_get_by_name 输出摘要: raw_chars=128 lines=3 Command failed (exit 1): kubectl get --show-labels -o wide pod workload Error from server (NotFound): pods "workload" not found
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 6 (4m29s ago) 10m 172.16.104.30
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod OOMKilled（以 Last State Reason 为准） > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Cr
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ConfigError / 启动配置失败 > Pod异常类型: ConfigError | 典型状态: CreateContainerConfigError / CreateContainerError / CrashLoopBackOff | 兼容分类: config_bootstrap ## 场景识别 | 信号 | 关键特征 | |------|-----
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (16.8s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"retrieved":6,"returned":6},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 根据预采集的可观测性 baseline，关键事实已指向明确方向：
+
+1.  **Logs (ES)**: 返回了 6 条完全一致的日志 `sh: exec: line 0: /opt/app/unavailable-command: not found`。这证实了容器入口进程因找不到指定文件而启动失败。
+2.  **Metrics (Prometheus)**: 显示 `kube_pod_container_status_waiting_reason` 为 `CrashLoopBackOff`，且 `kube_pod_container_status_last_terminated_reason` 为 `Error`。重启计数为 6 次。
+3.  **Tracing (DeepFlow)**: 覆盖率为 empty，这与应用从未成功启动、无法产生 L7 流量的生命周期状态一致。
+
+为了完成闭环并排除探针干扰（如 Readiness probe 因端口未监听而 kill 容器），需要补充验证 Pod 的具体 spec（command/args）和 Events 中是否存在 probe 相
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 49s (x48 over 10m) Warning BackOff Pod/workload Back-off restarting failed container app in pod workload_aiops-case-v08(00e5e755-886e-4661-9e8a-00d1e71595f6)
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v08 creationTimestamp: 2026-09-11T13:02:52Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v08 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 49s (x48 over 10m) kubelet
+[agent:parallel_evidence] 我需要根据 layer_handoff 的指示，调查 `aiops-case-v08/workload` 这个 Pod 的 CrashLoopBackOff 问题。从预采集中看到的一些线索（如 `sh: exec: line 0: /opt/app/unavailable-command: not found`）需要进一步验证。
+
+让我首先获取 Pod 的详细状态和事件信息。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_describe
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v08 creationTimestamp: 2026-09-11T13:02:52Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v08 node: node2/10.2.0.50 status: Running 关键诊断行: Warning BackOff 54s (x48 over 10m) kubelet Back-off restarting failed
+[heartbeat] layer
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 54s (x48 over 10m) Warning BackOff Pod/workload Back-off restarting failed container app in pod workload_aiops-case-v08(00e5e755-886e-4661-9e8a-00d1e71595f6)
+[agent:parallel_evidence] 根据已采集的 Kubernetes 事实，分析如下：
+
+### 已采集事实
+1.  **Pod 状态**：Pod `workload` 当前 Phase 为 **Running**，但容器状态为 **Error**。
+2.  **核心错误码**：容器 `app` 的 exitCode 为 **127**，Reason 为 **Error**（伴随 CrashLoopBackOff 事件）。
+3.  **命令配置**：容器启动命令配置为 `sh -c exec /opt/app/unavailable-command`。
+4.  **事件证据**：检测到频繁 (x48) 的 `Warning BackOff` 事件，表明容器在不断重启。
+
+### 候选原因支持/反驳证据
+*   **CrashLoopBackOff（循环重启中）：** **强支持**。Pod 虽在 Running 状态，但伴随 7 次重启和大量的 BackOff 事件，完全符合 CrashLoopBackOff 的定义特征。
+*   **Exit Code 127（命令未找到）：** **直接证实了崩溃原因**。配置中引
+[node:done] parallel_evidence / 并发证据采集 (62.1s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.4s)
+[final] run_id=900592be57ab4109 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v08/workload` | CrashLoopBackOff | Pod aiops-case-v08/workload 处于 CrashLoopBackOff 状态，容器不断重启并报错。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes | `Warning BackOff 54s (x48 over 10m) kubelet Back-off restarting failed container app in pod workload_aiops-case-v08` | 证实应用容器 `app` 进入 10 分钟内重启 48 次的 CrashLoopBackOff 循环 |
+| 2 | K8s State | Kubernetes | `container.last_terminated_reason` 返回 `Error`，`container.last_exit_code` 返回 `127` | 证实容器非正常退出，且退出码 127 是典型的命令未找到信号 |
+| 3 | Logging | Elasticsearch | `sh: exec: line 0: /opt/app/unavailable-command: not found` | 直接捕获崩溃瞬间日志，确认 Shell 找不到指定的启动命令路径 |
+| 4 | K8s Config | Kubernetes | `container.resource_request.memory`: `8Mi`, `container.resource_limit.memory`: `32Mi` | 排除内存资源不足导致的 OOMKilled，当前 CrashLoopBackOff 并非资源限制引起 |
+| 5 | Metric | Prometheus | `kube_pod_container_status_waiting_reason` 中 `CrashLoopBackOff` 当前值为 `1` | 从监控系统角度独立验证了容器当前处于等待重启状态 |
+
+日志中捕获了精确的崩溃报错信息（命令未找到），与 K8s 侧记录到的退出码 127（命令未找到标准错误码）完美对应；资源限制配置确认排除 OOM 可能。证据链完整指向应用自身启动命令配置错误。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 启动命令配置了不存在的路径 `/opt/app/unavailable-command` → 容器进程执行命令时 Shell 返回退出码 127 → 容器因执行失败终止 → Pod 进入 CrashLoopBackOff 状态
+```
+
+### 根因结论
+
+已确认的根因是容器启动命令配置错误。
+日志事实 [#3](#) 显示 `sh: exec: line 0: /opt/app/unavailable-command: not found`，结合 [#2](#) 中记录的退出码 `127`，确凿证明容器启动时未能找到指定的可执行文件。这一致命错误导致容器启动后立即崩溃，进而引发 K8s 的 BackOff 机制（如 [#1](#)、[#5](#) 所示）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.5m
+├─ 问题定位: 16.8s
+├─ 并发证据采集: 62.1s
+│  └─ g1 aiops-case-v08/workload: 62.1s (Evidence 53.8s, RCA 8.1s)
+└─ 汇总总结: 8.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v08/workload**: pod-crashloop-runtime, pod-oomkilled, pod-config-error
+
+[run:end] run_id=900592be57ab4109 status=-

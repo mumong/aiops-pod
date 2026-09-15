@@ -1,0 +1,115 @@
+[run] run_id=be8e8e2a10fc4df3
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 12 (4m41s ago) 43m 172.16.104.2
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] ### Layer 1 定位结果
+
+- **当前异常实体**：
+  - `aiops-case-v09/workload`：STATUS=`CrashLoopBackOff`，READY=`0/1`。
+- **异常状态**：ABNORMAL
+- **拆分结果**：
+  - 集群内存在 **1 个异常 Pod**，构成 **1 个独立异常组**。
+- **异常类型归类**：
+  - `pod_status_keyword`：`CrashLoopBackOff`
+  - `pod_abnormal_type`：`CrashLoopBackOffRuntime`
+
+### LayerOutput 结构化输出
+
+```json
+{
+  "layer": 1,
+  "confidence": "high",
+  "reasoning": "集群内共 66 个 Pod，其中 65 个处于 Running 状态，仅 1 个 Pod (aiops-case-v09/workload) 处于 CrashLoopBackOff 状态。根据状态特征，该 Pod 属于容器运行/重启异常，归类为 CrashLo
+[node:done] layer / 问题定位 (20.4s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":35,"matched":55,"normalized":55,"retrieved":55,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entity":{
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先确认实体的身份和生命周期，再判断各结果是否回答本轮 purpose。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_previous_logs
+[tool:start] kubectl_events
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v09 node: node2/10.2.0.50 status: Running 关键诊断行: Warning BackOff 3m34s (x179 over 43m) kubelet Back-off restarting fail
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 1 signals: 0 关键日志: unable to retrieve container logs for containerd://d8b2bd1e8091d591c4ae4b7dd3ccbfb7e73f87ea109b79130267a25452c9612e
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 3m35s (x179 over 43m) Warning BackOff Pod/workload Back-off restarting failed container app in pod workload_aiops-case-v09(5746c496-b67c-4906-aabb-e71359674305
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v09 creationTimestamp: 2026-09-11T14:11:24Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] ## 已采集事实
+
+**实体身份与生命周期**
+- Pod `aiops-case-v09/workload` (UID: `5746c496-b67c-4906-aabb-e71359674305`)，节点 `node2`，IP `172.16.104.20`
+- 当前 Pod 状态: `Running`，但容器 `app` 状态: `Terminated`，`Reason: Error`，`Exit Code: 1`
+- `Restart Count: 13`，`Restart Policy: Always`
+- `Ready: False`，条件 `ContainersNotReady`
+- 容器镜像: `xnet.registry.io:8443/observability/python:3-alpine`
+- 容器 Command: `python3 -u -c from pathlib import Path; print(Path('/input/app.conf').read_text())`
+- 容器资源: Limits `cpu=50m, memory=32Mi`，
+[node:done] parallel_evidence / 并发证据采集 (41.5s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (11.5s)
+[final] run_id=be8e8e2a10fc4df3 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v09/workload` | CrashLoopBackOff | Pod aiops-case-v09/workload 处于 CrashLoopBackOff 状态 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | Logging | `elasticsearch` | `FileNotFoundError: [Errno 2] No such file or directory: '/input/app.conf'` (fact-798f649ad00c) | 直接证明容器入口进程在读取 `/input/app.conf` 时因文件缺失而崩溃 |
+| 2 | Logging | `elasticsearch` | `from pathlib import Path; print(Path('/input/app.conf').read_text())` (fact-a4d6cbf898f5) | 确认导致崩溃的具体代码逻辑为尝试读取该配置文件 |
+| 3 | Metric | `prometheus` | `kube_pod_container_status_last_terminated_reason` 显示 `reason=Error` (fact-ea694ed008f0) | 独立观测到容器以 Error 状态异常终止，与日志中的抛出异常一致 |
+| 4 | K8s State | `kubernetes` | `container.last_terminated_reason` 为 `Error` (fact-32a1794d0ea6) | 确认上一次容器终止的具体原因为错误 |
+| 5 | K8s State | `kubernetes` | `container.last_exit_code` 为 `1` (fact-925cb5bc6c7c) | 确认进程以非零状态码退出，通常表示应用内部错误 |
+| 6 | K8s Event | `kubernetes` | `Warning BackOff restarting failed container app` (fact-e5cd61cef925) | 确认 Kubernetes 已介入进行指数级退避重启，导致 Pod 处于 CrashLoopBackOff 状态 |
+| 7 | K8s Config | `kubernetes` | `container.resource_request.memory` 为 `8Mi` (fact-248430115be7) | 排除资源请求不足导致 OOM 的可能性，佐证根因为文件缺失而非资源耗尽 |
+
+**证据关联说明：**
+Logging 维度提供了最直接的因果证据：Python 进程因找不到 `/input/app.conf` 而崩溃（#1, #2）。Kubernetes State（#4, #5）和 Metrics（#3）从集群状态层面独立验证了容器确实在以 Error 退出。Event（#6）则展示了这一机制对 Pod 生命周期的最终影响。资源配置（#7）排除了资源竞争导致进程退出的其他可能性。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+配置文件 '/input/app.conf' 缺失 → Python 进程执行 read_text 抛出 FileNotFoundError → 容器进程以 Exit Code 1 异常退出 → Pod 触发反复重启进入 CrashLoopBackOff 状态
+```
+
+### 根因结论
+
+**已确认根因：** 容器入口命令试图读取不存在的配置文件 `/input/app.conf`。
+依据事实 #1 和 #2，Python 应用启动时执行 `Path('/input/app.conf').read_text()` 失败，引发 `FileNotFoundError`，直接导致容器进程异常终止。Kubernetes 随后根据失败状态将容器状态标记为 `Error`（事实 #4, #3），并在多次重启后进入 `CrashLoopBackOff` 状态（事实 #6, #5）。
+
+**未知项：** 卷 `input`（挂载于 `/input`）中为何缺少预期的配置文件，目前无法区分是配置遗漏还是上游挂载失败（事实 #1 中的日志显示目录存在但文件缺失，但无法确认卷挂载本身是否成功）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 20.4s
+├─ 并发证据采集: 41.5s
+│  └─ g1 aiops-case-v09/workload: 41.5s (Evidence 33.4s, RCA 8.0s)
+└─ 汇总总结: 11.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v09/workload**: pod-crashloop-runtime
+
+[run:end] run_id=be8e8e2a10fc4df3 status=-

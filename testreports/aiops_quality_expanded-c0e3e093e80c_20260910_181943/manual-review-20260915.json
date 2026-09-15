@@ -1,0 +1,78 @@
+{
+  "status": "partial_review_complete",
+  "reviewer": "assistant_manual_report_review",
+  "scope": "报告中的因果链与根因结论人工阅读；疑点回看完整报告。不是重新运行模型或集群。",
+  "criteria": [
+    "主因须匹配该具体注入机制；同义表达、换行和无害措辞不扣分。",
+    "不能仅凭症状名称或错误码判正确；明确相反机制、对象错配、决定性数值错误判未通过。",
+    "人工仍待复议、只确认上层症状而具体机制未确认，按未通过；报告只对非必要的上游细节写证据不足，不自动否定已明确的目标机制。",
+    "长宽限期场景允许正确解释正常等待，不强求报告宣布异常卡死；不能声称应用能阻止到期 SIGKILL。",
+    "未人工阅读的样本保持未审，不冒充人工结论；原始评分文件不改。"
+  ],
+  "cases": {
+    "c08-startup": {
+      "reviewed": "all_valid",
+      "pass": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50],
+      "pending": [],
+      "note": "50 份根因结论均识别启动分配 256Mi 与 64Mi 硬限制不匹配并触发 OOM。部分将应用分配需求笼统称 Request，或把 137 泛称 OOM 标志，属于措辞风险；本组同时提供正确的启动超限主因，不因此全部判错。"
+    },
+    "c01-cpu": {
+      "reviewed": "all_valid",
+      "pass": [4,6,12,30,31,39,40],
+      "pending": [1,3,7,10,13,19,23,25,27,37,48],
+      "note": "通过项识别 CPU request=100k 的不合理量级。只复述 Insufficient cpu 或节点不能满足请求、未确定请求过大的列待复议；断言其他工作负载占满节点、100k 为极小/0.1 核等判错误。31 的错误解析用词不准确，但明确诊断 Pod 配置量级错误，按主因通过。"
+    },
+    "c11-grace": {
+      "reviewed": "all_valid",
+      "pass": [6,7,9,11,13,14,15,16,18,19,20,21,22,23,24,25,27,29,30,31,32,34,36,39,40,41,43,44,46,47,48,50],
+      "pending": [1,5,33,38,42],
+      "note": "接受应用接收 SIGTERM 后仍等待退出条件，以及宽限期内正常等待的等价解释；不要求逐字写忽略 SIGTERM。将原因改成 preStop、宣称到期仍无法强杀/Pod 永久不可删除，或未发布可确认主因的，不通过。30 全文已明确 3900 秒内等待，虽根因节写证据不足（非故障），按正确解释正常等待通过；时间计算不严谨另记质量风险。"
+    },
+    "c10": {
+      "reviewed": "all_valid",
+      "pass": [1,3,4,6,12,15,20,24,35,36,37,40,47,49],
+      "pending": [9,17,18,31,48],
+      "note": "多数失败把 137/Error 当作 OOM 或把正常 /work 与异常 /health 混用。7 原判通过但把内存受限加入已确认根因，改为错误。15、35 的主因是探针 HTTP500 触发终止，脚本被示例路径或语义规则干扰。9 同时写 OOM Kill 与排除 OOM、崩溃被 Kill，因果混杂，待复议；17 仍将诊断留在未确认，暂不计通过。"
+    },
+    "c11-prestop": {
+      "reviewed": "all_valid",
+      "pass": [1,14,17,20,21,22,23,27,29,33,34,36,37,38,39,45,46,48,50],
+      "pending": [4,5,8,9,10,11,12,13,16,18,24,25,26,28,31,32,35,40,41,43,44],
+      "note": "主因须识别 preStop 等待。仅归因长 grace 或主进程不响应信号不能替代 preStop。2、15、30、42 等把仍在等待写为超期/永久挂起；6、47 声称钩子可阻止强杀；49 明确写未配置超时，与实际 hook 的 3600 秒 deadline 相反，不通过。其余通过项即使使用死锁/无限循环等宽泛用词，若主因仍是 preStop 等待且没有明确宣称越过强杀边界，保留主因分并提示表述风险。"
+    },
+    "c10-timeout": {
+      "reviewed": "all_valid",
+      "pass": [2,3,6,14,16,17,18,21,23,24,25,32,35,37,44],
+      "pending": [1,5,8,9,10,12,13,19,29,41,45,49],
+      "note": "要求 /health 响应慢于探针阈值并触发重启，允许不知道具体代码行。原判通过的 4、20、30、31、34、38、42、43、48 实际仍归因内存/OOM；1、45 混入互相冲突的 OOM 机制。12、29 将 ThreadingHTTPServer 解释成无并发单线程作为致因，保留复议。2、16 原判失败但清楚识别 3 秒响应与探针超时冲突。"
+    },
+    "c07-env": {
+      "reviewed": "all_valid",
+      "pass": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50],
+      "pending": [],
+      "note": "所有有效报告均识别 APP_REQUIRED_CONFIG 缺失导致启动检查退出 78。未注入/未定义/未提供/值为 None 等同义表达被原规则遗漏。部分泛称 Deployment 或配置文件，但随后明确具体环境变量，按核心根因通过并保留措辞风险。"
+    },
+    "c05-plugin": {
+      "reviewed": "all_valid",
+      "pass": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,35,36,37,38,39],
+      "pending": [34],
+      "note": "39 个有效样本（40 注入失效排除）中，38 个识别指定 CNI 插件文件缺失。34 把指定插件文件缺失提升为整个 /opt/cni/bin 目录缺失/不可访问，缺少支持，待复议。"
+    },
+    "c01": {"reviewed":"original_failures","pass":[10,34,39],"pending":[25,48],"note":"三个同义/分句漏判；25、48 目标根因正确但额外报告 monitor 异常组，该组真实性未独立审核，整次暂待复议，不把额外组自动视为误诊或自动放行。"},
+    "c03": {"reviewed":"original_failures","pass":[],"pending":[],"note":"1 错判镜像认证；49 编造 app-config/app-secret 缺失，未准确定位 unavailable-config。"},
+    "c04": {"reviewed":"original_failures","pass":[],"pending":[40,44],"note":"37 指定错误 Secret/key；40、44 未确认具体配置缺陷。"},
+    "c05": {"reviewed":"original_failures","pass":[],"pending":[50],"note":"20 错判 PVC/Token 缺失；50 目标 Multus NAD 根因正确，但包含未复核的额外 monitor 对象，整次待复议。"},
+    "c06": {"reviewed":"original_failures","pass":[5,9,19,27,31,37,45,48],"pending":[],"note":"均说明 /work 请求处理中的运行时退出；19 已明确 runtime process exiting/Exit 2，未知的是额外堆栈，不强求合成场景不存在的真实代码缺陷。"},
+    "c07": {"reviewed":"original_failures","pass":[24,28,43],"pending":[],"note":"已确定配置缺失触发 Exit 78 或 config_missing_exit；具体配置源未知不否定本基准目标。阶段措辞不够精确另记风险。"},
+    "c08": {"reviewed":"original_failures","pass":[41],"pending":[],"note":"明确 /work 内存增长触及 64Mi 导致 OOM；同义表述未命中。"},
+    "c09": {"reviewed":"original_failures","pass":[7,10,15,19,20,22,23,24,26],"pending":[18],"note":"结合因果链核对 /ready/readiness 的 503 导致 NotReady。20 未知具体上游，但直接就绪失败机制已明确。18 混合 /work 与探针因果，待复议；47 因果链把 /work 当作健康检查端点，未通过。"},
+    "c11": {"reviewed":"original_failures","pass":[10,28,36,38],"pending":[31,43],"note":"四份准确识别 aiops.lab/hold 阻止删除，终断器/清理钩子等表述可接受；其余将采集缺失当根因、错认 OOM 或未确认。31 还把退出码当删除触发点，待复议。"},
+    "c01-memory": {"reviewed":"original_failures","pass":[1,13,25],"pending":[8,10],"note":"1、13、25 明确 1Pi 请求超节点容量。8、10 只用 memory limit 解释调度，未厘清 requests，待复议。"},
+    "c03-secret": {"reviewed":"original_failures","pass":[],"pending":[25],"note":"25 停留在镜像拉取问题，未准确诊断 Secret 卷依赖。"},
+    "c03-hostpath": {"reviewed":"original_failures","pass":[16,25,26,28,36,49],"pending":[],"note":"均识别具体宿主机路径不满足 Directory 类型检查，不强求无法从事件区分的文件/缺目录底层原因。"},
+    "c06-command": {"reviewed":"original_failures","pass":[28,48,50],"pending":[],"note":"均明确不可用入口命令 /opt/app/unavailable-command 导致退出127。"},
+    "c06-file": {"reviewed":"original_failures","pass":[2,7,10,24,26,29,30,45,47],"pending":[],"note":"九份正确识别 /input/app.conf 缺失/读取失败；20 错称卷未挂载；43 将实际配置文件路径写成 /input/app/conf，目标定位错误。"},
+    "c04-configmap-key": {"reviewed":"original_failures","pass":[3,23,43],"pending":[],"note":"都定位 workload-input 缺 unavailable-key，虽有将配置加载笼统称挂载的措辞问题，核心缺失对象/键与 CreateContainerConfigError 一致。"},
+    "c09-port": {"reviewed":"original_failures","pass":[13,14,21,23,25,26,30,33,36,42,43,46,49],"pending":[4,20],"note":"13 份明确 18081 与 18080 端口不一致或未监听端口导致连接拒绝。部分额外猜测路径不一致，单列风险不改变已正确的端口主因；4 有未审核额外组，20 未定位具体探针参数。"}
+  }
+}

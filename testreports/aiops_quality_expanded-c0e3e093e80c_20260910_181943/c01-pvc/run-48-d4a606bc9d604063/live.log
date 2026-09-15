@@ -1,0 +1,111 @@
+[run] run_id=d4a606bc9d604063
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前存在的异常。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[agent:layer] 检测到集群中存在一个异常 Pod。我将进一步获取该 Pod 的详细信息，以确认其状态并选择对应的诊断手册。
+[tool:start] kubectl_get_by_name
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 57m <none> <none> <none> <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 57m <none> <none> <none> <none>
+[agent:layer] 工具 `kubectl_get_by_name` 的当前输出中未包含 Events 信息。由于 Pod 状态确认为 `Pending`，我将获取集群中所有事件以寻找该 Pod 的调度失败原因。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 输出摘要: raw_chars=1058 lines=3 NAMESPACE LAST SEEN TYPE REASON OBJECT SUBOBJECT SOURCE MESSAGE
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success kubectl_get_by_name 输出摘要: raw_chars=182 lines=3 Command failed (exit 1): kubectl get --show-labels -o wide pvc unavailable-claim -n aiops-case-v03 Error from server (NotFound): persistentvolumeclaims
+[agent:layer] 根据对集群当前状态的诊断，分析如下：
+
+### 1. 异常实体与状态
+*   **异常 Pod**: `aiops-case-v03` 命名空间下的 `workload`。
+*   **当前状态**: `Pending`。
+*   **状态关键词**: `Pending`, `FailedScheduling`。
+
+### 2. 拆分为独立异常组
+*   **异常组 1**: `workload` 调度失败。
+    *   **核心证据**: 调度器持续上报 `FailedScheduling` 事件，原因为 `persistentvolumeclaim "unavailable-claim" not found`。
+    *   **根因定位**: 该 Pod 引用了一个名为 `unavailable-claim` 的 PVC，但该 PVC 在当前命名空间中并不存在（`NotFound`）。
+
+### 3. 诊断结论
+该集群当前主要存在**应用层调度约束导致的 Pod Pending** 问题。
+
+虽然 `workload` 最初表现为 `Pending`（对应 `pod-pen
+[node:done] layer / 问题定位 (25.9s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 我将根据证据计划执行 Kubernetes 层面的关键诊断：获取 Pod 描述和 YAML，以确认调度失败的具体原因。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] query_pod_topology
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v03 creationTimestamp: 2026-09-11T08:02:22Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v03 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 58m default-scheduler 0/3 nodes are available: persiste
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 证据采集结论
+
+**实体**：`aiops-case-v03/workload` (UID: `b2f83678-483c-4854-b4a8-02515010c20d`)
+
+### 支持候选原因的事实
+1. **Pod 持续 Pending**：`kubectl describe` 和 YAML 均确认 `status=Pending`，`node=<none>`，`PodScheduled=False`。Prometheus 指标也确认 `kube_pod_status_phase=1` (Pending)。
+2. **FailedScheduling 事件**：调度器产生了持续的 `Warning FailedScheduling` 事件。
+3. **根因定位**：失败原因为 `persistentvolumeclaim "unavailable-claim" not found`。
+4. **配置匹配**：Pod YAML 确认引用了一个名为 `input` 的 Volume，其 `ClaimName=unavailable-claim`。由于该 PVC 不存在，Pod
+[node:done] parallel_evidence / 并发证据采集 (27.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.9s)
+[final] run_id=d4a606bc9d604063 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v03/workload` | Pending | Pod aiops-case-v03/workload 处于 Pending 状态，持续被调度器拒绝 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | `default-scheduler` (x11) | `FailedScheduling ... persistentvolumeclaim "unavailable-claim" not found.` (`fact-c6db384e2c0d`, `fact-d23550c49569`) | 确认 Pod 持续被调度器拒绝，直接归因于 PVC 缺失。 |
+| 2 | K8s State | `pod.phase` | `Pending` (`fact-6c199204e9cd`) | 确认 Pod 未进入运行态，处于等待调度的阻塞状态。 |
+| 3 | K8s State | `pod.condition` | `PodScheduled: False (Unschedulable)` (`fact-697c3f3fe589`) | 验证 Pod 的调度状态标记，表明 3 个节点均无法调度。 |
+| 4 | Metric | `kube_pod_status_phase` | `1` (Pending) (`fact-2dcd29b366c7`) | 通过 Prometheus 指标独立确认 Pod 持续处于 Pending 阶段。 |
+| 5 | K8s Config | `resource_request/limit` | CPU 请求 5m/限制 50m, 内存 8Mi/限制 32Mi (`fact-08c321b3ffc2` 等) | 排除资源配额超限导致的调度失败，确认问题不在算力。 |
+
+证据表明 Pod 被调度器拒绝的唯一原因是 PVC 缺失（事实 1），指标（事实 4）确认该状态持续存在，且资源请求配置（事实 5）极低，排除了资源不足的可能性。
+
+## 🎯 根因分析 · g1
+
+```text
+PVC 'unavailable-claim' 在当前 namespace 中不存在 → 调度器无法绑定 Volume → Pod 标记为 Unschedulable 并持续 Pending → 用户可见 Pod 状态卡死在 Pending
+```
+
+### 根因结论
+
+已确认根因为**依赖的 PVC 'unavailable-claim' 缺失**（见证据 #1）。调度器因找不到指定的卷而拒绝调度，导致 Pod 状态持续为 Pending。Pod 资源请求极低且状态指标一致，进一步排除了集群资源耗尽等其他可能性，故障点明确指向 PVC 引用错误。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.0m
+├─ 问题定位: 25.9s
+├─ 并发证据采集: 27.4s
+│  └─ g1 aiops-case-v03/workload: 27.4s (Evidence 21.2s, RCA 6.0s)
+└─ 汇总总结: 7.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v03/workload**: pod-pending-unschedulable
+
+[run:end] run_id=d4a606bc9d604063 status=-

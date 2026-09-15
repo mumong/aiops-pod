@@ -1,0 +1,103 @@
+[run] run_id=ddd8fdab3eab4ff1
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前是否存在异常 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[agent:layer] 我发现了集群中存在一个异常 Pod。现在我将获取该 Pod 的详细信息，以确定其具体的异常类型。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 16 (23s ago) 57m 172.16.104.30
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] Layer | diagnosis | L1 |
+|---|---|---|
+| **confidence** | **high** | 集群内检测到 1 个异常 Pod，状态确认为 CrashLoopBackOff。 |
+| **reasoning** | 集群共 66 个 Pod，其中 65 个处于 Running 状态（健康），1 个 Pod (`aiops-case-v08/workload`) 处于 `CrashLoopBackOff` 状态。该 Pod 已经重启了 16 次，且最近一次重启发生在 22 秒前，表明故障具有持续性和反复性，是一个典型的活跃异常。 |
+| **abnormal_pods** | `[{"namespace": "aiops-case-v08", "name": "workload", "reason": "Pod 处于 CrashLoopBackOff 状态，且重启次数持续增加"}]` |
+| **abnormal_groups** | `[{"group_id": "1", "abnormal_pod_names": ["aiops-case-
+[node:done] layer / 问题定位 (20.1s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"retrieved":6,"returned":6},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 根据预采集结果，Pod `aiops-case-v08/workload` 存在明确的 **command/args 配置错误** 证据：
+1.  **Logs (Elasticsearch)**: 6 条重复日志 `sh: exec: line 0: /opt/app/unavailable-command: not found`。
+2.  **Metrics (Prometheus)**: `last_terminated_reason="Error"`，`restarts_total=16`，`phase=Running`（当前在重启中，但主进程持续无法启动）。
+3.  **Tracing**: 无 L7 数据，证实容器主进程从未正常启动接收流量。
+
+为了完全满足 Plan 要求，我将补全剩余的 Kubernetes 维度查询（Describe, YAML, Previous Logs），以确认退出码和完整的崩溃上下文。
+[tool:start] TodoWrite
+[tool:done] TodoWrite status=success TodoWrite 输出摘要: raw_chars=863 lines=11 Investigation plan updated with 7 tasks. # CURRENT INVESTIGATION TASKS **Task Status**: 3 completed, 1 in progress, 3 pending [ ] [step2-get-pod-yaml] kubectl_ge
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_previous_logs
+[tool:start] query_pod_topology
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 1 signals: 1 关键日志: sh: exec: line 0: /opt/app/unavailable-command: not found
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v08 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 3m19s (x257 over 58m) kubele
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v08 creationTimestamp: 2026-09-11T13:02:52Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 工具调用完成后，仅简短说明已采集事实、冲突和缺口；不得手写结构化合同。
+
+根据预采集结果，Pod `aiops-case-v08/workload` 存在明确的 **command/args 配置错误** 证据：
+1.  **Logs (Elasticsearch)**: 6 条重复日志 `sh: exec: line 0: /opt/app/unavailable-command: not found`。
+2.  **Metrics (Prometheus)**: `last_terminated_reason="Error"`，`restarts_total=16`，`phase=Running`（当前在重启中，但主进程持续无法启动）。
+3.  **Tracing**: 无 L7 数据，证实容器主进程从未正常启动接收流量。
+
+为了完全满足 Plan 要求，我将补全剩余的 Kubernetes 维度查询（Describe, YAML, Previous Logs），以确认退出码和完整的崩溃上下文。
+[node:done] parallel_evidence / 并发证据采集 (39.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.1s)
+[final] run_id=ddd8fdab3eab4ff1 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v08/workload` | CrashLoopBackOff | Pod 'workload' 在 aiops-case-v08 namespace 中配置了无效的入口命令 (sh -c exec /opt/app/unavailable-command)，该命令在容器镜像 xnet.registry.io:8443/observability/python:3-alpine 中不存在，导致进程以 exit code 127 崩溃。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes | `Warning BackOff ... Back-off restarting failed container app in pod workload...` (fact-886553f61d64) | 确认 Pod 反复重启且 kubelet 正在退避 |
+| 2 | K8s Config | Kubernetes | `sh -c exec /opt/app/unavailable-command` (诊断结论事实) | 指出导致进程无法启动的入口配置错误 |
+| 3 | Logging | Elasticsearch | `sh: exec: line 0: /opt/app/unavailable-command: not found` (fact-13cb3242823d) | 直接记录命令执行失败，证实文件缺失或不可执行 |
+| 4 | K8s State | Kubernetes | `exit_code: 127` (fact-0b3a210a666d) | 提供确凿的失败退出码，与“命令未找到”机制完全对应 |
+
+证据表明，日志中的 `not found` 错误与容器退出码 `127` 相互印证，结合 Kubernetes 事件中的 `BackOff` 状态，完整闭环验证了入口命令配置错误导致的 CrashLoopBackOff。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+入口命令配置错误 (/opt/app/unavailable-command 文件缺失) → 进程启动失败 (Exit 127) → 触发 CrashLoopBackOff 重启 → Pod 无法就绪
+```
+
+### 根因结论
+
+已确认根因为**容器入口命令配置错误**。Pod 配置了不存在的命令 `/opt/app/unavailable-command`，导致容器进程启动即失败（Exit 127），进而触发 Kubernetes 的重启机制进入 CrashLoopBackOff 状态。该结论由日志事实（fact-13cb3242823d）、退出码状态（fact-0b3a210a666d）及 K8s 诊断结论充分支持。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.1m
+├─ 问题定位: 20.1s
+├─ 并发证据采集: 39.4s
+│  └─ g1 aiops-case-v08/workload: 39.4s (Evidence 30.9s, RCA 8.4s)
+└─ 汇总总结: 7.1s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v08/workload**: pod-crashloop-runtime
+
+[run:end] run_id=ddd8fdab3eab4ff1 status=-

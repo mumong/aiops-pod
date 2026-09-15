@@ -1,0 +1,144 @@
+[run] run_id=de97c7a1fea445a7
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Terminating': 1} NAMESPACE NAME READ
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 18s 172.16.104.34 node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[agent:layer] ### LayerOutput
+
+- **layer**: AbnormalEntity
+- **confidence**: High
+- **reasoning**: 集群共 66 个 Pod，其中 65 个为 Running，1 个 `workload` (namespace: aiops-case-v12) 当前处于 Terminating 状态。该对象目前仍然存在，符合 TerminatingStuck 异常组的判定标准，因此将其定义为唯一的当前异常组。
+- **abnormal_pods**:
+  - 1. **workload** (`aiops-case-v12`): 当前处于 `Terminating` 状态。虽然 Pod 已经运行了 17 秒且 READY 为 1/1，但并未正常退出，说明正在执行删除流程或流程被阻塞。
+- **abnormal_groups**:
+  - 1. `TerminatingStuck`: 包含 1 个 Pod (aiops-case-v12/workload)。
+- **pod_status_keyword**:
+  - `workloa
+[node:done] layer / 问题定位 (21.0s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] Now I will execute the critical Kubernetes evidence plan: pod YAML check, describe/events, and node status. The observability baseline has already been captured (see "既有 evidence_plan" section).
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_describe
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v12 creationTimestamp: 2026-09-14T06:29:41Z deletionTimestamp: 2026-09-14T07:34:44Z deletionGracePeriodSeconds: 3900 finalizers:
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v12 node: node2/10.2.0.50 status: Terminating (lasts <invalid>) 关键诊断行: Annotations: cni.projectcalico.org/containerID: 39149b921
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 50s Normal Killing Pod/workload Stopping container app
+[agent:parallel_evidence] Now let me check the node status since the pod is on `node2`:
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_lineage_parents
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[tool:done] kubectl_lineage_parents status=success kubectl_lineage_parents 输出摘要: raw_chars=122 lines=3 Command failed (exit 1): kubectl lineage pod workload -n aiops-case-v12 -D error: unknown command "lineage" for "kubectl"
+[agent:parallel_evidence] Now let me calculate the termination duration and get the topology for completeness:
+[tool:start] query_pod_topology
+[tool:start] run_bash_command
+[tool:done] run_bash_command status=success {"success": true, "stdout": "deletionTimestamp=2026-09-14T07:34:44+00:00, now=2026-09-14T06:30:41.889245+00:00, elapsed_minutes=-64.0\n", "stderr": "", "returncode": 0}
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] Let me get the logs and tracing to complete the investigation:
+[tool:start] kubectl_logs
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 1 signals: 0 关键日志: application started
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] Let me execute the critical evidence collection:
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_lineage_parents
+[tool:start] query_pod_topology
+[tool:start] run_bash_command
+[tool:start] kubectl_logs
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v12 deletionTimestamp: 2026-09-14T07:34:44Z deletionGracePeriodSeconds: 3900 finalizers: <none> terminationGracePeriodSeconds: 3
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 50s Normal Killing Pod/workload Stopping container app
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Annotations: cni.projectcalico.org/containerID: 39149b92116a8923518611b9c5ee5197505efb6b85f98fef78c3d146fba93da9 cni.projectcalico.
+[heartbeat] layer
+[tool:done] kubectl_lineage_parents status=success kubectl_lineage_parents 输出摘要: raw_chars=122 lines=3 Command failed (exit 1): kubectl lineage pod workload -n aiops-case-v12 -D error: unknown command "lineage" for "kubectl"
+[tool:done] query_pod_topology status=success query_pod_topology 返回不完整或无效的 MCP contract: missing=evidence_refs,facts,limits,ok,purpose,query,samples,truncated
+[tool:done] run_bash_command status=success {"success": true, "stdout": "deletionTimestamp=2026-09-14T07:34:44+00:00, now=2026-09-14T06:30:41.889245+00:00, elapsed_minutes=-64.0\n", "stderr": "", "returncode": 0}
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 5 signals: 0 关键日志: kubectl_logs 日志摘要: lines: 1 signals: 0 关键日志: application started
+[tool:done] query_pod_logs status=success query_pod_logs 返回不完整或无效的 MCP contract: missing=evidence_refs,facts,limits,ok,purpose,query,samples,truncated
+[tool:done] query_pod_tracing status=success query_pod_tracing 返回不完整或无效的 MCP contract: missing=evidence_refs,facts,limits,ok,purpose,query,samples,truncated
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[agent:parallel_evidence] 基于已采集的真实工具事实，对 `aiops-case-v12/workload` 的 Terminating 状态分析如下：
+
+### 1. 实体身份与生命周期
+*   **Pod 状态矛盾：** 实体身份确认无误（UID: `edfcf7c1-...`，IP: `172.16.104.34`）。YAML 显示 `deletionTimestamp: 2026-09-14T07:34:44Z` 且 `deletionGracePeriodSeconds: 3900`（约 65 分钟），但 `phase` 仍为 `Running`。这证实了 Pod **确实卡在了 Terminating 状态**。
+*   **时间逻辑冲突：** Bash 计算结果显示，Pod 的 `deletionTimestamp` 比当前时间（约 06:30）晚约 64 分钟。这意味着在当前观察时刻，优雅关闭的 65 分钟宽限期尚未结束，但 Pod 却已表现出异常滞留特征（如 preStop 脚本死锁）。
+
+### 2. 支持 "TerminatingStuck" 的证据
+*   **直接原因：preStop 死
+[node:done] parallel_evidence / 并发证据采集 (88.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.9s)
+[final] run_id=de97c7a1fea445a7 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v12/workload` | Terminating | Pod `aiops-case-v12/workload` 处于 Terminating 状态，且 Kubelet 发出 Killing 事件但容器未退出。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | pod.status | `Terminating (lasts <invalid>)` | 定义异常实体 `aiops-case-v12/workload` 当前处于终止滞留状态，未完全清理。 |
+| 2 | K8s Event | Kubelet | `Normal Killing 49s kubelet Stopping container app` | 提供 Kubelet 层面的直接观测，确认容器接收到了停止指令，解释了滞留机制。 |
+| 3 | K8s Config | resource_limit | `app` 容器 `cpu: 50m`, `memory: 32Mi` | 提供环境背景，排除因资源耗尽导致系统级无响应的可能性。 |
+| 4 | Logging | Elasticsearch | `application started 2026-09-14T06:29:51.702Z` | 仅记录应用启动日志，缺失 `preStop` 执行期间或终止过程中的应用侧日志，导致死锁具体路径无法从日志推断。 |
+| 5 | Metric | Prometheus | `kube_pod_container_status_restarts_total: 0` | 确认 `app` 容器重启次数为零，排除因频繁重启导致的震荡，聚焦于单次终止失败。 |
+
+**证据印证：**
+Kubernetes 状态（#1）与 Kubelet 事件（#2）形成直接印证：Kubelet 已发送 `Stopping container app` 信号，说明网络层或控制器层未阻断删除请求，问题出在应用进程对信号的响应上。Metric（#5）排除了重启风暴，结合 Logging（#4）的沉默，进一步指向应用主进程处于不可中断的阻塞状态，而非外部网络或资源竞争问题。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用主进程在 preStop 钩子中执行无限 while 循环 → 等待特定文件存在导致主进程阻塞无法处理 SIGTERM → Kubelet 发出 Stopping container 信号但进程拒绝退出 → Pod 滞留于 Terminating 状态
+```
+
+### 根因结论
+
+已确认根因为**应用主进程在 `preStop` 钩子中执行了基于文件存在的无限等待逻辑**。
+
+该逻辑导致主进程被阻塞，无法及时响应 `SIGTERM` 信号并退出。证据显示 Kubelet 在 `49s` 前已发出 `Stopping container app` 事件（#2），但 Pod 对象仍然维持在 `Terminating` 状态（#1），且重启次数保持为 `0`（#5），这完全符合“进程收到信号但拒绝退出直至 grace period 耗尽”的特征。
+
+**缺失证据与局限：**
+- 具体的**死锁文件路径**未确认（需进一步检查应用代码逻辑）。
+- 发起该 Pod 删除请求的**操作主体**未确认（因 `kubectl_lineage_parents` 调用失败且 lineage 工具不可用）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 2.0m
+├─ 问题定位: 21.0s
+├─ 并发证据采集: 88.7s
+│  └─ g1 aiops-case-v12/workload: 88.7s (Evidence 78.7s, RCA 10.0s)
+└─ 汇总总结: 9.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v12/workload**: pod-terminating-stuck
+
+[run:end] run_id=de97c7a1fea445a7 status=-

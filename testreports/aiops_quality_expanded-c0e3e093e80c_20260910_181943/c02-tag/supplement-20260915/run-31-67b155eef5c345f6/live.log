@@ -1,0 +1,122 @@
+[run] run_id=67b155eef5c345f6
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以定位当前的异常情况。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'ErrImagePull': 1} NAMESPACE NAME REA
+[agent:layer] 集群中检测到 1 个异常 Pod：`aiops-case-v07` 命名空间下的 `workload`。
+
+**异常详情：**
+- **Pod 名称**: `workload`
+- **命名空间**: `aiops-case-v07`
+- **当前状态**: `ErrImagePull`
+- **状态分类**: 镜像拉取失败
+
+根据状态 `ErrImagePull`，我将获取 `pod-imagepull-failed.md` 诊断手册以进行后续排查。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[agent:layer] ### 集群异常摘要
+
+**异常状态**: ABNORMAL
+
+**当前异常实体**:
+1. **Pod**: `workload` (Namespace: `aiops-case-v07`)
+   - **状态**: `ErrImagePull`
+   - **异常类型**: `ImagePullFailed`
+
+**异常组**:
+- **Group 1**: 镜像拉取失败 (包含 Pod: `aiops-case-v07/workload`)
+
+**关键结论**:
+集群中仅存在 1 个异常 Pod，表现为镜像拉取失败 (`ErrImagePull`)。其他 65 个 Pod 状态正常（Running）。根据 `pod-imagepull-failed.md` 手册，下一步需检查该 Pod 的 Events 以确认具体的拉取错误原因（如认证失败、镜像不存在、网络超时等）。
+[node:done] layer / 问题定位 (15.3s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我将开始执行证据采集计划。首先进行 kubectl_describe、events、以及 topology 查询，以获取 Pod 的当前状态和事件详情。
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v07 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning Failed 35m (x4 over 37m) kubelet Failed to pull image "reg
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 35m (x4 over 37m) Warning Failed Pod/workload Failed to pull image "registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-202
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ### 已采集事实
+
+**1. 实体状态与生命周期**
+* **状态确认**：`kubectl_describe` 显示 Pod `aiops-case-v07/workload` 的当前状态为 **Pending**，其 `app` 容器的状态为 **Waiting**，具体原因为 **ImagePullBackOff**。这直接证实了上游提供的 `ErrImagePull` 异常依然在当前时刻**真实存在**，并未恢复。
+* **重启记录**：Prometheus 指标显示 `kube_pod_container_status_restarts_total` 为 **0**。结合 `kubectl_describe` 中的 `Restart Count: 0`，说明容器从未成功启动过，不存在因崩溃重启的情况。
+
+**2. 异常直接原因（根因证据）**
+* **Events 原始错误**：Kubernetes 事件（`kubectl_events` 和 `describe` 输出）给出了明确的拉取失败原因：
+  * **错误详情**：`Failed to pull image "re
+[node:done] parallel_evidence / 并发证据采集 (36.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.9s)
+[final] run_id=67b155eef5c345f6 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v07/workload` | ErrImagePull | Pod workload (aiops-case-v07) 处于 Pending 状态，容器 app 因 ErrImagePull 转换为 ImagePullBackOff。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubelet | `Error: ErrImagePull` (Fact: fact-6916cb39758a) | 确证拉取操作失败 |
+| 2 | K8s Event | kubelet | `rpc error: code = NotFound desc = ... registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908: not found` (Fact: fact-9cf5aa72ca79) | 提供决定性失败原因：镜像不存在 |
+| 3 | K8s State | pod.status | `Pending` (Fact: fact-e6684accd492) | 描述当前故障现象 |
+| 4 | Metric | prometheus | `kube_pod_container_status_waiting_reason{reason="ImagePullBackOff", container="app"} = 1` (Fact: fact-f083af988d74) | 确认 Pod 处于等待拉取镜像的状态 |
+
+**证据说明**
+- 证据 1 和 2 来自同一异常组（K8s Event），共同构成了从“拉取失败”到“仓库响应 NotFound”的完整证据链，直接支撑了根因。
+- 证据 3 和 4 分别从 Pod 状态和 Metrics 指标层面印证了 Pod 因镜像拉取问题而卡在 `Pending` / `ImagePullBackOff` 的状态，与 K8s 事件互为佐证。
+- Logging 和 Tracing 维度被判定为 `not_applicable`（容器未启动），无相关数据。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 配置了不存在的镜像 'registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908' 
+→ 镜像仓库响应 NotFound (Fact: 2) 
+→ kubelet 拉取镜像失败并进入 ImagePullBackOff (Fact: 1, 4) 
+→ Pod 持续处于 Pending 状态 (Fact: 3)
+```
+
+### 根因结论
+
+**已确认的根因**：Pod 配置了不存在的镜像标签 `aiops-fixture-unavailable-20260908`，导致镜像仓库返回 `NotFound` 错误。
+
+- **证据支撑**：
+    - 证据 2 (`fact-9cf5aa72ca79`) 明确指出错误原文为 `registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908: not found`。
+    - 证据 1 (`fact-6916cb39758a`) 记录了 `Error: ErrImagePull`，与镜像查找失败直接对应。
+    - 证据 4 (`fact-f083af988d74`) 通过 Prometheus 指标 `ImagePullBackOff` 确认了该失败状态的持续性。
+
+- **未知项**：该特定镜像标签 `aiops-fixture-unavailable-20260908` 为何被配置（丢失、错配或测试用例遗留）在输入事实中证据不足，无法确认。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.0m
+├─ 问题定位: 15.3s
+├─ 并发证据采集: 36.4s
+│  └─ g1 aiops-case-v07/workload: 36.4s (Evidence 27.6s, RCA 8.7s)
+└─ 汇总总结: 10.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v07/workload**: pod-imagepull-failed
+
+[run:end] run_id=67b155eef5c345f6 status=-

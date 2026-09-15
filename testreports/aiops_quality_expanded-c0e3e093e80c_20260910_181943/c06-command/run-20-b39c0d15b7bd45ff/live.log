@@ -1,0 +1,108 @@
+[run] run_id=b39c0d15b7bd45ff
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 9 (2m40s ago) 23m 172.16.104.30
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 9 (2m40s ago) 23m 172.16.104.30
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 9 (2m40s ago) 23m 172.16.104.30
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=6 abnormal=6 recent_restarts=0 status_counts={} NAMESPACE LAST SEEN TYPE REASON OBJECT SUBOBJECT SOURCE
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (13.6s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":9,"normalized":9,"retrieved":9,"returned":9},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 首轮可观测性 baseline 已采集完成，结果概要：
+- Metrics: `kube_pod_container_status_waiting_reason=1 (CrashLoopBackOff)`, `kube_pod_container_status_last_terminated_reason=1 (Error)`, `restarts=9`。
+- Logging: 9 条日志，全部为 `sh: exec: line 0: /opt/app/unavailable-command: not found`。
+- Tracing: 无匹配流量/Span（Pod 启动失败，无 L7 流量）。
+
+接下来执行 Kubernetes 层验证（describe、previous logs、yaml），以确认 Exit Code、Last State 和 command 配置。
+[tool:start] kubectl_describe
+[tool:start] kubectl_previous_logs
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v08 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 4m10s (x94 over 24m) kubelet
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 1 signals: 1 关键日志: sh: exec: line 0: /opt/app/unavailable-command: not found
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v08 creationTimestamp: 2026-09-11T13:02:52Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] ### 已采集事实
+
+1.  **Pod 生命周期 (Kubernetes + Metrics)**
+    *   `aiops-case-v08/workload` 当前状态为 **Running** (Pod phase)，但容器 `app` 处于 **CrashLoopBackOff**，`Ready=False`。
+    *   重启次数：**9 次**。
+    *   上一终态：**Terminated**, Reason=`Error`, **Exit Code=127**。
+    *   判定：确认为 **CrashLoopBackOffRuntime**，尚未恢复。
+
+2.  **崩溃根因 (Logging + describe)**
+    *   容器入口配置：`command: ["sh", "-c", "exec /opt/app/unavailable-command"]`。
+    *   崩溃日志原文（重复 9 次，与重启次数一致）：`sh: exec: line 0: /opt/app/unavailable-command: not found
+[node:done] parallel_evidence / 并发证据采集 (24.8s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (6.6s)
+[final] run_id=b39c0d15b7bd45ff status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v08/workload` | CrashLoopBackOff | CrashLoopBackOff |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | Logging | elasticsearch | `sh: exec: line 0: /opt/app/unavailable-command: not found` | 确认进程启动时因找不到命令直接失败 (Exit Code 127) |
+| 2 | K8s State | kubernetes | `last_exit_code`: 127 (container: app) | 对应日志中的命令未找到错误，确认为执行层面问题 |
+| 3 | K8s State | kubernetes | `container.waiting_reason`: CrashLoopBackOff | 展示当前容器处于重启回退状态 |
+| 4 | K8s Event | kubernetes | `Back-off restarting failed container app` (x94 over 24m) | 佐证容器频繁非正常退出及回退机制生效 |
+| 5 | Metric | prometheus | `restart_count`: 9 | 量化重启次数，与 K8s State 事实一致 |
+
+日志证据（事实 #1）与 K8s 状态事实（事实 #2）互为印证，日志提供了 Exit Code 127 的具体业务原因（可执行文件缺失）。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+容器入口命令指向镜像中不存在的可执行文件 → 容器启动执行失败 (Exit Code 127) → 容器频繁崩溃并触发重启策略 → Pod 状态显示为 CrashLoopBackOff
+```
+
+### 根因结论
+
+已确认根因为：容器镜像中配置的可执行文件 `/opt/app/unavailable-command` 不存在。
+
+该根因由以下证据链证实：
+*   容器进程在启动尝试执行该路径时立即失败，返回错误码 127 并触发重启 #2。
+*   日志记录了明确的 `not found` 错误信息 #1，直接指向缺失的可执行文件。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 45.0s
+├─ 问题定位: 13.6s
+├─ 并发证据采集: 24.8s
+│  └─ g1 aiops-case-v08/workload: 24.8s (Evidence 17.7s, RCA 6.9s)
+└─ 汇总总结: 6.6s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v08/workload**: pod-crashloop-runtime
+
+[run:end] run_id=b39c0d15b7bd45ff status=-

@@ -1,0 +1,102 @@
+[run] run_id=7042b67dfff64ecc
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5dbb5dcd6c-bntfh 0/1 ContainerCreating 0 6
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod VolumeMountFailed / 卷挂载失败 > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume ## 使用原则（给模型） - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。 - `kubectl
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5dbb5dcd6c-bntfh 0/1 ContainerCreating 0 6
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success kubectl_get_by_name 输出摘要: raw_chars=183 lines=3 Command failed (exit 1): kubectl get --show-labels -o wide event workload-5dbb5dcd6c-bntfh -n aiops-case-05 Error from server (NotFound): events "worklo
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success Pod workload-5dbb5dcd6c-bntfh in namespace aiops-case-05 is failing to start due to missing network-attachment-definition 'unavailable-network', resulting in 266 FailedCreatePodSandBox events on node2
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod SandboxCreateFailed / Pod sandbox 创建失败 > Pod异常类型: SandboxCreateFailed | 典型状态: ContainerCreating / FailedCreatePodSandBox | 兼容分类: sandbox_runtime ## 状态识别 - Events 含 `FailedCreatePodSa
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (23.0s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我将执行既有 evidence_plan 中的关键步骤，以采集真实工具事实来判断 `aiops-case-05/workload-5dbb5dcd6c-bntfh` 处于 `ContainerCreating` 状态的具体原因。
+
+首先，我注意到预采集的可观测性数据中，**Metrics 显示 Pod 处于 Pending 阶段，waiting_reason 为 ContainerCreating，但 pod_ip 为空**（导致 Tracing 查询因缺少 pod_ip 而无法执行）。这符合 Pod 尚未进入 Running 状态的预期。
+
+现在执行核心的 Kubernetes 工具调用：Describe Pod 和 Get YAML。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_previous_logs
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 输出摘要: raw_chars=205 lines=3 Command failed (exit 1): kubectl logs workload-5dbb5dcd6c-bntfh -n aiops-case-05 --previous Error from server (BadRequest): previous terminated contai
+[tool:done] kubectl_describe status=success Pod workload-5dbb5dcd6c-bntfh in namespace aiops-case-05 is stuck in Pending status due to missing NetworkAttachmentDefinition. Multus CNI plugin fails to find the network definition 'unavailable-netw
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-5dbb5dcd6c-bntfh namespace: aiops-case-05 creationTimestamp: 2026-09-10T16:26:26Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[agent:parallel_evidence] ### 1. 证据采集结果
+
+#### 1.1 Kubernetes 核心事实 (Describe & YAML)
+*   **Pod 状态**：`phase: Pending`，`ContainerState: Waiting (Reason: ContainerCreating)`。这与层传递中的描述一致。
+*   **调度节点**：Pod 已被调度到 `node2` (10.2.0.50)。
+*   **容器信息**：容器名为 `app`，镜像为 `xnet.registry.io:8443/observability/python:3-alpine`。`restarts=0`，说明该容器从未成功启动过。
+*   **关键事件 (Events)**：
+    *   `Warning NoNetworkFound (multus)`：**cannot find network-attachment-definition 'unavailable-network' in namespace aiops-case-05**。
+    *   `Warning FailedCreate
+[node:done] parallel_evidence / 并发证据采集 (47.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.1s)
+[final] run_id=7042b67dfff64ecc status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-05/workload-5dbb5dcd6c-bntfh` | ContainerCreating | Pod 配置了 Multus CNI 注解引用名为 'unavailable-network' 的 NetworkAttachmentDefinition，但该资源在 aiops-case-05 命名空间中不存在，导致 Multus 插件无法配置网络，进而引发 kubelet 创建 Pod Sandbox 失败。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes (Multus) | `NoNetworkFound`: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05) | 确认 Pod 配置了不存在的网络引用，导致 CNI 插件初始化失败 |
+| 2 | K8s Event | Kubernetes (Kubelet) | `FailedCreatePodSandBox`: rpc error: code = Unknown desc = failed to setup network for sandbox: plugin type="multus" name="multus-cni-network" failed: cannot find a network-attachment-definition (unavailable-network)... not found | 确认网络插件失败直接导致 Pod 容器沙箱创建失败 |
+| 3 | K8s State | Kubernetes (State) | `ContainerCreating`: container "app" 处于等待状态 | 对应上层网络插件失败导致的 Pod 调度停滞状态 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_waiting_reason` 值为 `1` (reason: `ContainerCreating`) | 量化确认了该容器处于等待网络/状态创建阶段的当前状态 |
+
+**证据分析**：
+Kubernetes Event 明确指出了 `NoNetworkFound` (fact-1) 和 `FailedCreatePodSandBox` (fact-2) 之间的直接因果关系。由于 Multus 插件找不到名为 `unavailable-network` 的 NetworkAttachmentDefinition，网络配置步骤中止，导致 Kubelet 无法创建沙箱，从而使得容器状态 (fact-3) 永久停留在 `ContainerCreating`。Metric 数据 (fact-4) 与 Event 状态一致，确认了当前等待的持续性。Logging/Tracing 因容器未启动而不可用，但 Event 级别的证据已足够闭环。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 配置引用了不存在的 NetworkAttachmentDefinition 'unavailable-network' → Multus CNI 插件无法找到目标网络定义 → Kubelet 创建 Pod Sandbox 失败 (网络配置阶段报错) → Pod 状态卡在 ContainerCreating，容器未启动
+```
+
+### 根因结论
+
+已确认根因为 **Pod 配置了不存在的网络依赖**。
+证据表明，Pod 在 `aiops-case-05` 命名空间中请求了名为 `unavailable-network` 的 Multus 网络，但该 `NetworkAttachmentDefinition` 资源不存在 (fact-1)。这导致 Multus 插件在初始化网络时直接报错 (fact-2)，进而阻断了 Pod 沙箱的创建流程，使容器长期处于 `ContainerCreating` 状态 (fact-3, fact-4)。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.3m
+├─ 问题定位: 23.0s
+├─ 并发证据采集: 47.6s
+│  └─ g1 aiops-case-05/workload-5dbb5dcd6c-bntfh: 47.6s (Evidence 39.7s, RCA 7.7s)
+└─ 汇总总结: 9.1s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-05/workload-5dbb5dcd6c-bntfh**: pod-volume-mount-failed, pod-sandbox-create-failed
+
+[run:end] run_id=7042b67dfff64ecc status=-

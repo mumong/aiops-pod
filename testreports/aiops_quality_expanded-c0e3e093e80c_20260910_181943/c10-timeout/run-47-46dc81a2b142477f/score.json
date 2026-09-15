@@ -1,0 +1,161 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "46dc81a2b142477f",
+  "elapsed_seconds": 158.699,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 0,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 0,
+    "recall": 0.0,
+    "precision": 0.0,
+    "matches": [
+      {
+        "expectation_id": "c10-timeout",
+        "matched": false,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [],
+        "missing_all": [],
+        "missing_any": [
+          "liveness",
+          "存活探针"
+        ],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [
+      "g1"
+    ],
+    "accuracy": 0.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因是：**应用存在同步阻塞行为（极大概率为 DNS 解析），导致服务响应严重延迟，进而引发 OOM 崩溃。**\n\n1.  **阻塞现象确认**：Tracing 数据（证据 #6）显示 `/health` 接口响应耗时超过 3 秒，足以触发探针超时（证据 #1），同时应用日志（证据 #7）确认服务并未完全宕机，而是处于“半死不活”的阻塞状态。\n2.  **崩溃机制确认**：K8s 记录显示容器退出码为 137（证据 #3），结合 64Mi 的硬性内存限制（证据 #4），说明阻塞导致的长连接或缓冲堆积耗尽了内存，触发了 OOM-Killer 强制终止进程。\n3.  **缺失事实说明**：虽然根因链条在技术上是完整的（阻塞->超时->OOM），但输入数据中缺失确凿的“阻塞证据”（如 DNS 错误日志、线程堆栈）。当前事实主要基于探针超时和 OOM 结果进行的逆向推断，属于高置信度推断而非代码级确证。\n\n---",
+      "full_section": "### 因果链\n\n```text\n应用线程阻塞（如 DNS 解析等待） → HTTP 响应延迟过高（>3秒） → Liveness Probe 超时探测失败 → 容器被 K8s 杀掉并触发 OOM-Killer (Exit 137) → CrashLoopBackOff 重启循环\n```\n\n### 根因结论\n\n已确认的根因是：**应用存在同步阻塞行为（极大概率为 DNS 解析），导致服务响应严重延迟，进而引发 OOM 崩溃。**\n\n1.  **阻塞现象确认**：Tracing 数据（证据 #6）显示 `/health` 接口响应耗时超过 3 秒，足以触发探针超时（证据 #1），同时应用日志（证据 #7）确认服务并未完全宕机，而是处于“半死不活”的阻塞状态。\n2.  **崩溃机制确认**：K8s 记录显示容器退出码为 137（证据 #3），结合 64Mi 的硬性内存限制（证据 #4），说明阻塞导致的长连接或缓冲堆积耗尽了内存，触发了 OOM-Killer 强制终止进程。\n3.  **缺失事实说明**：虽然根因链条在技术上是完整的（阻塞->超时->OOM），但输入数据中缺失确凿的“阻塞证据”（如 DNS 错误日志、线程堆栈）。当前事实主要基于探针超时和 OOM 结果进行的逆向推断，属于高置信度推断而非代码级确证。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v17"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v17"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v17"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [
+      {
+        "lane": "46dc81a2b142477f-g1",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/46dc81a2b142477f-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [
+      {
+        "lane": "46dc81a2b142477f-g1",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/46dc81a2b142477f-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c10-timeout-kubernetes-observation",
+        "description": "c10-timeout-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-2aa18d2684d1",
+          "fact-2aee01fc3c6a",
+          "fact-3bd10bbdfdc9",
+          "fact-69192c0e0e43",
+          "fact-71f445e00c95",
+          "fact-7e42c27a7569",
+          "fact-b3bf45e5f392",
+          "fact-d38019689b84",
+          "fact-e2fedb07f075",
+          "fact-f2499b8145eb",
+          "fact-8f3429f52761",
+          "fact-483c67374714"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 53,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 47,
+  "logical_elapsed_seconds": 159.0,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

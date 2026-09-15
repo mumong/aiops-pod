@@ -1,0 +1,105 @@
+[run] run_id=065161ac8a1a4891
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 15 (116s ago) 55m 172.16.104.20
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 15 (116s ago) 55m 172.16.104.20
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success LAST SEEN TYPE REASON OBJECT SUBOBJECT SOURCE MESSAGE
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod OOMKilled（以 Last State Reason 为准） > Pod异常类型: OOMKilled | 典型状态: CrashLoopBackOff / Error / Restarting | 兼容分类: container_memory ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Cr
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod Evicted / 本地临时存储或节点资源压力驱逐 > Pod异常类型: Evicted | 典型状态: Evicted / Failed | 兼容分类: resource_eviction ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | STATUS=Evicted、Failed，或 describe
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (18.9s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":46,"matched":66,"normalized":66,"retrieved":66,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entity":{
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 根据预采集结果，日志显示 Python 异常 `FileNotFoundError: [Errno 2] No such file or directory: '/input/app.conf'`，PromQL 显示 `last_terminated_reason=Error` 且重启了 15 次。这指向配置/启动失败。
+
+现在我执行 evidence_plan 中的 plan-1 到 plan-4 以及 observability-gate-1-topology 来获取完整的 Kubernetes 生命周期、配置和时间线证据。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_previous_logs
+[tool:start] kubectl_events
+[tool:start] query_pod_topology
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 11 signals: 4 关键日志: Traceback (most recent call last): with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f: return io.open(self,
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v09 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 87s (x245 over 56m) kubelet
+[heartbeat] layer
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 87s (x245 over 56m) Warning BackOff Pod/workload Back-off restarting failed container app in pod workload_aiops-case-v09(5746c496-b67c-4906-aabb-e71359674305)
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v09 creationTimestamp: 2026-09-11T14:11:24Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] 已采集到关于 `aiops-case-v09/workload` 的以下关键事实：
+
+**支持 "CrashLoopBackOff" 的状态证据：**
+*   **Kubernetes 状态 (`kubectl_get_yaml`, `kubectl_describe`)**：Pod 状态为 `Running`，但容器状态为 `CrashLoopBackOff`，`restarts=15`。Readiness Probe 失败，Reason 为 `ContainersNotReady`。事件日志显示 `Back-off restarting failed container app`，持续时间达 56 分钟。
+*   **Previous Logs (`kubectl_previous_logs`)**：容器在崩溃前的最后日志显示 Python 代码执行失败，抛出 `FileNotFoundError: [Errno 2] No such file or directory: '/input/app.conf'`。
+
+**异常根因事实：**
+*   该 Pod 的容器 `app` 启动
+[node:done] parallel_evidence / 并发证据采集 (50.9s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.3s)
+[final] run_id=065161ac8a1a4891 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v09/workload` | CrashLoopBackOff | 应用启动命令尝试读取的配置文件 /input/app.conf 不存在（Pod Volume 挂载配置缺失或数据源为空），导致容器启动失败并退出码为 1，Kubernetes 进入 CrashLoopBackOff 循环。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | `container.waiting_reason`: `CrashLoopBackOff` (fact-5d40e0124b35) | 确认异常状态 |
+| 2 | K8s Event | Kubernetes | `Back-off restarting failed container app` (fact-5a2b5a2609fa) | 证实异常状态来源 |
+| 3 | K8s State | Kubernetes | `exit_code`: `1` (fact-629894e1427d) | 证实进程异常退出 |
+| 4 | Logging | Elasticsearch | `Path('/input/app.conf').read_text()` (fact-7832dd7a2e41) | 揭示应用启动尝试读取的配置路径 |
+| 5 | Logging | Elasticsearch | `FileNotFoundError` 相关的 traceback (fact-2c8c3f0012eb, fact-98cf8b34c946) | 确认因文件不存在而崩溃 |
+| 6 | Metric | Prometheus | `kube_pod_container_status_waiting_reason`: `1` (reason=CrashLoopBackOff) (fact-2e223d88ab69) | Metric 维度状态印证 |
+| 7 | Metric | Prometheus | `kube_pod_container_status_restarts_total`: `15` (fact-b3b70471d199) | 证实循环重启模式 |
+
+日志显示应用启动指令中明确尝试读取 `/input/app.conf`，并伴随 `FileNotFoundError` 异常，直接解释了退出码 1 的原因。K8s 状态与 Metrics 数据共同确认了 `CrashLoopBackOff` 及连续重启 15 次的现象。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+配置文件 /input/app.conf 缺失（Volume 挂载配置问题或为空） → 应用启动时触发 FileNotFoundError → 容器进程异常退出 (exitCode=1) → Pod 处于 CrashLoopBackOff 状态
+```
+
+### 根因结论
+
+已确认根因为**应用启动配置文件缺失**。日志中的 Python 调用栈证实了 `pathlib` 在读取 `/input/app.conf` 时抛出 `FileNotFoundError`，导致进程以状态码 1 崩溃，进而触发 Kubernetes 的 `CrashLoopBackOff` 循环。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.3m
+├─ 问题定位: 18.9s
+├─ 并发证据采集: 50.9s
+│  └─ g1 aiops-case-v09/workload: 50.9s (Evidence 44.1s, RCA 6.6s)
+└─ 汇总总结: 8.3s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v09/workload**: pod-crashloop-runtime, pod-oomkilled, pod-evicted
+
+[run:end] run_id=065161ac8a1a4891 status=-

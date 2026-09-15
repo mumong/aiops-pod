@@ -1,0 +1,115 @@
+[run] run_id=33db0b6f48f34951
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以便初步评估集群健康情况。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 根据集群当前状态，66 个 Pod 中有 1 个处于 `Terminating` 状态，存在异常。
+
+我将进一步获取该 Pod 的详细信息，以判断其滞留原因并选择合适的诊断手册。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 19s 172.16.104.9 node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 19s 172.16.104.9 node2 <none>
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 19s 172.16.104.9 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (17.2s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"projected_series":0,"raw_series":0,"retrieved":0,"returned":0,"serialized_series":0},"coverage":"empty","di
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 开始执行首轮证据采集计划。先并行获取 Kubernetes 描述、Pod YAML 和拓扑，以及已有的可观测性基线（Metrics/Logs/Tracing 已在前置执行中返回结果）。
+
+**步骤 1：Kubernetes 核心事实采集**
+- `kubectl get pod workload -n aiops-case-v12 -o yaml`：确认 deletionTimestamp、finalizers、node 等关键状态。
+- `kubectl describe pod workload -n aiops-case-v12`：获取终止相关事件。
+- `query_pod_topology`：获取控制器和节点关系。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v12 node: node2/10.2.0.50 status: Terminating (lasts <invalid>) 关键诊断行: Annotations: cni.projectcalico.org/containerID: cd9c0bc1a
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v12 creationTimestamp: 2026-09-14T05:56:12Z deletionTimestamp: 2026-09-14T07:01:15Z deletionGracePeriodSeconds: 3900 finalizers:
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 以下是已采集的事实总结、冲突和缺口：
+
+### 已确认事实
+1. **Pod 当前状态矛盾**：
+   - `kubectl describe` 显示 `status: Terminating`，且有 `Killing` 事件。
+   - `kubectl get -o yaml` 显示 `phase: Running`，容器 `app` 状态为 `Running`，且 `finalizers: <none>`。
+   - 存在 `deletionTimestamp: 2026-09-14T07:01:15Z`，且 `deletionGracePeriodSeconds: 3900`。
+
+2. **终止机制配置**：
+   - `terminationGracePeriodSeconds: 3900`（65分钟）。
+   - `lifecycle.preStop` 已配置一个长耗时（`deadline = time.monotonic() + 3600`，即1小时）且会持续等待 `/state/teardown-requested` 文件出现的逻辑。
+   - 主容器也在等待 `/st
+[node:done] parallel_evidence / 并发证据采集 (29.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (11.7s)
+[final] run_id=33db0b6f48f34951 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v12/workload` | Terminating | 应用层终止逻辑包含长超时等待且缺失触发信号 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | `kubelet` (fact-837e031191e8) | `Normal Killing ... Stopping container app` (37s) | 确认触发机制：kubelet 已执行终止流程并发出信号 |
+| 2 | K8s Config | `container.resource_limit.memory` (fact-02bc9a079e2a) | `32Mi` | 排除容器内存硬限制触发 OOMKilled 导致立即退出的可能性 |
+| 3 | K8s State | `pod.status` (fact-f0fe6798e7c4) | `Terminating (lasts <invalid>)` | 确认症状：Pod 陷入终止状态且长时间未释放，处于挂起态 |
+| 4 | Logging | `elasticsearch` (fact-ff770fb7f438) | `application started` (2026-09-14T05:56:21.404Z) | 仅确认应用曾启动成功；缺失后续终止阶段的日志以支撑具体的“长超时等待”分析 |
+| 5 | K8s Event | `CNI/Annotations` (fact-2133f66a12b8等) | `cni.projectcalico.org/podIP: 172.16.104.9/32` 等 5条 | 排除 CNI 资源分配错误或注解缺失导致的 Pod 初始化/终止失败 |
+
+**证据关联说明：**
+证据 1 提供了直接的外部触发证据（Kubelet 发出 Killing），证据 3 展示了异常结果（Pod 挂起）。证据 2 排除了资源限制导致的被动终止。日志证据（证据 4）仅证实了生命周期起点，缺失终止阶段日志，无法单独验证长超时行为，因此终止逻辑的具体表现依赖正式 RCA 的因果链推论。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 收到删除请求 (deletionTimestamp已设置) → kubelet 发送 SIGTERM 并执行 lifecycle.preStop hook → preStop hook 启动最长 3600秒 的循环等待 /state/teardown-requested 文件 (未配置强制中断) → 主容器同样循环等待同一文件存在才退出 → 应用层终止逻辑包含长超时等待且缺失触发信号
+```
+
+### 根因结论
+
+已确认根因为 **应用层终止逻辑存在长超时等待且缺失触发信号**。
+
+- **机制分析**：Kubelet 在收到 Pod 删除请求后（证据 1），正常发出 `SIGTERM` 并执行 `preStop` 生命周期钩子。
+- **失败表现**：Pod 并未在预期的秒级时间窗内退出，而是陷入了 `Terminating` 状态的挂起（证据 3）。正式 RCA 指出，`preStop` 钩子中启动了针对 `/state/teardown-requested` 文件的最长 3600 秒的循环等待。
+- **逻辑缺陷**：主容器未配置强制中断机制（如 `SIGTERM` handler 强制退出），而是同样陷入对同一文件存在的等待，导致即使接收到终止信号也无法及时释放资源。
+- **支撑情况**：日志证据（证据 4）未提供该等待过程的直接记录，但 K8s 层面的终止状态（证据 3）与触发事件（证据 1）之间的异常延迟，以及排除了资源限制因素（证据 2），共同指向了应用内部逻辑导致的终止延迟。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 58.0s
+├─ 问题定位: 17.2s
+├─ 并发证据采集: 29.0s
+│  └─ g1 aiops-case-v12/workload: 29.0s (Evidence 20.6s, RCA 8.3s)
+└─ 汇总总结: 11.7s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v12/workload**: pod-terminating-stuck
+
+[run:end] run_id=33db0b6f48f34951 status=-

@@ -1,0 +1,111 @@
+[run] run_id=798694295f224d49
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以定位当前的异常状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 集群中检测到 1 个异常 Pod。现在获取该 Pod 的详细信息以确认异常类型。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 3m30s 172.16.104.21 node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 3m30s 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 3m30s 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 3m30s 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 3m30s 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (13.3s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":4,"normalized":4,"retrieved":4,"returned":4},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 已收到代码执行的首轮可观测性结果（Metrics、Logging、Tracing），它们显示 Pod 仍在正常处理 HTTP 请求，但这与 Terminating 状态矛盾。需要先完成 critical 的 Kubernetes 事实采集（describe + get yaml），再解释冲突。
+
+**首轮补证计划：**
+1. `kubectl_describe`: 确认当前 Pod 事件（是否有 FailedKillPod, GracefulPeriodEnd, volume 相关事件）。
+2. `kubectl_get_yaml`: 确认当前的 `metadata.deletionTimestamp`、`metadata.finalizers`、`spec.terminationGracePeriodSeconds` 和 `spec.lifecycle.preStop`。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-11 node: node2/10.2.0.50 status: Terminating (lasts 3m46s) 关键诊断行: Exit Code: 137 Annotations: cni.projectcalico.org/con
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-11 creationTimestamp: 2026-09-11T03:47:03Z deletionTimestamp: 2026-09-11T03:47:07Z deletionGracePeriodSeconds: 0 finalizers: aio
+[agent:parallel_evidence] ### 已采集事实
+
+1.  **Pod 当前状态**：`kubectl get/describe` 确认 Pod 仍处于 `Terminating` 状态，持续时长超过 3 分钟。
+2.  **卡死根因（Finalizer）**：`metadata.finalizers` 存在 `aiops.lab/hold`。这是一个自定义 Finalizer，阻止了 Pod 被最终删除。由于 Finalizer 未被清理，即使容器已终止，Pod 对象也无法从 API Server 中移除。
+3.  **容器生命周期**：容器 `app` 在 `deletionTimestamp` 触发后仅约 11 秒（03:47:04 启动，03:47:18 结束）便以 Exit Code 137（SIGKILL）异常退出。
+4.  **状态冲突**：
+    *   `kubectl describe` 显示容器状态为 `Terminated`（Reason: Error, Exit Code: 137）。
+    *   `kubectl get yaml` 显示 Pod 整体 `phase` 仍为 `Ru
+[node:done] parallel_evidence / 并发证据采集 (30.5s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (12.9s)
+[final] run_id=798694295f224d49 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-11/workload` | Terminating | Pod aiops-case-11/workload 持续 Terminating 状态超过 3 分钟，未能自动回收 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | Pod `aiops-case-11/workload` 状态: `Terminating` (持续时间 3m46s) | 症状：确认 Pod 处于删除滞留状态，未正常回收。 |
+| 2 | K8s Event | Kubernetes | `Stopping container app` | 现象：容器进程确实已被 kubelet 停止。 |
+| 3 | K8s State | Kubernetes | 容器退出码: 137 (SIGKILL) | 关键事件：容器进程被强制终止。 |
+| 4 | K8s Config | Kubernetes | 资源限制: 96Mi Memory, 200m CPU | 上下文：存在内存限制，虽未直接证实触发 Kill，但构成了 137 退出的潜在背景。 |
+| 5 | Logging | Elasticsearch | 最近日志: `request completed`, http_status: 200, path: /work (03:47:09-03:47:15) | 限定：进程在终止前瞬间仍在处理正常 HTTP 请求，表明异常可能是突发的外部信号或系统级 OOM。 |
+| 6 | Tracing | Deepflow/Tempo | Span: `GET /work` (trace_id: `1edba7b29f23053616d75e955fa073c8`), 耗时 3.6ms~17ms | 追踪关联：与日志记录完全对应，证明应用层逻辑在终止前运行正常。 |
+| 7 | Metric | Prometheus | `kube_pod_container_status_restarts_total`: 0 | 状态确认：容器尚未经历重启，当前仍处于终止后的清理阶段。 |
+
+**证据分析**：
+日志 `request completed` 和 Tracing Span `GET /work` 证实了容器进程在 `03:47:09` 至 `03:47:15` 期间仍具备业务处理能力。随后容器被系统强制发出 SIGKILL（退出码 137）并停止。Kubernetes 事件确认了 `Stopping container` 的行为。尽管容器已终止，但 Pod 对象本身卡在 `Terminating` 状态已超过 3 分钟，表明 API Server 无法完成该对象生命周期最后的清理阶段。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 包含 'aiops.lab/hold' 自定义 Finalizer 未被清理 → 阻塞 API Server 移除 Pod 对象 → 容器虽已因 SIGKILL (Exit 137) 退出，但 Pod 资源未被回收 → Pod 持续处于 Terminating 状态
+```
+
+### 根因结论
+
+已确认的根因是 `aiops-case-11/workload` 的 `metadata.finalizers` 字段中包含了未清理的自定义 Finalizer `'aiops.lab/hold'`。这导致 Kubernetes API Server 在容器终止后无法执行最终的垃圾回收操作，从而阻塞了 Pod 对象的删除。
+
+证据支持：
+- **机制阻断**：Kubernetes 事件 `Stopping container` 与最终状态 `Terminating` 并存（证据 #1, #2），表明控制平面与数据平面不一致。
+- **终止确认**：退出码 `137`（证据 #3）证明容器进程确实已非正常结束，排除了业务应用自身卡死导致无法退出的可能性。
+- **运行正常**：Tracing 和 Logging 显示业务请求在终止前瞬间处理正常（证据 #5, #6），进一步佐证了进程是被外部强制杀死的。
+
+未确认部分：
+- 触发容器 `SIGKILL (137)` 的具体上游原因（如 OOM Killer 触发、手动 `kubectl delete`、或健康检查失败）不在本次“Terminating 滞留”的诊断范围内。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 56.8s
+├─ 问题定位: 13.3s
+├─ 并发证据采集: 30.5s
+│  └─ g1 aiops-case-11/workload: 30.5s (Evidence 21.9s, RCA 8.5s)
+└─ 汇总总结: 12.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-11/workload**: pod-terminating-stuck
+
+[run:end] run_id=798694295f224d49 status=-

@@ -1,0 +1,98 @@
+[run] run_id=5392468fbb604167
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 19m <none> <none> <none> <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 19m <none> <none> <none> <none>
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=68 abnormal=8 recent_restarts=0 status_counts={'Pending': 8} NAMESPACE NAME STATUS VOLUME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 19m <none> <none> <none> <none>
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (17.8s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 已收到首轮可观测性 baseline 结果。Metrics 显示 Pod 仍为 Pending 状态（UID 一致），Logging 和 Tracing 为空是 Pending Pod 的预期结果。现在执行 Kubernetes 核心验证：`kubectl_describe` 获取 Events 和 YAML。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v03 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 20m default-scheduler 0/3 nodes are available: persiste
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v03 creationTimestamp: 2026-09-11T08:02:22Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] ## 已采集事实
+
+| 维度 | 关键事实 | 与候选原因关系 |
+|------|---------|--------------|
+| **Pod 状态** | phase=Pending, nodeName=None, PodScheduled=False | 支持 Pending 异常 |
+| **Prometheus** | `kube_pod_status_phase{phase="Pending"}=1`, UID=`b2f83678-...` | 确认当前仍 Pending，UID 一致无重用 |
+| **Events** | `FailedScheduling` (20m 前及 9m52s x2) 原文: `"persistentvolumeclaim \"unavailable-claim\" not found"` | **直接原因定位** |
+| **Pod YAML** | Volumes 含 `persistentVolumeClaim: unavailable-claim`，无 nodeSelector/affinity/taint 问题 | 确认 PVC
+[node:done] parallel_evidence / 并发证据采集 (28.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.9s)
+[final] run_id=5392468fbb604167 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v03/workload` | Pending | Pod aiops-case-v03/workload 处于 Pending 状态，节点为 <none>，PodScheduled=False。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | default-scheduler | `Warning FailedScheduling ... 0/3 nodes are available: persistentvolumeclaim "unavailable-claim" not found` (fact_id: fact-2577db867b5f, 重复 2 次) | 直接表明调度失败原因为 PVC 缺失 |
+| 2 | K8s State | pod.condition | `PodScheduled=False`，原因 `Unschedulable`，消息指向同一个 `unavailable-claim` not found (fact_id: fact-0a3820454ca1) | 确认 Pod 处于持续不可调度状态 |
+| 3 | K8s Config | container.resource_request.memory | `8Mi` (fact_id: fact-7659703b430e) | 排除内存资源请求过高导致的调度阻塞 |
+| 4 | K8s Config | container.resource_limit.cpu | `50m` (fact_id: fact-79baf3214a4e) | 排除 CPU 限制过高导致的调度阻塞 |
+| 5 | Metric | prometheus (Pending) | `kube_pod_status_phase` (phase="Pending") = 1 (fact_id: fact-f5c3559e8e39) | 确认 Pod 阶段维持为 Pending |
+| 6 | Metric | prometheus (Running) | `kube_pod_status_phase` (phase="Running") = 0 (fact_id: fact-0268d24ae65c) | 确认无副本处于运行状态 |
+
+**证据关联说明**：
+Kubernetes 的事件 (1) 与 Pod 条件状态 (2) 共同确认了 `Pending` 状态由 `FailedScheduling` 导致，且根因锁定在 `unavailable-claim` 的卷绑定环节。Metric 数据 (5, 6) 佐证了该状态在观测窗口内的持续性。资源配置检查 (3, 4) 排除了资源不足的可能性，确证是 PVC 引用错误导致的问题。由于容器未启动，Logging 和 Tracing 维度无数据。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod Spec 声明引用 PVC 'unavailable-claim' → PVC 在当前 namespace (aiops-case-v03) 中不存在 (Not Found) → Scheduler 无法绑定卷，返回 FailedScheduling 错误 → Pod 保持 Pending 状态，无法分配 nodeName
+```
+
+### 根因结论
+
+已确认根因为：Pod YAML 定义中引用了名为 `unavailable-claim` 的 PVC，该 PVC 在当前 namespace `aiops-case-v03` 中不存在。
+
+这一缺失直接导致 Kubernetes 调度器在执行卷绑定检查时失败，持续拒绝调度 Pod，从而表现出 Pod 处于 `Pending` 状态且 `PodScheduled` 条件为 `False` 的现象。证据 1 和 2 提供了决定性的事实支撑。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 56.3s
+├─ 问题定位: 17.8s
+├─ 并发证据采集: 28.6s
+│  └─ g1 aiops-case-v03/workload: 28.6s (Evidence 19.8s, RCA 8.7s)
+└─ 汇总总结: 9.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v03/workload**: pod-pending-unschedulable
+
+[run:end] run_id=5392468fbb604167 status=-

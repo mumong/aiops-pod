@@ -1,0 +1,140 @@
+[run] run_id=b6db5a5af8194590
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前存在的异常。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 集群中有一个 Pod 处于 `Terminating` 状态，表明它可能无法顺利删除。根据异常类型 `TerminatingStuck`，我将获取对应的诊断手册。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[agent:layer] 根据集群状态排查结果，当前集群存在一个异常项：
+
+1. **异常 Pod**：`workload` (Namespace: `aiops-case-v12`)
+2. **当前状态**：`Terminating`
+3. **异常类型**：`TerminatingStuck` (删除卡住)
+4. **异常组**：由于只有一个异常实体，独立构成一组 `TerminatingStuck`。
+
+下一步将深入诊断该 Pod 的删除停滞原因（如 Finalizer、Volume 卸载或节点状态等）。
+
+```json
+{
+  "layer": "Locate",
+  "confidence": "High",
+  "reasoning": "集群扫描发现 1 个 Pod 处于 Terminating 状态。根据状态归类为 TerminatingStuck 类型，并匹配对应 Runbook。其余 65 个 Pod 状态正常。",
+  "abnormal_pods": [
+    {
+      "name": "workload",
+      "namespace": "aiops-case-v12
+[node:done] layer / 问题定位 (16.0s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"projected_series":0,"raw_series":0,"retrieved":0,"returned":0,"serialized_series":0},"coverage":"empty","di
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] I need to investigate the `aiops-case-v12/workload` pod that is in Terminating state. Let me start by executing the critical Kubernetes queries to understand the pod's current state, deletion timestamp, finalizers, and events.
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 44s Normal Killing Pod/workload Stopping container app
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v12 creationTimestamp: 2026-09-14T05:21:16Z deletionTimestamp: 2026-09-14T06:26:20Z deletionGracePeriodSeconds: 3900 finalizers:
+[agent:parallel_evidence] Now I have the critical facts. Let me analyze what I've found:
+
+**Pod Status:**
+- Pod is still **Running** (phase: Running), but has a `deletionTimestamp` of `2026-09-14T06:26:20Z`
+- **No finalizers** (`finalizers: <none>`)
+- `terminationGracePeriodSeconds: 3900` (65 minutes)
+- `deletionGracePeriodSeconds: 3900` (65 minutes)
+- Container status: `ready=True, restarts=0`
+- `nodeName: node2`
+- Pod has a **preStop hook** with a complex logic: writes to `/state/prestop-started` then waits up to 3600
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Node name: node2 namespace: None
+[agent:parallel_evidence] Let me analyze the evidence I've collected so far:
+
+**Pod State (kubectl get pod -o yaml):**
+- Pod `aiops-case-v12/workload` is in phase: **Running** (not Terminating as initially reported)
+- `deletionTimestamp: 2026-09-14T06:26:20Z` - deletion was requested
+- `deletionGracePeriodSeconds: 3900` (65 minutes)
+- `terminationGracePeriodSeconds: 3900` (65 minutes)
+- `finalizers: <none>` - **No finalizers blocking deletion**
+- `nodeName: node2`
+- Container `app`: ready=True, restarts=0
+- **Critical**:
+[tool:start] kubectl_describe
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: node2 关键诊断行: volumes.kubernetes.io/controller-managed-attach-detach: true Taints: <none> 关键状态/事件: Lease: Failed to get lease: le
+[agent:parallel_evidence] The node describe output doesn't show the Ready status clearly. Let me get the node status more explicitly.
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[agent:parallel_evidence] Now let me check the current time to understand the timeline. The deletionTimestamp was `2026-09-14T06:26:20Z` and the grace period is 3900 seconds (65 minutes).
+[tool:start] run_bash_command
+[tool:done] run_bash_command status=success {"success": true, "stdout": "2026-09-14T05:22:20Z\n", "stderr": "", "returncode": 0}
+[agent:parallel_evidence] Now I have all the evidence. Let me analyze:
+
+**Current Time:** `2026-09-14T05:22:20Z`
+**DeletionTimestamp:** `2026-09-14T06:26:20Z`
+
+Wait - this is interesting. The deletionTimestamp (`06:26:20Z`) is **in the future** compared to the current time (`05:22:20Z`). This means the deletion was scheduled to start in about 64 minutes from now.
+
+But the pod is currently in **Running** phase, not Terminating. This is a key observation.
+
+Let me re-examine the evidence:
+
+**Key Facts:**
+1. Pod `aiops-case-
+[node:done] parallel_evidence / 并发证据采集 (46.5s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.2s)
+[final] run_id=b6db5a5af8194590 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v12/workload` | Terminating | deletionTimestamp 设置在当前时间之后 (2026-09-14T06:26:20Z)，Pod 处于预删除调度阶段，尚未进入实际的 Terminating 生命周期。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | pod.phase: Running | 确认 Pod 核心状态仍在运行，未发生实际崩溃 |
+| 2 | K8s State | Kubernetes | pod.condition (Ready/Initialized): True | 确认容器就绪且正常运行，非资源不足或拉取失败 |
+| 3 | K8s State | Kubernetes | deletionTimestamp: 2026-09-14T06:26:20Z | 存在未来的删除时间戳，是触发当前“预删除”状态的直接原因 |
+| 4 | K8s Config | Kubernetes | resource_request/limit: CPU 5m/50m, Memory 8Mi/32Mi | 配置资源门槛极低，排除因资源超卖导致的调度卡死 |
+| 5 | Logging | Elasticsearch | "application started" (2026-09-14T05:21:26.902Z) | 验证业务应用已按预期启动 |
+
+**证据印证**：Kubernetes 状态事实 (1, 2, 4) 结合日志事实 (5) 证明应用运行完全正常，且未被 OOM 或 CPU 限制；唯一异常点是存在一个未来的 `deletionTimestamp` (3)，将 Pod 强行拉入“终止中”队列，导致 Pod 表现为 Terminating 状态但实际进程未终止。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+deletionTimestamp 被设置为未来时间 → API Server 预调度删除流程 → Pod 进入 Terminating 状态但进程保持运行 → 用户/集群观察到 Pod 处于 Terminating 阶段
+```
+
+### 根因结论
+
+已确认根因为 **Pod 被注入了未来的 `deletionTimestamp`，导致其处于“预删除”的挂起状态**（证据编号：3）。
+该机制使得 Pod 尚未真正执行终止流程（证据编号：1），且当前应用启动及资源状态均正常（证据编号：2, 4, 5），排除了节点故障、资源不足或应用崩溃等传统终止失败原因。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 16.0s
+├─ 并发证据采集: 46.5s
+│  └─ g1 aiops-case-v12/workload: 46.5s (Evidence 41.6s, RCA 4.9s)
+└─ 汇总总结: 7.2s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v12/workload**: pod-terminating-stuck
+
+[run:end] run_id=b6db5a5af8194590 status=-

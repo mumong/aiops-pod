@@ -1,0 +1,159 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "75180c356ce54336",
+  "elapsed_seconds": 124.366,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "c10-timeout",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "liveness",
+          "存活探针"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [],
+    "accuracy": 1.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "```text\n应用进程处理耗时过长（未确认触发 OOM 或 CPU 限制） → 应用层阻塞导致探针超时 → Liveness Probe 判定失败 → Kubelet 发送 SIGKILL 触发重启\n```\n\n**根因结论：**\n\n**已确认的根因**是容器应用进程响应缓慢或阻塞，导致 Kubernetes 存活探针（Liveness Probe）判定失败并触发重启。\n*   **现象支撑**：\n    1.  **探针超时直接原因**：Tracing 数据显示在探针超时前的最近几次请求中，`/health` 端点响应耗时稳定在 3000ms 以上（见证据 #8），超过了探针的超时阈值。\n    2.  **排除直接崩溃**：Logging 和 Tracing 表明，在容器终止前（见证据 #7），应用进程依然能够处理 HTTP 请求并返回 200 状态码，并未出现直接的 Crash 或 OOM Kill 迹象。\n    3.  **重启循环机制**：K8s 检测到 Probe 失败后尝试重启，但应用进程可能仍处于阻塞或高负载状态，导致再次启动后再次无法在超时阈值内响应，从而陷入 `CrashLoopBackOff`（见证据 #2, #3）。\n\n**未确认的环节**：\n*   输入中的 `formal_rca` 假设根因为 `OOM Killer`（Exit Code 137），但目前的证据（特别是应用进程能持续响应 200 的请求日志）并不支持 OOM 是此次 **特定** 探针超时事件的直接触发原因。Exit Code 137 通常指被 SIGKILL，若由 OOM 触发，通常意味着进程瞬间被杀；而 Tracing 记录的长耗时请求表明进程是“假死”或极度缓慢。若 Exit Code 137 确实存在，则表明在探针失败后的某次重启中，进程可能再次发生了被强制终止的情况。\n*   **结论修正**：当前证据更支持“应用进程无响应/阻塞导致探针超时”作为直接故障链；OOM 或资源耗尽仅为可能的潜在诱发因素或后续重启中再次发生的行为，需更多内存指标（`trend_evaluable=true` 的 Prometheus 数据）验证。当前根因为：**Liveness Probe 因应用处理延迟超时，触发容器重启循环。**\n\n---",
+      "full_section": "```text\n应用进程处理耗时过长（未确认触发 OOM 或 CPU 限制） → 应用层阻塞导致探针超时 → Liveness Probe 判定失败 → Kubelet 发送 SIGKILL 触发重启\n```\n\n**根因结论：**\n\n**已确认的根因**是容器应用进程响应缓慢或阻塞，导致 Kubernetes 存活探针（Liveness Probe）判定失败并触发重启。\n*   **现象支撑**：\n    1.  **探针超时直接原因**：Tracing 数据显示在探针超时前的最近几次请求中，`/health` 端点响应耗时稳定在 3000ms 以上（见证据 #8），超过了探针的超时阈值。\n    2.  **排除直接崩溃**：Logging 和 Tracing 表明，在容器终止前（见证据 #7），应用进程依然能够处理 HTTP 请求并返回 200 状态码，并未出现直接的 Crash 或 OOM Kill 迹象。\n    3.  **重启循环机制**：K8s 检测到 Probe 失败后尝试重启，但应用进程可能仍处于阻塞或高负载状态，导致再次启动后再次无法在超时阈值内响应，从而陷入 `CrashLoopBackOff`（见证据 #2, #3）。\n\n**未确认的环节**：\n*   输入中的 `formal_rca` 假设根因为 `OOM Killer`（Exit Code 137），但目前的证据（特别是应用进程能持续响应 200 的请求日志）并不支持 OOM 是此次 **特定** 探针超时事件的直接触发原因。Exit Code 137 通常指被 SIGKILL，若由 OOM 触发，通常意味着进程瞬间被杀；而 Tracing 记录的长耗时请求表明进程是“假死”或极度缓慢。若 Exit Code 137 确实存在，则表明在探针失败后的某次重启中，进程可能再次发生了被强制终止的情况。\n*   **结论修正**：当前证据更支持“应用进程无响应/阻塞导致探针超时”作为直接故障链；OOM 或资源耗尽仅为可能的潜在诱发因素或后续重启中再次发生的行为，需更多内存指标（`trend_evaluable=true` 的 Prometheus 数据）验证。当前根因为：**Liveness Probe 因应用处理延迟超时，触发容器重启循环。**\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v17"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v17"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v17"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [
+      {
+        "lane": "75180c356ce54336-g1",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/75180c356ce54336-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 7,
+    "planned": 8,
+    "completeness": 0.875,
+    "lanes": [
+      {
+        "lane": "75180c356ce54336-g1",
+        "collected": 7,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/75180c356ce54336-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c10-timeout-kubernetes-observation",
+        "description": "c10-timeout-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-0ae5a11d38c6",
+          "fact-67a6663c6d55",
+          "fact-8ba152f404f2",
+          "fact-4fa72aae49ea",
+          "fact-642ab87d0eb0",
+          "fact-6e0c3416721d",
+          "fact-99433b836b84",
+          "fact-9f19eea05269",
+          "fact-10c7eb730ac4",
+          "fact-1feceda47041",
+          "fact-c2b9480887ff",
+          "fact-e9411991975d"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 34,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 44,
+  "logical_elapsed_seconds": 124.684,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

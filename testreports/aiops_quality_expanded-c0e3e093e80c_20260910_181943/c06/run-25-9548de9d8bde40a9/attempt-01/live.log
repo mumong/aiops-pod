@@ -1,0 +1,153 @@
+[run] run_id=9548de9d8bde40a9
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在的异常实体及其状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-7679bcf76-n5vp8 0/1 CrashLoopBackOff 15 (1
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-7679bcf76-n5vp8 0/1 CrashLoopBackOff 15 (1
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl events in cluster: 19 rows. 4 Normal events in admin ns (Chart up-to-date). Pod workload-7679bcf76-n5vp8 (ns: aiops-case-06) has Warning BackOff, restarting failed container app 248 times. Oth
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-7679bcf76-n5vp8 0/1 CrashLoopBackOff 15 (1
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-7679bcf76-n5vp8 0/1 CrashLoopBackOff 15 (1
+[agent:layer] 根据对集群中所有 Pod 状态的扫描与定位，当前集群存在以下异常：
+
+### 1. 异常实体定位
+*   **异常 Pod**: `workload-7679bcf76-n5vp8`
+*   **所在 Namespace**: `aiops-case-06`
+*   **当前状态**: `CrashLoopBackOff` (状态关键字: `CrashLoopBackOff`)
+*   **容器就绪情况**: `0/1` (容器未就绪)
+*   **重启次数**: 15 次 (最近一次重启于 110 秒前)
+
+### 2. 异常组划分
+该 Pod 的异常表现为典型的容器启动后崩溃并反复重启，属于单一异常组：
+*   **异常组 ID**: `AG-CrashLoopBackOff-06`
+*   **包含实体**: `aiops-case-06/workload-7679bcf76-n5vp8`
+*   **异常类型判定**: `CrashLoopBackOffRuntime`
+*   **判定依据**: 
+    *   Pod STATUS 明确为 `CrashLoopBackOf
+[node:done] layer / 问题定位 (37.7s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":12,"normalized":12,"retrieved":12,"returned":12},"coverage":"present","dimension":"logging","directness":"direct","entity":{"
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 我将对 Pod `aiops-case-06/workload-7679bcf76-n5vp8` 进行系统性诊断，首先获取其基本信息和状态。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-7679bcf76-n5vp8 namespace: aiops-case-06 creationTimestamp: 2026-09-10T18:31:58Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalize
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-7679bcf76-n5vp8 namespace: aiops-case-06 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 74s (x248 over
+[heartbeat] layer
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-7679bcf76-n5vp8 0/1 CrashLoopBackOff 15 (
+[agent:parallel_evidence] 我已确认 Pod 身份和当前状态。Pod `workload-7679bcf76-n5vp8` 处于 `CrashLoopBackOff`，重启 15 次，Exit Code=2。现在获取上一次容器崩溃的日志以确定退出原因。
+[tool:start] kubectl_previous_logs
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 2 signals: 1 关键日志: {"timestamp":1789068331.1519277,"event":"http_request","level":"error","message":"runtime process exiting","http_status":500,"path":"/work","durat
+[agent:parallel_evidence] 我需要先确认 Pod 的真实状态和 UID，然后获取 Metrics、Logs 和 Tracing 数据来验证 CrashLoopBackOff 的直接原因。
+[tool:start] kubernetes_tabular_query
+[tool:done] kubernetes_tabular_query status=success kubernetes_tabular_query 输出摘要: raw_chars=493 lines=3 Command failed (exit 1): kubectl get pods --all-namespaces -o custom-columns='metadata.name,status.phase,status.containerStatuses[*].ready,status.c
+[agent:parallel_evidence] 我已阅读归档中的上一轮工具结果。关键事实汇总：
+- kubectl_get_yaml 确认 Pod 状态为 CrashLoopBackOff，重启 15 次，reason=CrashLoopBackOff，exitCode=2，且 Ready=False。
+- kubectl_previous_logs 显示崩溃前容器日志为 `runtime process exiting`，http_status=500，path=/work。
+- kubectl_describe 记录了反复的 BackOff 警告。
+
+上一轮还进行了 query_pod_tracing 和 kubernetes_tabular_query（后者报 schema 错误）。我需要补证两点：1）用正确的 kubectl get 替代失败的 tabular_query；2）用 query_pod_logs 查看崩溃前的应用日志；3）用 execute_pod_promql 检查最近一分钟内是否有 crash/oom 指标；4）用 query_pod_topology 确认该 Pod 的基本归属关系。
+
+我将并行发起首轮补
+[tool:start] run_bash_command
+[tool:start] query_pod_logs
+[tool:start] execute_pod_promql
+[tool:start] query_pod_topology
+[tool:done] run_bash_command status=success {"success": true, "stdout": "name: app\nready: false\nstate: {\"waiting\":{\"message\":\"back-off 5m0s restarting failed container=app pod=workload-7679bcf76-n5vp8_aiops-case-06(08e11260-3505-495c-822
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"retrieved":5,"returned":5},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] 现在查看 kubectl_previous_logs 的完整输出，以确认崩溃前应用层错误日志：
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=952 lines=9 <context_archive> archive_path: /tmp/aiops/reports/context_archives/9548de9d8bde40a9-g1/tools/007-evidence-kubectl_previous_logs.raw.txt offset: 0 retu
+[agent:parallel_evidence] 已采集事实、冲突与缺口：
+
+**1. 实体身份与当前状态（Kubernetes 事实）**
+*   **身份确认**：Pod `workload-7679bcf76-n5vp8` 位于 `aiops-case-06` 命名空间，调度在 `node2` (10.2.0.50)，UID 为 `08e11260-3505-495c-8224-2b91f27f029c`。
+*   **状态**：Pod 阶段为 `Running`（基础设施层），但容器状态为 `CrashLoopBackOff`，重启次数已达 15 次。
+*   **启动/退出**：最近一次运行周期极短，Started: 19:25:25，Finished: 19:25:31（仅存活 6 秒）；退出码为 `2`，退出原因为 `Error`。
+
+**2. 根因证据（Metrics & Logging）**
+*   **反驳 OOMKill**：Prometheus 指标 `kube_pod_container_status_last_terminated_reason` 返回值为 `Error`，未检出 `OOMKilled`。这
+[node:done] parallel_evidence / 并发证据采集 (87.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (14.4s)
+[final] run_id=9548de9d8bde40a9 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-06/workload-7679bcf76-n5vp8` | CrashLoopBackOff | Pod workload-7679bcf76-n5vp8 处于 CrashLoopBackOff 状态 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes | container.last_terminated_reason: Error, container.last_exit_code: 2 | 确认进程异常终止的具体退出码 |
+| 2 | K8s Event | kubernetes | Warning BackOff: 74s (x248 over 56m), back-off 5m0s restarting failed container | 证实 CrashLoopBackOff 状态及长时间高频重启模式 |
+| 3 | K8s Config | kubernetes | resource_limit.cpu: 200m, resource_limit.memory: 96Mi | 提供资源限制上下文 |
+| 4 | Metric | prometheus | kube_pod_container_status_last_terminated_reason(Error): 1 | 从监控侧证实容器最后一次退出原因为 Error |
+| 5 | Metric | prometheus | kube_pod_container_status_waiting_reason(CrashLoopBackOff): 1 | 从监控侧证实当前等待原因为 CrashLoopBackOff |
+| 6 | Logging | elasticsearch | 模式 `runtime process exiting`, path=/work, http_status=500, 发生 2 次 (19:15-19:20) | 捕获进程退出时的错误日志模式及对应服务 |
+| 7 | Logging | elasticsearch | 模式 `request completed`, path=/work, http_status=200, 发生 6 次 (18:59-19:25) | 提供正常请求的对比基线，证明服务曾可正常运行 |
+| 8 | Tracing | deepflow | Flow: GET /work -> response_code: 500, count: 3 (03:04-03:09) | 从网络流层证实 /work 请求失败并返回 500 |
+| 9 | Tracing | tempo | Span: GET /work, response_code: 200, trace_id: b2c74bd59a13816a64bebc87858a5008 (19:25:29) | 确认同一 Trace ID 下存在成功返回，说明应用具备处理能力 |
+
+**证据关联说明：**
+- **现象确认**：事实 1、2 确认了 Pod 处于 CrashLoopBackOff 且进程以 Exit Code 2 异常退出的状态，事实 4、5 从监控指标层面提供了独立佐证。
+- **业务机制**：事实 6（Log）和事实 8（Flow）共同指向 `/work` 端点处理失败，表现为 HTTP 500。
+- **能力验证**：事实 9（Trace）结合事实 7（Log）证实该服务此前能够正常处理 `/work` 请求，排除了网络不通或基础设施整体不可用的可能性，问题局限于应用进程内部处理逻辑。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用层代码在 /work 端点处理逻辑中存在运行时异常 → 异常触发进程以 Exit Code 2 退出并记录 runtime process exiting 日志 → Kubernetes 探测到容器非正常退出并触发重启 → Pod 因频繁重启且退避耗尽进入 CrashLoopBackOff 状态
+```
+
+### 根因结论
+
+**已确认根因：应用进程在处理 `/work` 请求时发生未捕获的运行时异常导致进程直接退出。**
+
+具体表现为应用进程在处理 `/work` 请求时异常退出（Exit Code 2），Kubernetes 检测到容器异常退出后执行重启策略，但在重试耗尽后导致 Pod 进入 `CrashLoopBackOff` 状态。证据链显示日志中存在 `runtime process exiting` 错误（fact-6, fact-7），Tracing 网络流中观测到 `/work` 请求返回 500（fact-8），而同一时间窗口或关联 Trace ID 下又存在 200 成功响应（fact-9），确认应用本身是存活的，问题在于特定业务场景下的处理逻辑崩溃。
+
+**未确认部分：**
+- 导致 `/work` 请求处理失败的具体业务逻辑错误或异常类型（如 NPE、参数校验失败等）；
+- Trace ID `b2a618d284bf6044c4b23962ad35eb64` 未能在 Tracing 系统中检索到完整链路的原因。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 2.3m
+├─ 问题定位: 37.7s
+├─ 并发证据采集: 87.7s
+│  └─ g1 aiops-case-06/workload-7679bcf76-n5vp8: 87.7s (Evidence 76.6s, RCA 10.9s)
+└─ 汇总总结: 14.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-06/workload-7679bcf76-n5vp8**: pod-crashloop-runtime
+
+[run:end] run_id=9548de9d8bde40a9 status=-

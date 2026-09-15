@@ -1,0 +1,146 @@
+[run] run_id=e62b59ea89f24342
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前异常的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[agent:layer] 集群中检测到一个异常 Pod：`aiops-case-v15/workload`，当前状态为 `CrashLoopBackOff`。
+
+为了确定具体的异常类型（是容器启动错误、配置问题还是其他运行时问题），我将获取该 Pod 的详细状态信息。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 2 (19s ago) 40s 172.16.104.34 no
+[agent:layer] Pod `workload` 处于 `CrashLoopBackOff` 状态，READY 为 0/1。
+
+根据 Runbook 定义，我需要区分这是由 OOMKilled 引起的 CrashLoopBackOff，还是由其他运行时/配置问题（如命令错误、探针失败等）引起的。通常 `kubectl get` 不会直接显示 `Last State Reason`，但我需要先判断是否匹配 `pod-oomkilled.md` 还是 `pod-crashloop-runtime.md`。
+
+由于 `kubectl get` 输出中未直接显示 `Last State` 细节，且状态为 `CrashLoopBackOff`，这通常意味着容器启动后崩溃。我将获取 Runbook `pod-crashloop-runtime.md` 进行诊断，因为它是处理未确认 OOM/配置缺失的 CrashLoopBackOff 的标准入口。同时，为了严谨，我也应检查是否有 OOM 迹象（尽管在 get 中不直接显示，但通常 OOM 会有 ExitCode 137 和 Last State OOMKilled）。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] 根据当前状态：
+- Pod `aiops-case-v15/workload` 处于 `CrashLoopBackOff` 状态。
+- 没有直接证据表明是 `ImagePullBackOff`、`Pending`、`OOMKilled`（需 Last State Reason 确认）或 `ConfigError`（需配置缺失证据）。
+- 因此归类为 `CrashLoopBackOffRuntime`，需要进一步通过 `kubectl describe` 和 `kubectl logs` 来区分具体原因（如退出码、日志报错、探针失败等）。
+
+目前异常组定义：
+- **异常 Pod**: `aiops-case-v15/workload`
+- **状态关键字**: `CrashLoopBackOff`
+- **异常类型**: `CrashLoopBackOffRuntime`
+- **Runbook**: `pod-crashloop-runtime.md` (已获取)
+
+现在需要进入 Evidence 节点进行详细诊断（检查 Last State, Exit Code, Previous
+[tool:start] layer_output
+[tool:done] layer_output status=error layer_output 输出摘要: raw_chars=121 lines=1 Error: layer_output is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[agent:layer] 我的集群中检测到一个异常 Pod：`aiops-case-v15/workload`，当前状态为 `CrashLoopBackOff`。
+
+**异常定位总结：**
+*   **异常 Pod**: `aiops-case-v15/workload`
+*   **当前状态**: `CrashLoopBackOff` (容器反复重启)
+*   **异常分组**: `CrashLoopBackOffRuntime`
+*   **诊断方向**: 该状态通常由容器启动命令错误、应用内部崩溃、Liveness Probe 失败或资源/权限问题引起。需要进一步检查 `kubectl describe` (查看 Last State/Exit Code) 和 `kubectl logs --previous` 来定位具体根因。
+
+我已获取相关的诊断手册 `pod-crashloop-runtime.md`，后续 Evidence 节点将根据手册步骤进行详细日志和状态分析。
+[node:done] layer / 问题定位 (26.8s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":3,"normalized":3,"retrieved":3,"returned":3},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] # 首轮可观测性 Baseline 分析
+
+## 已采集事实（来自 Baseline）
+
+### Metrics (Prometheus)
+- **Pod 状态**: `kube_pod_container_status_waiting_reason` = `CrashLoopBackOff` (coverage=present)
+- **重启次数**: `kube_pod_container_status_restarts_total` = 2
+- **上次终止原因**: `kube_pod_container_status_last_terminated_reason` = `OOMKilled` (value=1)
+- **Phase**: `Running`=1 (当前可能短暂 Running)
+
+### Logging (Elasticsearch)
+- 仅找到 3 条日志，全部为 `"startup allocation 256Mi"`，无错误/异常/panic/OOM 相关原文。
+
+### Tracing (DeepFlow + Tempo)
+- **empty/abse
+[tool:start] kubectl_describe
+[tool:start] kubectl_previous_logs
+[tool:start] kubectl_get_yaml
+[tool:start] query_pod_topology
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v15 creationTimestamp: 2026-09-14T09:26:33Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 1 signals: 0 关键日志: startup allocation 256Mi
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v15 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ---
+
+## 证据汇总与因果分析
+
+### 支持证据
+
+| 维度 | 事实 |
+|------|------|
+| **kubectl describe** | Last State: Terminated, Reason=`OOMKilled`, Exit Code=`137` |
+| **kubectl get yaml** | containerStatus: restarts=3, exitCode=137, reason=CrashLoopBackOff |
+| **Prometheus Metrics** | `kube_pod_container_status_last_terminated_reason` = `OOMKilled`；`restarts_total` = 2 (describe 显示 3，metric 可能尚未同步最新一次) |
+| **kubectl previous logs** | 仅一行 `"startup allocation 256Mi"` — 进程启动后立即申请 256Mi 内存后被 OOMKilled |
+| **Pod Command
+[node:done] parallel_evidence / 并发证据采集 (50.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.4s)
+[final] run_id=e62b59ea89f24342 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v15/workload` | CrashLoopBackOff | Container memory limit (64Mi) is significantly lower than the application's memory allocation (256Mi), triggering OOMKilled (Exit Code 137) and CrashLoopBackOff. |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | 容器 `app` 等待原因为 `CrashLoopBackOff`，最后终止原因为 `OOMKilled` | 定位应用反复崩溃的直接状态 |
+| 2 | K8s State | Kubernetes | 容器 `app` 退出码为 `137` | 确认进程被系统强制终止（OOM Killer 行为） |
+| 3 | K8s Config | Kubernetes | 容器 `app` 内存硬限制（resource_limit.memory）为 `64Mi` | 提供资源限制事实，构成根因的必要条件 |
+| 4 | K8s State | Kubernetes | Pod 状态为 `Running`，但 `ContainersReady` 和 `Ready` 均为 `False` | 确认 Pod 处于无法提供服务的异常运行态 |
+| 5 | Logging | Elasticsearch | 应用日志消息显示：`startup allocation 256Mi` | 提供应用内存诉求事实，证实资源限制（64Mi）显著低于预期 |
+| 6 | K8s Event | Kubernetes | 事件消息：`Back-off restarting failed container app` (发生 8 次) | 印证 CrashLoopBackOff 机制及重启频率 |
+| 7 | Metric | Prometheus | `kube_pod_container_status_last_terminated_reason` 标签为 `OOMKilled` (值为 1) | 独立于 K8s API 确认终止原因 |
+
+**证据印证：**
+- **内存限制冲突**：K8s 配置显示内存硬限制为 `64Mi` [3]，而应用日志明确表明其启动分配的内存为 `256Mi` [5]。这一量级差异直接证实了 OOM（内存不足）发生的物理基础。
+- **OOM 确认闭环**：应用日志的内存分配 [5] 与 K8s 状态 [1, 2] 及 Prometheus 指标 [7] 均指向 `OOMKilled` 及退出码 `137`，证实应用因内存不足被系统强杀，进而触发重启并进入 `CrashLoopBackOff` 状态 [1, 6]。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+容器内存限制 (64Mi) 远低于应用实际诉求 (256Mi) → OOMKilled (Exit Code 137) → 触发 K8s 重启与退避逻辑 (BackOff) → Pod 持续处于 CrashLoopBackOff 状态 (ContainersNotReady)
+```
+
+### 根因结论
+
+已确认根因为：**容器内存配置严重不足**。
+
+Kubernetes 集群中 `aiops-case-v15/workload` 的 `app` 容器被强制设置了 `64Mi` 的内存硬限制，但应用启动时实际需求 `256Mi` 内存。这一配置缺陷导致进程在启动后瞬间触发 OOM Killer，被操作系统强制终止（Exit Code 137）。Kubernetes 检测到容器非正常退出后，触发指数退避重试机制，最终表现为容器长期处于 `CrashLoopBackOff` 状态。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.5m
+├─ 问题定位: 26.8s
+├─ 并发证据采集: 50.0s
+│  └─ g1 aiops-case-v15/workload: 50.0s (Evidence 44.0s, RCA 5.7s)
+└─ 汇总总结: 10.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v15/workload**: pod-crashloop-runtime
+
+[run:end] run_id=e62b59ea89f24342 status=-

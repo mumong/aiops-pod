@@ -1,0 +1,126 @@
+[run] run_id=4f5b336646f04cf1
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前异常的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 集群中存在一个状态异常的 Pod。为了更准确地判断其异常类型（例如是否卡在 Terminating 阶段），我将获取该 Pod 的详细信息（包括 Labels 和 Events）。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 19s 172.16.104.60 node2 <none>
+[agent:layer] 集群当前存在 1 个异常 Pod。该 Pod 处于 `Terminating` 状态，可能涉及终态清理（Finalizer）卡住、节点响应或卷卸载等问题。我将获取 `pod-terminating-stuck.md` 运行手册作为参考，并构建异常报告。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[agent:layer] ### 集群健康诊断结果
+
+当前集群中存在 **1 个异常 Pod**，主要表现为 **TerminatingStuck**（删除卡住）。其他 65 个 Pod 状态正常。
+
+**异常实体详情：**
+- **Namespace/Pod**: `aiops-case-v13/workload`
+- **当前状态**: `Terminating` (Running 1/1)
+- **异常类型**: `TerminatingStuck`
+- **所属节点**: `node2`
+- **运行手册**: `pod-terminating-stuck.md`
+
+**异常组分析：**
+- **Group ID**: `g1`
+- **类型**: TerminatingStuck
+- **证据特征**: Pod `workload` 在 `aiops-case-v13` 命名空间中，AGE 仅 19s，状态为 `Terminating`。需进一步确认是否超过 `terminationGracePeriodSeconds` 宽限期，或存在 `finalizers` 阻塞。
+
+**状态分类**:
+| 命名
+[node:done] layer / 问题定位 (17.3s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 执行首轮证据采集，并行执行 kubectl get yaml、describe pod、pod metrics、logs、tracing、topology。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v13 node: node2/10.2.0.50 status: Terminating (lasts <invalid>) 关键诊断行: Warning Unhealthy 45s (x2 over 47s) kubelet Readin
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v13 creationTimestamp: 2026-09-14T06:36:28Z deletionTimestamp: 2026-09-14T07:41:39Z deletionGracePeriodSeconds: 3900 finalizers:
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 现在执行 Node 状态确认和 Prometheus 指标补证，以及 Pod 日志详细查询。
+[tool:start] kubectl_get_by_name
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] 基于采集到的真实证据，以下是关于 `aiops-case-v13/workload` 异常状态及 TerminatingStuck 候选原因的事实分析：
+
+### 1. 实体身份与生命周期确认
+*   **Pod 身份**：`aiops-case-v13/workload`，UID `978865a9...`，调度在 `node2`。
+*   **启动时间**：`2026-09-14T06:36:28Z`。
+*   **触发删除时间**：`deletionTimestamp: 2026-09-14T07:41:39Z`（启动后约 1 小时 5 分钟）。
+*   **宽限期（Grace Period）**：`3900s`（65 分钟）。这意味着 Pod 预期在 `08:46:39Z` 左右才会被强制杀死（如果期间不退出）。
+*   **当前阶段**：Pod 处于 **`Terminating`** 状态，且日志表明正在“等待”。
+
+### 2. 支持/解释 "TerminatingStuck" 候选原因的事实
+*   **应用程序行为（根因）**：Pod 容器应用注册了 `SIGTERM
+[node:done] parallel_evidence / 并发证据采集 (51.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.9s)
+[final] run_id=4f5b336646f04cf1 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v13/workload` | Terminating | Pod aiops-case-v13/workload 处于 Terminating 状态，日志显示接收 SIGTERM 后等待外部文件 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubernetes | `Readiness probe failed: command "python3 -c import os; assert os.path.exists('/proc/1/status')" timed out` [fact-1dc472c68178] | 确认 Pod 在运行后期失去响应能力 |
+| 2 | Logging | elasticsearch | `SIGTERM received; waiting` [fact-5dd8ed65935f] | 证明进程接收到了终止信号但选择挂起 |
+| 3 | K8s State | kubernetes | Pod 状态 `Terminating`，容器重启次数 `0` [fact-43a1d4a53524][fact-7998f514df1b] | 排除因崩溃重启（OOM/CrashLoop）导致的异常，确认是优雅退出机制卡死 |
+| 4 | K8s State | kubernetes | 资源请求：CPU `5m`, Memory `8Mi` | 排除资源耗尽导致的计算或内存瓶颈 |
+| 5 | K8s State | kubernetes | 容器资源限制：Memory `32Mi`, CPU `50m` | 提供资源边界上下文，非异常原因 |
+
+**证据说明：**
+- [fact-5dd8ed65935f] 和 [fact-1dc472c68178] 结合证实了应用处于非正常响应状态。
+- [fact-43a1d4a53524] 和 [fact-7998f514df1b] 排除了容器意外崩溃的可能性，指向应用逻辑层面的阻塞。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用注册 SIGTERM 处理器并进入循环等待文件 '/state/teardown-requested' → Kubernetes 发送 SIGTERM 信号 → 应用日志显示 'SIGTERM received; waiting' 且未退出 → Pod 保持 Terminating 状态直至宽限期耗尽
+```
+
+### 根因结论
+
+- **已确认的根因**：应用代码逻辑阻塞。
+  - 应用代码显式注册了 SIGTERM 处理器，并在收到信号后进入等待外部文件 `/state/teardown-requested` 存在的循环 [fact-5dd8ed65935f]。
+  - 该阻塞导致应用未执行正常的退出流程，从而触发 K8s 的强制终止机制 [fact-1dc472c68178]，表现为 Pod 长期停留在 `Terminating` 状态 [fact-43a1d4a53524]。
+
+- **证据不足**：
+  - 文件 `/state/teardown-requested` 未能正确创建或通知的原因未知（可能涉及挂载配置或上游控制器逻辑）。
+  - 是否存在负责写入该文件的预期外部控制器或 Job 尚未确认。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.3m
+├─ 问题定位: 17.3s
+├─ 并发证据采集: 51.4s
+│  └─ g1 aiops-case-v13/workload: 51.4s (Evidence 42.7s, RCA 8.6s)
+└─ 汇总总结: 9.9s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v13/workload**: pod-terminating-stuck
+
+[run:end] run_id=4f5b336646f04cf1 status=-

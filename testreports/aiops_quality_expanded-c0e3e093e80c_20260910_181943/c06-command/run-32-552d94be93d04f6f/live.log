@@ -1,0 +1,114 @@
+[run] run_id=552d94be93d04f6f
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前是否存在异常状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[agent:layer] 我发现集群中有一个异常 Pod：`aiops-case-v08` 命名空间下的 `workload`，其状态为 `CrashLoopBackOff`。
+
+为了诊断该 Pod 的异常原因，我将先获取该 Pod 的详细信息（包括标签和事件），然后根据可能的异常类型选择对应的 Runbook 进行诊断。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 12 (55s ago) 37m 172.16.104.30
+[agent:layer] Pod `workload` 处于 `CrashLoopBackOff` 状态。根据异常分类，这属于 `CrashLoopBackOff` 类型的异常。我将获取对应的诊断手册 `pod-crashloop-runtime.md` 来指导后续的诊断步骤。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] 集群中识别到一个异常实体：
+
+*   **异常 Pod**：`aiops-case-v08/workload`
+*   **当前状态**：`CrashLoopBackOff` (重启 12 次)
+*   **异常类型**：`CrashLoopBackOffRuntime` (容器反复崩溃退出)
+
+**异常分组**：
+*   **Group 1**: `workload` Pod 处于 `CrashLoopBackOff` 状态，需要进一步检查其 Last State、Exit Code 和日志以区分是进程错误、探针杀死还是资源问题。
+
+**后续步骤**：
+根据 Runbook `pod-crashloop-runtime.md`，下一步需收集以下证据：
+1.  `kubectl describe pod` 查看 Last State 和 Exit Code。
+2.  `kubectl logs` (previous) 查看崩溃前的日志。
+3.  检查是否有 Liveness Probe 失败的事件。
+
+请确认是否继续收集这些证据以定位根因？
+[node:done] layer / 问题定位 (12.5s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"retrieved":6,"returned":6},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 先执行 kubectl describe/pod_yaml/previous logs/events，与已采集的 Prometheus 和 ES 日志基线交叉验证。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_logs
+[tool:start] kubectl_events
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v08 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 2m52s (x165 over 38m) kubele
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 2m52s (x165 over 38m) Warning BackOff Pod/workload Back-off restarting failed container app in pod workload_aiops-case-v08(00e5e755-886e-4661-9e8a-00d1e71595f6
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v08 creationTimestamp: 2026-09-11T13:02:52Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 1 signals: 1 关键日志: sh: exec: line 0: /opt/app/unavailable-command: not found
+[agent:parallel_evidence] ## 已采集事实（支持/反驳/缺口）
+
+### 支持“CrashLoopBackOffRuntime”的事实
+- **Pod 当前状态**：`phase=Running`，但容器 `app` 处于 `Waiting`，`Reason=CrashLoopBackOff`，`Ready=False`；已重启 **12 次**（Prometheus `restarts_total=12`，describe 一致）。
+- **Last State 终止细节**：`Exit Code=127`，`Reason=Error`（describe 与 Pod YAML 一致；Prometheus `last_terminated_reason=Error` 值 1）。
+- **崩溃前日志**：`kubectl logs --previous` 与 ES 日志（6 条）均一致返回：`sh: exec: line 0: /opt/app/unavailable-command: not found`。
+- **Spec 配置**：`command: ["sh", "-c", "exec /opt/app/
+[node:done] parallel_evidence / 并发证据采集 (35.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.4s)
+[final] run_id=552d94be93d04f6f status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v08/workload` | CrashLoopBackOff | Pod aiops-case-v08/workload 处于 CrashLoopBackOff 状态 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Config | Kubernetes | `container.resource_limit.memory=32Mi` | 确认容器具备极低的资源上限，排除常规 OOM Kill |
+| 2 | K8s State | Kubernetes | `container.last_exit_code=127` (container: app) | 核心诊断指标，127 代码对应系统级命令未找到 |
+| 3 | Logging | Elasticsearch | `sh: exec: line 0: /opt/app/unavailable-command: not found` | 直接证据，日志明确指出了失败的命令路径和 Shell 报错信息 |
+| 4 | K8s State | Kubernetes | `container.last_terminated_reason=Error` | 佐证容器异常终止状态 |
+
+**证据互证说明：**
+- K8s 状态显示的 `exit_code=127` 与 Elasticsearch 日志中的 `not found` 错误完全吻合，共同锁定了命令缺失这一根本原因。
+- `resource_limit.memory=32Mi` 作为上下文存在，但因日志明确指出了执行命令失败，故资源限制并非此次异常的直接原因。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod Spec 配置了不存在的命令 (/opt/app/unavailable-command) → sh -c exec 执行失败并返回 exit code 127 → kubelet 检测到容器异常退出并触发重启策略 → Pod 进入 CrashLoopBackOff 状态且无法就绪
+```
+
+### 根因结论
+
+- **已确认的根因**：容器启动命令（Command）指定了镜像中不存在的可执行文件（`/opt/app/unavailable-command`）。
+- **证据引用**：
+  - 日志事实 `fact-13cb3242823d` 记录了 `sh: ... unavailable-command: not found`。
+  - K8s 状态事实 `fact-acf5760b4cd0` 记录了容器的最后退出码为 `127`。
+- **结论**：应用无法启动，Kubernetes 根据重启策略不断尝试重启，导致 Pod 处于 `CrashLoopBackOff` 状态。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 55.4s
+├─ 问题定位: 12.5s
+├─ 并发证据采集: 35.4s
+│  └─ g1 aiops-case-v08/workload: 35.4s (Evidence 25.3s, RCA 10.0s)
+└─ 汇总总结: 7.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v08/workload**: pod-crashloop-runtime
+
+[run:end] run_id=552d94be93d04f6f status=-

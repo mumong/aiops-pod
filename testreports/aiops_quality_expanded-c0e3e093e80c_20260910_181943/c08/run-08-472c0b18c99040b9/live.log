@@ -1,0 +1,124 @@
+[run] run_id=472c0b18c99040b9
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 0/1 CrashLoopBackOff 10
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] ### 异常诊断概览
+
+当前集群中存在 **1个** 处于异常状态的 Pod，所有 Pod 均位于 `aiops-case-08` 命名空间下。
+
+*   **异常实体**: `workload-5c9c7b6489-p8462`
+*   **当前状态**: `CrashLoopBackOff`
+*   **异常组**: 1组
+*   **诊断手册**: `pod-crashloop-runtime.md`
+
+### 详细分析
+
+*   **Pod 列表**:
+    *   `workload-5c9c7b6489-p8462`: 状态为 `CrashLoopBackOff`，已重启 10 次（最后一次在约 91 秒前）。
+
+*   **关键诊断指向**:
+    *   根据状态 `CrashLoopBackOff`，已匹配诊断手册 **`pod-crashloop-runtime.md`**。
+    *   该类型通常由进程启动失败、退出代码为 0 导致被控制器重启、Liveness Probe 探测失败、或配置错误（如找不到命令）引起。
+[node:done] layer / 问题定位 (16.9s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":110,"matched":130,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 我将开始对 Pod `aiops-case-08/workload-5c9c7b6489-p8462` 进行诊断，首先确认其当前状态和基本信息。
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 2m13s (x122 over 36m) Warning BackOff Pod/workload-5c9c7b6489-p8462 Back-off restarting failed container app in pod workload-5c9c7b6489-p8462_aiops-case-08(7f2
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-5c9c7b6489-p8462 namespace: aiops-case-08 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: Cra
+[agent:parallel_evidence] 我将基于现有信息进行调查，首先获取更多详细证据。
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff Warning BackOff 2m14s (x122 over 36m) kubelet Back-off res
+[heartbeat] layer
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 2m13s (x122 over 36m) Warning BackOff Pod/workload-5c9c7b6489-p8462 Back-off restarting failed container app in pod workload-5c9c7b6489-p8462_aiops-case-08(7f2
+[agent:parallel_evidence] 需要确认 Pod 当前真实状态、容器重启原因及是否有 CrashLoopBackOff 事件。
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff Warning BackOff 2m14s (x122 over 36m) kubelet Back-off res
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 2m13s (x122 over 36m) Warning BackOff Pod/workload-5c9c7b6489-p8462 Back-off restarting failed container app in pod workload-5c9c7b6489-p8462_aiops-case-08(7f2
+[agent:parallel_evidence] 根据已采集的事实，该 Pod 的异常状态为 **CrashLoopBackOff**，直接原因为 **OOMKilled**。这与“容器进程启动失败或配置错误导致崩溃重启”的假设**部分相关**，但更具体地指向了 **内存资源不足** 的问题。以下是证据汇总：
+
+1.  **Pod 生命周期与状态**：
+    *   Pod 处于 **CrashLoopBackOff** 状态。
+    *   事件显示 kubelet 反复重启失败的 `app` 容器（`x122 over 36m`）。
+2.  **异常直接原因**：
+    *   `kubectl describe` 明确指出容器退出原因为 **OOMKilled**，退出码为 **137**。
+    *   这证实了容器并非因配置错误或启动失败而崩溃，而是因**内存超出限制（Memory Limit）**被操作系统 OOM Killer 强制终止。
+
+**结论**：当前异常为 **CrashLoopBackOff**，根因为 **OOMKilled**。
+
+**冲突点**：上游候选原因“配置错误”虽在宽泛意义上成立（如未正
+[node:done] parallel_evidence / 并发证据采集 (63.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (13.5s)
+[final] run_id=472c0b18c99040b9 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-08/workload-5c9c7b6489-p8462` | CrashLoopBackOff | Pod aiops-case-08/workload-5c9c7b6489-p8462 处于 CrashLoopBackOff 状态，应用容器（app）反复被 OOMKilled 终止。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | `kubernetes` | `container.last_terminated_reason`: `OOMKilled`; `container.last_exit_code`: `137` | 确认进程因内存超限被内核强杀（事实 ID: `fact-04bf12b98451`, `fact-cc24a306607a`） |
+| 2 | K8s State | `kubernetes` | `container.resource_limit.memory`: `64Mi` (request: `24Mi`) | 确立触发 OOM 的硬约束边界（事实 ID: `fact-20e648261261`） |
+| 3 | Logging | `elasticsearch` | Pattern `memory allocation advanced` 连续出现 8 次，内存分配量 (`allocated_mib`) 从 `16` 累积增至 `48` | 证明应用持续分配内存并逼近 64Mi 限制（事实 ID: `fact-2e4643b41536` 等） |
+| 4 | K8s Event | `kubernetes` | `Warning BackOff ... x122 over 36m`; `Exit Code: 137` | 证实系统进入重启循环（事实 ID: `fact-e49c5c370fd9` 等） |
+| 5 | Metric | `prometheus` | `kube_pod_container_status_last_terminated_reason` 值为 `1`，标签为 `reason: OOMKilled` | 指标层面印证容器因 OOM 终止（事实 ID: `fact-300a96ee7d43`） |
+| 6 | Tracing | `deepflow` | L7 Flow 统计 9 次 `GET /work` 请求，状态码 `200` | 确认触发内存增长的具体业务路径（事实 ID: `fact-0a2d2b227244` 等） |
+
+**证据链说明：**
+K8s 事件与指标（#1, #2, #5）直接确认了“内存硬限制触发 OOM 强杀”这一系统级机制。日志（#3）与追踪（#6）结合提供了业务侧视角，显示 `GET /work` 请求会导致内存分配量（`allocated_mib`）从 16 升至 48，这一增长趋势在 64Mi 的硬限制下直接导致了上述系统事件。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+容器内存硬限制配置过低（64Mi） → 应用处理 GET /work 请求时内存持续累积（从16Mi增至48Mi） → 超出限制触发内核 OOM Killer（退出码 137） → Pod 处于 CrashLoopBackOff 状态
+```
+
+### 根因结论
+
+**已确认根因：应用容器内存需求超过配置的硬限制。**
+
+具体而言，Pod `workload-5c9c7b6489-p8462` 配置了 `64Mi` 的内存硬限制（`fact-20e648261261`）。日志数据显示，在正常处理请求（`fact-0a2d2b227244`）的过程中，应用内存分配量持续攀升（`allocated_mib`: `16` → `48`，见 `fact-2e4643b41536` 等），这种增长模式表明该应用在运行过程中无法维持低于 `64Mi` 的内存驻留量。
+
+当内存占用触及硬限制时，内核触发 OOM Killer 强制终止进程（`fact-04bf12b98451`），导致容器退出并进入 CrashLoopBackOff（`fact-e49c5c370fd9`）。这一过程由 Prometheus 的终止原因指标（`fact-300a96ee7d43`）完整印证。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.6m
+├─ 问题定位: 16.9s
+├─ 并发证据采集: 63.0s
+│  └─ g1 aiops-case-08/workload-5c9c7b6489-p8462: 63.0s (Evidence 53.4s, RCA 9.5s)
+└─ 汇总总结: 13.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-08/workload-5c9c7b6489-p8462**: pod-crashloop-runtime
+
+[run:end] run_id=472c0b18c99040b9 status=-

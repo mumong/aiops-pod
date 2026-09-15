@@ -1,0 +1,125 @@
+[run] run_id=c04aafe9c7c049b4
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前存在的异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Terminating': 1} NAMESPACE NAME READ
+[agent:layer] 集群中发现 1 个异常 Pod：`aiops-case-v12` 命名空间下的 `workload`。
+
+**异常详情：**
+*   **Pod 名称**：`workload`
+*   **命名空间**：`aiops-case-v12`
+*   **当前状态**：`Terminating`
+*   **异常类型**：`pod-terminating-stuck`
+
+接下来，我将获取 `Terminating 状态` 的诊断手册以进行后续分析。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[agent:layer] 集群当前发现 1 个异常 Pod。以下是详细诊断输出：
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.40 node2 <none>
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.40 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.40 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.40 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 1/1 Terminating 0 21s 172.16.104.40 node2 <none>
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (19.6s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 开始执行首轮证据采集。先并行获取 Pod YAML、Events、Metrics、Logging、Tracing 和 Topology 的实时数据。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] query_pod_topology
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v12 creationTimestamp: 2026-09-14T04:42:02Z deletionTimestamp: 2026-09-14T05:47:05Z deletionGracePeriodSeconds: 3900 finalizers:
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 47s Normal Killing Pod/workload Stopping container app
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 已获取 Pod YAML、Events 和 Topology 关键事实。现在补充查询所在 Node 状态，并读取日志确认 PreStop/teardown 上下文。
+[tool:start] kubectl_get_by_name
+[tool:start] query_pod_logs
+[tool:done] kubectl_get_by_name status=success NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME LABELS node2 Ready <none> 26d v1.26.8 10.2.0.50 <no
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"retrieved":1,"returned":1},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[agent:parallel_evidence] ## 已采集事实
+
+| 维度 | 关键事实 |
+|---|---|
+| **Pod YAML** | `deletionTimestamp: 2026-09-14T05:47:05Z`；`terminationGracePeriodSeconds: 3900` (65分钟)；`finalizers: <none>`；`phase: Running`；单容器 app，无 volume 挂载（仅定义 emptyDir `state`） |
+| **Events** | 仅有一条：`Killing — Stopping container app`（47秒前） |
+| **Node** | `node2` 状态为 `Ready`，无 NotReady/Unknown |
+| **Topology** | Pod 调度在 node2，无 ownerReferences（独立 Pod，非控制器管理），无 Service 关联 |
+| **Logs** | 最近 30 分钟仅一条 `"application started"`；无 PreStop 输出、无 error/warn |
+| **Tra
+[node:done] parallel_evidence / 并发证据采集 (44.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.6s)
+[final] run_id=c04aafe9c7c049b4 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v12/workload` | Terminating | {'type': 'PodScheduled', 'status': 'True'} |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes | phase: Running; condition: PodScheduled/Initialized/Ready/ContainersReady (True); restart_count: 0 | 证实 Pod 处于正常运行状态且未重启，确认资源配置（Request: 8Mi/5m, Limit: 32Mi/50m）正常。 |
+| 2 | Metric | prometheus | `kube_pod_container_status_restarts_total` = 0; `kube_pod_status_phase` Running=1, Failed=0 | 佐证无应用崩溃或异常终止记录，无 Failed 状态出现。 |
+| 3 | Logging | elasticsearch | message: "application started" | 确认应用已启动，但缺乏退出或终止相关的后续日志记录。 |
+| 4 | K8s Event | kubernetes | 未检测到失败事件 (如 ForceKill, FailedKill) | 排除因资源超限或健康检查失败导致的强制终止现象。 |
+
+**证据关联说明：**
+- K8s State (fact-257c4cf30922) 与 Metric (fact-a43f97e667bb, fact-1006c835a875) 相互印证，确认 Pod 未经历异常重启或崩溃。
+- 缺乏 Tracing 数据且日志仅显示启动，无法确认应用内部是否正处于等待终止信号或文件存在性检查的逻辑中，但无证据表明进程已死锁。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 被请求终止（基于诊断报告推断） → 应用可能因检查 /state/teardown-requested 文件是否存在而挂起（正常逻辑） → Pod 处于 Terminating/Running 的未决状态 → 现象为 Pod 无法自动消失
+```
+*注：终止机制中的“应用等待”环节为基于逻辑的推演，当前无直接文件状态或集群当前时间事实支撑，标记为未确认环节。*
+
+### 根因结论
+
+**证据不足。**
+
+虽然 Pod 状态显示为 Running 且存在 Terminating 的潜在请求（参考诊断报告中的 unknowns），但现有证据缺失关键的判定基准：
+1. **无法确认是否超期**：缺乏“当前集群时间”与“deletionTimestamp”的对比事实，无法确认是否已超过 65 分钟（3900s）的 `terminationGracePeriodSeconds`。
+2. **缺乏异常证据**：未观察到 `ForceKill`、`FailedKill` 等事件，也未检测到应用进程非正常退出（重启计数为 0），无法排除这只是一个正常的等待过程。
+3. **状态未决**：缺少容器当前详细状态（如 Waiting Reason）以及应用内部文件 `/state/teardown-requested` 的存在性事实。
+
+在无法确认当前时间与删除请求间隔是否过长的情况下，无法判定为异常故障。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 19.6s
+├─ 并发证据采集: 44.4s
+│  └─ g1 aiops-case-v12/workload: 44.4s (Evidence 34.8s, RCA 9.6s)
+└─ 汇总总结: 9.6s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v12/workload**: pod-terminating-stuck
+
+[run:end] run_id=c04aafe9c7c049b4 status=-

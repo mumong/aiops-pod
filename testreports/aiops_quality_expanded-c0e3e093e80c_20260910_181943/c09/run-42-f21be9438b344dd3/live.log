@@ -1,0 +1,117 @@
+[run] run_id=f21be9438b344dd3
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以检查是否存在异常状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 67} NAMESPACE NAME READY STATUS REST
+[agent:layer] 我发现集群中有一个 Pod 处于异常状态：
+
+*   **Namespace**: `aiops-case-09`
+*   **Pod Name**: `workload-5f4fb9ff45-5mlnc`
+*   **状态**: `Running` 但 `READY` 为 `0/1`
+
+虽然 Pod 处于 `Running` 状态，但由于容器未处于 `Ready` 状态，这通常意味着应用未成功启动或健康检查失败。我将获取该 Pod 的详细信息以确定具体的异常类型（如探针失败、配置错误或启动慢等）。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 105m 172.16
+[agent:layer] Pod 状态为 `Running` 但 `READY` 为 `0/1`，且无重启记录。这通常属于 `NotReadyProbeFailed`（探针失败）或 `CrashLoopBackOffRuntime`（如果容器在启动后立即崩溃但尚未进入 BackOff，或者处于刚启动未就绪状态）。由于缺少详细的 `Events` 和 `Describe` 信息（如探针配置、Last State 原因），为了更精准地定位，我将获取对应的 Runbook 以指导后续的证据收集步骤。根据当前状态，最匹配的 Runbook 是 `pod-notready-probe-failed.md`。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[agent:layer] 当前集群中发现 1 个异常 Pod，具体诊断如下：
+
+### 1. 异常定位
+*   **异常 Pod**: `aiops-case-09/workload-5f4fb9ff45-5mlnc`
+*   **当前状态**: `Running` (0/1 Ready)
+*   **异常类型**: `NotReadyProbeFailed`
+*   **关键特征**: Pod 虽然处于 `Running` 状态，但容器未就绪 (`Ready: 0/1`)，且无重启记录 (`Restarts: 0`)。这通常意味着容器进程已启动，但健康检查（Probe）未通过，或者应用尚未完成启动流程。
+
+### 2. 异常组划分
+*   **Abnormal Group 1**:
+    *   **类型**: `NotReadyProbeFailed`
+    *   **涉及对象**: `workload-5f4fb9ff45-5mlnc`
+    *   **特征**: `Running` 但 `READY` 为 `0/1`。
+
+### 3. 关键实体与可能场景
+*   **可能场景**:
+    1
+[node:done] layer / 问题定位 (20.4s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":873,"matched":893,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 好的，根据已有的 Metrics、Logging、Tracing 结果，以及需要执行的 Kubernetes describe 和 Topology 查询，我执行首轮计划中剩余的 Kubernetes 工具调用，并基于所有结果进行分析。
+
+**首轮执行状态确认：**
+- **Metrics (execute_pod_promql):** 成功。返回 `kube_pod_status_phase` 为 Running=1（其他 phase 为 0），`kube_pod_container_status_restarts_total` 为 0。无等待或终止原因指标。
+- **Logging (query_pod_logs):** 成功。最近 30 分钟内有 893 条日志，样本显示大量 `http_request` level=error, `dependency unavailable`, `http_status: 503` 在 `/work` 路径。
+- **Tracing (query_pod_tracing):** 成功。最近 30 分钟有 DeepFlow 流量和 Tempo
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-5f4fb9ff45-5mlnc namespace: aiops-case-09 node: node2/10.2.0.50 status: Running 关键诊断行: Warning Unhealthy 69s (x2182 over 106m) kubelet Readiness probe failed:
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"retrieved":5,"returned":5},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 收到。我将基于已有的 Metrics、Logging、Tracing 结果，结合新执行的 Kubernetes describe 和 Topology 查询，综合分析该 Pod 的异常状态。
+
+### 1. 补充采集：Kubernetes 事实与拓扑
+
+**kubectl_describe 结果分析：**
+*   **生命周期状态**：Pod 当前 `status: Running`，但存在严重的健康检查问题。
+*   **关键事件 (Events)**：`Warning Unhealthy 69s (x2182 over 106m) kubelet Readiness probe failed: HTTP probe failed with statuscode: 503`。
+    *   **冲突/证据**：这是导致 `NotReady` 的**直接事实证据**。该警告在过去 106 分钟内触发了 2182 次，说明应用侧长期无法正常响应就绪探针的 HTTP 请求（返回 503 服务不可用）。
+*   **控制器归属**：`Controlled By: ReplicaSet/wo
+[node:done] parallel_evidence / 并发证据采集 (38.2s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.2s)
+[final] run_id=f21be9438b344dd3 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-09/workload-5f4fb9ff45-5mlnc` | NotReady | Pod NotReady (Readiness Probe failed: HTTP 503) |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Pod | `status: Running` (Pod 存活) | 确认业务容器进程在运行 |
+| 2 | K8s Event | Pod | `Readiness probe failed: HTTP probe failed with statuscode: 503` (持续 106 分钟) | 确诊 Pod 被标记为 NotReady 的直接诱因 |
+| 3 | Logging | ES | 8 次 `dependency unavailable` 错误 (trace_ids 如 `5ccad1bc...`) | 证实应用自身检测到上游依赖不可用并主动返回 503 |
+| 4 | Tracing | Tempo | `GET /work` 返回 `http.response.status_code: 503` (耗时 ~3ms) | 从流量层面确认应用层返回了故障响应，非网络或网关层问题 |
+
+**证据说明：**
+K8s 探针持续失败（证据 2）的根源在于应用内部（证据 3、4），Pod 处于 `Running` 状态（证据 1）但 `NotReady`。日志与 Trace 数据通过时间、路径（`/work`）及 TraceID 实现了强关联，证实故障由应用内部逻辑触发。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+```text
+上游依赖不可用 → 应用层探测失败 → Readiness Probe 返回 503 → Pod 被标记为 NotReady
+```
+
+### 根因结论
+**已确认根因：应用依赖不可用（Dependency unavailable）**
+应用服务因依赖组件不可用，在接收就绪探针请求时主动返回 503 错误，导致 K8s 调度器将该 Pod 标记为 `NotReady`。
+证据来源：K8s Readiness Probe 事件 `fact-ed22e56bc689` 与应用日志记录 `fact-132e2578e7a7` 相互印证，明确了故障发生在应用层而非基础设施层。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.1m
+├─ 问题定位: 20.4s
+├─ 并发证据采集: 38.2s
+│  └─ g1 aiops-case-09/workload-5f4fb9ff45-5mlnc: 38.2s (Evidence 30.3s, RCA 7.8s)
+└─ 汇总总结: 7.2s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-09/workload-5f4fb9ff45-5mlnc**: pod-notready-probe-failed
+
+[run:end] run_id=f21be9438b344dd3 status=-

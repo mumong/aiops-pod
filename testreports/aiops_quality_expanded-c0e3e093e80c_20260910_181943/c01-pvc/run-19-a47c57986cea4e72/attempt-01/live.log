@@ -1,0 +1,129 @@
+[run] run_id=a47c57986cea4e72
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前存在异常状态的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'Pending': 1} NAMESPACE NAME READY
+[agent:layer] 集群中发现 1 个异常 Pod：
+
+| NAMESPACE | POD NAME | STATUS | READY | ABNORMAL TYPE |
+| :--- | :--- | :--- | :--- | :--- |
+| aiops-case-v03 | workload | Pending | 0/1 | PendingUnschedulable |
+
+该 Pod 处于 `Pending` 状态，且未分配到节点，符合 `PendingUnschedulable` 特征。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod PendingUnschedulable / 调度失败 > Pod异常类型: PendingUnschedulable | 典型状态: Pending | 兼容分类: scheduling ## 场景识别 | 信号 | 关键特征 | |------|----------| | Pod 状态 | Pending，且 Events 含 `FailedSchedul
+[agent:layer] 我将检查异常 Pod 的详细信息和集群节点状态，以确认调度失败的具体原因。
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 18m <none> <none> <none> <none>
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[agent:layer] 我将获取 Pod 的 YAML 详细信息，以便检查其资源请求和调度约束（如 NodeSelector、Affinity 等）。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 18m <none> <none> <none> <none>
+[agent:layer] 我需要获取 Pod 的详细 YAML 和事件信息来确认 `FailedScheduling` 的具体原因。
+[tool:start] kubectl_exec
+[tool:start] kubectl_exec
+[tool:done] kubectl_exec status=error kubectl_exec 输出摘要: raw_chars=121 lines=1 Error: kubectl_exec is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:done] kubectl_exec status=error kubectl_exec 输出摘要: raw_chars=121 lines=1 Error: kubectl_exec is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 18m <none> <none> <none> <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Pending 0 18m <none> <none> <none> <none>
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (23.4s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"projected_series":5,"raw_series":5,"retrieved":5,"returned":5,"serialized_series":5},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我将继续执行证据采集。已收到的可观测性 baseline 显示：
+- **Metrics**: Pod UID `b2f83678-483c-4854-b4a8-02515010c20d` 处于 `Pending` 阶段，无重启，无 Waiting 原因。
+- **Logging**: 无日志（覆盖为空）。
+- **Tracing**: 无流量/Span（覆盖为空，因 Pod IP 为空）。
+
+这符合 Pending Pod 的预期行为。现在执行 Kubernetes 层面的核心诊断：获取 Describe、Events、YAML 资源和节点状态，以确定 FailedScheduling 的具体原因。
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v03 node: <none> status: Pending 关键诊断行: Warning FailedScheduling 19m default-scheduler 0/3 nodes are available: persistentv
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v03 creationTimestamp: 2026-09-11T08:02:22Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=0 recent_restarts=0 status_counts={'Ready': 3} NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 19m Warning FailedScheduling Pod/workload 0/3 nodes are available: persistentvolumeclaim "unavailable-claim" not found. preemption: 0/3 nodes are avail
+[agent:parallel_evidence] 所有关键 Kubernetes 工具已成功返回。以下是本轮采集的事实汇总与初步分析：
+
+### 1. 实体身份与生命周期
+- **Pod**: `workload` (UID: `b2f83678-483c-4854-b4a8-02515010c20d`)
+- **状态**: `Pending` (自 2026-09-11T08:02:22Z 创建以来未变)
+- **容器**: `app` (Image: `python:3-alpine`，资源请求低：CPU 5m, Memory 8Mi)
+- **拓扑**: 无 Pod IP，未分配到任何 Node（`nodeName: <none>`）
+
+### 2. 异常现象与直接原因 (FailedScheduling)
+- **调度事件 (Events)**: 19m 前首次出现 `FailedScheduling`，之后每 5 分钟（9m, x2 over 14m）持续触发。
+- **根本原因**: 事件消息明确指出 **`persistentvolumeclaim "unavailable-claim" not found`**。
+-
+[node:done] parallel_evidence / 并发证据采集 (36.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.7s)
+[final] run_id=a47c57986cea4e72 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v03/workload` | Pending | Pod `workload` 定义了引用 PVC `unavailable-claim` 的 Volume，但该 PVC 在集群中不存在，导致调度器因无法满足存储依赖而持续拒绝调度 (FailedScheduling)。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | event.message | `0/3 nodes are available: persistentvolumeclaim "unavailable-claim" not found.` | 确认调度失败的直接触发条件为 PVC 缺失 |
+| 2 | K8s State | pod.condition | `PodScheduled: False` (`message`: `0/3 nodes are available: persistentvolumeclaim "unavailable-claim" not found.`) | 描述 Pod 未调度（Schedulable）的客观状态 |
+| 3 | K8s State | pod.phase / pod.status | `Pending` | 描述 Pod 当前运行所处阶段 |
+| 4 | K8s Config | resource_request | `memory: 8Mi`, `cpu: 5m` | 排除因资源需求过大导致调度的可能性 |
+| 5 | Metric | kube_pod_status_phase | `Pending` (1个样本) | 从指标维度独立证实 Pod 仍处于等待状态 |
+
+证据表说明：
+Kubernetes 侧的 Event、Pod Condition、Pod Phase 均高度一致地指向 `FailedScheduling` 及 `unavailable-claim` 缺失。Metric 数据作为辅助印证，确认 Pod 在采集时刻仍处于 Pending 状态，未发生状态转变。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+PVC unavailable-claim 缺失 → 调度器无法满足 Volume 依赖 → FailedScheduling / Pod Scheduled=False → Pod 长期处于 Pending 状态
+```
+
+### 根因结论
+
+**已确认的根因**：Pod `aiops-case-v03/workload` 依赖的 PVC `unavailable-claim` 在集群中不存在，导致调度器无法满足存储卷依赖。
+
+该结论由以下事实互相印证：
+1. 调度器 Event 明确指出 `persistentvolumeclaim "unavailable-claim" not found` 是拒绝调度的原因（证据 #1）；
+2. Pod 的 `PodScheduled` 状态为 `False` 且报错信息一致，证实因该依赖导致的调度阻塞（证据 #2）；
+3. Pod 持续处于 `Pending` 状态（证据 #3, #5），且其资源请求极低（证据 #4），彻底排除了由于集群算力或内存不足导致调度的可能。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.1m
+├─ 问题定位: 23.4s
+├─ 并发证据采集: 36.0s
+│  └─ g1 aiops-case-v03/workload: 36.0s (Evidence 31.7s, RCA 4.2s)
+└─ 汇总总结: 7.7s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v03/workload**: pod-pending-unschedulable
+
+[run:end] run_id=a47c57986cea4e72 status=-

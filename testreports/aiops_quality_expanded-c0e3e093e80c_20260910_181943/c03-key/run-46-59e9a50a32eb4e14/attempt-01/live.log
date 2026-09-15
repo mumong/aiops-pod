@@ -1,0 +1,101 @@
+[run] run_id=59e9a50a32eb4e14
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前存在的异常。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[agent:layer] 我发现集群中有一个异常 Pod：`aiops-case-v05/workload`，当前状态为 `ContainerCreating`。
+
+为了确定其异常类型，我需要获取该 Pod 的详细信息和事件。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 74m <none> node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 74m <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod VolumeMountFailed / 卷挂载失败 > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume ## 使用原则（给模型） - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。 - `kubectl
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 74m <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod SandboxCreateFailed / Pod sandbox 创建失败 > Pod异常类型: SandboxCreateFailed | 典型状态: ContainerCreating / FailedCreatePodSandBox | 兼容分类: sandbox_runtime ## 状态识别 - Events 含 `FailedCreatePodSa
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] fetch_runbook
+[node:done] layer / 问题定位 (13.4s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 根据 baseline 结果，Metrics 确认 Pod 处于 `Pending` 阶段且 container waiting reason 为 `ContainerCreating`；Logging 和 Tracing 均为空（预期，因为容器未启动）。现在执行 Kubernetes describe 和 YAML 获取事件和卷配置，并用 topology 确认节点调度关系。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v05 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning FailedMount 9m37s (x40 over 74m) kubelet MountVolume.SetUp failed for volume "i
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v05 creationTimestamp: 2026-09-11T10:16:10Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 已采集事实
+
+| 维度 | 事实 |
+|------|------|
+| **K8s 状态** | Pod `workload` (UID `b9e687f5-...`) 处于 `Pending` 阶段，容器 `app` 等待原因 `ContainerCreating`，重启 0 次 |
+| **调度节点** | 分配到 `node2` (10.2.0.50)；无 NodeSelector；无 imagePullSecrets |
+| **Volume 配置** | 定义 `volumes[0]: input`，类型为 ConfigMap，引用名称 `workload-input` |
+| **Events** | `FailedMount` (×40 over 74m): `"configmap references non-existent config key: unavailable-key"`；另 `FailedMount` (×31 over 72m): `"Unable to attach or mount volumes: unmounted volumes=[i
+[node:done] parallel_evidence / 并发证据采集 (28.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.5s)
+[final] run_id=59e9a50a32eb4e14 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v05/workload` | ContainerCreating | Pod workload 处于 Pending/ContainerCreating 状态，容器未启动 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes (kubelet) | `pod.phase: Pending` (fact-19d5965c9d63, fact-5b19ad091034) | 确认 Pod 最终异常状态为 Pending，未进入 Running。 |
+| 2 | K8s Event | kubernetes (kubelet) | `Warning FailedMount ... MountVolume.SetUp failed for volume "input" : configmap references non-existent config key: unavailable-key` (fact-db488c38ded6) | 直接定位卷挂载失败的具体原因：ConfigMap Key 不存在。 |
+| 3 | K8s Event | kubernetes (kubelet) | `Warning FailedMount ... unmounted volumes=[input], unattached volumes=[input]: timed out waiting for the condition` (fact-b59102af2b9d) | 佐证因卷挂载卡死导致容器初始化失败，进而引发超时。 |
+| 4 | K8s State | kubernetes (api) | `container.waiting_reason: ContainerCreating` (fact-bb6845957c10) | 解释用户可见现象：Pod 卡在容器创建阶段，无法启动。 |
+| 5 | Metric | prometheus | `kube_pod_container_status_waiting_reason{reason="ContainerCreating"}: 1` (fact-0eca7e416954) | 独立指标确认当前状态，与 K8s Event 结论一致。 |
+
+**证据互证分析：**
+Kubernetes Event（事实 2、3）提供了最直接的失败原因，明确指出 `workload-input` ConfigMap 中引用的 key `unavailable-key` 不存在。这一配置错误导致 `MountVolume.SetUp` 永久失败，进而使 Pod 始终处于 `Pending` 状态且等待原因为 `ContainerCreating`。Prometheus 指标（事实 5）从监控层面印证了 Pod 处于 `ContainerCreating` 等待状态的事实，与 K8s 内部事件完全一致。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+ConfigMap volume 配置引用了不存在的 key: unavailable-key (事实 2) → kubelet 挂载卷失败 (FailedMount) (事实 2, 3) → Pod 无法完成卷初始化，持续处于 Pending 状态 (事实 1, 4) → 用户可见 Pod 处于 ContainerCreating 状态，容器未启动
+```
+
+### 根因结论
+
+已确认的根因为 **ConfigMap 挂载配置错误**。具体表现为：Pod 卷定义中引用的 ConfigMap `workload-input` 中，配置了不存在的 key `unavailable-key`。这导致 kubelet 在挂载卷时触发 `FailedMount` 事件并持续超时，使得容器无法进入运行状态。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 51.5s
+├─ 问题定位: 13.4s
+├─ 并发证据采集: 28.6s
+│  └─ g1 aiops-case-v05/workload: 28.6s (Evidence 21.8s, RCA 6.7s)
+└─ 汇总总结: 9.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v05/workload**: pod-volume-mount-failed, pod-sandbox-create-failed, pod-imagepull-failed
+
+[run:end] run_id=59e9a50a32eb4e14 status=-

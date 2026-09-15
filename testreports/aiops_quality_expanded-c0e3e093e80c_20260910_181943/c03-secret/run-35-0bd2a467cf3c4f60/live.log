@@ -1,0 +1,131 @@
+[run] run_id=0bd2a467cf3c4f60
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 50m <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod VolumeMountFailed / 卷挂载失败 > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume ## 使用原则（给模型） - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。 - `kubectl
+[agent:layer] ### 集群诊断结果
+
+当前集群存在 **1 个异常 Pod**，导致业务服务不可用。
+
+| 命名空间 | Pod 名称 | 当前状态 | 异常类型 | 关键证据 |
+| :--- | :--- | :--- | :--- | :--- |
+| aiops-case-v04 | workload | ContainerCreating | VolumeMountFailed (疑似 PVC 未绑定) | 卡在 `ContainerCreating` 阶段 |
+
+**异常分析与处置：**
+该 Pod 的 `workload` 应用在 `aiops-case-v04` 命名空间下，当前处于 `ContainerCreating` 状态已超过 50 分钟。这通常意味着 Pod 调度成功但容器运行时在挂载卷（Volume）或拉取镜像时遇到阻塞。根据经验，该状态极大概率是由于 **PVC（持久卷声明）未绑定（Pending）** 或 **存储后端问题** 导致，应用尚未真正启动。
+
+**后续诊断路径：**
+我将获取该 Pod 的详细事件（Events），以确认具体的挂载失败原因。
+[tool:start] kubectl_describe_pod
+[tool:done] kubectl_describe_pod status=error kubectl_describe_pod 输出摘要: raw_chars=129 lines=1 Error: kubectl_describe_pod is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 50m <none> node2 <none>
+[tool:start] kubectl_get_events
+[tool:done] kubectl_get_events status=error kubectl_get_events 输出摘要: raw_chars=127 lines=1 Error: kubectl_get_events is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 输出摘要: raw_chars=1239 lines=4 NAMESPACE LAST SEEN TYPE REASON OBJECT SUBOBJECT SOURCE MESSAGE
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (19.1s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我将按照计划执行。首先，我需要获取 Kubernetes 的实时事实（Pod describe, YAML, Events），同时结合已获取的 Metrics 基线（Pod 处于 Pending 阶段，Waiting 原因为 ContainerCreating）进行综合分析。
+
+**首轮执行：Kubernetes 核心资源事实**
+
+1.  **kubectl_describe**: 确认 Pod 详细状态及近期 Events。
+2.  **kubectl_get_yaml**: 验证 Pod 的 volumes/volumeMounts 配置，特别是 PVC/ConfigMap/Secret 引用。
+3.  **kubectl_events**: 获取更详细的 Events 列表（虽然 describe 会包含，但单独获取更清晰）。
+
+同时，已有 Metrics 结果显示：
+- `kube_pod_status_phase`: Pending=1
+- `kube_pod_container_status_waiting_reason`: ContainerCreating=1
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v04 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning FailedMount 2s (x33 over 50m) kubelet MountVolume.SetUp failed for
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 2s (x33 over 50m) Warning FailedMount Pod/workload MountVolume.SetUp failed for volume "input" : secret "unavailable-input" not found 5m55s (x20 over 48m) Warnin
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v04 creationTimestamp: 2026-09-11T09:03:17Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] ### 已采集事实分析
+
+**1. 实体身份与生命周期确认**
+-   **Pod**: `aiops-case-v04/workload`
+-   **UID**: `c4405668-4a40-44eb-9eed-a40f1a4ace4a` (与 Metrics 一致)
+-   **当前状态**: `Pending` (ContainerCreating)
+-   **调度节点**: `node2`
+-   **容器**: `app` (处于 `Waiting`，原因 `ContainerCreating`)
+
+**2. 异常根因事实**
+-   **Events (关键)**: 
+    -   `Warning FailedMount`: `MountVolume.SetUp failed for volume "input" : secret "unavailable-input" not found`
+    -   该事件重复出现 33 次，时间跨度 50 分钟。
+-   **Pod Spec (关键)**:
+    -   Volumes 定义了一个名为 `input`
+[node:done] parallel_evidence / 并发证据采集 (35.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (7.5s)
+[final] run_id=0bd2a467cf3c4f60 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v04/workload` | ContainerCreating | Pod aiops-case-v04/workload 处于 ContainerCreating/Pending 状态，容器未启动。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubernetes | `Warning FailedMount` : secret "unavailable-input" not found (fact-8d818e37c18b) | 直接指出挂载失败的具体原因 |
+| 2 | K8s State | kubernetes | Pod phase: `Pending`, container.waiting_reason: `ContainerCreating` (fact-17b54ed96229, fact-b4e8d5e8ac82) | 确认 Pod 因依赖资源问题无法启动 |
+| 3 | Metric | prometheus | `kube_pod_container_status_waiting_reason` (reason=`ContainerCreating`) = 1 (fact-9d89f9c94ce2) | 独立确认容器处于等待状态 |
+
+**证据说明：**
+K8s Event 显示 kubelet 在尝试挂载卷 `input` 时，明确报告 Secret `unavailable-input` 不存在（fact-1）。该事件与 Event 中其他关于挂载超时的记录一致，直接解释了 K8s State 中容器卡在 `ContainerCreating` 且 Pod 处于 `Pending` 状态的原因（fact-2）。Prometheus 指标独立确认了该等待状态（fact-3），但未提供额外的机制信息。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 挂载配置引用不存在的 Secret 'unavailable-input' 且非可选 → kubelet 执行 MountVolume.SetUp 时检索 Secret 失败 → 卷挂载超时并持续报错 FailedMount → 容器状态卡在 ContainerCreating，Pod 处于 Pending
+```
+
+### 根因结论
+
+已确认根因：Pod 定义中引用的 Secret `unavailable-input` 不存在，且挂载配置为非可选 (Optional: false)，导致 kubelet 挂载卷失败。
+
+该根因直接支撑了现象：
+- Secret 缺失事件 (fact-1) 解释了挂载失败。
+- 挂载失败导致容器无法启动，从而表现为 `Pending`/`ContainerCreating` (fact-2)。
+
+缺失决定性事实：确认 Secret `unavailable-input` 是意外删除还是存在拼写错误，需结合 GitOps 或部署历史确认。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.0m
+├─ 问题定位: 19.1s
+├─ 并发证据采集: 35.6s
+│  └─ g1 aiops-case-v04/workload: 35.6s (Evidence 27.6s, RCA 7.9s)
+└─ 汇总总结: 7.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v04/workload**: pod-volume-mount-failed
+
+[run:end] run_id=0bd2a467cf3c4f60 status=-

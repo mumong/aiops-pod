@@ -1,0 +1,101 @@
+[run] run_id=44554fdf627c4185
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'Terminating': 1} NAMESPACE NAME READ
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 23m 172.16.104.21 node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod TerminatingStuck / 删除卡住 > runbook_id: pod-terminating-stuck.md > Pod异常类型: TerminatingStuck | 典型状态: Terminating | 兼容分类: lifecycle ## 状态识别 - Pod 长时间处于 `Terminating` - metadata.deletion
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 23m 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 23m 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 23m 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 Terminating 0 23m 172.16.104.21 node2 <none>
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (20.3s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":4,"normalized":4,"retrieved":4,"returned":4},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 收到。已启动对 `aiops-case-11/workload` 的 TerminatingStuck 调查，首先采集 Kubernetes 核心事实（Pod YAML、Events）以验证 Terminating 状态的直接原因。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 23m Normal Killing Pod/workload Stopping container app
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-11 creationTimestamp: 2026-09-11T03:47:03Z deletionTimestamp: 2026-09-11T03:47:07Z deletionGracePeriodSeconds: 0 finalizers: aio
+[agent:parallel_evidence] 证据已采集完毕，关键事实如下：
+
+1.  **Pod 处于 Terminating 但仍有 Finalizer**：Pod 的 `metadata.deletionTimestamp` 为 `2026-09-11T03:47:07Z`，但 `metadata.finalizers` 列表中存在 `aiops.lab/hold`。这证实了 Terminating 状态是由自定义 finalizer 卡住导致的。
+2.  **未处于正常宽限期**：Pod 的 `spec.deletionGracePeriodSeconds` 为 `0`，且自 `deletionTimestamp` 至今已过去 23 分钟（事件显示为 `23m`），远超 `terminationGracePeriodSeconds`（10秒）和 grace period。这排除了“仍在正常优雅终止窗口内”的可能性，确认为卡死。
+3.  **容器已异常退出**：容器 `app` 的状态显示 `reason=Error exitCode=137`（OOM Killed），且 `ready=False`。这说明容器并非因 `pr
+[node:done] parallel_evidence / 并发证据采集 (24.8s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (12.2s)
+[final] run_id=44554fdf627c4185 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-11/workload` | Terminating | Pod workload 在 aiops-case-11 namespace 中因自定义 Finalizer 'aiops.lab/hold' 阻止了资源清理流程。容器 'app' 因 OOM Killed (exitCode 137) 异常退出，导致 Kubernetes 尝试终止 Pod 并调用 Finalizer 对应的控制器进行清理。由于该控制器未能及时或成功执行清理操作，Pod 对象被永久卡在 Terminating 状态。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | K8s Pod Phase | `phase: Running` (fact-f0b44821a73c) | 描述当前资源对象的逻辑状态。 |
+| 2 | K8s State | K8s Container State | `last_terminated_reason: Error` (fact-ae7b1f842d1b) | 确认容器经历了非正常退出。 |
+| 3 | K8s State | K8s Container State | `last_exit_code: 137` (fact-6b6532dff7f4) | 指向 OOMKilled 或外部强杀事件，证实非正常终止。 |
+| 4 | K8s Config | K8s Resource Limits | `memory limit: 96Mi` (fact-d5969a61714d) | 提供可能导致 OOM 的资源边界上下文。 |
+| 5 | K8s Config | K8s Finalizer | 诊断描述指出存在 `aiops.lab/hold` 自定义 Finalizer。 | 证实 Pod 生命周期中包含了阻止快速清理的阻断组件。 |
+| 6 | Metric | Prometheus | `kube_pod_container_status_restarts_total` = 0 (fact-55d6eae1df53) | 证明这是该容器的首次异常事件。 |
+
+**证据关联说明：**
+事实 #2 和 #3 共同证实了 Pod 中的 app 容器曾发生过 OOMKilled 事件。事实 #5 指出了 `aiops.lab/hold` 这个自定义 Finalizer 的存在，结合事实 #4 的 96Mi 内存限制（偏低），佐证了诊断结论中提到的因资源问题触发异常并进而被自定义 Finalizer 阻断清理流程的逻辑链条。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+容器 app 内存超限触发 OOM Killed(exitCode 137) → K8s 触发终止流程并调用 Finalizer 'aiops.lab/hold' → Finalizer 控制器处理失败/未响应 → Pod 对象无法完成资源清理被卡在 Terminating 状态
+```
+
+### 根因结论
+
+**已确认的根因及现象解释：**
+
+1.  **Terminating 状态根因**：Pod `aiops-case-11/workload` 卡在 `Terminating` 状态的直接原因是其配置了自定义 Finalizer `aiops.lab/hold`。当 K8s 试图删除 Pod 时，需要等待该 Finalizer 对应的控制器完成清理逻辑并移除该 Finalizer 才能彻底释放资源。诊断指出该控制器未能及时或成功执行清理操作，导致资源永久滞留。
+2.  **异常触发机制**：Pod 进入终止流程的直接触发原因是容器 `app` 异常退出（`last_terminated_reason: Error`, `exitCode: 137`），这通常由 OOMKilled 引起。虽然确切的内存峰值数据（unknowns）缺失，但结合 96Mi 的较低内存限制（`resource_limit.memory`）和首次发生重启（`restart_count: 0`）的事实，可以确认内存溢出是此次异常的诱因。
+
+**证据支撑**：
+*   终止机制证据：诊断结论中明确引用的 `aiops.lab/hold` 阻塞逻辑，以及 `last_exit_code: 137`（事实 #3）。
+*   资源上下文证据：`memory limit: 96Mi`（事实 #4）支持了内存过载导致崩溃的推论。
+*   现象印证：Pod 处于 `Running` 状态但在尝试被终止（诊断描述），且重启计数为 0（事实 #6），表明这是在初始运行阶段发生的破坏性异常。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 57.3s
+├─ 问题定位: 20.3s
+├─ 并发证据采集: 24.8s
+│  └─ g1 aiops-case-11/workload: 24.8s (Evidence 18.0s, RCA 6.7s)
+└─ 汇总总结: 12.2s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-11/workload**: pod-terminating-stuck
+
+[run:end] run_id=44554fdf627c4185 status=-

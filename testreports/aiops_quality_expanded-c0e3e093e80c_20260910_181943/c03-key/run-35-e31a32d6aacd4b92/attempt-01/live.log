@@ -1,0 +1,108 @@
+[run] run_id=e31a32d6aacd4b92
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 51m <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 51m <none> node2 <none>
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=3 recent_restarts=0 status_counts={} NAMESPACE LAST SEEN TYPE REASON OBJECT SUBOBJECT SOURCE
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=101 abnormal=0 recent_restarts=0 status_counts={} NAMESPACE NAME DATA AGE LABELS # 样例行 aaa
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME DATA AGE LABELS workload-input 1 51m <none>
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 51m <none> node2 <none>
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=5 abnormal=0 recent_restarts=0 status_counts={} kubectl_get_by_kind_in_cluster 表格摘要: rows=3 abnormal=3 recent_restarts=0 status_counts={} # 样例行 NAMESPACE
+[tool:start] fetch_runbook
+[node:done] layer / 问题定位 (13.4s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，已收到初始可观测性基线数据。现在执行后续工具调用，采集 Kubernetes YAML、Events 和 Topology 证据。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] query_pod_topology
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 46s (x33 over 51m) Warning FailedMount Pod/workload MountVolume.SetUp failed for volume "input" : configmap references non-existent config key: unavailable-key 6m29
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v05 creationTimestamp: 2026-09-11T10:16:10Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 证据采集结论
+
+### 已确认事实
+
+| 维度 | 关键事实 |
+|------|---------|
+| **Kubernetes YAML** | Pod `workload` 处于 **Pending** 阶段，container `app` 的 `reason=ContainerCreating`。容器镜像为 `xnet.registry.io:8443/observability/python:3-alpine`，**无 imagePullSecrets**。挂载了一个 ConfigMap volume `input` (configmap: `workload-input`)。 |
+| **Events** | 存在两条阻塞事件：1) **FailedMount**: configmap references non-existent config key: `unavailable-key`；2) **FailedMount**: timed out waiting for the condition (volumes=[input])。 |
+| **PromQL
+[node:done] parallel_evidence / 并发证据采集 (35.1s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.6s)
+[final] run_id=e31a32d6aacd4b92 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v05/workload` | ContainerCreating | Pod aiops-case-v05/workload 处于 ContainerCreating 阻塞状态，volume挂载失败 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes | `container.waiting_reason`: reason="ContainerCreating" (fact-9dc7c01d9f0b) | 确认 Pod 当前阻塞阶段 |
+| 2 | K8s State | kubernetes | `pod.phase`: Pending (fact-64774ea0c481); `restart_count`: 0 (fact-57e73cbba9f5) | 排除因容器崩溃导致重启的可能 |
+| 3 | Metric | prometheus | `kube_pod_container_status_waiting_reason`=1, reason="ContainerCreating" (fact-90d6f172984c) | 外部监控证实处于同一等待状态 |
+| 4 | K8s Config | kubernetes | 资源配置: 请求 5m CPU / 8Mi Memory; 限制 50m CPU / 32Mi Memory (fact-34875637159b, fact-8f38e192a925) | 提供调度资源约束上下文 |
+
+**说明**：
+- 证据 1 和 3 相互印证了 Pod 当前正处于 `ContainerCreating` 状态。
+- 证据 2 表明 Pod 从未启动过（重启数为 0），排除了容器运行时的故障，聚焦于启动准备阶段。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+ConfigMap 'workload-input' 中不存在 key 'unavailable-key' → Kubelet 执行 VolumeMount 解析失败 → Pod 持续处于 ContainerCreating 状态 (重启 0 次) → 应用容器未启动
+```
+
+### 根因结论
+
+**已确认根因**：
+Pod `aiops-case-v05/workload` 的 Volume 挂载配置引用了 ConfigMap `workload-input` 中的 key `unavailable-key`，但该 key 并不存在。这一配置错误导致 Kubernetes 无法完成卷挂载，进而使 Pod 一直阻塞在 `ContainerCreating` 状态且无法进入运行阶段（证据 1、2、3）。
+
+**证据引用**：
+- `fact-9dc7c01d9f0b`: 容器等待原因为 `ContainerCreating`。
+- `fact-90d6f172984c`: Metric 确认状态为 `ContainerCreating`。
+- `fact-57e73cbba9f5`: 重启次数为 0，佐证未启动过。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 57.1s
+├─ 问题定位: 13.4s
+├─ 并发证据采集: 35.1s
+│  └─ g1 aiops-case-v05/workload: 35.1s (Evidence 27.5s, RCA 7.5s)
+└─ 汇总总结: 8.6s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v05/workload**: pod-imagepull-failed
+
+[run:end] run_id=e31a32d6aacd4b92 status=-

@@ -1,0 +1,118 @@
+[run] run_id=90dbbac23afe4f5c
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'ImagePullBackOff': 1} NAMESPACE NAME
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-65b7f54794-z7kdp 0/1 ImagePullBackOff 0
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=error execute_pod_promql 输出摘要: raw_chars=127 lines=1 Error: execute_pod_promql is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=error execute_pod_promql 输出摘要: raw_chars=127 lines=1 Error: execute_pod_promql is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=error execute_pod_promql 输出摘要: raw_chars=127 lines=1 Error: execute_pod_promql is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] execute_pod_promql
+[node:done] layer / 问题定位 (16.7s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] # 诊断计划
+
+基于已确认的 Pod 身份（`aiops-case-02/workload-65b7f54794-z7kdp`，UID: `91141823-4070-43a3-810c-ddbf5a6b337f`，节点 `node2`，IP `172.16.104.46`，UID 无生命周期复用冲突），执行以下首轮工具：
+
+| # | 目的 | 工具 |
+|---|------|------|
+| 1 | 验证 ImagePullBackOff 是否持续存在，并提取具体的 ImagePull 错误原因（Reason/Message） | `kubectl_describe` |
+| 2 | 获取 K8s 原生事件中的具体失败原因（manifest not found, unauthorized, connection refused 等） | `kubectl_events` |
+| 3 | 从 Metrics 角度验证异常状态的持续性 | `execute_pod_promql` |
+| 4 | 获取最近的 ES/Filebeat 日志，识别错误原文或 trace ID | `qu
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-65b7f54794-z7kdp namespace: aiops-case-02 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning Failed 26s (x3 over 65s) kubelet Failed to pu
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 26s (x3 over 65s) Warning Failed Pod/workload-65b7f54794-z7kdp Failed to pull image "registry.invalid/aiops/workload:missing": rpc error: code = Unknown desc
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":4,"normalized":4,"retrieved":4,"returned":4},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 已采集事实总结
+
+### 1. Pod 生命周期状态
+- **Pod**: `aiops-case-02/workload-65b7f54794-z7kdp` (UID: `91141823-4070-43a3-810c-ddbf5a6b337f`)
+- **节点**: `node2` / IP: `172.16.104.46`
+- **状态**: `Pending` (phase=Pending=1, Running=0, Failed=0)
+- **Container**: `app` — 状态 **Waiting**, Reason: `ErrImagePull`
+- **重启次数**: 0
+- **镜像**: `registry.invalid/aiops/workload:missing`
+- **控制器**: Deployment `workload` → ReplicaSet `workload-65b7f54794` → Pod
+
+### 2. Kubernetes Events (关键证据)
+Events 明确指出失败原因：
+```
+Failed to pull
+[node:done] parallel_evidence / 并发证据采集 (46.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.5s)
+[final] run_id=90dbbac23afe4f5c status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-02/workload-65b7f54794-z7kdp` | ImagePullBackOff | Pod workload-65b7f54794-z7kdp 处于 ImagePullBackOff 状态，镜像拉取失败。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubelet | `Warning Failed ... Failed to pull image "registry.invalid/aiops/workload:missing": ... dial tcp: lookup registry.invalid on 127.0.0.53:53: no such host` | 记录根本原因：DNS 解析失败导致无法连接镜像仓库。 |
+| 2 | K8s Event | kubelet | `Normal BackOff ... Back-off pulling image "registry.invalid/aiops/workload:missing"` | 记录直接现象：因拉取失败进入退避状态。 |
+| 3 | K8s Config | Kubernetes | `container.image: "registry.invalid/aiops/workload:missing"` | 确认 Pod 配置了无效的镜像域名。 |
+| 4 | Metric | Prometheus | `kube_pod_container_status_waiting_reason{reason="ImagePullBackOff"} = 1` | 观测确认容器处于 ImagePullBackOff 等待状态。 |
+| 5 | Metric | Prometheus | `kube_pod_container_status_restarts_total = 0` | 排除容器启动后异常退出的可能性。 |
+
+**证据关联说明**
+Kubernetes 事件（#1）提供的错误原文直接证实了网络连通性失败的具体原因（DNS 解析 `no such host`），这排除了凭证错误或网络策略拦截等其它可能性。事件（#2）描述的 BackOff 状态与 Metric（#4）的 `ImagePullBackOff` 信号一致，同时重启计数为 0（#5）佐证了容器始终未能通过 `ErrImagePull` 阶段，未发生过任何有效启动。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+Pod 配置了无效的镜像仓库域名 registry.invalid → 集群 DNS (127.0.0.53) 无法解析该主机名 (no such host) → kubelet 发起的拉取请求失败 (ErrImagePull) → Pod 持续处于退避重试状态 (ImagePullBackOff)
+```
+
+### 根因结论
+
+**已确认的根因**：Pod 配置了不可达的镜像仓库域名 `registry.invalid`，导致集群 DNS 解析失败。
+**证据引用**：
+1. **事件层面**：Kubelet 上报了明确的 `dial tcp: lookup registry.invalid ... no such host` 错误（#1），确认连接建立前的 DNS 阶段即已失败。
+2. **状态层面**：Pod 处于 `Pending` 且处于 `ImagePullBackOff` 状态（#2, #4），且重启次数始终为 0（#5），确认容器进程从未启动，符合镜像拉取失败的典型特征。
+3. **配置层面**：Pod 显式配置了该无效域名（#3）。
+综合以上事实，判定为镜像配置错误导致的拉取失败。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.2m
+├─ 问题定位: 16.7s
+├─ 并发证据采集: 46.7s
+│  └─ g1 aiops-case-02/workload-65b7f54794-z7kdp: 46.7s (Evidence 38.4s, RCA 8.2s)
+└─ 汇总总结: 9.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-02/workload-65b7f54794-z7kdp**: pod-imagepull-failed
+
+[run:end] run_id=90dbbac23afe4f5c status=-

@@ -1,0 +1,162 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "7566f8c019a14297",
+  "elapsed_seconds": 175.301,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 0,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 0,
+    "recall": 0.0,
+    "precision": 0.0,
+    "matches": [
+      {
+        "expectation_id": "c10-timeout",
+        "matched": false,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "liveness"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [
+          "OOMKilled"
+        ],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [
+      "g1"
+    ],
+    "accuracy": 0.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**证据不足**，无法确认根本原因是 OOM 还是配置偏差。\n\n1.  **关于探针超时（高度可信）**：Tracing 和 Logging 明确显示，`/health` 接口实际耗时约 3 秒，这导致 Liveness Probe 发生 `context deadline exceeded`（事实 2, 6, 7）。这是导致容器被周期性重启的直接机制。\n2.  **关于异常根因（冲突/未确认）**：容器退出码为 137（事实 3）。在 Linux 标准中，137 通常意味着进程收到了 Signal 9 (SIGKILL)，常见原因为 OOMKilled 或人为 `kill -9`。然而，K8s State（事实 3）和 Prometheus Metric（事实 5）均明确记录 `terminated_reason=Error`，而非 `OOMKilled`。\n\n**缺失的决定性事实**：\n要区分是 OOM 还是非预期 Kill，需要查看具体的 `container_last_terminated_exit_code` 以及是否存在伴随 `Terminating` 阶段的其他错误日志或 `systemd`/`dmesg` 层面的 OOM 记录。目前的证据在“超时导致被杀”与“被杀的原因记录”之间存在事实冲突，无法直接下结论。\n\n---",
+      "full_section": "### 因果链\n\n```text\n探针超时配置(<3s) < 业务接口响应耗时(~3s) → 容器因 Liveness 探测失败被 K8s 杀死 (Kill/Signal 9) → 退出码 137 但 terminated_reason 记录为 Error → 应用进入 CrashLoopBackOff 循环\n```\n\n### 根因结论\n\n**证据不足**，无法确认根本原因是 OOM 还是配置偏差。\n\n1.  **关于探针超时（高度可信）**：Tracing 和 Logging 明确显示，`/health` 接口实际耗时约 3 秒，这导致 Liveness Probe 发生 `context deadline exceeded`（事实 2, 6, 7）。这是导致容器被周期性重启的直接机制。\n2.  **关于异常根因（冲突/未确认）**：容器退出码为 137（事实 3）。在 Linux 标准中，137 通常意味着进程收到了 Signal 9 (SIGKILL)，常见原因为 OOMKilled 或人为 `kill -9`。然而，K8s State（事实 3）和 Prometheus Metric（事实 5）均明确记录 `terminated_reason=Error`，而非 `OOMKilled`。\n\n**缺失的决定性事实**：\n要区分是 OOM 还是非预期 Kill，需要查看具体的 `container_last_terminated_exit_code` 以及是否存在伴随 `Terminating` 阶段的其他错误日志或 `systemd`/`dmesg` 层面的 OOM 记录。目前的证据在“超时导致被杀”与“被杀的原因记录”之间存在事实冲突，无法直接下结论。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v17"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v17"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v17"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 8,
+    "planned": 8,
+    "completeness": 1.0,
+    "lanes": [
+      {
+        "lane": "7566f8c019a14297-g1",
+        "collected": 8,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/7566f8c019a14297-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 8,
+    "planned": 8,
+    "completeness": 1.0,
+    "lanes": [
+      {
+        "lane": "7566f8c019a14297-g1",
+        "collected": 8,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/7566f8c019a14297-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c10-timeout-kubernetes-observation",
+        "description": "c10-timeout-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-63a623984853",
+          "fact-9a5c7230558c",
+          "fact-9aa9d62d3109",
+          "fact-4bd886f94f85",
+          "fact-98d55c5abf81",
+          "fact-a3c134ab24d3",
+          "fact-ee6c68f097c0",
+          "fact-fd8546422386",
+          "fact-24b35043dc09",
+          "fact-29aac37c1dc1",
+          "fact-480b351993f4",
+          "fact-9f035fd4eea5"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 56,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 9,
+  "logical_elapsed_seconds": 175.614,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

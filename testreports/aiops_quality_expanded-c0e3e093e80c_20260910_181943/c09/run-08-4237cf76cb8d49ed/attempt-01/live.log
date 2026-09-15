@@ -1,0 +1,131 @@
+[run] run_id=4237cf76cb8d49ed
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的状态，以识别当前的异常情况。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 67} NAMESPACE NAME READY STATUS REST
+[agent:layer] 我发现 `aiops-case-09` 命名空间下的 `workload-5f4fb9ff45-5mlnc` 状态异常。虽然其 STATUS 为 `Running`，但 `READY` 为 `0/1`，这表明容器可能未通过就绪探针。
+
+我将获取该 Pod 的详细信息来确认具体原因。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 24m 172.16.1
+[agent:layer] 根据 Pod 的详细信息，`workload-5f4fb9ff45-5mlnc` 处于 `Running` 状态但 `READY` 为 `0/1`，这通常意味着应用正在运行，但就绪探针（Readiness Probe）失败。
+
+我将获取对应的诊断手册以进行更详细的验证。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 24m 172.16.1
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 24m 172.16.1
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 24m 172.16.1
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 24m 172.16.1
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (20.6s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":716,"matched":736,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 好的，基于已有预采集结果，我需要补充获取 Kubernetes 状态描述和 Probe 配置以验证 NotReady 根因。先执行以下两个独立调用：
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-5f4fb9ff45-5mlnc namespace: aiops-case-09 node: node2/10.2.0.50 status: Running 关键诊断行: Warning Unhealthy 24m kubelet Readines
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-5f4fb9ff45-5mlnc namespace: aiops-case-09 creationTimestamp: 2026-09-11T00:33:31Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[agent:parallel_evidence] 我已有了 YAML 和 describe 的关键事实。Pod 状态为 Running 但 NotReady，Readiness probe 失败（先是 connection refused，后是 503）。现在我需要确认 probe 配置并检查应用日志以诊断根本原因。
+[tool:start] kubectl_describe
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Warning Unhealthy 24m kubelet Readiness probe failed: Get "http://172.16.104.16:8080/ready": dial tcp 172.16.104.16:8080: connect: co
+[heartbeat] layer
+[agent:parallel_evidence] 我已从上游 compacted 结果中获取了 kubectl_describe 和 kubectl_get_yaml 的关键事实，但仍缺少日志、指标和追踪数据来确认根因。我将按计划补充采集。
+
+**首轮补证计划：**
+1. **Logs**: 查询 `workload-5f4fb9ff45-5mlnc` 在异常窗口（约最近 30 分钟）的日志，寻找启动失败、端口绑定失败、应用层错误（如 connection refused 的源头）。
+2. **Metrics/PromQL**: 查询该 Pod 的容器重启次数、CPU/内存是否异常。
+3. **Topology**: 确认该 Pod 的 owner、Service 选择器及节点亲和性，验证是否因 Service/Endpoint 配置导致 Readiness Probe 失败。
+4. **Tracing**: 检查该 Pod 近期是否有 HTTP 请求被拒绝的记录。
+
+开始执行：
+[tool:start] query_pod_logs
+[tool:start] execute_pod_promql
+[tool:start] query_pod_topology
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":3,"normalized":1,"projected_series":1,"raw_series":3,"retrieved":3,"returned":1,"serialized_series":1},"coverage":"present","
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"retrieved":5,"returned":5},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":737,"matched":757,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[agent:parallel_evidence] 已采集以下维度事实：
+
+**Pod 身份与生命周期**：
+- Pod `aiops-case-09/workload-5f4fb9ff45-5mlnc` UID `705925d8-...`，当前 `phase=Running`，位于 `node2`。
+- 容器 `app` 使用镜像 `xnet.registry.io:8443/observability/python:3-alpine`，启动命令 `python3 /opt/aiops/server.py`。**restarts=0**，已排除 CrashLoopBackOff 或 OOMKill 导致的重启。
+- 所有者为 ReplicaSet `workload-5f4fb9ff45`，标签 `aiops.lab/case-id=c09`。
+
+**NotReady 的直接原因（kubelet Readiness Probe 失败）**：
+- kubectl_describe 显示两个阶段的 Readiness Probe 失败记录：
+  1. `dial tcp 172.16.104.16:8080: connect: conn
+[node:done] parallel_evidence / 并发证据采集 (74.3s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (11.4s)
+[final] run_id=4237cf76cb8d49ed status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-09/workload-5f4fb9ff45-5mlnc` | NotReady | Pod aiops-case-09/workload-5f4fb9ff45-5mlnc处于NotReady状态，Readiness Probe持续失败。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubelet | `Readiness probe failed: HTTP probe failed with statuscode: 503` (fact-c0f23c59e0da) | 直接导致 Kubernetes 判定 Pod 未就绪的现象证据 |
+| 2 | K8s Event | kubelet | `Readiness probe failed: dial tcp 172.16.104.16:8080: connect: connection refused` (fact-69d8bb45b93d) | 早期诊断线索，表明目标端口曾不可达，可能为依赖故障的前兆 |
+| 3 | Metric | prometheus | `kube_pod_container_status_restarts_total` = `0` (fact-7cdc9ff218f0) | 排除因 OOMKilled 或应用崩溃重启导致的故障 |
+| 4 | Logging | elasticsearch | `dependency unavailable` pattern, `http_status: 503`, `path: /work` (fact-5e7d8b04b85b 等) | 确认应用侧返回 503 的具体原因为内部依赖不可用 |
+| 5 | Tracing | deepflow | `GET /work` flow `response_code: 503`, `src_ip: 172.16.104.62 -> dst_ip: 172.16.104.16` (fact-4b74c185e7f4 等) | 独立于日志确认了健康检查接口 `/work` 被持续返回 503 的错误 |
+
+证据之间形成闭环：K8s Event (No.1) 记录了 Readiness Probe 收到 503 状态；Logging (No.4) 与 Tracing (No.5) 共同证实了应用代码在执行 `/work` 接口时，因“内部依赖不可用”主动返回了 503。Metric (No.3) 排除了容器自身进程异常的可能性。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+已验证的上游原因：应用内部关键依赖服务/资源不可用 → 失败机制：应用无法完成健康检查逻辑，返回 503 状态码 → 直接失败：Kubelet Readiness Probe 连续收到 503 HTTP 错误 → 用户可见现象：Pod Ready 条件变为 False，状态显示为 NotReady
+```
+
+### 根因结论
+
+已确认根因为**应用内部依赖不可用**。
+
+事实支撑：
+1.  **现象层**：Kubernetes 记录 Readiness Probe 持续失败，状态码为 503（事实 1）。
+2.  **应用层**：日志明确抛出 `dependency unavailable` 错误且伴随 HTTP 503（事实 4）。
+3.  **链路层**：流量分析确认了目标健康检查端点 `/work` 确实在返回 503（事实 5）。
+4.  **排除项**：容器未发生重启（事实 3），证明是应用逻辑层面的依赖阻断而非资源或进程问题。
+
+未确认项：
+具体是哪个内部依赖（如特定数据库、缓存或外部 API）不可用，当前证据不足以直接定位，需通过未提供的 Trace ID 进行跨服务调用链的深层排查。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.8m
+├─ 问题定位: 20.6s
+├─ 并发证据采集: 74.3s
+│  └─ g1 aiops-case-09/workload-5f4fb9ff45-5mlnc: 74.3s (Evidence 64.9s, RCA 9.3s)
+└─ 汇总总结: 11.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-09/workload-5f4fb9ff45-5mlnc**: pod-notready-probe-failed
+
+[run:end] run_id=4237cf76cb8d49ed status=-

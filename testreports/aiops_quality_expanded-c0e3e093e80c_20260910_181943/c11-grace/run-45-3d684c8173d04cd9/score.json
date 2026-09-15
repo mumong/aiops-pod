@@ -1,0 +1,162 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "3d684c8173d04cd9",
+  "elapsed_seconds": 68.988,
+  "root_cause": {
+    "passed": false,
+    "expected_count": 1,
+    "matched_count": 0,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 0,
+    "recall": 0.0,
+    "precision": 0.0,
+    "matches": [
+      {
+        "expectation_id": "c11-grace",
+        "matched": false,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "SIGTERM",
+          "terminationGracePeriodSeconds",
+          "优雅终止"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": [
+          "missing_causal_mechanism"
+        ]
+      }
+    ],
+    "unexpected_claim_groups": [
+      "g1"
+    ],
+    "accuracy": 0.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**已确认根因：应用代码中包含阻塞式优雅终止逻辑（#5 日志）**\n\n应用进程在捕获 SIGTERM 信号后，没有直接进行资源清理并退出，而是执行了轮询等待逻辑，检查特定文件（`/state/teardown-requested`）是否存在。由于该文件未被外部触发创建，容器永久卡在等待循环中，导致 Kubelet 无法终止该容器，进而使整个 Pod 僵死在 `Terminating` 状态（#1, #2 状态及 #6 指标证实）。\n\n**未知项：**\n1. `/state/teardown-requested` 文件是否会在未来某个时刻被外部触发创建（若不会，则为永久僵死）。\n2. Pod 的 `deletionTimestamp` 距今是否已超过 `terminationGracePeriodSeconds`（设定为 3900s），若已超过且仍未强制杀死，可能涉及 kubelet 或节点层面的异常。\n\n---",
+      "full_section": "### 因果链\n\n```text\nPod deletionTimestamp 已设置 → kubelet 发送 SIGTERM 信号 → 应用捕获 SIGTERM 后陷入 while not Path('/state/teardown-requested').exists() 循环 → 容器无法退出，Pod 保持 Terminating 状态\n```\n\n### 根因结论\n\n**已确认根因：应用代码中包含阻塞式优雅终止逻辑（#5 日志）**\n\n应用进程在捕获 SIGTERM 信号后，没有直接进行资源清理并退出，而是执行了轮询等待逻辑，检查特定文件（`/state/teardown-requested`）是否存在。由于该文件未被外部触发创建，容器永久卡在等待循环中，导致 Kubelet 无法终止该容器，进而使整个 Pod 僵死在 `Terminating` 状态（#1, #2 状态及 #6 指标证实）。\n\n**未知项：**\n1. `/state/teardown-requested` 文件是否会在未来某个时刻被外部触发创建（若不会，则为永久僵死）。\n2. Pod 的 `deletionTimestamp` 距今是否已超过 `terminationGracePeriodSeconds`（设定为 3900s），若已超过且仍未强制杀死，可能涉及 kubelet 或节点层面的异常。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v13"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v13"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v13"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-terminating-stuck"
+    ],
+    "found": [
+      "pod-terminating-stuck"
+    ],
+    "matched": [
+      "pod-terminating-stuck"
+    ],
+    "coverage": 1.0,
+    "passed": true
+  },
+  "evidence": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [
+      {
+        "lane": "3d684c8173d04cd9-g1",
+        "collected": 6,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/3d684c8173d04cd9-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 6,
+    "planned": 7,
+    "completeness": 0.8571428571428571,
+    "lanes": [
+      {
+        "lane": "3d684c8173d04cd9-g1",
+        "collected": 6,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/3d684c8173d04cd9-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c11-grace-kubernetes-observation",
+        "description": "c11-grace-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-77cd63e157ed",
+          "fact-89cabf41659d",
+          "fact-a0a493dd56ce",
+          "fact-cc00dd37a254",
+          "fact-a856d6c4b1c1",
+          "fact-b94d5d50d180",
+          "fact-d57ab78d524c",
+          "fact-e26a5efb4052",
+          "fact-91c9ef689765",
+          "fact-89e7c46c2644",
+          "/tmp/aiops/reports/context_archives/3d684c8173d04cd9-g1/tools/004-evidence-kubectl_get_yaml.structured.json"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 13,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 45,
+  "logical_elapsed_seconds": 69.241,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

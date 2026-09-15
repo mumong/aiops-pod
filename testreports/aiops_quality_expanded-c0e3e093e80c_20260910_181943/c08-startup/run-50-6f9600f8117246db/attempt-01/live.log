@@ -1,0 +1,161 @@
+[run] run_id=6f9600f8117246db
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 30 (97s ago) 130m 172.16.104.34
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_describe_pod
+[tool:start] kubectl_get_events
+[tool:start] kubectl_get_pod_yaml
+[tool:done] kubectl_describe_pod status=error kubectl_describe_pod 输出摘要: raw_chars=129 lines=1 Error: kubectl_describe_pod is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:done] kubectl_get_events status=error kubectl_get_events 输出摘要: raw_chars=127 lines=1 Error: kubectl_get_events is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:done] kubectl_get_pod_yaml status=error kubectl_get_pod_yaml 输出摘要: raw_chars=129 lines=1 Error: kubectl_get_pod_yaml is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 CrashLoopBackOff 30 (97s ago) 130m 172.16.104.34
+[tool:start] query_pod_logs
+[tool:done] query_pod_logs status=error query_pod_logs 输出摘要: raw_chars=123 lines=1 Error: query_pod_logs is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] query_pod_logs
+[tool:start] kubectl_get_events_by_name
+[tool:done] query_pod_logs status=error query_pod_logs 输出摘要: raw_chars=123 lines=1 Error: query_pod_logs is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:done] kubectl_get_events_by_name status=error kubectl_get_events_by_name 输出摘要: raw_chars=135 lines=1 Error: kubectl_get_events_by_name is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] execute_pod_promql
+[node:done] layer / 问题定位 (19.3s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"retrieved":6,"returned":6},"coverage":"present","dimension":"logging","directness":"direct","entity":{"cont
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，基于 ReAct 启动前已执行的 Metrics、Logging、Tracing 结果，结合后续需要执行的 Kubernetes 和 Topology 查询，继续执行既定的 evidence_plan。
+
+1.  **执行 kubectl describe pod** 以确认 Last State、Exit Code、Reason 和事件。
+2.  **执行 query_pod_topology** 获取拓扑关系。
+3.  (可选补证) 如果 describe 显示 Exit 137 或 OOMKilled，执行 `kubectl_previous_logs` 和 `kubectl get yaml` 确认配置。
+
+先执行核心的 kubectl describe 和 topology 查询：
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v15 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: OOMKilled Exit Code: 137 Reason: CrashLoopBackOff
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 现在关键事实已经非常清晰：
+1.  **Pod 状态**：`CrashLoopBackOff`，重启 32 次。
+2.  **Last State**：`Terminated`，Reason: `OOMKilled`，Exit Code: 137。
+3.  **Container Config**：`Command: python3 -u -c "import time; print('startup allocation 256Mi', flush=True); memory=bytearray(256*1024*1024); time.sleep(86400)"`。容器试图分配 256Mi 内存。
+4.  **Resource Limits**：`Limits: cpu: 100m, memory: 64Mi`。容器被限制为 64Mi，但代码尝试分配 256Mi。
+5.  **Logs**：`startup allocation 256Mi`（确认容器启动时正在执行内存分配逻辑）。
+6.  **Topology**：Pod 调度在 `node2`，包含 `app` 容器。
+
+根据
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v15 creationTimestamp: 2026-09-14T09:26:33Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[agent:parallel_evidence] ### 已采集事实与结论
+
+**1. 实体身份与生命周期**
+*   **Pod**: `aiops-case-v15/workload` (UID: `da351bf0-c4ab-47a0-b24d-7c7a75950753`)
+*   **当前状态**: `Running` (Phase)，但容器状态为 `Waiting: CrashLoopBackOff`。
+*   **重启次数**: 32 次（Metrics 显示 31，Describe 显示 32，处于持续崩溃中）。
+*   **调度节点**: `node2`。
+
+**2. 异常根因证据（强证据）**
+*   **OOMKilled 确认**: 
+    *   `kubectl describe` 显示 `Last State: Terminated`，`Reason: OOMKilled`，`Exit Code: 137`。
+    *   Prometheus Metrics (`kube_pod_container_status_last_terminated_reason`) 验证 `reason="OOMKill
+[node:done] parallel_evidence / 并发证据采集 (549.9s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.3s)
+[final] run_id=6f9600f8117246db status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v15/workload` | CrashLoopBackOff | 容器启动时尝试分配 256Mi 内存，远超 64Mi 的资源限制，触发 Linux OOM Killer 强制终止容器，导致 CrashLoopBackOff。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes | `BackOff restarting failed container app` (x624) | 直接表现容器崩溃后的剧烈重启行为 |
+| 2 | K8s State | Kubernetes | `last_terminated_reason=OOMKilled`, `exit_code=137` | 核心证据：明确指出容器因超内存被内核杀掉 |
+| 3 | K8s Config | Kubernetes | `memory request=8Mi`, `memory limit=64Mi` | 边界条件：证实当前资源限制为 64Mi |
+| 4 | Logging | Elasticsearch | `startup allocation 256Mi` | 核心证据：提供超内存行为的根本起因 |
+| 5 | Metrics | Prometheus | `kube_pod_container_status_last_terminated_reason=1 (OOMKilled)` | 交叉印证：Prometheus 指标与 K8s OOMKilled 状态一致 |
+
+**证据关联性说明：**
+- 证据 4 (256Mi 需求) 与证据 3 (64Mi 限制) 构成直接的因果冲突。
+- 证据 2 (OOMKilled/137) 是上述冲突在 Kubernetes 维度的直接执行结果。
+- 证据 5 (Metric OOMKilled=1) 作为独立指标源，确认了证据 2 的真实性。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+App 尝试分配 256Mi 内存 (日志证据) → 超过 64Mi 的 Pod 内存限制 (K8s配置证据) → 触发 Linux OOM Killer 杀死容器 (状态证据) → 容器反复崩溃并进入 CrashLoopBackOff (事件证据)
+```
+
+### 根因结论
+
+已确认根因为**应用启动时内存需求（256Mi）显著超过 Pod 资源限制（64Mi）**。
+
+- **启动异常与崩溃**：日志显示应用启动时尝试分配 `256Mi` 内存，这远超了 K8s 配置中设定的 `64Mi` 硬性限制（`fact-1746838a56ac`），导致容器进程被 Linux OOM Killer 强制终止（`fact-4150b06e011f`，`fact-517a4581e694`）。
+- **持续重启**：由于 Pod 配置未更新，该内存限制冲突未被解除，导致容器启动后立即被杀，引发 K8s 的指数退避重启机制，当前表现为 `CrashLoopBackOff`（`fact-ff252a1ea198`，`fact-bbfbe4459f87`）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 9.6m
+├─ 问题定位: 19.3s
+├─ 并发证据采集: 549.9s
+│  └─ g1 aiops-case-v15/workload: 549.9s (Evidence 544.8s, RCA 4.9s)
+└─ 汇总总结: 9.3s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v15/workload**: pod-crashloop-runtime
+
+[run:end] run_id=6f9600f8117246db status=-

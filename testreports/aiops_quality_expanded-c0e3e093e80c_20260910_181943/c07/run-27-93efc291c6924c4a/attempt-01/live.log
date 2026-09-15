@@ -1,0 +1,135 @@
+[run] run_id=93efc291c6924c4a
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-dff5cbc6b-sjvxl 0/1 CrashLoopBackOff 14 (2
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[agent:layer] ### 1. 当前异常 Pod 定位
+- **异常 Pod**：`aiops-case-07/workload-dff5cbc6b-sjvxl`
+- **异常表现**：Pod STATUS 为 `CrashLoopBackOff`，READY 为 `0/1`，已重启 14 次（最近一次在 23 秒前）。
+- **健康结论**：该 Pod 处于 ABNORMAL 状态。
+
+### 2. 异常组与类型归一化
+- **Abnormal Group 1 (CrashLoopBackOff)**：由 `workload-dff5cbc6b-sjvxl` 构成。
+- **Pod 状态关键词**：`CrashLoopBackOff`
+- **Abnormal Type 归一化**：`CrashLoopBackOffRuntime`（符合未明确确认 OOMKilled 或配置缺失时的通用 CrashLoop 分类）。
+
+### 3. 诊断依据
+根据集群状态统计，该 Pod 是集群中唯一的异常实体，其状态特征明确指向 `CrashLoopBackOffRuntime` 类型。已获取对应的诊断手册，后续需
+[node:done] layer / 问题定位 (14.1s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":18,"normalized":18,"retrieved":18,"returned":18},"coverage":"present","dimension":"logging","directness":"direct","entity":{"
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 好的，我将根据代码生成的首轮可观测性 baseline 事实，结合既有 evidence_plan 执行 Kubernetes 核心诊断工具，以确认 CrashLoopBackOff 的直接原因。
+
+从 baseline 中已确认的关键事实：
+- **Metrics**: Pod UID `5c278abe-982e-4ea1-9540-d55e1de90b26`, 重启 14 次, Last Terminated Reason=**Error**, Waiting Reason=**CrashLoopBackOff**
+- **Logging**: 18 条日志，全部是 `CONFIG_MISSING` 错误，HTTP 500 返回 `/work` 端点
+- **Tracing**: DeepFlow 发现 5 个 trace_id，Tempo Span 明确标记 `aiops.observed_mode=config_missing_exit`
+
+日志和追踪数据已非常清晰地指向"配置缺失导致应用退出"。现在执行 Kubernetes 核心工具验证 Last State、Exit C
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_previous_logs
+[tool:start] kubectl_logs
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 3 signals: 3 关键日志: {"timestamp":1789075112.990409,"event":"http_request","level":"error","message":"CONFIG_MISSING","http_status":500,"path":"/work","duration_ms":0.004451,"c
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-dff5cbc6b-sjvxl namespace: aiops-case-07 creationTimestamp: 2026-09-10T20:30:10Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalize
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-dff5cbc6b-sjvxl namespace: aiops-case-07 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 4m19s (x199 ov
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 3 signals: 3 关键日志: {"timestamp":1789075112.990409,"event":"http_request","level":"error","message":"CONFIG_MISSING","http_status":500,"path":"/work","duration_ms":0.
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 4m19s (x199 over 49m) Warning BackOff Pod/workload-dff5cbc6b-sjvxl Back-off restarting failed container app in pod workload-dff5cbc6b-sjvxl_aiops-case-07(5c278
+[agent:parallel_evidence] 我将基于已有的工具结果，补充采集 Pod 生命周期详情和配置映射信息，以完整验证 CrashLoopBackOff 的直接原因。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_previous_logs
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-dff5cbc6b-sjvxl namespace: aiops-case-07 deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> terminationGracePeriodSeconds
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 4m19s (x199 over 49m) Warning BackOff Pod/workload-dff5cbc6b-sjvxl Back-off restarting failed container app in pod workload-dff5cbc6b-sjvxl_aiops-case-07(5c278
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Reason: CrashLoopBackOff Warning BackOff 4m19s (x199 over 49m) kubelet Back-off restarting failed container app in pod workload-dff5cbc6b
+[tool:done] kubectl_get_yaml status=success Retrieved ConfigMap 'workload-code' in namespace 'aiops-case-07', containing Python source code for 'driver.py' and 'server.py' which implement a traffic generator and a stateful HTTP server with OTEL
+[tool:done] kubectl_previous_logs status=success kubectl_previous_logs 日志摘要: lines: 3 signals: 3 关键日志: {"timestamp":1789075112.990409,"event":"http_request","level":"error","message":"CONFIG_MISSING","http_status":500,"path":"/work","duration_ms":0.
+[agent:parallel_evidence] 让我先读取已采集的证据摘要，了解现有事实，然后决定是否需要补充调查。
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=1380 lines=37 <context_archive> archive_path: /tmp/aiops/reports/context_archives/93efc291c6924c4a-g1/tools/005-evidence-kubectl_get_yaml.summary.txt offset: 0 ret
+[tool:done] read_context_archive status=success Pod workload-dff5cbc6b-sjvxl in aiops-case-07 is in CrashLoopBackOff state on node2. The app container is restarting repeatedly with Exit Code 78. key_facts: ["Pod: workload-dff5cbc6b-sjvxl, Namespace
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=1365 lines=14 <context_archive> archive_path: /tmp/aiops/reports/context_archives/93efc291c6924c4a-g1/tools/007-evidence-kubectl_previous_logs.summary.txt offset:
+[agent:parallel_evidence] 根据已有证据，我来综合分析 `aiops-case-07/workload-dff5cbc6b-sjvxl` 的 CrashLoopBackOff 根因。
+
+## 事实与因果链
+
+**1. Pod 当前状态：CrashLoopBackOff 持续中**
+- Phase: Running（Pod 对象本身存活），但条件 `Ready=False`，`ContainersReady=False`
+- 容器 `app`：重启 14 次，Exit Code=78，Waiting Reason=CrashLoopBackOff
+- kubelet 事件：`Back-off restarting failed container app` (x199 over 49m)
+
+**2. 崩溃原因：应用代码主动退出，Exit Code 78**
+- 日志（当前 + 上次崩溃）均显示统一的 ERROR 日志：
+  ```json
+  {"level":"error","message":"CONFIG_MISSING","http_status":500,"path":"/work",...}
+  ```
+[node:done] parallel_evidence / 并发证据采集 (89.8s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.8s)
+[final] run_id=93efc291c6924c4a status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-07/workload-dff5cbc6b-sjvxl` | CrashLoopBackOff | Pod workload-dff5cbc6b-sjvxl 处于 CrashLoopBackOff 状态，app 容器反复以 Exit Code 78 崩溃退出 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | Kubernetes | `Container app` 处于 `CrashLoopBackOff`，最后终止原因为 `Error`，退出码为 78，重启次数 14 次 | 确认应用进程因主动异常退出陷入重启循环 |
+| 2 | K8s Event | Kubernetes | `Warning BackOff`: "Back-off restarting failed container app in pod workload-dff5cbc6b-sjvxl_aiops-case-07" | 记录 kubelet 因频繁崩溃而背压暂停重启的集群侧状态 |
+| 3 | Logging | Elasticsearch | 8 条 `CONFIG_MISSING` 错误日志，均发生在请求 `/work` 时，返回 HTTP 500，`allocated_mib` 均为 0 | 直接暴露应用因配置缺失而进入故障处理模式 |
+| 4 | Tracing | Deepflow/Tempo | Flow 与 Span 关联 trace_id `64132b2c9d9b8077c1ac955acb517247`；属性 `aiops.observed_mode: "config_missing_exit"`，响应码 500 | 证实应用进程内部已明确识别到配置缺失状态并终止处理 |
+
+上述证据形成闭环：Kubernetes 侧捕获到进程频繁以 78 码退出；日志层显示应用在接收到 `/work` 请求时打印 `CONFIG_MISSING` 并返回 500；追踪层通过关联的 trace_id 证实该 500 响应源于应用内部 `config_missing_exit` 模式。多维数据一致指向应用层因配置问题主动崩溃。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+应用配置缺失（未指定有效的 FAILURE_MODE 或关键配置项） → server.py 进入 config_missing_exit 模式处理请求 → 应用主动返回 HTTP 500 并退出（Exit Code 78） → kubelet 触发 CrashLoopBackOff 重启
+```
+
+### 根因结论
+
+**已确认根因：应用因配置缺失主动退出引发重启循环。**
+现有证据确凿：应用日志明确记录 `CONFIG_MISSING` 错误（#3），追踪数据证实请求处理因 `config_missing_exit` 模式失败（#4），集群侧 K8s 状态与日志时间线吻合，证实应用进程主动终止（#1）。根本原因在于 `server.py` 无法加载到有效的 `FAILURE_MODE` 配置，导致其按预设的安全机制主动退出。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.9m
+├─ 问题定位: 14.1s
+├─ 并发证据采集: 89.8s
+│  └─ g1 aiops-case-07/workload-dff5cbc6b-sjvxl: 89.8s (Evidence 78.6s, RCA 11.0s)
+└─ 汇总总结: 8.8s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-07/workload-dff5cbc6b-sjvxl**: pod-crashloop-runtime
+
+[run:end] run_id=93efc291c6924c4a status=-

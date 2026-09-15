@@ -1,0 +1,158 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "3e13efba9aa34159",
+  "elapsed_seconds": 125.569,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "c10-timeout",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "liveness"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [],
+    "accuracy": 1.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因是 **Liveness Probe 的超时配置（TimeoutSeconds）与应用的实际响应延迟不匹配**。\n\n依据如下证据：\n1.  **探针配置不足**：`kubectl` 事件报告 `context deadline exceeded` (Evid 1)，说明超时时间短于请求实际耗时。\n2.  **应用仍在运行但缓慢**：DeepFlow 追踪确认 `/health` 返回 200，但耗时长达约 3 秒 (Evid 8)；应用日志也记录成功处理请求 (Evid 7)。这证明应用进程存活，并非完全无响应。\n3.  **强制终止与重启**：容器因超时被杀死（Exit Code 137）(Evid 4)，进入 CrashLoopBackOff (Evid 2, Evid 6)。\n\n现有的证据不足以完全断定导致响应变慢的**根本系统原因**（如是否确因 64Mi 内存限制导致 Swap 或 GC 停顿，Evid 5），但导致当前“异常组”中 CrashLoopBackOff 现象的**决定性故障**是探针超时配置不当。\n\n---",
+      "full_section": "### 因果链\n\n```text\n容器内存限制极严(64Mi)或负载过高 → 应用响应延迟飙升至约3秒 → kubelet Liveness Probe 设置超时时间过短(预期<3s) → 探针判定超时并强制终止容器(Pid 137) → 容器进入 CrashLoopBackOff 循环\n```\n\n### 根因结论\n\n已确认的根因是 **Liveness Probe 的超时配置（TimeoutSeconds）与应用的实际响应延迟不匹配**。\n\n依据如下证据：\n1.  **探针配置不足**：`kubectl` 事件报告 `context deadline exceeded` (Evid 1)，说明超时时间短于请求实际耗时。\n2.  **应用仍在运行但缓慢**：DeepFlow 追踪确认 `/health` 返回 200，但耗时长达约 3 秒 (Evid 8)；应用日志也记录成功处理请求 (Evid 7)。这证明应用进程存活，并非完全无响应。\n3.  **强制终止与重启**：容器因超时被杀死（Exit Code 137）(Evid 4)，进入 CrashLoopBackOff (Evid 2, Evid 6)。\n\n现有的证据不足以完全断定导致响应变慢的**根本系统原因**（如是否确因 64Mi 内存限制导致 Swap 或 GC 停顿，Evid 5），但导致当前“异常组”中 CrashLoopBackOff 现象的**决定性故障**是探针超时配置不当。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v17"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v17"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v17"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 5,
+    "planned": 7,
+    "completeness": 0.7142857142857143,
+    "lanes": [
+      {
+        "lane": "3e13efba9aa34159-g1",
+        "collected": 5,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/3e13efba9aa34159-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 5,
+    "planned": 7,
+    "completeness": 0.7142857142857143,
+    "lanes": [
+      {
+        "lane": "3e13efba9aa34159-g1",
+        "collected": 5,
+        "planned": 7,
+        "source": "/tmp/aiops/reports/context_archives/3e13efba9aa34159-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c10-timeout-kubernetes-observation",
+        "description": "c10-timeout-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-1dbe5baa137d",
+          "fact-27303e03327c",
+          "fact-360a55686867",
+          "fact-3cce541f2f15",
+          "fact-63edb096e6c9",
+          "fact-642ee582a4a3",
+          "fact-a0f699350ddd",
+          "fact-c831e5c750c8",
+          "fact-cc2d8192e3d3",
+          "fact-e5f8501c07c5",
+          "fact-f1b69dcc3c38",
+          "fact-f1f32c9318a0"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 36,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 17,
+  "logical_elapsed_seconds": 125.832,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

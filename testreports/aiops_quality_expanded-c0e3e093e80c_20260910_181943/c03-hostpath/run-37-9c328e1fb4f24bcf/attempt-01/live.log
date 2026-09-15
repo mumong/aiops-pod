@@ -1,0 +1,105 @@
+[run] run_id=9c328e1fb4f24bcf
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 67m <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod VolumeMountFailed / 卷挂载失败 > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume ## 使用原则（给模型） - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。 - `kubectl
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 67m <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ConfigError / 启动配置失败 > Pod异常类型: ConfigError | 典型状态: CreateContainerConfigError / CreateContainerError / CrashLoopBackOff | 兼容分类: config_bootstrap ## 场景识别 | 信号 | 关键特征 | |------|-----
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod SandboxCreateFailed / Pod sandbox 创建失败 > Pod异常类型: SandboxCreateFailed | 典型状态: ContainerCreating / FailedCreatePodSandBox | 兼容分类: sandbox_runtime ## 状态识别 - Events 含 `FailedCreatePodSa
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (15.2s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 已获取第一轮可观测性基线：
+- Metrics: Pod UID=f0ed729b-e64a-4bd6-8065-3af3efc737f8, node=node2, container=app; phase=Pending(1), waiting_reason=ContainerCreating(1), restarts=0
+- Logging: empty (容器未启动，无日志)
+- Tracing: empty (pod_ip 为空，无法查询 DeepFlow/Tempo)
+
+接下来执行计划中的 `kubectl_describe` 和 `query_pod_topology` 以确认事件详情和拓扑关系。
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v06 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning FailedMount 3m12s (x40 over 68m) kubelet MountVolume.SetUp failed for volume "i
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] ## 证据结论
+
+### 实体确认
+- Pod `aiops-case-v06/workload` (UID: `f0ed729b-e64a-4bd6-8065-3af3efc737f8`)
+- 节点: `node2` (10.2.0.50)
+- 容器: `app` (Image: `xnet.registry.io:8443/observability/python:3-alpine`)
+- 状态: **Pending** / **ContainerCreating**，Restart Count = 0
+
+### 根因事实
+**支持 VolumeMountFailed (HostPath 类型错误):**
+- Event `FailedMount` (x40 over 68m, 最新 3m12s): `MountVolume.SetUp failed for volume "input" : hostPath type check failed: /var/lib/aiops-fixture-unavailable-7f394bef/input is not a directory
+[node:done] parallel_evidence / 并发证据采集 (27.0s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (8.8s)
+[final] run_id=9c328e1fb4f24bcf status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v06/workload` | ContainerCreating | Pod aiops-case-v06/workload 在节点 node2 上调度，但 Volume 'input' 挂载失败。根本原因是宿主机的 HostPath 路径 `/var/lib/aiops-fixture-unavailable-7f394bef/input` 不存在或非目录，导致 kubelet 无法完成 VolumeSetUp，Pod 卡在 ContainerCreating 状态。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | fact-aa9de2b1b28a | `Warning FailedMount` ... `hostPath type check failed: /var/lib/aiops-fixture-unavailable-7f394bef/input is not a directory` | 直接指明挂载失败的具体原因：宿主机路径不存在或非目录 |
+| 2 | K8s Event | fact-5d0ac5ce8f07 | `Warning FailedMount` ... `timed out waiting for the condition` (持续68m) | 证明故障处于持续挂起状态，而非偶发瞬时错误 |
+| 3 | Metric | fact-6745980881f5 | `kube_pod_container_status_waiting_reason` = 1 (reason=ContainerCreating) | 确认 Pod 长期停留在容器创建等待阶段，未进入运行态 |
+| 4 | Metric | fact-f5842427286a | `kube_pod_container_status_restarts_total` = 0 (container=app) | 确认容器尚未成功启动过，排除了因容器启动后崩溃导致的重启可能 |
+
+Kubernetes 事件（#1, #2）与 Metrics（#3）高度一致，共同指向了 Pod 因底层存储挂载失败而卡在 `ContainerCreating` 阶段的单一事实链条。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+宿主路径 /var/lib/aiops-fixture-unavailable-7f394bef/input 无效 → kubelet 执行 VolumeSetUp 类型检查失败 → Pod 挂载卷超时挂起 → 现象：Pod 状态卡在 ContainerCreating
+```
+
+### 根因结论
+
+已确认根因为 **Pod 挂载卷失败导致调度挂起**。
+具体证据支持如下：
+1. **直接原因**：Kubernetes Event `fact-aa9de2b1b28a` 明确指出 `hostPath type check failed`，说明 Pod 定义中引用的 HostPath `/var/lib/aiops-fixture-unavailable-7f394bef/input` 在调度节点上并非有效目录。
+2. **当前状态**：Metrics `fact-6745980881f5` 和 Event `fact-5d0ac5ce8f07` 证实该挂载失败状态已持续近 1 小时，Pod 无法进入 `Running` 状态。
+3. **排除其他因素**：Metrics `fact-f5842427286a` 显示重启次数为 0，排除了应用逻辑错误或资源争抢导致的启动失败。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 51.1s
+├─ 问题定位: 15.2s
+├─ 并发证据采集: 27.0s
+│  └─ g1 aiops-case-v06/workload: 27.0s (Evidence 19.3s, RCA 7.6s)
+└─ 汇总总结: 8.8s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v06/workload**: pod-imagepull-failed, pod-volume-mount-failed, pod-config-error, pod-sandbox-create-failed
+
+[run:end] run_id=9c328e1fb4f24bcf status=-

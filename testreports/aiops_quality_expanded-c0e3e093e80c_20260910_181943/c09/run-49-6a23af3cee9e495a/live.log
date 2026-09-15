@@ -1,0 +1,154 @@
+[run] run_id=6a23af3cee9e495a
+[node:start] layer / 问题定位
+[agent:layer] 我将为您检查集群中的 Pod 状态，以定位当前存在的异常。由于您未指定具体范围，我将首先获取所有命名空间下的 Pod 列表，以识别存在问题的 Pod。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 67} NAMESPACE NAME READY STATUS REST
+[agent:layer] 我找到了一个异常 Pod：
+
+*   **Pod**: `workload-5f4fb9ff45-5mlnc`
+*   **命名空间**: `aiops-case-09`
+*   **当前状态**: `Running` 但 `READY` 为 `0/1`
+
+这种状态表明容器正在运行，但未通过就绪探针（Readiness Probe），导致 Service 无法将其纳入流量。这符合 `pod-notready-probe-failed` 的异常类型。
+
+我将获取对应的诊断手册以进一步分析。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 118m 172.16
+[tool:start] kubectl_describe_pod
+[tool:start] kubectl_get_pod_yaml
+[tool:start] kubectl_get_logs
+[tool:done] kubectl_describe_pod status=error kubectl_describe_pod 输出摘要: raw_chars=129 lines=1 Error: kubectl_describe_pod is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:done] kubectl_get_pod_yaml status=error kubectl_get_pod_yaml 输出摘要: raw_chars=129 lines=1 Error: kubectl_get_pod_yaml is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:done] kubectl_get_logs status=error kubectl_get_logs 输出摘要: raw_chars=125 lines=1 Error: kubectl_get_logs is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[tool:start] kubectl_exec_pod
+[tool:done] kubectl_exec_pod status=error kubectl_exec_pod 输出摘要: raw_chars=125 lines=1 Error: kubectl_exec_pod is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_events
+[tool:done] kubectl_get_events status=error kubectl_get_events 输出摘要: raw_chars=127 lines=1 Error: kubectl_get_events is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_kind_in_cluster
+[node:done] layer / 问题定位 (17.9s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":873,"matched":893,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 好的，收到预采集结果。现在我需要执行证据计划中的 Kubernetes 描述、Topology 查询，并基于现有 Metrics/Logs/Tracing 结果决定是否需要补证。
+
+**预采集关键事实总结：**
+- **Metrics**: Pod 处于 `Running` phase，重启计数为 0，无 waiting/terminated 原因。
+- **Logs**: 最近日志全是 `dependency unavailable`, `http_status: 503`, `path: /work` 的错误，属于业务层依赖不可用。
+- **Tracing**: DeepFlow 显示 HTTP GET `/work` 返回 503，Tempo Span 标记 `aiops.observed_mode: "readiness_fail"`。
+
+这些事实强烈暗示 readiness probe 可能探测的是 `/work` 接口，而该接口因依赖不可用持续返回 503，导致 NotReady。我需要确认 Pod 的 probe 配置和 describe 事件来验证这一假设。
+
+现在执行
+[tool:start] kubectl_describe
+[tool:start] query_pod_topology
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-5f4fb9ff45-5mlnc namespace: aiops-case-09 node: node2/10.2.0.50 status: Running 关键诊断行: Warning Unhealthy 4m20s (x2390 over 119m) kubelet Readiness probe faile
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"retrieved":5,"returned":5},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[agent:parallel_evidence] 好的，收到预采集结果和上一轮的工具执行结果。现在我已有了 **kubernetes describe** 和 **topology** 的关键事实，接下来我需要结合这些新事实，对日志和追踪进行针对性补证，以确认根因。
+
+**当前已确认的事实：**
+1.  **Kubernetes Describe**:
+    *   Pod 状态：`Running` (Phase 正常)。
+    *   **核心异常**：持续收到 `Warning Unhealthy` 事件，原因是 `Readiness probe failed: HTTP probe failed with statuscode: 503`，且该事件已持续 119 分钟，触发次数高达 2390 次。这直接解释了 `NotReady` 的状态。
+    *   Probe 配置：Readiness Probe 是 HTTP GET，路径 `/health` (根据常见配置推断，需日志确认)，端口 8080。
+2.  **Topology**:
+    *   Pod 调度在 `node2`，IP 为 `172.16.104.16
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":10,"ledger_spans":3,"matched":10,"normalized":13,"retrieved":13,"returned":13,"serialized_flows":10,"serialized_spans":3
+[heartbeat] layer
+[heartbeat] layer
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":886,"matched":896,"normalized":100,"retrieved":100,"returned":10},"coverage":"present","dimension":"logging","directness":"direct","entit
+[agent:parallel_evidence] 我需要读取详细的结构化证据文件，以获取完整的日志、追踪、拓扑和 kubectl 描述信息。
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=5036 lines=125 <context_archive> archive_path: /tmp/aiops/reports/context_archives/6a23af3cee9e495a-g1/tools/004-evidence-kubectl_describe.structured.json offset:
+[tool:done] read_context_archive status=success query_pod_topology returns complete topology for pod workload-5f4fb9ff45-5mlnc (ns: aiops-case-09). Pod is on node2, part of Deployment/workload via ReplicaSet/workload-5f4fb9ff45, served by Service/w
+[tool:done] read_context_archive status=success Elasticsearch日志查询(007-evidence-query_pod_logs)返回10条采样记录。Pod 'workload-5f4fb9ff45-5mlnc' 在 'aiops-case-09' namespace 的 'app' 容器中，日志显示持续发生 'dependency unavailable' 错误（HTTP 503），请求路径为 '/work'。查询时间窗口为2026
+[tool:done] read_context_archive status=success query_pod_tracing 查询 aiops-case-09 namespace 下 workload-5f4fb9ff45-5mlnc pod 的 inbound HTTP 流量。查询成功但结果被截断。返回的 10 条证据全部显示 HTTP GET /work 请求从 172.16.104.62 发往 172.16.104.16:80，响应码均为 503，耗时约 20-30s。 key_
+[agent:parallel_evidence] 让我获取更多关键事实，包括 Pod YAML 完整信息、Events 以及日志/追踪的详细模式。
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 48s (x2493 over 120m) Warning Unhealthy Pod/workload-5f4fb9ff45-5mlnc Readiness probe failed: HTTP probe failed with statuscode: 503
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-5f4fb9ff45-5mlnc namespace: aiops-case-09 creationTimestamp: 2026-09-11T00:33:31Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":876,"matched":896,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[agent:parallel_evidence] Let me analyze all the evidence collected for the Pod `aiops-case-09/workload-5f4fb9ff45-5mlnc`:
+
+## 实体身份确认
+- **Pod**: workload-5f4fb9ff45-5mlnc (UID: 705925d8-1e60-4c25-8300-62e280589dee)
+- **Namespace**: aiops-case-09
+- **Node**: node2 (10.2.0.50), Pod IP: 172.16.104.16
+- **Container**: app, image: `xnet.registry.io:8443/observability/python:3-alpine`, command: `python3 /opt/aiops/server.py`
+- **控制器**: Deployment/workload → ReplicaSet/workload-5f4fb9ff45
+- **Service**: workload (172.30.17.7)
+-
+[node:done] parallel_evidence / 并发证据采集 (135.6s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (12.4s)
+[final] run_id=6a23af3cee9e495a status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-09/workload-5f4fb9ff45-5mlnc` | NotReady | Pod NotReady |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes | Pod Phase: Running; Ready: False (ContainersNotReady); Reason: app container not ready | 确认应用容器已启动但健康检查未通过，处于 NotReady 状态 |
+| 2 | K8s Event | kubernetes | Warning Unhealthy: Readiness probe failed: HTTP probe failed with statuscode: 503 (x2390 over 119m) | 提供 Readiness 探针长期失败的直接证据，且为 HTTP 503 错误 |
+| 3 | Metric | prometheus | kube_pod_container_status_restarts_total: 0 (container: app) | 排除应用进程崩溃重启导致的不健康状态，确认非 OOMKilled 或 CrashLoopBackOff |
+| 4 | Logging | elasticsearch | 模式: `http_request [error] dependency unavailable, http_status: 503, path: /work` (连续 14 条记录，时间窗 02:32:03 - 02:32:51) | 证实应用自身返回 503 状态码，且明确归因为依赖服务不可用，与探针失败原因一致 |
+| 5 | Tracing | deepflow | 聚合 13 条等价的 GET /work HTTP Flow，响应码均为 503，从源 172.16.104.62 发往 Pod IP 172.16.104.16 | 通过 L7 层面观测验证了外部或侧边请求在应用层被拦截并返回 503，与探针行为吻合 |
+| 6 | K8s Config | kubernetes | CPU 限制 200m, 内存限制 96Mi, 请求内存 24Mi | 资源配额配置正常，日志中 `allocated_mib` 均为 0 也表明未发生资源耗尽 |
+
+**证据综合：**
+K8s 事件与探针记录（#1, #2）明确显示了 `HTTP 503` 这一现象；日志（#4）揭示了这一现象的内部成因是“依赖不可用”并返回了 503；Tracing 数据（#5）从网络流转视角独立验证了 GET /work 路径持续返回 503；监控重启次数为 0（#3）排除了进程级故障。多源数据高度自洽，形成闭环。
+
+## 🎯 根因分析 · g1
+
+```text
+应用程序底层依赖服务不可用 → 业务逻辑拒绝服务并返回 HTTP 503 → Pod Readiness 探针（HTTP GET /work）连续失败 → Pod 状态变更为 NotReady（Ready=False）
+```
+
+**根因结论：**
+已确认根因为**应用业务逻辑层面的故障**（应用依赖不可用）。
+1. **现象机制**：应用代码捕获到依赖层（如数据库或上游 API）不可用的情况，并主动向调用方（包括集群的 Readiness 探针）返回 `HTTP 503` 状态码（证据 #2, #4, #5）。
+2. **最终表现**：由于探针长期收到非 2xx 状态码，Kubernetes 判定应用容器健康检查失败，进而将 Pod 的 `Ready` 状态置为 `False`，阻止流量进入该 Pod（证据 #1, #2）。
+3. **边界**：故障并非由资源耗尽、OOM 或网络配置（CNI/Calico）引起（证据 #3, #6, #2 中的 PodIP 信息正常）。目前缺乏决定性的底层拓扑或依赖方指标来进一步确认具体是哪个依赖（如特定数据库或缓存）不可用（属于未知项）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 2.8m
+├─ 问题定位: 17.8s
+├─ 并发证据采集: 135.6s
+│  └─ g1 aiops-case-09/workload-5f4fb9ff45-5mlnc: 135.6s (Evidence 125.7s, RCA 9.7s)
+└─ 汇总总结: 12.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-09/workload-5f4fb9ff45-5mlnc**: pod-notready-probe-failed
+
+[run:end] run_id=6a23af3cee9e495a status=-

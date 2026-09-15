@@ -1,0 +1,159 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "beed1239b6df4ae8",
+  "elapsed_seconds": 121.504,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "c10-timeout",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "liveness"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [],
+    "accuracy": 1.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "已确认的根因是应用代码执行逻辑（3s sleep）与 Liveness Probe 超时配置（1s）不匹配，导致容器被系统频繁终止并重启。\n\n- **机制支撑**：Tracing 数据（事实 #5）明确观测到 `/health` 端点请求耗时为 3001ms，直接导致 Kubernetes 探针在 1s 后抛出 `context deadline exceeded` 错误（事实 #2）。\n- **状态支撑**：Container 频繁被杀死（Exit Code 137，事实 #1）和 Pod 23 次重启（事实 #1）是探针频繁超后的直接后果。\n- **排除其他**：Memory 指标（事实 #3）未触及 `64Mi` 限制，排除了 OOM 可能；日志（事实 #4）虽然返回 200，但进一步确认了应用是在处理完请求后返回，而非服务崩溃，佐证了耗时导致的超时机制。\n\n*注：事实 #2 同时也记录了 `/ready` 端点连接被拒绝的现象，这是因为容器在重启间隙（如 `restart_count` 统计时）处于不可用状态，属于根因触发的副作用。*\n\n---",
+      "full_section": "### 因果链\n\n```text\n应用代码 /health 端点包含 3s sleep 逻辑 → Liveness 探针（1s超时）频繁触发 → 容器被 Kubelet 强杀(Exit 137) → Pod 崩溃重启(CrashLoopBackOff)\n```\n\n### 根因结论\n\n已确认的根因是应用代码执行逻辑（3s sleep）与 Liveness Probe 超时配置（1s）不匹配，导致容器被系统频繁终止并重启。\n\n- **机制支撑**：Tracing 数据（事实 #5）明确观测到 `/health` 端点请求耗时为 3001ms，直接导致 Kubernetes 探针在 1s 后抛出 `context deadline exceeded` 错误（事实 #2）。\n- **状态支撑**：Container 频繁被杀死（Exit Code 137，事实 #1）和 Pod 23 次重启（事实 #1）是探针频繁超后的直接后果。\n- **排除其他**：Memory 指标（事实 #3）未触及 `64Mi` 限制，排除了 OOM 可能；日志（事实 #4）虽然返回 200，但进一步确认了应用是在处理完请求后返回，而非服务崩溃，佐证了耗时导致的超时机制。\n\n*注：事实 #2 同时也记录了 `/ready` 端点连接被拒绝的现象，这是因为容器在重启间隙（如 `restart_count` 统计时）处于不可用状态，属于根因触发的副作用。*\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v17"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v17"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v17"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime",
+      "pod-oomkilled"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 9,
+    "planned": 9,
+    "completeness": 1.0,
+    "lanes": [
+      {
+        "lane": "beed1239b6df4ae8-g1",
+        "collected": 9,
+        "planned": 9,
+        "source": "/tmp/aiops/reports/context_archives/beed1239b6df4ae8-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 9,
+    "planned": 9,
+    "completeness": 1.0,
+    "lanes": [
+      {
+        "lane": "beed1239b6df4ae8-g1",
+        "collected": 9,
+        "planned": 9,
+        "source": "/tmp/aiops/reports/context_archives/beed1239b6df4ae8-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c10-timeout-kubernetes-observation",
+        "description": "c10-timeout-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-05078e461557",
+          "fact-1886b6880eea",
+          "fact-3b00b38c861d",
+          "fact-4e5e5c731849",
+          "fact-60e766349e89",
+          "fact-88caab9bd71c",
+          "fact-9a0764ac19fd",
+          "fact-a174d39ac49c",
+          "fact-a26a4cef80b4",
+          "fact-cba59be33338",
+          "fact-f760b42cdfc3",
+          "fact-44e079a38b31"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 33,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 24,
+  "logical_elapsed_seconds": 121.764,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

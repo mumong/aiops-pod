@@ -1,0 +1,111 @@
+[run] run_id=e5eba24dca5b4430
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65} NAMESPACE NAME READY STATUS
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 9m32s <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod VolumeMountFailed / 卷挂载失败 > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume ## 使用原则（给模型） - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。 - `kubectl
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 9m32s <none> node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 9m32s <none> node2 <none>
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload 0/1 ContainerCreating 0 9m32s <none> node2 <none>
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod VolumeMountFailed / 卷挂载失败 > Pod异常类型: VolumeMountFailed | 典型状态: Pending / ContainerCreating | 兼容分类: storage_volume ## 使用原则（给模型） - Runbook 是诊断 guide，不是要求把所有分支都查完的 checklist。 - `kubectl
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (12.3s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 根据已采集的预观察基线结果，开始执行既有的 Kubernetes 诊断计划。
+
+1. **Pod Describe**：获取详细状态和 Events
+2. **Pod YAML**：查看卷定义
+3. **Pod Events**：获取具体报错
+4. **PVC 检查**：识别并验证卷绑定
+5. **Topology**：补充拓扑关系
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_events
+[tool:start] kubernetes_tabular_query
+[tool:start] query_pod_topology
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":2,"normalized":2,"retrieved":2,"returned":2},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload namespace: aiops-case-v14 creationTimestamp: 2026-09-14T08:11:57Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finalizers: <none> serv
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 10m Warning FailedCreatePodSandBox Pod/workload Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "a
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload namespace: aiops-case-v14 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning FailedCreatePodSandBox 10m kubelet Failed to create
+[tool:done] kubernetes_tabular_query status=success kubernetes_tabular_query 输出摘要: raw_chars=317 lines=3 Command failed (exit 1): kubectl get pods --all-namespaces -o custom-columns='metadata.name,spec.volume.name,spec.pvc,spec.secret.secretName,spec.c
+[agent:parallel_evidence] ### 已采集事实
+
+- **Pod 身份与生命周期**：`aiops-case-v14/workload` (UID `88142b75...`) 调度在 `node2`，状态为 `Pending`，容器 `app` 处于 `Waiting` (Reason: `ContainerCreating`)。
+- **关键事件 (Events)**：唯一的关键事件是 `FailedCreatePodSandBox` (10m 前)。错误原文为：`failed to setup network for sandbox ... plugin type="multus" ... failed to find plugin "aiops-unavailable" in path [/opt/cni/bin /opt/cni/bin]`。
+- **Pod 规格 (YAML/Describe)**：
+    - 没有定义任何 `volumes`、`volumeMounts`、Secret 或 ConfigMap 挂载。
+    - 容器 `app` 使用镜像 `xnet.registry.io:844
+[node:done] parallel_evidence / 并发证据采集 (41.4s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (12.5s)
+[final] run_id=e5eba24dca5b4430 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-v14/workload` | ContainerCreating | 目标节点 node2 的 /opt/cni/bin 路径下缺失 Pod 附加网络所需的 CNI 插件 'aiops-unavailable'，导致 Multus CNI 执行失败，无法创建 Pod Sandbox，从而使容器状态保持在 ContainerCreating。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubernetes | `Warning FailedCreatePodSandBox ... Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "a2dd4c27504ff4dc1725009cd80c4198a6788079c9569c90df5c4e4e4d96e7f7": plugin type="multus" name="multus-cni-network" failed (add): [aiops-case-v14/workload:secondary-net]: error adding container to network "secondary-net": failed to find plugin "aiops-unavailable" in path [/opt/cni/bin /opt/cni/bin]` (fact-5d3ecbf15700) | 提供直接因果证据，定位到 CNI 插件缺失导致网络初始化失败 |
+| 2 | K8s State | kubernetes | `container.waiting_reason: ContainerCreating` (fact-908ae0978e9c) | 描述当前阻碍业务容器运行的状态 |
+| 3 | K8s Config | kubernetes | `Annotations: k8s.v1.cni.cncf.io/networks: secondary-net` (fact-33a742eef458) | 说明 Pod 期望通过 Multus 配置附加网络，从而触发了对特定 CNI 插件的查找 |
+| 4 | K8s State | kubernetes | `pod.phase: Pending` (fact-4818da35b454) | 确认 Pod 卡在调度或初始化阶段，尚未进入运行状态 |
+| 5 | Metric | prometheus | `kube_pod_container_status_waiting_reason{reason="ContainerCreating"} = 1` (fact-0d74b14176e0) | 从监控层确认容器持续处于等待状态 |
+| 6 | Metric | prometheus | `kube_pod_container_status_restarts_total = 0` (fact-8734efdce74a) | 排除业务应用已崩溃重启的可能性，验证故障发生在启动前阶段 |
+
+K8s Event 明确给出了失败机制与具体错误信息（缺失 'aiops-unavailable' 插件），直接支撑了状态保持 `ContainerCreating` 和 `Pending` 的现象。Metric 的等待原因与重启数为零的数据，排除了应用层启动后崩溃的场景，将问题严格限定在 Kubelet 执行 CNI 插件调用的初始化阶段。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+节点 node2 的 CNI 插件路径下缺失 'aiops-unavailable' 插件 → Multus CNI 尝试为 secondary-net 附加网络时执行失败 → Kubelet 创建 Pod Sandbox 流程因网络初始化报错中断 → Pod 容器状态卡在 ContainerCreating
+```
+
+### 根因结论
+
+已确认根因为：目标节点 node2 的 `/opt/cni/bin` 路径下缺少名为 `aiops-unavailable` 的 CNI 插件。
+
+具体而言，Pod `aiops-case-v14/workload` 配置了附加网络 `secondary-net`，在调度至 node2 后，Kubelet 调用 Multus CNI 进行网络配置，但在指定路径下未能找到该插件文件（见证据表 #1，fact-5d3ecbf15700）。这一缺失导致网络设置失败，进而使 Pod Sandbox 无法创建，容器一直处于 `ContainerCreating` 状态等待中（见证据表 #2，fact-908ae0978e9c）。
+
+目前证据不足以判断该插件应当是“被意外删除/未部署”，还是“Pod YAML 配置中错误引用了不存在的插件名称”。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.1m
+├─ 问题定位: 12.3s
+├─ 并发证据采集: 41.4s
+│  └─ g1 aiops-case-v14/workload: 41.4s (Evidence 33.7s, RCA 7.6s)
+└─ 汇总总结: 12.5s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-v14/workload**: pod-volume-mount-failed
+
+[run:end] run_id=e5eba24dca5b4430 status=-

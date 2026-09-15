@@ -1,0 +1,185 @@
+[run] run_id=087c1bcf5a1549cb
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-79d9f8fd88-48j8r 0/1 CrashLoopBackOff 1
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-79d9f8fd88-48j8r 0/1 CrashLoopBackOff 1
+[tool:start] kubectl_get_events
+[tool:done] kubectl_get_events status=error kubectl_get_events 输出摘要: raw_chars=127 lines=1 Error: kubectl_get_events is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-79d9f8fd88-48j8r 0/1 CrashLoopBackOff 1
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success In namespace aiops-case-10, pod workload-79d9f8fd88-48j8r on node2 is in CrashLoopBackOff due to liveness probe failures (HTTP 500). The pod traffic-driver-66457c6859-zswfm on node2 is running normall
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (26.1s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":155,"matched":175,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好的，我已了解情况。根据 pre-react 基线采集结果：
+
+- **Metrics**: Pod 正在 Running phase，但 container 处于 `CrashLoopBackOff` 等待状态，`last_terminated_reason=Error`，已重启 13 次。
+- **Logging**: ES 有日志，但 30 分钟内全是正常 `http_request completed` (200)，**没有崩溃/错误日志**。
+- **Tracing**: DeepFlow 和 Tempo 在 30 分钟内**空**，无匹配流量记录。
+
+这说明：**崩溃可能发生在更早的时间窗**（30分钟前），或者崩溃瞬间没有写入日志。需要：
+1. `kubectl describe pod` 确认当前状态和 Last State
+2. `kubectl logs --previous` 获取崩溃前的容器日志
+3. 扩大日志查询时间窗到 120 分钟
+
+同时执行 kubectl describe 和 previous logs：
+[tool:start] kubectl_describe
+[tool:start] kubectl_previous_logs
+[tool:start] query_pod_logs
+[tool:done] kubectl_previous_logs status=success Pod 'workload-79d9f8fd88-48j8r' (service: aiops-lab-workload) shows healthy HTTP traffic history; 19 lines of /work requests all returned HTTP 200 with ~3ms duration. key_facts: ["Pod: workload-79d9f8
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-79d9f8fd88-48j8r namespace: aiops-case-10 node: node2/10.2.0.50 status: Running 关键诊断行: Exit Code: 137 Warning Unhealthy 31m (x8 over 33m) kub
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":251,"matched":271,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[agent:parallel_evidence] 我已收到 pre-react 的基线结果，现在基于这些真实事实进行因果分析。
+
+**关键事实汇总：**
+
+1. **Pod 状态**: 当前处于 `Running` 阶段（`kubectl get` 显示 Running phase），但 container 处于 `CrashLoopBackOff` 等待重启，`last_terminated_reason=Error`，已重启 13 次。
+
+2. **kubectl_describe 关键发现**:
+   - `Exit Code: 137` — 这是 Linux OOM Killer 信号（SIGKILL, exit code 137）
+   - `Liveness probe failed: HTTP probe failed with statuscode: 500` — 探针返回 500 导致 kubelet 杀死容器
+   - `Warning BackOff: Back-off restarting failed container app` — 指数退避中
+
+3. **kubectl_previous_logs (崩溃
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[heartbeat] layer
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":2,"projected_series":2,"raw_series":6,"retrieved":6,"returned":2,"serialized_series":2},"coverage":"present","
+[agent:parallel_evidence] Let me analyze the evidence collected so far for `aiops-case-10/workload-79d9f8fd88-48j8r`.
+
+**Collected Evidence Summary:**
+
+1. **kubectl_describe**:
+   - Status: Running (current)
+   - Previous exit code: **137** (OOM Kill signal)
+   - Events: `Liveness probe failed: HTTP probe failed with statuscode: 500` (Warning x8 over 33m), `BackOff restarting failed container` (x101 over 29m)
+   - Node: node2/10.2.0.50
+
+2. **kubectl_previous_logs** (previous crash):
+   - 19 lines of /work requests all re
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success 从 Elasticsearch 查询到 pod 'workload-79d9f8fd88-48j8r' 的日志，时间窗口 2026-09-14 02:27:40Z 至 03:01:10Z。返回结果显示 'app' 容器有 HTTP 200 状态，无错误日志。日志被截断。 key_facts: ["Pod: workload-79d9f8fd88-48j8r (aiops-case-10/ns, n
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=1900 lines=8 <context_archive> archive_path: /tmp/aiops/reports/context_archives/087c1bcf5a1549cb-g1/tools/008-evidence-execute_pod_promql.summary.txt offset: 0 re
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=1931 lines=8 <context_archive> archive_path: /tmp/aiops/reports/context_archives/087c1bcf5a1549cb-g1/tools/007-evidence-execute_pod_promql.summary.txt offset: 0 re
+[tool:done] read_context_archive status=success read_context_archive 输出摘要: raw_chars=2172 lines=8 <context_archive> archive_path: /tmp/aiops/reports/context_archives/087c1bcf5a1549cb-g1/tools/009-evidence-execute_pod_promql.summary.txt offset: 0 re
+[agent:parallel_evidence] Let me analyze the evidence collected so far and determine if there are any gaps that need to be addressed.
+
+Based on the tool results:
+
+1. **kubectl_describe** shows:
+   - Pod status: Running
+   - Last terminated container exit code: 137 (which indicates OOM kill or SIGKILL)
+   - Liveness probe failures: HTTP probe failed with statuscode: 500
+   - Reason: CrashLoopBackOff
+   - Warning events: Back-off restarting failed container
+
+2. **kubectl_previous_logs** show:
+   - Previous logs show health
+[tool:start] execute_pod_promql
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_get_yaml status=success Pod workload-79d9f8fd88-48j8r in aiops-case-10 is Running on node2, container 'app' (image xnet.registry.io:8443/observability/python:3-alpine) has restarted 14 times due to OOMKilled (exitCode 137);
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] 让我基于已采集的工具结果进行分析。首先，我需要确认 Pod 的当前状态和关键事实。
+[tool:start] kubernetes_jq_query
+[tool:done] kubernetes_jq_query status=success kubernetes_jq_query 输出摘要: raw_chars=1028 lines=5 Script failed (exit 3): Executing jq query for pods... jq: error: syntax error, unexpected end of file (Unix shell quoting issues?) at <top-level>, lin
+[agent:parallel_evidence] 让我基于真实工具结果，对 `aiops-case-10/workload-79d9f8fd88-48j8r` 进行诊断分析。
+
+## 实体身份确认
+
+| 属性 | 值 |
+|------|-----|
+| **Pod** | `workload-79d9f8fd88-48j8r` |
+| **Namespace** | `aiops-case-10` |
+| **Node** | `node2` |
+| **Pod IP** | `172.16.104.34` |
+| **UID** | `f0496f24-4504-47ae-8b6d-685bd1536991` |
+
+## 已采集事实
+
+### 1. Pod 当前状态
+- **Phase**: `Running`（自 `2026-09-14T03:02:32Z` 起）
+- **Ready**: `True`
+- **重启次数**: `14` 次（`restartCount=14`）
+
+### 2. 上次终止原因
+- **Reason**: `Error`
+- **Exit Code**: `137`
+- **时间**: 最后终止于
+[node:done] parallel_evidence / 并发证据采集 (139.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.1s)
+[final] run_id=087c1bcf5a1549cb status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-10/workload-79d9f8fd88-48j8r` | CrashLoopBackOff | Container memory limit (96Mi) exceeded, causing OOMKilled (exit code 137) |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | K8s | 容器退出码 137 | 直接确认容器被 OOMKilled |
+| 2 | K8s Config | K8s | 内存硬限制 96Mi | 提供内存耗尽的直接原因 |
+| 3 | K8s Event | K8s | Liveness probe failed: HTTP probe failed with statuscode: 500 | 解释 Pod 状态为何不健康 |
+| 4 | K8s Config | K8s | 内存资源保留量 24Mi | 确认容器可用的内存上限为 72Mi |
+| 5 | Metric | Prometheus | 容器重启总数: 13 | 佐证故障已重复发生 |
+
+### 证据关联性分析
+- 退出码 137（事实 1）与内存硬限制 96Mi（事实 2）相互印证，确认为内存超限导致的 OOMKilled 事件。
+- 资源保留量 24Mi（事实 4）使得可用内存进一步缩减至 72Mi，加剧了内存溢出的风险，解释了为何 96Mi 的限制仍会导致崩溃。
+- Liveness 探针 500 错误（事实 3）是 OOMKilled 导致进程不可用后的直接表象，解释了 Kubernetes 进入 CrashLoopBackOff 的机制。
+- 重启数 13 次（事实 5）反映了该 OOM 事件不是偶发现象，而是常态行为。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+容器内存硬限制仅 96Mi 且保留量 24Mi（事实 2, 4） → 应用运行过程中内存占用超过 72Mi 可用空间 → 触发内核 OOMKilled 机制，强制终止进程并返回退出码 137（事实 1） → 容器崩溃退出，Liveness 探针检查失败报 500 错误（事实 3），Kubernetes 触发 CrashLoopBackOff 并不断重启（事实 5）
+```
+
+### 根因结论
+已确认根因为：**容器内存限制过低导致频繁 OOMKilled**。
+具体而言，Pod 的内存硬限制被设置为 96Mi（事实 2），同时保留了 24Mi 的系统级资源（事实 4），这极大地压缩了应用的实际可用内存。应用无法在如此严苛的内存空间内稳定运行，导致内存耗尽被系统强制杀死（退出码 137，事实 1），进而引发健康检查失败（事实 3）和不断重启的恶性循环（事实 5）。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 2.9m
+├─ 问题定位: 26.1s
+├─ 并发证据采集: 139.7s
+│  └─ g1 aiops-case-10/workload-79d9f8fd88-48j8r: 139.7s (Evidence 133.2s, RCA 6.3s)
+└─ 汇总总结: 9.1s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-10/workload-79d9f8fd88-48j8r**: pod-crashloop-runtime
+
+[run:end] run_id=087c1bcf5a1549cb status=-

@@ -1,0 +1,136 @@
+[run] run_id=0530de1bd3984fa5
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以识别当前的异常状态。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 66, 'CrashLoopBackOff': 1} NAMESPACE NAME
+[agent:layer] 检测到集群中存在一个异常 Pod：
+- **Namespace**: `aiops-case-08`
+- **Pod Name**: `workload-5c9c7b6489-p8462`
+- **Current Status**: `CrashLoopBackOff` (0/1 Ready)
+
+该 Pod 处于反复重启状态，我将获取其详细信息（包括标签和事件）以进一步确定异常类型。
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 0/1 CrashLoopBackOff 1
+[agent:layer] Pod `workload-5c9c7b6489-p8462` 状态为 `CrashLoopBackOff`，根据运行手册，这属于 `CrashLoopBackOffRuntime` 类型（L2）。我将获取对应的诊断手册以指导后续的证据收集。
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod CrashLoopBackOffRuntime / 容器反复退出 > Pod异常类型: CrashLoopBackOffRuntime | 典型状态: CrashLoopBackOff | 兼容分类: container_runtime ## 状态识别 - Pod 状态: `CrashLoopBackOff` - Last State: Terminated -
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 0/1 CrashLoopBackOff 1
+[tool:done] kubectl_get_by_kind_in_cluster status=success Found 17 events across 2 namespaces (aiops-case-08, monitor). Two main pods show issues: workload-5c9c7b6489-p8462 in aiops-case-08 is crashing (BackOff), and prometheus-observability-prometheus-0 in
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 0/1 CrashLoopBackOff 1
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 0/1 CrashLoopBackOff 1
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 0/1 CrashLoopBackOff 1
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (30.6s)
+[node:start] parallel_evidence / 并发证据采集
+[heartbeat] layer
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":8,"normalized":8,"projected_series":8,"raw_series":8,"retrieved":8,"returned":8,"serialized_series":8},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":100,"matched":120,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 我将开始调查 `aiops-case-08/workload-5c9c7b6489-p8462` Pod 的 CrashLoopBackOff 问题。首先获取 Pod 的基本状态和描述信息。
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-5c9c7b6489-p8462 namespace: aiops-case-08 node: node2/10.2.0.50 status: Running 关键诊断行: Reason: OOMKilled Exit Code: 137 Warning BackOff
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 1/1 Running 14 (5m11s ago) 58
+[agent:parallel_evidence] 我将基于工具结果采集本轮证据。
+
+**首轮采集计划：**
+1. Pod 状态确认（kubectl_get_by_name, kubectl_describe）
+2. 当前运行日志（kubectl_logs）
+3. 崩溃前容器日志（kubectl_previous_logs）
+4. Pod 事件（kubectl_events）
+5. 资源使用 PromQL（内存/CPU）
+6. 网络拓扑（query_pod_topology）
+
+先并行执行基础状态和日志查询：
+[tool:start] kubectl_get_by_name
+[tool:start] kubectl_describe
+[tool:start] kubectl_logs
+[tool:start] kubectl_previous_logs
+[tool:start] kubectl_events
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5c9c7b6489-p8462 1/1 Running 14 (5m11s ago) 58
+[heartbeat] layer
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: 关键诊断行: Reason: OOMKilled Exit Code: 137 Warning BackOff 3m50s (x198 over 57m) kubelet Back-off restarting failed container app in pod w
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 3m57s (x198 over 57m) Warning BackOff Pod/workload-5c9c7b6489-p8462 Back-off restarting failed container app in pod workload-5c9c7b6489-p8462_aiops-case-08(7f2
+[tool:done] kubectl_previous_logs status=success Pod workload-5c9c7b6489-p8462 (service aiops-lab-workload) returned HTTP 200 for 24 consecutive requests to path /work, with allocated_mib steadily increasing from 2 to 48. key_facts: ["pod: workload-
+[tool:done] kubectl_logs status=success kubectl_logs 日志摘要: lines: 7 signals: 0 关键日志: {"timestamp":1789081088.852827,"event":"http_request","level":"info","message":"memory allocation advanced","http_status":200,"path":"/work","duration_ms":
+[agent:parallel_evidence] Let me analyze the evidence collected for Pod `workload-5c9c7b6489-p8462` in namespace `aiops-case-08`.
+
+**已采集事实：**
+
+1. **kubectl_get_by_name**: Pod 当前状态为 **Running** (1/1), 14 次重启, 最后重启在 5m11s 前, Pod 运行了 58m。标签: `aiops.lab/case-id=c08`。
+
+2. **kubectl_describe**: 关键诊断行明确显示:
+   - **Reason: OOMKilled**
+   - **Exit Code: 137** (OOMKilled 的标准退出码)
+   - 事件: `Back-off restarting failed container app in pod workload-5c9c7b6489-p8462` (x198 over 57m)
+
+3. **kubectl_events**: 确认了 `Warning BackOff` 事件 (x198
+[node:done] parallel_evidence / 并发证据采集 (78.7s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (9.4s)
+[final] run_id=0530de1bd3984fa5 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-08/workload-5c9c7b6489-p8462` | CrashLoopBackOff | Pod workload-5c9c7b6489-p8462 in aiops-case-08 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s State | kubernetes | `container.last_terminated_reason`: OOMKilled; `container.last_exit_code`: 137 | 确定终止原因为内核 OOM Killer 介入 |
+| 2 | K8s Config | kubernetes | `container.resource_limit.memory`: 64Mi | 确立触发 OOM 的硬性资源上限 |
+| 3 | Logging | elasticsearch | Pattern: `http_request` on `/work`, `allocated_mib` 从 14 升至 48 (观测窗口内连续记录中) | 确认存在随请求增长且未释放的内存泄漏模式 |
+| 4 | K8s Event | kubernetes | `BackOff` 警告，198 次 (57m 内)，重启容器 app | 呈现应用因崩溃导致的频繁重启现象 |
+| 5 | K8s State | kubernetes | `container.restart_count`: 14 次 | 证实故障的持续性与严重性 |
+| 6 | Metric | prometheus | `kube_pod_container_status_waiting_reason`: CrashLoopBackOff | 佐证 Pod 当前处于异常等待状态 |
+
+**证据印证说明：**
+Kubernetes 事件与状态事实（证据 #1, #2, #4, #5）一致指向因资源耗尽导致的频繁崩溃重启；日志聚合事实（证据 #3）提供了直接的内存泄漏证据，显示应用在处理特定流量时内存持续增长且突破（或逼近）64MiB 限制，解释了触发 OOMKill 的直接机制。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+处理 /work 请求时内存未释放（内存泄漏） → 内存分配持续增长超出 64MiB 硬限制 → 内核 OOMKilled 容器（Exit 137） → Pod 频繁重启进入 CrashLoopBackOff
+```
+
+### 根因结论
+
+**已确认的根因**：应用容器 `app` 在处理 HTTP GET 请求 `GET /work` 时存在内存泄漏。
+*   **现象机制**：日志证据显示，在观测窗口内，应用在处理 `/work` 请求时分配的内存（`allocated_mib`）从 14MiB 持续上升至 48MiB 且未释放 [证据 #3]。
+*   **故障触发**：该持续增长的行为导致内存使用量超过了 Pod Spec 中配置的 64MiB 内存硬性限制 [证据 #2]。
+*   **最终结果**：触发 Linux 内核 OOM Killer 机制终止容器（Exit Code 137, OOMKilled）[证据 #1]，进而导致 Kubernetes 不断重启 Pod 陷入 CrashLoopBackOff 状态 [证据 #4, #5]。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 2.0m
+├─ 问题定位: 30.6s
+├─ 并发证据采集: 78.7s
+│  └─ g1 aiops-case-08/workload-5c9c7b6489-p8462: 78.7s (Evidence 68.1s, RCA 10.5s)
+└─ 汇总总结: 9.4s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-08/workload-5c9c7b6489-p8462**: pod-crashloop-runtime
+
+[run:end] run_id=0530de1bd3984fa5 status=-

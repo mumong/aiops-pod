@@ -1,0 +1,157 @@
+[run] run_id=2cf469cc06894cae
+[node:start] layer / 问题定位
+[agent:layer] 我将首先获取集群中所有 Pod 的列表，以评估整体健康状况并识别任何异常实体。
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=67 abnormal=1 recent_restarts=0 status_counts={'Running': 67} NAMESPACE NAME READY STATUS REST
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 91m 172.16.1
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod NotReadyProbeFailed / Running 但未 Ready > Pod异常类型: NotReadyProbeFailed | 典型状态: Running + READY 0/1 | 兼容分类: probe_health ## 状态识别 - Pod phase 通常为 `Running`，但 READY 为 `0/1` 或部分容器未 Ready
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 91m 172.16.1
+[tool:start] kubectl_describe_pod
+[tool:done] kubectl_describe_pod status=error kubectl_describe_pod 输出摘要: raw_chars=129 lines=1 Error: kubectl_describe_pod is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-5f4fb9ff45-5mlnc 0/1 Running 0 91m 172.16.1
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=1 abnormal=1 recent_restarts=0 status_counts={} NAMESPACE LAST SEEN TYPE REASON OBJECT SUBOBJECT SOURC
+[tool:start] kubectl_get_by_kind_in_cluster
+[node:done] layer / 问题定位 (18.6s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":6,"normalized":6,"projected_series":6,"raw_series":6,"retrieved":6,"returned":6,"serialized_series":6},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":872,"matched":892,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":3,"matched":20,"normalized":23,"retrieved":23,"returned":23,"serialized_flows":20,"serialized_spans":3
+[agent:parallel_evidence] 好的，我先根据既有的证据计划，执行 Kubernetes 侧的诊断（describe、yaml、logs、events），然后结合已有的可观测性结果进行综合分析。
+
+首先并行执行 Kubernetes 相关的工具调用：
+[tool:start] kubectl_describe
+[tool:start] kubectl_get_yaml
+[tool:start] kubectl_logs
+[tool:start] kubectl_events
+[tool:done] kubectl_logs status=success Pod 'workload-5f4fb9ff45-5mlnc' (Service: aiops-lab-workload) logs show continuous HTTP 503 errors with message 'dependency unavailable' on path '/work'. key_facts: ["Pod: workload-5f4fb9ff45-5mlnc",
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-5f4fb9ff45-5mlnc namespace: aiops-case-09 node: node2/10.2.0.50 status: Running 关键诊断行: Warning Unhealthy 2m12s (x1870 over 92m) kubelet Readiness probe failed
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 2m12s (x1870 over 92m) Warning Unhealthy Pod/workload-5f4fb9ff45-5mlnc Readiness probe failed: HTTP probe failed with statuscode: 503
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-5f4fb9ff45-5mlnc namespace: aiops-case-09 creationTimestamp: 2026-09-11T00:33:31Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[agent:parallel_evidence] 我已掌握以下证据事实：
+- Kubernetes describe/yaml/logs/events 均成功。
+- Pod 当前 status.phase=Running，但 conditions.Ready.status=False，message=ContainersNotReady。
+- Readiness probe (HTTP /work) 持续 503 (x1870 over 92m)。
+- 应用日志持续报 HTTP 503 "dependency unavailable"。
+
+这表明 Pod 的 container 进程在运行，但应用层依赖不可用，导致 readiness probe 失败，从而处于 NotReady 状态。为确认应用逻辑和依赖关系，接下来我将查询应用日志（定位 "dependency unavailable" 的具体下游）和 Topology（确认依赖服务）。
+[tool:start] query_pod_logs
+[tool:start] query_pod_topology
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":275,"matched":295,"normalized":100,"retrieved":100,"returned":20},"coverage":"present","dimension":"logging","directness":"direct","entit
+[heartbeat] layer
+[tool:done] query_pod_topology status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":5,"normalized":5,"retrieved":5,"returned":5},"coverage":"present","dimension":"topology","directness":"direct","entity":{"nam
+[tool:start] query_pod_tracing
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:start] execute_pod_promql
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":1,"normalized":1,"projected_series":1,"raw_series":1,"retrieved":1,"returned":1,"serialized_series":1},"coverage":"present","
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":20,"ledger_spans":0,"matched":20,"normalized":20,"retrieved":20,"returned":20,"serialized_flows":20,"serialized_spans":0
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"projected_series":0,"raw_series":0,"retrieved":0,"returned":0,"serialized_series":0},"coverage":"empty","di
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"projected_series":0,"raw_series":0,"retrieved":0,"returned":0,"serialized_series":0},"coverage":"empty","di
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":3,"normalized":1,"projected_series":1,"raw_series":3,"retrieved":3,"returned":1,"serialized_series":1},"coverage":"present","
+[agent:parallel_evidence] Let me analyze the collected evidence for `workload-5f4fb9ff45-5mlnc` in namespace `aiops-case-09`.
+
+**Entity Identity:**
+- Pod UID: `705925d8-1e60-4c25-8300-62e280589dee`
+- Node: `node2` (10.2.0.50)
+- Pod IP: `172.16.104.16`
+- Owner: ReplicaSet `workload-5f4fb9ff45` → Deployment `workload`
+- Container: `app` (image: `xnet.registry.io:8443/observability/python:3-alpine`, command: `python3 /opt/aiops/server.py`)
+- Creation time: `2026-09-11T00:33:31Z`
+
+**Evidence Collection & Analysis:**
+
+1. **Po
+[tool:start] read_context_archive
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success Query pod logs for workload-5f4fb9ff45-5mlnc in namespace aiops-case-09 succeeded with 295 matches in a 10-minute window; logs are truncated to 20 samples. All visible evidence contains repetitive HTT
+[tool:done] read_context_archive status=success query_pod_tracing (outbound) on pod workload-5f4fb9ff45-5mlnc (node2) returned 20 flows. DNS queries to lgtm.monitor failed (RCode 3/Status 4). HTTP POST /v1/traces succeeded (200). key_facts: ["Pod:
+[agent:parallel_evidence] Let me summarize the evidence collected and identify conflicts and gaps.
+[tool:start] read_context_archive
+[tool:done] read_context_archive status=success Pod workload-5f4fb9ff45-5mlnc in aiops-case-09 is in Running phase but not ready. Condition Ready and ContainersReady are False with reason ContainersNotReady due to container [app] being unready. key
+[agent:parallel_evidence] Let me analyze the evidence collected for this pod.
+
+**Evidence Summary:**
+
+1. **Pod Status (read_context_archive):**
+   - Phase: Running
+   - Condition Ready: False, Reason: ContainersNotReady
+   - Message: "containers with unready status: [app]"
+   - Container app: Ready=false, RestartCount=0, waiting=null, terminated=null
+
+2. **kubectl_events:**
+   - Warning Unhealthy (x1870 over 92m): "Readiness probe failed: HTTP probe failed with statuscode: 503"
+
+3. **kubectl_logs & query_pod_logs:**
+   -
+[node:done] parallel_evidence / 并发证据采集 (132.2s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (11.6s)
+[final] run_id=2cf469cc06894cae status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-09/workload-5f4fb9ff45-5mlnc` | NotReady | Pod aiops-case-09/workload-5f4fb9ff45-5mlnc is NotReady due to Readiness probe failures |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | Kubernetes | `Readiness probe failed: HTTP probe failed with statuscode: 503` (x1870 over 92m) | 确认就绪探针持续失败及具体 HTTP 响应码 |
+| 2 | K8s State | Kubernetes | Pod 状态 `phase=Running`, `Ready=False` (ContainersNotReady), Pod IP `172.16.104.16` | 确认应用容器仍在运行但 Pod 未就绪 |
+| 3 | Metric | Prometheus | `container_cpu_usage_seconds_total` app 容器在观测窗口内累计 `9.27s` 至 `13.89s`，重启数 `0` | 排除因资源耗尽导致的容器重启 |
+| 4 | Logging | Elasticsearch | 日志模式 `dependency unavailable`, HTTP `503`, path `/work` (12 次聚合) | 确认业务逻辑层因依赖问题显式返回 503 |
+| 5 | Tracing | Tempo | Trace `00406b37c27c19cde6a6537a1d019ad3`, span `GET /work` 返回 HTTP `503` | 将业务日志中的 503 错误与特定请求链路直接关联 |
+| 6 | Tracing | Deepflow | DNS 请求 `AAAA/A` 指向 `lgtm.monitor.svc.svc.cluster.local` 和 `aiops-case-09` 解析均失败 (`response_status: 4`) | 确认识别到的下游依赖域名存在解析或网络层面的故障 |
+
+**证据关联：**
+日志和 Trace 一致表明应用代码在 `/work` 路径因 `dependency unavailable` 返回 503，这直接解释了 Kubernetes 事件中的探针失败原因。Deepflow 提供的 DNS 解析失败事实与诊断结论中的依赖故障方向一致，但无法直接证明该依赖是探针检查的特定目标。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+下游依赖不可用 → /work 路径返回 HTTP 503 → 就绪探针检测失败 → Pod 标记为 NotReady
+```
+
+### 根因结论
+
+**已确认的根因：应用依赖不可用导致业务端点返回 HTTP 503，进而触发就绪探针持续失败。**
+证据编号 1、4 和 5 形成了闭环：K8s 记录了探针收到的 503 响应，日志明确指出了 503 的语义原因是 `dependency unavailable`，Trace 数据证实了应用正在执行 `/work` 业务逻辑。
+
+**未确认/证据不足的方面：**
+1. **具体的依赖目标身份**：虽然日志提到了 `dependency`，且 Trace 和 DNS 记录显示了 `lgtm.monitor` 域名的请求记录，但日志和 Trace 并未直接指明 `/work` 路径依赖的是 `lgtm.monitor`，因此依赖的确切身份属于未确认项。
+2. **DNS 解析失败的原因**：Deepflow 观测到了 `lgtm.monitor` 域名的 DNS 查询失败（响应码 3/4），但这仅能作为故障的佐证。诊断逻辑无法确认该 DNS 失败是网络策略拦截、服务未部署还是其他原因，且不能断定这正是导致 `/work` 返回 503 的唯一原因。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 2.7m
+├─ 问题定位: 18.6s
+├─ 并发证据采集: 132.2s
+│  └─ g1 aiops-case-09/workload-5f4fb9ff45-5mlnc: 132.2s (Evidence 122.6s, RCA 9.4s)
+└─ 汇总总结: 11.6s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-09/workload-5f4fb9ff45-5mlnc**: pod-notready-probe-failed
+
+[run:end] run_id=2cf469cc06894cae status=-

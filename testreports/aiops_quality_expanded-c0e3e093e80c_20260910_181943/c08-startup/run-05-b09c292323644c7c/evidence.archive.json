@@ -1,0 +1,1819 @@
+[
+  {
+    "source": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/node_outputs/evidence.full.json",
+    "payload": {
+      "evidence_plan": [
+        {
+          "id": "describe_pod_crashloop_details",
+          "description": "获取 Pod aiops-case-v15/workload 的详细状态：当前相位、READY 状态、重启次数、Last State 的 Exit Code/Reason/Message、以及最近的事件记录（特别是 CrashLoopBackOff、Killing、Liveness probe failed）。",
+          "level": "important",
+          "tool": "kubectl_describe",
+          "command": "kubectl describe pod workload -n aiops-case-v15",
+          "tool_args": {
+            "kind": "pod",
+            "name": "workload",
+            "namespace": "aiops-case-v15"
+          },
+          "purpose": "确证 CrashLoopBackOff 的具体表现：Exit Code、Reason 及是否由探针触发。",
+          "evidence_type": "kubernetes_pod_status",
+          "target_scope": "Pod/aiops-case-v15/workload",
+          "acceptable_tools": [
+            "kubectl_describe"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "get_pod_yaml_config",
+          "description": "获取 Pod 的 YAML 配置：容器镜像、command/args、资源限制（requests/limits）、探针配置（liveness/readiness/startup）及挂载卷信息。",
+          "level": "important",
+          "tool": "kubectl_get_yaml",
+          "command": "kubectl get pod workload -n aiops-case-v15 -o yaml",
+          "tool_args": {
+            "kind": "pod",
+            "name": "workload",
+            "namespace": "aiops-case-v15"
+          },
+          "purpose": "检查是否存在 command 错误、资源不足（OOMKilled 前提）、探针配置异常或启动参数问题。",
+          "evidence_type": "kubernetes_pod_config",
+          "target_scope": "Pod/aiops-case-v15/workload",
+          "acceptable_tools": [
+            "kubectl_get_yaml",
+            "kubectl_get_by_name",
+            "run_bash_command"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "previous_container_logs",
+          "description": "获取上一次崩溃容器的日志（最后 200 行），以定位崩溃前的最后输出、异常堆栈或进程退出原因。",
+          "level": "important",
+          "tool": "kubectl_previous_logs",
+          "command": "kubectl logs workload -n aiops-case-v15 --previous --tail=200",
+          "tool_args": {},
+          "purpose": "寻找导致容器退出的具体错误信息（如 Exception、No space left on device、permission denied、或正常退出后重启）。",
+          "evidence_type": "container_logs",
+          "target_scope": "Pod/aiops-case-v15/workload",
+          "acceptable_tools": [
+            "kubectl_previous_logs",
+            "kubectl_logs_grep"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "current_container_logs",
+          "description": "获取当前运行或刚启动容器的日志（最后 200 行），查看启动过程或当前报错。",
+          "level": "important",
+          "tool": "kubectl_logs",
+          "command": "kubectl logs workload -n aiops-case-v15 --tail=200",
+          "tool_args": {},
+          "purpose": "检查当前实例启动是否正常，或是否有持续的报错信息。",
+          "evidence_type": "container_logs",
+          "target_scope": "Pod/aiops-case-v15/workload",
+          "acceptable_tools": [
+            "kubectl_logs"
+          ],
+          "counts_for_completeness": false
+        },
+        {
+          "id": "pod_restart_metrics_trend",
+          "description": "查询该 Pod 容器重启计数的时序趋势，确认 CrashLoopBackOff 是近期突发还是持续状态，以及重启频率。",
+          "level": "critical",
+          "tool": "execute_pod_promql",
+          "command": "kube_pod_container_status_restarts_total{namespace='aiops-case-v15', pod='workload'}",
+          "tool_args": {
+            "namespace": "aiops-case-v15",
+            "pod": "workload",
+            "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+            "promql": "kube_pod_status_phase{namespace=\"aiops-case-v15\",pod=\"workload\"} or kube_pod_container_status_waiting_reason{namespace=\"aiops-case-v15\",pod=\"workload\"} or kube_pod_container_status_last_terminated_reason{namespace=\"aiops-case-v15\",pod=\"workload\"} or kube_pod_container_status_restarts_total{namespace=\"aiops-case-v15\",pod=\"workload\"}",
+            "query_type": "instant"
+          },
+          "purpose": "判断故障持续性：如果重启曲线在近期急剧上升，支持活跃崩溃；如果平稳，可能为间歇性或已恢复。",
+          "evidence_type": "prometheus_metric",
+          "target_scope": "Pod/aiops-case-v15/workload",
+          "acceptable_tools": [
+            "execute_pod_promql"
+          ],
+          "counts_for_completeness": false
+        },
+        {
+          "id": "observability-gate-1-logging",
+          "description": "首轮查询异常 Pod aiops-case-v15/workload 的logging 真实数据",
+          "level": "critical",
+          "tool": "query_pod_logs",
+          "command": "query recent real Pod logs without preset fault keywords",
+          "tool_args": {
+            "namespace": "aiops-case-v15",
+            "pod": "workload",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+            "window_minutes": 30,
+            "max_records": 20,
+            "allow_name_fallback": true
+          },
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_logs"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-tracing",
+          "description": "首轮查询异常 Pod aiops-case-v15/workload 的tracing 真实数据",
+          "level": "critical",
+          "tool": "query_pod_tracing",
+          "command": "query recent real Pod flows and application spans",
+          "tool_args": {
+            "namespace": "aiops-case-v15",
+            "pod": "workload",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+            "window_minutes": 30,
+            "direction": "any",
+            "include_tempo": true,
+            "max_records": 20
+          },
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_tracing"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-topology",
+          "description": "首轮查询异常 Pod aiops-case-v15/workload 的topology 真实数据",
+          "level": "critical",
+          "tool": "query_pod_topology",
+          "command": "query source-backed Pod topology relationships",
+          "tool_args": {
+            "namespace": "aiops-case-v15",
+            "pod": "workload",
+            "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边"
+          },
+          "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_topology"
+          ],
+          "counts_for_completeness": true
+        }
+      ],
+      "tool_results": [],
+      "tool_data": [
+        {
+          "tool": "execute_pod_promql",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":0,\"matched\":8,\"normalized\":8,\"projected_series\":8,\"raw_series\":8,\"retrieved\":8,\"returned\":8,\"serialized_series\":8},\"coverage\":\"present\",\"dimension\":\"metrics\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-v15\",\"node\":\"node2\",\"pod\":\"workload\",\"pod_ip\":\"172.16.104.34\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"evidence\":[{\"confidence\":\"high\",\"directness\":\"direct\",\"id\":\"fact-11f576af3223\",\"labels\":{\"container\":\"app\",\"reason\":\"OOMKilled\"},\"metric\":\"kube_pod_container_status_last_terminated_reason\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":1.0,\"last\":1.0,\"max\":1.0,\"min\":1.0},\"timestamp\":{\"utc\":\"2026-09-14T09:41:41.821000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"1\"},{\"confidence\":\"high\",\"directness\":\"direct\",\"id\":\"fact-bc2a9936032d\",\"labels\":{\"container\":\"app\"},\"metric\":\"kube_pod_container_status_restarts_total\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":7.0,\"last\":7.0,\"max\":7.0,\"min\":7.0},\"timestamp\":{\"utc\":\"2026-09-14T09:41:41.821000Z\"},\"trend_evaluable\":false,\"unit\":\"count\",\"value\":\"7\"},{\"confidence\":\"high\",\"directness\":\"direct\",\"id\":\"fact-1b003b32b756\",\"labels\":{\"container\":\"app\",\"reason\":\"CrashLoopBackOff\"},\"metric\":\"kube_pod_container_status_waiting_reason\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":1.0,\"last\":1.0,\"max\":1.0,\"min\":1.0},\"timestamp\":{\"utc\":\"2026-09-14T09:41:41.821000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"1\"},{\"confidence\":\"low\",\"directness\":\"related_context\",\"id\":\"fact-ef3384a14503\",\"labels\":{\"container\":\"kube-state-metrics\",\"phase\":\"Running\"},\"metric\":\"kube_pod_status_phase\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":1.0,\"last\":1.0,\"max\":1.0,\"min\":1.0},\"timestamp\":{\"utc\":\"2026-09-14T09:41:41.821000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"1\"}],\"query_ref\":{\"debug_available\":true,\"hash\":\"d6b96426a9395db6\",\"metric_names\":[\"kube_pod_status_phase\",\"kube_pod_container_status_waiting_reason\",\"kube_pod_container_status_last_terminated_reason\",\"kube_pod_container_status_restarts_total\"],\"query_type\":\"instant\"},\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/001-evidence-execute_pod_promql.raw.txt\",\"tool\":\"read_context_archive\"},\"source_system\":\"prometheus\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":4,\"selected\":4,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"execute_pod_promql\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"source_or_collection_truncated\":false,\"truncated\":false}}",
+          "duration_s": 1.6422145366668701,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/001-evidence-execute_pod_promql.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/001-evidence-execute_pod_promql.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/001-evidence-execute_pod_promql.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-e38f9c6fb51a",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-11f576af3223",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_container_status_last_terminated_reason",
+                "value": "1",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T09:41:41.821000Z",
+                "source_system": "prometheus",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "metric-aiops-case-v15-workload-a3a563d7b4a7"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_container_status_last_terminated_reason",
+                    "container": "app",
+                    "namespace": "aiops-case-v15",
+                    "pod": "workload",
+                    "reason": "OOMKilled",
+                    "uid": "da351bf0-c4ab-47a0-b24d-7c7a75950753"
+                  },
+                  "sample_count": 1,
+                  "series_role": "application_container",
+                  "stats": {
+                    "first": 1.0,
+                    "last": 1.0,
+                    "max": 1.0,
+                    "min": 1.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-1b003b32b756",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_container_status_waiting_reason",
+                "value": "1",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T09:41:41.821000Z",
+                "source_system": "prometheus",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "metric-aiops-case-v15-workload-99c31e10d944"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_container_status_waiting_reason",
+                    "container": "app",
+                    "namespace": "aiops-case-v15",
+                    "pod": "workload",
+                    "reason": "CrashLoopBackOff",
+                    "uid": "da351bf0-c4ab-47a0-b24d-7c7a75950753"
+                  },
+                  "sample_count": 1,
+                  "series_role": "application_container",
+                  "stats": {
+                    "first": 1.0,
+                    "last": 1.0,
+                    "max": 1.0,
+                    "min": 1.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-bc2a9936032d",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_container_status_restarts_total",
+                "value": "7",
+                "unit": "count",
+                "timestamp": "2026-09-14T09:41:41.821000Z",
+                "source_system": "prometheus",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "metric-aiops-case-v15-workload-de353395bfb5"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_container_status_restarts_total",
+                    "container": "app",
+                    "namespace": "aiops-case-v15",
+                    "pod": "workload",
+                    "uid": "da351bf0-c4ab-47a0-b24d-7c7a75950753"
+                  },
+                  "sample_count": 1,
+                  "series_role": "application_container",
+                  "stats": {
+                    "first": 7.0,
+                    "last": 7.0,
+                    "max": 7.0,
+                    "min": 7.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-77fd123a311d",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T09:41:41.821000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v15-workload-2587f125c9b4"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v15",
+                    "phase": "Pending",
+                    "pod": "workload",
+                    "uid": "da351bf0-c4ab-47a0-b24d-7c7a75950753"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-82fff141769d",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T09:41:41.821000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v15-workload-1507d830ec33"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v15",
+                    "phase": "Failed",
+                    "pod": "workload",
+                    "uid": "da351bf0-c4ab-47a0-b24d-7c7a75950753"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-c0d111e4ca47",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T09:41:41.821000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v15-workload-be0f33a9508f"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v15",
+                    "phase": "Unknown",
+                    "pod": "workload",
+                    "uid": "da351bf0-c4ab-47a0-b24d-7c7a75950753"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-cc348fb00969",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T09:41:41.821000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v15-workload-45913281f08b"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v15",
+                    "phase": "Succeeded",
+                    "pod": "workload",
+                    "uid": "da351bf0-c4ab-47a0-b24d-7c7a75950753"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-ef3384a14503",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "1",
+                "unit": "unitless",
+                "timestamp": "2026-09-14T09:41:41.821000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-v15-workload-97648d7afcc1"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-v15",
+                    "phase": "Running",
+                    "pod": "workload",
+                    "uid": "da351bf0-c4ab-47a0-b24d-7c7a75950753"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 1.0,
+                    "last": 1.0,
+                    "max": 1.0,
+                    "min": 1.0
+                  },
+                  "trend_evaluable": false
+                }
+              }
+            ],
+            "record_count": 8,
+            "truncated": false,
+            "source": "mcp_canonical",
+            "legacy_contract": false
+          },
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":{\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"lifecycle_changed\":false,\"node\":\"node2\",\"pod_ip\":\"172.16.104.34\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线\",\"coverage\":\"present\",\"directness\":\"direct\",\"query\":{\"promql\":\"kube_pod_status_phase{namespace=\\\"aiops-case-v15\\\",pod=\\\"workload\\\"} or kube_pod_container_status_waiting_reason{namespace=\\\"aiops-case-v15\\\",pod=\\\"workload\\\"} or kube_pod_container_status_last_terminated_reason{namespace=\\\"aiops-case-v15\\\",pod=\\\"workload\\\"} or kube_pod_container_status_restarts_total{namespace=\\\"aiops-case-v15\\\",pod=\\\"workload\\\"}\",\"query_type\":\"instant\",\"http_status\":200,\"value_unit\":\"mixed\",\"trend_evaluable\":false},\"facts\":[{\"ref\":\"metric-aiops-case-v15-workload-a3a563d7b4a7\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v15/workload/app\",\"observed_at\":\"2026-09-14T09:41:41.821000Z\",\"name\":\"kube_pod_container_status_last_terminated_reason\",\"value\":\"1\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_container_status_last_terminated_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"reason\":\"OOMKilled\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"ref\":\"metric-aiops-case-v15-workload-de353395bfb5\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v15/workload/app\",\"observed_at\":\"2026-09-14T09:41:41.821000Z\",\"name\":\"kube_pod_container_status_restarts_total\",\"value\":\"7\",\"unit\":\"count\",\"labels\":{\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"stats\":{\"first\":7.0,\"min\":7.0,\"max\":7.0,\"last\":7.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"ref\":\"metric-aiops-case-v15-workload-99c31e10d944\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v15/workload/app\",\"observed_at\":\"2026-09-14T09:41:41.821000Z\",\"name\":\"kube_pod_container_status_waiting_reason\",\"value\":\"1\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_container_status_waiting_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"reason\":\"CrashLoopBackOff\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"ref\":\"metric-aiops-case-v15-workload-1507d830ec33\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v15/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T09:41:41.821000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Failed\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-v15-workload-2587f125c9b4\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v15/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T09:41:41.821000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Pending\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-v15-workload-97648d7afcc1\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v15/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T09:41:41.821000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"1\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Running\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-v15-workload-45913281f08b\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v15/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T09:41:41.821000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Succeeded\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-v15-workload-be0f33a9508f\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-v15/workload/kube-state-metrics\",\"observed_at\":\"2026-09-14T09:41:41.821000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Unknown\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"}],\"samples\":[{\"metric\":{\"__name__\":\"kube_pod_container_status_last_terminated_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"reason\":\"OOMKilled\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"value\":[1789378901.821,\"1\"],\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"metric\":{\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"value\":[1789378901.821,\"7\"],\"stats\":{\"first\":7.0,\"min\":7.0,\"max\":7.0,\"last\":7.0},\"sample_count\":1,\"unit\":\"count\",\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"metric\":{\"__name__\":\"kube_pod_container_status_waiting_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"reason\":\"CrashLoopBackOff\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"value\":[1789378901.821,\"1\"],\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Failed\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"value\":[1789378901.821,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Pending\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"value\":[1789378901.821,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Running\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"value\":[1789378901.821,\"1\"],\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Succeeded\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"value\":[1789378901.821,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Unknown\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"value\":[1789378901.821,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"}],\"evidence_refs\":[\"metric-aiops-case-v15-workload-a3a563d7b4a7\",\"metric-aiops-case-v15-workload-de353395bfb5\",\"metric-aiops-case-v15-workload-99c31e10d944\",\"metric-aiops-case-v15-workload-1507d830ec33\",\"metric-aiops-case-v15-workload-2587f125c9b4\",\"metric-aiops-case-v15-workload-97648d7afcc1\",\"metric-aiops-case-v15-workload-45913281f08b\",\"metric-aiops-case-v15-workload-be0f33a9508f\"]}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=execute_pod_promql status=query_succeeded source_system=prometheus dimension=metrics coverage=present directness=direct purpose=\"首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线\"\nENTITY namespace=aiops-case-v15 pod=workload pod_uid=da351bf0-c4ab-47a0-b24d-7c7a75950753 pod_ip=172.16.104.34 node=node2\nEXECUTED_QUERY query={\"promql\":\"kube_pod_status_phase{namespace=\\\"aiops-case-v15\\\",pod=\\\"workload\\\"} or kube_pod_container_status_waiting_reason{namespace=\\\"aiops-case-v15\\\",pod=\\\"workload\\\"} or kube_pod_container_status_last_terminated_reason{namespace=\\\"aiops-case-v15\\\",pod=\\\"workload\\\"} or kube_pod_container_status_restarts_total{namespace=\\\"aiops-case-v15\\\",pod=\\\"workload\\\"}\",\"query_type\":\"instant\",\"http_status\":200,\"value_unit\":\"mixed\",\"trend_evaluable\":false}\nQUERY_FACT ref=metric-aiops-case-v15-workload-a3a563d7b4a7 source_system=prometheus name=kube_pod_container_status_last_terminated_reason value=1 unit=unitless labels={\"__name__\":\"kube_pod_container_status_last_terminated_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"reason\":\"OOMKilled\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"} stats={\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0} sample_count=1 trend_evaluable=false series_role=application_container directness=direct\nQUERY_FACT ref=metric-aiops-case-v15-workload-de353395bfb5 source_system=prometheus name=kube_pod_container_status_restarts_total value=7 unit=count labels={\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"} stats={\"first\":7.0,\"min\":7.0,\"max\":7.0,\"last\":7.0} sample_count=1 trend_evaluable=false series_role=application_container directness=direct\nQUERY_FACT ref=metric-aiops-case-v15-workload-99c31e10d944 source_system=prometheus name=kube_pod_container_status_waiting_reason value=1 unit=unitless labels={\"__name__\":\"kube_pod_container_status_waiting_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"reason\":\"CrashLoopBackOff\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"} stats={\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0} sample_count=1 trend_evaluable=false series_role=application_container directness=direct\nQUERY_FACT ref=metric-aiops-case-v15-workload-1507d830ec33 source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Failed\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-v15-workload-2587f125c9b4 source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Pending\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-v15-workload-97648d7afcc1 source_system=prometheus name=kube_pod_status_phase value=1 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Running\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"} stats={\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-v15-workload-45913281f08b source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Succeeded\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-v15-workload-be0f33a9508f source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-v15\",\"phase\":\"Unknown\",\"pod\":\"workload\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_LIMITATIONS\nEVIDENCE_REFS values=[\"metric-aiops-case-v15-workload-a3a563d7b4a7\",\"metric-aiops-case-v15-workload-de353395bfb5\",\"metric-aiops-case-v15-workload-99c31e10d944\",\"metric-aiops-case-v15-workload-1507d830ec33\",\"metric-aiops-case-v15-workload-2587f125c9b4\",\"metric-aiops-case-v15-workload-97648d7afcc1\",\"metric-aiops-case-v15-workload-45913281f08b\",\"metric-aiops-case-v15-workload-be0f33a9508f\"]"
+        },
+        {
+          "tool": "query_pod_logs",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":0,\"matched\":6,\"normalized\":6,\"retrieved\":6,\"returned\":6},\"coverage\":\"present\",\"dimension\":\"logging\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-v15\",\"node\":\"node2\",\"pod\":\"workload\",\"pod_ip\":\"172.16.104.34\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"evidence\":[{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-f4fa19db58ee\",\"message\":\"startup allocation 256Mi\",\"pattern_count\":6,\"pattern_exemplar\":\"head\",\"raw_ref\":{\"document_id\":\"Zxg9n6ABK0ORzrInfSRu\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T09:26:37.401000Z\"}},{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-c75d9d68a16f\",\"message\":\"startup allocation 256Mi\",\"pattern_count\":6,\"pattern_exemplar\":\"tail\",\"raw_ref\":{\"document_id\":\"JxhHn6ABK0ORzrInkJqf\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T09:37:40.614000Z\"}},{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-a907945f0d4b\",\"message\":\"startup allocation 256Mi\",\"pattern_count\":6,\"pattern_exemplar\":\"middle\",\"raw_ref\":{\"document_id\":\"uxg9n6ABK0ORzrInyyea\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T09:26:53.609000Z\"}},{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-43abbd48fc32\",\"message\":\"startup allocation 256Mi\",\"pattern_count\":6,\"pattern_exemplar\":\"middle\",\"raw_ref\":{\"document_id\":\"4hg-n6ABK0ORzrInHCuT\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T09:27:21.912000Z\"}},{\"attribute\":\"log.message\",\"confidence\":\"high\",\"container\":\"app\",\"directness\":\"direct\",\"id\":\"fact-efd899b4a8fa\",\"message\":\"startup allocation 256Mi\",\"pattern_count\":6,\"pattern_exemplar\":\"middle\",\"raw_ref\":{\"document_id\":\"bBg_n6ABK0ORzrInBzgE\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"source_system\":\"elasticsearch\"},\"source_system\":\"elasticsearch\",\"timestamp\":{\"utc\":\"2026-09-14T09:28:17.711000Z\"}}],\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/002-evidence-query_pod_logs.raw.txt\",\"tool\":\"read_context_archive\"},\"source_system\":\"elasticsearch\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":1,\"selected\":5,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"query_pod_logs\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"source_or_collection_truncated\":false,\"truncated\":false},\"window\":{\"end\":\"2026-09-14T09:41:42.506099Z\",\"start\":\"2026-09-14T09:26:33Z\"}}",
+          "duration_s": 1.6425797939300537,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/002-evidence-query_pod_logs.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/002-evidence-query_pod_logs.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-5e7bd1e9eda1",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-0e0f3b5f125d",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "startup allocation 256Mi",
+                "timestamp": "2026-09-14T09:32:36.901Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v15-workload-d21f491eb49e"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "rBhCn6ABK0ORzrIn_mvf",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 24,
+                  "value_sha256": "b7191967bada3313",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-43abbd48fc32",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "startup allocation 256Mi",
+                "timestamp": "2026-09-14T09:27:21.912Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v15-workload-3672f32d2323"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "4hg-n6ABK0ORzrInHCuT",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 24,
+                  "value_sha256": "b7191967bada3313",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-a907945f0d4b",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "startup allocation 256Mi",
+                "timestamp": "2026-09-14T09:26:53.609Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v15-workload-7b5beccf6411"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "uxg9n6ABK0ORzrInyyea",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 24,
+                  "value_sha256": "b7191967bada3313",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-c75d9d68a16f",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "startup allocation 256Mi",
+                "timestamp": "2026-09-14T09:37:40.614Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v15-workload-fa19324456f6"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "JxhHn6ABK0ORzrInkJqf",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 24,
+                  "value_sha256": "b7191967bada3313",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-efd899b4a8fa",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "startup allocation 256Mi",
+                "timestamp": "2026-09-14T09:28:17.711Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v15-workload-f0557194b970"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "bBg_n6ABK0ORzrInBzgE",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 24,
+                  "value_sha256": "b7191967bada3313",
+                  "value_truncated": false
+                }
+              },
+              {
+                "fact_id": "fact-f4fa19db58ee",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "logging",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": "startup allocation 256Mi",
+                "timestamp": "2026-09-14T09:26:37.401Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "log-aiops-case-v15-workload-d03f7fea068b"
+                ],
+                "metadata": {
+                  "raw_ref": {
+                    "document_id": "Zxg9n6ABK0ORzrInfSRu",
+                    "index": ".ds-filebeat-8.5.1-2026.08.21-000003",
+                    "source_system": "elasticsearch"
+                  },
+                  "value_original_length": 24,
+                  "value_sha256": "b7191967bada3313",
+                  "value_truncated": false
+                }
+              }
+            ],
+            "record_count": 6,
+            "truncated": false,
+            "source": "mcp_canonical",
+            "legacy_contract": false
+          },
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":{\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"lifecycle_changed\":false,\"node\":\"node2\",\"pod_ip\":\"172.16.104.34\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID\",\"coverage\":\"present\",\"directness\":\"direct\",\"query\":{\"index\":\"filebeat-*\",\"identity_basis\":\"pod_uid\",\"uid_query_hits\":6,\"backend_total\":{\"value\":6,\"relation\":\"eq\"},\"time_range\":{\"start\":\"2026-09-14T09:26:33Z\",\"end\":\"2026-09-14T09:41:42.506099Z\"},\"container\":null,\"keywords\":[],\"keyword_mode\":\"any\",\"levels\":[],\"trace_id\":null,\"dsl\":{\"size\":100,\"_source\":[\"@timestamp\",\"message\",\"log\",\"log.level\",\"level\",\"severity\",\"severity_text\",\"trace.id\",\"trace_id\",\"kubernetes.namespace\",\"kubernetes.namespace_name\",\"kubernetes.pod.name\",\"kubernetes.pod_name\",\"kubernetes.pod.uid\",\"kubernetes.container.name\",\"kubernetes.container_name\"],\"sort\":[{\"@timestamp\":\"desc\"}],\"query\":{\"bool\":{\"filter\":[{\"range\":{\"@timestamp\":{\"gte\":\"2026-09-14T09:26:33Z\",\"lte\":\"2026-09-14T09:41:42.506099Z\"}}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.namespace\":\"aiops-case-v15\"}},{\"term\":{\"kubernetes.namespace_name\":\"aiops-case-v15\"}}],\"minimum_should_match\":1}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.pod.uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"}},{\"term\":{\"kubernetes.pod.uid.keyword\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"}}],\"minimum_should_match\":1}}],\"must\":[]}}},\"executions\":[{\"identity_basis\":\"pod_uid\",\"dsl_ref\":\"query.dsl\",\"hit_count\":6}],\"dsl_sha256\":\"8361ef8a24f5b814\"},\"facts\":[{\"ref\":\"log-aiops-case-v15-workload-fa19324456f6\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v15/workload/app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"observed_at\":\"2026-09-14T09:37:40.614Z\",\"name\":\"log.message\",\"value\":\"startup allocation 256Mi\",\"value_original_length\":24,\"value_sha256\":\"b7191967bada3313\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"JxhHn6ABK0ORzrInkJqf\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v15-workload-d21f491eb49e\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v15/workload/app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"observed_at\":\"2026-09-14T09:32:36.901Z\",\"name\":\"log.message\",\"value\":\"startup allocation 256Mi\",\"value_original_length\":24,\"value_sha256\":\"b7191967bada3313\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"rBhCn6ABK0ORzrIn_mvf\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v15-workload-f0557194b970\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v15/workload/app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"observed_at\":\"2026-09-14T09:28:17.711Z\",\"name\":\"log.message\",\"value\":\"startup allocation 256Mi\",\"value_original_length\":24,\"value_sha256\":\"b7191967bada3313\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"bBg_n6ABK0ORzrInBzgE\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v15-workload-3672f32d2323\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v15/workload/app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"observed_at\":\"2026-09-14T09:27:21.912Z\",\"name\":\"log.message\",\"value\":\"startup allocation 256Mi\",\"value_original_length\":24,\"value_sha256\":\"b7191967bada3313\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"4hg-n6ABK0ORzrInHCuT\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v15-workload-7b5beccf6411\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v15/workload/app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"observed_at\":\"2026-09-14T09:26:53.609Z\",\"name\":\"log.message\",\"value\":\"startup allocation 256Mi\",\"value_original_length\":24,\"value_sha256\":\"b7191967bada3313\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uxg9n6ABK0ORzrInyyea\"},\"fields\":{},\"directness\":\"direct\"},{\"ref\":\"log-aiops-case-v15-workload-d03f7fea068b\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":\"aiops-case-v15/workload/app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"observed_at\":\"2026-09-14T09:26:37.401Z\",\"name\":\"log.message\",\"value\":\"startup allocation 256Mi\",\"value_original_length\":24,\"value_sha256\":\"b7191967bada3313\",\"value_truncated\":false,\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"Zxg9n6ABK0ORzrInfSRu\"},\"fields\":{},\"directness\":\"direct\"}],\"samples\":[{\"timestamp\":\"2026-09-14T09:37:40.614Z\",\"message\":\"startup allocation 256Mi\",\"message_original_length\":24,\"message_sha256\":\"b7191967bada3313\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"JxhHn6ABK0ORzrInkJqf\"},\"fields\":{},\"ref\":\"log-aiops-case-v15-workload-fa19324456f6\"},{\"timestamp\":\"2026-09-14T09:32:36.901Z\",\"message\":\"startup allocation 256Mi\",\"message_original_length\":24,\"message_sha256\":\"b7191967bada3313\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"rBhCn6ABK0ORzrIn_mvf\"},\"fields\":{},\"ref\":\"log-aiops-case-v15-workload-d21f491eb49e\"},{\"timestamp\":\"2026-09-14T09:28:17.711Z\",\"message\":\"startup allocation 256Mi\",\"message_original_length\":24,\"message_sha256\":\"b7191967bada3313\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"bBg_n6ABK0ORzrInBzgE\"},\"fields\":{},\"ref\":\"log-aiops-case-v15-workload-f0557194b970\"},{\"timestamp\":\"2026-09-14T09:27:21.912Z\",\"message\":\"startup allocation 256Mi\",\"message_original_length\":24,\"message_sha256\":\"b7191967bada3313\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"4hg-n6ABK0ORzrInHCuT\"},\"fields\":{},\"ref\":\"log-aiops-case-v15-workload-3672f32d2323\"},{\"timestamp\":\"2026-09-14T09:26:53.609Z\",\"message\":\"startup allocation 256Mi\",\"message_original_length\":24,\"message_sha256\":\"b7191967bada3313\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uxg9n6ABK0ORzrInyyea\"},\"fields\":{},\"ref\":\"log-aiops-case-v15-workload-7b5beccf6411\"},{\"timestamp\":\"2026-09-14T09:26:37.401Z\",\"message\":\"startup allocation 256Mi\",\"message_original_length\":24,\"message_sha256\":\"b7191967bada3313\",\"message_truncated\":false,\"container\":\"app\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"directness\":\"direct\",\"level\":null,\"trace_id\":null,\"raw_ref\":{\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"Zxg9n6ABK0ORzrInfSRu\"},\"fields\":{},\"ref\":\"log-aiops-case-v15-workload-d03f7fea068b\"}],\"evidence_refs\":[\"log-aiops-case-v15-workload-fa19324456f6\",\"log-aiops-case-v15-workload-d21f491eb49e\",\"log-aiops-case-v15-workload-f0557194b970\",\"log-aiops-case-v15-workload-3672f32d2323\",\"log-aiops-case-v15-workload-7b5beccf6411\",\"log-aiops-case-v15-workload-d03f7fea068b\"]}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=query_pod_logs status=query_succeeded source_system=elasticsearch dimension=logging coverage=present directness=direct purpose=\"首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID\"\nENTITY namespace=aiops-case-v15 pod=workload pod_uid=da351bf0-c4ab-47a0-b24d-7c7a75950753 pod_ip=172.16.104.34 node=node2\nEXECUTED_QUERY query={\"index\":\"filebeat-*\",\"identity_basis\":\"pod_uid\",\"uid_query_hits\":6,\"backend_total\":{\"value\":6,\"relation\":\"eq\"},\"time_range\":{\"start\":\"2026-09-14T09:26:33Z\",\"end\":\"2026-09-14T09:41:42.506099Z\"},\"container\":null,\"keywords\":[],\"keyword_mode\":\"any\",\"levels\":[],\"trace_id\":null,\"dsl\":{\"size\":100,\"_source\":[\"@timestamp\",\"message\",\"log\",\"log.level\",\"level\",\"severity\",\"severity_text\",\"trace.id\",\"trace_id\",\"kubernetes.namespace\",\"kubernetes.namespace_name\",\"kubernetes.pod.name\",\"kubernetes.pod_name\",\"kubernetes.pod.uid\",\"kubernetes.container.name\",\"kubernetes.container_name\"],\"sort\":[{\"@timestamp\":\"desc\"}],\"query\":{\"bool\":{\"filter\":[{\"range\":{\"@timestamp\":{\"gte\":\"2026-09-14T09:26:33Z\",\"lte\":\"2026-09-14T09:41:42.506099Z\"}}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.namespace\":\"aiops-case-v15\"}},{\"term\":{\"kubernetes.namespace_name\":\"aiops-case-v15\"}}],\"minimum_should_match\":1}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.pod.uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"}},{\"term\":{\"kubernetes.pod.uid.keyword\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"}}],\"minimum_should_match\":1}}],\"must\":[]}}},\"executions\":[{\"identity_basis\":\"pod_uid\",\"dsl_ref\":\"query.dsl\",\"hit_count\":6}],\"dsl_sha256\":\"8361ef8a24f5b814\"}\nQUERY_FACT ref=log-aiops-case-v15-workload-fa19324456f6 source_system=elasticsearch name=log.message value=\"startup allocation 256Mi\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"JxhHn6ABK0ORzrInkJqf\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v15-workload-d21f491eb49e source_system=elasticsearch name=log.message value=\"startup allocation 256Mi\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"rBhCn6ABK0ORzrIn_mvf\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v15-workload-f0557194b970 source_system=elasticsearch name=log.message value=\"startup allocation 256Mi\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"bBg_n6ABK0ORzrInBzgE\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v15-workload-3672f32d2323 source_system=elasticsearch name=log.message value=\"startup allocation 256Mi\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"4hg-n6ABK0ORzrInHCuT\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v15-workload-7b5beccf6411 source_system=elasticsearch name=log.message value=\"startup allocation 256Mi\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"uxg9n6ABK0ORzrInyyea\"} directness=direct\nQUERY_FACT ref=log-aiops-case-v15-workload-d03f7fea068b source_system=elasticsearch name=log.message value=\"startup allocation 256Mi\" raw_ref={\"source_system\":\"elasticsearch\",\"index\":\".ds-filebeat-8.5.1-2026.08.21-000003\",\"document_id\":\"Zxg9n6ABK0ORzrInfSRu\"} directness=direct\nQUERY_LIMITATIONS\nEVIDENCE_REFS values=[\"log-aiops-case-v15-workload-fa19324456f6\",\"log-aiops-case-v15-workload-d21f491eb49e\",\"log-aiops-case-v15-workload-f0557194b970\",\"log-aiops-case-v15-workload-3672f32d2323\",\"log-aiops-case-v15-workload-7b5beccf6411\",\"log-aiops-case-v15-workload-d03f7fea068b\"]"
+        },
+        {
+          "tool": "kubectl_describe",
+          "data": "kubectl_describe 摘要:\nname: workload\nnamespace: aiops-case-v15\nnode: node2/10.2.0.50\nstatus: Running\n关键诊断行:\n      Reason:       OOMKilled\n      Exit Code:    137\n      Reason:       CrashLoopBackOff\n  Warning  BackOff         6s (x71 over 15m)  kubelet            Back-off restarting failed container app in pod workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)\nAnnotations:      cni.projectcalico.org/containerID: 742d6cccd58e84c3b0233f03860e152be85aa6a9fac917e662f1f8576ad7a4cf\n                  cni.projectcalico.org/podIP: 172.16.104.34/32\n                  cni.projectcalico.org/podIPs: 172.16.104.34/32\n                  k8s.v1.cni.cncf.io/network-status:\n                  k8s.v1.cni.cncf.io/networks-status:\nPod 关键区块:\nQoS Class: Burstable\nNode-Selectors: <none>\nTolerations: node.kubernetes.io/not-ready:NoExecute op=Exists for 300s\nContainers:\n  app:\n    Container ID:  containerd://6457a853d95f1a78239ce526079a0341ff4d46f313e07b633be505a21b3cd3b6\n    Image:         xnet.registry.io:8443/observability/python:3-alpine\n    Image ID:      xnet.registry.io:8443/observability/python@sha256:3638eee7d584c52c0ce943653346383230c503b856e708fa7ecea8d9975adde3\n    Command:\n      python3\n      -u\n      -c\n      import time; print('startup allocation 256Mi', flush=True); memory=bytearray(256*1024*1024); time.sleep(86400)\n    State:          Waiting\n      Reason:       CrashLoopBackOff\n    Last State:     Terminated\n      Reason:       OOMKilled\n      Exit Code:    137\n      Started:      Mon, 14 Sep 2026 09:37:40 +0000\n      Finished:     Mon, 14 Sep 2026 09:37:41 +0000\n    Ready:          False\n    Restart Count:  7\n    Limits:\n      cpu:     100m\n      memory:  64Mi\n    Requests:\n      cpu:        5m\n      memory:     8Mi\n    Environment:  <none>\n    Mounts:       <none>\nEvents:\n  Warning  BackOff         6s (x71 over 15m)  kubelet            Back-off restarting failed container app in pod workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)\n关键状态/事件:",
+          "duration_s": 0,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "kubernetes-lifecycle-dbafacfb5d6c8262",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-02e81c7d63f3",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "message": "k8s.v1.cni.cncf.io/networks-status:"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[8]",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-0d66be5cf755",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "container.last_terminated_reason",
+                "value": {
+                  "container": "app",
+                  "reason": "OOMKilled"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].lastState.terminated.reason",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-129b4ebbba8c",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "message": "Reason:       CrashLoopBackOff"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[3]",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-32846113a35a",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "BackOff",
+                  "message": "Warning  BackOff         6s (x71 over 15m)  kubelet            Back-off restarting failed container app in pod workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[0]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-34a9f84ae9f1",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "message": "cni.projectcalico.org/podIPs: 172.16.104.34/32"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[6]",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-5ab61695c58e",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "message": "Annotations:      cni.projectcalico.org/containerID: 742d6cccd58e84c3b0233f03860e152be85aa6a9fac917e662f1f8576ad7a4cf"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[4]",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-63cd28a16fa3",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "message": "cni.projectcalico.org/podIP: 172.16.104.34/32"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[5]",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-7259b163c243",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "message": "k8s.v1.cni.cncf.io/network-status:"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[7]",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-935881d57b60",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "message": "Reason:       OOMKilled"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[1]",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-df1c02f4f423",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "message": "Exit Code:    137"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[2]",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-9fd428aab522",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "container.last_exit_code",
+                "value": {
+                  "container": "app",
+                  "exit_code": 137
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].lastState.terminated.exitCode",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-2da54adc1013",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_request.cpu",
+                "value": {
+                  "container": "app",
+                  "value": "5m"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.requests.cpu",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-335ab6663698",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_request.memory",
+                "value": {
+                  "container": "app",
+                  "value": "8Mi"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.requests.memory",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-7da6c0f6763c",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_limit.memory",
+                "value": {
+                  "container": "app",
+                  "value": "64Mi"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.limits.memory",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-f3f9c8e39291",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_limit.cpu",
+                "value": {
+                  "container": "app",
+                  "value": "100m"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.limits.cpu",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-0ea05ebb1670",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "measurement",
+                "attribute": "container.restart_count",
+                "value": {
+                  "container": "app",
+                  "restart_count": 7
+                },
+                "unit": "count",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].restartCount",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-6dcdbacb928f",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.status",
+                "value": {
+                  "status": "Running"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status",
+                  "evidence_role": "symptom"
+                }
+              }
+            ],
+            "record_count": 17,
+            "truncated": false,
+            "source": "robusta_legacy_adapter",
+            "legacy_contract": true
+          },
+          "agent_context": "{\"containers\":[{\"command\":\"python3 -u -c import time; print('startup allocation 256Mi', flush=True); memory=bytearray(256*1024*1024); time.sleep(86400)\",\"environment\":\"<none>\",\"exit_code\":\"137\",\"image\":\"xnet.registry.io:8443/observability/python:3-alpine\",\"last_state\":\"Terminated\",\"name\":\"app\",\"ready\":\"False\",\"reason\":\"OOMKilled\",\"resources\":{\"limits\":{\"cpu\":\"100m\",\"memory\":\"64Mi\"},\"requests\":{\"cpu\":\"5m\",\"memory\":\"8Mi\"}},\"restart_count\":\"7\",\"started\":\"Mon, 14 Sep 2026 09:37:40 +0000\",\"state\":\"Waiting\"}],\"dimension\":\"kubernetes\",\"entity\":{\"kind\":\"Pod\",\"name\":\"workload\",\"namespace\":\"aiops-case-v15\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"events\":[\"  Warning  BackOff         6s (x71 over 15m)  kubelet            Back-off restarting failed container app in pod workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)\"],\"node\":\"node2/10.2.0.50\",\"scheduling\":{\"node_selectors\":\"<none>\",\"tolerations\":\"node.kubernetes.io/not-ready:NoExecute op=Exists for 300s\"},\"source_system\":\"kubernetes\",\"status\":\"Running\"}"
+        },
+        {
+          "tool": "kubectl_get_yaml",
+          "data": "kubectl_get_yaml 关键字段摘要:\nkind: Pod\nname: workload\nnamespace: aiops-case-v15\ncreationTimestamp: 2026-09-14T09:26:33Z\ndeletionTimestamp: <absent>\ndeletionGracePeriodSeconds: None\nfinalizers: <none>\nserviceAccountName: default\nnodeName: node2\nrestartPolicy: Always\nterminationGracePeriodSeconds: 5\nimagePullSecrets: <absent>\nphase: Running\nlabels: aiops.lab/case-id=v15\ntolerations_count: 2\ncontainers:\n- app: image=xnet.registry.io:8443/observability/python:3-alpine imagePullPolicy=IfNotPresent\n  command: python3 -u -c import time; print('startup allocation 256Mi', flush=True); memory=bytearray(256*1024*1024); time.sleep(86400)\nconditions:\n- Initialized: status=True reason=None\n- Ready: status=False reason=ContainersNotReady message=containers with unready status: [app]\n- ContainersReady: status=False reason=ContainersNotReady message=containers with unready status: [app]\n- PodScheduled: status=True reason=None\ncontainerStatuses:\n- app: ready=False restarts=7 reason=CrashLoopBackOff exitCode=137\n  message: back-off 5m0s restarting failed container=app pod=workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)",
+          "duration_s": 0,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "kubernetes-lifecycle-ec7acc2ee8fd492f",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-319d956b41e7",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "container.waiting_message",
+                "value": {
+                  "container": "app",
+                  "message": "back-off 5m0s restarting failed container=app pod=workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].state.waiting.message",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-4a98f28e1d94",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "container.last_terminated_reason",
+                "value": {
+                  "container": "app",
+                  "reason": "OOMKilled"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].lastState.terminated.reason",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-6bfe16250b88",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "container.waiting_reason",
+                "value": {
+                  "container": "app",
+                  "reason": "CrashLoopBackOff"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].state.waiting.reason",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-57e1846b75d5",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.condition",
+                "value": {
+                  "type": "PodScheduled",
+                  "status": "True"
+                },
+                "timestamp": "2026-09-14T09:26:33Z",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.conditions[3]",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-701cb1d3a357",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.condition",
+                "value": {
+                  "type": "ContainersReady",
+                  "status": "False",
+                  "reason": "ContainersNotReady",
+                  "message": "containers with unready status: [app]"
+                },
+                "timestamp": "2026-09-14T09:32:38Z",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.conditions[2]",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-9e44ecda8c95",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "container.last_exit_code",
+                "value": {
+                  "container": "app",
+                  "exit_code": 137
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].lastState.terminated.exitCode",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-9fe8cd4086a9",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.condition",
+                "value": {
+                  "type": "Ready",
+                  "status": "False",
+                  "reason": "ContainersNotReady",
+                  "message": "containers with unready status: [app]"
+                },
+                "timestamp": "2026-09-14T09:32:38Z",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.conditions[1]",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-d3963fc51e26",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.condition",
+                "value": {
+                  "type": "Initialized",
+                  "status": "True"
+                },
+                "timestamp": "2026-09-14T09:26:33Z",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.conditions[0]",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-6394825310ac",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_limit.cpu",
+                "value": {
+                  "container": "app",
+                  "value": "100m"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.limits.cpu",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-801de112c91d",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_request.cpu",
+                "value": {
+                  "container": "app",
+                  "value": "5m"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.requests.cpu",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-9896820f3fd7",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_request.memory",
+                "value": {
+                  "container": "app",
+                  "value": "8Mi"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.requests.memory",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-ff5cecdffeed",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_limit.memory",
+                "value": {
+                  "container": "app",
+                  "value": "64Mi"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.limits.memory",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-4898f5757cd1",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "measurement",
+                "attribute": "container.restart_count",
+                "value": {
+                  "container": "app",
+                  "restart_count": 7
+                },
+                "unit": "count",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].restartCount",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-05ecba0e07d0",
+                "entity_id": "k8s.pod:aiops-case-v15/workload:da351bf0-c4ab-47a0-b24d-7c7a75950753",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-v15",
+                "entity_name": "workload",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.phase",
+                "value": {
+                  "phase": "Running"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.phase",
+                  "evidence_role": "symptom"
+                }
+              }
+            ],
+            "record_count": 14,
+            "truncated": false,
+            "source": "robusta_legacy_adapter",
+            "legacy_contract": true
+          },
+          "agent_context": "{\"conditions\":[{\"status\":\"True\",\"type\":\"Initialized\"},{\"message\":\"containers with unready status: [app]\",\"reason\":\"ContainersNotReady\",\"status\":\"False\",\"type\":\"Ready\"},{\"message\":\"containers with unready status: [app]\",\"reason\":\"ContainersNotReady\",\"status\":\"False\",\"type\":\"ContainersReady\"},{\"status\":\"True\",\"type\":\"PodScheduled\"}],\"container_statuses\":[{\"image\":\"xnet.registry.io:8443/observability/python:3-alpine\",\"imageID\":\"xnet.registry.io:8443/observability/python@sha256:3638eee7d584c52c0ce943653346383230c503b856e708fa7ecea8d9975adde3\",\"lastTerminated\":{\"containerID\":\"containerd://6457a853d95f1a78239ce526079a0341ff4d46f313e07b633be505a21b3cd3b6\",\"exitCode\":137,\"finishedAt\":\"2026-09-14T09:37:41Z\",\"reason\":\"OOMKilled\",\"startedAt\":\"2026-09-14T09:37:40Z\"},\"name\":\"app\",\"ready\":false,\"restartCount\":7,\"waiting\":{\"message\":\"back-off 5m0s restarting failed container=app pod=workload_aiops-case-v15(da351bf0-c4ab-47a0-b24d-7c7a75950753)\",\"reason\":\"CrashLoopBackOff\"}}],\"containers\":[{\"command\":[\"python3\",\"-u\",\"-c\",\"import time; print('startup allocation 256Mi', flush=True); memory=bytearray(256*1024*1024); time.sleep(86400)\"],\"image\":\"xnet.registry.io:8443/observability/python:3-alpine\",\"name\":\"app\",\"resources\":{\"limits\":{\"cpu\":\"100m\",\"memory\":\"64Mi\"},\"requests\":{\"cpu\":\"5m\",\"memory\":\"8Mi\"}}}],\"dimension\":\"kubernetes\",\"entity\":{\"kind\":\"Pod\",\"name\":\"workload\",\"namespace\":\"aiops-case-v15\",\"uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"phase\":\"Running\",\"scheduling\":{\"affinity_present\":false,\"nodeName\":\"node2\",\"tolerations\":[{\"effect\":\"NoExecute\",\"key\":\"node.kubernetes.io/not-ready\",\"operator\":\"Exists\",\"tolerationSeconds\":300},{\"effect\":\"NoExecute\",\"key\":\"node.kubernetes.io/unreachable\",\"operator\":\"Exists\",\"tolerationSeconds\":300}]},\"source_system\":\"kubernetes\",\"status\":\"yaml_summarized\"}"
+        },
+        {
+          "tool": "query_pod_tracing",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":0,\"ledger_flows\":0,\"ledger_spans\":0,\"matched\":0,\"normalized\":0,\"retrieved\":0,\"returned\":0,\"serialized_flows\":0,\"serialized_spans\":0},\"coverage\":\"empty\",\"dimension\":\"tracing\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-v15\",\"node\":\"node2\",\"pod\":\"workload\",\"pod_ip\":\"172.16.104.34\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\"},\"evidence\":[],\"negative_observation\":\"query_completed_without_matching_evidence\",\"query_ref\":{\"debug_available\":true,\"filters\":{\"direction\":\"any\"},\"hash\":\"59b9e900906aaa5b\"},\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/003-evidence-query_pod_tracing.raw.txt\",\"tool\":\"read_context_archive\"},\"source_coverage\":{\"deepflow\":{\"coverage\":\"empty\",\"directness\":\"direct\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"reason\":\"no_valid_trace_ids\"}},\"source_system\":\"deepflow+tempo\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":0,\"selected\":0,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"query_pod_tracing\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"source_or_collection_truncated\":false,\"truncated\":false},\"window\":{\"end\":\"2026-09-14T09:41:42.114650Z\",\"start\":\"2026-09-14T09:11:42.114650Z\"}}",
+          "duration_s": 1.6404790878295898,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/003-evidence-query_pod_tracing.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/003-evidence-query_pod_tracing.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/003-evidence-query_pod_tracing.summary.txt",
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"deepflow+tempo\",\"dimension\":\"tracing\",\"entity\":{\"namespace\":\"aiops-case-v15\",\"pod\":\"workload\",\"pod_uid\":\"da351bf0-c4ab-47a0-b24d-7c7a75950753\",\"lifecycle_changed\":false,\"node\":\"node2\",\"pod_ip\":\"172.16.104.34\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID\",\"coverage\":\"empty\",\"directness\":\"direct\",\"query\":{\"sql\":\"SELECT toString(flow.time) AS time, IPv4NumToString(ip4_0) AS src_ip, IPv4NumToString(ip4_1) AS dst_ip, l7_protocol_str, request_type, request_resource, response_code, response_status, response_duration, trace_id, span_id, toString(syscall_trace_id_request) AS syscall_trace_id_request, toString(syscall_trace_id_response) AS syscall_trace_id_response FROM flow_log.l7_flow_log AS flow WHERE flow.time >= toDateTime('2026-09-14 09:11:42', 'UTC') AND flow.time <= toDateTime('2026-09-14 09:41:42', 'UTC') AND (ip4_0 = '172.16.104.34' OR ip4_1 = '172.16.104.34') ORDER BY (trace_id != '') DESC, response_duration DESC, flow.time DESC LIMIT 20 FORMAT JSON\",\"filtered_match_count\":0,\"time_range\":{\"start\":\"2026-09-14T09:11:42.114650Z\",\"end\":\"2026-09-14T09:41:42.114650Z\"},\"pod_ip\":\"172.16.104.34\",\"direction\":\"any\",\"tempo_trace_ids\":[],\"invalid_tempo_trace_id_count\":0,\"tempo\":{}},\"telemetry\":{\"deepflow\":{\"coverage\":\"empty\",\"directness\":\"direct\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"query_meta\":{},\"reason\":\"no_valid_trace_ids\"}}}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=query_pod_tracing status=query_succeeded source_system=deepflow+tempo dimension=tracing coverage=empty directness=direct purpose=\"首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID\"\nENTITY namespace=aiops-case-v15 pod=workload pod_uid=da351bf0-c4ab-47a0-b24d-7c7a75950753 pod_ip=172.16.104.34 node=node2\nEXECUTED_QUERY query={\"sql\":\"SELECT toString(flow.time) AS time, IPv4NumToString(ip4_0) AS src_ip, IPv4NumToString(ip4_1) AS dst_ip, l7_protocol_str, request_type, request_resource, response_code, response_status, response_duration, trace_id, span_id, toString(syscall_trace_id_request) AS syscall_trace_id_request, toString(syscall_trace_id_response) AS syscall_trace_id_response FROM flow_log.l7_flow_log AS flow WHERE flow.time >= toDateTime('2026-09-14 09:11:42', 'UTC') AND flow.time <= toDateTime('2026-09-14 09:41:42', 'UTC') AND (ip4_0 = '172.16.104.34' OR ip4_1 = '172.16.104.34') ORDER BY (trace_id != '') DESC, response_duration DESC, flow.time DESC LIMIT 20 FORMAT JSON\",\"filtered_match_count\":0,\"time_range\":{\"start\":\"2026-09-14T09:11:42.114650Z\",\"end\":\"2026-09-14T09:41:42.114650Z\"},\"pod_ip\":\"172.16.104.34\",\"direction\":\"any\",\"tempo_trace_ids\":[],\"invalid_tempo_trace_id_count\":0,\"tempo\":{}}\nTELEMETRY sources={\"deepflow\":{\"coverage\":\"empty\",\"directness\":\"direct\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"query_meta\":{},\"reason\":\"no_valid_trace_ids\"}}\nQUERY_LIMITATIONS\nEVIDENCE_REFS"
+        },
+        {
+          "tool": "kubectl_logs",
+          "data": "kubectl_logs 日志摘要:\nlines: 1\nsignals: 0\n关键日志:\nstartup allocation 256Mi",
+          "duration_s": 0,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/004-evidence-kubectl_logs.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/004-evidence-kubectl_logs.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/004-evidence-kubectl_logs.summary.txt"
+        },
+        {
+          "tool": "kubectl_previous_logs",
+          "data": "kubectl_previous_logs 日志摘要:\nlines: 1\nsignals: 0\n关键日志:\nstartup allocation 256Mi",
+          "duration_s": 0,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/007-evidence-kubectl_previous_logs.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/007-evidence-kubectl_previous_logs.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/007-evidence-kubectl_previous_logs.summary.txt"
+        },
+        {
+          "tool": "TodoWrite",
+          "data": "TodoWrite 输出摘要: raw_chars=401 lines=9\nInvestigation plan updated with 5 tasks.\n# CURRENT INVESTIGATION TASKS\n**Task Status**: 0 completed, 1 in progress, 4 pending\n[ ] [collect-logs] 收集当前日志与上一次崩溃日志\n[ ] [check-oomevents] 检查OOMKilled事件与资源限制\n[ ] [collect-metrics] 采集Prometheus指标确认内存趋势\n[ ] [collect-topology] 收集Topology/Flow辅助信息\n[~] [confirm-identity] 确认Pod身份、状态和生命周期\n**Instructions**: Use TodoWrite tool to update task status as you work.",
+          "duration_s": 0,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/008-evidence-TodoWrite.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/008-evidence-TodoWrite.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/b09c292323644c7c-g1/tools/008-evidence-TodoWrite.summary.txt"
+        }
+      ],
+      "llm_analysis": "根据已采集的 Kubernetes 事实，以下是对 `aiops-case-v15/workload`  CrashLoopBackOff 的根因证据分析：\n\n### 1. 实体身份与状态确认\n*   **身份确认**：Pod `aiops-case-v15/workload` (UID: `da351bf0-c4ab-47a0-b24d-7c7a75950753`)，运行在 `node2` 上。\n*   **当前状态**：Pod 处于 `Running` 阶段，但其应用容器 `app` 处于 `CrashLoopBackOff` 状态。\n*   **重启情况**：容器已重启 7 次 (`restarts=7`)，且正在经历指数退避 (`back-off 5m0s`)。\n\n### 2. 核心证据：OOMKilled 导致的应用崩溃\n现有 Kubernetes 层面的证据高度一致，直接指向 **内存超限（OOM）** 是崩溃的直接原因：\n*   **退出码 137**：在 `kubectl get yaml` 和 `kubectl describe` 中，容器当前退出码均为 `137`（128 + 9 SIGKILL），这是 Linux 内核因内存不足杀死进程的典型特征。\n*   **Reason 明确**：`kubectl describe` 事件日志中明确记录 Reason 为 `OOMKilled`。\n*   **资源限制冲突**：\n    *   应用行为：启动脚本 `print('startup allocation 256Mi', ...)` 后申请了 `256MB` 的内存 (`bytearray`)。\n    *   内存限制：Kubernetes 配置中 `resources.limits.memory` 仅为 `64Mi`。\n    *   **结论**：应用启动即分配 256MB，远超 64MB 的限制，瞬间触发 OOM。\n\n### 3. 日志分析（补充缺失细节）\n*   **证据缺口**：通过 `kubectl logs` 和 `kubectl previous logs` 只能看到单行日志 `startup allocation 256Mi`。\n*   **缺失事实**：由于 Pod 内存限制极低（64Mi），容器在输出日志缓冲区溢出或写入剩余内存时已被内核直接杀死。因此，Kubernetes 容器日志未能捕获 Python 的 traceback 或 OOM 的具体报错信息。日志为空（除一行启动日志外）与 OOMKilled 现象是吻合的。\n\n### 4. 结论与缺口\n*   **当前事实**：Pod 处于 CrashLoopBackOff 状态，**根本原因是应用申请内存（256Mi）超过了 K8s 限制（64Mi），导致容器被 OOM Killed 并循环重启。**\n*   **证据缺口**：不需要进一步采集 Prometheus 或 Tracing 数据。Kubernetes 原生的 `OOMKilled` 事件、退出码 137 以及资源配额与代码行为的对比，已经形成了完整的证据链，足以回答根因。",
+      "plan_status": "ready",
+      "plan_failure_reason": "",
+      "collection_summary": "首轮可观测查询执行 2/4，完整度 50%；去重后证据计划 8 项，实际采集 6 项，未采集 2 项，完整度 75%；evidence 节点真实环境证据 6/8 项，完整度 75%；决定性多维证据 2/3 项，维度覆盖 67%，诊断充分度 47%（不足）；evidence 节点实际执行工具 7 个，其中核心 case 0 个、补充证据 7 个；已满足计划项 6 个，计划外补证 1 个",
+      "plan_total": 8,
+      "plan_collected": 6,
+      "plan_completeness": 0.75,
+      "environment_evidence_total": 8,
+      "environment_evidence_collected": 6,
+      "environment_evidence_completeness": 0.75,
+      "executed_tool_count": 7,
+      "matched_tool_count": 6,
+      "unplanned_tool_count": 1,
+      "case_tool_count": 0,
+      "supplemental_tool_count": 7,
+      "skipped_plan_count": 0,
+      "observability_target_total": 4,
+      "observability_target_collected": 2,
+      "observability_target_completeness": 0.5,
+      "diagnostic_evidence_total": 3,
+      "diagnostic_evidence_collected": 2,
+      "diagnostic_evidence_completeness": 0.6666666666666666,
+      "diagnostic_evidence_missing": [
+        "aiops-case-v15/workload:tracing(empty)"
+      ],
+      "dimension_coverage_total": 3,
+      "dimension_coverage_collected": 2,
+      "dimension_coverage": 0.6666666666666666,
+      "diagnostic_sufficiency": 0.4666666666666666,
+      "diagnostic_sufficiency_label": "不足",
+      "source_coverage": {
+        "cases": [],
+        "queries": [
+          {
+            "target": "aiops-case-v15/workload",
+            "tool": "execute_pod_promql",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+            "coverage": "present",
+            "directness": "direct",
+            "evidence_refs": [
+              "metric-aiops-case-v15-workload-a3a563d7b4a7",
+              "metric-aiops-case-v15-workload-de353395bfb5",
+              "metric-aiops-case-v15-workload-99c31e10d944",
+              "metric-aiops-case-v15-workload-1507d830ec33",
+              "metric-aiops-case-v15-workload-2587f125c9b4",
+              "metric-aiops-case-v15-workload-97648d7afcc1",
+              "metric-aiops-case-v15-workload-45913281f08b",
+              "metric-aiops-case-v15-workload-be0f33a9508f"
+            ]
+          },
+          {
+            "target": "aiops-case-v15/workload",
+            "tool": "query_pod_logs",
+            "source_system": "elasticsearch",
+            "dimension": "logging",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+            "coverage": "present",
+            "directness": "direct",
+            "evidence_refs": [
+              "log-aiops-case-v15-workload-fa19324456f6",
+              "log-aiops-case-v15-workload-d21f491eb49e",
+              "log-aiops-case-v15-workload-f0557194b970",
+              "log-aiops-case-v15-workload-3672f32d2323",
+              "log-aiops-case-v15-workload-7b5beccf6411",
+              "log-aiops-case-v15-workload-d03f7fea068b"
+            ]
+          },
+          {
+            "target": "aiops-case-v15/workload",
+            "tool": "query_pod_tracing",
+            "source_system": "deepflow+tempo",
+            "dimension": "tracing",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+            "coverage": "empty",
+            "directness": "direct",
+            "evidence_refs": []
+          }
+        ]
+      },
+      "case_target_coverage": {
+        "mode": "observability_first_round_gate",
+        "total": 4,
+        "collected": 2,
+        "rate": 0.5
+      },
+      "detail_retrieval": {
+        "evaluated": false,
+        "requested": 0,
+        "collected": 0,
+        "refs": []
+      },
+      "diagnostic_sufficiency_summary": {
+        "score": 0.4666666666666666,
+        "label": "不足"
+      },
+      "unresolved_questions": [
+        "aiops-case-v15/workload:tracing(empty)"
+      ],
+      "evidence_inventory": [
+        {
+          "id": "describe_pod_crashloop_details",
+          "description": "获取 Pod aiops-case-v15/workload 的详细状态：当前相位、READY 状态、重启次数、Last State 的 Exit Code/Reason/Message、以及最近的事件记录（特别是 CrashLoopBackOff、Killing、Liveness probe failed）。",
+          "level": "important",
+          "tool": "kubectl_describe",
+          "command": "kubectl describe pod workload -n aiops-case-v15",
+          "purpose": "确证 CrashLoopBackOff 的具体表现：Exit Code、Reason 及是否由探针触发。",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "get_pod_yaml_config",
+          "description": "获取 Pod 的 YAML 配置：容器镜像、command/args、资源限制（requests/limits）、探针配置（liveness/readiness/startup）及挂载卷信息。",
+          "level": "important",
+          "tool": "kubectl_get_yaml",
+          "command": "kubectl get pod workload -n aiops-case-v15 -o yaml",
+          "purpose": "检查是否存在 command 错误、资源不足（OOMKilled 前提）、探针配置异常或启动参数问题。",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "previous_container_logs",
+          "description": "获取上一次崩溃容器的日志（最后 200 行），以定位崩溃前的最后输出、异常堆栈或进程退出原因。",
+          "level": "important",
+          "tool": "kubectl_previous_logs",
+          "command": "kubectl logs workload -n aiops-case-v15 --previous --tail=200",
+          "purpose": "寻找导致容器退出的具体错误信息（如 Exception、No space left on device、permission denied、或正常退出后重启）。",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "current_container_logs",
+          "description": "获取当前运行或刚启动容器的日志（最后 200 行），查看启动过程或当前报错。",
+          "level": "important",
+          "tool": "kubectl_logs",
+          "command": "kubectl logs workload -n aiops-case-v15 --tail=200",
+          "purpose": "检查当前实例启动是否正常，或是否有持续的报错信息。",
+          "collected": false,
+          "source": "planned",
+          "outcome": "unknown"
+        },
+        {
+          "id": "pod_restart_metrics_trend",
+          "description": "查询该 Pod 容器重启计数的时序趋势，确认 CrashLoopBackOff 是近期突发还是持续状态，以及重启频率。",
+          "level": "critical",
+          "tool": "execute_pod_promql",
+          "command": "kube_pod_container_status_restarts_total{namespace='aiops-case-v15', pod='workload'}",
+          "purpose": "判断故障持续性：如果重启曲线在近期急剧上升，支持活跃崩溃；如果平稳，可能为间歇性或已恢复。",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-logging",
+          "description": "首轮查询异常 Pod aiops-case-v15/workload 的logging 真实数据",
+          "level": "critical",
+          "tool": "query_pod_logs",
+          "command": "query recent real Pod logs without preset fault keywords",
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-tracing",
+          "description": "首轮查询异常 Pod aiops-case-v15/workload 的tracing 真实数据",
+          "level": "critical",
+          "tool": "query_pod_tracing",
+          "command": "query recent real Pod flows and application spans",
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-topology",
+          "description": "首轮查询异常 Pod aiops-case-v15/workload 的topology 真实数据",
+          "level": "critical",
+          "tool": "query_pod_topology",
+          "command": "query source-backed Pod topology relationships",
+          "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边",
+          "collected": false,
+          "source": "planned",
+          "outcome": "unknown"
+        }
+      ],
+      "missing_reasons": [
+        "current_container_logs(获取当前运行或刚启动容器的日志（最后 200 行），查看启动过程或当前报错。): 已规划但工具执行失败或无匹配结果",
+        "observability-gate-1-topology(首轮查询异常 Pod aiops-case-v15/workload 的topology 真实数据): 已规划但工具执行失败或无匹配结果"
+      ],
+      "early_stop": {
+        "triggered": false,
+        "reason": "",
+        "required_levels": [
+          "critical",
+          "important"
+        ]
+      }
+    }
+  }
+]

@@ -1,0 +1,158 @@
+{
+  "scoring_version": "2026-09-10.1",
+  "success": true,
+  "run_id": "8d7be8caa6d64550",
+  "elapsed_seconds": 131.93,
+  "root_cause": {
+    "passed": true,
+    "expected_count": 1,
+    "matched_count": 1,
+    "diagnosed_claim_count": 1,
+    "matched_claim_count": 1,
+    "recall": 1.0,
+    "precision": 1.0,
+    "matches": [
+      {
+        "expectation_id": "c10-timeout",
+        "matched": true,
+        "group": "g1",
+        "matched_all": [],
+        "matched_any": [
+          "liveness"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "conflicts": [],
+        "failure_reasons": []
+      }
+    ],
+    "unexpected_claim_groups": [],
+    "accuracy": 1.0
+  },
+  "root_claims": [
+    {
+      "group": "g1",
+      "text": "**根因：容器内存硬限制配置过低 (64Mi)，导致应用进程被 OOMKill 终止。**\n\n1. **直接原因**：容器 `app` 被分配 64Mi 的内存限制 (`fact-41d641a08572`)。Linux 内核在内存不足时触发 OOM Killer，以 Exit Code 137 终止进程 (`fact-35f97d153037`)。\n2. **现象形成**：进程终止后，Kubernetes 的健康检查（Liveness Probe）检测到连接失败或超时 (`fact-37908e94807f`)，判定容器不健康。K8s 随之重启容器，但应用再次快速触发 OOM，形成 `CrashLoopBackOff` (`fact-9c8bb93dd67d`, `fact-05c8924e31ef`)。\n3. **证据支撑**：\n   - Exit Code 137 是 OOM Kill 的标准标志 (`fact-35f97d153037`)。\n   - 64Mi 的极低内存限制提供了 OOM 的物理原因 (`fact-41d641a08572`)。\n   - 缺失内存使用率 Metrics 无法展示增长曲线，但 OOM 事件的发生本身已足以定责。\n\n---",
+      "full_section": "### 因果链\n\n```text\nmemory_limit: 64Mi → 进程内存增长触及硬限制 → 触发 OOMKill (Exit 137) → 容器进程崩溃 & Liveness Probe 超时 → Pod 重启进入 CrashLoopBackOff\n```\n\n### 根因结论\n\n**根因：容器内存硬限制配置过低 (64Mi)，导致应用进程被 OOMKill 终止。**\n\n1. **直接原因**：容器 `app` 被分配 64Mi 的内存限制 (`fact-41d641a08572`)。Linux 内核在内存不足时触发 OOM Killer，以 Exit Code 137 终止进程 (`fact-35f97d153037`)。\n2. **现象形成**：进程终止后，Kubernetes 的健康检查（Liveness Probe）检测到连接失败或超时 (`fact-37908e94807f`)，判定容器不健康。K8s 随之重启容器，但应用再次快速触发 OOM，形成 `CrashLoopBackOff` (`fact-9c8bb93dd67d`, `fact-05c8924e31ef`)。\n3. **证据支撑**：\n   - Exit Code 137 是 OOM Kill 的标准标志 (`fact-35f97d153037`)。\n   - 64Mi 的极低内存限制提供了 OOM 的物理原因 (`fact-41d641a08572`)。\n   - 缺失内存使用率 Metrics 无法展示增长曲线，但 OOM 事件的发生本身已足以定责。\n\n---",
+      "inconclusive": false,
+      "namespaces": [
+        "aiops-case-v17"
+      ]
+    }
+  ],
+  "group_audit": {
+    "expected_namespaces": [
+      "aiops-case-v17"
+    ],
+    "observed_namespaces": [
+      "aiops-case-v17"
+    ],
+    "missing_namespaces": [],
+    "unexpected_namespaces": [],
+    "duplicate_namespaces": [],
+    "ambiguous_claim_groups": [],
+    "source": "final_report_overview_and_root_sections"
+  },
+  "runbook": {
+    "expected": [
+      "pod-notready-probe-failed",
+      "pod-crashloop-runtime"
+    ],
+    "found": [
+      "pod-crashloop-runtime"
+    ],
+    "matched": [
+      "pod-crashloop-runtime"
+    ],
+    "coverage": 0.5,
+    "passed": false
+  },
+  "evidence": {
+    "collected": 8,
+    "planned": 8,
+    "completeness": 1.0,
+    "lanes": [
+      {
+        "lane": "8d7be8caa6d64550-g1",
+        "collected": 8,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/8d7be8caa6d64550-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_plan_audit": {
+    "collected": 8,
+    "planned": 8,
+    "completeness": 1.0,
+    "lanes": [
+      {
+        "lane": "8d7be8caa6d64550-g1",
+        "collected": 8,
+        "planned": 8,
+        "source": "/tmp/aiops/reports/context_archives/8d7be8caa6d64550-g1/node_outputs/evidence.full.json"
+      }
+    ],
+    "source": "kubectl_archive",
+    "error": "",
+    "mode": "dynamic_plan",
+    "matches": []
+  },
+  "evidence_contract_audit": {
+    "collected": 1,
+    "planned": 1,
+    "completeness": 1.0,
+    "lanes": [],
+    "source": "kubectl_archive_fixed_contract",
+    "error": "",
+    "mode": "fixed_contract",
+    "matches": [
+      {
+        "id": "c10-timeout-kubernetes-observation",
+        "description": "c10-timeout-kubernetes-observation",
+        "weight": 1,
+        "required": true,
+        "matched": true,
+        "dimensions": [
+          "kubernetes"
+        ],
+        "matched_refs": [
+          "fact-1881ca63abff",
+          "fact-9c8bb93dd67d",
+          "fact-c907004c12b7",
+          "fact-0e6bf0229a6a",
+          "fact-35f97d153037",
+          "fact-408894f57b7f",
+          "fact-61eb20d9a5fe",
+          "fact-fc7706518985",
+          "fact-046b3377dd7e",
+          "fact-3baa6a5c63d6",
+          "fact-46544b35f643",
+          "fact-b1ea630f353f"
+        ],
+        "missing_all": [],
+        "missing_any": [],
+        "observation_count": 35,
+        "min_observations": 1,
+        "trend_required": false,
+        "trend_matched": true,
+        "distinct_value_key": "",
+        "distinct_value_count": 0,
+        "min_distinct_values": 0,
+        "correlate_by": "",
+        "correlation_dimensions": [],
+        "correlation_values": []
+      }
+    ]
+  },
+  "run_index": 48,
+  "logical_elapsed_seconds": 132.188,
+  "retry_elapsed_seconds": 0,
+  "request_attempt_count": 1,
+  "request_attempt_failures": [],
+  "runtime_revision": "9e72a945ffa12fd6ded129601c242c215833a816a23d7c5f68edac8c75702217",
+  "fixture_valid": true
+}

@@ -1,0 +1,132 @@
+[run] run_id=20f5a58563b24e31
+[node:start] layer / 问题定位
+[tool:start] kubectl_get_by_kind_in_cluster
+[tool:done] kubectl_get_by_kind_in_cluster status=success kubectl_get_by_kind_in_cluster 表格摘要: rows=66 abnormal=1 recent_restarts=0 status_counts={'Running': 65, 'ImagePullBackOff': 1} NAMESPACE NAME
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-65b7f54794-z7kdp 0/1 ImagePullBackOff 0
+[tool:start] fetch_runbook
+[tool:done] fetch_runbook status=success <runbook> # Pod ImagePullFailed / ImagePullBackOff > Pod异常类型: ImagePullFailed | 典型状态: ImagePullBackOff / ErrImagePull / ImageInspectError | 兼容分类: image_pull ## 场景识别 | 信号 | 关键特征 | |------|----------
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-65b7f54794-z7kdp 0/1 ImagePullBackOff 0
+[tool:start] kubectl_describe_pod
+[tool:start] kubectl_get_pod
+[tool:done] kubectl_describe_pod status=error kubectl_describe_pod 输出摘要: raw_chars=129 lines=1 Error: kubectl_describe_pod is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:done] kubectl_get_pod status=error kubectl_get_pod 输出摘要: raw_chars=124 lines=1 Error: kubectl_get_pod is not a valid tool, try one of [kubectl_get_by_name, kubectl_get_by_kind_in_cluster, fetch_runbook].
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE READINESS GATES LABELS workload-65b7f54794-z7kdp 0/1 ImagePullBackOff 0
+[tool:start] kubectl_get_by_name
+[tool:done] kubectl_get_by_name status=success NAME DESIRED CURRENT READY AGE CONTAINERS IMAGES SELECTOR LABELS workload-65b7f54794
+[tool:start] kubectl_get_by_name
+[node:done] layer / 问题定位 (20.5s)
+[node:start] parallel_evidence / 并发证据采集
+[tool:start] execute_pod_promql
+[tool:start] query_pod_logs
+[tool:start] query_pod_tracing
+[tool:done] execute_pod_promql status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":7,"normalized":7,"projected_series":7,"raw_series":7,"retrieved":7,"returned":7,"serialized_series":7},"coverage":"present","
+[tool:done] query_pod_logs status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"matched":0,"normalized":0,"retrieved":0,"returned":0},"coverage":"empty","dimension":"logging","directness":"direct","entity":{"contai
+[tool:done] query_pod_tracing status=success {"contract_version":"aiops.observation.v1","counts":{"dropped":0,"ledger_flows":0,"ledger_spans":0,"matched":0,"normalized":0,"retrieved":0,"returned":0,"serialized_flows":0,"serialized_spans":0},"cov
+[agent:parallel_evidence] 好，先根据已有 baseline 执行 Kubernetes 核心验证（describe、events、describe YAML），再决定是否需要补证。
+[tool:start] TodoWrite
+[tool:done] TodoWrite status=success TodoWrite 输出摘要: raw_chars=442 lines=7 Investigation plan updated with 3 tasks. # CURRENT INVESTIGATION TASKS **Task Status**: 0 completed, 1 in progress, 2 pending [ ] [k8s-events] kubectl_events pod
+[tool:start] kubectl_describe
+[tool:start] kubectl_events
+[tool:start] kubectl_get_yaml
+[tool:done] kubectl_events status=success kubectl_events 摘要: 关键诊断行: 16m (x4 over 17m) Warning Failed Pod/workload-65b7f54794-z7kdp Failed to pull image "registry.invalid/aiops/workload:missing": rpc error: code = Unknown de
+[tool:done] kubectl_get_yaml status=success kubectl_get_yaml 关键字段摘要: kind: Pod name: workload-65b7f54794-z7kdp namespace: aiops-case-02 creationTimestamp: 2026-09-10T11:42:52Z deletionTimestamp: <absent> deletionGracePeriodSeconds: None finaliz
+[tool:done] kubectl_describe status=success kubectl_describe 摘要: name: workload-65b7f54794-z7kdp namespace: aiops-case-02 node: node2/10.2.0.50 status: Pending 关键诊断行: Warning Failed 16m (x4 over 17m) kubelet Failed to
+[tool:start] TodoWrite
+[tool:done] TodoWrite status=success TodoWrite 输出摘要: raw_chars=526 lines=8 Investigation plan updated with 4 tasks. # CURRENT INVESTIGATION TASKS **Task Status**: 3 completed, 1 in progress, 0 pending [~] [root-cause-conclusion] 确认 Image
+[agent:parallel_evidence] ## 已采集事实（仅本轮）
+
+### 1. Kubernetes Pod 状态（Describe / YAML / Events）
+
+**实体身份**：
+- **Pod**: `aiops-case-02/workload-65b7f54794-z7kdp`
+- **UID**: `91141823-4070-43a3-810c-ddbf5a6b337f`
+- **Node**: `node2` / Pod IP: `172.16.104.46`
+- **Container**: `app`（Image: `registry.invalid/aiops/workload:missing`）
+- **无 imagePullSecrets**（`imagePullSecrets: <absent>`）
+
+**当前状态**：
+- **Phase**: `Pending`
+- **Container `app` State**: `Waiting` / Reason: `ImagePullBackOff`
+- **Restart Count**: `0`
+- **Ready**: `False
+[tool:start] TodoWrite
+[tool:done] TodoWrite status=success TodoWrite 输出摘要: raw_chars=526 lines=8 Investigation plan updated with 4 tasks. # CURRENT INVESTIGATION TASKS **Task Status**: 4 completed, 0 in progress, 0 pending [✓] [k8s-describe] kubectl_describe
+[agent:parallel_evidence] ### 已采集事实
+
+**实体身份确认：**
+- Pod: `aiops-case-02/workload-65b7f54794-z7kdp`
+- Phase: `Pending`
+- Container `app` 镜像: `registry.invalid/aiops/workload:missing`
+- 状态: `ImagePullBackOff`，从未进入 Running。
+
+**Kubernetes Events / Describe 证据：**
+1.  **Root Error (ErrImagePull)**:
+    `Failed to pull image "registry.invalid/aiops/workload:missing": ... failed to resolve reference ... dial tcp: lookup registry.invalid on 127.0.0.53:53: no such host`
+2.  **Follow-up Error (ImagePullBackOff)**:
+    `Back-off pull
+[node:done] parallel_evidence / 并发证据采集 (64.2s)
+[node:start] conclusion / 汇总总结
+[node:done] conclusion / 汇总总结 (10.8s)
+[final] run_id=20f5a58563b24e31 status=success
+========================================================================
+最终诊断报告
+========================================================================
+## 📊 异常概览与现象
+
+| 组 | 异常实体 | 异常状态 | 关键错误信息 |
+|---|---|---|---|
+| g1 | `aiops-case-02/workload-65b7f54794-z7kdp` | ImagePullBackOff | Pod aiops-case-02/workload-65b7f54794-z7kdp 处于 ImagePullBackOff 状态，无法启动。 |
+
+---
+
+## 🕵️ 证据内容 · g1
+
+| # | 类型 | 来源 | 真实原始结果 | 诊断作用 |
+|---|---|---|---|---|
+| 1 | K8s Event | kubelet | `Warning  Failed ... Failed to pull image "registry.invalid/aiops/workload:missing": ... Head "https://registry.invalid/v2/aiops/workload/manifests/missing": dial tcp: lookup registry.invalid on 127.0.0.53:53: no such host` | 直接证实 kubelet 访问镜像仓库时因 DNS 查询失败而中断 |
+| 2 | K8s Event | kubelet | `Warning  Failed ... Error: ErrImagePull` | 证实镜像拉取动作失败 |
+| 3 | K8s Event | kubelet | `Normal   BackOff ... Back-off pulling image "registry.invalid/aiops/workload:missing"` | 证实 kubelet 在拉取失败后进入退避重试状态 |
+| 4 | K8s State | K8s | `Waiting Reason: ImagePullBackOff`, `Waiting Message: Back-off pulling image "registry.invalid/aiops/workload:missing"` | 证实容器长期处于拉取失败的退避等待阶段 |
+| 5 | K8s State | K8s | `Pod Status: Pending`, `ContainersReady: False` | 证实 Pod 因容器未就绪卡在调度后阶段 |
+| 6 | Metric | prometheus | `kube_pod_container_status_waiting_reason{reason="ImagePullBackOff"} = 1` | 从监控侧确认该 Pod 处于 ImagePullBackOff 状态 |
+
+**证据关联与印证：**
+K8s Event 中的 DNS 错误原文 `lookup registry.invalid on 127.0.0.53:53: no such host` 证实了底层网络解析层面的失败，这直接导致了 K8s State 中的 `ImagePullBackOff` 现象以及 Metric 中的状态确认。由于 Pod 处于 Pending 且未启动，Logging 和 Tracing 维度无物理数据，Kubernetes 内部状态和事件是唯一可观测的诊断依据。
+
+## 🎯 根因分析 · g1
+
+### 因果链
+
+```text
+DNS 解析失败 (lookup registry.invalid ... no such host) → 镜像拉取失败 (ErrImagePull) → Kubelet 退避重试 (ImagePullBackOff) → Pod 状态维持在 Pending
+```
+
+### 根因结论
+
+**已确认的根因：**
+镜像仓库 `registry.invalid` 的域名解析失败（DNS 报错 `no such host`）。
+由于无法解析该域名，kubelet 无法与镜像仓库建立连接以拉取 `registry.invalid/aiops/workload:missing` 镜像，进而触发 K8s 的 `ImagePullBackOff` 机制，导致 Pod `aiops-case-02/workload-65b7f549794-z7kdp` 始终无法启动并保持 `Pending` 状态。
+
+**不确定性说明：**
+证据表明是 DNS 查询失败（指向 127.0.0.53:53），但未能确定这是集群全局的 DNS 服务故障，还是该特定域名 `registry.invalid` 仅在当前节点（或该集群）的网络配置中未定义。未排查 Node2 节点的 `/etc/resolv.conf` 配置细节，也无法确认是否有其他域名同样受阻。
+
+---
+
+## 📊 性能统计
+
+```text
+├─ 总耗时: 1.6m
+├─ 问题定位: 20.5s
+├─ 并发证据采集: 64.2s
+│  └─ g1 aiops-case-02/workload-65b7f54794-z7kdp: 64.2s (Evidence 55.8s, RCA 8.3s)
+└─ 汇总总结: 10.8s
+```
+
+📋 Runbook 参考
+
+- **g1 aiops-case-02/workload-65b7f54794-z7kdp**: pod-imagepull-failed
+
+[run:end] run_id=20f5a58563b24e31 status=-
