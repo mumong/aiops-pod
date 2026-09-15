@@ -376,6 +376,12 @@ kubectl delete namespace aiops-case-08
 
 案例说明见 [Pod 异常实验库](test/pod-anomaly-cases/README.md)，批量盲测、断点续跑与评分见 [E2E 质量测试](test/aiops_quality_e2e/README.md)。测试应用产生真实流量和遥测；评分器的标准答案不注入诊断 Agent。
 
+另有 17 个[同状态、不同根因的扩展 Case](test/pod-anomaly-cases/variants/README.md)：
+`make case-list-variants` 查看，`make case-deploy CASE=c03-secret` 部署，
+`make case-validate CASE=c03-secret` 验证故障，`make case-clean CASE=c03-secret` 单独清理。
+质量脚本用 `--scenario expanded` 测试基础与变体，用 `--combine` 同时部署选中的多个 Case。
+`make case-validate` 只检查故障状态及具体原因，不代表三维遥测验收通过。
+
 ### 日志、归档与 Langfuse
 
 Agent 日志：`kubectl logs -n aiops deployment/aiops-copilot -c aiops-copilot -f`。部署清单将报告写入 PVC，**容器内**目录如下；宿主机物理路径由存储系统决定，不要照搬其他环境的 `/data/redis/...`。

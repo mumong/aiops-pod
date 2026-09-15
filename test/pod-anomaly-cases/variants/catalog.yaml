@@ -1,0 +1,543 @@
+{
+  "schema_version": "aiops.pod-anomaly-variants.v1",
+  "cases": [
+    {
+      "id": "c01-cpu",
+      "name": "c01-cpu",
+      "directory": "variants/c01-cpu",
+      "namespace": "aiops-case-v01",
+      "symptom": "Pending",
+      "fault_scenario": "CPU request 超过节点可分配容量",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "phase": [
+          "Pending"
+        ],
+        "event_reasons": [
+          "FailedScheduling"
+        ],
+        "event_patterns_all": [
+          "Insufficient cpu"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v01"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c01-memory",
+      "name": "c01-memory",
+      "directory": "variants/c01-memory",
+      "namespace": "aiops-case-v02",
+      "symptom": "Pending",
+      "fault_scenario": "memory request 超过节点可分配容量",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "phase": [
+          "Pending"
+        ],
+        "event_reasons": [
+          "FailedScheduling"
+        ],
+        "event_patterns_all": [
+          "Insufficient memory"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v02"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c01-pvc",
+      "name": "c01-pvc",
+      "directory": "variants/c01-pvc",
+      "namespace": "aiops-case-v03",
+      "symptom": "Pending",
+      "fault_scenario": "引用不存在的 PVC",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "phase": [
+          "Pending"
+        ],
+        "event_reasons": [
+          "FailedScheduling"
+        ],
+        "event_patterns_all": [
+          "persistentvolumeclaim",
+          "unavailable-claim",
+          "not found"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v03"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c03-secret",
+      "name": "c03-secret",
+      "directory": "variants/c03-secret",
+      "namespace": "aiops-case-v04",
+      "symptom": "ContainerCreating / FailedMount",
+      "fault_scenario": "卷引用不存在的 Secret",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "phase": [
+          "Pending"
+        ],
+        "event_reasons": [
+          "FailedMount"
+        ],
+        "event_patterns_all": [
+          "secret",
+          "unavailable-input",
+          "not found"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v04"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c03-key",
+      "name": "c03-key",
+      "directory": "variants/c03-key",
+      "namespace": "aiops-case-v05",
+      "symptom": "ContainerCreating / FailedMount",
+      "fault_scenario": "ConfigMap 存在，但卷指定的 key 不存在",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "phase": [
+          "Pending"
+        ],
+        "event_reasons": [
+          "FailedMount"
+        ],
+        "event_patterns_all": [
+          "(?:non-existent config key|configmap.*(?:not found|missing))",
+          "unavailable-key"
+        ],
+        "pod_fields": {
+          "spec.volumes.0.configMap.name": "workload-input",
+          "spec.volumes.0.configMap.items.0.key": "unavailable-key"
+        }
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v05"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c03-hostpath",
+      "name": "c03-hostpath",
+      "directory": "variants/c03-hostpath",
+      "namespace": "aiops-case-v06",
+      "symptom": "ContainerCreating / FailedMount",
+      "fault_scenario": "hostPath 指定目录不存在（仅检查，不创建）",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "phase": [
+          "Pending"
+        ],
+        "event_reasons": [
+          "FailedMount"
+        ],
+        "event_patterns_all": [
+          "hostPath type check failed",
+          "is not a directory"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v06"
+      },
+      "prerequisites": "测试集群允许只读 hostPath；指定目录必须不存在；不会创建宿主机目录",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c02-tag",
+      "name": "c02-tag",
+      "directory": "variants/c02-tag",
+      "namespace": "aiops-case-v07",
+      "symptom": "ImagePullBackOff",
+      "fault_scenario": "已有镜像仓库中的镜像 tag 不存在",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "waiting_reasons": [
+          "ErrImagePull",
+          "ImagePullBackOff"
+        ],
+        "event_reasons": [
+          "Failed"
+        ],
+        "event_patterns_all": [
+          "(?:manifest unknown|manifest.{0,100}(?:not found|unknown)|(?:python|pause):aiops-fixture-unavailable-20260908.{0,40}not found)"
+        ],
+        "fail_fast_event_patterns": [
+          "x509:.*(?:unknown authority|expired|not valid)",
+          "(?:401|403).*(?:unauthorized|forbidden)"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v07"
+      },
+      "prerequisites": "节点可访问 registry.cn-hangzhou.aliyuncs.com/google_containers/pause；正常 tag 3.9 应可解析，测试 tag 必须返回 MANIFEST_UNKNOWN/not found；TLS、DNS、鉴权失败均不算目标故障，不修改节点信任配置",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c06-command",
+      "name": "c06-command",
+      "directory": "variants/c06-command",
+      "namespace": "aiops-case-v08",
+      "symptom": "CrashLoopBackOff",
+      "fault_scenario": "shell 启动的命令不存在，退出 127",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "waiting_reasons": [
+          "CrashLoopBackOff"
+        ],
+        "terminated_exit_codes": [
+          127
+        ],
+        "minimum_restarts": 1,
+        "log_patterns_all": [
+          "/opt/app/unavailable-command",
+          "not found"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v08"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c06-file",
+      "name": "c06-file",
+      "directory": "variants/c06-file",
+      "namespace": "aiops-case-v09",
+      "symptom": "CrashLoopBackOff",
+      "fault_scenario": "应用读取的配置文件不存在，退出 1",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "waiting_reasons": [
+          "CrashLoopBackOff"
+        ],
+        "terminated_exit_codes": [
+          1
+        ],
+        "minimum_restarts": 1,
+        "log_patterns_all": [
+          "FileNotFoundError",
+          "/input/app.conf"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v09"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c07-env",
+      "name": "c07-env",
+      "directory": "variants/c07-env",
+      "namespace": "aiops-case-v10",
+      "symptom": "CrashLoopBackOff",
+      "fault_scenario": "应用必需环境变量未设置，启动检查退出 78",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "waiting_reasons": [
+          "CrashLoopBackOff"
+        ],
+        "terminated_exit_codes": [
+          78
+        ],
+        "minimum_restarts": 1,
+        "log_patterns_all": [
+          "APP_REQUIRED_CONFIG",
+          "environment variable is missing"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v10"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c04-configmap-key",
+      "name": "c04-configmap-key",
+      "directory": "variants/c04-configmap-key",
+      "namespace": "aiops-case-v11",
+      "symptom": "CreateContainerConfigError",
+      "fault_scenario": "ConfigMap 存在，但环境变量引用的 key 缺失",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "waiting_reasons": [
+          "CreateContainerConfigError"
+        ],
+        "event_reasons": [
+          "Failed"
+        ],
+        "event_patterns_all": [
+          "configmap",
+          "unavailable-key",
+          "(?:couldn't find key|not found|missing)"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v11"
+      },
+      "prerequisites": "节点可拉取现有 python:3-alpine 镜像；命名空间无额外准入策略阻断",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c11-prestop",
+      "name": "c11-prestop",
+      "directory": "variants/c11-prestop",
+      "namespace": "aiops-case-v12",
+      "symptom": "Terminating",
+      "fault_scenario": "preStop hook 长时间运行（非 finalizer）",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "delete-pod-after-ready",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "phase": [
+          "Running"
+        ],
+        "deletion_timestamp": true,
+        "no_finalizers": true,
+        "all_containers_running": true,
+        "marker_file": "/state/prestop-started"
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v12",
+        "shorten_grace": true,
+        "release_file": "/state/teardown-requested"
+      },
+      "prerequisites": "故障只维持约 60–65 分钟；重复部署前先单 Case 清理，不用于无限等待",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c11-grace",
+      "name": "c11-grace",
+      "directory": "variants/c11-grace",
+      "namespace": "aiops-case-v13",
+      "symptom": "Terminating",
+      "fault_scenario": "进程忽略 SIGTERM，等待较长 terminationGracePeriodSeconds",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "delete-pod-after-ready",
+      "timeout_seconds": 240,
+      "status_gate": {
+        "phase": [
+          "Running"
+        ],
+        "deletion_timestamp": true,
+        "no_finalizers": true,
+        "all_containers_running": true,
+        "log_patterns_all": [
+          "SIGTERM received; waiting"
+        ],
+        "pod_fields": {
+          "spec.terminationGracePeriodSeconds": 3900
+        },
+        "no_prestop": true
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v13",
+        "shorten_grace": true,
+        "release_file": "/state/teardown-requested"
+      },
+      "prerequisites": "故障只维持约 60–65 分钟；重复部署前先单 Case 清理，不用于无限等待",
+      "telemetry_note": "此扩展阶段只验收真实 Kubernetes 状态、事件及必要容器日志；不宣称已有完整 Metrics/Logging/Tracing 覆盖"
+    },
+    {
+      "id": "c05-plugin",
+      "name": "c05-plugin",
+      "directory": "variants/c05-plugin",
+      "namespace": "aiops-case-v14",
+      "symptom": "ContainerCreating / FailedCreatePodSandBox",
+      "fault_scenario": "NAD 存在，但引用的 CNI 插件 aiops-unavailable 不存在",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 300,
+      "status_gate": {
+        "phase": [
+          "Pending"
+        ],
+        "event_reasons": [
+          "FailedCreatePodSandBox"
+        ],
+        "event_patterns_all": [
+          "aiops-unavailable",
+          "failed to find plugin|plugin.*not found"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v14"
+      },
+      "prerequisites": "Multus 及 NetworkAttachmentDefinition CRD 已安装；节点未安装 aiops-unavailable 插件",
+      "telemetry_note": "验收注入状态和具体原因；不保证存在 Tempo spans 或完整三维遥测"
+    },
+    {
+      "id": "c08-startup",
+      "name": "c08-startup",
+      "directory": "variants/c08-startup",
+      "namespace": "aiops-case-v15",
+      "symptom": "OOMKilled",
+      "fault_scenario": "启动时一次分配 256Mi 内存超过 64Mi limit（无业务请求）",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 300,
+      "status_gate": {
+        "terminated_reasons": [
+          "OOMKilled"
+        ],
+        "terminated_exit_codes": [
+          137
+        ],
+        "minimum_restarts": 1,
+        "log_patterns_all": [
+          "startup allocation 256Mi"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v15"
+      },
+      "prerequisites": "节点可以拉取已有 Python 镜像",
+      "telemetry_note": "验收注入状态和具体原因；不保证存在 Tempo spans 或完整三维遥测"
+    },
+    {
+      "id": "c09-port",
+      "name": "c09-port",
+      "directory": "variants/c09-port",
+      "namespace": "aiops-case-v16",
+      "symptom": "Running / NotReady",
+      "fault_scenario": "应用监听 18080，readinessProbe 错配端口 18081，连接被拒绝",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 300,
+      "status_gate": {
+        "phase": [
+          "Running"
+        ],
+        "ready": false,
+        "event_reasons": [
+          "Unhealthy"
+        ],
+        "event_patterns_all": [
+          "Readiness probe failed",
+          "18081",
+          "connection refused"
+        ],
+        "pod_fields": {
+          "spec.containers.0.readinessProbe.httpGet.port": 18081
+        },
+        "log_patterns_all": [
+          "listening on 18080"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v16"
+      },
+      "prerequisites": "节点可以拉取已有 Python 镜像",
+      "telemetry_note": "验收注入状态和具体原因；不保证存在 Tempo spans 或完整三维遥测"
+    },
+    {
+      "id": "c10-timeout",
+      "name": "c10-timeout",
+      "directory": "variants/c10-timeout",
+      "namespace": "aiops-case-v17",
+      "symptom": "LivenessProbeFailed / Restarting",
+      "fault_scenario": "livenessProbe /health 响应延迟 3 秒超过 timeoutSeconds=1，触发重启",
+      "workload_kind": "Pod",
+      "workload_name": "workload",
+      "container": "app",
+      "trigger": "apply",
+      "timeout_seconds": 300,
+      "status_gate": {
+        "minimum_restarts": 1,
+        "event_reasons": [
+          "Unhealthy"
+        ],
+        "event_patterns_all": [
+          "Liveness probe failed",
+          "deadline exceeded|timed out|timeout"
+        ],
+        "pod_fields": {
+          "spec.containers.0.livenessProbe.timeoutSeconds": 1
+        },
+        "log_patterns_all": [
+          "listening on 18080"
+        ]
+      },
+      "cleanup": {
+        "namespace": "aiops-case-v17"
+      },
+      "prerequisites": "节点可以拉取已有 Python 镜像",
+      "telemetry_note": "验收注入状态和具体原因；不保证存在 Tempo spans 或完整三维遥测"
+    }
+  ]
+}

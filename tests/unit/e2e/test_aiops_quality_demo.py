@@ -576,7 +576,8 @@ def test_protected_worker_publishes_completion_status(monkeypatch, tmp_path):
 def test_demo_contract_contains_all_isolated_catalog_scenarios():
     scenarios = load_scenarios(DEMO_DIR / "demo_cases.yaml")
 
-    assert list(scenarios) == [f"c{index:02d}" for index in range(1, 12)]
+    assert [s.id for s in select_scenarios(scenarios, "all")] == [f"c{index:02d}" for index in range(1, 12)]
+    assert len(scenarios) == 28
     assert all(scenario.members == (scenario.id,) for scenario in scenarios.values())
     assert len(scenarios["c04"].expected_root_causes) == 1
     assert scenarios["c04"].anomaly_type == "ConfigError"

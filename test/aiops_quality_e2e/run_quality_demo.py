@@ -68,7 +68,7 @@ QUALITY_THRESHOLDS = {
     "runbook_coverage": 0.7,
     "evidence_completeness": 0.7,
 }
-SCORING_VERSION = "2026-09-07.4"
+SCORING_VERSION = "2026-09-10.1"
 PROTECTED_WORKER_ENV = "AIOPS_QUALITY_PROTECTED_WORKER"
 PROTECTED_STATUS_ENV = "AIOPS_QUALITY_RUNNER_STATUS"
 RUNNER_LOG_NAME = "runner.log"
@@ -76,9 +76,14 @@ RUNNER_STATUS_NAME = "runner.status.json"
 
 
 def scoring_manifest(cases_file: Optional[Path] = None) -> dict[str, Any]:
-    paths = [Path(__file__), HERE / "evaluator.py"]
+    paths = [Path(__file__), HERE / "evaluator.py", HERE / "variant_suite.py", HERE / "variant_cases.yaml"]
+    fixture_paths = [CASE_ROOT / "catalog.yaml", CASE_ROOT / "variants/catalog.yaml",
+                     *sorted((CASE_ROOT / "variants").rglob("*.yaml")),
+                     *sorted((CASE_ROOT / "cases").rglob("*.yaml")),
+                     *sorted((CASE_ROOT / "scripts").glob("*.py"))]
     return {"version": SCORING_VERSION, "sha256": {
         **{p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},
+        **{str(p.relative_to(REPO_ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in fixture_paths},
         "cases_file": hashlib.sha256((cases_file or HERE / "demo_cases.yaml").read_bytes()).hexdigest(),
     }}
 
@@ -95,6 +100,54 @@ def atomic_write(path: Path, text: str) -> None:
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+
+
+def accept_runtime_resume(stats: dict[str, Any], manifest: dict[str, Any],
+                          output_dir: Path, *, allowed: bool) -> None:
+    """Explicit, audited lifecycle-only migration; never bypass grading changes."""
+    previous = stats.get("scoring_manifest") or {}
+    if previous == manifest:
+        return
+    old_hashes = previous.get("sha256") or {}
+    new_hashes = manifest.get("sha256") or {}
+    changed = {k for k in old_hashes.keys() | new_hashes.keys()
+               if old_hashes.get(k) != new_hashes.get(k)}
+    lifecycle_files = {"run_quality_demo.py", "test/pod-anomaly-cases/scripts/manage_cases.py"}
+    if (not allowed or not old_hashes or previous.get("version") != manifest.get("version")
+            or old_hashes.keys() != new_hashes.keys() or not changed <= lifecycle_files):
+        raise RuntimeError("checkpoint rules differ; only reviewed lifecycle-only changes may use --resume-runtime-update; scoring/fixture changes require a separate run")
+    snapshot = output_dir / f"stats-before-runtime-resume-{time.time_ns()}.json"
+    atomic_write(snapshot, json.dumps(stats, ensure_ascii=False, indent=2))
+    stats.setdefault("runtime_resume_audit", []).append({
+        "timestamp": datetime.now().isoformat(), "previous_manifest": previous,
+        "current_manifest": manifest, "changed_files": sorted(changed),
+        "snapshot": str(snapshot), "preserved_runs": sum(len(c.get("runs") or []) for c in stats.get("scenarios") or []),
+        "scope": "explicitly reviewed lifecycle-only update; archived scores unchanged",
+    })
+    stats["scoring_manifest"] = manifest
+
+
+def precheck_with_refresh(scenario, catalog, scenario_stats, run_index, *, reuse_existing):
+    """Renew only disposable isolated fixtures when historical Events age out.
+
+    Do not accept a weaker gate or refresh during a diagnosis. Fresh deployment
+    must pass the original gate; only one refresh is allowed per run.
+    """
+    try:
+        return {m: wait_for_case_gate(catalog[m]) for m in scenario.members}
+    except TimeoutError as exc:
+        if reuse_existing or len(scenario.members) != 1 or scenario.members[0] not in {"c02", "c10"}:
+            raise
+        member = scenario.members[0]
+        from variant_suite import fixture_manager
+        scenario_stats.setdefault("fixture_refreshes", []).append({
+            "run_index": run_index, "timestamp": datetime.now().isoformat(),
+            "reason": str(exc), "action": "redeploy_then_recheck_original_gate",
+        })
+        print(f"Refreshing {member} before run {run_index}: {exc}", flush=True)
+        fixture_manager().clean(catalog[member])
+        fixture_manager().deploy(catalog[member])
+        return {member: wait_for_case_gate(catalog[member])}
 
 
 @contextmanager
@@ -138,6 +191,7 @@ class Scenario:
     expected_root_causes: tuple[RootCauseExpectation, ...]
     expected_runbooks: tuple[str, ...]
     expected_evidence: tuple[EvidenceExpectation, ...]
+    runbook_targets: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -158,6 +212,9 @@ def _load_data(path: Path) -> Mapping[str, Any]:
 
 
 def load_catalog(path: Path) -> dict[str, Mapping[str, Any]]:
+    if path.resolve() == CATALOG_PATH.resolve():
+        from variant_suite import fixture_manager
+        return fixture_manager().catalog()
     data = _load_data(path)
     cases = data.get("cases") or []
     result = {str(item["id"]): item for item in cases if isinstance(item, Mapping)}
@@ -216,6 +273,9 @@ def load_scenarios(path: Path) -> dict[str, Scenario]:
             expected_runbooks=tuple(str(item) for item in (raw.get("expected_runbooks") or [])),
             expected_evidence=expected_evidence,
         )
+    if path.resolve() == DEMO_CASES_PATH.resolve():
+        from variant_suite import extend_scenarios
+        return extend_scenarios(result)
     return result
 
 
@@ -227,6 +287,14 @@ def select_scenarios(
     requested = [item.strip() for item in str(selector or "").split(",") if item.strip()]
     if not requested:
         raise ValueError("no scenarios selected")
+    if len(requested) != len(set(requested)):
+        raise ValueError("duplicate scenario IDs")
+    if "expanded" in requested or "variants" in requested:
+        if len(requested) != 1:
+            raise ValueError("suite selectors cannot be combined with explicit IDs")
+        return [s for key, s in scenarios.items()
+                if re.fullmatch(r"c\d{2}(?:-[a-z0-9-]+)?", key)
+                and (requested[0] == "expanded" or not re.fullmatch(r"c\d{2}", key))]
     if "all" in requested:
         if len(requested) != 1:
             raise ValueError("'all' cannot be combined with explicit scenario IDs")
@@ -252,6 +320,8 @@ def default_output_dir(
     full_suite = [f"c{index:02d}" for index in range(1, 12)]
     label = "all" if scenario_ids == full_suite else "-".join(scenario_ids)
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-") or "custom"
+    if len(safe_label) > 100:
+        safe_label = "expanded-" + hashlib.sha256(label.encode()).hexdigest()[:12]
     suffix = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     return REPO_ROOT / "testreports" / f"aiops_quality_{safe_label}_{suffix}"
 
@@ -363,7 +433,7 @@ def _protected_worker_entrypoint() -> None:
             },
         )
     try:
-        main()
+        outcome = main()
     except BaseException as exc:
         if status_path is not None:
             exit_code = exc.code if isinstance(exc, SystemExit) else 1
@@ -385,7 +455,7 @@ def _protected_worker_entrypoint() -> None:
             _write_runner_status(
                 status_path,
                 {
-                    "status": "completed",
+                    "status": outcome or "completed",
                     "pid": os.getpid(),
                     "started_at": started_at,
                     "completed_at": datetime.now().isoformat(),
@@ -425,6 +495,11 @@ def _kubectl_json(args: Sequence[str]) -> Mapping[str, Any]:
 def cleanup_catalog_namespaces(catalog: Mapping[str, Mapping[str, Any]]) -> None:
     """Delete only exact namespaces declared by the safe anomaly catalog."""
 
+    from variant_suite import fixture_manager
+    for case in catalog.values():
+        if case.get("variant"):
+            fixture_manager().clean(case)
+    catalog = {key: case for key, case in catalog.items() if not case.get("variant")}
     namespaces = sorted({str(case.get("namespace") or "") for case in catalog.values()} - {""})
     for case in catalog.values():
         cleanup = case.get("cleanup") or {}
@@ -452,12 +527,16 @@ def cleanup_catalog_namespaces(catalog: Mapping[str, Mapping[str, Any]]) -> None
 def apply_scenario(scenario: Scenario, catalog: Mapping[str, Mapping[str, Any]]) -> None:
     for member_id in scenario.members:
         case = catalog[member_id]
+        if case.get("variant"):
+            from variant_suite import fixture_manager
+            fixture_manager().deploy(case)
+            continue
         directory = CASE_ROOT / str(case["directory"])
         run_command(["kubectl", "apply", "-k", str(directory)])
 
     for member_id in scenario.members:
         case = catalog[member_id]
-        if case.get("trigger") != "delete-pod-after-ready":
+        if case.get("variant") or case.get("trigger") != "delete-pod-after-ready":
             continue
         namespace = str(case["namespace"])
         workload = str(case["workload_name"])
@@ -568,6 +647,11 @@ def gate_matches(case: Mapping[str, Any], pod: Mapping[str, Any]) -> tuple[bool,
 
 def wait_for_case_gate(case: Mapping[str, Any]) -> Mapping[str, Any]:
     timeout_seconds = int(case.get("timeout_seconds") or 240)
+    if case.get("variant"):
+        from variant_suite import fixture_manager
+        if not fixture_manager().validate_variant(case, timeout_seconds):
+            raise TimeoutError(f"case {case['id']} specific cause gate did not pass")
+        return _pod_for_case(case)
     deadline = time.monotonic() + timeout_seconds
     last_reason = "Pod not created"
     while time.monotonic() < deadline:
@@ -587,6 +671,42 @@ def wait_for_case_gate(case: Mapping[str, Any]) -> Mapping[str, Any]:
         print(f"Waiting for {case['id']} gate: {last_reason}", flush=True)
         time.sleep(5)
     raise TimeoutError(f"case {case['id']} gate timed out: {last_reason}")
+
+
+def record_fixture_failure(scenario, catalog, scenario_dir, scenario_stats, exc, *, phase):
+    """Capture current UID's source events before cleanup, without changing scores."""
+    record = {"phase": phase, "error": f"{type(exc).__name__}: {exc}",
+              "timestamp": datetime.now().isoformat(), "members": {}}
+    for member in scenario.members:
+        case = catalog[member]
+        detail = {"namespace": case["namespace"], "expected_gate": case.get("status_gate", {})}
+        try:
+            pod = _pod_for_case(case)
+            detail["pod"] = pod
+            uid = pod.get("metadata", {}).get("uid")
+            if uid:
+                detail["events"] = _kubectl_json([
+                    "-n", case["namespace"], "get", "events", "--field-selector", f"involvedObject.uid={uid}", "-o", "json"])
+        except Exception as archive_error:
+            detail["archive_error"] = str(archive_error)
+        record["members"][member] = detail
+    source = json.dumps(record["members"], ensure_ascii=False).lower()
+    record["category"] = ("registry_tls_untrusted" if "x509:" in source else
+                          "registry_auth" if "unauthorized" in source else "fixture_gate_unmet")
+    errors = scenario_stats.setdefault("fixture_errors", [])
+    path = scenario_dir / f"fixture-failure-{phase}-{time.time_ns()}.json"
+    atomic_write(path, json.dumps(record, ensure_ascii=False, indent=2))
+    errors.append({"phase": phase, "category": record["category"], "error": record["error"], "archive": str(path)})
+    scenario_stats["status"] = "blocked"
+    print(f"BLOCKED {scenario.id}: {record['category']}; archived {path}. No Agent failure score assigned.", flush=True)
+
+
+def quality_incomplete(stats):
+    runs = [run for case in stats.get("scenarios", []) for run in case.get("runs", [])]
+    return (stats.get("rescore_complete") is False or stats.get("status") in {"failed", "completed_with_errors"}
+            or any(case.get("status") == "blocked" for case in stats.get("scenarios", []))
+            or any(run.get("fixture_valid") is False or not run.get("success") for run in runs)
+            or (stats.get("planned_runs") is not None and len(runs) < stats["planned_runs"]))
 
 
 def _decode_line(value: Any) -> str:
@@ -890,14 +1010,32 @@ def _score_run(
         diagnosis.answer,
         observations=runbook_observations,
     )
+    root_data = asdict(root_score)
+    root_data["accuracy"] = (root_score.matched_count / root_score.expected_count
+                             if len(scenario.members) > 1 else float(root_score.passed))
+    runbook_data = asdict(runbook_score)
+    if scenario.runbook_targets:
+        from variant_suite import score_target_runbooks
+        runbook_data = score_target_runbooks(scenario.runbook_targets, diagnosis.answer, claims)
+    expected_targets = sorted({root.namespace for root in scenario.expected_root_causes if root.namespace})
+    observed_targets = [ns for claim in claims for ns in claim.namespaces]
     return {
         "scoring_version": SCORING_VERSION,
         "success": True,
         "run_id": diagnosis.run_id,
         "elapsed_seconds": diagnosis.elapsed_seconds,
-        "root_cause": asdict(root_score),
+        "root_cause": root_data,
         "root_claims": [asdict(item) for item in claims],
-        "runbook": asdict(runbook_score),
+        "group_audit": {
+            "expected_namespaces": expected_targets,
+            "observed_namespaces": sorted(set(observed_targets)),
+            "missing_namespaces": sorted(set(expected_targets) - set(observed_targets)),
+            "unexpected_namespaces": sorted(set(observed_targets) - set(expected_targets)) if expected_targets else [],
+            "duplicate_namespaces": sorted({ns for ns in observed_targets if observed_targets.count(ns) > 1}),
+            "ambiguous_claim_groups": [c.group for c in claims if len(c.namespaces) != 1] if expected_targets else [],
+            "source": "final_report_overview_and_root_sections",
+        },
+        "runbook": runbook_data,
         "evidence": asdict(evidence),
         "evidence_plan_audit": asdict(plan_evidence) if plan_evidence is not None else None,
         "evidence_contract_audit": (
@@ -1085,7 +1223,8 @@ def _fmt_duration(value: Optional[float]) -> str:
 
 
 def _aggregate_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    successful = [run for run in runs if run.get("success")]
+    requests_ok = [run for run in runs if run.get("success")]
+    successful = [run for run in requests_ok if run.get("fixture_valid") is not False]
     root_correct = sum(
         1 for run in successful if (run.get("root_cause") or {}).get("passed")
     )
@@ -1119,10 +1258,13 @@ def _aggregate_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     mttr_values = [float(run.get("elapsed_seconds") or 0.0) for run in successful]
     return {
         "runs": len(runs),
-        "successful": len(successful),
-        "failed": len(runs) - len(successful),
+        "successful": len(requests_ok),
+        "failed": len(runs) - len(requests_ok),
+        "valid_samples": len(successful),
+        "invalid_fixture_samples": len(requests_ok) - len(successful),
         "root_correct": root_correct,
-        "root_accuracy": root_correct / len(successful) if successful else None,
+        "root_accuracy": (sum(_root_accuracy(run.get("root_cause") or {}) for run in successful)
+                          / len(successful) if successful else None),
         "runbook_matched": runbook_matched,
         "runbook_expected": runbook_expected,
         "runbook_coverage": (
@@ -1138,6 +1280,10 @@ def _aggregate_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             sum(mttr_values) / len(mttr_values) if mttr_values else None
         ),
     }
+
+
+def _root_accuracy(root: Mapping[str, Any]) -> float:
+    return float(root.get("accuracy", float(bool(root.get("passed")))))
 
 
 def _aggregate_scenario_metrics(
@@ -1162,6 +1308,8 @@ def _aggregate_scenario_metrics(
 
     return {
         "scenario_count": len(aggregates),
+        "metric_samples": {key: sum(a.get(key) is not None for a in aggregates)
+                           for key in ("root_accuracy", "runbook_coverage", "evidence_completeness", "avg_mttr_seconds")},
         "root_accuracy": mean_of("root_accuracy"),
         "runbook_coverage": mean_of("runbook_coverage"),
         "evidence_completeness": mean_of("evidence_completeness"),
@@ -1171,10 +1319,17 @@ def _aggregate_scenario_metrics(
 
 def evaluation_warnings(stats: Mapping[str, Any]) -> list[str]:
     warnings = []
+    if quality_incomplete(stats):
+        warnings.append("未完成全量有效验收：以下仅为已获得有效样本的统计，不代表整套测试通过。")
     if stats.get("rescore_complete") is False:
         warnings.append("重评分不完整：包含旧评分或缺失/损坏归档；以下数值仅供审查，不能作为新版完整验收结果。")
     for scenario in stats.get("scenarios") or []:
+        if scenario.get("status") == "blocked":
+            error = (scenario.get("fixture_errors") or [{}])[-1]
+            warnings.append(f"{scenario['id']} 场景阻塞：{error.get('category', '')}；详见 {error.get('archive', '')}。")
         aggregate = _aggregate_runs(scenario.get("runs") or [])
+        if aggregate["invalid_fixture_samples"]:
+            warnings.append(f"{scenario['id']} 有 {aggregate['invalid_fixture_samples']} 次注入失效，原评分仅供审计，已排除质量均值。")
         if not aggregate["successful"]:
             warnings.append(f"{scenario['id']} 无成功样本，未进入质量均值。")
         elif aggregate["evidence_samples"] != aggregate["successful"]:
@@ -1208,6 +1363,8 @@ def build_console_report(stats: Mapping[str, Any], output_dir: Path) -> str:
             f"成功: {total['successful']} | 失败: {total['failed']}"
         ),
         f"总耗时: {total_elapsed:.0f}s ({total_elapsed / 60:.1f}m)",
+        f"任务状态: {stats.get('status', '未记录')} | 已记录请求: {total['runs']}/{stats.get('planned_runs', total['runs'])}",
+        *[f"⚠ {warning}" for warning in evaluation_warnings(stats)],
         "",
         "─" * 72,
         "异常 Case 范围",
@@ -1247,7 +1404,7 @@ def build_console_report(stats: Mapping[str, Any], output_dir: Path) -> str:
             root = run.get("root_cause") or {}
             runbook = run.get("runbook") or {}
             evidence = run.get("evidence") or {}
-            root_text = _fmt_rate(1.0 if root.get("passed") else 0.0)
+            root_text = _fmt_rate(_root_accuracy(root))
             runbook_text = (
                 f"{'✅' if runbook.get('passed') else '❌'} "
                 f"{len(runbook.get('matched') or [])}/{len(runbook.get('expected') or [])}"
@@ -1283,7 +1440,7 @@ def build_console_report(stats: Mapping[str, Any], output_dir: Path) -> str:
         )
 
     def status(value: Optional[float], threshold: float, *, less_than: bool = False) -> str:
-        if stats.get("rescore_complete") is False:
+        if quality_incomplete(stats):
             return "待复核"
         if value is None:
             return "N/A"
@@ -1353,7 +1510,7 @@ def build_summary(stats: Mapping[str, Any]) -> str:
             runbook = run["runbook"]
             lines.append(
                 f"| {scenario['id']} | {index} | ✅ | "
-                f"{_fmt_rate(1.0 if root['passed'] else 0.0)} | "
+                f"{_fmt_rate(_root_accuracy(root))} | "
                 f"{_fmt_rate(runbook['coverage'])} | "
                 f"{_fmt_rate(evidence['completeness'])} ({evidence['collected']}/{evidence['planned']}) | "
                 f"{float(run.get('elapsed_seconds') or 0):.1f}s | {run.get('run_id') or '-'} |"
@@ -1367,15 +1524,15 @@ def build_summary(stats: Mapping[str, Any]) -> str:
         if isinstance(scenario, Mapping)
     ]
     quality = _aggregate_scenario_metrics(scenario_rows)
-    scenario_count = int(quality["scenario_count"])
+    samples = quality["metric_samples"]
     lines.extend([
         "",
         "## 四项质量指标汇总",
         "",
-        f"- MTTR：{_fmt_duration(quality['avg_mttr_seconds'])}（{scenario_count} 个 Case 独立计算后算术平均）",
-        f"- 根因准确率：{_fmt_rate(quality['root_accuracy'])}（{scenario_count} 个 Case 准确率算术平均）",
-        f"- Runbook 覆盖率：{_fmt_rate(quality['runbook_coverage'])}（{scenario_count} 个 Case 覆盖率算术平均）",
-        f"- 证据完整度：{_fmt_rate(quality['evidence_completeness'])}（{scenario_count} 个 Case 完整度算术平均）",
+        f"- MTTR：{_fmt_duration(quality['avg_mttr_seconds'])}（{samples['avg_mttr_seconds']} 个 Case 独立计算后算术平均）",
+        f"- 根因准确率：{_fmt_rate(quality['root_accuracy'])}（{samples['root_accuracy']} 个 Case 准确率算术平均）",
+        f"- Runbook 覆盖率：{_fmt_rate(quality['runbook_coverage'])}（{samples['runbook_coverage']} 个 Case 覆盖率算术平均）",
+        f"- 证据完整度：{_fmt_rate(quality['evidence_completeness'])}（{samples['evidence_completeness']} 个 Case 完整度算术平均）",
         "- 总体口径：每个 Case 先独立计算指标，再对各 Case 指标做算术平均，各 Case 权重相同。单次证据完整度按 Evidence Plan 的 `plan_collected / plan_total` 计算；Case 内对成功运行做算术平均。固定 Case 证据合同仅保留在 `evidence_contract_audit` 中供审计。",
         f"- 请求成功率：{_fmt_rate(len(successful) / len(all_runs) if all_runs else None)}（{len(successful)}/{len(all_runs)}，不混入上述四项指标分母）",
         "",
@@ -1421,11 +1578,15 @@ def build_case_readme(
         f"# {_md_cell(cid)} · {_md_cell(scenario.get('anomaly_type') or 'Unknown')}", "",
         "[返回总体报告](../readme.md)", "",
         f"具体故障：{_md_cell(scenario.get('fault_scenario') or scenario.get('name'))}", "",
+        f"场景状态：{_md_cell(scenario.get('status') or '未记录')}。", "",
+        *[f"> 故障验收记录：{_md_cell(error.get('category'))}；归档 `{_md_cell(error.get('archive'))}`。\n"
+          for error in scenario.get("fixture_errors", [])],
         f"期望 Runbook：{_md_cell(', '.join(scenario.get('expected_runbooks') or []) or 'N/A')}", "",
         f"成功运行：{aggregate['successful']}/{aggregate['runs']}；"
         f"证据完整度有效样本：{aggregate['evidence_samples']}/{aggregate['successful']}。", "",
         "## 四项质量指标", "",
-        *_readme_metrics(aggregate, incomplete=stats.get("rescore_complete") is False), "",
+        *_readme_metrics(aggregate, incomplete=stats.get("rescore_complete") is False or
+                         scenario.get("status") == "blocked" or aggregate["invalid_fixture_samples"] > 0), "",
         "## 每次运行", "",
         "以下是原脚本评分，不等于人工裁决；根因 0% 不自动代表 Agent 实际误诊。", "",
         "| # | 请求 | 根因准确率 | Runbook 覆盖率 | 证据完整度 | MTTR | 原始报告 / Run ID |",
@@ -1449,7 +1610,7 @@ def build_case_readme(
         if evidence.get("completeness") is not None:
             ev += f" ({evidence.get('collected', 0)}/{evidence.get('planned', 0)})"
         lines.append(
-            f"| {index} | ✅ | {_fmt_rate(float(bool(root.get('passed'))))} | "
+            f"| {index} | ✅ | {_fmt_rate(_root_accuracy(root))} | "
             f"{_fmt_rate(rb.get('coverage'))} | {ev} | {_fmt_duration(run.get('elapsed_seconds'))} | {report_label} |"
         )
     lines.extend(["", "## 统计说明", "",
@@ -1483,7 +1644,7 @@ def build_readme(stats: Mapping[str, Any], output_dir: Path) -> str:
             f"{a['successful']}/{a['runs']} |"
         )
     lines.extend(["", "## 总体质量指标", "",
-        *_readme_metrics(_aggregate_scenario_metrics(scenarios), incomplete=stats.get("rescore_complete") is False), "",
+        *_readme_metrics(_aggregate_scenario_metrics(scenarios), incomplete=quality_incomplete(stats)), "",
         "先在每个 Case 内按运行求算术平均，再对有有效值的 Case 等权平均；不把各 Case 的数量合并作分母。",
         "单项通过不代表每个 Case 都通过，请同时查看上表和各 Case 明细。", ""])
     for warning in evaluation_warnings(stats):
@@ -1587,19 +1748,14 @@ def _rescore_existing_report(
                     if isinstance(candidate, Mapping):
                         metrics = candidate
 
-            claims = extract_root_claims(report)
-            root_score = score_root_causes(scenario.expected_root_causes, claims)
-            runbook_score = score_runbooks(
-                scenario.expected_runbooks,
-                report,
-                observations=_runbook_observations(
-                    [item for item in events if isinstance(item, Mapping)], metrics
-                ),
+            revision = _score_run(
+                scenario,
+                DiagnosisResult(run_id, report, metrics, float(run.get("elapsed_seconds") or 0),
+                                tuple(item for item in events if isinstance(item, Mapping)), ""),
+                EvidenceScore(0, 0, None, (), "not_rescored"),
             )
-            run["scoring_version"] = SCORING_VERSION
-            run["root_cause"] = asdict(root_score)
-            run["root_claims"] = [asdict(item) for item in claims]
-            run["runbook"] = asdict(runbook_score)
+            for key in ("scoring_version", "root_cause", "root_claims", "runbook", "group_audit"):
+                run[key] = revision[key]
             run.pop("rescore_error", None)
             run["rescore_revision"] = output_dir.name
             existing_score.update(run)
@@ -1636,18 +1792,19 @@ def _rescore_existing_report(
     return stats
 
 
-def main() -> None:
+def main() -> Optional[str]:
     with ExitStack() as stack:
-        _main(stack)
+        return _main(stack)
 
 
-def _main(stack: ExitStack) -> None:
+def _main(stack: ExitStack) -> Optional[str]:
     session_started = time.monotonic()
     parser = argparse.ArgumentParser(description="Current AIOps root-cause/evidence quality demo")
     parser.add_argument(
         "--scenario", default="c04",
-        help="c01-c11, comma-separated scenario IDs, or 'all' for the isolated overnight suite",
+        help="all=11 baselines; variants=17 variants; expanded=28 isolated scenarios; or comma-separated IDs",
     )
+    parser.add_argument("--combine", action="store_true", help="deploy selected scenarios together and score each target separately")
     parser.add_argument("--repeat", "-n", type=int, default=1)
     parser.add_argument("--concurrency", "-c", type=int, default=1)
     parser.add_argument("--url", default="http://10.2.0.48:30800")
@@ -1676,6 +1833,8 @@ def _main(stack: ExitStack) -> None:
         "--resume", action="store_true",
         help="resume missing run indexes from an existing output-dir checkpoint",
     )
+    parser.add_argument("--resume-runtime-update", action="store_true",
+                        help="with --resume: explicitly accept reviewed lifecycle-only script changes, preserving an audit snapshot")
     parser.add_argument(
         "--rescore-existing",
         action="store_true",
@@ -1692,6 +1851,9 @@ def _main(stack: ExitStack) -> None:
         help="stream human-readable progress; full also prints token-level model output",
     )
     args = parser.parse_args()
+
+    if args.resume_runtime_update and not args.resume:
+        parser.error("--resume-runtime-update requires --resume")
 
     if args.repeat < 1:
         raise SystemExit("--repeat must be >= 1")
@@ -1719,6 +1881,15 @@ def _main(stack: ExitStack) -> None:
         unknown_members = [item for item in scenario.members if item not in catalog]
         if unknown_members:
             raise SystemExit(f"scenario {scenario.id} has unknown members: {unknown_members}")
+    if args.combine:
+        from variant_suite import combine_scenarios
+        combined = combine_scenarios(selected, catalog)
+        selected = [combined]
+        scenarios[combined.id] = combined
+    timed_members = {member for s in selected for member in s.members
+                     if (catalog[member].get("cleanup") or {}).get("shorten_grace")}
+    if timed_members and args.concurrency != 1:
+        raise SystemExit("preStop/grace fixtures require -c 1 because they are renewed between runs")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = (
@@ -1754,10 +1925,18 @@ def _main(stack: ExitStack) -> None:
         if not isinstance(loaded, dict):
             raise SystemExit(f"invalid checkpoint: {checkpoint_path}")
         stats: dict[str, Any] = loaded
-        if stats.get("scoring_manifest") != manifest:
-            raise RuntimeError("checkpoint scoring rules differ or were not recorded; use a new run and rescore old reports separately")
+        if stats.get("selected_scenarios") != [s.id for s in selected] or stats.get("repeat") != args.repeat:
+            raise RuntimeError("resume must preserve the original selected scenarios and repeat count")
+        accept_runtime_resume(stats, manifest, output_dir, allowed=args.resume_runtime_update)
         stats["resumed_at"] = datetime.now().isoformat()
         stats["concurrency"] = args.concurrency
+        stats.setdefault("resume_sessions", []).append({
+            "timestamp": stats["resumed_at"],
+            "previous_terminal_state": {k: stats[k] for k in
+                ("status", "error", "cleanup_error", "finished_at", "completed_at") if k in stats},
+        })
+        for key in ("error", "cleanup_error", "finished_at", "completed_at"):
+            stats.pop(key, None)
     else:
         stats = {
             "timestamp": datetime.now().isoformat(),
@@ -1811,16 +1990,6 @@ def _main(stack: ExitStack) -> None:
                     flush=True,
                 )
                 continue
-            if not args.reuse_existing:
-                cleanup_catalog_namespaces(catalog)
-                apply_scenario(scenario, catalog)
-                environment_active = True
-            for member in scenario.members:
-                wait_for_case_gate(catalog[member])
-            if scenario.settle_after_gate_seconds:
-                print(f"Telemetry settle: {scenario.settle_after_gate_seconds}s", flush=True)
-                time.sleep(scenario.settle_after_gate_seconds)
-
             scenario_dir = output_dir / scenario.id
             scenario_dir.mkdir(parents=True, exist_ok=True)
             scenario_stats = next(
@@ -1837,6 +2006,7 @@ def _main(stack: ExitStack) -> None:
                     "expected_root_causes": [asdict(item) for item in scenario.expected_root_causes],
                     "expected_runbooks": list(scenario.expected_runbooks),
                     "expected_evidence": [asdict(item) for item in scenario.expected_evidence],
+                    "runbook_targets": scenario.runbook_targets,
                     "runs": [],
                 }
                 stats.setdefault("scenarios", []).append(scenario_stats)
@@ -1847,45 +2017,117 @@ def _main(stack: ExitStack) -> None:
                 run_index for run_index in range(1, args.repeat + 1)
                 if run_index not in completed_indexes
             ]
+            scenario_stats["status"] = "preparing"
+            checkpoint()
+            # Cleanup errors remain fatal: do not contaminate the next scenario.
+            if not args.reuse_existing:
+                cleanup_catalog_namespaces(catalog)
+                environment_active = True
+            try:
+                if not args.reuse_existing:
+                    apply_scenario(scenario, catalog)
+                for member in scenario.members:
+                    wait_for_case_gate(catalog[member])
+            except (TimeoutError, subprocess.SubprocessError) as exc:
+                record_fixture_failure(scenario, catalog, scenario_dir, scenario_stats, exc, phase="setup")
+                scenario_stats["blocked_run_indexes"] = pending_indexes
+                checkpoint()
+                if not args.reuse_existing:
+                    cleanup_catalog_namespaces(catalog)
+                    environment_active = False
+                continue
+            scenario_stats.pop("blocked_run_indexes", None)
+            scenario_stats["status"] = "running"
+            if scenario.settle_after_gate_seconds:
+                print(f"Telemetry settle: {scenario.settle_after_gate_seconds}s", flush=True)
+                time.sleep(scenario.settle_after_gate_seconds)
             print(
                 f"Checkpoint: completed={len(completed_indexes)} "
                 f"pending={len(pending_indexes)} total={args.repeat}",
                 flush=True,
             )
             checkpoint()
+            def checked_run(run_index):
+                # A long run must not silently outlive a preStop/grace fixture.
+                if run_index > 1 and not args.reuse_existing:
+                    from variant_suite import fixture_manager
+                    for member in scenario.members:
+                        if member in timed_members:
+                            fixture_manager().clean(catalog[member])
+                            fixture_manager().deploy(catalog[member])
+                before = precheck_with_refresh(scenario, catalog, scenario_stats, run_index,
+                                               reuse_existing=args.reuse_existing)
+                atomic_write(scenario_dir / f"fixture-run-{run_index:02d}-before.json",
+                             json.dumps(before, ensure_ascii=False, indent=2))
+                scored = run_diagnosis_once(
+                    run_index=run_index, repeat=args.repeat, scenario=scenario,
+                    scenario_dir=scenario_dir, args=args,
+                )
+                scored["runtime_revision"] = hashlib.sha256(
+                    json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+                try:
+                    after = {m: _pod_for_case(catalog[m]) for m in scenario.members}
+                    atomic_write(scenario_dir / f"fixture-run-{run_index:02d}-after.json",
+                                 json.dumps(after, ensure_ascii=False, indent=2))
+                    for member in scenario.members:
+                        if before[member].get("metadata", {}).get("uid") != after[member].get("metadata", {}).get("uid"):
+                            raise RuntimeError(f"{member} Pod UID changed during diagnosis")
+                        if catalog[member].get("variant"):
+                            from variant_suite import fixture_manager
+                            if not fixture_manager().validate_variant(catalog[member], 60):
+                                raise RuntimeError(f"{member} cause gate no longer holds")
+                    scored["fixture_valid"] = True
+                except Exception as exc:
+                    scored["fixture_valid"] = False
+                    scored["fixture_error"] = str(exc)
+                    record_fixture_failure(scenario, catalog, scenario_dir, scenario_stats, exc,
+                                           phase=f"run-{run_index:02d}-postcheck")
+                    # Keep the response/score for audit but exclude invalid injections.
+                score_path = scenario_dir / f"run-{run_index:02d}-{scored.get('run_id')}" / "score.json"
+                if score_path.is_file():
+                    atomic_write(score_path, json.dumps(scored, ensure_ascii=False, indent=2))
+                return scored
             if args.concurrency == 1:
                 for run_index in pending_indexes:
-                    scored = run_diagnosis_once(
-                        run_index=run_index,
-                        repeat=args.repeat,
-                        scenario=scenario,
-                        scenario_dir=scenario_dir,
-                        args=args,
-                    )
+                    try:
+                        scored = checked_run(run_index)
+                    except TimeoutError as exc:
+                        record_fixture_failure(scenario, catalog, scenario_dir, scenario_stats, exc,
+                                               phase=f"run-{run_index:02d}-precheck")
+                        completed = {r["run_index"] for r in scenario_stats["runs"]}
+                        scenario_stats["blocked_run_indexes"] = [i for i in pending_indexes if i not in completed]
+                        checkpoint()
+                        break
                     scenario_stats["runs"].append(scored)
                     checkpoint()
             else:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
                     futures = {
                         pool.submit(
-                            run_diagnosis_once,
-                            run_index=run_index,
-                            repeat=args.repeat,
-                            scenario=scenario,
-                            scenario_dir=scenario_dir,
-                            args=args,
+                            checked_run, run_index,
                         ): run_index
                         for run_index in pending_indexes
                     }
                     for future in concurrent.futures.as_completed(futures):
-                        scored = future.result()
+                        try:
+                            scored = future.result()
+                        except TimeoutError as exc:
+                            record_fixture_failure(scenario, catalog, scenario_dir, scenario_stats, exc,
+                                                   phase=f"run-{futures[future]:02d}-precheck")
+                            scenario_stats.setdefault("blocked_run_indexes", []).append(futures[future])
+                            checkpoint()
+                            continue
                         scenario_stats["runs"].append(scored)
                         scenario_stats["runs"].sort(key=lambda item: int(item.get("run_index") or 0))
                         checkpoint()
             if not args.reuse_existing and not (args.keep_last and scenario_index == len(selected)):
                 cleanup_catalog_namespaces(catalog)
                 environment_active = False
-        stats["status"] = "completed"
+            if scenario_stats["status"] != "blocked":
+                scenario_stats["status"] = "completed"
+            checkpoint()
+        # A finished traversal with blocked/invalid samples is not a full pass.
+        stats["status"] = "completed_with_errors" if quality_incomplete(stats) else "completed"
     except BaseException as exc:
         stats["status"] = "failed"
         stats["error"] = f"{type(exc).__name__}: {exc}"
@@ -1896,11 +2138,14 @@ def _main(stack: ExitStack) -> None:
                 cleanup_catalog_namespaces(catalog)
             except Exception as exc:
                 print(f"Final cleanup failed: {exc}", file=sys.stderr)
+                stats["cleanup_error"] = str(exc)
+                stats["status"] = "failed"
         stats["finished_at"] = datetime.now().isoformat()
-        if stats["status"] == "completed":
+        if stats["status"] in {"completed", "completed_with_errors"}:
             stats["completed_at"] = stats["finished_at"]
         checkpoint()
         print(build_console_report(stats, output_dir), flush=True)
+    return stats["status"]
 
 
 if __name__ == "__main__":

@@ -1,0 +1,47 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "workload",
+    "labels": {
+      "aiops.lab/case-id": "v12"
+    }
+  },
+  "spec": {
+    "terminationGracePeriodSeconds": 3900,
+    "volumes": [
+      {
+        "name": "state",
+        "emptyDir": {
+          "sizeLimit": "1Mi"
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "app",
+        "command": [
+          "python3", "-u", "-c",
+          "from pathlib import Path\nimport time\nprint('application started', flush=True)\nwhile not Path('/state/teardown-requested').exists():\n time.sleep(0.2)"
+        ],
+        "volumeMounts": [
+          {
+            "name": "state",
+            "mountPath": "/state"
+          }
+        ],
+        "lifecycle": {
+          "preStop": {
+            "exec": {
+              "command": [
+                "python3",
+                "-c",
+                "from pathlib import Path\nimport time\nPath('/state/prestop-started').write_text('started')\ndeadline = time.monotonic() + 3600\nwhile time.monotonic() < deadline and not Path('/state/teardown-requested').exists():\n time.sleep(0.2)"
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

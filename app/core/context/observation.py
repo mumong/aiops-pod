@@ -1411,7 +1411,9 @@ class ObservationProcessor:
             "volumes": volumes,
             "events": events,
             "signals": cls._dedupe_lines(signals),
-            "summary_lines": cls._dedupe_lines(summary_lines),
+            # Repeated lines under different containers, resource groups or
+            # volumes are distinct facts. Preserve the section hierarchy.
+            "summary_lines": summary_lines,
         }
 
     @classmethod
@@ -1516,7 +1518,7 @@ class ObservationProcessor:
             if item.get("lines"):
                 compact["signals"] = item["lines"][:40]
             compact_containers.append(compact)
-        return compact_containers, cls._dedupe_lines(summary)[:60]
+        return compact_containers, summary[:60]
 
     @classmethod
     def _extract_describe_events(cls, raw: str, max_lines: int = 20) -> list[str]:
@@ -1560,7 +1562,7 @@ class ObservationProcessor:
                 selected.append(line.rstrip())
                 if current is not None:
                     current.setdefault("signals", []).append(line.rstrip())
-        return items, cls._dedupe_lines(selected)[:max_lines]
+        return items, selected[:max_lines]
 
     @staticmethod
     def _section_lines(raw: str, section_name: str, stop_at_next_section: bool = True) -> list[str]:
@@ -1722,7 +1724,9 @@ class ObservationProcessor:
             return {"status": "text_summarized"}, self._generic_summary("kubernetes_jq_query", raw), "k8s_jq"
 
     def _extract_yaml(self, raw: str) -> tuple[Dict[str, Any], str, str]:
-        if re.search(r"command failed|error from server|notfound|not found", raw, re.IGNORECASE):
+        # Error messages inside a successful YAML observation describe the
+        # workload; only a failed invocation should invalidate the result.
+        if self._is_command_failure(raw):
             structured = {"status": "command_failed", "raw_preview": raw[:1000]}
             summary = self._generic_summary("kubectl_get_yaml", raw)
             return structured, summary, "k8s_yaml"
@@ -1742,6 +1746,8 @@ class ObservationProcessor:
             return self._extract_pod_yaml(doc)
         if kind == "Secret":
             return self._extract_secret_yaml(doc)
+        if kind == "ConfigMap":
+            return self._extract_configmap_yaml(doc)
 
         metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
         structured = {
@@ -1789,6 +1795,10 @@ class ObservationProcessor:
                 "args": container.get("args") if isinstance(container.get("args"), list) else [],
                 "lifecycle": container.get("lifecycle") if isinstance(container.get("lifecycle"), dict) else {},
                 "resources": container.get("resources") or {},
+                "volumeMounts": [
+                    dict(mount) for mount in container.get("volumeMounts") or []
+                    if isinstance(mount, dict)
+                ],
             })
 
         init_containers = []
@@ -1828,9 +1838,24 @@ class ObservationProcessor:
             if not isinstance(volume, dict):
                 continue
             volume_info = {"name": volume.get("name")}
-            for source in ["configMap", "secret", "persistentVolumeClaim"]:
-                if isinstance(volume.get(source), dict):
-                    volume_info[source] = volume[source].get("name") or volume[source].get("claimName")
+            source_details = {}
+            for source, name_key in (
+                ("configMap", "name"),
+                ("secret", "secretName"),
+                ("persistentVolumeClaim", "claimName"),
+                ("hostPath", None),
+            ):
+                source_spec = volume.get(source)
+                if not isinstance(source_spec, dict):
+                    continue
+                # Keep the existing compact reference fields for consumers,
+                # plus original source keys/items/optional/path/type. Absence
+                # is not filled with a guessed Kubernetes default.
+                if name_key is not None:
+                    volume_info[source] = source_spec.get(name_key)
+                source_details[source] = dict(source_spec)
+            if source_details:
+                volume_info["source_details"] = source_details
             volumes.append(volume_info)
 
         conditions = []
@@ -1935,6 +1960,10 @@ class ObservationProcessor:
                     lines.append("  args: " + (args_text[:500] + ("..." if len(args_text) > 500 else "")))
                 if lifecycle:
                     lines.append("  lifecycle: " + json.dumps(lifecycle, ensure_ascii=False)[:800])
+                if item.get("resources"):
+                    lines.append("  resources: " + json.dumps(item["resources"], ensure_ascii=False))
+                if item.get("volumeMounts"):
+                    lines.append("  volumeMounts: " + json.dumps(item["volumeMounts"], ensure_ascii=False))
         if conditions:
             lines.append("conditions:")
             for item in conditions[:10]:
@@ -1962,6 +1991,35 @@ class ObservationProcessor:
         if volumes:
             lines.append("volumes:")
             lines.extend(f"- {json.dumps(item, ensure_ascii=False)}" for item in volumes[:20])
+        return structured, "\n".join(lines), "k8s_yaml"
+
+    def _extract_configmap_yaml(self, doc: Dict[str, Any]) -> tuple[Dict[str, Any], str, str]:
+        """Keep the observed key inventory, not potentially sensitive values.
+
+        A volume's items[].key must be compared against data and binaryData
+        keys. Metadata alone cannot establish whether the requested key exists.
+        """
+        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
+        binary_data = doc.get("binaryData") if isinstance(doc.get("binaryData"), dict) else {}
+        structured = {
+            "status": "yaml_summarized",
+            "kind": "ConfigMap",
+            "name": metadata.get("name"),
+            "namespace": metadata.get("namespace"),
+            "uid": metadata.get("uid"),
+            "resourceVersion": metadata.get("resourceVersion"),
+            "data_keys": sorted(str(key) for key in data),
+            "binary_data_keys": sorted(str(key) for key in binary_data),
+        }
+        lines = [
+            "kubectl_get_yaml 关键字段摘要:",
+            "kind: ConfigMap",
+            f"name: {metadata.get('name')}",
+            f"namespace: {metadata.get('namespace')}",
+            "data_keys: " + (", ".join(structured["data_keys"]) or "<none>"),
+            "binary_data_keys: " + (", ".join(structured["binary_data_keys"]) or "<none>"),
+        ]
         return structured, "\n".join(lines), "k8s_yaml"
 
     def _extract_secret_yaml(self, doc: Dict[str, Any]) -> tuple[Dict[str, Any], str, str]:

@@ -15,7 +15,7 @@ A2A_PUBLIC_HOST ?= $(shell kubectl get nodes -o jsonpath='{.items[0].status.addr
 A2A_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30801
 
 .PHONY: build build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
-	case-list case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean
+	case-list case-list-variants case-render case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean case-clean-variants
 
 build: build-main build-a2a
 
@@ -116,27 +116,28 @@ sync-version:
 #   make case-clean                 # 清理全部 case namespace（先安全释放 c11 finalizer）
 # ============================================================
 CASES_DIR := test/pod-anomaly-cases
+CASE_MANAGER := python3 $(CASES_DIR)/scripts/manage_cases.py
 
 case-list:
-	@python3 -c "import json; cases=json.load(open('$(CASES_DIR)/catalog.yaml'))['cases']; \
-	print(f\"{'ID':<5}{'名称':<32}{'NS':<15}{'runtime':<9}覆盖(k8s/prom/es/deepflow/tempo)\"); \
-	[print(f\"{c['id']:<5}{c['name']:<32}{c['namespace']:<15}{str(c['runtime']):<9}\" \
-	+ '/'.join(c['coverage'][k] for k in ('kubernetes','prometheus','elasticsearch','deepflow','tempo'))) for c in cases]"
+	@$(CASE_MANAGER) list
+
+case-list-variants:
+	@$(CASE_MANAGER) list --variants
+
+case-render:
+	@$(CASE_MANAGER) render --case "$(CASE)"
 
 case-deploy:
 	@test -n "$(CASE)" || (echo "用法: make case-deploy CASE=c07" && exit 1)
-	@dir=$$(python3 -c "import json; cases=json.load(open('$(CASES_DIR)/catalog.yaml'))['cases']; \
-	print(next(c['directory'] for c in cases if c['id']=='$(CASE)'))"); \
-	echo "🚀 部署 $(CASE): $$dir"; kubectl apply -k $(CASES_DIR)/$$dir
+	@$(CASE_MANAGER) deploy --case "$(CASE)"
 
 case-validate:
 	@test -n "$(CASE)" || (echo "用法: make case-validate CASE=c07" && exit 1)
-	$(CASES_DIR)/scripts/validate.sh --case $(CASE) --wait
+	@$(CASE_MANAGER) validate --case "$(CASE)"
 
 case-ask:
 	@test -n "$(CASE)" || (echo "用法: make case-ask CASE=c07" && exit 1)
-	@ns=$$(python3 -c "import json; cases=json.load(open('$(CASES_DIR)/catalog.yaml'))['cases']; \
-	print(next(c['namespace'] for c in cases if c['id']=='$(CASE)'))"); \
+	@ns=$$($(CASE_MANAGER) namespace --case "$(CASE)") || exit 1; \
 	pod=$$(kubectl get pods -n aiops -l app=aiops-copilot -o jsonpath='{.items[0].metadata.name}'); \
 	q=$$(python3 -c "import urllib.parse; print(urllib.parse.quote('请诊断 $$ns 命名空间中的异常 Pod，为什么异常？'))"); \
 	out=reports/case-$(CASE)-$$(date +%Y%m%d_%H%M%S).txt; mkdir -p reports; \
@@ -173,4 +174,11 @@ case-deploy-all:
 	$(CASES_DIR)/scripts/deploy-safe.sh
 
 case-clean:
-	$(CASES_DIR)/scripts/cleanup.sh
+	@if test -n "$(CASE)"; then \
+		$(CASE_MANAGER) clean --case "$(CASE)"; \
+	else \
+		$(CASES_DIR)/scripts/cleanup.sh; \
+	fi
+
+case-clean-variants:
+	@$(CASE_MANAGER) clean --variants

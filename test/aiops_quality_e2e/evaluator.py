@@ -60,6 +60,7 @@ CONFLICT_NEGATION_MARKERS = (
 @dataclass(frozen=True)
 class RootCauseExpectation:
     id: str
+    namespace: str = ""
     include_all: tuple[str, ...] = ()
     include_any: tuple[str, ...] = ()
     exclude_any: tuple[str, ...] = ()
@@ -78,6 +79,7 @@ class RootCauseExpectation:
                 aliases[str(key)] = tuple(str(item) for item in (items or []))
         return cls(
             id=str(value.get("id") or fallback_id),
+            namespace=str(value.get("namespace") or ""),
             include_all=tuple(str(item) for item in (value.get("include_all") or [])),
             include_any=tuple(str(item) for item in (value.get("include_any") or [])),
             exclude_any=tuple(str(item) for item in (value.get("exclude_any") or [])),
@@ -94,6 +96,7 @@ class RootClaim:
     text: str
     full_section: str
     inconclusive: bool = False
+    namespaces: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -521,6 +524,18 @@ def _claim_is_inconclusive(claim: str) -> bool:
 def extract_root_claims(report: str) -> list[RootClaim]:
     """Extract one final claim per current per-lane root-cause section."""
 
+    # Only use the overview's entity column to associate a lane with its Pod.
+    # A namespace mentioned in evidence or a comparison is not its owner.
+    owners: dict[str, set[str]] = {}
+    overview = re.search(r"(?ms)^##[^\n]*异常概览[^\n]*\n(.*?)(?=^## |\Z)", report or "")
+    for line in (overview.group(1) if overview else "").splitlines():
+        cells = line.strip().strip("|").split("|")
+        if len(cells) < 2:
+            continue
+        group = cells[0].strip().strip("`* ")
+        namespaces = re.findall(r"(?<![\w-])([a-z0-9][a-z0-9-]*)/[a-z0-9][a-z0-9.-]*", cells[1])
+        if namespaces:
+            owners.setdefault(group, set()).update(namespaces)
     heading = re.compile(
         r"(?im)^##\s*(?:🎯\s*)?根因分析(?:\s*[·:：-]\s*(?P<group>[^\n]+))?\s*$"
     )
@@ -534,12 +549,15 @@ def extract_root_claims(report: str) -> list[RootClaim]:
         claim = _claim_body(section)
         if not claim:
             continue
+        group = (match.group("group") or f"claim-{index + 1}").strip()
+        heading_namespaces = re.findall(r"(?<![\w-])([a-z0-9][a-z0-9-]*)/[a-z0-9][a-z0-9.-]*", group)
         claims.append(
             RootClaim(
-                group=(match.group("group") or f"claim-{index + 1}").strip(),
+                group=group,
                 text=claim,
                 full_section=section,
                 inconclusive=_claim_is_inconclusive(claim),
+                namespaces=tuple(sorted(owners.get(group, set()) | set(heading_namespaces))),
             )
         )
 
@@ -581,6 +599,8 @@ def match_expectation(expectation: RootCauseExpectation, claim: RootClaim) -> Ex
     )
     normalized = _normalize(primary_scope)
     reasons = []
+    if expectation.namespace and claim.namespaces != (expectation.namespace,):
+        reasons.append("entity_scope_missing_or_ambiguous")
     if expectation.mechanisms_any and not any(
         re.search(pattern, normalized, re.I) for pattern in expectation.mechanisms_any
     ):
@@ -619,7 +639,14 @@ def score_root_causes(
     best_matches: list[ExpectationMatch] = []
     matched_claim_groups: set[str] = set()
     for expectation in expectations:
-        candidates = [match_expectation(expectation, claim) for claim in claims]
+        candidates = [match_expectation(expectation, claim) for claim in claims
+                      if not expectation.namespace or claim.namespaces == (expectation.namespace,)]
+        if expectation.namespace and len(candidates) > 1:
+            best_matches.append(ExpectationMatch(
+                expectation_id=expectation.id, matched=False,
+                failure_reasons=("duplicate_target_conclusions",),
+            ))
+            continue
         if candidates:
             best = max(candidates, key=_candidate_rank)
         else:
@@ -628,6 +655,7 @@ def score_root_causes(
                 matched=False,
                 missing_all=expectation.include_all,
                 missing_any=expectation.include_any,
+                failure_reasons=("entity_scope_missing_or_ambiguous",) if expectation.namespace else (),
             )
         best_matches.append(best)
         if best.matched:

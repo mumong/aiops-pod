@@ -4,6 +4,12 @@
 可精确清理的案例；运行态案例会产生真实 Prometheus、Elasticsearch、DeepFlow 和 Tempo 证据。
 案例不会部署标准答案或固定 AIOps 查询流程。
 
+新增的“同状态、不同根因”Case 见 [变体部署说明](variants/README.md)。在 robusta 根目录使用
+`make case-list-variants` 查看，`make case-deploy CASE=c03-secret` 部署，
+`make case-validate CASE=c03-secret` 验证具体故障，`make case-clean CASE=c03-secret` 单独清理。
+新增变体不加入原 safe 批量部署；质量脚本通过 `--scenario expanded` 或 `--scenario variants` 显式选用。
+其 `case-validate` 只检查注入状态与原因，不代表三维遥测齐全。
+
 ## Prerequisites
 
 - 可访问目标集群的 `kubectl`，并有创建/删除 `aiops-case-01` 至 `aiops-case-11` 的权限。
@@ -12,7 +18,7 @@
 - c05 需要集群已安装 Multus 和 `NetworkAttachmentDefinition` CRD；它只引用 namespace 内不存在的
   secondary network，不创建或修改 CNI 配置。
 - OTLP/HTTP collector 默认可通过 `http://lgtm.monitor.svc:4318/v1/traces` 访问。
-- 本地使用 `python3`；所有离线测试只依赖 Python 标准库。
+- 部署管理脚本使用 `python3` 标准库；新增变体的离线回归测试使用项目 `.venv` 中的 pytest 和 PyYAML。
 
 先复制验证器配置，不要提交含凭据的 `config.env`：
 

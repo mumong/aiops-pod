@@ -7,7 +7,7 @@
 3. Runbook 覆盖率
 4. 证据完整度
 
-Ground Truth 和固定证据合同位于 `demo_cases.yaml`，只由本地评分器使用，
+基础 Ground Truth 和固定证据合同位于 `demo_cases.yaml`，变体根因规则位于 `variant_cases.yaml`，只由本地评分器使用，
 不会注入 AIOps Prompt，也不会发送给 Agent。
 
 ## 1. 运行方式
@@ -35,8 +35,52 @@ Ground Truth 和固定证据合同位于 `demo_cases.yaml`，只由本地评分�
 .venv/bin/python test/aiops_quality_e2e/run_quality_demo.py --scenario all -n 50 -c 5 --timeout 1200 --url http://10.2.0.48:30800 --output-dir testreports/aiops_quality_overnight
 ```
 
-脚本只清理 `test/pod-anomaly-cases/catalog.yaml` 明确声明的 `aiops-case-XX`
-namespace。c11 清理前会先释放指定 Pod 的 finalizer。
+脚本清理基础及变体目录明确声明的测试 namespace；变体必须带有本工具的所有权标签。
+c11 清理前释放指定测试 Pod 的 finalizer。不要在这些 namespace 存放业务资源。
+
+### 场景失败时是否继续（2026-09-10）
+
+- 部署或故障验收失败：保存 `场景目录/fixture-failure-*.json`（Pod、当前 UID 的 Events、失败原因），标记该场景 `blocked`；清理成功后继续下一个场景，不给 Agent 编造失败分数。
+- `c02-tag` 遇到明确的仓库证书错误会快速标记环境阻塞，不把 TLS 错误冒充 tag 不存在。该 Case 真正通过仍需解决节点的仓库信任前置条件；脚本不会修改节点证书或绕过 TLS。
+- 清理失败：仍停止并记录 `cleanup_error`，避免污染后续场景。不要仅为了“跑完”跳过资源隔离检查。
+- 后验收最多等待 60 秒，避免恰逢容器重启过渡状态时因 1 秒窗口误判。UID 改变或原因仍无法确认的样本继续排除，并保存诊断现场。
+- `runner.status.json` / `stats.json` 中 `completed` 表示任务完成，`completed_with_errors` 表示已遍历但仍有阻塞、失败或无效样本，`failed` 表示执行异常退出。有汇总表不等于全量通过，部分结果的质量阈值显示“待复核”。
+
+默认拒绝执行指纹不同的直接续跑；仅经审查确认属于生命周期修复时，可使用下述显式迁移方式，保留旧结果及更新记录。
+
+2026-09-14 稳定性补充：c02/c10 前置检查超时后，仅在单场景、非 `--reuse-existing` 模式下重新部署该测试场景一次，并重新通过原始故障门槛；不以历史事件替代当前故障。ConfigError 允许当前目标容器的 waiting.message 同时满足全部原因模式，替代已过期 Event。preStop/grace 清理的 exec 非零退出后会复查原 UID 的 Pod；仅确认已终止或不存在才继续清理，仍运行、对象替换及查询错误不会被忽略。
+
+### 同症状、多根因扩展
+
+`all` 保持原有 11 个基础 Case；`variants` 为 17 个新增变体；`expanded` 为全部 28 个。
+每个基础 Case 至少有 1 个变体。一个变体 Pod 只注入一种原因，多个变体可同时诊断。
+
+```bash
+# 扩展全量：28 个 Case 依次部署，每个测试 2 次，共 56 个逻辑请求
+.venv/bin/python test/aiops_quality_e2e/run_quality_demo.py --scenario expanded -n 2 -c 1 --timeout 1200
+
+# 轻量单独测试：两个原因依次部署，共 4 个请求
+.venv/bin/python test/aiops_quality_e2e/run_quality_demo.py --scenario c03-secret,c03-key -n 2 -c 1 --timeout 1200
+
+# 分组测试：同时存在两个异常 Pod，共 2 个请求，每次应分别诊断两个对象
+.venv/bin/python test/aiops_quality_e2e/run_quality_demo.py --scenario c03-secret,c03-key --combine -n 2 -c 1 --timeout 1200
+```
+
+所有请求仍只问 **“我的集群有什么问题？”**，不发送目标清单或根因答案。
+手动部署仍支持 `make case-deploy CASE=c09-port`，完整列表见 [变体说明](../pod-anomaly-cases/variants/README.md)。
+
+扩展评分逻辑：
+
+- 根因只读最终报告。通过概览中的“组 → 对象”绑定根因段，不允许跨 Pod 借用答案；对象归属缺失或含糊不判通过。
+- 每个变体要求具体机制，不能仅凭 Pending、OOMKilled 等症状名称通过。比如 CPU 超大请求不等于集群 CPU 利用率高。
+- 同时部署时，单次根因准确率 = 正确目标根因数 / 期望目标根因数；`passed` 另外记录是否全部通过。额外诊断、漏组与重复对象保留在 `group_audit`，不会被隐藏。
+- 同时部署的 Runbook 按最终报告引用行绑定对象，每个对象算覆盖率后取平均，不能从其他对象借用 Runbook。单独部署沿用原有报告及结构化选用记录口径。
+- 单次证据完整度沿用 `Σlane.plan_collected / Σlane.plan_total`。**多次运行分别算百分比后取算术平均；总体再对选中场景等权平均，不累加项数算总比例。**
+- 扩展全量中的每个变体是独立场景，故变体多的症状类别占更多场景权重；与原 11 场景基线不可不加说明直接对比。
+- 运行前后保留 Pod 快照并核对 UID、具体原因。注入失效单列并排除质量均值，原报告仍保存。有限删除宽限期的 preStop/grace 变体只支持 `-c 1`，每轮重新部署；评分结束后的清理步骤通过该测试 Pod 的 `/state/teardown-requested` 标记释放等待，不改变评分时的故障。
+
+状态、根因及 Runbook 自动评分仍是确定性规则，不是语义裁判模型；低分需要结合原报告人工复核。
+扩展固定证据合同仅作目标 Kubernetes 观测审计，不宣称沿用了基础场景完整遥测合同。
 
 ## 2. 断网保护和断点续跑
 
@@ -67,6 +111,10 @@ cat testreports/<report-dir>/runner.status.json
 已写入 `stats.json` 的运行不会重跑；没有完成评分的运行编号会重新执行。
 续跑要求评分脚本与所用 Case 配置的 SHA256 与原任务一致；旧任务没有版本指纹或规则已
 修改时，请新建测试目录，避免一个报告混入不同口径。脚本保留本机防重复启动锁，不提供跨主机调度。
+
+仅当人工确认改动只涉及 `run_quality_demo.py`、`scripts/manage_cases.py` 的部署、校验和清理逻辑，且评分、Case 定义和清单均未改变时，可在原续跑命令后加 `--resume-runtime-update`。这是显式审查入口，不是自动证明 runner 内所有改动都不影响评分。其他文件指纹或评分版本变化仍拒绝迁移。
+
+迁移先保存 `stats-before-runtime-resume-*.json`，在 `runtime_resume_audit` 记录前后指纹；新增结果带 `runtime_revision`。已记录的运行（包括被排除的无效样本）保持原样，只补缺失编号；场景与 `-n` 必须与原任务一致。历史故障归档保留，已恢复的旧错误不再充当当前任务状态。因环境阻塞而无法补齐的场景仍标记不完整。
 
 如果只调整了本地评分规则，可以直接对已落盘的 `report.md/events.json` 重新评分，
 不会调用 AIOps、不会部署或清理 Case：

@@ -1,0 +1,37 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "workload",
+    "labels": {
+      "aiops.lab/case-id": "v13"
+    }
+  },
+  "spec": {
+    "terminationGracePeriodSeconds": 3900,
+    "volumes": [{"name": "state", "emptyDir": {"sizeLimit": "1Mi"}}],
+    "containers": [
+      {
+        "name": "app",
+        "command": [
+          "python3",
+          "-u",
+          "-c",
+          "from pathlib import Path\nimport signal, time\nsignal.signal(signal.SIGTERM, lambda *_: print('SIGTERM received; waiting', flush=True))\nprint('application started', flush=True)\nwhile not Path('/state/teardown-requested').exists():\n time.sleep(0.2)"
+        ],
+        "volumeMounts": [{"name": "state", "mountPath": "/state"}],
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "python3",
+              "-c",
+              "import os; assert os.path.exists('/proc/1/status')"
+            ]
+          },
+          "initialDelaySeconds": 3,
+          "periodSeconds": 2
+        }
+      }
+    ]
+  }
+}
