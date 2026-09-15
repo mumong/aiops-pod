@@ -65,7 +65,6 @@ Docker network 并使用运维 Adapter 的容器名。
 项目标准命令只发布主 Agent 和同 Pod 的 A2A sidecar：
 
 ```bash
-make delete
 make build
 make push
 make deploy

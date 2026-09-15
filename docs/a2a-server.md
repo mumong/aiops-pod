@@ -236,9 +236,9 @@ Kubernetes Service 暴露：
 - 原 API：`30800 -> 8000`
 - A2A：`30801 -> 8001`
 
-集群外调用前，将 `deploy/k8s-simple.yaml` 中的 `A2A_PUBLIC_URL` 改为调用方
-真正能够访问的 URL，例如 `http://NODE_IP:30801`。Agent Card 中的 URL 必须与
-实际可访问协议地址一致。
+集群外调用前，通过 `make deploy A2A_PUBLIC_HOST=<节点IP> A2A_PUBLIC_URL=http://<节点IP>:30801`
+传入调用方真正能访问的地址。Makefile 会写回清单中的 `A2A_PUBLIC_URL`，只手改清单可能被覆盖。
+Agent Card 中的 URL 必须与实际可访问协议地址一致。
 
 如需鉴权，通过部署环境的 `aiops-secret` 添加 `A2A_API_TOKEN`，不要将真实 Token
 提交到仓库。
@@ -254,9 +254,11 @@ python3 -m venv .venv-a2a
 # 或完成上述环境安装后执行 make test-a2a
 ```
 
-覆盖 Agent Card、阻塞调用、SSE 流式调用、快速查询路由、Task 持久化、Task
+覆盖 Agent Card、阻塞调用、SSE 流式调用、快速查询路由、进程内 Task 存取、Task
 取消、鉴权、后端 SSE 解析与错误处理。
 
 当前 Kubernetes 清单固定 `replicas: 1`，因此首版使用 SDK 的
 `InMemoryTaskStore`。Pod 重启后历史 Task 会丢失；如后续扩展多副本，需要先切换为
 SDK 的数据库 TaskStore，不能仅靠增加 Deployment replicas。
+
+需要验证另一 Agent 转调本服务时，见[Agent-to-Agent 测试服务](a2a-agent-to-agent-test.md)。它是独立测试工具，不进入正式部署。

@@ -68,7 +68,7 @@ make case-validate CASE=c03-key
 
 新增变体的 `make case-validate` 复用原状态检查，并补充具体原因检查：
 
-- Pending／挂载／拉取／配置错误：当前 Pod UID 的事件必须匹配具体原因；仅看到异常状态不算通过。
+- Pending／挂载／拉取／配置错误：当前 Pod UID 的事件必须匹配具体原因；配置错误也允许当前容器 waiting.message 满足全部原因模式。仅看到异常状态不算通过。
 - CrashLoop：重启状态、退出码、上一实例的真实错误日志必须同时成立。
 - preStop：删除已触发、容器仍运行、无 finalizer，并通过 exec 确认 hook 已创建启动标记文件。
 - 长宽限期：删除已触发、无 finalizer／preStop、容器仍运行，并有实际接收 SIGTERM 的日志。
@@ -83,7 +83,7 @@ make case-validate CASE=c03-key
 - 仅用于专用测试集群。默认复用 `xnet.registry.io:8443/observability/python:3-alpine`；节点需能拉取该镜像。
 - CPU／内存变体通过不可满足的 request 阻止调度，不启动压力程序、不耗尽节点资源。准入策略或 ResourceQuota 直接拒绝 Pod 时，不算目标故障成立。
 - `c02-tag` 必须得到 manifest/tag 不存在的错误；DNS、TLS、鉴权或网络错误均不会通过验证。若该 tag 意外存在，需换一个确实不存在的 tag 并同步验证规则。
-- `c02-tag` 使用 `registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908`。2026-09-15 补测前已验证同仓库正常 tag `3.9` 返回 200、测试 tag 返回 404/MANIFEST_UNKNOWN，用于排除旧 xnet 仓库证书阻塞；节点仍须能访问该仓库，不关闭 TLS 校验。镜像来源变更后的结果应保存到独立补测目录，不直接覆盖历史样本。
+- `c02-tag` 使用 `registry.cn-hangzhou.aliyuncs.com/google_containers/pause:aiops-fixture-unavailable-20260908`。部署前可用同仓库正常 tag `3.9` 作对照，确认测试 tag 返回 404/MANIFEST_UNKNOWN；节点仍须能访问该仓库，不关闭 TLS 校验。镜像来源变更后的结果应保存到独立补测目录，不直接覆盖历史样本。
 - `c03-hostpath` 仅使用只读挂载和 `type: Directory`，不会创建宿主机目录；要求测试集群允许 hostPath，且指定路径不存在。它不加入原 safe 批量清单。
 - Terminating 变体在就绪后自动触发删除，不使用 finalizer。配置的故障等待约 60～65 分钟，实际删除仍取决于 kubelet；重新测试需先清理再部署。清理在评分结束后对自有测试 Pod 写入 `/state/teardown-requested`，让 preStop/进程主动结束等待，再缩短宽限期并确认资源删除。不再只依赖重复 `delete --grace-period=1`。
 - preStop 验证需要测试执行者的 `pods/exec` 权限，仅检查已有 Pod，不创建额外探测 Pod。
@@ -97,4 +97,4 @@ make case-validate CASE=c03-key
 | Sandbox：RuntimeClass 无效 | 不存在的 RuntimeClass 可能直接被准入拒绝；要稳定复现 Sandbox 创建失败，需有效 RuntimeClass 对象配合节点不支持的 handler，涉及集群级资源 |
 | Evicted：临时存储 | 需要受控存储配额及隔离环境，不能用填满共享节点磁盘的方式加入默认测试 |
 
-新增 Case 已做本地渲染及模拟状态／事件回归检查；真实集群的触发和数据采集仍需执行上述部署、验证流程确认。
+离线渲染及模拟状态／事件回归检查不能替代真实集群验收；每次测试仍需执行上述部署、验证流程确认。

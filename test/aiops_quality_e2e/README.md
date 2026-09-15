@@ -32,23 +32,23 @@
 `--scenario all` 依次测试 c01～c11：
 
 ```bash
-.venv/bin/python test/aiops_quality_e2e/run_quality_demo.py --scenario all -n 50 -c 5 --timeout 1200 --url http://10.2.0.48:30800 --output-dir testreports/aiops_quality_overnight
+.venv/bin/python test/aiops_quality_e2e/run_quality_demo.py --scenario all -n 50 -c 1 --timeout 1200 --url http://10.2.0.48:30800 --output-dir testreports/aiops_quality_overnight
 ```
 
 脚本清理基础及变体目录明确声明的测试 namespace；变体必须带有本工具的所有权标签。
 c11 清理前释放指定测试 Pod 的 finalizer。不要在这些 namespace 存放业务资源。
 
-### 场景失败时是否继续（2026-09-10）
+### 场景失败时是否继续
 
 - 部署或故障验收失败：保存 `场景目录/fixture-failure-*.json`（Pod、当前 UID 的 Events、失败原因），标记该场景 `blocked`；清理成功后继续下一个场景，不给 Agent 编造失败分数。
-- `c02-tag` 遇到明确的仓库证书错误会快速标记环境阻塞，不把 TLS 错误冒充 tag 不存在。该 Case 真正通过仍需解决节点的仓库信任前置条件；脚本不会修改节点证书或绕过 TLS。
+- `c02-tag` 使用可访问仓库中的不存在 tag。TLS、DNS、鉴权等错误属于环境阻塞，不能冒充 tag 不存在；脚本不会修改节点证书或绕过 TLS。镜像与前置条件见[变体说明](../pod-anomaly-cases/variants/README.md)。
 - 清理失败：仍停止并记录 `cleanup_error`，避免污染后续场景。不要仅为了“跑完”跳过资源隔离检查。
 - 后验收最多等待 60 秒，避免恰逢容器重启过渡状态时因 1 秒窗口误判。UID 改变或原因仍无法确认的样本继续排除，并保存诊断现场。
 - `runner.status.json` / `stats.json` 中 `completed` 表示任务完成，`completed_with_errors` 表示已遍历但仍有阻塞、失败或无效样本，`failed` 表示执行异常退出。有汇总表不等于全量通过，部分结果的质量阈值显示“待复核”。
 
 默认拒绝执行指纹不同的直接续跑；仅经审查确认属于生命周期修复时，可使用下述显式迁移方式，保留旧结果及更新记录。
 
-2026-09-14 稳定性补充：c02/c10 前置检查超时后，仅在单场景、非 `--reuse-existing` 模式下重新部署该测试场景一次，并重新通过原始故障门槛；不以历史事件替代当前故障。ConfigError 允许当前目标容器的 waiting.message 同时满足全部原因模式，替代已过期 Event。preStop/grace 清理的 exec 非零退出后会复查原 UID 的 Pod；仅确认已终止或不存在才继续清理，仍运行、对象替换及查询错误不会被忽略。
+c02/c10 前置检查超时后，仅在单场景、非 `--reuse-existing` 模式下重新部署该测试场景一次，并重新通过原始故障门槛；不以历史事件替代当前故障。ConfigError 允许当前目标容器的 waiting.message 同时满足全部原因模式，替代已过期 Event。preStop/grace 清理的 exec 非零退出后会复查原 UID 的 Pod；仅确认已终止或不存在才继续清理，仍运行、对象替换及查询错误不会被忽略。
 
 ### 同症状、多根因扩展
 
@@ -105,7 +105,7 @@ cat testreports/<report-dir>/runner.status.json
 `stats.json` 在每次运行完成后更新。中断后使用同一输出目录续跑：
 
 ```bash
-.venv/bin/python test/aiops_quality_e2e/run_quality_demo.py --scenario all -n 50 -c 5 --timeout 1200 --url http://10.2.0.48:30800 --output-dir testreports/aiops_quality_overnight --resume
+.venv/bin/python test/aiops_quality_e2e/run_quality_demo.py --scenario all -n 50 -c 1 --timeout 1200 --url http://10.2.0.48:30800 --output-dir testreports/aiops_quality_overnight --resume
 ```
 
 已写入 `stats.json` 的运行不会重跑；没有完成评分的运行编号会重新执行。
@@ -141,6 +141,9 @@ testreports/aiops_quality_<scenarios>_<timestamp>/
 ├── overview.txt                       # 与终端一致的质量总览
 ├── stats.json                         # 断点和结构化总结果
 ├── cXX/readme.md                      # 该 Case 四项指标 + 每次评分 + 原报告链接
+├── cXX/fixture-run-*-before.json       # 诊断前 Pod 快照，用于确认注入和对象身份
+├── cXX/fixture-run-*-after.json        # 诊断后快照，不是报错或修复记录
+├── cXX/fixture-failure-*.json          # 部署/故障门槛未满足时的审计现场
 └── cXX/run-<NN>-<run_id>/
     ├── report.md                      # AIOps 最终诊断报告
     ├── score.json                     # 本次评分和命中明细
@@ -152,6 +155,9 @@ testreports/aiops_quality_<scenarios>_<timestamp>/
 ```
 
 ## 4. 指标统计口径
+
+以下“成功运行”均须同时满足样本有效性要求；故障注入失效的样本保留原报告和原分数，
+但排除质量均值。无有效样本的 Case 显示 N/A，不以零分或满分补齐；整体会标记不完整。
 
 先打开报告目录的 `readme.md`，点击 c01～c11 可进入对应 Case 明细。
 这两个层级只展示 `stats.json` 中已有分数，生成报告不会重评分。旧目录也可以只补生成
@@ -191,7 +197,7 @@ Case 内 MTTR 是成功运行耗时的算术平均值，总体再对各 Case 等
 每个 Case 先独立计算：
 
 ```text
-Case 根因准确率 = 本 Case 根因验收通过数 / 本 Case 成功返回运行数
+Case 根因准确率 = 本 Case 有效且根因通过的运行数 / 本 Case 有效成功运行数
 总体根因准确率 = Σ各 Case 根因准确率 / Case 数
 ```
 
@@ -208,7 +214,7 @@ aliases 只用于真实同义表达；模糊的“可能 OOM”或根因级“�
 这是确定性的规则评分，不是对整篇报告每条因果解释的事实核验；直接根因命中不代表所有
 附加解释均正确。历史回放分数变化也不能替代独立人工标注。
 
-`2026-09-07.4` 按主要根因语义验收：c09 必须明确 Readiness 异常和 503，支持“返回
+c09 必须明确 Readiness 异常和 503，支持“返回
 503 状态码”等等价表达，不再强制结论写出 `/ready`。端点候选表述的小瑕疵不单独使整条
 根因失败；明确将错误路径配置、Liveness 或 OOM 判作该 Case 根因仍不通过。c07 中
 “非资源耗尽导致的 OOMKilled”是排除语句，不作为根因冲突。根因评分仍只读取最终报告，
@@ -265,8 +271,8 @@ plan_collected
 ```
 
 例如两次运行分别为 4/5=80% 和 6/9=66.7%，总证据完整度为
-`(80% + 66.7%) / 2 = 73.35%`。请求失败不进入证据完整度分母，另行统计请求成功率。
-实际使用未四舍五入的单次比例计算；上述精确结果为 73.333…%。无有效计划或归档与回退
+`(80% + 66.666…%) / 2 = 73.333…%`。请求失败不进入证据完整度分母，另行统计请求成功率。
+实际使用未四舍五入的单次比例计算。无有效计划或归档与回退
 指标均缺失时显示 N/A，不按 100% 处理，也不进入均值；汇总会提示有效样本数不足。
 
 测试包含多个 Case 时，再对各 Case 的证据完整度做等权算术平均。根因准确率、
