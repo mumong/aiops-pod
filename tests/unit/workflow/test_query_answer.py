@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from app.core.workflow.graph import build_diagnosis_workflow
 from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
+from app.core.workflow.nodes.query_answer import parse_query_answer
 from app.core.workflow.executor import WorkflowExecutor
 
 
@@ -123,6 +124,29 @@ def test_structured_answer_preserves_frontend_markdown():
     result = node.execute({"question": "什么是 Pod？"})
     assert result["conclusion"] == answer["answer"]
     assert result["query_answer"] == answer
+
+
+def test_unescaped_log_json_is_recovered_without_rewriting_evidence():
+    markdown = '## OOM\n\n```json\n{"message":"memory allocation advanced","allocated_mib":48}\n```\n路径 C:\\tmp'
+    data = {"intent": "诊断", "scope": "pod", "status": "answered", "answer": markdown,
+            "evidence_refs": ["/archive/one.raw"], "runbooks": [], "missing": []}
+    raw = json.dumps(data, ensure_ascii=False)
+    bad = raw.replace('\\"message\\"', '"message"').replace('\\"memory allocation advanced\\"', '"memory allocation advanced"')
+    parsed, repaired = parse_query_answer(bad)
+    assert repaired is True
+    assert parsed == data
+    parsed, repaired = parse_query_answer(raw)
+    assert repaired is False and parsed == data
+
+
+def test_invalid_json_envelope_never_leaks_into_markdown():
+    node = QueryConclusionNode()
+    node._call_llm = lambda *a, **kw: (SimpleNamespace(result='{"answer":"unfinished'), [])
+    result = node.execute({"question": "诊断", "query_draft": "已观察到 OOMKilled，仍需确认原因。"})
+    assert result['query_answer'] is None
+    assert '已观察到 OOMKilled' in result['conclusion']
+    assert '格式异常' in result['conclusion']
+    assert '{"answer"' not in result['conclusion']
 
 
 def test_all_installed_runbooks_available_without_mutating_shared_tool(tmp_path):

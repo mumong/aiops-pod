@@ -78,7 +78,7 @@ def build_agent_card(settings: AdapterSettings) -> AgentCard:
                 name="Kubernetes and metrics query",
                 description=(
                     "Query Kubernetes resource state and observability metrics. "
-                    "Clients may set request metadata aiops_mode=query for the direct fast path."
+                    "Defaults to autonomous /query analysis; set aiops_mode=diagnosis for the legacy /ask workflow."
                 ),
                 tags=["kubernetes", "metrics", "prometheus", "query"],
                 examples=["查询当前集群各 Node 的 CPU 和内存使用率。"],

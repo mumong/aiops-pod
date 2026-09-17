@@ -25,7 +25,7 @@ from app.core.workflow.state import WorkflowState
 from app.core.workflow.graph import build_diagnosis_workflow
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.metrics import WorkflowMetrics
-from app.core.workflow.stream_contract import project_parallel_tool_event
+from app.core.workflow.stream_contract import project_parallel_tool_event, project_query_tool_event
 from app.core.holmes.log_listener import create_log_listener, HolmesLogListener
 from app.core.workflow.reporter import (
     save_report as _save_report_fn,
@@ -518,6 +518,7 @@ class WorkflowExecutor:
                         "iteration": data.get("iteration"),
                         "ts_ms": data.get("ts_ms", int(time.time() * 1000)),
                         **project_parallel_tool_event(data),
+                        **(project_query_tool_event(data) if node_id == "query_collect" else {}),
                     }
                     seq += 1
                     last_stream_event_ts = time.time()

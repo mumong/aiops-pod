@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from typing import Any, Mapping
 
 from pydantic import BaseModel
@@ -11,6 +13,33 @@ from app.core.workflow.schemas import GroupEntity
 
 
 PARALLEL_EVIDENCE_STREAM_CONTRACT_VERSION = "aiops.parallel-evidence-stream.v1"
+
+
+def project_query_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Presentation-only projection; never changes the model's observation."""
+    if event.get("type") not in {"tool_start", "tool_result"}:
+        return {}
+    out = {key: event[key] for key in ("tool_call_id", "tool_args", "raw_ref") if event.get(key) is not None}
+    if event.get("type") != "tool_result":
+        return out
+    raw = str(event.get("result") or event.get("result_preview") or "")
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        parsed = {}
+    structured = parsed if isinstance(parsed, dict) and "coverage" in parsed else _mapping(event.get("structured"))
+    facts = structured.get("facts") or []
+    out["tool_display"] = {
+        "coverage": structured.get("coverage"),
+        "query": structured.get("query"),
+        "measurements": [{key: fact.get(key) for key in ("name", "value", "unit", "observed_at", "labels")}
+                         for fact in facts[:20] if isinstance(fact, dict)],
+        "measurements_omitted": max(0, len(facts) - 20),
+        "result_excerpt": raw[:12000],
+        "result_excerpt_truncated": len(raw) > 12000,
+        "raw_ref": event.get("raw_ref"),
+    }
+    return out
 
 
 class ParallelEvidenceStreamContext(BaseModel):

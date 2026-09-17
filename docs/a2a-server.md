@@ -127,8 +127,7 @@ curl -N http://127.0.0.1:8001/ \
 
 ### 3.4 快速查询模式
 
-默认走完整 `/ask` 诊断。只查询指标或资源状态时，在请求 metadata 中指定
-`aiops_mode=query`，Adapter 会调用现有 `/query` 快路径：
+默认走 `/query` 两节点自主运维分析，支持查询和故障分析。需要旧的 `/ask` 完整分组诊断时，在请求 metadata 中指定 `aiops_mode=diagnosis`（或 `ask`）。显式 `aiops_mode=query` 仍受支持：
 
 ```json
 {

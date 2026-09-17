@@ -158,7 +158,17 @@ async def test_message_send_returns_completed_task_and_markdown_artifact():
     assert result["artifacts"][0]["name"] == "kubernetes-aiops-report.md"
     assert result["artifacts"][0]["parts"][0]["text"].startswith("# 诊断报告")
     assert result["artifacts"][0]["metadata"]["backend_run_id"] == "backend-run-1"
-    assert backend.calls == [{"question": "请诊断异常 Pod", "mode": "diagnosis"}]
+    assert backend.calls == [{"question": "请诊断异常 Pod", "mode": "query"}]
+
+
+@pytest.mark.asyncio
+async def test_explicit_diagnosis_metadata_preserves_ask_route():
+    backend = FakeBackend()
+    app = create_app(_settings(), backend_client=backend)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://a2a.test") as client:
+        response = await client.post("/", json=_message_request(metadata={"aiops_mode": "diagnosis"}))
+    assert response.status_code == 200
+    assert backend.calls[0]['mode'] == 'diagnosis'
 
 
 @pytest.mark.asyncio

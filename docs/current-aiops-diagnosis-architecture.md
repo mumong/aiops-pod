@@ -104,6 +104,21 @@ read_context_archive 接收已知 archive_path，按 offset / length 返回文�
 
 ### QUERY 原文输入与自动压缩
 
+QUERY 当前为单个自主采集 Agent → Conclusion，不执行 ASK 的异常组扇出；同轮多个工具调用可并发。可观测性工具 `execute_pod_promql`、`query_pod_logs`、`query_pod_tracing`、`query_pod_topology` 均可用，是否调用由任务和已获得证据决定，不强制三维采集。其他能力包括只读 Kubernetes 状态/日志/过滤查询、通用 Prometheus、Runbook 和归档回读；任意 shell 与创建测试 Pod 工具不暴露。
+
+本次部署核对的 QUERY 工具共 36 个（实际以已加载工具与白名单的交集为准）：
+
+| 类别 | 工具 |
+|---|---|
+| Kubernetes 状态与关联 | kubectl_get_by_name、kubectl_get_by_kind_in_namespace、kubectl_get_by_kind_in_cluster、kubectl_find_resource、kubectl_get_yaml、kubectl_describe、kubectl_events、kubectl_lineage_children、kubectl_lineage_parents |
+| Kubernetes 日志 | kubectl_logs、kubectl_previous_logs、kubectl_logs_all_containers、kubectl_previous_logs_all_containers、kubectl_container_logs、kubectl_container_previous_logs、kubectl_logs_grep、kubectl_logs_all_containers_grep |
+| 过滤与统计 | kubernetes_count、kubernetes_jq_query、kubernetes_tabular_query |
+| 通用 Prometheus | execute_prometheus_instant_query、execute_prometheus_range_query、get_metric_names、get_metric_metadata、get_all_labels、get_label_values、get_series、get_prometheus_target、list_prometheus_rules |
+| Pod 可观测性 | execute_pod_promql、query_pod_logs、query_pod_tracing、query_pod_topology |
+| 辅助 | fetch_runbook、read_context_archive、TodoWrite |
+
+Conclusion 先验证 QueryAnswer JSON；仅对 answer 字符串内未转义双引号/换行实施局部修复，要求外层字段完整且恢复结果唯一，不改写诊断事实。格式无法安全恢复时提示异常并展示可用分析草稿，不把 JSON 外壳当 Markdown。原文及格式处理状态写入 `conclusion/render_audit.json`。前端代码块由单层 pre/code 渲染。
+
 当前部署将 `workflow.context_compaction.hard_guard_input_ratio` 覆盖为 0.90。54K 窗口下仍预留 6,000 输出、2,000 安全及 256 估算余量，实际主调用输入触发线约 45,744 tokens；以下 0.72 是代码默认值，不是当前部署值。摘要子请求的保守分段预算不随主调用触发比例提高。
 
 `AIOPS_QUERY_RAW_TOOL_OUTPUT=true` 仅作用于 QUERY 的请求级客户端，默认关闭。启用后默认保留工具原文输入，但以下名单在单次返回超过 6,000 字符时使用定向摘要：`get_metric_names`、`kubectl_describe`、`kubectl_events`、`kubectl_get_by_kind_in_cluster`、`kubernetes_tabular_query`、`execute_prometheus_instant_query`、`execute_prometheus_range_query`、`execute_pod_promql`。名单位于 `ObservationProcessor.QUERY_SUMMARY_TOOLS`；events/range 为预防项，近期统计未覆盖独立调用。短结果、其他工具、Runbook 和归档回读保持原文，不因本名单改变 ASK。

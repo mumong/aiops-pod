@@ -26,6 +26,7 @@ class AiopsAgentExecutor(AgentExecutor):
         "parallel_evidence": "正在并行采集各异常对象的证据",
         "rca": "正在分析根因",
         "conclusion": "正在生成诊断报告",
+        "query_collect": "正在根据问题自主查询与分析",
     }
 
     def __init__(self, backend: AiopsBackendClient) -> None:
@@ -35,7 +36,7 @@ class AiopsAgentExecutor(AgentExecutor):
 
     @staticmethod
     def _mode(context: RequestContext) -> str:
-        """Allow an optional A2A metadata hint; diagnosis remains the safe default."""
+        """Default to autonomous QUERY; explicit diagnosis/ask retains the legacy route."""
         candidates: list[Any] = [
             context.metadata.get("aiops_mode"),
             context.metadata.get("mode"),
@@ -47,10 +48,13 @@ class AiopsAgentExecutor(AgentExecutor):
                     context.message.metadata.get("mode"),
                 ]
             )
-        requested_query = any(
-            str(value).lower() == "query" for value in candidates
-        )
-        return "query" if requested_query else "diagnosis"
+        for value in candidates:
+            mode = str(value or "").strip().lower()
+            if mode == "query":
+                return "query"
+            if mode in {"diagnosis", "ask"}:
+                return "diagnosis"
+        return "query"
 
     @staticmethod
     def _message(text: str, context: RequestContext):
@@ -97,7 +101,7 @@ class AiopsAgentExecutor(AgentExecutor):
                 await updater.submit(self._message("任务已提交。", context))
             await updater.start_work(
                 self._message(
-                    "正在执行快速查询。" if mode == "query" else "正在执行 Kubernetes AIOps 诊断。",
+                    "正在执行自主运维查询与分析。" if mode == "query" else "正在执行 Kubernetes AIOps 诊断。",
                     context,
                 )
             )
@@ -117,6 +121,10 @@ class AiopsAgentExecutor(AgentExecutor):
                     label = self._PROGRESS_LABELS.get(node)
                     if label:
                         await updater.start_work(self._message(label, context))
+                elif event.name == "thinking" and event.data.get("thinking_type") == "runtime_status":
+                    content = str(event.data.get("content") or "")
+                    if content:
+                        await updater.start_work(self._message(content, context))
                 elif event.name == "final":
                     final_answer = str(event.data.get("answer") or "").strip()
                     if final_answer:
