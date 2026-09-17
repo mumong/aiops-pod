@@ -25,7 +25,11 @@ class WorkflowState(TypedDict, total=False):
     """
     # ========== 输入 ==========
     question: str
+    original_question: str
     run_id: str
+    request_contract: Optional[Dict[str, Any]]
+    request_route: Optional[str]
+    focused_result: Optional[Dict[str, Any]]
     
     # ========== 节点1 输出：问题定位 ==========
     layer: Optional[Layer]               # 主层级（根因最深的层级，用于路由和下游处理）
@@ -78,6 +82,10 @@ class WorkflowState(TypedDict, total=False):
     primary_runbook_id: Optional[str]    # AI 判定的核心 Runbook（与诊断结论最匹配的）
     
     # ========== 节点4 输出：汇总总结 ==========
+    query_draft: Optional[str]           # QUERY Agent 草稿；不是已核验事实
+    query_session_context: Optional[Dict[str, Any]]
+    query_session_memory: Optional[Dict[str, Any]]
+    query_answer: Optional[Dict[str, Any]]  # 模型结构化回答，非程序语义验收
     conclusion: Optional[str]            # 最终报告
     conclusion_formatted: Optional[str]  # 格式化后的 Markdown
     remediation_plan: Optional[Dict[str, Any]]  # conclusion 中提取的结构化修复计划

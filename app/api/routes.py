@@ -19,12 +19,14 @@ API 使用示例：
 """
 import logging
 import os
+import re
+import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Generator
 from urllib.parse import unquote
 
-from fastapi import HTTPException, Query, Form
+from fastapi import HTTPException, Query, Form, Request
 from fastapi.responses import StreamingResponse, PlainTextResponse
 
 from app.core.service import get_service
@@ -146,10 +148,12 @@ def register_routes(app):
 
     @app.get("/query")
     async def query_get(
+        request: Request,
         q: str = Query(..., description="查询内容", example="集群 CPU 和内存使用率是多少"),
         stream: bool = Query(True, description="是否流式输出"),
         format: str = Query("text", description="输出格式: text(默认) 或 sse"),
         max_steps: int = Query(20, description="最大执行步数", ge=1, le=100),
+        session_id: Optional[str] = Query(None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
     ):
         question = fix_double_encoding(q)
         logger.info(f"📝 收到轻量查询: {question[:80]}...")
@@ -158,16 +162,21 @@ def register_routes(app):
             "query_mode": "direct",
             "nodes": {"layer": True, "evidence": False, "rca": False, "conclusion": True},
         }
+        owner = _query_session_owner(request, session_id, overrides)
         if stream:
-            return _stream_response(question, format, max_steps, overrides, "工作流查询模式")
-        return await _sync_response(question, max_steps, overrides, "工作流查询模式")
+            response = _stream_response(question, format, max_steps, overrides, "工作流查询模式")
+        else:
+            response = await _sync_response(question, max_steps, overrides, "工作流查询模式")
+        return _query_session_cookie(request, response, owner)
 
     @app.post("/query")
     async def query_post(
+        request: Request,
         q: str = Form(..., description="查询内容"),
         stream: bool = Form(True, description="是否流式输出"),
         format: str = Form("text", description="输出格式"),
         max_steps: int = Form(20, description="最大执行步数"),
+        session_id: Optional[str] = Form(None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
     ):
         question = fix_double_encoding(q)
         logger.info(f"📝 收到轻量查询 (POST): {question[:80]}...")
@@ -176,9 +185,27 @@ def register_routes(app):
             "query_mode": "direct",
             "nodes": {"layer": True, "evidence": False, "rca": False, "conclusion": True},
         }
+        owner = _query_session_owner(request, session_id, overrides)
         if stream:
-            return _stream_response(question, format, max_steps, overrides, "工作流查询模式")
-        return await _sync_response(question, max_steps, overrides, "工作流查询模式")
+            response = _stream_response(question, format, max_steps, overrides, "工作流查询模式")
+        else:
+            response = await _sync_response(question, max_steps, overrides, "工作流查询模式")
+        return _query_session_cookie(request, response, owner)
+
+    def _query_session_owner(request, session_id, overrides):
+        if not session_id:
+            return None
+        owner = request.cookies.get("aiops_query_owner", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", owner):
+            owner = secrets.token_hex(32)
+        overrides["_query_session_key"] = (owner, session_id)
+        return owner
+
+    def _query_session_cookie(request, response, owner):
+        if owner:
+            response.set_cookie("aiops_query_owner", owner, httponly=True, samesite="strict",
+                                secure=request.url.scheme == "https", max_age=86400, path="/")
+        return response
     
     # =========================================================================
     # 便捷别名路由
@@ -676,7 +703,7 @@ def register_routes(app):
 
     def _diagnosis_workflow_overrides() -> dict:
         overrides = {
-            "query_mode": "full",
+            "query_mode": "auto",
             "nodes": {"layer": True, "evidence": True, "rca": True, "conclusion": True},
         }
         return overrides

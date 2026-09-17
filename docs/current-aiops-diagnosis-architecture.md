@@ -22,7 +22,22 @@ MCP 查询和前端实现在独立仓库，不属于本仓库运行代码。接�
 
 ## 请求与 Pod 分组
 
-/ask 强制完整诊断模式；/query 使用轻量查询路径。Layer 根据当前 Kubernetes 状态确定异常目标，无异常时可直接汇总。
+`/ask` 使用任务路由（`query_mode=auto`）；`/query` 使用两个节点：自主查询 Agent → Conclusion Agent。
+
+`/query` 不再用 Prometheus JSON 兜底解析作为最终答案。`query_collect` 根据原问题自主调用只读工具，提供已安装 Runbook 的完整目录并按需读取正文。Conclusion 接收原问题、分析草稿和本次工具结果（含来源引用），不调用工具，生成 `QueryAnswer` JSON：intent、scope、status、answer、evidence_refs、runbooks、missing。最终事件保留 `answer` Markdown 兼容前端，另提供 `query_answer`。JSON 格式失败保留原模型文本，结构化字段为 null；不以格式失败判定没有证据。不对答案做程序级语义或引用校验，正常展示不代表结论已核验。查询不强制指标表、三维采集或诊断模板。保留归档、预算、取消和只读边界，不追加诊断质量评分，不自动修复。实现见 [query_answer.py](../app/core/workflow/nodes/query_answer.py)。
+
+- `request_router` 在查询环境前生成任务合同，保留任务类型、对象范围、时间要求和请求输出。只有明确的全局综合检查进入原诊断图。
+- 命名空间检查、指定 Pod 分析、指标/日志查询和组合问题进入 `focused`。该节点先自主调用只读工具，再仅根据本次工具记录整理结构化回答；不是固定工具序列。两个图节点不意味着只有两次模型调用。
+- 歧义返回澄清；路由失败停止，不默认全局扫描。用户要求写操作时不执行变更。
+- 聚焦路径不加载完整诊断提示词，不执行三维基线或自动异常分组。工具出现异常对象不会改变请求路由。
+
+`/ask` 的 focused 路径目前保留工具归档、预算、取消、输出结构与来源校验；查询范围由提示词指导，不再挂载 namespace/PromQL 参数拦截。引用存在校验只证明出处存在，不证明数值转换、解释或因果判断正确。NotFound、空结果和失败记录可用于说明不存在或采集限制，不能自动成为健康证据。轻量结果不追加诊断质量评分，也不进入自动修复。
+
+聚焦表格摘要按源顺序展示，不按异常状态过滤健康对象；结构化归档保留完整表格行，摘要注明省略数量并提供模型可见的原文回读地址。原诊断路径保留异常优先展示。发现的对象不再兜底成为“用户明确指定的 Pod”；分组子任务保留原始用户问题。
+
+实现入口：[request_router.py](../app/core/workflow/nodes/request_router.py)、[focused.py](../app/core/workflow/nodes/focused.py)、[task_tools.py](../app/core/workflow/task_tools.py)。真实模型/MCP 验证入口：[verify_task_routing.py](../scripts/verify_task_routing.py)，仅做只读请求，不部署异常环境；结果中 `route_pass` 仅代表路由通过，回答需单独核对。
+
+进入完整诊断图后，Layer 根据当前 Kubernetes 状态确定异常目标，无异常时可直接汇总。
 
 默认 workflow.evidence.parallel.threshold=0，任何已确认异常 Pod（包括只有一个）都进入独立 lane，而不是“超过两个异常才并行”。每条 lane 使用本组实体、独立采证上下文、正式 RootCauseAnalyzer 和归档 ID；完成后直达 Conclusion，不再进行一次全局 RCA。
 
@@ -78,6 +93,36 @@ read_context_archive 接收已知 archive_path，按 offset / length 返回文�
 回读工具主要执行文件路径边界检查，不等同于同组事实过滤器；模型是否回读、是否继续读取遗漏部分取决于执行过程。归档中不存在的历史数据不能靠引用恢复。
 
 ## RCA 与最终报告的边界
+
+### QUERY 会话短期记忆
+
+`/query` GET/POST 可传 `session_id`（16–128 位字母、数字、下划线或连字符）；不传保持单次请求。浏览器每个聊天生成随机 ID，同一聊天复用，“新建会话”更换。后端用 HttpOnly、SameSite=Strict 的匿名 Cookie 加 session_id 定位独立缓存；不是用户登录鉴权，生产环境仍需接入身份认证及 HTTPS。命令行续聊需要同时保留 Cookie 和 session_id。ASK 不读写此缓存。
+
+进程内 TTL/LRU 缓存默认保留 30 分钟、最多 64 个会话、每会话最多 256 KiB 序列化内容。同一会话并发请求拒绝，不交错写入；最终结果产生后原子提交，异常或取消不覆盖旧快照，超容量明确提示未保存。历史保存用户问题、最终回答、必要观测与来源、时间及压缩后的工作记忆；最新问题优先，历史指标不能作为当前值。预算不足时复用意图导向状态压缩，后续轮次使用替换后的工作摘要。
+
+这是单进程单副本验证方案：重启、过期或容量淘汰后记忆清空；浏览器仍显示旧对话不代表服务器记忆仍在。多副本/多 worker 需改共享存储。参考 [LangGraph Memory](https://docs.langchain.com/oss/python/langgraph/add-memory) 的 thread_id＋状态持久化及 [LangChain Short-term memory](https://docs.langchain.com/oss/python/langchain/short-term-memory) 的状态整理机制。本项目保留每轮独立工作流与 run_id，通过有界快照缓存实现会话延续，而非直接缓存整个诊断工作流检查点。
+
+### QUERY 原文输入与自动压缩
+
+当前部署将 `workflow.context_compaction.hard_guard_input_ratio` 覆盖为 0.90。54K 窗口下仍预留 6,000 输出、2,000 安全及 256 估算余量，实际主调用输入触发线约 45,744 tokens；以下 0.72 是代码默认值，不是当前部署值。摘要子请求的保守分段预算不随主调用触发比例提高。
+
+`AIOPS_QUERY_RAW_TOOL_OUTPUT=true` 仅作用于 QUERY 的请求级客户端，默认关闭。启用后默认保留工具原文输入，但以下名单在单次返回超过 6,000 字符时使用定向摘要：`get_metric_names`、`kubectl_describe`、`kubectl_events`、`kubectl_get_by_kind_in_cluster`、`kubernetes_tabular_query`、`execute_prometheus_instant_query`、`execute_prometheus_range_query`、`execute_pod_promql`。名单位于 `ObservationProcessor.QUERY_SUMMARY_TOOLS`；events/range 为预防项，近期统计未覆盖独立调用。短结果、其他工具、Runbook 和归档回读保持原文，不因本名单改变 ASK。
+
+名单内采用确定性提取，不调用工具摘要模型：describe/events/表格/Pod 指标复用已有提取器；指标目录按名称前缀类别轮选并标明遗漏数；通用 Prometheus 返回保留完整单条序列的标签、时间和值，不换算单位，不用子集推算整体。大到无法容纳的单条序列可全部省略，需缩小查询或回读。完整 raw/structured 仍归档，模型摘要附原文引用。Conclusion 对定向摘要结果不重新注入完整 structured，避免再次放大输入。摘要会省略信息，不保证保留所有任务相关事实。
+
+当前窗口按实际模型配置为 54,000 tokens；默认主调用输入触发线约 38,624 tokens（0.72 比例并扣除估算余量）。每次模型调用前仍检查预算；超预算时保留至多 min(8,000, 窗口×0.15) tokens 的最近完整交互，其余较早消息交给同配置模型整理。并行工具调用及对应返回作为一组保留，不能拆散；若最新一组本身太大，会进入摘要而不是截断它。消息正文、工具参数、调用关系及缓存来源保留，usage 等运行元数据不送去摘要。原始完整消息另行归档。
+
+摘要请求根据 token 预算优先一次处理，不再固定按 12,000 字符串行切块；为累计摘要、输出和协议保留余量。超大输入按完整交互分段，只有单个交互本身超出摘要容量时才完整切段，全部片段都会送入滚动摘要，不做首尾取样。通过 LangGraph `before_model` 返回 `RemoveMessage(REMOVE_ALL_MESSAGES)` 加原问题、新工作摘要和保留交互，真正替换消息状态。摘要沿用诊断模型，不默认切小模型或改变提供商思考参数。压缩前后快照及保留消息数、摘要调用数位于 `compactions/`；失败或压缩后仍超预算时不静默裁剪。系统提示词和工具定义保持不变。54K 是窗口大小，输出和安全余量仍占用该窗口。
+
+保留交互还通过 `context_compacted.retained_messages` 传递给 Conclusion，并存入会话记忆，避免只传历史摘要而漏掉未摘要的近期证据。
+
+Conclusion 使用最近一次工作摘要和此后新取得的工具结果，不重新拼回已压缩的全部旧工具正文。总结输入仍超预算时，同样按原意图分段整理后再生成回答。压缩使用 LLM，可能有语义遗漏，不构成事实无损保证；归档回读的分页、工具自身行数限制仍有效。工作历史替换是当前运行内的状态更新，不等于已实现跨进程断点恢复。
+
+`AIOPS_QUERY_TOOL_TIMEOUT_SECONDS` 默认 60 秒，限制 QUERY 单次工具等待；失败作为工具错误交给 Agent 决定下一步。步数、运行时限等中断会传给 Conclusion，并在最终回答标记未完成。取消客户端等待不保证远端计算同步停止。
+
+上下文压缩通过 `thinking/runtime_status` 发送分段开始、完成、失败和取消提示，覆盖采集节点及总结节点；不发送内部压缩正文。前端在折叠区域外显示当前阶段及耗时，区分工具等待、模型生成和上下文整理。超过 15 秒提醒当前尚未收到下一阶段结果，不把等待误报为失败。最终完成、错误、断线和手动停止均结束运行提示。普通 AI 正文标为“分析说明”，目前仍按内容类型汇总，不伪装成严格的执行时间线。此状态通道不依赖模型提供商的 reasoning 字段。
+
+默认摘要不是纯代码：表格、事件等使用规则提取，部分通用返回调用 LLM 摘要。原文保存不等于模型看过原文。常见输入缩短位置包括工具摘要限长、摘要模型原文预览、归档分页、运行时历史压缩、模型调用前预算裁剪；原文实验绕过逐次工具摘要，但仍在超预算时压缩输入。压缩是有损的，不保证所有关键字段进入模型，也不保证单位解释或诊断推理正确，需要对照调用参数、原始值与最终答案复核。
 
 当前配置为 rca_mode=lite，组内正式 RCA 主要使用已采证据推理，不再重复进行取证工具循环。
 

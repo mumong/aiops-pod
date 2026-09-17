@@ -41,7 +41,24 @@ def _build_client(monkeypatch):
     return TestClient(app), fake_service
 
 
-def test_ask_route_uses_full_diagnosis_workflow(monkeypatch):
+def test_query_session_cookie_isolation_and_validation(monkeypatch):
+    client, service = _build_client(monkeypatch)
+    params = {'q': 'pods', 'session_id': 'a' * 32}
+    response = client.get('/query', params=params)
+    assert response.status_code == 200
+    assert 'HttpOnly' in response.headers['set-cookie']
+    first = service.stream_calls[-1]['workflow_overrides']['_query_session_key']
+    client.get('/query', params=params)
+    assert service.stream_calls[-1]['workflow_overrides']['_query_session_key'] == first
+    client.cookies.clear()
+    client.get('/query', params=params)
+    assert service.stream_calls[-1]['workflow_overrides']['_query_session_key'][0] != first[0]
+    assert client.get('/query', params={'q': 'x', 'session_id': '../bad'}).status_code == 422
+    client.post('/query', data=params)
+    assert '_query_session_key' in service.stream_calls[-1]['workflow_overrides']
+
+
+def test_ask_route_uses_task_routing_with_diagnosis_available(monkeypatch):
     client, fake_service = _build_client(monkeypatch)
 
     response = client.get("/ask", params={"q": "我的集群有什么问题？", "stream": "false"})
@@ -49,7 +66,7 @@ def test_ask_route_uses_full_diagnosis_workflow(monkeypatch):
     assert response.status_code == 200
     assert len(fake_service.sync_calls) == 1
     overrides = fake_service.sync_calls[0]["workflow_overrides"]
-    assert overrides["query_mode"] == "full"
+    assert overrides["query_mode"] == "auto"
     assert overrides["nodes"] == {
         "layer": True,
         "evidence": True,

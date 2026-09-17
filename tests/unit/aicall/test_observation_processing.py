@@ -86,6 +86,46 @@ def test_aicall_process_tool_observation_returns_bounded_summary(tmp_path):
     assert processed["raw_ref"].endswith(".raw.txt")
 
 
+def test_raw_experiment_preserves_entire_tool_output(tmp_path):
+    def forbidden(**kwargs):
+        raise AssertionError("Raw experiment must not invoke a summarizer")
+    processor = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=500, summarizer=forbidden)
+    raw = "metric value 12.34\n" * 5000 + "TAIL_SENTINEL"
+    result = processor.process(run_id="raw-test", node_id="query_collect", sequence=1,
+                               tool_name="custom_tool", raw_content=raw, preserve_raw=True)
+    assert result["summary"] == raw
+    assert Path(result["raw_ref"]).read_text() == raw
+    assert Path(result["summary_ref"]).read_text() == raw
+
+
+def test_query_tool_timeout_isolated_for_duplicate_waiters():
+    middleware = AICall._build_tool_dedup_middleware(0.01)
+    async def handler(request):
+        await asyncio.sleep(10)
+    async def run():
+        requests = [ToolCallRequest(tool_call={"id": str(i), "name": "slow", "args": {}},
+                                    tool=None, state={}, runtime=None) for i in range(2)]
+        return await asyncio.gather(*(middleware.awrap_tool_call(r, handler) for r in requests))
+    results = asyncio.run(run())
+    assert all(r.status == "error" for r in results)
+    assert all("TimeoutError" in r.content for r in results)
+
+
+def test_raw_guard_compresses_only_when_over_budget(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    ai = AICall(model="openai/test", api_key="sk-test")
+    ai.query_raw_passthrough = True
+    text = "large tool output " * 50000
+    _, question, metadata, _, _ = ai._prepare_structured_call_context(
+        system_prompt="query", question=text, schema=None, node_id="conclusion", output_reserved=6000)
+    assert len(question) < len(text)
+    assert metadata["triggered"] is True
+    _, question, metadata, _, _ = ai._prepare_structured_call_context(
+        system_prompt="query", question="small raw result", schema=None, node_id="conclusion", output_reserved=6000)
+    assert question == "small raw result"
+    assert not metadata["triggered"]
+
+
 def test_tool_middleware_isolates_parallel_failure_and_keeps_success():
     middleware = AICall._build_tool_dedup_middleware()
     success_request = ToolCallRequest(
@@ -1019,6 +1059,14 @@ def test_tool_dedup_middleware_reuses_success_for_same_name_and_args():
     assert second.additional_kwargs["aiops_deduplicated"] is True
     assert second.additional_kwargs["aiops_original_tool_call_id"] == "tc-first"
 
+    first.content = "lossy summary from observation projection"
+    first.additional_kwargs["aiops_raw_ref"] = "/prior/artifact"
+    second.content = "another lossy summary"
+    third = asyncio.run(middleware.awrap_tool_call(second_request, handler))
+    assert third.content == '{"status":"success","pod":"pod-a"}'
+    assert "aiops_raw_ref" not in third.additional_kwargs
+    assert executions == ["tc-first"]
+
 
 def test_aicall_writes_final_budget_with_dynamic_context(tmp_path, monkeypatch):
     ai = AICall(model="openai/test", api_key="sk-test")
@@ -1888,8 +1936,9 @@ def test_deterministic_runtime_summary_clamps_budget_to_preserve_plan_and_ref():
     assert summary["completed_items"][0]["raw_ref"] == long_ref
 
 
+@pytest.mark.parametrize("raw_mode", [False, True])
 def test_agent_model_hard_guard_compacts_actual_request_before_handler(
-    monkeypatch,
+    monkeypatch, raw_mode,
 ):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
     ai = AICall(
@@ -1902,6 +1951,7 @@ def test_agent_model_hard_guard_compacts_actual_request_before_handler(
             "hard_guard_preserve_tail_tokens": 400,
         },
     )
+    ai.query_raw_passthrough = raw_mode
     middleware = ai._build_context_hard_guard_middleware(
         node_id="evidence",
         run_id="",

@@ -754,6 +754,8 @@ class AICall:
             )
 
         if original_input_tokens > effective_input_target:
+            if getattr(self, "query_context_state_compaction", False):
+                raise StructuredContextBudgetError("working_context_compaction_required", pre_budget=pre_budget)
             metadata["triggered"] = True
             if callable(context_compactor):
                 try:
@@ -1031,9 +1033,19 @@ class AICall:
                         node_id=node_id or "agent",
                         run_id=run_id,
                     ),
-                    self._build_tool_dedup_middleware(),
+                    self._build_tool_dedup_middleware(getattr(self, "query_tool_timeout", 0)),
                 ],
             }
+            if getattr(self, "query_context_state_compaction", False):
+                from app.core.aicall.working_context import WorkingContextMiddleware
+                summary_model = self._create_chat_model(
+                    node_id="context_compaction", disable_streaming=True,
+                ).bind(max_tokens=3000)
+                create_agent_kwargs["middleware"].insert(0, WorkingContextMiddleware(
+                    self, agent_model, summary_model, tools, system_prompt, question,
+                    run_id, node_id or "agent",
+                    lambda **event: self._push(stream_queue, node_id, thinking_events, **event),
+                ))
             if response_format is not None:
                 create_agent_kwargs["response_format"] = response_format
             return create_agent(**create_agent_kwargs)
@@ -1043,6 +1055,10 @@ class AICall:
         import concurrent.futures
 
         input_messages = {"messages": [{"role": "user", "content": question}]}
+        session_context = getattr(self, "query_session_context", None)
+        if session_context:
+            input_messages["messages"].insert(0, {"role": "user", "content":
+                "[会话历史：仅供理解指代，旧观测不是当前值]\n" + json.dumps(session_context, ensure_ascii=False, default=str)})
         # recursion_limit 直接使用 config 传入的 max_steps，不做任何公式转换
         langfuse_config = self._build_langchain_config(session_id, node_id=node_id or "agent")
         config = {"recursion_limit": max_steps}
@@ -1106,6 +1122,8 @@ class AICall:
                         token_msg, metadata = chunk_data[0], chunk_data[1]
                     else:
                         continue
+                    if isinstance(metadata, dict) and metadata.get("aiops_internal_compaction"):
+                        continue
                     token_text = self._extract_visible_ai_text(token_msg)
                     if token_text:
                         langgraph_node = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
@@ -1120,6 +1138,9 @@ class AICall:
                     continue
                 update_data = chunk_data if isinstance(chunk_data, dict) else {}
                 for node_name, update in update_data.items():
+                    if not isinstance(update, dict):
+                        # before_model may legitimately return None (no compaction).
+                        continue
                     if isinstance(update, dict) and update.get("structured_response") is not None:
                         structured_response = update.get("structured_response")
                         final_content = self._serialize_structured_response(structured_response)
@@ -1493,7 +1514,12 @@ class AICall:
         # 在新线程中运行异步 agent（避免与 uvicorn event loop 冲突）
         def _run_agent_thread():
             with self._langfuse_session_scope(session_id, node_id or "agent"):
-                asyncio.run(_run_agent())
+                async def run_bounded():
+                    if getattr(self, "query_tool_timeout", 0) > 0:
+                        await asyncio.wait_for(_run_agent(), timeout=max_steps * 30)
+                    else:
+                        await _run_agent()
+                asyncio.run(run_bounded())
 
         def _agent_has_progress() -> bool:
             return bool(
@@ -1518,11 +1544,13 @@ class AICall:
                     pool.submit(_run_agent_thread).result(timeout=max_steps * 30)
                 break
             except concurrent.futures.TimeoutError:
+                self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="agent_timeout")
                 logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
                 if not final_content:
                     final_content = "Agent 执行超时"
                 break
             except GraphRecursionError as e:
+                self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="step_limit")
                 recursion_msg = str(e).splitlines()[0].strip()
                 logger.warning("⚠️ [AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
                 if not final_content:
@@ -1541,6 +1569,7 @@ class AICall:
                     )
                     continue
                 logger.error("❌ [AICall] agent 执行异常: %s", e, exc_info=True)
+                self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason=str(e))
                 if not final_content:
                     final_content = f"Agent 执行异常: {e}"
                 break
@@ -2273,6 +2302,9 @@ class AICall:
         if original_input_tokens <= effective_input_target:
             return request, pre_budget
 
+        if getattr(self, "query_context_state_compaction", False):
+            raise StructuredContextBudgetError("working_context_compaction_required", pre_budget=pre_budget)
+
         fixed_tokens = sum(
             int(component.get("tokens") or 0)
             for component in pre_budget.get("components", [])
@@ -2580,7 +2612,7 @@ class AICall:
         return f"name:{name}|args:{args_str}"
 
     @staticmethod
-    def _build_tool_dedup_middleware():
+    def _build_tool_dedup_middleware(timeout_seconds: float = 0):
         """Deduplicate identical tool executions within one agent call."""
         import asyncio
         from langchain.agents.middleware import wrap_tool_call
@@ -2599,7 +2631,7 @@ class AICall:
                 "aiops_deduplicated": True,
                 "aiops_original_tool_call_id": original_call_id,
             })
-            return source.model_copy(update={
+            return source.model_copy(deep=True, update={
                 "id": None,
                 "tool_call_id": current_call_id,
                 "additional_kwargs": additional_kwargs,
@@ -2632,6 +2664,13 @@ class AICall:
                     owner = False
 
             try:
+                if timeout_seconds > 0:
+                    done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
+                    if not done:
+                        task.cancel()
+                        raise TimeoutError(f"工具调用超过 {timeout_seconds:g} 秒，已取消；可调整查询后重试")
+                    if task.cancelled():
+                        raise TimeoutError("共享工具调用已超时取消")
                 result = await task
             except Exception as exc:
                 error_message = compact_text_to_token_budget(
@@ -2679,8 +2718,11 @@ class AICall:
             if owner:
                 if getattr(result, "status", "success") == "success":
                     async with lock:
-                        cache[signature] = (result, original_call_id)
-                return result
+                        cache[signature] = (result.model_copy(deep=True), original_call_id)
+                # Observation projection mutates the delivered ToolMessage.
+                # Keep the cached/in-flight source immutable so a later reuse
+                # never archives a previously generated summary as raw output.
+                return result.model_copy(deep=True)
 
             return _clone_for_call(
                 result,
@@ -2732,8 +2774,11 @@ class AICall:
                 raw_content=tool_content or "",
                 context_usage_ratio=context_usage_ratio,
                 tool_args=tool_args or {},
+                preserve_raw=getattr(self, "query_raw_passthrough", False),
             )
         except Exception as exc:
+            if getattr(self, "query_raw_passthrough", False):
+                raise RuntimeError(f"原文归档/处理失败，未截断回退：{exc}") from exc
             logger.warning("⚠️ [AICall] observation processor 失败，使用截断回退: %s", exc)
             summary = (tool_content or "")[:3000]
             refs: Dict[str, str] = {}
@@ -2803,6 +2848,8 @@ class AICall:
         tool_observation_contents: List[str],
     ) -> bool:
         config = self._runtime_compaction_config()
+        if getattr(self, "query_raw_passthrough", False):
+            return False
         if not config.get("enabled"):
             return False
 

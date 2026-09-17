@@ -475,7 +475,7 @@ class HolmesService:
 
     def get_node_max_steps(self, node_id: str) -> int:
         """获取节点 max_steps，优先级: 环境变量 > config.yaml > 默认值"""
-        defaults = {"layer": 3, "evidence": 10, "rca": 8, "conclusion": 3}
+        defaults = {"layer": 3, "query_collect": 20, "evidence": 10, "rca": 8, "conclusion": 3}
         env_key = f"WORKFLOW_MAX_STEPS_{node_id.upper()}"
         env_val = os.getenv(env_key)
         if env_val and env_val.isdigit():

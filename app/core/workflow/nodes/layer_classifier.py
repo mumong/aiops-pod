@@ -1023,10 +1023,9 @@ class LayerClassifierNode(WorkflowNode):
         """Extract ordered explicit namespace/Pod targets without diagnosis rules.
 
         Both the standard ``namespace/pod`` notation and natural-language
-        ``namespace X ... Pod Y`` notation are accepted. Pydantic-extracted Pod
-        entities are only a fallback when the request contains no complete
-        pair. Once the user supplied namespace/Pod pairs, model extraction must
-        not add cross-clause combinations.
+        ``namespace X ... Pod Y`` notation are accepted. Observed or model-
+        extracted entities are not user instructions and must never become
+        explicit targets merely because the request contained no complete pair.
         """
         text = str(question or "").lower()
         positioned: List[tuple[int, str, str]] = []
@@ -1075,15 +1074,6 @@ class LayerClassifierNode(WorkflowNode):
 
         for _, namespace, name in positioned:
             add(namespace, name)
-        if targets:
-            return targets
-        for entity in active_entities or []:
-            if str(entity.get("type") or "").strip().lower() != "pod":
-                continue
-            add(
-                entity.get("namespace"),
-                cls._pick_text(entity.get("name"), entity.get("value")),
-            )
         return targets
 
     @classmethod

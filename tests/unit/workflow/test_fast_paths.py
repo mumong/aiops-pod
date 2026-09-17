@@ -1276,11 +1276,13 @@ def test_layer_normalizes_each_pod_with_its_preceding_namespace_only():
         {"type": "pod", "name": "api-c"},
     ])
 
-    assert LayerClassifierNode._extract_explicit_pod_targets("", entities) == [
+    assert [(entity["namespace"], entity["name"]) for entity in entities if entity["type"] == "pod"] == [
         ("team-a", "api-a"),
         ("team-b", "api-b"),
         ("team-c", "api-c"),
     ]
+    # Correctly normalized observations are still not explicit user targets.
+    assert LayerClassifierNode._extract_explicit_pod_targets("", entities) == []
 
 
 def test_layer_binds_fetched_runbooks_to_each_lane_without_global_broadcast():

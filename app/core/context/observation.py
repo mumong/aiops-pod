@@ -33,6 +33,14 @@ Summarizer = Callable[[str, str, str], Optional[str]]
 
 class ObservationProcessor:
     RECENT_RESTART_WINDOW_SECONDS = 15 * 60
+    # QUERY only: small values/errors and deliberate archive reads stay exact.
+    QUERY_SUMMARY_MIN_CHARS = 6000
+    QUERY_SUMMARY_TOOLS = frozenset({
+        "get_metric_names", "kubectl_describe", "kubectl_events",
+        "kubectl_get_by_kind_in_cluster", "kubernetes_tabular_query",
+        "execute_prometheus_instant_query", "execute_prometheus_range_query",
+        "execute_pod_promql",
+    })
 
     HEAVY_TOOLS = {
         "kubectl_get_by_kind_in_cluster",
@@ -119,9 +127,33 @@ class ObservationProcessor:
         raw_content: str,
         context_usage_ratio: Optional[float] = None,
         tool_args: Optional[Dict[str, Any]] = None,
+        preserve_raw: bool = False,
     ) -> Dict[str, Any]:
         raw = raw_content or ""
         tool = tool_name or "unknown"
+        targeted_summary = (
+            preserve_raw and node_id == "query_collect"
+            and tool in self.QUERY_SUMMARY_TOOLS
+            and len(raw) > self.QUERY_SUMMARY_MIN_CHARS
+        )
+        if targeted_summary:
+            preserve_raw = False
+        if preserve_raw:
+            try:
+                structured, _, extracted = self._extract(tool, raw, tool_args=tool_args)
+                if tool == "fetch_runbook":
+                    self._attach_runbook_metadata(structured, tool_args or {})
+            except Exception as exc:
+                structured, extracted = {"status": "extract_failed", "error": str(exc)}, "generic"
+            refs = ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
+                node_id=node_id, sequence=sequence, tool_name=tool,
+                raw=raw, structured=structured, summary=raw,
+            )
+            return {"tool": tool, "status": "success",
+                    "semantic_success": self._is_semantically_successful(structured, raw),
+                    "summary": raw, "structured": structured,
+                    "raw_chars": len(raw), "summary_chars": len(raw), "processed": True,
+                    "processor": extracted + "+raw_passthrough", **refs}
         structured: Dict[str, Any]
         summary: str
         processor = "passthrough"
@@ -151,6 +183,34 @@ class ObservationProcessor:
                 summary = self._generic_summary(tool, raw)
                 processor = "generic"
 
+        if node_id in {"focused", "query_collect"} and processor == "k8s_table" and structured.get("status") == "table_summarized":
+            # A task-oriented query must not silently discard healthy objects.
+            # Keep the full returned inventory in the archive; the model sees a
+            # bounded prefix with explicit coverage, never an abnormal-only view.
+            rows = [line for line in raw.splitlines() if line.strip()][1:]
+            structured["all_rows"] = rows
+            selected = []
+            used = len(structured.get("header", "")) + 350
+            for row in rows:
+                if used + len(row) + 1 > self.max_observation_chars:
+                    break
+                selected.append(row)
+                used += len(row) + 1
+            structured["selected_rows"] = selected
+            structured["omitted_rows"] = len(rows) - len(selected)
+            structured["selection_policy"] = "source_order_not_health_filtered"
+            summary = (
+                f"{tool}: 返回 {len(rows)} 行，展示 {len(selected)} 行，省略 {len(rows) - len(selected)} 行。"
+                "未展示不代表不存在；需要全部对象时缩小查询范围或按 raw_ref 回读。\n"
+                + structured.get("header", "") + "\n" + "\n".join(selected)
+            )
+
+        if targeted_summary and tool == "get_metric_names":
+            structured, summary = self._query_metric_catalog(raw)
+            processor = "metric_catalog"
+        elif targeted_summary and processor == "prometheus_result":
+            summary = self._query_metric_samples(raw)
+
         semantic_success = self._is_semantically_successful(structured, summary)
 
         over_context_threshold = (
@@ -158,8 +218,10 @@ class ObservationProcessor:
             and context_usage_ratio >= self.context_pressure_threshold
         )
         deterministic_summary = (
-            tool in self.AIOPS_CASE_TOOLS
+            targeted_summary
+            or tool in self.AIOPS_CASE_TOOLS
             or tool in self.OBSERVABILITY_QUERY_TOOLS
+            or (node_id in {"focused", "query_collect"} and processor == "k8s_table")
         )
         if deterministic_summary:
             should_llm_summarize = False
@@ -228,6 +290,15 @@ class ObservationProcessor:
                 structured=structured,
                 summary=summary,
             )
+        if node_id in {"focused", "query_collect"}:
+            # additional_kwargs are audit metadata, not reliably model-visible.
+            # Supply the real retrieval address in content, not an instruction
+            # to invent a reference or repeat an already truncated query.
+            summary += f"\n归档原文 raw_ref: {refs.get('raw_ref')}\n需要未展示内容时使用 read_context_archive 回读该路径。"
+            refs = archive.write_tool_artifact(
+                node_id=node_id, sequence=sequence, tool_name=tool,
+                raw=raw, structured=structured, summary=summary,
+            )
         return {
             "tool": tool,
             "status": "success",
@@ -237,11 +308,57 @@ class ObservationProcessor:
             "raw_chars": len(raw),
             "summary_chars": len(summary),
             "processed": True,
-            "processor": processor,
+            "processor": processor + ("+query_targeted_summary" if targeted_summary else ""),
             "observation_audit": observation_audit,
             "context_usage_ratio": context_usage_ratio,
             **refs,
         }
+
+    def _query_metric_catalog(self, raw: str) -> tuple[Dict[str, Any], str]:
+        """Round-robin metric families; never claim omitted names are absent."""
+        try:
+            payload = json.loads(raw)
+            names = payload.get("data") if isinstance(payload, dict) else payload
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                raise ValueError("not a metric name list")
+        except (ValueError, TypeError):
+            return {"status": "catalog_parse_failed"}, self._generic_summary("get_metric_names", raw)
+        groups: Dict[str, list] = {}
+        for name in names:
+            groups.setdefault(name.lstrip(":").split("_")[0], []).append(name)
+        selected = []
+        used = 350
+        for index in range(max((len(v) for v in groups.values()), default=0)):
+            for family in groups.values():
+                if index < len(family) and used + len(family[index]) + 1 <= self.max_observation_chars:
+                    selected.append(family[index])
+                    used += len(family[index]) + 1
+        metadata = {"status": "metric_catalog", "total": len(names), "selected": len(selected),
+                    "omitted": len(names) - len(selected), "selection_policy": "family_round_robin"}
+        return metadata, (
+            f"指标目录：共 {len(names)} 项，展示 {len(selected)} 项，省略 {len(names) - len(selected)} 项。"
+            "按指标名前缀轮选，不表示相关性排序。未展示不代表不存在；不要重复调用相同目录，"
+            "可按原文引用分页回读，或直接执行明确的 PromQL。以下只是名称，不是指标数值：\n"
+            + "\n".join(selected)
+        )
+
+    def _query_metric_samples(self, raw: str) -> str:
+        """Keep whole source series, including labels/timestamps/values, without unit inference."""
+        payload = json.loads(raw)
+        result = payload["data"]["result"]
+        selected = []
+        used = 400
+        for item in result:
+            encoded = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            if used + len(encoded) + 1 <= self.max_observation_chars:
+                selected.append(encoded)
+                used += len(encoded) + 1
+        return (
+            f"Prometheus {payload['data'].get('resultType', '')}: 共 {len(result)} 条序列，"
+            f"展示 {len(selected)} 条，省略 {len(result) - len(selected)} 条。"
+            "保留源标签、时间和值，未做单位换算或聚合；不能由子集推断全集统计。"
+            "省略内容需回读或缩小查询范围。\n" + "\n".join(selected)
+        )
 
     def _extract(
         self,

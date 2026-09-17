@@ -19,6 +19,9 @@ from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
+from app.core.workflow.nodes.request_router import RequestRouterNode
+from app.core.workflow.nodes.focused import FocusedTaskNode
+from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
 from app.core.workflow.nodes.parallel_evidence import (
     ParallelEvidenceNode,
     expand_groups_to_entity_lanes,
@@ -130,6 +133,17 @@ def build_diagnosis_workflow(
     Returns:
         (compiled_workflow, node_instances) — 编译后的工作流图 + 节点实例列表
     """
+    if query_mode == "direct":
+        workflow = StateGraph(WorkflowState)
+        nodes = [cls(holmes_service, metrics, runbook_catalog)
+                 for cls in (QueryCollectNode, QueryConclusionNode)]
+        for node in nodes:
+            workflow.add_node(node.node_id, _wrap_node_execute(node))
+        workflow.set_entry_point(nodes[0].node_id)
+        workflow.add_edge(nodes[0].node_id, "conclusion")
+        workflow.add_edge("conclusion", END)
+        return workflow.compile(), nodes
+
     enabled = _get_enabled_nodes(node_config)
     logger.info(f"🔧 工作流节点: {' → '.join(enabled)}")
 
@@ -166,7 +180,20 @@ def build_diagnosis_workflow(
         workflow.add_edge("parallel_evidence", "conclusion")
 
     # 设置入口点
-    workflow.set_entry_point(enabled[0])
+    if query_mode == "auto":
+        for cls in (RequestRouterNode, FocusedTaskNode):
+            node = cls(holmes_service, metrics, runbook_catalog)
+            node_instances.append(node)
+            workflow.add_node(node.node_id, _wrap_node_execute(node))
+        workflow.set_entry_point("request_router")
+        workflow.add_conditional_edges(
+            "request_router",
+            lambda state: state.get("request_route", "stop"),
+            {"full_diagnosis": enabled[0], "focused": "focused", "clarify": END, "stop": END},
+        )
+        workflow.add_edge("focused", END)
+    else:
+        workflow.set_entry_point(enabled[0])
 
     # 构建边
     layer_enabled = "layer" in enabled

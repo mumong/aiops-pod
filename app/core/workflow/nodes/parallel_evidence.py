@@ -878,12 +878,15 @@ class ParallelEvidenceNode(WorkflowNode):
             },
         }
         scoped_question = (
+            f"原始用户任务：{state.get('original_question') or state.get('question', '')}\n"
+            "以下是该任务内分配给本节点的子任务，不替代原始任务：\n"
             f"只调查 {self._group_entity_labels(group)}；初始状态为 "
             f"{'/'.join(status_keywords) or '未知'}。用真实工具事实判断其当前异常、"
             "已恢复或证据不足，不查询其他 Pod。"
         )
         return {
             "question": scoped_question,
+            "original_question": state.get("original_question") or state.get("question", ""),
             "run_id": state.get("run_id", ""),
             "layer": state.get("layer"),
             "layer_analysis": json.dumps(scoped_handoff, ensure_ascii=False),

@@ -157,7 +157,32 @@ class WorkflowExecutor:
         """从报告文本中提取实际层级（优先用 conclusion 的判断）"""
         return _extract_layer_fn(text)
 
-    def execute_stream(
+    def execute_stream(self, question, run_id=None, cancel_event=None, workflow_overrides=None):
+        from app.core.query_sessions import query_sessions, SessionBusy
+        overrides = dict(workflow_overrides or {})
+        key = overrides.pop("_query_session_key", None)
+        if not key or overrides.get("query_mode") != "direct":
+            yield from self._execute_stream(question, run_id, cancel_event, overrides)
+            return
+        try:
+            with query_sessions.checkout(key) as (memory, commit):
+                overrides["_query_session_context"] = memory
+                for event in self._execute_stream(question, run_id, cancel_event, overrides):
+                    snapshot = event.pop("_query_session_memory", None)
+                    if event.get("type") == "run_start":
+                        event["session_id"] = key[1]
+                        event["session_memory"] = "restored" if memory else "empty"
+                    if event.get("type") == "final" and snapshot is not None:
+                        saved = not (cancel_event and cancel_event.is_set()) and commit(snapshot)
+                        event["session_id"] = key[1]
+                        event["session_memory"] = "saved" if saved else "not_saved"
+                        if not saved:
+                            event["answer"] += "\n\n会话记忆未保存（已取消或超过缓存容量），下轮请明确查询对象。"
+                    yield event
+        except SessionBusy as exc:
+            yield {"type": "error", "error": str(exc), "session_id": key[1]}
+
+    def _execute_stream(
         self,
         question: str,
         run_id: Optional[str] = None,
@@ -238,6 +263,7 @@ class WorkflowExecutor:
         # 初始化状态
         initial_state: WorkflowState = {
             "question": question,
+            "original_question": question,
             "run_id": run_id,
             "layer": None,
             "layers": [],
@@ -271,6 +297,7 @@ class WorkflowExecutor:
             "errors": [],
             "warnings": [],
             "thinking_events": [],
+            "query_session_context": (workflow_overrides or {}).get("_query_session_context", {}),
         }
 
         # 发出开始事件
@@ -634,7 +661,15 @@ class WorkflowExecutor:
 
             stats_block = metrics.format_stats_block()
             from app.core.workflow.metrics import METRICS_ENABLED
-            metrics_block = metrics.format_metrics_block(enabled=METRICS_ENABLED)
+            task_route = final_state.get("request_route")
+            lightweight_task = task_route in {"focused", "query", "clarify", "stop"}
+            metrics_block = metrics.format_metrics_block(enabled=METRICS_ENABLED and not lightweight_task)
+            public_metrics = metrics.get_summary()
+            if lightweight_task:
+                public_metrics = {key: public_metrics[key] for key in (
+                    "run_id", "performance", "nodes", "success", "errors"
+                )}
+                public_metrics["diagnosis_metrics_applicable"] = False
 
             full_answer = f"{conclusion}\n{stats_block}\n{metrics_block}"
 
@@ -676,7 +711,13 @@ class WorkflowExecutor:
                 "answer": full_answer,
                 "answer_source": "workflow",
                 "elapsed_seconds": round(time.time() - total_start, 3),
-                "metrics": metrics.get_summary(),
+                "metrics": public_metrics,
+                "request_route": task_route,
+                "request_contract": final_state.get("request_contract"),
+                "focused_result": final_state.get("focused_result"),
+                "query_answer": final_state.get("query_answer"),
+                **({"_query_session_memory": final_state.get("query_session_memory")}
+                   if (workflow_overrides or {}).get("_query_session_context") is not None else {}),
             }
             last_stream_event_ts = time.time()
 
@@ -684,6 +725,10 @@ class WorkflowExecutor:
             remediation_enabled = False
             if isinstance(remediation_cfg, dict):
                 remediation_enabled = bool(remediation_cfg.get("enabled", False))
+            if final_state.get("request_route") in {"focused", "query", "clarify", "stop"}:
+                # A read-only task must not become a write workflow because the
+                # final prose happens to contain a remediation-shaped block.
+                remediation_enabled = False
             if remediation_enabled:
                 approval_timeout = 600
                 approval_mode = "review"
@@ -877,6 +922,9 @@ class WorkflowExecutor:
     def _get_node_display_name(self, node_id: str) -> str:
         """获取节点显示名称"""
         name_map = {
+            "request_router": "理解用户任务",
+            "focused": "按问题查询与分析",
+            "query_collect": "自主运维查询与分析",
             "layer": "问题定位",
             "evidence": "证据链采集",
             "rca": "根因分析",
@@ -898,7 +946,11 @@ class WorkflowExecutor:
         """
         snapshot = {}
 
-        if node_name == "layer":
+        if node_name == "request_router":
+            snapshot = {"request_route": state.get("request_route"), "request_contract": state.get("request_contract")}
+        elif node_name == "focused":
+            snapshot = {"focused_result": state.get("focused_result"), "conclusion": state.get("conclusion")}
+        elif node_name == "layer":
             layers = state.get("layers", [])
             snapshot = {
                 "layer": str(state.get("layer", "")),

@@ -207,6 +207,12 @@ make case-clean CASE=c01-cpu
 
 ## 其他使用方式
 
+`/query` 使用两节点运维工作流：Agent 根据原问题自主选择只读工具及已安装的 Runbook，Conclusion 输出 JSON 结构化结果。支持检查、故障分析、日志、指标、链路及知识解释，不强制固定采集步骤。前端显示 Markdown 正文；SSE 最终事件的 `query_answer` 提供意图、范围、状态、正文、来源、手册与缺失项。对象不明确时澄清；结构正确不代表诊断已核验。
+
+```bash
+curl -N -G "http://10.2.0.48:30800/query" --data-urlencode 'q=查询 xnet 命名空间下所有 Pod 的日志'
+```
+
 ```bash
 curl -N -G "http://10.2.0.48:30800/query"  --data-urlencode 'q=各节点当前 CPU 和内存使用率是多少？'
 ```
