@@ -30,6 +30,9 @@ class WorkflowState(TypedDict, total=False):
     run_id: str
     request_contract: Optional[Dict[str, Any]]
     request_route: Optional[str]
+    diagnosis_target: Optional[Dict[str, Any]]
+    autonomous_groups: List[Dict[str, Any]]
+    autonomous_group_results: List[Dict[str, Any]]
     focused_result: Optional[Dict[str, Any]]
     
     # ========== 节点1 输出：问题定位 ==========

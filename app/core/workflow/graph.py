@@ -141,22 +141,27 @@ def build_diagnosis_workflow(
         return workflow.compile(), nodes
 
     if query_mode == "auto":
+        from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode
         from app.core.workflow.nodes.autonomous_diagnosis import (
             DiagnosisStageNode, DiagnosisEvidenceNode, DiagnosisRootCauseNode,
         )
         workflow = StateGraph(WorkflowState)
         nodes = [cls(holmes_service, metrics, runbook_catalog) for cls in (
             RequestRouterNode, QueryCollectNode, DiagnosisStageNode,
-            DiagnosisEvidenceNode, DiagnosisRootCauseNode, QueryConclusionNode,
+            DiagnosisEvidenceNode, DiagnosisRootCauseNode, AutonomousParallelNode, QueryConclusionNode,
         )]
         for node in nodes:
+            if node.node_id == "layer":
+                node.autonomous_parallel_enabled = (parallel_config or {}).get("enabled", True)
             workflow.add_node(node.node_id, _wrap_node_execute(node))
         workflow.set_entry_point("request_router")
         workflow.add_conditional_edges("request_router", lambda state: state["request_route"], {
             "focused": "query_collect", "full_diagnosis": "layer", "clarify": END, "stop": END,
         })
         workflow.add_edge("query_collect", "conclusion")
-        workflow.add_edge("layer", "evidence")
+        workflow.add_conditional_edges("layer", lambda state: "parallel_evidence" if len(state.get("autonomous_groups") or []) > 1 else "evidence",
+                                       {"parallel_evidence": "parallel_evidence", "evidence": "evidence"})
+        workflow.add_edge("parallel_evidence", "conclusion")
         workflow.add_edge("evidence", "rca")
         workflow.add_edge("rca", "conclusion")
         workflow.add_edge("conclusion", END)

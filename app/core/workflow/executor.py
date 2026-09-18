@@ -948,8 +948,14 @@ class WorkflowExecutor:
         """
         snapshot = {}
 
+        if node_name == "parallel_evidence" and state.get("autonomous_group_results") is not None:
+            return {"autonomous_groups": state.get("autonomous_groups"),
+                    "groups": [{k: result.get(k) for k in ("group_id", "target", "status", "error", "run_id")}
+                               for result in state.get("autonomous_group_results") or []]}
+
         if state.get("query_draft") is not None and node_name in {"layer", "evidence", "rca"}:
             return {"question": state.get("original_question") or state.get("question"),
+                    "autonomous_groups": state.get("autonomous_groups"),
                     "request_contract": state.get("request_contract"),
                     "analysis_draft": state.get("query_draft")}
 

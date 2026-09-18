@@ -84,11 +84,13 @@ class RequestRouterNode(WorkflowNode):
                 if "working_context_compaction_required" not in str(exc):
                     raise
                 import asyncio
-                from app.core.aicall.working_context import summarize_history
+                from app.core.aicall.working_context import compact_working_material
                 model = self.ai_call._create_chat_model(node_id="context_compaction", disable_streaming=True).bind(max_tokens=3000)
-                summary = asyncio.run(summarize_history(model, question, serialized,
+                reduced = asyncio.run(compact_working_material(model, {
+                    "question": question, "working_summary": context["working_summary"],
+                    "recent_interactions": [{"type": "human", "content": json.dumps(turn, ensure_ascii=False)}
+                                            for turn in context["history"]]},
                     lambda **event: self.ai_call._push(self._event_queue, self.node_id, [], **event)))
-                reduced = {"question": question, "history_summary": summary}
                 self._archive_node_input({"before_compaction": context, "after_compaction": reduced})
                 contract, _ = classify(json.dumps(reduced, ensure_ascii=False))
             if contract is None:

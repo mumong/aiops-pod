@@ -33,10 +33,13 @@ class DiagnosisStageNode(QueryCollectNode):
         if getattr(self, "ai_call", None) is not None:
             # History is already in material; do not insert it twice.
             self.ai_call.query_session_context = {}
-            self.ai_call.working_context_original_question = state.get("original_question") or state.get("question", "")
+            self.ai_call.working_context_original_question = state.get("question", "") if state.get("diagnosis_target") else state.get("original_question") or state.get("question", "")
         material = build_working_material(state)
         material["request_contract"] = state.get("request_contract")
         prompt = self.stage_prompt
+        if state.get("diagnosis_target"):
+            from app.core.prompts import PARALLEL_LANE_PROMPT
+            prompt = PARALLEL_LANE_PROMPT + "\n本分支任务：" + material["question"] + "\n" + prompt
         if self.collect:
             prompt += "\n" + DIAGNOSTIC_TOOL_GUIDANCE
             prompt += "\nRunbook 目录（匹配当前异常时读取，已读可复用）：\n" + self._prepare_query_tools()
@@ -56,22 +59,23 @@ class DiagnosisStageNode(QueryCollectNode):
         except StructuredContextBudgetError as exc:
             if "working_context_compaction_required" not in str(exc):
                 raise
-            from app.core.aicall.working_context import summarize_history
+            from app.core.aicall.working_context import compact_working_material
             model = self.ai_call._create_chat_model(node_id="context_compaction", disable_streaming=True).bind(max_tokens=3000)
-            summary = asyncio.run(summarize_history(
-                model, material["question"], json.dumps(material, ensure_ascii=False, default=str),
+            compact = asyncio.run(compact_working_material(
+                model, material,
                 lambda **event: self.ai_call._push(self._event_queue, self.node_id, events, **event),
             ))
-            events.append({"type": "context_compacted", "working_summary": summary, "retained_messages": []})
-            compact = {"question": material["question"], "request_contract": material["request_contract"],
-                       "request_time_utc": material["request_time_utc"],
-                       "working_summary": summary, "execution_incomplete": material["execution_incomplete"]}
+            events.append({"type": "context_compacted", "working_summary": compact["working_summary"],
+                           "retained_messages": compact["recent_interactions"]})
             self._archive_node_input({"before_compaction": material, "after_compaction": compact})
             response, stage_events = call(compact)
         draft = response.result or ""
         output = {"query_draft": draft, "thinking_events": [*events, *stage_events]}
         # These fields are only stage prose, not verified facts or forced classifications.
         output[{"layer": "layer_analysis", "evidence": "evidence_analysis", "rca": "rca_analysis"}[self.node_id]] = draft
+        if self.node_id == "layer" and getattr(self, "autonomous_parallel_enabled", False):
+            from app.core.workflow.nodes.autonomous_parallel import plan_groups
+            output.update(plan_groups(self, {**state, **output}))
         self._archive_node_output(output)
         return output
 

@@ -41,17 +41,66 @@ def message_groups(messages):
     while index < len(messages):
         group = [messages[index]]
         index += 1
-        calls = getattr(group[0], "tool_calls", None)
+        calls = group[0].get("tool_calls") if isinstance(group[0], dict) else getattr(group[0], "tool_calls", None)
         if calls:
-            while index < len(messages) and getattr(messages[index], "type", None) == "tool":
+            while index < len(messages) and (messages[index].get("type", messages[index].get("role")) if isinstance(messages[index], dict) else getattr(messages[index], "type", None)) == "tool":
                 group.append(messages[index])
                 index += 1
             expected = {str(c["id"]) for c in calls}
-            actual = {str(m.tool_call_id) for m in group[1:]}
+            actual = {str(m.get("tool_call_id") if isinstance(m, dict) else m.tool_call_id) for m in group[1:]}
             if expected != actual:
                 raise RuntimeError("工具交互尚不完整，未压缩或拆分该交互")
         groups.append(group)
     return groups
+
+
+def partition_recent(groups, window):
+    """Shared atomic suffix policy for agents and inter-node material."""
+    keep_budget = min(8000, int(window * 0.15))
+    used, cut = 0, len(groups)
+    for group in reversed(groups):
+        cost = count_tokens(json.dumps([compact_message(m) for m in group], ensure_ascii=False))["tokens"]
+        if used + cost > keep_budget:
+            break
+        used += cost
+        cut -= 1
+    return groups[:cut], groups[cut:]
+
+
+async def compact_working_material(model, material, progress=None, *, window=None):
+    """Use the agent's suffix policy at node boundaries, retaining exact evidence.
+
+    Observations already include the call arguments and result, so each is an
+    atomic interaction. Do not concatenate independent lanes' message histories.
+    """
+    window = window or int(os.getenv("MODEL_CONTEXT_WINDOW", "32000"))
+    groups = message_groups(material.get("recent_interactions") or [])
+    groups += [[{"type": "human", "content": json.dumps({"tool_observation": item}, ensure_ascii=False, default=str)}]
+               for item in material.get("observations") or []]
+    head = {k: v for k, v in material.items() if k not in {"recent_interactions", "observations"}}
+    # Fan-in retains lane identity, including inside retained raw interactions.
+    # Compaction in one worker must never act as a global message replacement.
+    if material.get("parallel_results"):
+        head["parallel_results"] = []
+        for lane in sorted(material["parallel_results"], key=lambda r: r.get("completed_at", 0)):
+            data = lane.get("material") or {}
+            head["parallel_results"].append({**lane, "material": {
+                k: v for k, v in data.items() if k not in {"observations", "recent_interactions"}}})
+            units = message_groups(data.get("recent_interactions") or [])
+            units += [[{"type": "human", "content": json.dumps({"tool_observation": o}, ensure_ascii=False, default=str)}]
+                      for o in data.get("observations") or []]
+            groups += [[{"type": "human", "content": json.dumps({"lane_id": lane["group_id"],
+                         "target": lane.get("target"), "interaction": unit}, ensure_ascii=False, default=str)}]
+                       for unit in units]
+    older, recent = partition_recent(groups, window)
+    sections = [json.dumps(head, ensure_ascii=False, default=str) + "\n"]
+    sections += [json.dumps(group, ensure_ascii=False, default=str) + "\n" for group in older]
+    summary = await summarize_history(model, material["question"], "".join(sections), progress,
+                                      window=window, sections=sections)
+    return {**{k: material[k] for k in ("question", "original_question", "request_contract", "original_request_contract", "request_time_utc",
+                                      "execution_incomplete", "diagnosis_target", "parallel_inventory") if k in material},
+            "working_summary": summary, "recent_interactions": [m for group in recent for m in group],
+            "observations": []}
 
 
 def summary_chunks(question, serialized, *, window=None, sections=None):
@@ -98,7 +147,7 @@ async def summarize_history(model, question, serialized, progress=None, *, windo
             progress(type="runtime_status", status=status, content=content)
     offset = 0
     for index, chunk in enumerate(chunks):
-        notify("running", f"正在整理较早上下文：第 {index + 1}/{total} 段，近期完整交互另行保留；当前不是工具执行。")
+        notify("running", f"正在整理工作记忆（进度 {index + 1}/{total}）：待摘要内容较多时分批合并为一份摘要，完成后继续分析；当前不是工具执行。")
         try:
             request = [
             SystemMessage(content=SUMMARY_PROMPT),
@@ -159,19 +208,12 @@ class WorkingContextMiddleware(AgentMiddleware):
         window = int(pre_budget.get("context_window") or os.getenv("MODEL_CONTEXT_WINDOW", "32000"))
         groups = message_groups(messages)
         # A bounded suffix preserves the newest complete interactions verbatim.
-        keep_budget = min(8000, int(window * 0.15))
-        retained, used = [], 0
-        cut = len(groups)
-        for group in reversed(groups[1:]):
-            cost = count_tokens(json.dumps([compact_message(m) for m in group], ensure_ascii=False))["tokens"]
-            if used + cost > keep_budget:
-                break
-            retained = group + retained
-            used += cost
-            cut -= 1
-        older = [m for group in groups[:cut] for m in group]
+        old_groups, recent_groups = partition_recent(groups[1:], window)
+        old_groups = groups[:1] + old_groups
+        retained = [m for group in recent_groups for m in group]
+        older = [m for group in old_groups for m in group]
         sections = [json.dumps([compact_message(m) for m in group], ensure_ascii=False) + "\n"
-                    for group in groups[:cut]]
+                    for group in old_groups]
         history = "".join(sections)
         summary = await summarize_history(self.summary_model, self.question,
                                           history, self.emit, window=window, sections=sections)

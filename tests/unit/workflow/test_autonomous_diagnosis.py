@@ -128,10 +128,11 @@ def test_tool_free_nodes_compact_oversized_material_instead_of_truncating(node_c
         'request_time_utc': '2026-09-18T02:00:00Z',
         'thinking_events': [{'type': 'tool_result', 'result': '完整待压缩证据', 'raw_ref': '/raw/describe'}]})
     assert summaries[0][0] == '为什么 xnet/nginx 重启？'
-    assert '完整待压缩证据' in summaries[0][1]
+    assert '完整待压缩证据' not in summaries[0][1]
+    assert '完整待压缩证据' in json.dumps(calls[1]['recent_interactions'], ensure_ascii=False)
     assert calls[1]['question'] == summaries[0][0]
     assert calls[1]['request_contract']['route'] == 'full_diagnosis'
     assert calls[1]['request_time_utc'] == '2026-09-18T02:00:00Z'
     assert calls[1]['working_summary'].endswith('/raw/describe')
-    assert 'observations' not in calls[1]
+    assert calls[1]['observations'] == []
     assert output

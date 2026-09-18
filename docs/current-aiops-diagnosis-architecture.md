@@ -27,16 +27,20 @@ MCP 查询和前端实现在独立仓库，不属于本仓库运行代码。接�
 `/query` 与 `/ask` 均使用 `query_mode=auto`。RequestRouter Agent 输出 JSON，LangGraph 按 `route` 选择：
 
 - `focused`：`query_collect → conclusion`，日常查询、可观测性数据获取、知识解释和明确要求的快速初查。
-- `full_diagnosis`：`layer → evidence → rca → conclusion`，Pod/命名空间/集群异常诊断与根因分析。该名称表示深度，不表示全量扫描。
+- `full_diagnosis`：单对象或分组暂不可用时 `layer → evidence → rca → conclusion`；定位模型选出多个 Pod 时 `layer → parallel_evidence（每组 evidence → rca）→ conclusion`。该名称表示深度，不表示全量扫描。
 - `clarify`：返回模型的澄清问题并保存会话，等待补充；路由格式无效则明确停止，不自动选择某种业务流程。
 
 路由只校验结构，不根据关键词、namespace 或对象数量改写模型决定。工具结果也不会自行改变路由。提示词统一位于 [prompts.py](../app/core/prompts.py)。
 
 路由历史包含用户问题、助手回答、范围与观测时间。助手回答用于识别上一轮查询后新发现的对象（例如“刚才那个异常 Pod”），不被当作当前状态证据；原始工具正文不重复塞入路由。超预算走共享压缩，不预先删掉回答。
 
-深度节点实现见 [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py)。保留定位、取证、根因、总结四个职责，但不进入旧节点中的程序基线采集、异常状态派生、强制三维计划、按异常 Pod 自动 fanout、提前停止或因果发布校验。定位和取证自主使用只读工具、按需读取 Runbook；RCA 和总结不调用工具。同一轮工具仍可并发执行，但默认不再是每 Pod 独立 lane，不能把旧 lane 的性能与质量统计直接套用到新流程。
+深度节点实现见 [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py)，自主分组实现见 [autonomous_parallel.py](../app/core/workflow/nodes/autonomous_parallel.py)。定位后由模型从实际材料选择 Pod，每组独立客户端、工作上下文和归档；默认最多3组同时执行，更多组排队，环境变量 `AIOPS_AUTONOMOUS_PARALLEL_WORKERS` 可配置1–8。不进入旧节点的程序基线、强制三维计划、提前停止或因果发布门槛；不能直接沿用旧测试准确率。
+
+分支 `question/request_contract` 是该 Pod 子任务，`original_question/original_request_contract` 保留完整父任务。共享定位记录是参考，不是要求每组重新检查全部对象。任一组失败保留已取得证据和失败原因，其他组继续；最终汇总包含每组结果和限制，不因未满足旧 RCA schema 丢弃整组。前端展示真实分组工具事件，多个模型的逐字片段不混排。
 
 每次交接均包含用户原始问题、时间、任务范围、最新工作摘要、保留交互和真实工具观察。上游分析只是草稿，不是事实。工具结果只传一份，不同时重注入 raw 和 structured 的重复内容。超预算后使用替换后的工作上下文，不重新拼回已压缩历史。
+
+采集循环、路由、RCA和总结统一使用 `partition_recent`：在 min(8000, 窗口15%) token 中保留近期完整交互，将较早部分滚动合并成一份摘要。超大单条无法保留时进入摘要，不拆开工具调用与响应。节点间使用 `compact_working_material`，并发汇总保留每条交互的 lane 身份；一个子组的压缩不能重置父流程或兄弟组。失败不替换旧状态，预算仍不足则明确报告，不硬截断或静默循环。
 
 Conclusion 生成 `QueryAnswer` JSON，字段为 intent、scope、status、answer、evidence_refs、runbooks、missing；answer 为兼容前端的 Markdown 正文。无程序级语义验收，不宣称已自动验证根因正确。权限、格式、取消、超时、预算与归档属于工程边界，仍保留。`/query` 不启用修复；`/ask` 原修复入口配置未扩大授权范围。
 
@@ -56,7 +60,15 @@ Conclusion 生成 `QueryAnswer` JSON，字段为 intent、scope、status、answe
 
 显式内部 `query_mode=full` 仍保留原 layer_classifier、evidence_collector、parallel_evidence、root_cause_analyzer、conclusion_formatter，便于既有测试与历史报告复核；公开 /ask、/query 默认不进入。旧的每 Pod lane、Evidence Plan 完整度、规则兜底与模型修复机制不代表新默认路径行为。
 
-### 本轮验证与限制（未部署）
+### 并发与统一压缩验证（2026-09-18）
+
+后端全量单元测试 1332 项、前端 65 项通过；前端构建、lint 和部署后的分组/布局浏览器回放通过。后端镜像为 11.0.174，前端为 0.1.18。回放与单元测试不等价于真实模型端到端验收。
+
+两端已完成实际 Pod 滚动部署。经前端 `/api/query` 的上线查询 `5de3e7144746465f` 在约 19 秒内完成：正确路由 focused，一次工具调用列出 xnet 的 4 个 Running Pod，并收到流式分析事件及最终回答。该检查验证简单路径与前后端连接，不替代下述多组深度测试。
+
+真实三组测试 `intent-smoke-6a84544b99a3` 的三个取证请求在 36ms 内启动；已返回工具记录体现各组独立 Pod 子任务。但第三组取证触发 600 秒 agent_timeout，之后 RCA 仍长时间等待，独立测试进程在约 16 分钟后人工停止，归档保留。该次未产生最终汇总，不能记为端到端通过；已确认等待位于模型调用阶段，尚未确定提供商或客户端的具体根因。无工具 RCA 的等待仍受底层客户端策略影响，不能认为所有阶段已有一致的工作流总时限。
+
+### 前次路由验证记录（当时未部署）
 
 后端单元测试 1323 项通过；A2A 18 项通过。前端相关测试 13 项、构建和 lint 通过，完整前端测试仍有 3 项既有部署仓库断言失败，不能据此宣布全部前端测试通过。
 

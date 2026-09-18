@@ -36,18 +36,25 @@ class QueryAnswer(BaseModel):
 
 def build_working_material(state):
     """Carry the user task and only the latest working evidence representation."""
-    events = state.get("thinking_events") or []
+    events = [e for e in state.get("thinking_events") or [] if not e.get("lane_id")]
     last_compaction = next((i for i in range(len(events) - 1, -1, -1)
                             if events[i].get("type") == "context_compacted"), -1)
     return {
-        "question": state.get("original_question") or state.get("question", ""),
+        "question": state.get("question", "") if state.get("diagnosis_target") else state.get("original_question") or state.get("question", ""),
+        "original_question": state.get("original_question") or state.get("question", ""),
+        "original_request_contract": state.get("original_request_contract"),
+        "shared_location_notes": state.get("shared_location_notes"),
         "request_contract": state.get("request_contract"),
+        "diagnosis_target": state.get("diagnosis_target"),
+        "parallel_inventory": state.get("autonomous_groups") or [],
+        "parallel_results": state.get("autonomous_group_results") or [],
         "request_time_utc": state.get("request_time_utc") or datetime.now(timezone.utc).isoformat(),
         "analysis_draft": state.get("query_draft", ""),
         "working_summary": events[last_compaction].get("working_summary") if last_compaction >= 0 else None,
         "recent_interactions": events[last_compaction].get("retained_messages", []) if last_compaction >= 0 else [],
         "session_history": state.get("query_session_context") if last_compaction < 0 else None,
-        "execution_incomplete": [event.get("reason") for event in events if event.get("type") == "execution_incomplete"],
+        "execution_incomplete": [f"{event['lane_id']}: {event.get('reason')}" if event.get("lane_id") else event.get("reason")
+                                 for event in state.get("thinking_events") or [] if event.get("type") == "execution_incomplete"],
         "observations": [
             {key: event.get(key) for key in (
                 "tool_name", "tool_args", "status", "semantic_success",
@@ -170,7 +177,7 @@ class QueryConclusionNode(FocusedTaskNode):
         _configure_query_runtime(self)
         events = state.get("thinking_events") or []
         last_compaction = next((i for i in range(len(events) - 1, -1, -1)
-                                if events[i].get("type") == "context_compacted"), -1)
+                                if events[i].get("type") == "context_compacted" and not events[i].get("lane_id")), -1)
         payload = build_working_material(state)
         payload["request_contract"] = state.get("request_contract")
         if getattr(self, "ai_call", None) is not None:
@@ -192,17 +199,11 @@ class QueryConclusionNode(FocusedTaskNode):
                 if "working_context_compaction_required" not in str(exc):
                     raise
                 import asyncio
-                from app.core.aicall.working_context import summarize_history
+                from app.core.aicall.working_context import compact_working_material
                 model = self.ai_call._create_chat_model(node_id="context_compaction", disable_streaming=True).bind(max_tokens=3000)
-                summary = asyncio.run(summarize_history(model, payload["question"],
-                                                        json.dumps(payload, ensure_ascii=False, default=str),
-                                                        lambda **event: self.ai_call._push(
-                                                            self._event_queue, self.node_id, events, **event)))
-                final_compacted_summary = summary
-                compact_payload = {"question": payload["question"], "working_summary": summary,
-                                   "request_contract": payload["request_contract"],
-                                   "request_time_utc": payload["request_time_utc"],
-                                   "execution_incomplete": payload["execution_incomplete"]}
+                compact_payload = asyncio.run(compact_working_material(model, payload,
+                    lambda **event: self.ai_call._push(self._event_queue, self.node_id, events, **event)))
+                final_compacted_summary = compact_payload["working_summary"]
                 self._archive_node_input({"before_compaction": payload, "after_compaction": compact_payload})
                 response, final_events = conclude(compact_payload)
         except StructuredContextBudgetError as exc:
@@ -250,6 +251,7 @@ class QueryConclusionNode(FocusedTaskNode):
                                 "request_contract": state.get("request_contract"),
                                 "recent_interactions": payload["recent_interactions"],
                                 "observations": payload["observations"],
+                                "parallel_results": payload["parallel_results"],
                                 "execution_incomplete": payload["execution_incomplete"],
                                 "observed_at": datetime.now(timezone.utc).isoformat()})
         if final_compacted_summary:
@@ -257,6 +259,8 @@ class QueryConclusionNode(FocusedTaskNode):
                 "question": payload["question"], "answer": answer,
                 "scope": (result or {}).get("scope"),
                 "request_contract": state.get("request_contract"),
+                "recent_interactions": compact_payload["recent_interactions"],
+                "execution_incomplete": payload["execution_incomplete"],
                 "observed_at": datetime.now(timezone.utc).isoformat()}]}
         output["query_session_memory"] = memory
         self._archive_node_output(output)

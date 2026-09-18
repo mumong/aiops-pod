@@ -18,6 +18,38 @@ class SummaryModel:
         return AIMessage(content="任务：查 CPU。已发现 node_cpu_seconds_total，目录已读取，下一步仍需数值。")
 
 
+def test_material_compaction_retains_recent_original_and_summarizes_older():
+    from app.core.aicall.working_context import compact_working_material
+    model = SummaryModel()
+    material = {'question': '查 CPU', 'working_summary': 'earlier summary',
+                'observations': [{'tool_args': {'pod':'old'}, 'result':'OLD ' * 12000},
+                                 {'tool_args': {'pod':'new'}, 'result':'LATEST EXACT', 'raw_ref':'/raw/latest'}]}
+    compact = asyncio.run(compact_working_material(model, material, window=16000))
+    history = ''.join(m['next_history_chunk'] for m in model.inputs)
+    assert 'earlier summary' in history and 'OLD ' in history
+    assert 'LATEST EXACT' not in history
+    retained = json.loads(compact['recent_interactions'][0]['content'])['tool_observation']
+    assert retained == material['observations'][-1]
+    assert compact['observations'] == []
+
+
+def test_fanin_compaction_keeps_recent_evidence_with_lane_identity():
+    from app.core.aicall.working_context import compact_working_material
+    material = {'question': '比较两个Pod', 'parallel_results': [
+        {'group_id': 'g1', 'target': {'name':'a'}, 'status':'partial', 'error':'timeout',
+         'material': {'working_summary':'a summary', 'observations':[{'result':'a original'}]}},
+        {'group_id': 'g2', 'target': {'name':'b'}, 'status':'completed',
+         'material': {'working_summary':'b summary', 'observations':[{'result':'b original'}]}}]}
+    model = SummaryModel()
+    compact = asyncio.run(compact_working_material(model, material, window=54000))
+    recent = [json.loads(m['content']) for m in compact['recent_interactions']]
+    assert [m['lane_id'] for m in recent] == ['g1','g2']
+    assert 'a original' in recent[0]['interaction'][0]['content']
+    assert 'b original' in recent[1]['interaction'][0]['content']
+    history = ''.join(m['next_history_chunk'] for m in model.inputs)
+    assert 'a summary' in history and 'b summary' in history and 'timeout' in history
+
+
 def test_all_history_chunks_consumed_without_slicing_away_middle():
     model = SummaryModel()
     source = "a" * 15000 + "MIDDLE_IMPORTANT" + "z" * 15000
@@ -72,6 +104,9 @@ def test_compaction_progress_reports_chunks_and_terminal_state():
                                  lambda **e: events.append(e)))
     assert [e['status'] for e in events] == ['running', 'complete']
     assert '1/1' in events[0]['content']
+    assert '一份摘要' in events[0]['content']
+    # The helper also serves whole-payload callers; don't promise a retained tail here.
+    assert '近期完整交互另行保留' not in events[0]['content']
 
 
 def test_compaction_progress_reports_error_and_cancellation():
