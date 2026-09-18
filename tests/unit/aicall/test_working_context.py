@@ -27,19 +27,21 @@ def test_all_history_chunks_consumed_without_slicing_away_middle():
     assert model.inputs[1]['working_summary']
 
 
-def test_reducer_replaces_history_and_next_round_does_not_recompress(tmp_path, monkeypatch):
+@pytest.mark.parametrize('node_id', ['query_collect', 'layer', 'evidence'])
+@pytest.mark.parametrize('window', [32000, 54000])
+def test_reducer_replaces_history_and_next_round_does_not_recompress(tmp_path, monkeypatch, node_id, window):
     monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
-    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", str(window))
     client = AICall(model="openai/test", api_key="test")
     client.query_context_state_compaction = True
     model = SummaryModel()
     emitted = []
     middleware = WorkingContextMiddleware(client, client._create_chat_model(), model, [],
-                                         'system', '查 CPU', 'replace', 'query_collect',
+                                         'system', '查 CPU', 'replace', node_id,
                                          lambda **e: emitted.append(e))
     original = [HumanMessage(content='查 CPU'),
                 AIMessage(content='', tool_calls=[{'id': 't1', 'name': 'get_metric_names', 'args': {}}]),
-                ToolMessage(content='huge metric directory ' * 5000, tool_call_id='t1')]
+                ToolMessage(content='huge metric directory ' * 12000, tool_call_id='t1')]
     update = asyncio.run(middleware.abefore_model({'messages': original}, None))
     state = add_messages(original, update['messages'])
     assert len(state) == 2
@@ -50,7 +52,7 @@ def test_reducer_replaces_history_and_next_round_does_not_recompress(tmp_path, m
     assert asyncio.run(middleware.abefore_model({'messages': state}, None)) is None
     assert len(model.inputs) == calls
     # Subsequent accumulated data can trigger another replacement independently.
-    state = add_messages(state, [HumanMessage(content='next huge data ' * 6000)])
+    state = add_messages(state, [HumanMessage(content='next huge data ' * 18000)])
     update = asyncio.run(middleware.abefore_model({'messages': state}, None))
     assert len(add_messages(state, update['messages'])) == 2
     assert sum(e['type'] == 'context_compacted' for e in emitted) == 2

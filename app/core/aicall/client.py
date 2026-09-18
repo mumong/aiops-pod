@@ -1042,7 +1042,8 @@ class AICall:
                     node_id="context_compaction", disable_streaming=True,
                 ).bind(max_tokens=3000)
                 create_agent_kwargs["middleware"].insert(0, WorkingContextMiddleware(
-                    self, agent_model, summary_model, tools, system_prompt, question,
+                    self, agent_model, summary_model, tools, system_prompt,
+                    getattr(self, "working_context_original_question", None) or question,
                     run_id, node_id or "agent",
                     lambda **event: self._push(stream_queue, node_id, thinking_events, **event),
                 ))

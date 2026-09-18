@@ -155,7 +155,7 @@ class WorkingContextMiddleware(AgentMiddleware):
         self.sequence += 1
         archive = ContextArchive(run_id=self.run_id)
         source = [self.client._serialize_agent_message(m) for m in messages]
-        source_ref = archive.write_json(f"compactions/{self.sequence:03d}.before.json", source)
+        source_ref = archive.write_json(f"compactions/{self.node_id}-{self.sequence:03d}.before.json", source)
         window = int(pre_budget.get("context_window") or os.getenv("MODEL_CONTEXT_WINDOW", "32000"))
         groups = message_groups(messages)
         # A bounded suffix preserves the newest complete interactions verbatim.
@@ -185,7 +185,7 @@ class WorkingContextMiddleware(AgentMiddleware):
             self.emit(type="runtime_status", status="error",
                       content="整理后的上下文仍未通过预算检查，未替换原工作历史。")
             raise
-        archive.write_json(f"compactions/{self.sequence:03d}.after.json", {
+        archive.write_json(f"compactions/{self.node_id}-{self.sequence:03d}.after.json", {
             "messages": [m.model_dump() for m in replacement],
             "pre_budget": pre_budget, "post_budget": post_budget,
             "summarized_messages": len(older), "retained_messages": len(retained),

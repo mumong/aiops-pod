@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -20,10 +21,12 @@ def test_observed_entities_are_never_promoted_to_user_explicit_targets():
     {"task": "explain"},
     {"scope": "unspecified"},
 ])
-def test_inconsistent_full_scan_does_not_expand_scope(update):
+def test_schema_does_not_override_model_route_or_scope(update):
     values = dict(route="full_diagnosis", task="inspect", scope="cluster")
     values.update(update)
-    assert RequestContract(**values).route == "focused"
+    contract = RequestContract(**values)
+    assert contract.route == "full_diagnosis"
+    assert contract.scope == values['scope']
 
 
 def test_explicit_cluster_inspection_keeps_diagnostic_route():
@@ -66,3 +69,28 @@ def test_ambiguous_request_returns_clarification():
                         clarification="需要检查哪个 Pod？"), ""))
     result = node.execute({"question": "看看这个"})
     assert result["conclusion"] == "需要检查哪个 Pod？"
+    assert result['query_session_memory']['turns'][-1]['question'] == '看看这个'
+
+
+@pytest.mark.parametrize('question', ['这个异常的pod是什么根因？', '刚刚回复里的那个workload啊'])
+def test_router_receives_answer_discovered_targets_even_after_clarification(question):
+    answer = 'aiops-case-08 下两个 Pod：driver Running；workload-abc CrashLoopBackOff。'
+    turns = [
+        {'question': 'aiops-case-08下几个pod？', 'answer': answer,
+         'scope': 'aiops-case-08', 'observed_at': '2026-09-18T02:18:14Z',
+         'request_contract': {'pod_names': []}, 'observations': ['bulky raw results']},
+        {'question': '那个异常pod？', 'answer': '需要哪个Pod？', 'scope': 'unspecified'},
+    ]
+    def classify(**kwargs):
+        material = json.loads(kwargs['question'])
+        assert material['question'] == question
+        assert material['history'][0]['answer'] == answer
+        assert material['history'][0]['observed_at'] == turns[0]['observed_at']
+        assert material['history'][1]['answer'] == '需要哪个Pod？'
+        assert 'observations' not in material['history'][0]
+        return RequestContract(route='full_diagnosis', task='diagnose', scope='pod',
+                               namespaces=['aiops-case-08'], pod_names=['workload-abc']), ''
+    node = RequestRouterNode()
+    node.ai_call = SimpleNamespace(call_structured=classify)
+    result = node.execute({'question': question, 'query_session_context': {'turns': turns}})
+    assert result['request_contract']['pod_names'] == ['workload-abc']

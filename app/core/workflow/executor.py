@@ -18,7 +18,7 @@ import queue
 import re
 import threading
 from contextlib import contextmanager, nullcontext
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Generator, Dict, Any, Optional
 
 from app.core.workflow.state import WorkflowState
@@ -161,7 +161,7 @@ class WorkflowExecutor:
         from app.core.query_sessions import query_sessions, SessionBusy
         overrides = dict(workflow_overrides or {})
         key = overrides.pop("_query_session_key", None)
-        if not key or overrides.get("query_mode") != "direct":
+        if not key:
             yield from self._execute_stream(question, run_id, cancel_event, overrides)
             return
         try:
@@ -264,6 +264,7 @@ class WorkflowExecutor:
         initial_state: WorkflowState = {
             "question": question,
             "original_question": question,
+            "request_time_utc": datetime.now(timezone.utc).isoformat(),
             "run_id": run_id,
             "layer": None,
             "layers": [],
@@ -518,7 +519,7 @@ class WorkflowExecutor:
                         "iteration": data.get("iteration"),
                         "ts_ms": data.get("ts_ms", int(time.time() * 1000)),
                         **project_parallel_tool_event(data),
-                        **(project_query_tool_event(data) if node_id == "query_collect" else {}),
+                        **(project_query_tool_event(data) if query_mode in {"auto", "direct"} else {}),
                     }
                     seq += 1
                     last_stream_event_ts = time.time()
@@ -663,7 +664,7 @@ class WorkflowExecutor:
             stats_block = metrics.format_stats_block()
             from app.core.workflow.metrics import METRICS_ENABLED
             task_route = final_state.get("request_route")
-            lightweight_task = task_route in {"focused", "query", "clarify", "stop"}
+            lightweight_task = query_mode in {"auto", "direct"} or task_route in {"focused", "query", "clarify", "stop"}
             metrics_block = metrics.format_metrics_block(enabled=METRICS_ENABLED and not lightweight_task)
             public_metrics = metrics.get_summary()
             if lightweight_task:
@@ -947,6 +948,11 @@ class WorkflowExecutor:
         """
         snapshot = {}
 
+        if state.get("query_draft") is not None and node_name in {"layer", "evidence", "rca"}:
+            return {"question": state.get("original_question") or state.get("question"),
+                    "request_contract": state.get("request_contract"),
+                    "analysis_draft": state.get("query_draft")}
+
         if node_name == "request_router":
             snapshot = {"request_route": state.get("request_route"), "request_contract": state.get("request_contract")}
         elif node_name == "focused":
@@ -1145,6 +1151,8 @@ class WorkflowExecutor:
         snapshot: Dict
     ) -> str:
         """格式化节点摘要（用于日志输出）"""
+        if "analysis_draft" in snapshot:
+            return "阶段分析已完成，证据与判断见阶段输出"
         if node_name == "layer":
             layer = snapshot.get("layer", "?")
             conf = snapshot.get("layer_confidence", 0) or 0
@@ -1171,6 +1179,10 @@ class WorkflowExecutor:
     def _format_handoff_summary(self, node_name: str, state: WorkflowState) -> str:
         """格式化节点间传递的完整数据（不截断，供审查）"""
         import json as _json
+
+        if state.get("query_draft") is not None and node_name in {"layer", "evidence", "rca"}:
+            return (f"用户问题：{state.get('original_question') or state.get('question', '')}\n"
+                    f"本阶段分析草稿（非程序核验结论）：\n{state.get('query_draft', '')}")
 
         if node_name == "layer":
             layer = state.get("layer", "?")

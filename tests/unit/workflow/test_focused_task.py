@@ -53,16 +53,16 @@ def test_not_found_is_valid_negative_observation_not_positive_health():
     assert output["conclusion"] == "目标不存在"
 
 
-def test_auto_graph_scoped_request_never_enters_diagnosis():
+def test_auto_graph_model_selects_lightweight_scoped_request():
     graph, nodes = build_diagnosis_workflow(query_mode="auto")
     visited = []
     for node in nodes:
         if node.node_id == "request_router":
             node.ai_call = SimpleNamespace(call_structured=lambda **kw: (
                 RequestContract(route="focused", task="inspect", scope="namespace", namespaces=["xnet"]), ""))
-        elif node.node_id == "focused":
+        elif node.node_id in {"query_collect", "conclusion"}:
             def focused(state):
-                visited.append("focused")
+                visited.append("lightweight")
                 return {"conclusion": "xnet 正常"}
             node.execute = focused
         else:
@@ -70,14 +70,16 @@ def test_auto_graph_scoped_request_never_enters_diagnosis():
                 raise AssertionError("scoped task entered legacy diagnostic node")
             node.execute = unexpected
     result = graph.invoke({"question": "xnet 有异常吗？"})
-    assert visited == ["focused"]
+    assert visited == ["lightweight", "lightweight"]
     assert result["conclusion"] == "xnet 正常"
 
 
 def test_focused_executor_emits_final_without_enabling_remediation(monkeypatch, tmp_path):
     monkeypatch.setattr(RequestRouterNode, "execute", lambda self, state: {
         "request_route": "focused", "request_contract": {"task": "query"}})
-    monkeypatch.setattr(FocusedTaskNode, "execute", lambda self, state: {
+    from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
+    monkeypatch.setattr(QueryCollectNode, "execute", lambda self, state: {"query_draft": "CPU 查询结果"})
+    monkeypatch.setattr(QueryConclusionNode, "execute", lambda self, state: {
         "conclusion": "CPU 查询结果", "conclusion_formatted": "CPU 查询结果"})
 
     def forbidden(*args, **kwargs):

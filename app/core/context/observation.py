@@ -132,7 +132,7 @@ class ObservationProcessor:
         raw = raw_content or ""
         tool = tool_name or "unknown"
         targeted_summary = (
-            preserve_raw and node_id == "query_collect"
+            preserve_raw and node_id in {"query_collect", "layer", "evidence", "rca"}
             and tool in self.QUERY_SUMMARY_TOOLS
             and len(raw) > self.QUERY_SUMMARY_MIN_CHARS
         )
@@ -157,6 +157,7 @@ class ObservationProcessor:
         structured: Dict[str, Any]
         summary: str
         processor = "passthrough"
+        whole_series_summary = False
         full_passthrough = tool in self.FULL_PASSTHROUGH_TOOLS
 
         if full_passthrough:
@@ -183,7 +184,7 @@ class ObservationProcessor:
                 summary = self._generic_summary(tool, raw)
                 processor = "generic"
 
-        if node_id in {"focused", "query_collect"} and processor == "k8s_table" and structured.get("status") == "table_summarized":
+        if (targeted_summary or node_id in {"focused", "query_collect"}) and processor == "k8s_table" and structured.get("status") == "table_summarized":
             # A task-oriented query must not silently discard healthy objects.
             # Keep the full returned inventory in the archive; the model sees a
             # bounded prefix with explicit coverage, never an abnormal-only view.
@@ -208,8 +209,11 @@ class ObservationProcessor:
         if targeted_summary and tool == "get_metric_names":
             structured, summary = self._query_metric_catalog(raw)
             processor = "metric_catalog"
-        elif targeted_summary and processor == "prometheus_result":
+        elif targeted_summary and (processor == "prometheus_result" or (
+            tool == "execute_pod_promql" and structured.get("coverage") in {"present", "empty", "absent"}
+        )):
             summary = self._query_metric_samples(raw)
+            whole_series_summary = True
 
         semantic_success = self._is_semantically_successful(structured, summary)
 
@@ -257,6 +261,7 @@ class ObservationProcessor:
         observation_audit: Dict[str, Any] = {}
         if (
             tool in self.OBSERVABILITY_QUERY_TOOLS
+            and not whole_series_summary
             and structured.get("contract_version")
             == OBSERVABILITY_PROJECTION_VERSION
         ):
@@ -290,7 +295,7 @@ class ObservationProcessor:
                 structured=structured,
                 summary=summary,
             )
-        if node_id in {"focused", "query_collect"}:
+        if targeted_summary or node_id in {"focused", "query_collect"}:
             # additional_kwargs are audit metadata, not reliably model-visible.
             # Supply the real retrieval address in content, not an instruction
             # to invent a reference or repeat an already truncated query.
@@ -345,20 +350,26 @@ class ObservationProcessor:
     def _query_metric_samples(self, raw: str) -> str:
         """Keep whole source series, including labels/timestamps/values, without unit inference."""
         payload = json.loads(raw)
-        result = payload["data"]["result"]
+        data = payload.get("data") or {}
+        result = data.get("result") if "result" in data else payload.get("series", [])
+        query = payload.get("query") or {}
+        metadata = {key: query[key] for key in ("query_type", "value_unit", "time_range") if key in query}
+        heading = (
+            f"Prometheus {data.get('resultType', payload.get('result_type', ''))}: 共 {len(result)} 条序列。"
+            "每条记录是一条独立标签序列；不同实例标签的点不能串成同一次运行的趋势。"
+            "保留源标签、时间和值，未做单位换算或聚合；不能由子集推断全集统计。"
+            "省略内容需回读或缩小查询范围。\n"
+            + (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) + "\n" if metadata else "")
+        )
         selected = []
-        used = 400
+        # Reserve room for selection counts and the archive address appended later.
+        used = len(heading) + 400
         for item in result:
             encoded = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             if used + len(encoded) + 1 <= self.max_observation_chars:
                 selected.append(encoded)
                 used += len(encoded) + 1
-        return (
-            f"Prometheus {payload['data'].get('resultType', '')}: 共 {len(result)} 条序列，"
-            f"展示 {len(selected)} 条，省略 {len(result) - len(selected)} 条。"
-            "保留源标签、时间和值，未做单位换算或聚合；不能由子集推断全集统计。"
-            "省略内容需回读或缩小查询范围。\n" + "\n".join(selected)
-        )
+        return heading + f"展示 {len(selected)} 条，省略 {len(result) - len(selected)} 条。\n" + "\n".join(selected)
 
     def _extract(
         self,

@@ -89,7 +89,8 @@ def test_conclusion_does_not_reexpand_targeted_summary():
     ]})
     assert "structured" not in captured["observations"][0]
     assert captured["observations"][0]["structured_ref"] == "/archive/full.json"
-    assert captured["observations"][1]["structured"] == {"value": 1}
+    assert "structured" not in captured["observations"][1]
+    assert captured["observations"][1]["result"] == "small"
 
 
 def test_budget_failure_skips_conclusion_model_and_preserves_refs():

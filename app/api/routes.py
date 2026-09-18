@@ -61,11 +61,13 @@ def register_routes(app):
     
     @app.get("/ask")
     async def ask_get(
+        request: Request,
         q: str = Query(..., description="问题内容", example="Pod一直重启怎么办"),
         stream: bool = Query(True, description="是否流式输出"),
         format: str = Query("text", description="输出格式: text(默认) 或 sse"),
         max_steps: int = Query(20, description="最大执行步数", ge=1, le=100),
         remediate: Optional[bool] = Query(None, description="已废弃；修复流程由 workflow.remediation 配置控制"),
+        session_id: Optional[str] = Query(None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
     ):
         """
         🔍 智能运维查询（GET 方式）
@@ -85,30 +87,35 @@ def register_routes(app):
         """
         question = fix_double_encoding(q) # FastAPI 的 Query 已自动解码
         logger.info(f"📝 收到查询: {question[:80]}...")
+        overrides = _diagnosis_workflow_overrides()
+        owner = _query_session_owner(request, session_id, overrides)
         
         if stream:
-            return _stream_response(
+            response = _stream_response(
                 question,
                 format,
                 max_steps,
-                workflow_overrides=_diagnosis_workflow_overrides(),
+                workflow_overrides=overrides,
                 workflow_title="工作流诊断模式",
             )
         else:
-            return await _sync_response(
+            response = await _sync_response(
                 question,
                 max_steps,
-                workflow_overrides=_diagnosis_workflow_overrides(),
+                workflow_overrides=overrides,
                 workflow_title="工作流诊断模式",
             )
+        return _query_session_cookie(request, response, owner)
     
     @app.post("/ask")
     async def ask_post(
+        request: Request,
         q: str = Form(..., description="问题内容"),
         stream: bool = Form(True, description="是否流式输出"),
         format: str = Form("text", description="输出格式"),
         max_steps: int = Form(20, description="最大执行步数"),
         remediate: Optional[bool] = Form(None, description="已废弃；修复流程由 workflow.remediation 配置控制"),
+        session_id: Optional[str] = Form(None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
     ):
         """
         🔍 智能运维查询（POST 表单方式）
@@ -125,22 +132,25 @@ def register_routes(app):
         """
         question = fix_double_encoding(q)
         logger.info(f"📝 收到查询 (POST): {question[:80]}...")
+        overrides = _diagnosis_workflow_overrides()
+        owner = _query_session_owner(request, session_id, overrides)
 
         if stream:
-            return _stream_response(
+            response = _stream_response(
                 question,
                 format,
                 max_steps,
-                workflow_overrides=_diagnosis_workflow_overrides(),
+                workflow_overrides=overrides,
                 workflow_title="工作流诊断模式",
             )
         else:
-            return await _sync_response(
+            response = await _sync_response(
                 question,
                 max_steps,
-                workflow_overrides=_diagnosis_workflow_overrides(),
+                workflow_overrides=overrides,
                 workflow_title="工作流诊断模式",
             )
+        return _query_session_cookie(request, response, owner)
 
     # =========================================================================
     # 轻量查询 API：/query - QUERY 专用入口
@@ -159,8 +169,8 @@ def register_routes(app):
         logger.info(f"📝 收到轻量查询: {question[:80]}...")
 
         overrides = {
-            "query_mode": "direct",
-            "nodes": {"layer": True, "evidence": False, "rca": False, "conclusion": True},
+            "query_mode": "auto",
+            "remediation": {"enabled": False},
         }
         owner = _query_session_owner(request, session_id, overrides)
         if stream:
@@ -182,8 +192,8 @@ def register_routes(app):
         logger.info(f"📝 收到轻量查询 (POST): {question[:80]}...")
 
         overrides = {
-            "query_mode": "direct",
-            "nodes": {"layer": True, "evidence": False, "rca": False, "conclusion": True},
+            "query_mode": "auto",
+            "remediation": {"enabled": False},
         }
         owner = _query_session_owner(request, session_id, overrides)
         if stream:

@@ -8,10 +8,10 @@
 |---|---|---|
 | HTTP/SSE | [routes.py](../app/api/routes.py)、[service.py](../app/core/service.py) | 接收请求、加载配置与工具、启动诊断 |
 | 工作流 | [graph.py](../app/core/workflow/graph.py)、[executor.py](../app/core/workflow/executor.py) | 条件路由、事件、计时、取消与归档 |
-| 定位 | [layer_classifier.py](../app/core/workflow/nodes/layer_classifier.py) | 查询当前现场、确定目标 Pod、异常组和 Runbook |
-| Pod 独立诊断 | [parallel_evidence.py](../app/core/workflow/nodes/parallel_evidence.py) | 每 Pod 一条 lane，独立执行 Evidence 与正式 RCA |
-| 规划和采集 | [evidence_collector.py](../app/core/workflow/nodes/evidence_collector.py) | Evidence Plan、首轮查询、ReAct 补查及采集统计 |
-| 根因与展示 | [root_cause_analyzer.py](../app/core/workflow/nodes/root_cause_analyzer.py)、[conclusion_formatter.py](../app/core/workflow/nodes/conclusion_formatter.py) | 根因推理、分组报告与汇总 |
+| 意图路由 | [request_router.py](../app/core/workflow/nodes/request_router.py) | 模型理解意图、范围与深度，输出 JSON 路由 |
+| 深度诊断 | [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py) | 自主定位、取证和根因分析，不执行固定扫描兜底 |
+| 轻量查询与共同总结 | [query_answer.py](../app/core/workflow/nodes/query_answer.py) | 自主查询、证据驱动总结、会话结果保存 |
+| 旧式独立 lane | [parallel_evidence.py](../app/core/workflow/nodes/parallel_evidence.py) | 仅显式 legacy full 模式保留的每 Pod 独立诊断 |
 | 观测处理 | [observation.py](../app/core/context/observation.py)、[observability_projection.py](../app/core/context/observability_projection.py) | 类型解析、规则投影、模式归并、摘要及引用 |
 | 上下文 | [client.py](../app/core/aicall/client.py)、[budget.py](../app/core/context/budget.py) | 模型工具循环、预算门禁及压缩 |
 | 归档与回读 | [archive.py](../app/core/context/archive.py)、[builtin_tools.py](../app/core/aicall/builtin_tools.py) | 保存节点/工具记录、fetch_runbook、read_context_archive |
@@ -20,45 +20,51 @@
 
 MCP 查询和前端实现在独立仓库，不属于本仓库运行代码。接入关系见[部署指南](GUIDE.md)。
 
-## 请求与 Pod 分组
+## 当前入口：按意图选择深度
 
-`/ask` 使用任务路由（`query_mode=auto`）；`/query` 使用两个节点：自主查询 Agent → Conclusion Agent。
+[打开交互流程图](aiops-intent-workflow.html)（支持明暗主题与图片导出；编辑源为 aiops-intent-workflow.json）。图中区分模型意图判断与 LangGraph 的固定连线执行。
 
-`/query` 不再用 Prometheus JSON 兜底解析作为最终答案。`query_collect` 根据原问题自主调用只读工具，提供已安装 Runbook 的完整目录并按需读取正文。Conclusion 接收原问题、分析草稿和本次工具结果（含来源引用），不调用工具，生成 `QueryAnswer` JSON：intent、scope、status、answer、evidence_refs、runbooks、missing。最终事件保留 `answer` Markdown 兼容前端，另提供 `query_answer`。JSON 格式失败保留原模型文本，结构化字段为 null；不以格式失败判定没有证据。不对答案做程序级语义或引用校验，正常展示不代表结论已核验。查询不强制指标表、三维采集或诊断模板。保留归档、预算、取消和只读边界，不追加诊断质量评分，不自动修复。实现见 [query_answer.py](../app/core/workflow/nodes/query_answer.py)。
+`/query` 与 `/ask` 均使用 `query_mode=auto`。RequestRouter Agent 输出 JSON，LangGraph 按 `route` 选择：
 
-- `request_router` 在查询环境前生成任务合同，保留任务类型、对象范围、时间要求和请求输出。只有明确的全局综合检查进入原诊断图。
-- 命名空间检查、指定 Pod 分析、指标/日志查询和组合问题进入 `focused`。该节点先自主调用只读工具，再仅根据本次工具记录整理结构化回答；不是固定工具序列。两个图节点不意味着只有两次模型调用。
-- 歧义返回澄清；路由失败停止，不默认全局扫描。用户要求写操作时不执行变更。
-- 聚焦路径不加载完整诊断提示词，不执行三维基线或自动异常分组。工具出现异常对象不会改变请求路由。
+- `focused`：`query_collect → conclusion`，日常查询、可观测性数据获取、知识解释和明确要求的快速初查。
+- `full_diagnosis`：`layer → evidence → rca → conclusion`，Pod/命名空间/集群异常诊断与根因分析。该名称表示深度，不表示全量扫描。
+- `clarify`：返回模型的澄清问题并保存会话，等待补充；路由格式无效则明确停止，不自动选择某种业务流程。
 
-`/ask` 的 focused 路径目前保留工具归档、预算、取消、输出结构与来源校验；查询范围由提示词指导，不再挂载 namespace/PromQL 参数拦截。引用存在校验只证明出处存在，不证明数值转换、解释或因果判断正确。NotFound、空结果和失败记录可用于说明不存在或采集限制，不能自动成为健康证据。轻量结果不追加诊断质量评分，也不进入自动修复。
+路由只校验结构，不根据关键词、namespace 或对象数量改写模型决定。工具结果也不会自行改变路由。提示词统一位于 [prompts.py](../app/core/prompts.py)。
 
-聚焦表格摘要按源顺序展示，不按异常状态过滤健康对象；结构化归档保留完整表格行，摘要注明省略数量并提供模型可见的原文回读地址。原诊断路径保留异常优先展示。发现的对象不再兜底成为“用户明确指定的 Pod”；分组子任务保留原始用户问题。
+路由历史包含用户问题、助手回答、范围与观测时间。助手回答用于识别上一轮查询后新发现的对象（例如“刚才那个异常 Pod”），不被当作当前状态证据；原始工具正文不重复塞入路由。超预算走共享压缩，不预先删掉回答。
 
-实现入口：[request_router.py](../app/core/workflow/nodes/request_router.py)、[focused.py](../app/core/workflow/nodes/focused.py)、[task_tools.py](../app/core/workflow/task_tools.py)。真实模型/MCP 验证入口：[verify_task_routing.py](../scripts/verify_task_routing.py)，仅做只读请求，不部署异常环境；结果中 `route_pass` 仅代表路由通过，回答需单独核对。
+深度节点实现见 [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py)。保留定位、取证、根因、总结四个职责，但不进入旧节点中的程序基线采集、异常状态派生、强制三维计划、按异常 Pod 自动 fanout、提前停止或因果发布校验。定位和取证自主使用只读工具、按需读取 Runbook；RCA 和总结不调用工具。同一轮工具仍可并发执行，但默认不再是每 Pod 独立 lane，不能把旧 lane 的性能与质量统计直接套用到新流程。
 
-进入完整诊断图后，Layer 根据当前 Kubernetes 状态确定异常目标，无异常时可直接汇总。
+每次交接均包含用户原始问题、时间、任务范围、最新工作摘要、保留交互和真实工具观察。上游分析只是草稿，不是事实。工具结果只传一份，不同时重注入 raw 和 structured 的重复内容。超预算后使用替换后的工作上下文，不重新拼回已压缩历史。
 
-默认 workflow.evidence.parallel.threshold=0，任何已确认异常 Pod（包括只有一个）都进入独立 lane，而不是“超过两个异常才并行”。每条 lane 使用本组实体、独立采证上下文、正式 RootCauseAnalyzer 和归档 ID；完成后直达 Conclusion，不再进行一次全局 RCA。
+Conclusion 生成 `QueryAnswer` JSON，字段为 intent、scope、status、answer、evidence_refs、runbooks、missing；answer 为兼容前端的 Markdown 正文。无程序级语义验收，不宣称已自动验证根因正确。权限、格式、取消、超时、预算与归档属于工程边界，仍保留。`/query` 不启用修复；`/ask` 原修复入口配置未扩大授权范围。
 
-lane_concurrency=0 表示按目标数展开，没有该配置项指定的本地并发上限；受模型服务承载能力限制，可配置正数限制并发。不要把“并行”理解为无限资源。
+深度报告另用 `DEEP_CONCLUSION_PRESENTATION` 提示词组织结论、证据表、根因/待核实项及建议/Runbook；普通查询不套此模板。证据表要求区分 Metrics、Logging、Tracing 的已采集、未采集、失败、空结果或不适用，不由程序补造证据。匹配的 Runbook 由模型读取并选用步骤，未设置强制调用兜底，因此仍可能被模型跳过。前端阶段草稿默认折叠，按 Markdown 渲染，不将正文中的环境变量赋值拆成 KV 字段。
 
-[entity_evidence_snapshot.py](../app/core/workflow/entity_evidence_snapshot.py)负责组级证据快照，[lane_diagnosis_artifact.py](../app/core/workflow/lane_diagnosis_artifact.py)保存正式组级诊断产物。结构化交接和模型分析文字分别保存；模型文字不是工具事实的替代品。
+深度提示词现以原四节点专业要求为基础适配：定位只确认范围和现象，取证对比支持/反驳证据，RCA 寻找受支持的最上游可行动原因，总结恢复“异常概览—证据内容—因果链/根因结论”风格。没有接回旧 LayerOutput、程序首轮 Evidence Plan、80% 停采或 RCA 发布校验；报告仍包在 QueryAnswer.answer 中。此为提示词适配，不是旧工作流恢复，也不保证模型必然遵循。
 
-SSE 事件包含 run_id、节点、工具调用及组身份。并行工具事件由 [stream_contract.py](../app/core/workflow/stream_contract.py)投影 evidence_context，消费者应使用 group_id / tool_call_id 关联，不能按工具同名或到达顺序猜测归属。
+## 共享会话与 54k 上下文
 
-## Evidence Plan 与实际执行
+两个接口均接受 session_id，并用相同 HttpOnly owner cookie 隔离会话。前端同一会话切换入口仍传相同 ID。缓存为进程内 TTL/LRU，30 分钟、64 会话、单会话 256 KiB；Pod 重启丢失，不支持多副本共享。只有完成的结果保存，取消不覆盖旧记忆。
 
-当前 planning_mode=structured：
+两条路径使用同一 MODEL_CONTEXT_WINDOW（当前环境 54000）和 WorkingContextMiddleware。达到配置预算时，围绕原问题压缩完整工作历史、保留近期完整工具交互，并替换实际 LangGraph messages；后续再超预算仍会触发。工具调用与对应返回不拆散。RCA/总结无工具调用时同样在预算不足时调用共用摘要器。压缩失败不以切片假装完成。
 
-1. 单独调用模型生成 EvidencePlanOutput，程序做结构校验；无法取得有效计划时，自主模式可用最小 Describe 计划兜底。
-2. 整理后的计划以“既有 evidence_plan”放入 Evidence 的执行输入；它不是另一个自行运行的 Agent。
-3. 在 ReAct 前执行 Metrics、Logging、Tracing 首轮查询。优先使用计划中可用的查询项，否则补通用 Pod 生命周期指标和最近日志/链路基线。Topology 是辅助查询，不属于强制三维基线。
-4. Evidence 根据结果决定专项补查、修改 PromQL 或过滤条件、回读归档。计划不等于固定、不可变化的工具序列。
-5. 工具执行/参数失败有受限恢复路径；成功但 empty/absent 不等于执行失败，不触发同样的失败重试。
-6. 保存实际计划、采集结果、缺口及模型解释，再进入该 lane 的正式 RCA。
+重型工具名单继续使用 ObservationProcessor 中的受限摘要策略：仅名单内且超过 6000 字符时处理，普通工具、日志、Runbook 和归档回读保留原文。摘要不意味着源数据不存在；原文与遗漏信息保留。表格不再仅因存在异常而删掉健康对象。此策略共用于 query_collect、layer、evidence。
 
-可选 react_only 跳过独立 Plan 调用，仍保留首轮基线与自主调查。完整度是计划项完成情况，不等于关键证据充分，更不保证因果结论正确。
+## 旧流程的保留边界
+
+显式内部 `query_mode=full` 仍保留原 layer_classifier、evidence_collector、parallel_evidence、root_cause_analyzer、conclusion_formatter，便于既有测试与历史报告复核；公开 /ask、/query 默认不进入。旧的每 Pod lane、Evidence Plan 完整度、规则兜底与模型修复机制不代表新默认路径行为。
+
+### 本轮验证与限制（未部署）
+
+后端单元测试 1323 项通过；A2A 18 项通过。前端相关测试 13 项、构建和 lint 通过，完整前端测试仍有 3 项既有部署仓库断言失败，不能据此宣布全部前端测试通过。
+
+使用独立进程加载本轮源码、连接真实模型与 MCP，未替换线上服务：`intent-smoke-c0457e054868` 正确区分 xnet 当前健康状态与历史重启；`intent-smoke-7f59f45697e0` 通过归档回读补齐集群表格，识别 case05 沙箱、case08 OOM、case09 就绪探针异常。仍观察到将测试背景误解为无需处理、证据引用不精确及部分推断过强，不作为诊断准确率验收。
+
+真实 `intent-smoke-ad1870984a01` 的指标返回回放：13201 字符转为 2733 字符，3 个不同容器运行实例的完整序列、标签、时间和值均保留。修复的是摘要丢失运行实例标签的问题；不保证模型不会错误合并不同序列。重复超预算测试验证实际消息替换，而非仅缩短一次模型请求。
+
+以下为旧流程及上一部署的实现说明；涉及节点编排、仅 QUERY 开关、强制计划和报告校验的描述不适用于上文的新默认 auto 路径。
 
 ## 工具观测的三种表示
 

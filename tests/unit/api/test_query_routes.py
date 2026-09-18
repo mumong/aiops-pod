@@ -98,7 +98,7 @@ def test_ask_route_does_not_reject_sync_with_legacy_remediate_parameter(monkeypa
     assert "remediation" not in overrides
 
 
-def test_query_route_uses_direct_query_workflow(monkeypatch):
+def test_query_route_uses_intent_router_and_remains_readonly(monkeypatch):
     client, fake_service = _build_client(monkeypatch)
 
     response = client.get("/query", params={"q": "集群 CPU 使用率是多少", "stream": "false"})
@@ -106,13 +106,19 @@ def test_query_route_uses_direct_query_workflow(monkeypatch):
     assert response.status_code == 200
     assert len(fake_service.sync_calls) == 1
     overrides = fake_service.sync_calls[0]["workflow_overrides"]
-    assert overrides["query_mode"] == "direct"
-    assert overrides["nodes"] == {
-        "layer": True,
-        "evidence": False,
-        "rca": False,
-        "conclusion": True,
-    }
+    assert overrides["query_mode"] == "auto"
+    assert overrides["remediation"]["enabled"] is False
+
+
+def test_ask_and_query_share_owner_scoped_session_identity(monkeypatch):
+    client, service = _build_client(monkeypatch)
+    params = {'q': 'pods', 'session_id': 'a' * 32}
+    client.get('/query', params=params)
+    key = service.stream_calls[-1]['workflow_overrides']['_query_session_key']
+    client.get('/ask', params=params)
+    assert service.stream_calls[-1]['workflow_overrides']['_query_session_key'] == key
+    client.post('/ask', data=params)
+    assert service.stream_calls[-1]['workflow_overrides']['_query_session_key'] == key
 
 
 def test_query_stream_route_sets_query_title(monkeypatch):

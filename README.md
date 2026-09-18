@@ -207,7 +207,7 @@ make case-clean CASE=c01-cpu
 
 ## 其他使用方式
 
-`/query` 使用两节点运维工作流：Agent 根据原问题自主选择只读工具及已安装的 Runbook，Conclusion 输出 JSON 结构化结果。支持检查、故障分析、日志、指标、链路及知识解释，不强制固定采集步骤。前端显示 Markdown 正文；SSE 最终事件的 `query_answer` 提供意图、范围、状态、正文、来源、手册与缺失项。对象不明确时澄清；结构正确不代表诊断已核验。
+`/query` 与 `/ask` 先由 Agent 理解意图并输出 JSON 路由：日常查询和快速初查走“自主查询 → 总结”；Pod、命名空间或集群根因诊断走“定位 → 取证 → 根因 → 总结”。深度诊断不等于全量扫描，各节点围绕原问题自主选择只读工具和 Runbook，不执行固定采集兜底。前端显示 Markdown，SSE 的 `query_answer` 包含意图、范围、状态、正文、来源与缺失项；结构正确不代表诊断已核验。两接口共享 session_id 会话记忆及 54k 环境配置下的自动上下文压缩；进程内记忆在 Pod 重启后丢失。
 
 ```bash
 curl -N -G "http://10.2.0.48:30800/query" --data-urlencode 'q=查询 xnet 命名空间下所有 Pod 的日志'

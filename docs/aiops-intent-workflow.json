@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {"title": "AIOps：一个意图路由，两种处理深度", "subtitle": "源码流程 · /ask 与 /query 默认均为 auto · 模型决定分支，LangGraph 执行连接", "viewBox": [740, 740]},
+  "lanes": [
+    {"id":"entry","label":"入口与会话：前端按钮不是最终深度开关"},
+    {"id":"route","label":"唯一的任务意图路由：当前问题 + 历史问答 + 范围"},
+    {"id":"quick","label":"focused：自主查询 / 快速初查"},
+    {"id":"deep","label":"full_diagnosis：深度诊断；不等于全集群扫描"},
+    {"id":"answer","label":"共用总结与输出：结果保存到会话，下一轮重新识别意图"}
+  ],
+  "nodes": [
+    {"id":"user","lane":"entry","col":0,"type":"frontend","label":"用户问题","sublabel":"session_id"},
+    {"id":"api","lane":"entry","col":1,"type":"backend","label":"API + 记忆","sublabel":"/ask 或 /query"},
+    {"id":"router","lane":"route","col":1,"type":"backend","label":"意图 Agent","sublabel":"request_router","tag":"LLM 输出 JSON"},
+    {"id":"graph","lane":"route","col":3,"type":"security","label":"LangGraph","sublabel":"按 route 连线","tag":"程序，不重新判断意图"},
+    {"id":"stop","lane":"route","col":5,"type":"external","label":"澄清 / 停止","sublabel":"不启动采集"},
+    {"id":"collect","lane":"quick","col":3,"type":"backend","label":"自主采集","sublabel":"query_collect","tag":"按需调用只读工具"},
+    {"id":"layer","lane":"deep","col":0,"type":"backend","label":"定位","sublabel":"layer","tag":"对象与现象；可用工具"},
+    {"id":"evidence","lane":"deep","col":1,"type":"backend","label":"取证","sublabel":"evidence","tag":"补证据；可用工具"},
+    {"id":"rca","lane":"deep","col":3,"type":"backend","label":"根因分析","sublabel":"rca","tag":"依据证据；不调用工具"},
+    {"id":"conclusion","lane":"answer","col":3,"type":"backend","label":"共用总结","sublabel":"conclusion","tag":"JSON 内含 Markdown"},
+    {"id":"display","lane":"answer","col":5,"type":"frontend","label":"前端展示","sublabel":"SSE 状态 + 最终报告"}
+  ],
+  "edges": [
+    {"from":"user","to":"api"},
+    {"from":"api","to":"router","fromSide":"bottom","toSide":"top"},
+    {"from":"router","to":"graph"},
+    {"from":"graph","to":"stop","label":"clarify / 无效 JSON","labelAt":[530,206]},
+    {"from":"graph","to":"collect","fromSide":"bottom","toSide":"top","label":"focused","labelAt":[466,282]},
+    {"from":"graph","to":"layer","fromSide":"left","toSide":"top","via":[[365,243],[28,243],[28,418],[88,418]],"label":"full_diagnosis","labelAt":[100,407]},
+    {"from":"layer","to":"evidence"},
+    {"from":"evidence","to":"rca"},
+    {"from":"rca","to":"conclusion","fromSide":"bottom","toSide":"top"},
+    {"from":"collect","to":"conclusion","fromSide":"right","toSide":"right","route":"outside-right","channelX":702,"variant":"emphasis"},
+    {"from":"conclusion","to":"display"}
+  ],
+  "cards": [
+    {"dot":"emerald","title":"什么决定深度？","items":["当前同一 Qwen 模型执行意图识别，不是另一个小模型。","提示词规定 focused / full_diagnosis / clarify 的含义。","轻量为路由后 2 节点，深度为路由后 4 节点。","没有轻量中途自动升级深度的连线；下一轮可重新路由。"]},
+    {"dot":"violet","title":"两条路径共用什么？","items":["原始用户问题、对象范围和会话记忆。","54K 窗口；超预算替换上下文，再超再压缩。","采集节点可用 Kubernetes、Metrics、Logging、Tracing、Runbook、归档回读。","只对名单内的大工具结果生成摘要；原文保留归档。"]},
+    {"dot":"rose","title":"边界与误区","items":["诊断识别是判断用户需要什么，不是提前判断 Pod 根因。","程序保留格式、权限、预算和超时边界，不按异常关键词强制扫描。","三维证据展示不等于三维已采集；Runbook 提示不保证模型一定调用。","旧 full/lane 工作流保留但默认不进入；本图不画旧兼容路径。"]}
+  ]
+}

@@ -26,6 +26,7 @@ class WorkflowState(TypedDict, total=False):
     # ========== 输入 ==========
     question: str
     original_question: str
+    request_time_utc: str
     run_id: str
     request_contract: Optional[Dict[str, Any]]
     request_route: Optional[str]

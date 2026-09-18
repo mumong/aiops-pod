@@ -1,13 +1,10 @@
 """
 工作流图构建
 
-设计原则：
-- 节点顺序：layer → evidence → rca → conclusion
-- 节点可通过 config.yaml 的 workflow.nodes 启用/禁用
-- QUERY 模式走轻量查询路径（layer 轻量路由 → evidence 归一化 → conclusion 渲染）
-- HEALTHY 模式直接到 conclusion
-- conclusion 始终保留（最终输出节点）
-- 每个节点独立，易于替换/扩展
+公开入口使用 auto：模型 JSON 路由选择轻量查询或深度诊断。
+轻量：query_collect → conclusion；深度：layer → evidence → rca → conclusion。
+澄清或无效路由直接结束，不回退到全集群扫描。
+显式内部 full 模式保留旧节点、配置开关和并发 lane，供兼容与历史复核。
 """
 
 import logging
@@ -20,7 +17,6 @@ from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
 from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
 from app.core.workflow.nodes.request_router import RequestRouterNode
-from app.core.workflow.nodes.focused import FocusedTaskNode
 from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
 from app.core.workflow.nodes.parallel_evidence import (
     ParallelEvidenceNode,
@@ -144,6 +140,28 @@ def build_diagnosis_workflow(
         workflow.add_edge("conclusion", END)
         return workflow.compile(), nodes
 
+    if query_mode == "auto":
+        from app.core.workflow.nodes.autonomous_diagnosis import (
+            DiagnosisStageNode, DiagnosisEvidenceNode, DiagnosisRootCauseNode,
+        )
+        workflow = StateGraph(WorkflowState)
+        nodes = [cls(holmes_service, metrics, runbook_catalog) for cls in (
+            RequestRouterNode, QueryCollectNode, DiagnosisStageNode,
+            DiagnosisEvidenceNode, DiagnosisRootCauseNode, QueryConclusionNode,
+        )]
+        for node in nodes:
+            workflow.add_node(node.node_id, _wrap_node_execute(node))
+        workflow.set_entry_point("request_router")
+        workflow.add_conditional_edges("request_router", lambda state: state["request_route"], {
+            "focused": "query_collect", "full_diagnosis": "layer", "clarify": END, "stop": END,
+        })
+        workflow.add_edge("query_collect", "conclusion")
+        workflow.add_edge("layer", "evidence")
+        workflow.add_edge("evidence", "rca")
+        workflow.add_edge("rca", "conclusion")
+        workflow.add_edge("conclusion", END)
+        return workflow.compile(), nodes
+
     enabled = _get_enabled_nodes(node_config)
     logger.info(f"🔧 工作流节点: {' → '.join(enabled)}")
 
@@ -179,21 +197,8 @@ def build_diagnosis_workflow(
         # 并发采集完成后直达 conclusion（每组的单独分析即该组 RCA，跳过全局 rca）
         workflow.add_edge("parallel_evidence", "conclusion")
 
-    # 设置入口点
-    if query_mode == "auto":
-        for cls in (RequestRouterNode, FocusedTaskNode):
-            node = cls(holmes_service, metrics, runbook_catalog)
-            node_instances.append(node)
-            workflow.add_node(node.node_id, _wrap_node_execute(node))
-        workflow.set_entry_point("request_router")
-        workflow.add_conditional_edges(
-            "request_router",
-            lambda state: state.get("request_route", "stop"),
-            {"full_diagnosis": enabled[0], "focused": "focused", "clarify": END, "stop": END},
-        )
-        workflow.add_edge("focused", END)
-    else:
-        workflow.set_entry_point(enabled[0])
+    # Explicit legacy mode only; public endpoints use the question-led auto graph.
+    workflow.set_entry_point(enabled[0])
 
     # 构建边
     layer_enabled = "layer" in enabled

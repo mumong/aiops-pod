@@ -1,0 +1,89 @@
+"""Question-led diagnosis roles using the same evidence and memory path as QUERY.
+
+No baseline calls, inferred abnormal-group fanout, fault-specific stop checkers,
+or programmatic causal decisions. The graph assigns roles, not diagnoses.
+"""
+import asyncio
+import json
+
+from app.core.prompts import (
+    DIAGNOSTIC_TOOL_GUIDANCE, DEEP_LAYER_PROMPT, DEEP_EVIDENCE_PROMPT, DEEP_RCA_PROMPT,
+)
+from app.core.workflow.nodes.query_answer import (
+    QueryCollectNode, build_working_material, _configure_query_runtime,
+)
+
+
+class DiagnosisStageNode(QueryCollectNode):
+    stage_id = "layer"
+    stage_name = "问题定位"
+    stage_prompt = DEEP_LAYER_PROMPT
+    collect = True
+
+    @property
+    def node_id(self):
+        return self.stage_id
+
+    @property
+    def node_name(self):
+        return self.stage_name
+
+    def execute(self, state):
+        _configure_query_runtime(self)
+        if getattr(self, "ai_call", None) is not None:
+            # History is already in material; do not insert it twice.
+            self.ai_call.query_session_context = {}
+            self.ai_call.working_context_original_question = state.get("original_question") or state.get("question", "")
+        material = build_working_material(state)
+        material["request_contract"] = state.get("request_contract")
+        prompt = self.stage_prompt
+        if self.collect:
+            prompt += "\n" + DIAGNOSTIC_TOOL_GUIDANCE
+            prompt += "\nRunbook 目录（匹配当前异常时读取，已读可复用）：\n" + self._prepare_query_tools()
+        self._archive_node_input(material)
+
+        def call(payload):
+            return self._call_llm(
+                json.dumps(payload, ensure_ascii=False, default=str), prompt,
+                force_no_tools=not self.collect, skip_remediation_policy=True,
+                blocked_tool_names={t.name for t in getattr(self, "tools", []) if t.name not in self.READ_TOOLS},
+            )
+
+        events = list(state.get("thinking_events") or [])
+        from app.core.aicall.client import StructuredContextBudgetError
+        try:
+            response, stage_events = call(material)
+        except StructuredContextBudgetError as exc:
+            if "working_context_compaction_required" not in str(exc):
+                raise
+            from app.core.aicall.working_context import summarize_history
+            model = self.ai_call._create_chat_model(node_id="context_compaction", disable_streaming=True).bind(max_tokens=3000)
+            summary = asyncio.run(summarize_history(
+                model, material["question"], json.dumps(material, ensure_ascii=False, default=str),
+                lambda **event: self.ai_call._push(self._event_queue, self.node_id, events, **event),
+            ))
+            events.append({"type": "context_compacted", "working_summary": summary, "retained_messages": []})
+            compact = {"question": material["question"], "request_contract": material["request_contract"],
+                       "request_time_utc": material["request_time_utc"],
+                       "working_summary": summary, "execution_incomplete": material["execution_incomplete"]}
+            self._archive_node_input({"before_compaction": material, "after_compaction": compact})
+            response, stage_events = call(compact)
+        draft = response.result or ""
+        output = {"query_draft": draft, "thinking_events": [*events, *stage_events]}
+        # These fields are only stage prose, not verified facts or forced classifications.
+        output[{"layer": "layer_analysis", "evidence": "evidence_analysis", "rca": "rca_analysis"}[self.node_id]] = draft
+        self._archive_node_output(output)
+        return output
+
+
+class DiagnosisEvidenceNode(DiagnosisStageNode):
+    stage_id = "evidence"
+    stage_name = "证据采集"
+    stage_prompt = DEEP_EVIDENCE_PROMPT
+
+
+class DiagnosisRootCauseNode(DiagnosisStageNode):
+    stage_id = "rca"
+    stage_name = "根因分析"
+    stage_prompt = DEEP_RCA_PROMPT
+    collect = False

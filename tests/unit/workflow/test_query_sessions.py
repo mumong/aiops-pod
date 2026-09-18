@@ -38,7 +38,8 @@ def test_capacity_never_evicts_running_session_and_oversize_preserves_old():
     assert len(store.entries) == 1
 
 
-def test_executor_commits_before_final_and_cancel_does_not_overwrite(monkeypatch):
+@pytest.mark.parametrize('mode', ['direct', 'auto'])
+def test_executor_commits_before_final_and_cancel_does_not_overwrite(monkeypatch, mode):
     store = QuerySessionStore()
     monkeypatch.setattr('app.core.query_sessions.query_sessions', store)
     executor = WorkflowExecutor(SimpleNamespace(merged_catalog=None))
@@ -48,7 +49,7 @@ def test_executor_commits_before_final_and_cancel_does_not_overwrite(monkeypatch
         yield {'type': 'run_start'}
         yield {'type': 'final', 'answer': question, '_query_session_memory': {'answer': question}}
     monkeypatch.setattr(executor, '_execute_stream', run)
-    opts = {'query_mode': 'direct', '_query_session_key': ('owner', 'id')}
+    opts = {'query_mode': mode, '_query_session_key': ('owner', 'id')}
     first = list(executor.execute_stream('xnet pods', workflow_overrides=opts))
     assert first[-1]['session_memory'] == 'saved'
     assert '_query_session_memory' not in first[-1]
