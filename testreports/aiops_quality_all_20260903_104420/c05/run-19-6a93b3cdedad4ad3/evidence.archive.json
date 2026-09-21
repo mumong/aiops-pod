@@ -1,0 +1,2380 @@
+[
+  {
+    "source": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/node_outputs/evidence.full.json",
+    "payload": {
+      "evidence_plan": [
+        {
+          "id": "1-pod-describe-status",
+          "description": "获取 Pod 完整 status 和 conditions，确认当前状态是否仍为 ContainerCreating，以及 Node、QoS、Phase 等信息",
+          "level": "critical",
+          "tool": "kubectl_describe",
+          "command": "kubectl describe pod workload-5dbb5dcd6c-nhd7v -n aiops-case-05",
+          "tool_args": {
+            "kind": "pod",
+            "name": "workload-5dbb5dcd6c-nhd7v",
+            "namespace": "aiops-case-05"
+          },
+          "purpose": "确认 Pod 当前生命周期阶段，排除已恢复或处于其他异常状态的可能",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "2-pod-events",
+          "description": "获取该 Pod 的相关事件，特别是 FailedScheduling, PullFailed, CreateContainerConfigError 等导致 ContainerCreating 延迟或卡住的事件",
+          "level": "critical",
+          "tool": "kubectl_events",
+          "command": "kubectl get events --field-selector involvedObject.name=workload-5dbb5dcd6c-nhd7v,involvedObject.namespace=aiops-case-05 --sort-by='.lastTimestamp' -n aiops-case-05",
+          "tool_args": {
+            "resource_type": "pod",
+            "resource_name": "workload-5dbb5dcd6c-nhd7v",
+            "namespace": "aiops-case-05"
+          },
+          "purpose": "识别导致容器无法创建的具体原因（调度、镜像拉取、配置错误等）",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "3-pod-yaml-spec",
+          "description": "获取 Pod spec，检查是否有无效配置、资源请求过高、Volume 挂载问题或 ImagePullPolicy 异常",
+          "level": "important",
+          "tool": "kubectl_get_yaml",
+          "command": "kubectl get pod workload-5dbb5dcd6c-nhd7v -n aiops-case-05 -o yaml",
+          "tool_args": {
+            "kind": "pod",
+            "name": "workload-5dbb5dcd6c-nhd7v",
+            "namespace": "aiops-case-05"
+          },
+          "purpose": "验证 Pod 配置是否合理，排除因 spec 错误导致的 ContainerCreating",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "kubectl_get_yaml",
+            "run_bash_command"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "4-node-affinity-check",
+          "description": "如果 events 显示调度相关失败，获取调度该 Pod 的 Node 状态，检查节点资源、污点、亲和性",
+          "level": "optional",
+          "tool": "run_bash_command",
+          "command": "kubectl get pod workload-5dbb5dcd6c-nhd7v -n aiops-case-05 -o jsonpath='{.spec.nodeName}' | xargs -I {} kubectl describe node {} 2>/dev/null || echo 'No node assigned yet'",
+          "tool_args": {},
+          "purpose": "若 Pod 已分配节点，检查节点资源是否充足或存在污点/亲和性约束导致无法调度",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "run_bash_command"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-metrics",
+          "description": "首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的metrics 真实数据",
+          "level": "critical",
+          "tool": "execute_pod_promql",
+          "command": "execute generic Pod lifecycle PromQL",
+          "tool_args": {
+            "namespace": "aiops-case-05",
+            "pod": "workload-5dbb5dcd6c-nhd7v",
+            "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+            "promql": "kube_pod_status_phase{namespace=\"aiops-case-05\",pod=\"workload-5dbb5dcd6c-nhd7v\"} or kube_pod_container_status_waiting_reason{namespace=\"aiops-case-05\",pod=\"workload-5dbb5dcd6c-nhd7v\"} or kube_pod_container_status_last_terminated_reason{namespace=\"aiops-case-05\",pod=\"workload-5dbb5dcd6c-nhd7v\"} or kube_pod_container_status_restarts_total{namespace=\"aiops-case-05\",pod=\"workload-5dbb5dcd6c-nhd7v\"}",
+            "query_type": "instant"
+          },
+          "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "execute_pod_promql"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-logging",
+          "description": "首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的logging 真实数据",
+          "level": "critical",
+          "tool": "query_pod_logs",
+          "command": "query recent real Pod logs without preset fault keywords",
+          "tool_args": {
+            "namespace": "aiops-case-05",
+            "pod": "workload-5dbb5dcd6c-nhd7v",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+            "window_minutes": 30,
+            "max_records": 20,
+            "allow_name_fallback": true
+          },
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_logs"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-tracing",
+          "description": "首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的tracing 真实数据",
+          "level": "critical",
+          "tool": "query_pod_tracing",
+          "command": "query recent real Pod flows and application spans",
+          "tool_args": {
+            "namespace": "aiops-case-05",
+            "pod": "workload-5dbb5dcd6c-nhd7v",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+            "window_minutes": 30,
+            "direction": "any",
+            "include_tempo": true,
+            "max_records": 20
+          },
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_tracing"
+          ],
+          "counts_for_completeness": true
+        },
+        {
+          "id": "observability-gate-1-topology",
+          "description": "首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的topology 真实数据",
+          "level": "critical",
+          "tool": "query_pod_topology",
+          "command": "query source-backed Pod topology relationships",
+          "tool_args": {
+            "namespace": "aiops-case-05",
+            "pod": "workload-5dbb5dcd6c-nhd7v",
+            "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边"
+          },
+          "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边",
+          "evidence_type": "",
+          "target_scope": "",
+          "acceptable_tools": [
+            "query_pod_topology"
+          ],
+          "counts_for_completeness": true
+        }
+      ],
+      "tool_results": [],
+      "tool_data": [
+        {
+          "tool": "execute_pod_promql",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":0,\"matched\":7,\"normalized\":7,\"projected_series\":7,\"raw_series\":7,\"retrieved\":7,\"returned\":7,\"serialized_series\":7},\"coverage\":\"present\",\"dimension\":\"metrics\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-05\",\"node\":\"node2\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"pod_uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"evidence\":[{\"confidence\":\"high\",\"directness\":\"direct\",\"id\":\"fact-cf763a036202\",\"labels\":{\"container\":\"app\",\"reason\":\"ContainerCreating\"},\"metric\":\"kube_pod_container_status_waiting_reason\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":1.0,\"last\":1.0,\"max\":1.0,\"min\":1.0},\"timestamp\":{\"utc\":\"2026-09-03T10:16:54.920000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"1\"},{\"confidence\":\"low\",\"directness\":\"related_context\",\"id\":\"fact-6952cfd90cc9\",\"labels\":{\"container\":\"kube-state-metrics\",\"phase\":\"Pending\"},\"metric\":\"kube_pod_status_phase\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":1.0,\"last\":1.0,\"max\":1.0,\"min\":1.0},\"timestamp\":{\"utc\":\"2026-09-03T10:16:54.920000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"1\"},{\"confidence\":\"high\",\"directness\":\"direct\",\"id\":\"fact-131d4da06a35\",\"labels\":{\"container\":\"app\"},\"metric\":\"kube_pod_container_status_restarts_total\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":0.0,\"last\":0.0,\"max\":0.0,\"min\":0.0},\"timestamp\":{\"utc\":\"2026-09-03T10:16:54.920000Z\"},\"trend_evaluable\":false,\"unit\":\"count\",\"value\":\"0\"},{\"confidence\":\"low\",\"directness\":\"related_context\",\"id\":\"fact-f02658547c12\",\"labels\":{\"container\":\"kube-state-metrics\",\"phase\":\"Running\"},\"metric\":\"kube_pod_status_phase\",\"pattern_count\":1,\"pattern_exemplar\":\"head\",\"sample_count\":1,\"source_system\":\"prometheus\",\"stats\":{\"first\":0.0,\"last\":0.0,\"max\":0.0,\"min\":0.0},\"timestamp\":{\"utc\":\"2026-09-03T10:16:54.920000Z\"},\"trend_evaluable\":false,\"unit\":\"unitless\",\"value\":\"0\"}],\"query_ref\":{\"debug_available\":true,\"hash\":\"9977fb2ac6540bd4\",\"metric_names\":[\"kube_pod_status_phase\",\"kube_pod_container_status_waiting_reason\",\"kube_pod_container_status_last_terminated_reason\",\"kube_pod_container_status_restarts_total\"],\"query_type\":\"instant\"},\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/001-evidence-execute_pod_promql.raw.txt\",\"tool\":\"read_context_archive\"},\"source_system\":\"prometheus\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":3,\"selected\":4,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"execute_pod_promql\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"source_or_collection_truncated\":false,\"truncated\":false}}",
+          "duration_s": 2.9333364963531494,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/001-evidence-execute_pod_promql.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/001-evidence-execute_pod_promql.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/001-evidence-execute_pod_promql.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "query-fc636d99cbd2",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-131d4da06a35",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_container_status_restarts_total",
+                "value": "0",
+                "unit": "count",
+                "timestamp": "2026-09-03T10:16:54.920000Z",
+                "source_system": "prometheus",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-f9fdcd9a6a40"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_container_status_restarts_total",
+                    "container": "app",
+                    "namespace": "aiops-case-05",
+                    "pod": "workload-5dbb5dcd6c-nhd7v",
+                    "uid": "b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+                  },
+                  "sample_count": 1,
+                  "series_role": "application_container",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-cf763a036202",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_container_status_waiting_reason",
+                "value": "1",
+                "unit": "unitless",
+                "timestamp": "2026-09-03T10:16:54.920000Z",
+                "source_system": "prometheus",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": [
+                  "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-e49688df38ad"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_container_status_waiting_reason",
+                    "container": "app",
+                    "namespace": "aiops-case-05",
+                    "pod": "workload-5dbb5dcd6c-nhd7v",
+                    "reason": "ContainerCreating",
+                    "uid": "b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+                  },
+                  "sample_count": 1,
+                  "series_role": "application_container",
+                  "stats": {
+                    "first": 1.0,
+                    "last": 1.0,
+                    "max": 1.0,
+                    "min": 1.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-2358c3be8f3c",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-03T10:16:54.920000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3ab4e2f42355"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-05",
+                    "phase": "Succeeded",
+                    "pod": "workload-5dbb5dcd6c-nhd7v",
+                    "uid": "b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-6952cfd90cc9",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "1",
+                "unit": "unitless",
+                "timestamp": "2026-09-03T10:16:54.920000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-a0639b476123"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-05",
+                    "phase": "Pending",
+                    "pod": "workload-5dbb5dcd6c-nhd7v",
+                    "uid": "b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 1.0,
+                    "last": 1.0,
+                    "max": 1.0,
+                    "min": 1.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-b75362c7e154",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-03T10:16:54.920000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3f151785f557"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-05",
+                    "phase": "Unknown",
+                    "pod": "workload-5dbb5dcd6c-nhd7v",
+                    "uid": "b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-ca8788affae8",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-03T10:16:54.920000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-8b3ac0a1664c"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-05",
+                    "phase": "Failed",
+                    "pod": "workload-5dbb5dcd6c-nhd7v",
+                    "uid": "b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              },
+              {
+                "fact_id": "fact-f02658547c12",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "metrics",
+                "fact_type": "measurement",
+                "attribute": "kube_pod_status_phase",
+                "value": "0",
+                "unit": "unitless",
+                "timestamp": "2026-09-03T10:16:54.920000Z",
+                "source_system": "prometheus",
+                "directness": "related_context",
+                "confidence": "low",
+                "evidence_refs": [
+                  "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-9b4e64cfb2bb"
+                ],
+                "metadata": {
+                  "labels": {
+                    "__name__": "kube_pod_status_phase",
+                    "container": "kube-state-metrics",
+                    "namespace": "aiops-case-05",
+                    "phase": "Running",
+                    "pod": "workload-5dbb5dcd6c-nhd7v",
+                    "uid": "b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+                  },
+                  "sample_count": 1,
+                  "series_role": "unknown",
+                  "stats": {
+                    "first": 0.0,
+                    "last": 0.0,
+                    "max": 0.0,
+                    "min": 0.0
+                  },
+                  "trend_evaluable": false
+                }
+              }
+            ],
+            "record_count": 7,
+            "truncated": false,
+            "source": "mcp_canonical",
+            "legacy_contract": false
+          },
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":{\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"pod_uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\",\"lifecycle_changed\":false,\"node\":\"node2\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线\",\"coverage\":\"present\",\"directness\":\"direct\",\"query\":{\"promql\":\"kube_pod_status_phase{namespace=\\\"aiops-case-05\\\",pod=\\\"workload-5dbb5dcd6c-nhd7v\\\"} or kube_pod_container_status_waiting_reason{namespace=\\\"aiops-case-05\\\",pod=\\\"workload-5dbb5dcd6c-nhd7v\\\"} or kube_pod_container_status_last_terminated_reason{namespace=\\\"aiops-case-05\\\",pod=\\\"workload-5dbb5dcd6c-nhd7v\\\"} or kube_pod_container_status_restarts_total{namespace=\\\"aiops-case-05\\\",pod=\\\"workload-5dbb5dcd6c-nhd7v\\\"}\",\"query_type\":\"instant\",\"http_status\":200,\"value_unit\":\"mixed\",\"trend_evaluable\":false},\"facts\":[{\"ref\":\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-f9fdcd9a6a40\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-05/workload-5dbb5dcd6c-nhd7v/app\",\"observed_at\":\"2026-09-03T10:16:54.920000Z\",\"name\":\"kube_pod_container_status_restarts_total\",\"value\":\"0\",\"unit\":\"count\",\"labels\":{\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"ref\":\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-e49688df38ad\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-05/workload-5dbb5dcd6c-nhd7v/app\",\"observed_at\":\"2026-09-03T10:16:54.920000Z\",\"name\":\"kube_pod_container_status_waiting_reason\",\"value\":\"1\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_container_status_waiting_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"reason\":\"ContainerCreating\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"ref\":\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-8b3ac0a1664c\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-05/workload-5dbb5dcd6c-nhd7v/kube-state-metrics\",\"observed_at\":\"2026-09-03T10:16:54.920000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Failed\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-a0639b476123\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-05/workload-5dbb5dcd6c-nhd7v/kube-state-metrics\",\"observed_at\":\"2026-09-03T10:16:54.920000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"1\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Pending\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-9b4e64cfb2bb\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-05/workload-5dbb5dcd6c-nhd7v/kube-state-metrics\",\"observed_at\":\"2026-09-03T10:16:54.920000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Running\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3ab4e2f42355\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-05/workload-5dbb5dcd6c-nhd7v/kube-state-metrics\",\"observed_at\":\"2026-09-03T10:16:54.920000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Succeeded\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"ref\":\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3f151785f557\",\"source_system\":\"prometheus\",\"dimension\":\"metrics\",\"entity\":\"aiops-case-05/workload-5dbb5dcd6c-nhd7v/kube-state-metrics\",\"observed_at\":\"2026-09-03T10:16:54.920000Z\",\"name\":\"kube_pod_status_phase\",\"value\":\"0\",\"unit\":\"unitless\",\"labels\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Unknown\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"}],\"samples\":[{\"metric\":{\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"value\":[1788430614.92,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"count\",\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"metric\":{\"__name__\":\"kube_pod_container_status_waiting_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"reason\":\"ContainerCreating\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"value\":[1788430614.92,\"1\"],\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"application_container\",\"directness\":\"direct\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Failed\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"value\":[1788430614.92,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Pending\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"value\":[1788430614.92,\"1\"],\"stats\":{\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Running\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"value\":[1788430614.92,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Succeeded\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"value\":[1788430614.92,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"},{\"metric\":{\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Unknown\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"value\":[1788430614.92,\"0\"],\"stats\":{\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0},\"sample_count\":1,\"unit\":\"unitless\",\"trend_evaluable\":false,\"series_role\":\"unknown\",\"directness\":\"related_context\"}],\"evidence_refs\":[\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-f9fdcd9a6a40\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-e49688df38ad\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-8b3ac0a1664c\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-a0639b476123\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-9b4e64cfb2bb\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3ab4e2f42355\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3f151785f557\"]}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=execute_pod_promql status=query_succeeded source_system=prometheus dimension=metrics coverage=present directness=direct purpose=\"首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线\"\nENTITY namespace=aiops-case-05 pod=workload-5dbb5dcd6c-nhd7v pod_uid=b134b5a8-7471-4feb-a975-9fbb0cc4f912 node=node2\nEXECUTED_QUERY query={\"promql\":\"kube_pod_status_phase{namespace=\\\"aiops-case-05\\\",pod=\\\"workload-5dbb5dcd6c-nhd7v\\\"} or kube_pod_container_status_waiting_reason{namespace=\\\"aiops-case-05\\\",pod=\\\"workload-5dbb5dcd6c-nhd7v\\\"} or kube_pod_container_status_last_terminated_reason{namespace=\\\"aiops-case-05\\\",pod=\\\"workload-5dbb5dcd6c-nhd7v\\\"} or kube_pod_container_status_restarts_total{namespace=\\\"aiops-case-05\\\",pod=\\\"workload-5dbb5dcd6c-nhd7v\\\"}\",\"query_type\":\"instant\",\"http_status\":200,\"value_unit\":\"mixed\",\"trend_evaluable\":false}\nQUERY_FACT ref=metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-f9fdcd9a6a40 source_system=prometheus name=kube_pod_container_status_restarts_total value=0 unit=count labels={\"__name__\":\"kube_pod_container_status_restarts_total\",\"container\":\"app\",\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=application_container directness=direct\nQUERY_FACT ref=metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-e49688df38ad source_system=prometheus name=kube_pod_container_status_waiting_reason value=1 unit=unitless labels={\"__name__\":\"kube_pod_container_status_waiting_reason\",\"container\":\"app\",\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"reason\":\"ContainerCreating\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"} stats={\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0} sample_count=1 trend_evaluable=false series_role=application_container directness=direct\nQUERY_FACT ref=metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-8b3ac0a1664c source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Failed\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-a0639b476123 source_system=prometheus name=kube_pod_status_phase value=1 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Pending\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"} stats={\"first\":1.0,\"min\":1.0,\"max\":1.0,\"last\":1.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-9b4e64cfb2bb source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Running\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3ab4e2f42355 source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Succeeded\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_FACT ref=metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3f151785f557 source_system=prometheus name=kube_pod_status_phase value=0 unit=unitless labels={\"__name__\":\"kube_pod_status_phase\",\"container\":\"kube-state-metrics\",\"namespace\":\"aiops-case-05\",\"phase\":\"Unknown\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"} stats={\"first\":0.0,\"min\":0.0,\"max\":0.0,\"last\":0.0} sample_count=1 trend_evaluable=false series_role=unknown directness=related_context\nQUERY_LIMITATIONS\nEVIDENCE_REFS values=[\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-f9fdcd9a6a40\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-e49688df38ad\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-8b3ac0a1664c\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-a0639b476123\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-9b4e64cfb2bb\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3ab4e2f42355\",\"metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3f151785f557\"]"
+        },
+        {
+          "tool": "kubectl_describe",
+          "data": "Pod workload-5dbb5dcd6c-nhd7v in namespace aiops-case-05 is stuck in Pending state due to network configuration errors. Events show persistent failures to create pod sandbox caused by the inability to find a required network-attachment-definition named 'unavailable-network'.\nkey_facts: [\"Resource: Pod workload-5dbb5dcd6c-nhd7v\", \"Namespace: aiops-case-05\", \"Node: node2/10.2.0.50\", \"Status: Pending\", \"Container Status: Waiting (Reason: ContainerCreating)\", \"Image: xnet.registry.io:8443/observability/python:3-alpine\", \"Annotation: k8s.v1.cni.cncf.io/networks: unavailable-network\", \"Warning Event 1 (multus, 44m-41m): NoNetworkFound - cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05)\", \"Warning Event 2 (kubelet, 44m-42m): FailedCreatePodSandBox - failed to setup network for sandbox due to missing delegate 'unavailable-network'\", \"Frequency: Events repeat every 44m to 41m, indicating continuous retry loops\"]\nmissing: [\"Root cause analysis (e.g., whether 'unavailable-network' was deleted or never created)\"]",
+          "duration_s": 0,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "kubernetes-lifecycle-0f7d55cb4c257bb6",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-04e5419793ca",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          17m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[56]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-0c558f241395",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          38m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[35]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-110ad4bbbc1d",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          3m38s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[3]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-15165797cb78",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          31m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[42]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-1958dee975a4",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          19m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[54]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-1ea6c731fb02",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          20m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[53]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-1f3e1142ce2c",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          40m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[33]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-24cf74afc162",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          30m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[43]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-27badd9b0ec0",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          15m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[58]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-2bb726cab46f",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          27m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[46]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-2e1397b7ac5c",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          84s                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[13]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-3815ecc30403",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          23m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[50]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-3beda621b3e6",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          41m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[32]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-3c4f61dc5837",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          29s                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[17]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-3e8e264605b6",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "FailedCreatePodSandBox",
+                  "message": "Warning  FailedCreatePodSandBox  43m                   kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"e8b9bdba7737ee1b5791598d7f65622793c1806613ac3542f6865d45c96481b6\": plugin type=\"multus\" name=\"multus-cni-network\" failed (add): Multus: [aiops-case-05/workload-5dbb5dcd6c-nhd7v]: error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[23]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-41e4d7d1bc78",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "FailedCreatePodSandBox",
+                  "message": "Warning  FailedCreatePodSandBox  4m4s (x176 over 42m)  kubelet            (combined from similar events): Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"c15977f32bcf5a260b8952565a1577f19fa4abc7c36ecccbc07e56c07c07303a\": plugin type=\"multus\" name=\"multus-cni-network\" failed (add): Multus: [aiops-case-05/workload-5dbb5dcd6c-nhd7v]: error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[0]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-42f31ea4702a",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          22m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[51]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-4377c9425859",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          112s                  multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[11]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-44d21cffe51f",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          4m4s                  multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[1]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-470b9361e6f1",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          2m31s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[8]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-4dad71354e83",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          24m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[49]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-4daef4349e3b",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          16m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[57]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-57f47a28fa6b",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          71s                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[14]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-59223264fa18",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "FailedCreatePodSandBox",
+                  "message": "Warning  FailedCreatePodSandBox  43m                   kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"3fbc43ab97c1c8d138a423215b0302d20c1230750e490882ab666f2310796470\": plugin type=\"multus\" name=\"multus-cni-network\" failed (add): Multus: [aiops-case-05/workload-5dbb5dcd6c-nhd7v]: error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[26]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-5958c30ef794",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "FailedCreatePodSandBox",
+                  "message": "Warning  FailedCreatePodSandBox  43m                   kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"ebc186cd4dc12423632e170d0dca3961bf0969a6b722ba21662b83958ed73551\": plugin type=\"multus\" name=\"multus-cni-network\" failed (add): Multus: [aiops-case-05/workload-5dbb5dcd6c-nhd7v]: error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[24]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-606059dfd4e8",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          21m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[52]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-7b2c34124641",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          32m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[41]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-7c9f6db2619c",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          3m9s                  multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[5]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-7db553a75be2",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          39m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[34]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-80342a55aa6c",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          2m6s                  multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[10]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-818e423d6d8c",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "FailedCreatePodSandBox",
+                  "message": "Warning  FailedCreatePodSandBox  43m                   kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"767b9fd8df99b0edba1614bc23e7629c3a07ea483f430943f5904dd0e2897dfb\": plugin type=\"multus\" name=\"multus-cni-network\" failed (add): Multus: [aiops-case-05/workload-5dbb5dcd6c-nhd7v]: error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[25]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-906bd3033931",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          18m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[55]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-94013d4bc966",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          25m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[48]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-9868069ceed6",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          29m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[44]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-9c6bd72838da",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          36m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[37]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-a652d56d9ddf",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          2m18s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[9]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-a73e18f49d14",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          0s                    multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[19]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-a90782bdb581",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          26m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[47]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-abfc19c0b45e",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          58s                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[15]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-b4132e567e95",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          35m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[38]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-b7d47599d38d",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          37m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[36]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-bb152272c3ff",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          100s                  multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[12]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-bc689461cb5c",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          3m23s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[4]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-c1a8e3b1e1b5",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          2m44s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "events[7]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-c3c98812da09",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "FailedCreatePodSandBox",
+                  "message": "Warning  FailedCreatePodSandBox  44m                   kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"6e33714430d25824575ce0429eeaab5d9515b8358ad3f4774c7b097be0364787\": plugin type=\"multus\" name=\"multus-cni-network\" failed (add): Multus: [aiops-case-05/workload-5dbb5dcd6c-nhd7v]: error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[20]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-c549a9a492fe",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "FailedCreatePodSandBox",
+                  "message": "Warning  FailedCreatePodSandBox  42m                   kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"405c02bc3c180725764c1694bb932f4a37091bebab3ea48e69addb637b445b37\": plugin type=\"multus\" name=\"multus-cni-network\" failed (add): Multus: [aiops-case-05/workload-5dbb5dcd6c-nhd7v]: error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[28]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-c6a5c93aee9c",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          33m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[40]",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-cb59c4bace92",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "event",
+                "attribute": "event.message",
+                "value": {
+                  "type": "Warning",
+                  "reason": "NoNetworkFound",
+                  "message": "Warning  NoNetworkFound          44m                   multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \"unavailable-network\" not found"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/005-evidence-kubectl_describe.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "key_events[29]",
+                  "evidence_role": "causal_candidate"
+                }
+              }
+            ],
+            "record_count": 48,
+            "truncated": true,
+            "source": "robusta_legacy_adapter",
+            "legacy_contract": true
+          },
+          "agent_context": "{\"containers\":[{\"command\":\"python3 -c import time; time.sleep(3600)\",\"environment\":\"<none>\",\"image\":\"xnet.registry.io:8443/observability/python:3-alpine\",\"name\":\"app\",\"ready\":\"False\",\"reason\":\"ContainerCreating\",\"resources\":{\"limits\":{\"cpu\":\"50m\",\"memory\":\"32Mi\"},\"requests\":{\"cpu\":\"5m\",\"memory\":\"8Mi\"}},\"restart_count\":\"0\",\"state\":\"Waiting\"}],\"dimension\":\"kubernetes\",\"entity\":{\"kind\":\"Pod\",\"name\":\"workload-5dbb5dcd6c-nhd7v\",\"namespace\":\"aiops-case-05\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"events\":[\"  Warning  FailedCreatePodSandBox  4m4s (x176 over 42m)  kubelet            (combined from similar events): Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \\\"c15977f32bcf5a260b8952565a1577f19fa4abc7c36ecccbc07e56c07c07303a\\\": plugin type=\\\"multus\\\" name=\\\"multus-cni-network\\\" failed (add): Multus: [aiops-case-05/workload-5dbb5dcd6c-nhd7v]: error loading k8s delegates k8s args: TryLoadPodDelegates: error in getting k8s network for pod: GetNetworkDelegates: failed getting the delegate: getKubernetesDelegate: cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          4m4s                  multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          3m53s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          3m38s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          3m23s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          3m9s                  multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          2m56s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          2m44s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          2m31s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\",\"  Warning  NoNetworkFound          2m18s                 multus             cannot find a network-attachment-definition (unavailable-network) in namespace (aiops-case-05): network-attachment-definitions.k8s.cni.cncf.io \\\"unavailable-network\\\" not found\"],\"node\":\"node2/10.2.0.50\",\"scheduling\":{\"node_selectors\":\"<none>\",\"tolerations\":\"node.kubernetes.io/not-ready:NoExecute op=Exists for 300s\"},\"source_system\":\"kubernetes\",\"status\":\"Pending\"}"
+        },
+        {
+          "tool": "kubectl_get_yaml",
+          "data": "kubectl_get_yaml 关键字段摘要:\nkind: Pod\nname: workload-5dbb5dcd6c-nhd7v\nnamespace: aiops-case-05\ncreationTimestamp: 2026-09-03T09:32:46Z\ndeletionTimestamp: <absent>\ndeletionGracePeriodSeconds: None\nfinalizers: <none>\nserviceAccountName: default\nnodeName: node2\nrestartPolicy: Always\nterminationGracePeriodSeconds: 30\nimagePullSecrets: <absent>\nphase: Pending\nlabels: aiops.lab/case-id=c05\nownerReferences: ReplicaSet/workload-5dbb5dcd6c\ntolerations_count: 2\ncontainers:\n- app: image=xnet.registry.io:8443/observability/python:3-alpine imagePullPolicy=IfNotPresent\n  command: python3 -c import time; time.sleep(3600)\nconditions:\n- Initialized: status=True reason=None\n- Ready: status=False reason=ContainersNotReady message=containers with unready status: [app]\n- ContainersReady: status=False reason=ContainersNotReady message=containers with unready status: [app]\n- PodScheduled: status=True reason=None\ncontainerStatuses:\n- app: ready=False restarts=0 reason=ContainerCreating exitCode=None",
+          "duration_s": 0,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt",
+          "fact_ledger": {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "kubernetes-lifecycle-9c228584ded270b2",
+            "scope_entity_ids": [
+              "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912"
+            ],
+            "records": [
+              {
+                "fact_id": "fact-fd9f1d6f1907",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "container.waiting_reason",
+                "value": {
+                  "container": "app",
+                  "reason": "ContainerCreating"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].state.waiting.reason",
+                  "evidence_role": "causal_candidate"
+                }
+              },
+              {
+                "fact_id": "fact-1fd8c622a43f",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.condition",
+                "value": {
+                  "type": "ContainersReady",
+                  "status": "False",
+                  "reason": "ContainersNotReady",
+                  "message": "containers with unready status: [app]"
+                },
+                "timestamp": "2026-09-03T09:32:46Z",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.conditions[2]",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-8e4682735fde",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.condition",
+                "value": {
+                  "type": "Initialized",
+                  "status": "True"
+                },
+                "timestamp": "2026-09-03T09:32:46Z",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.conditions[0]",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-cf5ae93b51d4",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.condition",
+                "value": {
+                  "type": "PodScheduled",
+                  "status": "True"
+                },
+                "timestamp": "2026-09-03T09:32:46Z",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.conditions[3]",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-f30692633c6d",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.condition",
+                "value": {
+                  "type": "Ready",
+                  "status": "False",
+                  "reason": "ContainersNotReady",
+                  "message": "containers with unready status: [app]"
+                },
+                "timestamp": "2026-09-03T09:32:46Z",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.conditions[1]",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-3cdbba9d1755",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_request.cpu",
+                "value": {
+                  "container": "app",
+                  "value": "5m"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.requests.cpu",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-65d9363c3d4f",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_request.memory",
+                "value": {
+                  "container": "app",
+                  "value": "8Mi"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.requests.memory",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-b2df38cb9070",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_limit.cpu",
+                "value": {
+                  "container": "app",
+                  "value": "50m"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.limits.cpu",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-ca7150ee47b0",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "configuration",
+                "attribute": "container.resource_limit.memory",
+                "value": {
+                  "container": "app",
+                  "value": "32Mi"
+                },
+                "unit": "kubernetes_quantity",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "spec.containers[app].resources.limits.memory",
+                  "evidence_role": "context"
+                }
+              },
+              {
+                "fact_id": "fact-1ff493e9fcd4",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "measurement",
+                "attribute": "container.restart_count",
+                "value": {
+                  "container": "app",
+                  "restart_count": 0
+                },
+                "unit": "count",
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.containerStatuses[app].restartCount",
+                  "evidence_role": "symptom"
+                }
+              },
+              {
+                "fact_id": "fact-7f93b312cce4",
+                "entity_id": "k8s.pod:aiops-case-05/workload-5dbb5dcd6c-nhd7v:b134b5a8-7471-4feb-a975-9fbb0cc4f912",
+                "entity_kind": "Pod",
+                "namespace": "aiops-case-05",
+                "entity_name": "workload-5dbb5dcd6c-nhd7v",
+                "dimension": "kubernetes",
+                "fact_type": "state",
+                "attribute": "pod.phase",
+                "value": {
+                  "phase": "Pending"
+                },
+                "source_system": "kubernetes",
+                "directness": "direct",
+                "confidence": "high",
+                "strength": "strong",
+                "evidence_refs": [
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.raw.txt",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.structured.json",
+                  "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/006-evidence-kubectl_get_yaml.summary.txt"
+                ],
+                "metadata": {
+                  "source_path": "status.phase",
+                  "evidence_role": "symptom"
+                }
+              }
+            ],
+            "record_count": 11,
+            "truncated": false,
+            "source": "robusta_legacy_adapter",
+            "legacy_contract": true
+          },
+          "agent_context": "{\"conditions\":[{\"status\":\"True\",\"type\":\"Initialized\"},{\"message\":\"containers with unready status: [app]\",\"reason\":\"ContainersNotReady\",\"status\":\"False\",\"type\":\"Ready\"},{\"message\":\"containers with unready status: [app]\",\"reason\":\"ContainersNotReady\",\"status\":\"False\",\"type\":\"ContainersReady\"},{\"status\":\"True\",\"type\":\"PodScheduled\"}],\"container_statuses\":[{\"image\":\"xnet.registry.io:8443/observability/python:3-alpine\",\"name\":\"app\",\"ready\":false,\"restartCount\":0,\"waiting\":{\"reason\":\"ContainerCreating\"}}],\"containers\":[{\"command\":[\"python3\",\"-c\",\"import time; time.sleep(3600)\"],\"image\":\"xnet.registry.io:8443/observability/python:3-alpine\",\"name\":\"app\",\"resources\":{\"limits\":{\"cpu\":\"50m\",\"memory\":\"32Mi\"},\"requests\":{\"cpu\":\"5m\",\"memory\":\"8Mi\"}}}],\"dimension\":\"kubernetes\",\"entity\":{\"kind\":\"Pod\",\"name\":\"workload-5dbb5dcd6c-nhd7v\",\"namespace\":\"aiops-case-05\",\"uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"phase\":\"Pending\",\"scheduling\":{\"affinity_present\":false,\"nodeName\":\"node2\",\"tolerations\":[{\"effect\":\"NoExecute\",\"key\":\"node.kubernetes.io/not-ready\",\"operator\":\"Exists\",\"tolerationSeconds\":300},{\"effect\":\"NoExecute\",\"key\":\"node.kubernetes.io/unreachable\",\"operator\":\"Exists\",\"tolerationSeconds\":300}]},\"source_system\":\"kubernetes\",\"status\":\"yaml_summarized\"}"
+        },
+        {
+          "tool": "query_pod_logs",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":0,\"matched\":0,\"normalized\":0,\"retrieved\":0,\"returned\":0},\"coverage\":\"empty\",\"dimension\":\"logging\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-05\",\"node\":\"node2\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"pod_uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"evidence\":[],\"negative_observation\":\"query_completed_without_matching_evidence\",\"query_ref\":{\"debug_available\":true,\"execution_count\":2,\"filters\":{\"keyword_mode\":\"any\"},\"hash\":\"f88ec94e39e47cfc\",\"identity_basis\":\"name_time_fallback\",\"index\":\"filebeat-*\"},\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/002-evidence-query_pod_logs.raw.txt\",\"tool\":\"read_context_archive\"},\"source_system\":\"elasticsearch\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":0,\"selected\":0,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"query_pod_logs\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"source_or_collection_truncated\":false,\"truncated\":false},\"window\":{\"end\":\"2026-09-03T10:16:55.144178Z\",\"start\":\"2026-09-03T09:46:55.144178Z\"}}",
+          "duration_s": 2.931549549102783,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/002-evidence-query_pod_logs.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/002-evidence-query_pod_logs.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/002-evidence-query_pod_logs.summary.txt",
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"elasticsearch\",\"dimension\":\"logging\",\"entity\":{\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"pod_uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\",\"lifecycle_changed\":false,\"node\":\"node2\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID\",\"coverage\":\"empty\",\"directness\":\"direct\",\"query\":{\"index\":\"filebeat-*\",\"identity_basis\":\"name_time_fallback\",\"uid_query_hits\":0,\"backend_total\":{\"value\":0,\"relation\":\"eq\"},\"time_range\":{\"start\":\"2026-09-03T09:46:55.144178Z\",\"end\":\"2026-09-03T10:16:55.144178Z\"},\"container\":null,\"keywords\":[],\"keyword_mode\":\"any\",\"levels\":[],\"trace_id\":null,\"dsl\":{\"size\":100,\"_source\":[\"@timestamp\",\"message\",\"log\",\"log.level\",\"level\",\"severity\",\"severity_text\",\"trace.id\",\"trace_id\",\"kubernetes.namespace\",\"kubernetes.namespace_name\",\"kubernetes.pod.name\",\"kubernetes.pod_name\",\"kubernetes.pod.uid\",\"kubernetes.container.name\",\"kubernetes.container_name\"],\"sort\":[{\"@timestamp\":\"desc\"}],\"query\":{\"bool\":{\"filter\":[{\"range\":{\"@timestamp\":{\"gte\":\"2026-09-03T09:46:55.144178Z\",\"lte\":\"2026-09-03T10:16:55.144178Z\"}}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.namespace\":\"aiops-case-05\"}},{\"term\":{\"kubernetes.namespace_name\":\"aiops-case-05\"}}],\"minimum_should_match\":1}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.pod.name\":\"workload-5dbb5dcd6c-nhd7v\"}},{\"term\":{\"kubernetes.pod_name\":\"workload-5dbb5dcd6c-nhd7v\"}},{\"term\":{\"kubernetes.pod.name.keyword\":\"workload-5dbb5dcd6c-nhd7v\"}}],\"minimum_should_match\":1}}],\"must\":[]}}},\"executions\":[{\"identity_basis\":\"pod_uid\",\"query\":{\"preserved\":false,\"executed\":true,\"sha256\":\"19af0ccd6afe9d29\",\"serialized_bytes\":813},\"hit_count\":0},{\"identity_basis\":\"name_time_fallback\",\"dsl_ref\":\"query.dsl\",\"hit_count\":0}],\"dsl_sha256\":\"f88ec94e39e47cfc\"}}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=query_pod_logs status=query_succeeded source_system=elasticsearch dimension=logging coverage=empty directness=direct purpose=\"首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID\"\nENTITY namespace=aiops-case-05 pod=workload-5dbb5dcd6c-nhd7v pod_uid=b134b5a8-7471-4feb-a975-9fbb0cc4f912 node=node2\nEXECUTED_QUERY query={\"index\":\"filebeat-*\",\"identity_basis\":\"name_time_fallback\",\"uid_query_hits\":0,\"backend_total\":{\"value\":0,\"relation\":\"eq\"},\"time_range\":{\"start\":\"2026-09-03T09:46:55.144178Z\",\"end\":\"2026-09-03T10:16:55.144178Z\"},\"container\":null,\"keywords\":[],\"keyword_mode\":\"any\",\"levels\":[],\"trace_id\":null,\"dsl\":{\"size\":100,\"_source\":[\"@timestamp\",\"message\",\"log\",\"log.level\",\"level\",\"severity\",\"severity_text\",\"trace.id\",\"trace_id\",\"kubernetes.namespace\",\"kubernetes.namespace_name\",\"kubernetes.pod.name\",\"kubernetes.pod_name\",\"kubernetes.pod.uid\",\"kubernetes.container.name\",\"kubernetes.container_name\"],\"sort\":[{\"@timestamp\":\"desc\"}],\"query\":{\"bool\":{\"filter\":[{\"range\":{\"@timestamp\":{\"gte\":\"2026-09-03T09:46:55.144178Z\",\"lte\":\"2026-09-03T10:16:55.144178Z\"}}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.namespace\":\"aiops-case-05\"}},{\"term\":{\"kubernetes.namespace_name\":\"aiops-case-05\"}}],\"minimum_should_match\":1}},{\"bool\":{\"should\":[{\"term\":{\"kubernetes.pod.name\":\"workload-5dbb5dcd6c-nhd7v\"}},{\"term\":{\"kubernetes.pod_name\":\"workload-5dbb5dcd6c-nhd7v\"}},{\"term\":{\"kubernetes.pod.name.keyword\":\"workload-5dbb5dcd6c-nhd7v\"}}],\"minimum_should_match\":1}}],\"must\":[]}}},\"executions\":[{\"identity_basis\":\"pod_uid\",\"query\":{\"preserved\":false,\"executed\":true,\"sha256\":\"19af0ccd6afe9d29\",\"serialized_bytes\":813},\"hit_count\":0},{\"identity_basis\":\"name_time_fallback\",\"dsl_ref\":\"query.dsl\",\"hit_count\":0}],\"dsl_sha256\":\"f88ec94e39e47cfc\"}\nQUERY_LIMITATIONS\nEVIDENCE_REFS"
+        },
+        {
+          "tool": "query_pod_tracing",
+          "data": "{\"contract_version\":\"aiops.observation.v1\",\"counts\":{\"dropped\":0,\"ledger_flows\":0,\"ledger_spans\":0,\"matched\":0,\"normalized\":0,\"retrieved\":0,\"returned\":0,\"serialized_flows\":0,\"serialized_spans\":0},\"coverage\":\"empty\",\"dimension\":\"tracing\",\"directness\":\"direct\",\"entity\":{\"containers\":[\"app\"],\"namespace\":\"aiops-case-05\",\"node\":\"node2\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"pod_uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\"},\"evidence\":[],\"limitations\":[\"pod_ip is empty; Pod-scoped DeepFlow flow lookup cannot be executed\"],\"negative_observation\":\"query_completed_without_matching_evidence\",\"query_ref\":{\"debug_available\":true,\"hash\":\"903c7dc9ac964c3f\"},\"retrieval\":{\"mcp_response_complete\":true,\"raw_ref\":\"/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/003-evidence-query_pod_tracing.raw.txt\",\"tool\":\"read_context_archive\"},\"source_coverage\":{\"deepflow\":{\"coverage\":\"absent\",\"error\":\"pod_ip is empty\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"reason\":\"no_valid_trace_ids\"}},\"source_system\":\"deepflow+tempo\",\"status\":\"query_succeeded\",\"summary_selection\":{\"omitted\":0,\"selected\":0,\"strategy\":\"information_ranked_pattern_round_robin_budget_scan_no_fault_names\"},\"tool\":\"query_pod_tracing\",\"truncation\":{\"mcp_response_truncated\":false,\"reason_detail_complete\":true,\"source_or_collection_truncated\":false,\"truncated\":false},\"window\":{\"end\":\"2026-09-03T10:16:53.544046Z\",\"start\":\"2026-09-03T09:46:53.544046Z\"}}",
+          "duration_s": 2.8769896030426025,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/003-evidence-query_pod_tracing.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/003-evidence-query_pod_tracing.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/003-evidence-query_pod_tracing.summary.txt",
+          "agent_context": "{\"status\":\"query_succeeded\",\"source_system\":\"deepflow+tempo\",\"dimension\":\"tracing\",\"entity\":{\"namespace\":\"aiops-case-05\",\"pod\":\"workload-5dbb5dcd6c-nhd7v\",\"pod_uid\":\"b134b5a8-7471-4feb-a975-9fbb0cc4f912\",\"lifecycle_changed\":false,\"node\":\"node2\",\"containers\":[\"app\"]},\"purpose\":\"首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID\",\"coverage\":\"empty\",\"directness\":\"direct\",\"query\":{\"sql\":null,\"time_range\":{\"start\":\"2026-09-03T09:46:53.544046Z\",\"end\":\"2026-09-03T10:16:53.544046Z\"},\"pod_ip\":null,\"tempo_trace_ids\":[],\"tempo\":{}},\"telemetry\":{\"deepflow\":{\"coverage\":\"absent\",\"error\":\"pod_ip is empty\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"query_meta\":{},\"reason\":\"no_valid_trace_ids\"}},\"limitations\":[\"pod_ip is empty; Pod-scoped DeepFlow flow lookup cannot be executed\"]}",
+          "agent_facts": "OBSERVABILITY_QUERY tool=query_pod_tracing status=query_succeeded source_system=deepflow+tempo dimension=tracing coverage=empty directness=direct purpose=\"首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID\"\nENTITY namespace=aiops-case-05 pod=workload-5dbb5dcd6c-nhd7v pod_uid=b134b5a8-7471-4feb-a975-9fbb0cc4f912 node=node2\nEXECUTED_QUERY query={\"sql\":null,\"time_range\":{\"start\":\"2026-09-03T09:46:53.544046Z\",\"end\":\"2026-09-03T10:16:53.544046Z\"},\"pod_ip\":null,\"tempo_trace_ids\":[],\"tempo\":{}}\nTELEMETRY sources={\"deepflow\":{\"coverage\":\"absent\",\"error\":\"pod_ip is empty\"},\"tempo\":{\"coverage\":\"absent\",\"executed\":false,\"query_meta\":{},\"reason\":\"no_valid_trace_ids\"}}\nQUERY_LIMITATIONS limitations=[\"pod_ip is empty; Pod-scoped DeepFlow flow lookup cannot be executed\"]\nEVIDENCE_REFS"
+        },
+        {
+          "tool": "kubectl_events",
+          "data": "Pod workload-5dbb5dcd6c-nhd7v (ns: aiops-case-05) on node2 fails to create sandbox due to missing Multus network-attachment-definition 'unavailable-network'.\nkey_facts: [\"Pod: workload-5dbb5dcd6c-nhd7v, Namespace: aiops-case-05, Node: node2\", \"Events: Repeated Warning FailedCreatePodSandBox and NoNetworkFound (Last seen 40m-44m ago)\", \"Error: Multus plugin failed to setup network; cannot find network-attachment-definition 'unavailable-network'\", \"CNI Plugin: multus-cni-network\", \"Root Cause Signal: 'unavailable-network' network-attachment-definition not found in namespace aiops-case-05\"]\nmissing: [\"No events found for other pods or nodes in this view\", \"No information on whether other network-attachment-definitions exist in the namespace\"]",
+          "duration_s": 0,
+          "semantic_success": true,
+          "raw_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/004-evidence-kubectl_events.raw.txt",
+          "structured_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/004-evidence-kubectl_events.structured.json",
+          "summary_ref": "/tmp/aiops/reports/context_archives/6a93b3cdedad4ad3-g1/tools/004-evidence-kubectl_events.summary.txt"
+        }
+      ],
+      "llm_analysis": "### 第一轮已采集事实\n\n**1. Pod 生命周期阶段确认 (kubectl_describe + kubectl_get_yaml)**\n- **Phase 状态**: Pod `workload-5dbb5dcd6c-nhd7v` 当前处于 **Pending** 阶段，并非 Running。\n- **容器状态**: 容器 `app` 状态为 `Waiting`，原因 `ContainerCreating`，重启次数为 0。\n- **节点分配**: Pod 已成功调度到节点 `node2` (10.2.0.50)，因此 `PodScheduled` 条件为 `True`。\n- **标签**: `aiops.lab/case-id=c05`，由 ReplicaSet `workload-5dbb5dcd6c` 管理。\n\n**2. 关键事件证据 (kubectl_events + kubectl_describe)**\n- **核心报错 1 (`NoNetworkFound`)**: Multus CNI 插件报告 `cannot find a network-attachment-definition 'unavailable-network' in namespace aiops-case-05`。\n- **核心报错 2 (`FailedCreatePodSandBox`)**: Kubelet 报告 `failed to setup network for sandbox due to missing delegate 'unavailable-network'`。\n- **发生频率**: 事件在 44m 到 40m 前持续触发，表明 kubelet 在不断重试创建 Pod Sandbox 但反复失败。\n\n**3. Pod 配置验证 (kubectl_get_yaml)**\n- **异常配置**: Pod spec 的注解中明确引用了自定义网络：`k8s.v1.cni.cncf.io/networks: unavailable-network`。\n- **镜像与命令**: 镜像为 `xnet.registry.io:8443/observability/python:3-alpine`，命令为简单的 `sleep 3600` 测试命令，排除了镜像拉取（ImagePullBackOff）或应用启动逻辑导致卡住的可能。\n- **拉取密钥**: `imagePullSecrets` 为 `<absent>`，由于镜像仓库未报错，镜像本身可以拉取，故障点锁定在容器运行环境（网络插件）的依赖缺失。\n\n**4. 可观测性基线 (Pre-react Observability)**\n- **Metrics**: Prometheus 确认 `kube_pod_container_status_waiting_reason` 值为 1，标签 `reason=\"ContainerCreating\"`；`kube_pod_status_phase` 中 Pending 为 1，Running 为 0。\n- **Logging/Tracing**: 由于 Pod 尚未进入 Running 阶段，没有容器进程产生日志和 L7 流量，结果均为 empty/absent。\n\n---\n\n### 事实与候选原因的冲突与支撑\n\n*   **支撑事实**: \"ContainerCreating 的直接原因待验证\" 已由工具明确验证。Pod 停留在 `ContainerCreating` 的直接原因是 **Multus CNI 插件找不到 Pod 注解中指定的 `network-attachment-definition` 资源（名为 `unavailable-network`）**。\n*   **冲突/排除**: \n    *   **非资源不足**: Pod 已经分配了节点 `node2`，排除了集群资源耗尽导致无法调度的原因。\n    *   **非镜像拉取失败**: 状态未显示 `ImagePullBackOff` 或 `ErrImagePull`，说明镜像是存在的。\n    *   **非应用崩溃**: 容器 `restarts=0`，没有发生过运行期崩溃，卡死在初始化阶段。\n\n### 剩余缺口\n\n当前证据已能解释“为什么卡在 ContainerCreating\"（因为依赖的 `NetworkAttachmentDefinition` 不存在）。如果需要进一步确认，可以检查该命名空间下是否存在其他有效的 NetworkAttachmentDefinition，或者确认 `unavailable-network` 是否被意外删除。但就判定当前 Pod 异常根因而言，核心因果链（Spec 注解引用了不存在的网络定义 -> Multus 插件报错 -> Kubelet 无法创建 Sandbox）已经完整闭合。",
+      "plan_status": "ready",
+      "plan_failure_reason": "",
+      "collection_summary": "首轮可观测查询执行 1/4，完整度 25%；去重后证据计划 7 项，实际采集 6 项，未采集 1 项，完整度 86%；evidence 节点真实环境证据 6/7 项，完整度 86%；决定性多维证据 1/3 项，维度覆盖 33%，诊断充分度 13%（不足）；evidence 节点实际执行工具 6 个，其中核心 case 0 个、补充证据 6 个；已满足计划项 6 个，计划外补证 0 个",
+      "plan_total": 7,
+      "plan_collected": 6,
+      "plan_completeness": 0.8571428571428571,
+      "environment_evidence_total": 7,
+      "environment_evidence_collected": 6,
+      "environment_evidence_completeness": 0.8571428571428571,
+      "executed_tool_count": 6,
+      "matched_tool_count": 6,
+      "unplanned_tool_count": 0,
+      "case_tool_count": 0,
+      "supplemental_tool_count": 6,
+      "skipped_plan_count": 0,
+      "observability_target_total": 4,
+      "observability_target_collected": 1,
+      "observability_target_completeness": 0.25,
+      "diagnostic_evidence_total": 3,
+      "diagnostic_evidence_collected": 1,
+      "diagnostic_evidence_completeness": 0.3333333333333333,
+      "diagnostic_evidence_missing": [
+        "aiops-case-05/workload-5dbb5dcd6c-nhd7v:logging(empty)",
+        "aiops-case-05/workload-5dbb5dcd6c-nhd7v:tracing(empty)"
+      ],
+      "dimension_coverage_total": 3,
+      "dimension_coverage_collected": 1,
+      "dimension_coverage": 0.3333333333333333,
+      "diagnostic_sufficiency": 0.13333333333333333,
+      "diagnostic_sufficiency_label": "不足",
+      "source_coverage": {
+        "cases": [],
+        "queries": [
+          {
+            "target": "aiops-case-05/workload-5dbb5dcd6c-nhd7v",
+            "tool": "execute_pod_promql",
+            "source_system": "prometheus",
+            "dimension": "metrics",
+            "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+            "coverage": "present",
+            "directness": "direct",
+            "evidence_refs": [
+              "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-f9fdcd9a6a40",
+              "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-e49688df38ad",
+              "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-8b3ac0a1664c",
+              "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-a0639b476123",
+              "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-9b4e64cfb2bb",
+              "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3ab4e2f42355",
+              "metric-aiops-case-05-workload-5dbb5dcd6c-nhd7v-3f151785f557"
+            ]
+          },
+          {
+            "target": "aiops-case-05/workload-5dbb5dcd6c-nhd7v",
+            "tool": "query_pod_logs",
+            "source_system": "elasticsearch",
+            "dimension": "logging",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+            "coverage": "empty",
+            "directness": "direct",
+            "evidence_refs": []
+          },
+          {
+            "target": "aiops-case-05/workload-5dbb5dcd6c-nhd7v",
+            "tool": "query_pod_tracing",
+            "source_system": "deepflow+tempo",
+            "dimension": "tracing",
+            "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+            "coverage": "empty",
+            "directness": "direct",
+            "evidence_refs": []
+          }
+        ]
+      },
+      "case_target_coverage": {
+        "mode": "observability_first_round_gate",
+        "total": 4,
+        "collected": 1,
+        "rate": 0.25
+      },
+      "detail_retrieval": {
+        "evaluated": false,
+        "requested": 0,
+        "collected": 0,
+        "refs": []
+      },
+      "diagnostic_sufficiency_summary": {
+        "score": 0.13333333333333333,
+        "label": "不足"
+      },
+      "unresolved_questions": [
+        "aiops-case-05/workload-5dbb5dcd6c-nhd7v:logging(empty)",
+        "aiops-case-05/workload-5dbb5dcd6c-nhd7v:tracing(empty)"
+      ],
+      "evidence_inventory": [
+        {
+          "id": "1-pod-describe-status",
+          "description": "获取 Pod 完整 status 和 conditions，确认当前状态是否仍为 ContainerCreating，以及 Node、QoS、Phase 等信息",
+          "level": "critical",
+          "tool": "kubectl_describe",
+          "command": "kubectl describe pod workload-5dbb5dcd6c-nhd7v -n aiops-case-05",
+          "purpose": "确认 Pod 当前生命周期阶段，排除已恢复或处于其他异常状态的可能",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "2-pod-events",
+          "description": "获取该 Pod 的相关事件，特别是 FailedScheduling, PullFailed, CreateContainerConfigError 等导致 ContainerCreating 延迟或卡住的事件",
+          "level": "critical",
+          "tool": "kubectl_events",
+          "command": "kubectl get events --field-selector involvedObject.name=workload-5dbb5dcd6c-nhd7v,involvedObject.namespace=aiops-case-05 --sort-by='.lastTimestamp' -n aiops-case-05",
+          "purpose": "识别导致容器无法创建的具体原因（调度、镜像拉取、配置错误等）",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "3-pod-yaml-spec",
+          "description": "获取 Pod spec，检查是否有无效配置、资源请求过高、Volume 挂载问题或 ImagePullPolicy 异常",
+          "level": "important",
+          "tool": "kubectl_get_yaml",
+          "command": "kubectl get pod workload-5dbb5dcd6c-nhd7v -n aiops-case-05 -o yaml",
+          "purpose": "验证 Pod 配置是否合理，排除因 spec 错误导致的 ContainerCreating",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "4-node-affinity-check",
+          "description": "如果 events 显示调度相关失败，获取调度该 Pod 的 Node 状态，检查节点资源、污点、亲和性",
+          "level": "optional",
+          "tool": "run_bash_command",
+          "command": "kubectl get pod workload-5dbb5dcd6c-nhd7v -n aiops-case-05 -o jsonpath='{.spec.nodeName}' | xargs -I {} kubectl describe node {} 2>/dev/null || echo 'No node assigned yet'",
+          "purpose": "若 Pod 已分配节点，检查节点资源是否充足或存在污点/亲和性约束导致无法调度",
+          "collected": false,
+          "source": "planned",
+          "outcome": "unknown"
+        },
+        {
+          "id": "observability-gate-1-metrics",
+          "description": "首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的metrics 真实数据",
+          "level": "critical",
+          "tool": "execute_pod_promql",
+          "command": "execute generic Pod lifecycle PromQL",
+          "purpose": "首轮获取目标 Pod 的真实生命周期、等待原因、终止原因和重启指标，为后续选择更具体的 PromQL 提供基线",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-logging",
+          "description": "首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的logging 真实数据",
+          "level": "critical",
+          "tool": "query_pod_logs",
+          "command": "query recent real Pod logs without preset fault keywords",
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 ES/Filebeat 日志，识别可用于后续精确查询的错误原文、字段、路径或 trace ID",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-tracing",
+          "description": "首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的tracing 真实数据",
+          "level": "critical",
+          "tool": "query_pod_tracing",
+          "command": "query recent real Pod flows and application spans",
+          "purpose": "首轮获取目标 Pod 最近时间窗的真实 DeepFlow 流量和 Tempo Span，确认调用数据是否存在并发现可继续追踪的请求或 trace ID",
+          "collected": true,
+          "source": "thinking_match",
+          "outcome": "positive"
+        },
+        {
+          "id": "observability-gate-1-topology",
+          "description": "首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的topology 真实数据",
+          "level": "critical",
+          "tool": "query_pod_topology",
+          "command": "query source-backed Pod topology relationships",
+          "purpose": "首轮获取目标 Pod 的真实 Kubernetes 控制器、Service、节点和容器关系，为后续因果链提供来源可核验的拓扑边",
+          "collected": false,
+          "source": "planned",
+          "outcome": "unknown"
+        }
+      ],
+      "missing_reasons": [
+        "observability-gate-1-topology(首轮查询异常 Pod aiops-case-05/workload-5dbb5dcd6c-nhd7v 的topology 真实数据): 已规划但工具执行失败或无匹配结果"
+      ],
+      "early_stop": {
+        "triggered": false,
+        "reason": "",
+        "required_levels": [
+          "critical",
+          "important"
+        ]
+      }
+    }
+  }
+]

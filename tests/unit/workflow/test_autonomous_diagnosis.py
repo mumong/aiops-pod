@@ -31,7 +31,7 @@ def test_legacy_style_prompts_keep_professional_rules_without_old_engine_contrac
 
 
 @pytest.mark.parametrize('route,expected', [
-    ('focused', ['query_collect', 'conclusion']),
+    ('focused', ['query_collect']),
     ('full_diagnosis', ['layer', 'evidence', 'rca', 'conclusion']),
 ])
 def test_model_routes_scoped_task_and_original_question_survives_every_stage(route, expected):
@@ -64,10 +64,10 @@ def test_model_routes_scoped_task_and_original_question_survives_every_stage(rou
                     assert any(o['raw_ref'] == '/raw/describe' for o in payload['observations'])
             if _node.node_id in {'rca', 'conclusion'}:
                 assert kwargs['force_no_tools']
-            if _node.node_id == 'conclusion':
+            if _node.node_id in {'conclusion', 'query_collect'}:
                 assert ('证据表至少分别列出' in prompt) == (route == 'full_diagnosis')
                 return SimpleNamespace(result=json.dumps({'intent': question, 'scope': 'xnet/nginx',
-                    'status': 'partial', 'answer': 'OOMKilled；上游机制待核实', 'missing': ['机制']})), []
+                    'status': 'partial', 'answer': 'OOMKilled；上游机制待核实', 'missing': ['机制']})), [observation] if _node.node_id == 'query_collect' else []
             return SimpleNamespace(result='分析草稿，不是事实'), [observation] if _node.node_id in {'layer', 'query_collect'} else []
         node._call_llm = call
     result = graph.invoke({'question': '不得覆盖的旧 question', 'original_question': question,

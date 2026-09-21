@@ -7,31 +7,44 @@ from app.core.workflow.nodes.query_answer import parse_query_answer
 from app.core.workflow.executor import WorkflowExecutor
 
 
-def test_direct_query_uses_two_agents_and_passes_logs_without_metric_schema():
+def test_query_write_tools_only_for_explicit_ordinary_operation_contract():
+    node = QueryCollectNode()
+    node.tools = [SimpleNamespace(name=n) for n in ["run_bash_command", "kubectl_run_image", "kubectl_logs"]]
+    seen = []
+    def call(*args, **kwargs):
+        seen.append(kwargs["blocked_tool_names"])
+        return SimpleNamespace(result=json.dumps({"intent":"操作","scope":"xnet","status":"answered","answer":"结果"})), []
+    node._call_llm = call
+    for task in ["query", "diagnose", "repair", "operate"]:
+        node.execute({"question":"当前用户请求", "request_contract":{"task":task}})
+    for blocked in seen[:3]:
+        assert {"run_bash_command", "kubectl_run_image"} <= blocked
+    assert not ({"run_bash_command", "kubectl_run_image"} & seen[3])
+    assert "run_bash_command" not in node.READ_TOOLS
+
+
+def test_direct_query_finishes_structured_answer_without_summary_model():
     graph, nodes = build_diagnosis_workflow(query_mode="direct")
-    assert [type(node) for node in nodes] == [QueryCollectNode, QueryConclusionNode]
-    captured = {}
+    assert [type(node) for node in nodes] == [QueryCollectNode]
     observation = {"type": "tool_result", "tool_name": "kubectl_logs",
                    "result": "device not found", "raw_ref": "/archive/log.raw.txt"}
 
     def collect(question, prompt, **kwargs):
         assert "xnet" in question
-        assert not kwargs.get("expect_json")
+        assert kwargs.get("expect_json")
+        assert kwargs['response_schema'].__name__ == 'QueryAnswer'
         assert not kwargs.get("stop_checker")
-        return SimpleNamespace(result="可能没有设备"), [observation]
-
-    def conclude(question, prompt, **kwargs):
-        captured.update(json.loads(question))
-        assert kwargs["force_no_tools"]
-        assert kwargs["skip_remediation_policy"]
-        return SimpleNamespace(result="日志包含 device not found，不足以确认设备故障。"), []
+        assert '没有后续总结 Agent' in prompt
+        return SimpleNamespace(result=json.dumps({"intent": "查询日志", "scope": "xnet",
+            "status": "answered", "answer": "日志包含 device not found，不足以确认设备故障。",
+            "evidence_refs": [observation["raw_ref"]]})), [observation]
 
     nodes[0]._call_llm = collect
-    nodes[1]._call_llm = conclude
     result = graph.invoke({"question": "查 xnet Pod 日志"})
-    assert captured["question"] == "查 xnet Pod 日志"
-    assert captured["observations"][0]["result"] == "device not found"
-    assert captured["observations"][0]["raw_ref"] == observation["raw_ref"]
+    memory = result["query_session_memory"]["turns"][-1]
+    assert memory["question"] == "查 xnet Pod 日志"
+    assert memory["observations"][0]["result"] == "device not found"
+    assert memory["observations"][0]["raw_ref"] == observation["raw_ref"]
     assert "不足以确认" in result["conclusion"]
     assert "query_result" not in result
     assert result["request_route"] == "query"
@@ -40,10 +53,56 @@ def test_direct_query_uses_two_agents_and_passes_logs_without_metric_schema():
 def test_clarification_without_tools_is_not_rejected():
     graph, nodes = build_diagnosis_workflow(query_mode="direct")
     for node in nodes:
-        node._call_llm = lambda *a, **kw: (SimpleNamespace(result="需要查询哪个命名空间和 Pod？"), [])
+        node._call_llm = lambda *a, **kw: (SimpleNamespace(result=json.dumps({
+            "intent": "查询日志", "scope": "未知", "status": "clarify",
+            "answer": "需要查询哪个命名空间和 Pod？"})), [])
     result = graph.invoke({"question": "查询 Pod 日志"})
     assert result["conclusion"] == "需要查询哪个命名空间和 Pod？"
     assert "伪结构化" not in result["conclusion"]
+
+
+def test_direct_invalid_json_is_partial_without_hidden_summary_retry():
+    node = QueryCollectNode()
+    calls = []
+    def collect(*a, **kw):
+        calls.append(kw)
+        return SimpleNamespace(result='{"answer":"unfinished'), []
+    node._call_llm = collect
+    result = node.execute({"question": "查询"})
+    assert len(calls) == 1
+    assert result['query_answer']['status'] == 'partial'
+    assert '{"answer"' not in result['conclusion']
+    assert result['query_answer']['missing']
+
+
+def test_direct_budget_error_returns_structured_incomplete_answer():
+    from app.core.aicall.client import StructuredContextBudgetError
+    node = QueryCollectNode()
+    def fail(*a, **kw):
+        raise StructuredContextBudgetError('压缩后仍超过预算')
+    node._call_llm = fail
+    output = node.execute({'question': '查询'})
+    assert output['query_answer']['status'] == 'partial'
+    assert '压缩后仍超过预算' in output['conclusion']
+
+
+def test_direct_partial_result_keeps_memory_and_exact_recent_evidence():
+    node = QueryCollectNode()
+    node._call_llm = lambda *a, **kw: (SimpleNamespace(result=json.dumps({
+        'intent': 'CPU', 'scope': 'xnet', 'status': 'answered', 'answer': '| CPU |\n|---|\n| 1 核 |'})), [
+            {'type': 'context_compacted', 'working_summary': '早期历史',
+             'retained_messages': [{'type': 'tool', 'content': '近期完整结果'}]},
+            {'type': 'tool_result', 'raw_ref': '/raw/cpu', 'result': '1 core'},
+            {'type': 'execution_incomplete', 'reason': 'step_limit'},
+        ])
+    result = node.execute({'question': 'CPU', 'query_session_context': {'turns': [{'answer': '旧历史'}]}})
+    assert result['query_answer']['status'] == 'partial'
+    assert 'step_limit' in result['conclusion']
+    memory = result['query_session_memory']
+    assert memory['working_summary'] == '早期历史'
+    assert len(memory['turns']) == 1
+    assert memory['turns'][0]['recent_interactions'][0]['content'] == '近期完整结果'
+    assert memory['turns'][0]['observations'][0]['raw_ref'] == '/raw/cpu'
 
 
 def test_conclusion_consumes_latest_working_context_not_old_raw_history():
@@ -167,8 +226,7 @@ def test_all_installed_runbooks_available_without_mutating_shared_tool(tmp_path)
 
 def test_query_executor_preserves_answer_without_diagnostic_score_or_remediation(monkeypatch, tmp_path):
     monkeypatch.setattr(QueryCollectNode, "execute", lambda self, state: {
-        "request_route": "query", "query_draft": "日志摘录"})
-    monkeypatch.setattr(QueryConclusionNode, "execute", lambda self, state: {
+        "request_route": "query", "query_draft": "日志摘录",
         "conclusion": "日志查询完成", "conclusion_formatted": "日志查询完成"})
 
     def forbidden(*args, **kwargs):

@@ -19,7 +19,7 @@ def project_query_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
     """Presentation-only projection; never changes the model's observation."""
     if event.get("type") not in {"tool_start", "tool_result"}:
         return {}
-    out = {key: event[key] for key in ("tool_call_id", "tool_args", "raw_ref") if event.get(key) is not None}
+    out = {key: event[key] for key in ("tool_call_id", "tool_args", "raw_ref", "semantic_success", "transport_status") if event.get(key) is not None}
     if event.get("type") != "tool_result":
         return out
     raw = str(event.get("result") or event.get("result_preview") or "")
@@ -40,6 +40,20 @@ def project_query_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
         "raw_ref": event.get("raw_ref"),
     }
     return out
+
+
+def workflow_outcome(state: Mapping[str, Any]) -> str:
+    """Execution completeness, not a programmatic verdict on diagnosis quality."""
+    if state.get("request_error"):
+        return "error"
+    answer_status = _mapping(state.get("query_answer")).get("status")
+    incomplete = any(_mapping(e).get("type") == "execution_incomplete"
+                     for e in state.get("thinking_events") or [])
+    partial_lane = any(_mapping(g).get("status") == "partial"
+                       for g in state.get("autonomous_group_results") or [])
+    if incomplete or partial_lane or answer_status in {"partial", "unavailable"}:
+        return "partial"
+    return "success"
 
 
 class ParallelEvidenceStreamContext(BaseModel):
@@ -116,6 +130,10 @@ def _dimension(event: Mapping[str, Any]) -> str:
     tool_name = str(event.get("tool_name") or "").strip().lower()
     if tool_name in OBSERVABILITY_QUERY_TOOL_DIMENSIONS:
         return OBSERVABILITY_QUERY_TOOL_DIMENSIONS[tool_name]
+    if tool_name in {"execute_prometheus_instant_query", "execute_prometheus_range_query"}:
+        return "metrics"
+    if tool_name.startswith("kubectl_") and "logs" in tool_name:
+        return "logging"
     if tool_name.startswith(("kubectl_", "kubernetes_")):
         return "kubernetes"
     return "other"
@@ -150,6 +168,8 @@ def project_parallel_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
     lane_stage = str(event.get("lane_stage") or "").strip()
     if lane_stage:
         projected["lane_stage"] = lane_stage
+    if event.get("type") == "runtime_status":
+        projected["parallel_group_id"] = str(event["parallel_context"].get("group_id") or "")
     if event.get("type") not in {"tool_start", "tool_result"}:
         return projected
 

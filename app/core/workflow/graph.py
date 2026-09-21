@@ -2,7 +2,7 @@
 工作流图构建
 
 公开入口使用 auto：模型 JSON 路由选择轻量查询或深度诊断。
-轻量：query_collect → conclusion；深度：layer → evidence → rca → conclusion。
+轻量：query_collect 直接作答；深度：layer → evidence → rca → conclusion。
 澄清或无效路由直接结束，不回退到全集群扫描。
 显式内部 full 模式保留旧节点、配置开关和并发 lane，供兼容与历史复核。
 """
@@ -132,15 +132,15 @@ def build_diagnosis_workflow(
     if query_mode == "direct":
         workflow = StateGraph(WorkflowState)
         nodes = [cls(holmes_service, metrics, runbook_catalog)
-                 for cls in (QueryCollectNode, QueryConclusionNode)]
+                 for cls in (QueryCollectNode,)]
         for node in nodes:
             workflow.add_node(node.node_id, _wrap_node_execute(node))
         workflow.set_entry_point(nodes[0].node_id)
-        workflow.add_edge(nodes[0].node_id, "conclusion")
-        workflow.add_edge("conclusion", END)
+        workflow.add_edge(nodes[0].node_id, END)
         return workflow.compile(), nodes
 
     if query_mode == "auto":
+        from app.core.workflow.nodes.remediation import RemediationNode
         from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode
         from app.core.workflow.nodes.autonomous_diagnosis import (
             DiagnosisStageNode, DiagnosisEvidenceNode, DiagnosisRootCauseNode,
@@ -148,7 +148,7 @@ def build_diagnosis_workflow(
         workflow = StateGraph(WorkflowState)
         nodes = [cls(holmes_service, metrics, runbook_catalog) for cls in (
             RequestRouterNode, QueryCollectNode, DiagnosisStageNode,
-            DiagnosisEvidenceNode, DiagnosisRootCauseNode, AutonomousParallelNode, QueryConclusionNode,
+            DiagnosisEvidenceNode, DiagnosisRootCauseNode, AutonomousParallelNode, QueryConclusionNode, RemediationNode,
         )]
         for node in nodes:
             if node.node_id == "layer":
@@ -157,8 +157,10 @@ def build_diagnosis_workflow(
         workflow.set_entry_point("request_router")
         workflow.add_conditional_edges("request_router", lambda state: state["request_route"], {
             "focused": "query_collect", "full_diagnosis": "layer", "clarify": END, "stop": END,
+            "remediation": "remediation",
         })
-        workflow.add_edge("query_collect", "conclusion")
+        workflow.add_edge("remediation", END)
+        workflow.add_edge("query_collect", END)
         workflow.add_conditional_edges("layer", lambda state: "parallel_evidence" if len(state.get("autonomous_groups") or []) > 1 else "evidence",
                                        {"parallel_evidence": "parallel_evidence", "evidence": "evidence"})
         workflow.add_edge("parallel_evidence", "conclusion")

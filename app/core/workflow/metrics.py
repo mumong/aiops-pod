@@ -267,8 +267,9 @@ class WorkflowMetrics:
             node = str(event.get("node") or "")
             tool_name = str(event.get("tool_name") or "unknown")
             call_id = str(event.get("tool_call_id") or "").strip()
+            lane = str(event.get("lane_id") or "")
             if call_id:
-                key: Any = (node, call_id)
+                key: Any = (lane, node, call_id)
             elif event_type == "tool_start":
                 anonymous_index += 1
                 key = (node, "anonymous", tool_name, anonymous_index)
@@ -298,7 +299,8 @@ class WorkflowMetrics:
         for key in all_keys:
             start = starts.get(key, {})
             result = results.get(key, {})
-            success = bool(result) and result.get("status") == "success"
+            success = (bool(result) and result.get("status") == "success"
+                       and result.get("semantic_success") is not False)
             is_deduplicated = bool(result.get("deduplicated"))
             if success:
                 successful += 1

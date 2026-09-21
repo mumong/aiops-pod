@@ -46,7 +46,8 @@ def test_three_lanes_overlap_isolate_clients_and_keep_failed_lane(tmp_path, monk
     monkeypatch.setattr(DiagnosisEvidenceNode, '_call_llm', call)
     monkeypatch.setattr(DiagnosisRootCauseNode, '_call_llm', call)
     state = {'question': '检查这三个 Pod 的根因', 'autonomous_groups': groups(),
-             'thinking_events': [{'type': 'tool_result', 'result': 'shared-list'}]}
+             'thinking_events': [{'type': 'tool_result', 'result': 'shared-list'},
+                                 {'type': 'execution_incomplete', 'node': 'layer', 'reason': 'step_limit'}]}
     result = node.execute(state)
     assert len({id(c) for c in clients}) == 3
     assert [r['group_id'] for r in result['autonomous_group_results']] == ['g1', 'g2', 'g3']

@@ -30,6 +30,13 @@ def _runbook_body(name: str) -> str:
 
 
 class RunbookRemediationGuidanceTest(unittest.TestCase):
+    def test_common_runbooks_explain_executable_repair_boundaries(self):
+        for name in TARGET_RUNBOOKS:
+            self.assertIn('可执行修复决策', _runbook_body(name))
+        body = _runbook_body('pod-oomkilled.md')
+        self.assertIn('默认不生成反复扩容 action', body)
+        self.assertIn('回退值来自执行前原始配置', body)
+
     def test_all_active_pod_runbooks_have_standard_remediation_section(self):
         missing = [name for name in TARGET_RUNBOOKS if "## 标准修复建议" not in _runbook_body(name)]
         self.assertEqual([], missing)

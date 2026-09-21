@@ -1,4 +1,4 @@
-"""Autonomous read-only collection followed by a tool-free answer agent."""
+"""Direct structured query answers and the separate deep-diagnosis conclusion."""
 
 import json
 import os
@@ -34,6 +34,30 @@ class QueryAnswer(BaseModel):
     missing: list[str] = Field(default_factory=list, description="未回答的项目和原因")
 
 
+def evidence_receipts(events):
+    """Small acquisition inventory, never a semantic proof or diagnosis gate."""
+    receipts = {}
+    dimensions = {"execute_pod_promql": "metrics", "query_pod_logs": "logging",
+                  "query_pod_tracing": "tracing", "query_pod_topology": "topology",
+                  "fetch_runbook": "runbook"}
+    for event in events:
+        name = event.get("tool_name")
+        if event.get("type") != "tool_result" or name not in dimensions:
+            continue
+        args = event.get("tool_args") or {}
+        structured = event.get("structured") or {}
+        item = {"tool": name, "dimension": dimensions[name], "namespace": args.get("namespace"),
+                "pod": args.get("pod"), "runbook_id": args.get("runbook_id"),
+                "status": event.get("status"), "semantic_success": event.get("semantic_success"),
+                "coverage": structured.get("coverage"), "raw_ref": event.get("raw_ref"),
+                "group_id": event.get("lane_id"), "observed_at": event.get("timestamp")}
+        # Keep latest reference per acquisition outcome, not the full result or
+        # an ever-growing duplicate of every query. Failures and empties differ.
+        key = tuple(item[k] for k in ("tool", "namespace", "pod", "runbook_id", "status", "coverage", "group_id"))
+        receipts[key] = {k:v for k,v in item.items() if v is not None}
+    return list(receipts.values())
+
+
 def build_working_material(state):
     """Carry the user task and only the latest working evidence representation."""
     events = [e for e in state.get("thinking_events") or [] if not e.get("lane_id")]
@@ -50,6 +74,7 @@ def build_working_material(state):
         "parallel_results": state.get("autonomous_group_results") or [],
         "request_time_utc": state.get("request_time_utc") or datetime.now(timezone.utc).isoformat(),
         "analysis_draft": state.get("query_draft", ""),
+        "evidence_receipts": evidence_receipts(state.get("thinking_events") or []),
         "working_summary": events[last_compaction].get("working_summary") if last_compaction >= 0 else None,
         "recent_interactions": events[last_compaction].get("retained_messages", []) if last_compaction >= 0 else [],
         "session_history": state.get("query_session_context") if last_compaction < 0 else None,
@@ -102,6 +127,13 @@ def parse_query_answer(raw):
 
 
 class QueryCollectNode(FocusedTaskNode):
+    WRITE_TOOLS = {"run_bash_command", "kubectl_run_image"}
+
+    def _allowed_query_tools(self, state):
+        # Ordinary operations stay on QUERY; diagnostic subclasses keep READ_TOOLS.
+        contract = state.get("request_contract") or {}
+        return self.READ_TOOLS | (self.WRITE_TOOLS if contract.get("task") == "operate" else set())
+
     READ_TOOLS = FocusedTaskNode.READ_TOOLS | {
         "kubernetes_count", "kubernetes_jq_query", "kubernetes_tabular_query",
         "kubectl_logs_grep", "kubectl_logs_all_containers_grep",
@@ -145,19 +177,30 @@ class QueryCollectNode(FocusedTaskNode):
             self.ai_call.working_context_original_question = question
         catalog = self._prepare_query_tools()
         self._archive_node_input({"question": question, "request_contract": state.get("request_contract"), "runbook_catalog": catalog})
-        response, events = self._call_llm(
-            question + "\n当前 UTC 时间：" + datetime.now(timezone.utc).isoformat()
-            + "\n任务理解（以原问题为准）：" + json.dumps(state.get("request_contract"), ensure_ascii=False),
-            QUERY_COLLECT_PROMPT + "\n可用 Runbook 目录（按需读取）：\n" + catalog,
-            blocked_tool_names={t.name for t in getattr(self, "tools", []) if t.name not in self.READ_TOOLS},
-            skip_remediation_policy=True,
-        )
+        from app.core.aicall.client import StructuredContextBudgetError
+        try:
+            response, events = self._call_llm(
+                question + "\n当前 UTC 时间：" + datetime.now(timezone.utc).isoformat()
+                + "\n任务理解（以原问题为准）：" + json.dumps(state.get("request_contract"), ensure_ascii=False),
+                QUERY_COLLECT_PROMPT + "\n可用 Runbook 目录（按需读取）：\n" + catalog
+                + "\n最终输出 schema：\n" + json.dumps(QueryAnswer.model_json_schema(), ensure_ascii=False),
+                blocked_tool_names={t.name for t in getattr(self, "tools", []) if t.name not in self._allowed_query_tools(state)},
+                skip_remediation_policy=True,
+                expect_json=True,
+                response_schema=QueryAnswer,
+            )
+            raw = response.result or ""
+        except StructuredContextBudgetError as exc:
+            events = [{"type": "execution_incomplete", "reason": str(exc)}]
+            raw = QueryAnswer(intent=question, scope="本次请求范围", status="partial",
+                              answer="上下文预算不足，本次查询未完成。", missing=[str(exc)]).model_dump_json()
         output = {
             "layer": Layer.QUERY,
             "request_route": "query",
-            "query_draft": response.result or "",
+            "query_draft": raw,
             "thinking_events": [*(state.get("thinking_events") or []), *events],
         }
+        output.update(finalize_query_answer(self, {**state, **output}, raw, [], require_structured=True))
         self._archive_node_output(output)
         return output
 
@@ -185,11 +228,16 @@ class QueryConclusionNode(FocusedTaskNode):
         self._archive_node_input(payload)
         from app.core.aicall.client import StructuredContextBudgetError
         final_compacted_summary = None
+        repair_schema = None
         try:
             prompt = QUERY_CONCLUSION_PROMPT
             if (payload.get("request_contract") or {}).get("route") == "full_diagnosis":
                 prompt += "\n" + DEEP_CONCLUSION_PRESENTATION
-            prompt += "\n输出 schema：\n" + json.dumps(QueryAnswer.model_json_schema(), ensure_ascii=False)
+                from app.core.workflow.nodes.remediation import RepairDraft
+                from app.core.prompts import POD_REMEDIATION_PROMPT
+                repair_schema = RepairDraft
+                prompt += "\n" + POD_REMEDIATION_PROMPT + "\n当前为诊断总结，无新增工具调用。仅在既有真实证据足以核实对象身份和修复参数时附上修复计划；否则 actions 留空并说明需要补查。诊断报告仍是主任务，不因没有计划而省略诊断结论。"
+            prompt += "\n输出 schema：\n" + json.dumps((repair_schema or QueryAnswer).model_json_schema(), ensure_ascii=False)
             def conclude(material):
                 return self._call_llm(json.dumps(material, ensure_ascii=False, default=str), prompt,
                                       force_no_tools=True, skip_remediation_policy=True, expect_json=True)
@@ -215,53 +263,78 @@ class QueryConclusionNode(FocusedTaskNode):
                       "query_answer": result, "thinking_events": events}
             self._archive_node_output(output)
             return output
-        raw = response.result or ""
-        result, repaired = parse_query_answer(raw)
-        if getattr(self, "current_run_id", None):
-            from app.core.context.archive import ContextArchive
-            ContextArchive(run_id=self.current_run_id).write_json("conclusion/render_audit.json", {
-                "raw": raw, "format_repaired": repaired, "schema_valid": result is not None})
-        looks_structured = raw.lstrip().startswith(('{', '[', '```json'))
-        if result:
-            answer = result["answer"]
-        elif looks_structured:
-            # Never render a broken JSON envelope as Markdown or invent a successful schema.
-            draft = state.get("query_draft") or ""
-            if draft.lstrip().startswith(('{', '[', '```json')):
-                draft = ""
-            answer = ("结果整理格式异常，以下为采集阶段分析草稿，尚未完成最终整理。\n\n" + draft
-                      if draft else "结果整理格式异常，未能生成可展示报告。原始输出已保留，请重试。")
-        else:
-            answer = raw or "本次结果整理未返回内容，请重试。"
-        if payload["execution_incomplete"]:
-            limitation = "执行未完成：" + "；".join(str(r) for r in payload["execution_incomplete"])
-            answer += "\n\n" + limitation
-            if result:
-                result["status"] = "partial"
-                result["answer"] = answer
-                result["missing"].append(limitation)
-        output = {"conclusion": answer, "conclusion_formatted": answer,
-                  "query_answer": result,
-                  "thinking_events": [*events, *final_events]}
-        previous = state.get("query_session_context") or {}
-        memory = {"working_summary": payload["working_summary"], "turns": []} if last_compaction >= 0 else {
-            "working_summary": previous.get("working_summary"), "turns": list(previous.get("turns") or [])}
-        memory["turns"].append({"question": payload["question"], "answer": answer,
-                                "scope": (result or {}).get("scope"),
-                                "request_contract": state.get("request_contract"),
-                                "recent_interactions": payload["recent_interactions"],
-                                "observations": payload["observations"],
-                                "parallel_results": payload["parallel_results"],
-                                "execution_incomplete": payload["execution_incomplete"],
-                                "observed_at": datetime.now(timezone.utc).isoformat()})
-        if final_compacted_summary:
-            memory = {"working_summary": final_compacted_summary, "turns": [{
-                "question": payload["question"], "answer": answer,
-                "scope": (result or {}).get("scope"),
-                "request_contract": state.get("request_contract"),
-                "recent_interactions": compact_payload["recent_interactions"],
-                "execution_incomplete": payload["execution_incomplete"],
-                "observed_at": datetime.now(timezone.utc).isoformat()}]}
-        output["query_session_memory"] = memory
-        self._archive_node_output(output)
+        output = finalize_query_answer(self, state, response.result or "", final_events,
+                                     final_compacted_summary=final_compacted_summary,
+                                     compact_payload=compact_payload if final_compacted_summary else None)
+        if repair_schema:
+            try:
+                output["remediation_draft"] = repair_schema.model_validate_json(response.result or "").model_dump()
+            except ValueError:
+                # Never recover executable commands from malformed prose/JSON.
+                output["remediation_draft"] = None
         return output
+
+
+def finalize_query_answer(node, state, raw, final_events, *, require_structured=False,
+                          final_compacted_summary=None, compact_payload=None):
+    """Render and save an answer without another model call; shared with deep conclusion."""
+    events = state.get("thinking_events") or []
+    last_compaction = next((i for i in range(len(events) - 1, -1, -1)
+                            if events[i].get("type") == "context_compacted" and not events[i].get("lane_id")), -1)
+    payload = build_working_material(state)
+    result, repaired = parse_query_answer(raw)
+    if getattr(node, "current_run_id", None):
+        from app.core.context.archive import ContextArchive
+        ContextArchive(run_id=node.current_run_id).write_json(f"{node.node_id}/render_audit.json", {
+            "raw": raw, "format_repaired": repaired, "schema_valid": result is not None})
+    looks_structured = raw.lstrip().startswith(('{', '[', '```json'))
+    if result:
+        answer = result["answer"]
+    elif looks_structured:
+        # Never render a broken JSON envelope as Markdown or invent a successful schema.
+        draft = state.get("query_draft") or ""
+        if draft.lstrip().startswith(('{', '[', '```json')):
+            draft = ""
+        answer = ("结果整理格式异常，以下为采集阶段分析草稿，尚未完成最终整理。\n\n" + draft
+                  if draft else "结果整理格式异常，未能生成可展示报告。原始输出已保留，请重试。")
+    else:
+        answer = raw or "本次结果整理未返回内容，请重试。"
+    if require_structured and result is None:
+        # No silent second LLM or fabricated success when the output contract fails.
+        limitation = "未获得有效的结构化回答，以下内容未完成格式整理。"
+        answer = limitation + "\n\n" + answer
+        result = QueryAnswer(intent=payload["question"], scope="本次请求范围",
+                             status="partial", answer=answer, missing=[limitation],
+                             evidence_refs=[o["raw_ref"] for o in payload["observations"] if o.get("raw_ref")]).model_dump()
+    if payload["execution_incomplete"]:
+        limitation = "执行未完成：" + "；".join(str(r) for r in payload["execution_incomplete"])
+        answer += "\n\n" + limitation
+        if result:
+            result["status"] = "partial"
+            result["answer"] = answer
+            result["missing"].append(limitation)
+    output = {"conclusion": answer, "conclusion_formatted": answer,
+              "query_answer": result,
+              "thinking_events": [*events, *final_events]}
+    previous = state.get("query_session_context") or {}
+    memory = {"working_summary": payload["working_summary"], "turns": []} if last_compaction >= 0 else {
+        "working_summary": previous.get("working_summary"), "turns": list(previous.get("turns") or [])}
+    memory["turns"].append({"question": payload["question"], "answer": answer,
+                            "scope": (result or {}).get("scope"),
+                            "request_contract": state.get("request_contract"),
+                            "recent_interactions": payload["recent_interactions"],
+                            "observations": payload["observations"],
+                            "parallel_results": payload["parallel_results"],
+                            "execution_incomplete": payload["execution_incomplete"],
+                            "observed_at": datetime.now(timezone.utc).isoformat()})
+    if final_compacted_summary:
+        memory = {"working_summary": final_compacted_summary, "turns": [{
+            "question": payload["question"], "answer": answer,
+            "scope": (result or {}).get("scope"),
+            "request_contract": state.get("request_contract"),
+            "recent_interactions": compact_payload["recent_interactions"],
+            "execution_incomplete": payload["execution_incomplete"],
+            "observed_at": datetime.now(timezone.utc).isoformat()}]}
+    output["query_session_memory"] = memory
+    node._archive_node_output(output)
+    return output

@@ -30,6 +30,8 @@ class WorkflowState(TypedDict, total=False):
     run_id: str
     request_contract: Optional[Dict[str, Any]]
     request_route: Optional[str]
+    request_error: Optional[Dict[str, Any]]
+    remediation_draft: Optional[Dict[str, Any]]
     diagnosis_target: Optional[Dict[str, Any]]
     autonomous_groups: List[Dict[str, Any]]
     autonomous_group_results: List[Dict[str, Any]]

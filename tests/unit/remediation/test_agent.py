@@ -22,6 +22,26 @@ def _plan():
     )
 
 
+def test_write_in_verify_field_cannot_bypass_action_approval():
+    store = ApprovalStore()
+    calls = []
+    executor = RemediationAgentExecutor(
+        approval_store=store, command_runner=lambda command: calls.append(command),
+        decision_provider=lambda **_: AgentDecision(
+            decision="run_command", command="kubectl get pod memhog -n aiops-e2e",
+            verify_command="kubectl scale deployment/memhog -n aiops-e2e --replicas=0"),
+    )
+    events = executor.run("hidden-write", _plan(), "report", approval_timeout_seconds=1)
+    plan_event = next(events)
+    store.resolve("hidden-write", plan_event["approval_id"], True)
+    action_event = next(events)
+    assert action_event["approval_kind"] == "action"
+    assert calls == []
+    store.resolve("hidden-write", action_event["approval_id"], False)
+    assert next(events)["status"] == "rejected"
+    assert calls == []
+
+
 def test_agent_mode_stops_failed_when_pod_still_unhealthy_after_iterations():
     calls = []
 

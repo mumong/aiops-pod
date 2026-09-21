@@ -38,6 +38,8 @@ class ObservationProcessor:
     QUERY_SUMMARY_TOOLS = frozenset({
         "get_metric_names", "kubectl_describe", "kubectl_events",
         "kubectl_get_by_kind_in_cluster", "kubernetes_tabular_query",
+        "kubectl_get_by_kind_in_namespace", "kubernetes_jq_query",
+        "get_label_values",
         "execute_prometheus_instant_query", "execute_prometheus_range_query",
         "execute_pod_promql",
     })
@@ -86,6 +88,10 @@ class ObservationProcessor:
         "query_pod_tracing",
         "query_pod_topology",
     }
+    # Raw-first autonomous agents must still use the established projections
+    # for large logs/traces. Keep this derived from the supported families so
+    # adding a log tool cannot silently bypass the heavy-result policy.
+    QUERY_SUMMARY_TOOLS = QUERY_SUMMARY_TOOLS | LOG_TOOLS | OBSERVABILITY_QUERY_TOOLS
     OBSERVABILITY_QUERY_REQUIRED_FIELDS = {
         "ok",
         "status",
@@ -132,7 +138,7 @@ class ObservationProcessor:
         raw = raw_content or ""
         tool = tool_name or "unknown"
         targeted_summary = (
-            preserve_raw and node_id in {"query_collect", "layer", "evidence", "rca"}
+            preserve_raw
             and tool in self.QUERY_SUMMARY_TOOLS
             and len(raw) > self.QUERY_SUMMARY_MIN_CHARS
         )
@@ -191,19 +197,21 @@ class ObservationProcessor:
             rows = [line for line in raw.splitlines() if line.strip()][1:]
             structured["all_rows"] = rows
             selected = []
-            used = len(structured.get("header", "")) + 350
+            header = re.sub(r"[ \t]{2,}", "  ", structured.get("header", "").strip())
+            used = len(header) + 350
             for row in rows:
-                if used + len(row) + 1 > self.max_observation_chars:
-                    break
-                selected.append(row)
-                used += len(row) + 1
+                display_row = re.sub(r"[ \t]{2,}", "  ", row.strip())
+                if used + len(display_row) + 1 > self.max_observation_chars:
+                    continue
+                selected.append(display_row)
+                used += len(display_row) + 1
             structured["selected_rows"] = selected
             structured["omitted_rows"] = len(rows) - len(selected)
             structured["selection_policy"] = "source_order_not_health_filtered"
             summary = (
                 f"{tool}: 返回 {len(rows)} 行，展示 {len(selected)} 行，省略 {len(rows) - len(selected)} 行。"
                 "未展示不代表不存在；需要全部对象时缩小查询范围或按 raw_ref 回读。\n"
-                + structured.get("header", "") + "\n" + "\n".join(selected)
+                + header + "\n" + "\n".join(selected)
             )
 
         if targeted_summary and tool == "get_metric_names":
@@ -299,6 +307,8 @@ class ObservationProcessor:
             # additional_kwargs are audit metadata, not reliably model-visible.
             # Supply the real retrieval address in content, not an instruction
             # to invent a reference or repeat an already truncated query.
+            if targeted_summary:
+                summary += f"\n重型工具摘要（原文 {len(raw)} 字符）：未展示不代表不存在，不可据此推断全集或证明无异常。"
             summary += f"\n归档原文 raw_ref: {refs.get('raw_ref')}\n需要未展示内容时使用 read_context_archive 回读该路径。"
             refs = archive.write_tool_artifact(
                 node_id=node_id, sequence=sequence, tool_name=tool,
@@ -427,7 +437,7 @@ class ObservationProcessor:
             if self._looks_like_secret_table(raw):
                 return self._extract_secret_table(tool, raw)
             return self._extract_table(tool, raw)
-        if tool == "kubernetes_jq_query":
+        if tool in {"kubernetes_jq_query", "get_label_values"}:
             return self._extract_jq(raw)
 
         if tool in self.MEDIUM_TOOLS and len(raw) <= self.max_observation_chars:
@@ -1845,8 +1855,25 @@ class ObservationProcessor:
                 "status": "json_summarized",
                 "type": type(parsed).__name__,
                 "count": len(parsed) if isinstance(parsed, (list, dict)) else 1,
+                "data": parsed,
             }
-            summary = json.dumps(parsed, ensure_ascii=False)[: self.max_observation_chars]
+            # Keep complete records, never slice a JSON value midway. Source
+            # order is not a ranking: explicitly disclose incomplete coverage.
+            records = parsed if isinstance(parsed, list) else (
+                parsed["data"] if isinstance(parsed, dict) and isinstance(parsed.get("data"), list)
+                else [parsed])
+            selected = []
+            used = 250
+            for record in records:
+                encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                if used + len(encoded) + 1 <= self.max_observation_chars:
+                    selected.append(encoded)
+                    used += len(encoded) + 1
+            structured["selected_count"] = len(selected)
+            structured["omitted_count"] = len(records) - len(selected)
+            summary = (f"JSON 查询共 {len(records)} 条，展示 {len(selected)} 条，"
+                       f"省略 {len(records) - len(selected)} 条。未展示不代表不存在；"
+                       "需要完整字段或全集统计时回读原文。\n" + "\n".join(selected))
             return structured, summary, "k8s_jq"
         except Exception:
             return {"status": "text_summarized"}, self._generic_summary("kubernetes_jq_query", raw), "k8s_jq"
@@ -2381,23 +2408,61 @@ class ObservationProcessor:
             r"no such file|not found|crash|segfault"
         )
         signal_lines = [ln for ln in lines if re.search(signal_patterns, ln, re.IGNORECASE)]
-        selected = signal_lines[:40] or lines[-40:]
+        # Repeated errors must not crowd out recovery/normal observations or
+        # the latest state. Group by a conservative text pattern, retaining
+        # source lines verbatim (including their original numeric values).
+        patterns: Dict[str, list[str]] = {}
+        for line in lines:
+            pattern = re.sub(r"\b\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?", "<time>", line)
+            # Do not merge distinct HTTP codes, exit codes, or resource limits.
+            pattern = re.sub(r'(\b(?:attempt|allocated_mib)["\s:=]+)\d+', r'\1#', pattern)
+            patterns.setdefault(pattern, []).append(line)
+        selected = []
+        used = 0
+        budget = max(0, self.max_observation_chars - 300)
+        groups = list(patterns.values())
+        # Reserve opportunities for late failures/recovery and endpoints of
+        # changing counters before distinct routine lines exhaust the budget.
+        signal_groups = [group for group in groups
+                         if re.search(signal_patterns, group[0], re.IGNORECASE)]
+        recovery_groups = [group for group in groups
+                           if re.search(r"recover|healthy|ready|success", group[-1], re.IGNORECASE)]
+        priority = ([signal_groups[0][0], signal_groups[-1][-1]] if signal_groups else [])
+        priority += ([recovery_groups[-1][-1]] if recovery_groups else [])
+        priority += ([lines[0], lines[-1]] if lines else [])
+        priority += [group[-1] for group in groups if len(group) > 1]
+        for candidates in (priority, [group[0] for group in groups],
+                           [group[-1] for group in groups]):
+            for line in candidates:
+                if line in selected or len(selected) >= 40:
+                    continue
+                if used + len(line) + 1 > budget:
+                    continue
+                selected.append(line)
+                used += len(line) + 1
         structured = {
             "status": "logs_summarized",
             "line_count": len(lines),
             "signal_count": len(signal_lines),
             "selected_lines": selected,
+            "pattern_count": len(patterns),
+            "omitted_line_count": len(lines) - len(selected),
+            "selection_policy": "signals_recovery_endpoints_then_pattern_representatives",
         }
         summary_lines = [
             f"{tool} 日志摘要:",
             f"lines: {len(lines)}",
             f"signals: {len(signal_lines)}",
+            f"patterns: {len(patterns)}; selected: {len(selected)}; omitted: {len(lines) - len(selected)}",
+            "仅展示部分原始记录；未展示不代表不存在，完整内容见原文归档。",
         ]
         if selected:
             summary_lines.append("关键日志:")
             summary_lines.extend(selected)
-        else:
+        elif not lines:
             summary_lines.append("日志为空；这是负向观察，不能证明应用无异常。")
+        else:
+            summary_lines.append("原始日志非空，但完整记录超出展示预算；需回读原文。")
         return structured, "\n".join(summary_lines), "k8s_logs"
 
     def _generic_summary(self, tool: str, raw: str) -> str:

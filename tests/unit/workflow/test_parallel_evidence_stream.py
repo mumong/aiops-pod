@@ -79,6 +79,15 @@ def test_parallel_sse_projection_exposes_lane_stage_without_outer_node_override(
     assert projected == {"lane_stage": "rca"}
 
 
+def test_general_prometheus_and_kubectl_logs_have_observability_dimensions():
+    for tool_name, dimension in [('execute_prometheus_instant_query','metrics'),
+                                 ('execute_prometheus_range_query','metrics'),
+                                 ('kubectl_previous_logs','logging')]:
+        context=build_parallel_evidence_stream_context({'parallel_context':_parallel_context(),
+                                                        'tool_name':tool_name})
+        assert context['dimension']==dimension
+
+
 def test_stream_context_uses_exact_group_entity_from_tool_arguments():
     context = build_parallel_evidence_stream_context({
         "parallel_context": _parallel_context(),
@@ -93,7 +102,7 @@ def test_stream_context_uses_exact_group_entity_from_tool_arguments():
         "contract_version": "aiops.parallel-evidence-stream.v1",
         "group_id": "g3",
         "entity": GROUP_ENTITIES[0],
-        "dimension": "kubernetes",
+        "dimension": "logging",
     }
 
 

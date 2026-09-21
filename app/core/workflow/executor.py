@@ -25,7 +25,7 @@ from app.core.workflow.state import WorkflowState
 from app.core.workflow.graph import build_diagnosis_workflow
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.metrics import WorkflowMetrics
-from app.core.workflow.stream_contract import project_parallel_tool_event, project_query_tool_event
+from app.core.workflow.stream_contract import project_parallel_tool_event, project_query_tool_event, workflow_outcome
 from app.core.holmes.log_listener import create_log_listener, HolmesLogListener
 from app.core.workflow.reporter import (
     save_report as _save_report_fn,
@@ -166,6 +166,7 @@ class WorkflowExecutor:
             return
         try:
             with query_sessions.checkout(key) as (memory, commit):
+                overrides["_remediation_owner"] = key[0]
                 overrides["_query_session_context"] = memory
                 for event in self._execute_stream(question, run_id, cancel_event, overrides):
                     snapshot = event.pop("_query_session_memory", None)
@@ -654,6 +655,8 @@ class WorkflowExecutor:
             log_listener.detach()
 
             # 完成指标记录
+            outcome = workflow_outcome(final_state)
+            metrics.success = outcome == "success"
             metrics.finish()
             
             # Conclusion 只负责根因报告正文；Runbook 使用与执行耗时来自
@@ -709,13 +712,14 @@ class WorkflowExecutor:
                 "run_id": run_id,
                 "seq": seq,
                 "ts_ms": int(time.time() * 1000),
-                "status": "success",
+                "status": outcome,
                 "answer": full_answer,
                 "answer_source": "workflow",
                 "elapsed_seconds": round(time.time() - total_start, 3),
                 "metrics": public_metrics,
                 "request_route": task_route,
                 "request_contract": final_state.get("request_contract"),
+                "request_error": final_state.get("request_error"),
                 "focused_result": final_state.get("focused_result"),
                 "query_answer": final_state.get("query_answer"),
                 **({"_query_session_memory": final_state.get("query_session_memory")}
@@ -730,6 +734,28 @@ class WorkflowExecutor:
             if final_state.get("request_route") in {"focused", "query", "clarify", "stop"}:
                 # A read-only task must not become a write workflow because the
                 # final prose happens to contain a remediation-shaped block.
+                remediation_enabled = False
+            if remediation_enabled and (final_state.get("request_route") in {"remediation", "full_diagnosis"}
+                                        or remediation_cfg.get("executor") == "pod"):
+                from app.core.remediation.pod_executor import PodRepairExecutor
+                from app.core.remediation.policy import CommandPolicy
+                defaults = CommandPolicy()
+                policy = CommandPolicy(
+                    allowed_operations=frozenset(remediation_cfg.get("allowed_operations", defaults.allowed_operations)),
+                    denied_operations=frozenset(remediation_cfg.get("denied_operations", defaults.denied_operations)),
+                )
+                for repair_event in PodRepairExecutor().run(
+                    run_id, final_state.get("remediation_draft"), owner=(workflow_overrides or {}).get("_remediation_owner", ""),
+                    mode=normalize_remediation_mode(remediation_cfg.get("mode")),
+                    timeout=_int_config(remediation_cfg, "approval_timeout_seconds", 600),
+                    cancel=cancel_event, policy=policy,
+                    request_contract=final_state.get("request_contract"),
+                ):
+                    seq += 1
+                    yield {**repair_event, "id": f"{run_id}-repair-{seq}", "seq": seq,
+                           "ts_ms": int(time.time() * 1000)}
+                    if repair_event.get("type") == "remediation_finished":
+                        final_state["remediation_result"] = repair_event
                 remediation_enabled = False
             if remediation_enabled:
                 approval_timeout = 600
@@ -960,7 +986,8 @@ class WorkflowExecutor:
                     "analysis_draft": state.get("query_draft")}
 
         if node_name == "request_router":
-            snapshot = {"request_route": state.get("request_route"), "request_contract": state.get("request_contract")}
+            snapshot = {"request_route": state.get("request_route"), "request_contract": state.get("request_contract"),
+                        "request_error": state.get("request_error")}
         elif node_name == "focused":
             snapshot = {"focused_result": state.get("focused_result"), "conclusion": state.get("conclusion")}
         elif node_name == "layer":

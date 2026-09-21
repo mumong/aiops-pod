@@ -207,7 +207,23 @@ make case-clean CASE=c01-cpu
 
 ## 其他使用方式
 
-`/query` 与 `/ask` 先由 Agent 理解意图并输出 JSON 路由：日常查询和快速初查走“自主查询 → 总结”；Pod、命名空间或集群根因诊断走“定位 → 取证 → 根因 → 总结”。深度诊断不等于全量扫描，各节点围绕原问题自主选择只读工具和 Runbook，不执行固定采集兜底。前端显示 Markdown，SSE 的 `query_answer` 包含意图、范围、状态、正文、来源与缺失项；结构正确不代表诊断已核验。两接口共享 session_id 会话记忆及 54k 环境配置下的自动上下文压缩；进程内记忆在 Pod 重启后丢失。
+### Pod 修复（默认人工审批）
+
+普通资源操作与故障修复分开：明确要求创建测试 Pod、创建/修改资源时走 query 的 `focused/operate`，通过 MCP 执行后读取真实状态，不套故障修复计划。此路径已开放写工具，普通明确操作不额外弹出修复审批卡；高风险操作由 Agent 先澄清确认范围。MCP 危险命令拦截保留，但不是严格的资源级写白名单；管理员级 RBAC 下应限制服务访问对象。纯查询和深度诊断不开放这条直接写入通道。
+
+同一前端会话先诊断，再输入“帮我修复刚才的 Pod”，会进入独立修复规划路由。规划依据最近上下文、真实 Pod／控制器状态与 Runbook；命令在审批卡片中展示，批准后才执行，倒计时结束取消而非自动批准。深度诊断可在原总结调用中附修复计划，无需每次额外增加规划节点。
+
+深度诊断没有可执行计划时，报告下提供“生成修复方案并审阅”入口；点击仅发起同会话规划，不代表批准。前端按组展示预演、执行和验证结果；命令失败、审批取消与待复查状态分别显示。
+
+`workflow.remediation.enabled` 控制开关，`executor: pod` 使用受限执行器，`mode: review` 为默认人工审批，`mode: auto` 仅适合已授权的受控环境。`approval_timeout_seconds` 控制审批时间；`allowed_operations`／`denied_operations` 可进一步收紧命令策略，黑名单优先。普通查询不会因报告包含命令就变成写操作。
+
+当前默认写操作限于已核实 Pod／控制器的资源调整、受限 JSON Patch 和滚动重启；禁止任意 Shell、删除、跨集群或权限变更。命令成功不等于根因已消除，仍需结合验证结果复查。审批和修复互斥状态为进程内存，Pod 重启后需重新发起；不要据此部署多副本修复执行器。
+
+2026-09-20 按管理员要求，AIOps/MCP 的 Kubernetes RBAC 已开放集群管理权限；这是凭据层权限，不取消上述 Agent 命令策略和人工审批。常见故障的可修复条件、仅缓解与需人工分流见 [修复适用范围](docs/pod-repair-eligibility.md)。无限增长型 OOM 默认不再反复扩容。
+
+DeepSeek 联调使用独立 `aiops-deepseek-remediation` Secret，原模型 Secret 保留。部署前需准备该 Secret 的 `LLM_API_KEY`、`LLM_MODEL`、`LLM_API_BASE`；不要将真实密钥提交 Git。[实现与验收记录](docs/pod-remediation-delivery.md)。
+
+`/query` 与 `/ask` 先由 Agent 理解意图并输出 JSON 路由：日常查询和快速初查由查询 Agent 直接生成结构化答案，不再调用独立总结模型；Pod、命名空间或集群根因诊断走“定位 → 取证 → 根因 → 总结”，多个 Pod 可分组并发取证和分析。深度诊断不等于全量扫描，各节点围绕原问题自主选择只读工具和 Runbook，不执行固定采集兜底。前端显示 Markdown，SSE 的 `query_answer` 包含意图、范围、状态、正文、来源与缺失项；结构正确不代表诊断已核验。两接口共享 session_id 会话记忆及 54k 环境配置下的自动上下文压缩；进程内记忆在 Pod 重启后丢失。
 
 ```bash
 curl -N -G "http://10.2.0.48:30800/query" --data-urlencode 'q=查询 xnet 命名空间下所有 Pod 的日志'

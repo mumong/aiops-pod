@@ -127,6 +127,9 @@ class AutonomousParallelNode(WorkflowNode):
                 node.set_event_queue(LaneQueue(self._event_queue,
                     group_id=group["group_id"], entities=group["entities"]))
             try:
+                if node._event_queue is not None:
+                    client._push(node._event_queue, node.node_id, [], type="runtime_status", status="running",
+                                 content=f"{group['group_id']}：正在{'采集证据' if node.collect else '分析根因'}")
                 local.update(node.execute(local))
             except Exception as exc:
                 failure = f"{node.node_id}: {exc}"
@@ -135,10 +138,12 @@ class AutonomousParallelNode(WorkflowNode):
                 # Keep evidence on an RCA failure; no semantic retry or forced verdict.
                 break
         material = build_working_material(local)
+        own_events = (local.get("thinking_events") or [])[inherited:]
+        own_incomplete = any(e.get("type") == "execution_incomplete" for e in own_events)
         return {"group_id": group["group_id"], "target": group, "run_id": lane_run,
                 "started_at": started_at,
-                "status": "partial" if failure or material["execution_incomplete"] else "completed",
-                "error": failure, "material": material}, (local.get("thinking_events") or [])[inherited:]
+                "status": "partial" if failure or own_incomplete else "completed",
+                "error": failure, "material": material}, own_events
 
     def execute(self, state):
         groups = state.get("autonomous_groups") or []
@@ -160,6 +165,9 @@ class AutonomousParallelNode(WorkflowNode):
                 if result["status"] == "partial" and not any(e.get("type") == "execution_incomplete" for e in lane_events):
                     events.append({"type": "execution_incomplete", "lane_id": gid, "reason": f"{gid}: {result.get('error') or 'partial'}"})
                 if getattr(self, "ai_call", None):
+                    lane_queue = LaneQueue(self._event_queue, group_id=gid, entities=group['entities']) if self._event_queue is not None else None
+                    self.ai_call._push(lane_queue, self.node_id, [], type="runtime_status", status="complete",
+                        content=f"{gid}：{'部分完成' if result['status'] == 'partial' else '分支已结束'}")
                     self.ai_call._push(self._event_queue, self.node_id, [], type="runtime_status", status="running",
                         content=f"分组诊断已结束 {len(results)}/{len(groups)}；{gid}：{'部分完成' if result['status'] == 'partial' else '已结束'}")
         ordered = [results[g["group_id"]] for g in groups]

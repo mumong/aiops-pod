@@ -98,7 +98,7 @@ def test_ask_route_does_not_reject_sync_with_legacy_remediate_parameter(monkeypa
     assert "remediation" not in overrides
 
 
-def test_query_route_uses_intent_router_and_remains_readonly(monkeypatch):
+def test_query_route_uses_intent_router_and_server_remediation_policy(monkeypatch):
     client, fake_service = _build_client(monkeypatch)
 
     response = client.get("/query", params={"q": "集群 CPU 使用率是多少", "stream": "false"})
@@ -107,7 +107,7 @@ def test_query_route_uses_intent_router_and_remains_readonly(monkeypatch):
     assert len(fake_service.sync_calls) == 1
     overrides = fake_service.sync_calls[0]["workflow_overrides"]
     assert overrides["query_mode"] == "auto"
-    assert overrides["remediation"]["enabled"] is False
+    assert "remediation" not in overrides
 
 
 def test_ask_and_query_share_owner_scoped_session_identity(monkeypatch):

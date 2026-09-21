@@ -43,9 +43,7 @@ data:
       # Qwen3 local inference can otherwise spend minutes emitting `<think>`
       # before each tool call. This is model transport control, not workflow
       # business logic.
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+      extra_body: {}  # DeepSeek；Qwen 专属 chat_template_kwargs 不跨供应商发送
 
     # ------------------------------------------------------------------------
     # 2. Language / i18n
@@ -182,10 +180,12 @@ data:
         conclusion: true
 
       # max_steps 直接作为 LangGraph recursion_limit，不做公式转换
-      # 注意：LangGraph 每轮 model→tools 算 2 次 recursion，建议配置值 >= 预期工具调用数 * 2 + 5
+      # recursion 包含模型/工具/中间件状态更新，不等于工具数量；保留有界退出。
       max_steps:
-        layer: 15
-        evidence: 20
+        query_collect: 48
+        remediation: 64
+        layer: 32
+        evidence: 48
         rca: 0
         conclusion: 0
 
@@ -247,8 +247,8 @@ data:
       # --------------------------------------------------------------------
       # 修复执行: executor=deterministic 固定执行计划；executor=react 由 LLM 多轮观察后决策。
       remediation:
-        enabled: false               # 2026-08-07 用户要求暂时关闭修复审批流程
-        executor: react
+        enabled: true
+        executor: pod               # 只执行已核实范围内、经审批的不可变命令
         mode: review                 # review=人工审批；auto=自动执行
         # mode: auto
         approval_timeout_seconds: 600

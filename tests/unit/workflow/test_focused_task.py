@@ -70,7 +70,7 @@ def test_auto_graph_model_selects_lightweight_scoped_request():
                 raise AssertionError("scoped task entered legacy diagnostic node")
             node.execute = unexpected
     result = graph.invoke({"question": "xnet 有异常吗？"})
-    assert visited == ["lightweight", "lightweight"]
+    assert visited == ["lightweight"]
     assert result["conclusion"] == "xnet 正常"
 
 
@@ -78,8 +78,8 @@ def test_focused_executor_emits_final_without_enabling_remediation(monkeypatch, 
     monkeypatch.setattr(RequestRouterNode, "execute", lambda self, state: {
         "request_route": "focused", "request_contract": {"task": "query"}})
     from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
-    monkeypatch.setattr(QueryCollectNode, "execute", lambda self, state: {"query_draft": "CPU 查询结果"})
-    monkeypatch.setattr(QueryConclusionNode, "execute", lambda self, state: {
+    monkeypatch.setattr(QueryCollectNode, "execute", lambda self, state: {
+        "query_draft": "CPU 查询结果",
         "conclusion": "CPU 查询结果", "conclusion_formatted": "CPU 查询结果"})
 
     def forbidden(*args, **kwargs):

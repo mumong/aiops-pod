@@ -18,6 +18,33 @@ class SummaryModel:
         return AIMessage(content="任务：查 CPU。已发现 node_cpu_seconds_total，目录已读取，下一步仍需数值。")
 
 
+def test_compaction_probe_counts_repair_schema_at_budget_boundary(tmp_path, monkeypatch):
+    from app.core.aicall.client import StructuredContextBudgetError
+    from langchain.agents.structured_output import ToolStrategy
+    from app.core.workflow.nodes.remediation import RepairDraft
+    monkeypatch.setenv('AIOPS_CONTEXT_ARCHIVE_ROOT', str(tmp_path))
+    client = AICall(model='openai/test', api_key='test')
+    schema = ToolStrategy(RepairDraft)
+    seen = []
+    def guard(request, **kwargs):
+        seen.append(request.response_format)
+        # Original payload fits without the schema but exceeds with it, as in
+        # d550579632504069 (45,396 vs 46,272; effective target 45,744).
+        if request.response_format is schema and 'boundary payload' in str(request.messages):
+            raise StructuredContextBudgetError('working_context_compaction_required', pre_budget={'context_window':54000})
+        return request, {'context_window':54000}
+    monkeypatch.setattr(client, '_guard_agent_model_request', guard)
+    model = SummaryModel()
+    middleware = WorkingContextMiddleware(client, client._create_chat_model(), model, [],
+        'system', '修复', 'boundary', 'remediation', lambda **e: None, response_format=schema)
+    original = [HumanMessage(content='修复'), HumanMessage(content='boundary payload '*5000)]
+    update = asyncio.run(middleware.abefore_model({'messages':original}, None))
+    assert update and model.inputs
+    replaced = add_messages(original, update['messages'])
+    assert asyncio.run(middleware.abefore_model({'messages':replaced}, None)) is None
+    assert all(value is schema for value in seen)
+
+
 def test_material_compaction_retains_recent_original_and_summarizes_older():
     from app.core.aicall.working_context import compact_working_material
     model = SummaryModel()
@@ -53,7 +80,7 @@ def test_fanin_compaction_keeps_recent_evidence_with_lane_identity():
 def test_all_history_chunks_consumed_without_slicing_away_middle():
     model = SummaryModel()
     source = "a" * 15000 + "MIDDLE_IMPORTANT" + "z" * 15000
-    asyncio.run(summarize_history(model, "查 CPU", source, window=16000))
+    asyncio.run(summarize_history(model, "查 CPU", source, window=16000, parallel=False))
     assert ''.join(x['next_history_chunk'] for x in model.inputs) == source
     assert all(x['original_question'] == '查 CPU' for x in model.inputs)
     assert model.inputs[1]['working_summary']
@@ -96,6 +123,55 @@ def test_summary_failure_does_not_replace_state():
         async def ainvoke(self, *a, **kw): return SimpleNamespace(content='')
     with pytest.raises(RuntimeError, match='未替换'):
         asyncio.run(summarize_history(Empty(), 'q', 'data'))
+
+
+def test_parallel_summary_is_bounded_ordered_and_consumes_every_chunk(monkeypatch):
+    monkeypatch.setenv('AIOPS_COMPACTION_WORKERS', '3')
+    class Model:
+        def __init__(self):
+            self.inputs, self.active, self.peak = [], 0, 0
+        async def ainvoke(self, messages, **kwargs):
+            payload = json.loads(messages[-1].content)
+            self.inputs.append(payload)
+            if payload['mode'] == 'map':
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                await asyncio.sleep(0.01 * (3 - payload['chunk_index'] % 3))
+                self.active -= 1
+                return AIMessage(content=f"card-{payload['chunk_index']}")
+            return AIMessage(content='merged summary')
+    model = Model()
+    source = 'old log ' * 12000
+    stats = {}
+    result = asyncio.run(summarize_history(model, 'Pod OOM', source, window=16000, stats=stats))
+    maps = sorted((p for p in model.inputs if p['mode'] == 'map'), key=lambda p:p['chunk_index'])
+    assert len(maps) >= 3
+    assert ''.join(p['next_history_chunk'] for p in maps) == source
+    assert model.peak == 3
+    merged = next(p for p in model.inputs if p['mode'] == 'reduce')
+    assert merged['next_history_chunk'].index('card-0') < merged['next_history_chunk'].index('card-1')
+    assert merged['is_last_chunk'] is True
+    assert result == 'merged summary'
+    assert stats['calls'] == len(model.inputs)
+
+
+def test_parallel_failure_cancels_siblings_and_keeps_history(monkeypatch):
+    monkeypatch.setenv('AIOPS_COMPACTION_WORKERS', '3')
+    cancelled = []
+    class Broken:
+        async def ainvoke(self, messages, **kwargs):
+            p = json.loads(messages[-1].content)
+            if p['chunk_index'] == 0:
+                await asyncio.sleep(0)
+                raise RuntimeError('provider failed')
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled.append(p['chunk_index'])
+                raise
+    with pytest.raises(RuntimeError, match='provider failed'):
+        asyncio.run(summarize_history(Broken(), 'q', 'old log ' * 12000, window=16000))
+    assert cancelled
 
 
 def test_compaction_progress_reports_chunks_and_terminal_state():

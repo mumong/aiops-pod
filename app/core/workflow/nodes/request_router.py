@@ -8,7 +8,8 @@ model's route; both branches retain the original question and scope.
 from typing import Any, Literal
 import time
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from openai import APIStatusError, APITimeoutError, APIConnectionError
 from app.core.prompts import REQUEST_ROUTER_PROMPT
 import json
 from datetime import datetime, timezone
@@ -19,9 +20,9 @@ from app.core.workflow.nodes.base import WorkflowNode
 class RequestContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    route: Literal["full_diagnosis", "focused", "clarify"] = Field(
+    route: Literal["full_diagnosis", "focused", "clarify", "remediation"] = Field(
         description="处理深度；full_diagnosis 不代表扩大到全集群")
-    task: Literal["inspect", "query", "diagnose", "explain", "mixed", "unsupported"]
+    task: Literal["inspect", "query", "diagnose", "explain", "mixed", "unsupported", "repair", "operate"]
     scope: Literal["cluster", "namespace", "pod", "unspecified"] = Field(description="明确指定 Pod 时为 pod；不限 Pod 的命名空间范围才是 namespace")
     namespaces: list[str] = Field(default_factory=list, description="用户或会话明确的命名空间；ns/pod 中斜杠左侧")
     pod_names: list[str] = Field(default_factory=list, description="用户或会话明确的 Pod 名称；ns/pod 中斜杠右侧")
@@ -33,6 +34,27 @@ class RequestContract(BaseModel):
 
 
 ROUTER_PROMPT = REQUEST_ROUTER_PROMPT  # Compatibility import; editable source is prompts.py.
+
+
+def router_failure(exc, history_loaded=False):
+    """Public, sanitized error presentation; never expose provider bodies or credentials."""
+    status = getattr(exc, 'status_code', None) if isinstance(exc, APIStatusError) else None
+    if isinstance(exc, APITimeoutError):
+        code, title, detail = 'model_timeout', '模型服务响应超时', '理解任务时等待模型服务超时，请稍后重试。'
+    elif isinstance(exc, APIConnectionError):
+        code, title, detail = 'model_connection', '模型服务连接失败', '暂时无法连接模型服务，请稍后重试或检查服务连接。'
+    elif status is not None:
+        code, title, detail = 'model_service', '模型服务请求失败', f'理解任务时模型服务返回 HTTP {status}。'
+        detail += '请检查模型服务认证或配置。' if status in (401, 403) else '请稍后重试；持续失败请检查模型网关和上游服务。'
+    elif isinstance(exc, (ValidationError, ValueError)):
+        code, title, detail = 'route_format', '任务路由输出格式异常', '未获得有效的结构化路由结果，请重试；这不表示问题描述不清。'
+    else:
+        code, title, detail = 'route_execution', '任务路由执行异常', '任务路由未能完成，请重试；持续失败请根据 run_id 检查服务日志。'
+    if history_loaded:
+        detail += '本次已加载会话上下文，不是会话记忆缺失。'
+    detail += '尚未启动集群查询或诊断。'
+    return {'code': code, 'title': title, 'message': detail,
+            'http_status': status, 'history_loaded': history_loaded}
 
 
 class RequestRouterNode(WorkflowNode):
@@ -76,6 +98,7 @@ class RequestRouterNode(WorkflowNode):
                     system_prompt=REQUEST_ROUTER_PROMPT, question=material,
                     schema=RequestContract, node_id=self.node_id,
                     run_id=getattr(self, "current_run_id", ""), max_tokens=1200,
+                    raise_on_error=True,
                 )
             serialized = json.dumps(context, ensure_ascii=False) if history else question
             try:
@@ -98,11 +121,13 @@ class RequestRouterNode(WorkflowNode):
             contract = RequestContract.model_validate(contract)
         except Exception as exc:
             # Never convert a failed classifier into permission for a scan.
+            failure = router_failure(exc, bool(context['history'] or context['working_summary']))
             output = {
                 "request_contract": None,
                 "request_route": "stop",
-                "conclusion": "暂时无法可靠识别本次任务，未启动集群检查。请重试。",
-                "errors": [*(state.get("errors") or []), f"request_router: {exc}"],
+                "request_error": failure,
+                "conclusion": f"{failure['title']}\n\n{failure['message']}",
+                "errors": [*(state.get("errors") or []), f"request_router: {failure['code']}"],
             }
             self._archive_node_output(output)
             return output

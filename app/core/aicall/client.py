@@ -483,6 +483,7 @@ class AICall:
         schema: type[BaseModel],
         **kwargs,
     ) -> Tuple[Optional[BaseModel], str]:
+        raise_on_error = bool(kwargs.pop("raise_on_error", False))
         node_id = kwargs.pop("node_id", "")
         run_id = kwargs.pop("run_id", "")
         static_context_components = kwargs.pop("static_context_components", None)
@@ -575,10 +576,12 @@ class AICall:
             return None, str(result)
         except Exception as exc:
             logger.warning(
-                "⚠️ [AICall] native structured output failed for schema=%s, fallback to JSON: %s",
+                "⚠️ [AICall] native structured output failed for schema=%s: %s",
                 schema.__name__,
                 exc,
             )
+            if raise_on_error:
+                raise
             return None, ""
 
     def _prepare_structured_call_context(
@@ -1046,6 +1049,7 @@ class AICall:
                     getattr(self, "working_context_original_question", None) or question,
                     run_id, node_id or "agent",
                     lambda **event: self._push(stream_queue, node_id, thinking_events, **event),
+                    response_format=response_format,
                 ))
             if response_format is not None:
                 create_agent_kwargs["response_format"] = response_format
@@ -1334,6 +1338,9 @@ class AICall:
                                 status = "success"
                             if status == "error":
                                 observation["semantic_success"] = False
+                            transport_status = status
+                            if observation.get("semantic_success") is False:
+                                status = "error"
                             tool_call_id = getattr(msg, "tool_call_id", None)
                             tool_args = tool_args_by_call_id.get(str(tool_call_id), {}) if tool_call_id else {}
                             tool_sequence = tool_sequence_by_call_id.get(
@@ -1450,6 +1457,7 @@ class AICall:
                                         bounded_content[:2000])
                             evt = {
                                 "type": "tool_result",
+                                "transport_status": transport_status,
                                 "tool_name": tool_name,
                                 "tool_call_id": tool_call_id,
                                 "tool_sequence": tool_sequence,
@@ -1756,7 +1764,8 @@ class AICall:
                 "tool_call_id": f"baseline-{sequence}-{tool_name}",
                 "tool_sequence": sequence,
                 "tool_args": tool_args,
-                "status": outcome["status"],
+                "status": "error" if observation.get("semantic_success") is False else outcome["status"],
+                "transport_status": outcome["status"],
                 "result_preview": summary[:200],
                 "result": summary,
                 "raw_ref": observation.get("raw_ref"),

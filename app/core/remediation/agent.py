@@ -79,6 +79,7 @@ class RemediationAgentExecutor:
         review_mode = normalize_remediation_mode(approval_mode) != "auto"
         if review_mode:
             plan_request = self.approval_store.create_request(
+                timeout_seconds=approval_timeout_seconds,
                 run_id=run_id,
                 kind="plan",
                 title="是否认可诊断报告中的修复方案",
@@ -91,7 +92,8 @@ class RemediationAgentExecutor:
                     "actions": [action.__dict__ for action in plan.actions],
                 },
             )
-            yield self._approval_event(run_id, plan_request.approval_id, "plan", plan_request.title, plan_request.payload)
+            yield {**self._approval_event(run_id, plan_request.approval_id, "plan", plan_request.title, plan_request.payload),
+                   "expires_at": plan_request.expires_at, "server_time": time.time()}
             decision = self.approval_store.wait_for_decision(run_id, plan_request.approval_id, approval_timeout_seconds)
             if decision is None:
                 yield self._finished(run_id, "timeout", "plan approval timeout")
@@ -149,7 +151,14 @@ class RemediationAgentExecutor:
             verify_succeeded = False
             verify_accepted_not_found = False
             verify_result = ""
-            is_write = not is_read_only_kubectl_command(decision.command)
+            # Field names are model output, not authority: a write hidden in
+            # dry_run_command or verify_command requires the same approval.
+            try:
+                is_write = any(not is_read_only_kubectl_command(command)
+                               for _, command in commands if command)
+            except ValueError as exc:
+                yield self._finished(run_id, "failed", str(exc))
+                return
             if is_write:
                 write_count += 1
                 if write_count > cfg.max_write_actions:
@@ -157,18 +166,19 @@ class RemediationAgentExecutor:
                     return
                 if review_mode:
                     action_request = self.approval_store.create_request(
+                        timeout_seconds=approval_timeout_seconds,
                         run_id=run_id,
                         kind="action",
                         title=f"是否执行修复动作 react-{iteration}: {decision.description or decision.command}",
                         payload=decision.__dict__,
                     )
-                    yield self._approval_event(
+                    yield {**self._approval_event(
                         run_id,
                         action_request.approval_id,
                         "action",
                         action_request.title,
                         action_request.payload,
-                    )
+                    ), "expires_at": action_request.expires_at, "server_time": time.time()}
                     action_decision = self.approval_store.wait_for_decision(
                         run_id, action_request.approval_id, approval_timeout_seconds
                     )

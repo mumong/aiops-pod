@@ -170,7 +170,6 @@ def register_routes(app):
 
         overrides = {
             "query_mode": "auto",
-            "remediation": {"enabled": False},
         }
         owner = _query_session_owner(request, session_id, overrides)
         if stream:
@@ -193,7 +192,6 @@ def register_routes(app):
 
         overrides = {
             "query_mode": "auto",
-            "remediation": {"enabled": False},
         }
         owner = _query_session_owner(request, session_id, overrides)
         if stream:
@@ -250,6 +248,7 @@ def register_routes(app):
 
     @app.post("/remediation/approve")
     async def remediation_approve(
+        request: Request,
         run_id: str = Form(..., description="诊断 run_id"),
         approval_id: str = Form(..., description="审批 ID"),
         approved: bool = Form(..., description="是否同意"),
@@ -264,6 +263,7 @@ def register_routes(app):
             approved=approved,
             reviewer=reviewer,
             reason=reason,
+            owner=request.cookies.get("aiops_query_owner", ""),
         )
         if not ok:
             logger.warning(

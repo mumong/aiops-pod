@@ -44,3 +44,35 @@ def test_approval_store_returns_none_on_timeout():
     request = store.create_request("run1", "action", "执行", {})
 
     assert store.wait_for_decision("run1", request.approval_id, timeout_seconds=0.01) is None
+    assert not store.resolve("run1", request.approval_id, approved=True)
+
+
+def test_approval_decision_is_single_use_and_cannot_be_overwritten():
+    store = ApprovalStore()
+    request = store.create_request("run1", "action", "execute", {})
+    assert store.resolve("run1", request.approval_id, approved=False)
+    assert not store.resolve("run1", request.approval_id, approved=True)
+    assert store.wait_for_decision("run1", request.approval_id, 1).approved is False
+    assert store.wait_for_decision("run1", request.approval_id, 1) is None
+
+
+def test_unknown_approval_does_not_wait():
+    assert ApprovalStore().wait_for_decision("missing", "missing", 600) is None
+
+
+def test_expiry_starts_at_creation_not_when_wait_begins(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.core.remediation.approval.time.time", lambda: clock[0])
+    store = ApprovalStore()
+    request = store.create_request("run", "action", "execute", {}, timeout_seconds=5)
+    assert request.expires_at == 105
+    clock[0] = 106
+    assert not store.resolve("run", request.approval_id, True)
+    assert store.wait_for_decision("run", request.approval_id, 600) is None
+
+
+def test_approval_payload_is_snapshot():
+    payload = {"actions": [{"execute_command": "safe"}]}
+    request = ApprovalStore().create_request("run", "action", "execute", payload)
+    payload["actions"][0]["execute_command"] = "changed"
+    assert request.payload["actions"][0]["execute_command"] == "safe"
