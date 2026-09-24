@@ -1,4 +1,5 @@
 # K8s AIOps Copilot Makefile
+.DEFAULT_GOAL := build
 
 IMAGE_REPOSITORY := xnet.registry.io:8443
 PROJECT := xnet-cloud
@@ -10,12 +11,37 @@ A2A_TEST_AGENT_IMAGE_NAME := aiops-a2a-test-agent
 A2A_TEST_AGENT_DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_TEST_AGENT_IMAGE_NAME)
 
 VERSION ?= $(shell cat VERSION)
+PYTHON ?= .venv/bin/python
+RUFF ?= .venv-quality/bin/ruff
 DOCKER_TAG := $(VERSION)
 A2A_PUBLIC_HOST ?= $(shell kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
 A2A_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30801
 
 .PHONY: build build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
 	case-list case-list-variants case-render case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean case-clean-variants
+
+.PHONY: help test-unit test-replay check check-syntax lint
+
+help:
+	@echo "build-main / build-a2a: container artifacts (Python service, no native binary)"
+	@echo "test-unit: isolated unit tests and Runbook contracts"
+	@echo "test-replay: historical evidence replay; known failures are documented"
+	@echo "check: syntax + unit + replay; lint: static correctness checks"
+	@echo "Setup: CONTRIBUTING.md; baseline: docs/maintenance-normalization.md"
+
+test-unit:
+	$(PYTHON) -m pytest tests/unit test/workflow/test_runbook_remediation_guidance.py -q
+
+test-replay:
+	$(PYTHON) -m pytest tests/replay -q
+
+check-syntax:
+	$(PYTHON) scripts/check_syntax.py
+
+lint:
+	$(RUFF) check app tests scripts
+
+check: check-syntax test-unit test-replay
 
 build: build-main build-a2a
 

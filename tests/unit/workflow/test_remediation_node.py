@@ -48,15 +48,14 @@ def test_invalid_repair_json_is_not_an_executable_plan():
     assert result["query_answer"]["status"] == "partial"
 
 
-def test_repair_schema_rejects_readonly_actions_before_approval():
+def test_repair_schema_does_not_prescribe_agent_operations():
     from app.core.workflow.nodes.remediation import RepairDraft
     values = {"intent": "fix", "scope": "ns/demo", "status": "answered", "answer": "review",
               "targets": [{"namespace": "ns", "pod": "demo", "pod_uid": "uid", "group_id": "g1"}],
               "actions": [{"id": "a1", "group_id": "g1", "description": "check", "risk": "low",
                            "execute_command": "kubectl get pod/demo -n ns",
                            "verify_command": "kubectl get pod/demo -n ns", "rollback_advice": "none"}]}
-    with pytest.raises(ValueError, match="只包含写修复"):
-        RepairDraft.model_validate(values)
+    assert RepairDraft.model_validate(values).actions[0].execute_command.startswith("kubectl get")
 
 
 def test_deep_conclusion_reuses_one_call_for_report_and_repair_plan():

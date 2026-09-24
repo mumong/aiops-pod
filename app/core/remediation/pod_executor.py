@@ -1,9 +1,8 @@
-"""Execute a reviewed Pod plan with exact scope, fresh identity and no LLM writes."""
+"""Execute agent-selected Kubernetes commands with approval and real results."""
 from copy import deepcopy
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import threading
@@ -11,10 +10,10 @@ import time
 
 from app.core.remediation.approval import approval_store
 from app.core.remediation.policy import CommandPolicy, validate_target_command
+from app.core.remediation.execution_guard import check_repair_execution, RepairCommandDenied
 
 _lock = threading.Lock()
 _busy: set[tuple[str, str, str]] = set()
-_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 
 
 def run_argv(args):
@@ -42,35 +41,6 @@ def run_argv(args):
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout or "kubectl failed")[:3000])
     return result.stdout
-
-
-def verified_objects(target, runner):
-    """Walk the actual controlling owner chain; reject invented owner identities."""
-    ns, name = target["namespace"], target["pod"]
-    if not _NAME.fullmatch(ns) or not _NAME.fullmatch(name):
-        raise ValueError("无效 Pod 名称或命名空间")
-    kind, expected_uid = "pod", target["pod_uid"]
-    found = {}
-    for _ in range(5):
-        obj = json.loads(runner(["kubectl", "get", f"{kind}/{name}", "-n", ns, "-o", "json", "--request-timeout=15s"]))
-        meta = obj["metadata"]
-        if not expected_uid or meta.get("uid") != expected_uid or meta.get("name") != name or meta.get("namespace") != ns:
-            raise ValueError("Pod/控制器身份已变化，需重新诊断和审批")
-        found[(ns, kind, name)] = (meta["uid"], str(meta.get("generation", "")))
-        owners = [o for o in meta.get("ownerReferences", []) if o.get("controller") is True]
-        if not owners:
-            break
-        if len(owners) != 1:
-            raise ValueError("控制器归属不明确")
-        owner = owners[0]
-        kind, name, expected_uid = owner["kind"].lower(), owner["name"], owner["uid"]
-        if kind not in {"replicaset", "deployment", "statefulset", "daemonset"} or not _NAME.fullmatch(name):
-            break
-    if target.get("owner_name"):
-        owner_key = (ns, target.get("owner_kind", "").lower(), target["owner_name"])
-        if owner_key not in found or found[owner_key][0] != target.get("owner_uid"):
-            raise ValueError("建议中的控制器未经实际 ownerReferences 证实")
-    return found
 
 
 class PodRepairExecutor:
@@ -102,23 +72,31 @@ class PodRepairExecutor:
                 if ((contract.get("namespaces") and target["namespace"] not in contract["namespaces"])
                         or (contract.get("pod_names") and target["pod"] not in contract["pod_names"])):
                     raise ValueError("修复目标超出用户请求范围")
-                objects = verified_objects(target, self.runner)
+                # Group locks avoid simultaneous approved plans. They do not
+                # prescribe evidence collection or infer allowed resource types.
+                objects = {(target["namespace"], "pod", target["pod"])}
                 stages = []
                 for stage in ("dry_run", "execute", "verify"):
                     command = action.get(stage + "_command")
                     if not command:
                         continue
                     argv, operation = validate_target_command(command, objects, policy)
-                    if stage == "dry_run" and "--dry-run=server" not in argv:
-                        raise ValueError("预演命令必须显式 --dry-run=server")
-                    if stage == "verify" and operation not in {"get", "describe", "logs", "top", "rollout_status"}:
-                        raise ValueError("验证命令必须只读")
+                    try:
+                        check_repair_execution(argv, policy)
+                    except RepairCommandDenied as exc:
+                        yield {"type": "remediation_tool_result", "run_id": run_id,
+                               "group_id": action["group_id"], "action_id": action["id"],
+                               "stage": stage, "command": command, "status": "failed",
+                               "error_code": "repair_command_denied", "execution_skipped": True,
+                               "result_preview": str(exc), "result_truncated": False}
+                        yield finish("blocked", str(exc) + "；本计划尚未执行任何命令，请调整方案后重新提交")
+                        return
                     stages.append((stage, command, argv))
-                if not any(s[0] == "execute" for s in stages) or not any(s[0] == "verify" for s in stages):
-                    raise ValueError("动作必须具备执行与验证命令")
+                if not any(s[0] == "execute" for s in stages):
+                    raise ValueError("动作必须具备执行命令")
                 prepared.append((action, target, objects, stages))
-            # Hold all scopes across approval + execution; another request must
-            # not approve a conflicting change to the same controller in parallel.
+            # Hold declared Pod scopes across approval + execution. This avoids
+            # duplicate plans for that Pod, not all cross-resource conflicts.
             scopes = {key for _, _, objects, _ in prepared for key in objects}
             with _lock:
                 if scopes & _busy:
@@ -152,15 +130,12 @@ class PodRepairExecutor:
                     if decision is None or not decision.approved:
                         yield finish("rejected" if decision else "timeout", "修复未获有效批准，未执行")
                         return
-                # Generation detects controller spec changes during review;
-                # Pod UID detects recreation. Neither relies on LLM confidence.
-                if verified_objects(target, self.runner) != original:
-                    raise ValueError("审批期间对象配置已变化，请重新制定方案")
                 for stage, command, argv in stages:
                     if cancel and cancel.is_set():
                         yield finish("cancelled", "请求取消；已执行动作不会自动回滚")
                         return
                     validate_target_command(command, original, policy)
+                    check_repair_execution(argv, policy)
                     yield {"type": "remediation_tool_start", "run_id": run_id,
                            "group_id": action["group_id"], "action_id": action["id"],
                            "stage": stage, "command": command, "status": "running"}
@@ -177,7 +152,7 @@ class PodRepairExecutor:
                            "group_id": action["group_id"], "action_id": action["id"],
                            "stage": stage, "command": command, "status": "success",
                            "result_preview": str(output)[:6000], "result_truncated": len(str(output)) > 6000}
-            yield finish("needs_followup", "已执行批准的命令并返回验证结果；命令成功不等于 Pod 根因已消除，请复查状态")
+            yield finish("needs_followup", "已执行批准的命令并返回实际结果；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态")
         except Exception as exc:
             yield finish("blocked", str(exc))
         finally:

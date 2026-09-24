@@ -10,8 +10,8 @@ FROM python:3.12-slim
 ARG VERSION=1.0.0
 ARG COMMIT_HASH=unknown
 ARG BUILD_TIME=unknown
-ARG KUBECTL_VERSION=v1.29.0
-ARG HELM_VERSION=v3.14.0
+ARG KUBECTL_VERSION=v1.29.15
+ARG HELM_VERSION=v3.14.4
 
 # 设置工作目录
 WORKDIR /app
@@ -56,7 +56,8 @@ COPY requirements.runtime.txt .
 
 # 安装运行时依赖。
 # holmesgpt 使用 --no-deps，避免把未使用的多云/数据库 toolset 依赖整体带入镜像。
-RUN pip install --no-cache-dir --no-compile --no-deps holmesgpt==0.21.0 \
+RUN pip install --no-cache-dir --no-compile --upgrade pip==26.2.0 \
+    && pip install --no-cache-dir --no-compile --no-deps holmesgpt==0.21.0 \
     && pip install --no-cache-dir --no-compile -r requirements.runtime.txt \
     && find /usr/local/lib/python3.12/site-packages \
         \( -type d \( -name tests -o -name test -o -name __pycache__ \) \

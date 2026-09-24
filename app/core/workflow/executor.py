@@ -739,11 +739,7 @@ class WorkflowExecutor:
                                         or remediation_cfg.get("executor") == "pod"):
                 from app.core.remediation.pod_executor import PodRepairExecutor
                 from app.core.remediation.policy import CommandPolicy
-                defaults = CommandPolicy()
-                policy = CommandPolicy(
-                    allowed_operations=frozenset(remediation_cfg.get("allowed_operations", defaults.allowed_operations)),
-                    denied_operations=frozenset(remediation_cfg.get("denied_operations", defaults.denied_operations)),
-                )
+                policy = CommandPolicy.from_config(remediation_cfg)
                 for repair_event in PodRepairExecutor().run(
                     run_id, final_state.get("remediation_draft"), owner=(workflow_overrides or {}).get("_remediation_owner", ""),
                     mode=normalize_remediation_mode(remediation_cfg.get("mode")),

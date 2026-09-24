@@ -42,7 +42,18 @@ from app.core.skills.models import (
     Layer, DeterministicDecision, EvidenceItem,
     EvidenceLevel, Confidence
 )
-from app.core.prompts import get_workflow_prompt
+from app.core.prompts import (
+    get_workflow_prompt,
+    RCA_COMPACT_OUTPUT_CONTRACT,
+    RCA_FULL_OUTPUT_CONTRACT,
+    RCA_NO_RECOLLECT_POLICY,
+    RCA_LITE_EVIDENCE_LOCATION_NOTE,
+    RCA_REPAIR_INSTRUCTION,
+    RCA_FACT_LEDGER_POLICY,
+    RCA_NARRATIVE_EVIDENCE_POLICY,
+    RCA_QUALITY_POLICY,
+    build_rca_user_message,
+)
 from app.core.text_helpers import truncate_question
 
 logger = logging.getLogger(__name__)
@@ -550,12 +561,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
             ],
             "validation_reasons": list(claim.get("reasons") or []),
             "invalid_fact_ids": list(claim.get("invalid_fact_ids") or []),
-            "instruction": (
-                "只修复 RCA 发布合同，不重新采集。若 previous_claim 的语义被事实支持，"
-                "保留其内容并用本 payload 中精确 fact_id 填写顶层 supporting_fact_ids、"
-                "唯一 hypothesis 及 evidence_analysis；causal_chain 至少填写 trigger、"
-                "mechanism、manifestation。若不受支持则输出 inconclusive。"
-            ),
+            "instruction": RCA_REPAIR_INSTRUCTION,
         }
         return "## AIOps Fact Ledger — constrained repair\n" + bounded_json_dumps(
             repair_payload,
@@ -641,7 +647,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
             parts.extend([
                 "",
                 "# Fact Ledger 证据合同",
-                "Fact Ledger 是 AIOps 根因分析的主证据输入；只能引用当前 ledger 中的 fact_id。",
+                RCA_FACT_LEDGER_POLICY,
             ])
         elif fact_ledger_context_enabled:
             parts.extend([
@@ -656,9 +662,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
             parts.extend([
                 "",
                 "# RCA 输入模式",
-                "Evidence Agent 的自然语言分析仅作为推理草稿；每个数值、状态、"
-                "错误原文和最终判断仍必须由下方去重后的真实工具观察支撑。"
-                "不注入 Fact Ledger、selected_facts、evidence_items 或采集元状态。",
+                RCA_NARRATIVE_EVIDENCE_POLICY,
             ])
 
         facts = state.get("evidence_facts") or []
@@ -903,19 +907,8 @@ class RootCauseAnalyzerNode(WorkflowNode):
     @staticmethod
     def _rca_schema_contract(schema: type) -> str:
         if schema is RCACompactOutput:
-            return """
-
-# 精简输出合同
-只填写运行时 RCACompactOutput：现象、根因、最短因果链、置信度、未知项，
-以及最多 8 条 key_evidence。causal_chain 按“上游原因 → 机制 → 直接失败 → 现象”
-写成字符串数组。每条 key_evidence 使用 `[来源工具] 真实具体值或错误原文 | `
-`role=supports/contradicts/limits | fact_id=输入中的ID`；没有 fact_id 就省略。
-不要复制采集计划、coverage、完整工具响应或重复事实。"""
-        return """
-
-# 完整输出合同
-按运行时 RCAOutput schema 填写；只保留少量高价值 evidence_analysis，
-不要为了填满辅助字段复制工具结果。"""
+            return RCA_COMPACT_OUTPUT_CONTRACT
+        return RCA_FULL_OUTPUT_CONTRACT
 
     @staticmethod
     def _expand_model_rca_output(structured: Any) -> Dict[str, Any]:
@@ -1012,6 +1005,11 @@ class RootCauseAnalyzerNode(WorkflowNode):
             return None
         return self._recover_tolerant_rca_output(raw)
 
+    @staticmethod
+    def _build_rca_user_message(question: str, evidence_summary: str) -> str:
+        """Share the byte-identical user input without merging mode-specific policy."""
+        return build_rca_user_message(question, evidence_summary)
+
     def _analyze_with_llm_lite(
         self,
         question: str,
@@ -1023,18 +1021,12 @@ class RootCauseAnalyzerNode(WorkflowNode):
             layer_str = layer.value if layer else "ABNORMAL"
             system_prompt = self._get_rca_prompt().format(
                 layer=layer_str,
-                evidence_summary="证据上下文只在 user message 中提供，system prompt 不承载动态证据。"
+                evidence_summary=RCA_LITE_EVIDENCE_LOCATION_NOTE
             )
             schema = self._model_rca_schema()
             system_prompt += self._rca_schema_contract(schema)
 
-            user_message = f"""# 用户问题
-{question}
-
-# 已采集证据
-{evidence_summary}
-
-请直接基于以上证据进行根因分析，并通过运行时 Pydantic schema 生成结构化结果。"""
+            user_message = self._build_rca_user_message(question, evidence_summary)
             start_time = time.time()
 
             ai_call = getattr(self, 'ai_call', None)
@@ -1108,20 +1100,9 @@ class RootCauseAnalyzerNode(WorkflowNode):
             system_prompt += self._rca_schema_contract(schema)
 
             # 告诉 LLM 不要重复采集数据，基于已有证据分析
-            system_prompt += """
+            system_prompt += RCA_NO_RECOLLECT_POLICY
 
-# ⚠️ 重要：不要重复采集数据
-上面的「已采集证据」和「工具采集的原始数据」已经包含了所有需要的信息。
-请直接基于这些数据进行分析，**不要重新调用工具采集数据**。
-如果数据不足，在 limitations 中说明即可。"""
-
-            user_message = f"""# 用户问题
-{question}
-
-# 已采集证据
-{evidence_summary}
-
-请直接基于以上证据进行根因分析，并通过运行时 Pydantic schema 生成结构化结果。"""
+            user_message = self._build_rca_user_message(question, evidence_summary)
             structured, response, thinking_events = self._call_structured_agent(
                 schema=schema,
                 system_prompt=system_prompt,
@@ -1732,9 +1713,7 @@ class RootCauseAnalyzerNode(WorkflowNode):
                 )
                 sections.append((
                     "## 证据质量合同",
-                    "source_coverage/case_target_coverage 只表示采集覆盖，"
-                    "不能替代 diagnostic_sufficiency；未回答问题必须进入结论限制。\n"
-                    + quality_text,
+                    RCA_QUALITY_POLICY + quality_text,
                 ))
 
             tool_data = data.get("tool_data", [])

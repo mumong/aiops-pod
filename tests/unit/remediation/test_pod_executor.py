@@ -6,6 +6,40 @@ from app.core.remediation.approval import ApprovalStore
 from app.core.remediation.pod_executor import PodRepairExecutor
 
 
+def test_generic_command_is_reviewed_and_no_implicit_checks_are_inserted():
+    draft, _, _, _ = fixture()
+    command = "kubectl create configmap settings -n demo --from-literal=mode=test"
+    draft["actions"][0].update(execute_command=command, verify_command="")
+    calls = []
+    store = ApprovalStore()
+    def runner(argv):
+        calls.append(argv)
+        return "created"
+    stream = PodRepairExecutor(store, runner).run("generic", draft, owner="alice")
+    event = next(stream)
+    assert event["type"] == "remediation_approval_required"
+    assert calls == []
+    assert event["payload"]["execute_command"] == command
+    store.resolve("generic", event["approval_id"], True, owner="alice")
+    assert list(stream)[-1]["status"] == "needs_followup"
+    import shlex
+    assert calls == [shlex.split(command)]
+
+
+def test_generic_repair_rejection_does_not_execute_any_stage():
+    draft, _, _, _ = fixture()
+    draft["actions"][0].update(
+        dry_run_command="kubectl create serviceaccount worker -n demo --dry-run=server",
+        execute_command="kubectl create serviceaccount worker -n demo")
+    calls = []
+    store = ApprovalStore()
+    stream = PodRepairExecutor(store, lambda argv: calls.append(argv)).run("reject", draft, owner="alice")
+    event = next(stream)
+    store.resolve("reject", event["approval_id"], False, owner="alice")
+    assert list(stream)[-1]["status"] == "rejected"
+    assert calls == []
+
+
 def fixture():
     target = {"namespace": "demo", "pod": "api-1", "pod_uid": "p1", "group_id": "g1",
               "owner_kind": "Deployment", "owner_name": "api", "owner_uid": "d1"}
@@ -42,20 +76,20 @@ def test_review_exact_commands_owner_and_single_execution():
     assert not store.resolve("r", request["approval_id"], True, owner="alice")
 
 
-def test_generation_change_after_approval_stops_write():
+def test_no_implicit_controller_reads_or_generation_script():
     draft, objects, writes, runner = fixture()
     store = ApprovalStore()
     events = PodRepairExecutor(store, runner).run("r", draft, owner="alice")
     request = next(events)
     objects["deployment/api"]["metadata"]["generation"] = 2
     store.resolve("r", request["approval_id"], True, owner="alice")
-    assert list(events)[-1]["status"] == "blocked"
-    assert writes == []
+    assert list(events)[-1]["status"] == "needs_followup"
+    assert len(writes) == 1
 
 
-def test_auto_still_blocks_out_of_scope_and_hidden_writes():
-    for field, command in [("execute_command", "kubectl set resources deployment/other -n demo --limits=memory=256Mi"),
-                           ("verify_command", "kubectl rollout restart deployment/api -n demo")]:
+def test_transport_rejects_host_shell_in_every_stage():
+    for field, command in [("execute_command", "bash -c true"),
+                           ("verify_command", "bash -c true")]:
         draft, _, writes, runner = fixture()
         draft["actions"][0][field] = command
         result = list(PodRepairExecutor(runner=runner).run("r", draft, mode="auto"))

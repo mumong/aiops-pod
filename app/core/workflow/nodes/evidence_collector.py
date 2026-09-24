@@ -44,9 +44,39 @@ from app.core.workflow.schemas import EvidenceCollectionOutput, EvidencePlanOutp
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer, EvidenceItem, EvidenceLevel
 from app.core.prompts import (
+    CASE_REFINEMENT_PROMPT,
+    RUNBOOK_RECONCILIATION_PROMPT,
+    EVIDENCE_PLAN_GENERATION_INSTRUCTION,
+    POST_CASE_REFINEMENT_TASK,
+    POST_CASE_RUNBOOK_RECONCILIATION_TASK,
     EVIDENCE_PLAN_PROTOCOL_DYNAMIC,
     EVIDENCE_PLAN_PROTOCOL_EXISTING,
     EVIDENCE_PLAN_PROTOCOL_PREPLANNED,
+    EVIDENCE_FAILED_OBSERVABILITY_RETRY_TEMPLATE,
+    EVIDENCE_EXISTING_PLAN_SECTION_TEMPLATE,
+    EVIDENCE_STRICT_RETRY_SECTION_TEMPLATE,
+    EVIDENCE_ARCHIVE_INSTRUCTIONS,
+    EVIDENCE_HANDOFF_ARCHIVE_INSTRUCTION,
+    EVIDENCE_PLAN_PROTOCOL_REACT_ONLY,
+    EVIDENCE_EXISTING_PLAN_OUTPUT_INSTRUCTION,
+    EVIDENCE_DYNAMIC_OUTPUT_INSTRUCTION,
+    EVIDENCE_DIAGNOSIS_RETRY_TEMPLATE,
+    EVIDENCE_AUTONOMOUS_GUIDANCE_TEMPLATE,
+    EVIDENCE_LEGACY_GUIDANCE_TEMPLATE,
+    EVIDENCE_VALID_PLAN_RETRY_INSTRUCTION,
+    EVIDENCE_UPSTREAM_MUST_VERIFY,
+    EVIDENCE_MISSING_POD_CONFLICT,
+    EVIDENCE_STRICT_SYSTEM_RETRY_TEMPLATE,
+    EVIDENCE_COMPLETED_COLLECTION_TEMPLATE,
+    EVIDENCE_BASELINE_FAILURE_INSTRUCTION,
+    EVIDENCE_BASELINE_HANDOFF_TEMPLATE,
+    EVIDENCE_DEFAULT_EXECUTION_REASON,
+    EVIDENCE_DEFAULT_STRICT_REASON,
+    EVIDENCE_ABNORMAL_SUMMARY_HEADER,
+    EVIDENCE_ABNORMAL_COUNTS_FALLBACK,
+    EVIDENCE_ABNORMAL_COVERAGE_REQUIREMENT,
+    EVIDENCE_CONTINUE_GATE_REASON,
+    EVIDENCE_CONTINUE_MANDATORY_REASON,
     EVIDENCE_USER_MESSAGE_TEMPLATE,
     get_workflow_prompt,
     get_query_evidence_normalization_prompt,
@@ -331,8 +361,7 @@ class EvidenceCollectorNode(WorkflowNode):
                     layer_archive_ref=state.get("layer_archive_ref") or {},
                     strict_mode=retry_existing_plan is None,
                     failure_reason=(
-                        "上一轮 evidence_plan 已有效，本轮不要重新输出 evidence_plan；"
-                        "请直接按既有计划调用至少一个 critical 或 important 级真实工具。"
+                        EVIDENCE_VALID_PLAN_RETRY_INSTRUCTION
                         if retry_existing_plan
                         else retry_reason
                     ),
@@ -598,7 +627,7 @@ class EvidenceCollectorNode(WorkflowNode):
                         or parsed.get("key_entities", [])
                     ),
                     "possible_scenarios": parsed.get("possible_scenarios", []),
-                    "must_verify": ["基于真实 tool_result 重新验证上游定位"],
+                    "must_verify": [EVIDENCE_UPSTREAM_MUST_VERIFY],
                 }
                 for field in (
                     "primary_pod",
@@ -815,9 +844,7 @@ class EvidenceCollectorNode(WorkflowNode):
                         "name": missing_pod[1],
                         "namespace": missing_pod[0],
                     }
-                    conflict["message"] = (
-                        "异常 Pod 当前不存在；历史事件或归档摘要不能继续作为该 Pod 当前异常的正向证据"
-                    )
+                    conflict["message"] = EVIDENCE_MISSING_POD_CONFLICT
                 conflicts.append(conflict)
         return conflicts
 
@@ -974,10 +1001,8 @@ class EvidenceCollectorNode(WorkflowNode):
                 system_prompt += f"\n\n# 已提取的关键实体\n{entities_str}\n"
 
             if strict_mode:
-                system_prompt += (
-                    "\n\n# 本轮最低要求\n"
-                    f"- 失败原因：{failure_reason or '上一轮只返回计划，没有执行工具'}\n"
-                    "- 至少执行一条 critical/important 只读工具；没有真实 tool_result 时不得声称采集完成。\n"
+                system_prompt += EVIDENCE_STRICT_SYSTEM_RETRY_TEMPLATE.format(
+                    failure_reason=failure_reason or EVIDENCE_DEFAULT_STRICT_REASON
                 )
 
             user_message = self._build_evidence_user_message(
@@ -1136,8 +1161,7 @@ class EvidenceCollectorNode(WorkflowNode):
 
         plan_prompt = (
             system_prompt.rstrip()
-            + "\n\n# 结构化计划生成模式\n"
-            + "只生成最小 `EvidencePlanOutput`，不调用工具、不总结结论。每个计划项只表达一个待验证问题。\n"
+            + EVIDENCE_PLAN_GENERATION_INSTRUCTION
         )
         llm_start = time.time()
         try:
@@ -1590,9 +1614,9 @@ class EvidenceCollectorNode(WorkflowNode):
                     layer_archive_ref=layer_archive_ref or {},
                     strict_mode=False,
                     failure_reason=(
-                        "继续执行尚未尝试的首轮 Metrics、Logging、Tracing、Topology 门控项"
+                        EVIDENCE_CONTINUE_GATE_REASON
                         if first_round_gate
-                        else "继续执行尚未尝试的 mandatory 实时可观测性采集项"
+                        else EVIDENCE_CONTINUE_MANDATORY_REASON
                     ),
                     existing_plan=remaining_plan,
                     plan_mode="preplanned_execution",
@@ -1612,10 +1636,8 @@ class EvidenceCollectorNode(WorkflowNode):
                     )
                 )
                 if completed_summary:
-                    user_message = (
-                        f"{user_message.rstrip()}\n\n"
-                        "# 已完成首轮采集摘要（不要用相同参数重复调用）\n"
-                        f"{completed_summary}\n"
+                    user_message = EVIDENCE_COMPLETED_COLLECTION_TEMPLATE.format(
+                        user_message=user_message.rstrip(), completed_summary=completed_summary
                     )
                 blocked_tool_names = self._blocked_tools_for_preplanned_execution(
                     remaining_plan
@@ -1700,21 +1722,10 @@ class EvidenceCollectorNode(WorkflowNode):
             f"# 用户问题\n{question}\n\n"
             "# 实时 Case 首屏事实与未回答问题\n"
             f"{json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
-            "# 任务\n"
-            "- 只判断当前首屏事实是否足以回答用户问题；coverage=present 仅表示数据源存在，"
-            "不等于诊断证据充分。\n"
-            "- 如关键判断缺少原文、时间序列、可关联 Trace 或责任边，调用一个或少量允许的"
-            "细粒度 AIOps 工具补证。\n"
-            "- `get_aiops_case_evidence` 只能使用上面真实给出的 case_id 与 "
-            "recommended_refs_by_dimension，不得猜测 ref。\n"
-            "- 当前证据已经决定性、没有冲突时允许零工具调用，并回答 "
-            "`detail_retrieval: current_case_sufficient`。\n"
-            "- 最多执行这一轮；禁止重新调用 collect_aiops_case、kubectl、Runbook 或修复工具。"
+            + POST_CASE_REFINEMENT_TASK
         )
         system_prompt = (
-            "你负责在实时 AIOps Case 之后做一次窄范围证据补全。"
-            "你只选择是否展开真实 evidence ref 或调用已启用的 AIOps 细粒度查询；"
-            "不得按故障类型套规则，不得生成根因或修复结论。"
+            CASE_REFINEMENT_PROMPT
         )
         response, events = self._call_llm(
             user_message,
@@ -1942,17 +1953,8 @@ class EvidenceCollectorNode(WorkflowNode):
 
 {detail_summary}
 
-# 任务
-- 这是 evidence_plan 完成后的 Runbook 重新裁决，不得重写 evidence_plan，也不得采集新的环境证据。
-- 由你根据每个异常 Pod 的 Kubernetes 终态、决定性日志、Trace 和错误码，自主判断现有 Runbook 是否仍准确。
-- 如果实时证据把通用候选收敛成更具体异常，只调用 `fetch_runbook` 获取缺失且明显匹配的 Runbook。
-- 已在“上游已经实际获取”列表中的 Runbook 禁止重复调用；同一新 Runbook 本轮最多调用一次。
-- 不要求每个 Pod 都新增 Runbook。现有 Runbook 足够或没有可靠匹配时，不调用工具并明确回答 `runbook_reconciliation: keep_existing_or_none`。
-- Runbook 是参考知识，不是真实环境证据；不得把名称、标签或 Runbook 内容写成已证实根因。
-"""
-        system_prompt = """你负责根据实时可观测性证据重新裁决诊断 Runbook。
-只允许调用 fetch_runbook；不得调用 Kubernetes、日志、指标、Trace、case 或修复工具。
-Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。"""
+""" + POST_CASE_RUNBOOK_RECONCILIATION_TASK
+        system_prompt = RUNBOOK_RECONCILIATION_PROMPT
         return self._call_llm(
             user_message,
             system_prompt,
@@ -2200,10 +2202,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                         or event.get("result")
                         or "tool call failed"
                     )[:1600],
-                    "instruction": (
-                        "检查错误并补齐/修正参数后重新调用；"
-                        "不得把本次失败写成无匹配数据"
-                    ),
+                    "instruction": EVIDENCE_BASELINE_FAILURE_INSTRUCTION,
                 })
         payload = json.dumps(
             {
@@ -2215,14 +2214,8 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             separators=(",", ":"),
             default=str,
         )
-        return (
-            f"{user_message.rstrip()}\n\n"
-            "# 代码预采集的三维可观测性 baseline\n"
-            "以下是 ReAct 启动前已真实并行执行的 Metrics、Logging、Tracing "
-            "工具结果，不是根因结论。先比较这些事实与 Kubernetes 生命周期，"
-            "再自主决定需要调用哪些只读工具继续调查；required_follow_up 中的失败"
-            "必须先修正参数并继续调用，不要机械重复完全相同的查询。\n"
-            f"{payload}\n"
+        return EVIDENCE_BASELINE_HANDOFF_TEMPLATE.format(
+            user_message=user_message.rstrip(), payload=payload
         )
 
     @classmethod
@@ -2407,16 +2400,8 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             separators=(",", ":"),
             default=str,
         )
-        return (
-            "# action=repair_failed_observability_once\n"
-            f"用户问题：{question}\n\n"
-            "下面调用是 Metrics/Logging/Tracing/Topology 的真实执行失败，不是无匹配数据。"
-            "本轮只处理这些失败：阅读原始错误和当前工具 schema，补齐或修正参数后，"
-            "对同一 namespace/Pod 调用对应工具一次。不得原样重复完全相同的错误参数，"
-            "不得因为其他维度已有结果而直接总结，也不要调用无关工具。成功但结果为空"
-            "属于有效数据边界；修正后仍失败则保留原始错误并停止。必须先实际调用工具，"
-            "再简短说明结果。\n"
-            f"{payload}\n"
+        return EVIDENCE_FAILED_OBSERVABILITY_RETRY_TEMPLATE.format(
+            question=question, payload=payload
         )
 
     # Compatibility aliases for older callers/tests.  Runtime recovery uses
@@ -2686,42 +2671,28 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                         purpose=item.get("purpose", ""),
                     )
                 )
-            strict_section = f"""
-
-# 既有 evidence_plan
-直接执行以下计划，不重新规划：
-{chr(10).join(plan_lines)}
-- {failure_reason or '请直接按既有计划执行工具'}
-"""
+            strict_section = EVIDENCE_EXISTING_PLAN_SECTION_TEMPLATE.format(
+                plan_lines=chr(10).join(plan_lines),
+                failure_reason=failure_reason or EVIDENCE_DEFAULT_EXECUTION_REASON,
+            )
         elif strict_mode:
-            strict_section = f"""
-
-# 上一轮结果被系统拒绝
-- 失败原因：{failure_reason or '上一轮只返回计划，没有执行工具'}
-- 至少执行一个 critical/important 只读工具；没有 tool_result 时不得声称采集完成。
-"""
+            strict_section = EVIDENCE_STRICT_RETRY_SECTION_TEMPLATE.format(
+                failure_reason=failure_reason or EVIDENCE_DEFAULT_STRICT_REASON,
+            )
         archive_refs = layer_archive_ref or {}
         archive_lines = []
         context_root = (context_archive_ref or "").strip()
         if context_root:
-            archive_lines.extend([
-                "# context archive",
-                "- context archive 已落盘，仅供人工排障；evidence 默认不要读取归档。",
-                "- 归档不是当前环境证据，不要把读取归档写入 evidence_plan。",
-            ])
+            archive_lines.extend(EVIDENCE_ARCHIVE_INSTRUCTIONS)
         if archive_refs.get("handoff_ref"):
-            archive_lines.append("- layer handoff 已由上方 layer_handoff 注入；不要重复读取归档。")
+            archive_lines.append(EVIDENCE_HANDOFF_ARCHIVE_INSTRUCTION)
         archive_section = "\n".join(archive_lines).strip() if archive_lines else "无"
         if existing_plan:
             plan_protocol = EVIDENCE_PLAN_PROTOCOL_EXISTING
         elif plan_mode == "preplanned_execution":
             plan_protocol = EVIDENCE_PLAN_PROTOCOL_PREPLANNED
         elif plan_mode == "react_only":
-            plan_protocol = (
-                "- 代码会在 ReAct 前提供同一组 Metrics、Logging、Tracing baseline 真实结果。\n"
-                "- 不生成或复述 evidence_plan；根据 baseline 尚未回答的关键问题，"
-                "自主选择少量只读工具专项补查。"
-            )
+            plan_protocol = EVIDENCE_PLAN_PROTOCOL_REACT_ONLY
         else:
             plan_protocol = EVIDENCE_PLAN_PROTOCOL_DYNAMIC
         handoff_obj = EvidenceCollectorNode._parse_handoff_json(layer_handoff)
@@ -2737,9 +2708,9 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             plan_protocol=plan_protocol,
             strict_section=strict_section,
             output_instruction=(
-                "直接执行既有 Pydantic evidence_plan 中的必要工具，最后输出简短证据结论。"
+                EVIDENCE_EXISTING_PLAN_OUTPUT_INSTRUCTION
                 if existing_plan
-                else "调用必要真实工具后输出简短证据结论；不要手写 EvidenceCollectionOutput。"
+                else EVIDENCE_DYNAMIC_OUTPUT_INSTRUCTION
             ),
         )
         if not existing_plan or observability_mode == "autonomous":
@@ -2758,12 +2729,8 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                 separators=(",", ":"),
                 default=str,
             )
-            message = (
-                f"{message.rstrip()}\n\n"
-                "# 第二次完整 ReAct 诊断上下文\n"
-                "根据门禁反馈重新调查未解决的问题。保留已有有效事实，必要时用只读工具补证；"
-                "可以放弃第一次判断，不要只修 JSON，也不要重复完全相同的查询。\n"
-                f"{retry_payload[:18000]}\n"
+            message = EVIDENCE_DIAGNOSIS_RETRY_TEMPLATE.format(
+                message=message.rstrip(), retry_payload=retry_payload[:18000]
             )
         return message
 
@@ -2788,25 +2755,11 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
         if len(targets) > 8:
             rendered_targets += f" 等 {len(targets)} 个 Pod"
         if autonomous_mode:
-            return (
-                "# 自主可观测性组合查询\n"
-                f"- 上游已确认的异常 Pod 候选：{rendered_targets}。\n"
-                "- 代码已安排 Kubernetes 与 Metrics、Logging、Tracing、Topology 首轮查询；真实执行并保持精确实体范围。\n"
-                "- 首轮结果可能是 present、empty、absent、weak 或 error；先判断它们是否回答各自 purpose。\n"
-                "- Runbook 查询示例仅供参数形状参考，必须替换真实实体、异常时间窗和 purpose，并以工具 schema 为准。\n"
-                "- 仍有关键歧义或冲突时，用新的 purpose 自主选择少量补证；没有诊断增益时停止，不追求维度齐全。\n"
-                "- 只在完整 trace_id 一致时关联日志、Flow 和 Span；上下文使用率达到 80% 时停止新增采集。"
+            return EVIDENCE_AUTONOMOUS_GUIDANCE_TEMPLATE.format(
+                rendered_targets=rendered_targets
             )
-        return (
-            "# 实时可观测性证据优先\n"
-            f"- 上游已确认的异常 Pod 候选：{rendered_targets}。\n"
-            "- 诊断应优先依赖当前环境工具返回的真实证据，而不是 Runbook、名称、标签或模型经验推断。\n"
-            "- 每个已确认异常 Pod 都必须优先执行其 mandatory `collect_aiops_case` 计划项；"
-            "这是 Pod 级高信息密度入口，可一次返回 Kubernetes、Metrics、Logging、Tracing 和 Topology。\n"
-            "- coarse 结果足够时避免重复采集；coverage 缺失、冲突、error、absent 或工具不可用时，"
-            "kubectl/Prometheus 等细粒度工具才作为补证和降级路径。\n"
-            "- Agent 负责真实执行、理解 coverage 和选择必要补证，但不能跳过 mandatory coarse 项后直接推论。\n"
-            "- 上下文使用率达到 80% 后停止新增采集，明确列出未采集 Pod，不得把它们写成已验证结论。"
+        return EVIDENCE_LEGACY_GUIDANCE_TEMPLATE.format(
+            rendered_targets=rendered_targets
         )
 
     @classmethod
@@ -3285,7 +3238,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
     def _format_current_abnormal_summary_for_prompt(handoff: Dict[str, Any]) -> str:
         summary = handoff.get("current_abnormal_summary") if isinstance(handoff, dict) else {}
         issue_groups = handoff.get("issue_groups") if isinstance(handoff, dict) else []
-        lines = ["# 当前异常结构化摘要（必须优先审查）"]
+        lines = [EVIDENCE_ABNORMAL_SUMMARY_HEADER]
 
         status_counts = summary.get("status_counts") if isinstance(summary, dict) else {}
         if isinstance(status_counts, dict) and status_counts:
@@ -3293,7 +3246,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
             for status, count in status_counts.items():
                 lines.append(f"- {status}: {count}")
         else:
-            lines.append("status_counts: 未提供；从 issue_groups/abnormal_pods 进行最小覆盖。")
+            lines.append(EVIDENCE_ABNORMAL_COUNTS_FALLBACK)
 
         selected_rows = summary.get("selected_rows") if isinstance(summary, dict) else []
         if isinstance(selected_rows, list) and selected_rows:
@@ -3326,10 +3279,7 @@ Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。
                     f"entities={', '.join(entity_texts) or 'unknown'}"
                 )
 
-        lines.append(
-            "要求：非 Running/Completed/Succeeded/Ready/Bound/Active 的状态都需要至少最小验证；"
-            "主异常组做完整验证，非主异常组验证当前状态 + 一个最关键事件/配置/依赖信号。"
-        )
+        lines.append(EVIDENCE_ABNORMAL_COVERAGE_REQUIREMENT)
         return "\n".join(lines)
 
     def _get_plan_protocol_failure_reason(

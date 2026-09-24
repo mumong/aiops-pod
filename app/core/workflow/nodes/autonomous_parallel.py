@@ -11,7 +11,11 @@ from pydantic import BaseModel, Field
 from app.core.aicall.client import StructuredContextBudgetError
 from app.core.aicall.working_context import compact_working_material
 from app.core.context.archive import ContextArchive
-from app.core.prompts import PARALLEL_TARGETS_PROMPT
+from app.core.prompts import (
+    PARALLEL_TARGETS_PROMPT,
+    PARALLEL_LANE_QUESTION_TEMPLATE,
+    PARALLEL_FANIN_INSTRUCTION,
+)
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.parallel_evidence import _ScopedParallelEventQueue
 from app.core.workflow.nodes.query_answer import build_working_material
@@ -102,7 +106,9 @@ class AutonomousParallelNode(WorkflowNode):
         local["diagnosis_target"] = group
         entity = group["entities"][0]
         local["original_question"] = state.get("original_question") or state["question"]
-        local["question"] = f"本分支只诊断 {entity['namespace']}/{entity['name']}：{group['question']}"
+        local["question"] = PARALLEL_LANE_QUESTION_TEMPLATE.format(
+            namespace=entity["namespace"], name=entity["name"], question=group["question"],
+        )
         local["original_request_contract"] = copy.deepcopy(state.get("request_contract"))
         local["request_contract"] = {**(state.get("request_contract") or {}), "scope": "pod",
                                      "namespaces": [entity["namespace"]], "pod_names": [entity["name"]]}
@@ -179,4 +185,4 @@ class AutonomousParallelNode(WorkflowNode):
                 warnings.append(f"parallel archive failed: {exc}")
         return {"autonomous_group_results": ordered, "thinking_events": events,
                 "warnings": warnings,
-                "query_draft": "各 Pod 分支已结束；请按 parallel_results 中的各组证据和限制汇总，不把分支完成等同于根因确认。"}
+                "query_draft": PARALLEL_FANIN_INSTRUCTION}

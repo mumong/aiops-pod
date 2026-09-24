@@ -26,7 +26,17 @@ from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.schemas import LayerHandoff, LayerOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
-from app.core.prompts import get_workflow_prompt
+from app.core.prompts import (
+    get_workflow_prompt,
+    LAYER_QUERY_RETRY_SUFFIX,
+    LAYER_EXPLICIT_POD_MUST_VERIFY,
+    LAYER_GENERAL_MUST_VERIFY,
+    LAYER_HANDOFF_DO_NOT_CHANGE,
+    LAYER_SCENARIO_VERIFICATION_REASON,
+    LAYER_EXPLICIT_POD_BASELINE_TEMPLATE,
+    LAYER_EXTRACT_INSTRUCTION,
+    LAYER_QUERY_RETRY_EXTRACT_INSTRUCTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -448,17 +458,7 @@ class LayerClassifierNode(WorkflowNode):
         return normalized
 
     def _get_query_retry_prompt(self) -> str:
-        return (
-            self._get_layer_prompt()
-            + "\n\n# 上一轮结果被系统拒绝\n"
-              "- 原因：你给出了 QUERY 结论，但没有提供足够的真实工具执行结果。\n"
-              "- 本轮必须先执行工具，再让 Pydantic 结构化提取生成最终 query_result。\n"
-              "- 在出现至少一次成功的 tool_result 之前，禁止输出最终答案。\n"
-              "- 你的最后一条消息必须建立在真实工具结果之上，而不是工具计划之上。\n"
-              "- 如果没有至少一次成功的 tool_result，系统会再次拒绝你的输出。\n"
-              "- `query_result.rows` 为空且 `missing` 也为空，视为无效结果。\n"
-              "- `collection_summary`、`sources`、`rows` 只能基于真实工具结果填写，禁止编造“已采集 100%”。\n"
-        )
+        return self._get_layer_prompt() + LAYER_QUERY_RETRY_SUFFIX
 
     def _should_stop_query_direct_early(self, thinking_events: List[Dict[str, Any]]) -> bool:
         """Stop QUERY direct after all in-flight Prometheus queries returned.
@@ -949,21 +949,9 @@ class LayerClassifierNode(WorkflowNode):
             matched_runbooks,
         )
         if explicit_pod_scopes:
-            must_verify = [
-                "本轮仅验证用户明确指定的 namespace + Pod 列表；全局扫描中的其他异常只作为背景",
-                "逐一确认每个目标 Pod 当前仍存在于指定 namespace",
-                "逐一确认每个目标 Pod 的 active_signals 仍能被真实工具结果验证",
-                "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
-            ]
+            must_verify = list(LAYER_EXPLICIT_POD_MUST_VERIFY)
         else:
-            must_verify = [
-                "以 abnormal_groups、abnormal_pods、current_abnormal_summary 为覆盖基准",
-                "异常组完整/最小验证由 evidence 节点按 abnormal_groups 覆盖，避免遗漏 Terminating、Pending 等并发异常状态",
-                "确认 active_entities 中的对象当前仍存在于指定 namespace",
-                "确认 active_signals 仍能被真实工具结果验证",
-                "如果工具返回 NotFound、空事件或 namespace 不匹配，记录为冲突/负向证据",
-                "如果某个异常 Pod 不在当前异常 Pod 列表中，必须把它视为历史事件噪音而不是当前故障",
-            ]
+            must_verify = list(LAYER_GENERAL_MUST_VERIFY)
         handoff = {
             "diagnosis_scope": (
                 "explicit_pod" if len(explicit_pod_scopes) == 1
@@ -997,11 +985,7 @@ class LayerClassifierNode(WorkflowNode):
             "possible_scenarios": layer_result.get("possible_scenarios", []),
             "matched_runbooks": matched_runbooks,
             "must_verify": must_verify,
-            "do_not_change": [
-                "不要把上游 namespace、Pod、Service、Node 名称改写成其他对象",
-                "不要把历史 event 当成当前故障",
-                "不要把计划或工具名当成证据，必须基于 tool_result",
-            ],
+            "do_not_change": list(LAYER_HANDOFF_DO_NOT_CHANGE),
         }
         return LayerHandoff.model_validate(handoff).model_dump(exclude_none=True)
 
@@ -1734,7 +1718,7 @@ class LayerClassifierNode(WorkflowNode):
         return [{
             "scenario": f"{status_family} 的直接原因待验证",
             "probability": "未知",
-            "reason": "当前阶段只定位异常；根因必须由后续实时 canonical facts 确认",
+            "reason": LAYER_SCENARIO_VERIFICATION_REASON,
         }]
 
     @classmethod
@@ -2120,13 +2104,8 @@ class LayerClassifierNode(WorkflowNode):
             separators=(",", ":"),
             default=str,
         )
-        return (
-            f"{question.rstrip()}\n\n"
-            "# 代码预采集的显式 Pod 定位结果\n"
-            "以下结果已经按用户给出的 namespace/Pod 列表真实并行执行。"
-            "它们是目标清单与当前状态事实，不是根因结论。不得遗漏目标，"
-            "也不要机械重复相同查询；如结果失败或信息不足，可继续自主调用只读工具调查。\n"
-            f"{payload}\n"
+        return LAYER_EXPLICIT_POD_BASELINE_TEMPLATE.format(
+            question=question.rstrip(), payload=payload,
         )
 
     def _analyze_with_llm(self, question: str) -> tuple:
@@ -2272,7 +2251,7 @@ class LayerClassifierNode(WorkflowNode):
             extracted = self._extract_with_lite_llm(
                 question=question,
                 full_analysis_text=enriched_text_for_downstream,
-                failure_reason="基于 layer 阶段工具结果和分析文本生成 Pydantic LayerOutput",
+                failure_reason=LAYER_EXTRACT_INSTRUCTION,
             )
             extracted = self._normalize_layer_output_dict(extracted)
             extracted = self._normalize_query_result_sources(extracted, thinking_events)
@@ -2347,7 +2326,7 @@ class LayerClassifierNode(WorkflowNode):
                 retry_result = self._extract_with_lite_llm(
                     question=question,
                     full_analysis_text=enriched_text_for_downstream,
-                    failure_reason="基于 QUERY direct 严格重试后的工具结果生成 Pydantic LayerOutput",
+                    failure_reason=LAYER_QUERY_RETRY_EXTRACT_INSTRUCTION,
                 )
                 retry_result = self._normalize_layer_output_dict(retry_result)
                 retry_result = self._normalize_query_result_sources(retry_result, thinking_events)

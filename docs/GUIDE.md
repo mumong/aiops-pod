@@ -21,7 +21,9 @@
 | [deploy/rbac.yaml](../deploy/rbac.yaml) | Agent ServiceAccount 权限 |
 | [Makefile](../Makefile)、[VERSION](../VERSION) | 镜像仓库与发布版本 |
 
-缺少 Secret 文件时，在本地创建 deploy/secrets/core.yaml，结构如下；将占位内容换成真实配置，勿提交：
+缺少 Secret 文件时，可复制 [Secret 示例](../config/examples/aiops-secret.yaml) 到
+`deploy/secrets/core.yaml`，将占位内容换成真实配置，勿提交。示例刻意放在 `deploy/`
+之外，避免递归部署时用占位值覆盖真实 Secret；已有本地配置无需覆盖。结构如下：
 
 ~~~yaml
 apiVersion: v1

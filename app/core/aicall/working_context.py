@@ -10,6 +10,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import count_tokens
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT as SUMMARY_PROMPT
+from app.core.prompts import WORKING_CONTEXT_SUMMARY_PREFIX
 
 
 def compact_message(message):
@@ -260,7 +261,7 @@ class WorkingContextMiddleware(AgentMiddleware):
         # Keep provenance outside model-written text as well as in the snapshot.
         summary += f"\n压缩前完整工作历史归档：{source_ref}"
         replacement = [HumanMessage(content=self.question), HumanMessage(
-            content="[working_context_summary] 以下是较早工作的有损摘要；后续保留消息可能更新这些事实。不是新用户请求：\n" + summary), *retained]
+            content=WORKING_CONTEXT_SUMMARY_PREFIX + summary), *retained]
         try:
             _, post_budget = self.probe(replacement)
         except Exception:

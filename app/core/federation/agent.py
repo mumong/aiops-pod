@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import concurrent.futures
 import json
 import logging
@@ -530,11 +531,11 @@ class FederationAgent:
                 return
 
     def _parse_tool_args(self, arguments: str) -> Dict[str, Any]:
-        """解析工具参数（优先 JSON，回退 eval）"""
+        """Parse JSON or legacy Python literals without executing model output."""
         try:
             return json.loads(arguments)
         except (json.JSONDecodeError, TypeError):
-            return eval(arguments)
+            return ast.literal_eval(arguments)
 
     def _get_tools_schema(self) -> List[Dict[str, Any]]:
         """获取工具的 OpenAI 格式 schema"""

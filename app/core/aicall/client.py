@@ -36,6 +36,11 @@ from openai import (
     InternalServerError,
 )
 
+from app.core.prompts import (
+    EVIDENCE_MEMORY_COMPRESSION_PROMPT,
+    RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION,
+    RUNTIME_COMPACTION_INSTRUCTION,
+)
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import (
     ContextBudgetEstimator,
@@ -1853,7 +1858,8 @@ class AICall:
             else "unknown"
         )
         iter_part = "" if iteration is None else f" iteration={iteration}"
-        logger.info(
+        # Token fields below are provider usage counts, not authentication credentials.
+        logger.info(  # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
             "[context_usage.actual] node=%s%s input_tokens=%s input_usage=%s "
             "output_tokens=%s total_tokens=%s window=%s window_source=%s source=%s accuracy=exact",
             node_id or "unknown",
@@ -3848,11 +3854,7 @@ class AICall:
             "node_id": node_id,
             "usage_ratio": round(usage_ratio, 4),
             "context_window": context_window,
-            "instruction": (
-                "压缩 evidence 运行上下文。保留关键过程、计划、已完成/未完成证据、"
-                "正向事实、负向事实、冲突和下一步焦点。若模型陷入重复工具或钻牛角尖，"
-                "请抓大放小，把重复/无关节点容量、长 JSON、重复 describe 归入 discarded_noise。"
-            ),
+            "instruction": RUNTIME_COMPACTION_INSTRUCTION,
             "ai_messages": ai_messages,
             "tool_results": tool_results,
             "tool_observation_tail": [
@@ -3909,9 +3911,7 @@ class AICall:
         if _tokens() <= token_limit:
             return payload
 
-        payload["instruction"] = (
-            "压缩 evidence 上下文，保留计划、工具事实、错误和证据引用。"
-        )
+        payload["instruction"] = RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION
         while _tokens() > token_limit and payload["ai_messages"]:
             payload["ai_messages"].pop(0)
         while _tokens() > token_limit and payload["tool_observation_tail"]:
@@ -3968,14 +3968,7 @@ class AICall:
         run_id: str,
         max_tokens: int = 1200,
     ) -> Optional[Dict[str, Any]]:
-        prompt = """你是 K8s AIOps evidence 上下文压缩器。
-任务：把冗长的中间思考和工具输出压缩成结构化摘要，帮助后续模型继续诊断。
-要求：
-- 保留重要事实，不编造。
-- 体现过程顺序，用“先...随后...最后...”描述。
-- 负向结果也是事实，例如 timeout、connection reset、NotFound、空事件。
-- 如果工具调用重复、跑偏或钻牛角尖，抓大放小，把噪声放入 discarded_noise。
-"""
+        prompt = EVIDENCE_MEMORY_COMPRESSION_PROMPT
         try:
             parsed, raw = self.call_structured(
                 system_prompt=prompt,

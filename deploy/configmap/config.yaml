@@ -248,10 +248,14 @@ data:
       # 修复执行: executor=deterministic 固定执行计划；executor=react 由 LLM 多轮观察后决策。
       remediation:
         enabled: true
-        executor: pod               # 只执行已核实范围内、经审批的不可变命令
+        executor: pod               # 通用 kubectl 执行；Agent 规划，按 mode 审阅，无故障专用脚本
         mode: review                 # review=人工审批；auto=自动执行
         # mode: auto
         approval_timeout_seconds: 600
+        # 仅作用于 pod 修复执行器；deny 优先，支持命令名通配符。
+        denied_executables: [rm, unlink, shred, dd, "mkfs*", wipefs, fdisk, sfdisk, parted, reboot, shutdown, halt, poweroff]
+        # kubectl exec/run/debug 的内层命令；shell 只接受可检查的字面量 -c。
+        allowed_exec_commands: [echo, printf, cat, ls, pwd, stat, head, tail, grep, wc, id, whoami, hostname, uname, date, ps, df, du, "true", "false", test, "["]
         max_iterations: 10           # react 最大思考/观察轮次
         max_write_actions: 10        # react 最多执行多少个写动作
         max_duration_seconds: 900    # react 总耗时上限

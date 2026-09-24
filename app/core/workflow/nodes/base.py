@@ -15,6 +15,15 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from app.core.prompts import (
+    RUNBOOK_CATALOG_INSTRUCTION,
+    LEGACY_COMPACTION_USER_TEMPLATE,
+    LEGACY_CONTEXT_COMPRESSION_PROMPT,
+    REMEDIATION_AUTO_MODE_LINE,
+    REMEDIATION_REVIEW_MODE_LINE,
+    REMEDIATION_POLICY_TEMPLATE,
+    VISIBLE_OUTPUT_LANGUAGE_POLICY,
+)
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import ContextBudgetEstimator, serialize_tool_schema
 from app.core.remediation.models import normalize_remediation_mode
@@ -413,8 +422,7 @@ class WorkflowNode(ABC):
         if self.should_inject_runbook_catalog() and getattr(self, 'runbook_catalog', None) and hasattr(self.runbook_catalog, 'catalog'):
             entries = self.runbook_catalog.catalog
             if entries:
-                lines = ["# Available Runbooks",
-                         "If one or more runbooks match the issue, use the fetch_runbook tool for each relevant runbook.", ""]
+                lines = ["# Available Runbooks", RUNBOOK_CATALOG_INSTRUCTION, ""]
                 for e in entries:
                     desc = getattr(e, 'description', '') or ''
                     link = getattr(e, 'link', '') or ''
@@ -445,16 +453,10 @@ class WorkflowNode(ABC):
             if isinstance(remediation_cfg, dict):
                 remediation_mode = normalize_remediation_mode(remediation_cfg.get("mode"))
             if remediation_mode == "auto":
-                mode_line = "当前修复模式为 auto：结构化修复计划中的安全动作可由修复执行器自动审批并执行。"
+                mode_line = REMEDIATION_AUTO_MODE_LINE
             else:
-                mode_line = "当前修复模式为 review：结构化修复计划中的所有写动作必须先经过人工审批。"
-            remediation_policy = (
-                "\n\n# 修复计划与审批约束\n"
-                f"- {mode_line}\n"
-                "- 诊断节点不要直接执行 kubectl apply/patch/delete/rollout/scale 等写操作。\n"
-                "- 如果当前证据确认存在标准、安全、可验证的修复方式，可以在最终报告中生成结构化 remediation_plan actions。\n"
-                "- 写动作是否执行由 workflow.remediation.mode 和修复执行器控制；review 模式必须人工审批。\n"
-            )
+                mode_line = REMEDIATION_REVIEW_MODE_LINE
+            remediation_policy = REMEDIATION_POLICY_TEMPLATE.format(mode_line=mode_line)
             full_prompt += remediation_policy
             prompt_components.append({
                 "name": "remediation_policy",
@@ -462,11 +464,7 @@ class WorkflowNode(ABC):
                 "content": remediation_policy,
             })
 
-        language_policy = (
-            "\n\n# 语言与可见输出约束\n"
-            "- 全部可见输出必须使用中文，包括分析说明、工具调用前后的说明、结构化字段内的解释文本。\n"
-            "- 需要推理时只给结论性、可验证的简短说明，并优先调用工具获取事实。\n"
-        )
+        language_policy = VISIBLE_OUTPUT_LANGUAGE_POLICY
         full_prompt += language_policy
         prompt_components.append({
             "name": "language_policy",
@@ -707,14 +705,7 @@ class WorkflowNode(ABC):
             return text[:max_chars] + f"\n... (截断，原始 {len(text)} 字符)"
 
         compress_prompt = (
-            "你是一个信息压缩专家。将以下内容压缩为精炼摘要。\n\n"
-            "规则：\n"
-            "1. 保留所有工具调用记录：工具名 + 关键结果（具体数值、状态、错误信息）\n"
-            "2. 保留所有异常发现（Pod 状态异常、错误码、资源超限等）\n"
-            "3. 保留关键实体（Pod 名、Node 名、Namespace、IP 地址）\n"
-            "4. 删除重复信息和冗余的正常状态数据（如大量 Running 的 Pod 列表只保留异常的）\n"
-            "5. 用结构化格式输出，便于下游分析\n"
-            "6. 输出必须是中文"
+            LEGACY_CONTEXT_COMPRESSION_PROMPT
         )
 
         try:
@@ -724,7 +715,9 @@ class WorkflowNode(ABC):
             try:
                 compressed = ai_call.call_simple(
                     system_prompt=compress_prompt,
-                    question=f"请压缩以下内容（原始 {len(text)} 字符，目标 {max_chars} 字符以内）：\n\n{text}",
+                    question=LEGACY_COMPACTION_USER_TEMPLATE.format(
+                        original_chars=len(text), max_chars=max_chars, text=text,
+                    ),
                     max_tokens=4096,
                 )
             finally:

@@ -6,7 +6,7 @@
 
 - **异常诊断**：调度、镜像、挂载、配置、CrashLoop、OOM、探针及删除阻塞等 Pod 故障。
 - **三维可观测性**：通过 MCP 查询 Metrics、Logging、Tracing；支持按调查目的组合 PromQL、日志过滤和链路条件。
-- **多对象分析**：每个异常 Pod 独立取证和 RCA，多组并行后汇总，单 Pod 使用同一条处理路径。
+- **多对象分析**：自主深度诊断识别多个目标时分组并行取证和 RCA，再汇总；单目标直接进入取证与 RCA，复用相同阶段实现。
 - **证据可回查**：工具响应、结构化结果和模型摘要分别归档，支持按引用补读。
 - **对外接入**：HTTP/SSE、可选聊天前端、联邦多集群及标准 A2A Adapter。
 
@@ -30,6 +30,8 @@ Agent 负责规划和解释，MCP 查询真实数据，Runbook 提供排障知�
 以下命令用于本文内网环境：节点地址 **10.2.0.48**，三个仓库统一下载到 **~/aiops-workspace**。在同一个 Bash 终端中依次复制执行，每一步成功后再进行下一步。
 
 前提：Git/SSH 权限、kubectl 集群访问、私有镜像拉取和存储已就绪；[可观测性组件](http://10.2.0.86/platform/observability)已部署，MCP 仓库的后端配置与现场一致。其他环境必须先调整地址和连接配置。
+
+Agent 的 `make deploy` 会使用 `VERSION` 对应的主服务和 A2A 两个镜像。若该版本尚未完整发布，先执行文末的 `make build`、`make push`；仅发布主服务镜像不满足完整部署的前提。
 
 重部署使用 **make delete deploy**：先删除再部署对应服务，期间服务中断。诊断或测试运行期间禁止重部署。首次部署可使用 make deploy，不加 -j。
 
@@ -124,7 +126,7 @@ kubectl get pods,svc -n aiops
 | -------------- | -------------------------------------------------------------------------------------------------------- |
 | 聊天前端           | [http://10.2.0.48:30081](http://10.2.0.48:30081)                                                         |
 | Agent API      | [http://10.2.0.48:30800](http://10.2.0.48:30800)                                                         |
-| A2A Agent Card | [http://1own/agent-card.json0.2.0.48:30801/.well-kn](http://10.2.0.48:30801/.well-known/agent-card.json) |
+| A2A Agent Card | [http://10.2.0.48:30801/.well-known/agent-card.json](http://10.2.0.48:30801/.well-known/agent-card.json) |
 
 
 
@@ -199,12 +201,6 @@ make case-clean CASE=c08
 make case-clean CASE=c04
 ```
 
-```bash
-make case-clean CASE=c01-cpu
-```
-
-
-
 ## 其他使用方式
 
 ### Pod 修复（默认人工审批）
@@ -274,6 +270,13 @@ make delete deploy
 | [A2A 接入](docs/a2a-server.md)                         | 标准协议、客户端及鉴权                 |
 | [异常环境](test/pod-anomaly-cases/README.md)             | 故障部署、验证和安全清理                |
 | [质量测试](test/aiops_quality_e2e/README.md)             | 单场景、多根因、四项指标与报告             |
+| [开发与贡献](CONTRIBUTING.md) | 本地检查、模块边界、编码约定与审核要求 |
+| [规范化验收记录](docs/maintenance-normalization.md) | 修改前基线、回归结果和未完成项 |
 
 
 报告和工具归档默认写入 Pod 内的 `/tmp/aiops/reports`（PVC）。源码实现与当前线上版本可能不同，历史测试成绩不能直接代表当前部署效果。
+
+## License
+
+项目自有代码采用 [Apache License 2.0](LICENSE)，允许商业使用。
+第三方代码与依赖保留各自的许可证及署名，不由本项目重新授权。

@@ -12,7 +12,7 @@ from app.core.workflow.nodes.query_answer import (
 class RepairTarget(BaseModel):
     namespace: str
     pod: str
-    pod_uid: str
+    pod_uid: str = ""
     group_id: str
     owner_kind: str = ""
     owner_name: str = ""
@@ -26,7 +26,7 @@ class RepairAction(BaseModel):
     risk: str
     dry_run_command: str = ""
     execute_command: str
-    verify_command: str
+    verify_command: str = ""
     rollback_advice: str
 
 
@@ -37,8 +37,7 @@ class RepairDraft(QueryAnswer):
 
     @model_validator(mode="after")
     def command_contract(self):
-        # Schema feedback helps the planning agent correct syntax before asking
-        # a person to approve. Runtime still independently verifies all identities.
+        # Validate transport/schema only; the agent chooses the repair strategy.
         from app.core.remediation.policy import validate_target_command
         groups = {target.group_id: target for target in self.targets}
         if len(groups) != len(self.targets):
@@ -52,15 +51,9 @@ class RepairDraft(QueryAnswer):
                 allowed.add((target.namespace, target.owner_kind.lower(), target.owner_name))
             for stage, command in (("execute", action.execute_command), ("verify", action.verify_command),
                                    ("dry_run", action.dry_run_command)):
-                if not command and stage == "dry_run":
+                if not command and stage in {"dry_run", "verify"}:
                     continue
-                argv, operation = validate_target_command(command, allowed)
-                if stage == "execute" and operation not in {"set_resources", "patch", "rollout_restart"}:
-                    raise ValueError("actions 只包含写修复动作；只读后续检查放入 answer 或 verify_command")
-                if stage == "verify" and operation not in {"get", "describe", "logs", "top", "rollout_status"}:
-                    raise ValueError("verify_command 必须只读")
-                if stage == "dry_run" and "--dry-run=server" not in argv:
-                    raise ValueError("dry_run_command 必须包含 --dry-run=server")
+                validate_target_command(command, allowed)
         return self
 
 

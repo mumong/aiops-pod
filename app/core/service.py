@@ -144,7 +144,7 @@ def configure_token_counter(llm_config: Optional[Dict[str, Any]] = None) -> None
         value = cfg.get("tiktoken_encoding")
         if value and str(value).strip():
             os.environ["AIOPS_TIKTOKEN_ENCODING"] = str(value).strip()
-            logger.info("🔧 [context_budget] 从 config 设置 AIOPS_TIKTOKEN_ENCODING=%s", value)
+            logger.info("🔧 [context_budget] 分词编码配置已加载")
 
 
 class ThinkStreamFilter:

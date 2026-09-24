@@ -20,6 +20,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Mapping, Optional
 
+from app.core.prompts import (
+    PARALLEL_DIAGNOSIS_RETRY_INSTRUCTION,
+    PARALLEL_DIAGNOSIS_RETRY_QUESTION_TEMPLATE,
+    PARALLEL_GROUP_MUST_VERIFY_TEMPLATE,
+    PARALLEL_GROUP_QUESTION_TEMPLATE,
+)
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
 from app.core.workflow.nodes.root_cause_analyzer import RootCauseAnalyzerNode
@@ -736,11 +742,7 @@ class ParallelEvidenceNode(WorkflowNode):
         retry_handoff["diagnosis_retry"] = {
             "contract_version": "aiops.react-diagnosis-retry.v1",
             "attempt": 2,
-            "instruction": (
-                "Start one fresh ReAct investigation focused on the failed "
-                "gate. Keep valid facts, collect only missing evidence, and "
-                "do not merely repair JSON."
-            ),
+            "instruction": PARALLEL_DIAGNOSIS_RETRY_INSTRUCTION,
             "validation_feedback": dict(feedback),
             "previous_rca": cls._parse_rca_analysis(
                 rca_update.get("rca_analysis") or "{}"
@@ -757,9 +759,8 @@ class ParallelEvidenceNode(WorkflowNode):
             ensure_ascii=False,
             default=str,
         )
-        retry_state["question"] = (
-            f"{scoped_state.get('question', '')}\n"
-            "（第一次诊断未通过最小证据门禁；请用一次新的完整 ReAct 调查解决反馈中的缺口。）"
+        retry_state["question"] = PARALLEL_DIAGNOSIS_RETRY_QUESTION_TEMPLATE.format(
+            question=scoped_state.get('question', ''),
         )
         retry_state["thinking_events"] = [
             copy.deepcopy(event)
@@ -867,8 +868,9 @@ class ParallelEvidenceNode(WorkflowNode):
             # Never copy the global union into every independent lane.
             "matched_runbooks": group.get("matched_runbooks") or [],
             "must_verify": [
-                f"只诊断本组实体 {self._group_entity_labels(group)}，"
-                "不要采集其他 namespace/Pod 的证据",
+                PARALLEL_GROUP_MUST_VERIFY_TEMPLATE.format(
+                    entities=self._group_entity_labels(group),
+                ),
             ],
             "current_abnormal_summary": {
                 "source": "parallel_evidence_group_scope",
@@ -877,12 +879,10 @@ class ParallelEvidenceNode(WorkflowNode):
                 "selected_rows": [],
             },
         }
-        scoped_question = (
-            f"原始用户任务：{state.get('original_question') or state.get('question', '')}\n"
-            "以下是该任务内分配给本节点的子任务，不替代原始任务：\n"
-            f"只调查 {self._group_entity_labels(group)}；初始状态为 "
-            f"{'/'.join(status_keywords) or '未知'}。用真实工具事实判断其当前异常、"
-            "已恢复或证据不足，不查询其他 Pod。"
+        scoped_question = PARALLEL_GROUP_QUESTION_TEMPLATE.format(
+            original_question=state.get('original_question') or state.get('question', ''),
+            entities=self._group_entity_labels(group),
+            status='/'.join(status_keywords) or '未知',
         )
         return {
             "question": scoped_question,

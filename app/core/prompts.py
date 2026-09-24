@@ -17,6 +17,107 @@ System Prompts - 统一管理所有 AI 提示词
 - 在 deploy/secrets/core.yaml 中配置
 """
 
+from app.core.prompt_catalog.task_context import (
+    AUTONOMOUS_RUNBOOK_CATALOG_HEADER,
+    PARALLEL_LANE_TASK_PREFIX,
+    PARALLEL_LANE_QUESTION_TEMPLATE,
+    PARALLEL_FANIN_INSTRUCTION,
+    FOCUSED_RUNBOOK_DESCRIPTION_PREFIX,
+    QUERY_RUNBOOK_DESCRIPTION,
+    FOCUSED_REQUEST_TIME_TEMPLATE,
+    QUERY_TASK_AUTHORITY_PREFIX,
+    QUERY_RUNBOOK_CATALOG_HEADER,
+)
+from app.core.prompt_catalog.handoff import (
+    LAYER_QUERY_RETRY_SUFFIX,
+    LAYER_EXPLICIT_POD_MUST_VERIFY,
+    LAYER_GENERAL_MUST_VERIFY,
+    LAYER_HANDOFF_DO_NOT_CHANGE,
+    LAYER_SCENARIO_VERIFICATION_REASON,
+    LAYER_EXPLICIT_POD_BASELINE_TEMPLATE,
+    LAYER_EXTRACT_INSTRUCTION,
+    LAYER_QUERY_RETRY_EXTRACT_INSTRUCTION,
+    PARALLEL_DIAGNOSIS_RETRY_INSTRUCTION,
+    PARALLEL_DIAGNOSIS_RETRY_QUESTION_TEMPLATE,
+    PARALLEL_GROUP_MUST_VERIFY_TEMPLATE,
+    PARALLEL_GROUP_QUESTION_TEMPLATE,
+)
+from app.core.prompt_catalog.compatibility import (
+    FOCUSED_PROMPT,
+    FOCUSED_RESULT_PROMPT,
+    LEGACY_CONTEXT_COMPRESSION_PROMPT,
+    CASE_REFINEMENT_PROMPT,
+    RUNBOOK_RECONCILIATION_PROMPT,
+    EVIDENCE_MEMORY_COMPRESSION_PROMPT,
+    FEDERATION_SYNTHESIS_PROMPT,
+    FEDERATION_COMPRESSION_PROMPT,
+    LEGACY_REMEDIATION_AGENT_PROMPT,
+    LEGACY_QUERY_CONCLUSION_PROMPT,
+)
+from app.core.prompt_catalog.runtime_policy import (
+    RUNBOOK_CATALOG_INSTRUCTION,
+    REMEDIATION_AUTO_MODE_LINE,
+    REMEDIATION_REVIEW_MODE_LINE,
+    REMEDIATION_POLICY_TEMPLATE,
+    VISIBLE_OUTPUT_LANGUAGE_POLICY,
+    DIAGNOSIS_CONCLUSION_REMEDIATION_CONSTRAINT,
+)
+from app.core.prompt_catalog.context_policy import (
+    LEGACY_COMPACTION_USER_TEMPLATE,
+    WORKING_CONTEXT_SUMMARY_PREFIX,
+    RUNTIME_COMPACTION_INSTRUCTION,
+    RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION,
+)
+from app.core.prompt_catalog.evidence import (
+    EVIDENCE_VALID_PLAN_RETRY_INSTRUCTION,
+    EVIDENCE_UPSTREAM_MUST_VERIFY,
+    EVIDENCE_MISSING_POD_CONFLICT,
+    EVIDENCE_STRICT_SYSTEM_RETRY_TEMPLATE,
+    EVIDENCE_COMPLETED_COLLECTION_TEMPLATE,
+    EVIDENCE_BASELINE_FAILURE_INSTRUCTION,
+    EVIDENCE_BASELINE_HANDOFF_TEMPLATE,
+    EVIDENCE_DEFAULT_EXECUTION_REASON,
+    EVIDENCE_DEFAULT_STRICT_REASON,
+    EVIDENCE_ABNORMAL_SUMMARY_HEADER,
+    EVIDENCE_ABNORMAL_COUNTS_FALLBACK,
+    EVIDENCE_ABNORMAL_COVERAGE_REQUIREMENT,
+    EVIDENCE_CONTINUE_GATE_REASON,
+    EVIDENCE_CONTINUE_MANDATORY_REASON,
+    EVIDENCE_PLAN_GENERATION_INSTRUCTION,
+    POST_CASE_REFINEMENT_TASK,
+    POST_CASE_RUNBOOK_RECONCILIATION_TASK,
+    EVIDENCE_FAILED_OBSERVABILITY_RETRY_TEMPLATE,
+    EVIDENCE_EXISTING_PLAN_SECTION_TEMPLATE,
+    EVIDENCE_STRICT_RETRY_SECTION_TEMPLATE,
+    EVIDENCE_ARCHIVE_INSTRUCTIONS,
+    EVIDENCE_HANDOFF_ARCHIVE_INSTRUCTION,
+    EVIDENCE_PLAN_PROTOCOL_REACT_ONLY,
+    EVIDENCE_EXISTING_PLAN_OUTPUT_INSTRUCTION,
+    EVIDENCE_DYNAMIC_OUTPUT_INSTRUCTION,
+    EVIDENCE_DIAGNOSIS_RETRY_TEMPLATE,
+    EVIDENCE_AUTONOMOUS_GUIDANCE_TEMPLATE,
+    EVIDENCE_LEGACY_GUIDANCE_TEMPLATE,
+)
+from app.core.prompt_catalog.diagnosis import (
+    RCA_COMPACT_OUTPUT_CONTRACT,
+    RCA_FULL_OUTPUT_CONTRACT,
+    RCA_NO_RECOLLECT_POLICY,
+    RCA_LITE_EVIDENCE_LOCATION_NOTE,
+    RCA_REPAIR_INSTRUCTION,
+    RCA_FACT_LEDGER_POLICY,
+    RCA_NARRATIVE_EVIDENCE_POLICY,
+    RCA_QUALITY_POLICY,
+    QUERY_REPORT_TOOL_DATA_HEADER,
+    REPORT_FACT_AUTHORITY,
+    REPORT_FACT_AGGREGATION_POLICY,
+    REPORT_METRIC_TREND_RULE,
+    build_rca_user_message,
+    build_diagnosis_report_instruction,
+    build_diagnosis_report_user_message,
+    build_query_report_user_message,
+    build_group_report_user_message,
+)
+
 # ============================================================================
 # 自主路径提示词：意图路由、轻量查询、旧四节点专业职责适配与总结
 
@@ -75,30 +176,16 @@ intent、scope 说明用户目标和实际范围；status 使用 answered / part
 execute_pod_promql 只用于带真实 namespace/pod 标签的 Pod 指标；节点/集群指标改用 execute_prometheus_instant_query 或 execute_prometheus_range_query。不能为通过工具校验给指标添加不存在的标签；query_rejected 是失败而非空数据。
 """
 
-POD_REMEDIATION_PROMPT = """为当前用户请求的 Pod 异常制定可审阅的修复方案，不执行任何写操作。
-结合最近会话解析“刚才那个问题”，复用已有诊断与建议，但旧文本、脚本及 Runbook 都不是执行授权。
-只处理 Kubernetes Pod 异常及其真实所属工作负载；不处理任意主机、网络或文件系统操作。
-先用只读工具核对当前 Pod namespace/name/UID、当前异常及 ownerReferences；控制器名称不能从 Pod 名字猜测。
-优先读取匹配的 fetch_runbook 作为手册；已有原文可复用。没有匹配手册或读取失败时在 runbook_unavailable_reason 说明，不虚构调用。
-检查历史建议是否仍适用；CPU 高不自动等于应扩容，历史 OOM 不证明当前内存不足。
-修复参数和恢复判断优先复用同窗 Metrics、Logging、Tracing 证据；缺口会改变修复决策时主动调用可观测性工具。资源调整用 Prometheus 的实际用量/趋势及配置基线，请求故障结合日志和链路，不只凭 describe 制定方案。Pod 指标用 execute_pod_promql，节点/集群指标用 execute_prometheus_instant_query 或 execute_prometheus_range_query；未检查的维度保留未知，不声称排除。
-先区分可直接修复、仅缓解、需人工/外部条件。只为真实原因明确、修正参数有来源、当前执行器支持且可验证的操作生成 actions；其他对象分别说明，不拖住已有完整方案的对象。
-参数来源可以是已核实的配置、明确的用户要求或可靠的已知正常版本；Runbook 的示例值不是本集群事实。无限分配/已知内存泄漏的 OOM 不默认通过反复扩容“修复”；只有用户明确要求临时缓解时才提供扩容，并说明会复发。
-Runbook 是条件分支参考，不是全量采集清单。优先复用近期真实证据，仅补身份、修正参数与验证所需的缺口；同一权限错误不要反复换工具尝试。确认不支持或需外部条件后停止该分支取证，并输出原因。
-本节点不是第二轮完整根因调查。若真实代码/配置已经确认无限分配、已知错误开关或当前执行器不支持的根治操作，且用户没有要求临时缓解，立即对该对象输出 actions=[] 及人工根治建议；不要继续采完整内存生命周期、Tracing、节点压力或无关依赖来“证明不能修复”。只有可能改变可执行决策的缺口才继续查询。
-每个目标携带 group_id、Pod 身份和已核实控制器身份；每个动作绑定对应 group_id。
-actions 只包含可执行的写修复动作，不把只读检查或占位符后续步骤单独列为 action；只读验证放入 verify_command，更多建议写入 answer。
-动作输出单条具体 kubectl 命令，附风险、验证命令和回退建议。禁止 rm、shell/exec、delete、任意清单 apply/create、凭据/权限变更、清除 finalizers、批量无范围操作。
-当前执行白名单：kubectl set resources、kubectl rollout restart、受限 kubectl patch --type=json；只读 get/describe/logs/top/rollout status。
-每条命令必须显式 -n namespace 或 --namespace=namespace，并指定单个 kind/name。不支持 -l、--all、--all-namespaces、shell 管道、文件输入、跨集群参数。
-内存或 CPU 修复优先 kubectl set resources deployment/真实名称 -n 真实命名空间 --containers=真实容器 --limits=memory=已论证数值。
-若使用 patch，必须 --type=json，且仅允许容器 resources/limits 或 resources/requests 下的 cpu/memory 字段，op 为 test/add/replace；不支持 merge/strategic patch。
-dry_run_command 如非空必须包含 --dry-run=server；verify_command 必须只读。控制器变更后优先 kubectl rollout status deployment/真实名称 -n 真实命名空间 --timeout=45s；不要用旧 Pod 的存在性证明新版本恢复。
-修复应尽量修改已核实的所属工作负载，例如资源限制或已知错误配置；未知 Secret、镜像、业务参数不得捏造或用占位符。
-已采集的 ownerReferences 不因摘要省略而视为未采集；可按证据引用回读。仅有 Pod→ReplicaSet 时继续核实 ReplicaSet→Deployment，不猜控制器名。
-不能安全确定修复时 actions 为空，说明缺口；不要为了给出动作而改变故障定义。
-answer 使用中文 Markdown 展示真实依据、对象、建议命令、风险及验证方法，并明确“尚未执行，需审阅”。
-最终按 RepairDraft schema 输出；status=answered 仅表示已回答/制定方案，不表示修复完成。
+POD_REMEDIATION_PROMPT = """根据用户当前需求和真实观测，自主制定 Kubernetes 修复方案；此规划节点只取证，不提前执行写操作。
+结合会话理解目标、范围和授权，按需要选择工具、Runbook 与 Metrics/Logging/Tracing 证据。不把任何工具或手册当作固定检查清单，也不因某种故障名称套用固定方案。
+决定修复操作、参数、依赖顺序和验证方式。复用可靠的已有证据，缺少会影响操作的关键信息时补查或询问；不得虚构配置值、成功执行或恢复结果。
+执行器提供通用 kubectl 命令能力，不按资源类型、字段或故障设置修复白名单。Kubernetes 使用当前服务账号处理命令；命令失败如实报告，不声称系统不支持某种资源修复。
+每个 action 绑定 group_id，描述目的、目标、预期影响、风险及回退建议。目标身份字段填写已知事实，未知保持空值，不猜控制器归属。
+execute_command 是待执行的一条 kubectl 命令；dry_run_command 和 verify_command 按实际需要选用，可以留空。不强制每种操作都预演、重启或等待 rollout。
+不支持本地主机 shell、管道、重定向或切换集群身份；有依赖的命令拆成有序 actions。命令引用文件时只能使用已存在且核实过的文件，不能虚构路径。
+所有非空命令都会随动作一起审阅并按顺序执行，包括预演和验证字段。规划输出不等于执行授权，执行器按当前 review/auto 配置处理。
+自主区分根治、临时缓解和仍需外部条件，并据实际效果说明；不把命令退出成功等同于服务恢复。
+answer 用中文 Markdown 展示证据、方案和风险，明确尚未执行。最终按 RepairDraft schema 输出；status=answered 仅表示规划回答完成。
 """
 
 REQUEST_ROUTER_PROMPT = """理解当前用户的 Kubernetes 运维意图，输出 RequestContract JSON；不查询环境、不预判根因、不制定工具清单。

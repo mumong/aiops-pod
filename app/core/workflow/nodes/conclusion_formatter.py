@@ -33,8 +33,17 @@ from app.core.workflow.schemas import QueryConclusionOutput, QueryResult
 from app.core.workflow.state import WorkflowState
 from app.core.skills.models import Layer
 from app.core.prompts import (
+    LEGACY_QUERY_CONCLUSION_PROMPT,
     get_conclusion_mode_instruction,
     get_workflow_prompt,
+    QUERY_REPORT_TOOL_DATA_HEADER,
+    REPORT_FACT_AUTHORITY,
+    REPORT_FACT_AGGREGATION_POLICY,
+    REPORT_METRIC_TREND_RULE,
+    build_diagnosis_report_instruction,
+    build_diagnosis_report_user_message,
+    build_query_report_user_message,
+    build_group_report_user_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -742,17 +751,7 @@ class ConclusionFormatterNode(WorkflowNode):
         )
 
     def _get_query_conclusion_prompt(self) -> str:
-        return """你是 K8s 查询结果总结器。
-
-任务：把输入中的 `QUERY 结构化结果` 和真实工具数据总结为面向用户的 Markdown。
-输出契约：只输出一个 JSON 对象，schema 为 `{"markdown_report": "..."}`，不要输出 ```json 代码块之外的任何文字。
-边界：
-- 只回答用户明确询问的对象、维度和指标。
-- 必须使用表格展示已获取的数据。
-- 必须说明数据来源和单位。
-- 不要做根因分析，不要写修复建议，除非用户明确要求。
-- 不要编造、补算、猜测缺失值；缺失项写“未获取到”。
-- 输出必须是中文。"""
+        return LEGACY_QUERY_CONCLUSION_PROMPT
 
     def _get_query_mode(self) -> str:
         wf_config = getattr(self, "workflow_config_override", None) or {}
@@ -892,29 +891,19 @@ class ConclusionFormatterNode(WorkflowNode):
         rca_summary = self._build_rca_summary(rca_analysis)
         tool_section = tool_data_text[:_SECTION_CHAR_LIMITS["tool_data"]]
 
-        instruction = f"""# 任务
-用户的原始问题是「{question}」。只按 system prompt 中唯一的报告结构组织输入事实；
-证据表的“真实原始结果”必须摘自工具数据，不输出修复建议或验证步骤。"""
+        instruction = build_diagnosis_report_instruction(question)
 
         system_prompt_text = self._get_conclusion_prompt()
 
         def build_user_message() -> str:
-            return f"""# 用户问题
-{question}
-
-# 阶段1：问题定位
-{layer_section}
-
-# 阶段2：证据采集摘要
-{evidence_summary}
-
-# 阶段3：根因分析
-{rca_summary}
-
-# 工具采集的真实数据（重要！报告必须引用这些真实数据）
-{tool_section or "（本轮未采集到工具数据）"}
-
-{instruction}"""
+            return build_diagnosis_report_user_message(
+                question=question,
+                layer_section=layer_section,
+                evidence_summary=evidence_summary,
+                rca_summary=rca_summary,
+                tool_section=tool_section or "（本轮未采集到工具数据）",
+                instruction=instruction,
+            )
 
         user_message = build_user_message()
 
@@ -1009,8 +998,8 @@ class ConclusionFormatterNode(WorkflowNode):
         tool_section = ""
         if tool_data_text:
             tool_section = (
-                "\n# 工具采集的真实数据（必须引用）\n"
-                f"{tool_data_text[:_SECTION_CHAR_LIMITS['tool_data']]}\n"
+                QUERY_REPORT_TOOL_DATA_HEADER
+                + f"{tool_data_text[:_SECTION_CHAR_LIMITS['tool_data']]}\n"
             )
 
         instruction = get_conclusion_mode_instruction(
@@ -1018,12 +1007,9 @@ class ConclusionFormatterNode(WorkflowNode):
             question,
             prompt_language=self._get_prompt_language(),
         )
-        user_message = f"""# 用户问题
-{question}
-
-{query_result_section}
-{tool_section}
-{instruction}"""
+        user_message = build_query_report_user_message(
+            question, query_result_section, tool_section, instruction,
+        )
 
         start_time = time.time()
         structured, _response, thinking_events = self._call_structured_agent(
@@ -1831,14 +1817,9 @@ class ConclusionFormatterNode(WorkflowNode):
                 else None
             ),
             "fact_encoding": {
-                "authority": "canonical normalized facts",
-                "aggregation": (
-                    "repeated logs and equivalent L7 flows may be structurally grouped; "
-                    "counts, time ranges, numeric ranges, trace_ids and fact_ids remain explicit"
-                ),
-                "trend_rule": (
-                    "metric trend is valid only when trend_evaluable=true and sample_count>=2"
-                ),
+                "authority": REPORT_FACT_AUTHORITY,
+                "aggregation": REPORT_FACT_AGGREGATION_POLICY,
+                "trend_rule": REPORT_METRIC_TREND_RULE,
             },
             "question": question,
             "group_count": len(groups),
@@ -1874,21 +1855,7 @@ class ConclusionFormatterNode(WorkflowNode):
                 report_scope="group_fragment",
             )
             context_json = json.dumps(context, ensure_ascii=False, default=str)
-            user_message = f"""# 用户问题
-{question}
-
-# 当前唯一异常组
-本次调用只负责异常组 `{gid}`。下面 JSON 是本组唯一事实来源；你看不到也不得推测其他组。
-普通 fact 的 `value` 以及聚合 fact 的 `pattern/flow/records/numeric_fields`、labels、stats、timestamp、trace_ids 均来自原始规范化事实；聚合只合并重复记录，不改变事实含义。
-
-{context_json}
-
-# 任务
-只输出以下两个 Markdown 区块，组号必须是 `{gid}`：
-1. `## 🕵️ 证据内容 · {gid}`
-2. `## 🎯 根因分析 · {gid}`
-不要输出全局概览，不要提及其他异常组，不要附加修复建议或原始 JSON。
-"""
+            user_message = build_group_report_user_message(question, gid, context_json)
             estimated_tokens = self._estimate_tokens(system_prompt + user_message)
             input_budget = self._resolve_context_token_budget(
                 output_reserved=max_tokens

@@ -8,6 +8,7 @@ import json
 
 from app.core.prompts import (
     DIAGNOSTIC_TOOL_GUIDANCE, DEEP_LAYER_PROMPT, DEEP_EVIDENCE_PROMPT, DEEP_RCA_PROMPT,
+    AUTONOMOUS_RUNBOOK_CATALOG_HEADER, PARALLEL_LANE_TASK_PREFIX,
 )
 from app.core.workflow.nodes.query_answer import (
     QueryCollectNode, build_working_material, _configure_query_runtime,
@@ -39,10 +40,10 @@ class DiagnosisStageNode(QueryCollectNode):
         prompt = self.stage_prompt
         if state.get("diagnosis_target"):
             from app.core.prompts import PARALLEL_LANE_PROMPT
-            prompt = PARALLEL_LANE_PROMPT + "\n本分支任务：" + material["question"] + "\n" + prompt
+            prompt = PARALLEL_LANE_PROMPT + PARALLEL_LANE_TASK_PREFIX + material["question"] + "\n" + prompt
         if self.collect:
             prompt += "\n" + DIAGNOSTIC_TOOL_GUIDANCE
-            prompt += "\nRunbook 目录（匹配当前异常时读取，已读可复用）：\n" + self._prepare_query_tools()
+            prompt += AUTONOMOUS_RUNBOOK_CATALOG_HEADER + self._prepare_query_tools()
         self._archive_node_input(material)
 
         def call(payload):

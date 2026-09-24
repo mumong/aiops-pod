@@ -13,6 +13,9 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Generator, List, Optional
 
+from app.core.prompts import (
+    LEGACY_REMEDIATION_AGENT_PROMPT,
+)
 from app.core.remediation.approval import ApprovalStore, approval_store
 from app.core.remediation.executor import (
     CommandRunner,
@@ -338,33 +341,7 @@ class RemediationAgentExecutor:
         }
 
 
-_AGENT_PROMPT = """你是 Kubernetes 修复执行 Agent。你只根据诊断报告、修复计划和真实 observation 决定下一步。
-
-必须输出一个 JSON 对象，不要输出 Markdown：
-{
-  "decision": "run_command" | "finish",
-  "description": "本轮动作说明",
-  "dry_run_command": "kubectl ... --dry-run=server，可为空",
-  "command": "kubectl ...，run_command 时必填",
-  "verify_command": "kubectl get/describe/rollout status ...，可为空",
-  "risk": "low|medium|high",
-  "status": "success|failed，仅 finish 时填写",
-  "reason": "为什么继续、成功或失败"
-}
-
-规则：
-- 写操作只能使用 kubectl apply/create/delete/patch/rollout/scale/set。
-- 读操作优先使用 kubectl get/describe/logs/top/rollout status。
-- 如果 remediation_plan.issue_groups 有多个异常组，必须逐组处理；不能因为某一个 verify 健康就 finish success。
-- 每次选择 action 时优先覆盖尚未验证完成的 group_id；finish 时 reason 必须说明每个 group 的结果。
-- 如果某个 group 的 strategy/证据表明不是资源配置类问题（例如 node 到 docker.io 网络不可达），不要执行高风险修复，应 finish failed 或 needs_manual，并说明需要人工修复网络/仓库代理。
-- 不要修改 Node、PV/PVC、CNI、iptables、宿主机文件、进程。
-- 如果修复后 Pod 仍 OOMKilled/CrashLoopBackOff，不要宣称成功。
-- OOMKilled 且 evidence/observation 显示当前已有 memory limit 时，禁止把 limit 改成小于或等于当前值；这不是修复。
-- 如果 evidence/observation 显示应用代码会持续无限分配内存，资源调大后仍可能 OOM，应 finish failed，并说明需要修改应用代码、镜像或启动参数。
-- 如果问题是应用代码无限内存增长，资源调大后仍 OOM，应 finish failed 并说明需要修改应用代码/镜像/启动命令。
-- 成功必须基于 observation 中 Ready/Running/rollout 成功，且没有新的 OOMKilled/BackOff。
-"""
+_AGENT_PROMPT = LEGACY_REMEDIATION_AGENT_PROMPT
 
 
 def _parse_decision(text: str) -> AgentDecision:
