@@ -11,6 +11,7 @@ from app.core.workflow.query_contract import QueryAnswer, parse_query_answer
 from app.core.workflow.working_material import build_working_material, evidence_receipts
 
 from app.core.skills.models import Layer
+from app.core.runbook.catalog import reference_description
 from app.core.workflow.nodes.focused import FocusedTaskNode
 from app.core.prompts import (
     QUERY_COLLECT_PROMPT,
@@ -65,7 +66,8 @@ class QueryCollectNode(FocusedTaskNode):
                 for directory in getattr(tool, "runbook_dirs", []):
                     for path in Path(directory).glob("*.md"):
                         ids.add(path.stem)
-                        catalog.setdefault(path.name, "运维参考手册")
+                        if not catalog.get(path.name):
+                            catalog[path.name] = reference_description(path)
                 tool = tool.model_copy(
                     update={
                         "allowed_runbook_ids": sorted(ids)

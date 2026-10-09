@@ -8,6 +8,28 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
+def reference_description(path) -> str:
+    """Read a bounded, author-maintained description for uncatalogued references.
+
+    Markdown may declare ``> 适用说明：...`` near its title. Existing catalog
+    entries take precedence; no task matching or tool selection happens here.
+    """
+    try:
+        with path.open(encoding="utf-8") as source:
+            lines = source.read(4096).splitlines()[:32]
+    except (OSError, UnicodeError):
+        return "运维参考手册"
+    title = ""
+    for line in lines:
+        if line.startswith("> 适用说明："):
+            description = line.removeprefix("> 适用说明：").strip()
+            if description:
+                return description[:600]
+        if not title and line.startswith("# "):
+            title = line[2:].strip()
+    return title[:600] or "运维参考手册"
+
+
 @dataclass
 class RunbookEntry:
     """Runbook 条目"""

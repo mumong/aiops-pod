@@ -29,6 +29,7 @@ class FocusedResult(BaseModel):
 class FocusedTaskNode(WorkflowNode):
     # Explicit capability allowlist: no arbitrary shell, exec, or mutation tool.
     READ_TOOLS = {
+        "query_pod_lifecycle",
         "kubectl_get_by_name", "kubectl_get_by_kind_in_namespace",
         "kubectl_get_by_kind_in_cluster", "kubectl_find_resource", "kubectl_get_yaml",
         "kubectl_describe", "kubectl_events", "kubectl_logs", "kubectl_previous_logs",

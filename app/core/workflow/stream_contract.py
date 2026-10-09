@@ -8,6 +8,8 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel
 
+from app.core.context.prometheus_result import normalize_prometheus_result
+
 from app.core.workflow.fact_contract import OBSERVABILITY_QUERY_TOOL_DIMENSIONS
 from app.core.workflow.schemas import GroupEntity
 
@@ -28,13 +30,25 @@ def project_query_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
     except (ValueError, TypeError):
         parsed = {}
     structured = parsed if isinstance(parsed, dict) and "coverage" in parsed else _mapping(event.get("structured"))
+    if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict) and "resultType" in parsed["data"]:
+        structured = normalize_prometheus_result(parsed)
+    elif not structured.get("coverage") and structured.get("status") == "prometheus_empty":
+        structured = {**structured, "coverage": "empty", "parse_status": "parsed"}
+    elif (isinstance(parsed, dict) and (parsed.get("error") or parsed.get("status") == "error")) or structured.get("status") == "prometheus_error":
+        structured = {**structured, "coverage": "error", "parse_status": "error"}
     facts = structured.get("facts") or []
     out["tool_display"] = {
         "coverage": structured.get("coverage"),
-        "query": structured.get("query"),
-        "measurements": [{key: fact.get(key) for key in ("name", "value", "unit", "observed_at", "labels")}
+        "query": structured.get("query") or event.get("tool_args"),
+        "parse_status": structured.get("parse_status"),
+        "result_type": structured.get("result_type"),
+        "series_count": structured.get("series_count"),
+        "unparsed_series": structured.get("unparsed_series", 0),
+        "warnings": structured.get("warnings") or [],
+        "infos": structured.get("infos") or [],
+        "measurements": [{key: fact.get(key) for key in ("name", "value", "unit", "observed_at", "labels", "timestamp", "sample_count", "sample_window", "point_policy", "value_kind", "stats", "trend_evaluable")}
                          for fact in facts[:20] if isinstance(fact, dict)],
-        "measurements_omitted": max(0, len(facts) - 20),
+        "measurements_omitted": max(0, len(facts) - 20) + (structured.get("facts_omitted") or 0),
         "result_excerpt": raw[:12000],
         "result_excerpt_truncated": len(raw) > 12000,
         "raw_ref": event.get("raw_ref"),

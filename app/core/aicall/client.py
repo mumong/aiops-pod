@@ -146,6 +146,9 @@ class AICall:
         }
         if base_url:
             self._chat_model_kwargs["base_url"] = base_url
+        reasoning_effort = os.getenv("LLM_REASONING_EFFORT", "").strip()
+        if reasoning_effort:
+            self._chat_model_kwargs["reasoning_effort"] = reasoning_effort
 
         logger.info("🔧 [AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
                     model_name, base_url or "(default)")

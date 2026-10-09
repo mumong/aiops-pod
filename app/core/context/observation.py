@@ -21,6 +21,7 @@ from app.core.workflow.fact_contract import (
 )
 
 from .archive import ContextArchive, get_archive_root
+from .prometheus_result import normalize_prometheus_result
 from .observability_projection import (
     CONTRACT_VERSION as OBSERVABILITY_PROJECTION_VERSION,
     project_observability_payload,
@@ -137,6 +138,29 @@ class ObservationProcessor:
     ) -> Dict[str, Any]:
         raw = raw_content or ""
         tool = tool_name or "unknown"
+        if tool == "query_pod_lifecycle":
+            # This source already returns a bounded, paginated fact projection.
+            # Preserve container lifecycle and coverage together, without a second
+            # lossy summary or a health classification derived from Pod phase.
+            try:
+                structured = json.loads(raw)
+                if not isinstance(structured, dict):
+                    raise ValueError("expected lifecycle object")
+                valid = (structured.get("contract_version") == "pod-lifecycle.v1"
+                         and isinstance(structured.get("pods"), list))
+                semantic_success = valid and structured.get("status") == "success"
+                structured["parse_status"] = "parsed" if valid or structured.get("status") == "error" else "unsupported"
+            except (ValueError, TypeError):
+                structured = {"status": "parse_failed", "parse_status": "failed", "coverage": "unknown"}
+                semantic_success = False
+            refs = ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
+                node_id=node_id, sequence=sequence, tool_name=tool,
+                raw=raw, structured=structured, summary=raw,
+            )
+            return {"tool": tool, "status": "success", "semantic_success": semantic_success,
+                    "summary": raw, "structured": structured, "raw_chars": len(raw),
+                    "summary_chars": len(raw), "processed": True,
+                    "processor": "pod_lifecycle+lossless", **refs}
         targeted_summary = (
             preserve_raw
             and tool in self.QUERY_SUMMARY_TOOLS
@@ -2476,6 +2500,9 @@ class ObservationProcessor:
         except Exception:
             payload = {}
 
+        if not isinstance(payload, dict):
+            payload = {}
+
         error = str(payload.get("error") or "").strip()
         error_type = str(payload.get("errorType") or "").strip()
         query = str(payload.get("query") or "").strip()
@@ -2499,10 +2526,10 @@ class ObservationProcessor:
                 structured["url"] = url
             return structured, "\n".join(summary_lines), "prometheus_error"
 
-        result = ((payload.get("data") or {}).get("result") or []) if isinstance(payload, dict) else []
-        result_count = len(result) if isinstance(result, list) else 0
-        if result_count == 0:
+        normalized = normalize_prometheus_result(payload)
+        if normalized["coverage"] == "empty":
             structured = {
+                **normalized,
                 "status": "prometheus_empty",
                 "tool": tool,
                 "result_count": 0,
@@ -2510,15 +2537,19 @@ class ObservationProcessor:
             return structured, f"{tool} 执行成功但结果为空；这表示查询未命中数据，不能视为已采集到指标值。", "prometheus_empty"
 
         structured = {
+            **normalized,
             "status": "prometheus_result",
             "tool": tool,
-            "result_count": result_count,
         }
         return structured, raw, "prometheus_result"
 
     @staticmethod
     def _is_semantically_successful(structured: Dict[str, Any], summary: str) -> bool:
         status = str((structured or {}).get("status", "")).lower()
+        if status == "prometheus_empty":
+            # A valid empty vector/matrix is a successful query, not a failure
+            # or a measured zero. Coverage separately records absent matches.
+            return True
         if status in {"query_rejected", "query_parse_failed"}:
             return False
         if status == "query_succeeded":
@@ -2544,7 +2575,6 @@ class ObservationProcessor:
             "yaml_parse_failed",
             "invalid_tool",
             "prometheus_error",
-            "prometheus_empty",
             "run_image_result",
             "command_result",
             "case_error",

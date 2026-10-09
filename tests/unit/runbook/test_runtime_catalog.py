@@ -4,6 +4,26 @@ from pathlib import Path
 import yaml
 
 
+def test_query_reference_is_discoverable_without_polluting_diagnostic_catalog(tmp_path):
+    from app.core.aicall.builtin_tools import FetchRunbookTool
+    from app.core.workflow.nodes.query_answer import QueryCollectNode
+
+    data = yaml.safe_load(Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8"))["data"]
+    name = "private-k8s-query-promql-reference.md"
+    guide = data[name]
+    (tmp_path / name).write_text(guide, encoding="utf-8")
+    node = QueryCollectNode()
+    node.tools = [FetchRunbookTool(runbook_dirs=[str(tmp_path)])]
+    catalog = node._prepare_query_tools()
+    for keyword in ["CPU", "内存", "容量加权", "重复序列", "映射"]:
+        assert keyword in catalog
+    assert "NFS" not in guide
+    assert "控制面" not in guide or "无关的日志、链路、存储或控制面巡检" in guide
+    assert "node_uname_info" in guide
+    assert "同一个明确的评估时间" in guide
+    assert "不依赖已知“三份”" in guide
+
+
 def test_runtime_catalog_only_exposes_pod_abnormal_mainline_runbooks():
     configmap = Path("deploy/configmap/runbooks.yaml")
     data = yaml.safe_load(configmap.read_text(encoding="utf-8"))

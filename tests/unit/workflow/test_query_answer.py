@@ -7,6 +7,23 @@ from app.core.workflow.nodes.query_answer import parse_query_answer
 from app.core.workflow.executor import WorkflowExecutor
 
 
+def test_query_catalog_uses_author_description_and_preserves_explicit_catalog(tmp_path):
+    from app.core.aicall.builtin_tools import FetchRunbookTool
+    from app.core.runbook.catalog import reference_description
+
+    guide = tmp_path / "resource-guide.md"
+    guide.write_text("# Resource guide\n\n> 适用说明：集群 CPU、内存、PromQL 与节点映射\n", encoding="utf-8")
+    node = QueryCollectNode()
+    node.tools = [FetchRunbookTool(runbook_dirs=[str(tmp_path)])]
+    assert "集群 CPU、内存、PromQL 与节点映射" in node._prepare_query_tools()
+    node.runbook_catalog = SimpleNamespace(catalog=[SimpleNamespace(link=guide.name, description="显式目录优先")])
+    assert "显式目录优先" in node._prepare_query_tools()
+    assert "集群 CPU" not in node._prepare_query_tools()
+    guide.write_text("# Generic reference\nBody\n", encoding="utf-8")
+    assert reference_description(guide) == "Generic reference"
+    assert reference_description(tmp_path / "missing.md") == "运维参考手册"
+
+
 def test_query_write_tools_only_for_explicit_ordinary_operation_contract():
     node = QueryCollectNode()
     node.tools = [SimpleNamespace(name=n) for n in ["run_bash_command", "kubectl_run_image", "kubectl_logs"]]
@@ -34,7 +51,7 @@ def test_direct_query_finishes_structured_answer_without_summary_model():
         assert kwargs.get("expect_json")
         assert kwargs['response_schema'].__name__ == 'QueryAnswer'
         assert not kwargs.get("stop_checker")
-        assert '没有后续总结 Agent' in prompt
+        assert '没有后续总结节点' in prompt
         return SimpleNamespace(result=json.dumps({"intent": "查询日志", "scope": "xnet",
             "status": "answered", "answer": "日志包含 device not found，不足以确认设备故障。",
             "evidence_refs": [observation["raw_ref"]]})), [observation]

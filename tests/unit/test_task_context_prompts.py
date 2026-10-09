@@ -159,10 +159,11 @@ EXPECTED_DIGESTS = {
     "focused-query-True": "870561bee4aa85c3c0371116af3e58b6cad46c7fba6ad7acd0e4245c4065be13",
     "focused-explain-False": "107d2504391ad261c5e65510f7c964998dc5f00e0242bcf944b3947d9aa45c8a",
     "focused-explain-True": "107d2504391ad261c5e65510f7c964998dc5f00e0242bcf944b3947d9aa45c8a",
-    "query-False-query": "9be4845b7a57773ddd2e3a7cfc12be130a6025d97a0f5bedf39de80c786d451a",
-    "query-False-operate": "b649a5d985d8e419a6e158f673b8d6b08f02cbc4b18330c485cf420565e85976",
-    "query-True-query": "32fc877cffb3bac04e1b9b6bdc7680dd3e9d6d9655781848288694f090184358",
-    "query-True-operate": "89bdf7853be7398ec5612d7877a1693ef05547d789085a26046e3b9a1f30f904",
+    # Query guidance intentionally updated; deep/focused snapshots stay unchanged.
+    "query-False-query": "394bbc097f7c7c3ee706f857a45cc7f418d7da3ed840d8fd708a3d070945a845",
+    "query-False-operate": "0e4496fb827fe1d2531c26669c0109f219ed09d785d6b648d63c13c4ca618fdf",
+    "query-True-query": "350ddfd07103a8a836d9a98a2521d8c5b8beec5d3d3cde6a8fe471335a6164fc",
+    "query-True-operate": "f9dfc5018270b850ac50e6e12b0e9216fa172ecea97b635d0f211b3c5c0073b3",
 }
 
 
@@ -222,6 +223,7 @@ def test_parallel_lane_question_and_fanin_contract(monkeypatch):
 
 
 def test_query_runbook_ids_stay_dynamic_and_original_tools_unchanged(monkeypatch):
+    monkeypatch.setattr(query_answer, "reference_description", lambda path: "运维参考手册")
     node = query_answer.QueryCollectNode()
     tool = _tools()[0]
     tool.runbook_dirs = ["virtual-directory"]

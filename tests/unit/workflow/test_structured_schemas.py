@@ -328,7 +328,7 @@ def test_prometheus_api_error_preserves_parse_error_and_query():
     assert "PromQL:" in observation["summary"]
 
 
-def test_prometheus_empty_vector_is_semantic_miss():
+def test_prometheus_empty_vector_is_successful_with_empty_coverage():
     processor = ObservationProcessor()
 
     observation = processor.process(
@@ -339,7 +339,8 @@ def test_prometheus_empty_vector_is_semantic_miss():
         raw_content='{"status":"success","data":{"resultType":"vector","result":[]}}',
     )
 
-    assert observation["semantic_success"] is False
+    assert observation["semantic_success"] is True
+    assert observation["structured"]["coverage"] == "empty"
     assert observation["structured"]["status"] == "prometheus_empty"
     assert observation["structured"]["result_count"] == 0
     assert "结果为空" in observation["summary"]

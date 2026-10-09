@@ -1107,288 +1107,114 @@ data:
     - 验证：新 Pod Ready、实际健康请求成功和新探针失败停止；不只看 phase=Running。
 
   private-k8s-query-promql-reference.md: |
-    # 私有化 Kubernetes 节点级 Prometheus 查询参考手册
+    # 节点与集群资源指标查询参考
 
-    > 类型: reference | 适用: `/query` 指标查询 | 范围: node 级 CPU / memory / disk / network throughput
+    > 适用说明：节点／集群 CPU、内存、磁盘、网络使用率及趋势查询（node/cluster、Prometheus、PromQL）；提供节点整体与容器用量的口径区别、容量加权汇总、重复序列核查、instance/IP 到节点名映射、同时间比较及空结果排查。不替代 Pod 根因诊断手册。
+    > 类型：reference；按用户问题选取步骤，不是强制执行清单。
 
-    ## 使用边界
+    ## 范围与工具
 
-    本手册只用于 `/query` 场景下的**指标查询**，用于帮助构造稳定、准确的 **node 级 PromQL**。
+    本手册服务于资源指标查询，不按 HTTP /ask 或 /query 入口限制。深度诊断需要资源证据时也可参考，但指标不能单独证明根因。
+    节点／集群 PromQL 使用 execute_prometheus_instant_query（当前值）或 execute_prometheus_range_query（趋势）。
+    Pod 指标可使用 execute_pod_promql，必须提供真实 namespace/pod scope；不得为通过校验给节点指标添加虚构的 Pod 标签。
+    不需要每次调用所有工具；已知指标可直接验证，未知时定向发现。无关的日志、链路、存储或控制面巡检不属于普通资源查询。
 
-    不适用于：
-    - `/ask` 故障诊断
-    - 健康检查
-    - 根因分析
-    - Pod / Deployment / Namespace 级故障排查
+    ## 先确认口径和序列身份
 
-    如果用户在问“集群有什么问题”“服务为什么异常”“现在是否健康”，不要优先引用本手册，应优先使用诊断/健康检查类 runbook。
+    - 用户问节点／集群整体使用率时，通常采用节点整体口径并明确说明；只有问容器／工作负载用量时才用容器指标。容器 working set 不等于节点已用内存。
+    - 实际用量、capacity、allocatable、requests 和 limits 含义不同；分子、分母必须对应同一对象范围和单位。
+    - 汇总前保留并核对身份与采集来源标签。多个 job/service/endpoint 可能重复采集同一节点或容器，也可能属于不同对象或集群，不能直接全部相加或任意用 max/avg 去重。
+    - 需要核实来源时，可查询指标原序列、get_series，或按身份与来源分组计数。例如 machine_cpu_cores 保留 node、instance、job、service 后检查是否重复；node_cpu_seconds_total 的唯一身份通常包含 instance、cpu、mode，以及环境中的 cluster 等标签。
+    - 确认多个来源确实对应同一对象后，可选择一套完整、可靠的来源并说明选择依据；不在查询任务中修改监控配置。不依赖已知“三份”或固定倍数纠正结果。
+    - 聚合后的单个数值无法反向证明源序列唯一；分子分母同时重复还可能掩盖错误，使百分比正常而绝对量膨胀。
+    - 以下示例假设已确认 job="node-exporter" 对目标节点完整且无重复。实际 job/cluster/instance 标签以工具返回为准，缺失时调整选择条件，不盲目照抄。
 
-    ## 工具选择边界
+    ## 时间一致性
 
-    - `/query` 查询 node/cluster 通用指标时，instant 查询使用 `execute_prometheus_instant_query`，时间趋势查询使用 `execute_prometheus_range_query`。
-    - `/ask` Pod 异常诊断不得使用上述通用工具，必须使用要求精确 namespace/pod scope 的 `execute_pod_promql`。
-    - 不得为了绕过 `execute_pod_promql` 的 scope 校验，把 Prometheus 服务自身的 Pod 当作业务目标 Pod。
+    在一次相关计算开始时选择同一个明确的评估时间 T，instant 查询传入相同 time=T，CPU rate 使用相同窗口。
+    CPU rate 是窗口平均速率，不是瞬时峰值；Prometheus vector 时间是表达式评估时间，不一定是底层样本的实际采集时间。
+    查询绝对量和比例时使用同一时刻；结果来自缓存时保留原时间。不同时间只能明确标为不同观测，不能拼成同一张精确快照。
+    range 查询按问题指定 start/end/step；每条序列的最后一点不等于区间平均值。部分节点缺失时披露覆盖，不能把子集称为全集群。
 
-    ## 核心规则
+    ## CPU：整体使用率与集群加权汇总
 
-    1. 查询目标是“每个节点”时，结果里必须保留节点维度，优先使用 `instance`，再映射到节点名
-    2. 如果 PromQL 返回的 `metric` 为空，或没有 `instance/node` 标签，不能把该值复制到所有节点
-    3. 如果返回空结果，应明确说明“查询为空/指标不存在/label 不匹配”，不能伪造结果
-    4. 优先使用 node-exporter 的 `node_*` 指标；不要优先使用 pod/container 聚合指标去估算节点使用率
-    5. 除非用户明确要求，否则不要扩展额外指标
-
-    ## 常用 node 级标准查询
-
-    ### 1. 节点 CPU 使用率（百分比）
-
-    适用:
-    - 查询每个节点当前 CPU 使用率
-
-    标准 PromQL:
+    每个节点整体 CPU 使用率（非 idle，含 iowait）：
     ```promql
-    (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance)) * 100
+    100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle",job="node-exporter"}[5m])))
     ```
 
-    结果维度:
-    - `instance`
-
-    说明:
-    - `instance` 通常形如 `10.2.0.48:9100`
-    - 如需展示节点名，需再查询节点名与 IP/instance 的映射关系
-
-    禁止误用:
-    - 不要用 `container_cpu_usage_seconds_total` 去估算节点 CPU 使用率
-    - 不要先 `avg()` 成单个全局值再复制给每个节点
-
-    ### 2. 节点内存使用率（百分比）
-
-    适用:
-    - 查询每个节点当前内存使用率
-
-    标准 PromQL:
+    集群整体 CPU 使用率（按每个逻辑 CPU 等权，即节点按核数加权）：
     ```promql
-    (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
+    100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle",job="node-exporter"}[5m])))
     ```
 
-    结果维度:
-    - `instance`
-
-    说明:
-    - 这是最常用、最稳妥的节点内存使用率查询
-    - 不需要再额外做 `avg by (...)`
-
-    禁止误用:
-    - 不要用 `container_memory_usage_bytes` 聚合去估算节点内存使用率
-    - 不要在没有节点维度时把同一个内存值复制给所有节点
-
-    ### 3. 节点根分区磁盘使用率（百分比）
-
-    适用:
-    - 查询每个节点根分区 `/` 的磁盘使用率
-
-    标准 PromQL:
+    如需核对容量，同范围查询：
     ```promql
-    (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) * 100
+    count by (instance) (node_cpu_seconds_total{mode="idle",job="node-exporter"})
     ```
 
-    结果维度:
-    - `instance`
-    - `device`
-    - `mountpoint`
+    不用各节点百分比的简单平均替代集群核数加权值，除非已确认各节点核数相同。
+    machine_cpu_cores 可作为容量证据，但 sum 前必须核对重复来源。不能把容器 CPU / 节点容量叫作节点整体使用率。
+    若采用排除 iowait 的口径应单独注明，不能与本示例非 idle 口径混用。
 
-    说明:
-    - 建议过滤掉 `tmpfs`、`overlay`
-    - 如果一个节点存在多条结果，优先保留 `mountpoint="/"` 的根分区结果
+    ## 内存：节点整体口径
 
-    ### 4. 节点网络接收吞吐量（bits/s）
-
-    适用:
-    - 查询每个节点网络接收吞吐量
-
-    标准 PromQL:
+    每个节点：
     ```promql
-    sum by (instance) (
-      rate(node_network_receive_bytes_total{device!~"lo|veth.*|cali.*|flannel.*|tunl.*"}[5m])
-    ) * 8
+    100 * (1 - node_memory_MemAvailable_bytes{job="node-exporter"} / node_memory_MemTotal_bytes{job="node-exporter"})
     ```
 
-    结果维度:
-    - `instance`
-
-    说明:
-    - 优先过滤 loopback 和常见虚拟接口，只保留主要物理网卡流量
-    - 单位为 `bits/s`
-    ### 5. 节点网络发送吞吐量（bits/s）
-
-    适用:
-    - 查询每个节点网络发送吞吐量
-
-    标准 PromQL:
+    集群整体（按内存容量加权）：
     ```promql
-    sum by (instance) (
-      rate(node_network_transmit_bytes_total{device!~"lo|veth.*|cali.*|flannel.*|tunl.*"}[5m])
-    ) * 8
+    100 * (1 - sum(node_memory_MemAvailable_bytes{job="node-exporter"}) / sum(node_memory_MemTotal_bytes{job="node-exporter"}))
     ```
 
-    结果维度:
-    - `instance`
-
-    ## 辅助查询
-
-    ### 节点名与 instance 映射
-
-    如果需要把 `instance` 转成 `master/node1/node2` 这类节点名，先查询：
-
+    如需绝对量，同一时间查询总量与已用量：
     ```promql
-    node_uname_info
+    sum(node_memory_MemTotal_bytes{job="node-exporter"})
+    sum(node_memory_MemTotal_bytes{job="node-exporter"} - node_memory_MemAvailable_bytes{job="node-exporter"})
     ```
 
-    常见可用标签:
-    - `instance`
-    - `nodename`
+    这是 MemTotal-MemAvailable 口径，不是应用堆内存或容器 working set。GB 与 GiB 分别按 1000^3 与 1024^3 换算。
 
-    也可以通过 Kubernetes 节点列表辅助映射：
-    - `kubectl get nodes -o wide`
+    ## 节点名与指标实例映射
 
-    ## 输出要求
+    用户需要节点名时，取得真实映射再关联，不按返回行顺序对齐。
+    可选来源：
+    - node_uname_info：通常同时含 instance、nodename；nodename 是主机名，需要时与 Kubernetes 节点名核实。
+    - kube_node_info：通常含 node、internal_ip；其 instance 往往是 kube-state-metrics 服务地址，不是节点地址。
+    - Kubernetes 节点列表：请求 metadata.name 和 status.addresses 中 type=InternalIP 的 address。只查 NAME/Ready 无法映射 IP。
 
-    当用户要求“具体到每个 node 级别”时：
-    - 最终表格中每个节点必须有独立一行
-    - 每行数值必须来自该节点对应的 Prometheus 结果
-    - 如果某个节点缺失结果，必须单独写入 missing，而不是复制其他节点的值
-    - 再检查 NFS 服务端、导出目录、节点到 NFS 的网络连通性
-
-    ### 5. 控制面与基础组件
-    关键对象:
-    - `kube-apiserver`
-    - `etcd`
-    - `scheduler`
-    - `controller-manager`
-    - CoreDNS
-    - kube-proxy
-
-    这些对象不需要每次全查。只有在以下场景优先关注:
-    - 多个业务对象同时异常
-    - 节点大面积 NotReady
-    - API 调用明显失败、状态不一致
-    - Service/DNS 大面积失效
-
-    ## 按用户问题决定优先检查哪一面
-
-    ### 如果用户问“我的集群有什么问题”
-    先做最小检查：
-    1. `kubectl get nodes`
-    2. `kubectl get pods -A`
-    3. `kubectl get deploy,statefulset,daemonset -A`
-    4. 如用户反馈是“服务不通”，再看 `svc/endpoints`
-
-    ### 如果用户问“某服务为什么访问不到”
-    优先顺序：
-    1. `Service`
-    2. `Endpoints/EndpointSlice`
-    3. 后端 Pod 是否 `Ready`
-    4. DNS / Calico / kube-proxy
-
-    不要先做：
-    - 全集群所有 Pod logs
-    - 所有节点指标查询
-
-    ### 如果用户问“某 Pod 为什么起不来”
-    优先顺序：
-    1. `kubectl get pod`
-    2. `kubectl describe pod`
-    3. `kubectl logs --previous`
-    4. 如涉及挂载/调度/镜像，再扩展到 PVC、Node、Registry
-
-    ### 如果用户问“为什么 Pending”
-    优先考虑：
-    - 调度资源不足
-    - taint / affinity / nodeSelector
-    - PVC 未绑定
-    - NFS / 存储不可用
-
-    ### 如果用户问“为什么服务有问题但 Pod 都正常”
-    优先考虑：
-    - `Service` selector 错误
-    - `Endpoints` 为空
-    - Pod 未 Ready
-    - 端口映射错误
-    - DNS 解析失败
-    - Calico / kube-proxy 转发异常
-
-    ## 私有化环境下常见异常面
-
-    ### Calico 相关
-    常见问题:
-    - Pod 跨节点不通
-    - NetworkPolicy 拦截
-    - calico-node 异常
-    - 路由/BGP/overlay 配置异常
-
-    优先证据:
-    ```bash
-    kubectl get pods -n kube-system -l k8s-app=calico-node
-    kubectl logs -n kube-system ds/calico-node --tail=100
+    若已核实 node_uname_info 的 instance 唯一且 nodename 对应 Kubernetes 节点，可关联：
+    ```promql
+    (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle",job="node-exporter"}[5m]))))
+    * on(instance) group_left(nodename) node_uname_info{job="node-exporter"}
     ```
 
-    ### NFS 相关
-    常见问题:
-    - PVC 长时间 Pending
-    - Pod 卡在挂载阶段
-    - `mount.nfs` 超时
-    - `access denied` / 权限异常
+    关联前核对两侧键的含义、cluster 范围和唯一性。端口不同不能直接按完整 instance 匹配；IPv6 地址不能简单按冒号切割。
+    label_replace 只修改已有标签，不能创造真实身份关系；vector(1) 不包含节点映射。
+    关联为空时分别查询两侧原序列，检查缺失标签或不同 endpoint，必要时使用另一种映射来源。
+    映射仍不明确则保留 instance 并说明原因，不声称环境不存在映射，也不把同一对象的节点名和 IP 排成两台节点。
 
-    优先证据:
-    ```bash
-    kubectl describe pvc <pvc-name> -n <namespace>
-    kubectl describe pod <pod-name> -n <namespace>
+    ## 磁盘与网络（仅按需查询）
+
+    节点根分区使用率：
+    ```promql
+    100 * (1 - node_filesystem_avail_bytes{job="node-exporter",mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{job="node-exporter",mountpoint="/",fstype!~"tmpfs|overlay"})
     ```
+    保留 instance、device、mountpoint；avail 口径包括普通用户不可用的保留空间影响。多个挂载不能重复统计同一文件系统。
 
-    ### containerd 相关
-    常见问题:
-    - 容器无法创建
-    - 镜像拉取异常
-    - sandbox/container runtime 创建失败
-    - CRI 层异常导致 Pod 卡住
-
-    只有在 Pod 明显卡在 runtime 阶段时，再看:
-    ```bash
-    journalctl -u containerd -l --no-pager | tail -100
-    journalctl -u kubelet -l --no-pager | tail -100
+    物理接口接收吞吐量示例（bits/s）：
+    ```promql
+    sum by (instance) (rate(node_network_receive_bytes_total{job="node-exporter",device!~"lo|veth.*|cali.*|flannel.*|tunl.*"}[5m])) * 8
     ```
+    发送用 node_network_transmit_bytes_total；接口选择按现场拓扑核实，避免 bond/bridge/从接口重复计数。吞吐量不是百分比，没有可靠链路容量不能称为带宽使用率。
 
-    ## 低成本判断规则
+    ## 空结果与交付
 
-    ### 小模型执行原则
-    - Runbook 是 guide，不是全量巡检清单；不要把每个常见原因都转成 evidence_plan。
-    - 先拿最高信息密度证据：`kubectl describe pod`、`kubectl get events`、`kubectl logs --previous`、`kubectl get pod -o yaml`。
-    - 看到明确错误原文后按分支停止扩展：例如 `configmap not found` 只验证 ConfigMap/Pod volume 引用，不再查 PVC；`FailedScheduling` 只分析调度原因，不再查镜像；只有 `terminated.reason=OOMKilled` 或明确 cgroup/kernel OOM 事件才收敛到内存分析，`exitCode=137` 单独必须继续区分 SIGKILL 来源。
-    - `NotFound`、空事件、命令失败不是“没证据”；如果它正好回答了检查目的，应作为负向证据纳入证据完整度。
-    - 日志和 Events 是当前根因方向的主证据，普通资源列表只是辅助证据。
-
-    | 当前现象 | 优先怀疑面 | 不要直接下的结论 |
-    |----------|------------|------------------|
-    | Pod Running，但服务不可用 | Service / Endpoints / Ready / DNS / Calico | 不能直接判定健康 |
-    | Pod Pending | 调度 / 资源 / PVC / Taint | 不能直接判定为应用错误 |
-    | Pod CrashLoopBackOff | L2/L4 | 不能只靠 event 判断，必须看 describe/logs |
-    | Node Ready 但有 Pressure | 节点资源压力 | 不能直接判定节点健康 |
-    | PVC Bound 但 Pod 挂载失败 | NFS / 节点挂载链路 | 不能只看 PVC 状态 |
-    | 历史 Warning 事件存在 | 只算线索 | 不能直接判定当前故障 |
-
-    ## 建议的“停止扩展”时机
-
-    在以下任一条件成立时，应停止继续扩大排查范围：
-    - 已找到当前明确异常对象
-    - 已形成能解释用户问题的直接证据链
-    - 新工具调用只会重复确认已有结论
-
-    换句话说：
-    - **先定位当前异常对象，再决定是否扩展**
-    - **不是先全量扫描，再从海量信息里找问题**
-
-    ## 与经典排错资料的一致性说明
-
-    本手册吸收了 Kubernetes Handbook 排错总览中的通用思路，但针对私有化环境进行了裁剪：
-    - 保留了 `Node / Pod / Network / PV / Tools` 这些核心检查面
-    - 强化了 `Service/Endpoints`、Calico、NFS、containerd
-    - 弱化了公有云特有的云盘、云 LB、云厂商网络依赖
+    - status=success 且 result=[] 表示查询执行成功但未匹配数据；不是零、工具失败、对象健康或资源不存在。
+    - 对必答缺口核查选择条件、窗口和关联键；一侧原数据存在而 join 为空，先检查关联方式。不要反复执行相同失败表达式。
+    - 错误响应保留真实错误原因，不能当作空结果。只有真实样本 value=0 才展示为零。
+    - 回答先满足用户范围：问集群汇总给加权总体，问各节点给独立行；必要时总体加节点明细，不把分项当作总量。
+    - 表格写清实体、数值、单位；注明来源、评估时间、窗口、口径和覆盖边界。未完成项目进入 missing，不把部分结果标成全部完成。
+    - 这些是可选的查询依据，不是固定工具链。工具结果才是现场事实，手册示例不是实测结果。
