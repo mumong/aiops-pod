@@ -138,6 +138,14 @@ class ObservationProcessor:
     ) -> Dict[str, Any]:
         raw = raw_content or ""
         tool = tool_name or "unknown"
+        from .record_result import record_observation
+
+        computed = record_observation(raw, tool, lambda structured:
+            ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
+                node_id=node_id, sequence=sequence, tool_name=tool,
+                raw=raw, structured=structured, summary=raw))
+        if computed is not None:
+            return computed
         if tool == "query_pod_lifecycle":
             # This source already returns a bounded, paginated fact projection.
             # Preserve container lifecycle and coverage together, without a second

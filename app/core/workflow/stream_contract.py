@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from pydantic import BaseModel
 
 from app.core.context.prometheus_result import normalize_prometheus_result
+from app.core.context.record_result import record_display
 
 from app.core.workflow.fact_contract import OBSERVABILITY_QUERY_TOOL_DIMENSIONS
 from app.core.workflow.schemas import GroupEntity
@@ -25,6 +26,11 @@ def project_query_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
     if event.get("type") != "tool_result":
         return out
     raw = str(event.get("result") or event.get("result_preview") or "")
+    records = record_display(raw, event.get("raw_ref"))
+    if records is not None:
+        out["tool_display"] = records
+        out["semantic_success"] = records["semantic_success"]
+        return out
     try:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
