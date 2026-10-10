@@ -79,6 +79,35 @@ def test_pod_metrics_contract_preserves_units_labels_stats():
     assert result["query"] == payload["query"]
 
 
+@pytest.mark.parametrize("pod_contract", [False, True])
+def test_label_semantics_survive_native_and_pod_display_without_series_merging(pod_contract):
+    labels = [
+        {"namespace": "ns", "pod": "p", "container": "app", "endpoint": "http",
+         "instance": "a:80", "reason": "R", "condition": "Ready", "custom": "east"},
+        {"namespace": "ns", "pod": "p", "container": "app", "endpoint": "admin",
+         "instance": "a:81", "reason": "R", "condition": "Ready", "custom": "west"},
+    ]
+    if pod_contract:
+        payload = {"coverage": "present", "query": {"promql": "expression"}, "facts": [
+            {"name": "custom_state", "value": str(i), "unit": "unitless",
+             "labels": label, "observed_at": "2026-10-10T02:00:00Z"}
+            for i, label in enumerate(labels)
+        ]}
+    else:
+        payload = native("vector", [
+            {"metric": {"__name__": "custom_state", **label}, "value": [100, str(i)]}
+            for i, label in enumerate(labels)
+        ])
+    shown = display(payload, tool_name="execute_pod_promql" if pod_contract else "execute_prometheus_instant_query")
+    assert shown["coverage"] == "present"
+    assert len(shown["measurements"]) == 2
+    for i, row in enumerate(shown["measurements"]):
+        assert row["value"] == str(i)
+        assert row["observed_at"]
+        for key, value in labels[i].items():
+            assert row["labels"][key] == value
+
+
 @pytest.mark.parametrize("payload", [
     native("unknown", []), native("vector", [{"histogram": [100, {}]}]),
     native("vector", [{"value": ["bad_time", "5"]}]), native("scalar", [100]),

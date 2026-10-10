@@ -143,27 +143,27 @@ CASES = {
 }
 
 EXPECTED_DIGESTS = {
-    "DiagnosisStageNode-False-False": "af59032bd28138ab460de297c2940edee98a178befe969273cefcd0c1d766691",
-    "DiagnosisStageNode-False-True": "f7fbbb73dc714a9d48acdcbf9282000dfefb99e13acc4dca7619eaf0d3e6a604",
-    "DiagnosisStageNode-True-False": "55dced49c53f94a23693468140e948aab9e074e806453947d6a64d5b84b2f400",
-    "DiagnosisStageNode-True-True": "0030722e43d55473e77999ec6e9673c4505a7ef105f0af904388b5744fb3a110",
-    "DiagnosisEvidenceNode-False-False": "87ac57cae2b9caab18eb3589c38df5b870f94a57b7b4922a5d5908b891b7da2e",
-    "DiagnosisEvidenceNode-False-True": "2a43ab2b96b827eeb2d51cdda788a2a97c1237a9cf92dd06b0a4066b858259e8",
-    "DiagnosisEvidenceNode-True-False": "a7d3cda7b55b39d3af453f9fd84030d0d220b8b2af481cd8447986bc85095b1d",
-    "DiagnosisEvidenceNode-True-True": "81eeeb9d9aea88ba9ff24aa759cc29d605cde7245f09a74d1bcf114ca66a9876",
-    "DiagnosisRootCauseNode-False-False": "6a9d600ca9395e3f0f7f0a64d654514412879e5ab869a2c3ac6402d4df1ac9d3",
-    "DiagnosisRootCauseNode-False-True": "6a9d600ca9395e3f0f7f0a64d654514412879e5ab869a2c3ac6402d4df1ac9d3",
-    "DiagnosisRootCauseNode-True-False": "ea7440388988c0e18f124eb0638deb51fcd64766946dfb907a16868da8f2e623",
-    "DiagnosisRootCauseNode-True-True": "ea7440388988c0e18f124eb0638deb51fcd64766946dfb907a16868da8f2e623",
+    "DiagnosisStageNode-False-False": "410fa92200a14c7b50ccb53dec06bfcd1554b5460e74864e21d75c9eab703ee5",
+    "DiagnosisStageNode-False-True": "6bffb8884298f39abe0e88a37b5d8e457a32c822d5a842a9358ebe00f23e7f2f",
+    "DiagnosisStageNode-True-False": "8034d178eb5bc9eb76a8644ab02db557c38d47d1bf788ca586a590aac2babead",
+    "DiagnosisStageNode-True-True": "57210b9949f1f0202e5d7e66febc55cbb70b53d0ba863e0c8a311b69d2403a37",
+    "DiagnosisEvidenceNode-False-False": "45a4c7f6ae091576f49654466653bcf0b34a436a69a1dd8d606df2776efc059e",
+    "DiagnosisEvidenceNode-False-True": "13ebb6a298f3fc8bd968676605cd4e14bdf950e8ce468e63952d91c588437817",
+    "DiagnosisEvidenceNode-True-False": "5b605e87799116b58dc29a71358a46e971d314190ebf901d8cf123b2f6499bf4",
+    "DiagnosisEvidenceNode-True-True": "447e4c242d0e8b6ebb037d62e18883edc9e47e7d1dbd9b4c7914cb4d948d249f",
+    "DiagnosisRootCauseNode-False-False": "ae431beafd2af5dfc8a2034f3c62dbe5d90b768f6cc81cc79f0658c728994056",
+    "DiagnosisRootCauseNode-False-True": "ae431beafd2af5dfc8a2034f3c62dbe5d90b768f6cc81cc79f0658c728994056",
+    "DiagnosisRootCauseNode-True-False": "1a28a68898b34ce75ff3d460590de1af7fa0bb0d9b3dda51686989c100c1e486",
+    "DiagnosisRootCauseNode-True-True": "1a28a68898b34ce75ff3d460590de1af7fa0bb0d9b3dda51686989c100c1e486",
     "focused-query-False": "870561bee4aa85c3c0371116af3e58b6cad46c7fba6ad7acd0e4245c4065be13",
     "focused-query-True": "870561bee4aa85c3c0371116af3e58b6cad46c7fba6ad7acd0e4245c4065be13",
     "focused-explain-False": "107d2504391ad261c5e65510f7c964998dc5f00e0242bcf944b3947d9aa45c8a",
     "focused-explain-True": "107d2504391ad261c5e65510f7c964998dc5f00e0242bcf944b3947d9aa45c8a",
-    # Query guidance intentionally updated; deep/focused snapshots stay unchanged.
-    "query-False-query": "394bbc097f7c7c3ee706f857a45cc7f418d7da3ed840d8fd708a3d070945a845",
-    "query-False-operate": "0e4496fb827fe1d2531c26669c0109f219ed09d785d6b648d63c13c4ca618fdf",
-    "query-True-query": "350ddfd07103a8a836d9a98a2521d8c5b8beec5d3d3cde6a8fe471335a6164fc",
-    "query-True-operate": "f9dfc5018270b850ac50e6e12b0e9216fa172ecea97b635d0f211b3c5c0073b3",
+    # Metric guidance intentionally updated in query/deep; focused stays unchanged.
+    "query-False-query": "91655d35862d829761f7f1edc1f3d163bb1a83d1b1bc6e1091c1a3a059e1c967",
+    "query-False-operate": "bdc102f83401599602fc55716b19d3c90cfd292463956f6d2736207928305d77",
+    "query-True-query": "6cc32df21cc97aaed6dd5bcbb1dcbcde3dcb3eaead3500c112e31e949a4940d2",
+    "query-True-operate": "1702de940192615c3c7f056da46c8dee5e8efff8446c4b73eae326a324d5fe6e",
 }
 
 
