@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from app.core.context.archive import ContextArchive
+from app.core.context.handoff import protected_handoff, handoff_from_messages
 from app.core.context.budget import count_tokens
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT as SUMMARY_PROMPT
 from app.core.prompts import WORKING_CONTEXT_SUMMARY_PREFIX
@@ -90,6 +91,7 @@ async def compact_working_material(model, material, progress=None, *, window=Non
                                       window=window, sections=sections)
     return {**{k: material[k] for k in ("question", "original_question", "request_contract", "original_request_contract", "request_time_utc",
                                       "execution_incomplete", "diagnosis_target", "parallel_inventory", "evidence_receipts") if k in material},
+            "protected_handoff": protected_handoff(material),
             "working_summary": summary, "recent_interactions": [m for group in recent for m in group],
             "observations": []}
 
@@ -260,8 +262,12 @@ class WorkingContextMiddleware(AgentMiddleware):
                                           history, self.emit, window=window, sections=sections, stats=stats)
         # Keep provenance outside model-written text as well as in the snapshot.
         summary += f"\n压缩前完整工作历史归档：{source_ref}"
+        protected = handoff_from_messages(messages)
         replacement = [HumanMessage(content=self.question), HumanMessage(
             content=WORKING_CONTEXT_SUMMARY_PREFIX + summary), *retained]
+        if protected:
+            replacement.insert(1, HumanMessage(content=json.dumps(
+                {"protected_handoff": protected}, ensure_ascii=False)))
         try:
             _, post_budget = self.probe(replacement)
         except Exception:
@@ -274,7 +280,7 @@ class WorkingContextMiddleware(AgentMiddleware):
             "summarized_messages": len(older), "retained_messages": len(retained),
             "summary_calls": stats.get("calls", 0),
         })
-        self.emit(type="context_compacted", working_summary=summary,
+        self.emit(type="context_compacted", working_summary=summary, protected_handoff=protected,
                   source_ref=source_ref, original_messages=len(messages), replacement_messages=len(replacement),
                   retained_messages=[compact_message(m) for m in retained])
         return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *replacement]}

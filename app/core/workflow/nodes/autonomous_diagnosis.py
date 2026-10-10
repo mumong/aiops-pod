@@ -67,6 +67,7 @@ class DiagnosisStageNode(QueryCollectNode):
                 lambda **event: self.ai_call._push(self._event_queue, self.node_id, events, **event),
             ))
             events.append({"type": "context_compacted", "working_summary": compact["working_summary"],
+                           "protected_handoff": compact.get("protected_handoff", {}),
                            "retained_messages": compact["recent_interactions"]})
             self._archive_node_input({"before_compaction": material, "after_compaction": compact})
             response, stage_events = call(compact)

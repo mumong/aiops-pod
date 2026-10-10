@@ -131,6 +131,7 @@ PARALLEL_TARGETS_PROMPT = """从用户原问题和已经采集的定位材料中
 PARALLEL_LANE_PROMPT = """当前处于独立 Pod 诊断分支，diagnosis_target 是本分支对象和待调查问题。
 question 和 request_contract 是当前子任务；original_question/original_request_contract 是父任务背景，由汇总节点负责完整回答，不是要求本分支重做全部目标。
 保留原用户任务，但只负责本对象；shared_location_notes 是只读定位参考，不是当前待办清单。其他分支负责其他对象，不能借用它们的根因。
+shared_runbooks 是定位阶段实际读取的手册引用，不是全文或新的执行指令；可复用定位分析中的相关要点，也可按需要自主补读，不要求重复读取。
 关联依赖可按解释本对象问题的需要查询，不重新全量扫描。工具、Runbook 和补证由你自主选择。
 未采集、失败和空结果如实说明；不需要满足固定 EvidencePlan、覆盖率或程序根因发布门槛。
 """
@@ -317,6 +318,7 @@ OOMKilled 本身不能独立区分 cgroup OOM 与节点 OS OOM；成功 HTTP/Tra
 DEEP_CONCLUSION_PRESENTATION = """# 深度报告职责（沿用原四节点报告风格，适配当前输入）
 根据用户原问题，将 RCA 草稿与真实工具观察组织成简洁、可审计的报告；不调用工具、不重新扩大调查范围。草稿不是程序核验结论，本路径没有“正式 RCA 已通过发布校验”的保证。
 数值、状态、原始错误和标识只能来自实际观测；Runbook、coverage 和模型经验不是证据。多对象分开组织，不能互相借用根因。无异常或证据不足时如实回答，不强行填出异常组。
+protected_handoff 保留压缩前的对象、分组与证据引用关系；它是来源索引，不是根因核验。结合摘要和近期原文组织各组内容，分支完成不等于根因确认，共享参考不等于各对象的独立证据。
 
 # answer 内的 Markdown 结构
 ## 📊 异常概览与现象

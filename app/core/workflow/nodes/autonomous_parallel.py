@@ -113,6 +113,14 @@ class AutonomousParallelNode(WorkflowNode):
         local["request_contract"] = {**(state.get("request_contract") or {}), "scope": "pod",
                                      "namespaces": [entity["namespace"]], "pod_names": [entity["name"]]}
         local["shared_location_notes"] = state.get("query_draft", "")
+        local["shared_runbooks"] = [
+            {"runbook_id": (e.get("tool_args") or {}).get("runbook_id"),
+             "raw_ref": e["raw_ref"], "status": e.get("status"), "scope": "shared"}
+            for e in state.get("thinking_events") or []
+            if e.get("type") == "tool_result" and e.get("tool_name") == "fetch_runbook"
+            and e.get("raw_ref") and e.get("status") == "success"
+            and e.get("semantic_success") is not False
+        ]
         local["query_draft"] = ""
         local["autonomous_groups"] = []
         local["autonomous_group_results"] = []

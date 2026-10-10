@@ -1,6 +1,7 @@
 """Pure projections for shared evidence and the latest working context."""
 
 from datetime import datetime, timezone
+from app.core.context.handoff import shared_runbook_projection, project_shared_messages
 
 
 def evidence_receipts(events):
@@ -53,6 +54,8 @@ def build_working_material(state):
         ),
         -1,
     )
+    shared = state.get("shared_runbooks") or []
+    shared_refs = {item["raw_ref"] for item in shared if item.get("raw_ref")}
     return {
         "question": state.get("question", "")
         if state.get("diagnosis_target")
@@ -60,6 +63,9 @@ def build_working_material(state):
         "original_question": state.get("original_question") or state.get("question", ""),
         "original_request_contract": state.get("original_request_contract"),
         "shared_location_notes": state.get("shared_location_notes"),
+        "shared_runbooks": shared,
+        "protected_handoff": events[last_compaction].get("protected_handoff", {})
+        if last_compaction >= 0 else {},
         "request_contract": state.get("request_contract"),
         "diagnosis_target": state.get("diagnosis_target"),
         "parallel_inventory": state.get("autonomous_groups") or [],
@@ -71,7 +77,7 @@ def build_working_material(state):
         "working_summary": events[last_compaction].get("working_summary")
         if last_compaction >= 0
         else None,
-        "recent_interactions": events[last_compaction].get("retained_messages", [])
+        "recent_interactions": project_shared_messages(events[last_compaction].get("retained_messages", []), shared_refs)
         if last_compaction >= 0
         else [],
         "session_history": state.get("query_session_context") if last_compaction < 0 else None,
@@ -83,7 +89,7 @@ def build_working_material(state):
             if event.get("type") == "execution_incomplete"
         ],
         "observations": [
-            {
+            shared_runbook_projection({
                 key: event.get(key)
                 for key in (
                     "tool_name",
@@ -93,8 +99,9 @@ def build_working_material(state):
                     "result",
                     "raw_ref",
                     "structured_ref",
+                    "timestamp",
                 )
-            }
+            }, shared_refs)
             for event in events[last_compaction + 1 :]
             if event.get("type") == "tool_result"
         ],
