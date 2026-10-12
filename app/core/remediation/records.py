@@ -160,6 +160,7 @@ def diagnosis_payload(state, *, evidence_chars=64000):
     groups = [{"group_id": g.get("group_id"), "target": g.get("target"),
                "status": g.get("status"), "analysis": (g.get("material") or {}).get("analysis_draft"),
                "execution_incomplete": (g.get("material") or {}).get("execution_incomplete", []),
+               "diagnosis_handoff": deepcopy(((g.get("material") or {}).get("protected_handoff") or {}).get("diagnosis_handoff")),
                "evidence": [], "omitted_results": 0}
               for g in state.get("autonomous_group_results") or []]
     by_id = {g["group_id"]: g for g in groups}
@@ -199,6 +200,7 @@ def diagnosis_payload(state, *, evidence_chars=64000):
                 bucket["omitted_results"] += 1
             bucket["evidence"].append(receipt)
     return {"question": state.get("original_question") or state.get("question"),
+            "diagnosis_handoff": deepcopy(state.get("diagnosis_handoff")),
             "request_contract": state.get("request_contract"),
             "report": state.get("conclusion"), "groups": groups, "shared_evidence": shared,
             "scope_note": "历史诊断及采样，不代表当前状态；摘录可能不完整，可按原文引用自主补读。",

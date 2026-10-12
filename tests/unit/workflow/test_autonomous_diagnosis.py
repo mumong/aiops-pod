@@ -68,7 +68,11 @@ def test_model_routes_scoped_task_and_original_question_survives_every_stage(rou
                 assert ('证据表至少分别列出' in prompt) == (route == 'full_diagnosis')
                 return SimpleNamespace(result=json.dumps({'intent': question, 'scope': 'xnet/nginx',
                     'status': 'partial', 'answer': 'OOMKilled；上游机制待核实', 'missing': ['机制']})), [observation] if _node.node_id == 'query_collect' else []
-            return SimpleNamespace(result='分析草稿，不是事实'), [observation] if _node.node_id in {'layer', 'query_collect'} else []
+            if _node.node_id == 'layer':
+                assert kwargs['response_schema'].__name__ == 'LocationOutput'
+                return SimpleNamespace(result=json.dumps({'analysis': '分析草稿，不是事实', 'handoff': {'targets': []}})), [observation]
+            assert 'response_schema' not in kwargs
+            return SimpleNamespace(result='分析草稿，不是事实'), []
         node._call_llm = call
     result = graph.invoke({'question': '不得覆盖的旧 question', 'original_question': question,
                            'query_session_context': history})
@@ -83,7 +87,7 @@ def test_deep_handoff_uses_replaced_working_context_not_old_observations():
     seen = {}
     def call(text, *args, **kwargs):
         seen.update(json.loads(text))
-        return SimpleNamespace(result='继续分析'), []
+        return SimpleNamespace(result=json.dumps({'summary': '继续分析', 'targets': []})), []
     node._call_llm = call
     node.execute({'original_question': '查 xnet', 'thinking_events': [
         {'type': 'tool_result', 'result': 'OLD_HUGE'},

@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 CORE_VERSION = 'pod-lifecycle-core.v1'
 
 
+def lightweight_handoff(material):
+    protected = material.get('protected_handoff') or {}
+    return (protected.get('context_policy') == 'identity.v1'
+            or (protected.get('diagnosis_handoff') or {}).get('contract_version') == 'location-handoff.v1')
+
+
 def core_notice(protected):
     core = protected.get('lifecycle_core') or {}
     if not core:
@@ -124,6 +130,10 @@ def observation_reference(observation):
 
 def material_without_core(material):
     """Projection used only alongside a separately preserved core contract."""
+    if lightweight_handoff(material):
+        # Tool records remain ordinary, summarizable evidence. Never replace
+        # them with a pointer to a lifecycle core that is no longer protected.
+        return material
     result = dict(material)
     if 'protected_handoff' in result:
         result['protected_handoff'] = {k: v for k, v in result['protected_handoff'].items()
@@ -139,6 +149,10 @@ def material_without_core(material):
 
 
 def messages_without_core(messages):
+    for message in messages:
+        data = message if isinstance(message, dict) else message.model_dump()
+        if lightweight_handoff(_object(data.get('content'))):
+            return messages
     result = []
     for message in messages:
         data = message if isinstance(message, dict) else message.model_dump()

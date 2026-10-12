@@ -44,4 +44,5 @@ def scoped_diagnosis(record, group_id):
                         "groups": [group], "shared_evidence": {"evidence": shared},
                         "source_diagnosis_run_id": record.get("run_id"),
                         "group_id": group_id,
+                        "diagnosis_handoff": deepcopy(group.get("diagnosis_handoff")),
                         "scope_note": "仅本组历史诊断和证据；公共证据按引用自主补读，其他组未投递。"}}

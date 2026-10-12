@@ -992,6 +992,20 @@ class AICall:
                       node_id or "?", max_steps, len(tools or []), len(system_prompt), expect_json)
 
         # 无工具且不需要 agent structured_response 时直接调用 call_simple。
+        if not tools and response_schema is not None and max_steps <= 0:
+            # Tool-free stages have max_steps=0: use one native structured
+            # request, not an agent loop with a zero recursion/time budget.
+            parsed, _ = self.call_structured(
+                system_prompt, question, response_schema, node_id=node_id,
+                run_id=run_id, max_tokens=6000,
+            )
+            if parsed is None:
+                self._push(stream_queue, node_id, thinking_events,
+                           type="execution_incomplete", reason="structured_output_unavailable")
+            content = parsed.model_dump_json() if parsed is not None else ""
+            return AICallResult(result=content, iterations=1,
+                                duration_ms=(time.time() - call_start) * 1000), thinking_events
+
         if not tools and response_schema is None:
             content = self.call_simple(
                 system_prompt,

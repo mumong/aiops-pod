@@ -1047,6 +1047,7 @@ class WorkflowExecutor:
             return {"question": state.get("original_question") or state.get("question"),
                     "autonomous_groups": state.get("autonomous_groups"),
                     "request_contract": state.get("request_contract"),
+                    "diagnosis_handoff": state.get("diagnosis_handoff"),
                     "analysis_draft": state.get("query_draft")}
 
         if node_name == "request_router":
@@ -1276,6 +1277,9 @@ class WorkflowExecutor:
     def _format_handoff_summary(self, node_name: str, state: WorkflowState) -> str:
         """格式化节点间传递的完整数据（不截断，供审查）"""
         import json as _json
+
+        if state.get("diagnosis_handoff") is not None and node_name in {"layer", "evidence", "rca"}:
+            return _json.dumps(state["diagnosis_handoff"], ensure_ascii=False)
 
         if state.get("query_draft") is not None and node_name in {"layer", "evidence", "rca"}:
             return (f"用户问题：{state.get('original_question') or state.get('question', '')}\n"

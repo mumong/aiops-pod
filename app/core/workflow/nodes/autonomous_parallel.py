@@ -1,34 +1,18 @@
 """Bounded independent Pod lanes, without legacy diagnostic publication gates."""
-import asyncio
 import copy
-import json
 import os
 import time
 from app.core.workflow.group_runner import iter_group_results
 
-from pydantic import BaseModel, Field
-
-from app.core.aicall.client import StructuredContextBudgetError
-from app.core.aicall.working_context import compact_working_material
+from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
 from app.core.context.archive import ContextArchive
 from app.core.prompts import (
-    PARALLEL_TARGETS_PROMPT,
     PARALLEL_LANE_QUESTION_TEMPLATE,
     PARALLEL_FANIN_INSTRUCTION,
 )
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.parallel_evidence import _ScopedParallelEventQueue
 from app.core.workflow.nodes.query_answer import build_working_material
-
-
-class PodTarget(BaseModel):
-    namespace: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    question: str = Field(description="该对象需要调查的问题，不是已经确认的根因")
-
-
-class PodTargets(BaseModel):
-    targets: list[PodTarget] = Field(default_factory=list)
 
 
 class LaneQueue(_ScopedParallelEventQueue):
@@ -49,29 +33,20 @@ class LaneQueue(_ScopedParallelEventQueue):
 def plan_groups(node, state):
     material = build_working_material(state)
     try:
-        def classify(payload):
-            return node.ai_call.call_structured(
-                system_prompt=PARALLEL_TARGETS_PROMPT,
-                question=json.dumps(payload, ensure_ascii=False, default=str), schema=PodTargets,
-                node_id="diagnosis_targets", run_id=getattr(node, "current_run_id", ""), max_tokens=4000)
-        try:
-            plan, _ = classify(material)
-        except StructuredContextBudgetError as exc:
-            if "working_context_compaction_required" not in str(exc):
-                raise
-            model = node.ai_call._create_chat_model(node_id="context_compaction", disable_streaming=True).bind(max_tokens=3000)
-            material = asyncio.run(compact_working_material(model, material,
-                lambda **e: node.ai_call._push(node._event_queue, node.node_id, [], **e)))
-            plan, _ = classify(material)
-        plan = PodTargets.model_validate(plan)
-        groups, seen = [], set()
-        for target in plan.targets:
-            key = (target.namespace, target.name)
-            if key in seen:
-                continue
-            seen.add(key)
-            groups.append({"group_id": f"g{len(groups)+1}", "question": target.question,
-                           "entities": [{"kind": "Pod", "namespace": target.namespace, "name": target.name}]})
+        handoff = state.get("diagnosis_handoff")
+        if handoff is None:
+            return {"autonomous_groups": []}  # historical input stays serial; no re-extraction
+        schema = LocationHandoff if handoff.get("contract_version") == "location-handoff.v1" else DiagnosisHandoff
+        plan = schema.model_validate(handoff)
+        targets = [t for t in plan.targets if t.status == "investigate"]
+        # Existing lane runtime scopes Pod queries. Other resource kinds retain
+        # the entire contract in the serial workflow rather than being dropped.
+        groups = []
+        if all(t.entity.kind == "Pod" and t.entity.namespace for t in targets):
+            for target in targets:
+                groups.append({"group_id": f"g{len(groups)+1}", "target_id": target.target_id,
+                               "question": "；".join(getattr(target, "next_questions", [])) or target.issue,
+                               "entities": [target.entity.model_dump()]})
         if getattr(node, "current_run_id", ""):
             ContextArchive(run_id=node.current_run_id).write_json("parallel/plan.json", {"input": material, "groups": groups})
         return {"autonomous_groups": groups}
@@ -104,6 +79,8 @@ class AutonomousParallelNode(WorkflowNode):
             raise RuntimeError("无法创建独立诊断客户端")
         local = copy.deepcopy(state)
         local["diagnosis_target"] = group
+        if state.get("diagnosis_handoff") and group.get("target_id"):
+            local["diagnosis_handoff"] = scoped_handoff(state["diagnosis_handoff"], group["target_id"])
         entity = group["entities"][0]
         local["original_question"] = state.get("original_question") or state["question"]
         local["question"] = PARALLEL_LANE_QUESTION_TEMPLATE.format(
@@ -171,6 +148,10 @@ class AutonomousParallelNode(WorkflowNode):
             else:
                 result = {"group_id": gid, "target": group, "status": "partial", "error": str(error)}
                 lane_events = [{"type": "execution_incomplete", "reason": f"{gid}: {error}"}]
+                if state.get("diagnosis_handoff") and group.get("target_id"):
+                    retained = scoped_handoff(state["diagnosis_handoff"], group["target_id"])
+                    result["material"] = {"protected_handoff": {"diagnosis_handoff": retained},
+                                          "execution_incomplete": [str(error)]}
             results[gid] = result
             result["completed_at"] = time.time()
             events.extend({**e, "lane_id": gid} for e in lane_events)

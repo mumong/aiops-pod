@@ -13,6 +13,8 @@ from app.core.prompts import (
 from app.core.workflow.nodes.query_answer import (
     QueryCollectNode, build_working_material, _configure_query_runtime,
 )
+from app.core.workflow.diagnosis_contract import LocationOutput
+from app.core.prompts import DIAGNOSIS_HANDOFF_GUIDANCE
 
 
 class DiagnosisStageNode(QueryCollectNode):
@@ -35,9 +37,10 @@ class DiagnosisStageNode(QueryCollectNode):
             # History is already in material; do not insert it twice.
             self.ai_call.query_session_context = {}
             self.ai_call.working_context_original_question = state.get("question", "") if state.get("diagnosis_target") else state.get("original_question") or state.get("question", "")
-        material = build_working_material(state)
+        material = build_working_material({**state, "diagnosis_context_policy": "identity.v1"})
         material["request_contract"] = state.get("request_contract")
-        prompt = self.stage_prompt
+        locating = self.node_id == "layer"
+        prompt = self.stage_prompt + ("\n" + DIAGNOSIS_HANDOFF_GUIDANCE if locating else "")
         if state.get("diagnosis_target"):
             from app.core.prompts import PARALLEL_LANE_PROMPT
             prompt = PARALLEL_LANE_PROMPT + PARALLEL_LANE_TASK_PREFIX + material["question"] + "\n" + prompt
@@ -50,6 +53,7 @@ class DiagnosisStageNode(QueryCollectNode):
             return self._call_llm(
                 json.dumps(payload, ensure_ascii=False, default=str), prompt,
                 force_no_tools=not self.collect, skip_remediation_policy=True,
+                **({"expect_json": True, "response_schema": LocationOutput} if locating else {}),
                 blocked_tool_names={t.name for t in getattr(self, "tools", []) if t.name not in self.READ_TOOLS},
             )
 
@@ -71,8 +75,23 @@ class DiagnosisStageNode(QueryCollectNode):
                            "retained_messages": compact["recent_interactions"]})
             self._archive_node_input({"before_compaction": material, "after_compaction": compact})
             response, stage_events = call(compact)
-        draft = response.result or ""
-        output = {"query_draft": draft, "thinking_events": [*events, *stage_events]}
+        raw = response.result or ""
+        combined_events = [*events, *stage_events]
+        draft = raw
+        output = {"diagnosis_context_policy": "identity.v1"}
+        if locating:
+            try:
+                parsed = LocationOutput.model_validate_json(raw)
+                draft = parsed.analysis
+                output["diagnosis_handoff"] = parsed.handoff.model_dump()
+            except (ValueError, TypeError) as exc:
+                # Preserve prose/evidence and explicitly mark incomplete; no
+                # second model extraction or invented targets.
+                reason = f"定位结构化交接无效：{exc}"
+                output["diagnosis_handoff"] = {"contract_version": "location-handoff.v1",
+                    "targets": [], "coverage": "partial", "coverage_note": "定位交接无效，参见未完成事项"}
+                combined_events.append({"type": "execution_incomplete", "node": self.node_id, "reason": reason})
+        output.update({"query_draft": draft, "thinking_events": combined_events})
         # These fields are only stage prose, not verified facts or forced classifications.
         output[{"layer": "layer_analysis", "evidence": "evidence_analysis", "rca": "rca_analysis"}[self.node_id]] = draft
         if self.node_id == "layer" and getattr(self, "autonomous_parallel_enabled", False):

@@ -2,7 +2,7 @@ import json
 import threading
 from types import SimpleNamespace
 
-from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode, PodTargets, PodTarget, plan_groups
+from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode, plan_groups
 from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode, DiagnosisRootCauseNode
 from app.core.workflow.nodes.query_answer import build_working_material
 
@@ -37,12 +37,12 @@ def test_three_lanes_overlap_isolate_clients_and_keep_failed_lane(tmp_path, monk
             barrier.wait(timeout=5)  # Cannot pass if the implementation is serial.
             if gid == 'g2':
                 raise RuntimeError('tool/provider failure')
-            return SimpleNamespace(result=f'{gid} evidence'), [
+            return SimpleNamespace(result=json.dumps({'summary': f'{gid} evidence', 'targets': []})), [
                 {'type': 'context_compacted', 'working_summary': gid, 'retained_messages': []},
                 {'type': 'tool_result', 'tool_name': 'kubectl_describe', 'result': gid, 'raw_ref': f'/{gid}/raw'}]
         assert material['working_summary'] == gid
         assert kw['force_no_tools']
-        return SimpleNamespace(result=f'{gid} RCA uncertain'), []
+        return SimpleNamespace(result=json.dumps({'summary': f'{gid} RCA uncertain', 'targets': []})), []
     monkeypatch.setattr(DiagnosisEvidenceNode, '_call_llm', call)
     monkeypatch.setattr(DiagnosisRootCauseNode, '_call_llm', call)
     state = {'question': '检查这三个 Pod 的根因', 'autonomous_groups': groups(),
@@ -61,12 +61,10 @@ def test_three_lanes_overlap_isolate_clients_and_keep_failed_lane(tmp_path, monk
     assert (tmp_path/'parallel-test/parallel/results.json').exists()
 
 
-def test_planner_deduplicates_targets_and_failure_continues_serially():
-    plan = PodTargets(targets=[PodTarget(namespace='demo', name='pod', question='重启')]*2)
-    node = SimpleNamespace(ai_call=SimpleNamespace(call_structured=lambda **kw: (plan,'')))
-    assert len(plan_groups(node, {'question':'q'})['autonomous_groups']) == 1
-    node.ai_call.call_structured = lambda **kw: (None, 'bad')
-    result = plan_groups(node, {'question':'q'})
+def test_invalid_contract_continues_serially_without_model_reextraction():
+    node = SimpleNamespace(ai_call=SimpleNamespace(call_structured=lambda **kw: (_ for _ in ()).throw(AssertionError('no model'))))
+    assert plan_groups(node, {'question':'q'})['autonomous_groups'] == []
+    result = plan_groups(node, {'question':'q', 'diagnosis_handoff': {'targets': 'invalid'}})
     assert result['autonomous_groups'] == []
     assert result['warnings']
 

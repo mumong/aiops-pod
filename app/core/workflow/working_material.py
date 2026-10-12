@@ -58,7 +58,14 @@ def build_working_material(state):
     shared_refs = {item["raw_ref"] for item in shared if item.get("raw_ref")}
     from app.core.context.lifecycle_core import core_from_material, observation_reference, material_without_core
     protected = dict(events[last_compaction].get('protected_handoff') or {}) if last_compaction >= 0 else {}
-    core = core_from_material({'protected_handoff': protected,
+    if state.get('diagnosis_handoff') is not None:
+        protected['diagnosis_handoff'] = state['diagnosis_handoff']
+    light = (state.get('diagnosis_context_policy') == 'identity.v1'
+             or (state.get('diagnosis_handoff') or {}).get('contract_version') == 'location-handoff.v1')
+    legacy_core = protected.pop('lifecycle_core', None) if light else None
+    if light:
+        protected['context_policy'] = 'identity.v1'
+    core = {} if light else core_from_material({'protected_handoff': protected,
                               'observations': [e for e in events if e.get('type') == 'tool_result'],
                               'parallel_results': state.get('autonomous_group_results') or []})
     if core:
@@ -72,6 +79,7 @@ def build_working_material(state):
         "shared_location_notes": state.get("shared_location_notes"),
         "shared_runbooks": shared,
         "protected_handoff": protected,
+        **({"previous_lifecycle_context": legacy_core} if legacy_core else {}),
         "request_contract": state.get("request_contract"),
         "diagnosis_target": state.get("diagnosis_target"),
         "parallel_inventory": state.get("autonomous_groups") or [],
@@ -96,7 +104,7 @@ def build_working_material(state):
             if event.get("type") == "execution_incomplete"
         ],
         "observations": [
-            shared_runbook_projection(observation_reference({
+            shared_runbook_projection((lambda o: o if light else observation_reference(o))({
                 key: event.get(key)
                 for key in (
                     "tool_name",

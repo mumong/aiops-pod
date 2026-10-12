@@ -9,8 +9,11 @@ import json
 
 def protected_handoff(material):
     protected = copy.deepcopy(material.get("protected_handoff") or {})
-    from app.core.context.lifecycle_core import core_from_material
-    core = core_from_material(material)
+    from app.core.context.lifecycle_core import core_from_material, lightweight_handoff
+    light = lightweight_handoff(material)
+    if light:
+        protected.pop('lifecycle_core', None)
+    core = {} if light else core_from_material(material)
     if core:
         protected['lifecycle_core'] = core
     acquired = acquisition_refs(material)
@@ -29,6 +32,7 @@ def protected_handoff(material):
             ) if k in lane},
             "evidence_receipts": receipts,
             "execution_incomplete": copy.deepcopy(data.get("execution_incomplete") or []),
+            "diagnosis_handoff": copy.deepcopy((data.get("protected_handoff") or {}).get("diagnosis_handoff")),
         })
     if lanes:
         protected["groups"] = lanes
@@ -87,7 +91,8 @@ def handoff_from_messages(messages):
         if isinstance(payload, dict):
             result.update(protected_handoff(payload))
     from app.core.context.lifecycle_core import core_from_messages
-    core = core_from_messages(messages)
+    from app.core.context.lifecycle_core import lightweight_handoff
+    core = {} if lightweight_handoff({'protected_handoff': result}) else core_from_messages(messages)
     if core:
         result['lifecycle_core'] = core
     return result

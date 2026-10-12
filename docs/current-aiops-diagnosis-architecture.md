@@ -36,7 +36,9 @@ MCP 查询和前端实现在独立仓库，不属于本仓库运行代码。接�
 
 路由历史包含用户问题、助手回答、范围与观测时间。助手回答用于识别上一轮查询后新发现的对象（例如“刚才那个异常 Pod”），不被当作当前状态证据；原始工具正文不重复塞入路由。超预算走共享压缩，不预先删掉回答。
 
-深度节点实现见 [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py)，自主分组实现见 [autonomous_parallel.py](../app/core/workflow/nodes/autonomous_parallel.py)。定位后由模型从实际材料选择 Pod，每组独立客户端、工作上下文和归档；默认最多3组同时执行，更多组排队，环境变量 `AIOPS_AUTONOMOUS_PARALLEL_WORKERS` 可配置1–8。不进入旧节点的程序基线、强制三维计划、提前停止或因果发布门槛；不能直接沿用旧测试准确率。
+深度节点实现见 [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py)，分组实现见 [autonomous_parallel.py](../app/core/workflow/nodes/autonomous_parallel.py)。定位 Agent 直接输出结构化目标；代码分配组，不再二次调用模型从文字提取对象。每组独立客户端、工作上下文和归档；代码默认最多3组同时执行，部署配置为5，更多组排队，`AIOPS_AUTONOMOUS_PARALLEL_WORKERS` 可配置1–8。不进入旧节点的程序基线、强制三维计划、提前停止或因果发布门槛。
+
+定位使用 [location-handoff.v1](structured-diagnosis-handoff-20261012.md)：可压缩的分析文字之外，只保护稳定目标、简短现象、处理状态和引用，分组直接读取清单。取证与 RCA 仍输出文字；生命周期明细与分析过程可以摘要，不再作为免压缩的全量保护数据。非 Pod 目标兼容单路诊断，不能因不适用 Pod 并发执行器而丢弃。
 
 分支 `question/request_contract` 是该 Pod 子任务，`original_question/original_request_contract` 保留完整父任务。共享定位记录是参考，不是要求每组重新检查全部对象。任一组失败保留已取得证据和失败原因，其他组继续；最终汇总包含每组结果和限制，不因未满足旧 RCA schema 丢弃整组。前端展示真实分组工具事件，多个模型的逐字片段不混排。
 
