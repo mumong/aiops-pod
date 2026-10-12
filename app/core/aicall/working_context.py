@@ -9,21 +9,69 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from app.core.context.archive import ContextArchive
 from app.core.context.handoff import protected_handoff, handoff_from_messages
+from app.core.context.lifecycle_core import material_without_core, messages_without_core, core_notice
 from app.core.context.budget import count_tokens
+from app.core.context.evidence_policy import EvidencePolicy
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT as SUMMARY_PROMPT
 from app.core.prompts import WORKING_CONTEXT_SUMMARY_PREFIX
 
 
-def compact_message(message):
+def compact_message(message, *, include_refs=False):
     """Keep semantic content and call linkage, not usage/provider telemetry."""
     data = message if isinstance(message, dict) else message.model_dump(exclude_none=True)
     result = {key: data[key] for key in ("type", "role", "content", "name", "tool_calls", "tool_call_id")
               if key in data}
     extras = data.get("additional_kwargs") or {}
     provenance = {key: extras[key] for key in ("aiops_deduplicated", "aiops_original_tool_call_id", "aiops_tool_error") if key in extras}
+    if include_refs:
+        for key in ("aiops_raw_ref", "aiops_semantic_success"):
+            if key in extras:
+                provenance[key] = extras[key]
+            elif key in (data.get("provenance") or {}):
+                provenance[key] = data["provenance"][key]
     if provenance:
         result["provenance"] = provenance
     return result
+
+
+def source_receipts(messages):
+    """Index source addresses, not facts; avoid a forced read of full history."""
+    calls, receipts = {}, {}
+
+    def material(payload):
+        if not isinstance(payload, dict):
+            return
+        for item in payload.get("observations") or []:
+            if isinstance(item, dict) and item.get("raw_ref"):
+                receipts[item["raw_ref"]] = {k: item.get(k) for k in
+                                             ("tool_name", "tool_args", "raw_ref", "semantic_success")}
+        scan(payload.get("recent_interactions") or [])
+        for lane in payload.get("parallel_results") or []:
+            if isinstance(lane, dict):
+                material(lane.get("material") or {})
+
+    def scan(items):
+        for message in items:
+            data = message if isinstance(message, dict) else message.model_dump(exclude_none=True)
+            calls.update({call.get("id"): call for call in data.get("tool_calls") or []})
+            extras = {**(data.get("provenance") or {}), **(data.get("additional_kwargs") or {})}
+            ref = extras.get("aiops_raw_ref")
+            if ref:
+                call = calls.get(data.get("tool_call_id"), {})
+                receipts[ref] = {"raw_ref": ref, "tool_name": data.get("name") or call.get("name"),
+                                 "tool_args": call.get("args", {}),
+                                 "semantic_success": extras.get("aiops_semantic_success")}
+            if data.get("type", data.get("role")) in {"human", "user"}:
+                content = data.get("content")
+                if isinstance(content, str) and content.lstrip().startswith("{"):
+                    try:
+                        payload = json.loads(content)
+                    except (ValueError, RecursionError):
+                        continue
+                    if isinstance(payload, dict) and "question" in payload:
+                        material(payload)
+    scan(messages)
+    return list(receipts.values())
 
 
 def message_groups(messages):
@@ -46,9 +94,11 @@ def message_groups(messages):
     return groups
 
 
-def partition_recent(groups, window):
+def partition_recent(groups, window, *, keep_tokens=None):
     """Shared atomic suffix policy for agents and inter-node material."""
     keep_budget = min(8000, int(window * 0.15))
+    if keep_tokens is not None:
+        keep_budget = min(keep_budget, keep_tokens)
     used, cut = 0, len(groups)
     for group in reversed(groups):
         cost = count_tokens(json.dumps([compact_message(m) for m in group], ensure_ascii=False))["tokens"]
@@ -66,10 +116,14 @@ async def compact_working_material(model, material, progress=None, *, window=Non
     atomic interaction. Do not concatenate independent lanes' message histories.
     """
     window = window or int(os.getenv("MODEL_CONTEXT_WINDOW", "32000"))
+    protected = protected_handoff(material)
+    material = material_without_core(material)
     groups = message_groups(material.get("recent_interactions") or [])
     groups += [[{"type": "human", "content": json.dumps({"tool_observation": item}, ensure_ascii=False, default=str)}]
                for item in material.get("observations") or []]
-    head = {k: v for k, v in material.items() if k not in {"recent_interactions", "observations", "evidence_receipts"}}
+    head = {k: v for k, v in material.items() if k not in {"recent_interactions", "observations", "evidence_receipts", "protected_handoff"}}
+    if core_notice(protected):
+        head['protected_facts_available'] = core_notice(protected)
     # Fan-in retains lane identity, including inside retained raw interactions.
     # Compaction in one worker must never act as a global message replacement.
     if material.get("parallel_results"):
@@ -91,7 +145,7 @@ async def compact_working_material(model, material, progress=None, *, window=Non
                                       window=window, sections=sections)
     return {**{k: material[k] for k in ("question", "original_question", "request_contract", "original_request_contract", "request_time_utc",
                                       "execution_incomplete", "diagnosis_target", "parallel_inventory", "evidence_receipts") if k in material},
-            "protected_handoff": protected_handoff(material),
+            "protected_handoff": protected,
             "working_summary": summary, "recent_interactions": [m for group in recent for m in group],
             "observations": []}
 
@@ -225,6 +279,38 @@ class WorkingContextMiddleware(AgentMiddleware):
         self.run_id, self.node_id, self.emit = run_id, node_id, emit
         self.sequence = 0
         self.response_format = response_format
+        self.evidence_policy = EvidencePolicy.from_env()
+
+    @staticmethod
+    def tool_history_tokens(messages):
+        """Recount active atomic interactions; no process-global/monotonic counter.
+
+        Includes explicit archive reads and call arguments. Historical summaries
+        and system prompts remain covered by the independent whole-request guard.
+        """
+        total = 0
+        for group in message_groups(messages):
+            items = [compact_message(m) for m in group]
+            if any(m.get("type", m.get("role")) == "tool" for m in items):
+                total += count_tokens(json.dumps(items, ensure_ascii=False))["tokens"]
+                continue
+            # Node handoffs carry observations inside one human message rather
+            # than ToolMessages. Count the explicit material contract as well;
+            # starting a new collection node must not reset inherited evidence.
+            for item in items:
+                content = item.get("content")
+                if not isinstance(content, str) or not content.lstrip().startswith("{"):
+                    continue
+                try:
+                    payload = json.loads(content)
+                except (ValueError, RecursionError):
+                    continue
+                if isinstance(payload, dict) and "question" in payload:
+                    evidence = {k: payload[k] for k in ("observations", "recent_interactions", "parallel_results")
+                                if payload.get(k)}
+                    if evidence:
+                        total += count_tokens(json.dumps(evidence, ensure_ascii=False))["tokens"]
+        return total
 
     def probe(self, messages):
         return self.client._guard_agent_model_request(ModelRequest(
@@ -236,9 +322,14 @@ class WorkingContextMiddleware(AgentMiddleware):
     async def abefore_model(self, state, runtime):
         from app.core.aicall.client import StructuredContextBudgetError
         messages = state["messages"]
+        trigger = "request_budget"
         try:
-            self.probe(messages)
-            return None
+            _, pre_budget = self.probe(messages)
+            window = int(pre_budget.get("context_window") or os.getenv("MODEL_CONTEXT_WINDOW", "32000"))
+            high, _ = self.evidence_policy.limits(window)
+            if not self.evidence_policy.enabled or self.tool_history_tokens(messages) <= high:
+                return None
+            trigger = "evidence_history_budget"
         except StructuredContextBudgetError as exc:
             if "working_context_compaction_required" not in str(exc):
                 raise
@@ -248,21 +339,35 @@ class WorkingContextMiddleware(AgentMiddleware):
         source = [self.client._serialize_agent_message(m) for m in messages]
         source_ref = archive.write_json(f"compactions/{self.node_id}-{self.sequence:03d}.before.json", source)
         window = int(pre_budget.get("context_window") or os.getenv("MODEL_CONTEXT_WINDOW", "32000"))
-        groups = message_groups(messages)
+        high, low = self.evidence_policy.limits(window)
+        protected = handoff_from_messages(messages)
+        groups = message_groups(messages_without_core(messages))
         # A bounded suffix preserves the newest complete interactions verbatim.
-        old_groups, recent_groups = partition_recent(groups[1:], window)
+        if self.evidence_policy.enabled:
+            old_groups, recent_groups = partition_recent(groups[1:], window, keep_tokens=low)
+        else:
+            old_groups, recent_groups = partition_recent(groups[1:], window)
         old_groups = groups[:1] + old_groups
         retained = [m for group in recent_groups for m in group]
         older = [m for group in old_groups for m in group]
-        sections = [json.dumps([compact_message(m) for m in group], ensure_ascii=False) + "\n"
+        sections = [json.dumps([compact_message(m, include_refs=self.evidence_policy.enabled) for m in group], ensure_ascii=False) + "\n"
                     for group in old_groups]
+        if core_notice(protected):
+            sections.insert(0, json.dumps({'protected_facts_available': core_notice(protected)}, ensure_ascii=False) + '\n')
         history = "".join(sections)
         stats = {}
+        self.emit(type="runtime_status", status="running", content=(
+            "累计工具证据达到工作预算，正在整理早期历史；近期完整交互与原文归档保留，完成后继续。"
+            if trigger == "evidence_history_budget" else "上下文达到预算，正在整理早期历史并保留近期完整交互。"))
         summary = await summarize_history(self.summary_model, self.question,
                                           history, self.emit, window=window, sections=sections, stats=stats)
         # Keep provenance outside model-written text as well as in the snapshot.
         summary += f"\n压缩前完整工作历史归档：{source_ref}"
-        protected = handoff_from_messages(messages)
+        if self.evidence_policy.enabled:
+            receipts = source_receipts(older)
+            if receipts:
+                refs_path = archive.write_json(f"compactions/{self.node_id}-{self.sequence:03d}.sources.json", receipts)
+                summary += f"\n原始工具结果来源目录（工具名、参数、raw_ref；可定向检索，无需遍历整段历史）：{refs_path}"
         replacement = [HumanMessage(content=self.question), HumanMessage(
             content=WORKING_CONTEXT_SUMMARY_PREFIX + summary), *retained]
         if protected:
@@ -270,6 +375,8 @@ class WorkingContextMiddleware(AgentMiddleware):
                 {"protected_handoff": protected}, ensure_ascii=False)))
         try:
             _, post_budget = self.probe(replacement)
+            if self.evidence_policy.enabled and self.tool_history_tokens(replacement) > low:
+                raise RuntimeError("整理后工具证据未降至保留预算，未替换原工作历史")
         except Exception:
             self.emit(type="runtime_status", status="error",
                       content="整理后的上下文仍未通过预算检查，未替换原工作历史。")
@@ -279,8 +386,11 @@ class WorkingContextMiddleware(AgentMiddleware):
             "pre_budget": pre_budget, "post_budget": post_budget,
             "summarized_messages": len(older), "retained_messages": len(retained),
             "summary_calls": stats.get("calls", 0),
+            "trigger": trigger,
+            "evidence_budget": {"enabled": self.evidence_policy.enabled,
+                                "high_tokens": high, "recent_tokens": low},
         })
         self.emit(type="context_compacted", working_summary=summary, protected_handoff=protected,
                   source_ref=source_ref, original_messages=len(messages), replacement_messages=len(replacement),
-                  retained_messages=[compact_message(m) for m in retained])
+                  retained_messages=[compact_message(m, include_refs=self.evidence_policy.enabled) for m in retained])
         return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *replacement]}

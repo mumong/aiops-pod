@@ -169,6 +169,27 @@ def test_executor_preserves_setup_error_before_worker_creation(monkeypatch):
     assert error_event["error"] == "event queue setup failed"
 
 
+def test_executor_sse_sanitizes_llm_disconnect_and_retains_log(monkeypatch, caplog):
+    import httpx
+    from openai import APIError
+    message = 'stream disconnected before completion: stream closed before response.completed'
+
+    class FailingNode(_DummyNode):
+        def set_event_queue(self, queue):
+            if queue is not None:
+                raise APIError(message, request=httpx.Request('POST', 'https://model.invalid'), body=None)
+
+    node = FailingNode('conclusion')
+    monkeypatch.setattr('app.core.workflow.executor.build_diagnosis_workflow',
+        lambda *args, **kwargs: (_DummyWorkflow([node]), [node]))
+    monkeypatch.setattr('app.core.workflow.executor.create_log_listener', lambda: _DummyLogListener())
+    events = list(WorkflowExecutor(holmes_service=_DummyHolmesService()).execute_stream('test'))
+    error = next(event for event in events if event['type'] == 'error')
+    assert 'LLM API 服务连接中断' in error['error']
+    assert 'stream disconnected' not in error['error']
+    assert message in caplog.text
+
+
 def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
     nodes = [_DummyNode("rca"), _DummyNode("conclusion")]
 

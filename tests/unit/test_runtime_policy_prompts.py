@@ -102,8 +102,6 @@ def test_final_conclusion_prompt_bytes_and_schema_order(monkeypatch, route):
     schema = query_answer.QueryAnswer
     if route == "full_diagnosis":
         expected += "\n" + prompts.DEEP_CONCLUSION_PRESENTATION
-        expected += "\n" + prompts.POD_REMEDIATION_PROMPT + CONCLUSION_CONSTRAINT
-        schema = RepairDraft
     expected += "\n输出 schema：\n" + json.dumps(schema.model_json_schema(), ensure_ascii=False)
     assert captured["system_prompt"].encode() == expected.encode()
     assert json.loads(captured["question"])["question"] == state["question"]

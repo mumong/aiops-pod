@@ -41,6 +41,16 @@ def _build_client(monkeypatch):
     return TestClient(app), fake_service
 
 
+def test_repair_source_identifier_is_forwarded_and_requires_session(monkeypatch):
+    client, service = _build_client(monkeypatch)
+    assert client.get('/ask', params={'q': 'repair', 'diagnosis_run_id': 'run1'}).status_code == 400
+    params = {'q': 'repair', 'diagnosis_run_id': 'run1', 'session_id': 'a'*32}
+    assert client.get('/ask', params=params).status_code == 200
+    assert service.stream_calls[-1]['workflow_overrides']['_diagnosis_run_id'] == 'run1'
+    assert client.get('/query', params={**params, 'plan_run_id': 'plan1'}).status_code == 400
+    assert client.get('/query', params={**params, 'diagnosis_run_id': '../escape'}).status_code == 400
+
+
 def test_query_session_cookie_isolation_and_validation(monkeypatch):
     client, service = _build_client(monkeypatch)
     params = {'q': 'pods', 'session_id': 'a' * 32}

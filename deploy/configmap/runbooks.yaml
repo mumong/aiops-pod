@@ -342,7 +342,7 @@ data:
     ### 可执行修复决策
     - 已证实对象/键/挂载路径引用写错且正确值存在时，可人工修正 workload；缺少 PVC、存储数据或 CSI 故障不应靠删除重建存储解决。
     - hostPath 路径不存在、权限或节点差异需确认真实部署约束，不能自动 mkdir/chmod 主机目录。
-    - 当前执行器不支持卷引用修改；先说明条件与支持边界。验证挂载及应用 Ready，不将 rollout 成功等同于数据正确。
+    - 卷引用修改可通过通用 kubectl 命令规划；说明数据归属、挂载变更风险及未知条件，执行按当前策略与审批模式处理。验证挂载及应用 Ready，不将 rollout 成功等同于数据正确。
 
   pod-oomkilled.md: |
     # Pod OOMKilled（以 Last State Reason 为准）
@@ -577,7 +577,8 @@ data:
     ### 可执行修复决策
     - 已核实镜像仓库中存在可用 tag/digest、或有已验证正常发布版本时，镜像引用错误具备确定修正路径；不能猜 latest 或随意换公开镜像。
     - 仓库 TLS/网络、认证失败或 Secret 内容未知时，需要有效证书、凭据或平台处理；不要禁用 TLS 校验或编造 imagePullSecret。
-    - 当前执行器不支持 set image/创建 Secret 时列为人工可修复；验证新 Pod 实际拉取成功并 Ready，不只验证配置写入。
+    - 当前执行器支持通用 kubectl 命令；已核实控制器、容器名及可信镜像值时，可生成 set image 或 patch 动作，实际执行受安全策略和 review/auto 配置控制。只有真实策略拒绝或可信信息缺失时说明缺口，不预判系统不支持镜像修改。
+    - 镜像值来自用户批准的基线、已验证发布记录或可信仓库信息；不要把任意可拉取镜像替换成业务镜像，也不猜 tag。验证新 Pod 实际使用目标镜像、拉取成功并 Ready，不只验证配置写入。
 
   pod-config-error.md: |
     # Pod ConfigError / 启动配置失败
@@ -704,7 +705,8 @@ data:
     ### 可执行修复决策
     - ConfigMap/Secret 键名或引用错误，仅当实际对象中存在可确认的正确键、已知正常版本或用户提供准确配置时才能修正。
     - 缺失业务值、密码、证书不能从变量名推测；缺失对象也不意味着可以创建空配置。
-    - 当前执行器不支持 env/config 引用修改或创建配置对象，输出人工方案与缺口；应用已启动但返回 500 时不要当作容器配置生成失败。
+    - 当前执行器支持通用 kubectl patch/apply 等命令。已核实 Secret/ConfigMap 及准确键引用、控制器归属时，可生成工作负载模板修正动作；不预判系统不支持配置修改。禁止猜测 Secret 值、创建空配置敷衍错误或在报告泄露 Secret 内容；业务预期不明时明确询问所需配置。
+    - 修改后核对新 Pod 引用生效、容器成功创建且 Ready；应用已启动但返回 500 时不要当作容器配置生成失败。
 
   pod-pending-unschedulable.md: |
     # Pod PendingUnschedulable / 调度失败
@@ -811,7 +813,7 @@ data:
     ### 可执行修复决策
     - requests 明显误配置：只有已验证的正常需求与节点可分配容量支持调低目标值时，才使用 set resources 修改；不能为了调度成功盲目减小 requests。
     - 集群真实资源不足、GPU/设备资源缺失、PVC 未绑定或强亲和约束需扩容/存储/业务确认；不是重启 Pod 可以修复。
-    - 已知 nodeSelector/toleration 配置错误可人工修正，但不要删除合理的隔离或调度约束；当前受限执行器不支持这些字段。
+    - 已知 nodeSelector/toleration 配置错误可规划配置修正；说明隔离和调度影响，不删除与故障无关的合理约束。执行按当前策略与审批模式处理，不预判执行器不支持这些字段。
     - 验证调度成功、Pod Ready，且资源目标未破坏业务需求；回退使用原配置值。
 
   pod-node-lost-unknown.md: |
@@ -918,15 +920,15 @@ data:
     | Terminating + preStop hook 仍运行/超时 | preStop 或应用退出慢 | 中 |
 
     ## 标准修复建议
-    - finalizer 清理卡住: 只有在当前 `kubectl get pod <pod> -n <namespace> -o yaml` 确认 `deletionTimestamp` 长时间存在且 `metadata.finalizers` 非空时，才建议执行 `kubectl patch pod <pod> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge`；验证 `kubectl get pod <pod> -n <namespace>` 返回 NotFound 或对象消失。
+    - finalizer 清理卡住: 当前 YAML 确认删除受 finalizer 阻塞时，可规划定点移除相关 finalizer 的命令；保留其他 finalizer，不默认清空整个列表。方案写明跳过清理的影响及尚未确认事项，执行由当前审批与命令策略控制。验证以目标 Pod 对象消失为准，可使用 `kubectl wait --for=delete pod/<pod> -n <namespace> --timeout=60s`，不要将预期的对象消失误报为验证失败。
     - finalizers 为空时禁止按 finalizer 清理: 应继续检查 Node/kubelet、volume detach/unmount、preStop 和 terminationGracePeriodSeconds，不要建议 patch finalizers。
     - Node NotReady/Unknown 或 kubelet 无响应: 优先恢复 kubelet/容器运行时/节点网络；节点不可恢复时按流程 cordon/drain 或替换节点，验证 Node Ready 后 Pod 删除完成。
     - volume detach/unmount 卡住: 修复 CSI/NFS/存储后端或 kubelet volume manager 问题；不要在卷仍被使用时强制清理。
     - 仍在 terminationGracePeriodSeconds 或 preStop 窗口内: 等待正常优雅终止，或从工作负载配置层缩短过长的 grace/preStop；验证宽限期过后状态变化。
     - 不要先推荐 delete --force；`kubectl delete pod <pod> -n <namespace> --grace-period=0 --force` 只能作为最后应急 fallback: 必须先确认对象仍存在、无更安全分支可用，并明确风险是 API 对象可能消失但节点侧清理未完成。
     ### 可执行修复决策
-    - finalizer 保护的外部清理已完成并经负责方确认后，移除残留 finalizer 才有依据；不能只按等待时长判定。
-    - 当前执行器禁止 finalizer 删除/强制删除；即使 RBAC 足够也只提供人工审查建议，不规避白名单。
+    - 清理责任及完成情况能查询时自主核实；无法确认时在方案中明确披露风险，由审批者决定是否接受，不将待审批本身作为拒绝生成方案的理由。不能把等待时长当作清理已完成的证明。
+    - Runbook 不规定执行器权限；规划与执行分离，执行按当前服务端策略和审批模式处理。
     - preStop 卡住、节点失联、卷 detach 或 grace period 尚未结束分别处理；涉及存储和外部状态的情况不应自动强删。
 
   pod-crashloop-runtime.md: |
@@ -994,7 +996,8 @@ data:
     - livenessProbe 杀死容器: 若应用可用但探针过严，调整 path/port/timeout/failureThreshold；若应用不可用，切换 NotReadyProbeFailed 或修复应用健康。
     - OOMKilled/配置缺失/镜像拉取失败信号明确时，切换对应 runbook，不要按普通 CrashLoop 修复。
     ### 可执行修复决策
-    - 明确错误 command/args/env、缺少文件或错误探针且有已知正确配置时，可通过配置/版本修正；当前执行器不支持这些字段时转人工方案。
+    - 明确错误 command/args/env、缺少文件或错误探针且有已知正确配置时，可通过通用 kubectl 命令生成配置/版本修正方案；依据实际安全策略处理，不预判执行器不支持这些字段。
+    - CrashLoopBackOff 是现象，不统一套用探针修改。仅在探针错误且有用户批准基线、实测健康接口或已验证配置时修正；保留业务健康检测，不通过删除探针掩盖应用故障。缺少可查询的参数时自主补查，缺少业务预期时明确询问。
     - OOM 转 OOM Runbook；退出码本身不足以确认原因。应用逻辑错误或未知依赖不可用，不能用 restart 作为根治。
     - rollout restart 只用于已证明外部原因已消除、应用仍滞留且业务允许重启的情况；没有该依据不默认重启。
     - 验证新容器在超过历史崩溃间隔后无新增重启，并完成实际业务检查。
@@ -1049,7 +1052,7 @@ data:
     - NAD 引用缺失：先核实 Pod 模板注解、NAD 的准确 namespace/name，以及是否确实需要附加网络。只有存在已验证正确网络名，或用户明确确认附加网络不需要时，才有确定的模板修正方案；缺失 NAD 的 CNI 配置不能凭空编写。
     - 权限 Forbidden 不是资源不存在；停止同权限身份下反复更换 list/get 工具，报告权限缺口。
     - CNI/IPAM/runtime、节点证书等通常需平台管理员处理，不默认重启节点插件、清空 IPAM 或反复重启业务 Pod。
-    - 当前受限执行器不支持网络注解或 NAD 创建：给出人工方案与所需依据，不伪装成资源扩容 action。RBAC 放开不代表命令白名单也已放开。
+    - 网络注解或 NAD 创建可通过通用 kubectl 命令规划；缺少真实网络配置时补查或询问，不伪装成资源扩容动作。执行按当前策略与审批模式处理，不预判执行器不支持这些资源。
     - 验证：新 Pod 获得 IP、Ready，新的 sandbox 错误不再产生；不要要求历史 Events 立即消失。
 
   pod-notready-probe-failed.md: |
@@ -1103,7 +1106,7 @@ data:
     - 可确定修正：实测监听与探针 path/port/scheme 不一致，或正常版本给出明确正确值；修正工作负载模板，保留旧值用于回退。延长超时需有实际启动/响应耗时，不使用任意固定倍数。
     - 应用主动返回 503、dependency unavailable、readiness_fail 等：先核实代码分支、真实依赖或已验证正确配置；不能删除探针或扩容来掩盖错误。
     - 实验故障开关只有在用户确认结束实验且正确取值已由代码/基线证实时才适合恢复；不要仅凭 case 标签判定无需修复。
-    - 当前命令策略不支持 probe/env 修改时，列为人工可修复，不继续寻找同义命令绕过策略。
+    - 通用 kubectl 能力可以表达 probe/env 修改；有真实策略拒绝时说明限制，不尝试同义命令绕过。不能仅凭旧手册描述判定执行器不支持。
     - 验证：新 Pod Ready、实际健康请求成功和新探针失败停止；不只看 phase=Running。
 
   private-k8s-query-promql-reference.md: |

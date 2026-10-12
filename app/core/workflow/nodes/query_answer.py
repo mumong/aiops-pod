@@ -17,7 +17,6 @@ from app.core.prompts import (
     QUERY_COLLECT_PROMPT,
     QUERY_CONCLUSION_PROMPT,
     DEEP_CONCLUSION_PRESENTATION,
-    DIAGNOSIS_CONCLUSION_REMEDIATION_CONSTRAINT,
     QUERY_RUNBOOK_DESCRIPTION,
     QUERY_TASK_AUTHORITY_PREFIX,
     QUERY_RUNBOOK_CATALOG_HEADER,
@@ -181,22 +180,12 @@ class QueryConclusionNode(FocusedTaskNode):
         from app.core.aicall.client import StructuredContextBudgetError
 
         final_compacted_summary = None
-        repair_schema = None
         try:
             prompt = QUERY_CONCLUSION_PROMPT
             if (payload.get("request_contract") or {}).get("route") == "full_diagnosis":
                 prompt += "\n" + DEEP_CONCLUSION_PRESENTATION
-                from app.core.workflow.nodes.remediation import RepairDraft
-                from app.core.prompts import POD_REMEDIATION_PROMPT
-
-                repair_schema = RepairDraft
-                prompt += (
-                    "\n"
-                    + POD_REMEDIATION_PROMPT
-                    + DIAGNOSIS_CONCLUSION_REMEDIATION_CONSTRAINT
-                )
             prompt += "\n输出 schema：\n" + json.dumps(
-                (repair_schema or QueryAnswer).model_json_schema(), ensure_ascii=False
+                QueryAnswer.model_json_schema(), ensure_ascii=False
             )
 
             def conclude(material):
@@ -259,14 +248,6 @@ class QueryConclusionNode(FocusedTaskNode):
             final_compacted_summary=final_compacted_summary,
             compact_payload=compact_payload if final_compacted_summary else None,
         )
-        if repair_schema:
-            try:
-                output["remediation_draft"] = repair_schema.model_validate_json(
-                    response.result or ""
-                ).model_dump()
-            except ValueError:
-                # Never recover executable commands from malformed prose/JSON.
-                output["remediation_draft"] = None
         return output
 
 
@@ -371,6 +352,7 @@ def finalize_query_answer(
                     "scope": (result or {}).get("scope"),
                     "request_contract": state.get("request_contract"),
                     "recent_interactions": compact_payload["recent_interactions"],
+                    "protected_handoff": compact_payload.get("protected_handoff", {}),
                     "execution_incomplete": payload["execution_incomplete"],
                     "observed_at": datetime.now(timezone.utc).isoformat(),
                 }

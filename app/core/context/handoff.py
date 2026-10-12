@@ -1,4 +1,4 @@
-"""Lossless, content-free identity/provenance carried across summarization.
+"""Protected identity, provenance and selected source facts across summarization.
 
 These records describe acquisitions, not verified diagnoses or mandatory tasks.
 Long tool bodies and model prose deliberately remain outside this contract.
@@ -9,6 +9,10 @@ import json
 
 def protected_handoff(material):
     protected = copy.deepcopy(material.get("protected_handoff") or {})
+    from app.core.context.lifecycle_core import core_from_material
+    core = core_from_material(material)
+    if core:
+        protected['lifecycle_core'] = core
     acquired = acquisition_refs(material)
     if acquired:
         protected["evidence_receipts"] = merge_receipts(
@@ -82,6 +86,10 @@ def handoff_from_messages(messages):
             continue
         if isinstance(payload, dict):
             result.update(protected_handoff(payload))
+    from app.core.context.lifecycle_core import core_from_messages
+    core = core_from_messages(messages)
+    if core:
+        result['lifecycle_core'] = core
     return result
 
 

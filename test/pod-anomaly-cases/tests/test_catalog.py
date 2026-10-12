@@ -31,6 +31,8 @@ class CatalogTests(unittest.TestCase):
 
     def test_runtime_cases_require_real_backend_evidence(self):
         for item in load_catalog()["cases"][5:]:
+            if not item["runtime"]:
+                continue
             for backend in ("prometheus", "elasticsearch", "deepflow"):
                 self.assertEqual(item["coverage"][backend], "present", (item["id"], backend))
 

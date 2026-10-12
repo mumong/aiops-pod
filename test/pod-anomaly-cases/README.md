@@ -70,10 +70,10 @@ test/pod-anomaly-cases/scripts/validate.sh --case c11 --wait
 | c03 | `cases/volume-mount-failed` | 卷引用缺失 ConfigMap |
 | c04 | `cases/createcontainer-config-error` | Secret 环境变量 key 缺失 |
 | c05 | `cases/sandbox-create-failed` | Multus secondary network 缺失 |
-| c06 | `cases/crashloop-runtime` | 应用退出 2 |
+| c06 | `cases/crashloop-runtime` | 必需环境变量 APP_CONFIG_PATH 误写为 APP_CONF_PATH，启动退出 2 |
 | c07 | `cases/config-error-traced` | CONFIG_MISSING，HTTP 500 后退出 78 |
 | c08 | `cases/oomkilled-traced` | 内存增长触发 OOMKilled |
-| c09 | `cases/readiness-probe-failed` | Readiness 失败，Ready=False |
+| c09 | `cases/readiness-probe-failed` | Readiness 端口误配 8081，应用监听 8080，Ready=False |
 | c10 | `cases/liveness-probe-failed` | Liveness 失败触发重启 |
 | c11 | `cases/terminating-stuck` | deletionTimestamp + finalizer 阻塞删除 |
 
@@ -96,7 +96,9 @@ traffic-driver → workload /work + traceparent
 | 场景 | Kubernetes / Metrics | Logging / Tracing |
 |---|---|---|
 | c01–c05 | 调度、等待原因和事件 | 应用未启动，不应要求应用日志或 span |
-| c06–c10 | 重启、退出、Ready、资源等 | 应用退出前或运行中的真实遥测 |
+| c07、c08、c10 | 重启、退出、Ready、资源等 | 应用退出前或运行中的真实遥测 |
+| c06 | CrashLoopBackOff、退出 2、重启计数 | 启动错误日志；启动失败阶段不要求业务 flow/span |
+| c09 | Ready=False，探针连接 8081 失败 | 启动日志显示监听 8080；未就绪时 Service 不转发业务流量，不要求业务 span |
 | c11 | 删除时间与 finalizer | 删除前的关联上下文，不单独证明删除阻塞 |
 | 新增变体 | 状态与具体原因验收 | 简单容器未统一生成业务 span，不能保证三维齐全 |
 
@@ -151,3 +153,36 @@ Agent 的 `execute_pod_promql`、`query_pod_logs`、`query_pod_tracing`、`query
 ## 节点级场景
 
 [destructive/](destructive/README.md) 中 NodeLost、节点压力 Evicted 仅有候选 Pod 和人工安全指引，不属于 safe 批量入口。必须由集群所有者在专用节点确认影响范围、停止条件和恢复通道；本库不自动停止 kubelet、隔离网络或制造节点压力。
+
+## c06 自动修复验收
+
+- 场景：Deployment 将 `APP_CONFIG_PATH` 误写为 `APP_CONF_PATH`。应用必须读取该变量指定的 JSON 配置，并使用其中的 `http_port` 启动 HTTP 服务。
+- 现场证据：启动日志 `APP_CONFIG_PATH is required`；Deployment 环境变量；`workload-startup` 中真实的配置读取逻辑；`workload-settings` 与 `/etc/workload` 卷挂载。
+- 修复：确认配置文件有效后，将环境变量名称改为 `APP_CONFIG_PATH`，保留原文件路径。缺少文件或配置无效仍应启动失败，不得仅补任意值绕过检查。
+- 验收：新 Pod Ready；日志出现 `config_loaded`；`/ready`、`/work` 请求成功；持续流量下观察 120 秒无新增重启。命令执行成功不等于恢复。
+- 故障复现：首次使用 `make case-deploy CASE=c06`；修复后重新测试请先执行 `make case-clean CASE=c06`，再部署，避免上次人工修改的环境变量被保留；该场景启动失败时无业务 Trace，不能沿用旧版“退出前必须有 span”的要求。
+
+### c06 集群验证记录（2026-10-10）
+
+已实测：错误变量名导致 `CrashLoopBackOff`、退出码 2，启动日志提示 `APP_CONFIG_PATH is required`；仅修正变量名后，新 Pod Ready，配置加载成功，`/ready` 与 `/work` 均返回 200，持续流量下观察 120 秒无新增重启。
+这是 Case 的人工修复可行性验证，不代表 Agent 自动规划、审批与执行链路已经通过验收；Elasticsearch、DeepFlow、Tempo 后端采集未在本次进行完整验收。
+
+## c09 自动修复验收
+
+应用正常监听 8080，Deployment 的 Readiness 探针误配 8081。根据探针连接失败事件、启动日志和对 8080 `/ready` 的实测，修正探针端口。Service 不发布未就绪地址；验收新 Pod Ready、EndpointSlice 就绪、通过 Service 访问 `/work` 成功，观察期内无新增探针失败。
+
+## 专属自动修复四场景快捷操作
+
+在 `robusta` 目录执行：
+
+```bash
+make repair-cases-reset   # 删除并重新部署 c04/c06/c09/c11，自动触发 c11 删除，等待异常成立
+make repair-cases-status  # 查看这四个命名空间的 Pod
+make repair-cases-clean   # 仅清理这四个命名空间
+```
+
+脚本使用当前 kubectl context，运行时打印集群和范围。reset/clean 会删除这四个测试命名空间内全部资源；其他 Case 不受影响。c11 仅移除已知测试 finalizer `aiops.lab/hold`，不会清空未知 finalizer。
+
+也可从任意目录执行脚本的绝对路径，参数为 `reset`、`clean` 或 `status`；例如在 robusta 下运行 `python3 test/pod-anomaly-cases/scripts/repair_cases.py reset --timeout 300`。
+
+预期：c04 `CreateContainerConfigError`；c06 `CrashLoopBackOff`；c09 `Running / Ready 0/1`；c11 `Terminating`。检查仅确认故障状态，不代表 Agent 自动修复或可观测后端验收通过。失败会返回非零退出码，不继续伪报成功；修复环境问题后可重复运行 reset。

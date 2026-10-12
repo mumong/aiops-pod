@@ -14,10 +14,9 @@ from tests.unit.remediation.test_pod_executor import fixture
     "busybox rm /tmp/test", "env rm /tmp/test", "command rm /tmp/test",
     "sh -c 'echo before; rm /tmp/test'", "bash -lc 'cat /tmp/a && /bin/rm /tmp/a'",
     "sh -c 'echo ok | rm /tmp/a'", "sh -c 'echo ok\nrm /tmp/a'",
-    '''sh -c '"r""m" /tmp/a' ''', "sh -c 'eval echo'",
+    '''sh -c '"r""m" /tmp/a' ''',
     "sh -c '$COMMAND /tmp/a'", "sh -c '$(echo rm) /tmp/a'",
-    "sh -c 'echo hi > /tmp/a'", "sh /tmp/script.sh", "python3 -c 'print(1)'",
-    "mkfs.ext4 /dev/test", "unlink /tmp/a", "sh -c 'echo $(date)'",
+    "sh -c 'echo hi > /tmp/a'", "sh /tmp/script.sh", "sh -c 'echo $(date)'",
 ])
 def test_denies_literal_destructive_or_uninspectable_execution(inner):
     with pytest.raises(RepairCommandDenied):
@@ -34,6 +33,10 @@ def test_denies_literal_destructive_or_uninspectable_execution(inner):
     "kubectl run test -n demo --image=busybox --rm --attach -- echo ok",
     "kubectl -n demo rollout restart deployment/test",
     "kubectl get pod/test -n demo",
+    "kubectl exec pod/test -n demo -- curl http://service/health",
+    "kubectl exec pod/test -n demo -- python3 -c 'print(1)'",
+    "kubectl exec pod/test -n demo -- unlink /tmp/a",
+    "kubectl exec pod/test -n demo -- mkfs.ext4 /dev/test",
 ])
 def test_normal_repairs_and_data_are_not_substring_blocked(command):
     check_repair_execution(shlex.split(command), CommandPolicy())
@@ -54,9 +57,16 @@ def test_invalid_configuration_cannot_silently_disable_guard(value):
 
 
 def test_configuration_defaults_and_explicit_override():
-    assert "rm" in CommandPolicy.from_config({}).denied_executables
+    assert CommandPolicy.from_config({}).denied_executables == frozenset({"rm"})
+    assert not CommandPolicy.from_config({}).allowed_exec_commands
     configured = CommandPolicy.from_config({"denied_executables": [], "allowed_exec_commands": ["rm"]})
     check_repair_execution(shlex.split("kubectl exec pod/test -- rm /tmp/a"), configured)
+
+
+def test_optional_allowlist_still_supported():
+    policy = CommandPolicy.from_config({"allowed_exec_commands": ["cat"]})
+    with pytest.raises(RepairCommandDenied):
+        check_repair_execution(shlex.split("kubectl exec pod/test -- curl http://service"), policy)
 
 
 @pytest.mark.parametrize("stage", ["dry_run", "execute", "verify"])

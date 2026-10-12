@@ -4,7 +4,7 @@ import copy
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from app.core.workflow.group_runner import iter_group_results
 
 from pydantic import BaseModel, Field
 
@@ -163,27 +163,25 @@ class AutonomousParallelNode(WorkflowNode):
         groups = state.get("autonomous_groups") or []
         workers = max(1, min(8, int(os.getenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", "3"))))
         results, events = {}, list(state.get("thinking_events") or [])
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(self._run_lane, group, state): group for group in groups}
-            for future in as_completed(futures):
-                group = futures[future]
-                gid = group["group_id"]
-                try:
-                    result, lane_events = future.result()
-                except Exception as exc:
-                    result = {"group_id": gid, "target": group, "status": "partial", "error": str(exc)}
-                    lane_events = [{"type": "execution_incomplete", "reason": f"{gid}: {exc}"}]
-                results[gid] = result
-                result["completed_at"] = time.time()
-                events.extend({**e, "lane_id": gid} for e in lane_events)
-                if result["status"] == "partial" and not any(e.get("type") == "execution_incomplete" for e in lane_events):
-                    events.append({"type": "execution_incomplete", "lane_id": gid, "reason": f"{gid}: {result.get('error') or 'partial'}"})
-                if getattr(self, "ai_call", None):
-                    lane_queue = LaneQueue(self._event_queue, group_id=gid, entities=group['entities']) if self._event_queue is not None else None
-                    self.ai_call._push(lane_queue, self.node_id, [], type="runtime_status", status="complete",
-                        content=f"{gid}：{'部分完成' if result['status'] == 'partial' else '分支已结束'}")
-                    self.ai_call._push(self._event_queue, self.node_id, [], type="runtime_status", status="running",
-                        content=f"分组诊断已结束 {len(results)}/{len(groups)}；{gid}：{'部分完成' if result['status'] == 'partial' else '已结束'}")
+        for group, value, error in iter_group_results(groups, lambda g: self._run_lane(g, state),
+                                                     max_workers=workers, cancel=self.cancel_event):
+            gid = group["group_id"]
+            if error is None:
+                result, lane_events = value
+            else:
+                result = {"group_id": gid, "target": group, "status": "partial", "error": str(error)}
+                lane_events = [{"type": "execution_incomplete", "reason": f"{gid}: {error}"}]
+            results[gid] = result
+            result["completed_at"] = time.time()
+            events.extend({**e, "lane_id": gid} for e in lane_events)
+            if result["status"] == "partial" and not any(e.get("type") == "execution_incomplete" for e in lane_events):
+                events.append({"type": "execution_incomplete", "lane_id": gid, "reason": f"{gid}: {result.get('error') or 'partial'}"})
+            if getattr(self, "ai_call", None):
+                lane_queue = LaneQueue(self._event_queue, group_id=gid, entities=group['entities']) if self._event_queue is not None else None
+                self.ai_call._push(lane_queue, self.node_id, [], type="runtime_status", status="complete",
+                    content=f"{gid}：{'部分完成' if result['status'] == 'partial' else '分支已结束'}")
+                self.ai_call._push(self._event_queue, self.node_id, [], type="runtime_status", status="running",
+                    content=f"分组诊断已结束 {len(results)}/{len(groups)}；{gid}：{'部分完成' if result['status'] == 'partial' else '已结束'}")
         ordered = [results[g["group_id"]] for g in groups]
         warnings = list(state.get("warnings") or [])
         if getattr(self, "current_run_id", ""):

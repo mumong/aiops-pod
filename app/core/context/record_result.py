@@ -27,19 +27,40 @@ def parse_record_result(raw):
             raise ValueError("missing source time")
         if source.get("coverage") not in {"present", "empty", "partial", "unknown"}:
             raise ValueError("invalid source coverage")
-        if value.get("coverage") != source["coverage"]:
+        pagination = value.get('pagination')
+        if value.get("coverage") != source["coverage"] and not (pagination and value.get('coverage') == 'partial'):
             raise ValueError("source coverage mismatch")
         if not isinstance(value.get("executed_query"), dict):
             raise ValueError("missing executed query")
         counts = [value.get(k) for k in ("input_rows", "matched_rows", "unknown_filter_rows")]
         if any(type(n) is not int or n < 0 for n in counts) or counts[1] + counts[2] > counts[0]:
             raise ValueError("invalid row counts")
+        if pagination is not None:
+            if not isinstance(pagination, dict):
+                raise ValueError('invalid pagination')
+            offset, returned, total, remaining = [pagination.get(k) for k in ('offset', 'returned_rows', 'total_rows', 'remaining_rows')]
+            if any(type(n) is not int or n < 0 for n in (offset, returned, total, remaining)):
+                raise ValueError('invalid page counts')
+            if offset + returned + remaining != total or (remaining and not returned):
+                raise ValueError('inconsistent page counts')
+            if type(pagination.get('source_has_more')) is not bool or not isinstance(pagination.get('snapshot_id'), str):
+                raise ValueError('missing snapshot identity')
+            more = remaining > 0 or pagination['source_has_more']
+            if bool(pagination.get('next_continue_token')) != more:
+                raise ValueError('missing or unexpected continuation')
+            if more and value.get('coverage') != 'partial':
+                raise ValueError('incomplete results must be partial')
+            if pagination.get('next_continue_token') != source.get('next_continue_token'):
+                raise ValueError('continuation mismatch')
         if value.get("result_type") == "records":
             columns, rows = value.get("columns"), value.get("rows")
             if (not isinstance(columns, list) or not columns or
                     any(not isinstance(c, str) for c in columns) or len(set(columns)) != len(columns)):
                 raise ValueError("invalid columns")
-            if not isinstance(rows, list) or len(rows) != counts[1]:
+            expected_count = pagination['returned_rows'] if pagination else counts[1]
+            if pagination and pagination['total_rows'] != counts[1]:
+                raise ValueError('snapshot record count mismatch')
+            if not isinstance(rows, list) or len(rows) != expected_count:
                 raise ValueError("record count mismatch")
             if any(not isinstance(row, dict) or set(row) != set(columns) for row in rows):
                 raise ValueError("row/column mismatch")
@@ -58,7 +79,9 @@ def parse_record_result(raw):
                     raise ValueError("duplicate group")
                 seen.add(key)
                 total += group["count"]
-            if total != counts[1]:
+            if pagination and len(groups) != pagination['returned_rows']:
+                raise ValueError('group page count mismatch')
+            if (not pagination and total != counts[1]) or (pagination and total > counts[1]):
                 raise ValueError("group count mismatch")
         else:
             raise ValueError("unknown record result type")
@@ -94,6 +117,7 @@ def record_display(raw, raw_ref, limit=20):
         "coverage": value.get("coverage"), "source_metadata": source,
         "query": value.get("executed_query"), "result_type": value.get("result_type"),
         "record_unit": value.get("record_unit"),
+        "pagination": value.get('pagination'),
         **{key: value.get(key) for key in ("input_rows", "matched_rows", "unknown_filter_rows")},
         "columns": value.get("columns"), "records": rows[:limit],
         "records_omitted": max(0, len(rows) - limit),

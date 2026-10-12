@@ -2796,7 +2796,7 @@ class AICall:
                 preserve_raw=getattr(self, "query_raw_passthrough", False),
             )
         except Exception as exc:
-            if getattr(self, "query_raw_passthrough", False):
+            if getattr(self, "query_raw_passthrough", False) or getattr(processor, "evidence_view_mode", "legacy") == "compact":
                 raise RuntimeError(f"原文归档/处理失败，未截断回退：{exc}") from exc
             logger.warning("⚠️ [AICall] observation processor 失败，使用截断回退: %s", exc)
             summary = (tool_content or "")[:3000]

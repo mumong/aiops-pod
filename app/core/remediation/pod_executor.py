@@ -13,6 +13,7 @@ from app.core.remediation.policy import CommandPolicy, validate_target_command
 from app.core.remediation.execution_guard import check_repair_execution, RepairCommandDenied
 
 _lock = threading.Lock()
+_command_lock = threading.Lock()
 _busy: set[tuple[str, str, str]] = set()
 
 
@@ -48,11 +49,15 @@ class PodRepairExecutor:
         self.store, self.runner = store, runner
 
     def run(self, run_id, draft, *, owner="", mode="review", timeout=600, cancel=None, policy=None,
-            request_contract=None):
+            request_contract=None, record_store=None):
         draft = deepcopy(draft)
         policy = policy or CommandPolicy()
-        finish = lambda status, reason: {"type": "remediation_finished", "run_id": run_id,
-                                         "status": status, "reason": reason}
+        def finish(status, reason):
+            event = {"type": "remediation_finished", "run_id": run_id,
+                     "status": status, "reason": reason}
+            if record_store:
+                record_store.transition(run_id, owner, status, event)
+            return event
         if not draft or not draft.get("actions"):
             yield finish("skipped", "没有可安全执行的结构化修复动作")
             return
@@ -104,10 +109,16 @@ class PodRepairExecutor:
                 _busy.update(scopes)
                 reserved = scopes
             for action, target, original, stages in prepared:
+                if record_store and not record_store.current(run_id, owner):
+                    yield finish("superseded", "方案已被修改请求替代，旧审批不可继续执行")
+                    return
                 if cancel and cancel.is_set():
                     yield finish("cancelled", "请求已取消，未继续执行")
                     return
                 if mode != "auto":
+                    if record_store and not record_store.transition(run_id, owner, "awaiting_approval"):
+                        yield finish("superseded", "方案已被修改请求替代")
+                        return
                     request = self.store.create_request(run_id, "action", action["description"],
                         {"target": target, **action}, timeout_seconds=timeout, owner=owner)
                     pending = request.approval_id
@@ -117,6 +128,9 @@ class PodRepairExecutor:
                            "group_id": action["group_id"]}
                     decision = None
                     while time.time() < request.expires_at and not (cancel and cancel.is_set()):
+                        if record_store and not record_store.current(run_id, owner):
+                            yield finish("superseded", "方案已被修改请求替代，旧审批已失效")
+                            return
                         decision = self.store.poll_decision(run_id, pending)
                         if decision is not None:
                             break
@@ -131,6 +145,9 @@ class PodRepairExecutor:
                         yield finish("rejected" if decision else "timeout", "修复未获有效批准，未执行")
                         return
                 for stage, command, argv in stages:
+                    if record_store and not record_store.transition(run_id, owner, "executing"):
+                        yield finish("superseded", "方案已被修改请求替代，未执行旧命令")
+                        return
                     if cancel and cancel.is_set():
                         yield finish("cancelled", "请求取消；已执行动作不会自动回滚")
                         return
@@ -140,14 +157,26 @@ class PodRepairExecutor:
                            "group_id": action["group_id"], "action_id": action["id"],
                            "stage": stage, "command": command, "status": "running"}
                     try:
-                        output = self.runner(argv)
+                        with _command_lock:
+                            if cancel and cancel.is_set():
+                                yield finish("cancelled", "请求已取消，未执行排队命令")
+                                return
+                            output = self.runner(argv)
                     except Exception as exc:
+                        if record_store:
+                            record_store.transition(run_id, owner, "failed", {
+                                "action_id": action["id"], "stage": stage, "command": command,
+                                "status": "failed", "result": str(exc)[:6000]})
                         yield {"type": "remediation_tool_result", "run_id": run_id,
                                "group_id": action["group_id"], "action_id": action["id"],
                                "stage": stage, "command": command, "status": "failed",
                                "result_preview": str(exc)[:6000], "result_truncated": len(str(exc)) > 6000}
                         yield finish("failed", "修复命令或验证失败；已尝试的写操作可能生效，请复查状态，未自动回滚")
                         return
+                    if record_store:
+                        record_store.transition(run_id, owner, "executing", {
+                            "action_id": action["id"], "stage": stage, "command": command,
+                            "status": "success", "result": str(output)[:6000]})
                     yield {"type": "remediation_tool_result", "run_id": run_id,
                            "group_id": action["group_id"], "action_id": action["id"],
                            "stage": stage, "command": command, "status": "success",

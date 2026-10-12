@@ -159,13 +159,48 @@ class WorkflowExecutor:
 
     def execute_stream(self, question, run_id=None, cancel_event=None, workflow_overrides=None):
         from app.core.query_sessions import query_sessions, SessionBusy
+        from app.core.remediation.records import RepairRecordStore, RecordUnavailable, PlanConflict
         overrides = dict(workflow_overrides or {})
         key = overrides.pop("_query_session_key", None)
         if not key:
             yield from self._execute_stream(question, run_id, cancel_event, overrides)
             return
         try:
+            store = RepairRecordStore()
+            diagnosis_id, plan_id = overrides.get("_diagnosis_run_id"), overrides.get("_plan_run_id")
+            record = (store.load(plan_id or diagnosis_id, key[0], "plan" if plan_id else "diagnosis")
+                      if plan_id or diagnosis_id else store.latest(key[0], key[1]))
+            context = {}
+            if record:
+                if record["kind"] == "plan":
+                    context["previous_plan"] = record
+                    if record.get("source_run_id"):
+                        context["diagnosis"] = store.load(record["source_run_id"], key[0], "diagnosis")
+                else:
+                    context["diagnosis"] = record
+            group_id = overrides.get("_repair_group_id")
+            if group_id and context.get("diagnosis"):
+                from app.core.remediation.group_context import scoped_diagnosis
+                context["diagnosis"] = scoped_diagnosis(context["diagnosis"], group_id)
+            if plan_id and not overrides.get("_repair_revision_claimed"):
+                context["previous_plan"] = store.supersede(plan_id, key[0])
+                # The previous waiting executor observes supersession and releases
+                # its session reservation. Do not race a second active writer.
+                deadline = time.monotonic() + 5
+                while query_sessions.is_busy(key) and time.monotonic() < deadline:
+                    time.sleep(0.1)
+            overrides["_repair_context"] = context
+            overrides["_repair_entry_requested"] = bool(diagnosis_id or plan_id)
+            overrides["_record_session_id"] = key[1]
             with query_sessions.checkout(key) as (memory, commit):
+                if not memory and record:
+                    payload = ((context.get("diagnosis") or record)["payload"]
+                               if group_id else record["payload"])
+                    memory = {"turns": [{"question": payload.get("question") or "历史修复方案",
+                        "answer": ((context.get("diagnosis") or {}).get("payload", {}).get("report")
+                                   if group_id else payload.get("report")) or (payload.get("draft") or {}).get("answer", ""),
+                        "request_contract": payload.get("request_contract"),
+                        "observed_at": record["created_at"]}]}
                 overrides["_remediation_owner"] = key[0]
                 overrides["_query_session_context"] = memory
                 for event in self._execute_stream(question, run_id, cancel_event, overrides):
@@ -180,7 +215,7 @@ class WorkflowExecutor:
                         if not saved:
                             event["answer"] += "\n\n会话记忆未保存（已取消或超过缓存容量），下轮请明确查询对象。"
                     yield event
-        except SessionBusy as exc:
+        except (SessionBusy, RecordUnavailable, PlanConflict) as exc:
             yield {"type": "error", "error": str(exc), "session_id": key[1]}
 
     def _execute_stream(
@@ -263,6 +298,8 @@ class WorkflowExecutor:
 
         # 初始化状态
         initial_state: WorkflowState = {
+            "repair_context": (workflow_overrides or {}).get("_repair_context"),
+            "repair_entry_requested": bool((workflow_overrides or {}).get("_repair_entry_requested")),
             "question": question,
             "original_question": question,
             "request_time_utc": datetime.now(timezone.utc).isoformat(),
@@ -705,6 +742,27 @@ class WorkflowExecutor:
             logger.info("=" * 60)
             
             # 发出最终答案事件
+            repair_record = None
+            record_owner = (workflow_overrides or {}).get("_remediation_owner")
+            if record_owner and task_route in {"full_diagnosis", "remediation"}:
+                from app.core.remediation.records import RepairRecordStore, diagnosis_payload
+                store = RepairRecordStore()
+                context = (workflow_overrides or {}).get("_repair_context") or {}
+                try:
+                    repair_record = store.save(
+                        run_id, record_owner, (workflow_overrides or {}).get("_record_session_id"),
+                        "diagnosis" if task_route == "full_diagnosis" else "plan",
+                        diagnosis_payload(final_state) if task_route == "full_diagnosis" else {
+                            "question": question, "request_contract": final_state.get("request_contract"),
+                            "draft": final_state.get("remediation_draft"),
+                            "group_id": (workflow_overrides or {}).get("_repair_group_id")},
+                        source_run_id=(context.get("diagnosis") or {}).get("run_id"),
+                        previous_plan_id=(context.get("previous_plan") or {}).get("run_id"))
+                except Exception:
+                    logger.exception("Repair record persistence failed; execution disabled for this run")
+                    if task_route == "remediation":
+                        final_state["remediation_draft"] = None
+                    full_answer += "\n\n诊断/方案记录保存失败，本次不会自动执行修复，请重试。"
             seq += 1
             yield {
                 "type": "final",
@@ -722,6 +780,10 @@ class WorkflowExecutor:
                 "request_error": final_state.get("request_error"),
                 "focused_result": final_state.get("focused_result"),
                 "query_answer": final_state.get("query_answer"),
+                "repair_record": ({"run_id": run_id, "kind": repair_record["kind"],
+                                   "source_run_id": repair_record.get("source_run_id")}
+                                  if repair_record else None),
+                "repair_plan": final_state.get("remediation_draft") if task_route == "remediation" else None,
                 **({"_query_session_memory": final_state.get("query_session_memory")}
                    if (workflow_overrides or {}).get("_query_session_context") is not None else {}),
             }
@@ -731,7 +793,9 @@ class WorkflowExecutor:
             remediation_enabled = False
             if isinstance(remediation_cfg, dict):
                 remediation_enabled = bool(remediation_cfg.get("enabled", False))
-            if final_state.get("request_route") in {"focused", "query", "clarify", "stop"}:
+            if (workflow_overrides or {}).get("_defer_repair_execution"):
+                remediation_enabled = False
+            if final_state.get("request_route") in {"focused", "query", "clarify", "stop", "full_diagnosis"}:
                 # A read-only task must not become a write workflow because the
                 # final prose happens to contain a remediation-shaped block.
                 remediation_enabled = False
@@ -746,6 +810,7 @@ class WorkflowExecutor:
                     timeout=_int_config(remediation_cfg, "approval_timeout_seconds", 600),
                     cancel=cancel_event, policy=policy,
                     request_contract=final_state.get("request_contract"),
+                    record_store=store if repair_record else None,
                 ):
                     seq += 1
                     yield {**repair_event, "id": f"{run_id}-repair-{seq}", "seq": seq,
@@ -887,6 +952,8 @@ class WorkflowExecutor:
             metrics.finish()
 
             # 错误事件
+            from app.core.aicall.errors import model_transport_message
+            public_error = model_transport_message(e)
             seq += 1
             yield {
                 "type": "error",
@@ -894,12 +961,13 @@ class WorkflowExecutor:
                 "run_id": run_id,
                 "seq": seq,
                 "ts_ms": int(time.time() * 1000),
-                "error": str(e),
+                "error": public_error or str(e),
             }
             last_stream_event_ts = time.time()
         finally:
-            # 设置取消信号（确保后台线程也能感知）
-            if cancel_event:
+            # Normal completion is not user cancellation. Only stop a still
+            # running worker when its consumer exits early.
+            if cancel_event and worker is not None and worker.is_alive():
                 cancel_event.set()
             # 清除事件队列（实例级，无需类级别清理）+ 等待后台线程结束
             for node in node_instances:
@@ -953,7 +1021,7 @@ class WorkflowExecutor:
             "evidence": "证据链采集",
             "rca": "根因分析",
             "conclusion": "汇总总结",
-            "remediation": "修复执行",
+            "remediation": "制定 Pod 修复方案",
         }
         return name_map.get(node_id, node_id)
     

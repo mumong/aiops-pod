@@ -54,6 +54,8 @@ def fix_double_encoding(text: str) -> str:
 
 def register_routes(app):
     """注册所有 API 路由"""
+    from app.api.repair_routes import register_repair_routes
+    register_repair_routes(app)
     
     # =========================================================================
     # 核心 API：/ask - 诊断入口
@@ -201,6 +203,18 @@ def register_routes(app):
         return _query_session_cookie(request, response, owner)
 
     def _query_session_owner(request, session_id, overrides):
+        # Explicit UI context is a record identifier, never an archive file path.
+        diagnosis_id = request.query_params.get("diagnosis_run_id")
+        plan_id = request.query_params.get("plan_run_id")
+        if diagnosis_id and plan_id:
+            raise HTTPException(status_code=400, detail="诊断引用与方案修改引用不能同时指定")
+        for reference in (diagnosis_id, plan_id):
+            if reference and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", reference):
+                raise HTTPException(status_code=400, detail="无效的修复来源记录标识")
+        if (diagnosis_id or plan_id) and not session_id:
+            raise HTTPException(status_code=400, detail="修复记录引用需要 session_id")
+        overrides["_diagnosis_run_id"] = diagnosis_id
+        overrides["_plan_run_id"] = plan_id
         if not session_id:
             return None
         owner = request.cookies.get("aiops_query_owner", "")

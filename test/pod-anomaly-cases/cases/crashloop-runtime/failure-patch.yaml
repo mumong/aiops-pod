@@ -8,5 +8,19 @@ spec:
     spec:
       containers:
         - name: app
+          command: ["python3", "/opt/startup/bootstrap.py"]
           env:
-            - {name: FAILURE_MODE, value: runtime_exit}
+            - {name: FAILURE_MODE, value: normal}
+            - {name: APP_CONF_PATH, value: /etc/workload/app.json}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 3
+            timeoutSeconds: 2
+          volumeMounts:
+            - {name: startup, mountPath: /opt/startup, readOnly: true}
+            - {name: settings, mountPath: /etc/workload, readOnly: true}
+      volumes:
+        - name: startup
+          configMap: {name: workload-startup}
+        - name: settings
+          configMap: {name: workload-settings}

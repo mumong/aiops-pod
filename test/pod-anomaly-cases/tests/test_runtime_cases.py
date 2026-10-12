@@ -7,10 +7,10 @@ except ImportError:
 
 
 EXPECTED = {
-    "crashloop-runtime": ("aiops-case-06", "runtime_exit"),
+    "crashloop-runtime": ("aiops-case-06", "normal"),
     "config-error-traced": ("aiops-case-07", "config_missing_exit"),
     "oomkilled-traced": ("aiops-case-08", "oom_growth"),
-    "readiness-probe-failed": ("aiops-case-09", "readiness_fail"),
+    "readiness-probe-failed": ("aiops-case-09", "normal"),
     "liveness-probe-failed": ("aiops-case-10", "liveness_fail"),
 }
 
@@ -37,7 +37,8 @@ class RuntimeCaseTests(unittest.TestCase):
         ready = render("cases/readiness-probe-failed")
         self.assertIn("readinessProbe:", ready)
         self.assertIn("path: /ready", ready)
-        self.assertIn("publishNotReadyAddresses: true", ready)
+        self.assertIn("publishNotReadyAddresses: false", ready)
+        self.assertIn("port: 8081", ready)
         live = render("cases/liveness-probe-failed")
         self.assertIn("livenessProbe:", live)
         self.assertIn("path: /health", live)

@@ -32,6 +32,8 @@ class WorkflowState(TypedDict, total=False):
     request_route: Optional[str]
     request_error: Optional[Dict[str, Any]]
     remediation_draft: Optional[Dict[str, Any]]
+    repair_context: Optional[Dict[str, Any]]
+    repair_entry_requested: bool
     diagnosis_target: Optional[Dict[str, Any]]
     autonomous_groups: List[Dict[str, Any]]
     autonomous_group_results: List[Dict[str, Any]]

@@ -90,3 +90,20 @@ def test_unrelated_contracts_unchanged(packet):
     assert before == packet
     assert parse_record_result({"contract_version": "pod-lifecycle.v1", "pods": []}) is None
     assert parse_record_result('{"status":"success","data":{"result":[]}}') is None
+
+
+def test_paged_records_keep_source_counts_and_require_consistent_continuation(packet):
+    packet['rows'] = packet['rows'][:3]
+    packet['source_metadata'].update(coverage='present', next_continue_token='lr1.token.3')
+    packet['pagination'] = {'snapshot_id': 'snapshot', 'offset': 0, 'returned_rows': 3,
+                            'total_rows': 24, 'remaining_rows': 21,
+                            'next_continue_token': 'lr1.token.3', 'source_has_more': False}
+    parsed, success = parse_record_result(packet)
+    assert success
+    assert parsed['matched_rows'] == 24 and len(parsed['rows']) == 3
+    display = project_query_tool_event({'type':'tool_result','result':json.dumps(packet)})['tool_display']
+    assert display['pagination']['remaining_rows'] == 21
+    for change in ({'remaining_rows': 0}, {'next_continue_token': None}, {'returned_rows': 24}):
+        broken = copy.deepcopy(packet)
+        broken['pagination'].update(change)
+        assert parse_record_result(broken)[1] is False

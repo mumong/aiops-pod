@@ -58,7 +58,7 @@ def test_repair_schema_does_not_prescribe_agent_operations():
     assert RepairDraft.model_validate(values).actions[0].execute_command.startswith("kubectl get")
 
 
-def test_deep_conclusion_reuses_one_call_for_report_and_repair_plan():
+def test_deep_conclusion_never_emits_executable_repair_plan():
     from app.core.workflow.nodes.query_answer import QueryConclusionNode
     from tests.unit.remediation.test_pod_executor import fixture
     draft, _, _, _ = fixture()
@@ -69,14 +69,14 @@ def test_deep_conclusion_reuses_one_call_for_report_and_repair_plan():
     def conclude(question, prompt, **kw):
         calls.append(kw)
         assert kw['force_no_tools'] is True
-        assert 'RepairDraft' in prompt
+        assert 'RepairDraft' not in prompt
         return SimpleNamespace(result=json.dumps(draft)), []
     node._call_llm = conclude
     result = node.execute({'question':'诊断 demo/api-1',
                            'request_contract':{'route':'full_diagnosis'}})
     assert len(calls) == 1
     assert result['conclusion'] == draft['answer']
-    assert result['remediation_draft']['actions'][0]['execute_command'] == draft['actions'][0]['execute_command']
+    assert not result.get('remediation_draft')
 
 
 @pytest.mark.parametrize('mode', ['review', 'auto'])
@@ -86,7 +86,7 @@ def test_workflow_passes_configured_pod_mode_owner_and_policy(monkeypatch, tmp_p
     from app.core.remediation.pod_executor import PodRepairExecutor
     draft = {'targets': [], 'actions': []}
     monkeypatch.setattr(QueryCollectNode, 'execute', lambda self, state: {
-        'request_route': 'full_diagnosis', 'request_contract': {'namespaces': ['demo']},
+        'request_route': 'remediation', 'request_contract': {'namespaces': ['demo']},
         'remediation_draft': draft, 'conclusion': 'report', 'conclusion_formatted': 'report'})
     def run(self, run_id, actual, **kw):
         assert actual == draft and kw['mode'] == mode
@@ -99,6 +99,24 @@ def test_workflow_passes_configured_pod_mode_owner_and_policy(monkeypatch, tmp_p
         'enabled':True,'executor':'pod','mode':mode,'approval_timeout_seconds':42,'denied_operations':['patch']}})
     executor = WorkflowExecutor(service)
     executor.REPORTS_DIR = str(tmp_path)
-    events = list(executor.execute_stream('diagnose', workflow_overrides={
+    import threading
+    cancel = threading.Event()
+    events = list(executor.execute_stream('diagnose', cancel_event=cancel, workflow_overrides={
         'query_mode':'direct','_remediation_owner':'alice'}))
     assert any(e['type']=='remediation_finished' for e in events)
+    assert not cancel.is_set(), 'normal workflow completion must not cancel subsequent job execution'
+
+
+def test_group_scope_is_explicit_in_repair_material():
+    node = RemediationNode()
+    node.ai_call = SimpleNamespace()
+    node._prepare_query_tools = lambda: ''
+    def collect(question, prompt, **kw):
+        material = json.loads(question)
+        assert material['current_repair_group'] == {'group_id': 'g2', 'targets': [{'entities': [{'name': 'p2'}]}]}
+        assert '不为其他组生成 targets/actions' in prompt
+        return SimpleNamespace(result=json.dumps({'intent':'repair', 'scope':'p2', 'status':'answered',
+                                                  'answer':'needs input', 'targets':[], 'actions':[]})), []
+    node._call_llm = collect
+    node.execute({'question':'fix all three', 'repair_context': {'diagnosis': {'payload': {
+        'group_id':'g2', 'groups':[{'target':{'entities':[{'name':'p2'}]}}]}}}})

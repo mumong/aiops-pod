@@ -9,7 +9,7 @@ from typing import Any, Literal
 import time
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from openai import APIStatusError, APITimeoutError, APIConnectionError
+from openai import APIStatusError, APITimeoutError
 from app.core.prompts import REQUEST_ROUTER_PROMPT
 import json
 from datetime import datetime, timezone
@@ -38,11 +38,13 @@ ROUTER_PROMPT = REQUEST_ROUTER_PROMPT  # Compatibility import; editable source i
 
 def router_failure(exc, history_loaded=False):
     """Public, sanitized error presentation; never expose provider bodies or credentials."""
+    from app.core.aicall.errors import model_transport_message
+    transport_message = model_transport_message(exc)
     status = getattr(exc, 'status_code', None) if isinstance(exc, APIStatusError) else None
-    if isinstance(exc, APITimeoutError):
-        code, title, detail = 'model_timeout', '模型服务响应超时', '理解任务时等待模型服务超时，请稍后重试。'
-    elif isinstance(exc, APIConnectionError):
-        code, title, detail = 'model_connection', '模型服务连接失败', '暂时无法连接模型服务，请稍后重试或检查服务连接。'
+    if transport_message:
+        code, title, detail = 'model_connection', 'LLM API 服务连接异常', transport_message
+        if isinstance(exc, APITimeoutError):
+            code, title = 'model_timeout', 'LLM API 服务响应超时'
     elif status is not None:
         code, title, detail = 'model_service', '模型服务请求失败', f'理解任务时模型服务返回 HTTP {status}。'
         detail += '请检查模型服务认证或配置。' if status in (401, 403) else '请稍后重试；持续失败请检查模型网关和上游服务。'
@@ -79,6 +81,20 @@ class RequestRouterNode(WorkflowNode):
         from app.core.aicall.client import StructuredContextBudgetError
         _configure_query_runtime(self)
         question = state.get("original_question") or state.get("question", "")
+        if state.get("repair_entry_requested"):
+            # A clicked repair/revision entry explicitly chooses the workflow;
+            # the model still decides evidence, repair strategy and actions.
+            context = state.get("repair_context") or {}
+            source = context.get("diagnosis") or context.get("previous_plan") or {}
+            scope = (source.get("payload") or {}).get("request_contract") or {}
+            contract = RequestContract(route="remediation", task="repair",
+                scope=scope.get("scope") or "unspecified", namespaces=scope.get("namespaces") or [],
+                pod_names=scope.get("pod_names") or [], requested_outputs=["修复方案与执行审查"],
+                scope_basis="用户通过报告或方案入口明确发起；历史记录已校验归属，修复节点自主核实当前事实。")
+            output = {"request_route": "remediation", "request_contract": contract.model_dump()}
+            self._archive_node_input({"question": question, "source_run_id": source.get("run_id")})
+            self._archive_node_output(output)
+            return output
         history = state.get("query_session_context") or {}
         # Answers contain newly discovered referents absent from the original contract.
         # Preserve dialogue, not bulky tool payloads; budget overflow uses compaction below.

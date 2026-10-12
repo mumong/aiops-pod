@@ -7,7 +7,7 @@
 import os
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from langchain_core.tools import BaseTool
 from pydantic import Field
@@ -17,6 +17,8 @@ from app.core.context.archive import (
     REPORTS_ARCHIVE_ROOT,
     get_archive_root,
 )
+from app.core.context.evidence_policy import EvidencePolicy
+from app.core.context.budget import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -110,13 +112,24 @@ class ReadContextArchiveTool(BaseTool):
         "读取 context archive 里的已落盘文件。"
         "传入 archive_path（例如 raw_ref/summary_ref/archive_ref/handoff_ref/input_ref/output_ref 指向的绝对路径），"
         "可选 offset 和 length 用于分段读取大文件。"
+        "view=compact 可按 json_pointer 读取 JSON 子树，start/limit 分页；"
+        "search 为记录/文本行的字面关键词搜索，fields 支持字段名（name）或相对 JSON pointer（/containers/0/name）。"
+        "查找已知对象/字段时可用 compact+search/fields，避免顺序遍历无关记录；"
+        "search 扫描所选子树从 start 开始的记录，查全子树时 start=0。"
+        "返回 view_complete 和 next_start；索引未展示的数据不代表不存在。"
+        "view_complete=true 且 integrity=lossless_received_response 表示结构压紧但无遗漏，可直接使用已展示证据。"
+        "lossless_selected_subtree 只表示 json_pointer 所选子树完整，不代表整份响应或上游数据完整。"
         "仅允许读取 context archive 根目录下的文件。"
     )
     allowed_roots: list = Field(default_factory=_default_archive_roots)
     default_length: int = 12000
     max_length: int = 40000
+    evidence_budget_tokens: Optional[int] = Field(default_factory=lambda: EvidencePolicy.from_env().result_tokens)
 
-    def _run(self, archive_path: str, offset: int = 0, length: Optional[int] = None) -> str:
+    def _run(self, archive_path: str, offset: int = 0, length: Optional[int] = None,
+             view: Literal["raw", "compact"] = "raw", json_pointer: str = "",
+             start: int = 0, limit: int = 50, search: str = "",
+             fields: Optional[list[str]] = None, max_tokens: int = 4096) -> str:
         requested = (archive_path or "").strip()
         if not requested:
             return "Error: archive_path is required"
@@ -152,11 +165,37 @@ class ReadContextArchiveTool(BaseTool):
             logger.warning("⚠️ [read_context_archive] 读取失败: %s | %s", resolved, exc)
             return f"Error: failed to read archive file '{resolved}': {exc}"
 
+        if view == "compact" or json_pointer or search or fields:
+            from app.core.context.evidence_view import build_evidence_view, compact_json
+
+            result = build_evidence_view(
+                content, str(resolved), max_tokens=min(max_tokens, self.evidence_budget_tokens or 16384), json_pointer=json_pointer,
+                start=start, limit=limit, search=search, fields=fields,
+            )
+            if result.get("status") in {"invalid_pointer", "invalid_selector", "view_budget_too_small"}:
+                # Same failure protocol as path/IO errors below, so the loop and
+                # UI do not report an invalid archive lookup as successful data.
+                return "Error: archive view: " + compact_json(result)
+            return compact_json(result)
+
         safe_offset = max(0, int(offset or 0))
         requested_length = self.default_length if length is None else int(length)
         safe_length = max(200, min(requested_length, self.max_length))
         snippet = content[safe_offset:safe_offset + safe_length]
-        truncated = safe_offset + safe_length < len(content)
+        if self.evidence_budget_tokens is not None:
+            # Explicit raw reads remain available, but cannot refill the context
+            # with a 40k-character payload. Return the exact next byte-free char
+            # cursor; no re-summarization of already selected archive evidence.
+            allowance = max(128, self.evidence_budget_tokens - estimate_tokens(str(resolved)) - 200)
+            low, high = 0, len(snippet)
+            while low < high:
+                mid = (low + high + 1) // 2
+                if estimate_tokens(snippet[:mid]) <= allowance:
+                    low = mid
+                else:
+                    high = mid - 1
+            snippet = snippet[:low]
+        truncated = safe_offset + len(snippet) < len(content)
         logger.info(
             "📦 [read_context_archive] 读取: %s | offset=%d length=%d total=%d truncated=%s",
             resolved, safe_offset, safe_length, len(content), truncated,
@@ -181,8 +220,13 @@ class ReadContextArchiveTool(BaseTool):
             f"{suffix}"
         )
 
-    async def _arun(self, archive_path: str, offset: int = 0, length: Optional[int] = None) -> str:
-        return self._run(archive_path=archive_path, offset=offset, length=length)
+    async def _arun(self, archive_path: str, offset: int = 0, length: Optional[int] = None,
+                    view: Literal["raw", "compact"] = "raw", json_pointer: str = "",
+                    start: int = 0, limit: int = 50, search: str = "",
+                    fields: Optional[list[str]] = None, max_tokens: int = 4096) -> str:
+        return self._run(archive_path=archive_path, offset=offset, length=length,
+                         view=view, json_pointer=json_pointer, start=start, limit=limit,
+                         search=search, fields=fields, max_tokens=max_tokens)
 
     @staticmethod
     def _is_relative_to(path: Path, root: Path) -> bool:
@@ -191,6 +235,25 @@ class ReadContextArchiveTool(BaseTool):
             return True
         except ValueError:
             return False
+
+
+class LegacyReadContextArchiveTool(ReadContextArchiveTool):
+    """Keep the old tool schema/description intact while the trial is disabled."""
+
+    evidence_budget_tokens: Optional[int] = None
+
+    description: str = (
+        "读取 context archive 里的已落盘文件。"
+        "传入 archive_path（例如 raw_ref/summary_ref/archive_ref/handoff_ref/input_ref/output_ref 指向的绝对路径），"
+        "可选 offset 和 length 用于分段读取大文件。"
+        "仅允许读取 context archive 根目录下的文件。"
+    )
+
+    def _run(self, archive_path: str, offset: int = 0, length: Optional[int] = None) -> str:
+        return super()._run(archive_path=archive_path, offset=offset, length=length, view="raw")
+
+    async def _arun(self, archive_path: str, offset: int = 0, length: Optional[int] = None) -> str:
+        return self._run(archive_path=archive_path, offset=offset, length=length)
 
 
 def get_builtin_tools(runbook_dirs: Optional[list] = None) -> list:
@@ -205,7 +268,8 @@ def get_builtin_tools(runbook_dirs: Optional[list] = None) -> list:
     dirs = runbook_dirs or list(DEFAULT_RUNBOOK_DIRS)
     tools = [
         FetchRunbookTool(runbook_dirs=dirs),
-        ReadContextArchiveTool(),
+        (ReadContextArchiveTool() if os.getenv("AIOPS_EVIDENCE_VIEW_MODE", "legacy").lower() == "compact"
+         else LegacyReadContextArchiveTool()),
     ]
     # 标记为内置工具，方便 _log_loaded_resources 分组显示
     for t in tools:

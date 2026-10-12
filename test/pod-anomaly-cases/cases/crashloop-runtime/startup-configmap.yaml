@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: workload-startup}
+data:
+  bootstrap.py: |
+    import json
+    import os
+    import runpy
+    import sys
+    import time
+
+    def fail(message):
+        print(json.dumps({"timestamp": time.time(), "event": "startup_error",
+                          "level": "error", "message": message}), flush=True)
+        sys.exit(2)
+
+    config_path = os.environ.get("APP_CONFIG_PATH")
+    if not config_path:
+        fail("APP_CONFIG_PATH is required")
+    try:
+        with open(config_path, encoding="utf-8") as stream:
+            config = json.load(stream)
+        port = config["http_port"]
+        if type(port) is not int or not 1024 <= port <= 65535:
+            raise ValueError("http_port must be an integer between 1024 and 65535")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        fail("Cannot load application configuration: " + str(exc))
+    os.environ["HTTP_PORT"] = str(port)
+    print(json.dumps({"timestamp": time.time(), "event": "config_loaded",
+                      "path": config_path, "http_port": port}), flush=True)
+    runpy.run_path("/opt/aiops/server.py", run_name="__main__")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: workload-settings}
+data:
+  app.json: |
+    {"http_port": 8080}

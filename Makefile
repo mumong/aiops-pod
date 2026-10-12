@@ -208,3 +208,14 @@ case-clean:
 
 case-clean-variants:
 	@$(CASE_MANAGER) clean --variants
+
+# 专属自动修复验收：仅 c04、c06、c09、c11
+.PHONY: repair-cases-reset repair-cases-clean repair-cases-status
+repair-cases-reset:
+	@python3 $(CASES_DIR)/scripts/repair_cases.py reset
+
+repair-cases-clean:
+	@python3 $(CASES_DIR)/scripts/repair_cases.py clean
+
+repair-cases-status:
+	@python3 $(CASES_DIR)/scripts/repair_cases.py status

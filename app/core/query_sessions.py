@@ -51,5 +51,9 @@ class QuerySessionStore:
                 entry['busy'] = False
                 entry['touched'] = self.clock()
 
+    def is_busy(self, key):
+        with self.lock:
+            return bool(self.entries.get(key, {}).get('busy'))
+
 
 query_sessions = QuerySessionStore()

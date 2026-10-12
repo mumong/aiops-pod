@@ -112,6 +112,12 @@ class VerifierTests(unittest.TestCase):
         self.assertEqual(result.coverage, "error")
         self.assertIn("driver", result.summary)
 
+    def test_startup_logs_do_not_require_traffic_trace_identity(self):
+        identity = self.v.PodIdentity("aiops-case-06", "workload-x", "uid-1", "10.0.0.7", "2026-08-03T00:00:00Z")
+        with mock.patch.object(self.v, "query_elasticsearch") as query:
+            self.v.query_case_elasticsearch({"runtime": False}, identity, "driver-uid", "http://es", 100, 200)
+        self.assertEqual(query.call_args.args[1], "")
+
     def test_missing_pod_ip_is_absent_not_error_for_flow(self):
         identity = self.v.PodIdentity("aiops-case-01", "workload-x", "uid-1", "", "2026-08-03T00:00:00Z")
         result = self.v.query_deepflow(identity, 100, 200, "xnet", "app=clickhouse")

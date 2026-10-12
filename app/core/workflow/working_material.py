@@ -56,6 +56,13 @@ def build_working_material(state):
     )
     shared = state.get("shared_runbooks") or []
     shared_refs = {item["raw_ref"] for item in shared if item.get("raw_ref")}
+    from app.core.context.lifecycle_core import core_from_material, observation_reference, material_without_core
+    protected = dict(events[last_compaction].get('protected_handoff') or {}) if last_compaction >= 0 else {}
+    core = core_from_material({'protected_handoff': protected,
+                              'observations': [e for e in events if e.get('type') == 'tool_result'],
+                              'parallel_results': state.get('autonomous_group_results') or []})
+    if core:
+        protected['lifecycle_core'] = core
     return {
         "question": state.get("question", "")
         if state.get("diagnosis_target")
@@ -64,12 +71,12 @@ def build_working_material(state):
         "original_request_contract": state.get("original_request_contract"),
         "shared_location_notes": state.get("shared_location_notes"),
         "shared_runbooks": shared,
-        "protected_handoff": events[last_compaction].get("protected_handoff", {})
-        if last_compaction >= 0 else {},
+        "protected_handoff": protected,
         "request_contract": state.get("request_contract"),
         "diagnosis_target": state.get("diagnosis_target"),
         "parallel_inventory": state.get("autonomous_groups") or [],
-        "parallel_results": state.get("autonomous_group_results") or [],
+        "parallel_results": material_without_core({
+            "parallel_results": state.get("autonomous_group_results") or []})["parallel_results"],
         "request_time_utc": state.get("request_time_utc")
         or datetime.now(timezone.utc).isoformat(),
         "analysis_draft": state.get("query_draft", ""),
@@ -89,7 +96,7 @@ def build_working_material(state):
             if event.get("type") == "execution_incomplete"
         ],
         "observations": [
-            shared_runbook_projection({
+            shared_runbook_projection(observation_reference({
                 key: event.get(key)
                 for key in (
                     "tool_name",
@@ -101,7 +108,7 @@ def build_working_material(state):
                     "structured_ref",
                     "timestamp",
                 )
-            }, shared_refs)
+            }), shared_refs)
             for event in events[last_compaction + 1 :]
             if event.get("type") == "tool_result"
         ],

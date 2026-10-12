@@ -7,15 +7,9 @@ import fnmatch
 from pathlib import PurePosixPath
 import shlex
 
-DEFAULT_DENIED_EXECUTABLES = frozenset({
-    "rm", "unlink", "shred", "dd", "mkfs*", "wipefs", "fdisk", "sfdisk",
-    "parted", "reboot", "shutdown", "halt", "poweroff",
-})
-DEFAULT_ALLOWED_EXEC_COMMANDS = frozenset({
-    "echo", "printf", "cat", "ls", "pwd", "stat", "head", "tail", "grep",
-    "wc", "id", "whoami", "hostname", "uname", "date", "ps", "df", "du",
-    "true", "false", "test", "[",
-})
+DEFAULT_DENIED_EXECUTABLES = frozenset({"rm"})
+# Empty disables the optional executable allowlist; explicit deny still wins.
+DEFAULT_ALLOWED_EXEC_COMMANDS = frozenset()
 
 
 class RepairCommandDenied(ValueError):
@@ -65,7 +59,7 @@ def check_repair_execution(args, policy):
             if len(argv) < 2 or argv[1].startswith("-") or "=" in argv[1]:
                 reject("包装命令参数无法可靠检查")
             executable(argv[1:], depth + 1)
-        elif name not in allowed:
+        elif allowed and name not in allowed:
             reject("容器内命令不在 allowed_exec_commands：" + name)
 
     try:

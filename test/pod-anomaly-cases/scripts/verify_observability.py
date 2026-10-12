@@ -302,7 +302,7 @@ def query_case_elasticsearch(case: dict[str, Any], identity: PodIdentity, case_r
                              ca_cert: str = "") -> CoverageResult:
     if case.get("runtime") and not case_run_id:
         return CoverageResult("elasticsearch", "error", "current Running traffic-driver Pod UID is unavailable")
-    return query_elasticsearch(identity, case_run_id, base_url, start, end, username, password,
+    return query_elasticsearch(identity, case_run_id if case.get("runtime") else "", base_url, start, end, username, password,
                                tls_verify, ca_cert)
 
 

@@ -8,6 +8,7 @@ main agent.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Callable, Dict, Optional
 
@@ -117,6 +118,8 @@ class ObservationProcessor:
         summarizer: Optional[Summarizer] = None,
         summary_mode: str = "rule",
         context_pressure_threshold: float = 0.8,
+        evidence_view_mode: Optional[str] = None,
+        evidence_view_tokens: Optional[int] = None,
     ):
         self.archive_root = archive_root or get_archive_root()
         self.max_observation_chars = max_observation_chars
@@ -124,6 +127,13 @@ class ObservationProcessor:
         normalized = (summary_mode or "rule").strip().lower()
         self.summary_mode = normalized if normalized in {"rule", "ai"} else "rule"
         self.context_pressure_threshold = float(context_pressure_threshold or 0.8)
+        self.evidence_view_mode = (evidence_view_mode or os.getenv("AIOPS_EVIDENCE_VIEW_MODE", "legacy")).lower()
+        if self.evidence_view_mode not in {"legacy", "compact"}:
+            raise ValueError("AIOPS_EVIDENCE_VIEW_MODE must be legacy or compact")
+        from .evidence_policy import EvidencePolicy
+        policy = EvidencePolicy.from_env()
+        self.evidence_view_tokens = max(512, min(int(
+            policy.result_tokens if evidence_view_tokens is None else evidence_view_tokens), 16384))
 
     def process(
         self,
@@ -146,29 +156,26 @@ class ObservationProcessor:
                 raw=raw, structured=structured, summary=raw))
         if computed is not None:
             return computed
+        # Reference documents and explicit archive reads are not new observations.
+        # Re-projecting a deliberate read could make deferred evidence unreachable.
+        if self.evidence_view_mode == "compact" and tool not in {"fetch_runbook", "read_context_archive", "TodoWrite"}:
+            return self._compact_observation(run_id, node_id, sequence, tool, raw, tool_args)
         if tool == "query_pod_lifecycle":
             # This source already returns a bounded, paginated fact projection.
             # Preserve container lifecycle and coverage together, without a second
             # lossy summary or a health classification derived from Pod phase.
-            try:
-                structured = json.loads(raw)
-                if not isinstance(structured, dict):
-                    raise ValueError("expected lifecycle object")
-                valid = (structured.get("contract_version") == "pod-lifecycle.v1"
-                         and isinstance(structured.get("pods"), list))
-                semantic_success = valid and structured.get("status") == "success"
-                structured["parse_status"] = "parsed" if valid or structured.get("status") == "error" else "unsupported"
-            except (ValueError, TypeError):
-                structured = {"status": "parse_failed", "parse_status": "failed", "coverage": "unknown"}
-                semantic_success = False
+            structured, semantic_success = self._parse_lifecycle_observation(raw)
+            from .lifecycle_core import lifecycle_core
+            core = lifecycle_core(structured) if semantic_success and node_id in {'layer', 'evidence'} else {}
+            summary = json.dumps(core, ensure_ascii=False, separators=(',', ':')) if core else raw
             refs = ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
                 node_id=node_id, sequence=sequence, tool_name=tool,
-                raw=raw, structured=structured, summary=raw,
+                raw=raw, structured=structured, summary=summary,
             )
             return {"tool": tool, "status": "success", "semantic_success": semantic_success,
-                    "summary": raw, "structured": structured, "raw_chars": len(raw),
-                    "summary_chars": len(raw), "processed": True,
-                    "processor": "pod_lifecycle+lossless", **refs}
+                    "summary": summary, "structured": structured, "raw_chars": len(raw),
+                    "summary_chars": len(summary), "processed": True,
+                    "processor": "pod_lifecycle+core" if core else "pod_lifecycle+lossless", **refs}
         targeted_summary = (
             preserve_raw
             and tool in self.QUERY_SUMMARY_TOOLS
@@ -360,6 +367,60 @@ class ObservationProcessor:
             "context_usage_ratio": context_usage_ratio,
             **refs,
         }
+
+    @staticmethod
+    def _parse_lifecycle_observation(raw):
+        """Existing producer contract validation shared by both display modes."""
+        try:
+            structured = json.loads(raw)
+            if not isinstance(structured, dict):
+                raise ValueError("expected lifecycle object")
+            valid = (structured.get("contract_version") == "pod-lifecycle.v1"
+                     and isinstance(structured.get("pods"), list))
+            semantic_success = valid and structured.get("status") == "success"
+            structured["parse_status"] = "parsed" if valid or structured.get("status") == "error" else "unsupported"
+            return structured, semantic_success
+        except (ValueError, TypeError):
+            return {"status": "parse_failed", "parse_status": "failed", "coverage": "unknown"}, False
+
+    def _compact_observation(self, run_id, node_id, sequence, tool, raw, tool_args):
+        from .budget import estimate_tokens
+        from .evidence_view import build_evidence_view, compact_json, explicit_execution_failure
+
+        # Keep existing structured/UI contracts, but never use their record
+        # selection as the source of the new model-facing view.
+        contract_success = None
+        if tool == "query_pod_lifecycle":
+            structured, contract_success = self._parse_lifecycle_observation(raw)
+        else:
+            try:
+                structured, _, _ = self._extract(tool, raw, tool_args=tool_args)
+            except Exception:
+                structured = {"parse_status": "unsupported"}
+        archive = ContextArchive(run_id=run_id, root=self.archive_root)
+        refs = archive.write_tool_artifact(node_id, sequence, tool, raw, structured, raw)
+        view = None
+        if estimate_tokens(raw) <= self.evidence_view_tokens:
+            summary = raw
+        else:
+            view = build_evidence_view(raw, refs["raw_ref"], max_tokens=self.evidence_view_tokens)
+            summary = compact_json(view)
+        audit = {"mode": "compact", "raw_estimated_tokens": estimate_tokens(raw),
+                 "view_estimated_tokens": estimate_tokens(summary),
+                 "view_complete": view["view_complete"] if view else True,
+                 "budget_tokens": self.evidence_view_tokens}
+        structured["evidence_view"] = audit
+        refs = archive.write_tool_artifact(node_id, sequence, tool, raw, structured, summary)
+        semantic_success = (contract_success if contract_success is not None
+                            else self._is_semantically_successful(structured, raw))
+        # Preserve explicit failure semantics independently of view encoding.
+        if structured.get("status") in ("error", "parse_failed") or explicit_execution_failure(raw):
+            semantic_success = False
+        return {"tool": tool, "status": "success", "processed": True,
+                "semantic_success": semantic_success,
+                "summary": summary, "structured": structured, "raw_chars": len(raw),
+                "summary_chars": len(summary), "processor": "generic_evidence_view.v1",
+                "observation_audit": audit, **refs}
 
     def _query_metric_catalog(self, raw: str) -> tuple[Dict[str, Any], str]:
         """Round-robin metric families; never claim omitted names are absent."""

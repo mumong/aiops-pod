@@ -1,9 +1,31 @@
 import json
 from copy import deepcopy
 import threading
+import pytest
 
 from app.core.remediation.approval import ApprovalStore
 from app.core.remediation.pod_executor import PodRepairExecutor
+
+
+@pytest.mark.parametrize('command', [
+    '''kubectl patch pod/api-1 -n demo --type=json -p '[{"op":"remove","path":"/metadata/finalizers/0"}]' ''',
+    'kubectl exec pod/api-1 -n demo -- curl http://localhost:8080/health',
+])
+def test_risky_but_supported_plan_reaches_review_without_extra_whitelist(command):
+    draft, _, _, _ = fixture()
+    draft['actions'][0].update(execute_command=command, verify_command='',
+                               risk='外部清理状态未知，批准前请审阅影响')
+    calls = []
+    store = ApprovalStore()
+    stream = PodRepairExecutor(store, lambda argv: calls.append(argv) or 'ok').run(
+        'review-risk', draft, owner='alice')
+    event = next(stream)
+    assert event['type'] == 'remediation_approval_required'
+    assert event['payload']['execute_command'] == command
+    assert calls == []
+    store.resolve('review-risk', event['approval_id'], True, owner='alice')
+    assert list(stream)[-1]['status'] == 'needs_followup'
+    assert len(calls) == 1
 
 
 def test_generic_command_is_reviewed_and_no_implicit_checks_are_inserted():

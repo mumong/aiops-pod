@@ -1,5 +1,6 @@
 """Read-only preparation of a Pod remediation plan; never executes writes."""
 import json
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -28,12 +29,22 @@ class RepairAction(BaseModel):
     execute_command: str
     verify_command: str = ""
     rollback_advice: str
+    configuration_change: str = ""
+    verification_conditions: list[str] = Field(default_factory=list)
+
+
+class RepairAssessment(BaseModel):
+    group_id: str
+    status: Literal["ready", "needs_input", "not_actionable", "needs_evidence"]
+    reason: str
+    missing: list[str] = Field(default_factory=list)
 
 
 class RepairDraft(QueryAnswer):
     targets: list[RepairTarget] = Field(default_factory=list)
     actions: list[RepairAction] = Field(default_factory=list)
     runbook_unavailable_reason: str = ""
+    assessments: list[RepairAssessment] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def command_contract(self):
@@ -54,6 +65,13 @@ class RepairDraft(QueryAnswer):
                 if not command and stage in {"dry_run", "verify"}:
                     continue
                 validate_target_command(command, allowed)
+        decisions = {item.group_id: item for item in self.assessments}
+        if len(decisions) != len(self.assessments) or any(g not in groups for g in decisions):
+            raise ValueError("assessments 必须唯一关联已列出的目标")
+        actionable = {a.group_id for a in self.actions}
+        for gid, decision in decisions.items():
+            if (decision.status == "ready") != (gid in actionable):
+                raise ValueError("ready 必须有对应动作；其他规划状态不能包含执行动作")
         return self
 
 
@@ -72,8 +90,13 @@ class RemediationNode(QueryCollectNode):
         self.ai_call.query_session_context = state.get("query_session_context") or {}
         self.ai_call.working_context_original_question = question
         catalog = self._prepare_query_tools()
+        diagnosis = ((state.get("repair_context") or {}).get("diagnosis") or {}).get("payload") or {}
         material = {"question": question, "request_contract": state.get("request_contract"),
-                    "latest_diagnosis": state.get("conclusion") or state.get("query_draft")}
+                    "current_repair_group": ({"group_id": diagnosis["group_id"],
+                        "targets": [g.get("target") for g in diagnosis.get("groups", [])]}
+                        if diagnosis.get("group_id") else None),
+                    "latest_diagnosis": state.get("conclusion") or state.get("query_draft"),
+                    "repair_context": state.get("repair_context")}
         self._archive_node_input(material)
         response, events = self._call_llm(
             json.dumps(material, ensure_ascii=False),
