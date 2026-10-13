@@ -1352,7 +1352,8 @@ def test_call_with_tools_does_not_retry_stream_interruption_after_tool_call(
     assert len(created_agents) == 1
 
 
-def test_call_with_tools_can_return_structured_response_without_extra_extract_llm():
+@pytest.mark.parametrize('narrative', ['', '核查已完成，下面提交结构化结果。'])
+def test_call_with_tools_can_return_structured_response_without_extra_extract_llm(narrative):
     create_agent_kwargs = []
 
     class _LayerLikeOutput(BaseModel):
@@ -1386,7 +1387,7 @@ def test_call_with_tools_can_return_structured_response_without_extra_extract_ll
                         "structured_response": parsed,
                         "messages": [
                             AIMessage(
-                                content="",
+                                content=narrative,
                                 tool_calls=[
                                     {
                                         "name": "_LayerLikeOutput",

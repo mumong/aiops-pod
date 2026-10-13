@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import anyio
 from pydantic import BaseModel, ValidationError
 from langgraph.errors import GraphRecursionError
-from langchain_openai import ChatOpenAI
+from .model_streaming import VisibleChatOpenAI as ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from openai import (
     APIError,
@@ -1571,6 +1571,9 @@ class AICall:
             if not final_content:
                 final_content = f"Agent 执行异常: {e}"
 
+        # Visible progress must not overwrite the validated node contract.
+        if structured_response is not None:
+            final_content = self._serialize_structured_response(structured_response)
         total_ms = (time.time() - call_start) * 1000
         aggregate_usage = self._aggregate_usage_from_events(thinking_events)
         result = AICallResult(
@@ -1878,6 +1881,19 @@ class AICall:
             return ""
 
         content = getattr(message, "content", None) or ""
+        if isinstance(content, list):
+            visible = []
+            for block in content:
+                if isinstance(block, str):
+                    visible.append(block)
+                elif isinstance(block, dict) and block.get('type') in {'text', 'output_text'}:
+                    visible.append(str(block.get('text') or ''))
+                elif isinstance(block, dict) and block.get('type') == 'reasoning':
+                    summary = ''.join(str(item.get('text') or '') for item in block.get('summary', [])
+                                      if isinstance(item, dict) and item.get('type') == 'summary_text')
+                    if summary:
+                        visible.append(AICall._normalize_reasoning_text(summary))
+            content = ''.join(visible)
         additional_kwargs = getattr(message, "additional_kwargs", None) or {}
         response_metadata = getattr(message, "response_metadata", None) or {}
 

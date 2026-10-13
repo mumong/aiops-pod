@@ -551,6 +551,7 @@ class WorkflowExecutor:
                         "thinking_type": data.get("type", ""),
                         "tool_name": data.get("tool_name"),
                         "content": data.get("content"),
+                        **({"full_content": data["full_content"]} if data.get("type") == "ai_message" and data.get("full_content") is not None else {}),
                         "status": data.get("status"),
                         "result_preview": data.get("result_preview"),
                         "duration_seconds": data.get("duration_seconds"),

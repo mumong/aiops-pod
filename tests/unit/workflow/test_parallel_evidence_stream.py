@@ -76,7 +76,7 @@ def test_parallel_sse_projection_exposes_lane_stage_without_outer_node_override(
         "parallel_context": _parallel_context(),
     })
 
-    assert projected == {"lane_stage": "rca"}
+    assert projected == {"lane_stage": "rca", "parallel_group_id": "g3"}
 
 
 def test_general_prometheus_and_kubectl_logs_have_observability_dimensions():

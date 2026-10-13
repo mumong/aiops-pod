@@ -188,7 +188,7 @@ def project_parallel_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
     lane_stage = str(event.get("lane_stage") or "").strip()
     if lane_stage:
         projected["lane_stage"] = lane_stage
-    if event.get("type") == "runtime_status":
+    if event.get("type") in {"runtime_status", "ai_token", "ai_message"}:
         projected["parallel_group_id"] = str(event["parallel_context"].get("group_id") or "")
     if event.get("type") not in {"tool_start", "tool_result"}:
         return projected

@@ -18,18 +18,7 @@ from app.core.workflow.nodes.query_answer import build_working_material
 
 
 class LaneQueue(_ScopedParallelEventQueue):
-    """Stream scoped tools, not interleaved fragments from different models."""
-    @staticmethod
-    def _is_text(item):
-        return isinstance(item, tuple) and item[0] == "thinking" and item[1].get("type") in {"ai_token", "ai_message"}
-
-    def put_nowait(self, item):
-        if not self._is_text(item):
-            super().put_nowait(item)
-
-    def put(self, item, block=True, timeout=None):
-        if not self._is_text(item):
-            super().put(item, block=block, timeout=timeout)
+    """Keep text and tools scoped to their group; never mix sibling streams."""
 
 
 def plan_groups(node, state):
