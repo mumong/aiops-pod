@@ -58,6 +58,9 @@ class PodRepairExecutor:
             if record_store:
                 record_store.transition(run_id, owner, status, event)
             return event
+        if draft and draft.get('planning_error'):
+            yield finish('failed', draft['planning_error']['message'])
+            return
         if not draft or not draft.get("actions"):
             yield finish("skipped", "没有可安全执行的结构化修复动作")
             return

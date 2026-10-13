@@ -2,6 +2,8 @@
 import copy
 import os
 import time
+import threading
+from app.core.aicall.errors import ModelStreamInterrupted, raise_on_model_disconnect
 from app.core.workflow.group_runner import iter_group_results
 
 from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
@@ -123,6 +125,11 @@ class AutonomousParallelNode(WorkflowNode):
                                  content=f"{group['group_id']}：正在{'采集证据' if node.collect else '分析根因'}")
                 local.update(node.execute(local))
             except Exception as exc:
+                try:
+                    raise_on_model_disconnect(exc)
+                except ModelStreamInterrupted:
+                    self.cancel_event.set()
+                    raise
                 failure = f"{node.node_id}: {exc}"
                 local["thinking_events"] = [*(local.get("thinking_events") or []),
                     {"type": "execution_incomplete", "reason": failure}]
@@ -137,12 +144,22 @@ class AutonomousParallelNode(WorkflowNode):
                 "error": failure, "material": material}, own_events
 
     def execute(self, state):
+        # Local stop signal must not mark the parent run as user-cancelled;
+        # the fatal exception must reach the executor's error event instead.
+        parent_cancel = self.cancel_event
+        class BranchStop(threading.Event):
+            def is_set(self):
+                return super().is_set() or bool(parent_cancel and parent_cancel.is_set())
+        self.cancel_event = BranchStop()
         groups = state.get("autonomous_groups") or []
         workers = max(1, min(8, int(os.getenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", "3"))))
         results, events = {}, list(state.get("thinking_events") or [])
         for group, value, error in iter_group_results(groups, lambda g: self._run_lane(g, state),
                                                      max_workers=workers, cancel=self.cancel_event):
             gid = group["group_id"]
+            if isinstance(error, ModelStreamInterrupted):
+                self.cancel_event.set()
+                raise error
             if error is None:
                 result, lane_events = value
             else:

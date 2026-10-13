@@ -136,6 +136,8 @@ class RequestRouterNode(WorkflowNode):
                 raise ValueError("任务分类未返回有效结构化结果")
             contract = RequestContract.model_validate(contract)
         except Exception as exc:
+            from app.core.aicall.errors import raise_on_model_disconnect
+            raise_on_model_disconnect(exc)
             # Never convert a failed classifier into permission for a scan.
             failure = router_failure(exc, bool(context['history'] or context['working_summary']))
             output = {

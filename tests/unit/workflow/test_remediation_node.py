@@ -46,6 +46,23 @@ def test_invalid_repair_json_is_not_an_executable_plan():
     result = node.execute({"question": "修复"})
     assert result["remediation_draft"]["actions"] == []
     assert result["query_answer"]["status"] == "partial"
+    assert result['remediation_draft']['planning_error']['code'] == 'planning_incomplete'
+
+
+def test_disconnected_planner_is_failed_not_no_action():
+    node = RemediationNode()
+    node.ai_call = SimpleNamespace()
+    node._prepare_query_tools = lambda: ""
+    node._call_llm = lambda *a, **kw: (SimpleNamespace(result='Agent 执行异常'), [
+        {'type': 'execution_incomplete', 'reason': 'stream disconnected before completion: stream closed before response.completed'}])
+    result = node.execute({'question': '修复'})
+    plan = result['remediation_draft']
+    assert not plan['actions']
+    assert plan['planning_error']['code'] == 'model_connection_interrupted'
+    assert '模型服务连接中断' in plan['answer']
+    from app.core.remediation.pod_executor import PodRepairExecutor
+    events = list(PodRepairExecutor(runner=lambda args: pytest.fail('must not execute')).run('test', plan))
+    assert events[-1]['status'] == 'failed'
 
 
 def test_repair_schema_does_not_prescribe_agent_operations():

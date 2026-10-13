@@ -111,14 +111,21 @@ class RemediationNode(QueryCollectNode):
             ContextArchive(run_id=self.current_run_id).write_json("remediation/planning-response.json", {
                 "raw": response.result or "", "execution_incomplete": [
                     e.get("reason") for e in events if e.get("type") == "execution_incomplete"]})
+        planning_error = None
         try:
             draft = RepairDraft.model_validate_json(response.result or "")
         except ValueError:
             reasons = [str(e.get("reason", "")) for e in events if e.get("type") == "execution_incomplete"]
-            failure = ("上下文整理或预算检查未完成" if any("compaction" in r for r in reasons)
+            interrupted = any(any(s in r.lower() for s in (
+                "stream disconnected", "closed before response.completed", "connection error", "unexpected eof"
+            )) for r in reasons)
+            failure = ("模型服务连接中断，方案未生成" if interrupted
+                       else "上下文整理或预算检查未完成" if any("compaction" in r for r in reasons)
                        else "达到工具执行步数上限" if "step_limit" in reasons
                        else "工具规划执行超时" if "agent_timeout" in reasons
                        else "未获得完整有效的结构化修复方案")
+            planning_error = {"code": "model_connection_interrupted" if interrupted else "planning_incomplete",
+                              "message": failure + "。尚未执行修复，可重新生成本组方案。"}
             draft = RepairDraft(intent=question, scope="本次请求范围", status="partial",
                 answer=f"修复规划未完成：{failure}。未提交可执行动作，也没有执行修复；这不代表故障没有修复方法。",
                 missing=[failure])
@@ -126,9 +133,12 @@ class RemediationNode(QueryCollectNode):
         material_state = {**state, "thinking_events": [*(state.get("thinking_events") or []), *events]}
         output = finalize_query_answer(self, material_state, answer.model_dump_json(), [],
                                        require_structured=True)
-        output.update(request_route="remediation", remediation_draft=draft.model_dump())
+        payload = draft.model_dump()
+        if planning_error:
+            payload["planning_error"] = planning_error  # Server outcome, never a model-selected field.
+        output.update(request_route="remediation", remediation_draft=payload)
         if getattr(self, "current_run_id", None):
             from app.core.context.archive import ContextArchive
-            ContextArchive(run_id=self.current_run_id).write_json("remediation/plan.json", draft.model_dump())
+            ContextArchive(run_id=self.current_run_id).write_json("remediation/plan.json", payload)
         self._archive_node_output(output)
         return output

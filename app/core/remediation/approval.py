@@ -81,6 +81,20 @@ class ApprovalStore:
             self._condition.notify_all()
             return True
 
+    def decision_status(self, run_id: str, approval_id: str, owner: str = "") -> str:
+        """Read-only acknowledgement; never consumes or repeats a decision."""
+        key = (run_id, approval_id)
+        with self._condition:
+            request = self._requests.get(key)
+            if not request or (request.owner and not secrets.compare_digest(request.owner, owner)):
+                return 'unavailable'
+            decision = self._decisions.get(key)
+            if decision is not None:
+                return 'approved' if decision.approved else 'rejected'
+            if time.time() >= request.expires_at:
+                return 'expired'
+            return 'unavailable' if key in self._closed else 'pending'
+
     def poll_decision(self, run_id: str, approval_id: str) -> Optional[ApprovalDecision]:
         key = (run_id, approval_id)
         with self._condition:

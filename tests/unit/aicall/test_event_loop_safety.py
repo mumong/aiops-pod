@@ -107,7 +107,7 @@ def test_call_simple_creates_fresh_chat_model_per_invocation():
     model_instances[1].invoke.assert_called_once()
 
 
-def test_call_simple_replays_stream_eof_once_without_streaming(monkeypatch):
+def test_call_simple_stops_stream_eof_without_replay(monkeypatch):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
     ai = AICall(model="openai/gpt-5.6-sol", api_key="sk-test")
     created = []
@@ -150,25 +150,10 @@ def test_call_simple_replays_stream_eof_once_without_streaming(monkeypatch):
 
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
-    result = ai.call_simple(
-        "system",
-        "question",
-        node_id="conclusion",
-        max_tokens=8192,
-    )
-
-    assert result == "recovered report"
-    assert len(created) == 2
-    assert created[0].get("disable_streaming", False) is False
-    assert created[1]["disable_streaming"] is True
-    assert len(invocations) == 2
-    assert [message.content for message in invocations[0]["messages"]] == [
-        message.content for message in invocations[1]["messages"]
-    ]
-    assert invocations[0]["bind_kwargs"] == invocations[1]["bind_kwargs"] == {
-        "max_tokens": 8192,
-    }
-    assert invocations[0]["config"] == invocations[1]["config"]
+    from app.core.aicall.errors import ModelStreamInterrupted
+    with pytest.raises(ModelStreamInterrupted):
+        ai.call_simple("system", "question", node_id="conclusion", max_tokens=8192)
+    assert len(created) == len(invocations) == 1
 
 
 @pytest.mark.parametrize(
@@ -220,10 +205,10 @@ def test_call_simple_replays_measured_stream_interruptions_once_for_api_subclass
 
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
-    assert ai.call_simple("system", "question") == "recovered"
-    assert len(created) == 2
-    assert created[0].get("disable_streaming", False) is False
-    assert created[1]["disable_streaming"] is True
+    from app.core.aicall.errors import ModelStreamInterrupted
+    with pytest.raises(ModelStreamInterrupted):
+        ai.call_simple("system", "question")
+    assert len(created) == 1
 
 
 class _UnexpectedEOFTimeout(APITimeoutError):
@@ -269,9 +254,10 @@ def test_call_simple_retries_api_connection_eof_once_without_streaming(
 
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
-    assert ai.call_simple("system", "question") == "recovered"
-    assert len(created) == 2
-    assert created[1]["disable_streaming"] is True
+    from app.core.aicall.errors import ModelStreamInterrupted
+    with pytest.raises(ModelStreamInterrupted):
+        ai.call_simple("system", "question")
+    assert len(created) == 1
 
 
 def test_call_simple_retries_api_connection_eof_from_cause_chain(
@@ -313,9 +299,10 @@ def test_call_simple_retries_api_connection_eof_from_cause_chain(
 
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
-    assert ai.call_simple("system", "question") == "recovered from wrapped EOF"
-    assert len(created) == 2
-    assert created[1]["disable_streaming"] is True
+    from app.core.aicall.errors import ModelStreamInterrupted
+    with pytest.raises(ModelStreamInterrupted):
+        ai.call_simple("system", "question")
+    assert len(created) == 1
 
 
 @pytest.mark.parametrize(
@@ -480,7 +467,7 @@ def test_call_simple_does_not_retry_generic_exception_with_eof_signature(
     assert len(created) == 1
 
 
-def test_call_simple_retries_matching_api_error_only_once(monkeypatch):
+def test_call_simple_raises_original_disconnect_without_second_request(monkeypatch):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
     ai = AICall(model="openai/generic-model", api_key="sk-test")
     created = []
@@ -519,12 +506,12 @@ def test_call_simple_retries_matching_api_error_only_once(monkeypatch):
 
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
-    with pytest.raises(APIError) as exc_info:
+    from app.core.aicall.errors import ModelStreamInterrupted
+    with pytest.raises(ModelStreamInterrupted) as exc_info:
         ai.call_simple("system", "question")
 
-    assert exc_info.value is second_error
-    assert len(created) == 2
-    assert created[1]["disable_streaming"] is True
+    assert exc_info.value.__cause__ is first_error
+    assert len(created) == 1
 
 
 @pytest.mark.parametrize(
@@ -1275,15 +1262,10 @@ def test_call_with_tools_retries_stream_interruption_before_agent_progress(
 
     with patch("langchain.agents.create_agent", side_effect=_create_agent), \
          patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
-        result, events = ai.call("sys", "q", tools=[tool], max_steps=3)
-
-    assert result.result == "recovered agent response"
-    assert result.tool_call_count == 0
-    assert len(created_models) == 2
-    assert created_models[0].get("disable_streaming", False) is False
-    assert created_models[1]["disable_streaming"] is True
-    assert len(created_agents) == 2
-    assert not [event for event in events if event.get("type") == "tool_start"]
+        from app.core.aicall.errors import ModelStreamInterrupted
+        with pytest.raises(ModelStreamInterrupted):
+            ai.call("sys", "q", tools=[tool], max_steps=3)
+    assert len(created_models) == len(created_agents) == 1
 
 
 def test_call_with_tools_does_not_retry_stream_interruption_after_tool_call(
@@ -1363,15 +1345,11 @@ def test_call_with_tools_does_not_retry_stream_interruption_after_tool_call(
 
     with patch("langchain.agents.create_agent", side_effect=_create_agent), \
          patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
-        result, events = ai.call("sys", "q", tools=[tool], max_steps=3)
-
-    assert result.result == f"Agent 执行异常: {interruption}"
-    assert result.tool_call_count == 1
+        from app.core.aicall.errors import ModelStreamInterrupted
+        with pytest.raises(ModelStreamInterrupted):
+            ai.call("sys", "q", tools=[tool], max_steps=3)
     assert len(created_models) == 1
     assert len(created_agents) == 1
-    assert len([
-        event for event in events if event.get("type") == "tool_start"
-    ]) == 1
 
 
 def test_call_with_tools_can_return_structured_response_without_extra_extract_llm():

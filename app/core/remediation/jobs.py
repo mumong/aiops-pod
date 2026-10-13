@@ -22,6 +22,8 @@ class RepairJobs:
         self.cancellations = {}
 
     def _update(self, job_id, owner, **fields):
+        if 'status' in fields:
+            fields['status_started_at'] = time.time()
         return self.store.update_payload("job-" + job_id, owner, lambda p: p.update(fields))["payload"]
 
     def _new_job(self, batch_id, owner, diagnosis_id, group, *, version=1, previous=None, feedback=None):
@@ -30,6 +32,7 @@ class RepairJobs:
                    "target": group.get("target"), "diagnosis_run_id": diagnosis_id,
                    "version": version, "previous_plan_id": previous, "status": "queued",
                    "instance": self.instance, "events": [], "approval": None, "error": None,
+                   "created_at": time.time(), "status_started_at": time.time(),
                    "feedback": feedback, "previous_job_id": group.get('job_id')}
         self.store.save("job-" + job_id, owner, None, "repair_job", payload)
         self.cancellations[job_id] = threading.Event()
@@ -84,7 +87,9 @@ class RepairJobs:
             if event.get("type") == "final":
                 final = event
             elif event.get("type") == "error":
-                raise RuntimeError("workflow failed before producing a repair plan")
+                self._update(job['job_id'], owner, status='failed', approval=None,
+                             error=event.get('error') or '修复规划失败，本次运行已终止。')
+                return False
             elif event.get("type") in {"node_start", "node_complete"}:
                 self._update(job["job_id"], owner, stage=event.get("node_name"))
         if self.cancellations[job["job_id"]].is_set():
@@ -92,6 +97,11 @@ class RepairJobs:
             return False
         if not final or not final.get("repair_record") or not final.get("repair_plan"):
             raise RuntimeError("no persisted structured repair plan")
+        failure = final['repair_plan'].get('planning_error')
+        if failure:
+            self._update(job['job_id'], owner, status='failed', approval=None,
+                         error=failure['message'], error_code=failure['code'])
+            return False
         self._update(job["job_id"], owner, status="planned")
         return True
 
@@ -122,6 +132,8 @@ class RepairJobs:
                     self._update(job_id, owner, status="awaiting_approval", approval=event)
                 elif kind in {"remediation_tool_start", "remediation_tool_result"}:
                     def append(payload):
+                        if payload.get('status') != 'executing':
+                            payload['status_started_at'] = time.time()
                         payload.update(status="executing", approval=None)
                         payload["events"].append(event)
                     self.store.update_payload("job-" + job_id, owner, append)
@@ -146,6 +158,11 @@ class RepairJobs:
         except RecordUnavailable:
             job["plan"] = None
         job.pop("instance", None)
+        job['server_time'] = time.time()
+        if job.get('approval'):
+            from app.core.remediation.approval import approval_store
+            job['approval']['decision_status'] = approval_store.decision_status(
+                job_id, job['approval']['approval_id'], owner)
         history, previous, seen = [], job.get('previous_job_id') or job.get('previous_plan_id'), {job_id}
         while include_history and previous and previous not in seen:
             seen.add(previous)

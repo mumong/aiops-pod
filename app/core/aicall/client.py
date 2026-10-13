@@ -55,6 +55,7 @@ from app.core.prompts import get_workflow_prompt
 from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
 from .streaming import push_event
 from .types import AICallResult
+from .errors import raise_on_model_disconnect
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ class AICall:
             "api_key": api_key,
             "streaming": True,  # 启用 token 级别流式输出
             "stream_usage": True,  # 让 OpenAI-compatible 网关返回 usage_metadata
+            "max_retries": 0,  # A failed model request is surfaced, never silently replayed.
         }
         if base_url:
             self._chat_model_kwargs["base_url"] = base_url
@@ -321,14 +323,8 @@ class AICall:
         try:
             result = _invoke()
         except Exception as exc:
-            if not self._is_retryable_stream_eof(exc):
-                raise
-            logger.warning(
-                "⚠️ [AICall] streamed response ended unexpectedly; "
-                "retrying once without streaming | node=%s",
-                node_id or "simple",
-            )
-            result = _invoke(disable_streaming=True)
+            raise_on_model_disconnect(exc)
+            raise
         content = result.content or ""
         usage = self._extract_usage_metadata(result)
         self._log_provider_usage(node_id or "simple", usage, source="provider_usage:call_simple")
@@ -583,6 +579,7 @@ class AICall:
             )
             return None, str(result)
         except Exception as exc:
+            raise_on_model_disconnect(exc)
             logger.warning(
                 "⚠️ [AICall] native structured output failed for schema=%s: %s",
                 schema.__name__,
@@ -1552,58 +1549,27 @@ class AICall:
                         await _run_agent()
                 asyncio.run(run_bounded())
 
-        def _agent_has_progress() -> bool:
-            return bool(
-                tool_call_count
-                or iteration
-                or _content_buffer
-                or final_content
-                or structured_response is not None
-                or seen_tool_call_signatures
-                or seen_tool_result_signatures
-                or all_tool_calls
-                or emitted_ai_messages
-                or emitted_tool_messages
-            )
-
-        for attempt in range(2):
-            try:
-                agent = _create_agent_instance(
-                    disable_streaming=attempt == 1,
-                )
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    pool.submit(_run_agent_thread).result(timeout=max_steps * 30)
-                break
-            except concurrent.futures.TimeoutError:
-                self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="agent_timeout")
-                logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
-                if not final_content:
-                    final_content = "Agent 执行超时"
-                break
-            except GraphRecursionError as e:
-                self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="step_limit")
-                recursion_msg = str(e).splitlines()[0].strip()
-                logger.warning("⚠️ [AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
-                if not final_content:
-                    final_content = f"达到最大工具执行步数限制: {recursion_msg}"
-                break
-            except Exception as e:
-                if (
-                    attempt == 0
-                    and self._is_retryable_stream_eof(e)
-                    and not _agent_has_progress()
-                ):
-                    logger.warning(
-                        "⚠️ [AICall] agent stream ended before first payload; "
-                        "retrying once without streaming | node=%s",
-                        node_id or "agent",
-                    )
-                    continue
-                logger.error("❌ [AICall] agent 执行异常: %s", e, exc_info=True)
-                self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason=str(e))
-                if not final_content:
-                    final_content = f"Agent 执行异常: {e}"
-                break
+        try:
+            agent = _create_agent_instance(disable_streaming=False)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(_run_agent_thread).result(timeout=max_steps * 30)
+        except concurrent.futures.TimeoutError:
+            self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="agent_timeout")
+            logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
+            if not final_content:
+                final_content = "Agent 执行超时"
+        except GraphRecursionError as e:
+            self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="step_limit")
+            recursion_msg = str(e).splitlines()[0].strip()
+            logger.warning("⚠️ [AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
+            if not final_content:
+                final_content = f"达到最大工具执行步数限制: {recursion_msg}"
+        except Exception as e:
+            raise_on_model_disconnect(e)
+            logger.error("❌ [AICall] agent 执行异常: %s", e, exc_info=True)
+            self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason=str(e))
+            if not final_content:
+                final_content = f"Agent 执行异常: {e}"
 
         total_ms = (time.time() - call_start) * 1000
         aggregate_usage = self._aggregate_usage_from_events(thinking_events)

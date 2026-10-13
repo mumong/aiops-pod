@@ -60,6 +60,23 @@ def test_restart_and_immutable_plan_records(tmp_path, monkeypatch):
     assert jobs.store.load('d', owner)['payload']['groups']
 
 
+def test_planning_failure_never_enters_execution(tmp_path, monkeypatch):
+    jobs, owner = setup(tmp_path, monkeypatch)
+    job = jobs.start(None, owner, 'd', 'repair')['groups'][0]
+    failure = {'code': 'model_connection_interrupted', 'message': '模型服务连接中断，方案未生成。'}
+    from app.core.workflow.executor import WorkflowExecutor
+    monkeypatch.setattr(WorkflowExecutor, 'execute_stream', lambda *a, **kw: iter([
+        {'type': 'final', 'repair_record': {'run_id': job['job_id']},
+         'repair_plan': {'actions': [], 'planning_error': failure}}]))
+    service = SimpleNamespace(_build_request_scoped_ai_call=lambda: None, mcp_tools=[], merged_catalog=None)
+    assert jobs._plan(service, owner, jobs.detail(job['job_id'], owner), 'repair') is False
+    detail = jobs.detail(job['job_id'], owner)
+    assert detail['status'] == 'failed'
+    assert detail['error_code'] == 'model_connection_interrupted'
+    assert detail['approval'] is None
+    assert detail['status_started_at'] >= detail['created_at']
+
+
 def test_api_contract_and_owner(tmp_path, monkeypatch):
     import app.api.repair_routes as routes
     jobs, owner = setup(tmp_path, monkeypatch)

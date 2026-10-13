@@ -76,3 +76,16 @@ def test_approval_payload_is_snapshot():
     request = ApprovalStore().create_request("run", "action", "execute", payload)
     payload["actions"][0]["execute_command"] = "changed"
     assert request.payload["actions"][0]["execute_command"] == "safe"
+
+
+def test_decision_status_does_not_consume_and_is_owner_bound():
+    store = ApprovalStore()
+    request = store.create_request('run', 'action', 'test', {}, owner='owner')
+    assert store.decision_status('run', request.approval_id, 'other') == 'unavailable'
+    assert store.decision_status('run', request.approval_id, 'owner') == 'pending'
+    assert store.resolve('run', request.approval_id, True, owner='owner')
+    for _ in range(3):
+        assert store.decision_status('run', request.approval_id, 'owner') == 'approved'
+    assert store.poll_decision('run', request.approval_id).approved
+    assert store.poll_decision('run', request.approval_id) is None
+    assert store.decision_status('run', request.approval_id, 'owner') == 'approved'

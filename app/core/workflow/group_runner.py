@@ -26,7 +26,9 @@ def iter_group_results(groups, worker, *, max_workers, cancel=None):
             yield group, result, None
         return
 
-    with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), len(groups)))) as pool:
+    pool = ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), len(groups))))
+    completed = False
+    try:
         futures = {pool.submit(run, group): group for group in groups}
         for future in as_completed(futures):
             group = futures[future]
@@ -36,3 +38,8 @@ def iter_group_results(groups, worker, *, max_workers, cancel=None):
                 yield group, None, exc
             else:
                 yield group, result, None
+        completed = True
+    finally:
+        # Fatal consumer exit: cancel queued work and do not delay error
+        # delivery waiting for already-running read requests to return.
+        pool.shutdown(wait=completed, cancel_futures=not completed)
