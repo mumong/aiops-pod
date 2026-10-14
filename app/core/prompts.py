@@ -28,7 +28,6 @@ from app.core.prompt_catalog.task_context import (
 from app.core.prompt_catalog.compatibility import (
     FOCUSED_PROMPT,
     FOCUSED_RESULT_PROMPT,
-    LEGACY_CONTEXT_COMPRESSION_PROMPT,
     EVIDENCE_MEMORY_COMPRESSION_PROMPT,
     FEDERATION_SYNTHESIS_PROMPT,
     FEDERATION_COMPRESSION_PROMPT,
@@ -42,7 +41,6 @@ from app.core.prompt_catalog.runtime_policy import (
     VISIBLE_OUTPUT_LANGUAGE_POLICY,
 )
 from app.core.prompt_catalog.context_policy import (
-    LEGACY_COMPACTION_USER_TEMPLATE,
     WORKING_CONTEXT_SUMMARY_PREFIX,
     RUNTIME_COMPACTION_INSTRUCTION,
     RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION,

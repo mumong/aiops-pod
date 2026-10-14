@@ -6,7 +6,6 @@ import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-from app.core.service import HolmesService
 from app.core.prompts import get_workflow_prompt
 
 
@@ -146,16 +145,6 @@ def test_workflow_prompts_do_not_contain_json_output_templates():
         assert prompt
         for phrase in forbidden:
             assert phrase not in prompt
-
-
-def test_holmes_service_i18n_getters_preserve_default_behavior_and_allow_override():
-    service = HolmesService()
-    assert service.get_prompt_language() == "zh"
-    assert service.get_response_language() == "zh"
-
-    service.i18n_config = {"prompt_language": "en", "response_language": "en"}
-    assert service.get_prompt_language() == "en"
-    assert service.get_response_language() == "en"
 
 
 def test_deployment_enables_autonomous_evidence_context_stop():

@@ -17,7 +17,3 @@ RUNTIME_COMPACTION_INSTRUCTION = (
 RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION = (
     "压缩 evidence 上下文，保留计划、工具事实、错误和证据引用。"
 )
-
-LEGACY_COMPACTION_USER_TEMPLATE = (
-    "请压缩以下内容（原始 {original_chars} 字符，目标 {max_chars} 字符以内）：\n\n{text}"
-)

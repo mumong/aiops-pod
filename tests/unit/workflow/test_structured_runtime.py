@@ -4,106 +4,10 @@ from unittest.mock import MagicMock
 from pydantic import BaseModel
 
 from app.core.workflow.nodes.base import WorkflowNode
-from app.core.workflow.structured_runtime import StructuredAgentRuntime
 
 
 class DemoOutput(BaseModel):
     value: str
-
-
-def test_extract_structured_response_accepts_pydantic_instance():
-    response = SimpleNamespace(structured_response=DemoOutput(value="ok"))
-
-    parsed = StructuredAgentRuntime.extract_structured_response(response, DemoOutput)
-
-    assert parsed == DemoOutput(value="ok")
-
-
-def test_extract_structured_response_accepts_dict():
-    response = SimpleNamespace(structured_response={"value": "ok"})
-
-    parsed = StructuredAgentRuntime.extract_structured_response(response, DemoOutput)
-
-    assert parsed == DemoOutput(value="ok")
-
-
-def test_extract_structured_response_returns_none_when_missing():
-    response = SimpleNamespace(result="text only")
-
-    parsed = StructuredAgentRuntime.extract_structured_response(response, DemoOutput)
-
-    assert parsed is None
-
-
-
-
-def test_workflow_node_structured_agent_helper_with_tools_uses_agent_response_schema():
-    class _Node(WorkflowNode):
-        node_id = "demo"
-        node_name = "demo"
-
-        def execute(self, state):
-            return {}
-
-    node = _Node()
-    events = [{"type": "structured_response"}]
-    captured = {}
-
-    def _fake_call_llm(question, system_prompt, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(structured_response=DemoOutput(value="ok")), events
-
-    node._call_llm = _fake_call_llm
-
-    parsed, response, returned_events = node._call_structured_agent(
-        question="q",
-        system_prompt="sys",
-        schema=DemoOutput,
-        use_tools=True,
-    )
-
-    assert parsed == DemoOutput(value="ok")
-    assert response.structured_response == DemoOutput(value="ok")
-    assert returned_events == events
-    assert captured["response_schema"] is DemoOutput
-    assert captured["force_no_tools"] is False
-
-
-def test_workflow_node_structured_agent_helper_uses_call_structured_without_tools():
-    class _Node(WorkflowNode):
-        node_id = "demo"
-        node_name = "demo"
-
-        def execute(self, state):
-            return {}
-
-    node = _Node()
-    captured = {}
-
-    class _AICall:
-        def call_structured(self, **kwargs):
-            captured.update(kwargs)
-            return DemoOutput(value="ok"), '{"value":"ok"}'
-
-    node.ai_call = _AICall()
-    node.current_run_id = "run-1"
-
-    parsed, response, returned_events = node._call_structured_agent(
-        question="q",
-        system_prompt="sys",
-        schema=DemoOutput,
-        use_tools=False,
-        max_tokens=123,
-    )
-
-    assert parsed == DemoOutput(value="ok")
-    assert response.result == '{"value":"ok"}'
-    assert response.structured_response == DemoOutput(value="ok")
-    assert returned_events == [{"type": "structured_response", "node": "demo", "schema": "DemoOutput"}]
-    assert captured["schema"] is DemoOutput
-    assert captured["node_id"] == "demo"
-    assert captured["run_id"] == "run-1"
-    assert captured["max_tokens"] == 123
 
 
 def test_call_llm_force_no_tools_passes_empty_tool_list_to_aicall():

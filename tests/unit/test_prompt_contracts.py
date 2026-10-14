@@ -16,10 +16,6 @@ from app.core import prompts
             "60e43bb766cfa4b70aad15e4c501f43169a77ba6872914feb7906bd882c36389",
         ),
         (
-            "LEGACY_CONTEXT_COMPRESSION_PROMPT",
-            "93607a1c021bfe307ec2f614839fa79d6d10c7515cca3a87a83458e4f5a74661",
-        ),
-        (
             "EVIDENCE_MEMORY_COMPRESSION_PROMPT",
             "4979155e45628eb49bbb2ff87afb87ae4c8d17976a1e8abe979b227d191834f1",
         ),

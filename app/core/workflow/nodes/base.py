@@ -9,16 +9,13 @@
 """
 
 import logging
-import os
 import queue
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from app.core.prompts import (
     RUNBOOK_CATALOG_INSTRUCTION,
-    LEGACY_COMPACTION_USER_TEMPLATE,
-    LEGACY_CONTEXT_COMPRESSION_PROMPT,
     REMEDIATION_AUTO_MODE_LINE,
     REMEDIATION_REVIEW_MODE_LINE,
     REMEDIATION_POLICY_TEMPLATE,
@@ -27,7 +24,6 @@ from app.core.prompts import (
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import ContextBudgetEstimator, serialize_tool_schema
 from app.core.remediation.models import normalize_remediation_mode
-from app.core.workflow.structured_runtime import StructuredAgentRuntime
 from app.core.workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -51,17 +47,6 @@ class WorkflowNode(ABC):
         """设置实例级事件队列（executor 在启动 workflow 前调用）"""
         self._event_queue = q
 
-    # 保留类方法兼容旧调用，但标记为 deprecated
-    @classmethod
-    def set_event_queue_cls(cls, q: queue.Queue):
-        """[deprecated] 类级别设置，并发不安全，请用实例方法"""
-        pass  # no-op，不再修改类属性
-
-    @classmethod
-    def clear_event_queue(cls):
-        """[deprecated] 类级别清除，并发不安全"""
-        pass  # no-op
-    
     @property
     @abstractmethod
     def node_id(self) -> str:
@@ -91,26 +76,6 @@ class WorkflowNode(ABC):
         - 异常处理：捕获异常并写入 state.errors
         """
         pass
-    
-    def validate_input(self, state: WorkflowState) -> bool:
-        """
-        验证输入状态是否满足节点要求（可选）
-        
-        默认返回 True，子类可重写
-        """
-        return True
-
-    def _get_prompt_language(self) -> str:
-        if self.holmes_service and hasattr(self.holmes_service, "get_prompt_language"):
-            return self.holmes_service.get_prompt_language()
-        return "zh"
-
-    @staticmethod
-    def _has_successful_tool_results(thinking_events: List[Dict[str, Any]]) -> bool:
-        return any(
-            ev.get("type") == "tool_result" and ev.get("status") == "success"
-            for ev in (thinking_events or [])
-        )
 
     def _archive_node_input(self, payload: Dict) -> None:
         run_id = getattr(self, "current_run_id", "")
@@ -149,14 +114,6 @@ class WorkflowNode(ABC):
                 exc,
             )
             return None
-    
-    def get_required_fields(self) -> List[str]:
-        """
-        返回节点执行所需的前置字段（用于依赖检查）
-
-        默认返回空列表，子类可重写
-        """
-        return []
 
     def _get_workflow_config(self) -> dict:
         """Return workflow config visible to this node.
@@ -184,195 +141,11 @@ class WorkflowNode(ABC):
             return False
         return default
 
-    def _is_early_stop_enabled(self, default: bool = True) -> bool:
-        """Whether this node may use its dynamic early-stop mechanism.
-
-        Env override examples:
-        - WORKFLOW_LAYER_EARLY_STOP=false
-        - WORKFLOW_EVIDENCE_EARLY_STOP=false
-        """
-        node_key = str(self.node_id or "").upper()
-        for env_key in (
-            f"WORKFLOW_{node_key}_EARLY_STOP",
-            f"AIOPS_WORKFLOW_{node_key}_EARLY_STOP",
-        ):
-            if env_key in os.environ:
-                return self._parse_bool_config(os.getenv(env_key), default)
-
-        wf_config = self._get_workflow_config()
-        node_cfg = wf_config.get(self.node_id, {}) if isinstance(wf_config, dict) else {}
-        if isinstance(node_cfg, dict):
-            early_cfg = node_cfg.get("early_stop", {})
-            if isinstance(early_cfg, dict) and "enabled" in early_cfg:
-                return self._parse_bool_config(early_cfg.get("enabled"), default)
-            if "early_stop_enabled" in node_cfg:
-                return self._parse_bool_config(node_cfg.get("early_stop_enabled"), default)
-
-        return default
-
-    def _is_structured_runtime_enabled(self, default: bool = True) -> bool:
-        wf_config = self._get_workflow_config()
-        runtime_cfg = wf_config.get("structured_runtime", {}) if isinstance(wf_config, dict) else {}
-        if isinstance(runtime_cfg, dict):
-            nodes = runtime_cfg.get("nodes")
-            if isinstance(nodes, dict) and self.node_id in nodes:
-                return self._parse_bool_config(nodes.get(self.node_id), default)
-            if "enabled" in runtime_cfg:
-                return self._parse_bool_config(runtime_cfg.get("enabled"), default)
-        return default
-
     def _is_structured_runtime_fallback_enabled(self, default: bool = True) -> bool:
         wf_config = self._get_workflow_config()
         runtime_cfg = wf_config.get("structured_runtime", {}) if isinstance(wf_config, dict) else {}
         if isinstance(runtime_cfg, dict) and "fallback_enabled" in runtime_cfg:
             return self._parse_bool_config(runtime_cfg.get("fallback_enabled"), default)
-        return default
-
-    def _is_rca_validation_enabled(self, default: bool = False) -> bool:
-        """Whether RCA fact binding, claim validation and gate retries run.
-
-        Validation is opt-in. The default narrative RCA path preserves the
-        first model result and never starts a claim-gate repair implicitly.
-        """
-        for env_key in (
-            "WORKFLOW_RCA_VALIDATION_ENABLED",
-            "AIOPS_WORKFLOW_RCA_VALIDATION_ENABLED",
-        ):
-            if env_key in os.environ:
-                return self._parse_bool_config(os.getenv(env_key), default)
-
-        wf_config = self._get_workflow_config()
-        validation_cfg = (
-            wf_config.get("rca_validation", {})
-            if isinstance(wf_config, dict)
-            else {}
-        )
-        if isinstance(validation_cfg, dict) and "enabled" in validation_cfg:
-            return self._parse_bool_config(
-                validation_cfg.get("enabled"),
-                default,
-            )
-        if isinstance(validation_cfg, (bool, str, int)):
-            return self._parse_bool_config(validation_cfg, default)
-        return default
-
-    def _get_rca_structured_output_mode(self, default: str = "tolerant") -> str:
-        """Return RCA structured-output handling mode.
-
-        ``tolerant`` preserves a valid core diagnosis when optional nested
-        fields have a repairable shape/type mismatch. ``strict`` keeps the
-        original all-or-nothing Pydantic boundary.
-        """
-        for env_key in (
-            "WORKFLOW_RCA_STRUCTURED_OUTPUT_MODE",
-            "AIOPS_WORKFLOW_RCA_STRUCTURED_OUTPUT_MODE",
-        ):
-            value = os.getenv(env_key)
-            if value is not None:
-                mode = str(value).strip().lower()
-                return mode if mode in {"strict", "tolerant"} else default
-
-        wf_config = self._get_workflow_config()
-        output_cfg = (
-            wf_config.get("rca_structured_output", {})
-            if isinstance(wf_config, dict)
-            else {}
-        )
-        if isinstance(output_cfg, dict):
-            mode = str(output_cfg.get("mode") or default).strip().lower()
-            return mode if mode in {"strict", "tolerant"} else default
-        if isinstance(output_cfg, str):
-            mode = output_cfg.strip().lower()
-            return mode if mode in {"strict", "tolerant"} else default
-        return default
-
-    def _get_rca_output_schema_mode(self, default: str = "compact") -> str:
-        """Return the model-facing RCA schema size.
-
-        ``compact`` asks the model only for the diagnosis, shortest causal
-        chain, selected source observations and unknowns.  The node expands it
-        to the legacy internal RCAOutput after the call. ``full`` preserves the
-        previous provider contract for deployments that still use Fact Ledger
-        claim validation.
-        """
-        for env_key in (
-            "WORKFLOW_RCA_OUTPUT_SCHEMA",
-            "AIOPS_WORKFLOW_RCA_OUTPUT_SCHEMA",
-        ):
-            value = os.getenv(env_key)
-            if value is not None:
-                mode = str(value).strip().lower()
-                return mode if mode in {"compact", "full"} else default
-
-        wf_config = self._get_workflow_config()
-        output_cfg = (
-            wf_config.get("rca_structured_output", {})
-            if isinstance(wf_config, dict)
-            else {}
-        )
-        if isinstance(output_cfg, dict):
-            mode = str(output_cfg.get("schema") or default).strip().lower()
-            return mode if mode in {"compact", "full"} else default
-        return default
-
-    def _is_rca_fact_ledger_context_enabled(
-        self,
-        default: bool = False,
-    ) -> bool:
-        """Whether RCA receives the authoritative Fact Ledger projection.
-
-        This is opt-in and controls only RCA reasoning context. Canonical facts
-        remain available to audit archives and the final report evidence table.
-        """
-        for env_key in (
-            "WORKFLOW_RCA_FACT_LEDGER_CONTEXT_ENABLED",
-            "AIOPS_WORKFLOW_RCA_FACT_LEDGER_CONTEXT_ENABLED",
-        ):
-            if env_key in os.environ:
-                return self._parse_bool_config(os.getenv(env_key), default)
-
-        wf_config = self._get_workflow_config()
-        context_cfg = (
-            wf_config.get("rca_context", {})
-            if isinstance(wf_config, dict)
-            else {}
-        )
-        if isinstance(context_cfg, dict) and "fact_ledger_enabled" in context_cfg:
-            return self._parse_bool_config(
-                context_cfg.get("fact_ledger_enabled"),
-                default,
-            )
-        return default
-
-    def _is_rca_evidence_analysis_enabled(
-        self,
-        default: bool = False,
-    ) -> bool:
-        """Whether Evidence Agent natural-language analysis reaches RCA.
-
-        The default is intentionally off.  RCA already receives the real tool
-        observations and should form its own diagnosis from those observations;
-        copying the collector's prose into the same prompt repeats facts and can
-        preserve an earlier, incomplete interpretation after follow-up queries.
-        """
-        for env_key in (
-            "WORKFLOW_RCA_EVIDENCE_ANALYSIS_ENABLED",
-            "AIOPS_WORKFLOW_RCA_EVIDENCE_ANALYSIS_ENABLED",
-        ):
-            if env_key in os.environ:
-                return self._parse_bool_config(os.getenv(env_key), default)
-
-        wf_config = self._get_workflow_config()
-        context_cfg = (
-            wf_config.get("rca_context", {})
-            if isinstance(wf_config, dict)
-            else {}
-        )
-        if isinstance(context_cfg, dict) and "include_evidence_llm_analysis" in context_cfg:
-            return self._parse_bool_config(
-                context_cfg.get("include_evidence_llm_analysis"),
-                default,
-            )
         return default
 
     def should_inject_runbook_catalog(self) -> bool:
@@ -630,115 +403,3 @@ class WorkflowNode(ABC):
             "Error code: 500",
         )
         return any(marker in content for marker in incompatible_markers)
-
-    def _call_structured_agent(
-        self,
-        question: str,
-        system_prompt: str,
-        schema: type,
-        use_tools: bool = True,
-        stop_checker: Optional[Callable[[list], bool]] = None,
-        **kwargs,
-    ) -> Tuple[Any, Any, list]:
-        """Finalize a node with a no-tool Pydantic structured call.
-
-        Tool-heavy nodes should collect facts with `_call_llm` first, then use
-        this helper for schema finalization. This keeps structured output away
-        from streaming multi-tool agent loops, which are fragile on local
-        OpenAI-compatible gateways.
-        """
-        if use_tools:
-            response, thinking_events = self._call_llm(
-                question,
-                system_prompt,
-                stop_checker=stop_checker,
-                response_schema=schema,
-                force_no_tools=False,
-                **kwargs,
-            )
-            parsed = StructuredAgentRuntime.extract_structured_response(response, schema)
-            return parsed, response, thinking_events
-
-        ai_call = getattr(self, "ai_call", None)
-        if ai_call is None or not hasattr(ai_call, "call_structured"):
-            raise RuntimeError(f"[{self.node_id}] ai_call 不支持 call_structured，无法生成结构化输出")
-
-        run_id = getattr(self, "current_run_id", "") or kwargs.pop("run_id", "")
-        structured, raw = ai_call.call_structured(
-            system_prompt=system_prompt,
-            question=question,
-            schema=schema,
-            node_id=self.node_id,
-            run_id=run_id,
-            **kwargs,
-        )
-        from app.core.aicall.types import AICallResult
-
-        response = AICallResult(
-            result=raw or "",
-            tool_call_count=0,
-            iterations=1,
-            structured_response=structured,
-        )
-        events = []
-        if structured is not None:
-            events.append({
-                "type": "structured_response",
-                "node": self.node_id,
-                "schema": getattr(schema, "__name__", ""),
-            })
-        return structured, response, events
-
-    def _compact_context(self, text: str, max_chars: int = 30000) -> str:
-        """用 LLM 压缩大段上下文，保留关键信息（类似 Claude compact）。
-
-        仅当 text 超过 max_chars 时触发压缩，否则原样返回。
-        压缩由 LLM 完成：提取工具调用记录、异常发现、关键实体和数值，
-        删除冗余的正常状态数据和重复信息。
-        """
-        if len(text) <= max_chars:
-            return text
-
-        ai_call = getattr(self, 'ai_call', None)
-        if ai_call is None:
-            logger.warning("📦 [%s] _compact_context: 无 ai_call，硬截断到 %d chars", self.node_id, max_chars)
-            return text[:max_chars] + f"\n... (截断，原始 {len(text)} 字符)"
-
-        compress_prompt = (
-            LEGACY_CONTEXT_COMPRESSION_PROMPT
-        )
-
-        try:
-            logger.info("📦 [%s] 执行 LLM 压缩: %d chars → 目标 %d chars",
-                        self.node_id, len(text), max_chars)
-            llm_start = time.time()
-            try:
-                compressed = ai_call.call_simple(
-                    system_prompt=compress_prompt,
-                    question=LEGACY_COMPACTION_USER_TEMPLATE.format(
-                        original_chars=len(text), max_chars=max_chars, text=text,
-                    ),
-                    max_tokens=4096,
-                )
-            finally:
-                if getattr(self, "metrics", None):
-                    self.metrics.record_llm_call(
-                        self.node_id,
-                        (time.time() - llm_start) * 1000,
-                    )
-            if compressed and len(compressed) < len(text):
-                logger.info("📦 [%s] LLM 压缩完成: %d → %d chars (%.0f%%)",
-                            self.node_id, len(text), len(compressed),
-                            len(compressed) / len(text) * 100)
-                return compressed
-        except Exception as e:
-            logger.warning("📦 [%s] LLM 压缩失败，硬截断: %s", self.node_id, e)
-
-        return text[:max_chars] + f"\n... (截断，原始 {len(text)} 字符)"
-
-    def _save_thinking(self, state: WorkflowState, new_state: dict, thinking_events: list):
-        """将 thinking_events 带 node 标记存入 state"""
-        prev = state.get("thinking_events", [])
-        new_state["thinking_events"] = prev + [
-            {**ev, "node": self.node_id} for ev in thinking_events
-        ]
