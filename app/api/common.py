@@ -1,8 +1,11 @@
 """Helpers shared by the HTTP route modules."""
 import logging
-from typing import Iterable
+import threading
+from typing import Iterable, Optional
 
+import anyio
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 # All route modules log under the historical name so existing log filters
 # (LOG_FORMAT includes %(name)s) keep matching after the module split.
@@ -43,6 +46,41 @@ def fix_double_encoding(text: str) -> str:
         return text
 
 
-def streaming_response(body: Iterable[str], media_type: str = "text/plain; charset=utf-8") -> StreamingResponse:
+class CancellableStreamingResponse(StreamingResponse):
+    """StreamingResponse that releases a blocking generator as soon as the response ends.
+
+    On client disconnect Starlette only stops iterating; the sync generator stays
+    suspended until garbage collection, so its GeneratorExit handler (which cancels
+    the workflow) may never run. Here the cancel event is set and the generator is
+    closed explicitly when the response finishes for any reason.
+    """
+
+    def __init__(self, content: Iterable[str], *, cancel_event: Optional[threading.Event] = None, **kwargs):
+        super().__init__(content, **kwargs)
+        self._source = content
+        self._cancel_event = cancel_event
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if self._cancel_event is not None:
+                self._cancel_event.set()
+            close = getattr(self._source, "close", None)
+            if close is not None:
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await anyio.to_thread.run_sync(close)
+                    except ValueError:  # generator still executing elsewhere; cancel_event covers it
+                        logger.debug("stream generator busy at close", exc_info=True)
+
+
+def streaming_response(
+    body: Iterable[str],
+    media_type: str = "text/plain; charset=utf-8",
+    cancel_event: Optional[threading.Event] = None,
+) -> StreamingResponse:
     """Wrap a text generator with the no-buffering headers every stream uses."""
-    return StreamingResponse(body, media_type=media_type, headers=dict(STREAM_HEADERS))
+    return CancellableStreamingResponse(
+        body, cancel_event=cancel_event, media_type=media_type, headers=dict(STREAM_HEADERS)
+    )

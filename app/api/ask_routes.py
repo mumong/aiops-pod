@@ -97,7 +97,7 @@ def _stream_response(
             cancel_event.set()
 
     media_type = "text/event-stream" if output_format == "sse" else "text/plain; charset=utf-8"
-    return streaming_response(generate(), media_type=media_type)
+    return streaming_response(generate(), media_type=media_type, cancel_event=cancel_event)
 
 
 async def _sync_response(
