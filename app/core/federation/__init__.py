@@ -6,11 +6,10 @@
 """
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import logging
 from typing import Any, Dict, Generator, List, Optional
 
+from app.core.async_bridge import run_coroutine_sync
 from app.core.federation.registry import AgentRegistry, SubAgentConfig
 from app.core.federation.client import SubAgentResult
 from app.core.federation.aggregator import FederationAggregator
@@ -71,17 +70,14 @@ class FederationCoordinator:
         内部通过独立线程运行 asyncio，避免与外层事件循环冲突。
         """
         # 在独立线程中运行异步并发查询，确保不受外层 event loop 影响
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                asyncio.run,
-                self._aggregator.query_all(
-                    question=question,
-                    max_steps=max_steps,
-                    conclusion_max_tokens=conclusion_max_tokens,
-                    endpoint_path=endpoint_path,
-                ),
+        results = run_coroutine_sync(
+            lambda: self._aggregator.query_all(
+                question=question,
+                max_steps=max_steps,
+                conclusion_max_tokens=conclusion_max_tokens,
+                endpoint_path=endpoint_path,
             )
-            results = future.result()
+        )
 
         # 汇总各子集群状态
         successful_count = sum(1 for r in results if r.success)

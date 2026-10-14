@@ -1155,6 +1155,9 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -1221,6 +1224,9 @@ def test_call_with_tools_retries_stream_interruption_before_agent_progress(
 
         def __exit__(self, exc_type, exc, tb):
             return False
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
 
         def submit(self, fn):
             fn()
@@ -1304,6 +1310,9 @@ def test_call_with_tools_does_not_retry_stream_interruption_after_tool_call(
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -1376,6 +1385,9 @@ def test_call_with_tools_can_return_structured_response_without_extra_extract_ll
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -1445,6 +1457,9 @@ def test_call_without_real_tools_can_use_agent_structured_response():
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -1491,6 +1506,9 @@ def test_call_with_tools_propagates_langfuse_session_id(monkeypatch):
 
         def __exit__(self, exc_type, exc, tb):
             return False
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
 
         def submit(self, fn):
             fn()
@@ -2331,6 +2349,9 @@ def test_call_with_expect_json_interrupts_on_valid_json_message():
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -2399,6 +2420,9 @@ def test_call_surfaces_reasoning_content_in_stream_events():
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -2460,6 +2484,9 @@ def test_call_wraps_provider_reasoning_content_for_stream_filters():
 
         def __exit__(self, exc_type, exc, tb):
             return False
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
 
         def submit(self, fn):
             fn()

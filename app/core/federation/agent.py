@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import ast
-import concurrent.futures
 import json
 import logging
 import os
@@ -29,6 +28,7 @@ from typing import Any, Dict, Generator, List, Optional
 import httpx
 import litellm
 
+from app.core.async_bridge import run_coroutine_sync
 from app.core.federation.registry import AgentRegistry
 from app.core.federation.toolset import FederationToolset
 from app.core.federation.client import SubAgentClient
@@ -410,12 +410,7 @@ class FederationAgent:
         # 在独立线程中执行异步批量流式查询
         client = SubAgentClient()
 
-        def _run_batch():
-            return asyncio.run(client.batch_query_stream(queries))
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_run_batch)
-            batch_results = future.result()
+        batch_results = run_coroutine_sync(lambda: client.batch_query_stream(queries))
 
         # 组装结果
         results = []

@@ -396,16 +396,14 @@ class HolmesService:
                 # 加载 MCP 工具
                 mcp_cfg = _raw_config.get("mcp_servers", {})
                 if mcp_cfg:
-                    import asyncio
-                    import concurrent.futures
                     from app.core.aicall.tools import load_mcp_tools
+                    from app.core.async_bridge import run_coroutine_sync
                     try:
                         step_start = time.time()
                         logger.info("🔄 [AICall] 加载 MCP 工具...")
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            self.mcp_tools = pool.submit(
-                                lambda cfg=mcp_cfg: asyncio.run(load_mcp_tools(cfg))
-                            ).result(timeout=60)
+                        self.mcp_tools = run_coroutine_sync(
+                            lambda cfg=mcp_cfg: load_mcp_tools(cfg), timeout=60
+                        )
                         logger.info("   ✅ [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
                                    len(self.mcp_tools), time.time() - step_start)
                         for t in self.mcp_tools:

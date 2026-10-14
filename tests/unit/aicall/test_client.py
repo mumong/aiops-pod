@@ -74,6 +74,9 @@ class TestCallWithTools:
             def __exit__(self, exc_type, exc, tb):
                 return False
 
+            def shutdown(self, wait=True, cancel_futures=False):
+                return None
+
             def submit(self, fn):
                 fn()
                 return _CompletedFuture()

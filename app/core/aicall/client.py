@@ -41,6 +41,7 @@ from app.core.prompts import (
     RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION,
     RUNTIME_COMPACTION_INSTRUCTION,
 )
+from app.core.async_bridge import run_coroutine_sync, run_until_cancelled
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import (
     ContextBudgetEstimator,
@@ -1075,9 +1076,6 @@ class AICall:
             return create_agent(**create_agent_kwargs)
 
         # 使用 async stream 模式（MCP 工具需要异步调用）
-        import asyncio
-        import concurrent.futures
-
         input_messages = {"messages": [{"role": "user", "content": question}]}
         session_context = getattr(self, "query_session_context", None)
         if session_context:
@@ -1539,23 +1537,19 @@ class AICall:
                     except Exception as exc:
                         logger.warning("⚠️ [AICall] stop_checker 执行失败: %s", exc)
 
-        # 在新线程中运行异步 agent（避免与 uvicorn event loop 冲突）
-        def _run_agent_thread():
-            with self._langfuse_session_scope(session_id, node_id or "agent"):
-                async def run_bounded():
-                    if getattr(self, "query_tool_timeout", 0) > 0:
-                        await asyncio.wait_for(_run_agent(), timeout=max_steps * 30)
-                    else:
-                        await _run_agent()
-                asyncio.run(run_bounded())
-
+        # 在私有事件循环线程中运行 agent（避免与 uvicorn event loop 冲突）；超时在循环内取消。
+        agent_timeout = max_steps * 30 if max_steps > 0 else None
         try:
             agent = _create_agent_instance(disable_streaming=False)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                pool.submit(_run_agent_thread).result(timeout=max_steps * 30)
-        except concurrent.futures.TimeoutError:
+            run_coroutine_sync(
+                lambda: run_until_cancelled(_run_agent(), cancel_event),
+                timeout=agent_timeout,
+                worker_context=lambda: self._langfuse_session_scope(session_id, node_id or "agent"),
+                thread_name="aicall-agent",
+            )
+        except TimeoutError:
             self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="agent_timeout")
-            logger.warning("⚠️ [AICall] agent 执行超时 (%ds)", max_steps * 30)
+            logger.warning("⚠️ [AICall] agent 执行超时 (%ss)", agent_timeout)
             if not final_content:
                 final_content = "Agent 执行超时"
         except GraphRecursionError as e:

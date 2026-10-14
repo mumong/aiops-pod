@@ -216,6 +216,9 @@ def test_aicall_records_parallel_success_and_error_tool_messages(
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -234,7 +237,7 @@ def test_aicall_records_parallel_success_and_error_tool_messages(
     monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
     monkeypatch.setattr(
         "concurrent.futures.ThreadPoolExecutor",
-        lambda max_workers=1: _Executor(),
+        lambda *args, **kwargs: _Executor(),
     )
 
     tools = [
@@ -588,6 +591,9 @@ def test_aicall_mutates_tool_message_to_bounded_observation(tmp_path, monkeypatc
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -600,7 +606,7 @@ def test_aicall_mutates_tool_message_to_bounded_observation(tmp_path, monkeypatc
         return _Agent()
 
     monkeypatch.setattr("langchain.agents.create_agent", _create_agent)
-    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda *args, **kwargs: _Executor())
 
     tool = type("T", (), {"name": "kubectl_describe", "description": "d", "args_schema": None})()
     result, events = ai.call(
@@ -781,6 +787,9 @@ def test_aicall_observability_toolmessage_matches_summary_and_raw_is_pageable(
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -795,7 +804,7 @@ def test_aicall_observability_toolmessage_matches_summary_and_raw_is_pageable(
     )
     monkeypatch.setattr(
         "concurrent.futures.ThreadPoolExecutor",
-        lambda max_workers=1: _Executor(),
+        lambda *args, **kwargs: _Executor(),
     )
     tool = type(
         "T",
@@ -868,6 +877,9 @@ def test_aicall_tool_result_event_includes_context_usage_ratio(tmp_path, monkeyp
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -885,7 +897,7 @@ def test_aicall_tool_result_event_includes_context_usage_ratio(tmp_path, monkeyp
 
     monkeypatch.setattr(ai, "_process_tool_observation", _process_with_context_ratio)
     monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
-    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda *args, **kwargs: _Executor())
 
     tool = type("T", (), {"name": "kubectl_describe", "description": "d", "args_schema": None})()
     _, events = ai.call(
@@ -921,6 +933,9 @@ def test_aicall_tool_archive_sequence_can_continue_across_rounds(tmp_path, monke
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -930,7 +945,7 @@ def test_aicall_tool_archive_sequence_can_continue_across_rounds(tmp_path, monke
             yield ("updates", {"tools": {"messages": [msg]}})
 
     monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
-    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda *args, **kwargs: _Executor())
 
     tool = type("T", (), {"name": "kubectl_describe", "description": "d", "args_schema": None})()
     result, _ = ai.call(
@@ -988,6 +1003,9 @@ def test_aicall_assigns_stable_sequence_to_parallel_tool_results(tmp_path, monke
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -1000,7 +1018,7 @@ def test_aicall_assigns_stable_sequence_to_parallel_tool_results(tmp_path, monke
     monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
     monkeypatch.setattr(
         "concurrent.futures.ThreadPoolExecutor",
-        lambda max_workers=1: _Executor(),
+        lambda *args, **kwargs: _Executor(),
     )
 
     tool = type(
@@ -1090,6 +1108,9 @@ def test_aicall_writes_final_budget_with_dynamic_context(tmp_path, monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -1102,7 +1123,7 @@ def test_aicall_writes_final_budget_with_dynamic_context(tmp_path, monkeypatch):
         return _Agent()
 
     monkeypatch.setattr("langchain.agents.create_agent", _create_agent)
-    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda *args, **kwargs: _Executor())
 
     tool = type("T", (), {"name": "kubectl_describe", "description": "describe pods", "args_schema": None})()
     ai.call(
@@ -1705,6 +1726,9 @@ def test_runtime_compaction_tracks_empty_ai_tool_call_message_and_bounds_args(
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -1720,7 +1744,7 @@ def test_runtime_compaction_tracks_empty_ai_tool_call_message_and_bounds_args(
     )
     monkeypatch.setattr(
         "concurrent.futures.ThreadPoolExecutor",
-        lambda max_workers=1: _Executor(),
+        lambda *args, **kwargs: _Executor(),
     )
     tool = type(
         "T",
@@ -2379,6 +2403,9 @@ def test_aicall_allows_runtime_context_to_compact_twice_up_to_configured_limit(
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -2391,7 +2418,7 @@ def test_aicall_allows_runtime_context_to_compact_twice_up_to_configured_limit(
     monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
     monkeypatch.setattr(
         "concurrent.futures.ThreadPoolExecutor",
-        lambda max_workers=1: _Executor(),
+        lambda *args, **kwargs: _Executor(),
     )
 
     tool = type(
@@ -2464,6 +2491,9 @@ def test_runtime_compaction_does_not_block_parallel_async_tool_transport(
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -2486,7 +2516,7 @@ def test_runtime_compaction_does_not_block_parallel_async_tool_transport(
     monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
     monkeypatch.setattr(
         "concurrent.futures.ThreadPoolExecutor",
-        lambda max_workers=1: _Executor(),
+        lambda *args, **kwargs: _Executor(),
     )
 
     tool = type(
@@ -2568,6 +2598,9 @@ def test_aicall_compaction_rewrites_non_plan_ai_messages_in_agent_context(tmp_pa
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -2579,7 +2612,7 @@ def test_aicall_compaction_rewrites_non_plan_ai_messages_in_agent_context(tmp_pa
             yield ("updates", {"tools": {"messages": [tool_message]}})
 
     monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: _Agent())
-    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda *args, **kwargs: _Executor())
 
     tool = type("T", (), {"name": "run_bash_command", "description": "run readonly shell", "args_schema": None})()
     _, events = ai.call(
@@ -2634,6 +2667,9 @@ def test_aicall_passes_ai_summary_mode_to_observation_processor(tmp_path, monkey
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -2646,7 +2682,7 @@ def test_aicall_passes_ai_summary_mode_to_observation_processor(tmp_path, monkey
         return _Agent()
 
     monkeypatch.setattr("langchain.agents.create_agent", _create_agent)
-    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda *args, **kwargs: _Executor())
 
     tool = type("T", (), {"name": "kubectl_describe", "description": "describe pods", "args_schema": None})()
     result, events = ai.call(
@@ -2850,6 +2886,9 @@ def test_aicall_deduplicates_replayed_agent_updates(tmp_path, monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             fn()
             return _CompletedFuture()
@@ -2866,7 +2905,7 @@ def test_aicall_deduplicates_replayed_agent_updates(tmp_path, monkeypatch):
         return _Agent()
 
     monkeypatch.setattr("langchain.agents.create_agent", _create_agent)
-    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda max_workers=1: _Executor())
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", lambda *args, **kwargs: _Executor())
 
     tool = type("T", (), {"name": "kubectl_run_image", "description": "run image", "args_schema": None})()
     result, events = ai.call(

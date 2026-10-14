@@ -8,8 +8,6 @@
 """
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import logging
 import os
 from datetime import datetime
@@ -19,6 +17,7 @@ from typing import Any, Dict, Optional
 from holmes.core.tools import Tool, Toolset, ToolsetStatusEnum
 from pydantic import Field, PrivateAttr
 
+from app.core.async_bridge import run_coroutine_sync
 from app.core.federation.registry import AgentRegistry
 from app.core.federation.client import SubAgentClient
 from app.core.federation.report_parser import extract_final_answer
@@ -96,21 +95,16 @@ class QueryClusterTool(Tool):
         # 调用子集群（同步包装异步调用，使用流式模式获取完整报告）
         client = SubAgentClient()
 
-        def sync_query():
-            return asyncio.run(
-                client.query_stream(
-                    agent=agent,
-                    question=question,
-                    max_steps=max_steps,
-                    conclusion_max_tokens=conclusion_max_tokens,
-                    timeout=1800.0,
-                    endpoint_path=endpoint_path,
-                )
+        result = run_coroutine_sync(
+            lambda: client.query_stream(
+                agent=agent,
+                question=question,
+                max_steps=max_steps,
+                conclusion_max_tokens=conclusion_max_tokens,
+                timeout=1800.0,
+                endpoint_path=endpoint_path,
             )
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(sync_query)
-            result = future.result()
+        )
 
         if result.success:
             # 解析报告：提取最终答案给 LLM，完整文本保存到磁盘

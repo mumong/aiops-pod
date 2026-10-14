@@ -19,6 +19,9 @@ def test_call_recursion_limit_is_logged_as_warning_not_error():
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def shutdown(self, wait=True, cancel_futures=False):
+            return None
+
         def submit(self, fn):
             return _FailingFuture()
 
