@@ -48,7 +48,7 @@ class RunbookCatalog:
     def from_json(cls, path: str) -> "RunbookCatalog":
         """从 catalog.json 加载"""
         if not os.path.isfile(path):
-            logger.warning("⚠️ [Runbook] catalog 文件不存在: %s", path)
+            logger.warning("[Runbook] catalog 文件不存在: %s", path)
             return cls()
         try:
             with open(path, 'r', encoding='utf-8') as f:
@@ -60,10 +60,10 @@ class RunbookCatalog:
                     description=item.get("description", ""),
                     link=item.get("link", ""),
                 ))
-            logger.info("📚 [Runbook] 加载 %d 条 Runbook 从 %s", len(entries), path)
+            logger.info("[Runbook] 加载 %d 条 Runbook 从 %s", len(entries), path)
             return cls(catalog=entries)
         except Exception as e:
-            logger.error("❌ [Runbook] 加载 catalog 失败: %s", e)
+            logger.error("[Runbook] 加载 catalog 失败: %s", e)
             return cls()
 
     def to_prompt_text(self) -> str:

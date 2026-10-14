@@ -71,18 +71,18 @@ def get_config_file_path(project_root: Path) -> Tuple[Path, str]:
             config_path = project_root / env_config
         if config_path.exists():
             env_name = "kubernetes" if is_running_in_kubernetes() else "custom"
-            logger.info(f"📄 使用 CONFIG_FILE 指定的配置: {config_path} ({env_name})")
+            logger.info("使用 CONFIG_FILE 指定的配置: %s (%s)", config_path, env_name)
             return config_path, env_name
-        logger.warning(f"CONFIG_FILE 指定的文件不存在: {env_config}")
+        logger.warning("CONFIG_FILE 指定的文件不存在: %s", env_config)
 
     # 2. 回退：config/config.yaml（本地开发用，内容应与 deploy/configmap 保持一致）
     fallback = project_root / "config" / "config.yaml"
     if fallback.exists():
-        logger.info(f"💻 使用回退配置: {fallback}")
+        logger.info("使用回退配置: %s", fallback)
         return fallback, "local"
 
     # 3. 无配置文件
-    logger.warning("⚠️ 未找到配置文件，将使用默认配置")
+    logger.warning("未找到配置文件，将使用默认配置")
     return fallback, "local"
 
 
@@ -91,22 +91,22 @@ def log_environment_info():
     env = get_environment()
     
     logger.info("=" * 50)
-    logger.info("📍 运行环境信息")
+    logger.info("运行环境信息")
     logger.info("=" * 50)
     
     if env == "kubernetes":
-        logger.info(f"   环境: Kubernetes 集群内")
-        logger.info(f"   K8s Host: {os.getenv('KUBERNETES_SERVICE_HOST', 'N/A')}")
-        logger.info(f"   K8s Port: {os.getenv('KUBERNETES_SERVICE_PORT', 'N/A')}")
+        logger.info("   环境: Kubernetes 集群内")
+        logger.info("   K8s Host: %s", os.getenv('KUBERNETES_SERVICE_HOST', 'N/A'))
+        logger.info("   K8s Port: %s", os.getenv('KUBERNETES_SERVICE_PORT', 'N/A'))
         
         # 尝试获取 Pod 信息
         pod_name = os.getenv("POD_NAME", os.getenv("HOSTNAME", "N/A"))
         pod_namespace = os.getenv("POD_NAMESPACE", "N/A")
-        logger.info(f"   Pod: {pod_name}")
-        logger.info(f"   Namespace: {pod_namespace}")
+        logger.info("   Pod: %s", pod_name)
+        logger.info("   Namespace: %s", pod_namespace)
     else:
-        logger.info(f"   环境: 本地开发/集群外部")
-        logger.info(f"   主机: {os.getenv('HOSTNAME', 'localhost')}")
+        logger.info("   环境: 本地开发/集群外部")
+        logger.info("   主机: %s", os.getenv('HOSTNAME', 'localhost'))
     
     logger.info("=" * 50)
 

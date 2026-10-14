@@ -84,12 +84,11 @@ class FederationAgent:
                 if attempt < self._max_retries:
                     delay = self._retry_base_delay * (2 ** (attempt - 1))  # 指数退避: 2s, 4s, 8s
                     logger.warning(
-                        f"[FEDERATION AGENT] LLM 调用失败 (第{attempt}次), "
-                        f"{delay}s 后重试: {type(exc).__name__}: {str(exc)[:120]}"
+                        "[FEDERATION AGENT] LLM 调用失败 (第%s次), %ss 后重试: %s: %s", attempt, delay, type(exc).__name__, str(exc)[:120]
                     )
                     time.sleep(delay)
                 else:
-                    logger.error(f"[FEDERATION AGENT] LLM 调用失败 (已重试{self._max_retries}次): {exc}")
+                    logger.error("[FEDERATION AGENT] LLM 调用失败 (已重试%s次): %s", self._max_retries, exc)
         raise last_exc
 
     def ask_stream(self, question: str, endpoint_path: str = "/ask") -> Generator[str, None, None]:
@@ -99,7 +98,7 @@ class FederationAgent:
         子集群查询时实时转发流式输出（与 /ask 一致的 thinking 效果），
         最后由 LLM 合成统一报告。
         """
-        logger.info(f"[FEDERATION AGENT] 开始处理问题: {question[:60]}...")
+        logger.info("[FEDERATION AGENT] 开始处理问题: %s...", question[:60])
 
         # 构建初始消息
         messages = [
@@ -112,7 +111,7 @@ class FederationAgent:
 
         # Tool Calling 循环
         for step in range(self.max_steps):
-            logger.info(f"[FEDERATION AGENT] Step {step + 1}/{self.max_steps}")
+            logger.info("[FEDERATION AGENT] Step %s/%s", step + 1, self.max_steps)
 
             try:
                 _completion_kwargs = dict(
@@ -162,12 +161,12 @@ class FederationAgent:
 
                 else:
                     # 没有工具调用 → 流式生成最终答案
-                    logger.info(f"[FEDERATION AGENT] 开始生成最终答案（流式），共 {step + 1} 步")
+                    logger.info("[FEDERATION AGENT] 开始生成最终答案（流式），共 %s 步", step + 1)
                     yield from self._stream_final_answer(messages)
                     return
 
             except Exception as exc:
-                logger.error(f"[FEDERATION AGENT] 错误: {exc}", exc_info=True)
+                logger.error("[FEDERATION AGENT] 错误: %s", exc, exc_info=True)
                 yield f"\n❌ Agent 执行错误: {str(exc)}\n"
                 return
 
@@ -200,7 +199,7 @@ class FederationAgent:
 
         # 先执行非查询工具
         for tc, name, args in other_calls:
-            logger.info(f"[FEDERATION AGENT] 调用工具: {name}({args})")
+            logger.info("[FEDERATION AGENT] 调用工具: %s(%s)", name, args)
             result = self._execute_tool(name, args)
             results[tc.id] = (tc, result)
 
@@ -267,7 +266,7 @@ class FederationAgent:
             threads.append(t)
             t.start()
 
-        logger.info(f"[FEDERATION AGENT] 并发启动 {len(threads)} 个子集群查询")
+        logger.info("[FEDERATION AGENT] 并发启动 %s 个子集群查询", len(threads))
 
         # 输出所有子集群的查询开始标记
         yield f"\n{'=' * 70}\n"
@@ -345,18 +344,18 @@ class FederationAgent:
 
         # 先执行非查询工具（如 list_clusters，通常很快）
         for tc, name, args in other_calls:
-            logger.info(f"[FEDERATION AGENT] 调用工具: {name}({args})")
+            logger.info("[FEDERATION AGENT] 调用工具: %s(%s)", name, args)
             result = self._execute_tool(name, args, endpoint_path=endpoint_path)
-            logger.info(f"[FEDERATION AGENT] 工具结果: {str(result)[:200]}...")
+            logger.info("[FEDERATION AGENT] 工具结果: %s...", str(result)[:200])
             results[tc.id] = (tc, result)
 
         # 并发执行所有 query_cluster 调用
         if len(query_calls) == 1:
             # 单个查询：直接执行，无线程开销
             tc, args = query_calls[0]
-            logger.info(f"[FEDERATION AGENT] 调用工具: query_cluster({args})")
+            logger.info("[FEDERATION AGENT] 调用工具: query_cluster(%s)", args)
             result = self._execute_tool("query_cluster", args, endpoint_path=endpoint_path)
-            logger.info(f"[FEDERATION AGENT] 工具结果: {str(result)[:200]}...")
+            logger.info("[FEDERATION AGENT] 工具结果: %s...", str(result)[:200])
             results[tc.id] = (tc, result)
 
         elif len(query_calls) > 1:
@@ -381,7 +380,7 @@ class FederationAgent:
         Returns:
             [(tool_call, result_dict), ...]
         """
-        logger.info(f"[FEDERATION AGENT] 并发执行 {len(query_calls)} 个子集群查询")
+        logger.info("[FEDERATION AGENT] 并发执行 %s 个子集群查询", len(query_calls))
 
         registry = self.toolset.get_context(endpoint_path=endpoint_path).get("federation_registry")
         if not registry:
@@ -439,9 +438,7 @@ class FederationAgent:
                     }
 
                 logger.info(
-                    f"[FEDERATION AGENT] [并发] {cluster_name} 完成: "
-                    f"{'成功' if sub_result.success else '失败'}, "
-                    f"耗时 {sub_result.elapsed_seconds:.1f}s"
+                    "[FEDERATION AGENT] [并发] %s 完成: %s, 耗时 %.1fs", cluster_name, '成功' if sub_result.success else '失败', sub_result.elapsed_seconds
                 )
             else:
                 result = {
@@ -471,9 +468,9 @@ class FederationAgent:
                 f.write("---\n\n")
                 f.write(result.text)
 
-            logger.info(f"[FEDERATION A2A] 已保存 {cluster_name} 报告到: {filepath}")
+            logger.info("[FEDERATION A2A] 已保存 %s 报告到: %s", cluster_name, filepath)
         except Exception as exc:
-            logger.error(f"[FEDERATION A2A] 保存报告失败 ({cluster_name}): {exc}", exc_info=True)
+            logger.error("[FEDERATION A2A] 保存报告失败 (%s): %s", cluster_name, exc, exc_info=True)
 
     def _stream_final_answer(self, messages: List[Dict]) -> Generator[str, None, None]:
         """
@@ -513,15 +510,14 @@ class FederationAgent:
                 if attempt < self._max_retries:
                     delay = self._retry_base_delay * (2 ** (attempt - 1))
                     logger.warning(
-                        f"[FEDERATION AGENT] 流式回答失败 (第{attempt}次), "
-                        f"{delay}s 后重试: {type(exc).__name__}"
+                        "[FEDERATION AGENT] 流式回答失败 (第%s次), %ss 后重试: %s", attempt, delay, type(exc).__name__
                     )
                     time.sleep(delay)
                 else:
-                    logger.error(f"[FEDERATION AGENT] 流式回答失败 (已重试{self._max_retries}次): {exc}", exc_info=True)
+                    logger.error("[FEDERATION AGENT] 流式回答失败 (已重试%s次): %s", self._max_retries, exc, exc_info=True)
                     yield f"\n❌ 生成最终报告失败: {str(exc)}\n"
             except Exception as exc:
-                logger.error(f"[FEDERATION AGENT] 流式最终回答失败: {exc}", exc_info=True)
+                logger.error("[FEDERATION AGENT] 流式最终回答失败: %s", exc, exc_info=True)
                 yield f"\n❌ 生成最终报告失败: {str(exc)}\n"
                 return
 

@@ -127,10 +127,10 @@ def configure_model_context_window(llm_config: Optional[Dict[str, Any]] = None) 
         if not text:
             continue
         if not text.isdigit():
-            logger.warning("⚠️ [context_budget] 忽略无效 llm.%s=%r，必须是正整数 token 数", key, value)
+            logger.warning("[context_budget] 忽略无效 llm.%s=%r，必须是正整数 token 数", key, value)
             return None
         os.environ["MODEL_CONTEXT_WINDOW"] = text
-        logger.info("🔧 [context_budget] 从 config llm.%s 设置 MODEL_CONTEXT_WINDOW=%s", key, text)
+        logger.info("[context_budget] 从 config llm.%s 设置 MODEL_CONTEXT_WINDOW=%s", key, text)
         return int(text)
     return None
 
@@ -143,13 +143,13 @@ def configure_token_counter(llm_config: Optional[Dict[str, Any]] = None) -> None
         value = cfg.get("tokenizer_json_path") or cfg.get("tokenizer_path")
         if value and str(value).strip():
             os.environ["AIOPS_TOKENIZER_JSON_PATH"] = str(value).strip()
-            logger.info("🔧 [context_budget] 从 config 设置 AIOPS_TOKENIZER_JSON_PATH")
+            logger.info("[context_budget] 从 config 设置 AIOPS_TOKENIZER_JSON_PATH")
 
     if not os.getenv("AIOPS_TIKTOKEN_ENCODING", "").strip():
         value = cfg.get("tiktoken_encoding")
         if value and str(value).strip():
             os.environ["AIOPS_TIKTOKEN_ENCODING"] = str(value).strip()
-            logger.info("🔧 [context_budget] 分词编码配置已加载")
+            logger.info("[context_budget] 分词编码配置已加载")
 
 
 class ThinkStreamFilter:
@@ -308,7 +308,7 @@ class HolmesService:
 
                 if config_file is None:
                     config_file, env_name = get_config_file_path(project_root)
-                    logger.info(f"🔧 运行环境: {env_name}")
+                    logger.info("运行环境: %s", env_name)
 
                 # 读取原始 YAML
                 _raw_config: dict = {}
@@ -360,7 +360,7 @@ class HolmesService:
 
                 # 加载 Holmes Config（仍需用于 runbook catalog）
                 if config_file.exists():
-                    logger.info(f"从配置文件加载: {config_file}")
+                    logger.info("从配置文件加载: %s", config_file)
                     self.config = load_holmes_config_from_yaml(
                         config_file=config_file,
                         api_key=final_api_key,
@@ -370,7 +370,7 @@ class HolmesService:
                         logger=logger,
                     )
                 else:
-                    logger.warning(f"配置文件不存在: {config_file}，使用默认配置")
+                    logger.warning("配置文件不存在: %s，使用默认配置", config_file)
                     self.config = AppConfig(
                         llm_model=final_model,
                         llm_api_key=final_api_key,
@@ -380,13 +380,13 @@ class HolmesService:
 
                 # 加载 runbooks
                 step_start = time.time()
-                logger.info("🔄 加载 runbook catalogs...")
+                logger.info("加载 runbook catalogs...")
                 self._load_runbooks()
-                logger.info(f"   ✅ Runbook 加载完成 ({time.time() - step_start:.2f}s)")
+                logger.info("   Runbook 加载完成 (%.2fs)", time.time() - step_start)
 
                 # 创建 AICall 实例
                 step_start = time.time()
-                logger.info("🔄 创建 AICall 实例 (LangGraph)...")
+                logger.info("创建 AICall 实例 (LangGraph)...")
                 summary_mode, summary_max_chars = self.get_observation_summary_config()
                 self.ai_call = AICall(
                     model=final_model,
@@ -397,7 +397,7 @@ class HolmesService:
                     context_compaction_config=self.get_context_compaction_config(),
                     chat_model_extra_body=self.get_chat_model_extra_body_config(_llm_config),
                 )
-                logger.info("   ✅ AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
+                logger.info("   AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
                            final_model, summary_mode, summary_max_chars, time.time() - step_start)
 
                 # 加载 MCP 工具
@@ -407,7 +407,7 @@ class HolmesService:
                     from app.core.async_bridge import run_coroutine_sync
                     try:
                         step_start = time.time()
-                        logger.info("🔄 [AICall] 加载 MCP 工具...")
+                        logger.info("[AICall] 加载 MCP 工具...")
                         failed: List[str] = []
                         self.mcp_tools = run_coroutine_sync(
                             lambda cfg=mcp_cfg: load_mcp_tools(cfg, failed), timeout=60
@@ -415,12 +415,12 @@ class HolmesService:
                         self._mcp_servers_config = mcp_cfg
                         self._mcp_failed_servers = failed
                         self._mcp_retry_after = time.monotonic() + MCP_RETRY_INTERVAL_SECONDS
-                        logger.info("   ✅ [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
+                        logger.info("   [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
                                    len(self.mcp_tools), time.time() - step_start)
                         for t in self.mcp_tools:
-                            logger.debug("      📡 %s", t.name)
+                            logger.debug("      %s", t.name)
                     except Exception as e:
-                        logger.error("   ❌ [AICall] MCP 工具加载失败: %s", e, exc_info=True)
+                        logger.error("   [AICall] MCP 工具加载失败: %s", e, exc_info=True)
                         self.mcp_tools = []
                         self._mcp_servers_config = mcp_cfg
                         self._mcp_failed_servers = [
@@ -435,7 +435,7 @@ class HolmesService:
                 from app.core.aicall.builtin_tools import get_builtin_tools
                 builtin = get_builtin_tools()
                 self.mcp_tools = self.mcp_tools + builtin
-                logger.info("   🔧 [AICall] 工具总计: %d 个 (MCP %d + 内置 %d)",
+                logger.info("   [AICall] 工具总计: %d 个 (MCP %d + 内置 %d)",
                            len(self.mcp_tools), len(self.mcp_tools) - len(builtin), len(builtin))
 
                 # 初始化联邦协调器
@@ -460,13 +460,13 @@ class HolmesService:
                 else:
                     logger.debug("[FEDERATION] federation 未启用，跳过")
 
-                logger.info("✅ 服务初始化完成 | 模式=AICall(LangGraph) | 模型=%s",
+                logger.info("服务初始化完成 | 模式=AICall(LangGraph) | 模型=%s",
                            self.config.model)
 
                 # 输出资源信息
                 step_start = time.time()
                 self._log_loaded_resources()
-                logger.info(f"   ✅ 资源信息输出完成 ({time.time() - step_start:.2f}s)")
+                logger.info("   资源信息输出完成 (%.2fs)", time.time() - step_start)
 
                 # 禁用不可用的工具
                 self._disable_tools(DISABLED_TOOL_NAMES)
@@ -519,7 +519,7 @@ class HolmesService:
             self.mcp_tools = [t for t in self.mcp_tools if t.name not in tool_names]
             removed = before - len(self.mcp_tools)
             if removed:
-                logger.info("⛔ [AICall] 已禁用 %d 个工具: %s", removed, tool_names)
+                logger.info("[AICall] 已禁用 %d 个工具: %s", removed, tool_names)
 
     def get_node_max_steps(self, node_id: str) -> int:
         """获取节点 max_steps，优先级: 环境变量 > config.yaml > 默认值"""
@@ -702,7 +702,7 @@ class HolmesService:
     def _log_loaded_resources(self):
         """输出加载的资源信息（按 MCP Server 分组，INFO 级别可见）"""
         logger.info("=" * 50)
-        logger.info("📋 [AICall] 资源概览")
+        logger.info("[AICall] 资源概览")
         logger.info("=" * 50)
 
         mcp_tools = [t for t in self.mcp_tools if not getattr(t, '_is_builtin', False)]
@@ -720,31 +720,31 @@ class HolmesService:
             else:
                 ungrouped.append(t)
 
-        logger.info("   🔧 工具总计: %d 个 (MCP %d + 内置 %d)",
+        logger.info("   工具总计: %d 个 (MCP %d + 内置 %d)",
                     len(self.mcp_tools), len(mcp_tools), len(builtin_tools))
         logger.info("-" * 50)
 
         if server_groups:
             for srv_name, tools in server_groups.items():
-                logger.info("   📡 [%s] %d 个工具:", srv_name, len(tools))
+                logger.info("   [%s] %d 个工具:", srv_name, len(tools))
                 for t in tools:
                     logger.info("      - %s", t.name)
                     logger.debug("        描述: %s", getattr(t, 'description', '')[:120])
         if ungrouped:
-            logger.info("   📡 [MCP] %d 个工具:", len(ungrouped))
+            logger.info("   [MCP] %d 个工具:", len(ungrouped))
             for t in ungrouped:
                 logger.info("      - %s", t.name)
                 logger.debug("        描述: %s", getattr(t, 'description', '')[:120])
 
         if builtin_tools:
-            logger.info("   🔧 [内置] %d 个工具:", len(builtin_tools))
+            logger.info("   [内置] %d 个工具:", len(builtin_tools))
             for t in builtin_tools:
                 logger.info("      - %s", t.name)
 
         if self.merged_catalog:
             catalog_entries = getattr(self.merged_catalog, 'catalog', [])
             count = len(catalog_entries) if catalog_entries else 0
-            logger.info("   📚 Runbooks: %d 个", count)
+            logger.info("   Runbooks: %d 个", count)
             if catalog_entries:
                 for entry in catalog_entries:
                     rb_id = getattr(entry, 'id', '') or entry.get('id', '') if isinstance(entry, dict) else getattr(entry, 'id', '')
@@ -774,7 +774,7 @@ class HolmesService:
             waited = 0
             while not self._is_initialized() and waited < max_wait:
                 if waited == 0:
-                    logger.info("⏳ 等待服务初始化完成...")
+                    logger.info("等待服务初始化完成...")
                 time.sleep(1)
                 waited += 1
 
@@ -787,9 +787,9 @@ class HolmesService:
                 }
 
             if waited > 0:
-                logger.info(f"✅ 初始化完成（等待了 {waited}s）")
+                logger.info("初始化完成（等待了 %ss）", waited)
 
-            logger.info(f"执行查询: {question[:100]}...")
+            logger.info("执行查询: %s...", question[:100])
 
             chunks = []
             for chunk in self.execute_query_stream(
@@ -808,7 +808,7 @@ class HolmesService:
             }
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
-            logger.error(f"执行查询时出错: {e}", exc_info=True)
+            logger.error("执行查询时出错: %s", e, exc_info=True)
             return {
                 "success": False,
                 "error": str(e),
@@ -833,7 +833,7 @@ class HolmesService:
         waited = 0
         while not self._is_initialized() and waited < max_wait:
             if waited == 0:
-                logger.info("⏳ 等待服务初始化完成...")
+                logger.info("等待服务初始化完成...")
             time.sleep(1)
             waited += 1
 
@@ -847,9 +847,9 @@ class HolmesService:
             return
 
         if waited > 0:
-            logger.info(f"✅ 初始化完成（等待了 {waited}s）")
+            logger.info("初始化完成（等待了 %ss）", waited)
 
-        logger.info("🔄 使用工作流模式执行查询")
+        logger.info("使用工作流模式执行查询")
         yield from self._execute_query_stream_workflow(
             question=question,
             output_format=output_format,
@@ -874,7 +874,7 @@ class HolmesService:
             executor = WorkflowExecutor(holmes_service=self)
             executor.ai_call = self._build_request_scoped_ai_call()
             executor.mcp_tools = self.mcp_tools or []
-            logger.debug("🔀 [Workflow] aicall 路径激活 | tools=%d", len(executor.mcp_tools))
+            logger.debug("[Workflow] aicall 路径激活 | tools=%d", len(executor.mcp_tools))
 
             if output_format == "text":
                 yield from self._workflow_to_text(
@@ -902,7 +902,7 @@ class HolmesService:
                 yield create_sse_message_cn(event_type, payload)
 
         except ImportError as e:
-            logger.error(f"工作流模块导入失败: {e}")
+            logger.error("工作流模块导入失败: %s", e)
             if output_format == "text":
                 yield f"❌ 工作流模块导入失败: {e}\n"
             else:
@@ -911,7 +911,7 @@ class HolmesService:
                     "suggestion": "请确保已安装 langgraph: pip install langgraph"
                 })
         except Exception as e:
-            logger.error(f"工作流执行失败: {e}", exc_info=True)
+            logger.error("工作流执行失败: %s", e, exc_info=True)
             if output_format == "text":
                 yield f"❌ 工作流执行失败: {e}\n"
             else:
@@ -980,7 +980,7 @@ class HolmesService:
         _token_stream_buffer = ""
         think_mode, think_max_chars = self.get_think_stream_config()
         think_filter = ThinkStreamFilter(think_mode, think_max_chars)
-        logger.info("🧠 think stream mode=%s max_chars=%d", think_filter.mode, think_filter.max_chars)
+        logger.info("think stream mode=%s max_chars=%d", think_filter.mode, think_filter.max_chars)
         node_outputs = {"layer": "", "evidence": "", "rca": "", "conclusion": ""}
 
         for event in executor.execute_stream(

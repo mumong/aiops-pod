@@ -39,7 +39,7 @@ def test_call_recursion_limit_is_logged_as_warning_not_error():
 
     assert "达到最大工具执行步数限制" in result.result
     mock_logger.warning.assert_any_call(
-        "⚠️ [AICall] agent 达到递归/步数上限 (%d): %s",
+        "[AICall] agent 达到递归/步数上限 (%d): %s",
         10,
         "Recursion limit of 10 reached without hitting a stop condition.",
     )

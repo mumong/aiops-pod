@@ -89,7 +89,7 @@ class WorkflowNode(ABC):
                 input_payload=payload,
             )
         except Exception as exc:
-            logger.warning("⚠️ [%s] 写入 node input archive 失败: %s", self.node_id, exc)
+            logger.warning("[%s] 写入 node input archive 失败: %s", self.node_id, exc)
 
     def _archive_node_output(
         self,
@@ -109,7 +109,7 @@ class WorkflowNode(ABC):
             )
         except Exception as exc:
             logger.warning(
-                "⚠️ [%s] 写入 node output archive 失败: %s",
+                "[%s] 写入 node output archive 失败: %s",
                 self.node_id,
                 exc,
             )
@@ -201,7 +201,7 @@ class WorkflowNode(ABC):
                     link = getattr(e, 'link', '') or ''
                     lines.append(f"- {link}: {desc}")
                 catalog_text = "\n".join(lines)
-                logger.debug("📚 [%s] 注入 %d 条 Runbook 到 prompt", self.node_id, len(entries))
+                logger.debug("[%s] 注入 %d 条 Runbook 到 prompt", self.node_id, len(entries))
 
         if catalog_text:
             prompt_components.append({
@@ -296,11 +296,11 @@ class WorkflowNode(ABC):
             try:
                 ContextArchive(run_id=run_id).write_budget(self.node_id, budget)
             except Exception as exc:
-                logger.warning("⚠️ [%s] 写入 context budget 失败: %s", self.node_id, exc)
+                logger.warning("[%s] 写入 context budget 失败: %s", self.node_id, exc)
 
-        logger.info("📍 [%s] AICall.call() 开始 | max_steps=%d tools=%d",
+        logger.info("[%s] AICall.call() 开始 | max_steps=%d tools=%d",
                      self.node_id, max_steps, len(tools))
-        logger.debug("📍 [%s] AICall.call() prompt长度=%d字 question长度=%d字",
+        logger.debug("[%s] AICall.call() prompt长度=%d字 question长度=%d字",
                      self.node_id, len(full_prompt), len(question))
 
         result, thinking_events = self.ai_call.call(
@@ -323,7 +323,7 @@ class WorkflowNode(ABC):
             force_no_tools=force_no_tools,
         ):
             logger.warning(
-                "⚠️ [%s] agent response_format 与当前模型网关不兼容，保留 Pydantic fallback，重试无 response_schema 工具采集",
+                "[%s] agent response_format 与当前模型网关不兼容，保留 Pydantic fallback，重试无 response_schema 工具采集",
                 self.node_id,
             )
             retry_kwargs = dict(kwargs)
@@ -343,7 +343,7 @@ class WorkflowNode(ABC):
             )
 
         llm_duration_ms = (time.time() - start_time) * 1000
-        logger.info("✅ [%s] AICall.call() 完成 | %.1fs | iterations=%d | tools=%d | 输出=%d字",
+        logger.info("[%s] AICall.call() 完成 | %.1fs | iterations=%d | tools=%d | 输出=%d字",
                      self.node_id, llm_duration_ms / 1000,
                      result.iteration_count if hasattr(result, 'iteration_count') else 0,
                      result.tool_call_count, len(result.result or ""))

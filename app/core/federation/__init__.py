@@ -83,7 +83,7 @@ class FederationCoordinator:
         successful_count = sum(1 for r in results if r.success)
         total_count = len(results)
         logger.info(
-            f"[FEDERATION] 并发查询完成：{successful_count}/{total_count} 个子集群成功"
+            "[FEDERATION] 并发查询完成：%s/%s 个子集群成功", successful_count, total_count
         )
 
         yield f"🌐 联邦查询：共查询 {total_count} 个子集群，{successful_count} 个成功响应\n\n"

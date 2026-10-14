@@ -151,7 +151,7 @@ class AICall:
         if reasoning_effort:
             self._chat_model_kwargs["reasoning_effort"] = reasoning_effort
 
-        logger.info("🔧 [AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
+        logger.info("[AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
                     model_name, base_url or "(default)")
 
     def _create_chat_model(
@@ -244,7 +244,7 @@ class AICall:
                         )
                 except Exception as archive_exc:
                     logger.warning(
-                        "⚠️ [AICall] simple hard guard 失败归档写入失败: %s",
+                        "[AICall] simple hard guard 失败归档写入失败: %s",
                         archive_exc,
                     )
             raise
@@ -287,9 +287,9 @@ class AICall:
                 )
                 archive.write_budget(node_id or "simple", budget)
             except Exception as exc:
-                logger.warning("⚠️ [AICall] call_simple 写入 context budget 失败: %s", exc)
+                logger.warning("[AICall] call_simple 写入 context budget 失败: %s", exc)
 
-        logger.debug("📍 [AICall] call_simple 开始 | node=%s prompt=%d字 question=%d字 extra=%s",
+        logger.debug("[AICall] call_simple 开始 | node=%s prompt=%d字 question=%d字 extra=%s",
                       node_id or "simple", len(system_prompt), len(question), list(kwargs.keys()) or "无")
         start = time.time()
 
@@ -350,8 +350,8 @@ class AICall:
             try:
                 ContextArchive(run_id=run_id).write_budget(node_id or "simple", final_budget)
             except Exception as exc:
-                logger.warning("⚠️ [AICall] call_simple 写入 final context budget 失败: %s", exc)
-        logger.debug("✅ [AICall] call_simple 完成 | %.1fs | 输出=%d字",
+                logger.warning("[AICall] call_simple 写入 final context budget 失败: %s", exc)
+        logger.debug("[AICall] call_simple 完成 | %.1fs | 输出=%d字",
                       time.time() - start, len(content))
         return content
 
@@ -402,7 +402,7 @@ class AICall:
                         archive.write_budget(node_id, exc.final_budget)
                 except Exception as archive_exc:
                     logger.warning(
-                        "⚠️ [AICall] structured hard guard 失败归档写入失败: %s",
+                        "[AICall] structured hard guard 失败归档写入失败: %s",
                         archive_exc,
                     )
             raise
@@ -413,7 +413,7 @@ class AICall:
                 archive.write_budget(node_id, final_guard_budget)
             except Exception as exc:
                 logger.warning(
-                    "⚠️ [AICall] structured hard guard 写入 context budget 失败: %s",
+                    "[AICall] structured hard guard 写入 context budget 失败: %s",
                     exc,
                 )
         if use_native:
@@ -430,7 +430,7 @@ class AICall:
 
         if not allow_text_fallback:
             logger.warning(
-                "⚠️ [AICall] native structured output unavailable for schema=%s; text fallback disabled",
+                "[AICall] native structured output unavailable for schema=%s; text fallback disabled",
                 schema.__name__,
             )
             return None, raw if 'raw' in locals() else ""
@@ -447,19 +447,19 @@ class AICall:
                 )
             except Exception as exc:
                 logger.warning(
-                    "⚠️ [AICall] structured JSON fallback 写回 hard guard budget 失败: %s",
+                    "[AICall] structured JSON fallback 写回 hard guard budget 失败: %s",
                     exc,
                 )
         parsed = self.extract_json_payload(raw)
         if parsed is None:
-            logger.warning("⚠️ [AICall] structured output parse failed for schema=%s", schema.__name__)
+            logger.warning("[AICall] structured output parse failed for schema=%s", schema.__name__)
             return None, raw
 
         try:
             return schema.model_validate(parsed), raw
         except ValidationError as exc:
             logger.warning(
-                "⚠️ [AICall] structured output validation failed for schema=%s: %s",
+                "[AICall] structured output validation failed for schema=%s: %s",
                 schema.__name__,
                 exc,
             )
@@ -524,7 +524,7 @@ class AICall:
             try:
                 ContextArchive(run_id=run_id).write_budget(node_id or "structured", budget)
             except Exception as exc:
-                logger.warning("⚠️ [AICall] call_structured 写入 context budget 失败: %s", exc)
+                logger.warning("[AICall] call_structured 写入 context budget 失败: %s", exc)
 
         messages = []
         if system_prompt:
@@ -558,7 +558,7 @@ class AICall:
                 parsed = schema.model_validate(result)
                 return parsed, json.dumps(parsed.model_dump(), ensure_ascii=False, default=str)
             logger.warning(
-                "⚠️ [AICall] native structured output returned unsupported type=%s schema=%s",
+                "[AICall] native structured output returned unsupported type=%s schema=%s",
                 type(result).__name__,
                 schema.__name__,
             )
@@ -566,7 +566,7 @@ class AICall:
         except Exception as exc:
             raise_on_model_disconnect(exc)
             logger.warning(
-                "⚠️ [AICall] native structured output failed for schema=%s: %s",
+                "[AICall] native structured output failed for schema=%s: %s",
                 schema.__name__,
                 exc,
             )
@@ -762,7 +762,7 @@ class AICall:
                         strategies.append("node_compactor")
                 except Exception as exc:
                     logger.warning(
-                        "⚠️ [AICall] node-specific context compactor failed "
+                        "[AICall] node-specific context compactor failed "
                         "node=%s: %s",
                         node_id,
                         exc,
@@ -854,8 +854,8 @@ class AICall:
         final_budget["hard_guard"] = dict(metadata)
         if metadata["triggered"]:
             logger.warning(
-                "🧯 [AICall] structured hard context guard | node=%s "
-                "input=%d→%d target=%d limit=%d chars=%d→%d strategy=%s",
+                "[AICall] structured hard context guard | node=%s "
+                "input=%d%d target=%d limit=%d chars=%d%d strategy=%s",
                 node_id,
                 original_input_tokens,
                 final_input_tokens,
@@ -970,7 +970,7 @@ class AICall:
                 {"name": "output_reserved", "category": "reserved", "tokens": 6000},
             ]
 
-        logger.debug("📍 [AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字 expect_json=%s",
+        logger.debug("[AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字 expect_json=%s",
                       node_id or "?", max_steps, len(tools or []), len(system_prompt), expect_json)
 
         # 无工具且不需要 agent structured_response 时直接调用 call_simple。
@@ -1070,7 +1070,7 @@ class AICall:
         config = {"recursion_limit": max_steps}
         if langfuse_config:
             config.update(langfuse_config)
-        logger.info("📍 [AICall] node=%s | max_steps(recursion_limit)=%d", node_id or "?", max_steps)
+        logger.info("[AICall] node=%s | max_steps(recursion_limit)=%d", node_id or "?", max_steps)
 
         final_content = ""
         structured_response = None
@@ -1110,7 +1110,7 @@ class AICall:
                     chunk_type = chunk.get("type", "")
                     chunk_data = chunk.get("data", {})
                 else:
-                    logger.debug("   ⚠️ [AICall] 未知 chunk 类型: %s", type(chunk))
+                    logger.debug("   [AICall] 未知 chunk 类型: %s", type(chunk))
                     continue
 
                 if (
@@ -1118,7 +1118,7 @@ class AICall:
                     and cancel_event
                     and cancel_event.is_set()
                 ):
-                    logger.info("🛑 [AICall] 收到取消信号，停止 agent (node=%s)", node_id)
+                    logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", node_id)
                     break
 
                 # ── messages 模式：token 级别流式 ──
@@ -1186,7 +1186,7 @@ class AICall:
                                 signature = self._tool_call_signature(tc)
                                 if signature in seen_tool_call_signatures:
                                     logger.debug(
-                                        "   ♻️ [AICall] 跳过重复 tool_call replay | node=%s tool=%s signature=%s",
+                                        "   [AICall] 跳过重复 tool_call replay | node=%s tool=%s signature=%s",
                                         node_id or "?",
                                         tc.get("name"),
                                         signature,
@@ -1221,7 +1221,7 @@ class AICall:
                             if should_emit_ai_message:
                                 final_content = full_msg_text
                                 iteration += 1
-                                logger.debug("   💬 [AICall] AI 消息 #%d:\n%s",
+                                logger.debug("   [AICall] AI 消息 #%d:\n%s",
                                             iteration, full_msg_text[:1000])
                                 evt = {"type": "ai_message",
                                        "content": full_msg_text[:500],
@@ -1236,12 +1236,12 @@ class AICall:
                                     ):
                                         if json_acceptance_guard is not None and not json_acceptance_guard(parsed, thinking_events):
                                             logger.info(
-                                                "⏭️ [AICall] JSON middleware 捕获到结构化输出，但接受条件未满足，继续 agent (node=%s)",
+                                                "[AICall] JSON middleware 捕获到结构化输出，但接受条件未满足，继续 agent (node=%s)",
                                                 node_id,
                                             )
                                             continue
                                         final_content = json.dumps(parsed, ensure_ascii=False)
-                                        logger.info("🛑 [AICall] JSON middleware 捕获到有效结构化输出，提前结束 agent (node=%s)", node_id)
+                                        logger.info("[AICall] JSON middleware 捕获到有效结构化输出，提前结束 agent (node=%s)", node_id)
                                         return
 
                             # AI 工具调用
@@ -1249,14 +1249,14 @@ class AICall:
                                 for tc in new_tool_calls:
                                     if tc.get("name") in structured_output_tool_names:
                                         logger.info(
-                                            "🧾 [AICall] structured response emitted | node=%s schema=%s",
+                                            "[AICall] structured response emitted | node=%s schema=%s",
                                             node_id or "?",
                                             tc.get("name"),
                                         )
                                         continue
                                     tool_call_count += 1
                                     tool_sequence = tool_call_count
-                                    logger.debug("   🔧 [AICall] tool_call #%d %s | args=%s",
+                                    logger.debug("   [AICall] tool_call #%d %s | args=%s",
                                                 tool_sequence, tc["name"],
                                                 str(tc.get("args", {}))[:300])
                                     push_event(stream_queue, "tool_start", node_id,
@@ -1281,7 +1281,7 @@ class AICall:
                             tool_name = getattr(msg, 'name', '') or ''
                             if tool_name in structured_output_tool_names:
                                 logger.debug(
-                                    "🧾 [AICall] 跳过结构化输出 tool_result 统计 | node=%s schema=%s",
+                                    "[AICall] 跳过结构化输出 tool_result 统计 | node=%s schema=%s",
                                     node_id or "?",
                                     tool_name,
                                 )
@@ -1290,7 +1290,7 @@ class AICall:
                             tool_signature = self._tool_result_signature(msg, tool_name, tool_content)
                             if tool_signature in seen_tool_result_signatures:
                                 logger.debug(
-                                    "   ♻️ [AICall] 跳过重复 tool_result replay | node=%s tool=%s signature=%s",
+                                    "   [AICall] 跳过重复 tool_result replay | node=%s tool=%s signature=%s",
                                     node_id or "?",
                                     tool_name,
                                     tool_signature,
@@ -1331,7 +1331,7 @@ class AICall:
                                 })
                                 msg.additional_kwargs = additional_kwargs
                             except Exception as exc:
-                                logger.warning("⚠️ [AICall] ToolMessage 内容压缩回写失败: %s", exc)
+                                logger.warning("[AICall] ToolMessage 内容压缩回写失败: %s", exc)
                             status = str(
                                 getattr(msg, "status", "success") or "success"
                             ).strip().lower()
@@ -1383,7 +1383,7 @@ class AICall:
                                 "summary_ref": observation.get("summary_ref"),
                                 "summary_chars": observation.get("summary_chars", len(bounded_content)),
                             }))
-                            logger.info("   ✅ [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
+                            logger.info("   [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
                                         tool_sequence, tool_name, status,
                                         observation.get("raw_chars", len(tool_content)),
                                         observation.get("summary_chars", len(bounded_content)),
@@ -1396,7 +1396,7 @@ class AICall:
                                     else {}
                                 )
                                 logger.info(
-                                    "   🔎 [AICall] observability projection | node=%s tool=%s evidence=%d selected=%d omitted=%d patterns=%d/%d budget=%d/%d stop=%s unattempted=%d strategy=%s raw_ref=%s",
+                                    "   [AICall] observability projection | node=%s tool=%s evidence=%d selected=%d omitted=%d patterns=%d/%d budget=%d/%d stop=%s unattempted=%d strategy=%s raw_ref=%s",
                                     node_id or "?",
                                     tool_name,
                                     projection_audit.get("evidence_total", 0),
@@ -1413,7 +1413,7 @@ class AICall:
                                 )
                                 if projection_audit.get("evidence_omitted", 0):
                                     logger.warning(
-                                        "   📦 [AICall] evidence kept outside model context | node=%s tool=%s omitted=%d retrievable_raw_ref=%s",
+                                        "   [AICall] evidence kept outside model context | node=%s tool=%s omitted=%d retrievable_raw_ref=%s",
                                         node_id or "?",
                                         tool_name,
                                         projection_audit.get("evidence_omitted", 0),
@@ -1421,7 +1421,7 @@ class AICall:
                                     )
                                 if projection_audit.get("semantic_patterns_omitted", 0):
                                     logger.warning(
-                                        "   🧭 [AICall] observability semantic coverage gap | node=%s tool=%s omitted_patterns=%d first_rejected=%s omitted_pattern_preview=%s omitted_profiles=%s",
+                                        "   [AICall] observability semantic coverage gap | node=%s tool=%s omitted_patterns=%d first_rejected=%s omitted_pattern_preview=%s omitted_profiles=%s",
                                         node_id or "?",
                                         tool_name,
                                         projection_audit.get("semantic_patterns_omitted", 0),
@@ -1447,13 +1447,13 @@ class AICall:
                             context_usage_ratio = observation.get("context_usage_ratio")
                             if isinstance(context_usage_ratio, (int, float)) and context_usage_ratio >= 0.8:
                                 logger.warning(
-                                    "   🧯 [AICall] context compression guard triggered | node=%s tool=%s usage=%.0f%% processor=%s",
+                                    "   [AICall] context compression guard triggered | node=%s tool=%s usage=%.0f%% processor=%s",
                                     node_id or "?",
                                     tool_name,
                                     context_usage_ratio * 100,
                                     observation.get("processor", "unknown"),
                                 )
-                            logger.debug("   📄 [AICall] tool #%d %s 摘要输出:\n%s",
+                            logger.debug("   [AICall] tool #%d %s 摘要输出:\n%s",
                                         tool_sequence, tool_name,
                                         bounded_content[:2000])
                             evt = {
@@ -1504,12 +1504,12 @@ class AICall:
                                     self._compact_langgraph_tool_messages_in_place(emitted_tool_messages)
 
                 if cancel_event and cancel_event.is_set():
-                    logger.info("🛑 [AICall] 收到取消信号，停止 agent (node=%s)", node_id)
+                    logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", node_id)
                     break
                 if stop_checker:
                     try:
                         if stop_checker(thinking_events):
-                            logger.info("🛑 [AICall] stop_checker 触发，提前结束 agent (node=%s)", node_id)
+                            logger.info("[AICall] stop_checker 触发，提前结束 agent (node=%s)", node_id)
                             self._record(
                                 thinking_events,
                                 "early_stop",
@@ -1519,7 +1519,7 @@ class AICall:
                             )
                             return
                     except Exception as exc:
-                        logger.warning("⚠️ [AICall] stop_checker 执行失败: %s", exc)
+                        logger.warning("[AICall] stop_checker 执行失败: %s", exc)
 
         # 在私有事件循环线程中运行 agent（避免与 uvicorn event loop 冲突）；超时在循环内取消。
         agent_timeout = max_steps * 30 if max_steps > 0 else None
@@ -1533,18 +1533,18 @@ class AICall:
             )
         except TimeoutError:
             self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="agent_timeout")
-            logger.warning("⚠️ [AICall] agent 执行超时 (%ss)", agent_timeout)
+            logger.warning("[AICall] agent 执行超时 (%ss)", agent_timeout)
             if not final_content:
                 final_content = "Agent 执行超时"
         except GraphRecursionError as e:
             self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="step_limit")
             recursion_msg = str(e).splitlines()[0].strip()
-            logger.warning("⚠️ [AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
+            logger.warning("[AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
             if not final_content:
                 final_content = f"达到最大工具执行步数限制: {recursion_msg}"
         except Exception as e:
             raise_on_model_disconnect(e)
-            logger.error("❌ [AICall] agent 执行异常: %s", e, exc_info=True)
+            logger.error("[AICall] agent 执行异常: %s", e, exc_info=True)
             self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason=str(e))
             if not final_content:
                 final_content = f"Agent 执行异常: {e}"
@@ -1575,7 +1575,7 @@ class AICall:
             thinking_events=thinking_events,
             final_content=final_content,
         )
-        logger.info("✅ [AICall] call 完成 | node=%s | %.1fs | iterations=%d | tools=%d | 输出=%d字",
+        logger.info("[AICall] call 完成 | node=%s | %.1fs | iterations=%d | tools=%d | 输出=%d字",
                     node_id or "?", total_ms / 1000, result.iterations, tool_call_count,
                     len(final_content))
         return result, thinking_events
@@ -1788,7 +1788,7 @@ class AICall:
 
             return CallbackHandler()
         except Exception as exc:
-            logger.debug("📉 [AICall] Langfuse CallbackHandler 不可用，跳过 callbacks: %s", exc)
+            logger.debug("[AICall] Langfuse CallbackHandler 不可用，跳过 callbacks: %s", exc)
             return None
 
     def _bind_session_metadata(self, model: Any, session_id: Optional[str], node_id: str = "") -> Any:
@@ -1807,7 +1807,7 @@ class AICall:
                 extra_body=self._build_extra_body(session_id, node_id, metadata),
             )
         except Exception as exc:
-            logger.debug("📉 [AICall] 绑定 session metadata 失败，继续原模型调用: %s", exc)
+            logger.debug("[AICall] 绑定 session metadata 失败，继续原模型调用: %s", exc)
             return model
 
     def _build_extra_body(
@@ -1881,11 +1881,11 @@ class AICall:
         try:
             from langfuse import get_client, propagate_attributes
         except Exception as exc:
-            logger.debug("📉 [AICall] Langfuse session scope 不可用，直接执行: %s", exc)
+            logger.debug("[AICall] Langfuse session scope 不可用，直接执行: %s", exc)
             yield
             return
 
-        logger.debug("📈 [AICall] Langfuse session_id=%s node=%s", session_id, node_id or "unknown")
+        logger.debug("[AICall] Langfuse session_id=%s node=%s", session_id, node_id or "unknown")
         metadata = self._session_metadata(session_id, node_id)
         stack: Optional[ExitStack] = None
         try:
@@ -1898,7 +1898,7 @@ class AICall:
             ))
             stack.enter_context(propagate_attributes(session_id=session_id))
         except Exception as exc:
-            logger.debug("📉 [AICall] Langfuse span 创建失败，仅传播 session: %s", exc)
+            logger.debug("[AICall] Langfuse span 创建失败，仅传播 session: %s", exc)
             with propagate_attributes(session_id=session_id):
                 yield
             return
@@ -1938,7 +1938,7 @@ class AICall:
                         )
                     except Exception as archive_exc:
                         logger.warning(
-                            "⚠️ [AICall] agent hard guard 失败归档写入失败: %s",
+                            "[AICall] agent hard guard 失败归档写入失败: %s",
                             archive_exc,
                         )
                 raise
@@ -1951,7 +1951,7 @@ class AICall:
                     )
                 except Exception as exc:
                     logger.warning(
-                        "⚠️ [AICall] agent hard guard budget 写入失败: %s",
+                        "[AICall] agent hard guard budget 写入失败: %s",
                         exc,
                     )
             return await handler(guarded_request)
@@ -2210,8 +2210,8 @@ class AICall:
         pre_budget["hard_guard"] = dict(metadata)
         final_budget["hard_guard"] = dict(metadata)
         logger.warning(
-            "🧯 [AICall] agent hard context guard | node=%s "
-            "input=%d→%d target=%d limit=%d messages=%d→1",
+            "[AICall] agent hard context guard | node=%s "
+            "input=%d%d target=%d limit=%d messages=%d1",
             node_id,
             original_input_tokens,
             final_input_tokens,
@@ -2495,7 +2495,7 @@ class AICall:
                     preserve_tail_tokens=48,
                 )
                 logger.warning(
-                    "⚠️ [AICall] isolated tool failure | tool=%s "
+                    "[AICall] isolated tool failure | tool=%s "
                     "call_id=%s error=%s: %s",
                     tool_call.get("name") or "unknown",
                     current_call_id,
@@ -2594,7 +2594,7 @@ class AICall:
         except Exception as exc:
             if getattr(self, "query_raw_passthrough", False) or getattr(processor, "evidence_view_mode", "legacy") == "compact":
                 raise RuntimeError(f"原文归档/处理失败，未截断回退：{exc}") from exc
-            logger.warning("⚠️ [AICall] observation processor 失败，使用截断回退: %s", exc)
+            logger.warning("[AICall] observation processor 失败，使用截断回退: %s", exc)
             summary = (tool_content or "")[:3000]
             refs: Dict[str, str] = {}
             try:
@@ -2607,7 +2607,7 @@ class AICall:
                     summary=summary,
                 )
             except Exception as archive_exc:
-                logger.warning("⚠️ [AICall] fallback observation 归档失败: %s", archive_exc)
+                logger.warning("[AICall] fallback observation 归档失败: %s", archive_exc)
             return {
                 "tool": tool_name,
                 "status": "success",
@@ -2795,7 +2795,7 @@ class AICall:
         self._compact_thinking_events_in_place(thinking_events, compact_event)
         tool_observation_contents[:] = [compact_text]
         logger.info(
-            "🧯 [AICall] runtime context compacted | node=%s usage=%.0f%% window=%s",
+            "[AICall] runtime context compacted | node=%s usage=%.0f%% window=%s",
             node_text or "unknown",
             usage_ratio * 100,
             context_window,
@@ -3781,7 +3781,7 @@ class AICall:
                 return None
             return parsed.model_dump()
         except Exception as exc:
-            logger.warning("⚠️ [AICall] runtime context compaction failed: %s", exc)
+            logger.warning("[AICall] runtime context compaction failed: %s", exc)
             return None
 
     def _write_final_context_budget(
@@ -3852,7 +3852,7 @@ class AICall:
         try:
             ContextArchive(run_id=run_id).write_budget(node_id, budget)
         except Exception as exc:
-            logger.warning("⚠️ [AICall] 写入 final context budget 失败: %s", exc)
+            logger.warning("[AICall] 写入 final context budget 失败: %s", exc)
 
     def _summarize_tool_observation(self, tool_name: str, raw: str, current_summary: str) -> Optional[str]:
         if not raw:
@@ -3886,7 +3886,7 @@ class AICall:
                 return "\n".join(lines)
             return text[:3000] if text else current_summary
         except Exception as exc:
-            logger.warning("⚠️ [AICall] LLM observation summarizer 失败: %s", exc)
+            logger.warning("[AICall] LLM observation summarizer 失败: %s", exc)
             return current_summary
 
     @staticmethod

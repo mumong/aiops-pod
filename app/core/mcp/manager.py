@@ -71,14 +71,14 @@ class MCPServerManager:
     def load_config(self) -> Dict[str, Any]:
         """加载配置文件"""
         if not self.config_path.exists():
-            logger.warning(f"配置文件不存在: {self.config_path}")
+            logger.warning("配置文件不存在: %s", self.config_path)
             return {}
 
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}
         except Exception as e:
-            logger.error(f"加载配置文件失败: {e}")
+            logger.error("加载配置文件失败: %s", e)
             return {}
 
     def parse_mcp_servers(self) -> Dict[str, MCPServerInfo]:
@@ -117,7 +117,7 @@ class MCPServerManager:
             if autostart and is_local_url and name in self.SERVER_SCRIPTS:
                 script_path = self.project_root / self.SERVER_SCRIPTS[name]
                 if not script_path.exists():
-                    logger.warning(f"MCP 服务器脚本不存在: {script_path}")
+                    logger.warning("MCP 服务器脚本不存在: %s", script_path)
                     script_path = None
 
             servers[name] = MCPServerInfo(
@@ -142,33 +142,33 @@ class MCPServerManager:
     async def start_server(self, name: str) -> bool:
         """启动指定的 MCP 服务器（本地脚本）"""
         if name not in self.servers:
-            logger.error(f"未知的 MCP 服务器: {name}")
+            logger.error("未知的 MCP 服务器: %s", name)
             return False
 
         server = self.servers[name]
 
         if not server.enabled:
-            logger.debug(f"MCP 服务器 {name} 未启用，跳过")
+            logger.debug("MCP 服务器 %s 未启用，跳过", name)
             return False
 
         if not server.script_path or not server.script_path.exists():
-            logger.error(f"MCP 服务器 {name} 的脚本不存在: {server.script_path}")
+            logger.error("MCP 服务器 %s 的脚本不存在: %s", name, server.script_path)
             server.status = "failed"
             server.error = "脚本文件不存在"
             return False
 
         # 检查是否已经在运行
         if server.process and server.process.poll() is None:
-            logger.info(f"MCP 服务器 {name} 已在运行")
+            logger.info("MCP 服务器 %s 已在运行", name)
             return True
 
         # 检查端口是否已被占用（可能是之前启动的进程）
         if await self._check_health(server):
-            logger.info(f"MCP 服务器 {name} 已在端口 {server.port} 上运行")
+            logger.info("MCP 服务器 %s 已在端口 %s 上运行", name, server.port)
             server.status = "running"
             return True
 
-        logger.info(f"🚀 启动 MCP 服务器: {name} (端口: {server.port})")
+        logger.info("启动 MCP 服务器: %s (端口: %s)", name, server.port)
         server.status = "starting"
 
         try:
@@ -193,23 +193,23 @@ class MCPServerManager:
                 if server.process.poll() is not None:
                     stdout, _ = server.process.communicate()
                     error_msg = stdout.decode("utf-8", errors="ignore")[-500:] if stdout else "未知错误"
-                    logger.error(f"MCP 服务器 {name} 启动失败: {error_msg}")
+                    logger.error("MCP 服务器 %s 启动失败: %s", name, error_msg)
                     server.status = "failed"
                     server.error = error_msg
                     return False
 
                 if await self._check_health(server):
-                    logger.info(f"✅ MCP 服务器 {name} 启动成功 (端口: {server.port})")
+                    logger.info("MCP 服务器 %s 启动成功 (端口: %s)", name, server.port)
                     server.status = "running"
                     server.error = None
                     return True
 
-            logger.warning(f"⚠️ MCP 服务器 {name} 启动超时，但进程仍在运行")
+            logger.warning("MCP 服务器 %s 启动超时，但进程仍在运行", name)
             server.status = "running"
             return True
 
         except Exception as e:
-            logger.error(f"启动 MCP 服务器 {name} 失败: {e}", exc_info=True)
+            logger.error("启动 MCP 服务器 %s 失败: %s", name, e, exc_info=True)
             server.status = "failed"
             server.error = str(e)
             return False
@@ -225,7 +225,7 @@ class MCPServerManager:
             server.status = "stopped"
             return True
 
-        logger.info(f"🛑 停止 MCP 服务器: {name}")
+        logger.info("停止 MCP 服务器: %s", name)
 
         try:
             if os.name != "nt":
@@ -243,11 +243,11 @@ class MCPServerManager:
 
             server.process = None
             server.status = "stopped"
-            logger.info(f"✅ MCP 服务器 {name} 已停止")
+            logger.info("MCP 服务器 %s 已停止", name)
             return True
 
         except Exception as e:
-            logger.error(f"停止 MCP 服务器 {name} 失败: {e}")
+            logger.error("停止 MCP 服务器 %s 失败: %s", name, e)
             return False
 
     async def _check_health(self, server: MCPServerInfo) -> bool:
@@ -266,15 +266,15 @@ class MCPServerManager:
         results: Dict[str, bool] = {}
         enabled_servers = [s for s in self.servers.values() if s.enabled]
         if not enabled_servers:
-            logger.info("📭 没有启用的 MCP 服务器")
+            logger.info("没有启用的 MCP 服务器")
             return results
 
         local_script_servers = [s for s in enabled_servers if s.script_path]
         if not local_script_servers:
-            logger.info("📭 没有需要自动启动的本地 MCP 脚本（autostart 默认关闭）")
+            logger.info("没有需要自动启动的本地 MCP 脚本（autostart 默认关闭）")
             return results
 
-        logger.info(f"🧩 发现 {len(local_script_servers)} 个需要自动启动的本地 MCP 脚本服务")
+        logger.info("发现 %s 个需要自动启动的本地 MCP 脚本服务", len(local_script_servers))
         for server in local_script_servers:
             results[server.name] = await self.start_server(server.name)
 
@@ -308,17 +308,17 @@ class MCPServerManager:
                     if is_healthy:
                         if server.status != "running":
                             server.status = "running"
-                            logger.info(f"✅ MCP 服务器 {name} 恢复正常")
+                            logger.info("MCP 服务器 %s 恢复正常", name)
                     else:
                         if server.status == "running":
-                            logger.warning(f"⚠️ MCP 服务器 {name} 健康检查失败，尝试重启...")
+                            logger.warning("MCP 服务器 %s 健康检查失败，尝试重启...", name)
                             server.status = "failed"
                             await self.start_server(name)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"健康检查出错: {e}")
+                logger.error("健康检查出错: %s", e)
 
     def start_health_check(self, interval: int = 30):
         """启动健康检查任务"""
@@ -350,13 +350,13 @@ def _cleanup_all_processes():
     if not _all_started_processes:
         return
 
-    logger.info("🧹 清理 MCP 服务器进程...")
+    logger.info("清理 MCP 服务器进程...")
 
     for process in list(_all_started_processes):
         try:
             if process.poll() is None:
                 pid = process.pid
-                logger.info(f"   终止进程 PID: {pid}")
+                logger.info("   终止进程 PID: %s", pid)
 
                 if os.name != "nt":
                     try:
@@ -396,10 +396,10 @@ def _cleanup_all_processes():
                     pass
 
         except Exception as e:
-            logger.debug(f"清理进程时出错: {e}")
+            logger.debug("清理进程时出错: %s", e)
 
     _all_started_processes.clear()
-    logger.info("✅ MCP 服务器进程已清理")
+    logger.info("MCP 服务器进程已清理")
 
 
 def _register_cleanup():
@@ -411,7 +411,7 @@ def _register_cleanup():
     atexit.register(_cleanup_all_processes)
 
     def signal_handler(signum, frame):
-        logger.info(f"收到信号 {signum}，正在清理...")
+        logger.info("收到信号 %s，正在清理...", signum)
         _cleanup_all_processes()
         sys.exit(0)
 
@@ -459,14 +459,14 @@ def shutdown_mcp_servers_sync():
         for name, server in _global_manager.servers.items():
             if server.process and server.process.poll() is None:
                 try:
-                    logger.info(f"🛑 停止 MCP 服务器: {name}")
+                    logger.info("停止 MCP 服务器: %s", name)
                     if os.name != "nt":
                         os.killpg(os.getpgid(server.process.pid), signal.SIGTERM)
                     else:
                         server.process.terminate()
                     server.process.wait(timeout=3)
                 except Exception as e:
-                    logger.debug(f"停止 {name} 时出错: {e}")
+                    logger.debug("停止 %s 时出错: %s", name, e)
                     try:
                         server.process.kill()
                     except Exception:

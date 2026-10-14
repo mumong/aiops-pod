@@ -94,7 +94,7 @@ def count_tokens(text: Any, model: str = "") -> Dict[str, Any]:
                 "accuracy": "exact",
             }
         except Exception as exc:
-            logger.warning("⚠️ [context_budget] 文件分词计数失败，回退估算，异常类型: %s", type(exc).__name__)
+            logger.warning("[context_budget] 文件分词计数失败，回退估算，异常类型: %s", type(exc).__name__)
 
     tiktoken_encoding = os.getenv("AIOPS_TIKTOKEN_ENCODING", "").strip()
     if tiktoken_encoding:
@@ -112,7 +112,7 @@ def count_tokens(text: Any, model: str = "") -> Dict[str, Any]:
                 "accuracy": "exact",
             }
         except Exception as exc:
-            logger.warning("⚠️ [context_budget] 编码分词计数失败，回退估算，异常类型: %s", type(exc).__name__)
+            logger.warning("[context_budget] 编码分词计数失败，回退估算，异常类型: %s", type(exc).__name__)
 
     short_model = _short_model_name(model)
     if short_model and re.match(r"^(gpt-|o[0-9]|chatgpt-)", short_model.lower()):
@@ -355,7 +355,7 @@ class ModelContextResolver:
                     "accuracy": "exact",
                 }
         except Exception as exc:
-            logger.warning("⚠️ [context_budget] 读取模型 metadata 文件失败: %s", exc)
+            logger.warning("[context_budget] 读取模型 metadata 文件失败: %s", exc)
         return None
 
     def _from_openai_compatible_metadata(

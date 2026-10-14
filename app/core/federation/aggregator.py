@@ -73,8 +73,7 @@ class FederationAggregator:
             return []
 
         logger.info(
-            f"[FEDERATION] 开始并发查询 {len(agents)} 个子集群，"
-            f"问题: {question[:60]}..."
+            "[FEDERATION] 开始并发查询 %s 个子集群，问题: %s...", len(agents), question[:60]
         )
 
         tasks = [
@@ -122,17 +121,16 @@ class FederationAggregator:
                     f.write("---\n\n")
                     f.write(result.text)
 
-                logger.info(f"[FEDERATION] 已保存 {result.name} 报告到: {filepath}")
+                logger.info("[FEDERATION] 已保存 %s 报告到: %s", result.name, filepath)
 
         except Exception as exc:
-            logger.error(f"[FEDERATION] 保存报告失败: {exc}", exc_info=True)
+            logger.error("[FEDERATION] 保存报告失败: %s", exc, exc_info=True)
 
     def _compress_single(self, result: SubAgentResult) -> str:
         """调用 LLM 将单个子集群报告压缩为关键摘要"""
         before_tokens = _estimate_tokens(result.text)
         logger.info(
-            f"[FEDERATION] {result.name} 报告超出阈值"
-            f"（约 {before_tokens} tokens），开始压缩..."
+            "[FEDERATION] %s 报告超出阈值（约 %s tokens），开始压缩...", result.name, before_tokens
         )
         prompt = COMPRESS_PROMPT + result.text
         try:
@@ -149,12 +147,11 @@ class FederationAggregator:
             compressed = resp.choices[0].message.content or result.text
             after_tokens = _estimate_tokens(compressed)
             logger.info(
-                f"[FEDERATION] {result.name} 压缩完成: "
-                f"{before_tokens} → {after_tokens} tokens"
+                "[FEDERATION] %s 压缩完成: %s %s tokens", result.name, before_tokens, after_tokens
             )
             return compressed
         except Exception as exc:
-            logger.error(f"[FEDERATION] {result.name} 压缩失败，使用原始文本: {exc}")
+            logger.error("[FEDERATION] %s 压缩失败，使用原始文本: %s", result.name, exc)
             return result.text
 
     def synthesize(
@@ -209,8 +206,7 @@ class FederationAggregator:
         # 如果总 token 数超过模型上下文限制，强制压缩
         if total_tokens > MODEL_CONTEXT_LIMIT:
             logger.warning(
-                f"[FEDERATION] 总 tokens ({total_tokens}) 超过模型限制 ({MODEL_CONTEXT_LIMIT})，"
-                f"开始强制压缩..."
+                "[FEDERATION] 总 tokens (%s) 超过模型限制 (%s)，开始强制压缩...", total_tokens, MODEL_CONTEXT_LIMIT
             )
             compressed_contents = []
             total_tokens = 0
@@ -226,8 +222,7 @@ class FederationAggregator:
             contents = compressed_contents
 
         logger.info(
-            f"[FEDERATION] 开始 LLM 合成，总输入 tokens 约: {total_tokens}，"
-            f"集群数: {len(contents)}"
+            "[FEDERATION] 开始 LLM 合成，总输入 tokens 约: %s，集群数: %s", total_tokens, len(contents)
         )
 
         # 构建 synthesis 消息
@@ -262,7 +257,7 @@ class FederationAggregator:
                 if delta and delta.content:
                     yield delta.content
         except Exception as exc:
-            logger.error(f"[FEDERATION] LLM 合成失败: {exc}", exc_info=True)
+            logger.error("[FEDERATION] LLM 合成失败: %s", exc, exc_info=True)
             yield f"\n\n❌ LLM 合成失败: {exc}\n"
             yield "\n**各子集群原始报告（未合成）：**\n\n"
             for name, url, text, _ in contents:

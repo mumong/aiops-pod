@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
     from app.core.mcp import auto_start_mcp_servers, shutdown_mcp_servers, get_mcp_manager
     
     logger.info("=" * 60)
-    logger.info("🚀 K8s AIOps Copilot 启动中...")
+    logger.info("K8s AIOps Copilot 启动中...")
     logger.info("=" * 60)
     
     # ==================== 1. 启动 MCP 服务器（可选） ====================
@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
     # 如确实需要在本进程内自动拉起（例如本地开发跑 bridge），设置：
     #   export MCP_AUTO_START_LOCAL=true
     logger.info("")
-    logger.info("📡 [步骤 1/2] MCP 服务器连接/启动检查...")
+    logger.info("[步骤 1/2] MCP 服务器连接/启动检查...")
     logger.info("-" * 40)
 
     auto_start_local = os.getenv("MCP_AUTO_START_LOCAL", "false").lower() in ("1", "true", "yes", "on")
@@ -67,24 +67,24 @@ async def lifespan(app: FastAPI):
 
                 for name, success in mcp_results.items():
                     status_icon = "✅" if success else "❌"
-                    logger.info(f"   {status_icon} {name}: {'启动成功' if success else '启动失败'}")
+                    logger.info("   %s %s: %s", status_icon, name, '启动成功' if success else '启动失败')
 
-                logger.info(f"   📊 本地 MCP 子进程: {success_count}/{total_count} 个启动成功")
+                logger.info("   本地 MCP 子进程: %s/%s 个启动成功", success_count, total_count)
             else:
-                logger.info("   📭 没有配置需要自动启动的本地 MCP 服务器")
+                logger.info("   没有配置需要自动启动的本地 MCP 服务器")
 
             # 等待 MCP 服务器完全启动
             if any(mcp_results.values()):
-                logger.info("   ⏳ 等待本地 MCP 服务器就绪...")
+                logger.info("   等待本地 MCP 服务器就绪...")
                 await asyncio.sleep(2)
         except Exception as e:
-            logger.error(f"   ❌ 本地 MCP 启动失败: {e}", exc_info=True)
+            logger.error("   本地 MCP 启动失败: %s", e, exc_info=True)
     else:
         logger.info("   ℹ️ 已禁用本地 MCP auto-start（默认）。将直接使用配置中的第三方 MCP URL 连接。")
     
     # ==================== 2. 初始化 AIOps Copilot 服务 ====================
     logger.info("")
-    logger.info("🤖 [步骤 2/2] 初始化 AIOps Copilot 服务...")
+    logger.info("[步骤 2/2] 初始化 AIOps Copilot 服务...")
     logger.info("-" * 40)
 
     try:
@@ -97,36 +97,36 @@ async def lifespan(app: FastAPI):
             done, pending = await asyncio.wait({init_task}, timeout=init_timeout)
             if pending:
                 logger.warning(
-                    "   ⚠️ 服务初始化超时（%ss），先继续启动；初始化将在后台继续运行",
+                    "   服务初始化超时（%ss），先继续启动；初始化将在后台继续运行",
                     init_timeout,
                 )
                 # 不取消任务，让它在后台继续
         else:
             # 无超时：同步等待初始化完成
-            logger.info("   📌 等待服务完全初始化（无超时限制）...")
+            logger.info("   等待服务完全初始化（无超时限制）...")
             service.initialize()
-            logger.info("   ✅ AIOps Copilot 服务初始化完成")
+            logger.info("   AIOps Copilot 服务初始化完成")
     except Exception as e:
-        logger.error(f"   ❌ 服务初始化失败: {e}", exc_info=True)
+        logger.error("   服务初始化失败: %s", e, exc_info=True)
     
     logger.info("")
     logger.info("=" * 60)
-    logger.info("✅ 服务启动完成!")
+    logger.info("服务启动完成!")
     logger.info("=" * 60)
     
     yield
     
     # ==================== 清理资源 ====================
     logger.info("")
-    logger.info("🛑 正在关闭服务...")
+    logger.info("正在关闭服务...")
     
     try:
         await shutdown_mcp_servers()
-        logger.info("✅ MCP 服务器已关闭")
+        logger.info("MCP 服务器已关闭")
     except Exception as e:
-        logger.error(f"关闭 MCP 服务器时出错: {e}")
+        logger.error("关闭 MCP 服务器时出错: %s", e)
     
-    logger.info("👋 服务已停止")
+    logger.info("服务已停止")
 
 
 # 创建 FastAPI 应用
@@ -162,17 +162,17 @@ def main():
     port = int(os.getenv("API_PORT", "8000"))
     host = os.getenv("API_HOST", "0.0.0.0")
     
-    logger.info("🚀 启动 AIOps Copilot API 服务器")
-    logger.info(f"   地址: http://{host}:{port}")
-    logger.info(f"   日志级别: {logging.getLevelName(_log_level)}")
-    logger.info(f"")
-    logger.info(f"   📖 使用方式:")
-    logger.info(f"   curl -G 'http://{host}:{port}/ask' --data-urlencode 'q=你的问题'")
-    logger.info(f"   curl -X POST 'http://{host}:{port}/ask' -d 'q=你的问题'")
-    logger.info(f"")
-    logger.info(f"   🔗 其他端点:")
-    logger.info(f"   API 文档: http://{host}:{port}/docs")
-    logger.info(f"   健康检查: http://{host}:{port}/health")
+    logger.info("启动 AIOps Copilot API 服务器")
+    logger.info("   地址: http://%s:%s", host, port)
+    logger.info("   日志级别: %s", logging.getLevelName(_log_level))
+    logger.info("")
+    logger.info("   使用方式:")
+    logger.info("   curl -G 'http://%s:%s/ask' --data-urlencode 'q=你的问题'", host, port)
+    logger.info("   curl -X POST 'http://%s:%s/ask' -d 'q=你的问题'", host, port)
+    logger.info("")
+    logger.info("   其他端点:")
+    logger.info("   API 文档: http://%s:%s/docs", host, port)
+    logger.info("   健康检查: http://%s:%s/health", host, port)
     
     # uvicorn log_config 必须使用与 _log_level 一致的级别，否则会覆盖 basicConfig
     _level_name = logging.getLevelName(_log_level)  # e.g. "DEBUG", "INFO"

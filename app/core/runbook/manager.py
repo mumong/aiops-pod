@@ -47,7 +47,7 @@ class RunbookManager:
         catalog_file = self.runbook_dir / "catalog.json"
         
         if not catalog_file.exists():
-            logger.debug(f"自定义 runbook catalog 不存在: {catalog_file}")
+            logger.debug("自定义 runbook catalog 不存在: %s", catalog_file)
             return None
         
         try:
@@ -72,22 +72,22 @@ class RunbookManager:
                                 break
                     
                     if not found:
-                        logger.warning(f"Runbook 文件不存在，跳过: {entry['link']}")
+                        logger.warning("Runbook 文件不存在，跳过: %s", entry['link'])
                         continue
                 
                 validated_entries.append(entry)
             
             if not validated_entries:
-                logger.warning(f"没有有效的 runbook 条目在 {catalog_file}")
+                logger.warning("没有有效的 runbook 条目在 %s", catalog_file)
                 return None
             
             # 创建 catalog（只包含有效的条目）
             catalog_dict["catalog"] = validated_entries
             catalog = RunbookCatalog(**catalog_dict)
-            logger.info(f"✅ 加载自定义 runbook catalog: {len(catalog.catalog)} 个 runbooks")
+            logger.info("加载自定义 runbook catalog: %s 个 runbooks", len(catalog.catalog))
             return catalog
         except Exception as e:
-            logger.error(f"加载自定义 runbook catalog 失败: {e}", exc_info=True)
+            logger.error("加载自定义 runbook catalog 失败: %s", e, exc_info=True)
             return None
     
     def merge_catalogs(
@@ -115,7 +115,6 @@ class RunbookManager:
             catalog=base_catalog.catalog + custom_catalog.catalog
         )
         logger.info(
-            f"合并 runbook catalogs: 内置 {len(base_catalog.catalog)} + "
-            f"自定义 {len(custom_catalog.catalog)} = 总计 {len(merged_catalog.catalog)}"
+            "合并 runbook catalogs: 内置 %s + 自定义 %s = 总计 %s", len(base_catalog.catalog), len(custom_catalog.catalog), len(merged_catalog.catalog)
         )
         return merged_catalog

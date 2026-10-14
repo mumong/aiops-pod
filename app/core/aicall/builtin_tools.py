@@ -72,10 +72,10 @@ class FetchRunbookTool(BaseTool):
         """同步执行：读取本地 .md 文件"""
         safe_id = os.path.basename(runbook_id)
         normalized_id = safe_id[:-3] if safe_id.endswith(".md") else safe_id
-        logger.debug("📚 [fetch_runbook] 查找: %s", safe_id)
+        logger.debug("[fetch_runbook] 查找: %s", safe_id)
 
         if self.allowed_runbook_ids and normalized_id not in set(self.allowed_runbook_ids):
-            logger.warning("⚠️ [fetch_runbook] 已禁用: %s", safe_id)
+            logger.warning("[fetch_runbook] 已禁用: %s", safe_id)
             return f"Error: Runbook '{safe_id}' is disabled by the current runtime profile"
 
         for d in self.runbook_dirs:
@@ -83,7 +83,7 @@ class FetchRunbookTool(BaseTool):
             if os.path.isfile(path):
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
-                logger.info("📚 [fetch_runbook] 找到: %s (%d 字符)", path, len(content))
+                logger.info("[fetch_runbook] 找到: %s (%d 字符)", path, len(content))
 
                 suffix = (
                     "Note: the above runbook is for diagnostic reference and repair planning. "
@@ -96,7 +96,7 @@ class FetchRunbookTool(BaseTool):
                 return f"<runbook>\n{content}\n</runbook>\n{suffix}"
 
         searched = ", ".join(self.runbook_dirs)
-        logger.warning("⚠️ [fetch_runbook] 未找到: %s (搜索路径: %s)", safe_id, searched)
+        logger.warning("[fetch_runbook] 未找到: %s (搜索路径: %s)", safe_id, searched)
         return f"Error: Runbook '{safe_id}' not found in search paths: [{searched}]"
 
     async def _arun(self, runbook_id: str) -> str:
@@ -152,17 +152,17 @@ class ReadContextArchiveTool(BaseTool):
 
         if not any(self._is_relative_to(resolved, root) for root in allowed):
             allowed_text = ", ".join(str(p) for p in allowed)
-            logger.warning("⚠️ [read_context_archive] 非法路径: %s", requested)
+            logger.warning("[read_context_archive] 非法路径: %s", requested)
             return f"Error: archive_path '{requested}' is not under allowed archive roots: [{allowed_text}]"
 
         if not resolved.is_file():
-            logger.warning("⚠️ [read_context_archive] 文件不存在: %s", resolved)
+            logger.warning("[read_context_archive] 文件不存在: %s", resolved)
             return f"Error: archive file not found: {resolved}"
 
         try:
             content = resolved.read_text(encoding="utf-8", errors="replace")
         except Exception as exc:
-            logger.warning("⚠️ [read_context_archive] 读取失败: %s | %s", resolved, exc)
+            logger.warning("[read_context_archive] 读取失败: %s | %s", resolved, exc)
             return f"Error: failed to read archive file '{resolved}': {exc}"
 
         if view == "compact" or json_pointer or search or fields:
@@ -197,7 +197,7 @@ class ReadContextArchiveTool(BaseTool):
             snippet = snippet[:low]
         truncated = safe_offset + len(snippet) < len(content)
         logger.info(
-            "📦 [read_context_archive] 读取: %s | offset=%d length=%d total=%d truncated=%s",
+            "[read_context_archive] 读取: %s | offset=%d length=%d total=%d truncated=%s",
             resolved, safe_offset, safe_length, len(content), truncated,
         )
 
@@ -274,5 +274,5 @@ def get_builtin_tools(runbook_dirs: Optional[list] = None) -> list:
     # 标记为内置工具，方便 _log_loaded_resources 分组显示
     for t in tools:
         t._is_builtin = True
-    logger.info("🔧 [内置工具] 加载 %d 个: %s", len(tools), ", ".join(t.name for t in tools))
+    logger.info("[内置工具] 加载 %d 个: %s", len(tools), ", ".join(t.name for t in tools))
     return tools

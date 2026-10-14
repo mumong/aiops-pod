@@ -45,7 +45,7 @@ def fix_double_encoding(text: str) -> str:
     try:
         # 尝试将错误的字符串编码回字节，再用正确的编码解码
         fixed = text.encode('latin-1').decode('utf-8')
-        logger.debug(f"✅ 修复了双重编码: {text[:20]} -> {fixed[:20]}")
+        logger.debug("修复了双重编码: %s -> %s", text[:20], fixed[:20])
         return fixed
     except (UnicodeDecodeError, UnicodeEncodeError):
         # 如果修复失败，说明原始数据就是正确的
@@ -88,7 +88,7 @@ def register_routes(app):
         ```
         """
         question = fix_double_encoding(q) # FastAPI 的 Query 已自动解码
-        logger.info(f"📝 收到查询: {question[:80]}...")
+        logger.info("收到查询: %s...", question[:80])
         overrides = _diagnosis_workflow_overrides()
         owner = _query_session_owner(request, session_id, overrides)
         
@@ -133,7 +133,7 @@ def register_routes(app):
         ```
         """
         question = fix_double_encoding(q)
-        logger.info(f"📝 收到查询 (POST): {question[:80]}...")
+        logger.info("收到查询 (POST): %s...", question[:80])
         overrides = _diagnosis_workflow_overrides()
         owner = _query_session_owner(request, session_id, overrides)
 
@@ -168,7 +168,7 @@ def register_routes(app):
         session_id: Optional[str] = Query(None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
     ):
         question = fix_double_encoding(q)
-        logger.info(f"📝 收到轻量查询: {question[:80]}...")
+        logger.info("收到轻量查询: %s...", question[:80])
 
         overrides = {
             "query_mode": "auto",
@@ -190,7 +190,7 @@ def register_routes(app):
         session_id: Optional[str] = Form(None, min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
     ):
         question = fix_double_encoding(q)
-        logger.info(f"📝 收到轻量查询 (POST): {question[:80]}...")
+        logger.info("收到轻量查询 (POST): %s...", question[:80])
 
         overrides = {
             "query_mode": "auto",
@@ -253,7 +253,7 @@ def register_routes(app):
         注意：问题中的特殊字符需要 URL 编码
         """
         question = fix_double_encoding(question)  # 修复双重编码
-        logger.info(f"📝 收到查询 (路径): {question[:80]}...")
+        logger.info("收到查询 (路径): %s...", question[:80])
         
         overrides = _diagnosis_workflow_overrides()
         if stream:
@@ -282,7 +282,7 @@ def register_routes(app):
         )
         if not ok:
             logger.warning(
-                "🛠️ remediation approval not found | run_id=%s approval_id=%s approved=%s reviewer=%s",
+                "remediation approval not found | run_id=%s approval_id=%s approved=%s reviewer=%s",
                 run_id,
                 approval_id,
                 approved,
@@ -290,7 +290,7 @@ def register_routes(app):
             )
             raise HTTPException(status_code=404, detail="approval request not found")
         logger.info(
-            "🛠️ remediation approval resolved | run_id=%s approval_id=%s approved=%s reviewer=%s reason=%s",
+            "remediation approval resolved | run_id=%s approval_id=%s approved=%s reviewer=%s reason=%s",
             run_id,
             approval_id,
             approved,
@@ -350,7 +350,7 @@ def register_routes(app):
             service = get_service()
             return service.get_tools_info()
         except Exception as e:
-            logger.error(f"获取工具列表失败: {e}", exc_info=True)
+            logger.error("获取工具列表失败: %s", e, exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/tools/detail")
@@ -363,7 +363,7 @@ def register_routes(app):
             service = get_service()
             return service.get_tools_detail()
         except Exception as e:
-            logger.error(f"获取工具详情失败: {e}", exc_info=True)
+            logger.error("获取工具详情失败: %s", e, exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
     
     @app.get("/runbooks")
@@ -383,7 +383,7 @@ def register_routes(app):
                 return {"count": len(runbooks), "runbooks": runbooks}
             return {"count": 0, "runbooks": []}
         except Exception as e:
-            logger.error(f"获取 Runbooks 失败: {e}", exc_info=True)
+            logger.error("获取 Runbooks 失败: %s", e, exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/artifacts/{artifact_id}")
@@ -495,7 +495,7 @@ def register_routes(app):
         ```
         """
         question = fix_double_encoding(q)
-        logger.info(f"[FEDERATION] 收到联邦查询 (GET): {question[:80]}...")
+        logger.info("[FEDERATION] 收到联邦查询 (GET): %s...", question[:80])
         return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path="/ask")
 
     @app.post("/federation/ask")
@@ -512,7 +512,7 @@ def register_routes(app):
         ```
         """
         question = fix_double_encoding(q)
-        logger.info(f"[FEDERATION] 收到联邦查询 (POST): {question[:80]}...")
+        logger.info("[FEDERATION] 收到联邦查询 (POST): %s...", question[:80])
         return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path="/ask")
 
     # =========================================================================
@@ -526,7 +526,7 @@ def register_routes(app):
         conclusion_max_tokens: int = Query(8192, description="子集群查询结论最大 token 数", ge=0),
     ):
         question = fix_double_encoding(q)
-        logger.info(f"[FEDERATION] 收到联邦查询模式请求 (GET): {question[:80]}...")
+        logger.info("[FEDERATION] 收到联邦查询模式请求 (GET): %s...", question[:80])
         return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path="/query")
 
     @app.post("/federation/query")
@@ -536,7 +536,7 @@ def register_routes(app):
         conclusion_max_tokens: int = Form(8192, description="子集群查询结论最大 token 数"),
     ):
         question = fix_double_encoding(q)
-        logger.info(f"[FEDERATION] 收到联邦查询模式请求 (POST): {question[:80]}...")
+        logger.info("[FEDERATION] 收到联邦查询模式请求 (POST): %s...", question[:80])
         return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path="/query")
 
     def _federation_stream_response(
@@ -560,9 +560,7 @@ def register_routes(app):
                     )
                     return
                 logger.info(
-                    f"[FEDERATION] 开始联邦查询, "
-                    f"子集群数量: {len(coordinator._registry.get_enabled_agents())}, "
-                    f"端点: {endpoint_path}, 问题: {question[:60]}..."
+                    "[FEDERATION] 开始联邦查询, 子集群数量: %s, 端点: %s, 问题: %s...", len(coordinator._registry.get_enabled_agents()), endpoint_path, question[:60]
                 )
                 yield from coordinator.ask_stream(
                     question=question,
@@ -571,7 +569,7 @@ def register_routes(app):
                     endpoint_path=endpoint_path,
                 )
             except Exception as exc:
-                logger.error(f"[FEDERATION] 联邦查询出错: {exc}", exc_info=True)
+                logger.error("[FEDERATION] 联邦查询出错: %s", exc, exc_info=True)
                 yield f"\n❌ 联邦查询错误: {str(exc)}\n"
 
         return StreamingResponse(
@@ -606,7 +604,7 @@ def register_routes(app):
         ```
         """
         question = fix_double_encoding(q)
-        logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询 (GET): {question[:80]}...")
+        logger.info("[FEDERATION A2A] 收到 Agent-to-Agent 查询 (GET): %s...", question[:80])
         return _federation_agent_stream_response(question, max_steps, endpoint_path="/ask")
 
     @app.post("/federation/ask/v2")
@@ -622,7 +620,7 @@ def register_routes(app):
         ```
         """
         question = fix_double_encoding(q)
-        logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询 (POST): {question[:80]}...")
+        logger.info("[FEDERATION A2A] 收到 Agent-to-Agent 查询 (POST): %s...", question[:80])
         return _federation_agent_stream_response(question, max_steps, endpoint_path="/ask")
 
     @app.get("/federation/query/v2")
@@ -631,7 +629,7 @@ def register_routes(app):
         max_steps: int = Query(30, description="Agent 最大执行步数", ge=1, le=100),
     ):
         question = fix_double_encoding(q)
-        logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (GET): {question[:80]}...")
+        logger.info("[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (GET): %s...", question[:80])
         return _federation_agent_stream_response(question, max_steps, endpoint_path="/query")
 
     @app.post("/federation/query/v2")
@@ -640,7 +638,7 @@ def register_routes(app):
         max_steps: int = Form(30, description="Agent 最大执行步数"),
     ):
         question = fix_double_encoding(q)
-        logger.info(f"[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (POST): {question[:80]}...")
+        logger.info("[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (POST): %s...", question[:80])
         return _federation_agent_stream_response(question, max_steps, endpoint_path="/query")
 
     def _federation_agent_stream_response(
@@ -663,12 +661,11 @@ def register_routes(app):
                     )
                     return
                 logger.info(
-                    f"[FEDERATION A2A] 开始 Agent-to-Agent 查询, "
-                    f"端点: {endpoint_path}, 问题: {question[:60]}..."
+                    "[FEDERATION A2A] 开始 Agent-to-Agent 查询, 端点: %s, 问题: %s...", endpoint_path, question[:60]
                 )
                 yield from agent.ask_stream(question=question, endpoint_path=endpoint_path)
             except Exception as exc:
-                logger.error(f"[FEDERATION A2A] Agent-to-Agent 查询出错: {exc}", exc_info=True)
+                logger.error("[FEDERATION A2A] Agent-to-Agent 查询出错: %s", exc, exc_info=True)
                 yield f"\n❌ Agent-to-Agent 查询错误: {str(exc)}\n"
 
         return StreamingResponse(
@@ -705,10 +702,10 @@ def register_routes(app):
                 )
             except GeneratorExit:
                 # 客户端断开连接（curl Ctrl+C）
-                logger.info("🛑 客户端断开连接，触发取消信号")
+                logger.info("客户端断开连接，触发取消信号")
                 cancel_event.set()
             except Exception as e:
-                logger.error(f"流式查询出错: {e}", exc_info=True)
+                logger.error("流式查询出错: %s", e, exc_info=True)
                 yield f"\n❌ 错误: {str(e)}\n"
             finally:
                 # 确保取消信号被设置（无论正常结束还是异常）
@@ -760,5 +757,5 @@ def register_routes(app):
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"查询出错: {e}", exc_info=True)
+            logger.error("查询出错: %s", e, exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))

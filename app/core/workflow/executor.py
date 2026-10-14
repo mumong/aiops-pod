@@ -281,7 +281,7 @@ class WorkflowExecutor:
             if self.ai_call:
                 node.ai_call = self.ai_call
                 node.tools = self.mcp_tools or []
-                logger.debug("   🔧 [%s] ai_call=%s tools=%d",
+                logger.debug("   [%s] ai_call=%s tools=%d",
                              node.node_id, type(node.ai_call).__name__, len(node.tools))
 
         total_start = time.time()
@@ -323,7 +323,7 @@ class WorkflowExecutor:
         }
 
         # 发出开始事件
-        logger.info(f"🚀 工作流开始: run_id={run_id}")
+        logger.info("工作流开始: run_id=%s", run_id)
         yield {
             "type": "run_start",
             "id": f"{run_id}-run_start",
@@ -371,7 +371,7 @@ class WorkflowExecutor:
             while not workflow_done:
                 # 检查取消信号
                 if cancel_event and cancel_event.is_set():
-                    logger.info("🛑 [Workflow] 收到取消信号，停止工作流 (run_id=%s)", run_id)
+                    logger.info("[Workflow] 收到取消信号，停止工作流 (run_id=%s)", run_id)
                     workflow_done = True
                     break
 
@@ -414,7 +414,7 @@ class WorkflowExecutor:
                             node_start_times[node_id] = ts
                             metrics.start_node(node_id, node_name, start_ts=ts)
                             current_nodes.add(node_id)
-                            logger.info(f"📍 [{node_id}] {node_name} 开始...")
+                            logger.info("[%s] %s 开始...", node_id, node_name)
                             yield {
                                 "type": "node_start",
                                 "id": f"{run_id}-node_start-{node_id}",
@@ -447,13 +447,13 @@ class WorkflowExecutor:
                         self._archive_node_transition(run_id, node_id, final_state, snapshot, handoff)
                         duration_s = metrics.nodes.get(node_id).duration_ms / 1000 if node_id in metrics.nodes else 0
 
-                        logger.info(f"✅ [{node_id}] 完成 ({duration_s:.1f}s)")
+                        logger.info("[%s] 完成 (%.1fs)", node_id, duration_s)
                         if node_summary:
-                            logger.info(f"   {node_summary}")
+                            logger.info("   %s", node_summary)
                         if handoff:
                             handoff_short = handoff[:120] + "..." if len(handoff) > 120 else handoff
-                            logger.info(f"   📤 传递给下游: {handoff_short}")
-                            logger.debug(f"   📤 [DEBUG] 完整传递数据:\n{handoff}")
+                            logger.info("   传递给下游: %s", handoff_short)
+                            logger.debug("   [DEBUG] 完整传递数据:\n%s", handoff)
 
                         yield {
                             "type": "node_complete",
@@ -487,13 +487,13 @@ class WorkflowExecutor:
                                 node_summary = self._format_node_summary(prev_node, final_state, snapshot)
                                 handoff = self._format_handoff_summary(prev_node, final_state)
                                 self._archive_node_transition(run_id, prev_node, final_state, snapshot, handoff)
-                                logger.info(f"✅ [{prev_node}] 完成 ({prev_dur:.1f}s)")
+                                logger.info("[%s] 完成 (%.1fs)", prev_node, prev_dur)
                                 if node_summary:
-                                    logger.info(f"   {node_summary}")
+                                    logger.info("   %s", node_summary)
                                 if handoff:
                                     handoff_short = handoff[:120] + "..." if len(handoff) > 120 else handoff
-                                    logger.info(f"   📤 传递给下游: {handoff_short}")
-                                    logger.debug(f"   📤 [DEBUG] 完整传递数据:\n{handoff}")
+                                    logger.info("   传递给下游: %s", handoff_short)
+                                    logger.debug("   [DEBUG] 完整传递数据:\n%s", handoff)
                                 yield {
                                     "type": "node_complete",
                                     "id": f"{run_id}-node_complete-{prev_node}",
@@ -513,7 +513,7 @@ class WorkflowExecutor:
                         node_start_times[node_id] = time.time()
                         metrics.start_node(node_id, self._get_node_display_name(node_id))
                         current_nodes.add(node_id)
-                        logger.info(f"📍 [{node_id}] {self._get_node_display_name(node_id)} 开始...")
+                        logger.info("[%s] %s 开始...", node_id, self._get_node_display_name(node_id))
                         yield {
                             "type": "node_start",
                             "id": f"{run_id}-node_start-{node_id}",
@@ -560,7 +560,7 @@ class WorkflowExecutor:
                             node_start_times[node_name] = time.time()
                             metrics.start_node(node_name, self._get_node_display_name(node_name))
                             current_nodes.add(node_name)
-                            logger.info(f"📍 [{node_name}] {self._get_node_display_name(node_name)} 开始...")
+                            logger.info("[%s] %s 开始...", node_name, self._get_node_display_name(node_name))
 
                             yield {
                                 "type": "node_start",
@@ -586,13 +586,13 @@ class WorkflowExecutor:
                             handoff = self._format_handoff_summary(node_name, final_state)
                             self._archive_node_transition(run_id, node_name, final_state, snapshot, handoff)
 
-                            logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
+                            logger.info("[%s] 完成 (%.1fs)", node_name, node_duration)
                             if node_summary:
-                                logger.info(f"   {node_summary}")
+                                logger.info("   %s", node_summary)
                             if handoff:
                                 handoff_short = handoff[:120] + "..." if len(handoff) > 120 else handoff
-                                logger.info(f"   📤 传递给下游: {handoff_short}")
-                                logger.debug(f"   📤 [DEBUG] 完整传递数据:\n{handoff}")
+                                logger.info("   传递给下游: %s", handoff_short)
+                                logger.debug("   [DEBUG] 完整传递数据:\n%s", handoff)
 
                             yield {
                                 "type": "node_complete",
@@ -632,9 +632,9 @@ class WorkflowExecutor:
                     handoff = self._format_handoff_summary(node_name, final_state)
                     self._archive_node_transition(run_id, node_name, final_state, snapshot, handoff)
 
-                    logger.info(f"✅ [{node_name}] 完成 ({node_duration:.1f}s)")
+                    logger.info("[%s] 完成 (%.1fs)", node_name, node_duration)
                     if node_summary:
-                        logger.info(f"   {node_summary}")
+                        logger.info("   %s", node_summary)
 
                     yield {
                         "type": "node_complete",
@@ -683,13 +683,13 @@ class WorkflowExecutor:
             self._save_report(layer, question, full_answer)
             
             # 日志输出完成信息
-            logger.info(f"🎉 工作流完成: 耗时 {metrics.mttr_formatted}")
+            logger.info("工作流完成: 耗时 %s", metrics.mttr_formatted)
             logger.info("=" * 60)
-            logger.info("⏱️ [耗时分析] 各节点耗时明细:")
+            logger.info("[耗时分析] 各节点耗时明细:")
             for nid, node in metrics.nodes.items():
                 pct = (node.duration_ms / metrics.total_duration_ms * 100) if metrics.total_duration_ms > 0 else 0
-                logger.info(f"   {node.node_name}: {node.duration_ms/1000:.1f}s ({pct:.0f}%)")
-            logger.info(f"   模型请求耗时: {metrics.total_llm_duration_ms/1000:.1f}s ({metrics.total_llm_calls} 次)")
+                logger.info("   %s: %.1fs (%.0f%%)", node.node_name, node.duration_ms/1000, pct)
+            logger.info("   模型请求耗时: %.1fs (%s 次)", metrics.total_llm_duration_ms/1000, metrics.total_llm_calls)
             logger.info(
                 "   工具耗时: 累计 %.1fs，关键路径 %.1fs "
                 "(请求 %d，实际执行 %d，去重 %d，成功响应 %d，失败/未完成 %d)",
@@ -701,7 +701,7 @@ class WorkflowExecutor:
                 metrics.successful_tool_calls,
                 metrics.failed_tool_calls,
             )
-            logger.info(f"   总计: {metrics.total_duration_seconds:.1f}s")
+            logger.info("   总计: %.1fs", metrics.total_duration_seconds)
             logger.info("=" * 60)
             
             # 发出最终答案事件
@@ -811,7 +811,7 @@ class WorkflowExecutor:
                     plan = extract_remediation_plan(full_answer)
                 except ValueError as exc:
                     logger.warning(
-                        "🛠️ invalid remediation plan | run_id=%s error=%s",
+                        "invalid remediation plan | run_id=%s error=%s",
                         run_id,
                         exc,
                     )
@@ -832,7 +832,7 @@ class WorkflowExecutor:
                     missing_actions_reason = _missing_structured_actions_reason(full_answer, plan)
                     if missing_actions_reason:
                         logger.warning(
-                            "🛠️ invalid remediation plan | run_id=%s error=%s",
+                            "invalid remediation plan | run_id=%s error=%s",
                             run_id,
                             missing_actions_reason,
                         )
@@ -908,7 +908,7 @@ class WorkflowExecutor:
             last_stream_event_ts = time.time()
         
         except Exception as e:
-            logger.error(f"❌ 工作流执行失败: {e}", exc_info=True)
+            logger.error("工作流执行失败: %s", e, exc_info=True)
             metrics.success = False
             metrics.errors.append(str(e))
             metrics.finish()
@@ -942,7 +942,7 @@ class WorkflowExecutor:
                 worker_alive
                 and worker is not threading.current_thread()
             ):
-                logger.warning("⚠️ [Workflow] 后台线程未在 5s 内结束 (run_id=%s)", run_id)
+                logger.warning("[Workflow] 后台线程未在 5s 内结束 (run_id=%s)", run_id)
 
     @staticmethod
     def _normalize_langfuse_session_id(run_id: str) -> Optional[str]:
@@ -965,11 +965,11 @@ class WorkflowExecutor:
         try:
             from langfuse import propagate_attributes
         except Exception as exc:
-            logger.debug("📉 [Workflow] Langfuse session propagation 不可用，直接执行: %s", exc)
+            logger.debug("[Workflow] Langfuse session propagation 不可用，直接执行: %s", exc)
             yield
             return
 
-        logger.debug("📈 [Workflow] Langfuse session_id=%s", session_id)
+        logger.debug("[Workflow] Langfuse session_id=%s", session_id)
         with propagate_attributes(session_id=session_id):
             yield
     
@@ -1320,7 +1320,7 @@ class WorkflowExecutor:
                 handoff_payload=handoff_payload if handoff else None,
             )
         except Exception as exc:
-            logger.warning("⚠️ [Workflow] 写入 node transition archive 失败 node=%s: %s", node_name, exc)
+            logger.warning("[Workflow] 写入 node transition archive 失败 node=%s: %s", node_name, exc)
 
     def _update_metrics_from_state(
         self,

@@ -50,12 +50,12 @@ class AgentRegistry:
 
         for item in raw_agents:
             if not isinstance(item, dict):
-                logger.warning(f"[FEDERATION] 跳过非法 sub_agent 配置项: {item}")
+                logger.warning("[FEDERATION] 跳过非法 sub_agent 配置项: %s", item)
                 continue
             name = item.get("name", "")
             url = item.get("url", "")
             if not name or not url:
-                logger.warning(f"[FEDERATION] sub_agent 缺少 name 或 url，跳过: {item}")
+                logger.warning("[FEDERATION] sub_agent 缺少 name 或 url，跳过: %s", item)
                 continue
             agents.append(SubAgentConfig(
                 name=name,
@@ -64,13 +64,13 @@ class AgentRegistry:
                 enabled=bool(item.get("enabled", True)),
             ))
 
-        logger.info(f"[FEDERATION] 注册表加载完成，共 {len(agents)} 个子集群")
+        logger.info("[FEDERATION] 注册表加载完成，共 %s 个子集群", len(agents))
         return cls(agents)
 
     def get_enabled_agents(self) -> List[SubAgentConfig]:
         """返回所有已启用的子集群"""
         enabled = [a for a in self._agents if a.enabled]
-        logger.debug(f"[FEDERATION] 已启用子集群: {[a.name for a in enabled]}")
+        logger.debug("[FEDERATION] 已启用子集群: %s", [a.name for a in enabled])
         return enabled
 
     def __len__(self) -> int:

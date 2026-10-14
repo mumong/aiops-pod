@@ -45,13 +45,13 @@ def substitute_env_vars(obj: Any, logger, depth: int = 0) -> Any:
 
         env_value = os.environ.get(var_name)
         if env_value is not None:
-            logger.debug(f"🔄 环境变量替换: ${{{var_name}}} -> ***")
+            logger.debug("环境变量替换: ${%s} -> ***", var_name)
             return env_value
         if default_value is not None:
-            logger.debug(f"🔄 使用默认值: ${{{var_name}}} -> {default_value}")
+            logger.debug("使用默认值: ${%s} -> %s", var_name, default_value)
             return default_value
 
-        logger.warning(f"⚠️ 环境变量未设置: {var_name}")
+        logger.warning("环境变量未设置: %s", var_name)
         return match.group(0)
 
     return re.sub(pattern, replace_match, obj)
@@ -69,7 +69,7 @@ def load_holmes_config_from_yaml(
     """
     从 YAML 文件加载轻量配置对象
     """
-    logger.info("✅ 环境变量替换完成")
+    logger.info("环境变量替换完成")
     return ConfigLoader.load(
         config_file,
         api_key=api_key,

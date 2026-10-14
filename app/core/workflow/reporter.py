@@ -91,7 +91,7 @@ def save_report(reports_dir: str, layer: Any, question: str, full_answer: str) -
         import re as _re
 
         rdir = Path(reports_dir)
-        logger.info(f"📄 [报告保存] 目标目录: {rdir} (存在: {rdir.exists()})")
+        logger.info("[报告保存] 目标目录: %s (存在: %s)", rdir, rdir.exists())
 
         rdir.mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +99,7 @@ def save_report(reports_dir: str, layer: Any, question: str, full_answer: str) -
         layer_str = extract_layer_from_report(full_answer)
         if not layer_str:
             layer_str = layer.value if hasattr(layer, "value") else str(layer or "UNKNOWN")
-        logger.info(f"📄 [报告保存] 层级: {layer_str}, 问题: {question[:50]}")
+        logger.info("[报告保存] 层级: %s, 问题: %s", layer_str, question[:50])
 
         # 从问题中提取摘要（去掉特殊字符，截取前30字符）
         summary = _re.sub(r'[\\/:*?"<>|\n\r\t]', '', question)[:30].strip()
@@ -112,13 +112,13 @@ def save_report(reports_dir: str, layer: Any, question: str, full_answer: str) -
 
         content_size = len(full_answer.encode("utf-8"))
         filepath.write_text(full_answer, encoding="utf-8")
-        logger.info(f"📄 [报告保存] 成功: {filepath} ({content_size} bytes)")
+        logger.info("[报告保存] 成功: %s (%s bytes)", filepath, content_size)
     except PermissionError as e:
-        logger.error(f"❌ [报告保存] 权限不足: {e} (目录: {reports_dir})")
+        logger.error("[报告保存] 权限不足: %s (目录: %s)", e, reports_dir)
     except OSError as e:
-        logger.error(f"❌ [报告保存] 文件系统错误: {e} (目录: {reports_dir})")
+        logger.error("[报告保存] 文件系统错误: %s (目录: %s)", e, reports_dir)
     except Exception as e:
-        logger.error(f"❌ [报告保存] 未知错误: {type(e).__name__}: {e}", exc_info=True)
+        logger.error("[报告保存] 未知错误: %s: %s", type(e).__name__, e, exc_info=True)
 
 
 def extract_layer_from_report(text: str) -> str:
@@ -379,8 +379,8 @@ def update_metrics_from_state(
             metrics.runbook_id = None
 
         if metrics.primary_runbook:
-            logger.info(f"   核心 Runbook: {metrics.primary_runbook}")
-        logger.info(f"   参考 Runbook: {metrics.runbook_id}")
+            logger.info("   核心 Runbook: %s", metrics.primary_runbook)
+        logger.info("   参考 Runbook: %s", metrics.runbook_id)
     else:
         metrics.runbook_matched = False
         metrics.runbook_id = None

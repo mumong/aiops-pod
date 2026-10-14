@@ -49,7 +49,7 @@ def load_metrics_config(config: Optional[Dict] = None):
     if not os.getenv("METRICS_EVIDENCE_THRESHOLD") and "evidence_completeness" in thresholds:
         EVIDENCE_COMPLETENESS_THRESHOLD = float(thresholds["evidence_completeness"])
     logger.info(
-        f"📊 指标阈值: MTTR<{MTTR_THRESHOLD_SECONDS}s, "
+        f"指标阈值: MTTR<{MTTR_THRESHOLD_SECONDS}s, "
         f"RCA>={ROOT_CAUSE_CONFIDENCE_THRESHOLD:.0%}, "
         f"Evidence>{EVIDENCE_COMPLETENESS_THRESHOLD:.0%}, "
         f"Enabled={METRICS_ENABLED}"

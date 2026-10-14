@@ -147,9 +147,9 @@ class QueryClusterTool(Tool):
                 f.write("---\n\n")
                 f.write(result.text)
 
-            logger.info(f"[FEDERATION A2A] 已保存 {cluster_name} 报告到: {filepath}")
+            logger.info("[FEDERATION A2A] 已保存 %s 报告到: %s", cluster_name, filepath)
         except Exception as exc:
-            logger.error(f"[FEDERATION A2A] 保存报告失败 ({cluster_name}): {exc}", exc_info=True)
+            logger.error("[FEDERATION A2A] 保存报告失败 (%s): %s", cluster_name, exc, exc_info=True)
 
 
 class FederationToolset(Toolset):
