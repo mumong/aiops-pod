@@ -142,7 +142,6 @@ class QualityScorer:
             ConfidenceResult 包含最终分数、各维度明细、惩罚项
         """
         dimensions = []
-        penalties = []
         fallback_applied = False
 
         # --- 维度1: evidence_strength ---
@@ -187,7 +186,6 @@ class QualityScorer:
 
         # --- 维度4: runbook_match (梯度评分) ---
         runbook_matched = getattr(metrics, 'runbook_matched', False) if metrics else False
-        runbook_id = getattr(metrics, 'runbook_id', '') or '' if metrics else ''
         primary_runbook = getattr(metrics, 'primary_runbook', None) if metrics else None
         if primary_runbook:
             runbook_score = 1.0  # 有核心 runbook 命中

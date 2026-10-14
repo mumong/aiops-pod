@@ -24,7 +24,6 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Generator
-from urllib.parse import unquote
 
 from fastapi import HTTPException, Query, Form, Request
 from fastapi.responses import StreamingResponse, PlainTextResponse

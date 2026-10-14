@@ -154,8 +154,6 @@ class RemediationAgentExecutor:
                 ("verify", decision.verify_command),
             ]
             verify_succeeded = False
-            verify_accepted_not_found = False
-            verify_result = ""
             # Field names are model output, not authority: a write hidden in
             # dry_run_command or verify_command requires the same approval.
             try:
@@ -210,8 +208,6 @@ class RemediationAgentExecutor:
                             "verification accepted: target resource is NotFound after deletion/finalizer remediation"
                         )
                         verify_succeeded = True
-                        verify_accepted_not_found = True
-                        verify_result = result
                         observation = f"{stage}: {command}\n{result}"
                         observations.append(observation)
                         yield {
@@ -240,7 +236,6 @@ class RemediationAgentExecutor:
                 observations.append(observation)
                 if stage == "verify":
                     verify_succeeded = True
-                    verify_result = str(result or "")
                 yield {
                     "type": "remediation_tool_result",
                     "run_id": run_id,

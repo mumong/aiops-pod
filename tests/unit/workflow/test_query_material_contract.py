@@ -2,11 +2,8 @@
 
 from copy import deepcopy
 
-from app.core.workflow.nodes.query_answer import (
-    build_working_material,
-    evidence_receipts,
-    parse_query_answer,
-)
+from app.core.workflow.nodes.query_answer import build_working_material, parse_query_answer
+from app.core.workflow.working_material import evidence_receipts
 
 
 def test_latest_compaction_and_lane_boundaries_preserve_user_scope():

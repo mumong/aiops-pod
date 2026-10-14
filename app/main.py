@@ -42,7 +42,7 @@ for noisy_lib in [
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     from app.core import get_service
-    from app.core.mcp import auto_start_mcp_servers, shutdown_mcp_servers, get_mcp_manager
+    from app.core.mcp import auto_start_mcp_servers, shutdown_mcp_servers
     
     logger.info("=" * 60)
     logger.info("K8s AIOps Copilot 启动中...")

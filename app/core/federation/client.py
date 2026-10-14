@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 
 import httpx
 
@@ -200,7 +200,7 @@ class SubAgentClient:
             )
         except httpx.TimeoutException:
             elapsed = time.monotonic() - start
-            err = f"请求超时"
+            err = "请求超时"
             logger.error("[FEDERATION] %s %s", agent.name, err)
             return SubAgentResult(
                 name=agent.name, url=agent.url, success=False,

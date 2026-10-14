@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Re-export legacy imports while keeping contracts separate from orchestration.
 from app.core.workflow.query_contract import QueryAnswer, parse_query_answer
-from app.core.workflow.working_material import build_working_material, evidence_receipts
+from app.core.workflow.working_material import build_working_material
 
 from app.core.skills.models import Layer
 from app.core.runbook.catalog import reference_description
@@ -169,14 +169,6 @@ class QueryConclusionNode(FocusedTaskNode):
                 self.ai_call.query_session_context = {}
             return conclude_cases(self, state)
         events = state.get("thinking_events") or []
-        last_compaction = next(
-            (
-                i
-                for i in range(len(events) - 1, -1, -1)
-                if events[i].get("type") == "context_compacted" and not events[i].get("lane_id")
-            ),
-            -1,
-        )
         payload = build_working_material(state)
         payload["request_contract"] = state.get("request_contract")
         payload['pod_assessment'] = (state.get('diagnosis_handoff') or {}).get('pod_assessment')

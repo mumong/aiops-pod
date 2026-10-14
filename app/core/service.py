@@ -928,7 +928,6 @@ class HolmesService:
         workflow_title: str = "工作流诊断模式",
     ) -> Generator[str, None, None]:
         """工作流执行结果转换为美观的文本格式，专为终端 curl 优化"""
-        import json
 
         def emit(text: str) -> str:
             return text + "\n"
@@ -975,7 +974,6 @@ class HolmesService:
 
         final_answer = ""
         final_report_emitted = False
-        metrics_data = None
         _token_streaming_active = False
         _token_stream_buffer = ""
         think_mode, think_max_chars = self.get_think_stream_config()
@@ -1123,7 +1121,6 @@ class HolmesService:
 
             elif event_type == "final":
                 final_answer = event.get("answer", "")
-                metrics_data = event.get("metrics", {})
                 elapsed = event.get("elapsed_seconds", 0)
                 node_outputs["conclusion"] = final_answer or "（汇总节点生成最终报告）"
                 yield emit("-" * 70)

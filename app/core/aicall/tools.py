@@ -1,5 +1,4 @@
 """MCP 工具加载：使用 langchain-mcp-adapters 连接 MCP SSE 服务"""
-import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 

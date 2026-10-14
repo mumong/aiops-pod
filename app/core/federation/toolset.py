@@ -14,8 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from holmes.core.tools import Tool, Toolset, ToolsetStatusEnum
-from pydantic import Field, PrivateAttr
+from holmes.core.tools import Tool, Toolset
+from pydantic import PrivateAttr
 
 from app.core.async_bridge import run_coroutine_sync
 from app.core.federation.registry import AgentRegistry
@@ -142,7 +142,7 @@ class QueryClusterTool(Tool):
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(f"# 子集群诊断报告 - {cluster_name}\n\n")
                 f.write(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"**来源**: Agent-to-Agent (v2)\n")
+                f.write("**来源**: Agent-to-Agent (v2)\n")
                 f.write(f"**耗时**: {result.elapsed_seconds:.1f} 秒\n\n")
                 f.write("---\n\n")
                 f.write(result.text)
