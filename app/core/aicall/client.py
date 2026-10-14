@@ -2277,46 +2277,6 @@ class AICall:
             getattr(request, "response_format", None)
         )
 
-        def _components(message_content: Any) -> List[Dict[str, Any]]:
-            return [
-                {
-                    "name": "node_system_prompt",
-                    "category": "static_input",
-                    "content": system_content,
-                },
-                {
-                    "name": "agent_message_history",
-                    "category": "dynamic_runtime",
-                    "content": message_content,
-                },
-                {
-                    "name": "tool_schema",
-                    "category": "static_input",
-                    "content": tool_schema_payload,
-                },
-                {
-                    "name": "structured_schema",
-                    "category": "static_input",
-                    "content": response_schema_payload,
-                },
-                {
-                    "name": "output_reserved",
-                    "category": "reserved",
-                    "tokens": output_reserved,
-                },
-                {
-                    "name": "safety_margin",
-                    "category": "reserved",
-                    "tokens": safety_margin,
-                },
-                {
-                    "name": "provider_request_overhead",
-                    "category": "static_input",
-                    "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
-                    "token_accuracy": "estimated",
-                },
-            ]
-
         estimator = ContextBudgetEstimator()
 
         def _estimate(message_content: Any) -> Dict[str, Any]:
@@ -2325,7 +2285,14 @@ class AICall:
                 model=self.model_str,
                 system_prompt=system_content,
                 user_message="",
-                components=_components(message_content),
+                components=self._agent_guard_components(
+                    system_content=system_content,
+                    message_content=message_content,
+                    tool_schema_payload=tool_schema_payload,
+                    response_schema_payload=response_schema_payload,
+                    output_reserved=output_reserved,
+                    safety_margin=safety_margin,
+                ),
                 api_base=self.api_base or "",
                 api_key=self.api_key or "",
                 enable_usage_probe=False,
@@ -2458,6 +2425,55 @@ class AICall:
             len(messages),
         )
         return request.override(messages=compacted_messages), final_budget
+
+    @staticmethod
+    def _agent_guard_components(
+        *,
+        system_content: Any,
+        message_content: Any,
+        tool_schema_payload: Any,
+        response_schema_payload: Any,
+        output_reserved: int,
+        safety_margin: int,
+    ) -> List[Dict[str, Any]]:
+        return [
+            {
+                "name": "node_system_prompt",
+                "category": "static_input",
+                "content": system_content,
+            },
+            {
+                "name": "agent_message_history",
+                "category": "dynamic_runtime",
+                "content": message_content,
+            },
+            {
+                "name": "tool_schema",
+                "category": "static_input",
+                "content": tool_schema_payload,
+            },
+            {
+                "name": "structured_schema",
+                "category": "static_input",
+                "content": response_schema_payload,
+            },
+            {
+                "name": "output_reserved",
+                "category": "reserved",
+                "tokens": output_reserved,
+            },
+            {
+                "name": "safety_margin",
+                "category": "reserved",
+                "tokens": safety_margin,
+            },
+            {
+                "name": "provider_request_overhead",
+                "category": "static_input",
+                "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
+                "token_accuracy": "estimated",
+            },
+        ]
 
     @staticmethod
     def _agent_request_output_reserved(request: Any) -> int:
