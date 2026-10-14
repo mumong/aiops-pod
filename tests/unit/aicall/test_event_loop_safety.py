@@ -1694,22 +1694,6 @@ def test_create_chat_model_can_disable_streaming_for_structured_calls():
     assert captured["disable_streaming"] is True
 
 
-def test_call_simple_json_parses_fenced_json_output():
-    def _new_model(**kwargs):
-        model = MagicMock()
-        model.invoke.return_value = MagicMock(
-            content='```json\n{"layer":"QUERY","confidence":0.9,"reasoning":"ok"}\n```'
-        )
-        return model
-
-    with patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model):
-        ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
-        parsed, raw = ai.call_simple_json("sys", "q")
-
-    assert parsed == {"layer": "QUERY", "confidence": 0.9, "reasoning": "ok"}
-    assert "```json" in raw
-
-
 def test_call_structured_disables_text_fallback_by_default(monkeypatch):
     ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
 

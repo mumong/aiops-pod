@@ -16,8 +16,7 @@
 import logging
 import re
 import json
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -420,35 +419,3 @@ class QualityScorer:
 
         # 5. 最终兜底
         return 0.5, "fallback"
-
-    # ================================================================
-    # 格式化输出
-    # ================================================================
-    @staticmethod
-    def format_confidence_breakdown(result: ConfidenceResult) -> str:
-        """格式化置信度评分明细"""
-        lines = [f"根因置信度: {result.final_score:.0%}"]
-        for i, d in enumerate(result.dimensions):
-            prefix = "├─" if i < len(result.dimensions) - 1 or result.penalties else "└─"
-            lines.append(
-                f"  {prefix} {d.description}: {d.score:.0%} "
-                f"(权重 {d.weight:.0%}) → 贡献 {d.weighted_score:.1%}"
-            )
-        for i, p in enumerate(result.penalties):
-            prefix = "└─" if i == len(result.penalties) - 1 else "├─"
-            lines.append(f"  {prefix} 惩罚 {p.name}: -{p.value:.0%} ({p.reason})")
-        return "\n".join(lines)
-
-    @staticmethod
-    def format_evidence_breakdown(completeness: float, detail: Dict) -> str:
-        """格式化证据完整率明细"""
-        breakdown = detail.get("breakdown", {})
-        lines = [f"证据完整率: {completeness:.0%} (加权)"]
-        items = list(breakdown.items())
-        for i, (level, stats) in enumerate(items):
-            prefix = "└─" if i == len(items) - 1 else "├─"
-            lines.append(
-                f"  {prefix} {level}: {stats['collected']}/{stats['total']} "
-                f"(权重 {stats['weight']}) → {stats['rate']:.0%}"
-            )
-        return "\n".join(lines)

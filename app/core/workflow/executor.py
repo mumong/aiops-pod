@@ -23,12 +23,10 @@ from typing import Generator, Dict, Any, Optional
 
 from app.core.workflow.state import WorkflowState
 from app.core.workflow.graph import build_diagnosis_workflow
-from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.metrics import WorkflowMetrics
 from app.core.workflow.stream_contract import project_parallel_tool_event, project_query_tool_event, workflow_outcome
 from app.core.workflow.reporter import (
     save_report as _save_report_fn,
-    extract_layer_from_report as _extract_layer_fn,
     update_metrics_from_state as _update_metrics_fn,
 )
 from app.core.context.archive import ContextArchive
@@ -150,11 +148,6 @@ class WorkflowExecutor:
     def _save_report(self, layer, question: str, full_answer: str):
         """保存诊断报告到固定目录"""
         _save_report_fn(self.REPORTS_DIR, layer, question, full_answer)
-
-    @staticmethod
-    def _extract_layer_from_report(text: str) -> str:
-        """从报告文本中提取实际层级（优先用 conclusion 的判断）"""
-        return _extract_layer_fn(text)
 
     def execute_stream(self, question, run_id=None, cancel_event=None, workflow_overrides=None):
         from app.core.query_sessions import query_sessions, SessionBusy

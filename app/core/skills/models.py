@@ -37,15 +37,6 @@ class Confidence(str, Enum):
     HIGH = "高"
     MEDIUM = "中"
     LOW = "低"
-    
-    @classmethod
-    def from_score(cls, score: float) -> "Confidence":
-        """从分数转换为置信度等级"""
-        if score >= 0.8:
-            return cls.HIGH
-        elif score >= 0.5:
-            return cls.MEDIUM
-        return cls.LOW
 
 
 class EvidenceLevel(str, Enum):
@@ -74,31 +65,6 @@ class EvidenceItem:
 
 
 @dataclass
-class Fact:
-    """结构化事实"""
-    key: str
-    value: Any
-    source: str  # 来源事件引用
-    confidence: float = 1.0  # 事实本身的可信度
-
-    def to_dict(self) -> Dict:
-        return asdict(self)
-
-
-@dataclass
-class RuleMatch:
-    """规则匹配结果"""
-    rule_id: str
-    rule_name: str
-    matched: bool
-    conditions_met: List[str] = field(default_factory=list)
-    conditions_failed: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> Dict:
-        return asdict(self)
-
-
-@dataclass
 class EvidenceDetail:
     """详细证据记录（包含具体采集内容）"""
     id: str
@@ -112,22 +78,6 @@ class EvidenceDetail:
     
     def to_dict(self) -> Dict:
         return asdict(self)
-    
-    def format_display(self) -> str:
-        """格式化为可读字符串"""
-        if not self.collected:
-            return f"❌ {self.description}：未采集"
-        
-        parts = [f"✅ {self.description}"]
-        if self.value is not None:
-            parts.append(f"值 = `{self.value}`")
-        if self.raw_snippet:
-            # 截取关键片段
-            snippet = self.raw_snippet[:200].replace('\n', ' ').strip()
-            if len(self.raw_snippet) > 200:
-                snippet += "..."
-            parts.append(f"来源: {snippet}")
-        return " | ".join(parts)
 
 
 @dataclass
@@ -186,28 +136,3 @@ class DeterministicDecision:
         d["layer"] = self.layer.value if isinstance(self.layer, Layer) else self.layer
         d["confidence"] = self.confidence.value if isinstance(self.confidence, Confidence) else self.confidence
         return d
-
-    @property
-    def is_high_confidence(self) -> bool:
-        return self.confidence == Confidence.HIGH
-
-    @property
-    def has_critical_missing(self) -> bool:
-        return len(self.critical_missing) > 0
-
-    def _calculate_evidence_completeness(self) -> str:
-        """
-        计算证据完整度百分比
-
-        Returns:
-            格式化的百分比字符串，如 "75%"
-        """
-        total = len(self.collected_evidence) + len(self.missing_evidence)
-        if total == 0:
-            return "0%"
-        percentage = (len(self.collected_evidence) / total) * 100
-        return f"{percentage:.0f}%"
-
-    def get_context_value(self, key: str, default: str = "<未知>") -> str:
-        """安全获取上下文值"""
-        return self.context.get(key, default)

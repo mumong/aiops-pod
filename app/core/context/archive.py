@@ -104,13 +104,6 @@ class ContextArchive:
             "bytes": len(payload),
         }
 
-    def write_layer_artifacts(self, full_analysis: str, handoff: Dict[str, Any]) -> Dict[str, str]:
-        full_ref = self.write_text("layer/full_analysis.md", full_analysis or "")
-        handoff = dict(handoff or {})
-        handoff.setdefault("archive_ref", full_ref)
-        handoff_ref = self.write_json("layer/handoff.json", handoff)
-        return {"full_analysis_ref": full_ref, "handoff_ref": handoff_ref}
-
     def write_budget(self, node_id: str, budget: Dict[str, Any]) -> str:
         return self.write_json(f"budget/{_safe_name(node_id)}.json", budget)
 
