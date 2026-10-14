@@ -643,51 +643,20 @@ class AICall:
                 }
 
         safety_margin = int(config["safety_tokens"])
-        components = [
-            {
-                "name": "node_system_prompt",
-                "category": "static_input",
-                "content": system_prompt,
-            },
-            {
-                "name": "user_message",
-                "category": "static_input",
-                "content": question,
-            },
-            {
-                "name": "output_reserved",
-                "category": "reserved",
-                "tokens": output_reserved,
-            },
-            {
-                "name": "safety_margin",
-                "category": "reserved",
-                "tokens": safety_margin,
-            },
-            {
-                "name": "provider_request_overhead",
-                "category": "static_input",
-                "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
-                "token_accuracy": "estimated",
-            },
-        ]
-        if schema_payload is not None:
-            components.insert(2, {
-                "name": "structured_schema",
-                "category": "static_input",
-                "content": schema_payload,
-            })
         estimator = ContextBudgetEstimator()
-        pre_budget = estimator.estimate(
-            node_id=node_id,
-            model=self.model_str,
-            system_prompt=system_prompt,
-            user_message=question,
-            components=components,
-            api_base=self.api_base or "",
-            api_key=self.api_key or "",
-            enable_usage_probe=False,
-        )
+
+        def _estimate_candidate(candidate_question: str) -> Dict[str, Any]:
+            return self._estimate_structured_budget(
+                estimator,
+                node_id=node_id,
+                system_prompt=system_prompt,
+                question=candidate_question,
+                schema_payload=schema_payload,
+                output_reserved=output_reserved,
+                safety_margin=safety_margin,
+            )
+
+        pre_budget = _estimate_candidate(question)
         schema_tokens = (
             count_tokens(schema_payload, model=self.model_str)["tokens"]
             if schema_payload is not None
@@ -728,25 +697,18 @@ class AICall:
                 pre_budget=pre_budget,
             )
 
-        max_input_tokens = calculate_hard_input_limit(
+        (
+            max_input_tokens,
+            estimator_drift_reserve,
+            effective_input_target,
+        ) = self._hard_input_target(
+            config,
             context_window=context_window,
             output_reserved=output_reserved,
             safety_margin=safety_margin,
-            input_ratio=float(config["input_ratio"]),
+            token_count_accuracy=token_count_accuracy,
         )
         metadata["max_input_tokens"] = max_input_tokens
-        estimator_drift_reserve = (
-            0
-            if token_count_accuracy == "exact"
-            else min(
-                max_input_tokens,
-                int(config["estimator_drift_reserve"]),
-            )
-        )
-        effective_input_target = max(
-            0,
-            max_input_tokens - estimator_drift_reserve,
-        )
         metadata["effective_input_target"] = effective_input_target
         metadata["estimator_drift_reserve"] = estimator_drift_reserve
         pre_budget["hard_guard"] = dict(metadata)
@@ -791,80 +753,13 @@ class AICall:
             if getattr(self, "query_context_state_compaction", False):
                 raise StructuredContextBudgetError("working_context_compaction_required", pre_budget=pre_budget)
             metadata["triggered"] = True
-            if callable(context_compactor):
-                try:
-                    compacted = context_compactor(
-                        final_question,
-                        max_tokens=local_question_budget,
-                        model=self.model_str,
-                    )
-                    if isinstance(compacted, str) and compacted.strip():
-                        final_question = compacted
-                        strategies.append("node_compactor")
-                except Exception as exc:
-                    logger.warning(
-                        "[AICall] node-specific context compactor failed "
-                        "node=%s: %s",
-                        node_id,
-                        exc,
-                    )
-
-            if (
-                count_tokens(final_question, model=self.model_str)["tokens"]
-                > local_question_budget
-            ):
-                final_question = compact_text_to_token_budget(
-                    final_question,
-                    max_tokens=local_question_budget,
-                    model=self.model_str,
-                    preserve_tail_tokens=int(config["preserve_tail_tokens"]),
-                )
-                strategies.append("deterministic_head_tail")
-
-        def _estimate_candidate(candidate_question: str) -> Dict[str, Any]:
-            candidate_components = [
-                {
-                    "name": "node_system_prompt",
-                    "category": "static_input",
-                    "content": system_prompt,
-                },
-                {
-                    "name": "user_message",
-                    "category": "static_input",
-                    "content": candidate_question,
-                },
-                {
-                    "name": "output_reserved",
-                    "category": "reserved",
-                    "tokens": output_reserved,
-                },
-                {
-                    "name": "safety_margin",
-                    "category": "reserved",
-                    "tokens": safety_margin,
-                },
-                {
-                    "name": "provider_request_overhead",
-                    "category": "static_input",
-                    "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
-                    "token_accuracy": "estimated",
-                },
-            ]
-            if schema_payload is not None:
-                candidate_components.insert(2, {
-                    "name": "structured_schema",
-                    "category": "static_input",
-                    "content": schema_payload,
-                })
-            return estimator.estimate(
+            final_question = self._compact_structured_question(
+                final_question,
+                max_tokens=local_question_budget,
+                context_compactor=context_compactor,
                 node_id=node_id,
-                model=self.model_str,
-                system_prompt=system_prompt,
-                user_message=candidate_question,
-                components=candidate_components,
-                api_base=self.api_base or "",
-                api_key=self.api_key or "",
-                enable_usage_probe=False,
+                preserve_tail_tokens=int(config["preserve_tail_tokens"]),
+                strategies=strategies,
             )
 
         final_budget = _estimate_candidate(final_question)
@@ -913,6 +808,135 @@ class AICall:
             pre_budget,
             final_budget,
         )
+
+    @staticmethod
+    def _hard_input_target(
+        config: Dict[str, Any],
+        *,
+        context_window: int,
+        output_reserved: int,
+        safety_margin: int,
+        token_count_accuracy: str,
+    ) -> Tuple[int, int, int]:
+        """Return ``(max_input_tokens, estimator_drift_reserve, effective_target)``."""
+        max_input_tokens = calculate_hard_input_limit(
+            context_window=context_window,
+            output_reserved=output_reserved,
+            safety_margin=safety_margin,
+            input_ratio=float(config["input_ratio"]),
+        )
+        estimator_drift_reserve = (
+            0
+            if token_count_accuracy == "exact"
+            else min(
+                max_input_tokens,
+                int(config["estimator_drift_reserve"]),
+            )
+        )
+        effective_input_target = max(
+            0,
+            max_input_tokens - estimator_drift_reserve,
+        )
+        return max_input_tokens, estimator_drift_reserve, effective_input_target
+
+    def _estimate_structured_budget(
+        self,
+        estimator: ContextBudgetEstimator,
+        *,
+        node_id: str,
+        system_prompt: str,
+        question: str,
+        schema_payload: Any,
+        output_reserved: int,
+        safety_margin: int,
+    ) -> Dict[str, Any]:
+        components = [
+            {
+                "name": "node_system_prompt",
+                "category": "static_input",
+                "content": system_prompt,
+            },
+            {
+                "name": "user_message",
+                "category": "static_input",
+                "content": question,
+            },
+            {
+                "name": "output_reserved",
+                "category": "reserved",
+                "tokens": output_reserved,
+            },
+            {
+                "name": "safety_margin",
+                "category": "reserved",
+                "tokens": safety_margin,
+            },
+            {
+                "name": "provider_request_overhead",
+                "category": "static_input",
+                "tokens": _PROVIDER_REQUEST_OVERHEAD_TOKENS,
+                "token_accuracy": "estimated",
+            },
+        ]
+        if schema_payload is not None:
+            components.insert(2, {
+                "name": "structured_schema",
+                "category": "static_input",
+                "content": schema_payload,
+            })
+        return estimator.estimate(
+            node_id=node_id,
+            model=self.model_str,
+            system_prompt=system_prompt,
+            user_message=question,
+            components=components,
+            api_base=self.api_base or "",
+            api_key=self.api_key or "",
+            enable_usage_probe=False,
+        )
+
+    def _compact_structured_question(
+        self,
+        question: str,
+        *,
+        max_tokens: int,
+        context_compactor: Optional[Callable[..., str]],
+        node_id: str,
+        preserve_tail_tokens: int,
+        strategies: List[str],
+    ) -> str:
+        """Node compactor first, then deterministic head/tail; appends strategies."""
+        final_question = question
+        if callable(context_compactor):
+            try:
+                compacted = context_compactor(
+                    final_question,
+                    max_tokens=max_tokens,
+                    model=self.model_str,
+                )
+                if isinstance(compacted, str) and compacted.strip():
+                    final_question = compacted
+                    strategies.append("node_compactor")
+            except Exception as exc:
+                logger.warning(
+                    "[AICall] node-specific context compactor failed "
+                    "node=%s: %s",
+                    node_id,
+                    exc,
+                )
+
+        if (
+            count_tokens(final_question, model=self.model_str)["tokens"]
+            > max_tokens
+        ):
+            final_question = compact_text_to_token_budget(
+                final_question,
+                max_tokens=max_tokens,
+                model=self.model_str,
+                preserve_tail_tokens=preserve_tail_tokens,
+            )
+            strategies.append("deterministic_head_tail")
+        return final_question
 
     def _structured_hard_guard_config(self) -> Dict[str, Any]:
         config = self.context_compaction_config
