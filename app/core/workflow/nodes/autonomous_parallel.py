@@ -15,6 +15,7 @@ from app.core.prompts import (
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.parallel_evidence import _ScopedParallelEventQueue
 from app.core.workflow.nodes.query_answer import build_working_material
+from app.core.workflow.stage_material import branch_state
 
 
 class LaneQueue(_ScopedParallelEventQueue):
@@ -68,10 +69,7 @@ class AutonomousParallelNode(WorkflowNode):
         client = self.holmes_service._build_request_scoped_ai_call()
         if client is None:
             raise RuntimeError("无法创建独立诊断客户端")
-        local = copy.deepcopy(state)
-        local["diagnosis_target"] = group
-        if state.get("diagnosis_handoff") and group.get("target_id"):
-            local["diagnosis_handoff"] = scoped_handoff(state["diagnosis_handoff"], group["target_id"])
+        local = branch_state(state, group)
         entity = group["entities"][0]
         local["original_question"] = state.get("original_question") or state["question"]
         local["question"] = PARALLEL_LANE_QUESTION_TEMPLATE.format(
@@ -80,7 +78,7 @@ class AutonomousParallelNode(WorkflowNode):
         local["original_request_contract"] = copy.deepcopy(state.get("request_contract"))
         local["request_contract"] = {**(state.get("request_contract") or {}), "scope": "pod",
                                      "namespaces": [entity["namespace"]], "pod_names": [entity["name"]]}
-        local["shared_location_notes"] = state.get("query_draft", "")
+        local["shared_location_notes"] = ""
         local["shared_runbooks"] = [
             {"runbook_id": (e.get("tool_args") or {}).get("runbook_id"),
              "raw_ref": e["raw_ref"], "status": e.get("status"), "scope": "shared"}
@@ -125,12 +123,14 @@ class AutonomousParallelNode(WorkflowNode):
                 # Keep evidence on an RCA failure; no semantic retry or forced verdict.
                 break
         material = build_working_material(local)
+        material_ref = ContextArchive(run_id=lane_run).write_json("cases/work-context.json", material)
         own_events = (local.get("thinking_events") or [])[inherited:]
         own_incomplete = any(e.get("type") == "execution_incomplete" for e in own_events)
         return {"group_id": group["group_id"], "target": group, "run_id": lane_run,
                 "started_at": started_at,
                 "status": "partial" if failure or own_incomplete else "completed",
-                "error": failure, "material": material}, own_events
+                "error": failure, "material_ref": material_ref,
+                "case_result": local.get("diagnosis_case_result")}, own_events
 
     def execute(self, state):
         # Local stop signal must not mark the parent run as user-cancelled;

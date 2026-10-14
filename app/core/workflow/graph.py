@@ -161,8 +161,9 @@ def build_diagnosis_workflow(
         })
         workflow.add_edge("remediation", END)
         workflow.add_edge("query_collect", END)
-        workflow.add_conditional_edges("layer", lambda state: "parallel_evidence" if len(state.get("autonomous_groups") or []) > 1 else "evidence",
-                                       {"parallel_evidence": "parallel_evidence", "evidence": "evidence"})
+        from app.core.workflow.pod_detection import after_location
+        workflow.add_conditional_edges("layer", after_location,
+                                       {"parallel_evidence": "parallel_evidence", "evidence": "evidence", "conclusion": "conclusion"})
         workflow.add_edge("parallel_evidence", "conclusion")
         workflow.add_edge("evidence", "rca")
         workflow.add_edge("rca", "conclusion")

@@ -9,6 +9,10 @@ import json
 
 def protected_handoff(material):
     protected = copy.deepcopy(material.get("protected_handoff") or {})
+    if protected.get("context_policy") == "stage.v1":
+        # A consumer projection is already the protected contract. Tool receipts,
+        # historical versions and sibling materials remain ordinary context.
+        return {k: protected[k] for k in ("context_policy", "diagnosis_handoff", "evidence_handoff") if k in protected}
     from app.core.context.lifecycle_core import core_from_material, lightweight_handoff
     light = lightweight_handoff(material)
     if light:

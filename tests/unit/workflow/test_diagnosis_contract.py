@@ -29,6 +29,31 @@ def test_grouping_is_lossless_without_second_model_call(count):
     assert [g["target_id"] for g in result["autonomous_groups"]] == [f"t{i}" for i in range(count)]
 
 
+@pytest.mark.parametrize('kind', ['Pod', 'pod', 'POD', ' pod '])
+def test_location_kind_spelling_does_not_lose_four_parallel_groups(kind):
+    from app.core.workflow.diagnosis_contract import LocationOutput
+    raw = {'analysis': '发现四个待查对象', 'handoff': {'targets': [
+        {'target_id': f't{i}', 'entity': {'kind': kind, 'namespace': 'demo', 'name': f'p{i}'},
+         'issue': '需要调查的现场线索'} for i in range(4)]}}
+    handoff = LocationOutput.model_validate(raw).handoff.model_dump()
+    groups = plan_groups(SimpleNamespace(), {'diagnosis_handoff': handoff})['autonomous_groups']
+    assert len(groups) == 4
+    assert [g['target_id'] for g in groups] == [f't{i}' for i in range(4)]
+    assert all(g['entities'][0]['kind'] == 'Pod' for g in groups)
+    for group in groups:
+        assert len(scoped_handoff(handoff, group['target_id'])['targets']) == 1
+
+
+def test_kind_normalization_does_not_convert_other_resources_or_hide_duplicates():
+    from app.core.workflow.diagnosis_contract import DiagnosisEntity, LocationHandoff
+    assert DiagnosisEntity(kind='Service', name='p').kind == 'Service'
+    assert DiagnosisEntity(kind='PodMonitor', name='p').kind == 'PodMonitor'
+    with pytest.raises(ValueError, match='duplicate target identity'):
+        LocationHandoff.model_validate({'targets': [
+            {'target_id': str(i), 'entity': {'kind': kind, 'namespace': 'demo', 'name': 'p'},
+             'issue': '异常'} for i, kind in enumerate(['Pod', 'pod'])]})
+
+
 def test_general_entities_and_agent_dispositions():
     data = packet()
     data["targets"][1].update(status="excluded", status_reason="模型已核实正常")
@@ -111,19 +136,26 @@ def test_stage_emits_and_archives_contract(node_class):
     seen = {}
     def call(text, prompt, **kw):
         seen.update(kw)
+        if node_class is DiagnosisRootCauseNode:
+            return SimpleNamespace(result=json.dumps({'outcome': 'inconclusive', 'summary': '原因待核实',
+                'certainty': 'unknown', 'report': '本组诊断报告'})), []
         targets = [{k: t[k] for k in ('target_id', 'entity', 'issue', 'status', 'status_reason')} for t in packet()['targets']]
         return SimpleNamespace(result=json.dumps({'analysis': '定位文字', 'handoff': {'targets': targets}})
-                               if node_class is DiagnosisStageNode else '取证或根因文字'), []
+                               if node_class is DiagnosisStageNode else json.dumps({'analysis': '取证文字'})), []
     node._call_llm = call
-    result = node.execute({"question": "查询现场异常"})
+    result = node.execute({"question": "查询现场异常", "diagnosis_handoff": scoped_handoff(packet(), 't0')})
     if node_class is DiagnosisStageNode:
         assert seen["response_schema"] is LocationOutput
         assert len(result["diagnosis_handoff"]["targets"]) == 4
         assert result['query_draft'] == '定位文字'
+    elif node_class is DiagnosisRootCauseNode:
+        assert seen['response_schema'].__name__ == 'DiagnosisCaseOutput'
+        assert result['diagnosis_case_result']['execution_status'] == 'completed'
+        assert result['query_draft'] == '本组诊断报告'
     else:
-        assert 'response_schema' not in seen
+        assert seen['response_schema'].__name__ == 'EvidenceStageOutput'
         assert 'diagnosis_handoff' not in result
-        assert result['query_draft'] == '取证或根因文字'
+        assert result['query_draft'] == '取证文字'
     assert not result["thinking_events"]
 
 
@@ -163,16 +195,20 @@ def test_four_parallel_lanes_keep_target_contracts_isolated(monkeypatch):
         material = json.loads(text)
         contract = material["protected_handoff"]["diagnosis_handoff"]
         assert len(contract["targets"]) == 1
-        assert contract["targets"][0]["target_id"] == material["diagnosis_target"]["target_id"]
-        return SimpleNamespace(result=json.dumps(contract)), []
+        expected = next(g for g in state['autonomous_groups'] if g['group_id'] == material['group_id'])
+        assert contract["targets"][0]["target_id"] == expected['target_id']
+        if self.node_id == 'rca':
+            return SimpleNamespace(result=json.dumps({'outcome': 'inconclusive', 'summary': '原因待核实',
+                'certainty': 'unknown', 'report': '本组诊断报告'})), []
+        return SimpleNamespace(result=json.dumps({'analysis': '本组取证结果'})), []
     monkeypatch.setattr(DiagnosisEvidenceNode, "_call_llm", call)
     monkeypatch.setattr(DiagnosisRootCauseNode, "_call_llm", call)
     result = node.execute(state)
     assert len(result["autonomous_group_results"]) == 4
     for lane in result["autonomous_group_results"]:
         assert lane["status"] == "completed"
-        contract = lane["material"]["protected_handoff"]["diagnosis_handoff"]
-        assert contract["targets"][0]["target_id"] == lane["target"]["target_id"]
+        assert lane['case_result']['target']['target_id'] == lane['target']['target_id']
+        assert 'material' not in lane
     assert old == packet()  # parallel updates did not mutate parent
 
 

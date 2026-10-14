@@ -157,6 +157,17 @@ def diagnosis_payload(state, *, evidence_chars=64000):
     Oversized bodies are explicitly marked, never presented as complete data.
     No fault names, expected diagnoses or mandatory tool sequence are used.
     """
+    if state.get("diagnosis_cases") is not None:
+        # Persist independent RCA deliverables, not a second projection of every
+        # worker's tool history. A repair job reads one case through group_context.
+        return {"contract_version": "diagnosis-record.v2",
+                "question": state.get("original_question") or state.get("question"),
+                "request_contract": deepcopy(state.get("request_contract")),
+                "overview": deepcopy(state.get("diagnosis_overview")),
+                "groups": [{"group_id": c["group_id"], "target": deepcopy(c.get("target")),
+                            "status": c.get("execution_status"), "diagnosis_result": deepcopy(c)}
+                           for c in state["diagnosis_cases"]],
+                "scope_note": "历史诊断，不是当前状态或操作授权；按本组证据引用自主补读和核实。"}
     groups = [{"group_id": g.get("group_id"), "target": g.get("target"),
                "status": g.get("status"), "analysis": (g.get("material") or {}).get("analysis_draft"),
                "execution_incomplete": (g.get("material") or {}).get("execution_incomplete", []),

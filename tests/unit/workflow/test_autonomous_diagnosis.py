@@ -60,18 +60,32 @@ def test_model_routes_scoped_task_and_original_question_survives_every_stage(rou
                 payloads.append(payload)
                 assert payload['question'] == question
                 assert payload['request_contract']['pod_names'] == ['nginx']
-                if _node.node_id != 'layer':
-                    assert any(o['raw_ref'] == '/raw/describe' for o in payload['observations'])
+                if _node.node_id == 'conclusion':
+                    assert 'observations' not in payload
+                    assert 'results' in payload
+                elif _node.node_id in {'evidence', 'rca'}:
+                    assert not payload['observations']  # No inherited location tool bodies.
             if _node.node_id in {'rca', 'conclusion'}:
                 assert kwargs['force_no_tools']
-            if _node.node_id in {'conclusion', 'query_collect'}:
-                assert ('证据表至少分别列出' in prompt) == (route == 'full_diagnosis')
+            if _node.node_id == 'conclusion':
+                assert kwargs['response_schema'].__name__ == 'OverviewOutput'
+                return SimpleNamespace(result='{"overview":"原因尚待核实，详见分组诊断。"}'), []
+            if _node.node_id == 'query_collect':
                 return SimpleNamespace(result=json.dumps({'intent': question, 'scope': 'xnet/nginx',
                     'status': 'partial', 'answer': 'OOMKilled；上游机制待核实', 'missing': ['机制']})), [observation] if _node.node_id == 'query_collect' else []
             if _node.node_id == 'layer':
                 assert kwargs['response_schema'].__name__ == 'LocationOutput'
-                return SimpleNamespace(result=json.dumps({'analysis': '分析草稿，不是事实', 'handoff': {'targets': []}})), [observation]
-            assert 'response_schema' not in kwargs
+                return SimpleNamespace(result=json.dumps({'analysis': '分析草稿，不是事实', 'handoff': {'targets': [
+                    {'target_id': 't1', 'entity': {'kind': 'Pod', 'namespace': 'xnet', 'name': 'nginx'},
+                     'issue': '曾发生异常终止', 'evidence_refs': ['/raw/describe']} ]}})), [observation]
+            if _node.node_id == 'rca':
+                assert kwargs['response_schema'].__name__ == 'DiagnosisCaseOutput'
+                return SimpleNamespace(result=json.dumps({'outcome': 'inconclusive', 'summary': '原因待核实',
+                    'certainty': 'unknown', 'report': '原始证据可补读，当前不足以确认原因。'})), []
+            if _node.node_id == 'evidence':
+                assert kwargs['response_schema'].__name__ == 'EvidenceStageOutput'
+                return SimpleNamespace(result=json.dumps({'analysis': '本组证据分析',
+                    'key_facts': [], 'unresolved': ['机制待核实'], 'runbook_refs': []})), []
             return SimpleNamespace(result='分析草稿，不是事实'), []
         node._call_llm = call
     result = graph.invoke({'question': '不得覆盖的旧 question', 'original_question': question,

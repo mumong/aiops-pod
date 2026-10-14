@@ -105,19 +105,13 @@ class RemediationExecutor:
                     yield self._finished(run_id, "rejected", action_decision.reason or f"action {action.id} rejected")
                     return
             try:
-                unhealthy_reason = None
                 for event in self._execute_action(run_id, action):
                     yield event
-                    if event.get("stage") == "verify":
-                        unhealthy_reason = unhealthy_remediation_reason(event.get("result_preview", ""))
-                if unhealthy_reason:
-                    yield self._finished(run_id, "needs_followup", unhealthy_reason)
-                    return
             except Exception as exc:
                 yield self._finished(run_id, "failed", str(exc))
                 return
 
-        yield self._finished(run_id, "success", "all remediation actions completed")
+        yield self._finished(run_id, "needs_followup", "命令已执行；恢复条件尚未经结构化核验，请复查实际状态")
 
     def _execute_action(self, run_id: str, action: RemediationAction) -> Generator[Dict, None, None]:
         for stage, command in (
@@ -160,19 +154,9 @@ class RemediationExecutor:
 
 
 def unhealthy_remediation_reason(text: str) -> Optional[str]:
-    value = str(text or "")
-    if not value.strip():
-        return None
-    for marker in UNHEALTHY_REMEDIATION_MARKERS:
-        if marker in value:
-            return f"verification still shows unhealthy workload: {marker}"
+    # Compatibility only: prose does not establish a resource's health.
     return None
 
 
 def healthy_remediation_observation(text: str) -> bool:
-    value = str(text or "")
-    if unhealthy_remediation_reason(value):
-        return False
-    ready_signal = "Ready=True" in value or "1/1" in value or "2/2" in value
-    running_signal = "Running" in value or "successfully rolled out" in value
-    return ready_signal and running_signal
+    return False  # No structured verification contract in the legacy executor.

@@ -6,7 +6,8 @@ published facts; it does not decide whether an observation is a fault.
 from copy import deepcopy
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from app.core.workflow.pod_detection import PodAssessment
 
 
 class ContractModel(BaseModel):
@@ -18,6 +19,13 @@ class DiagnosisEntity(ContractModel):
     namespace: str = ""
     name: str = Field(min_length=1)
     uid: str = ""
+
+    @field_validator("kind")
+    @classmethod
+    def canonical_pod_kind(cls, value):
+        # Kubernetes Kind spelling, not fault inference. Keep other resource
+        # kinds unchanged so this does not broaden Pod-only branch scope.
+        return "Pod" if value.strip().casefold() == "pod" else value
 
 
 class LocationTarget(ContractModel):
@@ -36,6 +44,7 @@ class LocationTarget(ContractModel):
 
 
 class LocationHandoff(ContractModel):
+    pod_assessment: PodAssessment | None = None
     contract_version: Literal["location-handoff.v1"] = "location-handoff.v1"
     targets: list[LocationTarget]
     coverage: Literal["complete", "partial", "unknown"] = "unknown"
@@ -92,6 +101,7 @@ class DiagnosisTarget(ContractModel):
 
 
 class DiagnosisHandoff(ContractModel):
+    pod_assessment: PodAssessment | None = None
     contract_version: Literal["diagnosis-handoff.v1"] = "diagnosis-handoff.v1"
     summary: str
     targets: list[DiagnosisTarget]

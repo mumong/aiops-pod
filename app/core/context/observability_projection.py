@@ -37,16 +37,7 @@ LOG_FIELDS = (
     "service",
 )
 LOG_IDENTITY_FIELDS = {"timestamp", "case_run_id", "pod", "pod_uid", "namespace"}
-NOISY_METRIC_LABELS = {
-    "id",
-    "image_id",
-    "name",
-    "node",
-    "instance",
-    "job",
-    "metrics_path",
-    "service",
-}
+NOISY_METRIC_LABELS: set[str] = set()  # Source/identity labels are evidence, not noise.
 
 
 def compact_json(value: Any) -> str:
@@ -682,12 +673,7 @@ def _selection_profile_counts(
 
 def _selection_priority(item: dict[str, Any]) -> tuple[int, int, int, int]:
     """Rank information without case names, fault names, or severity keywords."""
-    value_rank = {
-        "nonzero": 3,
-        "text_or_object": 2,
-        "missing": 1,
-        "zero": 0,
-    }[_selection_value_state(item)]
+    value_rank = 0  # Zero is not less informative than a non-zero measurement.
     directness_rank = {
         "direct": 2,
         "related_context": 1,

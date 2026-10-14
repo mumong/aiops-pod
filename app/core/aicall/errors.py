@@ -34,6 +34,7 @@ def model_transport_message(exc):
         if isinstance(current, APIError) and any(signature in str(current).lower() for signature in (
             'stream disconnected', 'closed before response.completed',
             'unexpected eof', 'empty_stream', 'closed before first payload',
+            'tls handshake: eof',
         )):
             return 'LLM API 服务连接中断，未能完成本次回答，请稍后重试。'
         current = current.__cause__ or current.__context__

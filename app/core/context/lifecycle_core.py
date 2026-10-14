@@ -14,7 +14,7 @@ CORE_VERSION = 'pod-lifecycle-core.v1'
 
 def lightweight_handoff(material):
     protected = material.get('protected_handoff') or {}
-    return (protected.get('context_policy') == 'identity.v1'
+    return (protected.get('context_policy') in {'identity.v1', 'stage.v1'}
             or (protected.get('diagnosis_handoff') or {}).get('contract_version') == 'location-handoff.v1')
 
 

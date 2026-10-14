@@ -38,6 +38,11 @@ class WorkflowState(TypedDict, total=False):
     autonomous_groups: List[Dict[str, Any]]
     diagnosis_handoff: Optional[Dict[str, Any]]  # stage-owned targets and cited facts
     diagnosis_context_policy: Optional[str]  # compact identity protection; prose stays summarizable
+    diagnosis_events_start: int  # branch-local evidence begins after location history
+    diagnosis_evidence_handoff: Optional[Dict[str, Any]]  # bounded facts for this group's RCA only
+    diagnosis_case_result: Optional[Dict[str, Any]]  # isolated RCA deliverable, not working history
+    diagnosis_cases: List[Dict[str, Any]]
+    diagnosis_overview: Optional[Dict[str, Any]]
     autonomous_group_results: List[Dict[str, Any]]
     focused_result: Optional[Dict[str, Any]]
     

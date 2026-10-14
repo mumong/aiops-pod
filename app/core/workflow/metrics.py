@@ -663,26 +663,12 @@ class WorkflowMetrics:
         # 实际成功 fetch 的 Runbook（始终输出；不区分核心/参考）
         lines.append("📋 Runbook 参考")
         lines.append("")
-        assigned = set()
-        rendered_lane = False
+        runbooks = list(self.fetched_runbooks)
         for lane in self.runbooks_by_lane:
-            runbooks = [
-                str(item).strip()
-                for item in (lane.get("runbooks") or [])
-                if str(item).strip()
-            ]
-            if not runbooks:
-                continue
-            assigned.update(runbooks)
-            group_id = str(lane.get("group_id") or "lane")
-            entity = self._lane_entity_label(lane)
-            label = f"{group_id} {entity}".strip()
-            lines.append(f"- **{label}**: {', '.join(runbooks)}")
-            rendered_lane = True
-        unassigned = [rb for rb in self.fetched_runbooks if rb not in assigned]
-        if unassigned:
-            lines.append(f"- **未归属 lane**: {', '.join(unassigned)}")
-        if not rendered_lane and not unassigned:
+            runbooks.extend(lane.get("runbooks") or [])
+        runbooks = list(dict.fromkeys(str(item).strip() for item in runbooks if str(item).strip()))
+        lines.extend(f"- {name}" for name in runbooks)
+        if not runbooks:
             lines.append("- 未调用 Runbook")
         lines.append("")
 

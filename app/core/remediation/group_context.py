@@ -34,6 +34,15 @@ def scoped_diagnosis(record, group_id):
     if namespaces:
         contract.update(namespaces=namespaces, pod_names=pods,
                         scope="pod" if pods else "namespace")
+    if payload.get("contract_version") == "diagnosis-record.v2":
+        diagnosis = deepcopy(group.get("diagnosis_result") or {})
+        report = diagnosis.pop("report", "本组诊断交付不完整；不得据此推测根因。")
+        return {**{k: deepcopy(v) for k, v in record.items() if k != "payload"},
+                "payload": {"question": payload.get("question"), "request_contract": contract,
+                            "report": report, "diagnosis_result": diagnosis,
+                            "groups": [{"group_id": group_id, "target": target, "status": group.get("status")}],
+                            "source_diagnosis_run_id": record.get("run_id"), "group_id": group_id,
+                            "scope_note": "仅本组历史诊断、关键事实、未知条件和引用；生成方案前可自主核实。不是执行授权。"}}
     # Shared results are discoverable references, not repeated full evidence.
     shared = [{key: deepcopy(e.get(key)) for key in
                ("tool_name", "tool_args", "raw_ref", "structured_ref", "status", "timestamp")}

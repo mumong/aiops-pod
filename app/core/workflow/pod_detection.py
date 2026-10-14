@@ -1,0 +1,103 @@
+"""Agent-owned Pod assessment; code checks delivery/coverage, not fault semantics."""
+import json
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class PodAssessment(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    status: Literal['healthy', 'abnormal', 'inconclusive'] = 'inconclusive'
+    scope: str = Field(min_length=1, max_length=320)
+    observed_at: str = Field(min_length=1, max_length=80)
+    recent_signals_reviewed: bool = False
+    unresolved: list[str] = Field(default_factory=list, max_length=20)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+    reason: str = Field(min_length=1, max_length=600)
+
+
+POD_DETECTION_GUIDANCE = '''
+# 产品范围与结束条件：Pod 异常检测
+本深度诊断是指定范围的 Pod 异常检测，不是全栈集群体检。“我的集群有什么问题”默认检查全集群 Pod。
+基于当前状态和近期 10 分钟线索决定是否调查；Running 不等于健康，仍需结合就绪、删除状态、容器状态等事实。
+最近 10 分钟发生过重启或其他异常线索，先列为待核实并针对性调查，不能仅凭当前 Running/Ready 直接 healthy。
+累计重启不代表近期重启；只有当前快照/最近一次终止时，不能声称掌握完整 10 分钟历史。时间未知时不猜测。
+本次检查的是当前及近10分钟异常，不追溯所有历史故障。最后终止明确早于窗口、当前正常且无其他近期异常线索时，历史重启次数或历史 Error/Unknown 本身不构成待调查目标。
+history_complete=false 或 restart_count_in_window=null 是历史数据能力限制，不单独构成异常或阻止当前范围的 healthy；在报告中说明限制即可。存在近期线索但其时间/恢复情况不明才需要核实。
+例如：当前Ready、最后终止为5天前，即使累计重启很多也不因此建组；当前Ready但5分钟前重启，则先调查恢复情况。healthy 表示本次检查未发现当前或可见近期未解决的Pod异常，不保证完整历史或业务绝对健康。
+Agent 自主选择足以核实线索的证据，不要求固定调用日志、指标或链路。仅为解释目标 Pod 的实际线索，才调查关联对象。
+无当前异常也无待核实近期线索，且范围已完整覆盖，可结束。已核实近期异常属于已恢复且无持续问题，也可 healthy，但说明依据与历史。
+用户明确提出服务失败等反例时，Pod Ready 不能否定用户现象；针对目标补查，无法解释则 inconclusive。
+查询失败、遗漏分页、证据冲突、线索尚未核实不能判 healthy；必要的针对性补查后仍不足就说明检查不完整，不无限扩大范围。
+定位 handoff.pod_assessment 填 status、scope、observed_at、recent_signals_reviewed、unresolved、真实 evidence_refs 和 reason。引用只填写实际提供的原文路径或证据来源 ID，不把描述句当引用。不从只查健康对象的筛选子集宣称完整覆盖。
+healthy 要求 coverage=complete、无 investigate/deferred 目标、无 unresolved，且近期线索已核实（无近期线索也明确记录）。
+abnormal 保留所有待调查 Pod；inconclusive 明确缺口，不编造故障或健康。定位没有待调查目标时，不为执行后续节点制造问题。
+后续采证/RCA也遵守此范围；足以回答当前 Pod 问题就结束，不把未检查的无关维度当必须补齐的缺口。
+'''
+
+
+def assess_delivery(handoff, events, material=None):
+    assessment = handoff.get('pod_assessment')
+    if not isinstance(assessment, dict):
+        return handoff
+    handoff = {**handoff, 'pod_assessment': dict(assessment)}
+    assessment = handoff['pod_assessment']
+    if assessment.get('status') != 'healthy':
+        return handoff
+    problems = []
+    if handoff.get('coverage') != 'complete':
+        problems.append('检查范围未完整覆盖')
+    if any(t.get('status', 'investigate') in ('investigate', 'deferred') for t in handoff.get('targets', [])):
+        problems.append('仍有待核实或暂缓的目标')
+    if not assessment.get('recent_signals_reviewed') or assessment.get('unresolved'):
+        problems.append('近期线索或未解决事项尚未核实')
+    refs, continuations, consumed = set(), set(), set()
+    # IDs in producer-owned source maps are as valid as archive paths; prose is not.
+    protected = (material or {}).get('protected_handoff') or {}
+    sources = (protected.get('lifecycle_core') or {}).get('sources') or {}
+    for identifier, source in sources.items():
+        if isinstance(source, dict):
+            refs.add(identifier)
+            refs.update(source[k] for k in ('raw_ref', 'structured_ref', 'summary_ref') if isinstance(source.get(k), str))
+    for observation in (material or {}).get('observations') or []:
+        refs.update(observation[k] for k in ('raw_ref', 'structured_ref', 'summary_ref') if isinstance(observation.get(k), str))
+    for event in events:
+        if event.get('type') == 'execution_incomplete':
+            problems.append('本次执行存在未完成事项')
+        if event.get('type') != 'tool_result':
+            continue
+        args = event.get('tool_args') or {}
+        if isinstance(args, dict) and args.get('continue_token'):
+            consumed.add(args['continue_token'])
+        if event.get('status') in ('error', 'failed') or event.get('semantic_success') is False:
+            problems.append('采集存在失败或未解析结果')
+            continue
+        refs.update(event[k] for k in ('raw_ref', 'structured_ref', 'summary_ref') if isinstance(event.get(k), str))
+        raw = event.get('result') or event.get('result_preview') or ''
+        try:
+            packet = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            packet = {}
+        if isinstance(packet, dict):
+            if packet.get('status') == 'error':
+                problems.append('源端查询失败')
+            token = packet.get('next_continue_token') or (packet.get('pagination') or {}).get('next_continue_token')
+            if token:
+                continuations.add(token)
+    if continuations - consumed:
+        problems.append('存在未续读的数据页')
+    cited = set(assessment.get('evidence_refs') or [])
+    if not cited or not cited <= refs:
+        problems.append('健康判断缺少本次真实工具引用')
+    if problems:
+        assessment['status'] = 'inconclusive'
+        assessment['unresolved'] = list(dict.fromkeys([*(assessment.get('unresolved') or []), *problems]))
+    return handoff
+
+
+def after_location(state):
+    handoff = state.get('diagnosis_handoff') or {}
+    assessment = handoff.get('pod_assessment') or {}
+    pending = any(t.get('status', 'investigate') == 'investigate' for t in handoff.get('targets', []))
+    if assessment.get('status') in ('healthy', 'inconclusive') and not pending:
+        return 'conclusion'
+    return 'parallel_evidence' if len(state.get('autonomous_groups') or []) > 1 else 'evidence'

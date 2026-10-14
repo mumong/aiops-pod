@@ -131,6 +131,9 @@ class RemediationAgentExecutor:
                     reason = decision.reason or "remediation agent finish decision must include status=success or status=failed"
                 else:
                     reason = decision.reason or "agent finished"
+                if status == "success":
+                    status = "needs_followup"
+                    reason = "Agent 已完成处理；恢复条件尚未经结构化核验。" + reason
                 yield self._finished(run_id, status, reason)
                 return
 
@@ -253,7 +256,6 @@ class RemediationAgentExecutor:
             if (
                 matched_action is not None
                 and verify_succeeded
-                and _verify_establishes_terminal_success(decision.verify_command, verify_result, verify_accepted_not_found)
             ):
                 completed_action_ids.add(matched_action.id)
                 group_id = str(matched_action.metadata.get("group_id") or "").strip()
@@ -261,7 +263,7 @@ class RemediationAgentExecutor:
                     completed_group_ids.add(group_id)
                 if _planned_remediation_complete(plan, completed_action_ids, completed_group_ids):
                     reason = _completion_reason(completed_action_ids, completed_group_ids)
-                    yield self._finished(run_id, "success", reason)
+                    yield self._finished(run_id, "needs_followup", reason + "; recovery has not been verified")
                     return
 
         latest = observations[-1] if observations else ""
@@ -407,15 +409,7 @@ def _planned_remediation_complete(
 
 
 def _verify_establishes_terminal_success(command: str, result: str, accepted_not_found: bool) -> bool:
-    if accepted_not_found:
-        return True
-    if unhealthy_remediation_reason(result):
-        return False
-    command_text = str(command or "").lower()
-    result_text = str(result or "").lower()
-    if "rollout status" in command_text and "successfully rolled out" in result_text:
-        return True
-    return healthy_remediation_observation(result)
+    return False  # Text alone never establishes recovery.
 
 
 def _completion_reason(completed_action_ids: set[str], completed_group_ids: set[str]) -> str:
@@ -431,25 +425,4 @@ def _normalize_command(command: str) -> str:
 
 
 def _verify_not_found_is_success(decision: AgentDecision, command: str, error_text: str) -> bool:
-    if "NotFound" not in str(error_text) and "not found" not in str(error_text).lower():
-        return False
-    command_text = str(command or "").lower()
-    intent_text = " ".join(
-        [
-            str(decision.description or ""),
-            str(decision.reason or ""),
-            str(decision.command or ""),
-            str(decision.verify_command or ""),
-        ]
-    ).lower()
-    deletion_intent_markers = (
-        "finalizer",
-        "finalizers",
-        "delete",
-        "deletion",
-        "terminating",
-        "删除",
-        "移除",
-        "清理",
-    )
-    return "kubectl get" in command_text and any(marker in intent_text for marker in deletion_intent_markers)
+    return False  # A textual NotFound is not a verified deletion postcondition.

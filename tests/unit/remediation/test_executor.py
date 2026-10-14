@@ -76,7 +76,7 @@ def test_executor_requires_action_approval_and_runs_dry_run_execute_verify():
         "remediation_tool_result",
         "remediation_finished",
     ]
-    assert remaining[-1]["status"] == "success"
+    assert remaining[-1]["status"] == "needs_followup"
 
 
 def test_executor_auto_mode_runs_without_approval():
@@ -96,7 +96,7 @@ def test_executor_auto_mode_runs_without_approval():
         "kubectl get configmap missing -n aiops-e2e",
     ]
     assert all(event["type"] != "remediation_approval_required" for event in events)
-    assert events[-1]["status"] == "success"
+    assert events[-1]["status"] == "needs_followup"
 
 
 def test_executor_unknown_mode_defaults_to_review_approval():
@@ -129,4 +129,4 @@ def test_executor_marks_unhealthy_verify_as_needs_followup():
 
     assert events[-1]["type"] == "remediation_finished"
     assert events[-1]["status"] == "needs_followup"
-    assert "OOMKilled" in events[-1]["reason"]
+    assert "结构化核验" in events[-1]["reason"]

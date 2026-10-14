@@ -258,7 +258,8 @@ def test_executor_appends_deterministic_timing_and_runbook_trace(monkeypatch):
     assert "## 📊 性能统计" in answer
     assert "├─ 总耗时:" in answer
     assert "📋 Runbook 参考" in answer
-    assert "- **未归属 lane**: pod-oomkilled" in answer
+    assert "- pod-oomkilled" in answer
+    assert "未归属 lane" not in answer
     assert "LLM 调用" not in answer
     assert "工具调用" not in answer
     assert "## 📈 质量指标" not in answer

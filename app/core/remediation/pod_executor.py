@@ -52,9 +52,11 @@ class PodRepairExecutor:
             request_contract=None, record_store=None):
         draft = deepcopy(draft)
         policy = policy or CommandPolicy()
-        def finish(status, reason):
+        def finish(status, reason, error_code=None):
             event = {"type": "remediation_finished", "run_id": run_id,
                      "status": status, "reason": reason}
+            if error_code:
+                event['error_code'] = error_code
             if record_store:
                 record_store.transition(run_id, owner, status, event)
             return event
@@ -97,7 +99,7 @@ class PodRepairExecutor:
                                "stage": stage, "command": command, "status": "failed",
                                "error_code": "repair_command_denied", "execution_skipped": True,
                                "result_preview": str(exc), "result_truncated": False}
-                        yield finish("blocked", str(exc) + "；本计划尚未执行任何命令，请调整方案后重新提交")
+                        yield finish("blocked", str(exc) + "；本计划尚未执行任何命令，请调整方案后重新提交", "repair_command_denied")
                         return
                     stages.append((stage, command, argv))
                 if not any(s[0] == "execute" for s in stages):

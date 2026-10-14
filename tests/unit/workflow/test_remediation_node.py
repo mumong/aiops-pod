@@ -8,6 +8,33 @@ from app.core.workflow.nodes.remediation import RemediationNode
 from app.core.workflow.nodes.request_router import RequestContract
 
 
+@pytest.mark.parametrize('feedback', ['明确可以这样处理', '直接移除', '确认使用刚才说明的配置'])
+def test_revision_feedback_is_delivered_with_previous_plan_and_scope(feedback):
+    from app.core.prompts import POD_REMEDIATION_PROMPT
+    node = RemediationNode()
+    node.ai_call = SimpleNamespace()
+    node._prepare_query_tools = lambda: ''
+    context = {'diagnosis': {'payload': {'group_id': 'g4', 'groups': [
+        {'target': {'group_id': 'g4', 'entities': [{'kind': 'Pod', 'namespace': 'demo', 'name': 'p'}]}}]}},
+        'previous_plan': {'payload': {'draft': {'actions': [], 'missing': ['确认操作选择']}}}}
+    def collect(question, prompt, **kwargs):
+        material = json.loads(question)
+        assert material['question'] == feedback
+        assert material['current_repair_group']['group_id'] == 'g4'
+        assert material['repair_context'] == context
+        assert '最新人工反馈是高价值规划输入' in prompt
+        assert '旧方案的拒绝理由不是不可修改的规则' in prompt
+        assert '不解释成“同意继续等待确认”' in prompt
+        assert '存在多个会改变操作的解释时' in prompt
+        assert '其反馈不证明资源当前状态' in prompt
+        assert '不自动批准执行，不覆盖执行层安全限制' in prompt
+        return SimpleNamespace(result=json.dumps({'intent': '修订', 'scope': 'demo/p',
+            'status': 'answered', 'answer': '待审查', 'targets': [], 'actions': []})), []
+    node._call_llm = collect
+    node.execute({'question': feedback, 'repair_context': context})
+    assert 'finalizer' not in POD_REMEDIATION_PROMPT
+
+
 def test_repair_route_uses_recent_context_and_only_read_tools():
     graph, nodes = build_diagnosis_workflow(query_mode="auto")
     router = next(n for n in nodes if n.node_id == "request_router")

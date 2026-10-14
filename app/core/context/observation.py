@@ -2709,28 +2709,12 @@ class ObservationProcessor:
                 continue
             if re.search(patterns, stripped, re.IGNORECASE):
                 selected.append(stripped)
-        return sorted(
-            cls._dedupe_lines(selected),
-            key=cls._diagnostic_line_score,
-            reverse=True,
-        )[:limit]
+        return cls._dedupe_lines(selected)[:limit]
 
     @staticmethod
     def _diagnostic_line_score(line: str) -> int:
-        text = line or ""
-        score = 0
-        weighted_patterns = [
-            (r"MountVolume\.SetUp failed|configmaps? .+ not found|secrets? .+ not found", 100),
-            (r"OOMKilled|Exit Code:\s*137|FailedScheduling|FailedCreatePodSandBox|probe failed", 90),
-            (r"Failed to pull image|pull access denied|x509|i/o timeout|CrashLoopBackOff|Back-off", 80),
-            (r"FailedMount|FailedAttachVolume|Unable to attach or mount volumes", 70),
-            (r"Error from server|NotFound|not found", 60),
-            (r"Reason:|Warning|Failed|Error", 40),
-        ]
-        for pattern, weight in weighted_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                score = max(score, weight)
-        return score
+        # Compatibility hook: no cross-fault importance ranking.
+        return 0
 
     @staticmethod
     def _dedupe_lines(lines: list[str]) -> list[str]:

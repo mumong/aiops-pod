@@ -1187,15 +1187,16 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
     assert create_agent_calls[0] is not create_agent_calls[1]
 
 
+@pytest.mark.parametrize('transport_error', ['empty_stream', 'utls: TLS handshake: EOF'])
 def test_call_with_tools_retries_stream_interruption_before_agent_progress(
-    monkeypatch,
+    monkeypatch, transport_error,
 ):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
     ai = AICall(model="openai/generic-model", api_key="sk-test")
     created_models = []
     created_agents = []
     interruption = InternalServerError(
-        "empty_stream",
+        transport_error,
         response=httpx.Response(
             500,
             request=httpx.Request(
@@ -1268,15 +1269,16 @@ def test_call_with_tools_retries_stream_interruption_before_agent_progress(
     assert len(created_models) == len(created_agents) == 1
 
 
+@pytest.mark.parametrize('transport_error', ['empty_stream', 'utls: TLS handshake: EOF'])
 def test_call_with_tools_does_not_retry_stream_interruption_after_tool_call(
-    monkeypatch,
+    monkeypatch, transport_error,
 ):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
     ai = AICall(model="openai/generic-model", api_key="sk-test")
     created_models = []
     created_agents = []
     interruption = InternalServerError(
-        "empty_stream",
+        transport_error,
         response=httpx.Response(
             500,
             request=httpx.Request(

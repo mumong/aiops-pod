@@ -84,8 +84,8 @@ def test_agent_mode_stops_failed_when_pod_still_unhealthy_after_iterations():
         "kubectl get pod -l app=memhog -n aiops-e2e",
     ]
     assert events[-1]["type"] == "remediation_finished"
-    assert events[-1]["status"] == "failed"
-    assert "still OOMKilled" in events[-1]["reason"]
+    assert events[-1]["status"] == "needs_followup"
+    assert "recovery has not been verified" in events[-1]["reason"]
 
 
 def test_agent_mode_does_not_auto_succeed_from_single_ready_observation():
@@ -148,7 +148,7 @@ def test_agent_mode_succeeds_when_agent_finishes_after_verification():
     )
 
     assert events[-1]["type"] == "remediation_finished"
-    assert events[-1]["status"] == "success"
+    assert events[-1]["status"] == "needs_followup"
     assert "g1" in events[-1]["reason"]
 
 
@@ -237,9 +237,9 @@ def test_agent_mode_ignores_empty_command_decision_after_field_verify():
     )
 
     assert events[-1]["type"] == "remediation_finished"
-    assert events[-1]["status"] == "failed"
-    assert "workload health" in events[-1]["reason"]
-    assert decisions == []
+    assert events[-1]["status"] == "needs_followup"
+    assert "recovery has not been verified" in events[-1]["reason"]
+    assert decisions  # No repeated writes just to infer recovery from prose.
 
 
 def test_agent_mode_auto_finishes_after_planned_action_terminal_health_verify_success():
@@ -299,7 +299,7 @@ def test_agent_mode_auto_finishes_after_planned_action_terminal_health_verify_su
     )
 
     assert events[-1]["type"] == "remediation_finished"
-    assert events[-1]["status"] == "success"
+    assert events[-1]["status"] == "needs_followup"
     assert "a1" in events[-1]["reason"]
     assert len(decisions) == 1
 
@@ -396,9 +396,9 @@ def test_agent_mode_treats_verify_not_found_as_success_for_finalizer_remediation
     )
 
     verify_event = next(event for event in events if event.get("stage") == "verify")
-    assert verify_event["status"] == "success"
+    assert verify_event["status"] == "failed"
     assert events[-1]["type"] == "remediation_finished"
-    assert events[-1]["status"] == "success"
+    assert events[-1]["status"] == "failed"
 
 
 def test_agent_review_mode_requires_plan_approval_before_finalizer_patch_action():
@@ -545,6 +545,6 @@ def test_agent_auto_mode_runs_finalizer_patch_without_approval_events():
     assert all(event["type"] != "remediation_approval_required" for event in events)
     assert calls[0].startswith("kubectl get pod")
     assert calls[1].startswith("kubectl patch pod terminating-stuck")
-    assert any(event.get("stage") == "verify" and event["status"] == "success" for event in events)
+    assert any(event.get("stage") == "verify" and event["status"] == "failed" for event in events)
     assert events[-1]["type"] == "remediation_finished"
-    assert events[-1]["status"] == "success"
+    assert events[-1]["status"] == "failed"

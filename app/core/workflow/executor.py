@@ -781,6 +781,9 @@ class WorkflowExecutor:
                 "request_error": final_state.get("request_error"),
                 "focused_result": final_state.get("focused_result"),
                 "query_answer": final_state.get("query_answer"),
+                "diagnosis_cases": final_state.get("diagnosis_cases"),
+                "diagnosis_overview": final_state.get("diagnosis_overview"),
+                "diagnosis_footer": full_answer[len(conclusion):] if final_state.get("diagnosis_cases") is not None else None,
                 "repair_record": ({"run_id": run_id, "kind": repair_record["kind"],
                                    "source_run_id": repair_record.get("source_run_id")}
                                   if repair_record else None),

@@ -191,7 +191,7 @@ def test_reporter_projects_lane_timing_and_fetched_runbooks_from_group_results()
     assert metrics.fetched_runbooks == ["pod-oomkilled"]
 
 
-def test_metrics_trace_lists_every_fetched_runbook_by_lane_without_ranking():
+def test_metrics_trace_lists_unique_fetched_runbooks_without_lane_grouping():
     metrics = WorkflowMetrics(run_id="r5", question="我的集群有什么问题")
     metrics.runbook_matched = True
     metrics.primary_runbook = "pod-oomkilled, pod-config-error"
@@ -209,11 +209,11 @@ def test_metrics_trace_lists_every_fetched_runbook_by_lane_without_ranking():
     trace = metrics.format_metrics_block(enabled=False)
 
     assert "📋 Runbook 参考" in trace
-    assert (
-        "- **g1 demo/oom-pod**: pod-crashloop-runtime, pod-oomkilled"
-        in trace
-    )
-    assert "- **未归属 lane**: pod-config-error" in trace
+    for name in metrics.fetched_runbooks:
+        assert trace.count(f"- {name}") == 1
+    assert "lane" not in trace
+    assert "g1" not in trace
+    assert "demo/oom-pod" not in trace
     assert "核心 Runbook" not in trace
     assert "参考 Runbook" not in trace
     assert "工具调用" not in trace
