@@ -8,6 +8,7 @@ main agent.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any, Callable, Dict, Optional
@@ -29,6 +30,7 @@ from .observability_projection import (
     render_observability_summary,
 )
 
+logger = logging.getLogger(__name__)
 
 Summarizer = Callable[[str, str, str], Optional[str]]
 
@@ -396,6 +398,7 @@ class ObservationProcessor:
             try:
                 structured, _, _ = self._extract(tool, raw, tool_args=tool_args)
             except Exception:
+                logger.debug("_compact_observation: falling back after error", exc_info=True)
                 structured = {"parse_status": "unsupported"}
         archive = ContextArchive(run_id=run_id, root=self.archive_root)
         refs = archive.write_tool_artifact(node_id, sequence, tool, raw, structured, raw)
@@ -545,6 +548,7 @@ class ObservationProcessor:
         try:
             payload = json.loads(raw or "{}")
         except Exception:
+            logger.debug("_extract_observability_query: falling back after error", exc_info=True)
             return {
                 "status": "query_parse_failed",
                 "tool": tool,
@@ -718,6 +722,7 @@ class ObservationProcessor:
         try:
             payload = json.loads(raw or "{}")
         except Exception:
+            logger.debug("_extract_aiops_case: falling back after error", exc_info=True)
             return {
                 "status": "case_parse_failed",
                 "tool": tool,
@@ -1914,6 +1919,7 @@ class ObservationProcessor:
                        "需要完整字段或全集统计时回读原文。\n" + "\n".join(selected))
             return structured, summary, "k8s_jq"
         except Exception:
+            logger.debug("_extract_jq: falling back after error", exc_info=True)
             return {"status": "text_summarized"}, self._generic_summary("kubernetes_jq_query", raw), "k8s_jq"
 
     def _extract_yaml(self, raw: str) -> tuple[Dict[str, Any], str, str]:
@@ -2363,6 +2369,7 @@ class ObservationProcessor:
         try:
             parsed = json.loads(stripped) if stripped else {}
         except Exception:
+            logger.debug("_extract_run_image: falling back after error", exc_info=True)
             parsed = None
 
         if not isinstance(parsed, dict):
@@ -2410,6 +2417,7 @@ class ObservationProcessor:
         try:
             parsed = json.loads(stripped) if stripped else {}
         except Exception:
+            logger.debug("_extract_command_result: falling back after error", exc_info=True)
             parsed = None
         if not isinstance(parsed, dict):
             return {"status": "command_unparsed"}, self._generic_summary(tool, raw), "command_result"
@@ -2512,6 +2520,7 @@ class ObservationProcessor:
         try:
             payload = json.loads(raw or "{}")
         except Exception:
+            logger.debug("_extract_prometheus_result: falling back after error", exc_info=True)
             payload = {}
 
         if not isinstance(payload, dict):

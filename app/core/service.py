@@ -53,6 +53,7 @@ def format_evidence_plan_output(evidence_analysis: Any, max_items: int = 12) -> 
         try:
             data = json.loads(evidence_analysis)
         except Exception:
+            logger.debug("format_evidence_plan_output: falling back after error", exc_info=True)
             return ""
     elif isinstance(evidence_analysis, dict):
         data = evidence_analysis

@@ -130,7 +130,7 @@ def count_tokens(text: Any, model: str = "") -> Dict[str, Any]:
                 "accuracy": "exact",
             }
         except Exception:
-            pass
+            logger.debug("count_tokens: falling back after error", exc_info=True)
 
     return {
         "tokens": estimate_tokens(value),
@@ -395,6 +395,7 @@ class ModelContextResolver:
                     self._metadata_cache[cache_key] = result
                     return result
             except Exception:
+                logger.debug("_from_openai_compatible_metadata: falling back after error", exc_info=True)
                 continue
         return None
 
@@ -441,6 +442,7 @@ def serialize_tool_schema(tools: Optional[Iterable[Any]]) -> List[Dict[str, Any]
                 else:
                     item["args_schema"] = str(args_schema)
             except Exception:
+                logger.debug("serialize_tool_schema: falling back after error", exc_info=True)
                 item["args_schema"] = str(args_schema)
         serialized.append(item)
     return serialized

@@ -257,6 +257,7 @@ class MCPServerManager:
                 response = await client.get(f"http://{server.host}:{server.port}/sse")
                 return response.status_code in [200, 500]
         except Exception:
+            logger.debug("_check_health: falling back after error", exc_info=True)
             return False
 
     async def start_all_enabled(self) -> Dict[str, bool]:
@@ -371,7 +372,7 @@ def _cleanup_all_processes():
                             process.terminate()
                             time.sleep(0.5)
                         except Exception:
-                            pass
+                            logger.debug("_cleanup_all_processes: falling back after error", exc_info=True)
 
                     if process.poll() is None:
                         try:
@@ -382,7 +383,7 @@ def _cleanup_all_processes():
                         try:
                             process.kill()
                         except Exception:
-                            pass
+                            logger.debug("_cleanup_all_processes: falling back after error", exc_info=True)
                 else:
                     process.terminate()
                     try:
@@ -393,7 +394,7 @@ def _cleanup_all_processes():
                 try:
                     process.wait(timeout=1)
                 except Exception:
-                    pass
+                    logger.debug("_cleanup_all_processes: falling back after error", exc_info=True)
 
         except Exception as e:
             logger.debug("清理进程时出错: %s", e)
@@ -470,7 +471,7 @@ def shutdown_mcp_servers_sync():
                     try:
                         server.process.kill()
                     except Exception:
-                        pass
+                        logger.debug("shutdown_mcp_servers_sync: falling back after error", exc_info=True)
         _global_manager = None
 
     _cleanup_all_processes()

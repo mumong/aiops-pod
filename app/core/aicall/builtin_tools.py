@@ -138,6 +138,7 @@ class ReadContextArchiveTool(BaseTool):
         try:
             resolved = target.resolve(strict=False)
         except Exception:
+            logger.debug("_run: falling back after error", exc_info=True)
             resolved = target
 
         allowed = []
@@ -148,6 +149,7 @@ class ReadContextArchiveTool(BaseTool):
             try:
                 allowed.append(Path(text).expanduser().resolve(strict=False))
             except Exception:
+                logger.debug("_run: falling back after error", exc_info=True)
                 continue
 
         if not any(self._is_relative_to(resolved, root) for root in allowed):
