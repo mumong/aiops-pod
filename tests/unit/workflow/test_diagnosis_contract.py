@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.workflow.diagnosis_contract import DiagnosisHandoff, reconcile_handoff, scoped_handoff
+from app.core.workflow.diagnosis_contract import DiagnosisHandoff, scoped_handoff
 from app.core.workflow.nodes.autonomous_parallel import plan_groups
 from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisStageNode, DiagnosisEvidenceNode, DiagnosisRootCauseNode
 from app.core.workflow.working_material import build_working_material
@@ -64,50 +64,13 @@ def test_general_entities_and_agent_dispositions():
     assert len(general["targets"]) == 4  # serial path retains all targets
 
 
-def test_omitted_targets_and_facts_are_preserved_with_explicit_gap():
-    old = packet()
-    new = copy.deepcopy(old)
-    new["targets"].pop()
-    new["targets"][0]["facts"] = []
-    result, issues = reconcile_handoff(new, old)
-    assert len(result["targets"]) == 4 and result["coverage"] == "partial"
-    assert result["targets"][0]["facts"] == old["targets"][0]["facts"]
-    assert "t3" in issues[0]
-    assert len(new["targets"]) == 3  # caller input not mutated
-
-
-@pytest.mark.parametrize("change", ["duplicate", "entity", "unknown_ref", "unexplained_exclusion"])
+@pytest.mark.parametrize("change", ["duplicate", "unexplained_exclusion"])
 def test_invalid_contracts_fail_explicitly(change):
-    old = packet()
-    new = copy.deepcopy(old)
+    new = packet()
     target = new["targets"][0]
     if change == "duplicate": new["targets"].append(copy.deepcopy(target))
-    if change == "entity": target["entity"]["name"] = "another"
-    if change == "unknown_ref": target["findings"] = [{"summary": "推测", "certainty": "hypothesis", "fact_ids": ["missing"]}]
     if change == "unexplained_exclusion": target["status"] = "excluded"
-    with pytest.raises(ValueError): reconcile_handoff(new, old)
-
-
-def test_fact_rewording_preserves_original_and_versions_current_references():
-    old = packet(1)
-    new = copy.deepcopy(old)
-    new["targets"][0]["facts"][0]["summary"] = "新的表述，代码不判定它是否更正确"
-    new["targets"][0]["findings"] = [{"summary": "解释", "certainty": "hypothesis", "fact_ids": ["f1"]}]
-    result, issues = reconcile_handoff(new, old)
-    assert not issues
-    target = result["targets"][0]
-    assert old["targets"][0]["facts"][0] in target["facts"]
-    assert target["facts"][0]["previous_fact_id"] == "f1"
-    assert target["findings"][0]["fact_ids"] == ["f1.v2"]
-
-
-def test_uid_can_be_enriched_but_replacement_cannot_rewrite_identity():
-    old = packet(1)
-    new = copy.deepcopy(old)
-    new["targets"][0]["entity"]["uid"] = "uid-1"
-    enriched, _ = reconcile_handoff(new, old)
-    new["targets"][0]["entity"]["uid"] = "uid-2"
-    with pytest.raises(ValueError): reconcile_handoff(new, enriched)
+    with pytest.raises(ValueError): DiagnosisHandoff.model_validate(new)
 
 
 def test_scope_compaction_fanin_and_repair_keep_exact_contract(monkeypatch):

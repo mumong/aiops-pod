@@ -117,59 +117,6 @@ class DiagnosisHandoff(ContractModel):
         return self
 
 
-def reconcile_handoff(value, previous=None):
-    """Never silently erase handed-off targets/facts; flag omissions explicitly."""
-    result = DiagnosisHandoff.model_validate(value).model_dump()
-    previous = DiagnosisHandoff.model_validate(previous).model_dump() if previous else None
-    issues = []
-    targets = {t["target_id"]: t for t in result["targets"]}
-    for old in (previous or {}).get("targets", []):
-        current = targets.get(old["target_id"])
-        if current is None:
-            issues.append(f"未交接目标 {old['target_id']}；保留上一阶段内容，本阶段未完成")
-            result["targets"].append(deepcopy(old))
-            continue
-        if (any(current["entity"][k] != old["entity"][k] for k in ("kind", "namespace", "name"))
-                or (old["entity"]["uid"] and current["entity"]["uid"] not in {"", old["entity"]["uid"]})):
-            # A replacement object must be a new target, not rewrite old identity.
-            raise ValueError(f"target identity changed: {old['target_id']}")
-        if old["entity"]["uid"]:
-            current["entity"]["uid"] = old["entity"]["uid"]
-        facts = {f["fact_id"]: f for f in current["facts"]}
-        used_ids = set(facts) | {f["fact_id"] for f in old["facts"]}
-        remap = {}
-        for fact in old["facts"]:
-            if fact["fact_id"] in facts and facts[fact["fact_id"]] != fact:
-                # Preserve both versions; wording changes are not evidence
-                # failures. Code records provenance, not semantic equivalence.
-                updated = facts[fact["fact_id"]]
-                version = 2
-                new_id = f"{fact['fact_id']}.v{version}"
-                while new_id in used_ids:
-                    version += 1
-                    new_id = f"{fact['fact_id']}.v{version}"
-                used_ids.add(new_id)
-                remap[fact["fact_id"]] = new_id
-                updated["fact_id"] = new_id
-                updated["previous_fact_id"] = fact["fact_id"]
-                current["facts"].append(deepcopy(fact))
-            elif fact["fact_id"] not in facts:
-                current["facts"].append(deepcopy(fact))
-        for finding in current["findings"]:
-            finding["fact_ids"] = [remap.get(fid, fid) for fid in finding["fact_ids"]]
-        current["runbook_refs"] = list(dict.fromkeys(old["runbook_refs"] + current["runbook_refs"]))
-    # Validate after merge: finding references may refer to inherited facts.
-    result = DiagnosisHandoff.model_validate(result).model_dump()
-    for target in result["targets"]:
-        ids = {f["fact_id"] for f in target["facts"]}
-        if any(set(f["fact_ids"]) - ids for f in target["findings"]):
-            raise ValueError(f"unknown fact reference: {target['target_id']}")
-    if issues:
-        result["coverage"] = "partial"
-        result["limitations"].extend(issues)
-    return result, issues
-
-
 def scoped_handoff(handoff, target_id):
     result = deepcopy(handoff)
     result["targets"] = [t for t in result["targets"] if t["target_id"] == target_id]
