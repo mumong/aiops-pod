@@ -17,9 +17,10 @@ import queue
 import re
 import time
 from copy import deepcopy
+from dataclasses import dataclass, field
 from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import anyio
 from pydantic import BaseModel, ValidationError
@@ -106,6 +107,46 @@ class StructuredContextBudgetError(RuntimeError):
         super().__init__(message)
         self.pre_budget = pre_budget
         self.final_budget = final_budget
+
+
+@dataclass(eq=False)
+class _AgentRun:
+    """Mutable state shared by the stream handlers of one ``AICall.call`` run.
+
+    Lists are mutated in place: ``thinking_events`` is returned to the caller
+    and the emitted message lists are compacted in place by runtime compaction.
+    """
+
+    node_id: str
+    run_id: str
+    stream_queue: Optional[queue.Queue]
+    cancel_event: Optional[Any]
+    stop_checker: Optional[Callable[[List[Dict]], bool]]
+    expect_json: bool
+    json_validator: Optional[Callable[[Any], bool]]
+    json_acceptance_guard: Optional[Callable[[Any, List[Dict]], bool]]
+    response_schema: Optional[type[BaseModel]]
+    structured_output_tool_names: Set[str]
+    static_context_components: List[Dict[str, Any]]
+    observation_processor: ObservationProcessor
+    max_compactions: int
+    thinking_events: List[Dict]
+    tool_result_sequence: int = 0
+    final_content: str = ""
+    structured_response: Any = None
+    iteration: int = 0
+    tool_call_count: int = 0
+    compaction_count: int = 0
+    model_request_started_at: float = 0.0
+    all_tool_calls: List[Dict] = field(default_factory=list)
+    content_buffer: List[str] = field(default_factory=list)  # token 级别的文本片段
+    tool_observation_contents: List[str] = field(default_factory=list)
+    seen_tool_call_signatures: Set[Any] = field(default_factory=set)
+    seen_tool_result_signatures: Set[Any] = field(default_factory=set)
+    tool_args_by_call_id: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    tool_sequence_by_call_id: Dict[str, int] = field(default_factory=dict)
+    emitted_ai_messages: List[Tuple[Any, str]] = field(default_factory=list)
+    emitted_tool_messages: List[Tuple[Any, Dict[str, Any]]] = field(default_factory=list)
 
 
 class AICall:
@@ -947,34 +988,120 @@ class AICall:
         """
         call_start = time.time()
         thinking_events: List[Dict] = []
-        all_tool_calls: List[Dict] = []
-        tool_call_count = 0
         tool_result_sequence = max(0, int(tool_result_sequence_start or 0))
-        iteration = 0
-        seen_tool_call_signatures = set()
-        seen_tool_result_signatures = set()
-        tool_args_by_call_id: Dict[str, Dict[str, Any]] = {}
-        tool_sequence_by_call_id: Dict[str, int] = {}
         observation_processor = self._build_observation_processor()
         if static_context_components is None:
-            tool_schema_payload = serialize_tool_schema(tools or [])
-            static_context_components = [
-                {"name": "node_system_prompt", "category": "static_input", "content": system_prompt},
-                {"name": "user_message", "category": "static_input", "content": question},
-                {
-                    "name": "tool_schema",
-                    "category": "static_input",
-                    "content": tool_schema_payload,
-                },
-                {"name": "scratchpad_reserved", "category": "reserved", "tokens": 4096},
-                {"name": "output_reserved", "category": "reserved", "tokens": 6000},
-            ]
+            static_context_components = self._default_call_context_components(
+                system_prompt, question, tools,
+            )
 
         logger.debug("[AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字 expect_json=%s",
                       node_id or "?", max_steps, len(tools or []), len(system_prompt), expect_json)
 
         # 无工具且不需要 agent structured_response 时直接调用 call_simple。
-        if not tools and response_schema is not None and max_steps <= 0:
+        if not tools:
+            direct = self._call_without_agent_loop(
+                system_prompt=system_prompt,
+                question=question,
+                max_steps=max_steps,
+                stream_queue=stream_queue,
+                node_id=node_id,
+                run_id=run_id,
+                static_context_components=static_context_components,
+                response_schema=response_schema,
+                thinking_events=thinking_events,
+                call_start=call_start,
+            )
+            if direct is not None:
+                return direct
+
+        session_id = self._normalize_langfuse_session_id(run_id)
+        response_format, structured_output_tool_names = (
+            self._agent_response_format(response_schema)
+        )
+        input_messages = self._build_agent_input_messages(question)
+        config = self._build_agent_run_config(session_id, node_id, max_steps)
+        run = _AgentRun(
+            node_id=node_id,
+            run_id=run_id,
+            stream_queue=stream_queue,
+            cancel_event=cancel_event,
+            stop_checker=stop_checker,
+            expect_json=expect_json,
+            json_validator=json_validator,
+            json_acceptance_guard=json_acceptance_guard,
+            response_schema=response_schema,
+            structured_output_tool_names=structured_output_tool_names,
+            static_context_components=static_context_components,
+            observation_processor=observation_processor,
+            max_compactions=self._max_runtime_compactions_per_call(),
+            thinking_events=thinking_events,
+            tool_result_sequence=tool_result_sequence,
+        )
+        self._execute_agent_run(
+            run,
+            create_agent=lambda: self._create_call_agent(
+                system_prompt=system_prompt,
+                question=question,
+                tools=tools,
+                session_id=session_id,
+                node_id=node_id,
+                run_id=run_id,
+                stream_queue=stream_queue,
+                thinking_events=thinking_events,
+                response_format=response_format,
+            ),
+            input_messages=input_messages,
+            config=config,
+            max_steps=max_steps,
+            session_id=session_id,
+        )
+        return self._finish_agent_call(
+            run,
+            call_start=call_start,
+            system_prompt=system_prompt,
+            question=question,
+        )
+
+    # ------------------------------------------------------------------
+    # call(): setup helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _default_call_context_components(
+        system_prompt: str,
+        question: str,
+        tools: Optional[List],
+    ) -> List[Dict[str, Any]]:
+        tool_schema_payload = serialize_tool_schema(tools or [])
+        return [
+            {"name": "node_system_prompt", "category": "static_input", "content": system_prompt},
+            {"name": "user_message", "category": "static_input", "content": question},
+            {
+                "name": "tool_schema",
+                "category": "static_input",
+                "content": tool_schema_payload,
+            },
+            {"name": "scratchpad_reserved", "category": "reserved", "tokens": 4096},
+            {"name": "output_reserved", "category": "reserved", "tokens": 6000},
+        ]
+
+    def _call_without_agent_loop(
+        self,
+        *,
+        system_prompt: str,
+        question: str,
+        max_steps: int,
+        stream_queue: Optional[queue.Queue],
+        node_id: str,
+        run_id: str,
+        static_context_components: List[Dict[str, Any]],
+        response_schema: Optional[type[BaseModel]],
+        thinking_events: List[Dict],
+        call_start: float,
+    ) -> Optional[Tuple[AICallResult, List[Dict]]]:
+        """Tool-free shortcuts; ``None`` means the agent loop is still needed."""
+        if response_schema is not None and max_steps <= 0:
             # Tool-free stages have max_steps=0: use one native structured
             # request, not an agent loop with a zero recursion/time budget.
             parsed, _ = self.call_structured(
@@ -988,7 +1115,7 @@ class AICall:
             return AICallResult(result=content, iterations=1,
                                 duration_ms=(time.time() - call_start) * 1000), thinking_events
 
-        if not tools and response_schema is None:
+        if response_schema is None:
             content = self.call_simple(
                 system_prompt,
                 question,
@@ -1001,84 +1128,108 @@ class AICall:
                 result=content, iterations=1, duration_ms=total_ms,
             )
             return result, thinking_events
+        return None
 
+    @staticmethod
+    def _agent_response_format(
+        response_schema: Optional[type[BaseModel]],
+    ) -> Tuple[Any, Set[str]]:
+        """ToolStrategy response format and the names of its output tools."""
+        if response_schema is None:
+            return None, set()
+        from langchain.agents.structured_output import ToolStrategy
+
+        response_format = ToolStrategy(
+            schema=response_schema,
+            tool_message_content="结构化结果已生成。",
+        )
+        structured_output_tool_names = {
+            str(getattr(spec, "name", ""))
+            for spec in getattr(response_format, "schema_specs", [])
+            if str(getattr(spec, "name", "")).strip()
+        }
+        return response_format, structured_output_tool_names
+
+    def _create_call_agent(
+        self,
+        *,
+        system_prompt: str,
+        question: str,
+        tools: Optional[List],
+        session_id: Optional[str],
+        node_id: str,
+        run_id: str,
+        stream_queue: Optional[queue.Queue],
+        thinking_events: List[Dict],
+        response_format: Any,
+        disable_streaming: bool = False,
+    ):
         # 创建 LangChain Agent (create_agent，替代已废弃的 create_react_agent)
         from langchain.agents import create_agent
 
-        session_id = self._normalize_langfuse_session_id(run_id)
-        response_format = None
-        structured_output_tool_names = set()
-        if response_schema is not None:
-            from langchain.agents.structured_output import ToolStrategy
-
-            response_format = ToolStrategy(
-                schema=response_schema,
-                tool_message_content="结构化结果已生成。",
-            )
-            structured_output_tool_names = {
-                str(getattr(spec, "name", ""))
-                for spec in getattr(response_format, "schema_specs", [])
-                if str(getattr(spec, "name", "")).strip()
-            }
-
-        def _create_agent_instance(*, disable_streaming: bool = False):
-            agent_model = self._bind_session_metadata(
-                self._create_chat_model(
-                    session_id=session_id,
-                    node_id=node_id or "agent",
-                    disable_streaming=disable_streaming,
-                ),
-                session_id,
+        agent_model = self._bind_session_metadata(
+            self._create_chat_model(
+                session_id=session_id,
                 node_id=node_id or "agent",
-            )
-            create_agent_kwargs = {
-                "model": agent_model,
-                "tools": tools,
-                "system_prompt": system_prompt,
-                "middleware": [
-                    self._build_context_hard_guard_middleware(
-                        node_id=node_id or "agent",
-                        run_id=run_id,
-                    ),
-                    self._build_tool_dedup_middleware(getattr(self, "query_tool_timeout", 0)),
-                ],
-            }
-            if getattr(self, "query_context_state_compaction", False):
-                from app.core.aicall.working_context import WorkingContextMiddleware
-                summary_model = self._create_chat_model(
-                    node_id="context_compaction", disable_streaming=True,
-                ).bind(max_tokens=3000)
-                create_agent_kwargs["middleware"].insert(0, WorkingContextMiddleware(
-                    self, agent_model, summary_model, tools, system_prompt,
-                    getattr(self, "working_context_original_question", None) or question,
-                    run_id, node_id or "agent",
-                    lambda **event: self._push(stream_queue, node_id, thinking_events, **event),
-                    response_format=response_format,
-                ))
-            if response_format is not None:
-                create_agent_kwargs["response_format"] = response_format
-            return create_agent(**create_agent_kwargs)
+                disable_streaming=disable_streaming,
+            ),
+            session_id,
+            node_id=node_id or "agent",
+        )
+        create_agent_kwargs = {
+            "model": agent_model,
+            "tools": tools,
+            "system_prompt": system_prompt,
+            "middleware": [
+                self._build_context_hard_guard_middleware(
+                    node_id=node_id or "agent",
+                    run_id=run_id,
+                ),
+                self._build_tool_dedup_middleware(getattr(self, "query_tool_timeout", 0)),
+            ],
+        }
+        if getattr(self, "query_context_state_compaction", False):
+            from app.core.aicall.working_context import WorkingContextMiddleware
+            summary_model = self._create_chat_model(
+                node_id="context_compaction", disable_streaming=True,
+            ).bind(max_tokens=3000)
+            create_agent_kwargs["middleware"].insert(0, WorkingContextMiddleware(
+                self, agent_model, summary_model, tools, system_prompt,
+                getattr(self, "working_context_original_question", None) or question,
+                run_id, node_id or "agent",
+                lambda **event: self._push(stream_queue, node_id, thinking_events, **event),
+                response_format=response_format,
+            ))
+        if response_format is not None:
+            create_agent_kwargs["response_format"] = response_format
+        return create_agent(**create_agent_kwargs)
 
+    def _build_agent_input_messages(self, question: str) -> Dict[str, List[Dict[str, str]]]:
         # 使用 async stream 模式（MCP 工具需要异步调用）
         input_messages = {"messages": [{"role": "user", "content": question}]}
         session_context = getattr(self, "query_session_context", None)
         if session_context:
             input_messages["messages"].insert(0, {"role": "user", "content":
                 "[会话历史：仅供理解指代，旧观测不是当前值]\n" + json.dumps(session_context, ensure_ascii=False, default=str)})
+        return input_messages
+
+    def _build_agent_run_config(
+        self,
+        session_id: Optional[str],
+        node_id: str,
+        max_steps: int,
+    ) -> Dict[str, Any]:
         # recursion_limit 直接使用 config 传入的 max_steps，不做任何公式转换
         langfuse_config = self._build_langchain_config(session_id, node_id=node_id or "agent")
         config = {"recursion_limit": max_steps}
         if langfuse_config:
             config.update(langfuse_config)
         logger.info("[AICall] node=%s | max_steps(recursion_limit)=%d", node_id or "?", max_steps)
+        return config
 
-        final_content = ""
-        structured_response = None
-        _content_buffer = []  # 收集 token 级别的文本片段
-        tool_observation_contents: List[str] = []
-        compaction_count = 0
+    def _max_runtime_compactions_per_call(self) -> int:
         try:
-            max_compactions = max(
+            return max(
                 0,
                 int(
                     self._runtime_compaction_config().get(
@@ -1089,496 +1240,608 @@ class AICall:
                 ),
             )
         except (TypeError, ValueError):
-            max_compactions = 1
-        emitted_ai_messages: List[Tuple[Any, str]] = []
-        emitted_tool_messages: List[Tuple[Any, Dict[str, Any]]] = []
-        agent = None
+            return 1
 
-        async def _run_agent():
-            nonlocal final_content, structured_response, iteration, tool_call_count, tool_result_sequence, compaction_count
-            model_request_started_at = time.time()
-            async for chunk in agent.astream(
-                input_messages, config=config,
-                stream_mode=["updates", "messages"],
-                version="v2",
-            ):
-                # v2 格式: chunk 是 dict {"type": "updates"|"messages", "data": ..., "ns": [...]}
-                # 但某些版本可能返回 tuple (stream_mode_name, data)
-                if isinstance(chunk, tuple):
-                    chunk_type, chunk_data = chunk[0], chunk[1]
-                elif isinstance(chunk, dict):
-                    chunk_type = chunk.get("type", "")
-                    chunk_data = chunk.get("data", {})
-                else:
-                    logger.debug("   [AICall] 未知 chunk 类型: %s", type(chunk))
-                    continue
+    # ------------------------------------------------------------------
+    # call(): agent execution and result assembly
+    # ------------------------------------------------------------------
 
-                if (
-                    chunk_type != "updates"
-                    and cancel_event
-                    and cancel_event.is_set()
-                ):
-                    logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", node_id)
-                    break
-
-                # ── messages 模式：token 级别流式 ──
-                if chunk_type == "messages":
-                    # chunk_data 可能是 tuple (token_msg, metadata) 或 list
-                    if isinstance(chunk_data, (list, tuple)) and len(chunk_data) >= 2:
-                        token_msg, metadata = chunk_data[0], chunk_data[1]
-                    else:
-                        continue
-                    if isinstance(metadata, dict) and metadata.get("aiops_internal_compaction"):
-                        continue
-                    token_text = self._extract_visible_ai_text(token_msg)
-                    if token_text:
-                        langgraph_node = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
-                        if langgraph_node != "tools":
-                            _content_buffer.append(token_text)
-                            push_event(stream_queue, "ai_token", node_id,
-                                       content=token_text, iteration=iteration)
-                    continue
-
-                # ── updates 模式：消息/工具级别（原有逻辑） ──
-                if chunk_type != "updates":
-                    continue
-                update_data = chunk_data if isinstance(chunk_data, dict) else {}
-                for node_name, update in update_data.items():
-                    if not isinstance(update, dict):
-                        # before_model may legitimately return None (no compaction).
-                        continue
-                    if isinstance(update, dict) and update.get("structured_response") is not None:
-                        structured_response = update.get("structured_response")
-                        final_content = self._serialize_structured_response(structured_response)
-                        self._record(
-                            thinking_events,
-                            "structured_response",
-                            node_id,
-                            schema=getattr(response_schema, "__name__", "") if response_schema else "",
-                            content=final_content[:1000],
-                        )
-                    messages = update.get("messages", [])
-                    for msg in messages:
-                        if isinstance(msg, AIMessage):
-                            usage = self._extract_usage_metadata(msg)
-                            if usage:
-                                model_duration_ms = max(
-                                    0.0,
-                                    (time.time() - model_request_started_at) * 1000,
-                                )
-                                self._log_provider_usage(
-                                    node_id or "agent",
-                                    usage,
-                                    source="provider_usage:agent_astream",
-                                    iteration=iteration + 1,
-                                )
-                                self._record(
-                                    thinking_events,
-                                    "ai_usage",
-                                    node_id,
-                                    usage=usage,
-                                    iteration=iteration + 1,
-                                    model_duration_ms=model_duration_ms,
-                                )
-                            msg_tool_calls = list(msg.tool_calls or [])
-                            new_tool_calls = []
-                            for tc in msg_tool_calls:
-                                signature = self._tool_call_signature(tc)
-                                if signature in seen_tool_call_signatures:
-                                    logger.debug(
-                                        "   [AICall] 跳过重复 tool_call replay | node=%s tool=%s signature=%s",
-                                        node_id or "?",
-                                        tc.get("name"),
-                                        signature,
-                                    )
-                                    continue
-                                seen_tool_call_signatures.add(signature)
-                                new_tool_calls.append(tc)
-
-                            if msg_tool_calls and not new_tool_calls and not msg.content:
-                                continue
-
-                            # AI 完整消息（用于 final_content 和工具调用检测）
-                            full_msg_text = self._extract_visible_ai_text(msg)
-                            should_track_ai_message = (
-                                bool(full_msg_text) or bool(new_tool_calls)
-                            ) and (
-                                not msg_tool_calls or bool(new_tool_calls)
-                            )
-                            if should_track_ai_message:
-                                emitted_ai_messages.append(
-                                    (msg, full_msg_text)
-                                )
-                                if compaction_count > 0:
-                                    self._compact_langgraph_ai_messages_in_place(
-                                        emitted_ai_messages
-                                    )
-
-                            should_emit_ai_message = (
-                                bool(full_msg_text)
-                                and should_track_ai_message
-                            )
-                            if should_emit_ai_message:
-                                final_content = full_msg_text
-                                iteration += 1
-                                logger.debug("   [AICall] AI 消息 #%d:\n%s",
-                                            iteration, full_msg_text[:1000])
-                                evt = {"type": "ai_message",
-                                       "content": full_msg_text[:500],
-                                       "full_content": full_msg_text,
-                                       "iteration": iteration}
-                                self._push(stream_queue, node_id, thinking_events, **evt)
-
-                                if expect_json and not msg.tool_calls:
-                                    parsed = self.extract_json_payload(full_msg_text)
-                                    if parsed is not None and (
-                                        json_validator is None or json_validator(parsed)
-                                    ):
-                                        if json_acceptance_guard is not None and not json_acceptance_guard(parsed, thinking_events):
-                                            logger.info(
-                                                "[AICall] JSON middleware 捕获到结构化输出，但接受条件未满足，继续 agent (node=%s)",
-                                                node_id,
-                                            )
-                                            continue
-                                        final_content = json.dumps(parsed, ensure_ascii=False)
-                                        logger.info("[AICall] JSON middleware 捕获到有效结构化输出，提前结束 agent (node=%s)", node_id)
-                                        return
-
-                            # AI 工具调用
-                            if new_tool_calls:
-                                for tc in new_tool_calls:
-                                    if tc.get("name") in structured_output_tool_names:
-                                        logger.info(
-                                            "[AICall] structured response emitted | node=%s schema=%s",
-                                            node_id or "?",
-                                            tc.get("name"),
-                                        )
-                                        continue
-                                    tool_call_count += 1
-                                    tool_sequence = tool_call_count
-                                    logger.debug("   [AICall] tool_call #%d %s | args=%s",
-                                                tool_sequence, tc["name"],
-                                                str(tc.get("args", {}))[:300])
-                                    push_event(stream_queue, "tool_start", node_id,
-                                               tool_name=tc["name"],
-                                               tool_args=tc.get("args", {}),
-                                               tool_call_id=tc.get("id"),
-                                               tool_sequence=tool_sequence,
-                                               iteration=iteration)
-                                    if tc.get("id"):
-                                        call_id = str(tc.get("id"))
-                                        tool_args_by_call_id[call_id] = dict(tc.get("args") or {})
-                                        tool_sequence_by_call_id[call_id] = tool_sequence
-                                    self._record(thinking_events, "tool_start", node_id,
-                                                 tool_name=tc["name"],
-                                                 tool_args=tc.get("args", {}),
-                                                 tool_call_id=tc.get("id"),
-                                                 tool_sequence=tool_sequence,
-                                                 iteration=iteration)
-
-                        elif hasattr(msg, 'type') and msg.type == 'tool':
-                            # 工具执行结果
-                            tool_name = getattr(msg, 'name', '') or ''
-                            if tool_name in structured_output_tool_names:
-                                logger.debug(
-                                    "[AICall] 跳过结构化输出 tool_result 统计 | node=%s schema=%s",
-                                    node_id or "?",
-                                    tool_name,
-                                )
-                                continue
-                            tool_content = msg.content or ''
-                            tool_signature = self._tool_result_signature(msg, tool_name, tool_content)
-                            if tool_signature in seen_tool_result_signatures:
-                                logger.debug(
-                                    "   [AICall] 跳过重复 tool_result replay | node=%s tool=%s signature=%s",
-                                    node_id or "?",
-                                    tool_name,
-                                    tool_signature,
-                                )
-                                continue
-                            seen_tool_result_signatures.add(tool_signature)
-                            tool_result_sequence += 1
-                            observation = self._process_tool_observation(
-                                processor=observation_processor,
-                                run_id=run_id,
-                                node_id=node_id,
-                                sequence=tool_result_sequence,
-                                tool_name=tool_name,
-                                tool_content=tool_content,
-                                static_context_components=static_context_components,
-                                prior_tool_observations=tool_observation_contents,
-                                tool_args=tool_args_by_call_id.get(str(getattr(msg, "tool_call_id", None)), {}),
-                            )
-                            bounded_content = observation.get("summary", tool_content)
-                            tool_observation_contents.append(bounded_content)
-                            try:
-                                msg.content = bounded_content
-                                additional_kwargs = dict(
-                                    getattr(msg, "additional_kwargs", None) or {}
-                                )
-                                additional_kwargs.update({
-                                    "aiops_raw_ref": observation.get("raw_ref"),
-                                    "aiops_structured_ref": observation.get(
-                                        "structured_ref"
-                                    ),
-                                    "aiops_summary_ref": observation.get(
-                                        "summary_ref"
-                                    ),
-                                    "aiops_semantic_success": observation.get(
-                                        "semantic_success",
-                                        True,
-                                    ),
-                                })
-                                msg.additional_kwargs = additional_kwargs
-                            except Exception as exc:
-                                logger.warning("[AICall] ToolMessage 内容压缩回写失败: %s", exc)
-                            status = str(
-                                getattr(msg, "status", "success") or "success"
-                            ).strip().lower()
-                            if status not in {"success", "error"}:
-                                status = "success"
-                            if status == "error":
-                                observation["semantic_success"] = False
-                            transport_status = status
-                            if observation.get("semantic_success") is False:
-                                status = "error"
-                            tool_call_id = getattr(msg, "tool_call_id", None)
-                            tool_args = tool_args_by_call_id.get(str(tool_call_id), {}) if tool_call_id else {}
-                            tool_sequence = tool_sequence_by_call_id.get(
-                                str(tool_call_id),
-                                tool_result_sequence,
-                            )
-                            additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
-                            deduplicated = bool(additional_kwargs.get("aiops_deduplicated"))
-                            original_tool_call_id = additional_kwargs.get(
-                                "aiops_original_tool_call_id"
-                            )
-                            all_tool_calls.append({
-                                "tool_name": tool_name,
-                                "tool_args": tool_args,
-                                "status": status,
-                                "result": bounded_content,
-                                "raw_ref": observation.get("raw_ref"),
-                                "structured_ref": observation.get("structured_ref"),
-                                "summary_ref": observation.get("summary_ref"),
-                                "raw_chars": observation.get("raw_chars", len(tool_content)),
-                                "summary_chars": observation.get("summary_chars", len(bounded_content)),
-                                "semantic_success": observation.get("semantic_success", True),
-                                "structured": observation.get("structured"),
-                                "observation_audit": observation.get(
-                                    "observation_audit", {}
-                                ),
-                                "deduplicated": deduplicated,
-                                "original_tool_call_id": original_tool_call_id,
-                            })
-                            emitted_tool_messages.append((msg, {
-                                "tool_name": tool_name,
-                                "semantic_success": observation.get(
-                                    "semantic_success",
-                                    True,
-                                ),
-                                "result_preview": bounded_content[:500],
-                                "raw_ref": observation.get("raw_ref"),
-                                "structured_ref": observation.get("structured_ref"),
-                                "summary_ref": observation.get("summary_ref"),
-                                "summary_chars": observation.get("summary_chars", len(bounded_content)),
-                            }))
-                            logger.info("   [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
-                                        tool_sequence, tool_name, status,
-                                        observation.get("raw_chars", len(tool_content)),
-                                        observation.get("summary_chars", len(bounded_content)),
-                                        observation.get("processor", "unknown"))
-                            projection_audit = observation.get("observation_audit")
-                            if isinstance(projection_audit, dict) and projection_audit:
-                                projection_budget = (
-                                    projection_audit.get("budget")
-                                    if isinstance(projection_audit.get("budget"), dict)
-                                    else {}
-                                )
-                                logger.info(
-                                    "   [AICall] observability projection | node=%s tool=%s evidence=%d selected=%d omitted=%d patterns=%d/%d budget=%d/%d stop=%s unattempted=%d strategy=%s raw_ref=%s",
-                                    node_id or "?",
-                                    tool_name,
-                                    projection_audit.get("evidence_total", 0),
-                                    projection_audit.get("evidence_selected", 0),
-                                    projection_audit.get("evidence_omitted", 0),
-                                    projection_audit.get("semantic_patterns_selected", 0),
-                                    projection_audit.get("semantic_patterns_total", 0),
-                                    projection_budget.get("final_summary_chars", 0),
-                                    projection_budget.get("max_chars", 0),
-                                    projection_budget.get("selection_terminated_by", "unknown"),
-                                    projection_budget.get("candidates_unattempted", 0),
-                                    projection_audit.get("strategy", "unknown"),
-                                    observation.get("raw_ref") or "unavailable",
-                                )
-                                if projection_audit.get("evidence_omitted", 0):
-                                    logger.warning(
-                                        "   [AICall] evidence kept outside model context | node=%s tool=%s omitted=%d retrievable_raw_ref=%s",
-                                        node_id or "?",
-                                        tool_name,
-                                        projection_audit.get("evidence_omitted", 0),
-                                        observation.get("raw_ref") or "unavailable",
-                                    )
-                                if projection_audit.get("semantic_patterns_omitted", 0):
-                                    logger.warning(
-                                        "   [AICall] observability semantic coverage gap | node=%s tool=%s omitted_patterns=%d first_rejected=%s omitted_pattern_preview=%s omitted_profiles=%s",
-                                        node_id or "?",
-                                        tool_name,
-                                        projection_audit.get("semantic_patterns_omitted", 0),
-                                        json.dumps(
-                                            projection_budget.get("first_rejected"),
-                                            ensure_ascii=False,
-                                            separators=(",", ":"),
-                                            default=str,
-                                        )[:1200],
-                                        json.dumps(
-                                            projection_audit.get("omitted_pattern_preview", []),
-                                            ensure_ascii=False,
-                                            separators=(",", ":"),
-                                            default=str,
-                                        )[:1200],
-                                        json.dumps(
-                                            projection_audit.get("omitted_profile_counts", {}),
-                                            ensure_ascii=False,
-                                            separators=(",", ":"),
-                                            default=str,
-                                        )[:1200],
-                                    )
-                            context_usage_ratio = observation.get("context_usage_ratio")
-                            if isinstance(context_usage_ratio, (int, float)) and context_usage_ratio >= 0.8:
-                                logger.warning(
-                                    "   [AICall] context compression guard triggered | node=%s tool=%s usage=%.0f%% processor=%s",
-                                    node_id or "?",
-                                    tool_name,
-                                    context_usage_ratio * 100,
-                                    observation.get("processor", "unknown"),
-                                )
-                            logger.debug("   [AICall] tool #%d %s 摘要输出:\n%s",
-                                        tool_sequence, tool_name,
-                                        bounded_content[:2000])
-                            evt = {
-                                "type": "tool_result",
-                                "transport_status": transport_status,
-                                "tool_name": tool_name,
-                                "tool_call_id": tool_call_id,
-                                "tool_sequence": tool_sequence,
-                                "tool_args": tool_args,
-                                "status": status,
-                                "deduplicated": deduplicated,
-                                "original_tool_call_id": original_tool_call_id,
-                                "result_preview": bounded_content[:200],
-                                "result": bounded_content,
-                                "raw_ref": observation.get("raw_ref"),
-                                "structured_ref": observation.get("structured_ref"),
-                                "summary_ref": observation.get("summary_ref"),
-                                "raw_chars": observation.get("raw_chars", len(tool_content)),
-                                "summary_chars": observation.get("summary_chars", len(bounded_content)),
-                                "semantic_success": observation.get("semantic_success", True),
-                                "structured": observation.get("structured"),
-                                "observation_processed": observation.get("processed", False),
-                                "observation_processor": observation.get("processor", ""),
-                                "observation_audit": observation.get(
-                                    "observation_audit", {}
-                                ),
-                                "context_usage_ratio": observation.get("context_usage_ratio"),
-                                "iteration": iteration,
-                            }
-                            push_event(stream_queue, "tool_result", node_id, **evt)
-                            self._record(thinking_events, "tool_result", node_id, **evt)
-                            model_request_started_at = time.time()
-
-                            if compaction_count < max_compactions:
-                                compacted = await anyio.to_thread.run_sync(
-                                    partial(
-                                        self._maybe_compact_runtime_context,
-                                        node_id=node_id or "unknown",
-                                        run_id=run_id,
-                                        static_context_components=static_context_components,
-                                        thinking_events=thinking_events,
-                                        tool_observation_contents=tool_observation_contents,
-                                    ),
-                                )
-                                if compacted:
-                                    compaction_count += 1
-                                    self._compact_langgraph_ai_messages_in_place(emitted_ai_messages)
-                                    self._compact_langgraph_tool_messages_in_place(emitted_tool_messages)
-
-                if cancel_event and cancel_event.is_set():
-                    logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", node_id)
-                    break
-                if stop_checker:
-                    try:
-                        if stop_checker(thinking_events):
-                            logger.info("[AICall] stop_checker 触发，提前结束 agent (node=%s)", node_id)
-                            self._record(
-                                thinking_events,
-                                "early_stop",
-                                node_id,
-                                reason="stop_checker",
-                                iteration=iteration,
-                            )
-                            return
-                    except Exception as exc:
-                        logger.warning("[AICall] stop_checker 执行失败: %s", exc)
-
+    def _execute_agent_run(
+        self,
+        run: "_AgentRun",
+        *,
+        create_agent: Callable[[], Any],
+        input_messages: Dict[str, Any],
+        config: Dict[str, Any],
+        max_steps: int,
+        session_id: Optional[str],
+    ) -> None:
+        """Run the agent stream; failures become ``execution_incomplete`` events."""
+        node_id = run.node_id
         # 在私有事件循环线程中运行 agent（避免与 uvicorn event loop 冲突）；超时在循环内取消。
         agent_timeout = max_steps * 30 if max_steps > 0 else None
         try:
-            agent = _create_agent_instance(disable_streaming=False)
+            agent = create_agent()
             run_coroutine_sync(
-                lambda: run_until_cancelled(_run_agent(), cancel_event),
+                lambda: run_until_cancelled(
+                    self._stream_agent_run(agent, input_messages, config, run),
+                    run.cancel_event,
+                ),
                 timeout=agent_timeout,
                 worker_context=lambda: self._langfuse_session_scope(session_id, node_id or "agent"),
                 thread_name="aicall-agent",
             )
         except TimeoutError:
-            self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="agent_timeout")
+            self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason="agent_timeout")
             logger.warning("[AICall] agent 执行超时 (%ss)", agent_timeout)
-            if not final_content:
-                final_content = "Agent 执行超时"
+            if not run.final_content:
+                run.final_content = "Agent 执行超时"
         except GraphRecursionError as e:
-            self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason="step_limit")
+            self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason="step_limit")
             recursion_msg = str(e).splitlines()[0].strip()
             logger.warning("[AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
-            if not final_content:
-                final_content = f"达到最大工具执行步数限制: {recursion_msg}"
+            if not run.final_content:
+                run.final_content = f"达到最大工具执行步数限制: {recursion_msg}"
         except Exception as e:
             raise_on_model_disconnect(e)
             logger.error("[AICall] agent 执行异常: %s", e, exc_info=True)
-            self._push(stream_queue, node_id, thinking_events, type="execution_incomplete", reason=str(e))
-            if not final_content:
-                final_content = f"Agent 执行异常: {e}"
+            self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason=str(e))
+            if not run.final_content:
+                run.final_content = f"Agent 执行异常: {e}"
 
+    def _finish_agent_call(
+        self,
+        run: "_AgentRun",
+        *,
+        call_start: float,
+        system_prompt: str,
+        question: str,
+    ) -> Tuple[AICallResult, List[Dict]]:
+        node_id = run.node_id
+        thinking_events = run.thinking_events
         # Visible progress must not overwrite the validated node contract.
-        if structured_response is not None:
-            final_content = self._serialize_structured_response(structured_response)
+        if run.structured_response is not None:
+            run.final_content = self._serialize_structured_response(run.structured_response)
+        final_content = run.final_content
         total_ms = (time.time() - call_start) * 1000
         aggregate_usage = self._aggregate_usage_from_events(thinking_events)
         result = AICallResult(
             result=final_content,
-            tool_calls=all_tool_calls,
-            iterations=max(iteration, 1),
-            tool_call_count=tool_call_count,
+            tool_calls=run.all_tool_calls,
+            iterations=max(run.iteration, 1),
+            tool_call_count=run.tool_call_count,
             duration_ms=total_ms,
             intermediate_events=thinking_events,
             input_tokens=aggregate_usage.get("input_tokens"),
             output_tokens=aggregate_usage.get("output_tokens"),
             total_tokens=aggregate_usage.get("total_tokens"),
-            structured_response=structured_response,
+            structured_response=run.structured_response,
         )
         self._write_final_context_budget(
-            run_id=run_id,
+            run_id=run.run_id,
             node_id=node_id or "unknown",
             system_prompt=system_prompt,
             question=question,
-            static_context_components=static_context_components,
+            static_context_components=run.static_context_components,
             thinking_events=thinking_events,
             final_content=final_content,
         )
         logger.info("[AICall] call 完成 | node=%s | %.1fs | iterations=%d | tools=%d | 输出=%d字",
-                    node_id or "?", total_ms / 1000, result.iterations, tool_call_count,
+                    node_id or "?", total_ms / 1000, result.iterations, run.tool_call_count,
                     len(final_content))
         return result, thinking_events
+
+    # ------------------------------------------------------------------
+    # call(): agent stream consumption
+    # ------------------------------------------------------------------
+
+    async def _stream_agent_run(
+        self,
+        agent: Any,
+        input_messages: Dict[str, Any],
+        config: Dict[str, Any],
+        run: "_AgentRun",
+    ) -> None:
+        """Consume ``agent.astream`` v2 chunks until the stream ends or a stop."""
+        node_id = run.node_id
+        run.model_request_started_at = time.time()
+        async for chunk in agent.astream(
+            input_messages, config=config,
+            stream_mode=["updates", "messages"],
+            version="v2",
+        ):
+            split = self._split_stream_chunk(chunk)
+            if split is None:
+                continue
+            chunk_type, chunk_data = split
+
+            if (
+                chunk_type != "updates"
+                and run.cancel_event
+                and run.cancel_event.is_set()
+            ):
+                logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", node_id)
+                return
+
+            # ── messages 模式：token 级别流式 ──
+            if chunk_type == "messages":
+                self._handle_token_chunk(run, chunk_data)
+                continue
+
+            # ── updates 模式：消息/工具级别（原有逻辑） ──
+            if chunk_type != "updates":
+                continue
+            if await self._handle_updates_chunk(run, chunk_data):
+                return
+            if self._should_stop_after_update(run):
+                return
+
+    @staticmethod
+    def _split_stream_chunk(chunk: Any) -> Optional[Tuple[Any, Any]]:
+        # v2 格式: chunk 是 dict {"type": "updates"|"messages", "data": ..., "ns": [...]}
+        # 但某些版本可能返回 tuple (stream_mode_name, data)
+        if isinstance(chunk, tuple):
+            return chunk[0], chunk[1]
+        if isinstance(chunk, dict):
+            return chunk.get("type", ""), chunk.get("data", {})
+        logger.debug("   [AICall] 未知 chunk 类型: %s", type(chunk))
+        return None
+
+    def _handle_token_chunk(self, run: "_AgentRun", chunk_data: Any) -> None:
+        """messages mode: forward visible model tokens as ``ai_token`` events."""
+        # chunk_data 可能是 tuple (token_msg, metadata) 或 list
+        if isinstance(chunk_data, (list, tuple)) and len(chunk_data) >= 2:
+            token_msg, metadata = chunk_data[0], chunk_data[1]
+        else:
+            return
+        if isinstance(metadata, dict) and metadata.get("aiops_internal_compaction"):
+            return
+        token_text = self._extract_visible_ai_text(token_msg)
+        if token_text:
+            langgraph_node = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
+            if langgraph_node != "tools":
+                run.content_buffer.append(token_text)
+                push_event(run.stream_queue, "ai_token", run.node_id,
+                           content=token_text, iteration=run.iteration)
+
+    def _should_stop_after_update(self, run: "_AgentRun") -> bool:
+        node_id = run.node_id
+        if run.cancel_event and run.cancel_event.is_set():
+            logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", node_id)
+            return True
+        if run.stop_checker:
+            try:
+                if run.stop_checker(run.thinking_events):
+                    logger.info("[AICall] stop_checker 触发，提前结束 agent (node=%s)", node_id)
+                    self._record(
+                        run.thinking_events,
+                        "early_stop",
+                        node_id,
+                        reason="stop_checker",
+                        iteration=run.iteration,
+                    )
+                    return True
+            except Exception as exc:
+                logger.warning("[AICall] stop_checker 执行失败: %s", exc)
+        return False
+
+    async def _handle_updates_chunk(self, run: "_AgentRun", chunk_data: Any) -> bool:
+        """updates mode: process model/tool messages. True ends the agent run."""
+        update_data = chunk_data if isinstance(chunk_data, dict) else {}
+        for _node_name, update in update_data.items():
+            if not isinstance(update, dict):
+                # before_model may legitimately return None (no compaction).
+                continue
+            if update.get("structured_response") is not None:
+                self._capture_structured_response(run, update.get("structured_response"))
+            messages = update.get("messages", [])
+            for msg in messages:
+                if isinstance(msg, AIMessage):
+                    if self._handle_agent_ai_message(run, msg):
+                        return True
+                elif hasattr(msg, 'type') and msg.type == 'tool':
+                    await self._handle_agent_tool_message(run, msg)
+        return False
+
+    def _capture_structured_response(self, run: "_AgentRun", structured_response: Any) -> None:
+        run.structured_response = structured_response
+        run.final_content = self._serialize_structured_response(structured_response)
+        self._record(
+            run.thinking_events,
+            "structured_response",
+            run.node_id,
+            schema=getattr(run.response_schema, "__name__", "") if run.response_schema else "",
+            content=run.final_content[:1000],
+        )
+
+    def _record_ai_usage(self, run: "_AgentRun", msg: AIMessage) -> None:
+        usage = self._extract_usage_metadata(msg)
+        if not usage:
+            return
+        model_duration_ms = max(
+            0.0,
+            (time.time() - run.model_request_started_at) * 1000,
+        )
+        self._log_provider_usage(
+            run.node_id or "agent",
+            usage,
+            source="provider_usage:agent_astream",
+            iteration=run.iteration + 1,
+        )
+        self._record(
+            run.thinking_events,
+            "ai_usage",
+            run.node_id,
+            usage=usage,
+            iteration=run.iteration + 1,
+            model_duration_ms=model_duration_ms,
+        )
+
+    def _new_tool_calls(self, run: "_AgentRun", msg_tool_calls: List[Dict]) -> List[Dict]:
+        """Drop tool calls already seen in a replayed update."""
+        new_tool_calls = []
+        for tc in msg_tool_calls:
+            signature = self._tool_call_signature(tc)
+            if signature in run.seen_tool_call_signatures:
+                logger.debug(
+                    "   [AICall] 跳过重复 tool_call replay | node=%s tool=%s signature=%s",
+                    run.node_id or "?",
+                    tc.get("name"),
+                    signature,
+                )
+                continue
+            run.seen_tool_call_signatures.add(signature)
+            new_tool_calls.append(tc)
+        return new_tool_calls
+
+    def _handle_agent_ai_message(self, run: "_AgentRun", msg: AIMessage) -> bool:
+        """Track/emit one model message. True means accepted JSON ends the run."""
+        node_id = run.node_id
+        self._record_ai_usage(run, msg)
+        msg_tool_calls = list(msg.tool_calls or [])
+        new_tool_calls = self._new_tool_calls(run, msg_tool_calls)
+
+        if msg_tool_calls and not new_tool_calls and not msg.content:
+            return False
+
+        # AI 完整消息（用于 final_content 和工具调用检测）
+        full_msg_text = self._extract_visible_ai_text(msg)
+        should_track_ai_message = (
+            bool(full_msg_text) or bool(new_tool_calls)
+        ) and (
+            not msg_tool_calls or bool(new_tool_calls)
+        )
+        if should_track_ai_message:
+            run.emitted_ai_messages.append(
+                (msg, full_msg_text)
+            )
+            if run.compaction_count > 0:
+                self._compact_langgraph_ai_messages_in_place(
+                    run.emitted_ai_messages
+                )
+
+        should_emit_ai_message = (
+            bool(full_msg_text)
+            and should_track_ai_message
+        )
+        if should_emit_ai_message:
+            run.final_content = full_msg_text
+            run.iteration += 1
+            logger.debug("   [AICall] AI 消息 #%d:\n%s",
+                        run.iteration, full_msg_text[:1000])
+            evt = {"type": "ai_message",
+                   "content": full_msg_text[:500],
+                   "full_content": full_msg_text,
+                   "iteration": run.iteration}
+            self._push(run.stream_queue, node_id, run.thinking_events, **evt)
+
+            if run.expect_json and not msg.tool_calls:
+                parsed = self.extract_json_payload(full_msg_text)
+                if parsed is not None and (
+                    run.json_validator is None or run.json_validator(parsed)
+                ):
+                    if run.json_acceptance_guard is not None and not run.json_acceptance_guard(parsed, run.thinking_events):
+                        logger.info(
+                            "[AICall] JSON middleware 捕获到结构化输出，但接受条件未满足，继续 agent (node=%s)",
+                            node_id,
+                        )
+                        return False
+                    run.final_content = json.dumps(parsed, ensure_ascii=False)
+                    logger.info("[AICall] JSON middleware 捕获到有效结构化输出，提前结束 agent (node=%s)", node_id)
+                    return True
+
+        # AI 工具调用
+        if new_tool_calls:
+            self._emit_tool_starts(run, new_tool_calls)
+        return False
+
+    def _emit_tool_starts(self, run: "_AgentRun", new_tool_calls: List[Dict]) -> None:
+        node_id = run.node_id
+        for tc in new_tool_calls:
+            if tc.get("name") in run.structured_output_tool_names:
+                logger.info(
+                    "[AICall] structured response emitted | node=%s schema=%s",
+                    node_id or "?",
+                    tc.get("name"),
+                )
+                continue
+            run.tool_call_count += 1
+            tool_sequence = run.tool_call_count
+            logger.debug("   [AICall] tool_call #%d %s | args=%s",
+                        tool_sequence, tc["name"],
+                        str(tc.get("args", {}))[:300])
+            push_event(run.stream_queue, "tool_start", node_id,
+                       tool_name=tc["name"],
+                       tool_args=tc.get("args", {}),
+                       tool_call_id=tc.get("id"),
+                       tool_sequence=tool_sequence,
+                       iteration=run.iteration)
+            if tc.get("id"):
+                call_id = str(tc.get("id"))
+                run.tool_args_by_call_id[call_id] = dict(tc.get("args") or {})
+                run.tool_sequence_by_call_id[call_id] = tool_sequence
+            self._record(run.thinking_events, "tool_start", node_id,
+                         tool_name=tc["name"],
+                         tool_args=tc.get("args", {}),
+                         tool_call_id=tc.get("id"),
+                         tool_sequence=tool_sequence,
+                         iteration=run.iteration)
+
+    async def _handle_agent_tool_message(self, run: "_AgentRun", msg: Any) -> None:
+        """Process one tool result: dedup, observation, events, compaction."""
+        node_id = run.node_id
+        # 工具执行结果
+        tool_name = getattr(msg, 'name', '') or ''
+        if tool_name in run.structured_output_tool_names:
+            logger.debug(
+                "[AICall] 跳过结构化输出 tool_result 统计 | node=%s schema=%s",
+                node_id or "?",
+                tool_name,
+            )
+            return
+        tool_content = msg.content or ''
+        tool_signature = self._tool_result_signature(msg, tool_name, tool_content)
+        if tool_signature in run.seen_tool_result_signatures:
+            logger.debug(
+                "   [AICall] 跳过重复 tool_result replay | node=%s tool=%s signature=%s",
+                node_id or "?",
+                tool_name,
+                tool_signature,
+            )
+            return
+        run.seen_tool_result_signatures.add(tool_signature)
+        run.tool_result_sequence += 1
+        observation = self._process_tool_observation(
+            processor=run.observation_processor,
+            run_id=run.run_id,
+            node_id=node_id,
+            sequence=run.tool_result_sequence,
+            tool_name=tool_name,
+            tool_content=tool_content,
+            static_context_components=run.static_context_components,
+            prior_tool_observations=run.tool_observation_contents,
+            tool_args=run.tool_args_by_call_id.get(str(getattr(msg, "tool_call_id", None)), {}),
+        )
+        bounded_content = observation.get("summary", tool_content)
+        run.tool_observation_contents.append(bounded_content)
+        self._write_back_bounded_tool_message(msg, bounded_content, observation)
+        status, transport_status = self._tool_result_status(msg, observation)
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        tool_args = run.tool_args_by_call_id.get(str(tool_call_id), {}) if tool_call_id else {}
+        tool_sequence = run.tool_sequence_by_call_id.get(
+            str(tool_call_id),
+            run.tool_result_sequence,
+        )
+        additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+        deduplicated = bool(additional_kwargs.get("aiops_deduplicated"))
+        original_tool_call_id = additional_kwargs.get(
+            "aiops_original_tool_call_id"
+        )
+        run.all_tool_calls.append({
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            "status": status,
+            "result": bounded_content,
+            "raw_ref": observation.get("raw_ref"),
+            "structured_ref": observation.get("structured_ref"),
+            "summary_ref": observation.get("summary_ref"),
+            "raw_chars": observation.get("raw_chars", len(tool_content)),
+            "summary_chars": observation.get("summary_chars", len(bounded_content)),
+            "semantic_success": observation.get("semantic_success", True),
+            "structured": observation.get("structured"),
+            "observation_audit": observation.get(
+                "observation_audit", {}
+            ),
+            "deduplicated": deduplicated,
+            "original_tool_call_id": original_tool_call_id,
+        })
+        run.emitted_tool_messages.append((msg, {
+            "tool_name": tool_name,
+            "semantic_success": observation.get(
+                "semantic_success",
+                True,
+            ),
+            "result_preview": bounded_content[:500],
+            "raw_ref": observation.get("raw_ref"),
+            "structured_ref": observation.get("structured_ref"),
+            "summary_ref": observation.get("summary_ref"),
+            "summary_chars": observation.get("summary_chars", len(bounded_content)),
+        }))
+        logger.info("   [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
+                    tool_sequence, tool_name, status,
+                    observation.get("raw_chars", len(tool_content)),
+                    observation.get("summary_chars", len(bounded_content)),
+                    observation.get("processor", "unknown"))
+        self._log_observation_projection(node_id, tool_name, observation)
+        logger.debug("   [AICall] tool #%d %s 摘要输出:\n%s",
+                    tool_sequence, tool_name,
+                    bounded_content[:2000])
+        evt = {
+            "type": "tool_result",
+            "transport_status": transport_status,
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+            "tool_sequence": tool_sequence,
+            "tool_args": tool_args,
+            "status": status,
+            "deduplicated": deduplicated,
+            "original_tool_call_id": original_tool_call_id,
+            "result_preview": bounded_content[:200],
+            "result": bounded_content,
+            "raw_ref": observation.get("raw_ref"),
+            "structured_ref": observation.get("structured_ref"),
+            "summary_ref": observation.get("summary_ref"),
+            "raw_chars": observation.get("raw_chars", len(tool_content)),
+            "summary_chars": observation.get("summary_chars", len(bounded_content)),
+            "semantic_success": observation.get("semantic_success", True),
+            "structured": observation.get("structured"),
+            "observation_processed": observation.get("processed", False),
+            "observation_processor": observation.get("processor", ""),
+            "observation_audit": observation.get(
+                "observation_audit", {}
+            ),
+            "context_usage_ratio": observation.get("context_usage_ratio"),
+            "iteration": run.iteration,
+        }
+        push_event(run.stream_queue, "tool_result", node_id, **evt)
+        self._record(run.thinking_events, "tool_result", node_id, **evt)
+        run.model_request_started_at = time.time()
+        await self._maybe_compact_after_tool_result(run)
+
+    @staticmethod
+    def _write_back_bounded_tool_message(
+        msg: Any,
+        bounded_content: str,
+        observation: Dict[str, Any],
+    ) -> None:
+        """Replace the ToolMessage body with its bounded summary + archive refs."""
+        try:
+            msg.content = bounded_content
+            additional_kwargs = dict(
+                getattr(msg, "additional_kwargs", None) or {}
+            )
+            additional_kwargs.update({
+                "aiops_raw_ref": observation.get("raw_ref"),
+                "aiops_structured_ref": observation.get(
+                    "structured_ref"
+                ),
+                "aiops_summary_ref": observation.get(
+                    "summary_ref"
+                ),
+                "aiops_semantic_success": observation.get(
+                    "semantic_success",
+                    True,
+                ),
+            })
+            msg.additional_kwargs = additional_kwargs
+        except Exception as exc:
+            logger.warning("[AICall] ToolMessage 内容压缩回写失败: %s", exc)
+
+    @staticmethod
+    def _tool_result_status(msg: Any, observation: Dict[str, Any]) -> Tuple[str, str]:
+        """Return ``(status, transport_status)``; may mark observation failed."""
+        status = str(
+            getattr(msg, "status", "success") or "success"
+        ).strip().lower()
+        if status not in {"success", "error"}:
+            status = "success"
+        if status == "error":
+            observation["semantic_success"] = False
+        transport_status = status
+        if observation.get("semantic_success") is False:
+            status = "error"
+        return status, transport_status
+
+    @staticmethod
+    def _log_observation_projection(
+        node_id: str,
+        tool_name: str,
+        observation: Dict[str, Any],
+    ) -> None:
+        projection_audit = observation.get("observation_audit")
+        if isinstance(projection_audit, dict) and projection_audit:
+            projection_budget = (
+                projection_audit.get("budget")
+                if isinstance(projection_audit.get("budget"), dict)
+                else {}
+            )
+            logger.info(
+                "   [AICall] observability projection | node=%s tool=%s evidence=%d selected=%d omitted=%d patterns=%d/%d budget=%d/%d stop=%s unattempted=%d strategy=%s raw_ref=%s",
+                node_id or "?",
+                tool_name,
+                projection_audit.get("evidence_total", 0),
+                projection_audit.get("evidence_selected", 0),
+                projection_audit.get("evidence_omitted", 0),
+                projection_audit.get("semantic_patterns_selected", 0),
+                projection_audit.get("semantic_patterns_total", 0),
+                projection_budget.get("final_summary_chars", 0),
+                projection_budget.get("max_chars", 0),
+                projection_budget.get("selection_terminated_by", "unknown"),
+                projection_budget.get("candidates_unattempted", 0),
+                projection_audit.get("strategy", "unknown"),
+                observation.get("raw_ref") or "unavailable",
+            )
+            if projection_audit.get("evidence_omitted", 0):
+                logger.warning(
+                    "   [AICall] evidence kept outside model context | node=%s tool=%s omitted=%d retrievable_raw_ref=%s",
+                    node_id or "?",
+                    tool_name,
+                    projection_audit.get("evidence_omitted", 0),
+                    observation.get("raw_ref") or "unavailable",
+                )
+            if projection_audit.get("semantic_patterns_omitted", 0):
+                logger.warning(
+                    "   [AICall] observability semantic coverage gap | node=%s tool=%s omitted_patterns=%d first_rejected=%s omitted_pattern_preview=%s omitted_profiles=%s",
+                    node_id or "?",
+                    tool_name,
+                    projection_audit.get("semantic_patterns_omitted", 0),
+                    json.dumps(
+                        projection_budget.get("first_rejected"),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )[:1200],
+                    json.dumps(
+                        projection_audit.get("omitted_pattern_preview", []),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )[:1200],
+                    json.dumps(
+                        projection_audit.get("omitted_profile_counts", {}),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )[:1200],
+                )
+        context_usage_ratio = observation.get("context_usage_ratio")
+        if isinstance(context_usage_ratio, (int, float)) and context_usage_ratio >= 0.8:
+            logger.warning(
+                "   [AICall] context compression guard triggered | node=%s tool=%s usage=%.0f%% processor=%s",
+                node_id or "?",
+                tool_name,
+                context_usage_ratio * 100,
+                observation.get("processor", "unknown"),
+            )
+
+    async def _maybe_compact_after_tool_result(self, run: "_AgentRun") -> None:
+        """Runtime compaction step, bounded by ``max_compactions_per_call``."""
+        if run.compaction_count >= run.max_compactions:
+            return
+        compacted = await anyio.to_thread.run_sync(
+            partial(
+                self._maybe_compact_runtime_context,
+                node_id=run.node_id or "unknown",
+                run_id=run.run_id,
+                static_context_components=run.static_context_components,
+                thinking_events=run.thinking_events,
+                tool_observation_contents=run.tool_observation_contents,
+            ),
+        )
+        if compacted:
+            run.compaction_count += 1
+            self._compact_langgraph_ai_messages_in_place(run.emitted_ai_messages)
+            self._compact_langgraph_tool_messages_in_place(run.emitted_tool_messages)
 
     # ------------------------------------------------------------------
     # Private helpers
