@@ -29,7 +29,7 @@ help:
 	@echo "Setup: CONTRIBUTING.md; baseline: docs/maintenance-normalization.md"
 
 test-unit:
-	$(PYTHON) -m pytest tests/unit test/workflow/test_runbook_remediation_guidance.py -q
+	$(PYTHON) -m pytest -q
 
 check-syntax:
 	$(PYTHON) scripts/check_syntax.py

@@ -43,10 +43,12 @@ class RunbookRemediationGuidanceTest(unittest.TestCase):
 
     def test_terminating_finalizer_patch_is_preferred_over_force_delete(self):
         body = _runbook_body("pod-terminating-stuck.md")
-        self.assertIn("kubectl patch pod <pod> -n <namespace> -p '{\"metadata\":{\"finalizers\":null}}' --type=merge", body)
+        # Targeted removal of the blocking finalizer, never clearing the whole list by default.
+        self.assertIn("定点移除相关 finalizer", body)
+        self.assertIn("不默认清空整个列表", body)
         self.assertIn("finalizers 为空时禁止按 finalizer 清理", body)
         self.assertIn("delete --force", body)
-        self.assertLess(body.index("kubectl patch pod"), body.index("delete --force"))
+        self.assertLess(body.index("定点移除相关 finalizer"), body.index("delete --force"))
 
     def test_dangerous_actions_are_marked_as_fallbacks(self):
         body = _runbook_body("pod-terminating-stuck.md")
