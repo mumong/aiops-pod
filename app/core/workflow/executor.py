@@ -1130,6 +1130,8 @@ class WorkflowExecutor:
         """
         snapshot = {}
 
+        # Live parallel node output. Without autonomous_group_results (the node
+        # failed before returning) parallel_evidence has no snapshot.
         if node_name == "parallel_evidence" and state.get("autonomous_group_results") is not None:
             return {"autonomous_groups": state.get("autonomous_groups"),
                     "groups": [{k: result.get(k) for k in ("group_id", "target", "status", "error", "run_id")}
@@ -1191,127 +1193,6 @@ class WorkflowExecutor:
                 "completeness": state.get("evidence_completeness"),
                 "evidence_analysis": evidence_analysis,
                 "evidence_items": serialized_evidence_items,
-            }
-        elif node_name == "parallel_evidence":
-            raw_inventory = [
-                lane
-                for lane in (state.get("parallel_lane_inventory") or [])
-                if isinstance(lane, dict)
-            ]
-            raw_groups = [
-                group
-                for group in (state.get("group_results") or [])
-                if isinstance(group, dict)
-            ]
-            ordered_inventory = sorted(
-                raw_inventory,
-                key=lambda lane: (
-                    int(lane.get("presentation_index") or 0),
-                    str(lane.get("group_id") or ""),
-                ),
-            )
-            ordered_groups = sorted(
-                raw_groups,
-                key=lambda group: (
-                    int(group.get("presentation_index") or 0),
-                    str(group.get("group_id") or ""),
-                ),
-            )
-            expected_ids = [
-                str(lane.get("group_id") or "")
-                for lane in ordered_inventory
-                if str(lane.get("group_id") or "")
-            ]
-            terminal_ids = [
-                str(group.get("group_id") or "")
-                for group in ordered_groups
-                if str(group.get("group_id") or "")
-            ]
-            expected_id_set = set(expected_ids)
-            terminal_id_set = set(terminal_ids)
-            duplicate_expected_ids = sorted({
-                group_id
-                for group_id in expected_ids
-                if expected_ids.count(group_id) > 1
-            })
-            duplicate_ids = sorted({
-                group_id
-                for group_id in terminal_ids
-                if terminal_ids.count(group_id) > 1
-            })
-            missing_ids = sorted(expected_id_set - terminal_id_set)
-            unexpected_ids = sorted(terminal_id_set - expected_id_set)
-            join_errors = []
-            if duplicate_expected_ids:
-                join_errors.append(
-                    "duplicate expected group IDs: "
-                    + ",".join(duplicate_expected_ids)
-                )
-            if duplicate_ids:
-                join_errors.append(
-                    "duplicate terminal group IDs: " + ",".join(duplicate_ids)
-                )
-            if missing_ids:
-                join_errors.append(
-                    "missing terminal group IDs: " + ",".join(missing_ids)
-                )
-            if unexpected_ids:
-                join_errors.append(
-                    "unexpected terminal group IDs: " + ",".join(unexpected_ids)
-                )
-            missing_artifact_ids = sorted({
-                str(group.get("group_id") or "")
-                for group in ordered_groups
-                if str(group.get("group_id") or "") in expected_id_set
-                and not isinstance(group.get("lane_diagnosis_artifact_ref"), dict)
-            })
-            if missing_artifact_ids:
-                join_errors.append(
-                    "missing lane artifact refs: "
-                    + ",".join(missing_artifact_ids)
-                )
-
-            terminal_statuses = [
-                str(
-                    group.get("terminal_status")
-                    or group.get("diagnostic_status")
-                    or "inconclusive"
-                ).lower()
-                for group in ordered_groups
-            ]
-            snapshot = {
-                "contract_version": "aiops.parallel-evidence-output.v2",
-                # Compatibility alias retained for existing UI consumers.
-                "group_count": len(ordered_groups),
-                "expected_group_count": len(expected_id_set),
-                "terminal_group_count": len(terminal_id_set),
-                "join_complete": not join_errors,
-                "diagnosed_count": terminal_statuses.count("diagnosed"),
-                "inconclusive_count": terminal_statuses.count("inconclusive"),
-                "error_count": terminal_statuses.count("error"),
-                "errors": join_errors,
-                "groups": [
-                    {
-                        "group_id": group.get("group_id"),
-                        "presentation_index": group.get(
-                            "presentation_index"
-                        ),
-                        "entities": group.get("entities") or [],
-                        "diagnostic_status": group.get(
-                            "diagnostic_status", "inconclusive"
-                        ),
-                        "artifact_ref": group.get(
-                            "lane_diagnosis_artifact_ref"
-                        ),
-                        "snapshot_sha256": (
-                            (
-                                group.get("lane_diagnosis_artifact") or {}
-                            ).get("artifact_refs")
-                            or {}
-                        ).get("snapshot", {}).get("sha256", ""),
-                    }
-                    for group in ordered_groups
-                ],
             }
         elif node_name == "rca":
             decision = state.get("deterministic_decision")

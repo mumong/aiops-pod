@@ -390,134 +390,6 @@ def test_executor_evidence_snapshot_is_json_serializable():
     json.dumps(snapshot, ensure_ascii=False)
 
 
-def test_executor_parallel_snapshot_contains_ordered_reloadable_group_index():
-    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
-    groups = []
-    for index in (3, 1, 2):
-        groups.append({
-            "group_id": f"g{index}",
-            "presentation_index": index - 1,
-            "entities": [{"namespace": f"ns-{index}", "name": "pod"}],
-            "diagnostic_status": "diagnosed",
-            "lane_diagnosis_artifact_ref": {
-                "path": f"/archive/g{index}/artifact.json",
-                "sha256": str(index) * 64,
-                "bytes": 100,
-            },
-            "lane_diagnosis_artifact": {
-                "artifact_refs": {
-                    "snapshot": {
-                        "path": f"/archive/g{index}/snapshot.json",
-                        "sha256": str(index) * 64,
-                        "bytes": 50,
-                    }
-                }
-            },
-        })
-
-    snapshot = executor._extract_state_snapshot(
-        {
-            "parallel_lane_inventory": [
-                {
-                    "group_id": f"g{index}",
-                    "presentation_index": index - 1,
-                    "entities": [{"namespace": f"ns-{index}", "name": "pod"}],
-                }
-                for index in (1, 2, 3)
-            ],
-            "group_results": groups,
-        },
-        "parallel_evidence",
-    )
-
-    assert snapshot["contract_version"] == (
-        "aiops.parallel-evidence-output.v2"
-    )
-    assert snapshot["group_count"] == 3
-    assert snapshot["expected_group_count"] == 3
-    assert snapshot["terminal_group_count"] == 3
-    assert snapshot["join_complete"] is True
-    assert snapshot["diagnosed_count"] == 3
-    assert snapshot["inconclusive_count"] == 0
-    assert snapshot["error_count"] == 0
-    assert snapshot["errors"] == []
-    assert [item["group_id"] for item in snapshot["groups"]] == [
-        "g1", "g2", "g3"
-    ]
-    assert all(item["artifact_ref"] for item in snapshot["groups"])
-    json.dumps(snapshot, ensure_ascii=False)
-
-
-def test_executor_parallel_snapshot_reports_non_total_join_deterministically():
-    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
-    artifact_ref = {
-        "path": "/archive/g/artifact.json",
-        "sha256": "1" * 64,
-        "bytes": 100,
-    }
-    snapshot = executor._extract_state_snapshot(
-        {
-            "parallel_lane_inventory": [
-                {"group_id": "g1", "presentation_index": 0, "entities": []},
-                {"group_id": "g2", "presentation_index": 1, "entities": []},
-                {"group_id": "g3", "presentation_index": 2, "entities": []},
-            ],
-            "group_results": [
-                {
-                    "group_id": "g1",
-                    "presentation_index": 0,
-                    "terminal_status": "diagnosed",
-                    "lane_diagnosis_artifact_ref": artifact_ref,
-                },
-                {
-                    "group_id": "g1",
-                    "presentation_index": 0,
-                    "terminal_status": "diagnosed",
-                    "lane_diagnosis_artifact_ref": artifact_ref,
-                },
-                {
-                    "group_id": "g4",
-                    "presentation_index": 3,
-                    "terminal_status": "error",
-                    "lane_diagnosis_artifact_ref": artifact_ref,
-                },
-            ],
-        },
-        "parallel_evidence",
-    )
-
-    assert snapshot["join_complete"] is False
-    assert snapshot["expected_group_count"] == 3
-    assert snapshot["terminal_group_count"] == 2
-    assert snapshot["errors"] == [
-        "duplicate terminal group IDs: g1",
-        "missing terminal group IDs: g2,g3",
-        "unexpected terminal group IDs: g4",
-    ]
-
-
-def test_executor_parallel_snapshot_requires_every_lane_artifact_ref():
-    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
-    snapshot = executor._extract_state_snapshot(
-        {
-            "parallel_lane_inventory": [
-                {"group_id": "g1", "presentation_index": 0, "entities": []},
-            ],
-            "group_results": [
-                {
-                    "group_id": "g1",
-                    "presentation_index": 0,
-                    "terminal_status": "inconclusive",
-                },
-            ],
-        },
-        "parallel_evidence",
-    )
-
-    assert snapshot["join_complete"] is False
-    assert snapshot["errors"] == ["missing lane artifact refs: g1"]
-
-
 class _ParallelLifecycleWorkflow:
     def __init__(self, node):
         self._node = node
@@ -548,11 +420,12 @@ class _ParallelLifecycleWorkflow:
             },
         ))
         state_update = {
-            "group_results": [{
+            "autonomous_group_results": [{
                 "group_id": "g3",
-                "presentation_index": 0,
-                "entities": [{"kind": "Pod", "namespace": "ns", "name": "pod"}],
-                "diagnostic_status": "diagnosed",
+                "target": {"group_id": "g3"},
+                "status": "completed",
+                "error": None,
+                "run_id": "lane-g3",
             }],
         }
         event_queue.put((
@@ -602,8 +475,14 @@ def test_executor_archives_parallel_group_state_only_after_lifecycle_end(monkeyp
     assert thinking["node"] == "parallel_evidence"
     assert thinking["lane_stage"] == "rca"
     assert [archive["node"] for archive in archives] == ["parallel_evidence"]
-    assert archives[0]["snapshot"]["group_count"] == 1
-    assert archives[0]["state"]["group_results"][0]["group_id"] == "g3"
+    assert [group["group_id"] for group in archives[0]["snapshot"]["groups"]] == ["g3"]
+    assert archives[0]["state"]["autonomous_group_results"][0]["group_id"] == "g3"
+
+
+def test_executor_parallel_snapshot_without_group_results_is_empty():
+    executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
+
+    assert executor._extract_state_snapshot({}, "parallel_evidence") == {}
 
 
 def test_executor_evidence_handoff_summary_uses_structured_plan_counts():
