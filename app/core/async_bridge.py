@@ -8,6 +8,8 @@ import threading
 from contextlib import AbstractContextManager, nullcontext, suppress
 from typing import Awaitable, Callable, Optional, TypeVar
 
+from app.core.log_context import bind_current_context
+
 T = TypeVar("T")
 
 # Extra time the worker gets to unwind after its in-loop timeout cancels the
@@ -42,7 +44,7 @@ def run_coroutine_sync(
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name)
     try:
-        future = pool.submit(_worker)
+        future = pool.submit(bind_current_context(_worker))
         return future.result(timeout=None if timeout is None else timeout + _CANCEL_GRACE_SECONDS)
     finally:
         pool.shutdown(wait=False, cancel_futures=True)

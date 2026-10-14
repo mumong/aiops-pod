@@ -23,6 +23,7 @@ from typing import Generator, Dict, Any, Optional
 
 from app.core.workflow.state import WorkflowState
 from app.core.workflow.graph import build_diagnosis_workflow
+from app.core.log_context import log_context
 from app.core.workflow.metrics import WorkflowMetrics
 from app.core.workflow.stream_contract import project_parallel_tool_event, project_query_tool_event, workflow_outcome
 from app.core.workflow.reporter import (
@@ -349,7 +350,7 @@ class WorkflowExecutor:
         def _run_workflow_in_thread():
             """在后台线程中运行 LangGraph workflow.stream()"""
             try:
-                with self._langfuse_session_scope(run_id):
+                with log_context(run=run_id), self._langfuse_session_scope(run_id):
                     for lg_event in workflow.stream(initial_state):
                         event_queue.put(("langgraph_event", lg_event))
                 event_queue.put(("langgraph_done", None))

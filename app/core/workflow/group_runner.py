@@ -5,6 +5,8 @@ Each worker owns its client and mutable state; results retain the input identity
 """
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
+from app.core.log_context import bind_current_context
+
 
 def iter_group_results(groups, worker, *, max_workers, cancel=None):
     groups = list(groups)
@@ -29,7 +31,7 @@ def iter_group_results(groups, worker, *, max_workers, cancel=None):
     pool = ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), len(groups))))
     completed = False
     try:
-        futures = {pool.submit(run, group): group for group in groups}
+        futures = {pool.submit(bind_current_context(run), group): group for group in groups}
         for future in as_completed(futures):
             group = futures[future]
             try:

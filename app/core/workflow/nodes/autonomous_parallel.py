@@ -5,6 +5,7 @@ import time
 import threading
 from typing import Any, Dict, List, Optional
 from app.core.aicall.errors import ModelStreamInterrupted, raise_on_model_disconnect
+from app.core.log_context import log_context
 from app.core.workflow.group_runner import iter_group_results
 
 from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
@@ -101,6 +102,10 @@ class AutonomousParallelNode(WorkflowNode):
         return "分组并发诊断"
 
     def _run_lane(self, group, state):
+        with log_context(lane=group["group_id"]):
+            return self._run_lane_in_context(group, state)
+
+    def _run_lane_in_context(self, group, state):
         from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode, DiagnosisRootCauseNode
         started_at = time.time()
         # Never share the mutable AICall memory/compaction policy between workers.

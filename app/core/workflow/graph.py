@@ -12,6 +12,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 from langgraph.graph import StateGraph, END
+from app.core.log_context import log_context
 from app.core.workflow.state import WorkflowState
 from app.core.workflow.nodes.request_router import RequestRouterNode
 from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
@@ -37,7 +38,8 @@ def _wrap_node_execute(node: Any):
             ))
 
         try:
-            new_state = node.execute(state)
+            with log_context(node=node.node_id):
+                new_state = node.execute(state)
         except Exception as exc:
             if event_queue is not None:
                 event_queue.put((

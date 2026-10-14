@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.api import register_routes
+from app.core.log_context import LOG_FORMAT, LogContextFilter
 
 # 配置日志（通过 LOG_LEVEL 环境变量控制，默认 INFO）
 # DEBUG: 完整工具调用参数和响应体、节点间传递的完整数据
@@ -19,11 +20,9 @@ from app.api import register_routes
 # WARNING: 工具调用失败、非零退出码
 # ERROR: 异常、超时
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(
-    level=_log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    force=True
-)
+logging.basicConfig(level=_log_level, format=LOG_FORMAT, force=True)
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(LogContextFilter())
 logger = logging.getLogger(__name__)
 
 # 确保所有 app.* 模块的日志级别统一受控
@@ -182,17 +181,21 @@ def main():
         "disable_existing_loggers": False,
         "formatters": {
             "default": {
-                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                "format": LOG_FORMAT,
             },
             "access": {
                 "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             },
+        },
+        "filters": {
+            "log_context": {"()": LogContextFilter},
         },
         "handlers": {
             "default": {
                 "formatter": "default",
                 "class": "logging.StreamHandler",
                 "stream": "ext://sys.stdout",
+                "filters": ["log_context"],
             },
             "access": {
                 "formatter": "access",
