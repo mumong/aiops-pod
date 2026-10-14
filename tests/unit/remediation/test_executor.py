@@ -130,3 +130,12 @@ def test_executor_marks_unhealthy_verify_as_needs_followup():
     assert events[-1]["type"] == "remediation_finished"
     assert events[-1]["status"] == "needs_followup"
     assert "结构化核验" in events[-1]["reason"]
+
+
+def test_run_local_command_times_out(monkeypatch):
+    import pytest
+    from app.core.remediation import executor as remediation_executor
+
+    monkeypatch.setattr(remediation_executor, "LOCAL_COMMAND_TIMEOUT_SECONDS", 0.2)
+    with pytest.raises(RuntimeError, match="timed out"):
+        remediation_executor.run_local_command("sleep 5")

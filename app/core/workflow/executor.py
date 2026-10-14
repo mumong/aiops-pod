@@ -360,8 +360,9 @@ class WorkflowExecutor:
         heartbeat_interval_s = self._get_heartbeat_interval_seconds()
         last_stream_event_ts = time.time()
 
-        # 创建共享事件队列
-        event_queue: queue.Queue = queue.Queue(maxsize=500)
+        # 共享事件队列：不设上限，消费者提前退出（断连）时生产者不会阻塞在 put()
+        # 而错过取消信号；取消后工作线程会很快收敛，积压有界。
+        event_queue: queue.Queue = queue.Queue()
 
         def _run_workflow_in_thread():
             """在后台线程中运行 LangGraph workflow.stream()"""
@@ -973,6 +974,9 @@ class WorkflowExecutor:
             # running worker when its consumer exits early.
             if cancel_event and worker is not None and worker.is_alive():
                 cancel_event.set()
+            # 断连（GeneratorExit）不经过 except 分支；detach 幂等。
+            if log_listener:
+                log_listener.detach()
             # 清除事件队列（实例级，无需类级别清理）+ 等待后台线程结束
             for node in node_instances:
                 node.set_event_queue(None)

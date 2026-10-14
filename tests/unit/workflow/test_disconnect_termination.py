@@ -1,6 +1,7 @@
 """Fatal transport failures must never become successful partial workflow runs."""
 import queue
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -77,3 +78,42 @@ def test_executor_emits_error_without_final_or_downstream(monkeypatch):
     assert visited == ['request_router', 'layer']
     assert len([e for e in events if e['type'] == 'error']) == 1
     assert not any(e['type'] == 'final' for e in events)
+
+
+def test_client_disconnect_releases_worker_and_log_listener(monkeypatch):
+    """Closing the stream early must not leave a producer blocked on a full queue."""
+    from app.core.workflow.executor import WorkflowExecutor
+    from tests.unit.workflow.test_executor_timing import _DummyHolmesService, _DummyLogListener
+    graph, nodes = build_diagnosis_workflow(query_mode='auto')
+    producer_done = threading.Event()
+    listener = _DummyLogListener()
+    detached = []
+    listener.detach = lambda: detached.append(True)
+
+    for node in nodes:
+        def execute(state, name=node.node_id, node=node):
+            if name == 'request_router':
+                return {'request_route': 'full_diagnosis'}
+            try:
+                for i in range(2000):  # far more than the old 500-slot queue
+                    if node.cancel_event.is_set():
+                        break
+                    node._event_queue.put(('thinking', {'type': 'ai_token', 'node': name, 'content': str(i)}))
+                    time.sleep(0.002)
+            finally:
+                producer_done.set()
+            return {}
+        node.execute = execute
+
+    monkeypatch.setattr('app.core.workflow.executor.build_diagnosis_workflow', lambda *a, **k: (graph, nodes))
+    monkeypatch.setattr('app.core.workflow.executor.create_log_listener', lambda: listener)
+    cancel = threading.Event()
+    stream = WorkflowExecutor(holmes_service=_DummyHolmesService()).execute_stream('测试', cancel_event=cancel)
+    for event in stream:  # read until the producer is streaming tokens
+        if event.get('type') == 'thinking':
+            break
+    stream.close()  # client disconnect -> GeneratorExit inside the generator
+
+    assert producer_done.wait(timeout=5)
+    assert cancel.is_set()
+    assert detached

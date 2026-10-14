@@ -29,8 +29,21 @@ UNHEALTHY_REMEDIATION_MARKERS = (
 CommandRunner = Callable[[str], str]
 
 
+# Same bound as PodRepairExecutor's kubectl runner; a hung command must not pin the run.
+LOCAL_COMMAND_TIMEOUT_SECONDS = 60
+
+
 def run_local_command(command: str) -> str:
-    result = subprocess.run(shlex.split(command), text=True, capture_output=True, check=False)
+    try:
+        result = subprocess.run(
+            shlex.split(command),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=LOCAL_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"command timed out after {LOCAL_COMMAND_TIMEOUT_SECONDS}s: {command}") from exc
     output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
     if result.returncode != 0:
         raise RuntimeError(output or f"command failed with exit code {result.returncode}: {command}")
