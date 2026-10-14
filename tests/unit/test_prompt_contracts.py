@@ -20,14 +20,6 @@ from app.core import prompts
             "93607a1c021bfe307ec2f614839fa79d6d10c7515cca3a87a83458e4f5a74661",
         ),
         (
-            "CASE_REFINEMENT_PROMPT",
-            "933fc923d50b35b06b8fb8d8b39904963b2e757206e906cb03f6289014d80f26",
-        ),
-        (
-            "RUNBOOK_RECONCILIATION_PROMPT",
-            "3c70ffdd1f83538b0f35fca0eb507cf061af9606667cb96ae9abc73201d6e850",
-        ),
-        (
             "EVIDENCE_MEMORY_COMPRESSION_PROMPT",
             "4979155e45628eb49bbb2ff87afb87ae4c8d17976a1e8abe979b227d191834f1",
         ),

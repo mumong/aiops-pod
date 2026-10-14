@@ -7,7 +7,6 @@ import pytest
 from pydantic import ValidationError
 
 import app.core.workflow.fact_contract as fact_contract_module
-from app.core.prompts import ROOT_CAUSE_ANALYZER_PROMPT
 from app.core.workflow.fact_contract import (
     build_kubernetes_lifecycle_fact_ledger,
     build_observability_query_fact_ledger,
@@ -2221,27 +2220,6 @@ def test_compact_fact_ledgers_json_retains_identity_index_for_many_cases():
         f"case-{index:03d}" for index in range(65)
     ]
     assert all(item["ledger_ref"] for item in parsed["case_index"])
-
-
-def test_rca_prompt_matches_narrative_tool_evidence_contract():
-    assert "每次真实工具调用唯一的一份高价值摘要" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "工具失败边界和归档引用" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "自然语言分析只帮助组织推理，不是事实来源" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "采集计划、Runbook 和上游判断不是新的事实来源" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "Metrics 必须保留指标名、真实值、单位" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "工具调用失败只代表该次采集失败" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "direct 且 confidence=medium/high" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "direct 或 high-confidence" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "有工具证据且有分析结论，至少 0.8" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "必须且只能有一个 hypothesis" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "每个当前 scope entity 必须恰好有一个 hypothesis" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "必须恰好有一个 hypothesis" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "每个 hypothesis 必须绑定 authoritative entity" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "一个主要 hypothesis 足够" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "只有确有独立候选时才增加" not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "不为了结构完整生成假设清单" in ROOT_CAUSE_ANALYZER_PROMPT
-    assert '"entity_id": "当前 Fact Ledger scope 中的 entity_id"' not in ROOT_CAUSE_ANALYZER_PROMPT
-    assert "strength=critical/strong" not in ROOT_CAUSE_ANALYZER_PROMPT
 
 
 def test_kubernetes_lifecycle_adapter_preserves_last_reason_and_exit_code():

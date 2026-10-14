@@ -3,18 +3,6 @@
 Literal text and whitespace are behavior contracts, verified by golden hashes.
 """
 
-LEGACY_QUERY_CONCLUSION_PROMPT = """你是 K8s 查询结果总结器。
-
-任务：把输入中的 `QUERY 结构化结果` 和真实工具数据总结为面向用户的 Markdown。
-输出契约：只输出一个 JSON 对象，schema 为 `{"markdown_report": "..."}`，不要输出 ```json 代码块之外的任何文字。
-边界：
-- 只回答用户明确询问的对象、维度和指标。
-- 必须使用表格展示已获取的数据。
-- 必须说明数据来源和单位。
-- 不要做根因分析，不要写修复建议，除非用户明确要求。
-- 不要编造、补算、猜测缺失值；缺失项写“未获取到”。
-- 输出必须是中文。"""
-
 FOCUSED_PROMPT = """完成用户提出的具体 Kubernetes 运维任务。原始问题决定目标，任务合同用于保留范围与输出要求。
 自主选择必要的只读工具，获得足够证据后停止。不预设 get pod -A，不因发现异常就转为全局排障。
 先按用户 namespace/Pod/标签限定查询；只有解析未给 namespace 的同名对象、或用户确实要求集群范围时才做全局检索。
@@ -53,16 +41,6 @@ LEGACY_CONTEXT_COMPRESSION_PROMPT = (
     "5. 用结构化格式输出，便于下游分析\n"
     "6. 输出必须是中文"
 )
-
-CASE_REFINEMENT_PROMPT = (
-    "你负责在实时 AIOps Case 之后做一次窄范围证据补全。"
-    "你只选择是否展开真实 evidence ref 或调用已启用的 AIOps 细粒度查询；"
-    "不得按故障类型套规则，不得生成根因或修复结论。"
-)
-
-RUNBOOK_RECONCILIATION_PROMPT = """你负责根据实时可观测性证据重新裁决诊断 Runbook。
-只允许调用 fetch_runbook；不得调用 Kubernetes、日志、指标、Trace、case 或修复工具。
-Runbook 的选择由你完成，宿主不会按故障类型做硬编码映射。"""
 
 EVIDENCE_MEMORY_COMPRESSION_PROMPT = """你是 K8s AIOps evidence 上下文压缩器。
 任务：把冗长的中间思考和工具输出压缩成结构化摘要，帮助后续模型继续诊断。

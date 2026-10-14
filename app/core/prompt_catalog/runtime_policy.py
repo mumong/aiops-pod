@@ -24,10 +24,6 @@ VISIBLE_OUTPUT_LANGUAGE_POLICY = (
     "- 调用工具前，用一句简短中文向用户说明本次查询目的；结果返回后若需继续调查，简述当前发现和下一步关注点。使用普通可见文本，不把进展只写进工具参数或最终 JSON。只提供可核实的进展摘要，不展开内部思维链，不重复工具详情，不为展示进展增加查询；最终仍按既定结构输出。\n"
 )
 
-DIAGNOSIS_CONCLUSION_REMEDIATION_CONSTRAINT = (
-    "\n当前为诊断总结，无新增工具调用。仅在既有真实证据足以核实对象身份和修复参数时附上修复计划；否则 actions 留空并说明需要补查。诊断报告仍是主任务，不因没有计划而省略诊断结论。"
-)
-
 RUNBOOK_CATALOG_INSTRUCTION = (
     "If one or more runbooks match the issue, use the fetch_runbook tool for each relevant runbook."
 )
