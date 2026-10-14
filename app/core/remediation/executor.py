@@ -11,21 +11,6 @@ from app.core.remediation.approval import ApprovalStore, approval_store
 from app.core.remediation.models import RemediationAction, RemediationPlan, normalize_remediation_mode
 
 
-UNHEALTHY_REMEDIATION_MARKERS = (
-    "OOMKilled",
-    "CrashLoopBackOff",
-    "ImagePullBackOff",
-    "ErrImagePull",
-    "CreateContainerConfigError",
-    "CreateContainerError",
-    "RunContainerError",
-    "Error",
-    "BackOff",
-    "0/1",
-    "0/2",
-)
-
-
 CommandRunner = Callable[[str], str]
 
 
@@ -169,7 +154,3 @@ class RemediationExecutor:
 def unhealthy_remediation_reason(text: str) -> Optional[str]:
     # Compatibility only: prose does not establish a resource's health.
     return None
-
-
-def healthy_remediation_observation(text: str) -> bool:
-    return False  # No structured verification contract in the legacy executor.

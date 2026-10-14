@@ -399,12 +399,6 @@ class ModelContextResolver:
         return None
 
 
-def get_model_context_window(model: str = "") -> Optional[int]:
-    resolved = ModelContextResolver().resolve(model)
-    value = resolved.get("context_window")
-    return int(value) if value else None
-
-
 def serialize_tool_schema(tools: Optional[Iterable[Any]]) -> List[Dict[str, Any]]:
     """Serialize enough of tool schemas to estimate prompt pressure."""
     serialized: List[Dict[str, Any]] = []
@@ -449,24 +443,6 @@ def serialize_tool_schema(tools: Optional[Iterable[Any]]) -> List[Dict[str, Any]
             except Exception:
                 item["args_schema"] = str(args_schema)
         serialized.append(item)
-    return serialized
-
-
-def serialize_tool_schema_for_openai(tools: Optional[Iterable[Any]]) -> List[Dict[str, Any]]:
-    """Serialize LangChain tools into a minimal OpenAI-compatible tool schema."""
-    serialized: List[Dict[str, Any]] = []
-    for item in serialize_tool_schema(tools):
-        parameters = item.get("args_schema")
-        if not isinstance(parameters, dict):
-            parameters = {"type": "object", "properties": {}}
-        serialized.append({
-            "type": "function",
-            "function": {
-                "name": item.get("name") or "unknown_tool",
-                "description": item.get("description") or "",
-                "parameters": parameters,
-            },
-        })
     return serialized
 
 

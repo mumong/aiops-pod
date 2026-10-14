@@ -100,4 +100,3 @@ def test_fact_schemas_accept_generic_evidence_contract():
         "legacy_contract": False,
     })
     assert ledger.records[0].fact_id == record.fact_id
-

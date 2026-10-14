@@ -19,7 +19,6 @@ from app.core.prompts import (
 from app.core.remediation.approval import ApprovalStore, approval_store
 from app.core.remediation.executor import (
     CommandRunner,
-    healthy_remediation_observation,
     run_local_command,
     unhealthy_remediation_reason,
 )

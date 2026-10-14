@@ -116,4 +116,3 @@ class ContextCompactionSummary(BaseModel):
     conflicts: list[str] = Field(default_factory=list)
     discarded_noise: list[str] = Field(default_factory=list)
     next_focus: list[str] = Field(default_factory=list)
-

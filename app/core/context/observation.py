@@ -1317,61 +1317,6 @@ class ObservationProcessor:
         return result
 
     @staticmethod
-    def _aiops_dimension_detail_lines(details: Dict[str, Any]) -> list[str]:
-        lines = ["dimension_details（真实可观测性原始信号）:"]
-        metrics = details.get("metrics") or {}
-        lines.append(f"- Metrics coverage={metrics.get('coverage')}")
-        for item in (metrics.get("highlights") or [])[:3]:
-            lines.append(
-                "  metric={metric} container={container} start={start} max={max} "
-                "last={last} limit={limit} ratio={ratio} samples={samples} ref={ref}".format(
-                    metric=item.get("metric", ""),
-                    container=item.get("container", ""),
-                    start=item.get("start", ""),
-                    max=item.get("max", ""),
-                    last=item.get("last", ""),
-                    limit=item.get("limit", ""),
-                    ratio=item.get("max_limit_ratio", ""),
-                    samples=item.get("samples", []),
-                    ref=item.get("evidence_ref", ""),
-                )
-            )
-        logs = details.get("logs") or {}
-        lines.append(f"- Logging coverage={logs.get('coverage')}")
-        for item in (logs.get("samples") or [])[:4]:
-            lines.append(
-                f"  {item.get('timestamp', '')} container={item.get('container', '')} "
-                f"message={item.get('message', '')} ref={item.get('evidence_ref', '')}"
-            )
-        tracing = details.get("tracing") or {}
-        lines.append(
-            f"- Tracing coverage={tracing.get('coverage')} "
-            f"deepflow={tracing.get('deepflow_coverage')} tempo={tracing.get('tempo_coverage')}"
-        )
-        for item in (tracing.get("flows") or [])[:3]:
-            lines.append(
-                f"  flow {item.get('src', '')}->{item.get('dst', '')} "
-                f"{item.get('protocol', '')} {item.get('request', '')} "
-                f"code={item.get('response_code', '')} duration_us={item.get('duration_us', '')} "
-                f"trace_id={item.get('trace_id', '')} ref={item.get('evidence_ref', '')}"
-            )
-        for item in (tracing.get("spans") or [])[:2]:
-            lines.append(
-                f"  span trace_id={item.get('trace_id', '')} service={item.get('service', '')} "
-                f"name={item.get('name', '')} attributes={item.get('attributes', {})} "
-                f"ref={item.get('evidence_ref', '')}"
-            )
-        topology = details.get("topology") or {}
-        lines.append(f"- Topology coverage={topology.get('coverage')}")
-        for item in (topology.get("edges") or [])[:5]:
-            lines.append(
-                f"  {item.get('source', '')}: {item.get('relationship', '')} -> {item.get('target', '')} "
-                f"directness={item.get('directness', '')} confidence={item.get('confidence', '')} "
-                f"refs={item.get('evidence_refs', [])}"
-            )
-        return lines
-
-    @staticmethod
     def _select_keys(payload: Dict[str, Any], keys: list[str]) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             return {}
@@ -2710,11 +2655,6 @@ class ObservationProcessor:
             if re.search(patterns, stripped, re.IGNORECASE):
                 selected.append(stripped)
         return cls._dedupe_lines(selected)[:limit]
-
-    @staticmethod
-    def _diagnostic_line_score(line: str) -> int:
-        # Compatibility hook: no cross-fault importance ranking.
-        return 0
 
     @staticmethod
     def _dedupe_lines(lines: list[str]) -> list[str]:

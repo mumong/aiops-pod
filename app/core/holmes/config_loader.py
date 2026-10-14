@@ -15,25 +15,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-import yaml
 
 from app.core.config import AppConfig, ConfigLoader
-
-
-def load_stream_output_flag(config_file: Path, logger) -> bool:
-    """
-    从配置文件读取 stream_output（顶级字段）
-    """
-    try:
-        with open(config_file, "r", encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f) or {}
-        stream_output = bool(config_dict.get("stream_output", False))
-        output_mode = "流式输出 (stream)" if stream_output else "非流式输出 (invoke)"
-        logger.info(f"📡 输出模式: {output_mode}")
-        return stream_output
-    except Exception as e:
-        logger.warning(f"读取流式输出配置失败，使用默认值（非流式）: {e}")
-        return False
 
 
 def substitute_env_vars(obj: Any, logger, depth: int = 0) -> Any:

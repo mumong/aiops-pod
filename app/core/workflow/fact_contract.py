@@ -754,4 +754,3 @@ def _typed_topology_endpoints(record: FactRecord) -> set[str]:
     if not source or not target or source == target:
         return set()
     return {source, target}
-

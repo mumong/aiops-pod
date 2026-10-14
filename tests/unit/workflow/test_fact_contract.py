@@ -347,4 +347,3 @@ def test_normalize_fact_ledger_rejects_mismatched_canonical_id():
 
     assert ledger is not None
     assert ledger.records == []
-

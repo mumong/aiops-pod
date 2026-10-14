@@ -33,9 +33,6 @@ class RequestContract(BaseModel):
     clarification: str = ""
 
 
-ROUTER_PROMPT = REQUEST_ROUTER_PROMPT  # Compatibility import; editable source is prompts.py.
-
-
 def router_failure(exc, history_loaded=False):
     """Public, sanitized error presentation; never expose provider bodies or credentials."""
     from app.core.aicall.errors import model_transport_message
