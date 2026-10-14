@@ -9,6 +9,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.api.common import current_service, logger
 from app.core.holmes.artifacts import get_artifact_store
+from app.core.paths import get_app_version
 
 router = APIRouter()
 
@@ -22,7 +23,7 @@ async def root():
     """API 信息和使用说明"""
     return {
         "service": "AIOps Copilot",
-        "version": "2.0.0",
+        "version": get_app_version(),
         "status": "running",
         "usage": {
             "诊断入口": "curl -G 'http://HOST/ask' --data-urlencode 'q=你的诊断问题'",
