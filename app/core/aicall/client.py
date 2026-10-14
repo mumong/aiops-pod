@@ -2258,17 +2258,7 @@ class AICall:
             api_key=self.api_key or "",
         )
         context_window = resolved.get("context_window")
-        output_reserved = 6000
-        model_settings = getattr(request, "model_settings", None)
-        if isinstance(model_settings, dict):
-            try:
-                output_reserved = int(
-                    model_settings.get("max_tokens")
-                    or model_settings.get("max_completion_tokens")
-                    or output_reserved
-                )
-            except (TypeError, ValueError):
-                output_reserved = 6000
+        output_reserved = self._agent_request_output_reserved(request)
         safety_margin = int(config["safety_tokens"])
 
         system_content = (
@@ -2328,16 +2318,20 @@ class AICall:
             ]
 
         estimator = ContextBudgetEstimator()
-        pre_budget = estimator.estimate(
-            node_id=f"{node_id}_agent_guard",
-            model=self.model_str,
-            system_prompt=system_content,
-            user_message="",
-            components=_components(messages_payload),
-            api_base=self.api_base or "",
-            api_key=self.api_key or "",
-            enable_usage_probe=False,
-        )
+
+        def _estimate(message_content: Any) -> Dict[str, Any]:
+            return estimator.estimate(
+                node_id=f"{node_id}_agent_guard",
+                model=self.model_str,
+                system_prompt=system_content,
+                user_message="",
+                components=_components(message_content),
+                api_base=self.api_base or "",
+                api_key=self.api_key or "",
+                enable_usage_probe=False,
+            )
+
+        pre_budget = _estimate(messages_payload)
         original_input_tokens = int(
             pre_budget.get("actual_context_tokens") or 0
         )
@@ -2372,25 +2366,18 @@ class AICall:
                 pre_budget=pre_budget,
             )
 
-        max_input_tokens = calculate_hard_input_limit(
+        (
+            max_input_tokens,
+            estimator_drift_reserve,
+            effective_input_target,
+        ) = self._hard_input_target(
+            config,
             context_window=context_window,
             output_reserved=output_reserved,
             safety_margin=safety_margin,
-            input_ratio=float(config["input_ratio"]),
+            token_count_accuracy=token_count_accuracy,
         )
         metadata["max_input_tokens"] = max_input_tokens
-        estimator_drift_reserve = (
-            0
-            if token_count_accuracy == "exact"
-            else min(
-                max_input_tokens,
-                int(config["estimator_drift_reserve"]),
-            )
-        )
-        effective_input_target = max(
-            0,
-            max_input_tokens - estimator_drift_reserve,
-        )
         metadata["effective_input_target"] = effective_input_target
         metadata["estimator_drift_reserve"] = estimator_drift_reserve
         pre_budget["hard_guard"] = dict(metadata)
@@ -2425,51 +2412,15 @@ class AICall:
                 pre_budget=pre_budget,
             )
 
-        compacted_history = self._build_agent_request_compaction_summary(
-            messages,
-            max_tokens=message_budget,
-        )
-        compacted_messages = [HumanMessage(content=compacted_history)]
-        final_budget = estimator.estimate(
-            node_id=f"{node_id}_agent_guard",
-            model=self.model_str,
-            system_prompt=system_content,
-            user_message="",
-            components=_components([
-                self._serialize_agent_message(compacted_messages[0])
-            ]),
-            api_base=self.api_base or "",
-            api_key=self.api_key or "",
-            enable_usage_probe=False,
-        )
-        final_input_tokens = int(
-            final_budget.get("actual_context_tokens") or 0
-        )
-        if final_input_tokens > effective_input_target:
-            overflow = final_input_tokens - effective_input_target
-            tighter_budget = max(1, message_budget - overflow - 64)
-            compacted_history = compact_text_to_token_budget(
-                compacted_history,
-                max_tokens=tighter_budget,
-                model=self.model_str,
+        compacted_messages, final_budget, final_input_tokens = (
+            self._compact_agent_request_history(
+                messages,
+                message_budget=message_budget,
+                effective_input_target=effective_input_target,
                 preserve_tail_tokens=int(config["preserve_tail_tokens"]),
+                estimate=_estimate,
             )
-            compacted_messages = [HumanMessage(content=compacted_history)]
-            final_budget = estimator.estimate(
-                node_id=f"{node_id}_agent_guard",
-                model=self.model_str,
-                system_prompt=system_content,
-                user_message="",
-                components=_components([
-                    self._serialize_agent_message(compacted_messages[0])
-                ]),
-                api_base=self.api_base or "",
-                api_key=self.api_key or "",
-                enable_usage_probe=False,
-            )
-            final_input_tokens = int(
-                final_budget.get("actual_context_tokens") or 0
-            )
+        )
         if final_input_tokens > effective_input_target:
             metadata.update({
                 "triggered": True,
@@ -2507,6 +2458,60 @@ class AICall:
             len(messages),
         )
         return request.override(messages=compacted_messages), final_budget
+
+    @staticmethod
+    def _agent_request_output_reserved(request: Any) -> int:
+        output_reserved = 6000
+        model_settings = getattr(request, "model_settings", None)
+        if isinstance(model_settings, dict):
+            try:
+                output_reserved = int(
+                    model_settings.get("max_tokens")
+                    or model_settings.get("max_completion_tokens")
+                    or output_reserved
+                )
+            except (TypeError, ValueError):
+                output_reserved = 6000
+        return output_reserved
+
+    def _compact_agent_request_history(
+        self,
+        messages: List[Any],
+        *,
+        message_budget: int,
+        effective_input_target: int,
+        preserve_tail_tokens: int,
+        estimate: Callable[[Any], Dict[str, Any]],
+    ) -> Tuple[List[HumanMessage], Dict[str, Any], int]:
+        """Summarize history into one message; tighten once if still over target."""
+        compacted_history = self._build_agent_request_compaction_summary(
+            messages,
+            max_tokens=message_budget,
+        )
+        compacted_messages = [HumanMessage(content=compacted_history)]
+        final_budget = estimate([
+            self._serialize_agent_message(compacted_messages[0])
+        ])
+        final_input_tokens = int(
+            final_budget.get("actual_context_tokens") or 0
+        )
+        if final_input_tokens > effective_input_target:
+            overflow = final_input_tokens - effective_input_target
+            tighter_budget = max(1, message_budget - overflow - 64)
+            compacted_history = compact_text_to_token_budget(
+                compacted_history,
+                max_tokens=tighter_budget,
+                model=self.model_str,
+                preserve_tail_tokens=preserve_tail_tokens,
+            )
+            compacted_messages = [HumanMessage(content=compacted_history)]
+            final_budget = estimate([
+                self._serialize_agent_message(compacted_messages[0])
+            ])
+            final_input_tokens = int(
+                final_budget.get("actual_context_tokens") or 0
+            )
+        return compacted_messages, final_budget, final_input_tokens
 
     @staticmethod
     def _serialize_agent_message(message: Any) -> Dict[str, Any]:
