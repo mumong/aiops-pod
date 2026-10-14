@@ -1,7 +1,7 @@
 """MCP 工具加载：使用 langchain-mcp-adapters 连接 MCP SSE 服务"""
 import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,19 @@ def _wrap_mcp_tool_for_transport(tool: Any) -> Any:
     return wrapped
 
 
-async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
+# config.yaml ``mode`` -> langchain-mcp-adapters transport name
+_MCP_TRANSPORTS = {
+    "sse": "sse",
+    "http": "streamable_http",
+    "streamable-http": "streamable_http",
+    "streamable_http": "streamable_http",
+}
+
+
+async def load_mcp_tools(
+    mcp_servers_config: Dict[str, Any],
+    failed_servers: Optional[List[str]] = None,
+) -> List:
     """从 MCP 配置加载所有工具为 LangChain BaseTool
 
     Args:
@@ -99,6 +111,8 @@ async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
                 url: "http://host:port/sse"
                 mode: "sse"
               enabled: true
+
+        failed_servers: 可选输出参数，追加连接失败的 server 名称（供后续补连）
 
     Returns:
         List[BaseTool] — 所有已连接 MCP 服务器的工具列表
@@ -122,8 +136,13 @@ async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
             logger.warning("   ⚠️ [MCP-Tools] %s 无 url，跳过", name)
             continue
 
+        mode = str(config.get("mode") or "sse").lower()
+        transport = _MCP_TRANSPORTS.get(mode)
+        if transport is None:
+            logger.warning("   ⚠️ [MCP-Tools] %s 未知 mode=%s，按 sse 连接", name, mode)
+            transport = "sse"
         connections[name] = {
-            "transport": "sse",
+            "transport": transport,
             "url": url,
         }
         logger.debug("   📡 [MCP-Tools] 注册: %s → %s", name, url)
@@ -135,7 +154,8 @@ async def load_mcp_tools(mcp_servers_config: Dict[str, Any]) -> List:
     # 逐个 server 连接并加载工具，记录每个 server 的工具列表
     all_tools: List = []
     server_tool_map: Dict[str, List[str]] = {}
-    failed_servers: List[str] = []
+    if failed_servers is None:
+        failed_servers = []
 
     for srv_name, conn_cfg in connections.items():
         try:

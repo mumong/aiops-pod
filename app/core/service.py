@@ -8,8 +8,9 @@ import os
 import logging
 import threading
 import json
+import time
 from pathlib import Path
-from typing import Optional, Tuple, Any, Generator, Dict
+from typing import Optional, Tuple, Any, Generator, Dict, List
 from datetime import datetime
 
 from holmes.plugins.runbooks import RunbookCatalog
@@ -25,6 +26,10 @@ from app.core.aicall import AICall
 
 logger = logging.getLogger(__name__)
 
+# 集群不支持 metrics-server 的工具，加载后移除
+DISABLED_TOOL_NAMES = ("kubectl_top_nodes", "kubectl_top_pods")
+MCP_RETRY_INTERVAL_SECONDS = 60.0
+MCP_RETRY_TIMEOUT_SECONDS = 15.0
 
 
 def _short_cell(value: Any, max_chars: int = 80) -> str:
@@ -268,6 +273,11 @@ class HolmesService:
         self.raw_config: Dict = {}       # 完整原始配置
         self.ai_call: Optional[AICall] = None
         self.mcp_tools: list = []
+        # 启动时连接失败的 MCP server：请求时按间隔补连（已发现的工具每次调用新建会话，可自行恢复）
+        self._mcp_servers_config: Dict[str, Any] = {}
+        self._mcp_failed_servers: List[str] = []
+        self._mcp_retry_after: float = 0.0
+        self._mcp_retry_lock = threading.Lock()
 
     def _is_initialized(self) -> bool:
         """检查服务是否已初始化"""
@@ -371,7 +381,6 @@ class HolmesService:
                     )
 
                 # 加载 runbooks
-                import time
                 step_start = time.time()
                 logger.info("🔄 加载 runbook catalogs...")
                 self._load_runbooks()
@@ -401,9 +410,13 @@ class HolmesService:
                     try:
                         step_start = time.time()
                         logger.info("🔄 [AICall] 加载 MCP 工具...")
+                        failed: List[str] = []
                         self.mcp_tools = run_coroutine_sync(
-                            lambda cfg=mcp_cfg: load_mcp_tools(cfg), timeout=60
+                            lambda cfg=mcp_cfg: load_mcp_tools(cfg, failed), timeout=60
                         )
+                        self._mcp_servers_config = mcp_cfg
+                        self._mcp_failed_servers = failed
+                        self._mcp_retry_after = time.monotonic() + MCP_RETRY_INTERVAL_SECONDS
                         logger.info("   ✅ [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
                                    len(self.mcp_tools), time.time() - step_start)
                         for t in self.mcp_tools:
@@ -411,6 +424,11 @@ class HolmesService:
                     except Exception as e:
                         logger.error("   ❌ [AICall] MCP 工具加载失败: %s", e, exc_info=True)
                         self.mcp_tools = []
+                        self._mcp_servers_config = mcp_cfg
+                        self._mcp_failed_servers = [
+                            name for name, cfg in mcp_cfg.items() if (cfg or {}).get("enabled", False)
+                        ]
+                        self._mcp_retry_after = time.monotonic() + MCP_RETRY_INTERVAL_SECONDS
                 else:
                     self.mcp_tools = []
                     logger.info("   ℹ️ [AICall] 无 MCP 服务器配置")
@@ -453,7 +471,7 @@ class HolmesService:
                 logger.info(f"   ✅ 资源信息输出完成 ({time.time() - step_start:.2f}s)")
 
                 # 禁用不可用的工具
-                self._disable_tools(["kubectl_top_nodes", "kubectl_top_pods"])
+                self._disable_tools(DISABLED_TOOL_NAMES)
 
                 return self.config, self.ai_call
             except Exception as e:
@@ -461,6 +479,40 @@ class HolmesService:
                 raise
             finally:
                 self._init_in_progress = False
+
+    def _retry_failed_mcp_servers(self) -> None:
+        """补连启动时失败的 MCP server（有间隔限制，非阻塞并发）。"""
+        if not self._mcp_failed_servers or time.monotonic() < self._mcp_retry_after:
+            return
+        if not self._mcp_retry_lock.acquire(blocking=False):
+            return
+        try:
+            if not self._mcp_failed_servers or time.monotonic() < self._mcp_retry_after:
+                return
+            from app.core.aicall.tools import load_mcp_tools
+            from app.core.async_bridge import run_coroutine_sync
+
+            retry_cfg = {name: self._mcp_servers_config[name] for name in self._mcp_failed_servers
+                         if name in self._mcp_servers_config}
+            still_failed: List[str] = []
+            try:
+                recovered = run_coroutine_sync(
+                    lambda: load_mcp_tools(retry_cfg, still_failed),
+                    timeout=MCP_RETRY_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.warning("[MCP-Tools] 补连失败: %s", exc)
+                recovered, still_failed = [], list(retry_cfg)
+            known = {t.name for t in self.mcp_tools}
+            added = [t for t in recovered if t.name not in known and t.name not in DISABLED_TOOL_NAMES]
+            if added:
+                self.mcp_tools = self.mcp_tools + added
+                logger.info("[MCP-Tools] 补连成功，新增 %d 个工具: %s",
+                            len(added), ", ".join(t.name for t in added))
+            self._mcp_failed_servers = still_failed
+            self._mcp_retry_after = time.monotonic() + MCP_RETRY_INTERVAL_SECONDS
+        finally:
+            self._mcp_retry_lock.release()
 
     def _disable_tools(self, tool_names: list):
         """从工具列表中移除指定工具"""
@@ -744,7 +796,6 @@ class HolmesService:
                 self.ai_call = None
             self.initialize(api_key=api_key, model=model, max_steps=max_steps)
 
-            import time
             max_wait = 60
             waited = 0
             while not self._is_initialized() and waited < max_wait:
@@ -804,7 +855,6 @@ class HolmesService:
         workflow_title: str = "工作流诊断模式",
     ) -> Generator[str, None, None]:
         """执行查询并以流式方式返回结果"""
-        import time
         max_wait = 60
         waited = 0
         while not self._is_initialized() and waited < max_wait:
@@ -846,6 +896,7 @@ class HolmesService:
         try:
             from app.core.workflow.executor import WorkflowExecutor
 
+            self._retry_failed_mcp_servers()
             executor = WorkflowExecutor(holmes_service=self)
             executor.ai_call = self._build_request_scoped_ai_call()
             executor.mcp_tools = self.mcp_tools or []
@@ -1209,6 +1260,7 @@ class HolmesService:
                 "ai_initialized": True,
                 "mode": "AICall(LangGraph)",
                 "model": model_name,
+                "mcp_failed_servers": list(self._mcp_failed_servers),
             }
         if self._init_in_progress:
             return {

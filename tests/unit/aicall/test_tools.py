@@ -123,3 +123,32 @@ def test_prometheus_wrapper_uses_content_response_format():
     assert wrapped.name == "execute_prometheus_instant_query"
     assert wrapped.response_format == "content"
     assert wrapped.metadata == {"server_name": "prometheus"}
+
+
+def test_load_mcp_tools_honors_mode_and_reports_failed_servers():
+    config = {
+        "ok": {"config": {"url": "http://localhost:8093/mcp", "mode": "streamable-http"}, "enabled": True},
+        "down": {"config": {"url": "http://localhost:9999/sse", "mode": "sse"}, "enabled": True},
+    }
+    seen = {}
+
+    def _client(connections):
+        name = next(iter(connections))
+        seen[name] = connections[name]["transport"]
+        instance = AsyncMock()
+        if name == "down":
+            instance.get_tools = AsyncMock(side_effect=ConnectionError("refused"))
+        else:
+            tool = MagicMock()
+            tool.name = "tool_ok"
+            tool.metadata = {}
+            instance.get_tools = AsyncMock(return_value=[tool])
+        return instance
+
+    failed = []
+    with patch("langchain_mcp_adapters.client.MultiServerMCPClient", side_effect=_client):
+        tools = _run(load_mcp_tools(config, failed))
+
+    assert seen == {"ok": "streamable_http", "down": "sse"}
+    assert len(tools) == 1
+    assert failed == ["down"]
