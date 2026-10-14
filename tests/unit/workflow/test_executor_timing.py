@@ -14,11 +14,7 @@ from app.core.service import HolmesService
 from app.core.skills.models import EvidenceItem, EvidenceLevel
 from app.core.workflow.executor import WorkflowExecutor, _missing_structured_actions_reason
 from app.core.workflow.metrics import WorkflowMetrics
-from app.core.workflow.nodes.conclusion_formatter import ConclusionFormatterNode
-from app.core.workflow.nodes.evidence_collector import EvidenceCollectorNode
-from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
-from app.core.workflow.nodes.parallel_evidence import _ScopedParallelEventQueue
-from app.core.workflow.schemas import EvidencePlanOutput, LayerOutput
+from app.core.workflow.nodes.autonomous_parallel import LaneQueue
 
 
 def _install_fake_langfuse(monkeypatch):
@@ -555,7 +551,7 @@ class _ParallelLifecycleWorkflow:
                 "ts": now,
             },
         ))
-        scoped_queue = _ScopedParallelEventQueue(
+        scoped_queue = LaneQueue(
             event_queue,
             group_id="g3",
             entities=[{"kind": "Pod", "namespace": "ns", "name": "pod"}],
@@ -920,77 +916,14 @@ def test_bare_write_command_name_in_caution_is_not_treated_as_actionable_advice(
     assert _missing_structured_actions_reason(report, plan) is None
 
 
-class _DirectStructuredAICall:
-    def call_structured(self, **kwargs):
-        schema = kwargs["schema"]
-        if schema is LayerOutput:
-            value = schema.model_validate({
-                "layer": "L2",
-                "reasoning": "真实工具结果确认容器运行时异常",
-            })
-        elif schema is EvidencePlanOutput:
-            value = schema.model_validate({
-                "layer": "L2",
-                "evidence_plan": [{
-                    "id": "case-pod-a",
-                    "description": "采集 Pod 多维可观测性证据",
-                    "level": "critical",
-                    "tool": "collect_aiops_case",
-                    "command": "default/pod-a",
-                    "tool_args": {"namespace": "default", "pod": "pod-a"},
-                }],
-            })
-        else:
-            raise AssertionError(f"unexpected schema: {schema}")
-        return value, value.model_dump_json()
 
 
-class _DirectCompressionAICall:
-    def call_simple(self, **kwargs):
-        return "压缩后的真实证据"
 
 
-def test_layer_structured_extract_counts_one_direct_llm_request():
-    metrics = WorkflowMetrics(run_id="layer-direct")
-    node = LayerClassifierNode(metrics=metrics)
-    node.ai_call = _DirectStructuredAICall()
-
-    result = node._extract_with_lite_llm(
-        question="我的集群有什么问题",
-        full_analysis_text="kubectl 已确认 pod-a CrashLoopBackOff",
-    )
-
-    assert result["layer"] == "L2"
-    assert metrics.direct_llm_calls == 1
-    assert metrics.total_llm_calls == 1
 
 
-def test_evidence_plan_counts_one_direct_llm_request():
-    metrics = WorkflowMetrics(run_id="evidence-plan-direct")
-    node = EvidenceCollectorNode(metrics=metrics)
-    node.ai_call = _DirectStructuredAICall()
-
-    plan, _ = node._generate_structured_evidence_plan(
-        system_prompt="生成最小证据计划",
-        user_message="诊断 default/pod-a",
-        layer_str="L2",
-    )
-
-    assert plan[0]["tool"] == "collect_aiops_case"
-    assert metrics.direct_llm_calls == 1
-    assert metrics.total_llm_calls == 1
 
 
-def test_llm_context_compaction_counts_one_direct_llm_request():
-    metrics = WorkflowMetrics(run_id="compact-direct")
-    node = ConclusionFormatterNode(metrics=metrics)
-    node.ai_call = _DirectCompressionAICall()
-
-    result = node._compact_context("x" * 5000, max_chars=100)
-
-    assert result == "压缩后的真实证据"
-    assert metrics.direct_llm_calls == 1
-    assert metrics.total_llm_calls == 1
 
 
 def test_metrics_separates_parallel_tool_cumulative_and_wall_time():

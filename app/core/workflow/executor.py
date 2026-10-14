@@ -261,9 +261,9 @@ class WorkflowExecutor:
                 else:
                     wf_config[key] = value
         node_config = wf_config.get("nodes", {})
-        query_mode = "full"
+        query_mode = "auto"
         if workflow_overrides:
-            query_mode = str(workflow_overrides.get("query_mode", "full")).strip().lower() or "full"
+            query_mode = str(workflow_overrides.get("query_mode", "auto")).strip().lower() or "auto"
         wf_config.pop("query_mode", None)
         if workflow_overrides and "query_mode" in workflow_overrides:
             wf_config["query_mode"] = query_mode

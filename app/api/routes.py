@@ -255,10 +255,11 @@ def register_routes(app):
         question = fix_double_encoding(question)  # 修复双重编码
         logger.info(f"📝 收到查询 (路径): {question[:80]}...")
         
+        overrides = _diagnosis_workflow_overrides()
         if stream:
-            return _stream_response(question, format, max_steps)
+            return _stream_response(question, format, max_steps, overrides)
         else:
-            return await _sync_response(question, max_steps)
+            return await _sync_response(question, max_steps, overrides)
 
     @app.post("/remediation/approve")
     async def remediation_approve(

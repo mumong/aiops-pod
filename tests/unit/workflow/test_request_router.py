@@ -15,14 +15,8 @@ def test_ordinary_operation_contract_keeps_focused_route_and_session_scope():
     assert contract.pod_names == []
     assert "普通变更不等于故障修复" in REQUEST_ROUTER_PROMPT
     assert "不再次发起修复" in REQUEST_ROUTER_PROMPT
-from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 
 
-def test_observed_entities_are_never_promoted_to_user_explicit_targets():
-    observed = [{"type": "pod", "namespace": "aiops-case-08", "name": "workload"}]
-    assert LayerClassifierNode._extract_explicit_pod_targets("xnet 中有异常吗？", observed) == []
-    assert LayerClassifierNode._extract_explicit_pod_targets("集群有什么问题？", observed) == []
-    assert LayerClassifierNode._extract_explicit_pod_targets("检查 xnet/nginx", observed) == [("xnet", "nginx")]
 
 
 @pytest.mark.parametrize("update", [

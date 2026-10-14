@@ -1,6 +1,6 @@
 import queue
 
-from app.core.workflow.nodes.parallel_evidence import _ScopedParallelEventQueue
+from app.core.workflow.nodes.autonomous_parallel import LaneQueue
 from app.core.workflow.stream_contract import (
     build_parallel_evidence_stream_context,
     project_parallel_tool_event,
@@ -22,7 +22,7 @@ def _parallel_context():
 
 def test_scoped_parallel_queue_attaches_authoritative_group_context_without_mutating_input():
     target = queue.Queue()
-    scoped = _ScopedParallelEventQueue(
+    scoped = LaneQueue(
         target,
         group_id="g3",
         entities=GROUP_ENTITIES,
@@ -43,7 +43,7 @@ def test_scoped_parallel_queue_attaches_authoritative_group_context_without_muta
 
 def test_scoped_parallel_queue_uses_outer_lifecycle_node_and_preserves_lane_stage():
     target = queue.Queue()
-    scoped = _ScopedParallelEventQueue(
+    scoped = LaneQueue(
         target,
         group_id="g3",
         entities=GROUP_ENTITIES,

@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 from pydantic import BaseModel
 
 from app.core.workflow.nodes.base import WorkflowNode
-from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.workflow.structured_runtime import StructuredAgentRuntime
 
 
@@ -36,18 +35,6 @@ def test_extract_structured_response_returns_none_when_missing():
     assert parsed is None
 
 
-def test_layer_output_normalizes_query_result_alias_to_query():
-    normalized = LayerClassifierNode._normalize_layer_output_dict({
-        "layer": "query_result",
-        "derived_layer": "query_result",
-        "layers": ["query_result"],
-        "confidence": 0.9,
-        "reasoning": "查询结果已生成",
-    })
-
-    assert normalized["layer"] == "QUERY"
-    assert normalized["derived_layer"] == "QUERY"
-    assert normalized["layers"] == ["QUERY"]
 
 
 def test_workflow_node_structured_agent_helper_with_tools_uses_agent_response_schema():

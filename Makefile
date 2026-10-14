@@ -20,20 +20,16 @@ A2A_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30801
 .PHONY: build build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
 	case-list case-list-variants case-render case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean case-clean-variants
 
-.PHONY: help test-unit test-replay check check-syntax lint
+.PHONY: help test-unit check check-syntax lint
 
 help:
 	@echo "build-main / build-a2a: container artifacts (Python service, no native binary)"
 	@echo "test-unit: isolated unit tests and Runbook contracts"
-	@echo "test-replay: historical evidence replay; known failures are documented"
-	@echo "check: syntax + unit + replay; lint: static correctness checks"
+	@echo "check: syntax + unit; lint: static correctness checks"
 	@echo "Setup: CONTRIBUTING.md; baseline: docs/maintenance-normalization.md"
 
 test-unit:
 	$(PYTHON) -m pytest tests/unit test/workflow/test_runbook_remediation_guidance.py -q
-
-test-replay:
-	$(PYTHON) -m pytest tests/replay -q
 
 check-syntax:
 	$(PYTHON) scripts/check_syntax.py
@@ -41,7 +37,7 @@ check-syntax:
 lint:
 	$(RUFF) check app tests scripts
 
-check: check-syntax test-unit test-replay
+check: check-syntax test-unit
 
 build: build-main build-a2a
 

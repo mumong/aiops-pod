@@ -3,6 +3,7 @@ import copy
 import os
 import time
 import threading
+from typing import Any, Dict, List, Optional
 from app.core.aicall.errors import ModelStreamInterrupted, raise_on_model_disconnect
 from app.core.workflow.group_runner import iter_group_results
 
@@ -13,13 +14,50 @@ from app.core.prompts import (
     PARALLEL_FANIN_INSTRUCTION,
 )
 from app.core.workflow.nodes.base import WorkflowNode
-from app.core.workflow.nodes.parallel_evidence import _ScopedParallelEventQueue
 from app.core.workflow.nodes.query_answer import build_working_material
 from app.core.workflow.stage_material import branch_state
 
 
-class LaneQueue(_ScopedParallelEventQueue):
-    """Keep text and tools scoped to their group; never mix sibling streams."""
+class LaneQueue:
+    """Keep text and tools scoped to their group; never mix sibling streams.
+
+    Thinking events from a lane are re-attributed to ``parallel_evidence`` and
+    carry the authoritative group scope; everything else passes through.
+    """
+
+    def __init__(self, target: Any, *, group_id: str, entities: List[Dict[str, Any]]):
+        self._target = target
+        self._parallel_context = {
+            "group_id": group_id,
+            "entities": copy.deepcopy(entities),
+        }
+
+    def _decorate(self, item: Any) -> Any:
+        if (
+            isinstance(item, tuple)
+            and len(item) == 2
+            and item[0] == "thinking"
+            and isinstance(item[1], dict)
+        ):
+            lane_stage = item[1].get("lane_stage") or item[1].get("node")
+            decorated = {
+                **item[1],
+                "node": "parallel_evidence",
+                "parallel_context": copy.deepcopy(self._parallel_context),
+            }
+            if lane_stage:
+                decorated["lane_stage"] = lane_stage
+            return (item[0], decorated)
+        return item
+
+    def put_nowait(self, item: Any) -> None:
+        self._target.put_nowait(self._decorate(item))
+
+    def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
+        self._target.put(self._decorate(item), block=block, timeout=timeout)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
 
 
 def plan_groups(node, state):

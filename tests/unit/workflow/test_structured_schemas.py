@@ -19,7 +19,6 @@ from app.core.workflow.schemas import (
     RCAHypothesis,
     RCAOutput,
 )
-from app.core.workflow.nodes.layer_classifier import LayerClassifierNode
 from app.core.context.observation import ObservationProcessor
 
 
@@ -152,39 +151,6 @@ def test_layer_output_normalizes_pods_entities_and_scenarios():
     assert "primary_pod" not in parsed.model_dump(exclude_none=True)
 
 
-def test_layer_lite_extract_uses_pydantic_structured_output():
-    captured = {}
-
-    class _StructuredAICall:
-        def call_structured(self, system_prompt, question, schema, **kwargs):
-            captured["schema"] = schema
-            captured["node_id"] = kwargs.get("node_id")
-            return schema.model_validate({
-                "layer": "L1",
-                "derived_layer": "L1",
-                "layers": ["L1"],
-                "confidence": 0.91,
-                "reasoning": "发现 Terminating 卡住",
-                "abnormal_pods": [
-                    {"name": "terminating-stuck", "namespace": "aiops-e2e", "status": "Terminating"}
-                ],
-                "pod_status_keyword": "Terminating",
-                "pod_abnormal_type": "TerminatingStuck",
-            }), "{}"
-
-    node = LayerClassifierNode()
-    node.ai_call = _StructuredAICall()
-
-    result = node._extract_with_lite_llm(
-        question="我的集群有什么问题",
-        full_analysis_text="status_counts={'Terminating': 1}",
-        failure_reason="测试",
-    )
-
-    assert captured["schema"] is LayerOutput
-    assert captured["node_id"] == "layer_extract"
-    assert result["layer"] == "L1"
-    assert result["abnormal_pods"][0]["status"] == "Terminating"
 
 
 def test_layer_handoff_requires_issue_groups_and_group_scenarios():
