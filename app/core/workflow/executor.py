@@ -26,7 +26,6 @@ from app.core.workflow.graph import build_diagnosis_workflow
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.metrics import WorkflowMetrics
 from app.core.workflow.stream_contract import project_parallel_tool_event, project_query_tool_event, workflow_outcome
-from app.core.holmes.log_listener import create_log_listener, HolmesLogListener
 from app.core.workflow.reporter import (
     save_report as _save_report_fn,
     extract_layer_from_report as _extract_layer_fn,
@@ -292,9 +291,6 @@ class WorkflowExecutor:
                              node.node_id, type(node.ai_call).__name__, len(node.tools))
 
         total_start = time.time()
-
-        # 创建并附加日志监听器（用于捕获 HolmesGPT 内部的工具调用）
-        log_listener: Optional[HolmesLogListener] = create_log_listener()
 
         # 初始化状态
         initial_state: WorkflowState = {
@@ -671,28 +667,6 @@ class WorkflowExecutor:
             self._update_metrics_from_state(metrics, final_state)
             metrics.rebuild_runtime_counts(final_state.get("thinking_events", []))
 
-            # 从日志监听器提取 runbook 信息（补充，不覆盖已有结果）
-            runbook_summary = log_listener.get_runbook_summary()
-            if runbook_summary["matched"]:
-                metrics.runbook_matched = True
-                metrics.runbook_id = ", ".join(runbook_summary["runbook_ids"])
-                for runbook_id in runbook_summary["runbook_ids"]:
-                    normalized = str(runbook_id or "").strip()
-                    if normalized.endswith(".md"):
-                        normalized = normalized[:-3]
-                    if normalized and normalized not in metrics.fetched_runbooks:
-                        metrics.fetched_runbooks.append(normalized)
-                logger.info(f"   Runbook 使用(日志): {metrics.runbook_id}")
-
-            # 补充：从 log_listener 的工具调用记录补充 metrics 统计
-            tool_calls_from_log = log_listener.get_tool_calls()
-            if tool_calls_from_log and metrics.total_tool_calls == 0:
-                for tc in tool_calls_from_log:
-                    metrics.total_tool_calls += 1
-
-            # 分离日志监听器
-            log_listener.detach()
-
             # 完成指标记录
             outcome = workflow_outcome(final_state)
             metrics.success = outcome == "success"
@@ -947,10 +921,6 @@ class WorkflowExecutor:
             last_stream_event_ts = time.time()
         
         except Exception as e:
-            # 分离日志监听器
-            if log_listener:
-                log_listener.detach()
-
             logger.error(f"❌ 工作流执行失败: {e}", exc_info=True)
             metrics.success = False
             metrics.errors.append(str(e))
@@ -974,9 +944,6 @@ class WorkflowExecutor:
             # running worker when its consumer exits early.
             if cancel_event and worker is not None and worker.is_alive():
                 cancel_event.set()
-            # 断连（GeneratorExit）不经过 except 分支；detach 幂等。
-            if log_listener:
-                log_listener.detach()
             # 清除事件队列（实例级，无需类级别清理）+ 等待后台线程结束
             for node in node_instances:
                 node.set_event_queue(None)

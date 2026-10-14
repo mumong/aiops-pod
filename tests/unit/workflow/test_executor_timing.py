@@ -83,17 +83,6 @@ class _DummyWorkflow:
         })}
 
 
-class _DummyLogListener:
-    def get_runbook_summary(self):
-        return {"matched": False, "runbook_ids": []}
-
-    def get_tool_calls(self):
-        return []
-
-    def detach(self):
-        return None
-
-
 class _DummyHolmesService:
     merged_catalog = None
     workflow_config = {"nodes": {"layer": False, "evidence": False, "rca": True, "conclusion": True}}
@@ -153,10 +142,6 @@ def test_executor_preserves_setup_error_before_worker_creation(monkeypatch):
             [node],
         ),
     )
-    monkeypatch.setattr(
-        "app.core.workflow.executor.create_log_listener",
-        lambda: _DummyLogListener(),
-    )
 
     executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
     events = list(executor.execute_stream("setup failure"))
@@ -178,7 +163,6 @@ def test_executor_sse_sanitizes_llm_disconnect_and_retains_log(monkeypatch, capl
     node = FailingNode('conclusion')
     monkeypatch.setattr('app.core.workflow.executor.build_diagnosis_workflow',
         lambda *args, **kwargs: (_DummyWorkflow([node]), [node]))
-    monkeypatch.setattr('app.core.workflow.executor.create_log_listener', lambda: _DummyLogListener())
     events = list(WorkflowExecutor(holmes_service=_DummyHolmesService()).execute_stream('test'))
     error = next(event for event in events if event['type'] == 'error')
     assert 'LLM API 服务连接中断' in error['error']
@@ -195,10 +179,6 @@ def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
             _DummyWorkflow(nodes),
             nodes,
         ),
-    )
-    monkeypatch.setattr(
-        "app.core.workflow.executor.create_log_listener",
-        lambda: _DummyLogListener(),
     )
     monkeypatch.setattr(
         WorkflowExecutor,
@@ -219,23 +199,38 @@ def test_executor_tracks_non_streaming_final_node_duration(monkeypatch):
 def test_executor_appends_deterministic_timing_and_runbook_trace(monkeypatch):
     nodes = [_DummyNode("rca"), _DummyNode("conclusion")]
 
-    class _RunbookLogListener(_DummyLogListener):
-        def get_runbook_summary(self):
-            return {
-                "matched": True,
-                "runbook_ids": ["pod-oomkilled"],
-            }
+    class _RunbookWorkflow(_DummyWorkflow):
+        def stream(self, initial_state):
+            yield {"rca": self._run_node("rca", 0.02, {
+                "root_cause": "simulated-rca",
+                "rca_analysis": "{}",
+                "thinking_events": [
+                    {
+                        "type": "tool_start",
+                        "tool_name": "fetch_runbook",
+                        "tool_call_id": "call-runbook",
+                        "tool_args": {"runbook_id": "pod-oomkilled"},
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_name": "fetch_runbook",
+                        "tool_call_id": "call-runbook",
+                        "status": "success",
+                        "result_preview": "# Pod OOMKilled 诊断手册\n检查内存限制。",
+                    },
+                ],
+            })}
+            yield {"conclusion": self._run_node("conclusion", 0.03, {
+                "conclusion": "simulated conclusion",
+                "conclusion_formatted": "simulated conclusion",
+            })}
 
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
         lambda holmes_service, metrics, runbook_catalog, node_config, query_mode="full", **_kw: (
-            _DummyWorkflow(nodes),
+            _RunbookWorkflow(nodes),
             nodes,
         ),
-    )
-    monkeypatch.setattr(
-        "app.core.workflow.executor.create_log_listener",
-        lambda: _RunbookLogListener(),
     )
     monkeypatch.setattr(
         WorkflowExecutor,
@@ -273,10 +268,6 @@ def test_executor_propagates_langfuse_session_at_workflow_boundary(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "app.core.workflow.executor.create_log_listener",
-        lambda: _DummyLogListener(),
-    )
-    monkeypatch.setattr(
         WorkflowExecutor,
         "_save_report",
         lambda self, layer, question, full_answer: None,
@@ -302,10 +293,6 @@ def test_executor_assigns_same_run_id_to_all_four_nodes_without_ai_call(monkeypa
             _NoopWorkflow(),
             nodes,
         ),
-    )
-    monkeypatch.setattr(
-        "app.core.workflow.executor.create_log_listener",
-        lambda: _DummyLogListener(),
     )
     monkeypatch.setattr(
         WorkflowExecutor,
@@ -337,10 +324,6 @@ def test_executor_assigns_same_run_id_and_ai_call_to_all_four_nodes(monkeypatch)
             _NoopWorkflow(),
             nodes,
         ),
-    )
-    monkeypatch.setattr(
-        "app.core.workflow.executor.create_log_listener",
-        lambda: _DummyLogListener(),
     )
     monkeypatch.setattr(
         WorkflowExecutor,
@@ -597,10 +580,6 @@ def test_executor_archives_parallel_group_state_only_after_lifecycle_end(monkeyp
         ),
     )
     monkeypatch.setattr(
-        "app.core.workflow.executor.create_log_listener",
-        lambda: _DummyLogListener(),
-    )
-    monkeypatch.setattr(
         WorkflowExecutor,
         "_save_report",
         lambda self, layer, question, full_answer: None,
@@ -703,10 +682,6 @@ def test_executor_emits_heartbeat_when_workflow_is_idle(monkeypatch):
             _SlowWorkflow(node),
             [node],
         ),
-    )
-    monkeypatch.setattr(
-        "app.core.workflow.executor.create_log_listener",
-        lambda: _DummyLogListener(),
     )
     monkeypatch.setattr(
         WorkflowExecutor,

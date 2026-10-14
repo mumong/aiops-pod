@@ -234,15 +234,14 @@ def update_metrics_from_state(
     evidence_analysis_raw = state.get("evidence_analysis") or ""
     all_text = f"{conclusion}\n{rca_analysis_raw}\n{evidence_analysis_raw}"
 
-    # 1. 从 log_listener 提取（在 execute_stream 中已处理）
-    # 2. 从所有 state 文本中正则提取 runbook 文件名
+    # 1. 从所有 state 文本中正则提取 runbook 文件名
     for match in re.finditer(r'([\w][\w.-]*\.md)\b', all_text):
         name = match.group(1)
         # 排除非 runbook 文件
         if name not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
             runbook_ids.add(name)
 
-    # 3. 从 thinking_events 中检测 runbook 调用
+    # 2. 从 thinking_events 中检测 runbook 调用
     thinking_events = state.get("thinking_events", [])
     pending_runbook_args: Dict[str, str] = {}
     successful_fetched_runbook_ids: Set[str] = set()
@@ -280,7 +279,7 @@ def update_metrics_from_state(
                 if title and title not in runbook_names:
                     runbook_names.append(title)
 
-    # 4. 从 tool_call_details 中查找 runbook 相关调用（保留原逻辑作为补充）
+    # 3. 从 tool_call_details 中查找 runbook 相关调用（保留原逻辑作为补充）
     for detail in metrics.tool_call_details:
         tool_name = detail.get('tool', '')
         result = detail.get('result', '')

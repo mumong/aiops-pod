@@ -60,7 +60,7 @@ def test_parallel_disconnect_stops_peers_and_never_runs_rca(monkeypatch, tmp_pat
 
 def test_executor_emits_error_without_final_or_downstream(monkeypatch):
     from app.core.workflow.executor import WorkflowExecutor
-    from tests.unit.workflow.test_executor_timing import _DummyHolmesService, _DummyLogListener
+    from tests.unit.workflow.test_executor_timing import _DummyHolmesService
     graph, nodes = build_diagnosis_workflow(query_mode='auto')
     visited = []
     for node in nodes:
@@ -73,22 +73,18 @@ def test_executor_emits_error_without_final_or_downstream(monkeypatch):
             pytest.fail('No downstream node after disconnect')
         node.execute = execute
     monkeypatch.setattr('app.core.workflow.executor.build_diagnosis_workflow', lambda *a, **k: (graph, nodes))
-    monkeypatch.setattr('app.core.workflow.executor.create_log_listener', lambda: _DummyLogListener())
     events = list(WorkflowExecutor(holmes_service=_DummyHolmesService()).execute_stream('测试'))
     assert visited == ['request_router', 'layer']
     assert len([e for e in events if e['type'] == 'error']) == 1
     assert not any(e['type'] == 'final' for e in events)
 
 
-def test_client_disconnect_releases_worker_and_log_listener(monkeypatch):
+def test_client_disconnect_releases_worker(monkeypatch):
     """Closing the stream early must not leave a producer blocked on a full queue."""
     from app.core.workflow.executor import WorkflowExecutor
-    from tests.unit.workflow.test_executor_timing import _DummyHolmesService, _DummyLogListener
+    from tests.unit.workflow.test_executor_timing import _DummyHolmesService
     graph, nodes = build_diagnosis_workflow(query_mode='auto')
     producer_done = threading.Event()
-    listener = _DummyLogListener()
-    detached = []
-    listener.detach = lambda: detached.append(True)
 
     for node in nodes:
         def execute(state, name=node.node_id, node=node):
@@ -106,7 +102,6 @@ def test_client_disconnect_releases_worker_and_log_listener(monkeypatch):
         node.execute = execute
 
     monkeypatch.setattr('app.core.workflow.executor.build_diagnosis_workflow', lambda *a, **k: (graph, nodes))
-    monkeypatch.setattr('app.core.workflow.executor.create_log_listener', lambda: listener)
     cancel = threading.Event()
     stream = WorkflowExecutor(holmes_service=_DummyHolmesService()).execute_stream('测试', cancel_event=cancel)
     for event in stream:  # read until the producer is streaming tokens
@@ -116,4 +111,3 @@ def test_client_disconnect_releases_worker_and_log_listener(monkeypatch):
 
     assert producer_done.wait(timeout=5)
     assert cancel.is_set()
-    assert detached
