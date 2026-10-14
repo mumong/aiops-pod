@@ -11,7 +11,7 @@
 | 意图路由 | [request_router.py](../app/core/workflow/nodes/request_router.py) | 模型理解意图、范围与深度，输出 JSON 路由 |
 | 深度诊断 | [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py) | 自主定位、取证和根因分析，不执行固定扫描兜底 |
 | 轻量查询与共同总结 | [query_answer.py](../app/core/workflow/nodes/query_answer.py) | 自主查询、证据驱动总结、会话结果保存 |
-| 旧式独立 lane | [parallel_evidence.py](../app/core/workflow/nodes/parallel_evidence.py) | 仅显式 legacy full 模式保留的每 Pod 独立诊断 |
+| 多组并发 | [autonomous_parallel.py](../app/core/workflow/nodes/autonomous_parallel.py) | 定位交付多个调查组时，每组独立 Evidence → RCA lane（并发上限可配置） |
 | 观测处理 | [observation.py](../app/core/context/observation.py)、[observability_projection.py](../app/core/context/observability_projection.py) | 类型解析、规则投影、模式归并、摘要及引用 |
 | 上下文 | [client.py](../app/core/aicall/client.py)、[budget.py](../app/core/context/budget.py) | 模型工具循环、预算门禁及压缩 |
 | 归档与回读 | [archive.py](../app/core/context/archive.py)、[builtin_tools.py](../app/core/aicall/builtin_tools.py) | 保存节点/工具记录、fetch_runbook、read_context_archive |
@@ -76,9 +76,9 @@ Conclusion 生成 `QueryAnswer` JSON，字段为 intent、scope、status、answe
 
 重型工具名单继续使用 ObservationProcessor 中的受限摘要策略：仅名单内且超过 6000 字符时处理，普通工具、日志、Runbook 和归档回读保留原文。摘要不意味着源数据不存在；原文与遗漏信息保留。表格不再仅因存在异常而删掉健康对象。此策略共用于 query_collect、layer、evidence。
 
-## 旧流程的保留边界
+## 旧流程（已移除）
 
-显式内部 `query_mode=full` 仍保留原 layer_classifier、evidence_collector、parallel_evidence、root_cause_analyzer、conclusion_formatter，便于既有测试与历史报告复核；公开 /ask、/query 默认不进入。旧的每 Pod lane、Evidence Plan 完整度、规则兜底与模型修复机制不代表新默认路径行为。
+2026-10-14 起删除了 `query_mode=full` 旧流水线（layer_classifier、evidence_collector、parallel_evidence、root_cause_analyzer、conclusion_formatter 及其专属模块）。所有入口（含 `/q/{question}`）均使用 auto 图；`direct` 仅保留 QueryCollect。历史报告中的旧节点名与旧行为仅供复核，代码可从 git 历史（提交 2158d245 之前）回溯。
 
 ### 轻量直接作答验证（2026-09-18）
 
