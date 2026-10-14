@@ -3,6 +3,7 @@ import types
 import json
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 import queue
 
@@ -20,11 +21,89 @@ from openai import (
     RateLimitError,
     UnprocessableEntityError,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.aicall.client import AICall
 from app.core.context.budget import count_tokens, serialize_tool_schema
-from app.core.workflow.schemas import EvidencePlanOutput
+
+
+# Representative structured-output schema for AICall.call_structured tests
+# (copied from the former workflow EvidencePlanOutput contract).
+EvidenceLevelName = Literal["critical", "important", "optional", "reference"]
+EvidenceToolName = Literal[
+    "kubectl_describe",
+    "kubectl_get_by_name",
+    "kubectl_get_by_kind_in_namespace",
+    "kubectl_get_by_kind_in_cluster",
+    "kubectl_find_resource",
+    "kubectl_get_yaml",
+    "kubectl_events",
+    "kubectl_logs",
+    "kubectl_previous_logs",
+    "kubectl_logs_all_containers",
+    "kubectl_previous_logs_all_containers",
+    "kubectl_container_logs",
+    "kubectl_container_previous_logs",
+    "kubectl_logs_grep",
+    "kubectl_logs_all_containers_grep",
+    "kubernetes_jq_query",
+    "kubernetes_tabular_query",
+    "kubernetes_count",
+    "get_prometheus_target",
+    "kubectl_lineage_children",
+    "kubectl_lineage_parents",
+    "run_bash_command",
+    "kubectl_run_image",
+    "list_prometheus_rules",
+    "get_metric_names",
+    "get_label_values",
+    "get_all_labels",
+    "get_series",
+    "get_metric_metadata",
+    "execute_prometheus_instant_query",
+    "execute_prometheus_range_query",
+    "execute_pod_promql",
+    "query_pod_logs",
+    "query_pod_tracing",
+    "query_pod_topology",
+    "fetch_runbook",
+    "collect_aiops_case",
+    "get_aiops_case",
+    "get_aiops_case_evidence",
+    "search_aiops_cases",
+    "resolve_aiops_entity",
+    "query_aiops_k8s_snapshot",
+    "query_aiops_metrics",
+    "query_aiops_logs",
+    "query_aiops_deepflow_flows",
+    "build_aiops_topology",
+]
+
+
+class EvidencePlanItem(BaseModel):
+    id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    level: EvidenceLevelName = "important"
+    tool: EvidenceToolName
+    command: str = Field(min_length=1)
+    tool_args: dict[str, Any] = Field(default_factory=dict)
+    purpose: str = ""
+    evidence_type: str = ""
+    target_scope: str = ""
+    acceptable_tools: list[EvidenceToolName] = Field(
+        default_factory=list,
+        description=(
+            "可用于完成该证据意图的推荐工具；仅用于计划匹配，"
+            "不限制 Evidence ReAct Agent 的已注册工具可见性。"
+        ),
+    )
+    counts_for_completeness: bool = True
+
+
+class EvidencePlanOutput(BaseModel):
+    layer: str = ""
+    evidence_plan: list[EvidencePlanItem] = Field(default_factory=list)
+    collection_strategy: str = ""
 
 
 def _install_fake_langfuse(monkeypatch):
