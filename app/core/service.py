@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 DISABLED_TOOL_NAMES = ("kubectl_top_nodes", "kubectl_top_pods")
 MCP_RETRY_INTERVAL_SECONDS = 60.0
 MCP_RETRY_TIMEOUT_SECONDS = 15.0
+INIT_WAIT_TIMEOUT_SECONDS = 60.0
 
 
 def _short_cell(value: Any, max_chars: int = 80) -> str:
@@ -264,6 +265,7 @@ class HolmesService:
         self.federation_coordinator: Optional[FederationCoordinator] = None
         self.federation_agent: Optional[FederationAgent] = None
         self._init_lock = threading.Lock()
+        self._init_finished = threading.Event()  # set when an init attempt ends (success or failure)
         self._init_in_progress: bool = False
         self._init_error: Optional[str] = None
         self._init_started_at: Optional[datetime] = None
@@ -298,6 +300,7 @@ class HolmesService:
                 return self.config, self.ai_call
 
             self._init_in_progress = True
+            self._init_finished.clear()
             self._init_error = None
             self._init_started_at = datetime.now()
 
@@ -477,6 +480,15 @@ class HolmesService:
                 raise
             finally:
                 self._init_in_progress = False
+                self._init_finished.set()
+
+    def _wait_for_initialization(self, timeout: float = INIT_WAIT_TIMEOUT_SECONDS) -> float:
+        """等待进行中的初始化结束（成功或失败即返回），返回等待秒数。"""
+        started = time.monotonic()
+        if not self._is_initialized():
+            logger.info("等待服务初始化完成...")
+            self._init_finished.wait(timeout)
+        return time.monotonic() - started
 
     def _retry_failed_mcp_servers(self) -> None:
         """补连启动时失败的 MCP server（有间隔限制，非阻塞并发）。"""
@@ -770,14 +782,7 @@ class HolmesService:
                 self.ai_call = None
             self.initialize(api_key=api_key, model=model, max_steps=max_steps)
 
-            max_wait = 60
-            waited = 0
-            while not self._is_initialized() and waited < max_wait:
-                if waited == 0:
-                    logger.info("等待服务初始化完成...")
-                time.sleep(1)
-                waited += 1
-
+            waited = self._wait_for_initialization()
             if not self._is_initialized():
                 return {
                     "success": False,
@@ -786,8 +791,8 @@ class HolmesService:
                     "timestamp": datetime.now().isoformat()
                 }
 
-            if waited > 0:
-                logger.info("初始化完成（等待了 %ss）", waited)
+            if waited >= 1:
+                logger.info("初始化完成（等待了 %.0fs）", waited)
 
             logger.info("执行查询: %s...", question[:100])
 
@@ -829,14 +834,7 @@ class HolmesService:
         workflow_title: str = "工作流诊断模式",
     ) -> Generator[str, None, None]:
         """执行查询并以流式方式返回结果"""
-        max_wait = 60
-        waited = 0
-        while not self._is_initialized() and waited < max_wait:
-            if waited == 0:
-                logger.info("等待服务初始化完成...")
-            time.sleep(1)
-            waited += 1
-
+        waited = self._wait_for_initialization()
         if not self._is_initialized():
             error_msg = "服务初始化超时或失败"
             logger.error(error_msg)
@@ -846,8 +844,8 @@ class HolmesService:
                 yield create_sse_message_cn("error", {"error": error_msg})
             return
 
-        if waited > 0:
-            logger.info("初始化完成（等待了 %ss）", waited)
+        if waited >= 1:
+            logger.info("初始化完成（等待了 %.0fs）", waited)
 
         logger.info("使用工作流模式执行查询")
         yield from self._execute_query_stream_workflow(

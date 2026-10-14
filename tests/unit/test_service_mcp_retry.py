@@ -55,3 +55,23 @@ def test_no_retry_when_nothing_failed():
     service = _service_with_failed([])
     with patch("app.core.aicall.tools.load_mcp_tools", side_effect=AssertionError("must not load")):
         service._retry_failed_mcp_servers()
+
+
+def test_stream_waits_for_init_and_fails_fast_when_init_failed():
+    import threading
+
+    service = HolmesService()
+    # init attempt finished with failure -> no 60s wait
+    service._init_finished.set()
+    started = time.monotonic()
+    chunks = list(service.execute_query_stream("q", output_format="text"))
+    assert time.monotonic() - started < 1
+    assert "初始化超时或失败" in "".join(chunks)
+
+    # init in progress -> wakes up as soon as it finishes
+    service = HolmesService()
+    timer = threading.Timer(0.2, service._init_finished.set)
+    timer.start()
+    started = time.monotonic()
+    waited = service._wait_for_initialization(timeout=5)
+    assert 0.1 < waited < 2
