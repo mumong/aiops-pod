@@ -52,17 +52,9 @@ class WorkflowState(TypedDict, total=False):
     layer_confidence: Optional[float]    # 定层置信度 [0, 1]
     layer_reasoning: Optional[str]       # 定层理由
     layer_analysis: Optional[str]        # LLM 完整分析（JSON 字符串）
-    layer_full_analysis: Optional[str]   # Deprecated: 大文本不再跨节点传递，完整内容写入 context archive
     layer_handoff: Optional[Dict[str, Any]]  # 阶段1给下游的结构化交接信息
-    layer_archive_ref: Optional[Dict[str, Any]]  # layer 全量分析与 handoff 归档引用
     issue_groups: List[Dict[str, Any]]     # Deprecated alias: 当前异常问题组（按异常状态族聚合）
-    abnormal_groups: List[Dict[str, Any]]  # 当前异常组（按异常状态族聚合）
-    abnormal_pods: List[Dict[str, Any]]    # 当前异常 Pod 列表（紧凑摘要）
-    pod_status_keyword: Optional[str]      # 当前 Pod 异常状态关键字，如 CrashLoopBackOff/ImagePullBackOff
     pod_abnormal_type: Optional[str]       # 当前 Pod 异常类型，如 OOMKilled/ConfigBootstrapFail
-    derived_layer: Optional[str]           # Pod 异常状态派生出的兼容 L0-L4/HEALTHY 层级
-    status_category: Optional[str]         # Pod 异常类型的归一化类别，如 container_resource/image_registry
-    context_archive_ref: Optional[str]   # 当前 run 的 context archive 根目录
     context_budget: Optional[Dict[str, Any]]  # 最近一次/汇总上下文预算估算
     tool_artifact_refs: List[Dict[str, Any]]  # 工具 raw/structured/summary 归档引用
     key_entities: List[str]              # 提取的关键实体
@@ -74,16 +66,10 @@ class WorkflowState(TypedDict, total=False):
     # 启动隔离的富文本调用，并由代码按稳定组序拼接。非并发模式为 None。
     parallel_lane_inventory: Optional[List[Dict[str, Any]]]
     group_results: Optional[List[Dict[str, Any]]]
-    authoritative_lane_artifacts: Optional[List[Dict[str, Any]]]
-    entity_evidence_snapshot: Optional[Dict[str, Any]]
-    structured_group_diagnosis: Optional[Dict[str, Any]]
     evidence_items: List[EvidenceItem]   # 已采集证据
     tool_results: List[Dict]             # 工具调用结果
     evidence_completeness: Optional[float]  # 证据完整度 [0, 1]
     evidence_analysis: Optional[str]     # LLM 完整分析（JSON 字符串）
-    query_result: Optional[Dict[str, Any]]  # QUERY 模式下的结构化查询结果
-    evidence_facts: List[Dict[str, Any]]     # 已验证事实摘要
-    evidence_conflicts: List[Dict[str, Any]] # 负向/冲突观察
     missing_evidence: List[Dict[str, Any]]   # 缺失证据
 
     # ========== 节点3 输出：根因分析 ==========
@@ -91,9 +77,6 @@ class WorkflowState(TypedDict, total=False):
     root_cause: Optional[str]            # 根因结论
     causal_chain: Optional[Dict[str, str]]  # 因果链
     rca_analysis: Optional[str]          # LLM 完整分析（JSON 字符串）
-    rca_input_projection: Optional[Dict[str, Any]]
-    rca_attempts: Optional[List[Dict[str, Any]]]
-    claim_validation: Optional[Dict[str, Any]]
     primary_runbook_id: Optional[str]    # AI 判定的核心 Runbook（与诊断结论最匹配的）
     
     # ========== 节点4 输出：汇总总结 ==========
@@ -107,13 +90,6 @@ class WorkflowState(TypedDict, total=False):
     remediation_result: Optional[Dict[str, Any]]  # 修复执行结果摘要
     
     # ========== 元数据 ==========
-    current_node: Optional[str]          # 当前执行节点
     errors: List[str]                    # 错误列表
     warnings: List[str]                  # 警告列表
     thinking_events: List[Dict]          # 各节点的中间推理事件
-
-    # ========== 多场景模式新增字段 ==========
-    # 全局场景检测结果
-    multi_scenario_decisions: Optional[Dict[str, Any]]  # 多场景输出对象
-    detected_scenarios: List[Dict]            # 检测到的场景列表
-    detection_duration: Optional[float]       # 检测耗时（秒）
