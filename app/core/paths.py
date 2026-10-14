@@ -15,3 +15,11 @@ def get_project_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
+
+
+def get_app_version() -> str:
+    """Single version source: the VERSION file shipped next to app/ (also in the image)."""
+    try:
+        return (get_project_root() / "VERSION").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"

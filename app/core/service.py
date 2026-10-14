@@ -17,7 +17,7 @@ from holmes.plugins.runbooks import RunbookCatalog
 
 from app.core.config import AppConfig
 from app.core.runbook import RunbookManager
-from app.core.paths import get_project_root
+from app.core.paths import get_app_version, get_project_root
 from app.core.environment import get_config_file_path
 from app.core.holmes.streaming import create_sse_message_cn, format_duration
 from app.core.holmes.config_loader import load_holmes_config_from_yaml
@@ -1231,6 +1231,7 @@ class HolmesService:
                 "mode": "AICall(LangGraph)",
                 "model": model_name,
                 "mcp_failed_servers": list(self._mcp_failed_servers),
+                "version": get_app_version(),
             }
         if self._init_in_progress:
             return {

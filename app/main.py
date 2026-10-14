@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 from app.api import register_routes
 from app.core.log_context import LOG_FORMAT, LogContextFilter
+from app.core.paths import get_app_version
 
 # 配置日志（通过 LOG_LEVEL 环境变量控制，默认 INFO）
 # DEBUG: 完整工具调用参数和响应体、节点间传递的完整数据
@@ -133,7 +134,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="HolmesGPT API Server",
     description="智能运维 Copilot API 服务",
-    version="1.0.0",
+    version=get_app_version(),
     lifespan=lifespan
 )
 
