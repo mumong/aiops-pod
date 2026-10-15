@@ -189,7 +189,7 @@ Conclusion 使用最近一次工作摘要和此后新取得的工具结果，不
 
 默认摘要不是纯代码：表格、事件等使用规则提取，部分通用返回调用 LLM 摘要。原文保存不等于模型看过原文。常见输入缩短位置包括工具摘要限长、摘要模型原文预览、归档分页、运行时历史压缩、模型调用前预算裁剪；原文实验绕过逐次工具摘要，但仍在超预算时压缩输入。压缩是有损的，不保证所有关键字段进入模型，也不保证单位解释或诊断推理正确，需要对照调用参数、原始值与最终答案复核。
 
-组内正式 RCA 无工具，只依据已采证据推理。Fact Ledger 严格因果校验未启用（合同实现仍在 [fact_contract.py](../app/core/workflow/fact_contract.py)），不能把当前报告说成“全部经过严格因果验证”。`workflow` 配置只保留代码实际读取的键（nodes、max_steps、structured_runtime、evidence.parallel、remediation、think_stream、observation_summary、context_compaction），由 `test_deployed_workflow_config_contains_only_keys_the_code_reads` 钉住。结构字段合法、引用存在，都不等价于根因正确。
+组内正式 RCA 无工具，只依据已采证据推理；RCA/总结这类无工具的结构化交付按内部调用发出（`llm.internal_extra_body`，Qwen 关闭 thinking），任何原生结构化调用返回空结果时再以内部设置重试一次。实测同一 RCA 输入：开启 thinking 约 200 秒且常无输出，关闭后 26 秒交付。Fact Ledger 严格因果校验未启用（合同实现仍在 [fact_contract.py](../app/core/workflow/fact_contract.py)），不能把当前报告说成“全部经过严格因果验证”。`workflow` 配置只保留代码实际读取的键（nodes、max_steps、structured_runtime、evidence.parallel、remediation、think_stream、observation_summary、context_compaction），由 `test_deployed_workflow_config_contains_only_keys_the_code_reads` 钉住。结构字段合法、引用存在，都不等价于根因正确。
 
 实际复核必须区分事实和解释，例如 137 不能独立证明 OOM，/work 的 200 不能证明 /health 探针健康。
 
