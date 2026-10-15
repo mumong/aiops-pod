@@ -193,17 +193,19 @@ class ObservationProcessor:
             # Preserve container lifecycle and coverage together, without a second
             # lossy summary or a health classification derived from Pod phase.
             structured, semantic_success = self._parse_lifecycle_observation(raw)
-            from .lifecycle_core import lifecycle_core
+            from .lifecycle_core import INVENTORY_VERSION, inventory_view, lifecycle_core
             core = lifecycle_core(structured) if semantic_success and node_id in {'layer', 'evidence'} else {}
-            summary = json.dumps(core, ensure_ascii=False, separators=(',', ':')) if core else raw
+            view = inventory_view(core) if core else {}
+            summary = json.dumps(view, ensure_ascii=False, separators=(',', ':')) if view else raw
+            processor = ("pod_lifecycle+inventory" if view.get("contract_version") == INVENTORY_VERSION
+                         else "pod_lifecycle+core" if core else "pod_lifecycle+lossless")
             refs = ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
                 node_id=node_id, sequence=sequence, tool_name=tool,
                 raw=raw, structured=structured, summary=summary,
             )
             return {"tool": tool, "status": "success", "semantic_success": semantic_success,
                     "summary": summary, "structured": structured, "raw_chars": len(raw),
-                    "summary_chars": len(summary), "processed": True,
-                    "processor": "pod_lifecycle+core" if core else "pod_lifecycle+lossless", **refs}
+                    "summary_chars": len(summary), "processed": True, "processor": processor, **refs}
         targeted_summary = (
             preserve_raw
             and tool in self.QUERY_SUMMARY_TOOLS

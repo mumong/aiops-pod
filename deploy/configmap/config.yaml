@@ -166,25 +166,6 @@ data:
     # ------------------------------------------------------------------------
     # 工作流配置
     workflow:
-      # RCA 节点调用模式: lite(不带工具,避免重复) / full(原有全工具模式)
-      rca_mode: lite
-      # RCA 事实 ID/实体绑定与 claim 级发布校验暂时关闭：
-      # 直接保留第一次模型分析，不触发校验降级或结构导向的二次 repair。
-      rca_validation:
-        enabled: false
-      # RCA 推理上下文：关闭 Fact Ledger/selected_facts 权威投影。
-      # Evidence Agent 的自然语言分析作为有界推理草稿，同时只注入每次工具
-      # 唯一的一份真实高价值摘要；原始值仍以工具观察为唯一事实来源。
-      rca_context:
-        fact_ledger_enabled: false
-        include_evidence_llm_analysis: true
-      # RCA 结构化输出：tolerant=辅助字段类型错误时保留核心根因；
-      # strict=任一 Pydantic 字段错误即整体判为 inconclusive。
-      rca_structured_output:
-        mode: tolerant
-        # compact 只让模型生成根因、最短因果链、关键原始证据和未知项；
-        # 代码在调用后扩展为旧内部结构，避免审计辅助字段占用模型注意力。
-        schema: compact
       # 节点启用/禁用（false 跳过该节点，conclusion 不可禁用）
       nodes:
         layer: true
@@ -202,58 +183,15 @@ data:
         rca: 0
         conclusion: 0
 
-      # 结构化运行时: 控制 layer/evidence/rca 是否优先产出 Pydantic 结构化结果。
+      # 结构化交付失败时是否允许回退到文本交付（layer/evidence/rca）。
       structured_runtime:
-        enabled: true
         fallback_enabled: true
 
-      # 节点高级行为: 全局 layer 保留完整定位；显式 Pod 在首次真实状态确认后停止。
-      layer:
-        early_stop:
-          enabled: false
-          explicit_pod_enabled: true
       evidence:
-        # autonomous: Qwen 组合 Kubernetes 与三个通用可观测性查询工具。
-        # legacy: 保留 collect_aiops_case mandatory coarse 兼容行为。
-        observability_mode: autonomous
-        # A/B 实验开关：structured=独立 EvidencePlanOutput + baseline + ReAct；
-        # react_only=跳过独立 Plan LLM，仅执行同一代码级 baseline 后自主 ReAct。
-        planning_mode: structured
-        # 默认在 ReAct 前执行一次 Metrics、Logging、Tracing baseline；
-        # 首轮真实结果返回后，Agent 仍自主决定是否及如何专项补查。
-        pre_react_observability_baseline:
-          enabled: true
-        # 首轮按异常 Pod 真实尝试三维；随后由同一 Agent 自主专项补证。
-        observability_first_round_gate:
-          enabled: true
-          # 任一维是工具执行/参数错误时只续跑一次；成功但 empty/absent 不重试。
-          retry_failed_once: true
-        early_stop:
-          enabled: true
-        # 补证策略：诊断性补采仍由 Agent 在 ReAct 内自主决定；代码只对本 lane
-        # 最终未恢复的工具执行/参数失败提供一次协议恢复，不按故障类型选择查询或根因。
-        # Pod lane 扇出：默认所有异常 Pod（含 N=1）都使用同一独立
-        # evidence + formal RCA + artifact 契约，不随 N 变化切换数据路径。
+        # Pod lane 扇出：每个待调查 Pod 使用同一独立 evidence + 正式 RCA 契约；
+        # 并发上限由模型服务的 admission control 决定，代码不做本地限流。
         parallel:
           enabled: true
-          threshold: 0        # 0=任意异常 Pod 都进入 lane；正数仅用于兼容旧路由
-          lane_concurrency: 0  # 0=按异常 Pod 数全量 fan-out；正数为显式 lane 上限
-
-      conclusion:
-        # agent: 每个异常组只接收自己的 canonical facts + 正式 RCA，独立并发
-        # 生成 Markdown 片段；总览和最终组顺序由代码确定性拼接。
-        # deterministic: 不调用展示模型，使用同一总览+组片段结构确定性渲染。
-        presentation_mode: agent
-        # 0=按异常组数量全量并发；正数为本地显式并发上限。模型服务自身的
-        # admission control / batch 调度仍是最终容量边界。
-        lane_concurrency: 0
-        # 原始工具结果已经完整归档，默认不在用户报告中重复附加。
-        include_raw_evidence_appendix: false
-        # 最终报告输出 token 上限；query 短答，diagnosis 完整报告。
-        max_tokens:
-          query: 1024
-          diagnosis: 8192
-          group_diagnosis: 4096
 
       # --------------------------------------------------------------------
       # 4.1 Post-Diagnosis Remediation

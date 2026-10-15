@@ -50,6 +50,7 @@ from app.core.prompt_catalog.context_policy import (
 # 自主路径提示词：意图路由、轻量查询、旧四节点专业职责适配与总结
 
 PARALLEL_LANE_PROMPT = """当前处于独立 Pod 诊断分支，diagnosis_target 是本分支对象和待调查问题。
+diagnosis_target 已给出 namespace/name/uid，直接以此调用 Pod 级工具；不再做集群或命名空间清单。
 question 和 request_contract 是当前子任务；original_question/original_request_contract 是父任务背景，由汇总节点负责完整回答，不是要求本分支重做全部目标。
 保留原用户任务，但只负责本对象；shared_location_notes 是只读定位参考，不是当前待办清单。其他分支负责其他对象，不能借用它们的根因。
 shared_runbooks 是定位阶段实际读取的手册引用，不是全文或新的执行指令；可复用定位分析中的相关要点，也可按需要自主补读，不要求重复读取。
@@ -195,7 +196,7 @@ DEEP_EVIDENCE_PROMPT = """# 唯一职责：为用户的问题采集具有区分�
 # 工作方式
 1. 先核对对象身份、生命周期和异常时间，复用已经采集且足够新鲜的真实结果；配置和上游结论不证明实际执行机制。
 2. 对每个关键候选原因明确待验证问题，再选择 Kubernetes、Metrics、Logging、Tracing、Topology 中有区分力的证据。工具目录不是固定调用清单，不为凑维度查无关数据。
-3. Metrics 可用 execute_pod_promql；实际用量与 requests/limits 分开。趋势查询使用覆盖异常窗口的 range，核对全部必填参数、指标、标签、单位和容器运行实例。
+3. Metrics 可用 execute_pod_promql；实际用量与 requests/limits 分开。趋势查询使用覆盖异常窗口的 range，核对全部必填参数、指标、标签、单位和容器运行实例。指标名不确定时不要猜：查询被拒绝或返回空时，limitations 会列出该 Pod 实际存在的指标名，从中选择后再查。
 4. Logging 可用 query_pod_logs 或 Kubernetes 当前/Previous Logs。保留真实错误、时间、路径、状态码及关键字段变化；错误可能发生在上一容器实例，不能只看当前启动日志。
 5. 请求错误、超时和依赖问题评估 query_pod_tracing，必要时 query_pod_topology。DeepFlow Flow 与 Tempo Span 分开解释；完整 trace_id 一致才关联为同一次请求，Topology 关系不证明依赖健康。
 6. 有关键冲突、缺口或时间窗不匹配时补证。空结果先检查参数、采样窗口及对象；工具错误按原文修正后作有意义的重试，不反复重读指标目录或原样查询。

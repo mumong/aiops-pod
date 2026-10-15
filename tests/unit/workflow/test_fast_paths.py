@@ -22,46 +22,6 @@ def test_query_prometheus_runbook_declares_query_and_pod_diagnosis_tool_boundary
     assert "execute_pod_promql" in query_runbook
 
 
-def test_deployed_workflow_disables_layer_early_stop_by_default():
-    configmap = yaml.safe_load(
-        Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")
-    )
-    app_config = yaml.safe_load(configmap["data"]["config.yaml"])
-
-    layer_early_stop = app_config["workflow"]["layer"]["early_stop"]
-    assert layer_early_stop["enabled"] is False
-    assert layer_early_stop["explicit_pod_enabled"] is True
-
-
-def test_deployed_workflow_disables_rca_validation():
-    configmap = yaml.safe_load(
-        Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")
-    )
-    app_config = yaml.safe_load(configmap["data"]["config.yaml"])
-
-    assert app_config["workflow"]["rca_validation"]["enabled"] is False
-    assert (
-        app_config["workflow"]["rca_context"]["fact_ledger_enabled"]
-        is False
-    )
-    assert (
-        app_config["workflow"]["rca_context"]
-        ["include_evidence_llm_analysis"]
-        is True
-    )
-    assert app_config["workflow"]["rca_structured_output"]["schema"] == "compact"
-    assert (
-        app_config["workflow"]["evidence"]
-        ["observability_first_round_gate"]["retry_failed_once"]
-        is True
-    )
-    assert (
-        app_config["workflow"]["evidence"]
-        ["pre_react_observability_baseline"]["enabled"]
-        is True
-    )
-
-
 def test_oom_and_liveness_runbooks_contain_scoped_query_shape_examples():
     configmap = yaml.safe_load(
         Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8")
@@ -118,11 +78,6 @@ def test_deployed_config_enables_autonomous_observability_and_disables_compatibi
     assert fine["enabled"] is False
     assert fine["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8090/sse"
     assert fine["config"]["mode"] == "sse"
-    assert app_config["workflow"]["evidence"]["observability_mode"] == "autonomous"
-    assert (
-        app_config["workflow"]["evidence"]["observability_first_round_gate"]["enabled"]
-        is True
-    )
 
 
 def test_workflow_prompts_do_not_contain_json_output_templates():
@@ -147,16 +102,14 @@ def test_workflow_prompts_do_not_contain_json_output_templates():
             assert phrase not in prompt
 
 
-def test_deployment_enables_autonomous_evidence_context_stop():
-    manifest_path = Path(__file__).resolve().parents[3] / "deploy" / "configmap" / "config.yaml"
-    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    config = yaml.safe_load(manifest["data"]["config.yaml"])
-
-    assert config["workflow"]["evidence"]["observability_mode"] == "autonomous"
-    assert config["workflow"]["evidence"]["early_stop"]["enabled"] is True
-
-
-
-
-
-
+def test_deployed_workflow_config_contains_only_keys_the_code_reads():
+    # Dead switches (rca_mode, observability_mode, early_stop, lane_concurrency ...) used to
+    # document behaviour that no code implemented; every top-level key must have a reader.
+    configmap = yaml.safe_load(Path("deploy/configmap/config.yaml").read_text(encoding="utf-8"))
+    workflow = yaml.safe_load(configmap["data"]["config.yaml"])["workflow"]
+    assert set(workflow) == {
+        "nodes", "max_steps", "structured_runtime", "evidence", "remediation",
+        "think_stream", "observation_summary", "context_compaction",
+    }
+    assert workflow["evidence"] == {"parallel": {"enabled": True}}
+    assert workflow["structured_runtime"] == {"fallback_enabled": True}

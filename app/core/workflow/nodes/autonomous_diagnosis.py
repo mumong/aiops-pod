@@ -190,7 +190,18 @@ class DiagnosisEvidenceNode(DiagnosisStageNode):
     stage_id = "evidence"
     stage_name = "证据采集"
     stage_prompt = DEEP_EVIDENCE_PROMPT
-    READ_TOOLS = frozenset(QueryCollectNode.READ_TOOLS - _METRIC_CATALOG_TOOLS)
+    # One known Pod (namespace/name/uid come from the handoff): cross-check it with real
+    # metrics/logs/traces/topology plus its own Kubernetes objects. Cluster listing, grep
+    # and catalog tools stay out; 30 -> 17 schemas (~6.6k -> ~3.8k tokens per request)
+    # and fewer look-alike choices for small models.
+    READ_TOOLS = frozenset({
+        "execute_pod_promql", "query_pod_logs", "query_pod_tracing", "query_pod_topology",
+        "query_pod_lifecycle", "kubectl_describe", "kubectl_events", "kubectl_get_yaml",
+        "kubectl_get_by_name", "kubectl_logs", "kubectl_previous_logs",
+        "kubectl_container_logs", "kubectl_container_previous_logs",
+        "execute_prometheus_instant_query", "execute_prometheus_range_query",
+        "fetch_runbook", "read_context_archive",
+    })
 
 
 class DiagnosisRootCauseNode(DiagnosisStageNode):

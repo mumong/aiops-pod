@@ -186,5 +186,9 @@ def test_diagnosis_stages_expose_scoped_tools_only():
     assert layer < QueryCollectNode.READ_TOOLS  # never wider than the read-only set
     evidence = DiagnosisEvidenceNode.READ_TOOLS
     assert not (evidence & _METRIC_CATALOG_TOOLS)
-    assert {"execute_pod_promql", "query_pod_logs", "query_pod_tracing"} <= evidence
+    assert {"execute_pod_promql", "query_pod_logs", "query_pod_tracing", "query_pod_topology",
+            "kubectl_previous_logs", "fetch_runbook", "read_context_archive"} <= evidence
+    # A lane owns one Pod: no cluster listing, grep or scratchpad tools compete for the choice.
+    assert not ({"kubectl_get_by_kind_in_cluster", "kubernetes_jq_query", "kubectl_logs_grep", "TodoWrite"} & evidence)
+    assert evidence < QueryCollectNode.READ_TOOLS and len(evidence) <= 18
     assert "run_bash_command" not in layer | evidence

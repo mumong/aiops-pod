@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 
 
 CORE_VERSION = 'pod-lifecycle-core.v1'
+INVENTORY_VERSION = 'pod-lifecycle-inventory.v1'
+# Below this many nominal Pods the full core is cheaper than explaining a roster.
+ROSTER_MIN_NOMINAL = 4
+NOMINAL_CRITERIA = ('phase Running with Ready=True, every app container running and ready, no termination '
+                    'or restart inside the window, not deleting; or phase Succeeded')
 
 
 def lightweight_handoff(material):
@@ -111,6 +116,55 @@ def lifecycle_core(value, raw_ref=None):
         item['source'] = source_key
         entities.append(item)
     return {'contract_version': CORE_VERSION, 'entities': entities, 'sources': {source_key: source}}
+
+
+def _nominal(entity):
+    """Current snapshot shows nothing to investigate. Status facts only, never a health verdict."""
+    if entity.get('deletion_timestamp'):
+        return False
+    if entity.get('phase') == 'Succeeded':
+        return True
+    if entity.get('phase') != 'Running':
+        return False
+    if (entity.get('conditions') or {}).get('Ready', {}).get('status') != 'True':
+        return False
+    for container in entity.get('containers') or []:
+        if container.get('role', 'app') != 'app':
+            continue
+        if container.get('ready') is not True or set(container.get('state') or {}) != {'running'}:
+            return False
+        if container.get('termination_within_window') is True or (container.get('restart_count_in_window') or 0) > 0:
+            return False
+    return True
+
+
+def inventory_view(core):
+    """Model-facing view of a list-scope core: attention entities in full, nominal Pods as a roster.
+
+    The core keeps every entity; this only decides what the model reads first. A single-Pod
+    scope or a mostly-abnormal page is returned unchanged.
+    """
+    entities = core.get('entities') or []
+    sources = core.get('sources') or {}
+    if any((source.get('scope') or {}).get('pod') for source in sources.values()):
+        return core
+    nominal = [entity for entity in entities if _nominal(entity)]
+    if len(nominal) < ROSTER_MIN_NOMINAL:
+        return core
+    roster = {}
+    for entity in nominal:
+        roster.setdefault(entity['namespace'], []).append(entity['name'])
+    return {
+        'contract_version': INVENTORY_VERSION,
+        'sources': copy.deepcopy(sources),
+        'entities': [copy.deepcopy(entity) for entity in entities if not _nominal(entity)],
+        'attention_count': len(entities) - len(nominal),
+        'nominal_count': len(nominal),
+        'nominal_criteria': NOMINAL_CRITERIA,
+        'nominal_roster': {namespace: sorted(names) for namespace, names in sorted(roster.items())},
+        'note': ('Roster Pods are nominal in the current snapshot only (lastState is not full history). '
+                 'Their complete records stay in raw_ref; use read_context_archive when one is needed.'),
+    }
 
 
 def observation_reference(observation):
