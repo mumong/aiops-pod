@@ -995,12 +995,42 @@ class HolmesService:
         logger.info("think stream mode=%s max_chars=%d", think_filter.mode, think_filter.max_chars)
         node_outputs = {"layer": "", "evidence": "", "rca": "", "conclusion": ""}
 
+        reasoning_open = False  # a "🤔 思考:" line is being streamed
+        reasoning_chars = 0
         for event in executor.execute_stream(
             question,
             cancel_event=cancel_event,
             workflow_overrides=workflow_overrides,
         ):
             event_type = event.get("type", "unknown")
+            is_reasoning = event_type == "thinking" and event.get("thinking_type") == "ai_reasoning"
+            if reasoning_open and not is_reasoning:
+                yield "\n"
+                reasoning_open = False
+            if is_reasoning:
+                # Model reasoning: its own plain-text line (no <think> tags), honouring
+                # think_stream mode: full / truncated (max_chars per segment) / hidden.
+                text = event.get("content") or ""
+                if not text or think_filter.mode == "hidden":
+                    continue
+                if _token_streaming_active:
+                    yield "\n"
+                    _token_streaming_active = False
+                    _token_stream_buffer = ""
+                if not reasoning_open:
+                    yield f"   🤔 [{event.get('node_name', event.get('node', '?'))}] 思考: "
+                    reasoning_open, reasoning_chars = True, 0
+                if think_filter.mode == "truncated":
+                    room = think_filter.max_chars - reasoning_chars
+                    if room <= 0:
+                        if room == 0:
+                            yield "…（思考已截断）"
+                            reasoning_chars += 1
+                        continue
+                    text = text[:room]
+                reasoning_chars += len(text)
+                yield text
+                continue
 
             if event_type == "run_start":
                 run_id = event.get("run_id", "?")
@@ -1033,13 +1063,8 @@ class HolmesService:
                         _token_stream_buffer = ""
                     if content:
                         yield emit(f"   💭 [{node_name}] AI: {content[:500]}")
-                elif think_type in ("ai_token", "ai_reasoning"):
-                    # Reasoning arrives on its own channel; text mode keeps showing it through
-                    # the existing <think> filter (full / truncated / hidden).
-                    raw_token = event.get("content", "") or ""
-                    if think_type == "ai_reasoning" and raw_token:
-                        raw_token = f"<think>{raw_token}</think>"
-                    token_text = think_filter.filter_token(raw_token)
+                elif think_type == "ai_token":
+                    token_text = think_filter.filter_token(event.get("content", "") or "")
                     if token_text:
                         if not _token_streaming_active:
                             yield f"   💭 [{node_name}] "

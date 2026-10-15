@@ -250,3 +250,30 @@ def test_holmes_service_context_compaction_config_preserves_zero_compactions():
     }
 
     assert svc.get_context_compaction_config()["max_compactions_per_call"] == 0
+
+
+def test_text_mode_renders_reasoning_as_plain_line_without_think_tags(monkeypatch):
+    from app.core.service import HolmesService
+
+    events = [
+        {"type": "run_start", "run_id": "r1"},
+        {"type": "thinking", "thinking_type": "ai_reasoning", "node": "layer", "node_name": "定位", "content": "The"},
+        {"type": "thinking", "thinking_type": "ai_reasoning", "node": "layer", "node_name": "定位", "content": " pod"},
+        {"type": "thinking", "thinking_type": "ai_token", "node": "layer", "node_name": "定位", "content": "结论"},
+        {"type": "thinking", "thinking_type": "tool_start", "node": "layer", "node_name": "定位", "tool_name": "t"},
+    ]
+
+    class _Executor:
+        def execute_stream(self, question, **kw):
+            yield from events
+
+    service = HolmesService()
+    monkeypatch.setattr(service, "get_think_stream_config", lambda: ("full", 1200))
+    text = "".join(service._workflow_to_text(_Executor(), "q"))
+    assert "<think>" not in text and "</think>" not in text
+    assert "🤔 [定位] 思考: The pod\n" in text
+    assert "结论" in text
+
+    monkeypatch.setattr(service, "get_think_stream_config", lambda: ("hidden", 1200))
+    hidden = "".join(service._workflow_to_text(_Executor(), "q"))
+    assert "The pod" not in hidden and "结论" in hidden
