@@ -85,3 +85,31 @@ def test_model_transport_failure_during_finalization_stays_fatal():
         pass
     else:
         raise AssertionError("transport failure must propagate")
+
+
+def test_oversized_material_is_compacted_once_then_delivered(monkeypatch):
+    from app.core.aicall.client import StructuredContextBudgetError
+    import app.core.aicall.working_context as working_context
+
+    calls, compacted_inputs = [], []
+    ai = AICall(model="openai/x", api_key="sk-test", api_base="http://gw/v1")
+
+    def fake_call_structured(system_prompt, question, schema, **kwargs):
+        calls.append(question)
+        if len(calls) == 1:
+            raise StructuredContextBudgetError("working_context_compaction_required")
+        return _Out(targets=["t1"]), ""
+
+    async def fake_compact(model, material, progress=None, **kwargs):
+        compacted_inputs.append(material)
+        return {"question": material["question"], "working_summary": "4 个异常 Pod 摘要", "observations": []}
+
+    ai.call_structured = fake_call_structured
+    ai.create_compaction_model = lambda **kw: object()
+    monkeypatch.setattr(working_context, "compact_working_material", fake_compact)
+    run = _run()
+    ai._finalize_structured_delivery(run, system_prompt="S", question="Q")
+
+    assert len(calls) == 2 and "4 个异常 Pod 摘要" in calls[1]
+    assert compacted_inputs[0]["observations"][0]["result"].startswith("query_pod_lifecycle")
+    assert run.structured_response == _Out(targets=["t1"])

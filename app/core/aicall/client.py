@@ -1383,19 +1383,38 @@ class AICall:
             or (run.cancel_event is not None and run.cancel_event.is_set())
         ):
             return
-        material = self._run_material_for_finalization(run)
-        if not material:
+        material = self._run_material_for_finalization(run, question)
+        if not material["observations"] and not material["analysis"]:
             return
         node_id = run.node_id
         self._push(run.stream_queue, node_id, run.thinking_events, type="runtime_status", status="running",
                    content="调查预算已用尽，正在依据已采集结果提交本阶段结构化结论")
-        final_question = f"{question}\n\n{STRUCTURED_FINALIZATION_INSTRUCTION}\n\n{material}"
         started = time.time()
-        try:
+
+        def deliver(payload: Dict[str, Any]) -> Optional[BaseModel]:
+            final_question = (
+                f"{question}\n\n{STRUCTURED_FINALIZATION_INSTRUCTION}\n\n"
+                + json.dumps(payload, ensure_ascii=False, default=str)
+            )
             parsed, _raw = self.call_structured(
                 system_prompt, final_question, run.response_schema,
                 node_id=node_id or "structured", run_id=run.run_id, internal_model=True,
             )
+            return parsed
+
+        try:
+            try:
+                parsed = deliver(material)
+            except StructuredContextBudgetError as exc:
+                if "working_context_compaction_required" not in str(exc):
+                    raise
+                # Same convention as the nodes: semantic compaction, then one retry.
+                from app.core.aicall.working_context import compact_working_material
+                compacted = run_coroutine_sync(lambda: compact_working_material(
+                    self.create_compaction_model(), material,
+                    lambda **event: self._push(run.stream_queue, node_id, run.thinking_events, **event),
+                ))
+                parsed = deliver(compacted)
         except Exception as exc:
             raise_on_model_disconnect(exc)
             logger.warning("[AICall] 收卷结构化交付失败 (node=%s, reason=%s): %s",
@@ -1410,21 +1429,21 @@ class AICall:
             run.structured_response = parsed
 
     @staticmethod
-    def _run_material_for_finalization(run: "_AgentRun") -> str:
-        """This node's own analysis text and bounded tool observations, in order."""
+    def _run_material_for_finalization(run: "_AgentRun", question: str) -> Dict[str, Any]:
+        """This node's own bounded tool observations and analysis, in call order.
+
+        Shaped like node working material so compact_working_material can reduce it.
+        """
         analysis = [_strip_think(text) for _, text in run.emitted_ai_messages]
-        analysis = [text for text in analysis if text.strip()]
-        observations = [text for text in run.tool_observation_contents if str(text).strip()]
-        if not analysis and not observations:
-            return ""
-        parts = []
-        if observations:
-            parts.append("## 本阶段已获得的工具结果（按调用顺序）")
-            parts.extend(f"### 结果 {index}\n{text}" for index, text in enumerate(observations, 1))
-        if analysis:
-            parts.append("## 本阶段已形成的分析")
-            parts.extend(analysis)
-        return "\n\n".join(parts)
+        return {
+            "question": question,
+            "observations": [
+                {"order": index, "result": str(text)}
+                for index, text in enumerate(run.tool_observation_contents, 1)
+                if str(text).strip()
+            ],
+            "analysis": [text for text in analysis if text.strip()],
+        }
 
     def _finish_agent_call(
         self,
