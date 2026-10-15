@@ -10,6 +10,7 @@
     result, events = ai.call(system_prompt, question, tools=tools, max_steps=10)
     text = ai.call_simple(system_prompt, question)
 """
+import asyncio
 import json
 import logging
 import os
@@ -55,7 +56,7 @@ from app.core.prompts import get_workflow_prompt
 from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
 from .streaming import push_event
 from .types import AICallResult
-from .errors import raise_on_model_disconnect
+from .errors import ModelStreamStalled, raise_on_model_disconnect
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,18 @@ class StructuredContextBudgetError(RuntimeError):
         self.final_budget = final_budget
 
 
+_STREAM_END = object()
+_DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
+
+
+def _model_idle_timeout_seconds() -> float:
+    """Max silence while waiting on the model before declaring a stall (0 disables)."""
+    try:
+        return max(0.0, float(os.getenv("AICALL_MODEL_IDLE_TIMEOUT_SECONDS", _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS)))
+    except ValueError:
+        return _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS
+
+
 @dataclass(eq=False)
 class _AgentRun:
     """Mutable state shared by the stream handlers of one ``AICall.call`` run.
@@ -138,6 +151,7 @@ class _AgentRun:
     tool_call_count: int = 0
     compaction_count: int = 0
     model_request_started_at: float = 0.0
+    pending_tool_calls: int = 0  # >0 while tools run; idle watchdog only applies when waiting on the model
     all_tool_calls: List[Dict] = field(default_factory=list)
     content_buffer: List[str] = field(default_factory=list)  # token 级别的文本片段
     tool_observation_contents: List[str] = field(default_factory=list)
@@ -1367,38 +1381,70 @@ class AICall:
         run: "_AgentRun",
     ) -> None:
         """Consume ``agent.astream`` v2 chunks until the stream ends or a stop."""
-        node_id = run.node_id
         run.model_request_started_at = time.time()
-        async for chunk in agent.astream(
+        idle_limit = _model_idle_timeout_seconds()
+        stream = agent.astream(
             input_messages, config=config,
             stream_mode=["updates", "messages"],
             version="v2",
+        )
+        try:
+            while True:
+                chunk = await self._next_stream_chunk(stream, run, idle_limit)
+                if chunk is _STREAM_END:
+                    return
+                if await self._process_stream_chunk(run, chunk):
+                    return
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+    @staticmethod
+    async def _next_stream_chunk(stream: Any, run: "_AgentRun", idle_limit: float) -> Any:
+        """Next astream chunk; raise ModelStreamStalled if the model goes silent too long.
+
+        Tool execution has its own timeouts, so the idle limit only applies while
+        no tool call is outstanding (i.e. the agent is waiting on the model).
+        """
+        timeout = idle_limit if idle_limit > 0 and run.pending_tool_calls == 0 else None
+        try:
+            return await asyncio.wait_for(stream.__anext__(), timeout)
+        except StopAsyncIteration:
+            return _STREAM_END
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[AICall] 模型流停滞：%ss 未收到任何输出 (node=%s, iteration=%d)",
+                idle_limit, run.node_id, run.iteration,
+            )
+            raise ModelStreamStalled(idle_limit) from None
+
+    async def _process_stream_chunk(self, run: "_AgentRun", chunk: Any) -> bool:
+        """Handle one astream chunk; return True to stop consuming the stream."""
+        split = self._split_stream_chunk(chunk)
+        if split is None:
+            return False
+        chunk_type, chunk_data = split
+
+        if (
+            chunk_type != "updates"
+            and run.cancel_event
+            and run.cancel_event.is_set()
         ):
-            split = self._split_stream_chunk(chunk)
-            if split is None:
-                continue
-            chunk_type, chunk_data = split
+            logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", run.node_id)
+            return True
 
-            if (
-                chunk_type != "updates"
-                and run.cancel_event
-                and run.cancel_event.is_set()
-            ):
-                logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", node_id)
-                return
+        # ── messages 模式：token 级别流式 ──
+        if chunk_type == "messages":
+            self._handle_token_chunk(run, chunk_data)
+            return False
 
-            # ── messages 模式：token 级别流式 ──
-            if chunk_type == "messages":
-                self._handle_token_chunk(run, chunk_data)
-                continue
-
-            # ── updates 模式：消息/工具级别（原有逻辑） ──
-            if chunk_type != "updates":
-                continue
-            if await self._handle_updates_chunk(run, chunk_data):
-                return
-            if self._should_stop_after_update(run):
-                return
+        # ── updates 模式：消息/工具级别（原有逻辑） ──
+        if chunk_type != "updates":
+            return False
+        if await self._handle_updates_chunk(run, chunk_data):
+            return True
+        return self._should_stop_after_update(run)
 
     @staticmethod
     def _split_stream_chunk(chunk: Any) -> Optional[Tuple[Any, Any]]:
@@ -1590,6 +1636,7 @@ class AICall:
                 )
                 continue
             run.tool_call_count += 1
+            run.pending_tool_calls += 1
             tool_sequence = run.tool_call_count
             logger.debug("   [AICall] tool_call #%d %s | args=%s",
                         tool_sequence, tc["name"],
@@ -1729,6 +1776,7 @@ class AICall:
         }
         push_event(run.stream_queue, "tool_result", node_id, **evt)
         self._record(run.thinking_events, "tool_result", node_id, **evt)
+        run.pending_tool_calls = max(0, run.pending_tool_calls - 1)
         run.model_request_started_at = time.time()
         await self._maybe_compact_after_tool_result(run)
 

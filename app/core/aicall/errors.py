@@ -5,6 +5,39 @@ from openai import APIError, APIConnectionError, APITimeoutError, APIStatusError
 class ModelStreamInterrupted(RuntimeError):
     """Fatal model transport failure; never a partial successful answer."""
 
+    error_code = "model_disconnected"
+
+
+class ModelStreamStalled(ModelStreamInterrupted):
+    """The model stream went silent while the agent was waiting for model output."""
+
+    error_code = "model_stalled"
+
+    def __init__(self, idle_seconds: float):
+        self.idle_seconds = idle_seconds
+        super().__init__(
+            f"模型服务停滞：等待模型输出已超过 {idle_seconds:g} 秒未收到任何数据（模型或 LLM 网关无响应），"
+            "不是诊断流程卡住。本次运行已终止，已采集内容保留，请稍后重新发起。"
+        )
+
+
+def model_error_code(exc):
+    """Stable machine-readable code for the public error event, or None."""
+    current = exc
+    seen = set()
+    for _ in range(5):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        if isinstance(current, ModelStreamInterrupted):
+            return current.error_code
+        if isinstance(current, APITimeoutError):
+            return "model_timeout"
+        if isinstance(current, APIConnectionError):
+            return "model_disconnected"
+        current = current.__cause__ or current.__context__
+    return None
+
 
 def raise_on_model_disconnect(exc):
     if isinstance(exc, ModelStreamInterrupted):

@@ -6,6 +6,7 @@
 
 | 变量 | 默认值 | 读取位置 |
 |---|---|---|
+| `AICALL_MODEL_IDLE_TIMEOUT_SECONDS` | _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS | app/core/aicall/client.py:120 |
 | `AIOPS_AUTONOMOUS_PARALLEL_WORKERS` | "3" | app/core/remediation/jobs.py:60, app/core/workflow/nodes/autonomous_parallel.py:187 |
 | `AIOPS_COMPACTION_WORKERS` | "3" | app/core/aicall/working_context.py:196 |
 | `AIOPS_CONTEXT_ARCHIVE_ROOT` | "" | app/core/context/archive.py:23 |
@@ -28,12 +29,12 @@
 | `HOSTNAME` | "N/A" / 'localhost' | app/core/environment.py:103, app/core/environment.py:109 |
 | `KUBERNETES_SERVICE_HOST` | 'N/A' / — | app/core/environment.py:32, app/core/environment.py:99 |
 | `KUBERNETES_SERVICE_PORT` | 'N/A' | app/core/environment.py:100 |
-| `LANGFUSE_PUBLIC_KEY` | — | app/core/aicall/client.py:2067 |
-| `LANGFUSE_SECRET_KEY` | — | app/core/aicall/client.py:2067 |
+| `LANGFUSE_PUBLIC_KEY` | — | app/core/aicall/client.py:2115 |
+| `LANGFUSE_SECRET_KEY` | — | app/core/aicall/client.py:2115 |
 | `LLM_API_BASE` | — | app/core/service.py:358 |
 | `LLM_API_KEY` | — | app/core/service.py:339 |
 | `LLM_MODEL` | — | app/core/service.py:351 |
-| `LLM_REASONING_EFFORT` | "" | app/core/aicall/client.py:191 |
+| `LLM_REASONING_EFFORT` | "" | app/core/aicall/client.py:205 |
 | `LOG_LEVEL` | "INFO" | app/main.py:23 |
 | `MCP_AUTO_START_LOCAL` | "false" | app/main.py:60 |
 | `METRICS_ENABLED` | "true" / — | app/core/workflow/metrics.py:33, app/core/workflow/metrics.py:42 |

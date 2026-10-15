@@ -562,8 +562,9 @@ class WorkflowExecutor:
             metrics.errors.append(str(e))
             metrics.finish()
 
-            from app.core.aicall.errors import model_transport_message
+            from app.core.aicall.errors import model_error_code, model_transport_message
             public_error = model_transport_message(e)
+            error_code = model_error_code(e)
             seq = stream.next_seq()
             yield {
                 "type": "error",
@@ -572,6 +573,7 @@ class WorkflowExecutor:
                 "seq": seq,
                 "ts_ms": int(time.time() * 1000),
                 "error": public_error or str(e),
+                **({"error_code": error_code} if error_code else {}),
             }
         finally:
             # Normal completion is not user cancellation. Only stop a still
