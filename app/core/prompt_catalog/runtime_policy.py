@@ -4,8 +4,12 @@ These are literal compatibility contracts. Selection and composition remain in
 the callers; changing policy wording is separate from extracting these strings.
 """
 
-REMEDIATION_AUTO_MODE_LINE = "当前修复模式为 auto：结构化修复计划中的安全动作可由修复执行器自动审批并执行。"
-REMEDIATION_REVIEW_MODE_LINE = "当前修复模式为 review：结构化修复计划中的所有写动作必须先经过人工审批。"
+REMEDIATION_AUTO_MODE_LINE = (
+    "当前修复模式为 auto：结构化修复计划中的安全动作可由修复执行器自动审批并执行。"
+)
+REMEDIATION_REVIEW_MODE_LINE = (
+    "当前修复模式为 review：结构化修复计划中的所有写动作必须先经过人工审批。"
+)
 
 REMEDIATION_POLICY_TEMPLATE = (
     "\n\n# 修复计划与审批约束\n"
@@ -24,6 +28,4 @@ VISIBLE_OUTPUT_LANGUAGE_POLICY = (
     "- 调用工具前，用一句简短中文向用户说明本次查询目的；结果返回后若需继续调查，简述当前发现和下一步关注点。使用普通可见文本，不把进展只写进工具参数或最终 JSON。只提供可核实的进展摘要，不展开内部思维链，不重复工具详情，不为展示进展增加查询；最终仍按既定结构输出。\n"
 )
 
-RUNBOOK_CATALOG_INSTRUCTION = (
-    "If one or more runbooks match the issue, use the fetch_runbook tool for each relevant runbook."
-)
+RUNBOOK_CATALOG_INSTRUCTION = "If one or more runbooks match the issue, use the fetch_runbook tool for each relevant runbook."

@@ -10,6 +10,7 @@
     result, events = ai.call(system_prompt, question, tools=tools, max_steps=10)
     text = ai.call_simple(system_prompt, question)
 """
+
 import asyncio
 import json
 import logging
@@ -136,6 +137,7 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
             merged[key] = deepcopy(value)
     return merged
 
+
 _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
 
 
@@ -148,9 +150,14 @@ def _max_output_tokens() -> int:
     """Per-request output budget (reasoning + answer + tool call). Matches the output
     reservation used by the context budget; sent to the provider as max_tokens."""
     try:
-        return max(_MIN_OUTPUT_TOKENS, int(os.getenv("AICALL_MAX_OUTPUT_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS)))
+        return max(
+            _MIN_OUTPUT_TOKENS,
+            int(os.getenv("AICALL_MAX_OUTPUT_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS)),
+        )
     except ValueError:
         return _DEFAULT_MAX_OUTPUT_TOKENS
+
+
 _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS = 480.0
 
 
@@ -161,7 +168,11 @@ def _structured_call_timeout_seconds() -> Optional[float]:
     that send keepalive bytes defeat the SDK read timeout (observed >13 min).
     """
     try:
-        value = float(os.getenv("AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS", _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS))
+        value = float(
+            os.getenv(
+                "AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS", _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS
+            )
+        )
     except ValueError:
         value = _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS
     return value if value > 0 else None
@@ -187,7 +198,9 @@ def _call_with_deadline(fn: Callable[[], Any], timeout: Optional[float], *, what
 def _max_tool_calls_per_turn() -> int:
     """Tool calls executed per model message (0 disables); guards degenerate repetition."""
     try:
-        return max(0, int(os.getenv("AICALL_MAX_TOOL_CALLS_PER_TURN", _DEFAULT_MAX_TOOL_CALLS_PER_TURN)))
+        return max(
+            0, int(os.getenv("AICALL_MAX_TOOL_CALLS_PER_TURN", _DEFAULT_MAX_TOOL_CALLS_PER_TURN))
+        )
     except ValueError:
         return _DEFAULT_MAX_TOOL_CALLS_PER_TURN
 
@@ -195,7 +208,12 @@ def _max_tool_calls_per_turn() -> int:
 def _model_idle_timeout_seconds() -> float:
     """Max silence while waiting on the model before declaring a stall (0 disables)."""
     try:
-        return max(0.0, float(os.getenv("AICALL_MODEL_IDLE_TIMEOUT_SECONDS", _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS)))
+        return max(
+            0.0,
+            float(
+                os.getenv("AICALL_MODEL_IDLE_TIMEOUT_SECONDS", _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS)
+            ),
+        )
     except ValueError:
         return _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS
 
@@ -229,8 +247,12 @@ class _AgentRun:
     tool_call_count: int = 0
     compaction_count: int = 0
     model_request_started_at: float = 0.0
-    pending_tool_calls: int = 0  # >0 while tools run; idle watchdog only applies when waiting on the model
-    incomplete_reason: str = ""  # agent_timeout / step_limit / agent_error when the stream did not finish
+    pending_tool_calls: int = (
+        0  # >0 while tools run; idle watchdog only applies when waiting on the model
+    )
+    incomplete_reason: str = (
+        ""  # agent_timeout / step_limit / agent_error when the stream did not finish
+    )
     waiting_on: str = "模型响应"  # what the agent is currently waiting for (named in stall errors)
     all_tool_calls: List[Dict] = field(default_factory=list)
     content_buffer: List[str] = field(default_factory=list)  # token 级别的文本片段
@@ -270,7 +292,9 @@ class AICall:
         self.api_key = api_key
         self.api_base = api_base.strip() if api_base and api_base.strip() else None
         normalized_mode = (observation_summary_mode or "rule").strip().lower()
-        self.observation_summary_mode = normalized_mode if normalized_mode in {"rule", "ai"} else "rule"
+        self.observation_summary_mode = (
+            normalized_mode if normalized_mode in {"rule", "ai"} else "rule"
+        )
         self.observation_summary_max_chars = max(200, int(observation_summary_max_chars or 3000))
         self.context_compaction_config = dict(context_compaction_config or {})
         self.chat_model_extra_body = deepcopy(chat_model_extra_body or {})
@@ -290,8 +314,11 @@ class AICall:
         if reasoning_effort:
             self._chat_model_kwargs["reasoning_effort"] = reasoning_effort
 
-        logger.info("[AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
-                    model_name, base_url or "(default)")
+        logger.info(
+            "[AICall] 初始化 model=%s base_url=%s (LangChain ChatOpenAI)",
+            model_name,
+            base_url or "(default)",
+        )
 
     def _create_chat_model(
         self,
@@ -329,7 +356,9 @@ class AICall:
     def create_compaction_model(self, max_tokens: int = 3000):
         """Non-streaming internal model for context compaction / summaries."""
         return self._create_chat_model(
-            node_id="context_compaction", disable_streaming=True, internal=True,
+            node_id="context_compaction",
+            disable_streaming=True,
+            internal=True,
         ).bind(max_tokens=max_tokens)
 
     @staticmethod
@@ -352,8 +381,7 @@ class AICall:
             seen.add(id(current))
             message = str(current).strip().lower()
             if any(
-                signature in message
-                for signature in _RETRYABLE_STREAM_INTERRUPTION_SIGNATURES
+                signature in message for signature in _RETRYABLE_STREAM_INTERRUPTION_SIGNATURES
             ):
                 return True
             current = current.__cause__ or current.__context__
@@ -450,8 +478,13 @@ class AICall:
             except Exception as exc:
                 logger.warning("[AICall] call_simple 写入 context budget 失败: %s", exc)
 
-        logger.debug("[AICall] call_simple 开始 | node=%s prompt=%d字 question=%d字 extra=%s",
-                      node_id or "simple", len(system_prompt), len(question), list(kwargs.keys()) or "无")
+        logger.debug(
+            "[AICall] call_simple 开始 | node=%s prompt=%d字 question=%d字 extra=%s",
+            node_id or "simple",
+            len(system_prompt),
+            len(question),
+            list(kwargs.keys()) or "无",
+        )
         start = time.time()
 
         messages = []
@@ -512,8 +545,9 @@ class AICall:
                 ContextArchive(run_id=run_id).write_budget(node_id or "simple", final_budget)
             except Exception as exc:
                 logger.warning("[AICall] call_simple 写入 final context budget 失败: %s", exc)
-        logger.debug("[AICall] call_simple 完成 | %.1fs | 输出=%d字",
-                      time.time() - start, len(content))
+        logger.debug(
+            "[AICall] call_simple 完成 | %.1fs | 输出=%d字", time.time() - start, len(content)
+        )
         return content
 
     def call_structured(
@@ -596,7 +630,7 @@ class AICall:
                 "[AICall] native structured output unavailable for schema=%s; text fallback disabled",
                 schema.__name__,
             )
-            return None, raw if 'raw' in locals() else ""
+            return None, raw if "raw" in locals() else ""
 
         # Compatibility fallback for OpenAI-compatible gateways that do not
         # support native structured output. The schema is still enforced by
@@ -615,7 +649,9 @@ class AICall:
                 )
         parsed = self.extract_json_payload(raw)
         if parsed is None:
-            logger.warning("[AICall] structured output parse failed for schema=%s", schema.__name__)
+            logger.warning(
+                "[AICall] structured output parse failed for schema=%s", schema.__name__
+            )
             return None, raw
 
         try:
@@ -649,14 +685,21 @@ class AICall:
             schema_payload = {"schema": getattr(schema, "__name__", str(schema))}
         if static_context_components is None:
             static_context_components = [
-                {"name": "node_system_prompt", "category": "static_input", "content": system_prompt},
+                {
+                    "name": "node_system_prompt",
+                    "category": "static_input",
+                    "content": system_prompt,
+                },
                 {"name": "user_message", "category": "static_input", "content": question},
-                {"name": "structured_schema", "category": "static_input", "content": schema_payload},
+                {
+                    "name": "structured_schema",
+                    "category": "static_input",
+                    "content": schema_payload,
+                },
                 {"name": "output_reserved", "category": "reserved", "tokens": output_reserved},
             ]
         elif not any(
-            component.get("name") == "structured_schema"
-            for component in static_context_components
+            component.get("name") == "structured_schema" for component in static_context_components
         ):
             static_context_components = [
                 *static_context_components,
@@ -711,7 +754,9 @@ class AICall:
             if not hasattr(model, "with_structured_output"):
                 return None, ""
             structured_model = model.with_structured_output(schema, method=structured_method)
-            invoke_config = self._build_langchain_config(session_id, node_id=node_id or "structured")
+            invoke_config = self._build_langchain_config(
+                session_id, node_id=node_id or "structured"
+            )
             with self._langfuse_session_scope(session_id, node_id or "structured"):
                 result = _call_with_deadline(
                     lambda: (
@@ -768,9 +813,7 @@ class AICall:
             try:
                 schema_payload = schema.model_json_schema()
             except Exception:
-                schema_payload = {
-                    "schema": getattr(schema, "__name__", str(schema))
-                }
+                schema_payload = {"schema": getattr(schema, "__name__", str(schema))}
 
         safety_margin = int(config["safety_tokens"])
         estimator = ContextBudgetEstimator()
@@ -794,9 +837,9 @@ class AICall:
         )
         local_input_tokens = int(pre_budget.get("actual_context_tokens") or 0)
         original_input_tokens = local_input_tokens
-        token_count_accuracy = str(
-            pre_budget.get("token_count_accuracy") or "estimated"
-        ).strip().lower()
+        token_count_accuracy = (
+            str(pre_budget.get("token_count_accuracy") or "estimated").strip().lower()
+        )
         metadata: Dict[str, Any] = {
             "enabled": bool(config["enabled"]),
             "triggered": False,
@@ -881,7 +924,9 @@ class AICall:
 
         if original_input_tokens > effective_input_target:
             if getattr(self, "query_context_state_compaction", False):
-                raise StructuredContextBudgetError("working_context_compaction_required", pre_budget=pre_budget)
+                raise StructuredContextBudgetError(
+                    "working_context_compaction_required", pre_budget=pre_budget
+                )
             metadata["triggered"] = True
             final_question = self._compact_structured_question(
                 final_question,
@@ -893,9 +938,7 @@ class AICall:
             )
 
         final_budget = _estimate_candidate(final_question)
-        final_input_tokens = int(
-            final_budget.get("actual_context_tokens") or 0
-        )
+        final_input_tokens = int(final_budget.get("actual_context_tokens") or 0)
 
         if final_input_tokens > effective_input_target:
             metadata["error"] = "deterministic_compaction_failed"
@@ -911,11 +954,13 @@ class AICall:
                 final_budget=final_budget,
             )
 
-        metadata.update({
-            "strategy": "+".join(strategies) if strategies else "none",
-            "final_input_tokens": final_input_tokens,
-            "final_question_chars": len(final_question),
-        })
+        metadata.update(
+            {
+                "strategy": "+".join(strategies) if strategies else "none",
+                "final_input_tokens": final_input_tokens,
+                "final_question_chars": len(final_question),
+            }
+        )
         pre_budget["hard_guard"] = dict(metadata)
         final_budget["hard_guard"] = dict(metadata)
         if metadata["triggered"]:
@@ -1009,11 +1054,14 @@ class AICall:
             },
         ]
         if schema_payload is not None:
-            components.insert(2, {
-                "name": "structured_schema",
-                "category": "static_input",
-                "content": schema_payload,
-            })
+            components.insert(
+                2,
+                {
+                    "name": "structured_schema",
+                    "category": "static_input",
+                    "content": schema_payload,
+                },
+            )
         return estimator.estimate(
             node_id=node_id,
             model=self.model_str,
@@ -1049,16 +1097,12 @@ class AICall:
                     strategies.append("node_compactor")
             except Exception as exc:
                 logger.warning(
-                    "[AICall] node-specific context compactor failed "
-                    "node=%s: %s",
+                    "[AICall] node-specific context compactor failed node=%s: %s",
                     node_id,
                     exc,
                 )
 
-        if (
-            count_tokens(final_question, model=self.model_str)["tokens"]
-            > max_tokens
-        ):
+        if count_tokens(final_question, model=self.model_str)["tokens"] > max_tokens:
             final_question = compact_text_to_token_budget(
                 final_question,
                 max_tokens=max_tokens,
@@ -1080,9 +1124,7 @@ class AICall:
         except (TypeError, ValueError):
             safety_tokens = 2000
         try:
-            preserve_tail_tokens = int(
-                config.get("hard_guard_preserve_tail_tokens", 1200)
-            )
+            preserve_tail_tokens = int(config.get("hard_guard_preserve_tail_tokens", 1200))
         except (TypeError, ValueError):
             preserve_tail_tokens = 1200
         try:
@@ -1146,11 +1188,19 @@ class AICall:
         observation_processor = self._build_observation_processor()
         if static_context_components is None:
             static_context_components = self._default_call_context_components(
-                system_prompt, question, tools,
+                system_prompt,
+                question,
+                tools,
             )
 
-        logger.debug("[AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字 expect_json=%s",
-                      node_id or "?", max_steps, len(tools or []), len(system_prompt), expect_json)
+        logger.debug(
+            "[AICall] call 开始 | node=%s max_steps=%d tools=%d prompt=%d字 expect_json=%s",
+            node_id or "?",
+            max_steps,
+            len(tools or []),
+            len(system_prompt),
+            expect_json,
+        )
 
         # 无工具且不需要 agent structured_response 时直接调用 call_simple。
         if not tools:
@@ -1170,8 +1220,8 @@ class AICall:
                 return direct
 
         session_id = self._normalize_langfuse_session_id(run_id)
-        response_format, structured_output_tool_names = (
-            self._agent_response_format(response_schema)
+        response_format, structured_output_tool_names = self._agent_response_format(
+            response_schema
         )
         input_messages = self._build_agent_input_messages(question)
         config = self._build_agent_run_config(session_id, node_id, max_steps)
@@ -1261,15 +1311,25 @@ class AICall:
             # Tool-free stages have max_steps=0: use one native structured
             # request, not an agent loop with a zero recursion/time budget.
             parsed, _ = self.call_structured(
-                system_prompt, question, response_schema, node_id=node_id,
-                run_id=run_id, max_tokens=6000,
+                system_prompt,
+                question,
+                response_schema,
+                node_id=node_id,
+                run_id=run_id,
+                max_tokens=6000,
             )
             if parsed is None:
-                self._push(stream_queue, node_id, thinking_events,
-                           type="execution_incomplete", reason="structured_output_unavailable")
+                self._push(
+                    stream_queue,
+                    node_id,
+                    thinking_events,
+                    type="execution_incomplete",
+                    reason="structured_output_unavailable",
+                )
             content = parsed.model_dump_json() if parsed is not None else ""
-            return AICallResult(result=content, iterations=1,
-                                duration_ms=(time.time() - call_start) * 1000), thinking_events
+            return AICallResult(
+                result=content, iterations=1, duration_ms=(time.time() - call_start) * 1000
+            ), thinking_events
 
         if response_schema is None:
             content = self.call_simple(
@@ -1281,7 +1341,9 @@ class AICall:
             )
             total_ms = (time.time() - call_start) * 1000
             result = AICallResult(
-                result=content, iterations=1, duration_ms=total_ms,
+                result=content,
+                iterations=1,
+                duration_ms=total_ms,
             )
             return result, thinking_events
         return None
@@ -1348,15 +1410,24 @@ class AICall:
         }
         if getattr(self, "query_context_state_compaction", False):
             from app.core.aicall.working_context import WorkingContextMiddleware
+
             summary_model = self.create_compaction_model()
-            create_agent_kwargs["middleware"].insert(0, WorkingContextMiddleware(
-                self, agent_model, summary_model, tools, system_prompt,
-                getattr(self, "working_context_original_question", None) or question,
-                run_id, node_id or "agent",
-                lambda **event: self._push(stream_queue, node_id, thinking_events, **event),
-                response_format=response_format,
-                on_waiting=on_waiting,
-            ))
+            create_agent_kwargs["middleware"].insert(
+                0,
+                WorkingContextMiddleware(
+                    self,
+                    agent_model,
+                    summary_model,
+                    tools,
+                    system_prompt,
+                    getattr(self, "working_context_original_question", None) or question,
+                    run_id,
+                    node_id or "agent",
+                    lambda **event: self._push(stream_queue, node_id, thinking_events, **event),
+                    response_format=response_format,
+                    on_waiting=on_waiting,
+                ),
+            )
         if response_format is not None:
             create_agent_kwargs["response_format"] = response_format
         return create_agent(**create_agent_kwargs)
@@ -1366,8 +1437,14 @@ class AICall:
         input_messages = {"messages": [{"role": "user", "content": question}]}
         session_context = getattr(self, "query_session_context", None)
         if session_context:
-            input_messages["messages"].insert(0, {"role": "user", "content":
-                "[会话历史：仅供理解指代，旧观测不是当前值]\n" + json.dumps(session_context, ensure_ascii=False, default=str)})
+            input_messages["messages"].insert(
+                0,
+                {
+                    "role": "user",
+                    "content": "[会话历史：仅供理解指代，旧观测不是当前值]\n"
+                    + json.dumps(session_context, ensure_ascii=False, default=str),
+                },
+            )
         return input_messages
 
     def _build_agent_run_config(
@@ -1425,18 +1502,32 @@ class AICall:
                     run.cancel_event,
                 ),
                 timeout=agent_timeout,
-                worker_context=lambda: self._langfuse_session_scope(session_id, node_id or "agent"),
+                worker_context=lambda: self._langfuse_session_scope(
+                    session_id, node_id or "agent"
+                ),
                 thread_name="aicall-agent",
             )
         except TimeoutError:
             run.incomplete_reason = "agent_timeout"
-            self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason="agent_timeout")
+            self._push(
+                run.stream_queue,
+                node_id,
+                run.thinking_events,
+                type="execution_incomplete",
+                reason="agent_timeout",
+            )
             logger.warning("[AICall] agent 执行超时 (%ss)", agent_timeout)
             if not run.final_content:
                 run.final_content = "Agent 执行超时"
         except GraphRecursionError as e:
             run.incomplete_reason = "step_limit"
-            self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason="step_limit")
+            self._push(
+                run.stream_queue,
+                node_id,
+                run.thinking_events,
+                type="execution_incomplete",
+                reason="step_limit",
+            )
             recursion_msg = str(e).splitlines()[0].strip()
             logger.warning("[AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
             if not run.final_content:
@@ -1445,11 +1536,19 @@ class AICall:
             raise_on_model_disconnect(e)
             logger.error("[AICall] agent 执行异常: %s", e, exc_info=True)
             run.incomplete_reason = "agent_error"
-            self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason=str(e))
+            self._push(
+                run.stream_queue,
+                node_id,
+                run.thinking_events,
+                type="execution_incomplete",
+                reason=str(e),
+            )
             if not run.final_content:
                 run.final_content = f"Agent 执行异常: {e}"
 
-    def _finalize_structured_delivery(self, run: "_AgentRun", *, system_prompt: str, question: str) -> None:
+    def _finalize_structured_delivery(
+        self, run: "_AgentRun", *, system_prompt: str, question: str
+    ) -> None:
         """Bounded protocol recovery: one tool-free structured call when the agent ended
         without its required structured result - stopped early (step limit / timeout /
         error) or finished with plain text (e.g. tool-call arguments emitted as text).
@@ -1470,8 +1569,14 @@ class AICall:
         if not material["observations"] and not material["analysis"]:
             return
         node_id = run.node_id
-        self._push(run.stream_queue, node_id, run.thinking_events, type="runtime_status", status="running",
-                   content="调查预算已用尽，正在依据已采集结果提交本阶段结构化结论")
+        self._push(
+            run.stream_queue,
+            node_id,
+            run.thinking_events,
+            type="runtime_status",
+            status="running",
+            content="调查预算已用尽，正在依据已采集结果提交本阶段结构化结论",
+        )
         started = time.time()
 
         def deliver(payload: Dict[str, Any]) -> Optional[BaseModel]:
@@ -1480,8 +1585,12 @@ class AICall:
                 + json.dumps(payload, ensure_ascii=False, default=str)
             )
             parsed, _raw = self.call_structured(
-                system_prompt, final_question, run.response_schema,
-                node_id=node_id or "structured", run_id=run.run_id, internal_model=True,
+                system_prompt,
+                final_question,
+                run.response_schema,
+                node_id=node_id or "structured",
+                run_id=run.run_id,
+                internal_model=True,
             )
             return parsed
 
@@ -1493,21 +1602,41 @@ class AICall:
                     raise
                 # Same convention as the nodes: semantic compaction, then one retry.
                 from app.core.aicall.working_context import compact_working_material
-                compacted = run_coroutine_sync(lambda: compact_working_material(
-                    self.create_compaction_model(), material,
-                    lambda **event: self._push(run.stream_queue, node_id, run.thinking_events, **event),
-                ))
+
+                compacted = run_coroutine_sync(
+                    lambda: compact_working_material(
+                        self.create_compaction_model(),
+                        material,
+                        lambda **event: self._push(
+                            run.stream_queue, node_id, run.thinking_events, **event
+                        ),
+                    )
+                )
                 parsed = deliver(compacted)
         except Exception as exc:
             raise_on_model_disconnect(exc)
-            logger.warning("[AICall] 收卷结构化交付失败 (node=%s, reason=%s): %s",
-                           node_id, run.incomplete_reason, exc)
+            logger.warning(
+                "[AICall] 收卷结构化交付失败 (node=%s, reason=%s): %s",
+                node_id,
+                run.incomplete_reason,
+                exc,
+            )
             parsed = None
         status = "success" if parsed is not None else "failed"
-        logger.info("[AICall] 收卷结构化交付 %s | node=%s | reason=%s | %.1fs",
-                    status, node_id, run.incomplete_reason, time.time() - started)
-        self._record(run.thinking_events, "structured_finalization", node_id,
-                     status=status, reason=run.incomplete_reason)
+        logger.info(
+            "[AICall] 收卷结构化交付 %s | node=%s | reason=%s | %.1fs",
+            status,
+            node_id,
+            run.incomplete_reason,
+            time.time() - started,
+        )
+        self._record(
+            run.thinking_events,
+            "structured_finalization",
+            node_id,
+            status=status,
+            reason=run.incomplete_reason,
+        )
         if parsed is not None:
             run.structured_response = parsed
 
@@ -1565,9 +1694,14 @@ class AICall:
             thinking_events=thinking_events,
             final_content=final_content,
         )
-        logger.info("[AICall] call 完成 | node=%s | %.1fs | iterations=%d | tools=%d | 输出=%d字",
-                    node_id or "?", total_ms / 1000, result.iterations, run.tool_call_count,
-                    len(final_content))
+        logger.info(
+            "[AICall] call 完成 | node=%s | %.1fs | iterations=%d | tools=%d | 输出=%d字",
+            node_id or "?",
+            total_ms / 1000,
+            result.iterations,
+            run.tool_call_count,
+            len(final_content),
+        )
         return result, thinking_events
 
     # ------------------------------------------------------------------
@@ -1585,7 +1719,8 @@ class AICall:
         run.model_request_started_at = time.time()
         idle_limit = _model_idle_timeout_seconds()
         stream = agent.astream(
-            input_messages, config=config,
+            input_messages,
+            config=config,
             stream_mode=["updates", "messages"],
             version="v2",
         )
@@ -1625,7 +1760,10 @@ class AICall:
             waiting_on = getattr(run, "waiting_on", "") or "模型响应"
             logger.warning(
                 "[AICall] 模型流停滞：%ss 未收到任何输出 (node=%s, iteration=%d, 等待：%s)",
-                idle_limit, run.node_id, run.iteration, waiting_on,
+                idle_limit,
+                run.node_id,
+                run.iteration,
+                waiting_on,
             )
             raise ModelStreamStalled(idle_limit, waiting_on=waiting_on)
         try:
@@ -1640,11 +1778,7 @@ class AICall:
             return False
         chunk_type, chunk_data = split
 
-        if (
-            chunk_type != "updates"
-            and run.cancel_event
-            and run.cancel_event.is_set()
-        ):
+        if chunk_type != "updates" and run.cancel_event and run.cancel_event.is_set():
             logger.info("[AICall] 收到取消信号，停止 agent (node=%s)", run.node_id)
             return True
 
@@ -1685,13 +1819,23 @@ class AICall:
             return
         reasoning_text = self._extract_reasoning_text(token_msg)
         if reasoning_text:
-            push_event(run.stream_queue, "ai_reasoning", run.node_id,
-                       content=reasoning_text, iteration=run.iteration)
+            push_event(
+                run.stream_queue,
+                "ai_reasoning",
+                run.node_id,
+                content=reasoning_text,
+                iteration=run.iteration,
+            )
         token_text = self._extract_visible_ai_text(token_msg)
         if token_text:
             run.content_buffer.append(token_text)
-            push_event(run.stream_queue, "ai_token", run.node_id,
-                       content=token_text, iteration=run.iteration)
+            push_event(
+                run.stream_queue,
+                "ai_token",
+                run.node_id,
+                content=token_text,
+                iteration=run.iteration,
+            )
 
     def _should_stop_after_update(self, run: "_AgentRun") -> bool:
         node_id = run.node_id
@@ -1728,7 +1872,7 @@ class AICall:
                 if isinstance(msg, AIMessage):
                     if self._handle_agent_ai_message(run, msg):
                         return True
-                elif hasattr(msg, 'type') and msg.type == 'tool':
+                elif hasattr(msg, "type") and msg.type == "tool":
                     await self._handle_agent_tool_message(run, msg)
         return False
 
@@ -1795,33 +1939,25 @@ class AICall:
 
         # AI 完整消息（用于 final_content 和工具调用检测）
         full_msg_text = self._extract_visible_ai_text(msg)
-        should_track_ai_message = (
-            bool(full_msg_text) or bool(new_tool_calls)
-        ) and (
+        should_track_ai_message = (bool(full_msg_text) or bool(new_tool_calls)) and (
             not msg_tool_calls or bool(new_tool_calls)
         )
         if should_track_ai_message:
-            run.emitted_ai_messages.append(
-                (msg, full_msg_text)
-            )
+            run.emitted_ai_messages.append((msg, full_msg_text))
             if run.compaction_count > 0:
-                self._compact_langgraph_ai_messages_in_place(
-                    run.emitted_ai_messages
-                )
+                self._compact_langgraph_ai_messages_in_place(run.emitted_ai_messages)
 
-        should_emit_ai_message = (
-            bool(full_msg_text)
-            and should_track_ai_message
-        )
+        should_emit_ai_message = bool(full_msg_text) and should_track_ai_message
         if should_emit_ai_message:
             run.final_content = full_msg_text
             run.iteration += 1
-            logger.debug("   [AICall] AI 消息 #%d:\n%s",
-                        run.iteration, full_msg_text[:1000])
-            evt = {"type": "ai_message",
-                   "content": full_msg_text[:500],
-                   "full_content": full_msg_text,
-                   "iteration": run.iteration}
+            logger.debug("   [AICall] AI 消息 #%d:\n%s", run.iteration, full_msg_text[:1000])
+            evt = {
+                "type": "ai_message",
+                "content": full_msg_text[:500],
+                "full_content": full_msg_text,
+                "iteration": run.iteration,
+            }
             self._push(run.stream_queue, node_id, run.thinking_events, **evt)
 
             if run.expect_json and not msg.tool_calls:
@@ -1829,14 +1965,19 @@ class AICall:
                 if parsed is not None and (
                     run.json_validator is None or run.json_validator(parsed)
                 ):
-                    if run.json_acceptance_guard is not None and not run.json_acceptance_guard(parsed, run.thinking_events):
+                    if run.json_acceptance_guard is not None and not run.json_acceptance_guard(
+                        parsed, run.thinking_events
+                    ):
                         logger.info(
                             "[AICall] JSON middleware 捕获到结构化输出，但接受条件未满足，继续 agent (node=%s)",
                             node_id,
                         )
                         return False
                     run.final_content = json.dumps(parsed, ensure_ascii=False)
-                    logger.info("[AICall] JSON middleware 捕获到有效结构化输出，提前结束 agent (node=%s)", node_id)
+                    logger.info(
+                        "[AICall] JSON middleware 捕获到有效结构化输出，提前结束 agent (node=%s)",
+                        node_id,
+                    )
                     return True
 
         # AI 工具调用
@@ -1857,31 +1998,42 @@ class AICall:
             run.tool_call_count += 1
             run.pending_tool_calls += 1
             tool_sequence = run.tool_call_count
-            logger.debug("   [AICall] tool_call #%d %s | args=%s",
-                        tool_sequence, tc["name"],
-                        str(tc.get("args", {}))[:300])
-            push_event(run.stream_queue, "tool_start", node_id,
-                       tool_name=tc["name"],
-                       tool_args=tc.get("args", {}),
-                       tool_call_id=tc.get("id"),
-                       tool_sequence=tool_sequence,
-                       iteration=run.iteration)
+            logger.debug(
+                "   [AICall] tool_call #%d %s | args=%s",
+                tool_sequence,
+                tc["name"],
+                str(tc.get("args", {}))[:300],
+            )
+            push_event(
+                run.stream_queue,
+                "tool_start",
+                node_id,
+                tool_name=tc["name"],
+                tool_args=tc.get("args", {}),
+                tool_call_id=tc.get("id"),
+                tool_sequence=tool_sequence,
+                iteration=run.iteration,
+            )
             if tc.get("id"):
                 call_id = str(tc.get("id"))
                 run.tool_args_by_call_id[call_id] = dict(tc.get("args") or {})
                 run.tool_sequence_by_call_id[call_id] = tool_sequence
-            self._record(run.thinking_events, "tool_start", node_id,
-                         tool_name=tc["name"],
-                         tool_args=tc.get("args", {}),
-                         tool_call_id=tc.get("id"),
-                         tool_sequence=tool_sequence,
-                         iteration=run.iteration)
+            self._record(
+                run.thinking_events,
+                "tool_start",
+                node_id,
+                tool_name=tc["name"],
+                tool_args=tc.get("args", {}),
+                tool_call_id=tc.get("id"),
+                tool_sequence=tool_sequence,
+                iteration=run.iteration,
+            )
 
     async def _handle_agent_tool_message(self, run: "_AgentRun", msg: Any) -> None:
         """Process one tool result: dedup, observation, events, compaction."""
         node_id = run.node_id
         # 工具执行结果
-        tool_name = getattr(msg, 'name', '') or ''
+        tool_name = getattr(msg, "name", "") or ""
         if tool_name in run.structured_output_tool_names:
             logger.debug(
                 "[AICall] 跳过结构化输出 tool_result 统计 | node=%s schema=%s",
@@ -1889,7 +2041,7 @@ class AICall:
                 tool_name,
             )
             return
-        tool_content = msg.content or ''
+        tool_content = msg.content or ""
         tool_signature = self._tool_result_signature(msg, tool_name, tool_content)
         if tool_signature in run.seen_tool_result_signatures:
             logger.debug(
@@ -1924,48 +2076,58 @@ class AICall:
         )
         additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
         deduplicated = bool(additional_kwargs.get("aiops_deduplicated"))
-        original_tool_call_id = additional_kwargs.get(
-            "aiops_original_tool_call_id"
+        original_tool_call_id = additional_kwargs.get("aiops_original_tool_call_id")
+        run.all_tool_calls.append(
+            {
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "status": status,
+                "result": bounded_content,
+                "raw_ref": observation.get("raw_ref"),
+                "structured_ref": observation.get("structured_ref"),
+                "summary_ref": observation.get("summary_ref"),
+                "raw_chars": observation.get("raw_chars", len(tool_content)),
+                "summary_chars": observation.get("summary_chars", len(bounded_content)),
+                "semantic_success": observation.get("semantic_success", True),
+                "structured": observation.get("structured"),
+                "observation_audit": observation.get("observation_audit", {}),
+                "deduplicated": deduplicated,
+                "original_tool_call_id": original_tool_call_id,
+            }
         )
-        run.all_tool_calls.append({
-            "tool_name": tool_name,
-            "tool_args": tool_args,
-            "status": status,
-            "result": bounded_content,
-            "raw_ref": observation.get("raw_ref"),
-            "structured_ref": observation.get("structured_ref"),
-            "summary_ref": observation.get("summary_ref"),
-            "raw_chars": observation.get("raw_chars", len(tool_content)),
-            "summary_chars": observation.get("summary_chars", len(bounded_content)),
-            "semantic_success": observation.get("semantic_success", True),
-            "structured": observation.get("structured"),
-            "observation_audit": observation.get(
-                "observation_audit", {}
-            ),
-            "deduplicated": deduplicated,
-            "original_tool_call_id": original_tool_call_id,
-        })
-        run.emitted_tool_messages.append((msg, {
-            "tool_name": tool_name,
-            "semantic_success": observation.get(
-                "semantic_success",
-                True,
-            ),
-            "result_preview": bounded_content[:500],
-            "raw_ref": observation.get("raw_ref"),
-            "structured_ref": observation.get("structured_ref"),
-            "summary_ref": observation.get("summary_ref"),
-            "summary_chars": observation.get("summary_chars", len(bounded_content)),
-        }))
-        logger.info("   [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
-                    tool_sequence, tool_name, status,
-                    observation.get("raw_chars", len(tool_content)),
-                    observation.get("summary_chars", len(bounded_content)),
-                    observation.get("processor", "unknown"))
+        run.emitted_tool_messages.append(
+            (
+                msg,
+                {
+                    "tool_name": tool_name,
+                    "semantic_success": observation.get(
+                        "semantic_success",
+                        True,
+                    ),
+                    "result_preview": bounded_content[:500],
+                    "raw_ref": observation.get("raw_ref"),
+                    "structured_ref": observation.get("structured_ref"),
+                    "summary_ref": observation.get("summary_ref"),
+                    "summary_chars": observation.get("summary_chars", len(bounded_content)),
+                },
+            )
+        )
+        logger.info(
+            "   [AICall] tool #%d %s | %s | raw=%d summary=%d processor=%s",
+            tool_sequence,
+            tool_name,
+            status,
+            observation.get("raw_chars", len(tool_content)),
+            observation.get("summary_chars", len(bounded_content)),
+            observation.get("processor", "unknown"),
+        )
         self._log_observation_projection(node_id, tool_name, observation)
-        logger.debug("   [AICall] tool #%d %s 摘要输出:\n%s",
-                    tool_sequence, tool_name,
-                    bounded_content[:2000])
+        logger.debug(
+            "   [AICall] tool #%d %s 摘要输出:\n%s",
+            tool_sequence,
+            tool_name,
+            bounded_content[:2000],
+        )
         evt = {
             "type": "tool_result",
             "transport_status": transport_status,
@@ -1987,9 +2149,7 @@ class AICall:
             "structured": observation.get("structured"),
             "observation_processed": observation.get("processed", False),
             "observation_processor": observation.get("processor", ""),
-            "observation_audit": observation.get(
-                "observation_audit", {}
-            ),
+            "observation_audit": observation.get("observation_audit", {}),
             "context_usage_ratio": observation.get("context_usage_ratio"),
             "iteration": run.iteration,
         }
@@ -2008,22 +2168,18 @@ class AICall:
         """Replace the ToolMessage body with its bounded summary + archive refs."""
         try:
             msg.content = bounded_content
-            additional_kwargs = dict(
-                getattr(msg, "additional_kwargs", None) or {}
+            additional_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})
+            additional_kwargs.update(
+                {
+                    "aiops_raw_ref": observation.get("raw_ref"),
+                    "aiops_structured_ref": observation.get("structured_ref"),
+                    "aiops_summary_ref": observation.get("summary_ref"),
+                    "aiops_semantic_success": observation.get(
+                        "semantic_success",
+                        True,
+                    ),
+                }
             )
-            additional_kwargs.update({
-                "aiops_raw_ref": observation.get("raw_ref"),
-                "aiops_structured_ref": observation.get(
-                    "structured_ref"
-                ),
-                "aiops_summary_ref": observation.get(
-                    "summary_ref"
-                ),
-                "aiops_semantic_success": observation.get(
-                    "semantic_success",
-                    True,
-                ),
-            })
             msg.additional_kwargs = additional_kwargs
         except Exception as exc:
             logger.warning("[AICall] ToolMessage 内容压缩回写失败: %s", exc)
@@ -2031,9 +2187,7 @@ class AICall:
     @staticmethod
     def _tool_result_status(msg: Any, observation: Dict[str, Any]) -> Tuple[str, str]:
         """Return ``(status, transport_status)``; may mark observation failed."""
-        status = str(
-            getattr(msg, "status", "success") or "success"
-        ).strip().lower()
+        status = str(getattr(msg, "status", "success") or "success").strip().lower()
         if status not in {"success", "error"}:
             status = "success"
         if status == "error":
@@ -2193,9 +2347,7 @@ class AICall:
         )
         window = resolved.get("context_window")
         input_usage = (
-            f"{input_tokens / window:.2%}"
-            if isinstance(window, int) and window > 0
-            else "unknown"
+            f"{input_tokens / window:.2%}" if isinstance(window, int) and window > 0 else "unknown"
         )
         iter_part = "" if iteration is None else f" iteration={iteration}"
         # Token fields below are provider usage counts, not authentication credentials.
@@ -2244,9 +2396,9 @@ class AICall:
             for block in content:
                 if isinstance(block, str):
                     visible.append(block)
-                elif isinstance(block, dict) and block.get('type') in {'text', 'output_text'}:
-                    visible.append(str(block.get('text') or ''))
-            content = ''.join(visible)
+                elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+                    visible.append(str(block.get("text") or ""))
+            content = "".join(visible)
         return str(content or "")
 
     @staticmethod
@@ -2258,9 +2410,12 @@ class AICall:
         content = getattr(message, "content", None)
         if isinstance(content, list):
             for block in content:
-                if isinstance(block, dict) and block.get('type') == 'reasoning':
-                    parts.extend(str(item.get('text') or '') for item in block.get('summary', [])
-                                 if isinstance(item, dict) and item.get('type') == 'summary_text')
+                if isinstance(block, dict) and block.get("type") == "reasoning":
+                    parts.extend(
+                        str(item.get("text") or "")
+                        for item in block.get("summary", [])
+                        if isinstance(item, dict) and item.get("type") == "summary_text"
+                    )
         additional_kwargs = getattr(message, "additional_kwargs", None) or {}
         response_metadata = getattr(message, "response_metadata", None) or {}
         reasoning = (
@@ -2305,7 +2460,9 @@ class AICall:
             return None
         return ascii_text[:199]
 
-    def _build_langchain_config(self, session_id: Optional[str], node_id: str = "") -> Dict[str, Any]:
+    def _build_langchain_config(
+        self, session_id: Optional[str], node_id: str = ""
+    ) -> Dict[str, Any]:
         if not session_id:
             return {}
         # Keep this out of `metadata`: ChatOpenAI uses `metadata` both as a
@@ -2316,7 +2473,10 @@ class AICall:
         node_text = str(node_id or "").strip()
         if node_text:
             tags.append(f"node:{node_text}")
-        config: Dict[str, Any] = {"tags": tags, "metadata": self._session_metadata(session_id, node_id)}
+        config: Dict[str, Any] = {
+            "tags": tags,
+            "metadata": self._session_metadata(session_id, node_id),
+        }
         if self._is_langfuse_sdk_configured():
             handler = self._create_langfuse_callback_handler()
             if handler is not None:
@@ -2339,7 +2499,9 @@ class AICall:
             logger.debug("[AICall] Langfuse CallbackHandler 不可用，跳过 callbacks: %s", exc)
             return None
 
-    def _bind_session_metadata(self, model: Any, session_id: Optional[str], node_id: str = "") -> Any:
+    def _bind_session_metadata(
+        self, model: Any, session_id: Optional[str], node_id: str = ""
+    ) -> Any:
         if not session_id:
             return model
         metadata = self._session_metadata(session_id, node_id)
@@ -2439,11 +2601,13 @@ class AICall:
         try:
             langfuse = get_client()
             stack = ExitStack()
-            stack.enter_context(langfuse.start_as_current_observation(
-                as_type="span",
-                name=f"workflow-{node_id or 'unknown'}",
-                metadata=metadata,
-            ))
+            stack.enter_context(
+                langfuse.start_as_current_observation(
+                    as_type="span",
+                    name=f"workflow-{node_id or 'unknown'}",
+                    metadata=metadata,
+                )
+            )
             stack.enter_context(propagate_attributes(session_id=session_id))
         except Exception as exc:
             logger.debug("[AICall] Langfuse span 创建失败，仅传播 session: %s", exc)
@@ -2508,7 +2672,8 @@ class AICall:
                 tokens = ((budget or {}).get("hard_guard") or {}).get("final_input_tokens")
                 on_waiting(
                     f"本节点第 {request_sequence} 次模型请求（已发出，输入约 {tokens} tokens）"
-                    if tokens else f"本节点第 {request_sequence} 次模型请求（已发出）"
+                    if tokens
+                    else f"本节点第 {request_sequence} 次模型请求（已发出）"
                 )
             return await handler(guarded_request)
 
@@ -2530,18 +2695,10 @@ class AICall:
         output_reserved = self._agent_request_output_reserved(request)
         safety_margin = int(config["safety_tokens"])
 
-        system_content = (
-            getattr(getattr(request, "system_message", None), "content", "")
-            or ""
-        )
+        system_content = getattr(getattr(request, "system_message", None), "content", "") or ""
         messages = list(getattr(request, "messages", None) or [])
-        messages_payload = [
-            self._serialize_agent_message(message)
-            for message in messages
-        ]
-        tool_schema_payload = serialize_tool_schema(
-            getattr(request, "tools", None) or []
-        )
+        messages_payload = [self._serialize_agent_message(message) for message in messages]
+        tool_schema_payload = serialize_tool_schema(getattr(request, "tools", None) or [])
         response_schema_payload = self._serialize_agent_response_format(
             getattr(request, "response_format", None)
         )
@@ -2568,12 +2725,10 @@ class AICall:
             )
 
         pre_budget = _estimate(messages_payload)
-        original_input_tokens = int(
-            pre_budget.get("actual_context_tokens") or 0
+        original_input_tokens = int(pre_budget.get("actual_context_tokens") or 0)
+        token_count_accuracy = (
+            str(pre_budget.get("token_count_accuracy") or "estimated").strip().lower()
         )
-        token_count_accuracy = str(
-            pre_budget.get("token_count_accuracy") or "estimated"
-        ).strip().lower()
         metadata: Dict[str, Any] = {
             "enabled": bool(config["enabled"]),
             "triggered": False,
@@ -2628,7 +2783,9 @@ class AICall:
             return request, pre_budget
 
         if getattr(self, "query_context_state_compaction", False):
-            raise StructuredContextBudgetError("working_context_compaction_required", pre_budget=pre_budget)
+            raise StructuredContextBudgetError(
+                "working_context_compaction_required", pre_budget=pre_budget
+            )
 
         fixed_tokens = sum(
             int(component.get("tokens") or 0)
@@ -2648,23 +2805,23 @@ class AICall:
                 pre_budget=pre_budget,
             )
 
-        compacted_messages, final_budget, final_input_tokens = (
-            self._compact_agent_request_history(
-                messages,
-                message_budget=message_budget,
-                effective_input_target=effective_input_target,
-                preserve_tail_tokens=int(config["preserve_tail_tokens"]),
-                estimate=_estimate,
-            )
+        compacted_messages, final_budget, final_input_tokens = self._compact_agent_request_history(
+            messages,
+            message_budget=message_budget,
+            effective_input_target=effective_input_target,
+            preserve_tail_tokens=int(config["preserve_tail_tokens"]),
+            estimate=_estimate,
         )
         if final_input_tokens > effective_input_target:
-            metadata.update({
-                "triggered": True,
-                "strategy": "deterministic_agent_summary",
-                "error": "deterministic_compaction_failed",
-                "final_input_tokens": final_input_tokens,
-                "final_message_count": 1,
-            })
+            metadata.update(
+                {
+                    "triggered": True,
+                    "strategy": "deterministic_agent_summary",
+                    "error": "deterministic_compaction_failed",
+                    "final_input_tokens": final_input_tokens,
+                    "final_message_count": 1,
+                }
+            )
             pre_budget["hard_guard"] = dict(metadata)
             final_budget["hard_guard"] = dict(metadata)
             raise StructuredContextBudgetError(
@@ -2675,12 +2832,14 @@ class AICall:
                 final_budget=final_budget,
             )
 
-        metadata.update({
-            "triggered": True,
-            "strategy": "deterministic_agent_summary",
-            "final_input_tokens": final_input_tokens,
-            "final_message_count": 1,
-        })
+        metadata.update(
+            {
+                "triggered": True,
+                "strategy": "deterministic_agent_summary",
+                "final_input_tokens": final_input_tokens,
+                "final_message_count": 1,
+            }
+        )
         pre_budget["hard_guard"] = dict(metadata)
         final_budget["hard_guard"] = dict(metadata)
         logger.warning(
@@ -2797,12 +2956,8 @@ class AICall:
             max_tokens=message_budget,
         )
         compacted_messages = [HumanMessage(content=compacted_history)]
-        final_budget = estimate([
-            self._serialize_agent_message(compacted_messages[0])
-        ])
-        final_input_tokens = int(
-            final_budget.get("actual_context_tokens") or 0
-        )
+        final_budget = estimate([self._serialize_agent_message(compacted_messages[0])])
+        final_input_tokens = int(final_budget.get("actual_context_tokens") or 0)
         if final_input_tokens > effective_input_target:
             overflow = final_input_tokens - effective_input_target
             tighter_budget = max(1, message_budget - overflow - 64)
@@ -2813,12 +2968,8 @@ class AICall:
                 preserve_tail_tokens=preserve_tail_tokens,
             )
             compacted_messages = [HumanMessage(content=compacted_history)]
-            final_budget = estimate([
-                self._serialize_agent_message(compacted_messages[0])
-            ])
-            final_input_tokens = int(
-                final_budget.get("actual_context_tokens") or 0
-            )
+            final_budget = estimate([self._serialize_agent_message(compacted_messages[0])])
+            final_input_tokens = int(final_budget.get("actual_context_tokens") or 0)
         return compacted_messages, final_budget, final_input_tokens
 
     @staticmethod
@@ -2845,10 +2996,12 @@ class AICall:
             for spec in specs:
                 json_schema = getattr(spec, "json_schema", None)
                 if json_schema:
-                    payload.append({
-                        "name": getattr(spec, "name", ""),
-                        "json_schema": json_schema,
-                    })
+                    payload.append(
+                        {
+                            "name": getattr(spec, "name", ""),
+                            "json_schema": json_schema,
+                        }
+                    )
             if payload:
                 return payload
         schema = getattr(response_format, "schema", None)
@@ -2888,27 +3041,25 @@ class AICall:
                 if content:
                     assistant_messages.append(_bounded(content, 240))
                 for tool_call in list(message.tool_calls or []):
-                    tool_calls.append({
-                        "tool_name": str(
-                            tool_call.get("name") or "unknown"
-                        ),
-                        "tool_args": _bounded(
-                            json.dumps(
-                                tool_call.get("args") or {},
-                                ensure_ascii=False,
-                                default=str,
+                    tool_calls.append(
+                        {
+                            "tool_name": str(tool_call.get("name") or "unknown"),
+                            "tool_args": _bounded(
+                                json.dumps(
+                                    tool_call.get("args") or {},
+                                    ensure_ascii=False,
+                                    default=str,
+                                ),
+                                240,
                             ),
-                            240,
-                        ),
-                    })
+                        }
+                    )
                 continue
             if isinstance(message, ToolMessage):
                 additional = dict(message.additional_kwargs or {})
                 item: Dict[str, Any] = {
                     "tool_name": str(message.name or "unknown"),
-                    "semantic_success": additional.get(
-                        "aiops_semantic_success"
-                    ),
+                    "semantic_success": additional.get("aiops_semantic_success"),
                     "result_preview": _bounded(content, 480),
                 }
                 refs_available = False
@@ -2923,11 +3074,7 @@ class AICall:
                         refs_available = True
                 item["refs_available"] = refs_available
                 priority = (
-                    0
-                    if item.get("semantic_success") is False
-                    else 1
-                    if refs_available
-                    else 2
+                    0 if item.get("semantic_success") is False else 1 if refs_available else 2
                 )
                 tool_results.append((priority, -index, item))
 
@@ -2937,9 +3084,7 @@ class AICall:
             "compaction_strategy": "deterministic_agent_request",
             "original_message_count": len(messages),
             "user_requests": user_requests[:2],
-            "tool_results": [
-                item for _, _, item in tool_results[:12]
-            ],
+            "tool_results": [item for _, _, item in tool_results[:12]],
             "tool_calls": tool_calls[-12:],
             "assistant_messages": assistant_messages[-4:],
         }
@@ -2968,21 +3113,22 @@ class AICall:
                     text_budget,
                 )
             serialized = _serialized()
-            if count_tokens(
-                serialized,
-                model=self.model_str,
-            )["tokens"] <= max_tokens:
+            if (
+                count_tokens(
+                    serialized,
+                    model=self.model_str,
+                )["tokens"]
+                <= max_tokens
+            ):
                 return serialized
 
         while (
-            count_tokens(_serialized(), model=self.model_str)["tokens"]
-            > max_tokens
+            count_tokens(_serialized(), model=self.model_str)["tokens"] > max_tokens
             and len(summary["tool_results"]) > 1
         ):
             summary["tool_results"].pop()
         while (
-            count_tokens(_serialized(), model=self.model_str)["tokens"]
-            > max_tokens
+            count_tokens(_serialized(), model=self.model_str)["tokens"] > max_tokens
             and len(summary["tool_calls"]) > 1
         ):
             summary["tool_calls"].pop(0)
@@ -3044,18 +3190,27 @@ class AICall:
             original_call_id: str,
         ) -> ToolMessage:
             additional_kwargs = dict(source.additional_kwargs or {})
-            additional_kwargs.update({
-                "aiops_deduplicated": True,
-                "aiops_original_tool_call_id": original_call_id,
-            })
-            return source.model_copy(deep=True, update={
-                "id": None,
-                "tool_call_id": current_call_id,
-                "additional_kwargs": additional_kwargs,
-            })
+            additional_kwargs.update(
+                {
+                    "aiops_deduplicated": True,
+                    "aiops_original_tool_call_id": original_call_id,
+                }
+            )
+            return source.model_copy(
+                deep=True,
+                update={
+                    "id": None,
+                    "tool_call_id": current_call_id,
+                    "additional_kwargs": additional_kwargs,
+                },
+            )
 
         def _repeat_notice(
-            source: ToolMessage, current_call_id: str, original_call_id: str, *, same_turn: bool = False,
+            source: ToolMessage,
+            current_call_id: str,
+            original_call_id: str,
+            *,
+            same_turn: bool = False,
         ) -> ToolMessage:
             """A repeat of an already-answered call (HTTP 304 style): say so instead of
             replaying the whole body, so the model notices it is going in circles."""
@@ -3113,7 +3268,9 @@ class AICall:
                     done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
                     if not done:
                         task.cancel()
-                        raise TimeoutError(f"工具调用超过 {timeout_seconds:g} 秒，已取消；可调整查询后重试")
+                        raise TimeoutError(
+                            f"工具调用超过 {timeout_seconds:g} 秒，已取消；可调整查询后重试"
+                        )
                     if task.cancelled():
                         raise TimeoutError("共享工具调用已超时取消")
                 result = await task
@@ -3125,8 +3282,7 @@ class AICall:
                     preserve_tail_tokens=48,
                 )
                 logger.warning(
-                    "[AICall] isolated tool failure | tool=%s "
-                    "call_id=%s error=%s: %s",
+                    "[AICall] isolated tool failure | tool=%s call_id=%s error=%s: %s",
                     tool_call.get("name") or "unknown",
                     current_call_id,
                     type(exc).__name__,
@@ -3184,7 +3340,9 @@ class AICall:
     def _tool_call_position(request: Any, call_id: str) -> Optional[Tuple[int, int]]:
         """(index, total) of this call within the model message that issued it."""
         state = getattr(request, "state", None)
-        messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+        messages = (
+            state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+        )
         for message in reversed(messages or []):
             calls = getattr(message, "tool_calls", None)
             if not calls:
@@ -3240,7 +3398,10 @@ class AICall:
                 preserve_raw=getattr(self, "query_raw_passthrough", False),
             )
         except Exception as exc:
-            if getattr(self, "query_raw_passthrough", False) or getattr(processor, "evidence_view_mode", "legacy") == "compact":
+            if (
+                getattr(self, "query_raw_passthrough", False)
+                or getattr(processor, "evidence_view_mode", "legacy") == "compact"
+            ):
                 raise RuntimeError(f"原文归档/处理失败，未截断回退：{exc}") from exc
             logger.warning("[AICall] observation processor 失败，使用截断回退: %s", exc)
             summary = (tool_content or "")[:3000]
@@ -3275,16 +3436,15 @@ class AICall:
         prior_tool_observations: List[str],
         candidate_observation: str,
     ) -> Optional[float]:
-        components = [
-            c for c in static_context_components
-            if c.get("category") != "reserved"
-        ]
+        components = [c for c in static_context_components if c.get("category") != "reserved"]
         if prior_tool_observations or candidate_observation:
-            components.append({
-                "name": "tool_observations_after_candidate",
-                "category": "dynamic_runtime",
-                "content": "\n".join([*prior_tool_observations, candidate_observation]),
-            })
+            components.append(
+                {
+                    "name": "tool_observations_after_candidate",
+                    "category": "dynamic_runtime",
+                    "content": "\n".join([*prior_tool_observations, candidate_observation]),
+                }
+            )
         budget = ContextBudgetEstimator().estimate(
             node_id="observation_budget",
             model=self.model_str,
@@ -3376,9 +3536,7 @@ class AICall:
             thinking_events,
             max_tokens=max(1200, configured_summary_max_tokens),
         )
-        minimum_contract = self._minimum_runtime_summary_contract(
-            source_summary
-        )
+        minimum_contract = self._minimum_runtime_summary_contract(source_summary)
         minimum_contract = self._fit_minimum_runtime_contract_to_budget(
             minimum_contract,
             max_tokens=configured_summary_max_tokens,
@@ -3409,12 +3567,10 @@ class AICall:
                     candidate,
                     thinking_events,
                 ):
-                    validated_summary = (
-                        self._sanitize_runtime_compaction_summary(
-                            candidate,
-                            source_summary=source_summary,
-                            max_tokens=summary_max_tokens,
-                        )
+                    validated_summary = self._sanitize_runtime_compaction_summary(
+                        candidate,
+                        source_summary=source_summary,
+                        max_tokens=summary_max_tokens,
                     )
             except Exception:
                 validated_summary = None
@@ -3474,16 +3630,13 @@ class AICall:
             "structured_ref",
             "summary_ref",
         }
-        has_completed_tool_evidence = (
-            isinstance(completed_items, list)
+        has_completed_tool_evidence = isinstance(completed_items, list) and any(
+            isinstance(item, dict)
             and any(
-                isinstance(item, dict)
-                and any(
-                    key in item and item.get(key) not in (None, "", [], {})
-                    for key in completed_evidence_keys
-                )
-                for item in completed_items
+                key in item and item.get(key) not in (None, "", [], {})
+                for key in completed_evidence_keys
             )
+            for item in completed_items
         )
 
         def _has_archive_ref(value: Any) -> bool:
@@ -3498,9 +3651,7 @@ class AICall:
 
         has_candidate_ref = _has_archive_ref(candidate)
         source_tool_events = [
-            event
-            for event in thinking_events
-            if event.get("type") == "tool_result"
+            event for event in thinking_events if event.get("type") == "tool_result"
         ]
         source_has_tool_result = bool(source_tool_events)
         if source_has_tool_result:
@@ -3519,20 +3670,22 @@ class AICall:
                 str(item.get("tool_name") or item.get("tool") or "").strip()
                 for item in (completed_items or [])
                 if isinstance(item, dict)
-                and str(
-                    item.get("tool_name") or item.get("tool") or ""
-                ).strip()
+                and str(item.get("tool_name") or item.get("tool") or "").strip()
             }
 
             def _collect_refs(value: Any) -> set[str]:
                 refs: set[str] = set()
                 if isinstance(value, dict):
                     for key, item in value.items():
-                        if key in {
-                            "raw_ref",
-                            "structured_ref",
-                            "summary_ref",
-                        } and str(item or "").strip():
+                        if (
+                            key
+                            in {
+                                "raw_ref",
+                                "structured_ref",
+                                "summary_ref",
+                            }
+                            and str(item or "").strip()
+                        ):
                             refs.add(str(item).strip())
                         else:
                             refs.update(_collect_refs(item))
@@ -3542,9 +3695,7 @@ class AICall:
                 return refs
 
             candidate_refs = _collect_refs(candidate)
-            if candidate_tool_names and not candidate_tool_names.issubset(
-                source_tool_names
-            ):
+            if candidate_tool_names and not candidate_tool_names.issubset(source_tool_names):
                 return False
             if candidate_refs and not candidate_refs.issubset(source_refs):
                 return False
@@ -3554,17 +3705,13 @@ class AICall:
             for event in source_tool_events:
                 tool_name = str(event.get("tool_name") or "").strip()
                 source_by_tool.setdefault(tool_name, []).append(event)
-                source_corpus_parts.append(
-                    json.dumps(event, ensure_ascii=False, default=str)
-                )
+                source_corpus_parts.append(json.dumps(event, ensure_ascii=False, default=str))
             source_corpus = "\n".join(source_corpus_parts).lower()
             has_bound_candidate = False
             for item in completed_items or []:
                 if not isinstance(item, dict):
                     continue
-                item_tool = str(
-                    item.get("tool_name") or item.get("tool") or ""
-                ).strip()
+                item_tool = str(item.get("tool_name") or item.get("tool") or "").strip()
                 item_refs = {
                     str(item.get(key)).strip()
                     for key in ("raw_ref", "structured_ref", "summary_ref")
@@ -3578,15 +3725,17 @@ class AICall:
                     matching_events = [
                         event
                         for event in matching_events
-                        if item_refs.issubset({
-                            str(event.get(key)).strip()
-                            for key in (
-                                "raw_ref",
-                                "structured_ref",
-                                "summary_ref",
-                            )
-                            if str(event.get(key) or "").strip()
-                        })
+                        if item_refs.issubset(
+                            {
+                                str(event.get(key)).strip()
+                                for key in (
+                                    "raw_ref",
+                                    "structured_ref",
+                                    "summary_ref",
+                                )
+                                if str(event.get(key) or "").strip()
+                            }
+                        )
                     ]
                 if not matching_events:
                     return False
@@ -3597,16 +3746,13 @@ class AICall:
                         ensure_ascii=False,
                         default=str,
                     ).lower()
-                    if (
-                        item.get("semantic_success") is not None
-                        and item.get("semantic_success")
-                        != event.get("semantic_success")
-                    ):
+                    if item.get("semantic_success") is not None and item.get(
+                        "semantic_success"
+                    ) != event.get("semantic_success"):
                         continue
                     if any(
                         str(item.get(key) or "").strip()
-                        and str(item.get(key)).strip().lower()
-                        not in event_corpus
+                        and str(item.get(key)).strip().lower() not in event_corpus
                         for key in (
                             "result_preview",
                             "fact",
@@ -3639,33 +3785,15 @@ class AICall:
         """Rebuild every evidence-bearing field from deterministic source events."""
         sanitized = {
             "compaction_strategy": "validated_llm_shape_source_evidence",
-            "process_summary": deepcopy(
-                source_summary.get("process_summary") or []
-            ),
-            "evidence_plan": deepcopy(
-                source_summary.get("evidence_plan") or []
-            ),
-            "completed_items": deepcopy(
-                source_summary.get("completed_items") or []
-            ),
-            "open_items": deepcopy(
-                source_summary.get("open_items") or []
-            ),
-            "key_facts": deepcopy(
-                source_summary.get("key_facts") or []
-            ),
-            "negative_facts": deepcopy(
-                source_summary.get("negative_facts") or []
-            ),
-            "conflicts": deepcopy(
-                source_summary.get("conflicts") or []
-            ),
-            "discarded_noise": deepcopy(
-                source_summary.get("discarded_noise") or []
-            ),
-            "next_focus": deepcopy(
-                source_summary.get("next_focus") or []
-            ),
+            "process_summary": deepcopy(source_summary.get("process_summary") or []),
+            "evidence_plan": deepcopy(source_summary.get("evidence_plan") or []),
+            "completed_items": deepcopy(source_summary.get("completed_items") or []),
+            "open_items": deepcopy(source_summary.get("open_items") or []),
+            "key_facts": deepcopy(source_summary.get("key_facts") or []),
+            "negative_facts": deepcopy(source_summary.get("negative_facts") or []),
+            "conflicts": deepcopy(source_summary.get("conflicts") or []),
+            "discarded_noise": deepcopy(source_summary.get("discarded_noise") or []),
+            "next_focus": deepcopy(source_summary.get("next_focus") or []),
         }
         return self._fit_deterministic_runtime_summary_to_token_budget(
             sanitized,
@@ -3775,15 +3903,12 @@ class AICall:
             tool_candidates.append((priority, len(tool_candidates), item))
 
         tool_candidates.sort(key=lambda candidate: (candidate[0], candidate[1]))
-        completed_items = [
-            item for _, _, item in tool_candidates[:tool_limit]
-        ]
+        completed_items = [item for _, _, item in tool_candidates[:tool_limit]]
         summary = {
             "compaction_strategy": "deterministic_fallback",
             "deterministic_fallback": True,
             "process_summary": [
-                "Invalid LLM compaction output was replaced by bounded "
-                "deterministic evidence."
+                "Invalid LLM compaction output was replaced by bounded deterministic evidence."
             ],
             "evidence_plan": evidence_plan,
             "completed_items": completed_items,
@@ -3867,9 +3992,7 @@ class AICall:
             if not isinstance(item, dict):
                 continue
             minimum_item = {
-                key: item[key]
-                for key in ("id", "tool")
-                if item.get(key) not in (None, "", [], {})
+                key: item[key] for key in ("id", "tool") if item.get(key) not in (None, "", [], {})
             }
             if not minimum_item:
                 for key, value in item.items():
@@ -3894,8 +4017,7 @@ class AICall:
                     "summary_ref",
                     "refs_available",
                 )
-                if key in item
-                and item.get(key) not in (None, "", [], {})
+                if key in item and item.get(key) not in (None, "", [], {})
             }
             if minimum_item:
                 completed_items.append(minimum_item)
@@ -3921,15 +4043,9 @@ class AICall:
                 model=self.model_str,
             )["tokens"]
 
-        while (
-            _tokens() > max_tokens
-            and len(bounded.get("completed_items") or []) > 1
-        ):
+        while _tokens() > max_tokens and len(bounded.get("completed_items") or []) > 1:
             bounded["completed_items"].pop()
-        while (
-            _tokens() > max_tokens
-            and len(bounded.get("evidence_plan") or []) > 1
-        ):
+        while _tokens() > max_tokens and len(bounded.get("evidence_plan") or []) > 1:
             bounded["evidence_plan"].pop()
         return bounded
 
@@ -3940,20 +4056,12 @@ class AICall:
         max_chars: int = 1600,
     ) -> str:
         parsed = AICall.extract_json_payload(text)
-        plan_items = (
-            parsed.get("evidence_plan")
-            if isinstance(parsed, dict)
-            else None
-        )
+        plan_items = parsed.get("evidence_plan") if isinstance(parsed, dict) else None
         bounded_items: List[Dict[str, Any]] = []
 
         def _short(value: Any, limit: int) -> str:
             value_text = str(value or "")
-            return (
-                value_text
-                if len(value_text) <= limit
-                else value_text[:limit] + "..."
-            )
+            return value_text if len(value_text) <= limit else value_text[:limit] + "..."
 
         if isinstance(plan_items, list):
             for item in plan_items[:8]:
@@ -3993,9 +4101,7 @@ class AICall:
             bounded_items.pop()
             payload["evidence_plan"] = bounded_items
             if isinstance(plan_items, list):
-                payload["omitted_plan_count"] = (
-                    len(plan_items) - len(bounded_items)
-                )
+                payload["omitted_plan_count"] = len(plan_items) - len(bounded_items)
             serialized = json.dumps(payload, ensure_ascii=False)
         if len(serialized) <= max_chars:
             return serialized
@@ -4009,12 +4115,7 @@ class AICall:
             return serialized
 
         payload["evidence_plan"] = [
-            {
-                key: item[key]
-                for key in ("id", "tool")
-                if key in item
-            }
-            for item in bounded_items[:1]
+            {key: item[key] for key in ("id", "tool") if key in item} for item in bounded_items[:1]
         ]
         payload.pop("plan_preview", None)
         serialized = json.dumps(payload, ensure_ascii=False)
@@ -4071,10 +4172,7 @@ class AICall:
                         if raw_ref or structured_ref or summary_ref
                         else "refs unavailable"
                     )
-                    compacted["result"] = (
-                        result_preview[:1200]
-                        + f"\n...[compacted: {marker}]"
-                    )
+                    compacted["result"] = result_preview[:1200] + f"\n...[compacted: {marker}]"
                     compacted["result_preview"] = result_preview[:200]
                     compacted["context_compacted"] = True
                 compacted_events.append(compacted)
@@ -4099,9 +4197,7 @@ class AICall:
                         )
                         compacted_tool_calls.append(compacted)
                     msg.tool_calls = compacted_tool_calls
-                    additional_kwargs = dict(
-                        getattr(msg, "additional_kwargs", None) or {}
-                    )
+                    additional_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})
                     if isinstance(additional_kwargs.get("tool_calls"), list):
                         additional_kwargs["tool_calls"] = compacted_tool_calls
                         msg.additional_kwargs = additional_kwargs
@@ -4109,13 +4205,9 @@ class AICall:
                 if text:
                     if "evidence_plan" in text:
                         if len(text) > 1200:
-                            msg.content = AICall._bounded_evidence_plan_text(
-                                text
-                            )
+                            msg.content = AICall._bounded_evidence_plan_text(text)
                     else:
-                        msg.content = (
-                            f"[compacted ai_message: original_chars={len(text)}]"
-                        )
+                        msg.content = f"[compacted ai_message: original_chars={len(text)}]"
             except Exception:
                 continue
 
@@ -4139,11 +4231,7 @@ class AICall:
         for key, value in args.items():
             if isinstance(value, (str, int, float, bool)) or value is None:
                 text = str(value or "")
-                compacted[str(key)] = (
-                    value
-                    if len(text) <= 160
-                    else text[:160] + "...[truncated]"
-                )
+                compacted[str(key)] = value if len(text) <= 160 else text[:160] + "...[truncated]"
             else:
                 value_text = json.dumps(
                     value,
@@ -4151,28 +4239,23 @@ class AICall:
                     default=str,
                 )
                 compacted[str(key)] = (
-                    value
-                    if len(value_text) <= 240
-                    else value_text[:240] + "...[truncated]"
+                    value if len(value_text) <= 240 else value_text[:240] + "...[truncated]"
                 )
 
         while (
-            len(json.dumps(compacted, ensure_ascii=False, default=str))
-            > max_chars
+            len(json.dumps(compacted, ensure_ascii=False, default=str)) > max_chars
             and len(compacted) > 2
         ):
-            removable = [
-                key
-                for key in compacted
-                if key != "context_compacted"
-            ]
+            removable = [key for key in compacted if key != "context_compacted"]
             if not removable:
                 break
             compacted.pop(removable[-1], None)
         return compacted
 
     @staticmethod
-    def _compact_langgraph_tool_messages_in_place(messages: List[Tuple[Any, Dict[str, Any]]]) -> None:
+    def _compact_langgraph_tool_messages_in_place(
+        messages: List[Tuple[Any, Dict[str, Any]]],
+    ) -> None:
         """Compact tool observations already stored in the agent message list."""
         for msg, metadata in messages:
             current = str(getattr(msg, "content", "") or "")
@@ -4210,7 +4293,11 @@ class AICall:
             "summary_max_tokens": 1200,
         }
         cfg = dict(defaults)
-        user_cfg = self.context_compaction_config if isinstance(self.context_compaction_config, dict) else {}
+        user_cfg = (
+            self.context_compaction_config
+            if isinstance(self.context_compaction_config, dict)
+            else {}
+        )
         cfg.update({k: v for k, v in user_cfg.items() if v is not None})
         if isinstance(cfg.get("nodes"), str):
             cfg["nodes"] = [cfg["nodes"]]
@@ -4274,9 +4361,7 @@ class AICall:
     ) -> Dict[str, Any]:
         bounded_event_count = max(1, int(max_events or 1))
         selected_events = [
-            ev
-            for ev in thinking_events
-            if ev.get("type") in {"ai_message", "tool_result"}
+            ev for ev in thinking_events if ev.get("type") in {"ai_message", "tool_result"}
         ][-bounded_event_count:]
         ai_messages = [
             (ev.get("full_content") or ev.get("content") or "")[:2000]
@@ -4287,16 +4372,16 @@ class AICall:
         for ev in selected_events:
             if ev.get("type") != "tool_result":
                 continue
-            tool_results.append({
-                "tool_name": ev.get("tool_name"),
-                "semantic_success": ev.get("semantic_success"),
-                "result": (
-                    ev.get("result") or ev.get("result_preview") or ""
-                )[:1600],
-                "raw_ref": ev.get("raw_ref"),
-                "structured_ref": ev.get("structured_ref"),
-                "summary_ref": ev.get("summary_ref"),
-            })
+            tool_results.append(
+                {
+                    "tool_name": ev.get("tool_name"),
+                    "semantic_success": ev.get("semantic_success"),
+                    "result": (ev.get("result") or ev.get("result_preview") or "")[:1600],
+                    "raw_ref": ev.get("raw_ref"),
+                    "structured_ref": ev.get("structured_ref"),
+                    "summary_ref": ev.get("summary_ref"),
+                }
+            )
         payload = {
             "node_id": node_id,
             "usage_ratio": round(usage_ratio, 4),
@@ -4304,10 +4389,7 @@ class AICall:
             "instruction": RUNTIME_COMPACTION_INSTRUCTION,
             "ai_messages": ai_messages,
             "tool_results": tool_results,
-            "tool_observation_tail": [
-                str(item)[:1200]
-                for item in tool_observation_contents[-3:]
-            ],
+            "tool_observation_tail": [str(item)[:1200] for item in tool_observation_contents[-3:]],
         }
         token_limit = max(1, int(max_tokens or 1))
 
@@ -4350,10 +4432,7 @@ class AICall:
             payload["ai_messages"].pop(0)
         while _tokens() > token_limit and len(payload["tool_results"]) > 1:
             payload["tool_results"].pop(0)
-        while (
-            _tokens() > token_limit
-            and len(payload["tool_observation_tail"]) > 1
-        ):
+        while _tokens() > token_limit and len(payload["tool_observation_tail"]) > 1:
             payload["tool_observation_tail"].pop(0)
         if _tokens() <= token_limit:
             return payload
@@ -4393,18 +4472,19 @@ class AICall:
                 bounded.get("bounded_payload") or "",
                 max_tokens=max(
                     1,
-                    serialized_tokens
-                    - (bounded_tokens - token_limit)
-                    - 8,
+                    serialized_tokens - (bounded_tokens - token_limit) - 8,
                 ),
                 model=model,
                 preserve_tail_tokens=max(4, token_limit // 8),
             )
             bounded["bounded_payload"] = serialized
-        if count_tokens(
-            json.dumps(bounded, ensure_ascii=False, default=str),
-            model=model,
-        )["tokens"] <= token_limit:
+        if (
+            count_tokens(
+                json.dumps(bounded, ensure_ascii=False, default=str),
+                model=model,
+            )["tokens"]
+            <= token_limit
+        ):
             return bounded
         return {}
 
@@ -4502,7 +4582,9 @@ class AICall:
         except Exception as exc:
             logger.warning("[AICall] 写入 final context budget 失败: %s", exc)
 
-    def _summarize_tool_observation(self, tool_name: str, raw: str, current_summary: str) -> Optional[str]:
+    def _summarize_tool_observation(
+        self, tool_name: str, raw: str, current_summary: str
+    ) -> Optional[str]:
         if not raw:
             return current_summary
         try:
@@ -4526,11 +4608,17 @@ class AICall:
                 missing = parsed.missing or []
                 lines = [str(parsed.summary)]
                 if facts:
-                    lines.append("key_facts: " + json.dumps(facts, ensure_ascii=False, default=str))
+                    lines.append(
+                        "key_facts: " + json.dumps(facts, ensure_ascii=False, default=str)
+                    )
                 if conflicts:
-                    lines.append("conflicts: " + json.dumps(conflicts, ensure_ascii=False, default=str))
+                    lines.append(
+                        "conflicts: " + json.dumps(conflicts, ensure_ascii=False, default=str)
+                    )
                 if missing:
-                    lines.append("missing: " + json.dumps(missing, ensure_ascii=False, default=str))
+                    lines.append(
+                        "missing: " + json.dumps(missing, ensure_ascii=False, default=str)
+                    )
                 return "\n".join(lines)
             return text[:3000] if text else current_summary
         except Exception as exc:
@@ -4597,6 +4685,6 @@ class AICall:
             elif ch == closing:
                 depth -= 1
                 if depth == 0:
-                    return text[start:idx + 1]
+                    return text[start : idx + 1]
 
         return None

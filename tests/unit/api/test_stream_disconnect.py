@@ -1,4 +1,5 @@
 """Client disconnects must cancel the workflow and close the blocking stream generator."""
+
 import threading
 import time
 
@@ -21,7 +22,13 @@ def _run_until_disconnect(response, chunks_before_disconnect=1):
         if len(bodies) >= chunks_before_disconnect:
             disconnected.set()
 
-    scope = {"type": "http", "asgi": {"spec_version": "2.3"}, "method": "GET", "path": "/ask", "headers": []}
+    scope = {
+        "type": "http",
+        "asgi": {"spec_version": "2.3"},
+        "method": "GET",
+        "path": "/ask",
+        "headers": [],
+    }
 
     async def main():
         with anyio.fail_after(10):
@@ -46,7 +53,9 @@ def test_disconnect_sets_cancel_and_closes_generator():
             raise
 
     started = time.monotonic()
-    _run_until_disconnect(streaming_response(body(), media_type="text/event-stream", cancel_event=cancel))
+    _run_until_disconnect(
+        streaming_response(body(), media_type="text/event-stream", cancel_event=cancel)
+    )
     assert cancel.wait(2)
     assert closed.wait(2)
     assert time.monotonic() - started < 5
@@ -59,6 +68,8 @@ def test_normal_completion_still_closes_and_signals():
         yield "a"
         yield "b"
 
-    sent = _run_until_disconnect(streaming_response(body(), cancel_event=cancel), chunks_before_disconnect=99)
+    sent = _run_until_disconnect(
+        streaming_response(body(), cancel_event=cancel), chunks_before_disconnect=99
+    )
     assert b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body") == b"ab"
     assert cancel.is_set()

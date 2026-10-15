@@ -56,7 +56,9 @@ def approval_prompt(kind: str = "approval", commands: Optional["queue.Queue[str]
         print("请输入 approve 或 reject。", file=sys.stderr, flush=True)
 
 
-def post_approval(base_url: str, run_id: str, approval_id: str, approved: bool, reviewer: str) -> None:
+def post_approval(
+    base_url: str, run_id: str, approval_id: str, approved: bool, reviewer: str
+) -> None:
     response = requests.post(
         f"{base_url.rstrip('/')}/remediation/approve",
         data={
@@ -80,7 +82,10 @@ def stream_chat(base_url: str, question: str, reviewer: str) -> int:
     else:
         commands = None
 
-    print("[terminal-approval] 使用本客户端启动时，可在审批中断后直接输入 approve 或 reject。", flush=True)
+    print(
+        "[terminal-approval] 使用本客户端启动时，可在审批中断后直接输入 approve 或 reject。",
+        flush=True,
+    )
     with requests.get(url, stream=True, timeout=None) as response:
         response.raise_for_status()
         for raw_line in response.iter_lines(decode_unicode=True):
@@ -100,7 +105,9 @@ def stream_chat(base_url: str, question: str, reviewer: str) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run AIOps diagnosis with interactive remediation approval.")
+    parser = argparse.ArgumentParser(
+        description="Run AIOps diagnosis with interactive remediation approval."
+    )
     parser.add_argument("question", help="诊断问题，例如：我的集群有什么问题")
     parser.add_argument("--url", default="http://10.2.0.48:30800", help="AIOps Copilot base URL")
     parser.add_argument("--reviewer", default="terminal", help="审批人标识")

@@ -22,9 +22,7 @@ OBSERVABILITY_QUERY_TOOL_DIMENSIONS = {
     "query_pod_tracing": "tracing",
     "query_pod_topology": "topology",
 }
-OBSERVABILITY_QUERY_TOOLS = frozenset(
-    OBSERVABILITY_QUERY_TOOL_DIMENSIONS
-)
+OBSERVABILITY_QUERY_TOOLS = frozenset(OBSERVABILITY_QUERY_TOOL_DIMENSIONS)
 
 _FORBIDDEN_KEYS = {
     "diagnosis",
@@ -137,22 +135,26 @@ _STRENGTH_ORDER = {
 }
 _DIRECTNESS_ORDER = {"direct": 0, "derived": 1, "related_context": 2}
 _CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2, "weak": 3}
-_ALLOWED_TOPOLOGY_RELATIONS = frozenset({
-    "calls",
-    "ownedby",
-    "ownscontainer",
-    "scheduledon",
-    "selectedby",
-    "selects",
-})
-_TOPOLOGY_RELATIONS_BY_SOURCE = {
-    "kubernetes": frozenset({
+_ALLOWED_TOPOLOGY_RELATIONS = frozenset(
+    {
+        "calls",
         "ownedby",
         "ownscontainer",
         "scheduledon",
         "selectedby",
         "selects",
-    }),
+    }
+)
+_TOPOLOGY_RELATIONS_BY_SOURCE = {
+    "kubernetes": frozenset(
+        {
+            "ownedby",
+            "ownscontainer",
+            "scheduledon",
+            "selectedby",
+            "selects",
+        }
+    ),
     "deepflow": frozenset({"calls"}),
 }
 _CANONICAL_TOPOLOGY_SCOPE_ALIAS = "k8s.pod:scope/current"
@@ -160,23 +162,15 @@ _MAX_CANONICAL_TOPOLOGY_ENTITY_ID_CHARS = 192
 
 
 def _normalized_key(value: Any) -> str:
-    return "".join(
-        character
-        for character in str(value or "").lower()
-        if character.isalnum()
-    )
+    return "".join(character for character in str(value or "").lower() if character.isalnum())
 
 
 def is_forbidden_fact_key(value: Any) -> bool:
     normalized = _normalized_key(value)
     if not normalized:
         return False
-    return (
-        normalized in _FORBIDDEN_NORMALIZED_KEYS
-        or any(
-            family in normalized
-            for family in _FORBIDDEN_NORMALIZED_KEY_FAMILIES
-        )
+    return normalized in _FORBIDDEN_NORMALIZED_KEYS or any(
+        family in normalized for family in _FORBIDDEN_NORMALIZED_KEY_FAMILIES
     )
 
 
@@ -258,11 +252,7 @@ def _string_list(
     source_items = list(items)
     if limit is not None:
         source_items = source_items[:limit]
-    return list(dict.fromkeys(
-        text
-        for item in source_items
-        if (text := str(item or "").strip())
-    ))
+    return list(dict.fromkeys(text for item in source_items if (text := str(item or "").strip())))
 
 
 def _normalize_dimension(value: Any) -> str:
@@ -281,15 +271,10 @@ def _canonical_record_payload(value: Mapping[str, Any] | FactRecord) -> dict[str
         for key in _RECORD_FIELDS
         if key != "fact_id"
         and key in raw
-        and (
-            key not in _CANONICAL_OPTIONAL_FIELDS
-            or raw[key] not in (None, {}, [])
-        )
+        and (key not in _CANONICAL_OPTIONAL_FIELDS or raw[key] not in (None, {}, []))
     }
     payload["dimension"] = _normalize_dimension(payload.get("dimension"))
-    payload["evidence_refs"] = sorted(set(
-        _string_list(payload.get("evidence_refs"), limit=None)
-    ))
+    payload["evidence_refs"] = sorted(set(_string_list(payload.get("evidence_refs"), limit=None)))
     return payload
 
 
@@ -314,15 +299,9 @@ def _normalize_record(value: Any) -> FactRecord | None:
     if not isinstance(value, Mapping) or _record_contains_evaluator_fields(value):
         return None
 
-    payload = {
-        key: deepcopy(value[key])
-        for key in _RECORD_FIELDS
-        if key in value
-    }
+    payload = {key: deepcopy(value[key]) for key in _RECORD_FIELDS if key in value}
     payload["dimension"] = _normalize_dimension(payload.get("dimension"))
-    payload["evidence_refs"] = sorted(set(
-        _string_list(payload.get("evidence_refs"), limit=None)
-    ))
+    payload["evidence_refs"] = sorted(set(_string_list(payload.get("evidence_refs"), limit=None)))
     if not isinstance(payload.get("metadata"), dict):
         payload["metadata"] = {}
     try:
@@ -337,7 +316,8 @@ def _normalize_record(value: Any) -> FactRecord | None:
 def _record_priority(record: FactRecord) -> tuple[Any, ...]:
     semantic_priority = (
         0
-        if record.attribute in {
+        if record.attribute
+        in {
             "container.waiting_reason",
             "container.waiting_message",
             "container.last_terminated_reason",
@@ -420,23 +400,25 @@ def normalize_fact_ledger(value: Any) -> FactLedger | None:
     source = str(raw.get("source") or "mcp_canonical").strip()
     if source not in {"mcp_canonical", "robusta_legacy_adapter"}:
         source = "mcp_canonical"
-    legacy_contract = source == "robusta_legacy_adapter" or bool(
-        raw.get("legacy_contract")
-    )
+    legacy_contract = source == "robusta_legacy_adapter" or bool(raw.get("legacy_contract"))
     if legacy_contract:
         source = "robusta_legacy_adapter"
 
     try:
-        return FactLedger.model_validate({
-            "contract_version": FACT_LEDGER_VERSION,
-            "case_id": case_id,
-            "scope_entity_ids": scope_entity_ids,
-            "records": [record.model_dump(mode="json", exclude_none=True) for record in selected],
-            "record_count": len(selected),
-            "truncated": bool(raw.get("truncated")) or truncated,
-            "source": source,
-            "legacy_contract": legacy_contract,
-        })
+        return FactLedger.model_validate(
+            {
+                "contract_version": FACT_LEDGER_VERSION,
+                "case_id": case_id,
+                "scope_entity_ids": scope_entity_ids,
+                "records": [
+                    record.model_dump(mode="json", exclude_none=True) for record in selected
+                ],
+                "record_count": len(selected),
+                "truncated": bool(raw.get("truncated")) or truncated,
+                "source": source,
+                "legacy_contract": legacy_contract,
+            }
+        )
     except ValidationError:
         return None
 
@@ -449,10 +431,7 @@ def _topology_record_is_source_backed(record: FactRecord) -> bool:
     ):
         return False
     endpoint_ids = _typed_topology_endpoints(record)
-    relation = _normalized_key(
-        record.value.get("relation")
-        or record.value.get("relationship")
-    )
+    relation = _normalized_key(record.value.get("relation") or record.value.get("relationship"))
     source_system = _normalized_key(record.source_system)
     source_relations = _TOPOLOGY_RELATIONS_BY_SOURCE.get(
         source_system,
@@ -477,8 +456,7 @@ def _topology_graph_is_scope_connected(
     endpoint_sets = [
         _typed_topology_endpoints(record)
         for record in records
-        if record.dimension == "topology"
-        and record.fact_type == "relationship"
+        if record.dimension == "topology" and record.fact_type == "relationship"
     ]
     if not endpoint_sets:
         return True
@@ -487,8 +465,7 @@ def _topology_graph_is_scope_connected(
     if (
         allow_bounded_scope_alias
         and len(scope_entity_ids) == 1
-        and len(next(iter(scope_entity_ids)))
-        > _MAX_CANONICAL_TOPOLOGY_ENTITY_ID_CHARS
+        and len(next(iter(scope_entity_ids))) > _MAX_CANONICAL_TOPOLOGY_ENTITY_ID_CHARS
     ):
         reachable.add(_CANONICAL_TOPOLOGY_SCOPE_ALIAS)
     pending = list(endpoint_sets)
@@ -536,10 +513,7 @@ def _strict_authority_ledger(
         reasons.append("malformed_ledger")
         scope_entity_ids: set[str] = set()
     else:
-        scope_entity_ids = {
-            str(item).strip()
-            for item in scopes
-        }
+        scope_entity_ids = {str(item).strip() for item in scopes}
 
     records = raw.get("records")
     if not isinstance(records, list):
@@ -557,11 +531,9 @@ def _strict_authority_ledger(
     legacy_contract = raw.get("legacy_contract")
     if (
         (source == "mcp_canonical" and legacy_contract is not False)
-        or (
-            source == "robusta_legacy_adapter"
-            and legacy_contract is not True
-        )
-        or source not in {
+        or (source == "robusta_legacy_adapter" and legacy_contract is not True)
+        or source
+        not in {
             "mcp_canonical",
             "robusta_legacy_adapter",
         }
@@ -575,18 +547,13 @@ def _strict_authority_ledger(
             reasons.append("malformed_ledger")
             continue
         raw_record = dict(item)
-        if (
-            set(raw_record) - _RECORD_FIELDS
-            or _REQUIRED_RECORD_FIELDS - set(raw_record)
-        ):
+        if set(raw_record) - _RECORD_FIELDS or _REQUIRED_RECORD_FIELDS - set(raw_record):
             reasons.append("malformed_ledger")
             continue
         if _record_contains_evaluator_fields(raw_record):
             reasons.append("evaluator_field_present")
             continue
-        source_system = str(
-            raw_record.get("source_system") or ""
-        ).strip()
+        source_system = str(raw_record.get("source_system") or "").strip()
         if not source_system:
             reasons.append("blank_source_system")
             continue
@@ -594,10 +561,7 @@ def _strict_authority_ledger(
             raw_record.get("evidence_refs"),
             limit=None,
         )
-        if (
-            raw_record.get("fact_type") != "coverage"
-            and not refs
-        ):
+        if raw_record.get("fact_type") != "coverage" and not refs:
             reasons.append("missing_evidence_ref")
             continue
         try:
@@ -615,12 +579,8 @@ def _strict_authority_ledger(
         ):
             reasons.append("untrusted_topology_relationship")
             continue
-        if (
-            record.entity_id not in scope_entity_ids
-            and not (
-                record.dimension == "topology"
-                and record.fact_type == "relationship"
-            )
+        if record.entity_id not in scope_entity_ids and not (
+            record.dimension == "topology" and record.fact_type == "relationship"
         ):
             reasons.append("cross_entity_fact")
             continue
@@ -651,18 +611,23 @@ def _strict_authority_ledger(
     if len(parsed_records) != len(records):
         return None, unique_reasons
     try:
-        ledger = FactLedger.model_validate({
-            **raw,
-            "records": [
-                record.model_dump(mode="json", exclude_none=True)
-                for record in parsed_records
-            ],
-        })
+        ledger = FactLedger.model_validate(
+            {
+                **raw,
+                "records": [
+                    record.model_dump(mode="json", exclude_none=True) for record in parsed_records
+                ],
+            }
+        )
     except ValidationError:
-        return None, list(dict.fromkeys([
-            *unique_reasons,
-            "malformed_ledger",
-        ]))
+        return None, list(
+            dict.fromkeys(
+                [
+                    *unique_reasons,
+                    "malformed_ledger",
+                ]
+            )
+        )
     return ledger, unique_reasons
 
 
@@ -689,32 +654,16 @@ def validate_canonical_fact_ledger_contract(
 
 def _typed_entity_kind(entity_id: str) -> str:
     prefix, separator, remainder = str(entity_id or "").strip().partition(":")
-    if (
-        not separator
-        or not prefix.lower().startswith("k8s.")
-        or not prefix[4:]
-        or not remainder
-    ):
+    if not separator or not prefix.lower().startswith("k8s.") or not prefix[4:] or not remainder:
         return ""
     return _normalized_key(prefix[4:])
 
 
 def _endpoint_entity_id(value: Any) -> str:
     if isinstance(value, Mapping):
-        normalized = {
-            _normalized_key(key): item
-            for key, item in value.items()
-        }
-        entity_id = str(
-            normalized.get("entityid")
-            or normalized.get("id")
-            or ""
-        ).strip()
-        kind = str(
-            normalized.get("entitykind")
-            or normalized.get("kind")
-            or ""
-        ).strip()
+        normalized = {_normalized_key(key): item for key, item in value.items()}
+        entity_id = str(normalized.get("entityid") or normalized.get("id") or "").strip()
+        kind = str(normalized.get("entitykind") or normalized.get("kind") or "").strip()
         entity_kind = _typed_entity_kind(entity_id)
         normalized_kind = _normalized_key(kind)
         if normalized_kind.startswith("k8s"):
@@ -733,18 +682,12 @@ def _typed_topology_endpoints(record: FactRecord) -> set[str]:
         or not isinstance(record.value, Mapping)
     ):
         return set()
-    normalized = {
-        _normalized_key(key): item
-        for key, item in record.value.items()
-    }
+    normalized = {_normalized_key(key): item for key, item in record.value.items()}
     relation = normalized.get("relation") or normalized.get("relationship")
     if not isinstance(relation, str) or not relation.strip():
         return set()
 
-    if (
-        "sourceentityid" in normalized
-        or "targetentityid" in normalized
-    ):
+    if "sourceentityid" in normalized or "targetentityid" in normalized:
         source = _endpoint_entity_id(normalized.get("sourceentityid"))
         target = _endpoint_entity_id(normalized.get("targetentityid"))
     else:

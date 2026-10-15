@@ -1,5 +1,6 @@
 """Deterministic guards against degenerate tool-call repetition (live Qwen run 3248a3d833f84803:
 292 calls in one turn, 17 distinct calls x 17 repeats)."""
+
 import asyncio
 from types import SimpleNamespace
 
@@ -9,8 +10,10 @@ from app.core.aicall.client import AICall
 
 
 def _turn(calls):
-    message = AIMessage(content="", tool_calls=[
-        {"id": cid, "name": name, "args": args} for cid, name, args in calls])
+    message = AIMessage(
+        content="",
+        tool_calls=[{"id": cid, "name": name, "args": args} for cid, name, args in calls],
+    )
     return {"messages": [message]}
 
 
@@ -27,11 +30,17 @@ def test_identical_calls_in_one_turn_run_once_and_the_rest_get_a_notice():
     async def handler(request):
         executions.append(request.tool_call["id"])
         await asyncio.sleep(0.05)
-        return ToolMessage(content="FULL RESULT", tool_call_id=request.tool_call["id"], name="query_pod_lifecycle")
+        return ToolMessage(
+            content="FULL RESULT", tool_call_id=request.tool_call["id"], name="query_pod_lifecycle"
+        )
 
     async def main():
-        return await asyncio.gather(*[
-            middleware.awrap_tool_call(_request(state, cid, name, args), handler) for cid, name, args in calls])
+        return await asyncio.gather(
+            *[
+                middleware.awrap_tool_call(_request(state, cid, name, args), handler)
+                for cid, name, args in calls
+            ]
+        )
 
     results = asyncio.run(main())
     assert executions == ["c0"]
@@ -50,11 +59,15 @@ def test_calls_beyond_the_per_turn_cap_are_not_executed(monkeypatch):
 
     async def handler(request):
         executions.append(request.tool_call["id"])
-        return ToolMessage(content="ok", tool_call_id=request.tool_call["id"], name="query_pod_lifecycle")
+        return ToolMessage(
+            content="ok", tool_call_id=request.tool_call["id"], name="query_pod_lifecycle"
+        )
 
     async def main():
-        return [await middleware.awrap_tool_call(_request(state, cid, name, args), handler)
-                for cid, name, args in calls]
+        return [
+            await middleware.awrap_tool_call(_request(state, cid, name, args), handler)
+            for cid, name, args in calls
+        ]
 
     results = asyncio.run(main())
     assert executions == ["c0", "c1", "c2"]
@@ -72,6 +85,8 @@ def test_cap_disabled_with_zero(monkeypatch):
         return ToolMessage(content="ok", tool_call_id=request.tool_call["id"], name="t")
 
     async def main():
-        return [await middleware.awrap_tool_call(_request(state, *call), handler) for call in calls]
+        return [
+            await middleware.awrap_tool_call(_request(state, *call), handler) for call in calls
+        ]
 
     assert all(r.content == "ok" for r in asyncio.run(main()))

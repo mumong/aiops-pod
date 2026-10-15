@@ -102,7 +102,7 @@ def save_report(reports_dir: str, layer: Any, question: str, full_answer: str) -
         logger.info("[报告保存] 层级: %s, 问题: %s", layer_str, question[:50])
 
         # 从问题中提取摘要（去掉特殊字符，截取前30字符）
-        summary = _re.sub(r'[\\/:*?"<>|\n\r\t]', '', question)[:30].strip()
+        summary = _re.sub(r'[\\/:*?"<>|\n\r\t]', "", question)[:30].strip()
         if not summary:
             summary = "query"
 
@@ -128,16 +128,18 @@ def extract_layer_from_report(text: str) -> str:
     兼容历史报告中的 "问题层级 L?" 格式。
     """
     m = re.search(
-        r'\|\s*\*{0,2}Pod\s*异常状态\*{0,2}\s*\|\s*\*{0,2}\s*([A-Za-z][A-Za-z0-9_-]*)',
+        r"\|\s*\*{0,2}Pod\s*异常状态\*{0,2}\s*\|\s*\*{0,2}\s*([A-Za-z][A-Za-z0-9_-]*)",
         text,
     )
     if m:
         return m.group(1)
     # 历史报告兼容："| **问题层级** | L0 - xxx |" 或 "层级: L0"
-    m = re.search(r'\|\s*\*{0,2}问题层级\*{0,2}\s*\|\s*\*{0,2}\s*(L[0-4]|QUERY)', text, re.IGNORECASE)
+    m = re.search(
+        r"\|\s*\*{0,2}问题层级\*{0,2}\s*\|\s*\*{0,2}\s*(L[0-4]|QUERY)", text, re.IGNORECASE
+    )
     if m:
         return m.group(1).upper()
-    m = re.search(r'\*{0,2}层级\*{0,2}[：:\s]*\*{0,2}\s*(L[0-4]|QUERY)', text, re.IGNORECASE)
+    m = re.search(r"\*{0,2}层级\*{0,2}[：:\s]*\*{0,2}\s*(L[0-4]|QUERY)", text, re.IGNORECASE)
     if m:
         return m.group(1).upper()
     return ""
@@ -161,16 +163,20 @@ def update_metrics_from_state(
     # 证据完整率
     evidence_items = state.get("evidence_items", [])
     metrics.evidence_planned = len(evidence_items)
-    metrics.evidence_collected = sum(1 for e in evidence_items if getattr(e, 'collected', False))
+    metrics.evidence_collected = sum(1 for e in evidence_items if getattr(e, "collected", False))
 
     # 填充证据详情（每项证据的名称+级别+状态）
     metrics.evidence_details = []
     for e in evidence_items:
-        metrics.evidence_details.append({
-            "description": getattr(e, 'description', '未知'),
-            "level": getattr(e, 'level', 'IMPORTANT').value if hasattr(getattr(e, 'level', None), 'value') else str(getattr(e, 'level', 'IMPORTANT')),
-            "collected": getattr(e, 'collected', False),
-        })
+        metrics.evidence_details.append(
+            {
+                "description": getattr(e, "description", "未知"),
+                "level": getattr(e, "level", "IMPORTANT").value
+                if hasattr(getattr(e, "level", None), "value")
+                else str(getattr(e, "level", "IMPORTANT")),
+                "collected": getattr(e, "collected", False),
+            }
+        )
 
     # 工具调用统计补充：如果 metrics 中没有记录，从 state 的 tool_results 补充
     tool_results = state.get("tool_results", [])
@@ -179,7 +185,7 @@ def update_metrics_from_state(
             metrics.record_tool_call(
                 tool_name=tr.get("tool", "kubectl"),
                 duration_ms=tr.get("duration_ms", 0),
-                success=tr.get("success", False)
+                success=tr.get("success", False),
             )
 
     # LLM 调用统计补充：如果 metrics 中没有记录，从 state 的 llm_calls 补充
@@ -194,11 +200,7 @@ def update_metrics_from_state(
     # ================================================================
     runbook_lookup = _build_runbook_lookup(runbook_catalog)
     ordered_groups = sorted(
-        [
-            group
-            for group in (state.get("group_results") or [])
-            if isinstance(group, dict)
-        ],
+        [group for group in (state.get("group_results") or []) if isinstance(group, dict)],
         key=lambda group: (
             int(group.get("presentation_index") or 0),
             str(group.get("group_id") or ""),
@@ -209,33 +211,37 @@ def update_metrics_from_state(
     for group in ordered_groups:
         timing = group.get("lane_timing") or {}
         if isinstance(timing, dict) and timing:
-            metrics.lane_timings.append({
-                **timing,
-                "group_id": str(group.get("group_id") or ""),
-                "entities": group.get("entities") or [],
-            })
+            metrics.lane_timings.append(
+                {
+                    **timing,
+                    "group_id": str(group.get("group_id") or ""),
+                    "entities": group.get("entities") or [],
+                }
+            )
         lane_runbooks: List[str] = []
         for runbook in group.get("runbooks_used") or []:
             canonical = _canonicalize_runbook_name(str(runbook), runbook_lookup)
             canonical = canonical or re.sub(r"\.md$", "", str(runbook).strip())
             if canonical and canonical not in lane_runbooks:
                 lane_runbooks.append(canonical)
-        metrics.runbooks_by_lane.append({
-            "group_id": str(group.get("group_id") or ""),
-            "entities": group.get("entities") or [],
-            "runbooks": lane_runbooks,
-        })
+        metrics.runbooks_by_lane.append(
+            {
+                "group_id": str(group.get("group_id") or ""),
+                "entities": group.get("entities") or [],
+                "runbooks": lane_runbooks,
+            }
+        )
     runbook_ids: Set[str] = set()
     runbook_names: List[str] = []
 
     # 构建文本搜索源
-    conclusion = (state.get("conclusion_formatted") or state.get("conclusion") or "")
+    conclusion = state.get("conclusion_formatted") or state.get("conclusion") or ""
     rca_analysis_raw = state.get("rca_analysis") or ""
     evidence_analysis_raw = state.get("evidence_analysis") or ""
     all_text = f"{conclusion}\n{rca_analysis_raw}\n{evidence_analysis_raw}"
 
     # 1. 从所有 state 文本中正则提取 runbook 文件名
-    for match in re.finditer(r'([\w][\w.-]*\.md)\b', all_text):
+    for match in re.finditer(r"([\w][\w.-]*\.md)\b", all_text):
         name = match.group(1)
         # 排除非 runbook 文件
         if name not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
@@ -252,7 +258,9 @@ def update_metrics_from_state(
                 tool_args = ev.get("tool_args") or {}
                 runbook_arg = ""
                 if isinstance(tool_args, dict):
-                    runbook_arg = str(tool_args.get("runbook_id") or tool_args.get("id") or "").strip()
+                    runbook_arg = str(
+                        tool_args.get("runbook_id") or tool_args.get("id") or ""
+                    ).strip()
                 call_id = str(ev.get("tool_call_id") or "").strip()
                 if runbook_arg and call_id:
                     pending_runbook_args[call_id] = runbook_arg
@@ -267,13 +275,13 @@ def update_metrics_from_state(
             if runbook_arg:
                 successful_fetched_runbook_ids.add(runbook_arg)
             # 提取 .md 文件名
-            for m in re.finditer(r'([\w][\w.-]*\.md)', preview):
+            for m in re.finditer(r"([\w][\w.-]*\.md)", preview):
                 fname = m.group(1)
                 if fname not in ("README.md", "CLAUDE.md", "ARCHITECTURE.md", "CHANGELOG.md"):
                     runbook_ids.add(fname)
                     successful_fetched_runbook_ids.add(fname)
             # 提取 runbook 标题（如 "# L2 OOMKilled（Exit Code 137）"）
-            title_match = re.search(r'#\s+(.+?)(?:\n|$)', preview)
+            title_match = re.search(r"#\s+(.+?)(?:\n|$)", preview)
             if title_match:
                 title = title_match.group(1).strip()
                 if title and title not in runbook_names:
@@ -281,12 +289,12 @@ def update_metrics_from_state(
 
     # 3. 从 tool_call_details 中查找 runbook 相关调用（保留原逻辑作为补充）
     for detail in metrics.tool_call_details:
-        tool_name = detail.get('tool', '')
-        result = detail.get('result', '')
-        if 'runbook' in tool_name.lower() and result:
-            for m in re.finditer(r'[\w-]+\.md', result):
+        tool_name = detail.get("tool", "")
+        result = detail.get("result", "")
+        if "runbook" in tool_name.lower() and result:
+            for m in re.finditer(r"[\w-]+\.md", result):
                 runbook_ids.add(m.group(0))
-            bold_match = re.search(r'\*\*(.+?)\*\*', result)
+            bold_match = re.search(r"\*\*(.+?)\*\*", result)
             if bold_match:
                 rn = bold_match.group(1).strip()
                 if rn and rn not in runbook_names:
@@ -312,19 +320,27 @@ def update_metrics_from_state(
         # 方法2: 从 rca_analysis JSON 提取 primary_runbooks 字段
         if not primary_runbooks and rca_analysis_raw:
             try:
-                rca_data = _json.loads(rca_analysis_raw) if isinstance(rca_analysis_raw, str) else rca_analysis_raw
+                rca_data = (
+                    _json.loads(rca_analysis_raw)
+                    if isinstance(rca_analysis_raw, str)
+                    else rca_analysis_raw
+                )
                 if isinstance(rca_data, dict):
                     ai_primary = rca_data.get("primary_runbooks", [])
                     if isinstance(ai_primary, list):
                         for rb in ai_primary:
-                            canonical = _canonicalize_runbook_name(rb.strip(), runbook_lookup) if isinstance(rb, str) else None
+                            canonical = (
+                                _canonicalize_runbook_name(rb.strip(), runbook_lookup)
+                                if isinstance(rb, str)
+                                else None
+                            )
                             if canonical and canonical not in primary_runbooks:
                                 primary_runbooks.append(canonical)
                     # 方法2b: JSON 解析失败时从 llm_raw_analysis 提取
                     if not primary_runbooks:
                         raw = rca_data.get("llm_raw_analysis", "")
                         if raw:
-                            for m in re.finditer(r'found a runbook named \*\*(.+?)\*\*', raw):
+                            for m in re.finditer(r"found a runbook named \*\*(.+?)\*\*", raw):
                                 name = m.group(1).strip()
                                 canonical = _canonicalize_runbook_name(name, runbook_lookup)
                                 if canonical and canonical not in primary_runbooks:
@@ -359,7 +375,7 @@ def update_metrics_from_state(
         if not primary_runbooks and len(canonical_refs) == 1:
             primary_runbooks.append(canonical_refs[0])
 
-        metrics.primary_runbook = ', '.join(primary_runbooks) if primary_runbooks else None
+        metrics.primary_runbook = ", ".join(primary_runbooks) if primary_runbooks else None
 
         # 参考 Runbook：仅展示 catalog 中存在的 canonical runbook id
         all_ref_names = list(primary_runbooks)
@@ -371,10 +387,12 @@ def update_metrics_from_state(
         layer = state.get("layer")
         layer_val = layer.value if hasattr(layer, "value") else str(layer or "")
         if layer_val != "QUERY":
-            all_ref_names = [n for n in all_ref_names if "QUERY" not in n.upper() and "快速查询参考" not in n]
+            all_ref_names = [
+                n for n in all_ref_names if "QUERY" not in n.upper() and "快速查询参考" not in n
+            ]
 
         if all_ref_names:
-            metrics.runbook_id = ', '.join(all_ref_names)
+            metrics.runbook_id = ", ".join(all_ref_names)
         else:
             metrics.runbook_id = None
 
@@ -394,33 +412,44 @@ def update_metrics_from_state(
     rb_dims = []
     # 维度1: Runbook 引用（权重 50%）— 是否调用了 runbook
     rb_ref_score = 1.0 if metrics.runbook_matched else 0.0
-    rb_dims.append({
-        "description": "Runbook 引用",
-        "weight": 0.50, "score": rb_ref_score,
-        "weighted_score": round(0.50 * rb_ref_score, 4),
-    })
+    rb_dims.append(
+        {
+            "description": "Runbook 引用",
+            "weight": 0.50,
+            "score": rb_ref_score,
+            "weighted_score": round(0.50 * rb_ref_score, 4),
+        }
+    )
 
     # 维度2: 核心 Runbook 识别（权重 30%）— 是否识别出与诊断强相关的核心 runbook
-    rb_primary_score = 1.0 if metrics.primary_runbook else (0.3 if metrics.runbook_matched else 0.0)
-    rb_dims.append({
-        "description": "核心 Runbook 识别",
-        "weight": 0.30, "score": rb_primary_score,
-        "weighted_score": round(0.30 * rb_primary_score, 4),
-    })
+    rb_primary_score = (
+        1.0 if metrics.primary_runbook else (0.3 if metrics.runbook_matched else 0.0)
+    )
+    rb_dims.append(
+        {
+            "description": "核心 Runbook 识别",
+            "weight": 0.30,
+            "score": rb_primary_score,
+            "weighted_score": round(0.30 * rb_primary_score, 4),
+        }
+    )
     # 维度3: Runbook 结论关联（权重 20%）— 核心 runbook 是否在结论中被引用
     rb_conclusion_score = 0.0
     if metrics.primary_runbook and conclusion:
         # 检查 primary_runbook 的关键词是否出现在 conclusion 中
-        primary_keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', metrics.primary_runbook)
+        primary_keywords = re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}", metrics.primary_runbook)
         matched_kw = sum(1 for kw in primary_keywords if kw.lower() in conclusion.lower())
         rb_conclusion_score = min(1.0, matched_kw / max(len(primary_keywords), 1))
     elif metrics.runbook_matched and conclusion:
         rb_conclusion_score = 0.3  # 有 runbook 但无 primary，给基础分
-    rb_dims.append({
-        "description": "Runbook 结论关联",
-        "weight": 0.20, "score": rb_conclusion_score,
-        "weighted_score": round(0.20 * rb_conclusion_score, 4),
-    })
+    rb_dims.append(
+        {
+            "description": "Runbook 结论关联",
+            "weight": 0.20,
+            "score": rb_conclusion_score,
+            "weighted_score": round(0.20 * rb_conclusion_score, 4),
+        }
+    )
 
     rb_total = sum(d["weighted_score"] for d in rb_dims)
     # 保底：有 runbook 引用时至少 85%
@@ -438,7 +467,7 @@ def update_metrics_from_state(
 
     metrics_config = None
     if holmes_service:
-        full_config = getattr(holmes_service, 'raw_config', None)
+        full_config = getattr(holmes_service, "raw_config", None)
         if full_config and isinstance(full_config, dict):
             metrics_config = full_config.get("metrics")
 

@@ -1,4 +1,5 @@
 """MCP 工具加载：使用 langchain-mcp-adapters 连接 MCP SSE 服务"""
+
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -40,7 +41,9 @@ def _sanitize_mcp_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, A
     return sanitized
 
 
-def _log_sanitized_args(tool_name: str, original: Dict[str, Any], sanitized: Dict[str, Any]) -> None:
+def _log_sanitized_args(
+    tool_name: str, original: Dict[str, Any], sanitized: Dict[str, Any]
+) -> None:
     if sanitized == original:
         return
     removed = sorted(set(original.keys()) - set(sanitized.keys()))
@@ -168,20 +171,24 @@ async def load_mcp_tools(
                 t.metadata = {**(t.metadata or {}), "server_name": srv_name}
                 wrapped_tools.append(_wrap_mcp_tool_for_transport(t))
             all_tools.extend(wrapped_tools)
-            logger.info("   [%s] %d 个工具: %s",
-                       srv_name, len(tools), ", ".join(tool_names))
+            logger.info("   [%s] %d 个工具: %s", srv_name, len(tools), ", ".join(tool_names))
         except Exception as e:
             failed_servers.append(srv_name)
             logger.error("   [%s] 连接失败: %s", srv_name, e)
 
     if failed_servers:
-        logger.warning("[MCP-Tools] %d 个服务器连接失败: %s",
-                       len(failed_servers), ", ".join(failed_servers))
+        logger.warning(
+            "[MCP-Tools] %d 个服务器连接失败: %s", len(failed_servers), ", ".join(failed_servers)
+        )
 
     # 汇总输出：按 server 分组的工具清单
     logger.info("=" * 50)
-    logger.info("[MCP-Tools] 工具加载汇总: %d 个工具 (来自 %d/%d 个服务器)",
-                len(all_tools), len(server_tool_map), len(connections))
+    logger.info(
+        "[MCP-Tools] 工具加载汇总: %d 个工具 (来自 %d/%d 个服务器)",
+        len(all_tools),
+        len(server_tool_map),
+        len(connections),
+    )
     logger.info("-" * 50)
     for srv_name, tool_names in server_tool_map.items():
         logger.info("   [%s] %d 个工具:", srv_name, len(tool_names))

@@ -65,8 +65,7 @@ class NetworkBackend:
             "final",
             {
                 "answer": (
-                    "# 真实 Agent-to-Agent 测试报告\n\n"
-                    "请求已经通过测试 Agent 到达运维 Agent。"
+                    "# 真实 Agent-to-Agent 测试报告\n\n请求已经通过测试 Agent 到达运维 Agent。"
                 )
             },
         )
@@ -152,9 +151,7 @@ async def test_delegator_agent_card_readiness_and_artifact_metadata():
     artifact = result["artifacts"][0]
     assert artifact["parts"][0]["text"].startswith("# 委派诊断报告")
     assert artifact["metadata"]["target_task_id"] == "target-task-1"
-    assert remote.calls == [
-        {"question": "查询 Node CPU", "metadata": {"aiops_mode": "query"}}
-    ]
+    assert remote.calls == [{"question": "查询 Node CPU", "metadata": {"aiops_mode": "query"}}]
 
 
 @pytest.mark.asyncio
@@ -182,9 +179,7 @@ async def test_real_http_two_hop_agent_to_agent_chain_with_official_sdk():
         )
     )
 
-    async with _serve(operations_app, operations_port), _serve(
-        delegator_app, delegator_port
-    ):
+    async with _serve(operations_app, operations_port), _serve(delegator_app, delegator_port):
         async with httpx.AsyncClient(timeout=10) as http_client:
             client = await ClientFactory.connect(
                 delegator_url,
@@ -205,10 +200,6 @@ async def test_real_http_two_hop_agent_to_agent_chain_with_official_sdk():
     final_task, final_update = events[-1]
     assert final_task.status.state == TaskState.completed
     assert final_update.status.state == TaskState.completed
-    assert "真实 Agent-to-Agent 测试报告" in (
-        final_task.artifacts[0].parts[0].root.text
-    )
+    assert "真实 Agent-to-Agent 测试报告" in (final_task.artifacts[0].parts[0].root.text)
     assert final_task.artifacts[0].metadata["target_task_id"]
-    assert backend.calls == [
-        {"question": "查询各 Node CPU 使用率", "mode": "query"}
-    ]
+    assert backend.calls == [{"question": "查询各 Node CPU 使用率", "mode": "query"}]

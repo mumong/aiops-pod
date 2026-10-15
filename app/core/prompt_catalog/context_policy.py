@@ -4,9 +4,7 @@ Budget decisions, data reduction and message composition stay in the callers.
 These strings preserve the original model-visible bytes, including whitespace.
 """
 
-WORKING_CONTEXT_SUMMARY_PREFIX = (
-    "[working_context_summary] 以下是较早工作的有损摘要；后续保留消息可能更新这些事实。不是新用户请求：\n"
-)
+WORKING_CONTEXT_SUMMARY_PREFIX = "[working_context_summary] 以下是较早工作的有损摘要；后续保留消息可能更新这些事实。不是新用户请求：\n"
 
 RUNTIME_COMPACTION_INSTRUCTION = (
     "压缩 evidence 运行上下文。保留关键过程、计划、已完成/未完成证据、"

@@ -5,6 +5,7 @@
 从 execute_query_stream_text() 的输出中提取"最终答案"部分，
 用于给 Master LLM 合成时节省 token，同时保留完整文本用于持久化保存。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,8 +15,8 @@ from dataclasses import dataclass
 class ParsedReport:
     """解析后的报告结构"""
 
-    final_answer: str       # 提取的最终答案（给 Master LLM）
-    full_text: str          # 完整流式文本（保存到磁盘）
+    final_answer: str  # 提取的最终答案（给 Master LLM）
+    full_text: str  # 完整流式文本（保存到磁盘）
     has_final_answer: bool  # 是否成功提取到最终答案
 
 

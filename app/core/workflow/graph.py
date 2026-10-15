@@ -24,52 +24,59 @@ logger = logging.getLogger(__name__)
 
 def _wrap_node_execute(node: Any):
     """为节点执行注入生命周期事件，便于 executor 做精确计时。"""
+
     def execute_with_lifecycle(state: WorkflowState):
         event_queue = getattr(node, "_event_queue", None)
         start_ts = time.time()
 
         if event_queue is not None:
-            event_queue.put((
-                "node_lifecycle",
-                {
-                    "phase": "start",
-                    "node": node.node_id,
-                    "node_name": node.node_name,
-                    "ts": start_ts,
-                },
-            ))
+            event_queue.put(
+                (
+                    "node_lifecycle",
+                    {
+                        "phase": "start",
+                        "node": node.node_id,
+                        "node_name": node.node_name,
+                        "ts": start_ts,
+                    },
+                )
+            )
 
         try:
             with log_context(node=node.node_id):
                 new_state = node.execute(state)
         except Exception as exc:
             if event_queue is not None:
-                event_queue.put((
+                event_queue.put(
+                    (
+                        "node_lifecycle",
+                        {
+                            "phase": "end",
+                            "node": node.node_id,
+                            "node_name": node.node_name,
+                            "ts": time.time(),
+                            "success": False,
+                            "error": str(exc),
+                            "state_update": {},
+                        },
+                    )
+                )
+            raise
+
+        if event_queue is not None:
+            event_queue.put(
+                (
                     "node_lifecycle",
                     {
                         "phase": "end",
                         "node": node.node_id,
                         "node_name": node.node_name,
                         "ts": time.time(),
-                        "success": False,
-                        "error": str(exc),
-                        "state_update": {},
+                        "success": True,
+                        "state_update": new_state,
                     },
-                ))
-            raise
-
-        if event_queue is not None:
-            event_queue.put((
-                "node_lifecycle",
-                {
-                    "phase": "end",
-                    "node": node.node_id,
-                    "node_name": node.node_name,
-                    "ts": time.time(),
-                    "success": True,
-                    "state_update": new_state,
-                },
-            ))
+                )
+            )
 
         return new_state
 
@@ -117,25 +124,50 @@ def build_diagnosis_workflow(
     )
     from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode
     from app.core.workflow.nodes.remediation import RemediationNode
+
     workflow = StateGraph(WorkflowState)
-    nodes = [cls(holmes_service, metrics, runbook_catalog) for cls in (
-        RequestRouterNode, QueryCollectNode, DiagnosisStageNode,
-        DiagnosisEvidenceNode, DiagnosisRootCauseNode, AutonomousParallelNode, QueryConclusionNode, RemediationNode,
-    )]
+    nodes = [
+        cls(holmes_service, metrics, runbook_catalog)
+        for cls in (
+            RequestRouterNode,
+            QueryCollectNode,
+            DiagnosisStageNode,
+            DiagnosisEvidenceNode,
+            DiagnosisRootCauseNode,
+            AutonomousParallelNode,
+            QueryConclusionNode,
+            RemediationNode,
+        )
+    ]
     for node in nodes:
         if node.node_id == "layer":
             node.autonomous_parallel_enabled = (parallel_config or {}).get("enabled", True)
         workflow.add_node(node.node_id, _wrap_node_execute(node))
     workflow.set_entry_point("request_router")
-    workflow.add_conditional_edges("request_router", lambda state: state["request_route"], {
-        "focused": "query_collect", "full_diagnosis": "layer", "clarify": END, "stop": END,
-        "remediation": "remediation",
-    })
+    workflow.add_conditional_edges(
+        "request_router",
+        lambda state: state["request_route"],
+        {
+            "focused": "query_collect",
+            "full_diagnosis": "layer",
+            "clarify": END,
+            "stop": END,
+            "remediation": "remediation",
+        },
+    )
     workflow.add_edge("remediation", END)
     workflow.add_edge("query_collect", END)
     from app.core.workflow.pod_detection import after_location
-    workflow.add_conditional_edges("layer", after_location,
-                                   {"parallel_evidence": "parallel_evidence", "evidence": "evidence", "conclusion": "conclusion"})
+
+    workflow.add_conditional_edges(
+        "layer",
+        after_location,
+        {
+            "parallel_evidence": "parallel_evidence",
+            "evidence": "evidence",
+            "conclusion": "conclusion",
+        },
+    )
     workflow.add_edge("parallel_evidence", "conclusion")
     workflow.add_edge("evidence", "rca")
     workflow.add_edge("rca", "conclusion")

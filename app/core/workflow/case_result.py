@@ -4,6 +4,7 @@ The model writes diagnostic content. The caller binds run/group/entity identity
 from the assigned task. A full report is stored separately from the bounded
 index sent to the overview model; neither contains execution authorization.
 """
+
 import re
 from copy import deepcopy
 from typing import Annotated, Literal
@@ -11,7 +12,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=320)]
-EvidenceRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=640)]
+EvidenceRef = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=640)
+]
 
 
 class CaseFact(BaseModel):
@@ -19,12 +22,16 @@ class CaseFact(BaseModel):
 
     statement: ShortText
     observed_at: str = Field(default="", max_length=80)
-    evidence_refs: list[EvidenceRef] = Field(min_length=1, max_length=3,
-        description="原样使用工具结果中的 raw_ref 或 structured_ref 归档地址；不自编工具描述作为地址")
+    evidence_refs: list[EvidenceRef] = Field(
+        min_length=1,
+        max_length=3,
+        description="原样使用工具结果中的 raw_ref 或 structured_ref 归档地址；不自编工具描述作为地址",
+    )
 
 
 class EvidenceStageOutput(BaseModel):
     """Only selected evidence survives compression; analysis remains ordinary text."""
+
     model_config = ConfigDict(extra="forbid")
 
     analysis: str = Field(min_length=1)
@@ -39,6 +46,7 @@ class DiagnosisCaseOutput(BaseModel):
     Facts and unknowns are selected by the agent, not fault-name heuristics.
     Schema overflow is a delivery error, never silently clipped evidence.
     """
+
     model_config = ConfigDict(extra="forbid")
 
     outcome: Literal["abnormal", "recovered", "inconclusive"]
@@ -48,7 +56,10 @@ class DiagnosisCaseOutput(BaseModel):
     key_facts: list[CaseFact] = Field(default_factory=list, max_length=8)
     unresolved: list[ShortText] = Field(default_factory=list, max_length=6)
     runbook_refs: list[EvidenceRef] = Field(default_factory=list, max_length=6)
-    report: str = Field(min_length=1, description="供用户直接阅读的完整 Markdown：诊断结论、异常现象、真实工具证据及来源、原因分析、待核实与采集边界；不是一句摘要。不包含其他组，不生成修复命令")
+    report: str = Field(
+        min_length=1,
+        description="供用户直接阅读的完整 Markdown：诊断结论、异常现象、真实工具证据及来源、原因分析、待核实与采集边界；不是一句摘要。不包含其他组，不生成修复命令",
+    )
 
 
 def normalize_report_paragraphs(report):
@@ -58,8 +69,9 @@ def normalize_report_paragraphs(report):
     regexes, log snippets and single escaped newlines must remain unchanged.
     """
     parts = re.split(r"(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)", report)
-    return "".join(part if index % 2 else part.replace(r"\n\n", "\n\n")
-                   for index, part in enumerate(parts))
+    return "".join(
+        part if index % 2 else part.replace(r"\n\n", "\n\n") for index, part in enumerate(parts)
+    )
 
 
 def bind_case_result(output, *, group_id, target, result_ref):
@@ -72,9 +84,14 @@ def bind_case_result(output, *, group_id, target, result_ref):
         raise ValueError("assigned target identity is required")
     if not isinstance(result_ref, str) or not result_ref.strip():
         raise ValueError("case result archive reference is required")
-    return {"contract_version": "diagnosis-case.v1", "group_id": group_id,
-            "target": deepcopy(target), "result_ref": result_ref,
-            "execution_status": "completed", **parsed}
+    return {
+        "contract_version": "diagnosis-case.v1",
+        "group_id": group_id,
+        "target": deepcopy(target),
+        "result_ref": result_ref,
+        "execution_status": "completed",
+        **parsed,
+    }
 
 
 def case_index(result):
@@ -84,10 +101,13 @@ def case_index(result):
     projection deliberately has no policy for choosing/omitting cases.
     """
     target = result.get("target") or {}
-    return {"group_id": result["group_id"], "target_id": target.get("target_id"),
-            "entities": deepcopy(target.get("entities") or []),
-            "execution_status": result.get("execution_status", "partial"),
-            "outcome": result.get("outcome", "inconclusive"),
-            "summary": result.get("summary", "未交付完整诊断结果"),
-            "certainty": result.get("certainty", "unknown"),
-            "result_ref": result.get("result_ref")}
+    return {
+        "group_id": result["group_id"],
+        "target_id": target.get("target_id"),
+        "entities": deepcopy(target.get("entities") or []),
+        "execution_status": result.get("execution_status", "partial"),
+        "outcome": result.get("outcome", "inconclusive"),
+        "summary": result.get("summary", "未交付完整诊断结果"),
+        "certainty": result.get("certainty", "unknown"),
+        "result_ref": result.get("result_ref"),
+    }

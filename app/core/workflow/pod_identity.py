@@ -15,7 +15,11 @@ from typing import Any, Callable, Dict, Iterable, List
 logger = logging.getLogger(__name__)
 
 _POD_INDEX_ARGV = [
-    "kubectl", "get", "pods", "-A", "-o",
+    "kubectl",
+    "get",
+    "pods",
+    "-A",
+    "-o",
     'jsonpath={range .items[*]}{.metadata.namespace}{"\\t"}{.metadata.name}{"\\t"}{.metadata.uid}{"\\n"}{end}',
 ]
 
@@ -24,16 +28,21 @@ def _default_runner(argv: List[str]) -> str:
     from app.core.remediation.pod_executor import (
         run_argv,  # read-only kubectl get, in-cluster identity
     )
+
     return run_argv(argv)
 
 
-def complete_pod_namespaces(entities: Iterable[Dict[str, Any]],
-                            runner: Callable[[List[str]], str] = _default_runner) -> int:
+def complete_pod_namespaces(
+    entities: Iterable[Dict[str, Any]], runner: Callable[[List[str]], str] = _default_runner
+) -> int:
     """Fill missing namespaces of Pod entities in place; return how many were filled."""
     missing = [
-        entity for entity in entities
-        if isinstance(entity, dict) and str(entity.get("kind") or "").lower() == "pod"
-        and not entity.get("namespace") and (entity.get("uid") or entity.get("name"))
+        entity
+        for entity in entities
+        if isinstance(entity, dict)
+        and str(entity.get("kind") or "").lower() == "pod"
+        and not entity.get("namespace")
+        and (entity.get("uid") or entity.get("name"))
     ]
     if not missing:
         return 0
@@ -61,5 +70,7 @@ def complete_pod_namespaces(entities: Iterable[Dict[str, Any]],
             entity["namespace"] = namespace
             filled += 1
     if filled:
-        logger.info("[pod_identity] 已按 UID/唯一名称补全 %d/%d 个 Pod 命名空间", filled, len(missing))
+        logger.info(
+            "[pod_identity] 已按 UID/唯一名称补全 %d/%d 个 Pod 命名空间", filled, len(missing)
+        )
     return filled

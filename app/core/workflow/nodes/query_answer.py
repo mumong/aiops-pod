@@ -162,15 +162,20 @@ class QueryConclusionNode(FocusedTaskNode):
 
     def execute(self, state):
         _configure_query_runtime(self)
-        if state.get("diagnosis_case_result") or state.get("autonomous_groups") or state.get("autonomous_group_results"):
+        if (
+            state.get("diagnosis_case_result")
+            or state.get("autonomous_groups")
+            or state.get("autonomous_group_results")
+        ):
             from app.core.workflow.case_report import conclude_cases
+
             if getattr(self, "ai_call", None) is not None:
                 self.ai_call.query_session_context = {}
             return conclude_cases(self, state)
         events = state.get("thinking_events") or []
         payload = build_working_material(state)
         payload["request_contract"] = state.get("request_contract")
-        payload['pod_assessment'] = (state.get('diagnosis_handoff') or {}).get('pod_assessment')
+        payload["pod_assessment"] = (state.get("diagnosis_handoff") or {}).get("pod_assessment")
         if getattr(self, "ai_call", None) is not None:
             self.ai_call.query_session_context = {}
         self._archive_node_input(payload)
@@ -180,12 +185,14 @@ class QueryConclusionNode(FocusedTaskNode):
         try:
             prompt = QUERY_CONCLUSION_PROMPT
             if (payload.get("request_contract") or {}).get("route") == "full_diagnosis":
-                assessment = payload.get('pod_assessment') or {}
-                if assessment.get('status') in ('healthy', 'inconclusive') and not state.get('rca_analysis'):
-                    prompt += '\n这是定位后直接结束的 Pod 检查，只输出简短检查结论、范围/时间/数量、关键依据及限制。不要套用异常概览、根因、三维证据表，不把没有调查的无关维度列成待办。inconclusive 必须明确具体缺口。历史累计重启不冒充近期异常；仅当近期线索仍未解释才列为待核实。'
+                assessment = payload.get("pod_assessment") or {}
+                if assessment.get("status") in ("healthy", "inconclusive") and not state.get(
+                    "rca_analysis"
+                ):
+                    prompt += "\n这是定位后直接结束的 Pod 检查，只输出简短检查结论、范围/时间/数量、关键依据及限制。不要套用异常概览、根因、三维证据表，不把没有调查的无关维度列成待办。inconclusive 必须明确具体缺口。历史累计重启不冒充近期异常；仅当近期线索仍未解释才列为待核实。"
                 else:
                     prompt += "\n" + DEEP_CONCLUSION_PRESENTATION
-                prompt += '\n本产品深度诊断是 Pod 异常检测，不是全面集群健康评估。若 pod_assessment 为 healthy，简述 Healthy、本次范围/时间/证据与近期线索核实结果，无需异常根因表；只说明本次检查未发现 Pod 异常，不承诺业务全健康。若为 inconclusive，明确检查不完整及缺口，不输出 healthy。不因未采集无关指标日志链路而扩展检查。'
+                prompt += "\n本产品深度诊断是 Pod 异常检测，不是全面集群健康评估。若 pod_assessment 为 healthy，简述 Healthy、本次范围/时间/证据与近期线索核实结果，无需异常根因表；只说明本次检查未发现 Pod 异常，不承诺业务全健康。若为 inconclusive，明确检查不完整及缺口，不输出 healthy。不因未采集无关指标日志链路而扩展检查。"
             prompt += "\n输出 schema：\n" + json.dumps(
                 QueryAnswer.model_json_schema(), ensure_ascii=False
             )

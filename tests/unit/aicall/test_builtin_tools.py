@@ -33,7 +33,9 @@ def test_read_context_archive_tool_rejects_path_outside_allowed_roots(tmp_path):
 def test_fetch_runbook_tool_rejects_disabled_runbook(tmp_path):
     runbook_dir = tmp_path / "runbooks"
     runbook_dir.mkdir()
-    (runbook_dir / "private-k8s-health-reference.md").write_text("# private health", encoding="utf-8")
+    (runbook_dir / "private-k8s-health-reference.md").write_text(
+        "# private health", encoding="utf-8"
+    )
 
     tool = FetchRunbookTool(
         runbook_dirs=[str(runbook_dir)],

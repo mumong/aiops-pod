@@ -62,16 +62,12 @@ class DelegatingAgentExecutor(AgentExecutor):
 
         async def report_progress(progress: str) -> None:
             if not cancel_event.is_set():
-                await updater.start_work(
-                    self._message(f"下游运维 Agent：{progress}", context)
-                )
+                await updater.start_work(self._message(f"下游运维 Agent：{progress}", context))
 
         try:
             if context.current_task is None:
                 await updater.submit(self._message("委派任务已提交。", context))
-            await updater.start_work(
-                self._message("正在通过 A2A 协议调用运维 Agent。", context)
-            )
+            await updater.start_work(self._message("正在通过 A2A 协议调用运维 Agent。", context))
             result = await self.remote.invoke(
                 question,
                 metadata=self._metadata(context),

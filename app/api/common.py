@@ -1,4 +1,5 @@
 """Helpers shared by the HTTP route modules."""
+
 import logging
 import threading
 from typing import Iterable, Optional
@@ -38,7 +39,7 @@ def fix_double_encoding(text: str) -> str:
     """
     try:
         # 尝试将错误的字符串编码回字节，再用正确的编码解码
-        fixed = text.encode('latin-1').decode('utf-8')
+        fixed = text.encode("latin-1").decode("utf-8")
         logger.debug("修复了双重编码: %s -> %s", text[:20], fixed[:20])
         return fixed
     except (UnicodeDecodeError, UnicodeEncodeError):
@@ -55,7 +56,9 @@ class CancellableStreamingResponse(StreamingResponse):
     closed explicitly when the response finishes for any reason.
     """
 
-    def __init__(self, content: Iterable[str], *, cancel_event: Optional[threading.Event] = None, **kwargs):
+    def __init__(
+        self, content: Iterable[str], *, cancel_event: Optional[threading.Event] = None, **kwargs
+    ):
         super().__init__(content, **kwargs)
         self._source = content
         self._cancel_event = cancel_event
@@ -71,7 +74,9 @@ class CancellableStreamingResponse(StreamingResponse):
                 with anyio.CancelScope(shield=True):
                     try:
                         await anyio.to_thread.run_sync(close)
-                    except ValueError:  # generator still executing elsewhere; cancel_event covers it
+                    except (
+                        ValueError
+                    ):  # generator still executing elsewhere; cancel_event covers it
                         logger.debug("stream generator busy at close", exc_info=True)
 
 

@@ -14,7 +14,9 @@ def test_executor_does_not_propagate_ambient_query_mode_to_nodes(monkeypatch):
         def stream(self, initial_state):
             return iter([])
 
-    def _fake_build_workflow(holmes_service, metrics, runbook_catalog, node_config=None, query_mode="auto", **_kw):
+    def _fake_build_workflow(
+        holmes_service, metrics, runbook_catalog, node_config=None, query_mode="auto", **_kw
+    ):
         captured["query_mode"] = query_mode
         node = SimpleNamespace(
             node_id="layer",
@@ -23,7 +25,9 @@ def test_executor_does_not_propagate_ambient_query_mode_to_nodes(monkeypatch):
         captured["node"] = node
         return _DummyWorkflow(), [node]
 
-    monkeypatch.setattr("app.core.workflow.executor.build_diagnosis_workflow", _fake_build_workflow)
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow", _fake_build_workflow
+    )
 
     executor = WorkflowExecutor(
         holmes_service=SimpleNamespace(

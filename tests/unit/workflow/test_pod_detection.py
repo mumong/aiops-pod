@@ -9,94 +9,143 @@ from app.core.workflow.pod_detection import after_location, assess_delivery
 
 
 def healthy():
-    return {'coverage': 'complete', 'targets': [], 'pod_assessment': {
-        'status': 'healthy', 'scope': 'ns', 'observed_at': '2026-10-13T00:00:00Z',
-        'recent_signals_reviewed': True, 'unresolved': [], 'evidence_refs': ['/raw/1'],
-        'reason': '当前状态与近期线索已核实'}}
+    return {
+        "coverage": "complete",
+        "targets": [],
+        "pod_assessment": {
+            "status": "healthy",
+            "scope": "ns",
+            "observed_at": "2026-10-13T00:00:00Z",
+            "recent_signals_reviewed": True,
+            "unresolved": [],
+            "evidence_refs": ["/raw/1"],
+            "reason": "当前状态与近期线索已核实",
+        },
+    }
 
 
 def events():
-    return [{'type': 'tool_result', 'status': 'success', 'raw_ref': '/raw/1',
-             'result': '{"status":"success","next_continue_token":null}'}]
+    return [
+        {
+            "type": "tool_result",
+            "status": "success",
+            "raw_ref": "/raw/1",
+            "result": '{"status":"success","next_continue_token":null}',
+        }
+    ]
 
 
 def test_complete_no_pending_skips_deeper_collection():
     result = assess_delivery(healthy(), events())
-    assert result['pod_assessment']['status'] == 'healthy'
-    assert after_location({'diagnosis_handoff': result}) == 'conclusion'
+    assert result["pod_assessment"]["status"] == "healthy"
+    assert after_location({"diagnosis_handoff": result}) == "conclusion"
 
 
 def test_history_limitation_alone_does_not_invalidate_current_health():
     records = events()
-    records[0]['result'] = json.dumps({'status': 'success', 'history_complete': False,
-                                     'restart_count_in_window': None})
-    assert assess_delivery(healthy(), records)['pod_assessment']['status'] == 'healthy'
+    records[0]["result"] = json.dumps(
+        {"status": "success", "history_complete": False, "restart_count_in_window": None}
+    )
+    assert assess_delivery(healthy(), records)["pod_assessment"]["status"] == "healthy"
 
 
 def test_producer_source_id_is_accepted_but_descriptive_prose_is_not():
     data = healthy()
-    data['pod_assessment']['evidence_refs'] = ['source-1']
-    material = {'protected_handoff': {'lifecycle_core': {'sources': {'source-1': {'raw_ref': '/raw/1'}}}}}
-    assert assess_delivery(data, events(), material)['pod_assessment']['status'] == 'healthy'
-    data['pod_assessment']['evidence_refs'].append('looked at all pods')
-    assert assess_delivery(data, events(), material)['pod_assessment']['status'] == 'inconclusive'
+    data["pod_assessment"]["evidence_refs"] = ["source-1"]
+    material = {
+        "protected_handoff": {"lifecycle_core": {"sources": {"source-1": {"raw_ref": "/raw/1"}}}}
+    }
+    assert assess_delivery(data, events(), material)["pod_assessment"]["status"] == "healthy"
+    data["pod_assessment"]["evidence_refs"].append("looked at all pods")
+    assert assess_delivery(data, events(), material)["pod_assessment"]["status"] == "inconclusive"
 
 
-@pytest.mark.parametrize('change', ['coverage', 'recent', 'unresolved', 'deferred', 'invented_ref', 'no_refs'])
+@pytest.mark.parametrize(
+    "change", ["coverage", "recent", "unresolved", "deferred", "invented_ref", "no_refs"]
+)
 def test_inconsistent_healthy_becomes_inconclusive(change):
     data = healthy()
-    if change == 'coverage': data['coverage'] = 'partial'
-    if change == 'recent': data['pod_assessment']['recent_signals_reviewed'] = False
-    if change == 'unresolved': data['pod_assessment']['unresolved'] = ['近期重启尚未解释']
-    if change == 'deferred': data['targets'] = [{'status': 'deferred'}]
-    if change == 'invented_ref': data['pod_assessment']['evidence_refs'] = ['/invented']
-    if change == 'no_refs': data['pod_assessment']['evidence_refs'] = []
-    assert assess_delivery(data, events())['pod_assessment']['status'] == 'inconclusive'
+    if change == "coverage":
+        data["coverage"] = "partial"
+    if change == "recent":
+        data["pod_assessment"]["recent_signals_reviewed"] = False
+    if change == "unresolved":
+        data["pod_assessment"]["unresolved"] = ["近期重启尚未解释"]
+    if change == "deferred":
+        data["targets"] = [{"status": "deferred"}]
+    if change == "invented_ref":
+        data["pod_assessment"]["evidence_refs"] = ["/invented"]
+    if change == "no_refs":
+        data["pod_assessment"]["evidence_refs"] = []
+    assert assess_delivery(data, events())["pod_assessment"]["status"] == "inconclusive"
 
 
-@pytest.mark.parametrize('extra', [
-    {'type': 'execution_incomplete'},
-    {'type': 'tool_result', 'status': 'failed'},
-    {'type': 'tool_result', 'result': '{"status":"error"}'},
-    {'type': 'tool_result', 'result': '{"next_continue_token":"next"}'},
-])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"type": "execution_incomplete"},
+        {"type": "tool_result", "status": "failed"},
+        {"type": "tool_result", "result": '{"status":"error"}'},
+        {"type": "tool_result", "result": '{"next_continue_token":"next"}'},
+    ],
+)
 def test_incomplete_source_never_healthy(extra):
-    assert assess_delivery(healthy(), events() + [extra])['pod_assessment']['status'] == 'inconclusive'
+    assert (
+        assess_delivery(healthy(), events() + [extra])["pod_assessment"]["status"]
+        == "inconclusive"
+    )
 
 
 def test_completed_pagination_does_not_force_extra_diagnosis():
     records = events() + [
-        {'type': 'tool_result', 'result': '{"next_continue_token":"next"}'},
-        {'type': 'tool_result', 'tool_args': {'continue_token': 'next'}, 'result': '{}'}]
-    assert assess_delivery(healthy(), records)['pod_assessment']['status'] == 'healthy'
+        {"type": "tool_result", "result": '{"next_continue_token":"next"}'},
+        {"type": "tool_result", "tool_args": {"continue_token": "next"}, "result": "{}"},
+    ]
+    assert assess_delivery(healthy(), records)["pod_assessment"]["status"] == "healthy"
 
 
-@pytest.mark.parametrize('issue', ['近10分钟重启，当前Running/Ready', 'Running但未Ready', '删除中', '业务失败但Pod就绪'])
+@pytest.mark.parametrize(
+    "issue", ["近10分钟重启，当前Running/Ready", "Running但未Ready", "删除中", "业务失败但Pod就绪"]
+)
 def test_unresolved_target_remains_investigation(issue):
     data = healthy()
-    data['targets'] = [{'status': 'investigate', 'issue': issue}]
+    data["targets"] = [{"status": "investigate", "issue": issue}]
     result = assess_delivery(data, events())
-    assert result['pod_assessment']['status'] == 'inconclusive'
-    assert after_location({'diagnosis_handoff': result}) == 'evidence'
-    assert after_location({'diagnosis_handoff': result, 'autonomous_groups': [{}, {}]}) == 'parallel_evidence'
+    assert result["pod_assessment"]["status"] == "inconclusive"
+    assert after_location({"diagnosis_handoff": result}) == "evidence"
+    assert (
+        after_location({"diagnosis_handoff": result, "autonomous_groups": [{}, {}]})
+        == "parallel_evidence"
+    )
 
 
 def test_recovered_restart_can_be_healthy_after_agent_verifies():
     data = healthy()
-    data['targets'] = [{'status': 'assessed', 'status_reason': '重启已核实，当前恢复，无持续异常'}]
-    assert assess_delivery(data, events())['pod_assessment']['status'] == 'healthy'
+    data["targets"] = [{"status": "assessed", "status_reason": "重启已核实，当前恢复，无持续异常"}]
+    assert assess_delivery(data, events())["pod_assessment"]["status"] == "healthy"
 
 
 def test_missing_assessment_never_short_circuits_legacy_input():
-    assert after_location({'diagnosis_handoff': {'coverage': 'complete', 'targets': []}}) == 'evidence'
+    assert (
+        after_location({"diagnosis_handoff": {"coverage": "complete", "targets": []}})
+        == "evidence"
+    )
 
 
 def test_zero_and_nonzero_have_equal_priority_and_identity_labels_survive():
-    fact = {'metric': 'up', 'value': 0, 'labels': {'instance': 'a', 'job': 'b', 'node': 'n', 'service': 's'}}
-    assert _selection_priority(fact) == _selection_priority({**fact, 'value': 1})
-    assert _summary_evidence(deepcopy(fact), compact=True)['labels'] == fact['labels']
+    fact = {
+        "metric": "up",
+        "value": 0,
+        "labels": {"instance": "a", "job": "b", "node": "n", "service": "s"},
+    }
+    assert _selection_priority(fact) == _selection_priority({**fact, "value": 1})
+    assert _summary_evidence(deepcopy(fact), compact=True)["labels"] == fact["labels"]
 
 
-@pytest.mark.parametrize('text', ['Running 1/1', 'Ready=True Running', 'successfully rolled out', 'old log Error'])
+@pytest.mark.parametrize(
+    "text", ["Running 1/1", "Ready=True Running", "successfully rolled out", "old log Error"]
+)
 def test_plain_text_is_not_machine_verified_recovery(text):
-    assert not _verify_establishes_terminal_success('kubectl rollout status deployment/x', text, False)
+    assert not _verify_establishes_terminal_success(
+        "kubectl rollout status deployment/x", text, False
+    )

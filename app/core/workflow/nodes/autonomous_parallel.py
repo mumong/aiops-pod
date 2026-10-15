@@ -1,4 +1,5 @@
 """Bounded independent Pod lanes, without legacy diagnostic publication gates."""
+
 import copy
 import os
 import threading
@@ -68,10 +69,17 @@ def plan_groups(node, state):
         handoff = state.get("diagnosis_handoff")
         if handoff is None:
             return {"autonomous_groups": []}  # historical input stays serial; no re-extraction
-        schema = LocationHandoff if handoff.get("contract_version") == "location-handoff.v1" else DiagnosisHandoff
+        schema = (
+            LocationHandoff
+            if handoff.get("contract_version") == "location-handoff.v1"
+            else DiagnosisHandoff
+        )
         handoff = copy.deepcopy(handoff)
         completed = complete_pod_namespaces(
-            target.get("entity") for target in handoff.get("targets") or [] if isinstance(target, dict))
+            target.get("entity")
+            for target in handoff.get("targets") or []
+            if isinstance(target, dict)
+        )
         plan = schema.model_validate(handoff)
         targets = [t for t in plan.targets if t.status == "investigate"]
         # Existing lane runtime scopes Pod queries. Other resource kinds retain
@@ -79,11 +87,19 @@ def plan_groups(node, state):
         groups = []
         if all(t.entity.kind == "Pod" and t.entity.namespace for t in targets):
             for target in targets:
-                groups.append({"group_id": f"g{len(groups)+1}", "target_id": target.target_id,
-                               "question": "；".join(getattr(target, "next_questions", [])) or target.issue,
-                               "entities": [target.entity.model_dump()]})
+                groups.append(
+                    {
+                        "group_id": f"g{len(groups) + 1}",
+                        "target_id": target.target_id,
+                        "question": "；".join(getattr(target, "next_questions", []))
+                        or target.issue,
+                        "entities": [target.entity.model_dump()],
+                    }
+                )
         if getattr(node, "current_run_id", ""):
-            ContextArchive(run_id=node.current_run_id).write_json("parallel/plan.json", {"input": material, "groups": groups})
+            ContextArchive(run_id=node.current_run_id).write_json(
+                "parallel/plan.json", {"input": material, "groups": groups}
+            )
         result = {"autonomous_groups": groups}
         if completed:
             result["diagnosis_handoff"] = handoff  # identities completed from the API server
@@ -91,14 +107,27 @@ def plan_groups(node, state):
     except Exception as exc:
         # A formatting/provider failure must not erase the diagnosis or imply health.
         if hasattr(node.ai_call, "_push"):
-            node.ai_call._push(node._event_queue, node.node_id, [], type="runtime_status", status="running",
-                               content="分组暂不可用，保留当前证据并继续单路诊断。")
-        return {"autonomous_groups": [], "warnings": [*(state.get("warnings") or []), f"parallel planning unavailable: {exc}"]}
+            node.ai_call._push(
+                node._event_queue,
+                node.node_id,
+                [],
+                type="runtime_status",
+                status="running",
+                content="分组暂不可用，保留当前证据并继续单路诊断。",
+            )
+        return {
+            "autonomous_groups": [],
+            "warnings": [*(state.get("warnings") or []), f"parallel planning unavailable: {exc}"],
+        }
 
 
 class AutonomousParallelNode(WorkflowNode):
     def __init__(self, holmes_service=None, metrics=None, runbook_catalog=None):
-        self.holmes_service, self.metrics, self.runbook_catalog = holmes_service, metrics, runbook_catalog
+        self.holmes_service, self.metrics, self.runbook_catalog = (
+            holmes_service,
+            metrics,
+            runbook_catalog,
+        )
 
     @property
     def node_id(self):
@@ -117,6 +146,7 @@ class AutonomousParallelNode(WorkflowNode):
             DiagnosisEvidenceNode,
             DiagnosisRootCauseNode,
         )
+
         started_at = time.time()
         # Never share the mutable AICall memory/compaction policy between workers.
         client = self.holmes_service._build_request_scoped_ai_call()
@@ -126,18 +156,30 @@ class AutonomousParallelNode(WorkflowNode):
         entity = group["entities"][0]
         local["original_question"] = state.get("original_question") or state["question"]
         local["question"] = PARALLEL_LANE_QUESTION_TEMPLATE.format(
-            namespace=entity["namespace"], name=entity["name"], question=group["question"],
+            namespace=entity["namespace"],
+            name=entity["name"],
+            question=group["question"],
         )
         local["original_request_contract"] = copy.deepcopy(state.get("request_contract"))
-        local["request_contract"] = {**(state.get("request_contract") or {}), "scope": "pod",
-                                     "namespaces": [entity["namespace"]], "pod_names": [entity["name"]]}
+        local["request_contract"] = {
+            **(state.get("request_contract") or {}),
+            "scope": "pod",
+            "namespaces": [entity["namespace"]],
+            "pod_names": [entity["name"]],
+        }
         local["shared_location_notes"] = ""
         local["shared_runbooks"] = [
-            {"runbook_id": (e.get("tool_args") or {}).get("runbook_id"),
-             "raw_ref": e["raw_ref"], "status": e.get("status"), "scope": "shared"}
+            {
+                "runbook_id": (e.get("tool_args") or {}).get("runbook_id"),
+                "raw_ref": e["raw_ref"],
+                "status": e.get("status"),
+                "scope": "shared",
+            }
             for e in state.get("thinking_events") or []
-            if e.get("type") == "tool_result" and e.get("tool_name") == "fetch_runbook"
-            and e.get("raw_ref") and e.get("status") == "success"
+            if e.get("type") == "tool_result"
+            and e.get("tool_name") == "fetch_runbook"
+            and e.get("raw_ref")
+            and e.get("status") == "success"
             and e.get("semantic_success") is not False
         ]
         local["query_draft"] = ""
@@ -157,12 +199,21 @@ class AutonomousParallelNode(WorkflowNode):
             node.cancel_event = self.cancel_event
             node.workflow_config_override = getattr(self, "workflow_config_override", None)
             if self._event_queue is not None:
-                node.set_event_queue(LaneQueue(self._event_queue,
-                    group_id=group["group_id"], entities=group["entities"]))
+                node.set_event_queue(
+                    LaneQueue(
+                        self._event_queue, group_id=group["group_id"], entities=group["entities"]
+                    )
+                )
             try:
                 if node._event_queue is not None:
-                    client._push(node._event_queue, node.node_id, [], type="runtime_status", status="running",
-                                 content=f"{group['group_id']}：正在{'采集证据' if node.collect else '分析根因'}")
+                    client._push(
+                        node._event_queue,
+                        node.node_id,
+                        [],
+                        type="runtime_status",
+                        status="running",
+                        content=f"{group['group_id']}：正在{'采集证据' if node.collect else '分析根因'}",
+                    )
                 local.update(node.execute(local))
             except Exception as exc:
                 try:
@@ -171,33 +222,48 @@ class AutonomousParallelNode(WorkflowNode):
                     self.cancel_event.set()
                     raise
                 failure = f"{node.node_id}: {exc}"
-                local["thinking_events"] = [*(local.get("thinking_events") or []),
-                    {"type": "execution_incomplete", "reason": failure}]
+                local["thinking_events"] = [
+                    *(local.get("thinking_events") or []),
+                    {"type": "execution_incomplete", "reason": failure},
+                ]
                 # Keep evidence on an RCA failure; no semantic retry or forced verdict.
                 break
         material = build_working_material(local)
-        material_ref = ContextArchive(run_id=lane_run).write_json("cases/work-context.json", material)
+        material_ref = ContextArchive(run_id=lane_run).write_json(
+            "cases/work-context.json", material
+        )
         own_events = (local.get("thinking_events") or [])[inherited:]
         own_incomplete = any(e.get("type") == "execution_incomplete" for e in own_events)
-        return {"group_id": group["group_id"], "target": group, "run_id": lane_run,
-                "started_at": started_at,
-                "status": "partial" if failure or own_incomplete else "completed",
-                "error": failure, "material_ref": material_ref,
-                "case_result": local.get("diagnosis_case_result")}, own_events
+        return {
+            "group_id": group["group_id"],
+            "target": group,
+            "run_id": lane_run,
+            "started_at": started_at,
+            "status": "partial" if failure or own_incomplete else "completed",
+            "error": failure,
+            "material_ref": material_ref,
+            "case_result": local.get("diagnosis_case_result"),
+        }, own_events
 
     def execute(self, state):
         # Local stop signal must not mark the parent run as user-cancelled;
         # the fatal exception must reach the executor's error event instead.
         parent_cancel = self.cancel_event
+
         class BranchStop(threading.Event):
             def is_set(self):
                 return super().is_set() or bool(parent_cancel and parent_cancel.is_set())
+
         self.cancel_event = BranchStop()
         groups = state.get("autonomous_groups") or []
         workers = max(1, min(8, int(os.getenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", "3"))))
         results, events = {}, list(state.get("thinking_events") or [])
-        for group, value, error in iter_group_results(groups, lambda g: self._run_lane(g, state),
-                                                     max_workers=workers, cancel=self.cancel_event):
+        for group, value, error in iter_group_results(
+            groups,
+            lambda g: self._run_lane(g, state),
+            max_workers=workers,
+            cancel=self.cancel_event,
+        ):
             gid = group["group_id"]
             if isinstance(error, ModelStreamInterrupted):
                 self.cancel_event.set()
@@ -205,30 +271,66 @@ class AutonomousParallelNode(WorkflowNode):
             if error is None:
                 result, lane_events = value
             else:
-                result = {"group_id": gid, "target": group, "status": "partial", "error": str(error)}
+                result = {
+                    "group_id": gid,
+                    "target": group,
+                    "status": "partial",
+                    "error": str(error),
+                }
                 lane_events = [{"type": "execution_incomplete", "reason": f"{gid}: {error}"}]
                 if state.get("diagnosis_handoff") and group.get("target_id"):
                     retained = scoped_handoff(state["diagnosis_handoff"], group["target_id"])
-                    result["material"] = {"protected_handoff": {"diagnosis_handoff": retained},
-                                          "execution_incomplete": [str(error)]}
+                    result["material"] = {
+                        "protected_handoff": {"diagnosis_handoff": retained},
+                        "execution_incomplete": [str(error)],
+                    }
             results[gid] = result
             result["completed_at"] = time.time()
             events.extend({**e, "lane_id": gid} for e in lane_events)
-            if result["status"] == "partial" and not any(e.get("type") == "execution_incomplete" for e in lane_events):
-                events.append({"type": "execution_incomplete", "lane_id": gid, "reason": f"{gid}: {result.get('error') or 'partial'}"})
+            if result["status"] == "partial" and not any(
+                e.get("type") == "execution_incomplete" for e in lane_events
+            ):
+                events.append(
+                    {
+                        "type": "execution_incomplete",
+                        "lane_id": gid,
+                        "reason": f"{gid}: {result.get('error') or 'partial'}",
+                    }
+                )
             if getattr(self, "ai_call", None):
-                lane_queue = LaneQueue(self._event_queue, group_id=gid, entities=group['entities']) if self._event_queue is not None else None
-                self.ai_call._push(lane_queue, self.node_id, [], type="runtime_status", status="complete",
-                    content=f"{gid}：{'部分完成' if result['status'] == 'partial' else '分支已结束'}")
-                self.ai_call._push(self._event_queue, self.node_id, [], type="runtime_status", status="running",
-                    content=f"分组诊断已结束 {len(results)}/{len(groups)}；{gid}：{'部分完成' if result['status'] == 'partial' else '已结束'}")
+                lane_queue = (
+                    LaneQueue(self._event_queue, group_id=gid, entities=group["entities"])
+                    if self._event_queue is not None
+                    else None
+                )
+                self.ai_call._push(
+                    lane_queue,
+                    self.node_id,
+                    [],
+                    type="runtime_status",
+                    status="complete",
+                    content=f"{gid}：{'部分完成' if result['status'] == 'partial' else '分支已结束'}",
+                )
+                self.ai_call._push(
+                    self._event_queue,
+                    self.node_id,
+                    [],
+                    type="runtime_status",
+                    status="running",
+                    content=f"分组诊断已结束 {len(results)}/{len(groups)}；{gid}：{'部分完成' if result['status'] == 'partial' else '已结束'}",
+                )
         ordered = [results[g["group_id"]] for g in groups]
         warnings = list(state.get("warnings") or [])
         if getattr(self, "current_run_id", ""):
             try:
-                ContextArchive(run_id=self.current_run_id).write_json("parallel/results.json", ordered)
+                ContextArchive(run_id=self.current_run_id).write_json(
+                    "parallel/results.json", ordered
+                )
             except Exception as exc:
                 warnings.append(f"parallel archive failed: {exc}")
-        return {"autonomous_group_results": ordered, "thinking_events": events,
-                "warnings": warnings,
-                "query_draft": PARALLEL_FANIN_INSTRUCTION}
+        return {
+            "autonomous_group_results": ordered,
+            "thinking_events": events,
+            "warnings": warnings,
+            "query_draft": PARALLEL_FANIN_INSTRUCTION,
+        }

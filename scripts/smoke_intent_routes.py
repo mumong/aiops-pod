@@ -4,6 +4,7 @@ Loads current app sources in memory, not into the serving process or Pod files.
 Uses the Pod's existing model/MCP configuration without exporting credentials.
 Run: .venv/bin/python scripts/smoke_intent_routes.py --pod <backend-pod>
 """
+
 import argparse
 import base64
 import json
@@ -13,28 +14,43 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--pod', required=True)
-    parser.add_argument('--question', action='append')
-    parser.add_argument('--routing-only', action='store_true')
-    parser.add_argument('--evidence-mode', choices=['legacy', 'compact'])
-    parser.add_argument('--output', type=Path)
-    parser.add_argument('--max-seconds', type=int, default=600,
-                        help='Remote test process deadline; does not change serving model timeouts')
+    parser.add_argument("--pod", required=True)
+    parser.add_argument("--question", action="append")
+    parser.add_argument("--routing-only", action="store_true")
+    parser.add_argument("--evidence-mode", choices=["legacy", "compact"])
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--max-seconds",
+        type=int,
+        default=600,
+        help="Remote test process deadline; does not change serving model timeouts",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     # Include all application modules so the tested process matches the worktree,
     # not a mixture of new callers and old deployed dependencies.
-    sources = {'.'.join(p.relative_to(root).with_suffix('').parts): p.read_text()
-               for p in (root / 'app').rglob('*.py') if p.name != '__init__.py'}
+    sources = {
+        ".".join(p.relative_to(root).with_suffix("").parts): p.read_text()
+        for p in (root / "app").rglob("*.py")
+        if p.name != "__init__.py"
+    }
     questions = args.question or [
-        '我的 xnet 命名空间有哪些 Pod？只列名称和状态。',
-        '这些 Pod 有什么异常需要排查？分析原因。',
-        '查询这些 Pod 当前的 CPU 和内存使用情况。',
-        '分析 aiops-case-08/workload-5c9c7b6489-s7p79 频繁重启的根因。',
+        "我的 xnet 命名空间有哪些 Pod？只列名称和状态。",
+        "这些 Pod 有什么异常需要排查？分析原因。",
+        "查询这些 Pod 当前的 CPU 和内存使用情况。",
+        "分析 aiops-case-08/workload-5c9c7b6489-s7p79 频繁重启的根因。",
     ]
-    bundle = base64.b64encode(json.dumps({'sources': sources, 'questions': questions, 'routing_only': args.routing_only,
-                                         'evidence_mode': args.evidence_mode}).encode()).decode()
-    remote = '''
+    bundle = base64.b64encode(
+        json.dumps(
+            {
+                "sources": sources,
+                "questions": questions,
+                "routing_only": args.routing_only,
+                "evidence_mode": args.evidence_mode,
+            }
+        ).encode()
+    ).decode()
+    remote = """
 import base64, json, importlib.abc, importlib.util, sys, logging, uuid, os
 logging.basicConfig(level=logging.CRITICAL, force=True)
 bundle = json.loads(base64.b64decode(BUNDLE))
@@ -86,17 +102,32 @@ for question in bundle['questions']:
         elif event.get('type') == 'error':
             print(json.dumps(event, ensure_ascii=False), flush=True)
     if not completed: raise RuntimeError('Smoke run did not produce final result')
-'''.replace('BUNDLE', repr(bundle))
+""".replace("BUNDLE", repr(bundle))
     if args.max_seconds <= 0:
-        raise ValueError('--max-seconds must be positive')
-    command = ['kubectl', '-n', 'aiops', 'exec', '-i', args.pod, '-c', 'aiops-copilot', '--',
-               'timeout', '--signal=TERM', '--kill-after=10s', f'{args.max_seconds}s', 'python3', '-']
+        raise ValueError("--max-seconds must be positive")
+    command = [
+        "kubectl",
+        "-n",
+        "aiops",
+        "exec",
+        "-i",
+        args.pod,
+        "-c",
+        "aiops-copilot",
+        "--",
+        "timeout",
+        "--signal=TERM",
+        "--kill-after=10s",
+        f"{args.max_seconds}s",
+        "python3",
+        "-",
+    ]
     if args.output:
-        with args.output.open('x') as output:
+        with args.output.open("x") as output:
             subprocess.run(command, input=remote, text=True, check=True, stdout=output)
     else:
         subprocess.run(command, input=remote, text=True, check=True)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

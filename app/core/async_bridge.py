@@ -57,7 +57,9 @@ def run_coroutine_sync(
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name)
     try:
         worker = pool.submit(bind_current_context(_worker))
-        return _await_outcome(outcome, worker, None if timeout is None else timeout + _CANCEL_GRACE_SECONDS)
+        return _await_outcome(
+            outcome, worker, None if timeout is None else timeout + _CANCEL_GRACE_SECONDS
+        )
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 

@@ -165,10 +165,14 @@ async def test_message_send_returns_completed_task_and_markdown_artifact():
 async def test_explicit_diagnosis_metadata_preserves_ask_route():
     backend = FakeBackend()
     app = create_app(_settings(), backend_client=backend)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://a2a.test") as client:
-        response = await client.post("/", json=_message_request(metadata={"aiops_mode": "diagnosis"}))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://a2a.test"
+    ) as client:
+        response = await client.post(
+            "/", json=_message_request(metadata={"aiops_mode": "diagnosis"})
+        )
     assert response.status_code == 200
-    assert backend.calls[0]['mode'] == 'diagnosis'
+    assert backend.calls[0]["mode"] == "diagnosis"
 
 
 @pytest.mark.asyncio
@@ -226,9 +230,7 @@ async def test_message_stream_emits_standard_a2a_sse_updates():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://a2a.test"
     ) as client:
-        response = await client.post(
-            "/", json=_message_request(method="message/stream")
-        )
+        response = await client.post("/", json=_message_request(method="message/stream"))
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
@@ -297,9 +299,7 @@ async def test_tasks_cancel_stops_running_backend_and_returns_canceled_task():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://a2a.test"
     ) as client:
-        sent = await client.post(
-            "/", json=_message_request(blocking=False)
-        )
+        sent = await client.post("/", json=_message_request(blocking=False))
         task = sent.json()["result"]
         await asyncio.wait_for(backend.started.wait(), timeout=1)
         canceled = await client.post(

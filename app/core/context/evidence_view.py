@@ -3,6 +3,7 @@
 Raw archives remain authoritative. JSON pointers always address that raw JSON,
 never an encoded preview. Incomplete views are indexes, not negative evidence.
 """
+
 from __future__ import annotations
 
 import json
@@ -71,22 +72,32 @@ def encode_json(value: Any) -> dict[str, Any]:
                 if len(compact_json(table)) + len(pointer) + 200 < len(compact_json(item)):
                     # Compare against common-field factoring too: long repeated
                     # values benefit more from the existing representation.
-                    common = {k: item[0][k] for k in keys
-                              if all(compact_json(r[k]) == compact_json(item[0][k]) for r in item[1:])}
-                    factored = {"common": common,
-                                "rows": [{k: v for k, v in r.items() if k not in common} for r in item]}
+                    common = {
+                        k: item[0][k]
+                        for k in keys
+                        if all(compact_json(r[k]) == compact_json(item[0][k]) for r in item[1:])
+                    }
+                    factored = {
+                        "common": common,
+                        "rows": [{k: v for k, v in r.items() if k not in common} for r in item],
+                    }
                     if not common or len(compact_json(table)) + 200 < len(compact_json(factored)):
                         table_paths.append(pointer)
                         return table
             common = dict(item[0])
             for row in item[1:]:
-                common = {k: v for k, v in common.items()
-                          if k in row and compact_json(v) == compact_json(row[k])}
+                common = {
+                    k: v
+                    for k, v in common.items()
+                    if k in row and compact_json(v) == compact_json(row[k])
+                }
                 if not common:
                     break
             if common:
-                candidate = {"common": common,
-                             "rows": [{k: v for k, v in r.items() if k not in common} for r in item]}
+                candidate = {
+                    "common": common,
+                    "rows": [{k: v for k, v in r.items() if k not in common} for r in item],
+                }
                 if len(compact_json(candidate)) + len(pointer) + 4 < len(compact_json(item)):
                     paths.append(pointer)
                     return candidate
@@ -100,14 +111,20 @@ def encode_json(value: Any) -> dict[str, Any]:
     original = {"encoding": "json", "value": value}
     if not paths and not table_paths:
         return original
-    factored = {"encoding": "shared-fields.v1", "shared_paths": paths,
-                "decode": "At each shared_path, each original record = common merged with its row; order unchanged.",
-                "value": encoded}
+    factored = {
+        "encoding": "shared-fields.v1",
+        "shared_paths": paths,
+        "decode": "At each shared_path, each original record = common merged with its row; order unchanged.",
+        "value": encoded,
+    }
     if table_paths:
-        factored.update(encoding="record-tables.v1", table_paths=table_paths,
-                        decode="At table_paths, each row is an ordered values array mapped to columns. "
-                               "At shared_paths, merge common with each row. Other values stay literal. "
-                               "Paths address the original JSON; order, duplicates, null and types are unchanged.")
+        factored.update(
+            encoding="record-tables.v1",
+            table_paths=table_paths,
+            decode="At table_paths, each row is an ordered values array mapped to columns. "
+            "At shared_paths, merge common with each row. Other values stay literal. "
+            "Paths address the original JSON; order, duplicates, null and types are unchanged.",
+        )
     return factored if len(compact_json(factored)) < len(compact_json(original)) else original
 
 
@@ -131,8 +148,7 @@ def decode_json(encoded: dict[str, Any]) -> Any:
 
 
 def _descriptor(value: Any, pointer: str) -> dict[str, Any]:
-    info: dict[str, Any] = {"pointer": pointer, "deferred": True,
-                            "type": type(value).__name__}
+    info: dict[str, Any] = {"pointer": pointer, "deferred": True, "type": type(value).__name__}
     if isinstance(value, (dict, list, str)):
         info["count"] = len(value)
     # Keys can themselves be very large; the index remains paginated below.
@@ -148,6 +164,7 @@ def _parse(raw: str) -> tuple[Any, str]:
     if len(raw) > MAX_JSON_CHARS:
         return raw, "text_json_size_limit"
     try:
+
         def unique_object(pairs):
             result = {}
             for key, value in pairs:
@@ -156,8 +173,11 @@ def _parse(raw: str) -> tuple[Any, str]:
                 result[key] = value
             return result
 
-        value = json.loads(raw, object_pairs_hook=unique_object,
-                           parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
+        value = json.loads(
+            raw,
+            object_pairs_hook=unique_object,
+            parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)),
+        )
         # The same serializer used below must support this document.
         compact_json(value).encode("utf-8")
         return value, "json"
@@ -196,14 +216,24 @@ def explicit_execution_failure(raw: str) -> bool:
     value, source_format = _parse(raw)
     if source_format != "json" or not isinstance(value, dict):
         return False
-    return (value.get("ok") is False or value.get("success") is False
-            or value.get("status") in ("error", "failed", "failure", "query_rejected", "query_parse_failed"))
+    return (
+        value.get("ok") is False
+        or value.get("success") is False
+        or value.get("status")
+        in ("error", "failed", "failure", "query_rejected", "query_parse_failed")
+    )
 
 
 def build_evidence_view(
-    raw: str, raw_ref: str, *, max_tokens: int = DEFAULT_TOKENS,
-    json_pointer: str = "", start: int = 0, limit: int = 50,
-    search: str = "", fields: list[str] | None = None,
+    raw: str,
+    raw_ref: str,
+    *,
+    max_tokens: int = DEFAULT_TOKENS,
+    json_pointer: str = "",
+    start: int = 0,
+    limit: int = 50,
+    search: str = "",
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return a bounded view, or an exact, actionable error.
 
@@ -216,18 +246,34 @@ def build_evidence_view(
     budget = max(512, min(int(max_tokens), 16384))
     start = max(0, int(start))
     limit = max(1, min(int(limit), 200))
-    if (len(raw_ref) > 2048 or len(json_pointer) > 2048 or len(search) > 512
-            or len(fields or []) > 32 or any(len(f) > 512 for f in (fields or []))):
-        return {"contract_version": VERSION, "status": "invalid_selector",
-                "view_complete": False, "error": "Selector exceeds bounded read limits."}
+    if (
+        len(raw_ref) > 2048
+        or len(json_pointer) > 2048
+        or len(search) > 512
+        or len(fields or []) > 32
+        or any(len(f) > 512 for f in (fields or []))
+    ):
+        return {
+            "contract_version": VERSION,
+            "status": "invalid_selector",
+            "view_complete": False,
+            "error": "Selector exceeds bounded read limits.",
+        }
     value, source_format = _parse(raw)
     base: dict[str, Any] = {
-        "contract_version": VERSION, "raw_ref": raw_ref,
-        "source_format": source_format, "scope": "received_tool_response_not_entire_datasource",
-        "json_pointer": json_pointer, "view_complete": False,
+        "contract_version": VERSION,
+        "raw_ref": raw_ref,
+        "source_format": source_format,
+        "scope": "received_tool_response_not_entire_datasource",
+        "json_pointer": json_pointer,
+        "view_complete": False,
         "budget": {"max_tokens": budget, "counter": "estimated_utf8_bytes_div_3"},
-        "retrieval": {"tool": "read_context_archive", "archive_path": raw_ref,
-                      "view": "compact", "json_pointer": json_pointer},
+        "retrieval": {
+            "tool": "read_context_archive",
+            "archive_path": raw_ref,
+            "view": "compact",
+            "json_pointer": json_pointer,
+        },
     }
 
     def fits(candidate: dict[str, Any]) -> bool:
@@ -236,15 +282,24 @@ def build_evidence_view(
     def finish(candidate: dict[str, Any]) -> dict[str, Any]:
         if fits(candidate):
             return candidate
-        return {"contract_version": VERSION, "status": "view_budget_too_small",
-                "view_complete": False, "error": "Navigation metadata exceeds budget; narrow selectors or raise budget."}
+        return {
+            "contract_version": VERSION,
+            "status": "view_budget_too_small",
+            "view_complete": False,
+            "error": "Navigation metadata exceeds budget; narrow selectors or raise budget.",
+        }
 
     def complete(data: dict[str, Any]) -> dict[str, Any]:
         # An archive address is provenance, not an instruction to repeat a read.
         result = {k: v for k, v in base.items() if k != "retrieval"}
-        result.update(view_complete=True, integrity=("lossless_selected_subtree" if json_pointer
-                                                    else "lossless_received_response"),
-                      omitted_records=0, data=data)
+        result.update(
+            view_complete=True,
+            integrity=(
+                "lossless_selected_subtree" if json_pointer else "lossless_received_response"
+            ),
+            omitted_records=0,
+            data=data,
+        )
         return result
 
     try:
@@ -268,8 +323,13 @@ def build_evidence_view(
                 runs[-1]["repeat"] += 1
             else:
                 runs.append({"line": line, "repeat": 1})
-        full = complete({"encoding": "text-runs.v1", "runs": runs,
-                         "decode": "Repeat each exact line repeat times in order; concatenate."})
+        full = complete(
+            {
+                "encoding": "text-runs.v1",
+                "runs": runs,
+                "decode": "Repeat each exact line repeat times in order; concatenate.",
+            }
+        )
         if fits(full):
             return full
 
@@ -295,26 +355,44 @@ def build_evidence_view(
     else:
         # Oversized scalar: provide an exact prefix and an explicit char cursor.
         scalar = value if isinstance(value, str) else compact_json(value)
-        result = {**base, "unit": "character", "total": len(scalar), "start": start,
-                  "next_start": None, "data": ""}
+        result = {
+            **base,
+            "unit": "character",
+            "total": len(scalar),
+            "start": start,
+            "next_start": None,
+            "data": "",
+        }
         lo, hi = 0, len(scalar[start:])
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            test = {**result, "data": scalar[start:start + mid], "next_start": start + mid}
+            test = {**result, "data": scalar[start : start + mid], "next_start": start + mid}
             if fits(test):
                 lo = mid
             else:
                 hi = mid - 1
         end = start + lo
-        result.update(data=scalar[start:end], next_start=end if end < len(scalar) else None,
-                      view_complete=start == 0 and end >= len(scalar))
+        result.update(
+            data=scalar[start:end],
+            next_start=end if end < len(scalar) else None,
+            view_complete=start == 0 and end >= len(scalar),
+        )
         return finish(result)
 
-    result = {**base, "unit": unit, "total": len(records), "start": start,
-              "selection": "source_order", "search": search or None,
-              "fields": fields or None, "records": [], "next_start": None,
-              "search_complete": None, "matched_in_scanned_suffix": None,
-              "note": "Deferred/unshown records may contain relevant evidence. Read by pointer/page/search; this is not an absence finding."}
+    result = {
+        **base,
+        "unit": unit,
+        "total": len(records),
+        "start": start,
+        "selection": "source_order",
+        "search": search or None,
+        "fields": fields or None,
+        "records": [],
+        "next_start": None,
+        "search_complete": None,
+        "matched_in_scanned_suffix": None,
+        "note": "Deferred/unshown records may contain relevant evidence. Read by pointer/page/search; this is not an absence finding.",
+    }
     if not text_mode:
         index = _dataset_index(value, json_pointer)
         if estimate_tokens(compact_json({**result, "datasets": index})) < budget // 2:
@@ -327,7 +405,11 @@ def build_evidence_view(
         if search and search.casefold() not in compact_json(item).casefold():
             scanned = index + 1
             continue
-        pointer = (json_pointer + key if unit == "selected_field" else _child(json_pointer, key)) if not text_mode else ""
+        pointer = (
+            (json_pointer + key if unit == "selected_field" else _child(json_pointer, key))
+            if not text_mode
+            else ""
+        )
         selected = item
         if fields and unit != "selected_field":
             selected = {}
@@ -351,9 +433,13 @@ def build_evidence_view(
             candidate = {**result, "records": [*result["records"], entry], "next_start": index + 1}
             if not fits(candidate):
                 if not result["records"]:
-                    return {"contract_version": VERSION, "raw_ref": raw_ref,
-                            "status": "view_budget_too_small", "view_complete": False,
-                            "error": "Record address/envelope exceeds budget; increase max_tokens or use raw offset/length."}
+                    return {
+                        "contract_version": VERSION,
+                        "raw_ref": raw_ref,
+                        "status": "view_budget_too_small",
+                        "view_complete": False,
+                        "error": "Record address/envelope exceeds budget; increase max_tokens or use raw offset/length.",
+                    }
                 break
             deferred = True
         result["records"].append(entry)
@@ -362,7 +448,9 @@ def build_evidence_view(
         if len(result["records"]) >= limit:
             break
     result["next_start"] = scanned if scanned < len(records) else None
-    result["view_complete"] = not (deferred or filtered or start or result["next_start"] is not None)
+    result["view_complete"] = not (
+        deferred or filtered or start or result["next_start"] is not None
+    )
     # A complete search is not a complete data view. No new upstream coverage claims.
     result["search_complete"] = scanned >= len(records) if search else None
     result["matched_in_scanned_suffix"] = matched if search else None

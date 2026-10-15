@@ -35,7 +35,11 @@ METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() not in ("false", 
 
 def load_metrics_config(config: Optional[Dict] = None):
     """从 config.yaml 的 metrics 块加载阈值（环境变量优先）"""
-    global MTTR_THRESHOLD_SECONDS, ROOT_CAUSE_CONFIDENCE_THRESHOLD, EVIDENCE_COMPLETENESS_THRESHOLD, METRICS_ENABLED
+    global \
+        MTTR_THRESHOLD_SECONDS, \
+        ROOT_CAUSE_CONFIDENCE_THRESHOLD, \
+        EVIDENCE_COMPLETENESS_THRESHOLD, \
+        METRICS_ENABLED
     if not config:
         return
     # enabled 开关
@@ -59,6 +63,7 @@ def load_metrics_config(config: Optional[Dict] = None):
 @dataclass
 class NodeMetrics:
     """单个节点的执行指标"""
+
     node_id: str
     node_name: str
     start_time: float = 0.0
@@ -89,15 +94,16 @@ class NodeMetrics:
 @dataclass
 class WorkflowMetrics:
     """工作流整体指标"""
+
     run_id: str
     question: str = ""
     start_time: float = field(default_factory=time.time)
     end_time: float = 0.0
-    
+
     # 各阶段耗时
     init_duration_ms: float = 0.0
     nodes: Dict[str, NodeMetrics] = field(default_factory=dict)
-    
+
     # LLM 调用统计
     total_llm_calls: int = 0
     total_llm_duration_ms: float = 0.0
@@ -105,7 +111,7 @@ class WorkflowMetrics:
     direct_llm_duration_ms: float = 0.0
     direct_llm_calls_by_node: Dict[str, int] = field(default_factory=dict)
     direct_llm_duration_by_node: Dict[str, float] = field(default_factory=dict)
-    
+
     # 工具调用统计
     total_tool_calls: int = 0
     executed_tool_calls: int = 0
@@ -115,7 +121,7 @@ class WorkflowMetrics:
     total_tool_duration_ms: float = 0.0
     tool_wall_duration_ms: float = 0.0
     tool_call_details: List[Dict] = field(default_factory=list)
-    
+
     # 核心指标
     evidence_collected: int = 0
     evidence_planned: int = 0
@@ -136,7 +142,7 @@ class WorkflowMetrics:
     evidence_details: List[Dict] = field(default_factory=list)  # 每项证据的名称+状态
 
     # Runbook 覆盖率明细
-    runbook_coverage_score: float = 0.0       # 最终覆盖率 [0, 1]
+    runbook_coverage_score: float = 0.0  # 最终覆盖率 [0, 1]
     runbook_coverage_breakdown: List[Dict] = field(default_factory=list)
 
     # 多场景指标
@@ -145,18 +151,20 @@ class WorkflowMetrics:
     # 最终状态
     success: bool = True
     errors: List[str] = field(default_factory=list)
-    
+
     def start_node(self, node_id: str, node_name: str, start_ts: float = 0.0) -> NodeMetrics:
         """开始记录节点执行"""
         node = NodeMetrics(
             node_id=node_id,
             node_name=node_name,
-            start_time=start_ts if start_ts > 0 else time.time()
+            start_time=start_ts if start_ts > 0 else time.time(),
         )
         self.nodes[node_id] = node
         return node
-    
-    def finish_node(self, node_id: str, success: bool = True, error: str = None, end_ts: float = 0.0):
+
+    def finish_node(
+        self, node_id: str, success: bool = True, error: str = None, end_ts: float = 0.0
+    ):
         """完成节点执行记录（只处理未完成的节点）
 
         Args:
@@ -171,7 +179,7 @@ class WorkflowMetrics:
                 node.error = error
                 if not success and error:
                     self.errors.append(f"[{node_id}] {error}")
-    
+
     def record_llm_call(
         self,
         node_id: str,
@@ -197,7 +205,7 @@ class WorkflowMetrics:
             self.nodes[node_id] = NodeMetrics(node_id=node_id, node_name=node_id)
         self.nodes[node_id].llm_calls += request_count
         self.nodes[node_id].llm_duration_ms += duration_ms
-    
+
     def record_tool_call(self, tool_name: str, duration_ms: float, success: bool = True):
         """记录工具调用"""
         self.total_tool_calls += 1
@@ -207,12 +215,14 @@ class WorkflowMetrics:
         else:
             self.failed_tool_calls += 1
         self.total_tool_duration_ms += duration_ms
-        self.tool_call_details.append({
-            "tool": tool_name,
-            "duration_ms": duration_ms,
-            "success": success,
-            "timestamp": time.time()
-        })
+        self.tool_call_details.append(
+            {
+                "tool": tool_name,
+                "duration_ms": duration_ms,
+                "success": success,
+                "timestamp": time.time(),
+            }
+        )
 
     def rebuild_runtime_counts(self, thinking_events: List[Dict[str, Any]]) -> None:
         """Rebuild provider/tool counts from the final deduplicated event stream."""
@@ -298,8 +308,11 @@ class WorkflowMetrics:
         for key in all_keys:
             start = starts.get(key, {})
             result = results.get(key, {})
-            success = (bool(result) and result.get("status") == "success"
-                       and result.get("semantic_success") is not False)
+            success = (
+                bool(result)
+                and result.get("status") == "success"
+                and result.get("semantic_success") is not False
+            )
             is_deduplicated = bool(result.get("deduplicated"))
             if success:
                 successful += 1
@@ -317,32 +330,19 @@ class WorkflowMetrics:
             ):
                 duration_ms = max(0.0, (float(result_ts) - float(start_ts)) * 1000)
                 tool_intervals.append((float(start_ts), float(result_ts)))
-            elif (
-                not is_deduplicated
-                and isinstance(result.get("duration_seconds"), (int, float))
-            ):
+            elif not is_deduplicated and isinstance(result.get("duration_seconds"), (int, float)):
                 duration_ms = max(0.0, float(result["duration_seconds"]) * 1000)
             total_duration_ms += duration_ms
             detail = {
-                "tool": str(
-                    result.get("tool_name")
-                    or start.get("tool_name")
-                    or "unknown"
-                ),
-                "tool_call_id": str(
-                    result.get("tool_call_id")
-                    or start.get("tool_call_id")
-                    or ""
-                ),
+                "tool": str(result.get("tool_name") or start.get("tool_name") or "unknown"),
+                "tool_call_id": str(result.get("tool_call_id") or start.get("tool_call_id") or ""),
                 "duration_ms": duration_ms,
                 "success": success,
                 "node": str(result.get("node") or start.get("node") or ""),
             }
             if is_deduplicated:
                 detail["deduplicated"] = True
-                detail["original_tool_call_id"] = str(
-                    result.get("original_tool_call_id") or ""
-                )
+                detail["original_tool_call_id"] = str(result.get("original_tool_call_id") or "")
             details.append(detail)
 
         self.total_tool_calls = len(all_keys)
@@ -357,11 +357,7 @@ class WorkflowMetrics:
     @staticmethod
     def _merge_interval_duration_ms(intervals: List[tuple[float, float]]) -> float:
         """Return elapsed wall time covered by possibly parallel tool calls."""
-        normalized = sorted(
-            (float(start), float(end))
-            for start, end in intervals
-            if end >= start
-        )
+        normalized = sorted((float(start), float(end)) for start, end in intervals if end >= start)
         if not normalized:
             return 0.0
 
@@ -375,28 +371,28 @@ class WorkflowMetrics:
             merged_start, merged_end = start, end
         total_seconds += merged_end - merged_start
         return max(0.0, total_seconds * 1000)
-    
+
     def finish(self):
         """完成整个工作流，计算最终指标"""
         self.end_time = time.time()
-    
+
     @property
     def total_duration_ms(self) -> float:
         """总耗时（毫秒）"""
         if self.end_time > 0:
             return (self.end_time - self.start_time) * 1000
         return (time.time() - self.start_time) * 1000
-    
+
     @property
     def total_duration_seconds(self) -> float:
         """总耗时（秒）"""
         return self.total_duration_ms / 1000
-    
+
     @property
     def mttr_seconds(self) -> float:
         """MTTR（从开始到输出方案的时间，秒）"""
         return self.total_duration_seconds
-    
+
     @property
     def mttr_formatted(self) -> str:
         """格式化的 MTTR"""
@@ -409,7 +405,7 @@ class WorkflowMetrics:
         else:
             hours = seconds / 3600
             return f"{hours:.1f}h"
-    
+
     @property
     def mttr_pass(self) -> bool:
         """MTTR 是否达标（使用配置阈值）"""
@@ -431,12 +427,12 @@ class WorkflowMetrics:
     def root_cause_accuracy_pass(self) -> bool:
         """根因准确率是否达标（使用配置阈值）"""
         return self.root_cause_confidence >= ROOT_CAUSE_CONFIDENCE_THRESHOLD
-    
+
     @property
     def runbook_coverage_pass(self) -> bool:
         """Runbook 覆盖率是否达标（>= 80%）"""
         return self.runbook_coverage_score >= 0.80
-    
+
     def get_summary(self) -> Dict[str, Any]:
         """获取指标摘要"""
         # 格式化阈值显示
@@ -450,19 +446,19 @@ class WorkflowMetrics:
                 "value": self.mttr_formatted,
                 "seconds": self.mttr_seconds,
                 "pass": self.mttr_pass,
-                "threshold": mttr_threshold_str
+                "threshold": mttr_threshold_str,
             },
             "evidence_completeness": {
                 "value": f"{self.evidence_completeness:.0%}",
                 "collected": self.evidence_collected,
                 "planned": self.evidence_planned,
                 "pass": self.evidence_completeness_pass,
-                "threshold": ev_threshold_str
+                "threshold": ev_threshold_str,
             },
             "root_cause_confidence": {
                 "value": f"{self.root_cause_confidence:.0%}",
                 "pass": self.root_cause_accuracy_pass,
-                "threshold": rca_threshold_str
+                "threshold": rca_threshold_str,
             },
             "runbook_coverage": {
                 "matched": self.runbook_matched,
@@ -490,14 +486,14 @@ class WorkflowMetrics:
                 node_id: {
                     "name": node.node_name,
                     "duration_ms": node.duration_ms,
-                    "success": node.success
+                    "success": node.success,
                 }
                 for node_id, node in self.nodes.items()
             },
             "success": self.success,
-            "errors": self.errors
+            "errors": self.errors,
         }
-    
+
     def format_stats_block(self) -> str:
         """只展示总耗时、顶层节点和并发诊断 lane 的 wall time。"""
         lines = []
@@ -542,10 +538,7 @@ class WorkflowMetrics:
                 rca = float(lane.get("rca_duration_ms") or 0) / 1000
                 detail = f"Evidence {evidence:.1f}s, RCA {rca:.1f}s"
                 label = f"{group_id} {entity}".strip()
-                lines.append(
-                    f"{child_prefix}{branch} {label}: {total:.1f}s "
-                    f"({detail})"
-                )
+                lines.append(f"{child_prefix}{branch} {label}: {total:.1f}s ({detail})")
         lines.append("```")
         lines.append("")
 
@@ -564,7 +557,7 @@ class WorkflowMetrics:
             if label:
                 labels.append(label)
         return ", ".join(labels)
-    
+
     def format_metrics_block(self, enabled: bool = True) -> str:
         """格式化指标达标情况（用于输出）
 
@@ -586,19 +579,27 @@ class WorkflowMetrics:
 
             # MTTR
             mttr_status = "✅ 达标" if self.mttr_pass else "❌ 未达标"
-            lines.append(f"| **MTTR** | {mttr_threshold_str} | {self.mttr_formatted} | {mttr_status} |")
+            lines.append(
+                f"| **MTTR** | {mttr_threshold_str} | {self.mttr_formatted} | {mttr_status} |"
+            )
 
             # 根因准确率
             rca_status = "✅ 达标" if self.root_cause_accuracy_pass else "⚠️ 待验证"
-            lines.append(f"| **根因置信度** | {rca_threshold_str} | {self.root_cause_confidence:.0%} | {rca_status} |")
+            lines.append(
+                f"| **根因置信度** | {rca_threshold_str} | {self.root_cause_confidence:.0%} | {rca_status} |"
+            )
 
             # 证据完整率
             ev_status = "✅ 达标" if self.evidence_completeness_pass else "⚠️ 不足"
-            lines.append(f"| **证据完整率** | {ev_threshold_str} | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |")
+            lines.append(
+                f"| **证据完整率** | {ev_threshold_str} | {self.evidence_completeness:.0%} ({self.evidence_collected}/{self.evidence_planned}) | {ev_status} |"
+            )
 
             # Runbook 覆盖率
             rb_status = "✅ 达标" if self.runbook_coverage_pass else "⚠️ 不足"
-            lines.append(f"| **Runbook 覆盖率** | >= 80% | {self.runbook_coverage_score:.0%} | {rb_status} |")
+            lines.append(
+                f"| **Runbook 覆盖率** | >= 80% | {self.runbook_coverage_score:.0%} | {rb_status} |"
+            )
 
             lines.append("")
 
@@ -607,7 +608,11 @@ class WorkflowMetrics:
                 lines.append("📊 置信度评分明细")
                 lines.append("")
                 for i, dim in enumerate(self.confidence_breakdown):
-                    prefix = "├─" if i < len(self.confidence_breakdown) - 1 or self.confidence_penalties else "└─"
+                    prefix = (
+                        "├─"
+                        if i < len(self.confidence_breakdown) - 1 or self.confidence_penalties
+                        else "└─"
+                    )
                     lines.append(
                         f"  {prefix} {dim.get('description', dim.get('name', ''))}: "
                         f"{dim.get('score', 0):.0%} (权重 {dim.get('weight', 0):.0%}) "
@@ -615,7 +620,9 @@ class WorkflowMetrics:
                     )
                 for i, p in enumerate(self.confidence_penalties):
                     prefix = "└─" if i == len(self.confidence_penalties) - 1 else "├─"
-                    lines.append(f"  {prefix} 惩罚 {p.get('name', '')}: -{p.get('value', 0):.0%} ({p.get('reason', '')})")
+                    lines.append(
+                        f"  {prefix} 惩罚 {p.get('name', '')}: -{p.get('value', 0):.0%} ({p.get('reason', '')})"
+                    )
                 lines.append("")
 
             # 证据明细
@@ -641,7 +648,7 @@ class WorkflowMetrics:
                 for i, ev in enumerate(self.evidence_details):
                     status_icon = "✅" if ev.get("collected") else "❌"
                     lines.append(
-                        f"| {i+1} | {ev.get('description', '未知')} | "
+                        f"| {i + 1} | {ev.get('description', '未知')} | "
                         f"{ev.get('level', 'IMPORTANT')} | {status_icon} |"
                     )
                 lines.append("")
@@ -685,7 +692,8 @@ def start_workflow_metrics(run_id: str, question: str = "") -> WorkflowMetrics:
     """[deprecated] 开始工作流指标记录 — 请改用 WorkflowMetrics() 实例"""
     warnings.warn(
         "start_workflow_metrics() is deprecated, use WorkflowMetrics() directly",
-        DeprecationWarning, stacklevel=2,
+        DeprecationWarning,
+        stacklevel=2,
     )
     global _current_metrics
     _current_metrics = WorkflowMetrics(run_id=run_id, question=question)
@@ -696,7 +704,8 @@ def get_current_metrics() -> Optional[WorkflowMetrics]:
     """[deprecated] 获取当前工作流指标"""
     warnings.warn(
         "get_current_metrics() is deprecated",
-        DeprecationWarning, stacklevel=2,
+        DeprecationWarning,
+        stacklevel=2,
     )
     return _current_metrics
 
@@ -705,7 +714,8 @@ def finish_workflow_metrics() -> Optional[WorkflowMetrics]:
     """[deprecated] 完成工作流指标记录 — 请改用 metrics.finish()"""
     warnings.warn(
         "finish_workflow_metrics() is deprecated, use metrics.finish() directly",
-        DeprecationWarning, stacklevel=2,
+        DeprecationWarning,
+        stacklevel=2,
     )
     global _current_metrics
     if _current_metrics:

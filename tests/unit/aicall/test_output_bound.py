@@ -1,4 +1,5 @@
 """Every agent model request carries max_tokens; input + output must fit the context window."""
+
 from dataclasses import dataclass, field, replace
 
 from app.core.aicall.client import AICall
@@ -13,8 +14,14 @@ class _Request:
 
 
 def _budget(window=54000, used=17222, reserved=6000, safety=2000):
-    return {"hard_guard": {"context_window": window, "final_input_tokens": used,
-                           "output_reserved": reserved, "safety_tokens": safety}}
+    return {
+        "hard_guard": {
+            "context_window": window,
+            "final_input_tokens": used,
+            "output_reserved": reserved,
+            "safety_tokens": safety,
+        }
+    }
 
 
 def test_small_input_gets_the_configured_output_budget():
@@ -57,5 +64,7 @@ def test_structured_calls_keep_max_tokens_through_with_structured_output():
 
     ai._create_chat_model = spy
     ai._bind_session_metadata = lambda model, *a, **k: model
-    ai._call_native_structured("sys", "q", _S, node_id="rca", max_tokens=1234, raise_on_error=False)
+    ai._call_native_structured(
+        "sys", "q", _S, node_id="rca", max_tokens=1234, raise_on_error=False
+    )
     assert captured["model"].max_tokens == 1234

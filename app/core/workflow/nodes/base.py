@@ -52,24 +52,24 @@ class WorkflowNode(ABC):
     def node_id(self) -> str:
         """节点唯一标识"""
         pass
-    
+
     @property
     @abstractmethod
     def node_name(self) -> str:
         """节点显示名称"""
         pass
-    
+
     @abstractmethod
     def execute(self, state: WorkflowState) -> WorkflowState:
         """
         执行节点逻辑
-        
+
         Args:
             state: 当前工作流状态（只读输入）
-        
+
         Returns:
             更新后的状态（只更新自己负责的字段）
-        
+
         设计原则：
         - 不修改输入 state，返回新状态
         - 只更新自己负责的字段
@@ -143,7 +143,9 @@ class WorkflowNode(ABC):
 
     def _is_structured_runtime_fallback_enabled(self, default: bool = True) -> bool:
         wf_config = self._get_workflow_config()
-        runtime_cfg = wf_config.get("structured_runtime", {}) if isinstance(wf_config, dict) else {}
+        runtime_cfg = (
+            wf_config.get("structured_runtime", {}) if isinstance(wf_config, dict) else {}
+        )
         if isinstance(runtime_cfg, dict) and "fallback_enabled" in runtime_cfg:
             return self._parse_bool_config(runtime_cfg.get("fallback_enabled"), default)
         return default
@@ -169,51 +171,57 @@ class WorkflowNode(ABC):
         Returns:
             (AICallResult, thinking_events)
         """
-        ai_call = getattr(self, 'ai_call', None)
+        ai_call = getattr(self, "ai_call", None)
         if ai_call is None:
             raise RuntimeError(
                 f"[{self.node_id}] ai_call 未设置，无法调用 LLM。"
                 "请确保 USE_AICALL=true 且 AICall 初始化成功。"
-        )
+            )
 
         start_time = time.time()
         force_no_tools = bool(kwargs.pop("force_no_tools", False))
         skip_remediation_policy = bool(kwargs.pop("skip_remediation_policy", False))
         blocked_tool_names = {
-            str(item)
-            for item in (kwargs.pop("blocked_tool_names", []) or [])
-            if str(item).strip()
+            str(item) for item in (kwargs.pop("blocked_tool_names", []) or []) if str(item).strip()
         }
         max_steps = 10
-        if getattr(self, 'holmes_service', None):
+        if getattr(self, "holmes_service", None):
             max_steps = self.holmes_service.get_node_max_steps(self.node_id)
 
         prompt_components = []
 
         # Inject runbook catalog into system_prompt
         catalog_text = ""
-        if self.should_inject_runbook_catalog() and getattr(self, 'runbook_catalog', None) and hasattr(self.runbook_catalog, 'catalog'):
+        if (
+            self.should_inject_runbook_catalog()
+            and getattr(self, "runbook_catalog", None)
+            and hasattr(self.runbook_catalog, "catalog")
+        ):
             entries = self.runbook_catalog.catalog
             if entries:
                 lines = ["# Available Runbooks", RUNBOOK_CATALOG_INSTRUCTION, ""]
                 for e in entries:
-                    desc = getattr(e, 'description', '') or ''
-                    link = getattr(e, 'link', '') or ''
+                    desc = getattr(e, "description", "") or ""
+                    link = getattr(e, "link", "") or ""
                     lines.append(f"- {link}: {desc}")
                 catalog_text = "\n".join(lines)
                 logger.debug("[%s] 注入 %d 条 Runbook 到 prompt", self.node_id, len(entries))
 
         if catalog_text:
-            prompt_components.append({
-                "name": "runbook_catalog",
+            prompt_components.append(
+                {
+                    "name": "runbook_catalog",
+                    "category": "static_input",
+                    "content": catalog_text,
+                }
+            )
+        prompt_components.append(
+            {
+                "name": "node_system_prompt",
                 "category": "static_input",
-                "content": catalog_text,
-            })
-        prompt_components.append({
-            "name": "node_system_prompt",
-            "category": "static_input",
-            "content": system_prompt,
-        })
+                "content": system_prompt,
+            }
+        )
 
         full_prompt = system_prompt
         if catalog_text:
@@ -221,7 +229,9 @@ class WorkflowNode(ABC):
 
         if not skip_remediation_policy:
             wf_config = self._get_workflow_config()
-            remediation_cfg = wf_config.get("remediation", {}) if isinstance(wf_config, dict) else {}
+            remediation_cfg = (
+                wf_config.get("remediation", {}) if isinstance(wf_config, dict) else {}
+            )
             remediation_mode = "review"
             if isinstance(remediation_cfg, dict):
                 remediation_mode = normalize_remediation_mode(remediation_cfg.get("mode"))
@@ -231,24 +241,29 @@ class WorkflowNode(ABC):
                 mode_line = REMEDIATION_REVIEW_MODE_LINE
             remediation_policy = REMEDIATION_POLICY_TEMPLATE.format(mode_line=mode_line)
             full_prompt += remediation_policy
-            prompt_components.append({
-                "name": "remediation_policy",
-                "category": "static_input",
-                "content": remediation_policy,
-            })
+            prompt_components.append(
+                {
+                    "name": "remediation_policy",
+                    "category": "static_input",
+                    "content": remediation_policy,
+                }
+            )
 
         language_policy = VISIBLE_OUTPUT_LANGUAGE_POLICY
         full_prompt += language_policy
-        prompt_components.append({
-            "name": "language_policy",
-            "category": "static_input",
-            "content": language_policy,
-        })
+        prompt_components.append(
+            {
+                "name": "language_policy",
+                "category": "static_input",
+                "content": language_policy,
+            }
+        )
 
-        tools = [] if force_no_tools else (getattr(self, 'tools', []) or [])
+        tools = [] if force_no_tools else (getattr(self, "tools", []) or [])
         if blocked_tool_names:
             tools = [
-                tool for tool in tools
+                tool
+                for tool in tools
                 if str(getattr(tool, "name", "") or "") not in blocked_tool_names
             ]
         run_id = getattr(self, "current_run_id", "") or kwargs.pop("run_id", "")
@@ -264,7 +279,9 @@ class WorkflowNode(ABC):
                 "name": "tool_schema",
                 "category": "static_input",
                 "content": tool_schema_payload,
-                "preview": ",".join(str(item.get("name", "")) for item in tool_schema_payload[:20]),
+                "preview": ",".join(
+                    str(item.get("name", "")) for item in tool_schema_payload[:20]
+                ),
             },
             {
                 "name": "scratchpad_reserved",
@@ -298,10 +315,15 @@ class WorkflowNode(ABC):
             except Exception as exc:
                 logger.warning("[%s] 写入 context budget 失败: %s", self.node_id, exc)
 
-        logger.info("[%s] AICall.call() 开始 | max_steps=%d tools=%d",
-                     self.node_id, max_steps, len(tools))
-        logger.debug("[%s] AICall.call() prompt长度=%d字 question长度=%d字",
-                     self.node_id, len(full_prompt), len(question))
+        logger.info(
+            "[%s] AICall.call() 开始 | max_steps=%d tools=%d", self.node_id, max_steps, len(tools)
+        )
+        logger.debug(
+            "[%s] AICall.call() prompt长度=%d字 question长度=%d字",
+            self.node_id,
+            len(full_prompt),
+            len(question),
+        )
 
         result, thinking_events = self.ai_call.call(
             system_prompt=full_prompt,
@@ -343,24 +365,29 @@ class WorkflowNode(ABC):
             )
 
         llm_duration_ms = (time.time() - start_time) * 1000
-        logger.info("[%s] AICall.call() 完成 | %.1fs | iterations=%d | tools=%d | 输出=%d字",
-                     self.node_id, llm_duration_ms / 1000,
-                     result.iteration_count if hasattr(result, 'iteration_count') else 0,
-                     result.tool_call_count, len(result.result or ""))
+        logger.info(
+            "[%s] AICall.call() 完成 | %.1fs | iterations=%d | tools=%d | 输出=%d字",
+            self.node_id,
+            llm_duration_ms / 1000,
+            result.iteration_count if hasattr(result, "iteration_count") else 0,
+            result.tool_call_count,
+            len(result.result or ""),
+        )
 
         # metrics
-        if getattr(self, 'metrics', None):
+        if getattr(self, "metrics", None):
             actual_duration = result.duration_ms or llm_duration_ms
-            usage_count = len({
-                (
-                    event.get("iteration"),
-                    event.get("timestamp"),
-                    tuple(sorted((event.get("usage") or {}).items())),
-                )
-                for event in (thinking_events or [])
-                if event.get("type") == "ai_usage"
-                and isinstance(event.get("usage"), dict)
-            })
+            usage_count = len(
+                {
+                    (
+                        event.get("iteration"),
+                        event.get("timestamp"),
+                        tuple(sorted((event.get("usage") or {}).items())),
+                    )
+                    for event in (thinking_events or [])
+                    if event.get("type") == "ai_usage" and isinstance(event.get("usage"), dict)
+                }
+            )
             self.metrics.record_llm_call(
                 self.node_id,
                 actual_duration,

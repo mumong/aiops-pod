@@ -27,7 +27,9 @@ def test_approval_store_waits_until_rejected():
 
     def reject_later():
         time.sleep(0.05)
-        store.resolve("run1", request.approval_id, approved=False, reviewer="tester", reason="不认可")
+        store.resolve(
+            "run1", request.approval_id, approved=False, reviewer="tester", reason="不认可"
+        )
 
     thread = threading.Thread(target=reject_later)
     thread.start()
@@ -80,12 +82,12 @@ def test_approval_payload_is_snapshot():
 
 def test_decision_status_does_not_consume_and_is_owner_bound():
     store = ApprovalStore()
-    request = store.create_request('run', 'action', 'test', {}, owner='owner')
-    assert store.decision_status('run', request.approval_id, 'other') == 'unavailable'
-    assert store.decision_status('run', request.approval_id, 'owner') == 'pending'
-    assert store.resolve('run', request.approval_id, True, owner='owner')
+    request = store.create_request("run", "action", "test", {}, owner="owner")
+    assert store.decision_status("run", request.approval_id, "other") == "unavailable"
+    assert store.decision_status("run", request.approval_id, "owner") == "pending"
+    assert store.resolve("run", request.approval_id, True, owner="owner")
     for _ in range(3):
-        assert store.decision_status('run', request.approval_id, 'owner') == 'approved'
-    assert store.poll_decision('run', request.approval_id).approved
-    assert store.poll_decision('run', request.approval_id) is None
-    assert store.decision_status('run', request.approval_id, 'owner') == 'approved'
+        assert store.decision_status("run", request.approval_id, "owner") == "approved"
+    assert store.poll_decision("run", request.approval_id).approved
+    assert store.poll_decision("run", request.approval_id) is None
+    assert store.decision_status("run", request.approval_id, "owner") == "approved"

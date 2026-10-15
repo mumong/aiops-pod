@@ -13,7 +13,9 @@ def _tool(name):
 def _service_with_failed(failed, existing=("a",)):
     service = HolmesService()
     service.mcp_tools = [_tool(n) for n in existing]
-    service._mcp_servers_config = {name: {"enabled": True, "config": {"url": "u"}} for name in failed}
+    service._mcp_servers_config = {
+        name: {"enabled": True, "config": {"url": "u"}} for name in failed
+    }
     service._mcp_failed_servers = list(failed)
     service._mcp_retry_after = 0.0
     return service
@@ -48,12 +50,16 @@ def test_retry_is_rate_limited_and_keeps_still_failed():
 
     assert len(calls) == 1
     assert service._mcp_failed_servers == ["k8s"]
-    assert service._mcp_retry_after > time.monotonic() + service_module.MCP_RETRY_INTERVAL_SECONDS - 5
+    assert (
+        service._mcp_retry_after > time.monotonic() + service_module.MCP_RETRY_INTERVAL_SECONDS - 5
+    )
 
 
 def test_no_retry_when_nothing_failed():
     service = _service_with_failed([])
-    with patch("app.core.aicall.tools.load_mcp_tools", side_effect=AssertionError("must not load")):
+    with patch(
+        "app.core.aicall.tools.load_mcp_tools", side_effect=AssertionError("must not load")
+    ):
         service._retry_failed_mcp_servers()
 
 

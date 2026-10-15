@@ -104,7 +104,9 @@ def test_invalid_remediation_plan_yields_failure_event_and_run_end(monkeypatch):
     def _fake_build_workflow(*args, **kwargs):
         return _DummyWorkflow(), []
 
-    monkeypatch.setattr("app.core.workflow.executor.build_diagnosis_workflow", _fake_build_workflow)
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow", _fake_build_workflow
+    )
 
     executor = WorkflowExecutor(
         holmes_service=SimpleNamespace(

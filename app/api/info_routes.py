@@ -1,4 +1,5 @@
 """辅助端点：服务信息、健康检查、工具/Runbook 清单、大输出全文、MCP 状态与诊断报告。"""
+
 import os
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +45,7 @@ async def root():
             "/tools": "GET - 可用工具列表",
             "/runbooks": "GET - 可用 Runbooks",
         },
-        "note": "中文问题需要 URL 编码，推荐使用 --data-urlencode 或 POST 方式"
+        "note": "中文问题需要 URL 编码，推荐使用 --data-urlencode 或 POST 方式",
     }
 
 
@@ -88,12 +89,14 @@ async def list_runbooks():
         if service.merged_catalog and service.merged_catalog.catalog:
             runbooks = []
             for entry in service.merged_catalog.catalog:
-                if hasattr(entry, 'id'):
-                    runbooks.append({
-                        "id": entry.id,
-                        "description": getattr(entry, 'description', ''),
-                        "link": getattr(entry, 'link', '')
-                    })
+                if hasattr(entry, "id"):
+                    runbooks.append(
+                        {
+                            "id": entry.id,
+                            "description": getattr(entry, "description", ""),
+                            "link": getattr(entry, "link", ""),
+                        }
+                    )
             return {"count": len(runbooks), "runbooks": runbooks}
         return {"count": 0, "runbooks": []}
     except Exception as e:
@@ -117,6 +120,7 @@ async def get_artifact(artifact_id: str):
 async def get_mcp_status():
     """获取 MCP 服务器状态"""
     from app.core.mcp import get_mcp_manager
+
     manager = get_mcp_manager()
     return {"success": True, "servers": manager.get_status()}
 
@@ -124,6 +128,7 @@ async def get_mcp_status():
 # =========================================================================
 # 报告查看 API：/reports - 查看保存的子集群诊断报告
 # =========================================================================
+
 
 @router.get("/reports")
 async def list_reports(
@@ -158,11 +163,13 @@ async def list_reports(
     report_list = []
     for f in files:
         stat = f.stat()
-        report_list.append({
-            "filename": f.name,
-            "size_bytes": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-        })
+        report_list.append(
+            {
+                "filename": f.name,
+                "size_bytes": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
 
     return {"count": len(report_list), "reports": report_list}
 

@@ -3,6 +3,7 @@
 GET（Query 参数）与 POST（Form 表单）保留各自的参数声明，
 请求处理统一走 ``_handle_session_query``。
 """
+
 import re
 import secrets
 import threading
@@ -23,6 +24,7 @@ QUERY_TITLE = "工作流查询模式"
 # =========================================================================
 # 内部辅助函数
 # =========================================================================
+
 
 def _diagnosis_workflow_overrides() -> dict:
     return {
@@ -59,8 +61,15 @@ def _query_session_owner(request, session_id, overrides):
 
 def _query_session_cookie(request, response, owner):
     if owner:
-        response.set_cookie("aiops_query_owner", owner, httponly=True, samesite="strict",
-                            secure=request.url.scheme == "https", max_age=86400, path="/")
+        response.set_cookie(
+            "aiops_query_owner",
+            owner,
+            httponly=True,
+            samesite="strict",
+            secure=request.url.scheme == "https",
+            max_age=86400,
+            path="/",
+        )
     return response
 
 
@@ -118,8 +127,7 @@ async def _sync_response(
 
         if result.get("success"):
             return PlainTextResponse(
-                content=result.get("result", ""),
-                media_type="text/plain; charset=utf-8"
+                content=result.get("result", ""), media_type="text/plain; charset=utf-8"
             )
         else:
             raise HTTPException(status_code=500, detail=result.get("error"))
@@ -137,8 +145,9 @@ async def _respond(question, stream, output_format, max_steps, overrides, title)
     return await _sync_response(question, max_steps, overrides, title)
 
 
-async def _handle_session_query(request, q, stream, output_format, max_steps, session_id,
-                                overrides, title, log_message):
+async def _handle_session_query(
+    request, q, stream, output_format, max_steps, session_id, overrides, title, log_message
+):
     """/ask 与 /query 的 GET/POST 共用实现。"""
     question = fix_double_encoding(q)  # FastAPI 的 Query 已自动解码
     logger.info(log_message, question[:80])
@@ -151,6 +160,7 @@ async def _handle_session_query(request, q, stream, output_format, max_steps, se
 # 核心 API：/ask - 诊断入口
 # =========================================================================
 
+
 @router.get("/ask")
 async def ask_get(
     request: Request,
@@ -158,8 +168,12 @@ async def ask_get(
     stream: bool = Query(True, description="是否流式输出"),
     format: str = Query("text", description="输出格式: text(默认) 或 sse"),
     max_steps: int = Query(20, description="最大执行步数", ge=1, le=100),
-    remediate: Optional[bool] = Query(None, description="已废弃；修复流程由 workflow.remediation 配置控制"),
-    session_id: Optional[str] = Query(None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN),
+    remediate: Optional[bool] = Query(
+        None, description="已废弃；修复流程由 workflow.remediation 配置控制"
+    ),
+    session_id: Optional[str] = Query(
+        None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
+    ),
 ):
     """
     🔍 智能运维查询（GET 方式）
@@ -178,8 +192,15 @@ async def ask_get(
     ```
     """
     return await _handle_session_query(
-        request, q, stream, format, max_steps, session_id,
-        _diagnosis_workflow_overrides(), DIAGNOSIS_TITLE, "收到查询: %s...",
+        request,
+        q,
+        stream,
+        format,
+        max_steps,
+        session_id,
+        _diagnosis_workflow_overrides(),
+        DIAGNOSIS_TITLE,
+        "收到查询: %s...",
     )
 
 
@@ -190,8 +211,12 @@ async def ask_post(
     stream: bool = Form(True, description="是否流式输出"),
     format: str = Form("text", description="输出格式"),
     max_steps: int = Form(20, description="最大执行步数"),
-    remediate: Optional[bool] = Form(None, description="已废弃；修复流程由 workflow.remediation 配置控制"),
-    session_id: Optional[str] = Form(None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN),
+    remediate: Optional[bool] = Form(
+        None, description="已废弃；修复流程由 workflow.remediation 配置控制"
+    ),
+    session_id: Optional[str] = Form(
+        None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
+    ),
 ):
     """
     🔍 智能运维查询（POST 表单方式）
@@ -207,14 +232,22 @@ async def ask_post(
     ```
     """
     return await _handle_session_query(
-        request, q, stream, format, max_steps, session_id,
-        _diagnosis_workflow_overrides(), DIAGNOSIS_TITLE, "收到查询 (POST): %s...",
+        request,
+        q,
+        stream,
+        format,
+        max_steps,
+        session_id,
+        _diagnosis_workflow_overrides(),
+        DIAGNOSIS_TITLE,
+        "收到查询 (POST): %s...",
     )
 
 
 # =========================================================================
 # 轻量查询 API：/query - QUERY 专用入口
 # =========================================================================
+
 
 @router.get("/query")
 async def query_get(
@@ -223,11 +256,20 @@ async def query_get(
     stream: bool = Query(True, description="是否流式输出"),
     format: str = Query("text", description="输出格式: text(默认) 或 sse"),
     max_steps: int = Query(20, description="最大执行步数", ge=1, le=100),
-    session_id: Optional[str] = Query(None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN),
+    session_id: Optional[str] = Query(
+        None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
+    ),
 ):
     return await _handle_session_query(
-        request, q, stream, format, max_steps, session_id,
-        _query_workflow_overrides(), QUERY_TITLE, "收到轻量查询: %s...",
+        request,
+        q,
+        stream,
+        format,
+        max_steps,
+        session_id,
+        _query_workflow_overrides(),
+        QUERY_TITLE,
+        "收到轻量查询: %s...",
     )
 
 
@@ -238,17 +280,27 @@ async def query_post(
     stream: bool = Form(True, description="是否流式输出"),
     format: str = Form("text", description="输出格式"),
     max_steps: int = Form(20, description="最大执行步数"),
-    session_id: Optional[str] = Form(None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN),
+    session_id: Optional[str] = Form(
+        None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
+    ),
 ):
     return await _handle_session_query(
-        request, q, stream, format, max_steps, session_id,
-        _query_workflow_overrides(), QUERY_TITLE, "收到轻量查询 (POST): %s...",
+        request,
+        q,
+        stream,
+        format,
+        max_steps,
+        session_id,
+        _query_workflow_overrides(),
+        QUERY_TITLE,
+        "收到轻量查询 (POST): %s...",
     )
 
 
 # =========================================================================
 # 便捷别名路由
 # =========================================================================
+
 
 @router.get("/q/{question:path}")
 async def ask_path(
@@ -272,7 +324,9 @@ async def ask_path(
     question = fix_double_encoding(question)  # 修复双重编码
     logger.info("收到查询 (路径): %s...", question[:80])
     # 路径别名不参与会话/修复引用：不注入 session 相关 overrides，也不下发 cookie。
-    return await _respond(question, stream, format, max_steps, _diagnosis_workflow_overrides(), DIAGNOSIS_TITLE)
+    return await _respond(
+        question, stream, format, max_steps, _diagnosis_workflow_overrides(), DIAGNOSIS_TITLE
+    )
 
 
 @router.post("/remediation/approve")

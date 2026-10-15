@@ -1,4 +1,5 @@
 """Transport-independent repair workspaces. Ownership uses the existing cookie."""
+
 import re
 
 from fastapi import HTTPException, Request
@@ -12,7 +13,11 @@ from app.core.service import get_service
 class StartRepair(BaseModel):
     model_config = ConfigDict(extra="forbid")
     diagnosis_run_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,100}$")
-    question: str = Field(default="基于该诊断生成本组修复方案，必要时自主核实证据和读取 Runbook。", min_length=1, max_length=8000)
+    question: str = Field(
+        default="基于该诊断生成本组修复方案，必要时自主核实证据和读取 Runbook。",
+        min_length=1,
+        max_length=8000,
+    )
 
 
 class RepairFeedback(BaseModel):
@@ -39,7 +44,9 @@ def register_repair_routes(app):
     @app.post("/repair/batches")
     def start(request: Request, body: StartRepair):
         identity = owner(request)
-        return call(repair_jobs.start, get_service(), identity, body.diagnosis_run_id, body.question)
+        return call(
+            repair_jobs.start, get_service(), identity, body.diagnosis_run_id, body.question
+        )
 
     @app.get("/repair/batches/{batch_id}")
     def batch(request: Request, batch_id: str):
@@ -54,7 +61,9 @@ def register_repair_routes(app):
         identity = owner(request)
         if not body.feedback.strip():
             raise HTTPException(422, "反馈内容不能为空")
-        return call(repair_jobs.revise, get_service(), identity, job_id, body.version, body.feedback)
+        return call(
+            repair_jobs.revise, get_service(), identity, job_id, body.version, body.feedback
+        )
 
     @app.post("/repair/jobs/{job_id}/cancel")
     def cancel(request: Request, job_id: str):

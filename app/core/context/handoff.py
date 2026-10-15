@@ -3,6 +3,7 @@
 These records describe acquisitions, not verified diagnoses or mandatory tasks.
 Long tool bodies and model prose deliberately remain outside this contract.
 """
+
 import copy
 import json
 
@@ -12,32 +13,52 @@ def protected_handoff(material):
     if protected.get("context_policy") == "stage.v1":
         # A consumer projection is already the protected contract. Tool receipts,
         # historical versions and sibling materials remain ordinary context.
-        return {k: protected[k] for k in ("context_policy", "diagnosis_handoff", "evidence_handoff") if k in protected}
+        return {
+            k: protected[k]
+            for k in ("context_policy", "diagnosis_handoff", "evidence_handoff")
+            if k in protected
+        }
     from app.core.context.lifecycle_core import core_from_material, lightweight_handoff
+
     light = lightweight_handoff(material)
     if light:
-        protected.pop('lifecycle_core', None)
+        protected.pop("lifecycle_core", None)
     core = {} if light else core_from_material(material)
     if core:
-        protected['lifecycle_core'] = core
+        protected["lifecycle_core"] = core
     acquired = acquisition_refs(material)
     if acquired:
         protected["evidence_receipts"] = merge_receipts(
-            [*(protected.get("evidence_receipts") or []), *acquired])
+            [*(protected.get("evidence_receipts") or []), *acquired]
+        )
     lanes = []
     for lane in material.get("parallel_results") or []:
         data = lane.get("material") or {}
         receipts = acquisition_refs(data)
         # Shared acquisitions retain their existing ownership; a branch does
         # not become the owner merely because it inherited the observation.
-        lanes.append({
-            **{k: copy.deepcopy(lane[k]) for k in (
-                "group_id", "target", "run_id", "status", "error", "started_at", "completed_at"
-            ) if k in lane},
-            "evidence_receipts": receipts,
-            "execution_incomplete": copy.deepcopy(data.get("execution_incomplete") or []),
-            "diagnosis_handoff": copy.deepcopy((data.get("protected_handoff") or {}).get("diagnosis_handoff")),
-        })
+        lanes.append(
+            {
+                **{
+                    k: copy.deepcopy(lane[k])
+                    for k in (
+                        "group_id",
+                        "target",
+                        "run_id",
+                        "status",
+                        "error",
+                        "started_at",
+                        "completed_at",
+                    )
+                    if k in lane
+                },
+                "evidence_receipts": receipts,
+                "execution_incomplete": copy.deepcopy(data.get("execution_incomplete") or []),
+                "diagnosis_handoff": copy.deepcopy(
+                    (data.get("protected_handoff") or {}).get("diagnosis_handoff")
+                ),
+            }
+        )
     if lanes:
         protected["groups"] = lanes
     for key in ("diagnosis_target", "shared_runbooks"):
@@ -47,13 +68,26 @@ def protected_handoff(material):
 
 
 def acquisition_refs(material):
-    receipts = [*((material.get("protected_handoff") or {}).get("evidence_receipts") or []),
-                *(material.get("evidence_receipts") or [])]
+    receipts = [
+        *((material.get("protected_handoff") or {}).get("evidence_receipts") or []),
+        *(material.get("evidence_receipts") or []),
+    ]
     for observation in material.get("observations") or []:
         if observation.get("raw_ref"):
-            receipts.append({k: observation[k] for k in (
-                "tool_name", "raw_ref", "structured_ref", "status", "semantic_success", "timestamp"
-            ) if k in observation})
+            receipts.append(
+                {
+                    k: observation[k]
+                    for k in (
+                        "tool_name",
+                        "raw_ref",
+                        "structured_ref",
+                        "status",
+                        "semantic_success",
+                        "timestamp",
+                    )
+                    if k in observation
+                }
+            )
     return merge_receipts(receipts)
 
 
@@ -62,7 +96,10 @@ def merge_receipts(items):
     for item in items:
         if item.get("raw_ref"):
             ref = item["raw_ref"]
-            indexed[ref] = {**indexed.get(ref, {}), **{k: v for k, v in item.items() if v is not None}}
+            indexed[ref] = {
+                **indexed.get(ref, {}),
+                **{k: v for k, v in item.items() if v is not None},
+            }
         else:
             unaddressed.append(item)
     return unique([*indexed.values(), *unaddressed])
@@ -95,9 +132,12 @@ def handoff_from_messages(messages):
         if isinstance(payload, dict):
             result.update(protected_handoff(payload))
     from app.core.context.lifecycle_core import core_from_messages, lightweight_handoff
-    core = {} if lightweight_handoff({'protected_handoff': result}) else core_from_messages(messages)
+
+    core = (
+        {} if lightweight_handoff({"protected_handoff": result}) else core_from_messages(messages)
+    )
     if core:
-        result['lifecycle_core'] = core
+        result["lifecycle_core"] = core
     return result
 
 
@@ -108,15 +148,22 @@ def shared_runbook_projection(observation, shared_refs):
     This neither fetches nor blocks a subsequent autonomous read.
     """
     ref = observation.get("raw_ref")
-    if (observation.get("tool_name") != "fetch_runbook" or not ref
-            or ref not in shared_refs or observation.get("status") != "success"
-            or observation.get("semantic_success") is False):
+    if (
+        observation.get("tool_name") != "fetch_runbook"
+        or not ref
+        or ref not in shared_refs
+        or observation.get("status") != "success"
+        or observation.get("semantic_success") is False
+    ):
         return observation
-    return {**observation, "result": {
-        "shared_reference": ref,
-        "runbook_id": (observation.get("tool_args") or {}).get("runbook_id"),
-        "note": "定位阶段已读取，相关应用要点见共享定位分析；这不是手册全文。可自主重新读取手册或归档，不要求重复读取。",
-    }}
+    return {
+        **observation,
+        "result": {
+            "shared_reference": ref,
+            "runbook_id": (observation.get("tool_args") or {}).get("runbook_id"),
+            "note": "定位阶段已读取，相关应用要点见共享定位分析；这不是手册全文。可自主重新读取手册或归档，不要求重复读取。",
+        },
+    }
 
 
 def project_shared_messages(messages, shared_refs):
@@ -125,12 +172,17 @@ def project_shared_messages(messages, shared_refs):
         if not isinstance(message, dict):
             continue
         extras = {**(message.get("provenance") or {}), **(message.get("additional_kwargs") or {})}
-        if (message.get("type", message.get("role")) == "tool"
-                and message.get("name") == "fetch_runbook"
-                and extras.get("aiops_raw_ref") in shared_refs
-                and extras.get("aiops_semantic_success") is not False):
-            message["content"] = json.dumps({
-                "shared_reference": extras["aiops_raw_ref"],
-                "note": "已读共享手册；按需自主补读，当前仅传递引用。",
-            }, ensure_ascii=False)
+        if (
+            message.get("type", message.get("role")) == "tool"
+            and message.get("name") == "fetch_runbook"
+            and extras.get("aiops_raw_ref") in shared_refs
+            and extras.get("aiops_semantic_success") is not False
+        ):
+            message["content"] = json.dumps(
+                {
+                    "shared_reference": extras["aiops_raw_ref"],
+                    "note": "已读共享手册；按需自主补读，当前仅传递引用。",
+                },
+                ensure_ascii=False,
+            )
     return result

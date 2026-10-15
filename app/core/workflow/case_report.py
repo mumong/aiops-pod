@@ -1,4 +1,5 @@
 """Assemble complete case reports without putting worker histories in an LLM."""
+
 import json
 import os
 from copy import deepcopy
@@ -23,7 +24,9 @@ def diagnosis_cases(state):
         return [deepcopy(single)]
     results = state.get("autonomous_group_results") or []
     by_id = {item["group_id"]: item for item in results}
-    plans = state.get("autonomous_groups") or [r.get("target") or {"group_id": r["group_id"]} for r in results]
+    plans = state.get("autonomous_groups") or [
+        r.get("target") or {"group_id": r["group_id"]} for r in results
+    ]
     cases = []
     for group in plans:
         row = by_id.get(group["group_id"], {})
@@ -36,12 +39,20 @@ def diagnosis_cases(state):
             continue
         material = row.get("material") or {}
         report = material.get("analysis_draft") or "本组未交付诊断结果，请查看执行状态。"
-        cases.append({"contract_version": "diagnosis-case.v1", "group_id": group["group_id"],
-                      "target": deepcopy(group), "execution_status": "partial",
-                      "outcome": "inconclusive", "certainty": "unknown",
-                      "summary": "未交付新版结构化结果；已有分析保留在详情中",
-                      "report": report, "unresolved": [row.get("error") or "诊断交付不完整"],
-                      "result_ref": None})
+        cases.append(
+            {
+                "contract_version": "diagnosis-case.v1",
+                "group_id": group["group_id"],
+                "target": deepcopy(group),
+                "execution_status": "partial",
+                "outcome": "inconclusive",
+                "certainty": "unknown",
+                "summary": "未交付新版结构化结果；已有分析保留在详情中",
+                "report": report,
+                "unresolved": [row.get("error") or "诊断交付不完整"],
+                "result_ref": None,
+            }
+        )
     return cases
 
 
@@ -51,7 +62,11 @@ def pack_indexes(items, token_budget):
     for item in items:
         if count_tokens(json.dumps([item], ensure_ascii=False))["tokens"] > token_budget:
             raise ValueError("单个结果索引超过总览预算；完整结果仍保留")
-        if batch and count_tokens(json.dumps([*batch, item], ensure_ascii=False))["tokens"] > token_budget:
+        if (
+            batch
+            and count_tokens(json.dumps([*batch, item], ensure_ascii=False))["tokens"]
+            > token_budget
+        ):
             batches.append(batch)
             batch = []
         batch.append(item)
@@ -71,17 +86,22 @@ OVERVIEW_PROMPT = """根据独立诊断结果的索引生成简短中文总览�
 def conclude_cases(node, state):
     cases = diagnosis_cases(state)
     indexes = [case_index(case) for case in cases]
-    context = {"question": state.get("original_question") or state.get("question"),
-               "request_contract": state.get("request_contract"),
-               "request_time_utc": state.get("request_time_utc"),
-               "coverage": (state.get("diagnosis_handoff") or {}).get("coverage", "unknown")}
+    context = {
+        "question": state.get("original_question") or state.get("question"),
+        "request_contract": state.get("request_contract"),
+        "request_time_utc": state.get("request_time_utc"),
+        "coverage": (state.get("diagnosis_handoff") or {}).get("coverage", "unknown"),
+    }
     events = list(state.get("thinking_events") or [])
     failed = False
     inputs = []
     try:
         window = int(os.getenv("MODEL_CONTEXT_WINDOW", "54000"))
-        overhead = count_tokens(OVERVIEW_PROMPT + json.dumps(context, ensure_ascii=False) +
-                                json.dumps(OverviewOutput.model_json_schema(), ensure_ascii=False))["tokens"]
+        overhead = count_tokens(
+            OVERVIEW_PROMPT
+            + json.dumps(context, ensure_ascii=False)
+            + json.dumps(OverviewOutput.model_json_schema(), ensure_ascii=False)
+        )["tokens"]
         budget = min(12000, window - overhead - 10096 - 2000)
         if budget < 1000:
             raise ValueError("总览请求没有足够上下文预算")
@@ -93,11 +113,17 @@ def conclude_cases(node, state):
                 payload = {**context, "level": level, "results": batch}
                 inputs.append(payload)
                 response, own_events = node._call_llm(
-                    json.dumps(payload, ensure_ascii=False), OVERVIEW_PROMPT,
-                    force_no_tools=True, skip_remediation_policy=True, expect_json=True,
-                    response_schema=OverviewOutput)
+                    json.dumps(payload, ensure_ascii=False),
+                    OVERVIEW_PROMPT,
+                    force_no_tools=True,
+                    skip_remediation_policy=True,
+                    expect_json=True,
+                    response_schema=OverviewOutput,
+                )
                 events.extend(own_events)
-                summaries.append({"overview": OverviewOutput.model_validate_json(response.result).overview})
+                summaries.append(
+                    {"overview": OverviewOutput.model_validate_json(response.result).overview}
+                )
             if len(summaries) == 1:
                 overview = summaries[0]["overview"]
                 break
@@ -110,32 +136,63 @@ def conclude_cases(node, state):
         failed = True
         events.append({"type": "execution_incomplete", "node": "conclusion", "reason": str(exc)})
     complete = sum(case.get("execution_status") == "completed" for case in cases)
-    header = f"诊断对象：{len(cases)} 组；完整交付：{complete} 组；未完整交付：{len(cases)-complete} 组。"
+    header = f"诊断对象：{len(cases)} 组；完整交付：{complete} 组；未完整交付：{len(cases) - complete} 组。"
     sections = ["## 诊断总览", header, overview]
     for case in cases:
         entities = (case.get("target") or {}).get("entities") or []
         label = "、".join(f"{e.get('namespace', '')}/{e.get('name', '')}" for e in entities)
-        sections.extend([f"## {case['group_id']} · {label}", case.get("report") or "本组未交付报告。"])
+        sections.extend(
+            [f"## {case['group_id']} · {label}", case.get("report") or "本组未交付报告。"]
+        )
     answer = "\n\n".join(sections)
     contract = state.get("request_contract") or {}
     namespaces, pods = contract.get("namespaces") or [], contract.get("pod_names") or []
-    scope = f"{namespaces[0]}/{pods[0]}" if len(namespaces) == len(pods) == 1 else contract.get("scope", "本次诊断范围")
+    scope = (
+        f"{namespaces[0]}/{pods[0]}"
+        if len(namespaces) == len(pods) == 1
+        else contract.get("scope", "本次诊断范围")
+    )
     previous = state.get("query_session_context") or {}
-    memory = {"working_summary": previous.get("working_summary"),
-              "turns": [*(previous.get("turns") or []), {
-                  "question": context["question"], "answer": header + "\n" + overview,
-                  "scope": scope, "request_contract": contract,
-                  "case_results": indexes, "observations": [], "recent_interactions": [],
-                  "execution_incomplete": ["总览未完成"] if failed else [],
-                  "observed_at": datetime.now(timezone.utc).isoformat()}]}
-    output = {"conclusion": answer, "conclusion_formatted": answer,
-              "query_session_memory": memory,
-              "diagnosis_cases": cases, "diagnosis_overview": {"text": overview, "failed": failed,
-                  "total": len(cases), "completed": complete, "partial": len(cases)-complete},
-              "query_answer": {"intent": context["question"], "scope": scope,
-                  "status": "partial" if failed or complete != len(cases) else "answered",
-                  "answer": answer, "missing": ["总览未完成"] if failed else [],
-                  "evidence_refs": [], "runbooks": []}, "thinking_events": events}
+    memory = {
+        "working_summary": previous.get("working_summary"),
+        "turns": [
+            *(previous.get("turns") or []),
+            {
+                "question": context["question"],
+                "answer": header + "\n" + overview,
+                "scope": scope,
+                "request_contract": contract,
+                "case_results": indexes,
+                "observations": [],
+                "recent_interactions": [],
+                "execution_incomplete": ["总览未完成"] if failed else [],
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        ],
+    }
+    output = {
+        "conclusion": answer,
+        "conclusion_formatted": answer,
+        "query_session_memory": memory,
+        "diagnosis_cases": cases,
+        "diagnosis_overview": {
+            "text": overview,
+            "failed": failed,
+            "total": len(cases),
+            "completed": complete,
+            "partial": len(cases) - complete,
+        },
+        "query_answer": {
+            "intent": context["question"],
+            "scope": scope,
+            "status": "partial" if failed or complete != len(cases) else "answered",
+            "answer": answer,
+            "missing": ["总览未完成"] if failed else [],
+            "evidence_refs": [],
+            "runbooks": [],
+        },
+        "thinking_events": events,
+    }
     node._archive_node_input({"overview_requests": inputs, "case_count": len(cases)})
     node._archive_node_output(output)
     return output

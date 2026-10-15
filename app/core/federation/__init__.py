@@ -4,6 +4,7 @@
 
 公开接口：FederationCoordinator, FederationAgent
 """
+
 from __future__ import annotations
 
 import logging
@@ -82,9 +83,7 @@ class FederationCoordinator:
         # 汇总各子集群状态
         successful_count = sum(1 for r in results if r.success)
         total_count = len(results)
-        logger.info(
-            "[FEDERATION] 并发查询完成：%s/%s 个子集群成功", successful_count, total_count
-        )
+        logger.info("[FEDERATION] 并发查询完成：%s/%s 个子集群成功", successful_count, total_count)
 
         yield f"🌐 联邦查询：共查询 {total_count} 个子集群，{successful_count} 个成功响应\n\n"
 
@@ -160,11 +159,7 @@ def get_federation_agent(
 
     registry = AgentRegistry.load_from_dict(federation_config)
     _global_agent = FederationAgent(
-        registry=registry,
-        model=model,
-        api_key=api_key,
-        api_base=api_base,
-        max_steps=30
+        registry=registry, model=model, api_key=api_key, api_base=api_base, max_steps=30
     )
     logger.info("[FEDERATION] FederationAgent 初始化完成（真正的 Agent-to-Agent）")
     return _global_agent

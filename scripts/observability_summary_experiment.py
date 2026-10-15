@@ -71,7 +71,9 @@ def integer(value: Any) -> int | None:
         return None
 
 
-def normalize_timestamp(value: Any, source_system: str, local_timezone: str) -> dict[str, Any] | None:
+def normalize_timestamp(
+    value: Any, source_system: str, local_timezone: str
+) -> dict[str, Any] | None:
     text = str(value or "").strip()
     if not text:
         return None
@@ -118,11 +120,7 @@ def minimal_entity(payload: dict[str, Any]) -> dict[str, Any]:
 def query_window(payload: dict[str, Any]) -> dict[str, Any]:
     query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
     window = query.get("time_range") if isinstance(query.get("time_range"), dict) else {}
-    return {
-        key: window.get(key)
-        for key in ("start", "end")
-        if window.get(key) is not None
-    }
+    return {key: window.get(key) for key in ("start", "end") if window.get(key) is not None}
 
 
 def query_ref(payload: dict[str, Any]) -> dict[str, Any]:
@@ -139,10 +137,14 @@ def query_ref(payload: dict[str, Any]) -> dict[str, Any]:
     dimension = str(payload.get("dimension") or "")
     if dimension == "metrics":
         promql = str(query.get("promql") or "")
-        metric_names = list(dict.fromkeys(re.findall(
-            r"([A-Za-z_:][A-Za-z0-9_:]*)\s*\{",
-            promql,
-        )))
+        metric_names = list(
+            dict.fromkeys(
+                re.findall(
+                    r"([A-Za-z_:][A-Za-z0-9_:]*)\s*\{",
+                    promql,
+                )
+            )
+        )
         if metric_names:
             result["metric_names"] = metric_names
     elif dimension == "logging":
@@ -192,7 +194,11 @@ def result_counts(payload: dict[str, Any], evidence_count: int) -> dict[str, Any
         matched = integer(query.get("filtered_match_count"))
     retrieved = integer(query.get("uid_query_hits"))
     if retrieved is None and isinstance(query.get("executions"), list):
-        values = [integer(item.get("hit_count")) for item in query["executions"] if isinstance(item, dict)]
+        values = [
+            integer(item.get("hit_count"))
+            for item in query["executions"]
+            if isinstance(item, dict)
+        ]
         valid = [value for value in values if value is not None]
         retrieved = sum(valid) if valid else None
     counts = {
@@ -204,29 +210,35 @@ def result_counts(payload: dict[str, Any], evidence_count: int) -> dict[str, Any
         "mcp_samples": len(payload.get("samples") or []),
     }
     if payload.get("dimension") == "metrics":
-        counts.update({
-            "raw_series": integer(payload.get("raw_series_count")),
-            "projected_series": integer(payload.get("series_count")),
-            "serialized_series": len(payload.get("series") or []),
-        })
+        counts.update(
+            {
+                "raw_series": integer(payload.get("raw_series_count")),
+                "projected_series": integer(payload.get("series_count")),
+                "serialized_series": len(payload.get("series") or []),
+            }
+        )
     if payload.get("dimension") == "tracing":
         records = (
             payload.get("fact_ledger", {}).get("records", [])
             if isinstance(payload.get("fact_ledger"), dict)
             else []
         )
-        counts.update({
-            "serialized_flows": len(payload.get("flows") or []),
-            "serialized_spans": len(payload.get("spans") or []),
-            "ledger_flows": sum(
-                1 for item in records
-                if isinstance(item, dict) and item.get("fact_type") == "flow"
-            ),
-            "ledger_spans": sum(
-                1 for item in records
-                if isinstance(item, dict) and item.get("fact_type") == "span"
-            ),
-        })
+        counts.update(
+            {
+                "serialized_flows": len(payload.get("flows") or []),
+                "serialized_spans": len(payload.get("spans") or []),
+                "ledger_flows": sum(
+                    1
+                    for item in records
+                    if isinstance(item, dict) and item.get("fact_type") == "flow"
+                ),
+                "ledger_spans": sum(
+                    1
+                    for item in records
+                    if isinstance(item, dict) and item.get("fact_type") == "span"
+                ),
+            }
+        )
     return counts
 
 
@@ -238,7 +250,12 @@ def truncation_contract(payload: dict[str, Any]) -> dict[str, Any]:
     backend_total = query.get("backend_total")
     matched = integer(backend_total.get("value")) if isinstance(backend_total, dict) else None
     backend_limit = integer(limits.get("max_backend_records"))
-    if truncated and matched is not None and backend_limit is not None and matched >= backend_limit:
+    if (
+        truncated
+        and matched is not None
+        and backend_limit is not None
+        and matched >= backend_limit
+    ):
         reasons.append("backend_limit")
     ledger = payload.get("fact_ledger") if isinstance(payload.get("fact_ledger"), dict) else {}
     if ledger.get("truncated") is True:
@@ -274,19 +291,21 @@ def normalize_metric(record: dict[str, Any], local_timezone: str) -> dict[str, A
     result = record_base(record, local_timezone)
     metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
-    result.update({
-        "metric": record.get("attribute"),
-        "value": record.get("value"),
-        "unit": record.get("unit"),
-        "labels": {
-            key: value
-            for key, value in labels.items()
-            if key not in IDENTITY_LABELS and value not in (None, "")
-        },
-        "stats": metadata.get("stats"),
-        "sample_count": metadata.get("sample_count"),
-        "trend_evaluable": metadata.get("trend_evaluable"),
-    })
+    result.update(
+        {
+            "metric": record.get("attribute"),
+            "value": record.get("value"),
+            "unit": record.get("unit"),
+            "labels": {
+                key: value
+                for key, value in labels.items()
+                if key not in IDENTITY_LABELS and value not in (None, "")
+            },
+            "stats": metadata.get("stats"),
+            "sample_count": metadata.get("sample_count"),
+            "trend_evaluable": metadata.get("trend_evaluable"),
+        }
+    )
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
 
@@ -463,9 +482,14 @@ def build_shadow(payload: dict[str, Any], max_chars: int, local_timezone: str) -
         "source_coverage": compact_source_coverage(payload),
         "limitations": deepcopy(payload.get("limitations") or []),
     }
-    if payload.get("status") == "query_succeeded" and payload.get("coverage") in {"empty", "absent"}:
+    if payload.get("status") == "query_succeeded" and payload.get("coverage") in {
+        "empty",
+        "absent",
+    }:
         structured["negative_observation"] = "query_completed_without_matching_evidence"
-    structured = {key: value for key, value in structured.items() if value not in (None, "", [], {})}
+    structured = {
+        key: value for key, value in structured.items() if value not in (None, "", [], {})
+    }
 
     base = {
         key: deepcopy(structured[key])
@@ -510,7 +534,9 @@ def build_shadow(payload: dict[str, Any], max_chars: int, local_timezone: str) -
         }
     summary_text = compact_json(base)
     if len(summary_text) > max_chars:
-        raise ValueError(f"control envelope exceeds summary budget: {len(summary_text)} > {max_chars}")
+        raise ValueError(
+            f"control envelope exceeds summary budget: {len(summary_text)} > {max_chars}"
+        )
     return {
         "structured": structured,
         "summary": base,
@@ -531,7 +557,9 @@ def build_shadow(payload: dict[str, Any], max_chars: int, local_timezone: str) -
     }
 
 
-def run_batch(patterns: list[str], max_chars: int, local_timezone: str, namespace_prefix: str) -> dict[str, Any]:
+def run_batch(
+    patterns: list[str], max_chars: int, local_timezone: str, namespace_prefix: str
+) -> dict[str, Any]:
     paths = sorted({path for pattern in patterns for path in glob.glob(pattern)})
     aggregate: dict[str, Any] = {
         "files_scanned": len(paths),
@@ -559,15 +587,18 @@ def run_batch(patterns: list[str], max_chars: int, local_timezone: str, namespac
             continue
         audit = result["audit"]
         dimension = str(payload.get("dimension") or "unknown")
-        dimension_stats = aggregate["by_dimension"].setdefault(dimension, {
-            "payloads": 0,
-            "evidence_total": 0,
-            "evidence_selected": 0,
-            "evidence_omitted": 0,
-            "max_summary_chars": 0,
-            "current_summary_fact_ids_total": 0,
-            "current_summary_fact_ids_visible": 0,
-        })
+        dimension_stats = aggregate["by_dimension"].setdefault(
+            dimension,
+            {
+                "payloads": 0,
+                "evidence_total": 0,
+                "evidence_selected": 0,
+                "evidence_omitted": 0,
+                "max_summary_chars": 0,
+                "current_summary_fact_ids_total": 0,
+                "current_summary_fact_ids_visible": 0,
+            },
+        )
         aggregate["payloads_evaluated"] += 1
         dimension_stats["payloads"] += 1
         if audit["summary_chars"] > aggregate["max_summary_chars"]:
@@ -600,7 +631,9 @@ def main() -> int:
     parser.add_argument("raw", nargs="?", help="MCP raw JSON path, or - for stdin")
     parser.add_argument("--max-chars", type=int, default=3000)
     parser.add_argument("--local-timezone", default="Asia/Shanghai")
-    parser.add_argument("--section", choices=("all", "structured", "summary", "audit"), default="all")
+    parser.add_argument(
+        "--section", choices=("all", "structured", "summary", "audit"), default="all"
+    )
     parser.add_argument("--batch-glob", action="append", default=[])
     parser.add_argument("--namespace-prefix", default="")
     args = parser.parse_args()

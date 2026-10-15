@@ -1,4 +1,5 @@
 """Serial accumulation, parallel atomicity and rollback of generic budgets."""
+
 import asyncio
 import json
 
@@ -41,11 +42,17 @@ class Summary:
 
 
 def exchange(index, parallel=1):
-    calls = [{"id": f"{index}-{j}", "name": "unknown_future_tool", "args": {"index": index}}
-             for j in range(parallel)]
-    return [AIMessage(content="", tool_calls=calls), *[
-        ToolMessage(content=(f"exact-{index}-{j}:" + "abc " * 2500), tool_call_id=c["id"])
-        for j, c in enumerate(calls)]]
+    calls = [
+        {"id": f"{index}-{j}", "name": "unknown_future_tool", "args": {"index": index}}
+        for j in range(parallel)
+    ]
+    return [
+        AIMessage(content="", tool_calls=calls),
+        *[
+            ToolMessage(content=(f"exact-{index}-{j}:" + "abc " * 2500), tool_call_id=c["id"])
+            for j, c in enumerate(calls)
+        ],
+    ]
 
 
 def middleware(tmp_path, monkeypatch, node="query_collect", summary=None):
@@ -53,8 +60,17 @@ def middleware(tmp_path, monkeypatch, node="query_collect", summary=None):
     monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
     summary = summary or Summary()
     events = []
-    mw = WorkingContextMiddleware(Client(), None, summary, [], "system", "原始任务", "budget", node,
-                                  lambda **e: events.append(e))
+    mw = WorkingContextMiddleware(
+        Client(),
+        None,
+        summary,
+        [],
+        "system",
+        "原始任务",
+        "budget",
+        node,
+        lambda **e: events.append(e),
+    )
     return mw, summary, events
 
 
@@ -88,8 +104,10 @@ def test_parallel_batch_never_orphans_calls_and_lanes_are_independent(tmp_path, 
     small = [HumanMessage(content="q"), *exchange(2)]
 
     async def run():
-        return await asyncio.gather(first.abefore_model({"messages": large}, None),
-                                    second.abefore_model({"messages": small}, None))
+        return await asyncio.gather(
+            first.abefore_model({"messages": large}, None),
+            second.abefore_model({"messages": small}, None),
+        )
 
     a, b = asyncio.run(run())
     assert a and b is None and not second_model.calls
@@ -101,6 +119,7 @@ def test_failed_summary_does_not_mutate_history(tmp_path, monkeypatch):
     class Failed(Summary):
         async def ainvoke(self, *a, **kw):
             raise RuntimeError("provider unavailable")
+
     mw, _, _ = middleware(tmp_path, monkeypatch, summary=Failed())
     state = [HumanMessage(content="q"), *exchange(1, 10)]
     before = [m.model_dump() for m in state]
@@ -112,7 +131,12 @@ def test_failed_summary_does_not_mutate_history(tmp_path, monkeypatch):
 def test_legacy_does_not_add_cumulative_trigger(tmp_path, monkeypatch):
     mw, model, _ = middleware(tmp_path, monkeypatch)
     mw.evidence_policy = EvidencePolicy()
-    assert asyncio.run(mw.abefore_model({"messages": [HumanMessage(content="q"), *exchange(1, 12)]}, None)) is None
+    assert (
+        asyncio.run(
+            mw.abefore_model({"messages": [HumanMessage(content="q"), *exchange(1, 12)]}, None)
+        )
+        is None
+    )
     assert not model.calls
 
 
@@ -137,24 +161,37 @@ def test_read_is_bounded_and_legacy_remains_raw(tmp_path):
     assert "next_offset=" in bounded
     old = LegacyReadContextArchiveTool(allowed_roots=[str(tmp_path)])._run(str(path), length=40000)
     assert old.startswith("<context_archive>") and len(old) > len(bounded)
-    assert json.loads(reader._run(str(path), view="compact"))["contract_version"] == "evidence-view.v1"
+    assert (
+        json.loads(reader._run(str(path), view="compact"))["contract_version"]
+        == "evidence-view.v1"
+    )
 
 
 def test_invalid_archive_selection_reports_failure_not_empty_success(tmp_path):
     from app.core.context.observation import ObservationProcessor
+
     path = tmp_path / "data.json"
     path.write_text('{"items":[]}')
-    raw = ReadContextArchiveTool(allowed_roots=[str(tmp_path)])._run(str(path), json_pointer="/missing")
+    raw = ReadContextArchiveTool(allowed_roots=[str(tmp_path)])._run(
+        str(path), json_pointer="/missing"
+    )
     assert raw.startswith("Error:") and "invalid_pointer" in raw
-    result = ObservationProcessor(archive_root=str(tmp_path), evidence_view_mode="compact").process(
-        "run", "evidence", 1, "read_context_archive", raw, preserve_raw=True)
+    result = ObservationProcessor(
+        archive_root=str(tmp_path), evidence_view_mode="compact"
+    ).process("run", "evidence", 1, "read_context_archive", raw, preserve_raw=True)
     assert result["semantic_success"] is False
 
 
 def test_table_encoding_preserves_units_false_null_identity_and_multiplicity():
-    rows = [{"long_identity_column": f"a-{i}", "timestamp_utc": i,
-             "measurement_units": "bytes", "observed_value": v}
-            for i, v in enumerate([False, 0, None, "0", 1.0] * 50)]
+    rows = [
+        {
+            "long_identity_column": f"a-{i}",
+            "timestamp_utc": i,
+            "measurement_units": "bytes",
+            "observed_value": v,
+        }
+        for i, v in enumerate([False, 0, None, "0", 1.0] * 50)
+    ]
     data = {"rows": rows, "columns": ["literal"], "a/~": rows}
     encoded = encode_json(data)
     assert encoded["encoding"] == "record-tables.v1"
@@ -172,10 +209,15 @@ def test_source_refs_survive_compaction_and_node_handoff(tmp_path, monkeypatch):
     mw, model, _ = middleware(tmp_path, monkeypatch)
     state = [HumanMessage(content="q"), *exchange(1, 10)]
     for index, message in enumerate(state[2:]):
-        message.additional_kwargs = {"aiops_raw_ref": f"/archive/tool-{index}.raw.txt",
-                                     "aiops_semantic_success": index != 2}
+        message.additional_kwargs = {
+            "aiops_raw_ref": f"/archive/tool-{index}.raw.txt",
+            "aiops_semantic_success": index != 2,
+        }
     assert "aiops_raw_ref" not in str(compact_message(state[2]))
-    assert compact_message(state[2], include_refs=True)["provenance"]["aiops_raw_ref"] == "/archive/tool-0.raw.txt"
+    assert (
+        compact_message(state[2], include_refs=True)["provenance"]["aiops_raw_ref"]
+        == "/archive/tool-0.raw.txt"
+    )
     update = asyncio.run(mw.abefore_model({"messages": state}, None))
     replaced = add_messages(state, update["messages"])
     catalog = next(tmp_path.glob("budget/compactions/*.sources.json"))
@@ -183,8 +225,11 @@ def test_source_refs_survive_compaction_and_node_handoff(tmp_path, monkeypatch):
     assert len(records) == 10 and records[2]["semantic_success"] is False
     assert records[0]["tool_args"] == {"index": 1}
     assert str(catalog) in replaced[1].content
-    payload = {"question": "q", "observations": records,
-               "recent_interactions": [compact_message(m, include_refs=True) for m in state[1:]]}
+    payload = {
+        "question": "q",
+        "observations": records,
+        "recent_interactions": [compact_message(m, include_refs=True) for m in state[1:]],
+    }
     assert len(source_receipts([HumanMessage(content=json.dumps(payload))])) == 10
 
 

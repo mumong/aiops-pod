@@ -117,12 +117,18 @@ class ContextArchive:
         safe_node = _safe_name(node_id)
         refs: Dict[str, str] = {}
         if input_payload is not None:
-            refs["input_ref"] = self.write_json(f"node_inputs/{safe_node}.input.json", input_payload)
+            refs["input_ref"] = self.write_json(
+                f"node_inputs/{safe_node}.input.json", input_payload
+            )
         if output_payload is not None:
-            refs["output_ref"] = self.write_json(f"node_outputs/{safe_node}.output.json", output_payload)
+            refs["output_ref"] = self.write_json(
+                f"node_outputs/{safe_node}.output.json", output_payload
+            )
         if handoff_payload is not None:
             target = _safe_name(next_node_id or _next_node_name(node_id))
-            refs["handoff_ref"] = self.write_json(f"handoff/{safe_node}-to-{target}.json", handoff_payload)
+            refs["handoff_ref"] = self.write_json(
+                f"handoff/{safe_node}-to-{target}.json", handoff_payload
+            )
         return refs
 
     def write_tool_artifact(

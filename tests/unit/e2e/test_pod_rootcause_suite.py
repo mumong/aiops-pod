@@ -50,14 +50,30 @@ def test_cleanup_namespace_patches_labeled_pods_by_name(monkeypatch):
 
     suite.cleanup_namespace("aiops-e2e")
 
-    assert ["kubectl", "-n", "aiops-e2e", "patch", "pod/rc-terminating-finalizer", "-p", '{"metadata":{"finalizers":null}}', "--type=merge"] in commands
-    assert not any(command[:5] == ["kubectl", "-n", "aiops-e2e", "patch", "pod"] and "-l" in command for command in commands)
+    assert [
+        "kubectl",
+        "-n",
+        "aiops-e2e",
+        "patch",
+        "pod/rc-terminating-finalizer",
+        "-p",
+        '{"metadata":{"finalizers":null}}',
+        "--type=merge",
+    ] in commands
+    assert not any(
+        command[:5] == ["kubectl", "-n", "aiops-e2e", "patch", "pod"] and "-l" in command
+        for command in commands
+    )
 
 
 def test_sandbox_runtimeclass_manifest_is_admitted_before_kubelet_failure():
     docs = [
         doc
-        for doc in yaml.safe_load_all(Path("test/pod_rootcause_e2e/manifests/sandbox/runtimeclass-invalid.yaml").read_text(encoding="utf-8"))
+        for doc in yaml.safe_load_all(
+            Path("test/pod_rootcause_e2e/manifests/sandbox/runtimeclass-invalid.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
         if doc
     ]
     runtime_class = next((doc for doc in docs if doc.get("kind") == "RuntimeClass"), None)
@@ -70,11 +86,21 @@ def test_sandbox_runtimeclass_manifest_is_admitted_before_kubelet_failure():
 
 
 def test_terminating_long_running_cases_survive_fifty_request_suite():
-    prestop = yaml.safe_load(Path("test/pod_rootcause_e2e/manifests/terminating/prestop-stuck.yaml").read_text(encoding="utf-8"))
-    long_grace = yaml.safe_load(Path("test/pod_rootcause_e2e/manifests/terminating/long-grace-period.yaml").read_text(encoding="utf-8"))
+    prestop = yaml.safe_load(
+        Path("test/pod_rootcause_e2e/manifests/terminating/prestop-stuck.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    long_grace = yaml.safe_load(
+        Path("test/pod_rootcause_e2e/manifests/terminating/long-grace-period.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
 
     assert prestop["spec"]["terminationGracePeriodSeconds"] >= 21600
-    assert "sleep 21600" in str(prestop["spec"]["containers"][0]["lifecycle"]["preStop"]["exec"]["command"])
+    assert "sleep 21600" in str(
+        prestop["spec"]["containers"][0]["lifecycle"]["preStop"]["exec"]["command"]
+    )
     assert long_grace["spec"]["terminationGracePeriodSeconds"] >= 21600
     assert "sleep 21600" in str(long_grace["spec"]["containers"][0]["command"])
 
@@ -115,15 +141,24 @@ def test_write_suite_summary_aggregates_completed_and_failed_cases(tmp_path):
         [completed, failed],
         args,
         started=0,
-        outcomes={"terminating-finalizer-stuck": {"status": "completed"}, "sandbox-runtimeclass-invalid": {"status": "failed", "error": "apply failed"}},
+        outcomes={
+            "terminating-finalizer-stuck": {"status": "completed"},
+            "sandbox-runtimeclass-invalid": {"status": "failed", "error": "apply failed"},
+        },
     )
 
     summary_md = (tmp_path / "suite_summary.md").read_text(encoding="utf-8")
     suite_stats = json.loads((tmp_path / "suite_stats.json").read_text(encoding="utf-8"))
 
     assert "完成 Case: 1/2" in summary_md
-    assert "| terminating-finalizer-stuck | terminating | completed | 2 | 100.0% | 50.0% | 75.0% | 2.0m |" in summary_md
-    assert "| sandbox-runtimeclass-invalid | sandbox | failed | 0 | N/A | N/A | N/A | N/A | apply failed |" in summary_md
+    assert (
+        "| terminating-finalizer-stuck | terminating | completed | 2 | 100.0% | 50.0% | 75.0% | 2.0m |"
+        in summary_md
+    )
+    assert (
+        "| sandbox-runtimeclass-invalid | sandbox | failed | 0 | N/A | N/A | N/A | N/A | apply failed |"
+        in summary_md
+    )
     assert "| TOTAL | 1 | 2 | 100.0% | 50.0% | 75.0% | 2.0m |" in summary_md
     assert suite_stats["completed_cases"] == 1
     assert suite_stats["failed_cases"] == 1

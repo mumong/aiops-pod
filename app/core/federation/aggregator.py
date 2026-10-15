@@ -8,6 +8,7 @@
 3. 调用 LLM 合成多集群统一报告（流式输出）
 4. 保存子集群报告到本地
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -206,7 +207,9 @@ class FederationAggregator:
         # 如果总 token 数超过模型上下文限制，强制压缩
         if total_tokens > MODEL_CONTEXT_LIMIT:
             logger.warning(
-                "[FEDERATION] 总 tokens (%s) 超过模型限制 (%s)，开始强制压缩...", total_tokens, MODEL_CONTEXT_LIMIT
+                "[FEDERATION] 总 tokens (%s) 超过模型限制 (%s)，开始强制压缩...",
+                total_tokens,
+                MODEL_CONTEXT_LIMIT,
             )
             compressed_contents = []
             total_tokens = 0
@@ -222,13 +225,14 @@ class FederationAggregator:
             contents = compressed_contents
 
         logger.info(
-            "[FEDERATION] 开始 LLM 合成，总输入 tokens 约: %s，集群数: %s", total_tokens, len(contents)
+            "[FEDERATION] 开始 LLM 合成，总输入 tokens 约: %s，集群数: %s",
+            total_tokens,
+            len(contents),
         )
 
         # 构建 synthesis 消息
         sub_reports = "\n\n".join(
-            f"---\n## 集群: {name} ({url})\n\n{text}"
-            for name, url, text, _ in contents
+            f"---\n## 集群: {name} ({url})\n\n{text}" for name, url, text, _ in contents
         )
         user_message = (
             f"用户原始问题：{question}\n\n"

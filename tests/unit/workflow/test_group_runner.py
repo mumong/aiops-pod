@@ -6,13 +6,17 @@ from app.core.workflow.group_runner import iter_group_results
 
 def test_parallel_groups_keep_identity_and_isolate_failure():
     barrier = threading.Barrier(3)
+
     def worker(group):
         barrier.wait(timeout=3)
         if group == "bad":
             raise ValueError("test failure")
         return group + " result"
-    results = {g: (value, error) for g, value, error in
-               iter_group_results(["a", "bad", "b"], worker, max_workers=3)}
+
+    results = {
+        g: (value, error)
+        for g, value, error in iter_group_results(["a", "bad", "b"], worker, max_workers=3)
+    }
     assert results["a"] == ("a result", None)
     assert results["b"] == ("b result", None)
     assert isinstance(results["bad"][1], ValueError)

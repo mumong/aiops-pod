@@ -1,4 +1,5 @@
 """Markdown reporting must preserve scoring and expose per-case results."""
+
 import copy
 import json
 import sys
@@ -12,18 +13,31 @@ from run_quality_demo import build_readme, write_checkpoint, write_readme_report
 
 
 def run(index=1, *, root=True, rb=1.0, evidence=1.0):
-    return {"run_index": index, "run_id": f"id{index}", "success": True,
-            "elapsed_seconds": 60, "root_cause": {"passed": root},
-            "runbook": {"coverage": rb},
-            "evidence": {"planned": 4, "collected": 4, "completeness": evidence}}
+    return {
+        "run_index": index,
+        "run_id": f"id{index}",
+        "success": True,
+        "elapsed_seconds": 60,
+        "root_cause": {"passed": root},
+        "runbook": {"coverage": rb},
+        "evidence": {"planned": 4, "collected": 4, "completeness": evidence},
+    }
 
 
 def sample_stats():
-    return {"status": "completed", "scoring_version": "unchanged", "planned_runs": 3,
-            "scenarios": [
-                {"id": "c01", "anomaly_type": "Pending", "runs": [run()]},
-                {"id": "c02", "anomaly_type": "ImagePull", "runs": [run(root=False, rb=.5, evidence=.5), run(2)]},
-            ]}
+    return {
+        "status": "completed",
+        "scoring_version": "unchanged",
+        "planned_runs": 3,
+        "scenarios": [
+            {"id": "c01", "anomaly_type": "Pending", "runs": [run()]},
+            {
+                "id": "c02",
+                "anomaly_type": "ImagePull",
+                "runs": [run(root=False, rb=0.5, evidence=0.5), run(2)],
+            },
+        ],
+    }
 
 
 def test_root_and_case_readmes_use_case_means_and_preserve_source(tmp_path):

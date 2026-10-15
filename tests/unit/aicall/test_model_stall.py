@@ -1,4 +1,5 @@
 """A silent model stream must fail fast as a model stall, not look like a stuck workflow."""
+
 import asyncio
 from types import SimpleNamespace
 
@@ -61,13 +62,16 @@ def test_executor_error_event_reports_model_stall():
 
     graph, nodes = build_diagnosis_workflow(query_mode="auto")
     for node in nodes:
+
         def execute(state, name=node.node_id):
             if name == "request_router":
                 return {"request_route": "focused"}
             raise ModelStreamStalled(180)
+
         node.execute = execute
 
     import app.core.workflow.executor as executor_module
+
     original = executor_module.build_diagnosis_workflow
     executor_module.build_diagnosis_workflow = lambda *a, **k: (graph, nodes)
     try:
@@ -103,8 +107,12 @@ def test_stall_is_reported_even_if_the_stream_is_slow_to_cancel():
 
 
 def test_stall_error_names_what_the_agent_was_waiting_on():
-    run = SimpleNamespace(pending_tool_calls=0, node_id="layer", iteration=5,
-                          waiting_on="本节点第 6 次模型请求（已发出，输入约 25096 tokens）")
+    run = SimpleNamespace(
+        pending_tool_calls=0,
+        node_id="layer",
+        iteration=5,
+        waiting_on="本节点第 6 次模型请求（已发出，输入约 25096 tokens）",
+    )
 
     async def main():
         with pytest.raises(ModelStreamStalled) as info:
@@ -114,5 +122,7 @@ def test_stall_error_names_what_the_agent_was_waiting_on():
     err = asyncio.run(main())
     assert "第 6 次模型请求" in str(err) and "25096" in str(err)
     assert err.waiting_on.startswith("本节点第 6 次")
-    compaction = ModelStreamStalled(180, waiting_on="上下文压缩（内部摘要模型调用，压缩早期工作历史）")
+    compaction = ModelStreamStalled(
+        180, waiting_on="上下文压缩（内部摘要模型调用，压缩早期工作历史）"
+    )
     assert "上下文压缩" in str(compaction) and model_error_code(compaction) == "model_stalled"

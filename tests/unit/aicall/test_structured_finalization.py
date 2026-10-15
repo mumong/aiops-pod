@@ -1,4 +1,5 @@
 """Bounded protocol recovery: one tool-free structured delivery after the agent stops early."""
+
 import threading
 from types import SimpleNamespace
 
@@ -14,8 +15,14 @@ class _Out(BaseModel):
 
 def _run(**overrides):
     base = dict(
-        response_schema=_Out, structured_response=None, incomplete_reason="step_limit",
-        cancel_event=None, node_id="layer", run_id="r1", stream_queue=None, thinking_events=[],
+        response_schema=_Out,
+        structured_response=None,
+        incomplete_reason="step_limit",
+        cancel_event=None,
+        node_id="layer",
+        run_id="r1",
+        stream_queue=None,
+        thinking_events=[],
         emitted_ai_messages=[(None, "<think>private reasoning</think>发现 4 个异常 Pod")],
         tool_observation_contents=["query_pod_lifecycle: 72 pods, 4 abnormal"],
     )
@@ -37,7 +44,9 @@ def _ai(calls, result):
 def test_step_limit_triggers_one_tool_free_structured_delivery_from_own_material():
     calls = []
     run = _run()
-    _ai(calls, _Out(targets=["a", "b"]))._finalize_structured_delivery(run, system_prompt="SYS", question="Q")
+    _ai(calls, _Out(targets=["a", "b"]))._finalize_structured_delivery(
+        run, system_prompt="SYS", question="Q"
+    )
 
     assert len(calls) == 1
     call = calls[0]
@@ -67,7 +76,9 @@ def test_not_triggered_when_delivered_cancelled_unstructured_or_completed():
         {"emitted_ai_messages": [], "tool_observation_contents": []},
     ):
         calls = []
-        _ai(calls, _Out(targets=["x"]))._finalize_structured_delivery(_run(**overrides), system_prompt="S", question="Q")
+        _ai(calls, _Out(targets=["x"]))._finalize_structured_delivery(
+            _run(**overrides), system_prompt="S", question="Q"
+        )
         assert calls == [], overrides
 
 
@@ -101,7 +112,11 @@ def test_oversized_material_is_compacted_once_then_delivered(monkeypatch):
 
     async def fake_compact(model, material, progress=None, **kwargs):
         compacted_inputs.append(material)
-        return {"question": material["question"], "working_summary": "4 个异常 Pod 摘要", "observations": []}
+        return {
+            "question": material["question"],
+            "working_summary": "4 个异常 Pod 摘要",
+            "observations": [],
+        }
 
     ai.call_structured = fake_call_structured
     ai.create_compaction_model = lambda **kw: object()
@@ -119,7 +134,9 @@ def test_agent_that_ends_with_plain_text_instead_of_the_schema_is_finalized():
     tool-argument fragment as text and no LocationOutput."""
     calls = []
     run = _run(incomplete_reason="", emitted_ai_messages=[(None, '["namespace", "pod", "uid"]')])
-    _ai(calls, _Out(targets=["a"]))._finalize_structured_delivery(run, system_prompt="S", question="Q")
+    _ai(calls, _Out(targets=["a"]))._finalize_structured_delivery(
+        run, system_prompt="S", question="Q"
+    )
     assert len(calls) == 1
     assert run.incomplete_reason == "no_structured_output"
     assert run.structured_response == _Out(targets=["a"])

@@ -22,6 +22,7 @@ class Layer(str, Enum):
     表达，不再做 L0-L4 层级归因。
     L0-L4 仅作为历史兼容值保留（旧输入仍可解析），运行时等同 ABNORMAL。
     """
+
     HEALTHY = "HEALTHY"  # 集群健康，无异常
     QUERY = "QUERY"  # 直接查询（非故障诊断）
     ABNORMAL = "ABNORMAL"  # 存在异常 Pod，进入完整诊断链路
@@ -34,6 +35,7 @@ class Layer(str, Enum):
 
 class Confidence(str, Enum):
     """置信度等级"""
+
     HIGH = "高"
     MEDIUM = "中"
     LOW = "低"
@@ -41,14 +43,16 @@ class Confidence(str, Enum):
 
 class EvidenceLevel(str, Enum):
     """证据重要性级别"""
-    CRITICAL = "critical"    # 关键证据，缺失则强制降级
+
+    CRITICAL = "critical"  # 关键证据，缺失则强制降级
     IMPORTANT = "important"  # 重要证据，影响置信度
-    OPTIONAL = "optional"    # 可选证据，辅助判断
+    OPTIONAL = "optional"  # 可选证据，辅助判断
 
 
 @dataclass
 class EvidenceItem:
     """单项证据"""
+
     id: str
     description: str
     level: EvidenceLevel = EvidenceLevel.IMPORTANT
@@ -67,6 +71,7 @@ class EvidenceItem:
 @dataclass
 class EvidenceDetail:
     """详细证据记录（包含具体采集内容）"""
+
     id: str
     description: str
     level: str  # critical/important/optional
@@ -75,7 +80,7 @@ class EvidenceDetail:
     raw_snippet: Optional[str] = None  # 原始文本片段（证据来源）
     source_tool: Optional[str] = None  # 采集工具（如 kubectl describe）
     source_ref: Optional[str] = None  # 事件引用（如 tool_result#3）
-    
+
     def to_dict(self) -> Dict:
         return asdict(self)
 
@@ -84,49 +89,50 @@ class EvidenceDetail:
 class DeterministicDecision:
     """
     确定性判定结果
-    
+
     设计说明：
     - 这是 skills 模块的核心输出
     - 包含完整的判定上下文，便于追溯和解释
     - 支持软拦截模式：不阻断 LLM 输出，只附加判定结果
     """
+
     layer: Layer
     scenario: str
     category: str
     confidence: Confidence
     confidence_score: float = 0.0  # 量化分数 [0, 1]
-    
+
     # 是否真正发现了问题
     issue_found: bool = True
     issue_summary: str = ""  # 一句话总结
-    
+
     # 上下文信息（填充占位符用）
     context: Dict[str, Any] = field(default_factory=dict)
     # 例如: {"pod": "my-app-xxx", "namespace": "default", "memory_limit": "512Mi", "exit_code": 137}
-    
+
     # 规则匹配详情
     matched_rules: List[str] = field(default_factory=list)
     excluded_rules: List[str] = field(default_factory=list)
-    
+
     # 证据状态（简单标签列表，向后兼容）
     collected_evidence: List[str] = field(default_factory=list)
     missing_evidence: List[str] = field(default_factory=list)
     critical_missing: List[str] = field(default_factory=list)
-    
+
     # 详细证据（包含具体内容）
     evidence_details: List[EvidenceDetail] = field(default_factory=list)
-    
+
     # 因果链
     causal_chain: Dict[str, str] = field(default_factory=dict)
     # 例如: {"root_cause": "容器内存超限", "propagation": "OOM Killer 触发", "impact": "Pod 重启"}
-    
+
     # 修复建议（已填充具体值）
     remediation_steps: List[str] = field(default_factory=list)
     verification_steps: List[str] = field(default_factory=list)
-    
+
     # 建议（原字段保留兼容）
     next_steps: List[str] = field(default_factory=list)
-    
+
     # 溯源
     evidence_refs: List[str] = field(default_factory=list)
     facts: List[Dict] = field(default_factory=list)
@@ -134,5 +140,7 @@ class DeterministicDecision:
     def to_dict(self) -> Dict:
         d = asdict(self)
         d["layer"] = self.layer.value if isinstance(self.layer, Layer) else self.layer
-        d["confidence"] = self.confidence.value if isinstance(self.confidence, Confidence) else self.confidence
+        d["confidence"] = (
+            self.confidence.value if isinstance(self.confidence, Confidence) else self.confidence
+        )
         return d

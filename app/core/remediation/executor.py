@@ -31,10 +31,14 @@ def run_local_command(command: str) -> str:
             timeout=LOCAL_COMMAND_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"command timed out after {LOCAL_COMMAND_TIMEOUT_SECONDS}s: {command}") from exc
+        raise RuntimeError(
+            f"command timed out after {LOCAL_COMMAND_TIMEOUT_SECONDS}s: {command}"
+        ) from exc
     output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
     if result.returncode != 0:
-        raise RuntimeError(output or f"command failed with exit code {result.returncode}: {command}")
+        raise RuntimeError(
+            output or f"command failed with exit code {result.returncode}: {command}"
+        )
     return output
 
 
@@ -77,9 +81,20 @@ class RemediationExecutor:
                     "actions": [action.__dict__ for action in plan.actions],
                 },
             )
-            yield {**self._approval_event(run_id, plan_request.approval_id, "plan", plan_request.title, plan_request.payload),
-                   "expires_at": plan_request.expires_at, "server_time": time.time()}
-            decision = self.approval_store.wait_for_decision(run_id, plan_request.approval_id, approval_timeout_seconds)
+            yield {
+                **self._approval_event(
+                    run_id,
+                    plan_request.approval_id,
+                    "plan",
+                    plan_request.title,
+                    plan_request.payload,
+                ),
+                "expires_at": plan_request.expires_at,
+                "server_time": time.time(),
+            }
+            decision = self.approval_store.wait_for_decision(
+                run_id, plan_request.approval_id, approval_timeout_seconds
+            )
             if decision is None:
                 yield self._finished(run_id, "timeout", "plan approval timeout")
                 return
@@ -96,14 +111,29 @@ class RemediationExecutor:
                     title=f"是否执行修复动作 {action.id}: {action.description}",
                     payload=action.__dict__,
                 )
-                yield {**self._approval_event(run_id, action_request.approval_id, "action", action_request.title, action_request.payload),
-                       "expires_at": action_request.expires_at, "server_time": time.time()}
-                action_decision = self.approval_store.wait_for_decision(run_id, action_request.approval_id, approval_timeout_seconds)
+                yield {
+                    **self._approval_event(
+                        run_id,
+                        action_request.approval_id,
+                        "action",
+                        action_request.title,
+                        action_request.payload,
+                    ),
+                    "expires_at": action_request.expires_at,
+                    "server_time": time.time(),
+                }
+                action_decision = self.approval_store.wait_for_decision(
+                    run_id, action_request.approval_id, approval_timeout_seconds
+                )
                 if action_decision is None:
                     yield self._finished(run_id, "timeout", f"action {action.id} approval timeout")
                     return
                 if not action_decision.approved:
-                    yield self._finished(run_id, "rejected", action_decision.reason or f"action {action.id} rejected")
+                    yield self._finished(
+                        run_id,
+                        "rejected",
+                        action_decision.reason or f"action {action.id} rejected",
+                    )
                     return
             try:
                 for event in self._execute_action(run_id, action):
@@ -112,9 +142,13 @@ class RemediationExecutor:
                 yield self._finished(run_id, "failed", str(exc))
                 return
 
-        yield self._finished(run_id, "needs_followup", "命令已执行；恢复条件尚未经结构化核验，请复查实际状态")
+        yield self._finished(
+            run_id, "needs_followup", "命令已执行；恢复条件尚未经结构化核验，请复查实际状态"
+        )
 
-    def _execute_action(self, run_id: str, action: RemediationAction) -> Generator[Dict, None, None]:
+    def _execute_action(
+        self, run_id: str, action: RemediationAction
+    ) -> Generator[Dict, None, None]:
         for stage, command in (
             ("dry_run", action.dry_run_command),
             ("execute", action.execute_command),
@@ -134,7 +168,9 @@ class RemediationExecutor:
             }
 
     @staticmethod
-    def _approval_event(run_id: str, approval_id: str, kind: str, title: str, payload: Dict) -> Dict:
+    def _approval_event(
+        run_id: str, approval_id: str, kind: str, title: str, payload: Dict
+    ) -> Dict:
         return {
             "type": "remediation_approval_required",
             "run_id": run_id,

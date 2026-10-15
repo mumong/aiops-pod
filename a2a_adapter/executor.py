@@ -101,7 +101,9 @@ class AiopsAgentExecutor(AgentExecutor):
                 await updater.submit(self._message("任务已提交。", context))
             await updater.start_work(
                 self._message(
-                    "正在执行自主运维查询与分析。" if mode == "query" else "正在执行 Kubernetes AIOps 诊断。",
+                    "正在执行自主运维查询与分析。"
+                    if mode == "query"
+                    else "正在执行 Kubernetes AIOps 诊断。",
                     context,
                 )
             )
@@ -121,7 +123,10 @@ class AiopsAgentExecutor(AgentExecutor):
                     label = self._PROGRESS_LABELS.get(node)
                     if label:
                         await updater.start_work(self._message(label, context))
-                elif event.name == "thinking" and event.data.get("thinking_type") == "runtime_status":
+                elif (
+                    event.name == "thinking"
+                    and event.data.get("thinking_type") == "runtime_status"
+                ):
                     content = str(event.data.get("content") or "")
                     if content:
                         await updater.start_work(self._message(content, context))
@@ -149,9 +154,7 @@ class AiopsAgentExecutor(AgentExecutor):
                 raise BackendError("AIOps backend ended without a final answer")
             await updater.complete(
                 self._message(
-                    f"诊断完成。后端 run_id={backend_run_id}"
-                    if backend_run_id
-                    else "诊断完成。",
+                    f"诊断完成。后端 run_id={backend_run_id}" if backend_run_id else "诊断完成。",
                     context,
                 )
             )

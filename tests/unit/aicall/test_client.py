@@ -1,4 +1,5 @@
 """Tests for AICall client"""
+
 import queue
 from unittest.mock import MagicMock, patch
 
@@ -144,7 +145,9 @@ class TestCallWithTools:
     @patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock())
     @patch("concurrent.futures.ThreadPoolExecutor")
     @patch("langchain.agents.create_agent")
-    def test_call_pushes_events_to_queue(self, mock_create_agent, mock_executor, _mock_chat_openai):
+    def test_call_pushes_events_to_queue(
+        self, mock_create_agent, mock_executor, _mock_chat_openai
+    ):
         class _Agent:
             async def astream(self, *args, **kwargs):
                 yield (

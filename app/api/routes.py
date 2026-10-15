@@ -23,6 +23,7 @@ API 使用示例：
     # POST 方式（自定义选项）
     curl -X POST "http://localhost:8000/ask" -d "q=Pod状态异常"
 """
+
 # get_service 保留在本模块：各路由模块经 app.api.common.current_service 在调用时
 # 从这里解析，测试通过 monkeypatch "app.api.routes.get_service" 替换服务。
 from app.api import ask_routes, federation_routes, info_routes
@@ -33,6 +34,7 @@ from app.core.service import get_service  # noqa: F401
 def register_routes(app):
     """注册所有 API 路由（顺序即匹配与 OpenAPI 顺序）"""
     from app.api.repair_routes import register_repair_routes
+
     register_repair_routes(app)
 
     app.include_router(ask_routes.router)

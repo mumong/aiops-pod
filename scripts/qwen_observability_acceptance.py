@@ -102,10 +102,14 @@ def _select_payloads(case_dir: Path, namespace: str) -> list[tuple[Path, dict[st
             path.name,
         )
         current_score = (
-            _record_count(current[1]),
-            1 if current[1].get("coverage") == "present" else 0,
-            current[0].name,
-        ) if current else (-1, -1, "")
+            (
+                _record_count(current[1]),
+                1 if current[1].get("coverage") == "present" else 0,
+                current[0].name,
+            )
+            if current
+            else (-1, -1, "")
+        )
         if candidate_score > current_score:
             best[dimension] = (path, payload)
     ordered = [best[key] for key in ("metrics", "logging", "tracing") if key in best]
@@ -178,13 +182,20 @@ def _expected_visible_values(summaries: list[dict[str, Any]]) -> dict[str, Any]:
         for evidence in summary.get("evidence") or []:
             metric = str(evidence.get("metric") or "")
             labels = evidence.get("labels") if isinstance(evidence.get("labels"), dict) else {}
-            if "last_terminated_reason" in metric and str(evidence.get("value")) not in {"0", "0.0"}:
+            if "last_terminated_reason" in metric and str(evidence.get("value")) not in {
+                "0",
+                "0.0",
+            }:
                 expected["active_reason"] = labels.get("reason")
             if "restarts_total" in metric:
                 expected["restart_value"] = evidence.get("value")
             if evidence.get("message"):
                 expected["log_message"] = evidence.get("message")
-                attributes = evidence.get("attributes") if isinstance(evidence.get("attributes"), dict) else {}
+                attributes = (
+                    evidence.get("attributes")
+                    if isinstance(evidence.get("attributes"), dict)
+                    else {}
+                )
                 if attributes.get("allocated_mib") is not None:
                     expected["allocated_mib"] = attributes["allocated_mib"]
                 if evidence.get("http_status") is not None:
@@ -201,10 +212,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if not api_key:
         raise ValueError("QWEN_AUDIT_API_KEY is required")
     tool_specs = _load_tool_specs(Path(args.mcp_repo))
-    registered_names = {
-        spec["function"]["name"]
-        for spec in tool_specs
-    }
+    registered_names = {spec["function"]["name"] for spec in tool_specs}
     selected = _select_payloads(Path(args.case_dir), args.namespace)
     observation_messages, summaries = _tool_messages(selected, args.max_chars)
     entity = summaries[0].get("entity") or {}
@@ -253,24 +261,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     parsed = _extract_json(str(response.content))
     rendered = json.dumps(parsed, ensure_ascii=False)
     expected = _expected_visible_values(summaries)
-    next_tool = ((parsed.get("next_action") or {}).get("tool"))
+    next_tool = (parsed.get("next_action") or {}).get("tool")
     checks = {
         "json_object": True,
         "active_reason_recalled": (
-            expected["active_reason"] is None
-            or str(expected["active_reason"]) in rendered
+            expected["active_reason"] is None or str(expected["active_reason"]) in rendered
         ),
         "restart_value_recalled": (
-            expected["restart_value"] is None
-            or str(expected["restart_value"]) in rendered
+            expected["restart_value"] is None or str(expected["restart_value"]) in rendered
         ),
         "log_message_recalled": (
-            expected["log_message"] is None
-            or str(expected["log_message"]) in rendered
+            expected["log_message"] is None or str(expected["log_message"]) in rendered
         ),
         "allocated_mib_recalled": (
-            expected["allocated_mib"] is None
-            or str(expected["allocated_mib"]) in rendered
+            expected["allocated_mib"] is None or str(expected["allocated_mib"]) in rendered
         ),
         "http_codes_recalled": all(str(code) in rendered for code in expected["http_codes"]),
         "compression_understood": bool(
@@ -341,7 +345,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "tool": TOOL_BY_DIMENSION[payload["dimension"]],
                 "raw_path": str(path),
-                "summary_chars": len(json.dumps(summary, ensure_ascii=False, separators=(",", ":"))),
+                "summary_chars": len(
+                    json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+                ),
                 "evidence_selected": (summary.get("summary_selection") or {}).get("selected"),
                 "evidence_omitted": (summary.get("summary_selection") or {}).get("omitted"),
                 "coverage": summary.get("coverage"),

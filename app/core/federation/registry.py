@@ -4,6 +4,7 @@
 
 从配置文件的 federation.sub_agents 列表加载子集群配置，支持运行时感知。
 """
+
 from __future__ import annotations
 
 import logging
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SubAgentConfig:
     """子集群配置"""
+
     name: str
     url: str
     description: str = ""
@@ -57,12 +59,14 @@ class AgentRegistry:
             if not name or not url:
                 logger.warning("[FEDERATION] sub_agent 缺少 name 或 url，跳过: %s", item)
                 continue
-            agents.append(SubAgentConfig(
-                name=name,
-                url=url,
-                description=item.get("description", ""),
-                enabled=bool(item.get("enabled", True)),
-            ))
+            agents.append(
+                SubAgentConfig(
+                    name=name,
+                    url=url,
+                    description=item.get("description", ""),
+                    enabled=bool(item.get("enabled", True)),
+                )
+            )
 
         logger.info("[FEDERATION] 注册表加载完成，共 %s 个子集群", len(agents))
         return cls(agents)

@@ -4,6 +4,7 @@
 - FetchRunbookTool: 读取本地 Runbook .md 文件（通过 ConfigMap 挂载）
 - ReadContextArchiveTool: 按归档路径读取本地 context archive 文件
 """
+
 import logging
 import os
 from pathlib import Path
@@ -24,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 # Runbook 搜索路径（按优先级）
 DEFAULT_RUNBOOK_DIRS = [
-    "/app/knowledge_base/runbooks",      # K8s ConfigMap 挂载
-    "knowledge_base/runbooks",           # 本地开发
+    "/app/knowledge_base/runbooks",  # K8s ConfigMap 挂载
+    "knowledge_base/runbooks",  # 本地开发
 ]
 
 DEFAULT_ENABLED_RUNBOOK_IDS = [
@@ -60,6 +61,7 @@ class FetchRunbookTool(BaseTool):
     传入 runbook_id（如 'pod-imagepull-failed.md'），
     返回完整的诊断手册内容 + 执行指令。
     """
+
     name: str = "fetch_runbook"
     description: str = (
         "获取 Runbook 诊断手册。传入 runbook_id（如 'pod-imagepull-failed.md'）。"
@@ -124,12 +126,23 @@ class ReadContextArchiveTool(BaseTool):
     allowed_roots: list = Field(default_factory=_default_archive_roots)
     default_length: int = 12000
     max_length: int = 40000
-    evidence_budget_tokens: Optional[int] = Field(default_factory=lambda: EvidencePolicy.from_env().result_tokens)
+    evidence_budget_tokens: Optional[int] = Field(
+        default_factory=lambda: EvidencePolicy.from_env().result_tokens
+    )
 
-    def _run(self, archive_path: str, offset: int = 0, length: Optional[int] = None,
-             view: Literal["raw", "compact"] = "raw", json_pointer: str = "",
-             start: int = 0, limit: int = 50, search: str = "",
-             fields: Optional[list[str]] = None, max_tokens: int = 4096) -> str:
+    def _run(
+        self,
+        archive_path: str,
+        offset: int = 0,
+        length: Optional[int] = None,
+        view: Literal["raw", "compact"] = "raw",
+        json_pointer: str = "",
+        start: int = 0,
+        limit: int = 50,
+        search: str = "",
+        fields: Optional[list[str]] = None,
+        max_tokens: int = 4096,
+    ) -> str:
         requested = (archive_path or "").strip()
         if not requested:
             return "Error: archive_path is required"
@@ -171,10 +184,20 @@ class ReadContextArchiveTool(BaseTool):
             from app.core.context.evidence_view import build_evidence_view, compact_json
 
             result = build_evidence_view(
-                content, str(resolved), max_tokens=min(max_tokens, self.evidence_budget_tokens or 16384), json_pointer=json_pointer,
-                start=start, limit=limit, search=search, fields=fields,
+                content,
+                str(resolved),
+                max_tokens=min(max_tokens, self.evidence_budget_tokens or 16384),
+                json_pointer=json_pointer,
+                start=start,
+                limit=limit,
+                search=search,
+                fields=fields,
             )
-            if result.get("status") in {"invalid_pointer", "invalid_selector", "view_budget_too_small"}:
+            if result.get("status") in {
+                "invalid_pointer",
+                "invalid_selector",
+                "view_budget_too_small",
+            }:
                 # Same failure protocol as path/IO errors below, so the loop and
                 # UI do not report an invalid archive lookup as successful data.
                 return "Error: archive view: " + compact_json(result)
@@ -183,12 +206,14 @@ class ReadContextArchiveTool(BaseTool):
         safe_offset = max(0, int(offset or 0))
         requested_length = self.default_length if length is None else int(length)
         safe_length = max(200, min(requested_length, self.max_length))
-        snippet = content[safe_offset:safe_offset + safe_length]
+        snippet = content[safe_offset : safe_offset + safe_length]
         if self.evidence_budget_tokens is not None:
             # Explicit raw reads remain available, but cannot refill the context
             # with a 40k-character payload. Return the exact next byte-free char
             # cursor; no re-summarization of already selected archive evidence.
-            allowance = max(128, self.evidence_budget_tokens - estimate_tokens(str(resolved)) - 200)
+            allowance = max(
+                128, self.evidence_budget_tokens - estimate_tokens(str(resolved)) - 200
+            )
             low, high = 0, len(snippet)
             while low < high:
                 mid = (low + high + 1) // 2
@@ -200,7 +225,11 @@ class ReadContextArchiveTool(BaseTool):
         truncated = safe_offset + len(snippet) < len(content)
         logger.info(
             "[read_context_archive] 读取: %s | offset=%d length=%d total=%d truncated=%s",
-            resolved, safe_offset, safe_length, len(content), truncated,
+            resolved,
+            safe_offset,
+            safe_length,
+            len(content),
+            truncated,
         )
 
         suffix = ""
@@ -222,13 +251,31 @@ class ReadContextArchiveTool(BaseTool):
             f"{suffix}"
         )
 
-    async def _arun(self, archive_path: str, offset: int = 0, length: Optional[int] = None,
-                    view: Literal["raw", "compact"] = "raw", json_pointer: str = "",
-                    start: int = 0, limit: int = 50, search: str = "",
-                    fields: Optional[list[str]] = None, max_tokens: int = 4096) -> str:
-        return self._run(archive_path=archive_path, offset=offset, length=length,
-                         view=view, json_pointer=json_pointer, start=start, limit=limit,
-                         search=search, fields=fields, max_tokens=max_tokens)
+    async def _arun(
+        self,
+        archive_path: str,
+        offset: int = 0,
+        length: Optional[int] = None,
+        view: Literal["raw", "compact"] = "raw",
+        json_pointer: str = "",
+        start: int = 0,
+        limit: int = 50,
+        search: str = "",
+        fields: Optional[list[str]] = None,
+        max_tokens: int = 4096,
+    ) -> str:
+        return self._run(
+            archive_path=archive_path,
+            offset=offset,
+            length=length,
+            view=view,
+            json_pointer=json_pointer,
+            start=start,
+            limit=limit,
+            search=search,
+            fields=fields,
+            max_tokens=max_tokens,
+        )
 
     @staticmethod
     def _is_relative_to(path: Path, root: Path) -> bool:
@@ -270,8 +317,11 @@ def get_builtin_tools(runbook_dirs: Optional[list] = None) -> list:
     dirs = runbook_dirs or list(DEFAULT_RUNBOOK_DIRS)
     tools = [
         FetchRunbookTool(runbook_dirs=dirs),
-        (ReadContextArchiveTool() if os.getenv("AIOPS_EVIDENCE_VIEW_MODE", "legacy").lower() == "compact"
-         else LegacyReadContextArchiveTool()),
+        (
+            ReadContextArchiveTool()
+            if os.getenv("AIOPS_EVIDENCE_VIEW_MODE", "legacy").lower() == "compact"
+            else LegacyReadContextArchiveTool()
+        ),
     ]
     # 标记为内置工具，方便 _log_loaded_resources 分组显示
     for t in tools:

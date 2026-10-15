@@ -4,6 +4,7 @@ The store transports evidence and exact plan versions; it never infers a repair.
 Execution claims and supersession share a file lock, so an old approval cannot
 start a command after a revision has been accepted.
 """
+
 import fcntl
 import hashlib
 import json
@@ -26,8 +27,11 @@ class PlanConflict(ValueError):
 
 class RepairRecordStore:
     def __init__(self, root=None):
-        self.root = Path(root or os.getenv("AIOPS_REPAIR_RECORD_ROOT") or
-                         str(Path(os.getenv("REPORTS_DIR", "/tmp/aiops/reports")) / "repair_records"))
+        self.root = Path(
+            root
+            or os.getenv("AIOPS_REPAIR_RECORD_ROOT")
+            or str(Path(os.getenv("REPORTS_DIR", "/tmp/aiops/reports")) / "repair_records")
+        )
 
     @staticmethod
     def _owner(owner):
@@ -53,8 +57,9 @@ class RepairRecordStore:
     def _write(self, path, value):
         name = None
         try:
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.root,
-                                             prefix=".record-", delete=False) as handle:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.root, prefix=".record-", delete=False
+            ) as handle:
                 name = handle.name
                 json.dump(value, handle, ensure_ascii=False, default=str)
                 handle.flush()
@@ -84,19 +89,36 @@ class RepairRecordStore:
     def public(value):
         return deepcopy({k: v for k, v in value.items() if k != "owner"})
 
-    def save(self, run_id, owner, session_id, kind, payload, *, source_run_id=None, previous_plan_id=None):
+    def save(
+        self,
+        run_id,
+        owner,
+        session_id,
+        kind,
+        payload,
+        *,
+        source_run_id=None,
+        previous_plan_id=None,
+    ):
         if kind not in {"diagnosis", "plan", "repair_batch", "repair_job"}:
             raise ValueError("unsupported record kind")
         with self._locked():
             path = self._path(run_id)
             if path.exists():
                 raise PlanConflict("运行记录已经存在，不能覆盖原诊断或方案")
-            value = {"schema_version": 1, "run_id": run_id, "kind": kind,
-                     "owner": self._owner(owner), "session_id": session_id,
-                     "created_at": datetime.now(timezone.utc).isoformat(),
-                     "source_run_id": source_run_id, "previous_plan_id": previous_plan_id,
-                     "payload": deepcopy(payload), "execution_status": "ready" if kind == "plan" else None,
-                     "execution_events": []}
+            value = {
+                "schema_version": 1,
+                "run_id": run_id,
+                "kind": kind,
+                "owner": self._owner(owner),
+                "session_id": session_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "source_run_id": source_run_id,
+                "previous_plan_id": previous_plan_id,
+                "payload": deepcopy(payload),
+                "execution_status": "ready" if kind == "plan" else None,
+                "execution_events": [],
+            }
             self._write(path, value)
             if session_id:
                 key = hashlib.sha256((self._owner(owner) + ":" + session_id).encode()).hexdigest()
@@ -127,7 +149,9 @@ class RepairRecordStore:
             if value.get("kind") != "plan":
                 raise RecordUnavailable("只能修改修复方案记录")
             if value.get("execution_status") == "executing":
-                raise PlanConflict("原方案正在执行命令，请等待结果后再修改；已执行动作不会自动撤销")
+                raise PlanConflict(
+                    "原方案正在执行命令，请等待结果后再修改；已执行动作不会自动撤销"
+                )
             if value.get("execution_status") == "superseded":
                 raise PlanConflict("原方案已被修改请求替代，请使用最新方案")
             prior = self.public(value)
@@ -160,20 +184,37 @@ def diagnosis_payload(state, *, evidence_chars=64000):
     if state.get("diagnosis_cases") is not None:
         # Persist independent RCA deliverables, not a second projection of every
         # worker's tool history. A repair job reads one case through group_context.
-        return {"contract_version": "diagnosis-record.v2",
-                "question": state.get("original_question") or state.get("question"),
-                "request_contract": deepcopy(state.get("request_contract")),
-                "overview": deepcopy(state.get("diagnosis_overview")),
-                "groups": [{"group_id": c["group_id"], "target": deepcopy(c.get("target")),
-                            "status": c.get("execution_status"), "diagnosis_result": deepcopy(c)}
-                           for c in state["diagnosis_cases"]],
-                "scope_note": "历史诊断，不是当前状态或操作授权；按本组证据引用自主补读和核实。"}
-    groups = [{"group_id": g.get("group_id"), "target": g.get("target"),
-               "status": g.get("status"), "analysis": (g.get("material") or {}).get("analysis_draft"),
-               "execution_incomplete": (g.get("material") or {}).get("execution_incomplete", []),
-               "diagnosis_handoff": deepcopy(((g.get("material") or {}).get("protected_handoff") or {}).get("diagnosis_handoff")),
-               "evidence": [], "omitted_results": 0}
-              for g in state.get("autonomous_group_results") or []]
+        return {
+            "contract_version": "diagnosis-record.v2",
+            "question": state.get("original_question") or state.get("question"),
+            "request_contract": deepcopy(state.get("request_contract")),
+            "overview": deepcopy(state.get("diagnosis_overview")),
+            "groups": [
+                {
+                    "group_id": c["group_id"],
+                    "target": deepcopy(c.get("target")),
+                    "status": c.get("execution_status"),
+                    "diagnosis_result": deepcopy(c),
+                }
+                for c in state["diagnosis_cases"]
+            ],
+            "scope_note": "历史诊断，不是当前状态或操作授权；按本组证据引用自主补读和核实。",
+        }
+    groups = [
+        {
+            "group_id": g.get("group_id"),
+            "target": g.get("target"),
+            "status": g.get("status"),
+            "analysis": (g.get("material") or {}).get("analysis_draft"),
+            "execution_incomplete": (g.get("material") or {}).get("execution_incomplete", []),
+            "diagnosis_handoff": deepcopy(
+                ((g.get("material") or {}).get("protected_handoff") or {}).get("diagnosis_handoff")
+            ),
+            "evidence": [],
+            "omitted_results": 0,
+        }
+        for g in state.get("autonomous_group_results") or []
+    ]
     by_id = {g["group_id"]: g for g in groups}
     shared = {"group_id": "shared", "evidence": [], "omitted_results": 0}
     queues = {g["group_id"]: [] for g in groups}
@@ -183,8 +224,12 @@ def diagnosis_payload(state, *, evidence_chars=64000):
         if event.get("type") != "tool_result":
             continue
         ref = event.get("raw_ref")
-        identity = ref or (event.get("lane_id"), event.get("tool_call_id"), event.get("tool_name"),
-                           json.dumps(event.get("tool_args"), sort_keys=True, default=str))
+        identity = ref or (
+            event.get("lane_id"),
+            event.get("tool_call_id"),
+            event.get("tool_name"),
+            json.dumps(event.get("tool_args"), sort_keys=True, default=str),
+        )
         if identity in seen:
             continue
         seen.add(identity)
@@ -197,10 +242,24 @@ def diagnosis_payload(state, *, evidence_chars=64000):
                 continue
             event = queue.pop(0)
             bucket = shared if gid == "shared" else by_id[gid]
-            receipt = {k: event.get(k) for k in ("tool_name", "tool_args", "status", "semantic_success",
-                                                 "timestamp", "raw_ref", "structured_ref")}
+            receipt = {
+                k: event.get(k)
+                for k in (
+                    "tool_name",
+                    "tool_args",
+                    "status",
+                    "semantic_success",
+                    "timestamp",
+                    "raw_ref",
+                    "structured_ref",
+                )
+            }
             body = event.get("result")
-            text = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False, default=str)
+            text = (
+                body
+                if isinstance(body, str)
+                else json.dumps(body, ensure_ascii=False, default=str)
+            )
             # Runbook text is reference guidance, not evidence; retain its address.
             cap = 0 if event.get("tool_name") == "fetch_runbook" else min(4000, max(0, remaining))
             receipt["result_excerpt"] = text[:cap]
@@ -210,9 +269,13 @@ def diagnosis_payload(state, *, evidence_chars=64000):
             if not cap and text:
                 bucket["omitted_results"] += 1
             bucket["evidence"].append(receipt)
-    return {"question": state.get("original_question") or state.get("question"),
-            "diagnosis_handoff": deepcopy(state.get("diagnosis_handoff")),
-            "request_contract": state.get("request_contract"),
-            "report": state.get("conclusion"), "groups": groups, "shared_evidence": shared,
-            "scope_note": "历史诊断及采样，不代表当前状态；摘录可能不完整，可按原文引用自主补读。",
-            "excerpt_budget_chars": evidence_chars}
+    return {
+        "question": state.get("original_question") or state.get("question"),
+        "diagnosis_handoff": deepcopy(state.get("diagnosis_handoff")),
+        "request_contract": state.get("request_contract"),
+        "report": state.get("conclusion"),
+        "groups": groups,
+        "shared_evidence": shared,
+        "scope_note": "历史诊断及采样，不代表当前状态；摘录可能不完整，可按原文引用自主补读。",
+        "excerpt_budget_chars": evidence_chars,
+    }

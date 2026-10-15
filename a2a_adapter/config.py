@@ -66,19 +66,11 @@ class AdapterSettings:
             host=os.getenv("A2A_HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=_positive_int("A2A_PORT", 8001),
             max_steps=_positive_int("A2A_MAX_STEPS", 20),
-            request_timeout_seconds=_positive_float(
-                "A2A_REQUEST_TIMEOUT_SECONDS", 1800.0
-            ),
-            connect_timeout_seconds=_positive_float(
-                "A2A_CONNECT_TIMEOUT_SECONDS", 10.0
-            ),
+            request_timeout_seconds=_positive_float("A2A_REQUEST_TIMEOUT_SECONDS", 1800.0),
+            connect_timeout_seconds=_positive_float("A2A_CONNECT_TIMEOUT_SECONDS", 10.0),
             api_token=os.getenv("A2A_API_TOKEN", "").strip(),
-            agent_name=os.getenv(
-                "A2A_AGENT_NAME", "Kubernetes AIOps Copilot"
-            ).strip()
+            agent_name=os.getenv("A2A_AGENT_NAME", "Kubernetes AIOps Copilot").strip()
             or "Kubernetes AIOps Copilot",
-            agent_version=os.getenv(
-                "A2A_AGENT_VERSION", os.getenv("APP_VERSION", "1.0.0")
-            ).strip()
+            agent_version=os.getenv("A2A_AGENT_VERSION", os.getenv("APP_VERSION", "1.0.0")).strip()
             or "1.0.0",
         )

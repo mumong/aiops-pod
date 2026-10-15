@@ -99,26 +99,28 @@ def test_log_shadow_parses_json_and_preserves_unknown_scalar_attributes():
     payload = _base_payload("logging")
     payload["fact_ledger"] = {
         "truncated": False,
-        "records": [{
-            "fact_id": "fact-log",
-            "fact_type": "log",
-            "attribute": "log.message",
-            "value": (
-                '{"event":"request","level":"info","message":"state advanced",'
-                '"trace_id":"trace-1","http_status":200,"path":"/work",'
-                '"business_counter":48}'
-            ),
-            "timestamp": "2026-08-20T08:29:00Z",
-            "source_system": "elasticsearch",
-            "directness": "direct",
-            "confidence": "high",
-            "evidence_refs": ["log-a"],
-            "metadata": {
-                "value_original_length": 160,
-                "value_truncated": False,
-                "raw_ref": {"index": "logs-*", "document_id": "doc-1"},
-            },
-        }],
+        "records": [
+            {
+                "fact_id": "fact-log",
+                "fact_type": "log",
+                "attribute": "log.message",
+                "value": (
+                    '{"event":"request","level":"info","message":"state advanced",'
+                    '"trace_id":"trace-1","http_status":200,"path":"/work",'
+                    '"business_counter":48}'
+                ),
+                "timestamp": "2026-08-20T08:29:00Z",
+                "source_system": "elasticsearch",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": ["log-a"],
+                "metadata": {
+                    "value_original_length": 160,
+                    "value_truncated": False,
+                    "raw_ref": {"index": "logs-*", "document_id": "doc-1"},
+                },
+            }
+        ],
     }
 
     result = build_shadow(payload, max_chars=3000, local_timezone="Asia/Shanghai")
@@ -146,24 +148,26 @@ def test_trace_shadow_normalizes_naive_time_and_keeps_per_source_coverage():
     }
     payload["fact_ledger"] = {
         "truncated": True,
-        "records": [{
-            "fact_id": "fact-flow",
-            "fact_type": "flow",
-            "attribute": "l7_flow",
-            "value": {
+        "records": [
+            {
+                "fact_id": "fact-flow",
+                "fact_type": "flow",
+                "attribute": "l7_flow",
+                "value": {
+                    "timestamp": "2026-08-20 16:30:21",
+                    "trace_id": "trace-1",
+                    "request_type": "GET",
+                    "request_resource": "/health",
+                    "response_code": 200,
+                    "syscall_trace_id_request": "0",
+                },
                 "timestamp": "2026-08-20 16:30:21",
-                "trace_id": "trace-1",
-                "request_type": "GET",
-                "request_resource": "/health",
-                "response_code": 200,
-                "syscall_trace_id_request": "0",
-            },
-            "timestamp": "2026-08-20 16:30:21",
-            "source_system": "deepflow",
-            "directness": "direct",
-            "confidence": "high",
-            "evidence_refs": ["flow-a"],
-        }],
+                "source_system": "deepflow",
+                "directness": "direct",
+                "confidence": "high",
+                "evidence_refs": ["flow-a"],
+            }
+        ],
     }
 
     result = build_shadow(payload, max_chars=3000, local_timezone="Asia/Shanghai")

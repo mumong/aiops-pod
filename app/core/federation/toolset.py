@@ -6,6 +6,7 @@
 - list_clusters: 列出所有可用的子集群
 - query_cluster: 查询特定子集群
 """
+
 from __future__ import annotations
 
 import logging
@@ -31,7 +32,9 @@ class ListClustersTool(Tool):
     name: str = "list_clusters"
     description: str = "列出所有可用的子集群信息，包括名称、URL 和描述"
 
-    def _invoke(self, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _invoke(
+        self, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行工具调用"""
         registry: AgentRegistry = context.get("federation_registry") if context else None
         if not registry:
@@ -41,13 +44,9 @@ class ListClustersTool(Tool):
         return {
             "total": len(clusters),
             "clusters": [
-                {
-                    "name": c.name,
-                    "url": c.url,
-                    "description": c.description or "无描述"
-                }
+                {"name": c.name, "url": c.url, "description": c.description or "无描述"}
                 for c in clusters
-            ]
+            ],
         }
 
     def get_parameterized_one_liner(self, params: Dict[str, Any]) -> str:
@@ -64,7 +63,9 @@ class QueryClusterTool(Tool):
         "max_steps（最大执行步数，默认30），conclusion_max_tokens（结论最大token数，默认8192）"
     )
 
-    def _invoke(self, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _invoke(
+        self, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """执行工具调用"""
         cluster_name = params.get("cluster_name")
         question = params.get("question")
@@ -89,7 +90,7 @@ class QueryClusterTool(Tool):
         if not agent:
             return {
                 "error": f"Cluster '{cluster_name}' not found",
-                "available_clusters": [a.name for a in registry.get_enabled_agents()]
+                "available_clusters": [a.name for a in registry.get_enabled_agents()],
             }
 
         # 调用子集群（同步包装异步调用，使用流式模式获取完整报告）
@@ -114,14 +115,14 @@ class QueryClusterTool(Tool):
                 "cluster": cluster_name,
                 "success": True,
                 "response": parsed.final_answer,
-                "elapsed_seconds": result.elapsed_seconds
+                "elapsed_seconds": result.elapsed_seconds,
             }
         else:
             return {
                 "cluster": cluster_name,
                 "success": False,
                 "error": result.error,
-                "elapsed_seconds": result.elapsed_seconds
+                "elapsed_seconds": result.elapsed_seconds,
             }
 
     def get_parameterized_one_liner(self, params: Dict[str, Any]) -> str:
@@ -149,7 +150,9 @@ class QueryClusterTool(Tool):
 
             logger.info("[FEDERATION A2A] 已保存 %s 报告到: %s", cluster_name, filepath)
         except Exception as exc:
-            logger.error("[FEDERATION A2A] 保存报告失败 (%s): %s", cluster_name, exc, exc_info=True)
+            logger.error(
+                "[FEDERATION A2A] 保存报告失败 (%s): %s", cluster_name, exc, exc_info=True
+            )
 
 
 class FederationToolset(Toolset):
@@ -160,22 +163,14 @@ class FederationToolset(Toolset):
 
     def __init__(self, registry: AgentRegistry):
         super().__init__(
-            name="federation",
-            description="联邦查询工具集，用于多集群智能路由和查询",
-            tools=[]
+            name="federation", description="联邦查询工具集，用于多集群智能路由和查询", tools=[]
         )
         self._registry = registry
-        self._tools = [
-            ListClustersTool(),
-            QueryClusterTool()
-        ]
+        self._tools = [ListClustersTool(), QueryClusterTool()]
 
     @classmethod
     def get_example_config(cls) -> Dict[str, Any]:
-        return {
-            "enabled": True,
-            "description": "联邦查询工具集，用于多集群智能路由和查询"
-        }
+        return {"enabled": True, "description": "联邦查询工具集，用于多集群智能路由和查询"}
 
     def get_tools(self) -> list[Tool]:
         return self._tools

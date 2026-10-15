@@ -12,8 +12,10 @@ def normalize_prometheus_result(payload: Any, limit: int = 20) -> dict[str, Any]
     must not be reported as empty or silently converted into numeric samples.
     """
     result: dict[str, Any] = {
-        "coverage": "unknown", "parse_status": "unsupported",
-        "facts": [], "facts_omitted": 0,
+        "coverage": "unknown",
+        "parse_status": "unsupported",
+        "facts": [],
+        "facts_omitted": 0,
     }
     if not isinstance(payload, dict):
         return result
@@ -62,10 +64,14 @@ def normalize_prometheus_result(payload: Any, limit: int = 20) -> dict[str, Any]
         index = max(range(len(points)), key=timestamps.__getitem__)
         point = points[index]
         fact = {
-            "name": labels.get("__name__") or ("prometheus_text" if kind == "string" else "prometheus_sample"),
-            "value": point[1], "unit": "unknown", "labels": labels,
+            "name": labels.get("__name__")
+            or ("prometheus_text" if kind == "string" else "prometheus_sample"),
+            "value": point[1],
+            "unit": "unknown",
+            "labels": labels,
             "observed_at": datetime.fromtimestamp(timestamps[index], timezone.utc).isoformat(),
-            "timestamp": point[0], "sample_count": len(points),
+            "timestamp": point[0],
+            "sample_count": len(points),
             "value_kind": "text" if kind == "string" else "number",
         }
         if kind == "matrix":
@@ -82,6 +88,7 @@ def normalize_prometheus_result(payload: Any, limit: int = 20) -> dict[str, Any]
     result.update(
         coverage="present" if total else "unknown",
         parse_status=("partial" if total else "unsupported") if invalid else "parsed",
-        facts_omitted=max(0, total - limit), unparsed_series=invalid,
+        facts_omitted=max(0, total - limit),
+        unparsed_series=invalid,
     )
     return result

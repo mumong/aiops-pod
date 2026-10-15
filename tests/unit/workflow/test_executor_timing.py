@@ -49,43 +49,61 @@ class _DummyWorkflow:
         node = self._nodes[node_id]
         event_queue = node._event_queue
 
-        event_queue.put((
-            "node_lifecycle",
-            {
-                "phase": "start",
-                "node": node.node_id,
-                "node_name": node.node_name,
-                "ts": time.time(),
-            },
-        ))
+        event_queue.put(
+            (
+                "node_lifecycle",
+                {
+                    "phase": "start",
+                    "node": node.node_id,
+                    "node_name": node.node_name,
+                    "ts": time.time(),
+                },
+            )
+        )
         time.sleep(sleep_seconds)
-        event_queue.put((
-            "node_lifecycle",
-            {
-                "phase": "end",
-                "node": node.node_id,
-                "node_name": node.node_name,
-                "ts": time.time(),
-                "success": True,
-                "state_update": state_update,
-            },
-        ))
+        event_queue.put(
+            (
+                "node_lifecycle",
+                {
+                    "phase": "end",
+                    "node": node.node_id,
+                    "node_name": node.node_name,
+                    "ts": time.time(),
+                    "success": True,
+                    "state_update": state_update,
+                },
+            )
+        )
         return state_update
 
     def stream(self, initial_state):
-        yield {"rca": self._run_node("rca", 0.02, {
-            "root_cause": "simulated-rca",
-            "rca_analysis": "{}",
-        })}
-        yield {"conclusion": self._run_node("conclusion", 0.03, {
-            "conclusion": "simulated conclusion",
-            "conclusion_formatted": "simulated conclusion",
-        })}
+        yield {
+            "rca": self._run_node(
+                "rca",
+                0.02,
+                {
+                    "root_cause": "simulated-rca",
+                    "rca_analysis": "{}",
+                },
+            )
+        }
+        yield {
+            "conclusion": self._run_node(
+                "conclusion",
+                0.03,
+                {
+                    "conclusion": "simulated conclusion",
+                    "conclusion_formatted": "simulated conclusion",
+                },
+            )
+        }
 
 
 class _DummyHolmesService:
     merged_catalog = None
-    workflow_config = {"nodes": {"layer": False, "evidence": False, "rca": True, "conclusion": True}}
+    workflow_config = {
+        "nodes": {"layer": False, "evidence": False, "rca": True, "conclusion": True}
+    }
 
 
 def test_executor_join_helper_never_joins_current_thread():
@@ -153,20 +171,25 @@ def test_executor_preserves_setup_error_before_worker_creation(monkeypatch):
 def test_executor_sse_sanitizes_llm_disconnect_and_retains_log(monkeypatch, caplog):
     import httpx
     from openai import APIError
-    message = 'stream disconnected before completion: stream closed before response.completed'
+
+    message = "stream disconnected before completion: stream closed before response.completed"
 
     class FailingNode(_DummyNode):
         def set_event_queue(self, queue):
             if queue is not None:
-                raise APIError(message, request=httpx.Request('POST', 'https://model.invalid'), body=None)
+                raise APIError(
+                    message, request=httpx.Request("POST", "https://model.invalid"), body=None
+                )
 
-    node = FailingNode('conclusion')
-    monkeypatch.setattr('app.core.workflow.executor.build_diagnosis_workflow',
-        lambda *args, **kwargs: (_DummyWorkflow([node]), [node]))
-    events = list(WorkflowExecutor(holmes_service=_DummyHolmesService()).execute_stream('test'))
-    error = next(event for event in events if event['type'] == 'error')
-    assert 'LLM API 服务连接中断' in error['error']
-    assert 'stream disconnected' not in error['error']
+    node = FailingNode("conclusion")
+    monkeypatch.setattr(
+        "app.core.workflow.executor.build_diagnosis_workflow",
+        lambda *args, **kwargs: (_DummyWorkflow([node]), [node]),
+    )
+    events = list(WorkflowExecutor(holmes_service=_DummyHolmesService()).execute_stream("test"))
+    error = next(event for event in events if event["type"] == "error")
+    assert "LLM API 服务连接中断" in error["error"]
+    assert "stream disconnected" not in error["error"]
     assert message in caplog.text
 
 
@@ -201,29 +224,41 @@ def test_executor_appends_deterministic_timing_and_runbook_trace(monkeypatch):
 
     class _RunbookWorkflow(_DummyWorkflow):
         def stream(self, initial_state):
-            yield {"rca": self._run_node("rca", 0.02, {
-                "root_cause": "simulated-rca",
-                "rca_analysis": "{}",
-                "thinking_events": [
+            yield {
+                "rca": self._run_node(
+                    "rca",
+                    0.02,
                     {
-                        "type": "tool_start",
-                        "tool_name": "fetch_runbook",
-                        "tool_call_id": "call-runbook",
-                        "tool_args": {"runbook_id": "pod-oomkilled"},
+                        "root_cause": "simulated-rca",
+                        "rca_analysis": "{}",
+                        "thinking_events": [
+                            {
+                                "type": "tool_start",
+                                "tool_name": "fetch_runbook",
+                                "tool_call_id": "call-runbook",
+                                "tool_args": {"runbook_id": "pod-oomkilled"},
+                            },
+                            {
+                                "type": "tool_result",
+                                "tool_name": "fetch_runbook",
+                                "tool_call_id": "call-runbook",
+                                "status": "success",
+                                "result_preview": "# Pod OOMKilled 诊断手册\n检查内存限制。",
+                            },
+                        ],
                     },
+                )
+            }
+            yield {
+                "conclusion": self._run_node(
+                    "conclusion",
+                    0.03,
                     {
-                        "type": "tool_result",
-                        "tool_name": "fetch_runbook",
-                        "tool_call_id": "call-runbook",
-                        "status": "success",
-                        "result_preview": "# Pod OOMKilled 诊断手册\n检查内存限制。",
+                        "conclusion": "simulated conclusion",
+                        "conclusion_formatted": "simulated conclusion",
                     },
-                ],
-            })}
-            yield {"conclusion": self._run_node("conclusion", 0.03, {
-                "conclusion": "simulated conclusion",
-                "conclusion_formatted": "simulated conclusion",
-            })}
+                )
+            }
 
     monkeypatch.setattr(
         "app.core.workflow.executor.build_diagnosis_workflow",
@@ -239,9 +274,11 @@ def test_executor_appends_deterministic_timing_and_runbook_trace(monkeypatch):
     )
     monkeypatch.setattr("app.core.workflow.metrics.METRICS_ENABLED", False)
 
-    events = list(WorkflowExecutor(
-        holmes_service=_DummyHolmesService(),
-    ).execute_stream("timing and runbook trace"))
+    events = list(
+        WorkflowExecutor(
+            holmes_service=_DummyHolmesService(),
+        ).execute_stream("timing and runbook trace")
+    )
     final_event = next(event for event in events if event.get("type") == "final")
     answer = final_event["answer"]
 
@@ -281,7 +318,12 @@ def test_executor_propagates_langfuse_session_at_workflow_boundary(monkeypatch):
 
 
 def test_executor_assigns_same_run_id_to_all_four_nodes_without_ai_call(monkeypatch):
-    nodes = [_DummyNode("layer"), _DummyNode("evidence"), _DummyNode("rca"), _DummyNode("conclusion")]
+    nodes = [
+        _DummyNode("layer"),
+        _DummyNode("evidence"),
+        _DummyNode("rca"),
+        _DummyNode("conclusion"),
+    ]
 
     class _NoopWorkflow:
         def stream(self, initial_state):
@@ -312,7 +354,12 @@ def test_executor_assigns_same_run_id_to_all_four_nodes_without_ai_call(monkeypa
 
 
 def test_executor_assigns_same_run_id_and_ai_call_to_all_four_nodes(monkeypatch):
-    nodes = [_DummyNode("layer"), _DummyNode("evidence"), _DummyNode("rca"), _DummyNode("conclusion")]
+    nodes = [
+        _DummyNode("layer"),
+        _DummyNode("evidence"),
+        _DummyNode("rca"),
+        _DummyNode("conclusion"),
+    ]
 
     class _NoopWorkflow:
         def stream(self, initial_state):
@@ -397,48 +444,56 @@ class _ParallelLifecycleWorkflow:
     def stream(self, initial_state):
         event_queue = self._node._event_queue
         now = time.time()
-        event_queue.put((
-            "node_lifecycle",
-            {
-                "phase": "start",
-                "node": "parallel_evidence",
-                "node_name": "parallel-evidence-name",
-                "ts": now,
-            },
-        ))
+        event_queue.put(
+            (
+                "node_lifecycle",
+                {
+                    "phase": "start",
+                    "node": "parallel_evidence",
+                    "node_name": "parallel-evidence-name",
+                    "ts": now,
+                },
+            )
+        )
         scoped_queue = LaneQueue(
             event_queue,
             group_id="g3",
             entities=[{"kind": "Pod", "namespace": "ns", "name": "pod"}],
         )
-        scoped_queue.put((
-            "thinking",
-            {
-                "type": "ai_message",
-                "node": "rca",
-                "content": "lane analysis",
-            },
-        ))
+        scoped_queue.put(
+            (
+                "thinking",
+                {
+                    "type": "ai_message",
+                    "node": "rca",
+                    "content": "lane analysis",
+                },
+            )
+        )
         state_update = {
-            "autonomous_group_results": [{
-                "group_id": "g3",
-                "target": {"group_id": "g3"},
-                "status": "completed",
-                "error": None,
-                "run_id": "lane-g3",
-            }],
+            "autonomous_group_results": [
+                {
+                    "group_id": "g3",
+                    "target": {"group_id": "g3"},
+                    "status": "completed",
+                    "error": None,
+                    "run_id": "lane-g3",
+                }
+            ],
         }
-        event_queue.put((
-            "node_lifecycle",
-            {
-                "phase": "end",
-                "node": "parallel_evidence",
-                "node_name": "parallel-evidence-name",
-                "ts": now + 0.01,
-                "success": True,
-                "state_update": state_update,
-            },
-        ))
+        event_queue.put(
+            (
+                "node_lifecycle",
+                {
+                    "phase": "end",
+                    "node": "parallel_evidence",
+                    "node_name": "parallel-evidence-name",
+                    "ts": now + 0.01,
+                    "success": True,
+                    "state_update": state_update,
+                },
+            )
+        )
         yield {"parallel_evidence": state_update}
 
 
@@ -460,16 +515,20 @@ def test_executor_archives_parallel_group_state_only_after_lifecycle_end(monkeyp
     monkeypatch.setattr(
         WorkflowExecutor,
         "_archive_node_transition",
-        lambda self, run_id, node_name, state, snapshot, handoff: archives.append({
-            "node": node_name,
-            "state": dict(state),
-            "snapshot": snapshot,
-        }),
+        lambda self, run_id, node_name, state, snapshot, handoff: archives.append(
+            {
+                "node": node_name,
+                "state": dict(state),
+                "snapshot": snapshot,
+            }
+        ),
     )
 
-    events = list(WorkflowExecutor(
-        holmes_service=_DummyHolmesService(),
-    ).execute_stream("parallel lifecycle"))
+    events = list(
+        WorkflowExecutor(
+            holmes_service=_DummyHolmesService(),
+        ).execute_stream("parallel lifecycle")
+    )
 
     thinking = next(event for event in events if event.get("type") == "thinking")
     assert thinking["node"] == "parallel_evidence"
@@ -488,10 +547,12 @@ def test_executor_parallel_snapshot_without_group_results_is_empty():
 def test_executor_evidence_handoff_summary_uses_structured_plan_counts():
     executor = WorkflowExecutor(holmes_service=_DummyHolmesService())
     state = {
-        "evidence_analysis": json.dumps({
-            "plan_total": 2,
-            "plan_collected": 2,
-        }),
+        "evidence_analysis": json.dumps(
+            {
+                "plan_total": 2,
+                "plan_collected": 2,
+            }
+        ),
         "evidence_items": [
             EvidenceItem(
                 id=f"item-{index}",
@@ -524,30 +585,34 @@ class _SlowWorkflow:
         self._node = node
 
     def stream(self, initial_state):
-        self._node._event_queue.put((
-            "node_lifecycle",
-            {
-                "phase": "start",
-                "node": self._node.node_id,
-                "node_name": self._node.node_name,
-                "ts": time.time(),
-            },
-        ))
-        time.sleep(0.45)
-        self._node._event_queue.put((
-            "node_lifecycle",
-            {
-                "phase": "end",
-                "node": self._node.node_id,
-                "node_name": self._node.node_name,
-                "ts": time.time(),
-                "success": True,
-                "state_update": {
-                    "conclusion": "done",
-                    "conclusion_formatted": "done",
+        self._node._event_queue.put(
+            (
+                "node_lifecycle",
+                {
+                    "phase": "start",
+                    "node": self._node.node_id,
+                    "node_name": self._node.node_name,
+                    "ts": time.time(),
                 },
-            },
-        ))
+            )
+        )
+        time.sleep(0.45)
+        self._node._event_queue.put(
+            (
+                "node_lifecycle",
+                {
+                    "phase": "end",
+                    "node": self._node.node_id,
+                    "node_name": self._node.node_name,
+                    "ts": time.time(),
+                    "success": True,
+                    "state_update": {
+                        "conclusion": "done",
+                        "conclusion_formatted": "done",
+                    },
+                },
+            )
+        )
         yield {"conclusion": {"conclusion": "done"}}
 
 
@@ -734,13 +799,15 @@ def test_metrics_stats_block_shows_parallel_lane_wall_times():
         start_ts=metrics.start_time + 1,
     )
     parallel.finish(end_ts=metrics.start_time + 11)
-    metrics.lane_timings = [{
-        "group_id": "g1",
-        "entities": [{"namespace": "demo", "name": "oom-pod"}],
-        "total_duration_ms": 9000,
-        "evidence_duration_ms": 6000,
-        "rca_duration_ms": 2500,
-    }]
+    metrics.lane_timings = [
+        {
+            "group_id": "g1",
+            "entities": [{"namespace": "demo", "name": "oom-pod"}],
+            "total_duration_ms": 9000,
+            "evidence_duration_ms": 6000,
+            "rca_duration_ms": 2500,
+        }
+    ]
 
     stats = metrics.format_stats_block()
 
@@ -768,16 +835,6 @@ def test_bare_write_command_name_in_caution_is_not_treated_as_actionable_advice(
     plan = SimpleNamespace(remediation_available=False, actions=[])
 
     assert _missing_structured_actions_reason(report, plan) is None
-
-
-
-
-
-
-
-
-
-
 
 
 def test_metrics_separates_parallel_tool_cumulative_and_wall_time():

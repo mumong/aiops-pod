@@ -67,8 +67,7 @@ def extract_remediation_plan(text: str) -> Optional[RemediationPlan]:
     fact_ledger_marker_present = False
     for candidate in _candidate_json_objects(text or ""):
         fact_ledger_marker_present = (
-            fact_ledger_marker_present
-            or _contains_fact_ledger_contract_marker(candidate)
+            fact_ledger_marker_present or _contains_fact_ledger_contract_marker(candidate)
         )
         data = _loads_json(candidate)
         if not isinstance(data, dict):
@@ -81,19 +80,21 @@ def extract_remediation_plan(text: str) -> Optional[RemediationPlan]:
 
     if fact_ledger_marker_present:
         source = candidates[0] if candidates else {}
-        return _build_plan({
-            "remediation_available": False,
-            "fix_type": "manual_only",
-            "risk_level": "medium",
-            "requires_human_approval": True,
-            "issue_groups": _fact_ledger_issue_groups(source),
-            "basis": [
-                "Fact Ledger reports are diagnostic-only; executable "
-                "writes require a typed policy contract."
-            ],
-            "actions": [],
-            "stop_conditions": [],
-        })
+        return _build_plan(
+            {
+                "remediation_available": False,
+                "fix_type": "manual_only",
+                "risk_level": "medium",
+                "requires_human_approval": True,
+                "issue_groups": _fact_ledger_issue_groups(source),
+                "basis": [
+                    "Fact Ledger reports are diagnostic-only; executable "
+                    "writes require a typed policy contract."
+                ],
+                "actions": [],
+                "stop_conditions": [],
+            }
+        )
 
     for data in candidates:
         return _build_plan(data)
@@ -120,9 +121,7 @@ def _fact_ledger_issue_groups(data: Dict[str, Any]) -> list[Dict[str, Any]]:
                 r"(?i)\bkubectl\b",
                 value,
             ):
-                group[key] = (
-                    "[未授权的 Kubernetes 写操作已移除]"
-                )
+                group[key] = "[未授权的 Kubernetes 写操作已移除]"
         group["auto_fixable"] = False
         groups.append(group)
     return groups
@@ -161,10 +160,7 @@ def _contains_fact_ledger_contract_marker(raw: str) -> bool:
     ) -> Dict[str, Any]:
         nonlocal marker_present
         for key, value in pairs:
-            if (
-                key == "remediation_contract"
-                and value in _FACT_LEDGER_REMEDIATION_CONTRACTS
-            ):
+            if key == "remediation_contract" and value in _FACT_LEDGER_REMEDIATION_CONTRACTS:
                 marker_present = True
         return dict(pairs)
 
@@ -194,7 +190,9 @@ def _build_plan(data: Dict[str, Any]) -> RemediationPlan:
     )
 
 
-def _validate_issue_group_coverage(issue_groups: list[Dict[str, Any]], actions: list[RemediationAction]) -> None:
+def _validate_issue_group_coverage(
+    issue_groups: list[Dict[str, Any]], actions: list[RemediationAction]
+) -> None:
     if len(issue_groups) < 2:
         return
     group_ids = {str(group.get("group_id") or "").strip() for group in issue_groups}
@@ -208,7 +206,9 @@ def _validate_issue_group_coverage(issue_groups: list[Dict[str, Any]], actions: 
         if not action_group_id:
             raise ValueError("multi-issue remediation action missing group_id")
         if action_group_id not in group_ids:
-            raise ValueError(f"remediation action group_id not found in issue_groups: {action_group_id}")
+            raise ValueError(
+                f"remediation action group_id not found in issue_groups: {action_group_id}"
+            )
         covered_group_ids.add(action_group_id)
 
     required_group_ids = {
@@ -219,7 +219,9 @@ def _validate_issue_group_coverage(issue_groups: list[Dict[str, Any]], actions: 
     required_group_ids.discard("")
     missing = sorted(required_group_ids - covered_group_ids)
     if missing:
-        raise ValueError(f"auto-fixable issue_groups missing remediation actions: {', '.join(missing)}")
+        raise ValueError(
+            f"auto-fixable issue_groups missing remediation actions: {', '.join(missing)}"
+        )
 
 
 def _build_action(data: Dict[str, Any]) -> RemediationAction:
@@ -231,17 +233,22 @@ def _build_action(data: Dict[str, Any]) -> RemediationAction:
         dry_run_command=_optional_command(data.get("dry_run_command") or data.get("command")),
         execute_command=_optional_command(data.get("execute_command")),
         verify_command=_optional_command(data.get("verify_command")),
-        metadata={k: v for k, v in data.items() if k not in {
-            "id",
-            "action_id",
-            "type",
-            "description",
-            "risk",
-            "dry_run_command",
-            "command",
-            "execute_command",
-            "verify_command",
-        }},
+        metadata={
+            k: v
+            for k, v in data.items()
+            if k
+            not in {
+                "id",
+                "action_id",
+                "type",
+                "description",
+                "risk",
+                "dry_run_command",
+                "command",
+                "execute_command",
+                "verify_command",
+            }
+        },
     )
     for command in (action.dry_run_command, action.execute_command, action.verify_command):
         if command:
@@ -268,10 +275,7 @@ def validate_safe_kubectl_command(command: str) -> None:
     except ValueError as exc:
         raise ValueError(f"unsafe remediation command: {command}") from exc
     verb_index = _kubectl_verb_index(parts)
-    if (
-        verb_index is None
-        or parts[verb_index].lower() not in _ALLOWED_KUBECTL_VERBS
-    ):
+    if verb_index is None or parts[verb_index].lower() not in _ALLOWED_KUBECTL_VERBS:
         raise ValueError(f"unsafe remediation command: {command}")
 
 

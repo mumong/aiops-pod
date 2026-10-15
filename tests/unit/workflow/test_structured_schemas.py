@@ -72,30 +72,34 @@ def test_prometheus_empty_vector_is_successful_with_empty_coverage():
 
 def test_fact_schemas_accept_generic_evidence_contract():
     entity_id = "k8s.pod:demo/api:uid-a"
-    record = FactRecord.model_validate({
-        "fact_id": "fact-000000000001",
-        "entity_id": entity_id,
-        "entity_kind": "Pod",
-        "namespace": "demo",
-        "entity_name": "api",
-        "dimension": "logging",
-        "fact_type": "log",
-        "attribute": "log.message",
-        "value": {"message": "request returned status 503"},
-        "source_system": "elasticsearch",
-        "directness": "direct",
-        "confidence": "high",
-        "strength": "strong",
-        "evidence_refs": ["logs:target"],
-    })
-    ledger = FactLedger.model_validate({
-        "contract_version": "aiops.fact-ledger.v1",
-        "case_id": "case-facts",
-        "scope_entity_ids": [entity_id],
-        "records": [record.model_dump()],
-        "record_count": 1,
-        "truncated": False,
-        "source": "mcp_canonical",
-        "legacy_contract": False,
-    })
+    record = FactRecord.model_validate(
+        {
+            "fact_id": "fact-000000000001",
+            "entity_id": entity_id,
+            "entity_kind": "Pod",
+            "namespace": "demo",
+            "entity_name": "api",
+            "dimension": "logging",
+            "fact_type": "log",
+            "attribute": "log.message",
+            "value": {"message": "request returned status 503"},
+            "source_system": "elasticsearch",
+            "directness": "direct",
+            "confidence": "high",
+            "strength": "strong",
+            "evidence_refs": ["logs:target"],
+        }
+    )
+    ledger = FactLedger.model_validate(
+        {
+            "contract_version": "aiops.fact-ledger.v1",
+            "case_id": "case-facts",
+            "scope_entity_ids": [entity_id],
+            "records": [record.model_dump()],
+            "record_count": 1,
+            "truncated": False,
+            "source": "mcp_canonical",
+            "legacy_contract": False,
+        }
+    )
     assert ledger.records[0].fact_id == record.fact_id

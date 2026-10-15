@@ -152,29 +152,34 @@ def test_reporter_projects_lane_timing_and_fetched_runbooks_from_group_results()
         "conclusion": "两个 lane 已完成诊断。",
         "rca_analysis": "",
         "evidence_analysis": "",
-        "group_results": [{
-            "group_id": "g1",
-            "presentation_index": 0,
-            "entities": [{"namespace": "demo", "name": "oom-pod"}],
-            "runbooks_used": ["pod-crashloop-runtime", "pod-oomkilled.md"],
-            "lane_timing": {
-                "total_duration_ms": 9000,
-                "evidence_duration_ms": 6000,
-                "rca_duration_ms": 2500,
+        "group_results": [
+            {
+                "group_id": "g1",
+                "presentation_index": 0,
+                "entities": [{"namespace": "demo", "name": "oom-pod"}],
+                "runbooks_used": ["pod-crashloop-runtime", "pod-oomkilled.md"],
+                "lane_timing": {
+                    "total_duration_ms": 9000,
+                    "evidence_duration_ms": 6000,
+                    "rca_duration_ms": 2500,
+                },
+            }
+        ],
+        "thinking_events": [
+            {
+                "type": "tool_start",
+                "tool_name": "fetch_runbook",
+                "tool_call_id": "rb-1",
+                "tool_args": {"runbook_id": "pod-oomkilled.md"},
             },
-        }],
-        "thinking_events": [{
-            "type": "tool_start",
-            "tool_name": "fetch_runbook",
-            "tool_call_id": "rb-1",
-            "tool_args": {"runbook_id": "pod-oomkilled.md"},
-        }, {
-            "type": "tool_result",
-            "status": "success",
-            "tool_name": "fetch_runbook",
-            "tool_call_id": "rb-1",
-            "result_preview": "<runbook>\n# L2 Pod OOMKilled (Exit Code 137)",
-        }],
+            {
+                "type": "tool_result",
+                "status": "success",
+                "tool_name": "fetch_runbook",
+                "tool_call_id": "rb-1",
+                "result_preview": "<runbook>\n# L2 Pod OOMKilled (Exit Code 137)",
+            },
+        ],
         "evidence_items": [],
         "tool_results": [],
         "llm_calls": 1,
@@ -200,11 +205,13 @@ def test_metrics_trace_lists_unique_fetched_runbooks_without_lane_grouping():
         "pod-config-error",
         "pod-crashloop-runtime",
     ]
-    metrics.runbooks_by_lane = [{
-        "group_id": "g1",
-        "entities": [{"namespace": "demo", "name": "oom-pod"}],
-        "runbooks": ["pod-crashloop-runtime", "pod-oomkilled"],
-    }]
+    metrics.runbooks_by_lane = [
+        {
+            "group_id": "g1",
+            "entities": [{"namespace": "demo", "name": "oom-pod"}],
+            "runbooks": ["pod-crashloop-runtime", "pod-oomkilled"],
+        }
+    ]
 
     trace = metrics.format_metrics_block(enabled=False)
 
@@ -221,9 +228,7 @@ def test_metrics_trace_lists_unique_fetched_runbooks_without_lane_grouping():
 
 
 def test_autonomous_observability_runtime_switches_are_deployed():
-    configmap = yaml.safe_load(
-        Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")
-    )
+    configmap = yaml.safe_load(Path("deploy/configmap/config.yaml").read_text(encoding="utf-8"))
     config = yaml.safe_load(configmap["data"]["config.yaml"])
     servers = config["mcp_servers"]
 
@@ -244,9 +249,7 @@ def test_autonomous_observability_runtime_switches_are_deployed():
 
 
 def test_primary_runbooks_offer_query_guidance_without_fixed_tool_sequence():
-    configmap = yaml.safe_load(
-        Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8")
-    )
+    configmap = yaml.safe_load(Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8"))
     data = configmap["data"]
 
     for name in (

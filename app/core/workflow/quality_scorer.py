@@ -41,9 +41,9 @@ DEFAULT_PENALTIES = {
 
 # 保底分配置
 DEFAULT_BASELINE = {
-    "with_evidence": 0.80,      # 有结论 + 有证据/工具 → 保底
-    "with_root_cause": 0.75,    # 有结论 + 有根因但无工具证据 → 保底
-    "minimum": 0.0,             # 绝对最低分
+    "with_evidence": 0.80,  # 有结论 + 有证据/工具 → 保底
+    "with_root_cause": 0.75,  # 有结论 + 有根因但无工具证据 → 保底
+    "minimum": 0.0,  # 绝对最低分
 }
 
 DEFAULT_EVIDENCE_LEVEL_WEIGHTS = {
@@ -52,14 +52,16 @@ DEFAULT_EVIDENCE_LEVEL_WEIGHTS = {
     "SUPPLEMENTARY": 0.3,
 }
 
+
 @dataclass
 class ConfidenceDimension:
     """单个评分维度"""
+
     name: str
     weight: float
-    score: float          # [0, 1]
+    score: float  # [0, 1]
     description: str
-    detail: str = ""      # 人类可读的评分依据
+    detail: str = ""  # 人类可读的评分依据
 
     @property
     def weighted_score(self) -> float:
@@ -79,8 +81,9 @@ class ConfidenceDimension:
 @dataclass
 class Penalty:
     """惩罚项"""
+
     name: str
-    value: float          # 扣分值 [0, 1]
+    value: float  # 扣分值 [0, 1]
     reason: str
 
     def to_dict(self) -> Dict:
@@ -90,6 +93,7 @@ class Penalty:
 @dataclass
 class ConfidenceResult:
     """置信度评分结果"""
+
     final_score: float
     dimensions: List[ConfidenceDimension]
     penalties: List[Penalty]
@@ -105,6 +109,7 @@ class ConfidenceResult:
             "penalties": [p.to_dict() for p in self.penalties],
         }
 
+
 class QualityScorer:
     """
     质量评分引擎
@@ -117,15 +122,11 @@ class QualityScorer:
         self._dimensions_config = metrics_config.get(
             "confidence_dimensions", DEFAULT_CONFIDENCE_DIMENSIONS
         )
-        self._penalties_config = metrics_config.get(
-            "penalties", DEFAULT_PENALTIES
-        )
+        self._penalties_config = metrics_config.get("penalties", DEFAULT_PENALTIES)
         self._evidence_weights = metrics_config.get(
             "evidence_level_weights", DEFAULT_EVIDENCE_LEVEL_WEIGHTS
         )
-        self._baseline = metrics_config.get(
-            "baseline", DEFAULT_BASELINE
-        )
+        self._baseline = metrics_config.get("baseline", DEFAULT_BASELINE)
 
     # ================================================================
     # 根因置信度评分
@@ -148,13 +149,15 @@ class QualityScorer:
         evidence_items = state.get("evidence_items", [])
         ev_score, _ = self.score_evidence_completeness(evidence_items)
         dim_cfg = self._dimensions_config.get("evidence_strength", {})
-        dimensions.append(ConfidenceDimension(
-            name="evidence_strength",
-            weight=dim_cfg.get("weight", 0.35),
-            score=ev_score,
-            description=dim_cfg.get("description", "加权证据完整率"),
-            detail=f"加权完整率 {ev_score:.0%}",
-        ))
+        dimensions.append(
+            ConfidenceDimension(
+                name="evidence_strength",
+                weight=dim_cfg.get("weight", 0.35),
+                score=ev_score,
+                description=dim_cfg.get("description", "加权证据完整率"),
+                detail=f"加权完整率 {ev_score:.0%}",
+            )
+        )
 
         # --- 维度2: causal_chain ---
         # 从结构化字段 + 文本内容中检测因果链
@@ -162,31 +165,37 @@ class QualityScorer:
         decision = state.get("deterministic_decision")
         conclusion = state.get("conclusion_formatted") or state.get("conclusion") or ""
         rca_raw = state.get("rca_analysis", "")
-        chain_score = self._score_causal_chain(causal_chain, decision, evidence_items, conclusion, rca_raw)
+        chain_score = self._score_causal_chain(
+            causal_chain, decision, evidence_items, conclusion, rca_raw
+        )
         dim_cfg = self._dimensions_config.get("causal_chain", {})
-        dimensions.append(ConfidenceDimension(
-            name="causal_chain",
-            weight=dim_cfg.get("weight", 0.25),
-            score=chain_score,
-            description=dim_cfg.get("description", "因果链完整性"),
-            detail=f"{'完整' if chain_score >= 0.8 else '部分' if chain_score > 0 else '无'}因果链",
-        ))
+        dimensions.append(
+            ConfidenceDimension(
+                name="causal_chain",
+                weight=dim_cfg.get("weight", 0.25),
+                score=chain_score,
+                description=dim_cfg.get("description", "因果链完整性"),
+                detail=f"{'完整' if chain_score >= 0.8 else '部分' if chain_score > 0 else '无'}因果链",
+            )
+        )
 
         # --- 维度3: tool_coverage ---
         tool_results = state.get("tool_results", [])
         tool_score = self._score_tool_coverage(tool_results, metrics)
         dim_cfg = self._dimensions_config.get("tool_coverage", {})
-        dimensions.append(ConfidenceDimension(
-            name="tool_coverage",
-            weight=dim_cfg.get("weight", 0.15),
-            score=tool_score,
-            description=dim_cfg.get("description", "关键探针覆盖率"),
-            detail=f"工具成功率 {tool_score:.0%}",
-        ))
+        dimensions.append(
+            ConfidenceDimension(
+                name="tool_coverage",
+                weight=dim_cfg.get("weight", 0.15),
+                score=tool_score,
+                description=dim_cfg.get("description", "关键探针覆盖率"),
+                detail=f"工具成功率 {tool_score:.0%}",
+            )
+        )
 
         # --- 维度4: runbook_match (梯度评分) ---
-        runbook_matched = getattr(metrics, 'runbook_matched', False) if metrics else False
-        primary_runbook = getattr(metrics, 'primary_runbook', None) if metrics else None
+        runbook_matched = getattr(metrics, "runbook_matched", False) if metrics else False
+        primary_runbook = getattr(metrics, "primary_runbook", None) if metrics else None
         if primary_runbook:
             runbook_score = 1.0  # 有核心 runbook 命中
             runbook_detail = f"核心: {primary_runbook}"
@@ -197,26 +206,30 @@ class QualityScorer:
             runbook_score = 0.3  # 未匹配，但不是 0（AI 可能用了通用知识）
             runbook_detail = "未匹配"
         dim_cfg = self._dimensions_config.get("runbook_match", {})
-        dimensions.append(ConfidenceDimension(
-            name="runbook_match",
-            weight=dim_cfg.get("weight", 0.15),
-            score=runbook_score,
-            description=dim_cfg.get("description", "Runbook 匹配质量"),
-            detail=runbook_detail,
-        ))
+        dimensions.append(
+            ConfidenceDimension(
+                name="runbook_match",
+                weight=dim_cfg.get("weight", 0.15),
+                score=runbook_score,
+                description=dim_cfg.get("description", "Runbook 匹配质量"),
+                detail=runbook_detail,
+            )
+        )
 
         # --- 维度5: llm_self_score ---
         llm_score, llm_source = self._extract_llm_self_score(state)
         if llm_source == "fallback":
             fallback_applied = True
         dim_cfg = self._dimensions_config.get("llm_self_score", {})
-        dimensions.append(ConfidenceDimension(
-            name="llm_self_score",
-            weight=dim_cfg.get("weight", 0.10),
-            score=llm_score,
-            description=dim_cfg.get("description", "LLM 自评分数"),
-            detail=f"来源: {llm_source}, 分数: {llm_score:.0%}",
-        ))
+        dimensions.append(
+            ConfidenceDimension(
+                name="llm_self_score",
+                weight=dim_cfg.get("weight", 0.10),
+                score=llm_score,
+                description=dim_cfg.get("description", "LLM 自评分数"),
+                detail=f"来源: {llm_source}, 分数: {llm_score:.0%}",
+            )
+        )
 
         # --- 计算加权总分 ---
         total_weight = sum(d.weight for d in dimensions)
@@ -234,7 +247,7 @@ class QualityScorer:
         has_root_cause = bool(state.get("root_cause"))
         has_evidence = len(evidence_items) > 0
         has_tool_calls = len(state.get("tool_results", [])) > 0 or (
-            getattr(metrics, 'total_tool_calls', 0) > 0 if metrics else False
+            getattr(metrics, "total_tool_calls", 0) > 0 if metrics else False
         )
 
         final_score = weighted_total
@@ -256,9 +269,7 @@ class QualityScorer:
     # ================================================================
     # 证据完整率（加权）
     # ================================================================
-    def score_evidence_completeness(
-        self, evidence_items: List[Any]
-    ) -> Tuple[float, Dict]:
+    def score_evidence_completeness(self, evidence_items: List[Any]) -> Tuple[float, Dict]:
         """
         按 EvidenceLevel 加权计算证据完整率
 
@@ -274,9 +285,9 @@ class QualityScorer:
 
         for item in evidence_items:
             level_name = "IMPORTANT"  # 默认
-            if hasattr(item, 'level'):
+            if hasattr(item, "level"):
                 level_val = item.level
-                if hasattr(level_val, 'value'):
+                if hasattr(level_val, "value"):
                     level_name = level_val.value
                 elif isinstance(level_val, str):
                     level_name = level_val.upper()
@@ -287,7 +298,7 @@ class QualityScorer:
                 level_stats[level_name] = {"total": 0, "collected": 0, "weight": level_w}
             level_stats[level_name]["total"] += 1
 
-            collected = getattr(item, 'collected', False) if hasattr(item, 'collected') else False
+            collected = getattr(item, "collected", False) if hasattr(item, "collected") else False
             if collected:
                 level_stats[level_name]["collected"] += 1
                 collected_weight += level_w
@@ -315,8 +326,12 @@ class QualityScorer:
     # 私有方法：各维度评分逻辑
     # ================================================================
     def _score_causal_chain(
-        self, causal_chain: Dict, decision: Any, evidence_items: List,
-        conclusion: str = "", rca_raw: str = ""
+        self,
+        causal_chain: Dict,
+        decision: Any,
+        evidence_items: List,
+        conclusion: str = "",
+        rca_raw: str = "",
     ) -> float:
         """因果链完整性评分 — 从结构化字段 + 文本内容检测"""
         score = 0.0
@@ -329,9 +344,15 @@ class QualityScorer:
         if score < 0.5:
             all_text = f"{conclusion}\n{rca_raw}"
             chain_indicators = [
-                "因果链", "根本原因", "传导机制", "直接原因",
-                "causal", "root cause", "→",
-                "┌─", "└─",  # ASCII 因果链图
+                "因果链",
+                "根本原因",
+                "传导机制",
+                "直接原因",
+                "causal",
+                "root cause",
+                "→",
+                "┌─",
+                "└─",  # ASCII 因果链图
             ]
             matches = sum(1 for ind in chain_indicators if ind in all_text)
             if matches >= 3:
@@ -341,7 +362,7 @@ class QualityScorer:
 
         # 3. 有证据支撑加分
         if evidence_items and score > 0:
-            collected = [e for e in evidence_items if getattr(e, 'collected', False)]
+            collected = [e for e in evidence_items if getattr(e, "collected", False)]
             if collected:
                 score = min(1.0, score + 0.1)
 
@@ -352,7 +373,7 @@ class QualityScorer:
         total = len(tool_results) if tool_results else 0
         if total == 0:
             # 从 metrics 补充
-            total = getattr(metrics, 'total_tool_calls', 0) if metrics else 0
+            total = getattr(metrics, "total_tool_calls", 0) if metrics else 0
             if total > 0:
                 return 0.85  # 有工具调用但无详细结果，给个合理分
             return 0.3  # 完全没有工具调用，但不是 0
@@ -371,7 +392,7 @@ class QualityScorer:
         """
         # 1. 优先从 deterministic_decision.confidence_score
         decision = state.get("deterministic_decision")
-        if decision and hasattr(decision, 'confidence_score') and decision.confidence_score > 0:
+        if decision and hasattr(decision, "confidence_score") and decision.confidence_score > 0:
             return decision.confidence_score, "deterministic_decision"
 
         # 2. 从 rca_analysis JSON
@@ -396,9 +417,9 @@ class QualityScorer:
         all_text = f"{conclusion}\n{rca_raw}\n{evidence_raw}"
 
         patterns = [
-            r'置信度[：:]\s*(?:约?\s*)?(\d{1,3})\s*%',
-            r'置信度[：:|\s]*(?:高|中|低)\s*\(?(\d{1,3})\s*%\)?',
-            r'\*\*置信度\*\*\s*\|\s*(?:高|中|低)\s*\(?(\d{1,3})\s*%\)?',
+            r"置信度[：:]\s*(?:约?\s*)?(\d{1,3})\s*%",
+            r"置信度[：:|\s]*(?:高|中|低)\s*\(?(\d{1,3})\s*%\)?",
+            r"\*\*置信度\*\*\s*\|\s*(?:高|中|低)\s*\(?(\d{1,3})\s*%\)?",
             r'"confidence"\s*:\s*(0\.\d+|1\.0)',
         ]
         for pattern in patterns:

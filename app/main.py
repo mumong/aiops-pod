@@ -3,6 +3,7 @@
 HolmesGPT API Server
 FastAPI 应用入口，只负责应用配置和启动
 """
+
 import asyncio
 import logging
 import os
@@ -27,14 +28,23 @@ for _handler in logging.getLogger().handlers:
 logger = logging.getLogger(__name__)
 
 # 确保所有 app.* 模块的日志级别统一受控
-logging.getLogger('app').setLevel(_log_level)
+logging.getLogger("app").setLevel(_log_level)
 
 # 抑制第三方库的 DEBUG 噪音（它们在 DEBUG 模式下产生海量日志，淹没业务日志）
 for noisy_lib in [
-    'httpcore', 'httpx', 'openai', 'LiteLLM', 'litellm',
-    'urllib3', 'asyncio', 'charset_normalizer',
-    'langchain', 'langgraph', 'langsmith',
-    'holmes', 'supabase',
+    "httpcore",
+    "httpx",
+    "openai",
+    "LiteLLM",
+    "litellm",
+    "urllib3",
+    "asyncio",
+    "charset_normalizer",
+    "langchain",
+    "langgraph",
+    "langsmith",
+    "holmes",
+    "supabase",
 ]:
     logging.getLogger(noisy_lib).setLevel(max(_log_level, logging.WARNING))
 
@@ -44,11 +54,11 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     from app.core import get_service
     from app.core.mcp import auto_start_mcp_servers, shutdown_mcp_servers
-    
+
     logger.info("=" * 60)
     logger.info("K8s AIOps Copilot 启动中...")
     logger.info("=" * 60)
-    
+
     # ==================== 1. 启动 MCP 服务器（可选） ====================
     # 默认不自动启动本地 MCP 子进程：生产环境更常见的模式是直接连接第三方/独立部署的 MCP Server
     # 如确实需要在本进程内自动拉起（例如本地开发跑 bridge），设置：
@@ -57,7 +67,12 @@ async def lifespan(app: FastAPI):
     logger.info("[步骤 1/2] MCP 服务器连接/启动检查...")
     logger.info("-" * 40)
 
-    auto_start_local = os.getenv("MCP_AUTO_START_LOCAL", "false").lower() in ("1", "true", "yes", "on")
+    auto_start_local = os.getenv("MCP_AUTO_START_LOCAL", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     if auto_start_local:
         try:
             mcp_results = await auto_start_mcp_servers()
@@ -68,7 +83,9 @@ async def lifespan(app: FastAPI):
 
                 for name, success in mcp_results.items():
                     status_icon = "✅" if success else "❌"
-                    logger.info("   %s %s: %s", status_icon, name, '启动成功' if success else '启动失败')
+                    logger.info(
+                        "   %s %s: %s", status_icon, name, "启动成功" if success else "启动失败"
+                    )
 
                 logger.info("   本地 MCP 子进程: %s/%s 个启动成功", success_count, total_count)
             else:
@@ -81,8 +98,10 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("   本地 MCP 启动失败: %s", e, exc_info=True)
     else:
-        logger.info("   ℹ️ 已禁用本地 MCP auto-start（默认）。将直接使用配置中的第三方 MCP URL 连接。")
-    
+        logger.info(
+            "   ℹ️ 已禁用本地 MCP auto-start（默认）。将直接使用配置中的第三方 MCP URL 连接。"
+        )
+
     # ==================== 2. 初始化 AIOps Copilot 服务 ====================
     logger.info("")
     logger.info("[步骤 2/2] 初始化 AIOps Copilot 服务...")
@@ -109,24 +128,24 @@ async def lifespan(app: FastAPI):
             logger.info("   AIOps Copilot 服务初始化完成")
     except Exception as e:
         logger.error("   服务初始化失败: %s", e, exc_info=True)
-    
+
     logger.info("")
     logger.info("=" * 60)
     logger.info("服务启动完成!")
     logger.info("=" * 60)
-    
+
     yield
-    
+
     # ==================== 清理资源 ====================
     logger.info("")
     logger.info("正在关闭服务...")
-    
+
     try:
         await shutdown_mcp_servers()
         logger.info("MCP 服务器已关闭")
     except Exception as e:
         logger.error("关闭 MCP 服务器时出错: %s", e)
-    
+
     logger.info("服务已停止")
 
 
@@ -135,7 +154,7 @@ app = FastAPI(
     title="HolmesGPT API Server",
     description="智能运维 Copilot API 服务",
     version=get_app_version(),
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # 配置 CORS
@@ -159,10 +178,10 @@ def create_app() -> FastAPI:
 def main():
     """启动 API 服务器"""
     import uvicorn
-    
+
     port = int(os.getenv("API_PORT", "8000"))
     host = os.getenv("API_HOST", "0.0.0.0")
-    
+
     logger.info("启动 AIOps Copilot API 服务器")
     logger.info("   地址: http://%s:%s", host, port)
     logger.info("   日志级别: %s", logging.getLevelName(_log_level))
@@ -174,7 +193,7 @@ def main():
     logger.info("   其他端点:")
     logger.info("   API 文档: http://%s:%s/docs", host, port)
     logger.info("   健康检查: http://%s:%s/health", host, port)
-    
+
     # uvicorn log_config 必须使用与 _log_level 一致的级别，否则会覆盖 basicConfig
     _level_name = logging.getLevelName(_log_level)  # e.g. "DEBUG", "INFO"
     log_config = {
@@ -234,7 +253,7 @@ def main():
         port=port,
         log_level=_level_name.lower(),
         log_config=log_config,
-        use_colors=True
+        use_colors=True,
     )
     server = uvicorn.Server(config)
     server.run()

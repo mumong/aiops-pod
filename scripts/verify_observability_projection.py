@@ -120,8 +120,7 @@ def run(patterns: list[str], max_chars: int, local_timezone: str) -> dict[str, A
                 }
             )
         if (
-            budget.get("selection_terminated_by")
-            in {"budget", "budget_scan_completed"}
+            budget.get("selection_terminated_by") in {"budget", "budget_scan_completed"}
             and budget.get("rejected_candidates", 0) > 0
         ):
             report["budget_stops"].append(
@@ -144,7 +143,10 @@ def run(patterns: list[str], max_chars: int, local_timezone: str) -> dict[str, A
                     "omitted": audit.get("omitted_profile_counts", {}),
                 }
             )
-        if selection.get("selected") != len(selected_evidence) or selection.get("omitted") != expected_omitted:
+        if (
+            selection.get("selected") != len(selected_evidence)
+            or selection.get("omitted") != expected_omitted
+        ):
             report["selection_count_mismatches"].append(path)
         retrieval = summary.get("retrieval") or {}
         if retrieval.get("raw_ref") != str(Path(path).resolve()) or not Path(path).is_file():

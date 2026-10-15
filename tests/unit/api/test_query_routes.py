@@ -43,29 +43,33 @@ def _build_client(monkeypatch):
 
 def test_repair_source_identifier_is_forwarded_and_requires_session(monkeypatch):
     client, service = _build_client(monkeypatch)
-    assert client.get('/ask', params={'q': 'repair', 'diagnosis_run_id': 'run1'}).status_code == 400
-    params = {'q': 'repair', 'diagnosis_run_id': 'run1', 'session_id': 'a'*32}
-    assert client.get('/ask', params=params).status_code == 200
-    assert service.stream_calls[-1]['workflow_overrides']['_diagnosis_run_id'] == 'run1'
-    assert client.get('/query', params={**params, 'plan_run_id': 'plan1'}).status_code == 400
-    assert client.get('/query', params={**params, 'diagnosis_run_id': '../escape'}).status_code == 400
+    assert (
+        client.get("/ask", params={"q": "repair", "diagnosis_run_id": "run1"}).status_code == 400
+    )
+    params = {"q": "repair", "diagnosis_run_id": "run1", "session_id": "a" * 32}
+    assert client.get("/ask", params=params).status_code == 200
+    assert service.stream_calls[-1]["workflow_overrides"]["_diagnosis_run_id"] == "run1"
+    assert client.get("/query", params={**params, "plan_run_id": "plan1"}).status_code == 400
+    assert (
+        client.get("/query", params={**params, "diagnosis_run_id": "../escape"}).status_code == 400
+    )
 
 
 def test_query_session_cookie_isolation_and_validation(monkeypatch):
     client, service = _build_client(monkeypatch)
-    params = {'q': 'pods', 'session_id': 'a' * 32}
-    response = client.get('/query', params=params)
+    params = {"q": "pods", "session_id": "a" * 32}
+    response = client.get("/query", params=params)
     assert response.status_code == 200
-    assert 'HttpOnly' in response.headers['set-cookie']
-    first = service.stream_calls[-1]['workflow_overrides']['_query_session_key']
-    client.get('/query', params=params)
-    assert service.stream_calls[-1]['workflow_overrides']['_query_session_key'] == first
+    assert "HttpOnly" in response.headers["set-cookie"]
+    first = service.stream_calls[-1]["workflow_overrides"]["_query_session_key"]
+    client.get("/query", params=params)
+    assert service.stream_calls[-1]["workflow_overrides"]["_query_session_key"] == first
     client.cookies.clear()
-    client.get('/query', params=params)
-    assert service.stream_calls[-1]['workflow_overrides']['_query_session_key'][0] != first[0]
-    assert client.get('/query', params={'q': 'x', 'session_id': '../bad'}).status_code == 422
-    client.post('/query', data=params)
-    assert '_query_session_key' in service.stream_calls[-1]['workflow_overrides']
+    client.get("/query", params=params)
+    assert service.stream_calls[-1]["workflow_overrides"]["_query_session_key"][0] != first[0]
+    assert client.get("/query", params={"q": "x", "session_id": "../bad"}).status_code == 422
+    client.post("/query", data=params)
+    assert "_query_session_key" in service.stream_calls[-1]["workflow_overrides"]
 
 
 def test_ask_route_uses_task_routing_with_diagnosis_available(monkeypatch):
@@ -89,7 +93,9 @@ def test_ask_route_uses_task_routing_with_diagnosis_available(monkeypatch):
 def test_ask_route_ignores_legacy_remediate_parameter(monkeypatch):
     client, fake_service = _build_client(monkeypatch)
 
-    response = client.get("/ask", params={"q": "我的集群有什么问题？", "stream": "true", "remediate": "true"})
+    response = client.get(
+        "/ask", params={"q": "我的集群有什么问题？", "stream": "true", "remediate": "true"}
+    )
 
     assert response.status_code == 200
     assert response.text == "ok"
@@ -100,7 +106,9 @@ def test_ask_route_ignores_legacy_remediate_parameter(monkeypatch):
 def test_ask_route_does_not_reject_sync_with_legacy_remediate_parameter(monkeypatch):
     client, fake_service = _build_client(monkeypatch)
 
-    response = client.get("/ask", params={"q": "我的集群有什么问题？", "stream": "false", "remediate": "true"})
+    response = client.get(
+        "/ask", params={"q": "我的集群有什么问题？", "stream": "false", "remediate": "true"}
+    )
 
     assert response.status_code == 200
     assert len(fake_service.sync_calls) == 1
@@ -122,13 +130,13 @@ def test_query_route_uses_intent_router_and_server_remediation_policy(monkeypatc
 
 def test_ask_and_query_share_owner_scoped_session_identity(monkeypatch):
     client, service = _build_client(monkeypatch)
-    params = {'q': 'pods', 'session_id': 'a' * 32}
-    client.get('/query', params=params)
-    key = service.stream_calls[-1]['workflow_overrides']['_query_session_key']
-    client.get('/ask', params=params)
-    assert service.stream_calls[-1]['workflow_overrides']['_query_session_key'] == key
-    client.post('/ask', data=params)
-    assert service.stream_calls[-1]['workflow_overrides']['_query_session_key'] == key
+    params = {"q": "pods", "session_id": "a" * 32}
+    client.get("/query", params=params)
+    key = service.stream_calls[-1]["workflow_overrides"]["_query_session_key"]
+    client.get("/ask", params=params)
+    assert service.stream_calls[-1]["workflow_overrides"]["_query_session_key"] == key
+    client.post("/ask", data=params)
+    assert service.stream_calls[-1]["workflow_overrides"]["_query_session_key"] == key
 
 
 def test_query_stream_route_sets_query_title(monkeypatch):
@@ -160,7 +168,9 @@ def test_remediation_approve_route_resolves_request(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["success"] is True
-    decision = approval_store.wait_for_decision("run-api", request.approval_id, timeout_seconds=0.01)
+    decision = approval_store.wait_for_decision(
+        "run-api", request.approval_id, timeout_seconds=0.01
+    )
     assert decision is not None
     assert decision.approved is True
     assert decision.reviewer == "tester"

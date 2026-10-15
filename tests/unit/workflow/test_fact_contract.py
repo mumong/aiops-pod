@@ -35,14 +35,11 @@ def _canonical_fact_id(record: dict) -> str:
     payload = {
         key: value
         for key, value in record.items()
-        if key != "fact_id"
-        and (key not in _OPTIONAL_FACT_FIELDS or value not in (None, {}, []))
+        if key != "fact_id" and (key not in _OPTIONAL_FACT_FIELDS or value not in (None, {}, []))
     }
-    payload["evidence_refs"] = sorted({
-        str(ref)
-        for ref in payload.get("evidence_refs", [])
-        if str(ref or "").strip()
-    })
+    payload["evidence_refs"] = sorted(
+        {str(ref) for ref in payload.get("evidence_refs", []) if str(ref or "").strip()}
+    )
     canonical = json.dumps(
         payload,
         ensure_ascii=False,
@@ -70,21 +67,23 @@ def _fact(
     strength: str = "strong",
     value=None,
 ):
-    return _with_canonical_fact_id({
-        "entity_id": entity_id,
-        "entity_kind": "Pod",
-        "namespace": "demo",
-        "entity_name": entity_id.rsplit("/", 1)[-1].split(":", 1)[0],
-        "dimension": dimension,
-        "fact_type": fact_type,
-        "attribute": f"{dimension}.observed",
-        "value": value if value is not None else {"message": marker},
-        "source_system": "test-source",
-        "directness": directness,
-        "confidence": confidence,
-        "strength": strength,
-        "evidence_refs": [f"ref:{marker}"],
-    })
+    return _with_canonical_fact_id(
+        {
+            "entity_id": entity_id,
+            "entity_kind": "Pod",
+            "namespace": "demo",
+            "entity_name": entity_id.rsplit("/", 1)[-1].split(":", 1)[0],
+            "dimension": dimension,
+            "fact_type": fact_type,
+            "attribute": f"{dimension}.observed",
+            "value": value if value is not None else {"message": marker},
+            "source_system": "test-source",
+            "directness": directness,
+            "confidence": confidence,
+            "strength": strength,
+            "evidence_refs": [f"ref:{marker}"],
+        }
+    )
 
 
 def _ledger(
@@ -143,10 +142,12 @@ def test_normalize_fact_ledger_keeps_id_built_from_stripped_source():
     entity_id = "k8s.pod:demo/api:uid-a"
     record = _fact("source-canonical-after-strip", entity_id)
     record["source_system"] = "  kubernetes  "
-    record["fact_id"] = _canonical_fact_id({
-        **record,
-        "source_system": "kubernetes",
-    })
+    record["fact_id"] = _canonical_fact_id(
+        {
+            **record,
+            "source_system": "kubernetes",
+        }
+    )
 
     ledger = normalize_fact_ledger(
         _ledger(
@@ -223,9 +224,7 @@ def test_normalize_fact_ledger_rejects_nested_evaluator_key_variants(
     }
     record["fact_id"] = _canonical_fact_id(record)
 
-    ledger = normalize_fact_ledger(
-        _ledger("case-evaluator", entity_id, [record])
-    )
+    ledger = normalize_fact_ledger(_ledger("case-evaluator", entity_id, [record]))
 
     assert ledger is not None
     assert ledger.records == []
@@ -295,9 +294,7 @@ def test_normalize_fact_ledger_preserves_source_text_with_causal_words():
         value={"message": message},
     )
 
-    ledger = normalize_fact_ledger(
-        _ledger("case-source-text", entity_id, [record])
-    )
+    ledger = normalize_fact_ledger(_ledger("case-source-text", entity_id, [record]))
 
     assert ledger is not None
     assert [item.fact_id for item in ledger.records] == [record["fact_id"]]
@@ -320,15 +317,10 @@ def test_normalize_fact_ledger_accepts_valid_canonical_id_and_sorts_refs():
 def test_normalize_fact_ledger_preserves_complete_canonical_evidence_refs():
     entity_id = "k8s.pod:demo/api:uid-a"
     record = _fact("complete-refs", entity_id)
-    record["evidence_refs"] = [
-        f"ref:{index:02d}"
-        for index in range(40)
-    ]
+    record["evidence_refs"] = [f"ref:{index:02d}" for index in range(40)]
     record["fact_id"] = _canonical_fact_id(record)
 
-    ledger = normalize_fact_ledger(
-        _ledger("case-complete-refs", entity_id, [record])
-    )
+    ledger = normalize_fact_ledger(_ledger("case-complete-refs", entity_id, [record]))
 
     assert ledger is not None
     assert ledger.records[0].fact_id == record["fact_id"]
@@ -340,9 +332,7 @@ def test_normalize_fact_ledger_rejects_mismatched_canonical_id():
     record = _fact("mismatched", entity_id)
     record["fact_id"] = "fact-000000000000"
 
-    ledger = normalize_fact_ledger(
-        _ledger("case-mismatched-id", entity_id, [record])
-    )
+    ledger = normalize_fact_ledger(_ledger("case-mismatched-id", entity_id, [record]))
 
     assert ledger is not None
     assert ledger.records == []

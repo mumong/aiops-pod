@@ -398,9 +398,7 @@ def test_temporal_pattern_stratification_keeps_rare_tail_without_severity_rules(
     audit = result["audit"]
     assert audit["semantic_patterns_omitted"] > 0
     assert audit["budget"]["selection_terminated_by"] == "budget_scan_completed"
-    assert audit["budget"]["first_rejected"]["reason"] == (
-        "candidate_exceeds_remaining_budget"
-    )
+    assert audit["budget"]["first_rejected"]["reason"] == ("candidate_exceeds_remaining_budget")
     assert audit["budget"]["candidates_unattempted"] == 0
     assert audit["omitted_pattern_preview"]
     assert audit["selected_profile_counts"]
@@ -651,9 +649,7 @@ def test_trace_budget_gives_flow_and_span_a_first_wave_slot():
     evidence = json.loads(result["summary"])["evidence"]
     trace_types = {item["trace_type"] for item in evidence}
     flow_codes = {
-        item["data"]["response_code"]
-        for item in evidence
-        if item["trace_type"] == "flow"
+        item["data"]["response_code"] for item in evidence if item["trace_type"] == "flow"
     }
 
     assert trace_types == {"flow", "span"}
@@ -683,8 +679,7 @@ def test_log_pattern_keeps_head_and_tail_state_progression():
         max_chars=3000,
     )
     selected_values = {
-        item["attributes"]["allocated_mib"]
-        for item in json.loads(result["summary"])["evidence"]
+        item["attributes"]["allocated_mib"] for item in json.loads(result["summary"])["evidence"]
     }
 
     assert {10, 48} <= selected_values

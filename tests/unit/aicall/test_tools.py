@@ -1,4 +1,5 @@
 """Tests for MCP tool loading"""
+
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -127,7 +128,10 @@ def test_prometheus_wrapper_uses_content_response_format():
 
 def test_load_mcp_tools_honors_mode_and_reports_failed_servers():
     config = {
-        "ok": {"config": {"url": "http://localhost:8093/mcp", "mode": "streamable-http"}, "enabled": True},
+        "ok": {
+            "config": {"url": "http://localhost:8093/mcp", "mode": "streamable-http"},
+            "enabled": True,
+        },
         "down": {"config": {"url": "http://localhost:9999/sse", "mode": "sse"}, "enabled": True},
     }
     seen = {}

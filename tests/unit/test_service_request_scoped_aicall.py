@@ -64,6 +64,7 @@ def test_workflow_request_uses_fresh_aicall_instance(monkeypatch):
     assert all(instance.api_key == service.ai_call.api_key for instance in created)
     assert all(instance.api_base == service.ai_call.api_base for instance in created)
     assert all(
-        instance.kwargs["chat_model_extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+        instance.kwargs["chat_model_extra_body"]["chat_template_kwargs"]["enable_thinking"]
+        is False
         for instance in created
     )

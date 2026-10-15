@@ -62,12 +62,8 @@ def test_canonical_fact_ledger_contract_precedes_ordinary_remediation_json():
     }
     text = "\n\n".join(
         [
-            "```json\n"
-            + json.dumps(ordinary_plan, ensure_ascii=False)
-            + "\n```",
-            "```json\n"
-            + json.dumps(canonical_plan, ensure_ascii=False)
-            + "\n```",
+            "```json\n" + json.dumps(ordinary_plan, ensure_ascii=False) + "\n```",
+            "```json\n" + json.dumps(canonical_plan, ensure_ascii=False) + "\n```",
         ]
     )
 
@@ -87,25 +83,28 @@ def test_canonical_fact_ledger_contract_precedes_ordinary_remediation_json():
     ],
 )
 def test_t017_fact_ledger_authority_marker_forces_manual_only_plan(contract):
-    text = "```json\n" + json.dumps(
-        {
-            "remediation_contract": contract,
-            "remediation_available": True,
-            "fix_type": "patch_workload_resources",
-            "requires_human_approval": False,
-            "actions": [
-                {
-                    "id": "unsafe-write",
-                    "type": "kubectl_set",
-                    "execute_command": (
-                        "kubectl set resources deployment/api -n demo "
-                        "--limits=memory=128Mi"
-                    ),
-                }
-            ],
-        },
-        ensure_ascii=False,
-    ) + "\n```"
+    text = (
+        "```json\n"
+        + json.dumps(
+            {
+                "remediation_contract": contract,
+                "remediation_available": True,
+                "fix_type": "patch_workload_resources",
+                "requires_human_approval": False,
+                "actions": [
+                    {
+                        "id": "unsafe-write",
+                        "type": "kubectl_set",
+                        "execute_command": (
+                            "kubectl set resources deployment/api -n demo --limits=memory=128Mi"
+                        ),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n```"
+    )
 
     plan = extract_remediation_plan(text)
 
@@ -117,28 +116,30 @@ def test_t017_fact_ledger_authority_marker_forces_manual_only_plan(contract):
 
 
 def test_t017_nested_fact_ledger_marker_forces_manual_only_for_sibling_plan():
-    text = "```json\n" + json.dumps(
-        {
-            "diagnostic_contract": {
-                "authority": {
-                    "remediation_contract": (
-                        "fact-ledger-diagnostic-only-v1"
-                    )
-                }
+    text = (
+        "```json\n"
+        + json.dumps(
+            {
+                "diagnostic_contract": {
+                    "authority": {"remediation_contract": ("fact-ledger-diagnostic-only-v1")}
+                },
+                "remediation_plan": {
+                    "remediation_available": True,
+                    "fix_type": "delete_pod",
+                    "requires_human_approval": False,
+                    "actions": [
+                        {
+                            "id": "unsafe-nested-marker-write",
+                            "type": "kubectl_delete",
+                            "execute_command": "kubectl delete pod api -n demo",
+                        }
+                    ],
+                },
             },
-            "remediation_plan": {
-                "remediation_available": True,
-                "fix_type": "delete_pod",
-                "requires_human_approval": False,
-                "actions": [{
-                    "id": "unsafe-nested-marker-write",
-                    "type": "kubectl_delete",
-                    "execute_command": "kubectl delete pod api -n demo",
-                }],
-            },
-        },
-        ensure_ascii=False,
-    ) + "\n```"
+            ensure_ascii=False,
+        )
+        + "\n```"
+    )
 
     plan = extract_remediation_plan(text)
 
@@ -182,22 +183,24 @@ def test_t017_duplicate_contract_key_cannot_overwrite_fact_ledger_marker():
 
 @pytest.mark.parametrize("separator", ["\n", "\t"])
 def test_rejects_decoded_control_whitespace_in_kubectl_commands(separator):
-    text = "```json\n" + json.dumps(
-        {
-            "remediation_available": True,
-            "fix_type": "delete_pod",
-            "actions": [
-                {
-                    "id": "delete-api",
-                    "type": "kubectl_delete",
-                    "execute_command": (
-                        f"kubectl{separator}delete pod api -n demo"
-                    ),
-                }
-            ],
-        },
-        ensure_ascii=False,
-    ) + "\n```"
+    text = (
+        "```json\n"
+        + json.dumps(
+            {
+                "remediation_available": True,
+                "fix_type": "delete_pod",
+                "actions": [
+                    {
+                        "id": "delete-api",
+                        "type": "kubectl_delete",
+                        "execute_command": (f"kubectl{separator}delete pod api -n demo"),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n```"
+    )
 
     with pytest.raises(ValueError, match="unsafe remediation command"):
         extract_remediation_plan(text)
@@ -222,12 +225,8 @@ def test_legacy_multiple_plans_keep_first_valid_plan():
     }
     text = "\n\n".join(
         [
-            "```json\n"
-            + json.dumps(first_plan, ensure_ascii=False)
-            + "\n```",
-            "```json\n"
-            + json.dumps(second_plan, ensure_ascii=False)
-            + "\n```",
+            "```json\n" + json.dumps(first_plan, ensure_ascii=False) + "\n```",
+            "```json\n" + json.dumps(second_plan, ensure_ascii=False) + "\n```",
         ]
     )
 

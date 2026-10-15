@@ -5,9 +5,7 @@ import requests
 
 
 def _load_test_accuracy_module():
-    module_path = (
-        Path(__file__).resolve().parents[2] / "test" / "e2e" / "test_accuracy.py"
-    )
+    module_path = Path(__file__).resolve().parents[2] / "test" / "e2e" / "test_accuracy.py"
     spec = importlib.util.spec_from_file_location("test_accuracy_module", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

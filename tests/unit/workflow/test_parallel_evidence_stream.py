@@ -68,34 +68,41 @@ def test_scoped_parallel_queue_uses_outer_lifecycle_node_and_preserves_lane_stag
 
 
 def test_parallel_sse_projection_exposes_lane_stage_without_outer_node_override():
-    projected = project_parallel_tool_event({
-        "type": "ai_message",
-        "node": "parallel_evidence",
-        "lane_stage": "rca",
-        "parallel_context": _parallel_context(),
-    })
+    projected = project_parallel_tool_event(
+        {
+            "type": "ai_message",
+            "node": "parallel_evidence",
+            "lane_stage": "rca",
+            "parallel_context": _parallel_context(),
+        }
+    )
 
     assert projected == {"lane_stage": "rca", "parallel_group_id": "g3"}
 
 
 def test_general_prometheus_and_kubectl_logs_have_observability_dimensions():
-    for tool_name, dimension in [('execute_prometheus_instant_query','metrics'),
-                                 ('execute_prometheus_range_query','metrics'),
-                                 ('kubectl_previous_logs','logging')]:
-        context=build_parallel_evidence_stream_context({'parallel_context':_parallel_context(),
-                                                        'tool_name':tool_name})
-        assert context['dimension']==dimension
+    for tool_name, dimension in [
+        ("execute_prometheus_instant_query", "metrics"),
+        ("execute_prometheus_range_query", "metrics"),
+        ("kubectl_previous_logs", "logging"),
+    ]:
+        context = build_parallel_evidence_stream_context(
+            {"parallel_context": _parallel_context(), "tool_name": tool_name}
+        )
+        assert context["dimension"] == dimension
 
 
 def test_stream_context_uses_exact_group_entity_from_tool_arguments():
-    context = build_parallel_evidence_stream_context({
-        "parallel_context": _parallel_context(),
-        "tool_name": "kubectl_previous_logs",
-        "tool_args": {
-            "namespace": "aiops-case-09",
-            "pod_name": "workload-5f4fb9ff45-nmqpr",
-        },
-    })
+    context = build_parallel_evidence_stream_context(
+        {
+            "parallel_context": _parallel_context(),
+            "tool_name": "kubectl_previous_logs",
+            "tool_args": {
+                "namespace": "aiops-case-09",
+                "pod_name": "workload-5f4fb9ff45-nmqpr",
+            },
+        }
+    )
 
     assert context == {
         "contract_version": "aiops.parallel-evidence-stream.v1",
@@ -111,34 +118,38 @@ def test_stream_context_matches_pod_even_when_it_is_not_the_first_group_entity()
         "namespace": "aiops-case-09",
         "name": "workload-5f4fb9ff45-nmqpr",
     }
-    context = build_parallel_evidence_stream_context({
-        "parallel_context": {
-            "group_id": "g3",
-            "entities": [
-                {
-                    "kind": "Service",
-                    "namespace": "aiops-case-09",
-                    "name": "workload",
-                },
-                pod,
-            ],
-        },
-        "tool_name": "kubectl_previous_logs",
-        "tool_args": {
-            "namespace": "aiops-case-09",
-            "pod_name": "workload-5f4fb9ff45-nmqpr",
-        },
-    })
+    context = build_parallel_evidence_stream_context(
+        {
+            "parallel_context": {
+                "group_id": "g3",
+                "entities": [
+                    {
+                        "kind": "Service",
+                        "namespace": "aiops-case-09",
+                        "name": "workload",
+                    },
+                    pod,
+                ],
+            },
+            "tool_name": "kubectl_previous_logs",
+            "tool_args": {
+                "namespace": "aiops-case-09",
+                "pod_name": "workload-5f4fb9ff45-nmqpr",
+            },
+        }
+    )
 
     assert context["entity"] == pod
 
 
 def test_stream_context_keeps_group_only_when_tool_has_no_unique_pod():
-    context = build_parallel_evidence_stream_context({
-        "parallel_context": _parallel_context(),
-        "tool_name": "fetch_runbook",
-        "tool_args": {"runbook_id": "pod-notready-probe-failed.md"},
-    })
+    context = build_parallel_evidence_stream_context(
+        {
+            "parallel_context": _parallel_context(),
+            "tool_name": "fetch_runbook",
+            "tool_args": {"runbook_id": "pod-notready-probe-failed.md"},
+        }
+    )
 
     assert context == {
         "contract_version": "aiops.parallel-evidence-stream.v1",
@@ -149,18 +160,20 @@ def test_stream_context_keeps_group_only_when_tool_has_no_unique_pod():
 
 
 def test_stream_context_rejects_tool_entity_outside_scoped_group():
-    context = build_parallel_evidence_stream_context({
-        "parallel_context": _parallel_context(),
-        "tool_name": "query_pod_logs",
-        "tool_args": {
-            "namespace": "other-namespace",
-            "pod": "other-pod",
-        },
-        "structured": {
-            "dimension": "logging",
-            "source_system": "elasticsearch",
-        },
-    })
+    context = build_parallel_evidence_stream_context(
+        {
+            "parallel_context": _parallel_context(),
+            "tool_name": "query_pod_logs",
+            "tool_args": {
+                "namespace": "other-namespace",
+                "pod": "other-pod",
+            },
+            "structured": {
+                "dimension": "logging",
+                "source_system": "elasticsearch",
+            },
+        }
+    )
 
     assert context == {
         "contract_version": "aiops.parallel-evidence-stream.v1",
@@ -205,12 +218,14 @@ def test_parallel_result_projection_preserves_full_summary_and_failure_semantics
 
 
 def test_non_parallel_projection_does_not_expand_existing_sse_payload():
-    projected = project_parallel_tool_event({
-        "type": "tool_result",
-        "tool_name": "kubectl_previous_logs",
-        "tool_call_id": "ordinary-call",
-        "result": "large ordinary result",
-        "semantic_success": False,
-    })
+    projected = project_parallel_tool_event(
+        {
+            "type": "tool_result",
+            "tool_name": "kubectl_previous_logs",
+            "tool_call_id": "ordinary-call",
+            "result": "large ordinary result",
+            "semantic_success": False,
+        }
+    )
 
     assert projected == {}

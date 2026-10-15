@@ -13,6 +13,7 @@
 - 所有并发查询共享同一个 httpx 连接池（单事件循环）
 - 最终答案使用 stream=True 减少首 token 延迟
 """
+
 from __future__ import annotations
 
 import ast
@@ -47,7 +48,7 @@ class FederationAgent:
         model: str,
         api_key: str,
         api_base: str = None,
-        max_steps: int = 30
+        max_steps: int = 30,
     ):
         self.registry = registry
         self.toolset = FederationToolset(registry)
@@ -84,11 +85,17 @@ class FederationAgent:
                 if attempt < self._max_retries:
                     delay = self._retry_base_delay * (2 ** (attempt - 1))  # 指数退避: 2s, 4s, 8s
                     logger.warning(
-                        "[FEDERATION AGENT] LLM 调用失败 (第%s次), %ss 后重试: %s: %s", attempt, delay, type(exc).__name__, str(exc)[:120]
+                        "[FEDERATION AGENT] LLM 调用失败 (第%s次), %ss 后重试: %s: %s",
+                        attempt,
+                        delay,
+                        type(exc).__name__,
+                        str(exc)[:120],
                     )
                     time.sleep(delay)
                 else:
-                    logger.error("[FEDERATION AGENT] LLM 调用失败 (已重试%s次): %s", self._max_retries, exc)
+                    logger.error(
+                        "[FEDERATION AGENT] LLM 调用失败 (已重试%s次): %s", self._max_retries, exc
+                    )
         raise last_exc
 
     def ask_stream(self, question: str, endpoint_path: str = "/ask") -> Generator[str, None, None]:
@@ -103,7 +110,7 @@ class FederationAgent:
         # 构建初始消息
         messages = [
             {"role": "system", "content": FEDERATION_AGENT_PROMPT},
-            {"role": "user", "content": question}
+            {"role": "user", "content": question},
         ]
 
         # 收集各子集群的完整报告文本（用于最终合成）
@@ -130,21 +137,23 @@ class FederationAgent:
 
                 if message.tool_calls:
                     # 添加 assistant 消息
-                    messages.append({
-                        "role": "assistant",
-                        "content": message.content or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": message.content or "",
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments,
+                                    },
                                 }
-                            }
-                            for tc in message.tool_calls
-                        ]
-                    })
+                                for tc in message.tool_calls
+                            ],
+                        }
+                    )
 
                     # 执行工具调用 — 实时 yield 子集群输出
                     tool_results = yield from self._execute_tools_streaming(
@@ -153,11 +162,9 @@ class FederationAgent:
 
                     # 添加工具结果到消息历史
                     for tool_call, result in tool_results:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": str(result)
-                        })
+                        messages.append(
+                            {"role": "tool", "tool_call_id": tool_call.id, "content": str(result)}
+                        )
 
                 else:
                     # 没有工具调用 → 流式生成最终答案
@@ -220,10 +227,13 @@ class FederationAgent:
             cluster_name = args.get("cluster_name", "")
             agent_cfg = enabled_agents.get(cluster_name)
             if not agent_cfg:
-                results[tc.id] = (tc, {
-                    "error": f"Cluster '{cluster_name}' not found",
-                    "available_clusters": list(enabled_agents.keys())
-                })
+                results[tc.id] = (
+                    tc,
+                    {
+                        "error": f"Cluster '{cluster_name}' not found",
+                        "available_clusters": list(enabled_agents.keys()),
+                    },
+                )
                 continue
             valid_queries.append((tc, args, cluster_name, agent_cfg))
             cluster_chunks[cluster_name] = []
@@ -239,6 +249,7 @@ class FederationAgent:
             """在独立线程中流式查询一个子集群"""
             client = SubAgentClient()
             try:
+
                 async def _run():
                     async for _name, chunk in client.query_stream_realtime(
                         agent_cfg,
@@ -249,6 +260,7 @@ class FederationAgent:
                     ):
                         chunk_queue.put((cluster_name, chunk))
                     chunk_queue.put((cluster_name, None))  # sentinel
+
                 asyncio.run(_run())
             except Exception as exc:
                 chunk_queue.put((cluster_name, f"\n❌ {cluster_name} 查询失败: {exc}\n"))
@@ -259,9 +271,14 @@ class FederationAgent:
         for _tc, _args, cluster_name, agent_cfg in valid_queries:
             t = threading.Thread(
                 target=_stream_cluster,
-                args=(agent_cfg, cluster_name, args.get("question", ""),
-                      args.get("max_steps", 30), args.get("conclusion_max_tokens", 8192)),
-                daemon=True
+                args=(
+                    agent_cfg,
+                    cluster_name,
+                    args.get("question", ""),
+                    args.get("max_steps", 30),
+                    args.get("conclusion_max_tokens", 8192),
+                ),
+                daemon=True,
             )
             threads.append(t)
             t.start()
@@ -310,14 +327,19 @@ class FederationAgent:
         for tc, _args, cluster_name, _agent_cfg in valid_queries:
             full_text = "".join(cluster_chunks.get(cluster_name, []))
             cluster_reports[cluster_name] = full_text
-            self._save_report(cluster_name, type('R', (), {'text': full_text, 'elapsed_seconds': 0})())
+            self._save_report(
+                cluster_name, type("R", (), {"text": full_text, "elapsed_seconds": 0})()
+            )
 
             parsed_report = extract_final_answer(full_text)
-            results[tc.id] = (tc, {
-                "cluster": cluster_name,
-                "success": True,
-                "response": parsed_report.final_answer,
-            })
+            results[tc.id] = (
+                tc,
+                {
+                    "cluster": cluster_name,
+                    "success": True,
+                    "response": parsed_report.final_answer,
+                },
+            )
 
         return [results[tc.id] for tc in tool_calls]
 
@@ -367,7 +389,9 @@ class FederationAgent:
         # 按原始顺序返回结果
         return [results[tc.id] for tc in tool_calls]
 
-    def _batch_query_clusters(self, query_calls: List[tuple], endpoint_path: str = "/ask") -> List[tuple]:
+    def _batch_query_clusters(
+        self, query_calls: List[tuple], endpoint_path: str = "/ask"
+    ) -> List[tuple]:
         """
         批量并发执行多个 query_cluster 调用。
 
@@ -395,13 +419,15 @@ class FederationAgent:
             cluster_name = args.get("cluster_name", "")
             agent = enabled_agents.get(cluster_name)
             if agent:
-                queries.append({
-                    "agent": agent,
-                    "question": args.get("question", ""),
-                    "max_steps": args.get("max_steps", 30),
-                    "conclusion_max_tokens": args.get("conclusion_max_tokens", 8192),
-                    "endpoint_path": endpoint_path,
-                })
+                queries.append(
+                    {
+                        "agent": agent,
+                        "question": args.get("question", ""),
+                        "max_steps": args.get("max_steps", 30),
+                        "conclusion_max_tokens": args.get("conclusion_max_tokens", 8192),
+                        "endpoint_path": endpoint_path,
+                    }
+                )
                 tc_map.append((tc, cluster_name, True))
             else:
                 tc_map.append((tc, cluster_name, False))
@@ -427,23 +453,26 @@ class FederationAgent:
                         "cluster": cluster_name,
                         "success": True,
                         "response": parsed.final_answer,
-                        "elapsed_seconds": sub_result.elapsed_seconds
+                        "elapsed_seconds": sub_result.elapsed_seconds,
                     }
                 else:
                     result = {
                         "cluster": cluster_name,
                         "success": False,
                         "error": sub_result.error,
-                        "elapsed_seconds": sub_result.elapsed_seconds
+                        "elapsed_seconds": sub_result.elapsed_seconds,
                     }
 
                 logger.info(
-                    "[FEDERATION AGENT] [并发] %s 完成: %s, 耗时 %.1fs", cluster_name, '成功' if sub_result.success else '失败', sub_result.elapsed_seconds
+                    "[FEDERATION AGENT] [并发] %s 完成: %s, 耗时 %.1fs",
+                    cluster_name,
+                    "成功" if sub_result.success else "失败",
+                    sub_result.elapsed_seconds,
                 )
             else:
                 result = {
                     "error": f"Cluster '{cluster_name}' not found",
-                    "available_clusters": list(enabled_agents.keys())
+                    "available_clusters": list(enabled_agents.keys()),
                 }
 
             results.append((tc, result))
@@ -470,7 +499,9 @@ class FederationAgent:
 
             logger.info("[FEDERATION A2A] 已保存 %s 报告到: %s", cluster_name, filepath)
         except Exception as exc:
-            logger.error("[FEDERATION A2A] 保存报告失败 (%s): %s", cluster_name, exc, exc_info=True)
+            logger.error(
+                "[FEDERATION A2A] 保存报告失败 (%s): %s", cluster_name, exc, exc_info=True
+            )
 
     def _stream_final_answer(self, messages: List[Dict]) -> Generator[str, None, None]:
         """
@@ -510,11 +541,19 @@ class FederationAgent:
                 if attempt < self._max_retries:
                     delay = self._retry_base_delay * (2 ** (attempt - 1))
                     logger.warning(
-                        "[FEDERATION AGENT] 流式回答失败 (第%s次), %ss 后重试: %s", attempt, delay, type(exc).__name__
+                        "[FEDERATION AGENT] 流式回答失败 (第%s次), %ss 后重试: %s",
+                        attempt,
+                        delay,
+                        type(exc).__name__,
                     )
                     time.sleep(delay)
                 else:
-                    logger.error("[FEDERATION AGENT] 流式回答失败 (已重试%s次): %s", self._max_retries, exc, exc_info=True)
+                    logger.error(
+                        "[FEDERATION AGENT] 流式回答失败 (已重试%s次): %s",
+                        self._max_retries,
+                        exc,
+                        exc_info=True,
+                    )
                     yield f"\n❌ 生成最终报告失败: {str(exc)}\n"
             except Exception as exc:
                 logger.error("[FEDERATION AGENT] 流式最终回答失败: %s", exc, exc_info=True)
@@ -533,53 +572,43 @@ class FederationAgent:
         tools = []
 
         for tool in self.toolset.get_tools():
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": self._get_tool_parameters(tool)
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": self._get_tool_parameters(tool),
+                    },
                 }
-            })
+            )
 
         return tools
 
     def _get_tool_parameters(self, tool) -> Dict[str, Any]:
         """获取工具参数的 JSON Schema"""
         if tool.name == "list_clusters":
-            return {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+            return {"type": "object", "properties": {}, "required": []}
         elif tool.name == "query_cluster":
             return {
                 "type": "object",
                 "properties": {
-                    "cluster_name": {
-                        "type": "string",
-                        "description": "子集群名称"
-                    },
-                    "question": {
-                        "type": "string",
-                        "description": "要查询的问题"
-                    },
-                    "max_steps": {
-                        "type": "integer",
-                        "description": "最大执行步数",
-                        "default": 30
-                    },
+                    "cluster_name": {"type": "string", "description": "子集群名称"},
+                    "question": {"type": "string", "description": "要查询的问题"},
+                    "max_steps": {"type": "integer", "description": "最大执行步数", "default": 30},
                     "conclusion_max_tokens": {
                         "type": "integer",
                         "description": "结论最大 token 数",
-                        "default": 8192
-                    }
+                        "default": 8192,
+                    },
                 },
-                "required": ["cluster_name", "question"]
+                "required": ["cluster_name", "question"],
             }
         return {"type": "object", "properties": {}}
 
-    def _execute_tool(self, tool_name: str, params: Dict[str, Any], endpoint_path: str = "/ask") -> Dict[str, Any]:
+    def _execute_tool(
+        self, tool_name: str, params: Dict[str, Any], endpoint_path: str = "/ask"
+    ) -> Dict[str, Any]:
         """执行单个工具调用"""
         tool = self.toolset.get_tool_by_name(tool_name)
         if not tool:

@@ -30,10 +30,13 @@ def test_write_in_verify_field_cannot_bypass_action_approval():
     store = ApprovalStore()
     calls = []
     executor = RemediationAgentExecutor(
-        approval_store=store, command_runner=lambda command: calls.append(command),
+        approval_store=store,
+        command_runner=lambda command: calls.append(command),
         decision_provider=lambda **_: AgentDecision(
-            decision="run_command", command="kubectl get pod memhog -n aiops-e2e",
-            verify_command="kubectl scale deployment/memhog -n aiops-e2e --replicas=0"),
+            decision="run_command",
+            command="kubectl get pod memhog -n aiops-e2e",
+            verify_command="kubectl scale deployment/memhog -n aiops-e2e --replicas=0",
+        ),
     )
     events = executor.run("hidden-write", _plan(), "report", approval_timeout_seconds=1)
     plan_event = next(events)
@@ -63,7 +66,9 @@ def test_agent_mode_stops_failed_when_pod_still_unhealthy_after_iterations():
             command="kubectl set resources deployment/memhog -n aiops-e2e --limits=memory=512Mi",
             verify_command="kubectl get pod -l app=memhog -n aiops-e2e",
         ),
-        AgentDecision(decision="finish", status="failed", reason="Pod still OOMKilled after resource update"),
+        AgentDecision(
+            decision="finish", status="failed", reason="Pod still OOMKilled after resource update"
+        ),
     ]
 
     executor = RemediationAgentExecutor(
@@ -278,7 +283,11 @@ def test_agent_mode_auto_finishes_after_planned_action_terminal_health_verify_su
             command="kubectl rollout restart deployment/appconfigfail -n aiops-e2e",
             verify_command="kubectl rollout status deployment/appconfigfail -n aiops-e2e --timeout=60s",
         ),
-        AgentDecision(decision="run_command", command="", reason="should not be called after terminal verification"),
+        AgentDecision(
+            decision="run_command",
+            command="",
+            reason="should not be called after terminal verification",
+        ),
     ]
 
     def runner(command):
@@ -316,15 +325,25 @@ def test_agent_mode_preserves_multiple_issue_groups_in_plan_payload():
         risk_level="medium",
         requires_human_approval=True,
         issue_groups=[
-            {"group_id": "g1", "problem_type": "OOMKilled", "target": "aiops-e2e/deployment/memhog"},
-            {"group_id": "g2", "problem_type": "ImagePullFailed", "target": "default/statefulset/test-redis"},
+            {
+                "group_id": "g1",
+                "problem_type": "OOMKilled",
+                "target": "aiops-e2e/deployment/memhog",
+            },
+            {
+                "group_id": "g2",
+                "problem_type": "ImagePullFailed",
+                "target": "default/statefulset/test-redis",
+            },
         ],
         basis=["multi issue"],
         actions=[],
     )
     executor = RemediationAgentExecutor(
         approval_store=store,
-        decision_provider=lambda **_: AgentDecision(decision="finish", status="failed", reason="manual only"),
+        decision_provider=lambda **_: AgentDecision(
+            decision="finish", status="failed", reason="manual only"
+        ),
     )
 
     events = executor.run(run_id="run1", plan=plan, report="report", approval_timeout_seconds=0.01)
@@ -430,7 +449,7 @@ def test_agent_review_mode_requires_plan_approval_before_finalizer_patch_action(
                 dry_run_command="kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
                 execute_command=(
                     "kubectl patch pod terminating-stuck -n aiops-e2e "
-                    "-p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+                    '-p \'{"metadata":{"finalizers":null}}\' --type=merge'
                 ),
                 verify_command="kubectl get pod terminating-stuck -n aiops-e2e",
                 metadata={"group_id": "g1"},
@@ -440,7 +459,9 @@ def test_agent_review_mode_requires_plan_approval_before_finalizer_patch_action(
 
     def runner(command):
         calls.append(command)
-        if command.startswith("kubectl get pod") and any(call.startswith("kubectl patch pod") for call in calls):
+        if command.startswith("kubectl get pod") and any(
+            call.startswith("kubectl patch pod") for call in calls
+        ):
             raise RuntimeError('Error from server (NotFound): pods "terminating-stuck" not found')
         if command.startswith("kubectl get pod"):
             return "finalizers: aiops.e2e/hold"
@@ -455,25 +476,31 @@ def test_agent_review_mode_requires_plan_approval_before_finalizer_patch_action(
             dry_run_command="kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
             command=(
                 "kubectl patch pod terminating-stuck -n aiops-e2e "
-                "-p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+                '-p \'{"metadata":{"finalizers":null}}\' --type=merge'
             ),
             verify_command="kubectl get pod terminating-stuck -n aiops-e2e",
         ),
     )
 
-    events = executor.run(run_id="run-review-finalizer", plan=plan, report="report", approval_mode="review")
+    events = executor.run(
+        run_id="run-review-finalizer", plan=plan, report="report", approval_mode="review"
+    )
 
     plan_approval = next(events)
     assert plan_approval["type"] == "remediation_approval_required"
     assert plan_approval["approval_kind"] == "plan"
     assert calls == []
-    store.resolve("run-review-finalizer", plan_approval["approval_id"], approved=True, reviewer="tester")
+    store.resolve(
+        "run-review-finalizer", plan_approval["approval_id"], approved=True, reviewer="tester"
+    )
 
     action_approval = next(events)
     assert action_approval["type"] == "remediation_approval_required"
     assert action_approval["approval_kind"] == "action"
     assert calls == []
-    store.resolve("run-review-finalizer", action_approval["approval_id"], approved=True, reviewer="tester")
+    store.resolve(
+        "run-review-finalizer", action_approval["approval_id"], approved=True, reviewer="tester"
+    )
 
     remaining = list(events)
     assert any(event.get("stage") == "execute" for event in remaining)
@@ -505,7 +532,7 @@ def test_agent_auto_mode_runs_finalizer_patch_without_approval_events():
                 dry_run_command="kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
                 execute_command=(
                     "kubectl patch pod terminating-stuck -n aiops-e2e "
-                    "-p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+                    '-p \'{"metadata":{"finalizers":null}}\' --type=merge'
                 ),
                 verify_command="kubectl get pod terminating-stuck -n aiops-e2e",
                 metadata={"group_id": "g1"},
@@ -515,7 +542,9 @@ def test_agent_auto_mode_runs_finalizer_patch_without_approval_events():
 
     def runner(command):
         calls.append(command)
-        if command.startswith("kubectl get pod") and any(call.startswith("kubectl patch pod") for call in calls):
+        if command.startswith("kubectl get pod") and any(
+            call.startswith("kubectl patch pod") for call in calls
+        ):
             raise RuntimeError('Error from server (NotFound): pods "terminating-stuck" not found')
         if command.startswith("kubectl get pod"):
             return "finalizers: aiops.e2e/hold"
@@ -530,7 +559,7 @@ def test_agent_auto_mode_runs_finalizer_patch_without_approval_events():
             dry_run_command="kubectl get pod terminating-stuck -n aiops-e2e -o yaml",
             command=(
                 "kubectl patch pod terminating-stuck -n aiops-e2e "
-                "-p '{\"metadata\":{\"finalizers\":null}}' --type=merge"
+                '-p \'{"metadata":{"finalizers":null}}\' --type=merge'
             ),
             verify_command="kubectl get pod terminating-stuck -n aiops-e2e",
         ),

@@ -3,6 +3,7 @@
 Models select targets and evidence. Code preserves identity and previously
 published facts; it does not decide whether an observation is a fault.
 """
+
 from copy import deepcopy
 from typing import Literal
 
@@ -67,9 +68,13 @@ class LocationOutput(ContractModel):
 
 class DiagnosisFact(ContractModel):
     fact_id: str = Field(min_length=1)
-    summary: str = Field(min_length=1, description="关键原始事实，不复制完整工具正文；保留数值、单位或原始错误")
+    summary: str = Field(
+        min_length=1, description="关键原始事实，不复制完整工具正文；保留数值、单位或原始错误"
+    )
     observed_at: str = Field(description="源端观测时间；无法确定时留空，不猜测")
-    evidence_refs: list[str] = Field(min_length=1, description="实际工具返回或归档引用；不是 Runbook 判断")
+    evidence_refs: list[str] = Field(
+        min_length=1, description="实际工具返回或归档引用；不是 Runbook 判断"
+    )
     previous_fact_id: str = Field(default="", description="由传递层记录版本关联；新增事实留空")
 
 

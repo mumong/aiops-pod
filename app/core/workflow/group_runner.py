@@ -3,6 +3,7 @@
 No diagnosis, repair strategy, approval or resource mutation belongs here.
 Each worker owns its client and mutable state; results retain the input identity.
 """
+
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from app.core.log_context import bind_current_context

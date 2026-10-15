@@ -35,9 +35,7 @@ _CONTEXT_WINDOW_KEYS = {
 
 
 _TOKENIZER_CACHE: Dict[str, Any] = {}
-_DETERMINISTIC_COMPACTION_MARKER = (
-    "\n...[deterministic context compaction: middle omitted]...\n"
-)
+_DETERMINISTIC_COMPACTION_MARKER = "\n...[deterministic context compaction: middle omitted]...\n"
 
 
 def _env_truthy(name: str, default: str = "false") -> bool:
@@ -93,7 +91,9 @@ def count_tokens(text: Any, model: str = "") -> Dict[str, Any]:
                 "accuracy": "exact",
             }
         except Exception as exc:
-            logger.warning("[context_budget] 文件分词计数失败，回退估算，异常类型: %s", type(exc).__name__)
+            logger.warning(
+                "[context_budget] 文件分词计数失败，回退估算，异常类型: %s", type(exc).__name__
+            )
 
     tiktoken_encoding = os.getenv("AIOPS_TIKTOKEN_ENCODING", "").strip()
     if tiktoken_encoding:
@@ -111,7 +111,9 @@ def count_tokens(text: Any, model: str = "") -> Dict[str, Any]:
                 "accuracy": "exact",
             }
         except Exception as exc:
-            logger.warning("[context_budget] 编码分词计数失败，回退估算，异常类型: %s", type(exc).__name__)
+            logger.warning(
+                "[context_budget] 编码分词计数失败，回退估算，异常类型: %s", type(exc).__name__
+            )
 
     short_model = _short_model_name(model)
     if short_model and re.match(r"^(gpt-|o[0-9]|chatgpt-)", short_model.lower()):
@@ -155,11 +157,7 @@ def calculate_hard_input_limit(
         return 0
     normalized_ratio = min(max(float(input_ratio), 0.05), 0.95)
     ratio_limit = int(context_window * normalized_ratio)
-    reserve_limit = (
-        int(context_window)
-        - max(0, int(output_reserved))
-        - max(0, int(safety_margin))
-    )
+    reserve_limit = int(context_window) - max(0, int(output_reserved)) - max(0, int(safety_margin))
     return max(0, min(ratio_limit, reserve_limit))
 
 
@@ -238,9 +236,7 @@ def _fit_text_edge_to_token_budget(
     best = ""
     while low <= high:
         length = (low + high) // 2
-        candidate = text[-length:] if from_end and length else (
-            text[:length] if length else ""
-        )
+        candidate = text[-length:] if from_end and length else (text[:length] if length else "")
         if count_tokens(candidate, model=model)["tokens"] <= max_tokens:
             best = candidate
             low = length + 1
@@ -394,7 +390,9 @@ class ModelContextResolver:
                     self._metadata_cache[cache_key] = result
                     return result
             except Exception:
-                logger.debug("_from_openai_compatible_metadata: falling back after error", exc_info=True)
+                logger.debug(
+                    "_from_openai_compatible_metadata: falling back after error", exc_info=True
+                )
                 continue
         return None
 
@@ -404,18 +402,10 @@ def serialize_tool_schema(tools: Optional[Iterable[Any]]) -> List[Dict[str, Any]
     serialized: List[Dict[str, Any]] = []
     for tool in tools or []:
         if isinstance(tool, dict):
-            function = (
-                tool.get("function")
-                if isinstance(tool.get("function"), dict)
-                else tool
-            )
+            function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
             item = {
                 "name": function.get("name") or tool.get("name") or "unknown_tool",
-                "description": (
-                    function.get("description")
-                    or tool.get("description")
-                    or ""
-                ),
+                "description": (function.get("description") or tool.get("description") or ""),
             }
             parameters = (
                 function.get("parameters")
@@ -499,8 +489,16 @@ class ContextBudgetEstimator:
                     "token_accuracy": tool_schema_count["accuracy"],
                 },
                 {"name": "handoff", "category": "static_input", "content": handoff},
-                {"name": "tool_traces", "category": "dynamic_runtime", "content": list(tool_traces or [])},
-                {"name": "scratchpad_reserved", "category": "reserved", "tokens": scratchpad_reserved},
+                {
+                    "name": "tool_traces",
+                    "category": "dynamic_runtime",
+                    "content": list(tool_traces or []),
+                },
+                {
+                    "name": "scratchpad_reserved",
+                    "category": "reserved",
+                    "tokens": scratchpad_reserved,
+                },
                 {"name": "output_reserved", "category": "reserved", "tokens": output_reserved},
             ]
 
@@ -509,19 +507,29 @@ class ContextBudgetEstimator:
         usage_ratio = (estimated_total / context_window) if context_window else None
         provider_input_usage_ratio = (
             provider_prompt_tokens / context_window
-            if isinstance(provider_prompt_tokens, int) and isinstance(context_window, int) and context_window > 0
+            if isinstance(provider_prompt_tokens, int)
+            and isinstance(context_window, int)
+            and context_window > 0
             else None
         )
 
-        static_context_tokens = sum(c["tokens"] for c in normalized_components if c["category"] == "static_input")
-        dynamic_context_tokens = sum(c["tokens"] for c in normalized_components if c["category"] == "dynamic_runtime")
-        reserved_tokens = sum(c["tokens"] for c in normalized_components if c["category"] == "reserved")
+        static_context_tokens = sum(
+            c["tokens"] for c in normalized_components if c["category"] == "static_input"
+        )
+        dynamic_context_tokens = sum(
+            c["tokens"] for c in normalized_components if c["category"] == "dynamic_runtime"
+        )
+        reserved_tokens = sum(
+            c["tokens"] for c in normalized_components if c["category"] == "reserved"
+        )
         actual_context_tokens = static_context_tokens + dynamic_context_tokens
-        token_sources = sorted({
-            str(c.get("token_source"))
-            for c in normalized_components
-            if c.get("token_source") and c.get("category") != "reserved"
-        })
+        token_sources = sorted(
+            {
+                str(c.get("token_source"))
+                for c in normalized_components
+                if c.get("token_source") and c.get("category") != "reserved"
+            }
+        )
         token_accuracies = {
             str(c.get("token_accuracy"))
             for c in normalized_components
@@ -535,8 +543,12 @@ class ContextBudgetEstimator:
             token_count_accuracy = "estimated"
 
         for component in normalized_components:
-            component["total_ratio"] = round(component["tokens"] / estimated_total, 4) if estimated_total else 0.0
-            component["window_ratio"] = round(component["tokens"] / context_window, 4) if context_window else None
+            component["total_ratio"] = (
+                round(component["tokens"] / estimated_total, 4) if estimated_total else 0.0
+            )
+            component["window_ratio"] = (
+                round(component["tokens"] / context_window, 4) if context_window else None
+            )
 
         budget = {
             "node": node_id,
@@ -569,15 +581,21 @@ class ContextBudgetEstimator:
             "user": self._component_tokens(normalized_components, "user_message"),
             "tool_schema": self._component_tokens(normalized_components, "tool_schema"),
             "handoff": self._component_tokens(normalized_components, "handoff", "layer_handoff"),
-            "tool_traces": self._component_tokens(normalized_components, "tool_traces", "tool_observations"),
-            "scratchpad_reserved": self._component_tokens(normalized_components, "scratchpad_reserved"),
+            "tool_traces": self._component_tokens(
+                normalized_components, "tool_traces", "tool_observations"
+            ),
+            "scratchpad_reserved": self._component_tokens(
+                normalized_components, "scratchpad_reserved"
+            ),
             "output_reserved": self._component_tokens(normalized_components, "output_reserved"),
             "estimated_total": estimated_total,
             "usage_ratio": usage_ratio,
         }
         return budget
 
-    def _normalize_components(self, components: List[Dict[str, Any]], model: str = "") -> List[Dict[str, Any]]:
+    def _normalize_components(
+        self, components: List[Dict[str, Any]], model: str = ""
+    ) -> List[Dict[str, Any]]:
         normalized = []
         for component in components or []:
             name = str(component.get("name") or "unknown")
@@ -592,22 +610,29 @@ class ContextBudgetEstimator:
                 token_accuracy = counted["accuracy"]
             else:
                 token_source = token_source or "provided"
-                token_accuracy = token_accuracy or ("reserved" if category == "reserved" else "unknown")
+                token_accuracy = token_accuracy or (
+                    "reserved" if category == "reserved" else "unknown"
+                )
             preview = component.get("preview")
             if preview is None and "content" in component:
                 content = component.get("content")
                 if not isinstance(content, str):
                     content = json.dumps(content, ensure_ascii=False, default=str)
                 preview = content[:200]
-            normalized.append({
-                "name": name,
-                "category": category,
-                "tokens": int(tokens or 0),
-                "token_source": token_source,
-                "token_accuracy": token_accuracy,
-                "chars": component.get("chars", len(str(component.get("content", ""))) if "content" in component else None),
-                "preview": preview,
-            })
+            normalized.append(
+                {
+                    "name": name,
+                    "category": category,
+                    "tokens": int(tokens or 0),
+                    "token_source": token_source,
+                    "token_accuracy": token_accuracy,
+                    "chars": component.get(
+                        "chars",
+                        len(str(component.get("content", ""))) if "content" in component else None,
+                    ),
+                    "preview": preview,
+                }
+            )
         return normalized
 
     @staticmethod
@@ -633,16 +658,26 @@ class ContextBudgetEstimator:
             budget.get("components", []),
             {"static_input", "dynamic_runtime"},
         )
-        input_tokens = provider_prompt_tokens if has_provider_exact else (
-            budget.get("actual_context_tokens") if token_accuracy == "exact" else (
-                f"~{estimated_input_tokens}" if estimated_input_tokens else "n/a"
+        input_tokens = (
+            provider_prompt_tokens
+            if has_provider_exact
+            else (
+                budget.get("actual_context_tokens")
+                if token_accuracy == "exact"
+                else (f"~{estimated_input_tokens}" if estimated_input_tokens else "n/a")
             )
         )
         if isinstance(provider_input_usage, (int, float)):
             input_usage = f"{provider_input_usage:.0%}"
             input_token_source = budget.get("provider_usage_source") or "provider_usage_probe"
-        elif token_accuracy == "exact" and isinstance(budget.get("context_window"), int) and budget.get("context_window"):
-            input_usage = f"{budget.get('actual_context_tokens') / budget.get('context_window'):.0%}"
+        elif (
+            token_accuracy == "exact"
+            and isinstance(budget.get("context_window"), int)
+            and budget.get("context_window")
+        ):
+            input_usage = (
+                f"{budget.get('actual_context_tokens') / budget.get('context_window'):.0%}"
+            )
             input_token_source = "local_tokenizer"
         else:
             context_window = budget.get("context_window")
@@ -653,7 +688,9 @@ class ContextBudgetEstimator:
                 input_usage = "n/a"
                 input_token_source = "n/a"
         level = logging.INFO
-        ratio_for_level = provider_input_usage if isinstance(provider_input_usage, (int, float)) else usage
+        ratio_for_level = (
+            provider_input_usage if isinstance(provider_input_usage, (int, float)) else usage
+        )
         if isinstance(ratio_for_level, (int, float)):
             if ratio_for_level >= 0.90:
                 level = logging.ERROR
@@ -684,7 +721,8 @@ class ContextBudgetEstimator:
             )
 
         top_components = [
-            c for c in budget.get("components", [])
+            c
+            for c in budget.get("components", [])
             if c.get("category") in {"static_input", "dynamic_runtime"}
         ]
         top_components.sort(key=lambda c: int(c.get("tokens") or 0), reverse=True)

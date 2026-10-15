@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 def is_running_in_kubernetes() -> bool:
     """
     检测是否在 Kubernetes 集群内运行
-    
+
     检测方法：
     1. 检查 ServiceAccount token 文件是否存在
     2. 检查 KUBERNETES_SERVICE_HOST 环境变量
-    
+
     Returns:
         True 如果在 Kubernetes 集群内运行
     """
@@ -27,18 +27,18 @@ def is_running_in_kubernetes() -> bool:
     sa_token_path = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
     if sa_token_path.exists():
         return True
-    
+
     # 方法 2: 检查 KUBERNETES_SERVICE_HOST 环境变量
     if os.getenv("KUBERNETES_SERVICE_HOST"):
         return True
-    
+
     return False
 
 
 def get_environment() -> str:
     """
     获取当前运行环境名称
-    
+
     Returns:
         "kubernetes" 或 "local"
     """
@@ -89,16 +89,16 @@ def get_config_file_path(project_root: Path) -> Tuple[Path, str]:
 def log_environment_info():
     """输出环境信息日志"""
     env = get_environment()
-    
+
     logger.info("=" * 50)
     logger.info("运行环境信息")
     logger.info("=" * 50)
-    
+
     if env == "kubernetes":
         logger.info("   环境: Kubernetes 集群内")
-        logger.info("   K8s Host: %s", os.getenv('KUBERNETES_SERVICE_HOST', 'N/A'))
-        logger.info("   K8s Port: %s", os.getenv('KUBERNETES_SERVICE_PORT', 'N/A'))
-        
+        logger.info("   K8s Host: %s", os.getenv("KUBERNETES_SERVICE_HOST", "N/A"))
+        logger.info("   K8s Port: %s", os.getenv("KUBERNETES_SERVICE_PORT", "N/A"))
+
         # 尝试获取 Pod 信息
         pod_name = os.getenv("POD_NAME", os.getenv("HOSTNAME", "N/A"))
         pod_namespace = os.getenv("POD_NAMESPACE", "N/A")
@@ -106,7 +106,6 @@ def log_environment_info():
         logger.info("   Namespace: %s", pod_namespace)
     else:
         logger.info("   环境: 本地开发/集群外部")
-        logger.info("   主机: %s", os.getenv('HOSTNAME', 'localhost'))
-    
-    logger.info("=" * 50)
+        logger.info("   主机: %s", os.getenv("HOSTNAME", "localhost"))
 
+    logger.info("=" * 50)

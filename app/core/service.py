@@ -4,6 +4,7 @@ AIOps Copilot Service
 负责 AI 服务的初始化、配置和查询执行
 唯一模式：AICall (LangGraph) + Workflow
 """
+
 import json
 import logging
 import os
@@ -134,7 +135,9 @@ def configure_model_context_window(llm_config: Optional[Dict[str, Any]] = None) 
         if not text:
             continue
         if not text.isdigit():
-            logger.warning("[context_budget] 忽略无效 llm.%s=%r，必须是正整数 token 数", key, value)
+            logger.warning(
+                "[context_budget] 忽略无效 llm.%s=%r，必须是正整数 token 数", key, value
+            )
             return None
         os.environ["MODEL_CONTEXT_WINDOW"] = text
         logger.info("[context_budget] 从 config llm.%s 设置 MODEL_CONTEXT_WINDOW=%s", key, text)
@@ -186,9 +189,11 @@ class ThinkStreamFilter:
             body = match.group(1)
             if len(body) <= self.max_chars:
                 return match.group(0)
-            return f"<think>{body[:self.max_chars]}\n...（think 已截断）\n</think>"
+            return f"<think>{body[: self.max_chars]}\n...（think 已截断）\n</think>"
 
-        return re.sub(r"<think>(.*?)</think>", _truncate, text or "", flags=re.DOTALL | re.IGNORECASE)
+        return re.sub(
+            r"<think>(.*?)</think>", _truncate, text or "", flags=re.DOTALL | re.IGNORECASE
+        )
 
     def filter_token(self, text: str) -> str:
         """Filter token streaming while preserving state across chunks."""
@@ -206,7 +211,7 @@ class ThinkStreamFilter:
                 end = remaining.lower().find("</think>")
                 if end < 0:
                     return "".join(visible)
-                remaining = remaining[end + len("</think>"):]
+                remaining = remaining[end + len("</think>") :]
                 self._inside_think = False
                 continue
 
@@ -215,7 +220,7 @@ class ThinkStreamFilter:
                 visible.append(remaining)
                 break
             visible.append(remaining[:start])
-            remaining = remaining[start + len("<think>"):]
+            remaining = remaining[start + len("<think>") :]
             self._inside_think = True
         return "".join(visible)
 
@@ -229,7 +234,7 @@ class ThinkStreamFilter:
                     visible.append(remaining)
                     break
                 visible.append(remaining[: start + len("<think>")])
-                remaining = remaining[start + len("<think>"):]
+                remaining = remaining[start + len("<think>") :]
                 self._inside_think = True
                 self._think_chars = 0
                 self._truncated_current_block = False
@@ -237,7 +242,7 @@ class ThinkStreamFilter:
 
             end = remaining.lower().find("</think>")
             think_part = remaining if end < 0 else remaining[:end]
-            remaining_after_end = "" if end < 0 else remaining[end + len("</think>"):]
+            remaining_after_end = "" if end < 0 else remaining[end + len("</think>") :]
 
             if not self._truncated_current_block:
                 remaining_budget = self.max_chars - self._think_chars
@@ -271,13 +276,15 @@ class HolmesService:
         self.federation_coordinator: Optional[FederationCoordinator] = None
         self.federation_agent: Optional[FederationAgent] = None
         self._init_lock = threading.Lock()
-        self._init_finished = threading.Event()  # set when an init attempt ends (success or failure)
+        self._init_finished = (
+            threading.Event()
+        )  # set when an init attempt ends (success or failure)
         self._init_in_progress: bool = False
         self._init_error: Optional[str] = None
         self._init_started_at: Optional[datetime] = None
         self.workflow_config: Dict = {}  # 工作流配置（max_steps 等）
-        self.metrics_config: Dict = {}   # 质量指标配置
-        self.raw_config: Dict = {}       # 完整原始配置
+        self.metrics_config: Dict = {}  # 质量指标配置
+        self.raw_config: Dict = {}  # 完整原始配置
         self.ai_call: Optional[AICall] = None
         self.mcp_tools: list = []
         # 启动时连接失败的 MCP server：请求时按间隔补连（已发现的工具每次调用新建会话，可自行恢复）
@@ -295,7 +302,7 @@ class HolmesService:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         max_steps: int = 50,
-        config_file: Optional[Path] = None
+        config_file: Optional[Path] = None,
     ) -> Tuple[AppConfig, Any]:
         """初始化服务配置和 AICall 实例"""
         if self._is_initialized():
@@ -323,11 +330,13 @@ class HolmesService:
                 _raw_config: dict = {}
                 if config_file.exists():
                     import yaml as _yaml
+
                     with open(config_file, "r", encoding="utf-8") as _f:
                         _raw_config = _yaml.safe_load(_f) or {}
 
                 # 环境变量替换
                 from app.core.holmes.config_loader import substitute_env_vars
+
                 _raw_config = substitute_env_vars(_raw_config, logger)
 
                 _llm_config = _raw_config.get("llm", {}) or {}
@@ -336,6 +345,7 @@ class HolmesService:
                 self.raw_config = _raw_config
 
                 from app.core.workflow.metrics import load_metrics_config
+
                 load_metrics_config(self.metrics_config)
 
                 # API Key 优先级: 参数 > 环境变量 > config
@@ -407,14 +417,20 @@ class HolmesService:
                     chat_model_extra_body=self.get_chat_model_extra_body_config(_llm_config),
                     internal_extra_body=self.get_internal_extra_body_config(_llm_config),
                 )
-                logger.info("   AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
-                           final_model, summary_mode, summary_max_chars, time.time() - step_start)
+                logger.info(
+                    "   AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
+                    final_model,
+                    summary_mode,
+                    summary_max_chars,
+                    time.time() - step_start,
+                )
 
                 # 加载 MCP 工具
                 mcp_cfg = _raw_config.get("mcp_servers", {})
                 if mcp_cfg:
                     from app.core.aicall.tools import load_mcp_tools
                     from app.core.async_bridge import run_coroutine_sync
+
                     try:
                         step_start = time.time()
                         logger.info("[AICall] 加载 MCP 工具...")
@@ -425,8 +441,11 @@ class HolmesService:
                         self._mcp_servers_config = mcp_cfg
                         self._mcp_failed_servers = failed
                         self._mcp_retry_after = time.monotonic() + MCP_RETRY_INTERVAL_SECONDS
-                        logger.info("   [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
-                                   len(self.mcp_tools), time.time() - step_start)
+                        logger.info(
+                            "   [AICall] MCP 工具加载完成: %d 个 (%.2fs)",
+                            len(self.mcp_tools),
+                            time.time() - step_start,
+                        )
                         for t in self.mcp_tools:
                             logger.debug("      %s", t.name)
                     except Exception as e:
@@ -434,7 +453,9 @@ class HolmesService:
                         self.mcp_tools = []
                         self._mcp_servers_config = mcp_cfg
                         self._mcp_failed_servers = [
-                            name for name, cfg in mcp_cfg.items() if (cfg or {}).get("enabled", False)
+                            name
+                            for name, cfg in mcp_cfg.items()
+                            if (cfg or {}).get("enabled", False)
                         ]
                         self._mcp_retry_after = time.monotonic() + MCP_RETRY_INTERVAL_SECONDS
                 else:
@@ -443,10 +464,15 @@ class HolmesService:
 
                 # 加载内置工具
                 from app.core.aicall.builtin_tools import get_builtin_tools
+
                 builtin = get_builtin_tools()
                 self.mcp_tools = self.mcp_tools + builtin
-                logger.info("   [AICall] 工具总计: %d 个 (MCP %d + 内置 %d)",
-                           len(self.mcp_tools), len(self.mcp_tools) - len(builtin), len(builtin))
+                logger.info(
+                    "   [AICall] 工具总计: %d 个 (MCP %d + 内置 %d)",
+                    len(self.mcp_tools),
+                    len(self.mcp_tools) - len(builtin),
+                    len(builtin),
+                )
 
                 # 初始化联邦协调器
                 _federation_cfg = _raw_config.get("federation", {})
@@ -470,8 +496,7 @@ class HolmesService:
                 else:
                     logger.debug("[FEDERATION] federation 未启用，跳过")
 
-                logger.info("服务初始化完成 | 模式=AICall(LangGraph) | 模型=%s",
-                           self.config.model)
+                logger.info("服务初始化完成 | 模式=AICall(LangGraph) | 模型=%s", self.config.model)
 
                 # 输出资源信息
                 step_start = time.time()
@@ -509,8 +534,11 @@ class HolmesService:
             from app.core.aicall.tools import load_mcp_tools
             from app.core.async_bridge import run_coroutine_sync
 
-            retry_cfg = {name: self._mcp_servers_config[name] for name in self._mcp_failed_servers
-                         if name in self._mcp_servers_config}
+            retry_cfg = {
+                name: self._mcp_servers_config[name]
+                for name in self._mcp_failed_servers
+                if name in self._mcp_servers_config
+            }
             still_failed: List[str] = []
             try:
                 recovered = run_coroutine_sync(
@@ -521,11 +549,16 @@ class HolmesService:
                 logger.warning("[MCP-Tools] 补连失败: %s", exc)
                 recovered, still_failed = [], list(retry_cfg)
             known = {t.name for t in self.mcp_tools}
-            added = [t for t in recovered if t.name not in known and t.name not in DISABLED_TOOL_NAMES]
+            added = [
+                t for t in recovered if t.name not in known and t.name not in DISABLED_TOOL_NAMES
+            ]
             if added:
                 self.mcp_tools = self.mcp_tools + added
-                logger.info("[MCP-Tools] 补连成功，新增 %d 个工具: %s",
-                            len(added), ", ".join(t.name for t in added))
+                logger.info(
+                    "[MCP-Tools] 补连成功，新增 %d 个工具: %s",
+                    len(added),
+                    ", ".join(t.name for t in added),
+                )
             self._mcp_failed_servers = still_failed
             self._mcp_retry_after = time.monotonic() + MCP_RETRY_INTERVAL_SECONDS
         finally:
@@ -558,6 +591,7 @@ class HolmesService:
             return None
 
         from app.core.aicall.client import AICall
+
         summary_mode, summary_max_chars = self.get_observation_summary_config()
 
         try:
@@ -587,7 +621,11 @@ class HolmesService:
         - truncated: 只展示前 N 字符
         - hidden: 不展示
         """
-        think_cfg = self.workflow_config.get("think_stream", {}) if isinstance(self.workflow_config, dict) else {}
+        think_cfg = (
+            self.workflow_config.get("think_stream", {})
+            if isinstance(self.workflow_config, dict)
+            else {}
+        )
         if not isinstance(think_cfg, dict):
             think_cfg = {}
         mode = (
@@ -619,7 +657,11 @@ class HolmesService:
         Secret 只承载模型连接和敏感信息，避免 Secret 环境变量覆盖 ConfigMap 造成实际模式不透明。
         """
         wf_cfg = self.workflow_config if isinstance(self.workflow_config, dict) else {}
-        obs_cfg = wf_cfg.get("observation_summary", {}) if isinstance(wf_cfg.get("observation_summary", {}), dict) else {}
+        obs_cfg = (
+            wf_cfg.get("observation_summary", {})
+            if isinstance(wf_cfg.get("observation_summary", {}), dict)
+            else {}
+        )
         mode = obs_cfg.get("mode") or "rule"
         normalized_mode = str(mode or "rule").strip().lower()
         if normalized_mode not in {"rule", "ai"}:
@@ -639,16 +681,18 @@ class HolmesService:
         隐式改变模型上下文治理行为。
         """
         wf_cfg = self.workflow_config if isinstance(self.workflow_config, dict) else {}
-        cfg = wf_cfg.get("context_compaction", {}) if isinstance(wf_cfg.get("context_compaction", {}), dict) else {}
+        cfg = (
+            wf_cfg.get("context_compaction", {})
+            if isinstance(wf_cfg.get("context_compaction", {}), dict)
+            else {}
+        )
         max_compactions = cfg.get("max_compactions_per_call")
         result: Dict[str, Any] = {
             "enabled": bool(cfg.get("enabled", True)),
             "nodes": cfg.get("nodes") or ["evidence"],
             "max_context_window": cfg.get("max_context_window") or 35000,
             "trigger_ratio": cfg.get("trigger_ratio") or 0.70,
-            "max_compactions_per_call": (
-                1 if max_compactions is None else max_compactions
-            ),
+            "max_compactions_per_call": (1 if max_compactions is None else max_compactions),
             "summary_max_tokens": cfg.get("summary_max_tokens") or 1200,
             "hard_guard_enabled": bool(cfg.get("hard_guard_enabled", True)),
             "hard_guard_input_ratio": cfg.get("hard_guard_input_ratio") or 0.72,
@@ -676,15 +720,11 @@ class HolmesService:
         except (TypeError, ValueError):
             result["summary_max_tokens"] = 1200
         try:
-            result["hard_guard_input_ratio"] = float(
-                result["hard_guard_input_ratio"]
-            )
+            result["hard_guard_input_ratio"] = float(result["hard_guard_input_ratio"])
         except (TypeError, ValueError):
             result["hard_guard_input_ratio"] = 0.72
         try:
-            result["hard_guard_safety_tokens"] = int(
-                result["hard_guard_safety_tokens"]
-            )
+            result["hard_guard_safety_tokens"] = int(result["hard_guard_safety_tokens"])
         except (TypeError, ValueError):
             result["hard_guard_safety_tokens"] = 2000
         try:
@@ -703,7 +743,11 @@ class HolmesService:
         (context compaction, structured finalization), e.g. disabling model thinking."""
         cfg = llm_config if isinstance(llm_config, dict) else None
         if cfg is None:
-            raw_cfg = getattr(self, "raw_config", {}) if isinstance(getattr(self, "raw_config", {}), dict) else {}
+            raw_cfg = (
+                getattr(self, "raw_config", {})
+                if isinstance(getattr(self, "raw_config", {}), dict)
+                else {}
+            )
             cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
         extra_body = cfg.get("internal_extra_body", {})
         return dict(extra_body) if isinstance(extra_body, dict) else {}
@@ -719,18 +763,22 @@ class HolmesService:
         """
         cfg = llm_config if isinstance(llm_config, dict) else None
         if cfg is None:
-            raw_cfg = getattr(self, "raw_config", {}) if isinstance(getattr(self, "raw_config", {}), dict) else {}
+            raw_cfg = (
+                getattr(self, "raw_config", {})
+                if isinstance(getattr(self, "raw_config", {}), dict)
+                else {}
+            )
             cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
-        extra_body = cfg.get("extra_body", {}) if isinstance(cfg.get("extra_body", {}), dict) else {}
+        extra_body = (
+            cfg.get("extra_body", {}) if isinstance(cfg.get("extra_body", {}), dict) else {}
+        )
         return dict(extra_body)
 
     def _load_runbooks(self):
         """加载和合并 runbook catalogs"""
         custom_catalog = self.runbook_manager.load_custom_catalog()
         base_catalog = self.config.get_runbook_catalog()
-        self.merged_catalog = self.runbook_manager.merge_catalogs(
-            base_catalog, custom_catalog
-        )
+        self.merged_catalog = self.runbook_manager.merge_catalogs(base_catalog, custom_catalog)
 
     def _log_loaded_resources(self):
         """输出加载的资源信息（按 MCP Server 分组，INFO 级别可见）"""
@@ -738,23 +786,29 @@ class HolmesService:
         logger.info("[AICall] 资源概览")
         logger.info("=" * 50)
 
-        mcp_tools = [t for t in self.mcp_tools if not getattr(t, '_is_builtin', False)]
-        builtin_tools = [t for t in self.mcp_tools if getattr(t, '_is_builtin', False)]
+        mcp_tools = [t for t in self.mcp_tools if not getattr(t, "_is_builtin", False)]
+        builtin_tools = [t for t in self.mcp_tools if getattr(t, "_is_builtin", False)]
 
         # 按 MCP Server 分组
         server_groups: dict = {}
         ungrouped = []
         for t in mcp_tools:
-            srv = (getattr(t, 'server_name', None)
-                   or (getattr(t, 'metadata', {}) or {}).get('server_name')
-                   or (getattr(t, 'metadata', {}) or {}).get('server'))
+            srv = (
+                getattr(t, "server_name", None)
+                or (getattr(t, "metadata", {}) or {}).get("server_name")
+                or (getattr(t, "metadata", {}) or {}).get("server")
+            )
             if srv:
                 server_groups.setdefault(srv, []).append(t)
             else:
                 ungrouped.append(t)
 
-        logger.info("   工具总计: %d 个 (MCP %d + 内置 %d)",
-                    len(self.mcp_tools), len(mcp_tools), len(builtin_tools))
+        logger.info(
+            "   工具总计: %d 个 (MCP %d + 内置 %d)",
+            len(self.mcp_tools),
+            len(mcp_tools),
+            len(builtin_tools),
+        )
         logger.info("-" * 50)
 
         if server_groups:
@@ -762,12 +816,12 @@ class HolmesService:
                 logger.info("   [%s] %d 个工具:", srv_name, len(tools))
                 for t in tools:
                     logger.info("      - %s", t.name)
-                    logger.debug("        描述: %s", getattr(t, 'description', '')[:120])
+                    logger.debug("        描述: %s", getattr(t, "description", "")[:120])
         if ungrouped:
             logger.info("   [MCP] %d 个工具:", len(ungrouped))
             for t in ungrouped:
                 logger.info("      - %s", t.name)
-                logger.debug("        描述: %s", getattr(t, 'description', '')[:120])
+                logger.debug("        描述: %s", getattr(t, "description", "")[:120])
 
         if builtin_tools:
             logger.info("   [内置] %d 个工具:", len(builtin_tools))
@@ -775,13 +829,19 @@ class HolmesService:
                 logger.info("      - %s", t.name)
 
         if self.merged_catalog:
-            catalog_entries = getattr(self.merged_catalog, 'catalog', [])
+            catalog_entries = getattr(self.merged_catalog, "catalog", [])
             count = len(catalog_entries) if catalog_entries else 0
             logger.info("   Runbooks: %d 个", count)
             if catalog_entries:
                 for entry in catalog_entries:
-                    rb_id = getattr(entry, 'id', '') or entry.get('id', '') if isinstance(entry, dict) else getattr(entry, 'id', '')
-                    rb_desc = getattr(entry, 'description', '') or (entry.get('description', '') if isinstance(entry, dict) else '')
+                    rb_id = (
+                        getattr(entry, "id", "") or entry.get("id", "")
+                        if isinstance(entry, dict)
+                        else getattr(entry, "id", "")
+                    )
+                    rb_desc = getattr(entry, "description", "") or (
+                        entry.get("description", "") if isinstance(entry, dict) else ""
+                    )
                     logger.info("      - [%s] %s", rb_id, rb_desc[:60])
         logger.info("=" * 50)
 
@@ -809,7 +869,7 @@ class HolmesService:
                     "success": False,
                     "error": "服务初始化超时或失败",
                     "execution_time": (datetime.now() - start_time).total_seconds(),
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
                 }
 
             if waited >= 1:
@@ -839,7 +899,7 @@ class HolmesService:
                 "success": False,
                 "error": str(e),
                 "execution_time": execution_time,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             }
 
     def execute_query_stream(
@@ -925,18 +985,19 @@ class HolmesService:
             if output_format == "text":
                 yield f"❌ 工作流模块导入失败: {e}\n"
             else:
-                yield create_sse_message_cn("error", {
-                    "error": f"工作流模块未安装或导入失败: {str(e)}",
-                    "suggestion": "请确保已安装 langgraph: pip install langgraph"
-                })
+                yield create_sse_message_cn(
+                    "error",
+                    {
+                        "error": f"工作流模块未安装或导入失败: {str(e)}",
+                        "suggestion": "请确保已安装 langgraph: pip install langgraph",
+                    },
+                )
         except Exception as e:
             logger.error("工作流执行失败: %s", e, exc_info=True)
             if output_format == "text":
                 yield f"❌ 工作流执行失败: {e}\n"
             else:
-                yield create_sse_message_cn("error", {
-                    "error": f"工作流执行失败: {str(e)}"
-                })
+                yield create_sse_message_cn("error", {"error": f"工作流执行失败: {str(e)}"})
 
     def _workflow_to_text(
         self,
@@ -1008,7 +1069,9 @@ class HolmesService:
             workflow_overrides=workflow_overrides,
         ):
             event_type = event.get("type", "unknown")
-            is_reasoning = event_type == "thinking" and event.get("thinking_type") == "ai_reasoning"
+            is_reasoning = (
+                event_type == "thinking" and event.get("thinking_type") == "ai_reasoning"
+            )
             if reasoning_open and not is_reasoning:
                 yield "\n"
                 reasoning_open = False
@@ -1052,10 +1115,14 @@ class HolmesService:
                 if think_type == "tool_start":
                     yield emit(f"   💭 [{node_name}] 调用工具: {event.get('tool_name')}")
                 elif think_type == "tool_result":
-                    yield emit(f"   💭 [{node_name}] 工具结果: {event.get('tool_name')} ({event.get('status')})")
+                    yield emit(
+                        f"   💭 [{node_name}] 工具结果: {event.get('tool_name')} ({event.get('status')})"
+                    )
                     preview = event.get("result_preview", "")
                     if preview:
-                        yield emit(f"      📄 {preview[:300]}{'...' if len(preview) > 300 else ''}")
+                        yield emit(
+                            f"      📄 {preview[:300]}{'...' if len(preview) > 300 else ''}"
+                        )
                 elif think_type == "ai_message":
                     raw_content = event.get("full_content") or event.get("content") or ""
                     content = think_filter.filter_message(raw_content).strip()
@@ -1110,7 +1177,9 @@ class HolmesService:
                     else:
                         yield emit(f"   层级: {layer}")
                     yield emit(f"   置信度: {conf:.0%}")
-                    node_outputs["layer"] = snapshot.get("layer_analysis", "") or format_layer_node_output(snapshot)
+                    node_outputs["layer"] = snapshot.get(
+                        "layer_analysis", ""
+                    ) or format_layer_node_output(snapshot)
 
                 elif node_id == "evidence":
                     yield emit("   ┌──────────────────────────────────────────┐")
@@ -1121,11 +1190,15 @@ class HolmesService:
                     collected = snapshot.get("collected_count", 0)
                     completeness = snapshot.get("completeness", 0) or 0
                     yield emit(f"   证据: {collected}/{count} 项, 完整度: {completeness:.0%}")
-                    plan_output = format_evidence_plan_output(snapshot.get("evidence_analysis", ""))
+                    plan_output = format_evidence_plan_output(
+                        snapshot.get("evidence_analysis", "")
+                    )
                     if plan_output:
                         yield emit("")
                         yield emit(plan_output)
-                    node_outputs["evidence"] = snapshot.get("evidence_analysis", "") or format_evidence_node_output(snapshot)
+                    node_outputs["evidence"] = snapshot.get(
+                        "evidence_analysis", ""
+                    ) or format_evidence_node_output(snapshot)
 
                 elif node_id == "rca":
                     yield emit("   ┌──────────────────────────────────────────┐")
@@ -1146,7 +1219,9 @@ class HolmesService:
                     if causal_chain:
                         yield emit("   🔗 因果链:")
                         trigger = causal_chain.get("trigger") or causal_chain.get("root_cause", "")
-                        mechanism = causal_chain.get("mechanism") or causal_chain.get("propagation", "")
+                        mechanism = causal_chain.get("mechanism") or causal_chain.get(
+                            "propagation", ""
+                        )
                         manifestation = causal_chain.get("manifestation", "")
                         if trigger:
                             yield emit(f"     根本原因: {trigger}")
@@ -1156,7 +1231,9 @@ class HolmesService:
                             yield emit(f"     最终表现: {manifestation}")
                         yield emit("")
 
-                    node_outputs["rca"] = snapshot.get("rca_analysis", "") or format_rca_node_output(snapshot)
+                    node_outputs["rca"] = snapshot.get(
+                        "rca_analysis", ""
+                    ) or format_rca_node_output(snapshot)
 
                 elif node_id == "conclusion":
                     yield emit("   ┌──────────────────────────────────────────┐")
@@ -1212,10 +1289,7 @@ class HolmesService:
                 yield emit("")
 
             elif event_type == "remediation_finished":
-                yield emit(
-                    f"🛠️ 修复流程结束: {event.get('status')} "
-                    f"({event.get('reason', '')})"
-                )
+                yield emit(f"🛠️ 修复流程结束: {event.get('status')} ({event.get('reason', '')})")
                 yield emit("")
 
             elif event_type == "error":
@@ -1253,7 +1327,7 @@ class HolmesService:
         tools_detail = []
         for t in self.mcp_tools:
             d = {"name": t.name}
-            desc = getattr(t, 'description', None)
+            desc = getattr(t, "description", None)
             if desc:
                 d["description"] = desc[:200]
             tools_detail.append(d)
@@ -1292,10 +1366,7 @@ class HolmesService:
                 "started_at": self._init_started_at.isoformat() if self._init_started_at else None,
             }
         if self._init_error:
-            return {
-                "status": "unhealthy",
-                "error": self._init_error
-            }
+            return {"status": "unhealthy", "error": self._init_error}
         return {
             "status": "uninitialized",
             "config_loaded": self.config is not None,

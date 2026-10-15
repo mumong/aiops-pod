@@ -62,19 +62,34 @@ def build_working_material(state):
         material_without_core,
         observation_reference,
     )
-    protected = dict(events[last_compaction].get('protected_handoff') or {}) if last_compaction >= 0 else {}
-    if state.get('diagnosis_handoff') is not None:
-        protected['diagnosis_handoff'] = state['diagnosis_handoff']
-    light = (state.get('diagnosis_context_policy') == 'identity.v1'
-             or (state.get('diagnosis_handoff') or {}).get('contract_version') == 'location-handoff.v1')
-    legacy_core = protected.pop('lifecycle_core', None) if light else None
+
+    protected = (
+        dict(events[last_compaction].get("protected_handoff") or {})
+        if last_compaction >= 0
+        else {}
+    )
+    if state.get("diagnosis_handoff") is not None:
+        protected["diagnosis_handoff"] = state["diagnosis_handoff"]
+    light = (
+        state.get("diagnosis_context_policy") == "identity.v1"
+        or (state.get("diagnosis_handoff") or {}).get("contract_version") == "location-handoff.v1"
+    )
+    legacy_core = protected.pop("lifecycle_core", None) if light else None
     if light:
-        protected['context_policy'] = 'identity.v1'
-    core = {} if light else core_from_material({'protected_handoff': protected,
-                              'observations': [e for e in events if e.get('type') == 'tool_result'],
-                              'parallel_results': state.get('autonomous_group_results') or []})
+        protected["context_policy"] = "identity.v1"
+    core = (
+        {}
+        if light
+        else core_from_material(
+            {
+                "protected_handoff": protected,
+                "observations": [e for e in events if e.get("type") == "tool_result"],
+                "parallel_results": state.get("autonomous_group_results") or [],
+            }
+        )
+    )
     if core:
-        protected['lifecycle_core'] = core
+        protected["lifecycle_core"] = core
     return {
         "question": state.get("question", "")
         if state.get("diagnosis_target")
@@ -88,8 +103,9 @@ def build_working_material(state):
         "request_contract": state.get("request_contract"),
         "diagnosis_target": state.get("diagnosis_target"),
         "parallel_inventory": state.get("autonomous_groups") or [],
-        "parallel_results": material_without_core({
-            "parallel_results": state.get("autonomous_group_results") or []})["parallel_results"],
+        "parallel_results": material_without_core(
+            {"parallel_results": state.get("autonomous_group_results") or []}
+        )["parallel_results"],
         "request_time_utc": state.get("request_time_utc")
         or datetime.now(timezone.utc).isoformat(),
         "analysis_draft": state.get("query_draft", ""),
@@ -97,7 +113,9 @@ def build_working_material(state):
         "working_summary": events[last_compaction].get("working_summary")
         if last_compaction >= 0
         else None,
-        "recent_interactions": project_shared_messages(events[last_compaction].get("retained_messages", []), shared_refs)
+        "recent_interactions": project_shared_messages(
+            events[last_compaction].get("retained_messages", []), shared_refs
+        )
         if last_compaction >= 0
         else [],
         "session_history": state.get("query_session_context") if last_compaction < 0 else None,
@@ -109,19 +127,24 @@ def build_working_material(state):
             if event.get("type") == "execution_incomplete"
         ],
         "observations": [
-            shared_runbook_projection((lambda o: o if light else observation_reference(o))({
-                key: event.get(key)
-                for key in (
-                    "tool_name",
-                    "tool_args",
-                    "status",
-                    "semantic_success",
-                    "result",
-                    "raw_ref",
-                    "structured_ref",
-                    "timestamp",
-                )
-            }), shared_refs)
+            shared_runbook_projection(
+                (lambda o: o if light else observation_reference(o))(
+                    {
+                        key: event.get(key)
+                        for key in (
+                            "tool_name",
+                            "tool_args",
+                            "status",
+                            "semantic_success",
+                            "result",
+                            "raw_ref",
+                            "structured_ref",
+                            "timestamp",
+                        )
+                    }
+                ),
+                shared_refs,
+            )
             for event in events[last_compaction + 1 :]
             if event.get("type") == "tool_result"
         ],

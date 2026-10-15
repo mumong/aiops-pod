@@ -1,4 +1,5 @@
 """Execute agent-selected Kubernetes commands with approval and real results."""
+
 import json
 import os
 import subprocess
@@ -20,25 +21,44 @@ _busy: set[tuple[str, str, str]] = set()
 def run_argv(args):
     # kubectl does not automatically use client-go's in-cluster config here.
     # Use only this Pod's projected ServiceAccount, never host/admin credentials.
-    token = Path('/var/run/secrets/kubernetes.io/serviceaccount/token')
+    token = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
     env = os.environ.copy()
-    with tempfile.TemporaryDirectory(prefix='aiops-kube-') as directory:
-        if not env.get('KUBECONFIG') and env.get('KUBERNETES_SERVICE_HOST') and token.is_file():
-            host = env['KUBERNETES_SERVICE_HOST']
-            if ':' in host and not host.startswith('['):
-                host = '[' + host + ']'
-            config = {'apiVersion': 'v1', 'kind': 'Config',
-                'clusters': [{'name': 'in-cluster', 'cluster': {
-                    'server': 'https://' + host + ':' + env.get('KUBERNETES_SERVICE_PORT', '443'),
-                    'certificate-authority': str(token.parent / 'ca.crt')}}],
-                'users': [{'name': 'serviceaccount', 'user': {'tokenFile': str(token)}}],
-                'contexts': [{'name': 'repair', 'context': {'cluster': 'in-cluster', 'user': 'serviceaccount'}}],
-                'current-context': 'repair'}
-            path = Path(directory) / 'config'
+    with tempfile.TemporaryDirectory(prefix="aiops-kube-") as directory:
+        if not env.get("KUBECONFIG") and env.get("KUBERNETES_SERVICE_HOST") and token.is_file():
+            host = env["KUBERNETES_SERVICE_HOST"]
+            if ":" in host and not host.startswith("["):
+                host = "[" + host + "]"
+            config = {
+                "apiVersion": "v1",
+                "kind": "Config",
+                "clusters": [
+                    {
+                        "name": "in-cluster",
+                        "cluster": {
+                            "server": "https://"
+                            + host
+                            + ":"
+                            + env.get("KUBERNETES_SERVICE_PORT", "443"),
+                            "certificate-authority": str(token.parent / "ca.crt"),
+                        },
+                    }
+                ],
+                "users": [{"name": "serviceaccount", "user": {"tokenFile": str(token)}}],
+                "contexts": [
+                    {
+                        "name": "repair",
+                        "context": {"cluster": "in-cluster", "user": "serviceaccount"},
+                    }
+                ],
+                "current-context": "repair",
+            }
+            path = Path(directory) / "config"
             path.write_text(json.dumps(config))
             path.chmod(0o600)
-            env['KUBECONFIG'] = str(path)
-        result = subprocess.run(args, capture_output=True, text=True, timeout=60, check=False, env=env)
+            env["KUBECONFIG"] = str(path)
+        result = subprocess.run(
+            args, capture_output=True, text=True, timeout=60, check=False, env=env
+        )
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout or "kubectl failed")[:3000])
     return result.stdout
@@ -48,20 +68,37 @@ class PodRepairExecutor:
     def __init__(self, store=approval_store, runner=run_argv):
         self.store, self.runner = store, runner
 
-    def run(self, run_id, draft, *, owner="", mode="review", timeout=600, cancel=None, policy=None,
-            request_contract=None, record_store=None):
+    def run(
+        self,
+        run_id,
+        draft,
+        *,
+        owner="",
+        mode="review",
+        timeout=600,
+        cancel=None,
+        policy=None,
+        request_contract=None,
+        record_store=None,
+    ):
         draft = deepcopy(draft)
         policy = policy or CommandPolicy()
+
         def finish(status, reason, error_code=None):
-            event = {"type": "remediation_finished", "run_id": run_id,
-                     "status": status, "reason": reason}
+            event = {
+                "type": "remediation_finished",
+                "run_id": run_id,
+                "status": status,
+                "reason": reason,
+            }
             if error_code:
-                event['error_code'] = error_code
+                event["error_code"] = error_code
             if record_store:
                 record_store.transition(run_id, owner, status, event)
             return event
-        if draft and draft.get('planning_error'):
-            yield finish('failed', draft['planning_error']['message'])
+
+        if draft and draft.get("planning_error"):
+            yield finish("failed", draft["planning_error"]["message"])
             return
         if not draft or not draft.get("actions"):
             yield finish("skipped", "没有可安全执行的结构化修复动作")
@@ -79,8 +116,10 @@ class PodRepairExecutor:
             for action in draft["actions"]:
                 target = targets[action["group_id"]]
                 contract = request_contract or {}
-                if ((contract.get("namespaces") and target["namespace"] not in contract["namespaces"])
-                        or (contract.get("pod_names") and target["pod"] not in contract["pod_names"])):
+                if (
+                    contract.get("namespaces")
+                    and target["namespace"] not in contract["namespaces"]
+                ) or (contract.get("pod_names") and target["pod"] not in contract["pod_names"]):
                     raise ValueError("修复目标超出用户请求范围")
                 # Group locks avoid simultaneous approved plans. They do not
                 # prescribe evidence collection or infer allowed resource types.
@@ -94,12 +133,24 @@ class PodRepairExecutor:
                     try:
                         check_repair_execution(argv, policy)
                     except RepairCommandDenied as exc:
-                        yield {"type": "remediation_tool_result", "run_id": run_id,
-                               "group_id": action["group_id"], "action_id": action["id"],
-                               "stage": stage, "command": command, "status": "failed",
-                               "error_code": "repair_command_denied", "execution_skipped": True,
-                               "result_preview": str(exc), "result_truncated": False}
-                        yield finish("blocked", str(exc) + "；本计划尚未执行任何命令，请调整方案后重新提交", "repair_command_denied")
+                        yield {
+                            "type": "remediation_tool_result",
+                            "run_id": run_id,
+                            "group_id": action["group_id"],
+                            "action_id": action["id"],
+                            "stage": stage,
+                            "command": command,
+                            "status": "failed",
+                            "error_code": "repair_command_denied",
+                            "execution_skipped": True,
+                            "result_preview": str(exc),
+                            "result_truncated": False,
+                        }
+                        yield finish(
+                            "blocked",
+                            str(exc) + "；本计划尚未执行任何命令，请调整方案后重新提交",
+                            "repair_command_denied",
+                        )
                         return
                     stages.append((stage, command, argv))
                 if not any(s[0] == "execute" for s in stages):
@@ -121,16 +172,31 @@ class PodRepairExecutor:
                     yield finish("cancelled", "请求已取消，未继续执行")
                     return
                 if mode != "auto":
-                    if record_store and not record_store.transition(run_id, owner, "awaiting_approval"):
+                    if record_store and not record_store.transition(
+                        run_id, owner, "awaiting_approval"
+                    ):
                         yield finish("superseded", "方案已被修改请求替代")
                         return
-                    request = self.store.create_request(run_id, "action", action["description"],
-                        {"target": target, **action}, timeout_seconds=timeout, owner=owner)
+                    request = self.store.create_request(
+                        run_id,
+                        "action",
+                        action["description"],
+                        {"target": target, **action},
+                        timeout_seconds=timeout,
+                        owner=owner,
+                    )
                     pending = request.approval_id
-                    yield {"type": "remediation_approval_required", "run_id": run_id,
-                           "approval_id": pending, "approval_kind": "action", "title": request.title,
-                           "payload": request.payload, "expires_at": request.expires_at, "server_time": time.time(),
-                           "group_id": action["group_id"]}
+                    yield {
+                        "type": "remediation_approval_required",
+                        "run_id": run_id,
+                        "approval_id": pending,
+                        "approval_kind": "action",
+                        "title": request.title,
+                        "payload": request.payload,
+                        "expires_at": request.expires_at,
+                        "server_time": time.time(),
+                        "group_id": action["group_id"],
+                    }
                     decision = None
                     while time.time() < request.expires_at and not (cancel and cancel.is_set()):
                         if record_store and not record_store.current(run_id, owner):
@@ -139,15 +205,23 @@ class PodRepairExecutor:
                         decision = self.store.poll_decision(run_id, pending)
                         if decision is not None:
                             break
-                        yield {"type": "heartbeat", "run_id": run_id, "stage": "remediation_approval"}
+                        yield {
+                            "type": "heartbeat",
+                            "run_id": run_id,
+                            "stage": "remediation_approval",
+                        }
                         time.sleep(0.2)
                     self.store.close(run_id, pending)
                     pending = None
                     if cancel and cancel.is_set():
-                        yield finish("cancelled", "请求已取消，未继续执行；此前已执行动作不会自动回滚")
+                        yield finish(
+                            "cancelled", "请求已取消，未继续执行；此前已执行动作不会自动回滚"
+                        )
                         return
                     if decision is None or not decision.approved:
-                        yield finish("rejected" if decision else "timeout", "修复未获有效批准，未执行")
+                        yield finish(
+                            "rejected" if decision else "timeout", "修复未获有效批准，未执行"
+                        )
                         return
                 for stage, command, argv in stages:
                     if record_store and not record_store.transition(run_id, owner, "executing"):
@@ -158,9 +232,15 @@ class PodRepairExecutor:
                         return
                     validate_target_command(command, original, policy)
                     check_repair_execution(argv, policy)
-                    yield {"type": "remediation_tool_start", "run_id": run_id,
-                           "group_id": action["group_id"], "action_id": action["id"],
-                           "stage": stage, "command": command, "status": "running"}
+                    yield {
+                        "type": "remediation_tool_start",
+                        "run_id": run_id,
+                        "group_id": action["group_id"],
+                        "action_id": action["id"],
+                        "stage": stage,
+                        "command": command,
+                        "status": "running",
+                    }
                     try:
                         with _command_lock:
                             if cancel and cancel.is_set():
@@ -169,24 +249,62 @@ class PodRepairExecutor:
                             output = self.runner(argv)
                     except Exception as exc:
                         if record_store:
-                            record_store.transition(run_id, owner, "failed", {
-                                "action_id": action["id"], "stage": stage, "command": command,
-                                "status": "failed", "result": str(exc)[:6000]})
-                        yield {"type": "remediation_tool_result", "run_id": run_id,
-                               "group_id": action["group_id"], "action_id": action["id"],
-                               "stage": stage, "command": command, "status": "failed",
-                               "result_preview": str(exc)[:6000], "result_truncated": len(str(exc)) > 6000}
-                        yield finish("failed", "修复命令或验证失败；已尝试的写操作可能生效，请复查状态，未自动回滚")
+                            record_store.transition(
+                                run_id,
+                                owner,
+                                "failed",
+                                {
+                                    "action_id": action["id"],
+                                    "stage": stage,
+                                    "command": command,
+                                    "status": "failed",
+                                    "result": str(exc)[:6000],
+                                },
+                            )
+                        yield {
+                            "type": "remediation_tool_result",
+                            "run_id": run_id,
+                            "group_id": action["group_id"],
+                            "action_id": action["id"],
+                            "stage": stage,
+                            "command": command,
+                            "status": "failed",
+                            "result_preview": str(exc)[:6000],
+                            "result_truncated": len(str(exc)) > 6000,
+                        }
+                        yield finish(
+                            "failed",
+                            "修复命令或验证失败；已尝试的写操作可能生效，请复查状态，未自动回滚",
+                        )
                         return
                     if record_store:
-                        record_store.transition(run_id, owner, "executing", {
-                            "action_id": action["id"], "stage": stage, "command": command,
-                            "status": "success", "result": str(output)[:6000]})
-                    yield {"type": "remediation_tool_result", "run_id": run_id,
-                           "group_id": action["group_id"], "action_id": action["id"],
-                           "stage": stage, "command": command, "status": "success",
-                           "result_preview": str(output)[:6000], "result_truncated": len(str(output)) > 6000}
-            yield finish("needs_followup", "已执行批准的命令并返回实际结果；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态")
+                        record_store.transition(
+                            run_id,
+                            owner,
+                            "executing",
+                            {
+                                "action_id": action["id"],
+                                "stage": stage,
+                                "command": command,
+                                "status": "success",
+                                "result": str(output)[:6000],
+                            },
+                        )
+                    yield {
+                        "type": "remediation_tool_result",
+                        "run_id": run_id,
+                        "group_id": action["group_id"],
+                        "action_id": action["id"],
+                        "stage": stage,
+                        "command": command,
+                        "status": "success",
+                        "result_preview": str(output)[:6000],
+                        "result_truncated": len(str(output)) > 6000,
+                    }
+            yield finish(
+                "needs_followup",
+                "已执行批准的命令并返回实际结果；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态",
+            )
         except Exception as exc:
             yield finish("blocked", str(exc))
         finally:

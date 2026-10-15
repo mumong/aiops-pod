@@ -1,4 +1,5 @@
 """Root variants must discriminate causes, targets and arithmetic denominators."""
+
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -11,10 +12,15 @@ from variant_suite import combine_scenarios, score_target_runbooks
 
 
 def report(rows):
-    return ("## 📊 异常概览与现象\n\n| 组 | 异常实体 | 异常状态 |\n|---|---|---|\n"
-            + "\n".join(f"| g{i} | `{ns}/workload` | abnormal |" for i, (ns, _) in enumerate(rows, 1))
-            + "\n\n" + "\n\n".join(f"## 🎯 根因分析 · g{i}\n\n### 根因结论\n\n已确认根因：{text}"
-                                      for i, (_, text) in enumerate(rows, 1)))
+    return (
+        "## 📊 异常概览与现象\n\n| 组 | 异常实体 | 异常状态 |\n|---|---|---|\n"
+        + "\n".join(f"| g{i} | `{ns}/workload` | abnormal |" for i, (ns, _) in enumerate(rows, 1))
+        + "\n\n"
+        + "\n\n".join(
+            f"## 🎯 根因分析 · g{i}\n\n### 根因结论\n\n已确认根因：{text}"
+            for i, (_, text) in enumerate(rows, 1)
+        )
+    )
 
 
 GOOD = {
@@ -44,8 +50,12 @@ def test_variant_positive_and_inconclusive(case_id, text):
     ns = s.expected_root_causes[0].namespace
     claims = q.extract_root_claims(report([(ns, text)]))
     assert q.score_root_causes(s.expected_root_causes, claims).passed
-    assert not q.score_root_causes(s.expected_root_causes, [replace(claims[0], inconclusive=True)]).passed
-    assert not q.score_root_causes(s.expected_root_causes, [replace(claims[0], namespaces=("wrong-ns",))]).passed
+    assert not q.score_root_causes(
+        s.expected_root_causes, [replace(claims[0], inconclusive=True)]
+    ).passed
+    assert not q.score_root_causes(
+        s.expected_root_causes, [replace(claims[0], namespaces=("wrong-ns",))]
+    ).passed
 
 
 def test_suites_cover_every_base_and_preserve_baseline():
@@ -65,28 +75,38 @@ def test_swapped_same_symptom_causes_do_not_pass():
     s = q.load_scenarios(q.DEMO_CASES_PATH)
     combined = combine_scenarios([s["c03-secret"], s["c03-key"]], q.load_catalog(q.CATALOG_PATH))
     swapped = report([("aiops-case-v04", GOOD["c03-key"]), ("aiops-case-v05", GOOD["c03-secret"])])
-    assert q.score_root_causes(combined.expected_root_causes, q.extract_root_claims(swapped)).matched_count == 0
+    assert (
+        q.score_root_causes(
+            combined.expected_root_causes, q.extract_root_claims(swapped)
+        ).matched_count
+        == 0
+    )
     one = report([("aiops-case-v04", GOOD["c03-secret"])])
     diagnosis = q.DiagnosisResult("mock", one, {}, 60, (), "")
-    result = q._score_run(combined, diagnosis, q.EvidenceScore(1, 2, .5, (), "test"))
-    assert result["root_cause"]["accuracy"] == .5
+    result = q._score_run(combined, diagnosis, q.EvidenceScore(1, 2, 0.5, (), "test"))
+    assert result["root_cause"]["accuracy"] == 0.5
     assert result["group_audit"]["missing_namespaces"] == ["aiops-case-v05"]
 
 
 def test_runbook_cannot_be_borrowed_from_other_target():
-    targets = (("aiops-case-v01", ("pod-pending-unschedulable",)),
-               ("aiops-case-v05", ("pod-volume-mount-failed",)))
+    targets = (
+        ("aiops-case-v01", ("pod-pending-unschedulable",)),
+        ("aiops-case-v05", ("pod-volume-mount-failed",)),
+    )
     text = report([("aiops-case-v01", "CPU 请求过高"), ("aiops-case-v05", "key 缺失")])
     text += "\n\n📋 Runbook 参考\n\n- **g1 aiops-case-v01/workload**: pod-pending-unschedulable, pod-volume-mount-failed\n"
     result = score_target_runbooks(targets, text, q.extract_root_claims(text))
-    assert result["coverage"] == .5
+    assert result["coverage"] == 0.5
 
 
-@pytest.mark.parametrize("text,passed", [
-    ("Volume input 引用了 ConfigMap 中不存在的 Key unavailable-key，导致挂载失败。", True),
-    ("ConfigMap workload-input 对象不存在，导致无法取得 unavailable-key 键。", False),
-    ("ConfigMap workload-input 存在，但 key unavailable-key 缺失。", True),
-])
+@pytest.mark.parametrize(
+    "text,passed",
+    [
+        ("Volume input 引用了 ConfigMap 中不存在的 Key unavailable-key，导致挂载失败。", True),
+        ("ConfigMap workload-input 对象不存在，导致无法取得 unavailable-key 键。", False),
+        ("ConfigMap workload-input 存在，但 key unavailable-key 缺失。", True),
+    ],
+)
 def test_missing_key_is_not_missing_configmap(text, passed):
     s = q.load_scenarios(q.DEMO_CASES_PATH)["c03-key"]
     claims = q.extract_root_claims(report([("aiops-case-v05", text)]))
@@ -95,28 +115,50 @@ def test_missing_key_is_not_missing_configmap(text, passed):
 
 def test_duplicate_target_conclusions_require_review():
     s = q.load_scenarios(q.DEMO_CASES_PATH)["c03-key"]
-    claims = q.extract_root_claims(report([("aiops-case-v05", GOOD["c03-key"]),
-                                         ("aiops-case-v05", "ConfigMap 对象不存在")]))
+    claims = q.extract_root_claims(
+        report([("aiops-case-v05", GOOD["c03-key"]), ("aiops-case-v05", "ConfigMap 对象不存在")])
+    )
     assert not q.score_root_causes(s.expected_root_causes, claims).passed
 
 
 def test_per_run_percentage_mean_and_invalid_fixture_exclusion():
     def run(accuracy, ev):
-        return {"success": True, "root_cause": {"accuracy": accuracy}, "runbook": {"coverage": accuracy},
-                "evidence": {"completeness": ev}, "elapsed_seconds": 60}
-    rows = [run(1, 1), run(.5, .5), dict(run(0, 0), fixture_valid=False)]
+        return {
+            "success": True,
+            "root_cause": {"accuracy": accuracy},
+            "runbook": {"coverage": accuracy},
+            "evidence": {"completeness": ev},
+            "elapsed_seconds": 60,
+        }
+
+    rows = [run(1, 1), run(0.5, 0.5), dict(run(0, 0), fixture_valid=False)]
     result = q._aggregate_runs(rows)
-    assert result["root_accuracy"] == result["runbook_coverage"] == result["evidence_completeness"] == .75
+    assert (
+        result["root_accuracy"]
+        == result["runbook_coverage"]
+        == result["evidence_completeness"]
+        == 0.75
+    )
     assert result["successful"] == 3 and result["valid_samples"] == 2
 
 
 @pytest.mark.parametrize("index,matched", [(1, 4), (2, 5)])
 def test_historical_mixed_reports_agree_with_manual_review(index, matched):
-    path = Path(f"testreports/aiops_c01_c03_groups_20260908_183108/01-mixed/run-{index:02d}/report.md")
+    path = Path(
+        f"testreports/aiops_c01_c03_groups_20260908_183108/01-mixed/run-{index:02d}/report.md"
+    )
     if not path.is_file():
         pytest.skip("optional local historical archive")
     s = q.load_scenarios(q.DEMO_CASES_PATH)
-    mix = combine_scenarios([s[x] for x in ("c01-cpu", "c01-memory", "c01-pvc", "c03-secret", "c03-key", "c03-hostpath")], q.load_catalog(q.CATALOG_PATH))
+    mix = combine_scenarios(
+        [
+            s[x]
+            for x in ("c01-cpu", "c01-memory", "c01-pvc", "c03-secret", "c03-key", "c03-hostpath")
+        ],
+        q.load_catalog(q.CATALOG_PATH),
+    )
     claims = q.extract_root_claims(path.read_text())
     assert q.score_root_causes(mix.expected_root_causes, claims).matched_count == matched
-    assert score_target_runbooks(mix.runbook_targets, path.read_text(), claims)["coverage"] == (0 if index == 1 else 1)
+    assert score_target_runbooks(mix.runbook_targets, path.read_text(), claims)["coverage"] == (
+        0 if index == 1 else 1
+    )

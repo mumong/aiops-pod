@@ -30,10 +30,12 @@ def test_call_recursion_limit_is_logged_as_warning_not_error():
     tool.description = "loop tool"
     tool.args_schema = None
 
-    with patch("app.core.aicall.client.ChatOpenAI"), \
-         patch("app.core.aicall.client.logger") as mock_logger, \
-         patch("langchain.agents.create_agent", return_value=MagicMock()), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_FailingExecutor()):
+    with (
+        patch("app.core.aicall.client.ChatOpenAI"),
+        patch("app.core.aicall.client.logger") as mock_logger,
+        patch("langchain.agents.create_agent", return_value=MagicMock()),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_FailingExecutor()),
+    ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         result, _ = ai.call("sys", "q", tools=[tool], max_steps=10)
 

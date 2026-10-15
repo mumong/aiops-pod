@@ -55,10 +55,13 @@ def _table_rows_needing_attention(header: str, rows: list) -> list:
             continue
         status = cells[status_at].lower()
         ready = re.fullmatch(r"(\d+)/(\d+)", cells[ready_at])
-        not_ready = bool(ready) and int(ready.group(1)) < int(ready.group(2)) and status != "completed"
+        not_ready = (
+            bool(ready) and int(ready.group(1)) < int(ready.group(2)) and status != "completed"
+        )
         if status not in _NOMINAL_TABLE_STATUSES or not_ready:
             flagged.append(index)
     return flagged
+
 
 Summarizer = Callable[[str, str, str], Optional[str]]
 
@@ -67,14 +70,21 @@ class ObservationProcessor:
     RECENT_RESTART_WINDOW_SECONDS = 15 * 60
     # QUERY only: small values/errors and deliberate archive reads stay exact.
     QUERY_SUMMARY_MIN_CHARS = 6000
-    QUERY_SUMMARY_TOOLS = frozenset({
-        "get_metric_names", "kubectl_describe", "kubectl_events",
-        "kubectl_get_by_kind_in_cluster", "kubernetes_tabular_query",
-        "kubectl_get_by_kind_in_namespace", "kubernetes_jq_query",
-        "get_label_values",
-        "execute_prometheus_instant_query", "execute_prometheus_range_query",
-        "execute_pod_promql",
-    })
+    QUERY_SUMMARY_TOOLS = frozenset(
+        {
+            "get_metric_names",
+            "kubectl_describe",
+            "kubectl_events",
+            "kubectl_get_by_kind_in_cluster",
+            "kubernetes_tabular_query",
+            "kubectl_get_by_kind_in_namespace",
+            "kubernetes_jq_query",
+            "get_label_values",
+            "execute_prometheus_instant_query",
+            "execute_prometheus_range_query",
+            "execute_pod_promql",
+        }
+    )
 
     HEAVY_TOOLS = {
         "kubectl_get_by_kind_in_cluster",
@@ -157,13 +167,23 @@ class ObservationProcessor:
         normalized = (summary_mode or "rule").strip().lower()
         self.summary_mode = normalized if normalized in {"rule", "ai"} else "rule"
         self.context_pressure_threshold = float(context_pressure_threshold or 0.8)
-        self.evidence_view_mode = (evidence_view_mode or os.getenv("AIOPS_EVIDENCE_VIEW_MODE", "legacy")).lower()
+        self.evidence_view_mode = (
+            evidence_view_mode or os.getenv("AIOPS_EVIDENCE_VIEW_MODE", "legacy")
+        ).lower()
         if self.evidence_view_mode not in {"legacy", "compact"}:
             raise ValueError("AIOPS_EVIDENCE_VIEW_MODE must be legacy or compact")
         from .evidence_policy import EvidencePolicy
+
         policy = EvidencePolicy.from_env()
-        self.evidence_view_tokens = max(512, min(int(
-            policy.result_tokens if evidence_view_tokens is None else evidence_view_tokens), 16384))
+        self.evidence_view_tokens = max(
+            512,
+            min(
+                int(
+                    policy.result_tokens if evidence_view_tokens is None else evidence_view_tokens
+                ),
+                16384,
+            ),
+        )
 
     def process(
         self,
@@ -180,15 +200,29 @@ class ObservationProcessor:
         tool = tool_name or "unknown"
         from .record_result import record_observation
 
-        computed = record_observation(raw, tool, lambda structured:
-            ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
-                node_id=node_id, sequence=sequence, tool_name=tool,
-                raw=raw, structured=structured, summary=raw))
+        computed = record_observation(
+            raw,
+            tool,
+            lambda structured: ContextArchive(
+                run_id=run_id, root=self.archive_root
+            ).write_tool_artifact(
+                node_id=node_id,
+                sequence=sequence,
+                tool_name=tool,
+                raw=raw,
+                structured=structured,
+                summary=raw,
+            ),
+        )
         if computed is not None:
             return computed
         # Reference documents and explicit archive reads are not new observations.
         # Re-projecting a deliberate read could make deferred evidence unreachable.
-        if self.evidence_view_mode == "compact" and tool not in {"fetch_runbook", "read_context_archive", "TodoWrite"}:
+        if self.evidence_view_mode == "compact" and tool not in {
+            "fetch_runbook",
+            "read_context_archive",
+            "TodoWrite",
+        }:
             return self._compact_observation(run_id, node_id, sequence, tool, raw, tool_args)
         if tool == "query_pod_lifecycle":
             # This source already returns a bounded, paginated fact projection.
@@ -196,18 +230,41 @@ class ObservationProcessor:
             # lossy summary or a health classification derived from Pod phase.
             structured, semantic_success = self._parse_lifecycle_observation(raw)
             from .lifecycle_core import INVENTORY_VERSION, inventory_view, lifecycle_core
-            core = lifecycle_core(structured) if semantic_success and node_id in {'layer', 'evidence'} else {}
-            view = inventory_view(core) if core else {}
-            summary = json.dumps(view, ensure_ascii=False, separators=(',', ':')) if view else raw
-            processor = ("pod_lifecycle+inventory" if view.get("contract_version") == INVENTORY_VERSION
-                         else "pod_lifecycle+core" if core else "pod_lifecycle+lossless")
-            refs = ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
-                node_id=node_id, sequence=sequence, tool_name=tool,
-                raw=raw, structured=structured, summary=summary,
+
+            core = (
+                lifecycle_core(structured)
+                if semantic_success and node_id in {"layer", "evidence"}
+                else {}
             )
-            return {"tool": tool, "status": "success", "semantic_success": semantic_success,
-                    "summary": summary, "structured": structured, "raw_chars": len(raw),
-                    "summary_chars": len(summary), "processed": True, "processor": processor, **refs}
+            view = inventory_view(core) if core else {}
+            summary = json.dumps(view, ensure_ascii=False, separators=(",", ":")) if view else raw
+            processor = (
+                "pod_lifecycle+inventory"
+                if view.get("contract_version") == INVENTORY_VERSION
+                else "pod_lifecycle+core"
+                if core
+                else "pod_lifecycle+lossless"
+            )
+            refs = ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
+                node_id=node_id,
+                sequence=sequence,
+                tool_name=tool,
+                raw=raw,
+                structured=structured,
+                summary=summary,
+            )
+            return {
+                "tool": tool,
+                "status": "success",
+                "semantic_success": semantic_success,
+                "summary": summary,
+                "structured": structured,
+                "raw_chars": len(raw),
+                "summary_chars": len(summary),
+                "processed": True,
+                "processor": processor,
+                **refs,
+            }
         targeted_summary = (
             preserve_raw
             and tool in self.QUERY_SUMMARY_TOOLS
@@ -223,14 +280,25 @@ class ObservationProcessor:
             except Exception as exc:
                 structured, extracted = {"status": "extract_failed", "error": str(exc)}, "generic"
             refs = ContextArchive(run_id=run_id, root=self.archive_root).write_tool_artifact(
-                node_id=node_id, sequence=sequence, tool_name=tool,
-                raw=raw, structured=structured, summary=raw,
+                node_id=node_id,
+                sequence=sequence,
+                tool_name=tool,
+                raw=raw,
+                structured=structured,
+                summary=raw,
             )
-            return {"tool": tool, "status": "success",
-                    "semantic_success": self._is_semantically_successful(structured, raw),
-                    "summary": raw, "structured": structured,
-                    "raw_chars": len(raw), "summary_chars": len(raw), "processed": True,
-                    "processor": extracted + "+raw_passthrough", **refs}
+            return {
+                "tool": tool,
+                "status": "success",
+                "semantic_success": self._is_semantically_successful(structured, raw),
+                "summary": raw,
+                "structured": structured,
+                "raw_chars": len(raw),
+                "summary_chars": len(raw),
+                "processed": True,
+                "processor": extracted + "+raw_passthrough",
+                **refs,
+            }
         structured: Dict[str, Any]
         summary: str
         processor = "passthrough"
@@ -261,7 +329,11 @@ class ObservationProcessor:
                 summary = self._generic_summary(tool, raw)
                 processor = "generic"
 
-        if (targeted_summary or node_id in {"focused", "query_collect"}) and processor == "k8s_table" and structured.get("status") == "table_summarized":
+        if (
+            (targeted_summary or node_id in {"focused", "query_collect"})
+            and processor == "k8s_table"
+            and structured.get("status") == "table_summarized"
+        ):
             # A task-oriented query must not silently discard healthy objects.
             # Keep the full returned inventory in the archive; the model sees a
             # bounded selection with explicit coverage, never an abnormal-only view.
@@ -271,7 +343,9 @@ class ObservationProcessor:
             structured["all_rows"] = rows
             header_raw = structured.get("header", "").strip()
             attention = _table_rows_needing_attention(header_raw, rows)
-            ordered = [rows[i] for i in attention] + [row for i, row in enumerate(rows) if i not in set(attention)]
+            ordered = [rows[i] for i in attention] + [
+                row for i, row in enumerate(rows) if i not in set(attention)
+            ]
             selected = []
             header = re.sub(r"[ \t]{2,}", "  ", header_raw)
             used = len(header) + 350
@@ -285,25 +359,34 @@ class ObservationProcessor:
             structured["omitted_rows"] = len(rows) - len(selected)
             structured["attention_rows"] = len(attention)
             structured["selection_policy"] = (
-                "status_attention_first_then_source_order" if attention else "source_order_not_health_filtered"
+                "status_attention_first_then_source_order"
+                if attention
+                else "source_order_not_health_filtered"
             )
             ordering_note = (
                 f"其中 STATUS/READY 非常态的 {len(attention)} 行排在最前（仅按字段排序，不代表诊断结论），其余按原顺序。"
-                if attention else ""
+                if attention
+                else ""
             )
             summary = (
                 f"{tool}: 返回 {len(rows)} 行，展示 {len(selected)} 行，省略 {len(rows) - len(selected)} 行。"
                 + ordering_note
                 + "未展示不代表不存在；需要全部对象时缩小查询范围或按 raw_ref 回读。\n"
-                + header + "\n" + "\n".join(selected)
+                + header
+                + "\n"
+                + "\n".join(selected)
             )
 
         if targeted_summary and tool == "get_metric_names":
             structured, summary = self._query_metric_catalog(raw)
             processor = "metric_catalog"
-        elif targeted_summary and (processor == "prometheus_result" or (
-            tool == "execute_pod_promql" and structured.get("coverage") in {"present", "empty", "absent"}
-        )):
+        elif targeted_summary and (
+            processor == "prometheus_result"
+            or (
+                tool == "execute_pod_promql"
+                and structured.get("coverage") in {"present", "empty", "absent"}
+            )
+        ):
             summary = self._query_metric_samples(raw)
             whole_series_summary = True
 
@@ -354,8 +437,7 @@ class ObservationProcessor:
         if (
             tool in self.OBSERVABILITY_QUERY_TOOLS
             and not whole_series_summary
-            and structured.get("contract_version")
-            == OBSERVABILITY_PROJECTION_VERSION
+            and structured.get("contract_version") == OBSERVABILITY_PROJECTION_VERSION
         ):
             truncation = (
                 structured.get("truncation")
@@ -367,10 +449,7 @@ class ObservationProcessor:
                 "tool": "read_context_archive",
                 "raw_ref": refs.get("raw_ref"),
                 "scope": "complete_mcp_response",
-                "mcp_response_complete": truncation.get(
-                    "mcp_response_truncated"
-                )
-                is not True,
+                "mcp_response_complete": truncation.get("mcp_response_truncated") is not True,
             }
             summary, observation_audit = render_observability_summary(
                 structured,
@@ -395,8 +474,12 @@ class ObservationProcessor:
                 summary += f"\n重型工具摘要（原文 {len(raw)} 字符）：未展示不代表不存在，不可据此推断全集或证明无异常。"
             summary += f"\n归档原文 raw_ref: {refs.get('raw_ref')}\n需要未展示内容时使用 read_context_archive 回读该路径。"
             refs = archive.write_tool_artifact(
-                node_id=node_id, sequence=sequence, tool_name=tool,
-                raw=raw, structured=structured, summary=summary,
+                node_id=node_id,
+                sequence=sequence,
+                tool_name=tool,
+                raw=raw,
+                structured=structured,
+                summary=summary,
             )
         return {
             "tool": tool,
@@ -420,13 +503,20 @@ class ObservationProcessor:
             structured = json.loads(raw)
             if not isinstance(structured, dict):
                 raise ValueError("expected lifecycle object")
-            valid = (structured.get("contract_version") == "pod-lifecycle.v1"
-                     and isinstance(structured.get("pods"), list))
+            valid = structured.get("contract_version") == "pod-lifecycle.v1" and isinstance(
+                structured.get("pods"), list
+            )
             semantic_success = valid and structured.get("status") == "success"
-            structured["parse_status"] = "parsed" if valid or structured.get("status") == "error" else "unsupported"
+            structured["parse_status"] = (
+                "parsed" if valid or structured.get("status") == "error" else "unsupported"
+            )
             return structured, semantic_success
         except (ValueError, TypeError):
-            return {"status": "parse_failed", "parse_status": "failed", "coverage": "unknown"}, False
+            return {
+                "status": "parse_failed",
+                "parse_status": "failed",
+                "coverage": "unknown",
+            }, False
 
     def _compact_observation(self, run_id, node_id, sequence, tool, raw, tool_args):
         from .budget import estimate_tokens
@@ -451,22 +541,38 @@ class ObservationProcessor:
         else:
             view = build_evidence_view(raw, refs["raw_ref"], max_tokens=self.evidence_view_tokens)
             summary = compact_json(view)
-        audit = {"mode": "compact", "raw_estimated_tokens": estimate_tokens(raw),
-                 "view_estimated_tokens": estimate_tokens(summary),
-                 "view_complete": view["view_complete"] if view else True,
-                 "budget_tokens": self.evidence_view_tokens}
+        audit = {
+            "mode": "compact",
+            "raw_estimated_tokens": estimate_tokens(raw),
+            "view_estimated_tokens": estimate_tokens(summary),
+            "view_complete": view["view_complete"] if view else True,
+            "budget_tokens": self.evidence_view_tokens,
+        }
         structured["evidence_view"] = audit
         refs = archive.write_tool_artifact(node_id, sequence, tool, raw, structured, summary)
-        semantic_success = (contract_success if contract_success is not None
-                            else self._is_semantically_successful(structured, raw))
+        semantic_success = (
+            contract_success
+            if contract_success is not None
+            else self._is_semantically_successful(structured, raw)
+        )
         # Preserve explicit failure semantics independently of view encoding.
-        if structured.get("status") in ("error", "parse_failed") or explicit_execution_failure(raw):
+        if structured.get("status") in ("error", "parse_failed") or explicit_execution_failure(
+            raw
+        ):
             semantic_success = False
-        return {"tool": tool, "status": "success", "processed": True,
-                "semantic_success": semantic_success,
-                "summary": summary, "structured": structured, "raw_chars": len(raw),
-                "summary_chars": len(summary), "processor": "generic_evidence_view.v1",
-                "observation_audit": audit, **refs}
+        return {
+            "tool": tool,
+            "status": "success",
+            "processed": True,
+            "semantic_success": semantic_success,
+            "summary": summary,
+            "structured": structured,
+            "raw_chars": len(raw),
+            "summary_chars": len(summary),
+            "processor": "generic_evidence_view.v1",
+            "observation_audit": audit,
+            **refs,
+        }
 
     def _query_metric_catalog(self, raw: str) -> tuple[Dict[str, Any], str]:
         """Round-robin metric families; never claim omitted names are absent."""
@@ -476,7 +582,9 @@ class ObservationProcessor:
             if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
                 raise ValueError("not a metric name list")
         except (ValueError, TypeError):
-            return {"status": "catalog_parse_failed"}, self._generic_summary("get_metric_names", raw)
+            return {"status": "catalog_parse_failed"}, self._generic_summary(
+                "get_metric_names", raw
+            )
         groups: Dict[str, list] = {}
         for name in names:
             groups.setdefault(name.lstrip(":").split("_")[0], []).append(name)
@@ -484,11 +592,19 @@ class ObservationProcessor:
         used = 350
         for index in range(max((len(v) for v in groups.values()), default=0)):
             for family in groups.values():
-                if index < len(family) and used + len(family[index]) + 1 <= self.max_observation_chars:
+                if (
+                    index < len(family)
+                    and used + len(family[index]) + 1 <= self.max_observation_chars
+                ):
                     selected.append(family[index])
                     used += len(family[index]) + 1
-        metadata = {"status": "metric_catalog", "total": len(names), "selected": len(selected),
-                    "omitted": len(names) - len(selected), "selection_policy": "family_round_robin"}
+        metadata = {
+            "status": "metric_catalog",
+            "total": len(names),
+            "selected": len(selected),
+            "omitted": len(names) - len(selected),
+            "selection_policy": "family_round_robin",
+        }
         return metadata, (
             f"指标目录：共 {len(names)} 项，展示 {len(selected)} 项，省略 {len(names) - len(selected)} 项。"
             "按指标名前缀轮选，不表示相关性排序。未展示不代表不存在；不要重复调用相同目录，"
@@ -502,13 +618,19 @@ class ObservationProcessor:
         data = payload.get("data") or {}
         result = data.get("result") if "result" in data else payload.get("series", [])
         query = payload.get("query") or {}
-        metadata = {key: query[key] for key in ("query_type", "value_unit", "time_range") if key in query}
+        metadata = {
+            key: query[key] for key in ("query_type", "value_unit", "time_range") if key in query
+        }
         heading = (
             f"Prometheus {data.get('resultType', payload.get('result_type', ''))}: 共 {len(result)} 条序列。"
             "每条记录是一条独立标签序列；不同实例标签的点不能串成同一次运行的趋势。"
             "保留源标签、时间和值，未做单位换算或聚合；不能由子集推断全集统计。"
             "省略内容需回读或缩小查询范围。\n"
-            + (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) + "\n" if metadata else "")
+            + (
+                json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) + "\n"
+                if metadata
+                else ""
+            )
         )
         selected = []
         # Reserve room for selection counts and the archive address appended later.
@@ -518,7 +640,11 @@ class ObservationProcessor:
             if used + len(encoded) + 1 <= self.max_observation_chars:
                 selected.append(encoded)
                 used += len(encoded) + 1
-        return heading + f"展示 {len(selected)} 条，省略 {len(result) - len(selected)} 条。\n" + "\n".join(selected)
+        return (
+            heading
+            + f"展示 {len(selected)} 条，省略 {len(result) - len(selected)} 条。\n"
+            + "\n".join(selected)
+        )
 
     def _extract(
         self,
@@ -530,11 +656,15 @@ class ObservationProcessor:
         if tool == "fetch_runbook":
             return self._extract_runbook(raw)
         if re.search(r"is not a valid tool|try one of \[", raw, re.IGNORECASE):
-            return {
-                "status": "invalid_tool",
-                "tool": tool,
-                "raw_preview": raw[:1000],
-            }, self._generic_summary(tool, raw), "invalid_tool"
+            return (
+                {
+                    "status": "invalid_tool",
+                    "tool": tool,
+                    "raw_preview": raw[:1000],
+                },
+                self._generic_summary(tool, raw),
+                "invalid_tool",
+            )
         if tool in self.AIOPS_CASE_TOOLS:
             return self._extract_aiops_case(tool, raw)
         if tool in self.OBSERVABILITY_QUERY_TOOLS:
@@ -552,17 +682,25 @@ class ObservationProcessor:
             return self._extract_logs(tool, raw)
 
         if self._is_command_failure(raw):
-            return {
-                "status": "command_failed",
-                "tool": tool,
-                "raw_preview": raw[:1000],
-            }, self._generic_summary(tool, raw), "generic_failure"
+            return (
+                {
+                    "status": "command_failed",
+                    "tool": tool,
+                    "raw_preview": raw[:1000],
+                },
+                self._generic_summary(tool, raw),
+                "generic_failure",
+            )
         if re.search(r"^\s*no resources found", raw, re.IGNORECASE):
-            return {
-                "status": "empty",
-                "tool": tool,
-                "raw_preview": raw[:1000],
-            }, "工具成功执行，但没有找到资源；这是空/负向观察，不能当作异常已被验证。", "generic_empty"
+            return (
+                {
+                    "status": "empty",
+                    "tool": tool,
+                    "raw_preview": raw[:1000],
+                },
+                "工具成功执行，但没有找到资源；这是空/负向观察，不能当作异常已被验证。",
+                "generic_empty",
+            )
 
         if tool == "kubectl_get_yaml":
             return self._extract_yaml(raw)
@@ -572,7 +710,11 @@ class ObservationProcessor:
             return self._extract_command_result(tool, raw)
         if tool in {"execute_prometheus_instant_query", "execute_prometheus_range_query"}:
             return self._extract_prometheus_result(tool, raw)
-        if tool in {"kubectl_get_by_kind_in_cluster", "kubectl_get_by_kind_in_namespace", "kubernetes_tabular_query"}:
+        if tool in {
+            "kubectl_get_by_kind_in_cluster",
+            "kubectl_get_by_kind_in_namespace",
+            "kubernetes_tabular_query",
+        }:
             if self._looks_like_secret_table(raw):
                 return self._extract_secret_table(tool, raw)
             return self._extract_table(tool, raw)
@@ -592,37 +734,38 @@ class ObservationProcessor:
             payload = json.loads(raw or "{}")
         except Exception:
             logger.debug("_extract_observability_query: falling back after error", exc_info=True)
-            return {
-                "status": "query_parse_failed",
-                "tool": tool,
-                "coverage": "error",
-                "raw_preview": raw[:1000],
-            }, self._generic_summary(tool, raw), "observability_query_parse_failed"
+            return (
+                {
+                    "status": "query_parse_failed",
+                    "tool": tool,
+                    "coverage": "error",
+                    "raw_preview": raw[:1000],
+                },
+                self._generic_summary(tool, raw),
+                "observability_query_parse_failed",
+            )
 
         if not isinstance(payload, dict):
-            return {
-                "status": "query_parse_failed",
-                "tool": tool,
-                "coverage": "error",
-                "raw_preview": raw[:1000],
-            }, self._generic_summary(tool, raw), "observability_query_parse_failed"
+            return (
+                {
+                    "status": "query_parse_failed",
+                    "tool": tool,
+                    "coverage": "error",
+                    "raw_preview": raw[:1000],
+                },
+                self._generic_summary(tool, raw),
+                "observability_query_parse_failed",
+            )
 
         contract_errors = self._observability_query_contract_errors(payload)
         normalized_ledger = None
         if not contract_errors and "fact_ledger" in payload:
             ledger_input = payload.get("fact_ledger")
-            normalized_ledger, ledger_reasons = (
-                validate_canonical_fact_ledger_contract(
-                    ledger_input
-                    if isinstance(ledger_input, dict)
-                    else {}
-                )
+            normalized_ledger, ledger_reasons = validate_canonical_fact_ledger_contract(
+                ledger_input if isinstance(ledger_input, dict) else {}
             )
             if normalized_ledger is None:
-                contract_errors.append(
-                    "invalid_fact_ledger="
-                    + ",".join(ledger_reasons)
-                )
+                contract_errors.append("invalid_fact_ledger=" + ",".join(ledger_reasons))
         if contract_errors:
             structured = {
                 "status": "query_parse_failed",
@@ -633,10 +776,7 @@ class ObservationProcessor:
             }
             return (
                 structured,
-                (
-                    f"{tool} 返回不完整或无效的 MCP contract: "
-                    + "; ".join(contract_errors)
-                ),
+                (f"{tool} 返回不完整或无效的 MCP contract: " + "; ".join(contract_errors)),
                 "observability_query_parse_failed",
             )
 
@@ -663,9 +803,10 @@ class ObservationProcessor:
             refs = fact.get("evidence_refs") or []
             if fact.get("id"):
                 refs = [*refs, fact.get("id")]
-            if any(str(ref or "").strip() for ref in refs) and str(
-                fact.get("source_system") or default_source
-            ).strip():
+            if (
+                any(str(ref or "").strip() for ref in refs)
+                and str(fact.get("source_system") or default_source).strip()
+            ):
                 return True
         for fact in payload.get("facts") or []:
             if not isinstance(fact, dict):
@@ -677,9 +818,7 @@ class ObservationProcessor:
             if isinstance(fact.get("evidence_refs"), list):
                 refs.extend(fact["evidence_refs"])
             has_ref = any(str(ref or "").strip() for ref in refs)
-            source_system = str(
-                fact.get("source_system") or default_source
-            ).strip()
+            source_system = str(fact.get("source_system") or default_source).strip()
             if has_ref and source_system:
                 return True
         return False
@@ -733,12 +872,7 @@ class ObservationProcessor:
         if status == "query_partial":
             if payload.get("ok") is True and "error" in payload:
                 errors.append("error_present_for_success")
-            if (
-                coverage != "partial"
-                or not cls._has_source_backed_observability_fact(
-                    payload
-                )
-            ):
+            if coverage != "partial" or not cls._has_source_backed_observability_fact(payload):
                 errors.append("invalid_partial_contract")
         elif payload.get("ok") is False:
             error = payload.get("error")
@@ -753,10 +887,7 @@ class ObservationProcessor:
         elif payload.get("ok") is True:
             if "error" in payload:
                 errors.append("error_present_for_success")
-            if (
-                status != "query_succeeded"
-                or coverage in {"partial", "error"}
-            ):
+            if status != "query_succeeded" or coverage in {"partial", "error"}:
                 errors.append("invalid_success_contract")
 
         return errors
@@ -766,18 +897,26 @@ class ObservationProcessor:
             payload = json.loads(raw or "{}")
         except Exception:
             logger.debug("_extract_aiops_case: falling back after error", exc_info=True)
-            return {
-                "status": "case_parse_failed",
-                "tool": tool,
-                "raw_preview": raw[:1000],
-            }, self._generic_summary(tool, raw), "aiops_case_parse_failed"
+            return (
+                {
+                    "status": "case_parse_failed",
+                    "tool": tool,
+                    "raw_preview": raw[:1000],
+                },
+                self._generic_summary(tool, raw),
+                "aiops_case_parse_failed",
+            )
 
         if not isinstance(payload, dict):
-            return {
-                "status": "case_parse_failed",
-                "tool": tool,
-                "raw_preview": raw[:1000],
-            }, self._generic_summary(tool, raw), "aiops_case_parse_failed"
+            return (
+                {
+                    "status": "case_parse_failed",
+                    "tool": tool,
+                    "raw_preview": raw[:1000],
+                },
+                self._generic_summary(tool, raw),
+                "aiops_case_parse_failed",
+            )
 
         if payload.get("ok") is False:
             error = str(payload.get("error") or "aiops case tool returned ok=false")
@@ -797,7 +936,9 @@ class ObservationProcessor:
                 "tool": tool,
                 "total": payload.get("total", len(cases)),
                 "cases": [
-                    self._select_keys(item, ["case_id", "abnormal_type", "namespace", "pod", "package_ref"])
+                    self._select_keys(
+                        item, ["case_id", "abnormal_type", "namespace", "pod", "package_ref"]
+                    )
                     for item in cases[:20]
                     if isinstance(item, dict)
                 ],
@@ -855,22 +996,32 @@ class ObservationProcessor:
             if structured.get("truncated") is not None:
                 lines.append(f"truncated={structured.get('truncated')}")
             if structured.get("record"):
-                lines.append("record=" + json.dumps(structured["record"], ensure_ascii=False, default=str))
+                lines.append(
+                    "record=" + json.dumps(structured["record"], ensure_ascii=False, default=str)
+                )
             elif content:
                 lines.append(f"content_chars={len(content)}")
-                lines.append("content omitted from prompt; use evidence_id records or an approved evidence ref, not evaluator files.")
+                lines.append(
+                    "content omitted from prompt; use evidence_id records or an approved evidence ref, not evaluator files."
+                )
             return structured, "\n".join(lines), "aiops_case"
 
-        primary = payload.get("primary_entity") if isinstance(payload.get("primary_entity"), dict) else {}
+        primary = (
+            payload.get("primary_entity")
+            if isinstance(payload.get("primary_entity"), dict)
+            else {}
+        )
         coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
-        topology = payload.get("topology_summary") if isinstance(payload.get("topology_summary"), dict) else {}
-        evidence_refs = [
-            str(ref)
-            for ref in (payload.get("evidence_refs") or [])
-            if ref
-        ][:30]
+        topology = (
+            payload.get("topology_summary")
+            if isinstance(payload.get("topology_summary"), dict)
+            else {}
+        )
+        evidence_refs = [str(ref) for ref in (payload.get("evidence_refs") or []) if ref][:30]
         signals = [
-            self._select_keys(item, ["signal_id", "dimension", "strength", "observed", "evidence_refs"])
+            self._select_keys(
+                item, ["signal_id", "dimension", "strength", "observed", "evidence_refs"]
+            )
             for item in (payload.get("signals_summary") or [])[:12]
             if isinstance(item, dict)
         ]
@@ -892,7 +1043,9 @@ class ObservationProcessor:
             for key, value in recommended_refs.items()
             if isinstance(value, list)
         }
-        dimension_details = self._sanitize_aiops_dimension_details(payload.get("dimension_details"))
+        dimension_details = self._sanitize_aiops_dimension_details(
+            payload.get("dimension_details")
+        )
         fact_ledger = normalize_fact_ledger(payload.get("fact_ledger"))
         status = "case_collected" if tool == "collect_aiops_case" else "case_loaded"
         structured = {
@@ -901,13 +1054,22 @@ class ObservationProcessor:
             "case_id": payload.get("case_id"),
             "abnormal_type": payload.get("abnormal_type"),
             "scenario": payload.get("scenario"),
-            "primary_entity": self._select_keys(primary, ["kind", "namespace", "name", "uid", "node", "pod_ip"]),
+            "primary_entity": self._select_keys(
+                primary, ["kind", "namespace", "name", "uid", "node", "pod_ip"]
+            ),
             "coverage": sanitize_evidence_value(coverage),
             "signals_summary": signals,
             "timeline_summary": timeline,
             "topology_summary": self._select_keys(
                 topology,
-                ["entity_count", "edge_count", "entity_kinds", "relations", "directness", "confidence"],
+                [
+                    "entity_count",
+                    "edge_count",
+                    "entity_kinds",
+                    "relations",
+                    "directness",
+                    "confidence",
+                ],
             ),
             "dimension_details": dimension_details,
             "evidence_inventory": inventory,
@@ -993,11 +1155,7 @@ class ObservationProcessor:
                     or not observed.strip()
                 ):
                     continue
-                refs = [
-                    str(ref)
-                    for ref in (item.get("evidence_refs") or [])[:5]
-                    if ref
-                ]
+                refs = [str(ref) for ref in (item.get("evidence_refs") or [])[:5] if ref]
                 add(
                     "K8S_SIGNAL strength={strength} observed={observed} evidence_refs={refs}".format(
                         strength=compact(strength, 20),
@@ -1050,25 +1208,20 @@ class ObservationProcessor:
                 ("alloc_mib", parsed.get("alloc_mib")),
                 ("allocated_mib", parsed.get("allocated_mib")),
             ]
-            add("LOG " + " ".join(
-                f"{key}={compact(value, 120)}"
-                for key, value in log_fields
-                if value is not None and value != ""
-            ))
+            add(
+                "LOG "
+                + " ".join(
+                    f"{key}={compact(value, 120)}"
+                    for key, value in log_fields
+                    if value is not None and value != ""
+                )
+            )
 
         tracing = details.get("tracing") if isinstance(details.get("tracing"), dict) else {}
         flows = [item for item in (tracing.get("flows") or []) if isinstance(item, dict)]
         spans = [item for item in (tracing.get("spans") or []) if isinstance(item, dict)]
-        deepflow_trace_ids = {
-            str(item.get("trace_id"))
-            for item in flows
-            if item.get("trace_id")
-        }
-        tempo_trace_ids = {
-            str(item.get("trace_id"))
-            for item in spans
-            if item.get("trace_id")
-        }
+        deepflow_trace_ids = {str(item.get("trace_id")) for item in flows if item.get("trace_id")}
+        tempo_trace_ids = {str(item.get("trace_id")) for item in spans if item.get("trace_id")}
         log_tempo_trace_ids = sorted(log_trace_ids & tempo_trace_ids)
         source_trace_sets = [
             trace_ids
@@ -1079,12 +1232,8 @@ class ObservationProcessor:
             )
             if trace_ids
         ]
-        do_not_merge = (
-            len(source_trace_sets) >= 2
-            and any(
-                trace_ids != source_trace_sets[0]
-                for trace_ids in source_trace_sets[1:]
-            )
+        do_not_merge = len(source_trace_sets) >= 2 and any(
+            trace_ids != source_trace_sets[0] for trace_ids in source_trace_sets[1:]
         )
         if log_tempo_trace_ids or deepflow_trace_ids:
             add(
@@ -1124,20 +1273,21 @@ class ObservationProcessor:
                 ("allocated_before", attrs.get("aiops.allocated_mib.before")),
                 ("allocated_after", attrs.get("aiops.allocated_mib.after")),
             ]
-            add("TEMPO " + " ".join(
-                f"{key}={compact(value, 120)}"
-                for key, value in span_fields
-                if value is not None and value != ""
-            ))
+            add(
+                "TEMPO "
+                + " ".join(
+                    f"{key}={compact(value, 120)}"
+                    for key, value in span_fields
+                    if value is not None and value != ""
+                )
+            )
 
         complete = self._aiops_case_dimensions_complete(coverage)
         add(
             "DIMENSION_DETAILS complete={complete} action={action}".format(
                 complete=str(complete).lower(),
                 action=(
-                    "post_case_reconciliation"
-                    if complete
-                    else "supplement_missing_dimensions"
+                    "post_case_reconciliation" if complete else "supplement_missing_dimensions"
                 ),
             )
         )
@@ -1145,9 +1295,7 @@ class ObservationProcessor:
 
         topology = details.get("topology") if isinstance(details.get("topology"), dict) else {}
         topology_edges = [
-            item
-            for item in (topology.get("edges") or [])[:8]
-            if isinstance(item, dict)
+            item for item in (topology.get("edges") or [])[:8] if isinstance(item, dict)
         ]
 
         def add_topology_edge(item: Dict[str, Any]) -> None:
@@ -1222,8 +1370,16 @@ class ObservationProcessor:
                     self._select_keys(
                         item,
                         [
-                            "metric", "pod", "container", "start", "max", "last",
-                            "limit", "max_limit_ratio", "samples", "evidence_ref",
+                            "metric",
+                            "pod",
+                            "container",
+                            "start",
+                            "max",
+                            "last",
+                            "limit",
+                            "max_limit_ratio",
+                            "samples",
+                            "evidence_ref",
                         ],
                     )
                     for item in (metrics.get("highlights") or [])[:5]
@@ -1249,8 +1405,15 @@ class ObservationProcessor:
                     self._select_keys(
                         item,
                         [
-                            "timestamp", "src", "dst", "protocol", "request",
-                            "response_code", "duration_us", "trace_id", "span_id",
+                            "timestamp",
+                            "src",
+                            "dst",
+                            "protocol",
+                            "request",
+                            "response_code",
+                            "duration_us",
+                            "trace_id",
+                            "span_id",
                             "evidence_ref",
                         ],
                     )
@@ -1263,14 +1426,18 @@ class ObservationProcessor:
                             item,
                             ["trace_id", "service", "name", "start", "end", "evidence_ref"],
                         ),
-                        "attributes": self._sanitize_scalar_mapping(item.get("attributes"), max_items=8),
+                        "attributes": self._sanitize_scalar_mapping(
+                            item.get("attributes"), max_items=8
+                        ),
                     }
                     for item in (tracing.get("spans") or [])[:3]
                     if isinstance(item, dict)
                 ],
                 "call_chains": [
                     {
-                        **self._select_keys(item, ["syscall_trace_id", "hop_count", "evidence_ref"]),
+                        **self._select_keys(
+                            item, ["syscall_trace_id", "hop_count", "evidence_ref"]
+                        ),
                         "hops": [
                             self._select_keys(
                                 hop,
@@ -1292,7 +1459,9 @@ class ObservationProcessor:
                             item,
                             ["entity_id", "kind", "namespace", "name", "evidence_refs"],
                         ),
-                        "attributes": self._sanitize_scalar_mapping(item.get("attributes"), max_items=8),
+                        "attributes": self._sanitize_scalar_mapping(
+                            item.get("attributes"), max_items=8
+                        ),
                     }
                     for item in (topology.get("entities") or [])[:10]
                     if isinstance(item, dict)
@@ -1301,8 +1470,13 @@ class ObservationProcessor:
                     self._select_keys(
                         item,
                         [
-                            "relationship", "source", "target", "source_system",
-                            "directness", "confidence", "evidence_refs",
+                            "relationship",
+                            "source",
+                            "target",
+                            "source_system",
+                            "directness",
+                            "confidence",
+                            "evidence_refs",
                         ],
                     )
                     for item in (topology.get("edges") or [])[:12]
@@ -1371,32 +1545,36 @@ class ObservationProcessor:
         selected = {
             key: payload[key]
             for key in keys
-            if (
-                key in payload
-                and payload.get(key) is not None
-                and not is_forbidden_fact_key(key)
-            )
+            if (key in payload and payload.get(key) is not None and not is_forbidden_fact_key(key))
         }
         sanitized = sanitize_evidence_value(selected)
         return sanitized if isinstance(sanitized, dict) else {}
 
     def _extract_runbook(self, raw: str) -> tuple[Dict[str, Any], str, str]:
         if re.match(r"^\s*Error:\s*Runbook\b", raw or "", re.IGNORECASE):
-            return {
-                "status": "command_failed",
-                "tool": "fetch_runbook",
-                "raw_preview": raw[:1000],
-            }, self._generic_summary("fetch_runbook", raw), "runbook"
+            return (
+                {
+                    "status": "command_failed",
+                    "tool": "fetch_runbook",
+                    "raw_preview": raw[:1000],
+                },
+                self._generic_summary("fetch_runbook", raw),
+                "runbook",
+            )
 
         title = None
         match = re.search(r"^\s*#\s+(.+)$", raw or "", re.MULTILINE)
         if match:
             title = match.group(1).strip()
-        return {
-            "status": "runbook_loaded",
-            "title": title,
-            "raw_chars": len(raw or ""),
-        }, raw, "runbook"
+        return (
+            {
+                "status": "runbook_loaded",
+                "title": title,
+                "raw_chars": len(raw or ""),
+            },
+            raw,
+            "runbook",
+        )
 
     @staticmethod
     def _attach_runbook_metadata(structured: Dict[str, Any], tool_args: Dict[str, Any]) -> None:
@@ -1408,14 +1586,26 @@ class ObservationProcessor:
 
     def _extract_events(self, raw: str) -> tuple[Dict[str, Any], str, str]:
         if self._is_command_failure(raw):
-            return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary("kubectl_events", raw), "k8s_events"
+            return (
+                {"status": "command_failed", "raw_preview": raw[:1000]},
+                self._generic_summary("kubectl_events", raw),
+                "k8s_events",
+            )
         if re.search(r"no events found|no resources found", raw, re.IGNORECASE):
             structured = {"status": "no_events_found", "warnings": []}
-            return structured, "工具成功执行，但没有找到事件；这是空/负向观察，不能当作异常已被验证。", "k8s_events"
+            return (
+                structured,
+                "工具成功执行，但没有找到事件；这是空/负向观察，不能当作异常已被验证。",
+                "k8s_events",
+            )
 
         lines = [ln for ln in raw.splitlines() if ln.strip()]
         diagnostic_lines = self._extract_diagnostic_lines(raw, limit=20)
-        warning_lines = [ln for ln in lines if re.search(r"\bWarning\b|Failed|BackOff|x509|ErrImagePull|ImagePullBackOff", ln)]
+        warning_lines = [
+            ln
+            for ln in lines
+            if re.search(r"\bWarning\b|Failed|BackOff|x509|ErrImagePull|ImagePullBackOff", ln)
+        ]
         selected = diagnostic_lines or warning_lines[:20] or lines[:20]
         structured = {
             "status": "events_found",
@@ -1443,7 +1633,11 @@ class ObservationProcessor:
         tool_args: Optional[Dict[str, Any]] = None,
     ) -> tuple[Dict[str, Any], str, str]:
         if self._is_command_failure(raw):
-            return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary("kubectl_describe", raw), "k8s_describe"
+            return (
+                {"status": "command_failed", "raw_preview": raw[:1000]},
+                self._generic_summary("kubectl_describe", raw),
+                "k8s_describe",
+            )
 
         fields = {}
         for key in ["Name", "Namespace", "Node", "Status", "Reason", "Message"]:
@@ -1465,20 +1659,18 @@ class ObservationProcessor:
             ):
                 interesting.append(line.rstrip())
         diagnostic_lines = self._extract_diagnostic_lines(raw, limit=40)
-        merged_signals = self._dedupe_lines([
-            *diagnostic_lines,
-            *interesting,
-            *pod_sections.get("signals", []),
-        ])
+        merged_signals = self._dedupe_lines(
+            [
+                *diagnostic_lines,
+                *interesting,
+                *pod_sections.get("signals", []),
+            ]
+        )
 
         primary_entity: Dict[str, Any] = {}
         pod_name = str(fields.get("name") or "").strip()
         namespace = str(fields.get("namespace") or "").strip()
-        if (
-            pod_name
-            and namespace
-            and self._is_exact_pod_request(tool_args)
-        ):
+        if pod_name and namespace and self._is_exact_pod_request(tool_args):
             primary_entity = {
                 "kind": "Pod",
                 "namespace": namespace,
@@ -1494,11 +1686,7 @@ class ObservationProcessor:
 
         structured = {
             **fields,
-            **(
-                {"primary_entity": primary_entity}
-                if primary_entity
-                else {}
-            ),
+            **({"primary_entity": primary_entity} if primary_entity else {}),
             "lifecycle": pod_sections.get("lifecycle", {}),
             "containers": pod_sections.get("containers", []),
             "scheduling": pod_sections.get("scheduling", {}),
@@ -1521,10 +1709,13 @@ class ObservationProcessor:
         if interesting:
             summary_lines.append("关键状态/事件:")
             section_seen = set(section_summary)
-            summary_lines.extend([
-                ln for ln in interesting[:40]
-                if ln not in diagnostic_lines and ln not in section_seen
-            ])
+            summary_lines.extend(
+                [
+                    ln
+                    for ln in interesting[:40]
+                    if ln not in diagnostic_lines and ln not in section_seen
+                ]
+            )
         return structured, "\n".join(summary_lines), "k8s_describe"
 
     @staticmethod
@@ -1533,12 +1724,16 @@ class ObservationProcessor:
     ) -> bool:
         if not isinstance(tool_args, dict):
             return False
-        kind = str(
-            tool_args.get("kind")
-            or tool_args.get("resource_kind")
-            or tool_args.get("resource_type")
-            or ""
-        ).strip().lower()
+        kind = (
+            str(
+                tool_args.get("kind")
+                or tool_args.get("resource_kind")
+                or tool_args.get("resource_type")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         namespace = str(tool_args.get("namespace") or "").strip()
         name = str(
             tool_args.get("pod")
@@ -1547,9 +1742,7 @@ class ObservationProcessor:
             or tool_args.get("resource_name")
             or ""
         ).strip()
-        return kind in {"pod", "pods", "po"} and bool(
-            namespace and name
-        )
+        return kind in {"pod", "pods", "po"} and bool(namespace and name)
 
     @staticmethod
     def _extract_describe_pod_uid(
@@ -1563,11 +1756,7 @@ class ObservationProcessor:
             raw,
             re.MULTILINE,
         )
-        candidates = (
-            {direct_match.group(1)}
-            if direct_match
-            else set()
-        )
+        candidates = {direct_match.group(1)} if direct_match else set()
 
         event_pattern = re.compile(
             rf"\bpod\s+{re.escape(pod_name)}_{re.escape(namespace)}"
@@ -1602,7 +1791,11 @@ class ObservationProcessor:
             if match:
                 value = match.group(1).strip()
                 target[key] = value
-                line = f"{label}:  {value}" if label == "Termination Grace Period" else f"{label}: {value}"
+                line = (
+                    f"{label}:  {value}"
+                    if label == "Termination Grace Period"
+                    else f"{label}: {value}"
+                )
                 summary_lines.append(line)
                 signals.append(line)
 
@@ -1789,7 +1982,9 @@ class ObservationProcessor:
         return items, selected[:max_lines]
 
     @staticmethod
-    def _section_lines(raw: str, section_name: str, stop_at_next_section: bool = True) -> list[str]:
+    def _section_lines(
+        raw: str, section_name: str, stop_at_next_section: bool = True
+    ) -> list[str]:
         lines = (raw or "").splitlines()
         start = None
         for idx, line in enumerate(lines):
@@ -1818,25 +2013,29 @@ class ObservationProcessor:
         if not lines:
             return {"status": "empty"}, "工具返回为空；不能作为正向健康证据。", "k8s_table"
         if re.search(r"command failed|error from server|notfound|not found", raw, re.IGNORECASE):
-            return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary(tool, raw), "k8s_table"
+            return (
+                {"status": "command_failed", "raw_preview": raw[:1000]},
+                self._generic_summary(tool, raw),
+                "k8s_table",
+            )
 
         header = lines[0]
         columns = re.split(r"\s{2,}|\t+", header.strip())
         status_indexes = {
-            idx for idx, column in enumerate(columns)
+            idx
+            for idx, column in enumerate(columns)
             if column.upper() in {"READY", "STATUS", "REASON", "PHASE"}
         }
         pure_status_indexes = {
-            idx for idx, column in enumerate(columns)
+            idx
+            for idx, column in enumerate(columns)
             if column.upper() in {"STATUS", "REASON", "PHASE"}
         }
         endpoint_indexes = {
-            idx for idx, column in enumerate(columns)
-            if column.upper() in {"ENDPOINTS"}
+            idx for idx, column in enumerate(columns) if column.upper() in {"ENDPOINTS"}
         }
         restart_indexes = {
-            idx for idx, column in enumerate(columns)
-            if column.upper() in {"RESTARTS"}
+            idx for idx, column in enumerate(columns) if column.upper() in {"RESTARTS"}
         }
         abnormal = []
         recent_restart_rows = []
@@ -1880,8 +2079,7 @@ class ObservationProcessor:
         summary = (
             f"{tool} 表格摘要: rows={structured['row_count']} "
             f"abnormal={len(abnormal)} recent_restarts={len(recent_restart_rows)} "
-            f"status_counts={status_counts}\n{header}\n# {label}\n"
-            + "\n".join(selected)
+            f"status_counts={status_counts}\n{header}\n# {label}\n" + "\n".join(selected)
         )
         return structured, summary, "k8s_table"
 
@@ -1908,7 +2106,9 @@ class ObservationProcessor:
             lowered = row.lower()
             if "kubernetes.io/dockerconfigjson" in lowered or "kubernetes.io/dockercfg" in lowered:
                 docker_secret_rows.append(row)
-            elif any(keyword in lowered for keyword in ["docker", "registry", "pull", "xnet-bmcs"]):
+            elif any(
+                keyword in lowered for keyword in ["docker", "registry", "pull", "xnet-bmcs"]
+            ):
                 docker_like_rows.append(row)
 
         structured = {
@@ -1926,7 +2126,9 @@ class ObservationProcessor:
             lines.append("# kubernetes.io/dockerconfigjson/dockercfg Secret")
             lines.extend(docker_secret_rows[:20])
         else:
-            lines.append("未发现 type 为 kubernetes.io/dockerconfigjson 或 kubernetes.io/dockercfg 的 Secret。")
+            lines.append(
+                "未发现 type 为 kubernetes.io/dockerconfigjson 或 kubernetes.io/dockercfg 的 Secret。"
+            )
         if docker_like_rows:
             lines.append("# 名称疑似与镜像拉取相关但类型不一定有效")
             lines.extend(docker_like_rows[:20])
@@ -1945,9 +2147,15 @@ class ObservationProcessor:
             }
             # Keep complete records, never slice a JSON value midway. Source
             # order is not a ranking: explicitly disclose incomplete coverage.
-            records = parsed if isinstance(parsed, list) else (
-                parsed["data"] if isinstance(parsed, dict) and isinstance(parsed.get("data"), list)
-                else [parsed])
+            records = (
+                parsed
+                if isinstance(parsed, list)
+                else (
+                    parsed["data"]
+                    if isinstance(parsed, dict) and isinstance(parsed.get("data"), list)
+                    else [parsed]
+                )
+            )
             selected = []
             used = 250
             for record in records:
@@ -1957,13 +2165,19 @@ class ObservationProcessor:
                     used += len(encoded) + 1
             structured["selected_count"] = len(selected)
             structured["omitted_count"] = len(records) - len(selected)
-            summary = (f"JSON 查询共 {len(records)} 条，展示 {len(selected)} 条，"
-                       f"省略 {len(records) - len(selected)} 条。未展示不代表不存在；"
-                       "需要完整字段或全集统计时回读原文。\n" + "\n".join(selected))
+            summary = (
+                f"JSON 查询共 {len(records)} 条，展示 {len(selected)} 条，"
+                f"省略 {len(records) - len(selected)} 条。未展示不代表不存在；"
+                "需要完整字段或全集统计时回读原文。\n" + "\n".join(selected)
+            )
             return structured, summary, "k8s_jq"
         except Exception:
             logger.debug("_extract_jq: falling back after error", exc_info=True)
-            return {"status": "text_summarized"}, self._generic_summary("kubernetes_jq_query", raw), "k8s_jq"
+            return (
+                {"status": "text_summarized"},
+                self._generic_summary("kubernetes_jq_query", raw),
+                "k8s_jq",
+            )
 
     def _extract_yaml(self, raw: str) -> tuple[Dict[str, Any], str, str]:
         # Error messages inside a successful YAML observation describe the
@@ -2011,7 +2225,9 @@ class ObservationProcessor:
         spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
         status = doc.get("status") if isinstance(doc.get("status"), dict) else {}
         labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
-        annotations = metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {}
+        annotations = (
+            metadata.get("annotations") if isinstance(metadata.get("annotations"), dict) else {}
+        )
         diagnostic_annotations = {
             str(key): value
             for key, value in annotations.items()
@@ -2019,39 +2235,54 @@ class ObservationProcessor:
         }
 
         image_pull_secrets_raw = spec.get("imagePullSecrets")
-        image_pull_secrets = [
-            item.get("name")
-            for item in image_pull_secrets_raw
-            if isinstance(item, dict) and item.get("name")
-        ] if isinstance(image_pull_secrets_raw, list) else []
+        image_pull_secrets = (
+            [
+                item.get("name")
+                for item in image_pull_secrets_raw
+                if isinstance(item, dict) and item.get("name")
+            ]
+            if isinstance(image_pull_secrets_raw, list)
+            else []
+        )
 
         containers = []
         for container in spec.get("containers") or []:
             if not isinstance(container, dict):
                 continue
-            containers.append({
-                "name": container.get("name"),
-                "image": container.get("image"),
-                "imagePullPolicy": container.get("imagePullPolicy"),
-                "command": container.get("command") if isinstance(container.get("command"), list) else [],
-                "args": container.get("args") if isinstance(container.get("args"), list) else [],
-                "lifecycle": container.get("lifecycle") if isinstance(container.get("lifecycle"), dict) else {},
-                "resources": container.get("resources") or {},
-                "volumeMounts": [
-                    dict(mount) for mount in container.get("volumeMounts") or []
-                    if isinstance(mount, dict)
-                ],
-            })
+            containers.append(
+                {
+                    "name": container.get("name"),
+                    "image": container.get("image"),
+                    "imagePullPolicy": container.get("imagePullPolicy"),
+                    "command": container.get("command")
+                    if isinstance(container.get("command"), list)
+                    else [],
+                    "args": container.get("args")
+                    if isinstance(container.get("args"), list)
+                    else [],
+                    "lifecycle": container.get("lifecycle")
+                    if isinstance(container.get("lifecycle"), dict)
+                    else {},
+                    "resources": container.get("resources") or {},
+                    "volumeMounts": [
+                        dict(mount)
+                        for mount in container.get("volumeMounts") or []
+                        if isinstance(mount, dict)
+                    ],
+                }
+            )
 
         init_containers = []
         for container in spec.get("initContainers") or []:
             if not isinstance(container, dict):
                 continue
-            init_containers.append({
-                "name": container.get("name"),
-                "image": container.get("image"),
-                "imagePullPolicy": container.get("imagePullPolicy"),
-            })
+            init_containers.append(
+                {
+                    "name": container.get("name"),
+                    "image": container.get("image"),
+                    "imagePullPolicy": container.get("imagePullPolicy"),
+                }
+            )
 
         container_statuses = []
         for item in status.get("containerStatuses") or []:
@@ -2059,16 +2290,24 @@ class ObservationProcessor:
                 continue
             state = item.get("state") if isinstance(item.get("state"), dict) else {}
             last_state = item.get("lastState") if isinstance(item.get("lastState"), dict) else {}
-            container_statuses.append({
-                "name": item.get("name"),
-                "ready": item.get("ready"),
-                "restartCount": item.get("restartCount"),
-                "image": item.get("image"),
-                "imageID": item.get("imageID"),
-                "waiting": state.get("waiting") if isinstance(state.get("waiting"), dict) else None,
-                "terminated": state.get("terminated") if isinstance(state.get("terminated"), dict) else None,
-                "lastTerminated": last_state.get("terminated") if isinstance(last_state.get("terminated"), dict) else None,
-            })
+            container_statuses.append(
+                {
+                    "name": item.get("name"),
+                    "ready": item.get("ready"),
+                    "restartCount": item.get("restartCount"),
+                    "image": item.get("image"),
+                    "imageID": item.get("imageID"),
+                    "waiting": state.get("waiting")
+                    if isinstance(state.get("waiting"), dict)
+                    else None,
+                    "terminated": state.get("terminated")
+                    if isinstance(state.get("terminated"), dict)
+                    else None,
+                    "lastTerminated": last_state.get("terminated")
+                    if isinstance(last_state.get("terminated"), dict)
+                    else None,
+                }
+            )
 
         owner_refs = []
         for item in metadata.get("ownerReferences") or []:
@@ -2104,13 +2343,15 @@ class ObservationProcessor:
         for item in status.get("conditions") or []:
             if not isinstance(item, dict):
                 continue
-            conditions.append({
-                "type": item.get("type"),
-                "status": item.get("status"),
-                "reason": item.get("reason"),
-                "message": item.get("message"),
-                "lastTransitionTime": item.get("lastTransitionTime"),
-            })
+            conditions.append(
+                {
+                    "type": item.get("type"),
+                    "status": item.get("status"),
+                    "reason": item.get("reason"),
+                    "message": item.get("message"),
+                    "lastTransitionTime": item.get("lastTransitionTime"),
+                }
+            )
 
         structured = {
             "status": "yaml_summarized",
@@ -2121,7 +2362,9 @@ class ObservationProcessor:
             "creationTimestamp": metadata.get("creationTimestamp"),
             "deletionTimestamp": metadata.get("deletionTimestamp"),
             "deletionGracePeriodSeconds": metadata.get("deletionGracePeriodSeconds"),
-            "finalizers": metadata.get("finalizers") if isinstance(metadata.get("finalizers"), list) else [],
+            "finalizers": metadata.get("finalizers")
+            if isinstance(metadata.get("finalizers"), list)
+            else [],
             "labels": labels,
             "diagnostic_annotations": diagnostic_annotations,
             "ownerReferences": owner_refs,
@@ -2129,9 +2372,14 @@ class ObservationProcessor:
             "nodeName": spec.get("nodeName"),
             "restartPolicy": spec.get("restartPolicy"),
             "terminationGracePeriodSeconds": spec.get("terminationGracePeriodSeconds"),
-            "nodeSelector": spec.get("nodeSelector") if isinstance(spec.get("nodeSelector"), dict) else {},
-            "tolerations": spec.get("tolerations") if isinstance(spec.get("tolerations"), list) else [],
-            "affinity_present": isinstance(spec.get("affinity"), dict) and bool(spec.get("affinity")),
+            "nodeSelector": spec.get("nodeSelector")
+            if isinstance(spec.get("nodeSelector"), dict)
+            else {},
+            "tolerations": spec.get("tolerations")
+            if isinstance(spec.get("tolerations"), list)
+            else [],
+            "affinity_present": isinstance(spec.get("affinity"), dict)
+            and bool(spec.get("affinity")),
             "imagePullSecrets": image_pull_secrets,
             "imagePullSecrets_present": image_pull_secrets_raw is not None,
             "containers": containers,
@@ -2152,15 +2400,18 @@ class ObservationProcessor:
             f"creationTimestamp: {metadata.get('creationTimestamp')}",
             f"deletionTimestamp: {metadata.get('deletionTimestamp') or '<absent>'}",
             f"deletionGracePeriodSeconds: {metadata.get('deletionGracePeriodSeconds')}",
-            "finalizers: " + (
+            "finalizers: "
+            + (
                 ", ".join(str(item) for item in structured["finalizers"])
-                if structured["finalizers"] else "<none>"
+                if structured["finalizers"]
+                else "<none>"
             ),
             f"serviceAccountName: {spec.get('serviceAccountName')}",
             f"nodeName: {spec.get('nodeName')}",
             f"restartPolicy: {spec.get('restartPolicy')}",
             f"terminationGracePeriodSeconds: {spec.get('terminationGracePeriodSeconds')}",
-            "imagePullSecrets: " + (", ".join(image_pull_secrets) if image_pull_secrets else "<absent>"),
+            "imagePullSecrets: "
+            + (", ".join(image_pull_secrets) if image_pull_secrets else "<absent>"),
             f"phase: {status.get('phase')}",
         ]
         if labels:
@@ -2173,15 +2424,19 @@ class ObservationProcessor:
             if label_facts:
                 lines.append("labels: " + ", ".join(f"{k}={v}" for k, v in label_facts.items()))
         if diagnostic_annotations:
-            lines.append("diagnostic_annotations: " + ", ".join(
-                f"{k}={v}" for k, v in sorted(diagnostic_annotations.items())
-            ))
+            lines.append(
+                "diagnostic_annotations: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(diagnostic_annotations.items()))
+            )
         if owner_refs:
-            lines.append("ownerReferences: " + ", ".join(
-                f"{item.get('kind')}/{item.get('name')}" for item in owner_refs
-            ))
+            lines.append(
+                "ownerReferences: "
+                + ", ".join(f"{item.get('kind')}/{item.get('name')}" for item in owner_refs)
+            )
         if structured["nodeSelector"]:
-            lines.append("nodeSelector: " + json.dumps(structured["nodeSelector"], ensure_ascii=False))
+            lines.append(
+                "nodeSelector: " + json.dumps(structured["nodeSelector"], ensure_ascii=False)
+            )
         if structured["tolerations"]:
             lines.append("tolerations_count: " + str(len(structured["tolerations"])))
         if structured["affinity_present"]:
@@ -2199,13 +2454,19 @@ class ObservationProcessor:
                     lines.append("  command: " + " ".join(str(part) for part in command[:10]))
                 if args:
                     args_text = " ".join(str(part) for part in args[:10])
-                    lines.append("  args: " + (args_text[:500] + ("..." if len(args_text) > 500 else "")))
+                    lines.append(
+                        "  args: " + (args_text[:500] + ("..." if len(args_text) > 500 else ""))
+                    )
                 if lifecycle:
                     lines.append("  lifecycle: " + json.dumps(lifecycle, ensure_ascii=False)[:800])
                 if item.get("resources"):
-                    lines.append("  resources: " + json.dumps(item["resources"], ensure_ascii=False))
+                    lines.append(
+                        "  resources: " + json.dumps(item["resources"], ensure_ascii=False)
+                    )
                 if item.get("volumeMounts"):
-                    lines.append("  volumeMounts: " + json.dumps(item["volumeMounts"], ensure_ascii=False))
+                    lines.append(
+                        "  volumeMounts: " + json.dumps(item["volumeMounts"], ensure_ascii=False)
+                    )
         if conditions:
             lines.append("conditions:")
             for item in conditions[:10]:
@@ -2269,8 +2530,13 @@ class ObservationProcessor:
         data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
         data_keys = sorted(str(key) for key in data.keys())
         secret_type = doc.get("type")
-        has_dockerconfigjson = any(key in data for key in [".dockerconfigjson", "dockerconfigjson"])
-        docker_secret_type_valid = secret_type in {"kubernetes.io/dockerconfigjson", "kubernetes.io/dockercfg"}
+        has_dockerconfigjson = any(
+            key in data for key in [".dockerconfigjson", "dockerconfigjson"]
+        )
+        docker_secret_type_valid = secret_type in {
+            "kubernetes.io/dockerconfigjson",
+            "kubernetes.io/dockercfg",
+        }
         structured = {
             "status": "yaml_summarized",
             "kind": "Secret",
@@ -2317,18 +2583,9 @@ class ObservationProcessor:
         endpoint_indexes: set[int],
     ) -> bool:
         cells = re.split(r"\s{2,}|\t+", row.strip())
-        status_text = " ".join(
-            cells[idx] for idx in status_indexes
-            if idx < len(cells)
-        )
-        pure_status_text = " ".join(
-            cells[idx] for idx in pure_status_indexes
-            if idx < len(cells)
-        )
-        endpoint_text = " ".join(
-            cells[idx] for idx in endpoint_indexes
-            if idx < len(cells)
-        )
+        status_text = " ".join(cells[idx] for idx in status_indexes if idx < len(cells))
+        pure_status_text = " ".join(cells[idx] for idx in pure_status_indexes if idx < len(cells))
+        endpoint_text = " ".join(cells[idx] for idx in endpoint_indexes if idx < len(cells))
         if endpoint_text and re.search(r"(^|\s)<none>($|\s)", endpoint_text, re.IGNORECASE):
             return True
         if pure_status_text:
@@ -2338,21 +2595,21 @@ class ObservationProcessor:
             # READY 未就绪（如 0/1）即为异常：readiness 探针失败时
             # STATUS 列仍显示 Running，不能只看状态关键字（c09 实测教训）。
             ready_indexes = status_indexes - pure_status_indexes
-            ready_text = " ".join(
-                cells[idx] for idx in ready_indexes if idx < len(cells)
-            )
+            ready_text = " ".join(cells[idx] for idx in ready_indexes if idx < len(cells))
             ready_match = re.search(r"\b(\d+)/(\d+)\b", ready_text)
             if ready_match and int(ready_match.group(1)) < int(ready_match.group(2)):
                 return True
             if normalized in {"running", "ready", "bound", "active"}:
                 return False
             return True
-        return bool(re.search(
-            r"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|OOMKilled|Evicted|"
-            r"Pending|Failed|Error|NotReady|Unknown|0/\d+",
-            status_text,
-            re.IGNORECASE,
-        ))
+        return bool(
+            re.search(
+                r"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|OOMKilled|Evicted|"
+                r"Pending|Failed|Error|NotReady|Unknown|0/\d+",
+                status_text,
+                re.IGNORECASE,
+            )
+        )
 
     @classmethod
     def _table_row_has_recent_restart(
@@ -2364,17 +2621,13 @@ class ObservationProcessor:
         if not pure_status_indexes or not restart_indexes:
             return False
         cells = re.split(r"\s{2,}|\t+", row.strip())
-        status_text = " ".join(
-            cells[idx] for idx in pure_status_indexes
-            if idx < len(cells)
-        ).strip().lower()
+        status_text = (
+            " ".join(cells[idx] for idx in pure_status_indexes if idx < len(cells)).strip().lower()
+        )
         if status_text != "running":
             return False
 
-        restart_text = " ".join(
-            cells[idx] for idx in restart_indexes
-            if idx < len(cells)
-        ).strip()
+        restart_text = " ".join(cells[idx] for idx in restart_indexes if idx < len(cells)).strip()
         match = re.fullmatch(
             r"(?P<count>\d+)\s+\((?P<age>[^()]+?)\s+ago\)",
             restart_text,
@@ -2384,10 +2637,7 @@ class ObservationProcessor:
             return False
 
         age_seconds = cls._parse_kubectl_duration_seconds(match.group("age"))
-        return (
-            age_seconds is not None
-            and age_seconds <= cls.RECENT_RESTART_WINDOW_SECONDS
-        )
+        return age_seconds is not None and age_seconds <= cls.RECENT_RESTART_WINDOW_SECONDS
 
     @staticmethod
     def _parse_kubectl_duration_seconds(value: str) -> Optional[int]:
@@ -2416,7 +2666,11 @@ class ObservationProcessor:
             parsed = None
 
         if not isinstance(parsed, dict):
-            return {"status": "run_image_unparsed"}, self._generic_summary("kubectl_run_image", raw), "k8s_run_image"
+            return (
+                {"status": "run_image_unparsed"},
+                self._generic_summary("kubectl_run_image", raw),
+                "k8s_run_image",
+            )
 
         success = parsed.get("success")
         stdout = (parsed.get("stdout") or "").strip()
@@ -2426,7 +2680,10 @@ class ObservationProcessor:
         signals = []
         for pattern, label in [
             (r"timed out|deadlineexceeded|i/o timeout", "timeout"),
-            (r"no such host|nxdomain|server can't find|temporary failure in name resolution", "dns"),
+            (
+                r"no such host|nxdomain|server can't find|temporary failure in name resolution",
+                "dns",
+            ),
             (r"x509|certificate signed by unknown authority|tls", "tls"),
             (r"connection refused|no route to host|network is unreachable", "network"),
             (r"imagepullbackoff|errimagepull|failed to pull", "image_pull"),
@@ -2463,7 +2720,11 @@ class ObservationProcessor:
             logger.debug("_extract_command_result: falling back after error", exc_info=True)
             parsed = None
         if not isinstance(parsed, dict):
-            return {"status": "command_unparsed"}, self._generic_summary(tool, raw), "command_result"
+            return (
+                {"status": "command_unparsed"},
+                self._generic_summary(tool, raw),
+                "command_result",
+            )
         stdout = (parsed.get("stdout") or "").strip()
         stderr = (parsed.get("stderr") or "").strip()
         structured = {
@@ -2488,7 +2749,11 @@ class ObservationProcessor:
 
     def _extract_logs(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
         if self._is_command_failure(raw):
-            return {"status": "command_failed", "raw_preview": raw[:1000]}, self._generic_summary(tool, raw), "k8s_logs"
+            return (
+                {"status": "command_failed", "raw_preview": raw[:1000]},
+                self._generic_summary(tool, raw),
+                "k8s_logs",
+            )
 
         lines = [ln for ln in raw.splitlines() if ln.strip()]
         signal_patterns = (
@@ -2504,7 +2769,7 @@ class ObservationProcessor:
         for line in lines:
             pattern = re.sub(r"\b\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?", "<time>", line)
             # Do not merge distinct HTTP codes, exit codes, or resource limits.
-            pattern = re.sub(r'(\b(?:attempt|allocated_mib)["\s:=]+)\d+', r'\1#', pattern)
+            pattern = re.sub(r'(\b(?:attempt|allocated_mib)["\s:=]+)\d+', r"\1#", pattern)
             patterns.setdefault(pattern, []).append(line)
         selected = []
         used = 0
@@ -2512,16 +2777,23 @@ class ObservationProcessor:
         groups = list(patterns.values())
         # Reserve opportunities for late failures/recovery and endpoints of
         # changing counters before distinct routine lines exhaust the budget.
-        signal_groups = [group for group in groups
-                         if re.search(signal_patterns, group[0], re.IGNORECASE)]
-        recovery_groups = [group for group in groups
-                           if re.search(r"recover|healthy|ready|success", group[-1], re.IGNORECASE)]
-        priority = ([signal_groups[0][0], signal_groups[-1][-1]] if signal_groups else [])
-        priority += ([recovery_groups[-1][-1]] if recovery_groups else [])
-        priority += ([lines[0], lines[-1]] if lines else [])
+        signal_groups = [
+            group for group in groups if re.search(signal_patterns, group[0], re.IGNORECASE)
+        ]
+        recovery_groups = [
+            group
+            for group in groups
+            if re.search(r"recover|healthy|ready|success", group[-1], re.IGNORECASE)
+        ]
+        priority = [signal_groups[0][0], signal_groups[-1][-1]] if signal_groups else []
+        priority += [recovery_groups[-1][-1]] if recovery_groups else []
+        priority += [lines[0], lines[-1]] if lines else []
         priority += [group[-1] for group in groups if len(group) > 1]
-        for candidates in (priority, [group[0] for group in groups],
-                           [group[-1] for group in groups]):
+        for candidates in (
+            priority,
+            [group[0] for group in groups],
+            [group[-1] for group in groups],
+        ):
             for line in candidates:
                 if line in selected or len(selected) >= 40:
                     continue
@@ -2574,7 +2846,12 @@ class ObservationProcessor:
         query = str(payload.get("query") or "").strip()
         url = str(payload.get("url") or "").strip()
         status = str(payload.get("status") or "").strip().lower()
-        if error or error_type or status == "error" or re.search(r"\b(?:400|500)\s+Client Error|Bad Request", raw or "", re.IGNORECASE):
+        if (
+            error
+            or error_type
+            or status == "error"
+            or re.search(r"\b(?:400|500)\s+Client Error|Bad Request", raw or "", re.IGNORECASE)
+        ):
             message = error or error_type or raw[:1000]
             structured = {
                 "status": "prometheus_error",
@@ -2600,7 +2877,11 @@ class ObservationProcessor:
                 "tool": tool,
                 "result_count": 0,
             }
-            return structured, f"{tool} 执行成功但结果为空；这表示查询未命中数据，不能视为已采集到指标值。", "prometheus_empty"
+            return (
+                structured,
+                f"{tool} 执行成功但结果为空；这表示查询未命中数据，不能视为已采集到指标值。",
+                "prometheus_empty",
+            )
 
         structured = {
             **normalized,
@@ -2626,14 +2907,10 @@ class ObservationProcessor:
                 "weak",
             }
         if status == "query_partial":
-            return (
-                str(
-                    (structured or {}).get("coverage") or ""
-                ).lower()
-                == "partial"
-                and ObservationProcessor._has_source_backed_observability_fact(
-                    structured or {}
-                )
+            return str(
+                (structured or {}).get("coverage") or ""
+            ).lower() == "partial" and ObservationProcessor._has_source_backed_observability_fact(
+                structured or {}
             )
         if status in {
             "empty",
@@ -2654,7 +2931,9 @@ class ObservationProcessor:
         text = summary or ""
         if not text.strip():
             return False
-        if ObservationProcessor._is_command_failure(text) or re.search(r"工具返回为空", text, re.IGNORECASE):
+        if ObservationProcessor._is_command_failure(text) or re.search(
+            r"工具返回为空", text, re.IGNORECASE
+        ):
             return False
         return True
 

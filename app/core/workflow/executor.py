@@ -81,14 +81,13 @@ def _missing_structured_actions_reason(report: str, plan: Any) -> Optional[str]:
         r"\bkubectl\s+rollout\s+(?:pause|restart|resume|undo)\s+"
         r"(?:[A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+",
     )
-    has_write_advice = any(
-        re.search(pattern, text, re.IGNORECASE)
-        for pattern in write_patterns
-    )
+    has_write_advice = any(re.search(pattern, text, re.IGNORECASE) for pattern in write_patterns)
     if not has_write_advice:
         return None
     actions = getattr(plan, "actions", None) if plan is not None else None
-    remediation_available = bool(getattr(plan, "remediation_available", False)) if plan is not None else False
+    remediation_available = (
+        bool(getattr(plan, "remediation_available", False)) if plan is not None else False
+    )
     if plan is None:
         return "natural-language remediation advice exists but no structured remediation plan was emitted"
     if not remediation_available or not actions:
@@ -182,7 +181,9 @@ class _StreamTranslator:
         ):
             # Name the stage actually running: the latest-started unfinished node (a
             # finished node can linger in current_nodes via a trailing LangGraph update).
-            active = [n for n in self.current_nodes if n not in self.completed_nodes] or list(self.current_nodes)
+            active = [n for n in self.current_nodes if n not in self.completed_nodes] or list(
+                self.current_nodes
+            )
             heartbeat_node_id = max(active, key=lambda n: (self.node_start_times.get(n, 0.0), n))
             yield {
                 "type": "heartbeat",
@@ -219,9 +220,14 @@ class _StreamTranslator:
                 end_ts=ts,
             )
             self.current_nodes.discard(node_id)
-            duration_s = (self.metrics.nodes.get(node_id).duration_ms / 1000
-                          if node_id in self.metrics.nodes else 0)
-            yield from self._complete_node(node_id, node_name=node_name, ts=ts, duration_s=duration_s)
+            duration_s = (
+                self.metrics.nodes.get(node_id).duration_ms / 1000
+                if node_id in self.metrics.nodes
+                else 0
+            )
+            yield from self._complete_node(
+                node_id, node_name=node_name, ts=ts, duration_s=duration_s
+            )
 
     def _on_thinking(self, data: Dict[str, Any]) -> Generator[Dict, None, None]:
         """Real-time thinking event; synthesizes node_start for unseen nodes."""
@@ -253,7 +259,9 @@ class _StreamTranslator:
             new_nodes_in_this_event.add(node_name)
             self.final_state.update(updated_state)
             if node_name not in self.node_start_times:
-                yield from self._start_node(node_name, self.executor._get_node_display_name(node_name))
+                yield from self._start_node(
+                    node_name, self.executor._get_node_display_name(node_name)
+                )
 
         for node_name in self.current_nodes:
             if node_name not in new_nodes_in_this_event and node_name not in self.completed_nodes:
@@ -270,7 +278,11 @@ class _StreamTranslator:
     # ── event builders ─────────────────────────────────────────────────
 
     def _start_node(
-        self, node_id: str, node_name: str, *, ts: Optional[float] = None,
+        self,
+        node_id: str,
+        node_name: str,
+        *,
+        ts: Optional[float] = None,
     ) -> Generator[Dict, None, None]:
         """Record and emit node_start. ``ts`` is the lifecycle-reported start;
         without it the start is observed now."""
@@ -282,18 +294,23 @@ class _StreamTranslator:
             self.metrics.start_node(node_id, node_name, start_ts=ts)
         self.current_nodes.add(node_id)
         logger.info("[%s] %s 开始...", node_id, node_name)
-        yield from self._emit({
-            "type": "node_start",
-            "id": f"{self.run_id}-node_start-{node_id}",
-            "run_id": self.run_id,
-            "seq": self.seq,
-            "ts_ms": int((time.time() if ts is None else ts) * 1000),
-            "node": node_id,
-            "node_name": node_name,
-        })
+        yield from self._emit(
+            {
+                "type": "node_start",
+                "id": f"{self.run_id}-node_start-{node_id}",
+                "run_id": self.run_id,
+                "seq": self.seq,
+                "ts_ms": int((time.time() if ts is None else ts) * 1000),
+                "node": node_id,
+                "node_name": node_name,
+            }
+        )
 
     def _complete_inferred_node(
-        self, node_name: str, *, include_handoff: bool = True,
+        self,
+        node_name: str,
+        *,
+        include_handoff: bool = True,
     ) -> Generator[Dict, None, None]:
         """Complete a node whose end was inferred rather than reported."""
         node_duration = time.time() - self.node_start_times.get(node_name, time.time())
@@ -326,7 +343,9 @@ class _StreamTranslator:
         snapshot = executor._extract_state_snapshot(self.final_state, node_id)
         node_summary = executor._format_node_summary(node_id, self.final_state, snapshot)
         handoff = executor._format_handoff_summary(node_id, self.final_state)
-        executor._archive_node_transition(self.run_id, node_id, self.final_state, snapshot, handoff)
+        executor._archive_node_transition(
+            self.run_id, node_id, self.final_state, snapshot, handoff
+        )
 
         logger.info("[%s] 完成 (%.1fs)", node_id, duration_s)
         if node_summary:
@@ -361,7 +380,11 @@ class _StreamTranslator:
             "thinking_type": data.get("type", ""),
             "tool_name": data.get("tool_name"),
             "content": data.get("content"),
-            **({"full_content": data["full_content"]} if data.get("type") == "ai_message" and data.get("full_content") is not None else {}),
+            **(
+                {"full_content": data["full_content"]}
+                if data.get("type") == "ai_message" and data.get("full_content") is not None
+                else {}
+            ),
             "status": data.get("status"),
             "result_preview": data.get("result_preview"),
             "duration_seconds": data.get("duration_seconds"),
@@ -375,13 +398,13 @@ class _StreamTranslator:
 class WorkflowExecutor:
     """
     工作流执行器（与 HolmesService 集成）
-    
+
     设计原则：
     - 封装 LangGraph 工作流的执行细节
     - 输出格式与现有 event_mapper 兼容
     - 记录性能和质量指标
     """
-    
+
     def __init__(self, holmes_service: Any = None, metrics: Any = None):
         """
         初始化执行器
@@ -392,8 +415,8 @@ class WorkflowExecutor:
         """
         self.holmes_service = holmes_service
         self.metrics = metrics
-        self.ai_call = None       # Set externally to enable aicall path
-        self.mcp_tools = []       # Set externally (list of tool defs for aicall)
+        self.ai_call = None  # Set externally to enable aicall path
+        self.mcp_tools = []  # Set externally (list of tool defs for aicall)
         # 获取 runbook_catalog（从 HolmesService）
         self.runbook_catalog = (
             holmes_service.merged_catalog
@@ -435,6 +458,7 @@ class WorkflowExecutor:
     def execute_stream(self, question, run_id=None, cancel_event=None, workflow_overrides=None):
         from app.core.query_sessions import SessionBusy, query_sessions
         from app.core.remediation.records import PlanConflict, RecordUnavailable, RepairRecordStore
+
         overrides = dict(workflow_overrides or {})
         key = overrides.pop("_query_session_key", None)
         if not key:
@@ -442,20 +466,29 @@ class WorkflowExecutor:
             return
         try:
             store = RepairRecordStore()
-            diagnosis_id, plan_id = overrides.get("_diagnosis_run_id"), overrides.get("_plan_run_id")
-            record = (store.load(plan_id or diagnosis_id, key[0], "plan" if plan_id else "diagnosis")
-                      if plan_id or diagnosis_id else store.latest(key[0], key[1]))
+            diagnosis_id, plan_id = (
+                overrides.get("_diagnosis_run_id"),
+                overrides.get("_plan_run_id"),
+            )
+            record = (
+                store.load(plan_id or diagnosis_id, key[0], "plan" if plan_id else "diagnosis")
+                if plan_id or diagnosis_id
+                else store.latest(key[0], key[1])
+            )
             context = {}
             if record:
                 if record["kind"] == "plan":
                     context["previous_plan"] = record
                     if record.get("source_run_id"):
-                        context["diagnosis"] = store.load(record["source_run_id"], key[0], "diagnosis")
+                        context["diagnosis"] = store.load(
+                            record["source_run_id"], key[0], "diagnosis"
+                        )
                 else:
                     context["diagnosis"] = record
             group_id = overrides.get("_repair_group_id")
             if group_id and context.get("diagnosis"):
                 from app.core.remediation.group_context import scoped_diagnosis
+
                 context["diagnosis"] = scoped_diagnosis(context["diagnosis"], group_id)
             if plan_id and not overrides.get("_repair_revision_claimed"):
                 context["previous_plan"] = store.supersede(plan_id, key[0])
@@ -469,13 +502,28 @@ class WorkflowExecutor:
             overrides["_record_session_id"] = key[1]
             with query_sessions.checkout(key) as (memory, commit):
                 if not memory and record:
-                    payload = ((context.get("diagnosis") or record)["payload"]
-                               if group_id else record["payload"])
-                    memory = {"turns": [{"question": payload.get("question") or "历史修复方案",
-                        "answer": ((context.get("diagnosis") or {}).get("payload", {}).get("report")
-                                   if group_id else payload.get("report")) or (payload.get("draft") or {}).get("answer", ""),
-                        "request_contract": payload.get("request_contract"),
-                        "observed_at": record["created_at"]}]}
+                    payload = (
+                        (context.get("diagnosis") or record)["payload"]
+                        if group_id
+                        else record["payload"]
+                    )
+                    memory = {
+                        "turns": [
+                            {
+                                "question": payload.get("question") or "历史修复方案",
+                                "answer": (
+                                    (context.get("diagnosis") or {})
+                                    .get("payload", {})
+                                    .get("report")
+                                    if group_id
+                                    else payload.get("report")
+                                )
+                                or (payload.get("draft") or {}).get("answer", ""),
+                                "request_contract": payload.get("request_contract"),
+                                "observed_at": record["created_at"],
+                            }
+                        ]
+                    }
                 overrides["_remediation_owner"] = key[0]
                 overrides["_query_session_context"] = memory
                 for event in self._execute_stream(question, run_id, cancel_event, overrides):
@@ -488,7 +536,9 @@ class WorkflowExecutor:
                         event["session_id"] = key[1]
                         event["session_memory"] = "saved" if saved else "not_saved"
                         if not saved:
-                            event["answer"] += "\n\n会话记忆未保存（已取消或超过缓存容量），下轮请明确查询对象。"
+                            event["answer"] += (
+                                "\n\n会话记忆未保存（已取消或超过缓存容量），下轮请明确查询对象。"
+                            )
                     yield event
         except (SessionBusy, RecordUnavailable, PlanConflict) as exc:
             yield {"type": "error", "error": str(exc), "session_id": key[1]}
@@ -518,7 +568,11 @@ class WorkflowExecutor:
         metrics = self._start_metrics(run_id, question)
         wf_config, query_mode = self._resolve_workflow_config(workflow_overrides)
         workflow, node_instances = self._build_request_workflow(
-            metrics, wf_config, query_mode, run_id, cancel_event,
+            metrics,
+            wf_config,
+            query_mode,
+            run_id,
+            cancel_event,
         )
 
         total_start = time.time()
@@ -536,7 +590,11 @@ class WorkflowExecutor:
         }
 
         stream = _StreamTranslator(
-            self, run_id, metrics, initial_state.copy(), query_mode,
+            self,
+            run_id,
+            metrics,
+            initial_state.copy(),
+            query_mode,
             heartbeat_interval_s=self._get_heartbeat_interval_seconds(),
         )
         # 共享事件队列：不设上限，消费者提前退出（断连）时生产者不会阻塞在 put()
@@ -561,8 +619,15 @@ class WorkflowExecutor:
             yield from stream.finalize_open_nodes()
 
             yield from self._finish_run(
-                question, run_id, metrics, stream, wf_config, query_mode,
-                overrides, cancel_event, total_start,
+                question,
+                run_id,
+                metrics,
+                stream,
+                wf_config,
+                query_mode,
+                overrides,
+                cancel_event,
+                total_start,
             )
 
         except Exception as e:
@@ -572,6 +637,7 @@ class WorkflowExecutor:
             metrics.finish()
 
             from app.core.aicall.errors import model_error_code, model_transport_message
+
             public_error = model_transport_message(e)
             error_code = model_error_code(e)
             seq = stream.next_seq()
@@ -596,10 +662,7 @@ class WorkflowExecutor:
                 worker,
                 timeout=5,
             )
-            if (
-                worker_alive
-                and worker is not threading.current_thread()
-            ):
+            if worker_alive and worker is not threading.current_thread():
                 logger.warning("[Workflow] 后台线程未在 5s 内结束 (run_id=%s)", run_id)
 
     # ── per-request preparation ────────────────────────────────────────
@@ -615,7 +678,8 @@ class WorkflowExecutor:
         return metrics
 
     def _resolve_workflow_config(
-        self, workflow_overrides: Optional[Dict[str, Any]],
+        self,
+        workflow_overrides: Optional[Dict[str, Any]],
     ) -> Tuple[Dict[str, Any], str]:
         """Merge per-request overrides into a private copy of workflow_config.
 
@@ -634,7 +698,9 @@ class WorkflowExecutor:
                     wf_config[key] = value
         query_mode = "auto"
         if workflow_overrides:
-            query_mode = str(workflow_overrides.get("query_mode", "auto")).strip().lower() or "auto"
+            query_mode = (
+                str(workflow_overrides.get("query_mode", "auto")).strip().lower() or "auto"
+            )
         wf_config.pop("query_mode", None)
         if workflow_overrides and "query_mode" in workflow_overrides:
             wf_config["query_mode"] = query_mode
@@ -654,7 +720,9 @@ class WorkflowExecutor:
             evidence_cfg.get("parallel", {}) if isinstance(evidence_cfg, dict) else {}
         )
         workflow, node_instances = build_diagnosis_workflow(
-            self.holmes_service, metrics, self.runbook_catalog,
+            self.holmes_service,
+            metrics,
+            self.runbook_catalog,
             node_config=wf_config.get("nodes", {}),
             query_mode=query_mode,
             parallel_config=parallel_config,
@@ -670,13 +738,19 @@ class WorkflowExecutor:
             if self.ai_call:
                 node.ai_call = self.ai_call
                 node.tools = self.mcp_tools or []
-                logger.debug("   [%s] ai_call=%s tools=%d",
-                             node.node_id, type(node.ai_call).__name__, len(node.tools))
+                logger.debug(
+                    "   [%s] ai_call=%s tools=%d",
+                    node.node_id,
+                    type(node.ai_call).__name__,
+                    len(node.tools),
+                )
         return workflow, node_instances
 
     @staticmethod
     def _build_initial_state(
-        question: str, run_id: str, overrides: Dict[str, Any],
+        question: str,
+        run_id: str,
+        overrides: Dict[str, Any],
     ) -> WorkflowState:
         return {
             "repair_context": overrides.get("_repair_context"),
@@ -753,14 +827,19 @@ class WorkflowExecutor:
         metrics.finish()
 
         conclusion, full_answer, public_metrics = self._compose_answer(
-            metrics, final_state, query_mode,
+            metrics,
+            final_state,
+            query_mode,
         )
         task_route = final_state.get("request_route")
         self._save_report(final_state.get("layer"), question, full_answer)
         self._log_timing_breakdown(metrics)
 
         repair_record, record_store, record_failed = self._persist_repair_record(
-            run_id, question, final_state, overrides,
+            run_id,
+            question,
+            final_state,
+            overrides,
         )
         if record_failed:
             if task_route == "remediation":
@@ -786,17 +865,35 @@ class WorkflowExecutor:
             "query_answer": final_state.get("query_answer"),
             "diagnosis_cases": final_state.get("diagnosis_cases"),
             "diagnosis_overview": final_state.get("diagnosis_overview"),
-            "diagnosis_footer": full_answer[len(conclusion):] if final_state.get("diagnosis_cases") is not None else None,
-            "repair_record": ({"run_id": run_id, "kind": repair_record["kind"],
-                               "source_run_id": repair_record.get("source_run_id")}
-                              if repair_record else None),
-            "repair_plan": final_state.get("remediation_draft") if task_route == "remediation" else None,
-            **({"_query_session_memory": final_state.get("query_session_memory")}
-               if overrides.get("_query_session_context") is not None else {}),
+            "diagnosis_footer": full_answer[len(conclusion) :]
+            if final_state.get("diagnosis_cases") is not None
+            else None,
+            "repair_record": (
+                {
+                    "run_id": run_id,
+                    "kind": repair_record["kind"],
+                    "source_run_id": repair_record.get("source_run_id"),
+                }
+                if repair_record
+                else None
+            ),
+            "repair_plan": final_state.get("remediation_draft")
+            if task_route == "remediation"
+            else None,
+            **(
+                {"_query_session_memory": final_state.get("query_session_memory")}
+                if overrides.get("_query_session_context") is not None
+                else {}
+            ),
         }
 
         yield from self._remediation_events(
-            run_id, stream, wf_config, overrides, full_answer, cancel_event,
+            run_id,
+            stream,
+            wf_config,
+            overrides,
+            full_answer,
+            cancel_event,
             record_store if repair_record else None,
         )
 
@@ -812,7 +909,9 @@ class WorkflowExecutor:
 
     @staticmethod
     def _compose_answer(
-        metrics: WorkflowMetrics, final_state: WorkflowState, query_mode: str,
+        metrics: WorkflowMetrics,
+        final_state: WorkflowState,
+        query_mode: str,
     ) -> Tuple[str, str, Dict[str, Any]]:
         """Return ``(conclusion, full_answer, public_metrics)``.
 
@@ -825,13 +924,21 @@ class WorkflowExecutor:
         conclusion = final_state.get("conclusion_formatted") or final_state.get("conclusion") or ""
         stats_block = metrics.format_stats_block()
         task_route = final_state.get("request_route")
-        lightweight_task = query_mode in {"auto", "direct"} or task_route in {"focused", "query", "clarify", "stop"}
-        metrics_block = metrics.format_metrics_block(enabled=METRICS_ENABLED and not lightweight_task)
+        lightweight_task = query_mode in {"auto", "direct"} or task_route in {
+            "focused",
+            "query",
+            "clarify",
+            "stop",
+        }
+        metrics_block = metrics.format_metrics_block(
+            enabled=METRICS_ENABLED and not lightweight_task
+        )
         public_metrics = metrics.get_summary()
         if lightweight_task:
-            public_metrics = {key: public_metrics[key] for key in (
-                "run_id", "performance", "nodes", "success", "errors"
-            )}
+            public_metrics = {
+                key: public_metrics[key]
+                for key in ("run_id", "performance", "nodes", "success", "errors")
+            }
             public_metrics["diagnosis_metrics_applicable"] = False
         return conclusion, f"{conclusion}\n{stats_block}\n{metrics_block}", public_metrics
 
@@ -841,9 +948,17 @@ class WorkflowExecutor:
         logger.info("=" * 60)
         logger.info("[耗时分析] 各节点耗时明细:")
         for node in metrics.nodes.values():
-            pct = (node.duration_ms / metrics.total_duration_ms * 100) if metrics.total_duration_ms > 0 else 0
-            logger.info("   %s: %.1fs (%.0f%%)", node.node_name, node.duration_ms/1000, pct)
-        logger.info("   模型请求耗时: %.1fs (%s 次)", metrics.total_llm_duration_ms/1000, metrics.total_llm_calls)
+            pct = (
+                (node.duration_ms / metrics.total_duration_ms * 100)
+                if metrics.total_duration_ms > 0
+                else 0
+            )
+            logger.info("   %s: %.1fs (%.0f%%)", node.node_name, node.duration_ms / 1000, pct)
+        logger.info(
+            "   模型请求耗时: %.1fs (%s 次)",
+            metrics.total_llm_duration_ms / 1000,
+            metrics.total_llm_calls,
+        )
         logger.info(
             "   工具耗时: 累计 %.1fs，关键路径 %.1fs "
             "(请求 %d，实际执行 %d，去重 %d，成功响应 %d，失败/未完成 %d)",
@@ -875,18 +990,26 @@ class WorkflowExecutor:
         if not (record_owner and task_route in {"full_diagnosis", "remediation"}):
             return None, None, False
         from app.core.remediation.records import RepairRecordStore, diagnosis_payload
+
         store = RepairRecordStore()
         context = overrides.get("_repair_context") or {}
         try:
             record = store.save(
-                run_id, record_owner, overrides.get("_record_session_id"),
+                run_id,
+                record_owner,
+                overrides.get("_record_session_id"),
                 "diagnosis" if task_route == "full_diagnosis" else "plan",
-                diagnosis_payload(final_state) if task_route == "full_diagnosis" else {
-                    "question": question, "request_contract": final_state.get("request_contract"),
+                diagnosis_payload(final_state)
+                if task_route == "full_diagnosis"
+                else {
+                    "question": question,
+                    "request_contract": final_state.get("request_contract"),
                     "draft": final_state.get("remediation_draft"),
-                    "group_id": overrides.get("_repair_group_id")},
+                    "group_id": overrides.get("_repair_group_id"),
+                },
                 source_run_id=(context.get("diagnosis") or {}).get("run_id"),
-                previous_plan_id=(context.get("previous_plan") or {}).get("run_id"))
+                previous_plan_id=(context.get("previous_plan") or {}).get("run_id"),
+            )
         except Exception:
             logger.exception("Repair record persistence failed; execution disabled for this run")
             return None, store, True
@@ -912,16 +1035,29 @@ class WorkflowExecutor:
             remediation_enabled = bool(remediation_cfg.get("enabled", False))
         if overrides.get("_defer_repair_execution"):
             remediation_enabled = False
-        if final_state.get("request_route") in {"focused", "query", "clarify", "stop", "full_diagnosis"}:
+        if final_state.get("request_route") in {
+            "focused",
+            "query",
+            "clarify",
+            "stop",
+            "full_diagnosis",
+        }:
             # A read-only task must not become a write workflow because the
             # final prose happens to contain a remediation-shaped block.
             remediation_enabled = False
         if not remediation_enabled:
             return
-        if (final_state.get("request_route") in {"remediation", "full_diagnosis"}
-                or remediation_cfg.get("executor") == "pod"):
+        if (
+            final_state.get("request_route") in {"remediation", "full_diagnosis"}
+            or remediation_cfg.get("executor") == "pod"
+        ):
             yield from self._pod_remediation_events(
-                run_id, stream, remediation_cfg, overrides, cancel_event, record_store,
+                run_id,
+                stream,
+                remediation_cfg,
+                overrides,
+                cancel_event,
+                record_store,
             )
             return
         yield from self._plan_remediation_events(run_id, stream, remediation_cfg, full_answer)
@@ -937,24 +1073,34 @@ class WorkflowExecutor:
     ) -> Generator[Dict, None, None]:
         from app.core.remediation.pod_executor import PodRepairExecutor
         from app.core.remediation.policy import CommandPolicy
+
         final_state = stream.final_state
         policy = CommandPolicy.from_config(remediation_cfg)
         for repair_event in PodRepairExecutor().run(
-            run_id, final_state.get("remediation_draft"), owner=overrides.get("_remediation_owner", ""),
+            run_id,
+            final_state.get("remediation_draft"),
+            owner=overrides.get("_remediation_owner", ""),
             mode=normalize_remediation_mode(remediation_cfg.get("mode")),
             timeout=_int_config(remediation_cfg, "approval_timeout_seconds", 600),
-            cancel=cancel_event, policy=policy,
+            cancel=cancel_event,
+            policy=policy,
             request_contract=final_state.get("request_contract"),
             record_store=record_store,
         ):
             seq = stream.next_seq()
-            yield {**repair_event, "id": f"{run_id}-repair-{seq}", "seq": seq,
-                   "ts_ms": int(time.time() * 1000)}
+            yield {
+                **repair_event,
+                "id": f"{run_id}-repair-{seq}",
+                "seq": seq,
+                "ts_ms": int(time.time() * 1000),
+            }
             if repair_event.get("type") == "remediation_finished":
                 final_state["remediation_result"] = repair_event
 
     @staticmethod
-    def _plan_remediation_settings(remediation_cfg: Any) -> Tuple[int, str, str, RemediationRuntimeConfig]:
+    def _plan_remediation_settings(
+        remediation_cfg: Any,
+    ) -> Tuple[int, str, str, RemediationRuntimeConfig]:
         """Return ``(approval_timeout, approval_mode, executor_type, runtime_config)``."""
         approval_timeout = 600
         approval_mode = "review"
@@ -966,9 +1112,15 @@ class WorkflowExecutor:
             except (TypeError, ValueError):
                 approval_timeout = 600
             approval_mode = normalize_remediation_mode(remediation_cfg.get("mode"))
-            remediation_executor_type = str(
-                remediation_cfg.get("executor") or remediation_cfg.get("strategy") or "deterministic"
-            ).strip().lower()
+            remediation_executor_type = (
+                str(
+                    remediation_cfg.get("executor")
+                    or remediation_cfg.get("strategy")
+                    or "deterministic"
+                )
+                .strip()
+                .lower()
+            )
             runtime_config = RemediationRuntimeConfig(
                 executor=remediation_executor_type,
                 max_iterations=_int_config(remediation_cfg, "max_iterations", 4),
@@ -980,7 +1132,9 @@ class WorkflowExecutor:
 
     @staticmethod
     def _validate_remediation_plan(
-        run_id: str, full_answer: str, final_state: WorkflowState,
+        run_id: str,
+        full_answer: str,
+        final_state: WorkflowState,
     ) -> Tuple[Any, Optional[Dict[str, Any]]]:
         """Parse the report's structured plan; return ``(plan, invalid_plan_event)``.
 
@@ -1034,7 +1188,9 @@ class WorkflowExecutor:
         approval_timeout, approval_mode, remediation_executor_type, runtime_config = (
             self._plan_remediation_settings(remediation_cfg)
         )
-        plan, invalid_plan_event = self._validate_remediation_plan(run_id, full_answer, final_state)
+        plan, invalid_plan_event = self._validate_remediation_plan(
+            run_id, full_answer, final_state
+        )
 
         if invalid_plan_event is not None:
             seq = stream.next_seq()
@@ -1113,7 +1269,7 @@ class WorkflowExecutor:
         logger.debug("[Workflow] Langfuse session_id=%s", session_id)
         with propagate_attributes(session_id=session_id):
             yield
-    
+
     def _get_node_display_name(self, node_id: str) -> str:
         """获取节点显示名称"""
         name_map = {
@@ -1127,12 +1283,8 @@ class WorkflowExecutor:
             "remediation": "制定 Pod 修复方案",
         }
         return name_map.get(node_id, node_id)
-    
-    def _extract_state_snapshot(
-        self,
-        state: WorkflowState,
-        node_name: str
-    ) -> Dict[str, Any]:
+
+    def _extract_state_snapshot(self, state: WorkflowState, node_name: str) -> Dict[str, Any]:
         """提取状态快照（用于调试和日志）
 
         设计：
@@ -1144,27 +1296,39 @@ class WorkflowExecutor:
         # Live parallel node output. Without autonomous_group_results (the node
         # failed before returning) parallel_evidence has no snapshot.
         if node_name == "parallel_evidence" and state.get("autonomous_group_results") is not None:
-            return {"autonomous_groups": state.get("autonomous_groups"),
-                    "groups": [{k: result.get(k) for k in ("group_id", "target", "status", "error", "run_id")}
-                               for result in state.get("autonomous_group_results") or []]}
+            return {
+                "autonomous_groups": state.get("autonomous_groups"),
+                "groups": [
+                    {k: result.get(k) for k in ("group_id", "target", "status", "error", "run_id")}
+                    for result in state.get("autonomous_group_results") or []
+                ],
+            }
 
         if state.get("query_draft") is not None and node_name in {"layer", "evidence", "rca"}:
-            return {"question": state.get("original_question") or state.get("question"),
-                    "autonomous_groups": state.get("autonomous_groups"),
-                    "request_contract": state.get("request_contract"),
-                    "diagnosis_handoff": state.get("diagnosis_handoff"),
-                    "analysis_draft": state.get("query_draft")}
+            return {
+                "question": state.get("original_question") or state.get("question"),
+                "autonomous_groups": state.get("autonomous_groups"),
+                "request_contract": state.get("request_contract"),
+                "diagnosis_handoff": state.get("diagnosis_handoff"),
+                "analysis_draft": state.get("query_draft"),
+            }
 
         if node_name == "request_router":
-            snapshot = {"request_route": state.get("request_route"), "request_contract": state.get("request_contract"),
-                        "request_error": state.get("request_error")}
+            snapshot = {
+                "request_route": state.get("request_route"),
+                "request_contract": state.get("request_contract"),
+                "request_error": state.get("request_error"),
+            }
         elif node_name == "focused":
-            snapshot = {"focused_result": state.get("focused_result"), "conclusion": state.get("conclusion")}
+            snapshot = {
+                "focused_result": state.get("focused_result"),
+                "conclusion": state.get("conclusion"),
+            }
         elif node_name == "layer":
             layers = state.get("layers", [])
             snapshot = {
                 "layer": str(state.get("layer", "")),
-                "layers": [l.value if hasattr(l, 'value') else str(l) for l in layers],
+                "layers": [l.value if hasattr(l, "value") else str(l) for l in layers],
                 "layer_confidence": state.get("layer_confidence"),
                 "layer_reasoning": state.get("layer_reasoning") or "",
                 "layer_analysis": state.get("layer_analysis", ""),
@@ -1174,7 +1338,7 @@ class WorkflowExecutor:
         elif node_name == "evidence":
             evidence_items = state.get("evidence_items", [])
             evidence_analysis = state.get("evidence_analysis", "")
-            collected = sum(1 for e in evidence_items if getattr(e, 'collected', False))
+            collected = sum(1 for e in evidence_items if getattr(e, "collected", False))
             count = len(evidence_items)
             try:
                 analysis_data = json.loads(evidence_analysis) if evidence_analysis else {}
@@ -1190,14 +1354,20 @@ class WorkflowExecutor:
                 elif isinstance(item, dict):
                     serialized_evidence_items.append(item)
                 else:
-                    serialized_evidence_items.append({
-                        "id": getattr(item, "id", ""),
-                        "description": getattr(item, "description", ""),
-                        "level": str(getattr(getattr(item, "level", ""), "value", getattr(item, "level", ""))),
-                        "collected": bool(getattr(item, "collected", False)),
-                        "value": getattr(item, "value", None),
-                        "source": getattr(item, "source", None),
-                    })
+                    serialized_evidence_items.append(
+                        {
+                            "id": getattr(item, "id", ""),
+                            "description": getattr(item, "description", ""),
+                            "level": str(
+                                getattr(
+                                    getattr(item, "level", ""), "value", getattr(item, "level", "")
+                                )
+                            ),
+                            "collected": bool(getattr(item, "collected", False)),
+                            "value": getattr(item, "value", None),
+                            "source": getattr(item, "source", None),
+                        }
+                    )
             snapshot = {
                 "evidence_count": count,
                 "collected_count": collected,
@@ -1225,13 +1395,8 @@ class WorkflowExecutor:
             }
 
         return snapshot
-    
-    def _format_node_summary(
-        self,
-        node_name: str,
-        state: WorkflowState,
-        snapshot: Dict
-    ) -> str:
+
+    def _format_node_summary(self, node_name: str, state: WorkflowState, snapshot: Dict) -> str:
         """格式化节点摘要（用于日志输出）"""
         if "analysis_draft" in snapshot:
             return "阶段分析已完成，证据与判断见阶段输出"
@@ -1239,35 +1404,41 @@ class WorkflowExecutor:
             layer = snapshot.get("layer", "?")
             conf = snapshot.get("layer_confidence", 0) or 0
             return f"层级: {layer}, 置信度: {conf:.0%}"
-        
+
         elif node_name == "evidence":
             count = snapshot.get("evidence_count", 0)
             collected = snapshot.get("collected_count", 0)
             completeness = snapshot.get("completeness", 0) or 0
             return f"证据: {collected}/{count}, 完整度: {completeness:.0%}"
-        
+
         elif node_name == "rca":
             root_cause = snapshot.get("root_cause", "")
             conf = snapshot.get("confidence")
             conf_str = f"{conf:.0%}" if conf else "?"
             return f"根因: {root_cause[:50]}..., 置信度: {conf_str}"
-        
+
         elif node_name == "conclusion":
             length = snapshot.get("conclusion_length", 0)
             return f"报告长度: {length} 字符"
-        
+
         return ""
 
     def _format_handoff_summary(self, node_name: str, state: WorkflowState) -> str:
         """格式化节点间传递的完整数据（不截断，供审查）"""
         import json as _json
 
-        if state.get("diagnosis_handoff") is not None and node_name in {"layer", "evidence", "rca"}:
+        if state.get("diagnosis_handoff") is not None and node_name in {
+            "layer",
+            "evidence",
+            "rca",
+        }:
             return _json.dumps(state["diagnosis_handoff"], ensure_ascii=False)
 
         if state.get("query_draft") is not None and node_name in {"layer", "evidence", "rca"}:
-            return (f"用户问题：{state.get('original_question') or state.get('question', '')}\n"
-                    f"本阶段分析草稿（非程序核验结论）：\n{state.get('query_draft', '')}")
+            return (
+                f"用户问题：{state.get('original_question') or state.get('question', '')}\n"
+                f"本阶段分析草稿（非程序核验结论）：\n{state.get('query_draft', '')}"
+            )
 
         if node_name == "layer":
             layer = state.get("layer", "?")
@@ -1276,7 +1447,11 @@ class WorkflowExecutor:
             entities = state.get("key_entities", [])
             analysis = state.get("layer_analysis", "")
             reasoning = state.get("layer_reasoning", "")
-            layers_str = "+".join(l.value if hasattr(l, 'value') else str(l) for l in layers) if layers else str(layer)
+            layers_str = (
+                "+".join(l.value if hasattr(l, "value") else str(l) for l in layers)
+                if layers
+                else str(layer)
+            )
             return (
                 f"layer={layer}, layers={layers_str}\n"
                 f"   scenarios={scenarios}\n"
@@ -1286,7 +1461,7 @@ class WorkflowExecutor:
             )
         elif node_name == "evidence":
             items = state.get("evidence_items", [])
-            collected = sum(1 for e in items if getattr(e, 'collected', False))
+            collected = sum(1 for e in items if getattr(e, "collected", False))
             total = len(items)
             analysis = state.get("evidence_analysis", "")
             try:
@@ -1296,10 +1471,7 @@ class WorkflowExecutor:
                     total = int(analysis_data.get("plan_total") or 0)
             except Exception:
                 pass
-            return (
-                f"evidence_items={collected}/{total}\n"
-                f"   evidence_analysis={analysis}"
-            )
+            return f"evidence_items={collected}/{total}\n   evidence_analysis={analysis}"
         elif node_name == "rca":
             root_cause = state.get("root_cause", "") or ""
             decision = state.get("deterministic_decision")
@@ -1342,16 +1514,15 @@ class WorkflowExecutor:
                 handoff_payload=handoff_payload if handoff else None,
             )
         except Exception as exc:
-            logger.warning("[Workflow] 写入 node transition archive 失败 node=%s: %s", node_name, exc)
+            logger.warning(
+                "[Workflow] 写入 node transition archive 失败 node=%s: %s", node_name, exc
+            )
 
-    def _update_metrics_from_state(
-        self,
-        metrics: WorkflowMetrics,
-        state: WorkflowState
-    ):
+    def _update_metrics_from_state(self, metrics: WorkflowMetrics, state: WorkflowState):
         """从最终状态更新指标"""
         _update_metrics_fn(
-            metrics, state,
+            metrics,
+            state,
             runbook_catalog=self.runbook_catalog,
             holmes_service=self.holmes_service,
         )

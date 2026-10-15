@@ -31,8 +31,12 @@ def test_context_archive_writes_raw_structured_and_summary(tmp_path):
     assert refs["raw_ref"].endswith("001-layer-kubectl_describe.raw.txt")
     assert refs["structured_ref"].endswith("001-layer-kubectl_describe.structured.json")
     assert refs["summary_ref"].endswith("001-layer-kubectl_describe.summary.txt")
-    assert (tmp_path / "run-1" / "tools" / "001-layer-kubectl_describe.raw.txt").read_text() == "Name: pod-a\nStatus: Failed\n"
-    assert json.loads((tmp_path / "run-1" / "tools" / "001-layer-kubectl_describe.structured.json").read_text()) == {"status": "Failed"}
+    assert (
+        tmp_path / "run-1" / "tools" / "001-layer-kubectl_describe.raw.txt"
+    ).read_text() == "Name: pod-a\nStatus: Failed\n"
+    assert json.loads(
+        (tmp_path / "run-1" / "tools" / "001-layer-kubectl_describe.structured.json").read_text()
+    ) == {"status": "Failed"}
 
 
 def test_context_archive_writes_node_handoff_and_io(tmp_path):
@@ -48,8 +52,18 @@ def test_context_archive_writes_node_handoff_and_io(tmp_path):
     assert refs["input_ref"].endswith("node_inputs/evidence.input.json")
     assert refs["output_ref"].endswith("node_outputs/evidence.output.json")
     assert refs["handoff_ref"].endswith("handoff/evidence-to-rca.json")
-    assert json.loads((tmp_path / "run-io" / "node_inputs" / "evidence.input.json").read_text())["question"] == "q"
-    assert json.loads((tmp_path / "run-io" / "handoff" / "evidence-to-rca.json").read_text())["summary"] == "evidence ready"
+    assert (
+        json.loads((tmp_path / "run-io" / "node_inputs" / "evidence.input.json").read_text())[
+            "question"
+        ]
+        == "q"
+    )
+    assert (
+        json.loads((tmp_path / "run-io" / "handoff" / "evidence-to-rca.json").read_text())[
+            "summary"
+        ]
+        == "evidence ready"
+    )
 
 
 def test_context_archive_atomic_json_returns_reloadable_digest(tmp_path):
@@ -65,15 +79,21 @@ def test_context_archive_atomic_json_returns_reloadable_digest(tmp_path):
     assert list(path.parent.glob(".*.tmp")) == []
 
 
-def test_archive_root_prefers_reports_subdir_when_default_parent_is_not_writable(tmp_path, monkeypatch):
+def test_archive_root_prefers_reports_subdir_when_default_parent_is_not_writable(
+    tmp_path, monkeypatch
+):
     default_root = tmp_path / "aiops" / "context_archives"
     reports_root = tmp_path / "aiops" / "reports"
     reports_root.mkdir(parents=True)
 
     monkeypatch.delenv("AIOPS_CONTEXT_ARCHIVE_ROOT", raising=False)
     monkeypatch.setattr("app.core.context.archive.DEFAULT_ARCHIVE_ROOT", str(default_root))
-    monkeypatch.setattr("app.core.context.archive.REPORTS_ARCHIVE_ROOT", str(reports_root / "context_archives"))
-    monkeypatch.setattr("app.core.context.archive.os.access", lambda path, mode: str(path) == str(reports_root))
+    monkeypatch.setattr(
+        "app.core.context.archive.REPORTS_ARCHIVE_ROOT", str(reports_root / "context_archives")
+    )
+    monkeypatch.setattr(
+        "app.core.context.archive.os.access", lambda path, mode: str(path) == str(reports_root)
+    )
 
     assert get_archive_root() == str(reports_root / "context_archives")
 
@@ -120,22 +140,24 @@ def test_hard_input_budget_reserves_output_and_safety_margin():
 
 
 def test_serialize_tool_schema_preserves_openai_dict_tool_contract():
-    serialized = serialize_tool_schema([
-        {
-            "type": "function",
-            "function": {
-                "name": "query_pod_logs",
-                "description": "query real pod logs",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": {"type": "string"},
-                        "pod": {"type": "string"},
+    serialized = serialize_tool_schema(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "query_pod_logs",
+                    "description": "query real pod logs",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "namespace": {"type": "string"},
+                            "pod": {"type": "string"},
+                        },
                     },
                 },
-            },
-        }
-    ])
+            }
+        ]
+    )
 
     assert serialized == [
         {
@@ -281,7 +303,11 @@ def test_context_budget_log_is_compact_when_token_count_exact(monkeypatch, caplo
         components=[
             {"name": "node_system_prompt", "category": "static_input", "content": "hello world"},
             {"name": "user_message", "category": "static_input", "content": "hello"},
-            {"name": "tool_observations", "category": "dynamic_runtime", "content": "hello world hello"},
+            {
+                "name": "tool_observations",
+                "category": "dynamic_runtime",
+                "content": "hello world hello",
+            },
             {"name": "scratchpad_reserved", "category": "reserved", "tokens": 10},
             {"name": "output_reserved", "category": "reserved", "tokens": 20},
         ],
@@ -567,7 +593,11 @@ status:
     assert structured["deletionTimestamp"] == "2026-05-18T01:00:00Z"
     assert structured["finalizers"] == ["aiops.e2e/hold"]
     assert structured["terminationGracePeriodSeconds"] == 600
-    assert structured["containers"][0]["lifecycle"]["preStop"]["exec"]["command"] == ["sh", "-c", "sleep 600"]
+    assert structured["containers"][0]["lifecycle"]["preStop"]["exec"]["command"] == [
+        "sh",
+        "-c",
+        "sleep 600",
+    ]
     assert "deletionTimestamp: 2026-05-18T01:00:00Z" in processed["summary"]
     assert "finalizers: aiops.e2e/hold" in processed["summary"]
     assert "terminationGracePeriodSeconds: 600" in processed["summary"]
@@ -736,13 +766,27 @@ def test_observation_processor_context_guard_truncates_runbook_without_summarize
 def test_table_row_running_not_ready_is_abnormal():
     """observation 表格摘要：0/1 Running 行必须入选异常行；Completed 0/1 不算。"""
     from app.core.context.observation import ObservationProcessor
+
     proc = ObservationProcessor.__new__(ObservationProcessor)
     header_cols = ["NAMESPACE", "NAME", "READY", "STATUS", "RESTARTS", "AGE"]
-    status_indexes = {i for i, c in enumerate(header_cols) if c in {"READY", "STATUS", "REASON", "PHASE"}}
-    pure_status_indexes = {i for i, c in enumerate(header_cols) if c in {"STATUS", "REASON", "PHASE"}}
+    status_indexes = {
+        i for i, c in enumerate(header_cols) if c in {"READY", "STATUS", "REASON", "PHASE"}
+    }
+    pure_status_indexes = {
+        i for i, c in enumerate(header_cols) if c in {"STATUS", "REASON", "PHASE"}
+    }
     row_not_ready = "aiops-case-09  workload-x  0/1  Running  0  5m"
     row_healthy = "kube-system  coredns-abc  1/1  Running  0  10d"
     row_completed = "batch  job-xyz  0/1  Completed  0  1h"
-    assert proc._table_row_is_abnormal(row_not_ready, status_indexes, pure_status_indexes, set()) is True
-    assert proc._table_row_is_abnormal(row_healthy, status_indexes, pure_status_indexes, set()) is False
-    assert proc._table_row_is_abnormal(row_completed, status_indexes, pure_status_indexes, set()) is False
+    assert (
+        proc._table_row_is_abnormal(row_not_ready, status_indexes, pure_status_indexes, set())
+        is True
+    )
+    assert (
+        proc._table_row_is_abnormal(row_healthy, status_indexes, pure_status_indexes, set())
+        is False
+    )
+    assert (
+        proc._table_row_is_abnormal(row_completed, status_indexes, pure_status_indexes, set())
+        is False
+    )

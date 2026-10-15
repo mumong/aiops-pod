@@ -1,4 +1,5 @@
 """Evaluation infrastructure must not silently substitute or overclaim evidence."""
+
 import json
 
 import pytest
@@ -15,14 +16,22 @@ def test_missing_requested_fixture_fails_instead_of_silently_skipping(tmp_path):
         cases(tmp_path, {"misspelled"})
 
 
-@pytest.mark.parametrize("mode,tool_type", [("legacy", LegacyReadContextArchiveTool),
-                                            ("raw", LegacyReadContextArchiveTool),
-                                            ("compact", ReadContextArchiveTool)])
+@pytest.mark.parametrize(
+    "mode,tool_type",
+    [
+        ("legacy", LegacyReadContextArchiveTool),
+        ("raw", LegacyReadContextArchiveTool),
+        ("compact", ReadContextArchiveTool),
+    ],
+)
 def test_actual_production_tool_contract_used(mode, tool_type, tmp_path):
     tool = archive_reader(mode, tmp_path)
     expected = tool_type(allowed_roots=[str(tmp_path)])
     assert tool.description == expected.description
-    assert tool.get_input_schema().model_json_schema() == expected.get_input_schema().model_json_schema()
+    assert (
+        tool.get_input_schema().model_json_schema()
+        == expected.get_input_schema().model_json_schema()
+    )
 
 
 @pytest.mark.parametrize("value", ["all expected keywords but not JSON", {"answer": "done"}, None])

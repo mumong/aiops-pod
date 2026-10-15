@@ -3,6 +3,7 @@
 They pin request parsing, forwarded arguments and response shapes so the
 route modules can be reorganized without changing observable behavior.
 """
+
 import os
 import sys
 
@@ -82,8 +83,8 @@ def test_route_table_order_and_names_are_stable(monkeypatch):
     table = [
         (route.path, sorted(route.methods), route.name)
         for route in app.routes
-        if getattr(route, "endpoint", None) is not None and route.path not in {
-            "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+        if getattr(route, "endpoint", None) is not None
+        and route.path not in {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
     ]
     assert table == [
         ("/repair/batches", ["POST"], "start"),
@@ -139,7 +140,10 @@ def test_path_route_sync_and_validation(monkeypatch):
     response = client.get("/q/hello", params={"stream": "false"})
     assert response.status_code == 200
     assert response.text == "sync-ok"
-    assert service.sync_calls[-1]["workflow_overrides"] == {"query_mode": "auto", "nodes": DIAGNOSIS_NODES}
+    assert service.sync_calls[-1]["workflow_overrides"] == {
+        "query_mode": "auto",
+        "nodes": DIAGNOSIS_NODES,
+    }
     assert service.sync_calls[-1]["workflow_title"] == "工作流诊断模式"
     assert client.get("/q/hello", params={"max_steps": 0}).status_code == 422
 
@@ -184,7 +188,11 @@ def test_query_post_sync_and_overrides(monkeypatch):
     assert response.text == "sync-ok"
     call = service.sync_calls[-1]
     assert call["workflow_title"] == "工作流查询模式"
-    assert call["workflow_overrides"] == {"query_mode": "auto", "_diagnosis_run_id": None, "_plan_run_id": None}
+    assert call["workflow_overrides"] == {
+        "query_mode": "auto",
+        "_diagnosis_run_id": None,
+        "_plan_run_id": None,
+    }
 
 
 def test_sync_failure_maps_to_500(monkeypatch):
@@ -204,7 +212,9 @@ def test_info_routes(monkeypatch):
     assert client.get("/tools").json() == {"tools": ["a"]}
     assert client.get("/tools/detail").json() == {"toolsets": {"x": []}}
     assert client.get("/runbooks").json() == {"count": 0, "runbooks": []}
-    service.merged_catalog = type("_Catalog", (), {"catalog": [_Entry("rb1", "desc", "l.md"), object()]})()
+    service.merged_catalog = type(
+        "_Catalog", (), {"catalog": [_Entry("rb1", "desc", "l.md"), object()]}
+    )()
     assert client.get("/runbooks").json() == {
         "count": 1,
         "runbooks": [{"id": "rb1", "description": "desc", "link": "l.md"}],
@@ -269,15 +279,25 @@ def test_reports_routes(monkeypatch, tmp_path):
 def test_federation_post_routes_forward_form_arguments(monkeypatch):
     client, service, _app = _build_client(monkeypatch)
 
-    response = client.post("/federation/query", data={"q": "cpu", "max_steps": "5", "conclusion_max_tokens": "10"})
+    response = client.post(
+        "/federation/query", data={"q": "cpu", "max_steps": "5", "conclusion_max_tokens": "10"}
+    )
     assert response.status_code == 200
     assert response.text == "coordinator-ok"
     assert service.federation_coordinator.calls[-1] == {
-        "question": "cpu", "max_steps": 5, "conclusion_max_tokens": 10, "endpoint_path": "/query"}
+        "question": "cpu",
+        "max_steps": 5,
+        "conclusion_max_tokens": 10,
+        "endpoint_path": "/query",
+    }
 
     client.post("/federation/ask", data={"q": "why"})
     assert service.federation_coordinator.calls[-1] == {
-        "question": "why", "max_steps": 30, "conclusion_max_tokens": 8192, "endpoint_path": "/ask"}
+        "question": "why",
+        "max_steps": 30,
+        "conclusion_max_tokens": 8192,
+        "endpoint_path": "/ask",
+    }
 
     response = client.post("/federation/ask/v2", data={"q": "a2a"})
     assert response.text == "agent-ok"
@@ -297,4 +317,7 @@ def test_federation_disabled_messages(monkeypatch):
     text = client.get("/federation/ask/v2", params={"q": "x"}).text
     assert text.startswith("❌ Agent-to-Agent 联邦查询未启用。")
     assert "请使用 /ask 端点" in text
-    assert client.get("/federation/ask", params={"q": "x", "conclusion_max_tokens": -1}).status_code == 422
+    assert (
+        client.get("/federation/ask", params={"q": "x", "conclusion_max_tokens": -1}).status_code
+        == 422
+    )

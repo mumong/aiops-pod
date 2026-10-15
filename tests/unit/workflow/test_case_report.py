@@ -11,21 +11,43 @@ from app.core.workflow.case_report import conclude_cases, diagnosis_cases, pack_
 def state(count=4):
     groups, results = [], []
     for i in range(count):
-        group = {"group_id": f"g{i}", "target_id": f"t{i}", "entities": [
-            {"kind": "Pod", "namespace": "ns", "name": f"pod{i}", "uid": f"uid{i}"}]}
-        case = {"group_id": group["group_id"], "target": group, "summary": f"异常{i}",
-                "report": f"完整报告{i}", "execution_status": "completed", "outcome": "abnormal",
-                "certainty": "supported", "key_facts": [{"statement": f"实际错误{i}",
-                    "evidence_refs": [f"/raw/{i}"]}], "unresolved": ["尚未恢复"],
-                "runbook_refs": ["manual"], "result_ref": f"/case/{i}"}
+        group = {
+            "group_id": f"g{i}",
+            "target_id": f"t{i}",
+            "entities": [{"kind": "Pod", "namespace": "ns", "name": f"pod{i}", "uid": f"uid{i}"}],
+        }
+        case = {
+            "group_id": group["group_id"],
+            "target": group,
+            "summary": f"异常{i}",
+            "report": f"完整报告{i}",
+            "execution_status": "completed",
+            "outcome": "abnormal",
+            "certainty": "supported",
+            "key_facts": [{"statement": f"实际错误{i}", "evidence_refs": [f"/raw/{i}"]}],
+            "unresolved": ["尚未恢复"],
+            "runbook_refs": ["manual"],
+            "result_ref": f"/case/{i}",
+        }
         groups.append(group)
-        results.append({"group_id": group["group_id"], "status": "completed", "case_result": case,
-                        "material": {"observations": ["huge-body" * 10000]}})
-    return {"question": "检查Pod", "autonomous_groups": groups, "autonomous_group_results": results}
+        results.append(
+            {
+                "group_id": group["group_id"],
+                "status": "completed",
+                "case_result": case,
+                "material": {"observations": ["huge-body" * 10000]},
+            }
+        )
+    return {
+        "question": "检查Pod",
+        "autonomous_groups": groups,
+        "autonomous_group_results": results,
+    }
 
 
 def node(fail=False):
     calls = []
+
     def call(text, prompt, **kwargs):
         calls.append(json.loads(text))
         assert "huge-body" not in text and "完整报告" not in text
@@ -33,8 +55,10 @@ def node(fail=False):
         if fail:
             raise ValueError("working_context_compaction_required")
         return SimpleNamespace(result='{"overview":"存在已识别的异常，详见各组。"}'), []
-    return SimpleNamespace(_call_llm=call, _archive_node_input=lambda _: None,
-                           _archive_node_output=lambda _: None), calls
+
+    return SimpleNamespace(
+        _call_llm=call, _archive_node_input=lambda _: None, _archive_node_output=lambda _: None
+    ), calls
 
 
 @pytest.mark.parametrize("count", [1, 4, 10, 100])
@@ -51,18 +75,21 @@ def test_all_reports_preserved_without_full_material_in_model(count):
 
 def test_hundred_large_indexes_batch_without_rewriting_or_omitting_reports():
     from app.core.context.budget import count_tokens
+
     data = state(100)
-    for row in data['autonomous_group_results']:
-        row['case_result']['summary'] = '证据尚有缺口，不能判断已恢复。' * 19
+    for row in data["autonomous_group_results"]:
+        row["case_result"]["summary"] = "证据尚有缺口，不能判断已恢复。" * 19
     n, calls = node()
     result = conclude_cases(n, data)
-    assert not result['diagnosis_overview']['failed']
-    leaves = [item for call in calls if call['level'] == 0 for item in call['results']]
-    assert [i['group_id'] for i in leaves] == [f'g{i}' for i in range(100)]
+    assert not result["diagnosis_overview"]["failed"]
+    leaves = [item for call in calls if call["level"] == 0 for item in call["results"]]
+    assert [i["group_id"] for i in leaves] == [f"g{i}" for i in range(100)]
     assert len(calls) > 1
-    assert all(count_tokens(json.dumps(call['results'], ensure_ascii=False))['tokens'] <= 12000
-               for call in calls)
-    assert len(result['diagnosis_cases']) == 100
+    assert all(
+        count_tokens(json.dumps(call["results"], ensure_ascii=False))["tokens"] <= 12000
+        for call in calls
+    )
+    assert len(result["diagnosis_cases"]) == 100
 
 
 def test_overview_failure_does_not_erase_reports_or_leak_internal_error_as_answer():

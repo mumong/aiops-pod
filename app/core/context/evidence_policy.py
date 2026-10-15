@@ -1,4 +1,5 @@
 """Per-response and live-history limits, independent of tool names and symptoms."""
+
 import os
 from dataclasses import dataclass
 
@@ -21,7 +22,9 @@ class EvidencePolicy:
         history = int(os.getenv("AIOPS_EVIDENCE_HISTORY_TOKENS", "24000"))
         recent = int(os.getenv("AIOPS_EVIDENCE_RECENT_TOKENS", "8000"))
         if not (512 <= result <= 16384 and result <= recent and recent * 2 <= history):
-            raise ValueError("Evidence budgets require 512 <= result <= 16384, result <= recent <= history/2")
+            raise ValueError(
+                "Evidence budgets require 512 <= result <= 16384, result <= recent <= history/2"
+            )
         return cls(True, result, history, recent)
 
     def limits(self, window):

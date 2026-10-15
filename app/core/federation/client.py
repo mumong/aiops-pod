@@ -6,6 +6,7 @@
 每次调用创建独立的 httpx.AsyncClient（因为 asyncio.run 会关闭事件循环，
 共享 client 会导致 'Event loop is closed' 错误）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SubAgentResult:
     """子集群查询结果"""
+
     name: str
     url: str
     success: bool
@@ -67,9 +69,7 @@ class SubAgentClient:
         logger.info("[FEDERATION] 开始查询子集群 %s: %s", agent.name, url)
 
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(timeout, connect=10.0)
-            ) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
                 resp = await client.post(
                     url,
                     data={
@@ -83,7 +83,10 @@ class SubAgentClient:
                 text = resp.text
                 elapsed = time.monotonic() - start
                 logger.info(
-                    "[FEDERATION] %s 响应成功，长度: %s chars，耗时: %.1fs", agent.name, len(text), elapsed
+                    "[FEDERATION] %s 响应成功，长度: %s chars，耗时: %.1fs",
+                    agent.name,
+                    len(text),
+                    elapsed,
                 )
                 return SubAgentResult(
                     name=agent.name,
@@ -145,9 +148,7 @@ class SubAgentClient:
         Returns:
             SubAgentResult 列表（与输入顺序一致）
         """
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0)
-        ) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
             tasks = [
                 self._query_with_client(
                     client,
@@ -189,7 +190,10 @@ class SubAgentClient:
             text = resp.text
             elapsed = time.monotonic() - start
             logger.info(
-                "[FEDERATION] %s 响应成功，长度: %s chars，耗时: %.1fs", agent.name, len(text), elapsed
+                "[FEDERATION] %s 响应成功，长度: %s chars，耗时: %.1fs",
+                agent.name,
+                len(text),
+                elapsed,
             )
             return SubAgentResult(
                 name=agent.name,
@@ -203,24 +207,33 @@ class SubAgentClient:
             err = "请求超时"
             logger.error("[FEDERATION] %s %s", agent.name, err)
             return SubAgentResult(
-                name=agent.name, url=agent.url, success=False,
-                error=err, elapsed_seconds=elapsed,
+                name=agent.name,
+                url=agent.url,
+                success=False,
+                error=err,
+                elapsed_seconds=elapsed,
             )
         except httpx.HTTPStatusError as exc:
             elapsed = time.monotonic() - start
             err = f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
             logger.error("[FEDERATION] %s 请求失败: %s", agent.name, err)
             return SubAgentResult(
-                name=agent.name, url=agent.url, success=False,
-                error=err, elapsed_seconds=elapsed,
+                name=agent.name,
+                url=agent.url,
+                success=False,
+                error=err,
+                elapsed_seconds=elapsed,
             )
         except Exception as exc:
             elapsed = time.monotonic() - start
             err = str(exc)
             logger.error("[FEDERATION] %s 请求异常: %s", agent.name, err, exc_info=True)
             return SubAgentResult(
-                name=agent.name, url=agent.url, success=False,
-                error=err, elapsed_seconds=elapsed,
+                name=agent.name,
+                url=agent.url,
+                success=False,
+                error=err,
+                elapsed_seconds=elapsed,
             )
 
     # ------------------------------------------------------------------
@@ -244,11 +257,10 @@ class SubAgentClient:
         logger.info("[FEDERATION] 开始实时流式查询 %s: %s", agent.name, url)
 
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(timeout, connect=10.0)
-            ) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
                 async with client.stream(
-                    "POST", url,
+                    "POST",
+                    url,
                     data={
                         "q": question,
                         "stream": "true",
@@ -295,12 +307,14 @@ class SubAgentClient:
             SubAgentResult（text 为完整的流式文本拼接）
         """
         start = time.monotonic()
-        logger.info("[FEDERATION] 开始流式查询子集群 %s: %s", agent.name, self._build_url(agent, endpoint_path))
+        logger.info(
+            "[FEDERATION] 开始流式查询子集群 %s: %s",
+            agent.name,
+            self._build_url(agent, endpoint_path),
+        )
 
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(timeout, connect=10.0)
-            ) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
                 return await self._query_stream_with_client(
                     client, agent, question, max_steps, conclusion_max_tokens, endpoint_path
                 )
@@ -309,16 +323,22 @@ class SubAgentClient:
             err = f"流式请求超时（{timeout}s）"
             logger.error("[FEDERATION] %s %s", agent.name, err)
             return SubAgentResult(
-                name=agent.name, url=agent.url, success=False,
-                error=err, elapsed_seconds=elapsed,
+                name=agent.name,
+                url=agent.url,
+                success=False,
+                error=err,
+                elapsed_seconds=elapsed,
             )
         except Exception as exc:
             elapsed = time.monotonic() - start
             err = str(exc)
             logger.error("[FEDERATION] %s 流式请求异常: %s", agent.name, err, exc_info=True)
             return SubAgentResult(
-                name=agent.name, url=agent.url, success=False,
-                error=err, elapsed_seconds=elapsed,
+                name=agent.name,
+                url=agent.url,
+                success=False,
+                error=err,
+                elapsed_seconds=elapsed,
             )
 
     async def _query_stream_with_client(
@@ -356,7 +376,10 @@ class SubAgentClient:
             text = "".join(chunks)
             elapsed = time.monotonic() - start
             logger.info(
-                "[FEDERATION] %s 流式响应成功，长度: %s chars，耗时: %.1fs", agent.name, len(text), elapsed
+                "[FEDERATION] %s 流式响应成功，长度: %s chars，耗时: %.1fs",
+                agent.name,
+                len(text),
+                elapsed,
             )
             return SubAgentResult(
                 name=agent.name,
@@ -370,24 +393,33 @@ class SubAgentClient:
             err = "流式请求超时"
             logger.error("[FEDERATION] %s %s", agent.name, err)
             return SubAgentResult(
-                name=agent.name, url=agent.url, success=False,
-                error=err, elapsed_seconds=elapsed,
+                name=agent.name,
+                url=agent.url,
+                success=False,
+                error=err,
+                elapsed_seconds=elapsed,
             )
         except httpx.HTTPStatusError as exc:
             elapsed = time.monotonic() - start
             err = f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
             logger.error("[FEDERATION] %s 流式请求失败: %s", agent.name, err)
             return SubAgentResult(
-                name=agent.name, url=agent.url, success=False,
-                error=err, elapsed_seconds=elapsed,
+                name=agent.name,
+                url=agent.url,
+                success=False,
+                error=err,
+                elapsed_seconds=elapsed,
             )
         except Exception as exc:
             elapsed = time.monotonic() - start
             err = str(exc)
             logger.error("[FEDERATION] %s 流式请求异常: %s", agent.name, err, exc_info=True)
             return SubAgentResult(
-                name=agent.name, url=agent.url, success=False,
-                error=err, elapsed_seconds=elapsed,
+                name=agent.name,
+                url=agent.url,
+                success=False,
+                error=err,
+                elapsed_seconds=elapsed,
             )
 
     async def batch_query_stream(
@@ -407,9 +439,7 @@ class SubAgentClient:
         Returns:
             SubAgentResult 列表（与输入顺序一致）
         """
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0)
-        ) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
             tasks = [
                 self._query_stream_with_client(
                     client,

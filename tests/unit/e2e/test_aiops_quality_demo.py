@@ -136,16 +136,22 @@ def test_unexpected_diagnosed_group_fails_precision_but_inconclusive_group_does_
 Secret workload-input 缺少 unavailable-key。
 """
     expectation = _expectation("secret", ["Secret", "unavailable-key"])
-    unexpected = base + """
+    unexpected = (
+        base
+        + """
 ## 🎯 根因分析 · g2
 ### 根因结论
 镜像地址错误导致 ImagePullBackOff。
 """
-    inconclusive = base + """
+    )
+    inconclusive = (
+        base
+        + """
 ## 🎯 根因分析 · g2
 ### 根因结论
 证据不足，无法确认该组根因。
 """
+    )
 
     unexpected_score = score_root_causes([expectation], extract_root_claims(unexpected))
     inconclusive_score = score_root_causes([expectation], extract_root_claims(inconclusive))
@@ -575,7 +581,9 @@ def test_protected_worker_publishes_completion_status(monkeypatch, tmp_path):
 def test_demo_contract_contains_all_isolated_catalog_scenarios():
     scenarios = load_scenarios(DEMO_DIR / "demo_cases.yaml")
 
-    assert [s.id for s in select_scenarios(scenarios, "all")] == [f"c{index:02d}" for index in range(1, 12)]
+    assert [s.id for s in select_scenarios(scenarios, "all")] == [
+        f"c{index:02d}" for index in range(1, 12)
+    ]
     assert len(scenarios) == 28
     assert all(scenario.members == (scenario.id,) for scenario in scenarios.values())
     assert len(scenarios["c04"].expected_root_causes) == 1
@@ -756,9 +764,7 @@ def test_default_output_dir_contains_scenario_and_timestamp():
     scenarios = load_scenarios(DEMO_DIR / "demo_cases.yaml")
 
     single = default_output_dir([scenarios["c04"]], timestamp="20260901_120000")
-    full = default_output_dir(
-        select_scenarios(scenarios, "all"), timestamp="20260901_120000"
-    )
+    full = default_output_dir(select_scenarios(scenarios, "all"), timestamp="20260901_120000")
 
     assert single.name == "aiops_quality_c04_20260901_120000"
     assert full.name == "aiops_quality_all_20260901_120000"
@@ -1200,7 +1206,10 @@ def test_rescore_existing_report_reuses_archives_without_changing_evidence(tmp_p
     assert run["scoring_version"] == SCORING_VERSION
     assert (Path(rescored["revision_dir"]) / "summary.md").is_file()
     assert json.loads((run_dir / "score.json").read_text()) == original_run
-    assert json.loads((tmp_path / "stats.json").read_text())["scenarios"][0]["runs"][0] == original_run
+    assert (
+        json.loads((tmp_path / "stats.json").read_text())["scenarios"][0]["runs"][0]
+        == original_run
+    )
 
 
 def test_confirmed_root_is_not_invalidated_by_an_unconfirmed_secondary_detail():

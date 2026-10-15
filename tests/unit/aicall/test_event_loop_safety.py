@@ -202,11 +202,13 @@ def test_call_simple_stops_stream_eof_without_replay(monkeypatch):
             return self
 
         def invoke(self, messages, config=None):
-            invocations.append({
-                "messages": messages,
-                "config": config,
-                "bind_kwargs": dict(self.bind_kwargs),
-            })
+            invocations.append(
+                {
+                    "messages": messages,
+                    "config": config,
+                    "bind_kwargs": dict(self.bind_kwargs),
+                }
+            )
             if self.error is not None:
                 raise self.error
             return self.result
@@ -229,6 +231,7 @@ def test_call_simple_stops_stream_eof_without_replay(monkeypatch):
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
     from app.core.aicall.errors import ModelStreamInterrupted
+
     with pytest.raises(ModelStreamInterrupted):
         ai.call_simple("system", "question", node_id="conclusion", max_tokens=8192)
     assert len(created) == len(invocations) == 1
@@ -284,6 +287,7 @@ def test_call_simple_replays_measured_stream_interruptions_once_for_api_subclass
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
     from app.core.aicall.errors import ModelStreamInterrupted
+
     with pytest.raises(ModelStreamInterrupted):
         ai.call_simple("system", "question")
     assert len(created) == 1
@@ -333,6 +337,7 @@ def test_call_simple_retries_api_connection_eof_once_without_streaming(
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
     from app.core.aicall.errors import ModelStreamInterrupted
+
     with pytest.raises(ModelStreamInterrupted):
         ai.call_simple("system", "question")
     assert len(created) == 1
@@ -378,6 +383,7 @@ def test_call_simple_retries_api_connection_eof_from_cause_chain(
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
     from app.core.aicall.errors import ModelStreamInterrupted
+
     with pytest.raises(ModelStreamInterrupted):
         ai.call_simple("system", "question")
     assert len(created) == 1
@@ -585,6 +591,7 @@ def test_call_simple_raises_original_disconnect_without_second_request(monkeypat
     monkeypatch.setattr(ai, "_create_chat_model", _create_chat_model)
 
     from app.core.aicall.errors import ModelStreamInterrupted
+
     with pytest.raises(ModelStreamInterrupted) as exc_info:
         ai.call_simple("system", "question")
 
@@ -757,26 +764,14 @@ def test_call_simple_hard_guard_bounds_provider_input_and_archives_budget(
     assert result == "bounded"
     assert final_input_tokens <= 23040
     assert captured["question"].startswith("HEAD preserve diagnosis scope")
-    assert captured["question"].endswith(
-        "TAIL preserve final report constraints"
-    )
+    assert captured["question"].endswith("TAIL preserve final report constraints")
     assert "deterministic context compaction" in captured["question"]
 
     pre_guard = json.loads(
-        (
-            tmp_path
-            / "run-simple-hard-guard"
-            / "budget"
-            / "conclusion_pre_guard.json"
-        ).read_text()
+        (tmp_path / "run-simple-hard-guard" / "budget" / "conclusion_pre_guard.json").read_text()
     )
     final_budget = json.loads(
-        (
-            tmp_path
-            / "run-simple-hard-guard"
-            / "budget"
-            / "conclusion.json"
-        ).read_text()
+        (tmp_path / "run-simple-hard-guard" / "budget" / "conclusion.json").read_text()
     )
     assert pre_guard["hard_guard"]["triggered"] is True
     assert final_budget["hard_guard"]["final_input_tokens"] <= 23040
@@ -811,21 +806,19 @@ def test_call_simple_hard_guard_uses_fixed_estimator_drift_metadata(
 
     monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
 
-    assert ai.call_simple(
-        "system",
-        "question",
-        node_id="conclusion",
-        run_id="run-simple-drift",
-        max_tokens=6000,
-    ) == "bounded"
+    assert (
+        ai.call_simple(
+            "system",
+            "question",
+            node_id="conclusion",
+            run_id="run-simple-drift",
+            max_tokens=6000,
+        )
+        == "bounded"
+    )
 
     final_budget = json.loads(
-        (
-            tmp_path
-            / "run-simple-drift"
-            / "budget"
-            / "conclusion.json"
-        ).read_text()
+        (tmp_path / "run-simple-drift" / "budget" / "conclusion.json").read_text()
     )
     hard_guard = final_budget["hard_guard"]
     assert hard_guard["token_count_accuracy"] != "exact"
@@ -928,21 +921,19 @@ def test_call_simple_hard_guard_reserves_provider_framing_with_exact_content_cou
 
     monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
 
-    assert ai.call_simple(
-        "system",
-        "question",
-        node_id="conclusion",
-        run_id="run-simple-exact",
-        max_tokens=6000,
-    ) == "exact"
+    assert (
+        ai.call_simple(
+            "system",
+            "question",
+            node_id="conclusion",
+            run_id="run-simple-exact",
+            max_tokens=6000,
+        )
+        == "exact"
+    )
 
     final_budget = json.loads(
-        (
-            tmp_path
-            / "run-simple-exact"
-            / "budget"
-            / "conclusion.json"
-        ).read_text()
+        (tmp_path / "run-simple-exact" / "budget" / "conclusion.json").read_text()
     )
     hard_guard = final_budget["hard_guard"]
     provider_overhead = next(
@@ -989,27 +980,21 @@ def test_call_simple_estimated_boundary_compacts_above_effective_target(
     monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
     system_prompt = "s" * 100
     desired_total = 22900
-    question = "q" * (
-        desired_total
-        - token_count(system_prompt)["tokens"]
-        - 64
+    question = "q" * (desired_total - token_count(system_prompt)["tokens"] - 64)
+
+    assert (
+        ai.call_simple(
+            system_prompt,
+            question,
+            node_id="conclusion",
+            run_id="run-simple-estimated-boundary",
+            max_tokens=6000,
+        )
+        == "bounded"
     )
 
-    assert ai.call_simple(
-        system_prompt,
-        question,
-        node_id="conclusion",
-        run_id="run-simple-estimated-boundary",
-        max_tokens=6000,
-    ) == "bounded"
-
     final_budget = json.loads(
-        (
-            tmp_path
-            / "run-simple-estimated-boundary"
-            / "budget"
-            / "conclusion.json"
-        ).read_text()
+        (tmp_path / "run-simple-estimated-boundary" / "budget" / "conclusion.json").read_text()
     )
     hard_guard = final_budget["hard_guard"]
     assert hard_guard["original_input_tokens"] == desired_total
@@ -1052,27 +1037,21 @@ def test_call_simple_exact_boundary_compacts_above_effective_target(
     monkeypatch.setattr(ai, "_create_chat_model", lambda **kwargs: _Model())
     system_prompt = "s" * 100
     desired_total = 22900
-    question = "q" * (
-        desired_total
-        - token_count(system_prompt)["tokens"]
-        - 64
+    question = "q" * (desired_total - token_count(system_prompt)["tokens"] - 64)
+
+    assert (
+        ai.call_simple(
+            system_prompt,
+            question,
+            node_id="conclusion",
+            run_id="run-simple-exact-boundary",
+            max_tokens=6000,
+        )
+        == "exact"
     )
 
-    assert ai.call_simple(
-        system_prompt,
-        question,
-        node_id="conclusion",
-        run_id="run-simple-exact-boundary",
-        max_tokens=6000,
-    ) == "exact"
-
     final_budget = json.loads(
-        (
-            tmp_path
-            / "run-simple-exact-boundary"
-            / "budget"
-            / "conclusion.json"
-        ).read_text()
+        (tmp_path / "run-simple-exact-boundary" / "budget" / "conclusion.json").read_text()
     )
     hard_guard = final_budget["hard_guard"]
     assert 22785 <= hard_guard["original_input_tokens"] <= 23040
@@ -1120,10 +1099,7 @@ def test_call_simple_hard_guard_fails_closed_before_provider_when_window_unknown
     assert provider_calls == []
     archived = json.loads(
         (
-            tmp_path
-            / "run-simple-unknown-window"
-            / "budget"
-            / "conclusion_pre_guard.json"
+            tmp_path / "run-simple-unknown-window" / "budget" / "conclusion_pre_guard.json"
         ).read_text()
     )
     assert archived["hard_guard"]["error"] == "context_window_unavailable"
@@ -1254,9 +1230,11 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
     tool.description = "tool"
     tool.args_schema = None
 
-    with patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model), \
-         patch("langchain.agents.create_agent", side_effect=_capture_agent), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model),
+        patch("langchain.agents.create_agent", side_effect=_capture_agent),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         ai.call("sys", "q1", tools=[tool])
         ai.call("sys", "q2", tools=[tool])
@@ -1268,9 +1246,10 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
     assert create_agent_calls[0] is not create_agent_calls[1]
 
 
-@pytest.mark.parametrize('transport_error', ['empty_stream', 'utls: TLS handshake: EOF'])
+@pytest.mark.parametrize("transport_error", ["empty_stream", "utls: TLS handshake: EOF"])
 def test_call_with_tools_retries_stream_interruption_before_agent_progress(
-    monkeypatch, transport_error,
+    monkeypatch,
+    transport_error,
 ):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
     ai = AICall(model="openai/generic-model", api_key="sk-test")
@@ -1320,13 +1299,7 @@ def test_call_with_tools_retries_stream_interruption_before_agent_progress(
         async def astream(self, *args, **kwargs):
             yield (
                 "updates",
-                {
-                    "model": {
-                        "messages": [
-                            AIMessage(content="recovered agent response")
-                        ]
-                    }
-                },
+                {"model": {"messages": [AIMessage(content="recovered agent response")]}},
             )
 
     agents = [_FailingAgent(), _SuccessfulAgent()]
@@ -1345,17 +1318,21 @@ def test_call_with_tools_retries_stream_interruption_before_agent_progress(
     tool.description = "tool"
     tool.args_schema = None
 
-    with patch("langchain.agents.create_agent", side_effect=_create_agent), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("langchain.agents.create_agent", side_effect=_create_agent),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         from app.core.aicall.errors import ModelStreamInterrupted
+
         with pytest.raises(ModelStreamInterrupted):
             ai.call("sys", "q", tools=[tool], max_steps=3)
     assert len(created_models) == len(created_agents) == 1
 
 
-@pytest.mark.parametrize('transport_error', ['empty_stream', 'utls: TLS handshake: EOF'])
+@pytest.mark.parametrize("transport_error", ["empty_stream", "utls: TLS handshake: EOF"])
 def test_call_with_tools_does_not_retry_stream_interruption_after_tool_call(
-    monkeypatch, transport_error,
+    monkeypatch,
+    transport_error,
 ):
     monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "32000")
     ai = AICall(model="openai/generic-model", api_key="sk-test")
@@ -1432,16 +1409,19 @@ def test_call_with_tools_does_not_retry_stream_interruption_after_tool_call(
     tool.description = "tool"
     tool.args_schema = None
 
-    with patch("langchain.agents.create_agent", side_effect=_create_agent), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("langchain.agents.create_agent", side_effect=_create_agent),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         from app.core.aicall.errors import ModelStreamInterrupted
+
         with pytest.raises(ModelStreamInterrupted):
             ai.call("sys", "q", tools=[tool], max_steps=3)
     assert len(created_models) == 1
     assert len(created_agents) == 1
 
 
-@pytest.mark.parametrize('narrative', ['', '核查已完成，下面提交结构化结果。'])
+@pytest.mark.parametrize("narrative", ["", "核查已完成，下面提交结构化结果。"])
 def test_call_with_tools_can_return_structured_response_without_extra_extract_llm(narrative):
     create_agent_kwargs = []
 
@@ -1502,9 +1482,11 @@ def test_call_with_tools_can_return_structured_response_without_extra_extract_ll
     tool.description = "tool"
     tool.args_schema = None
 
-    with patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()), \
-         patch("langchain.agents.create_agent", side_effect=_create_agent), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()),
+        patch("langchain.agents.create_agent", side_effect=_create_agent),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         result, events = ai.call("sys", "q", tools=[tool], response_schema=_LayerLikeOutput)
 
@@ -1550,9 +1532,11 @@ def test_call_without_real_tools_can_use_agent_structured_response():
         create_agent_kwargs.append(kwargs)
         return _Agent()
 
-    with patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()), \
-         patch("langchain.agents.create_agent", side_effect=_create_agent), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()),
+        patch("langchain.agents.create_agent", side_effect=_create_agent),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         result, events = ai.call("sys", "q", tools=[], response_schema=_SummaryOutput)
 
@@ -1606,9 +1590,11 @@ def test_call_with_tools_propagates_langfuse_session_id(monkeypatch):
     tool.description = "tool"
     tool.args_schema = None
 
-    with patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model), \
-         patch("langchain.agents.create_agent", side_effect=_create_agent), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model),
+        patch("langchain.agents.create_agent", side_effect=_create_agent),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         ai.call("sys", "q", tools=[tool], run_id="run-session-2", node_id="layer", max_steps=3)
 
@@ -1877,18 +1863,18 @@ def test_call_structured_hard_guard_bounds_provider_input_and_archives_budget(
     pre_guard = json.loads(
         (tmp_path / "run-hard-guard" / "budget" / "rca_pre_guard.json").read_text()
     )
-    final_budget = json.loads(
-        (tmp_path / "run-hard-guard" / "budget" / "rca.json").read_text()
-    )
+    final_budget = json.loads((tmp_path / "run-hard-guard" / "budget" / "rca.json").read_text())
     assert pre_guard["hard_guard"]["triggered"] is True
     assert final_budget["hard_guard"]["final_input_tokens"] <= 23040
     assert final_budget["reserved_tokens"] == 8000
     assert any(
-        component["name"] == "safety_margin"
-        and component["tokens"] == 2000
+        component["name"] == "safety_margin" and component["tokens"] == 2000
         for component in final_budget["components"]
     )
-    assert final_budget["hard_guard"]["original_question_chars"] > final_budget["hard_guard"]["final_question_chars"]
+    assert (
+        final_budget["hard_guard"]["original_question_chars"]
+        > final_budget["hard_guard"]["final_question_chars"]
+    )
 
 
 def test_call_structured_hard_guard_reserves_estimator_drift_below_public_limit(
@@ -1937,12 +1923,7 @@ def test_call_structured_hard_guard_reserves_estimator_drift_below_public_limit(
     )
 
     final_budget = json.loads(
-        (
-            tmp_path
-            / "run-estimator-drift"
-            / "budget"
-            / "rca.json"
-        ).read_text()
+        (tmp_path / "run-estimator-drift" / "budget" / "rca.json").read_text()
     )
     hard_guard = final_budget["hard_guard"]
     assert final_budget["token_count_accuracy"] != "exact"
@@ -2014,12 +1995,7 @@ def test_call_structured_hard_guard_reserves_provider_framing_with_exact_content
     )
 
     final_budget = json.loads(
-        (
-            tmp_path
-            / "run-exact-tokenizer"
-            / "budget"
-            / "rca.json"
-        ).read_text()
+        (tmp_path / "run-exact-tokenizer" / "budget" / "rca.json").read_text()
     )
     hard_guard = final_budget["hard_guard"]
     provider_overhead = next(
@@ -2094,12 +2070,7 @@ def test_call_structured_exact_boundary_compacts_above_effective_target(
     )
 
     final_budget = json.loads(
-        (
-            tmp_path
-            / "run-structured-exact-boundary"
-            / "budget"
-            / "rca.json"
-        ).read_text()
+        (tmp_path / "run-structured-exact-boundary" / "budget" / "rca.json").read_text()
     )
     hard_guard = final_budget["hard_guard"]
     assert isinstance(parsed, EvidencePlanOutput)
@@ -2220,9 +2191,7 @@ def test_agent_estimated_boundary_compacts_above_effective_target(monkeypatch):
         },
     )
     system_prompt = "system"
-    empty_history = [
-        ai._serialize_agent_message(HumanMessage(content=""))
-    ]
+    empty_history = [ai._serialize_agent_message(HumanMessage(content=""))]
     fixed_tokens = (
         token_count(system_prompt)["tokens"]
         + token_count(empty_history)["tokens"]
@@ -2273,9 +2242,7 @@ def test_agent_exact_boundary_compacts_above_effective_target(monkeypatch):
         },
     )
     system_prompt = "system"
-    empty_history = [
-        ai._serialize_agent_message(HumanMessage(content=""))
-    ]
+    empty_history = [ai._serialize_agent_message(HumanMessage(content=""))]
     fixed_tokens = (
         token_count(system_prompt)["tokens"]
         + token_count(empty_history)["tokens"]
@@ -2380,12 +2347,7 @@ def test_call_structured_hard_guard_fails_closed_and_archives_unknown_window(
         )
 
     assert provider_calls == []
-    pre_guard_path = (
-        tmp_path
-        / "run-unknown-window"
-        / "budget"
-        / "rca_pre_guard.json"
-    )
+    pre_guard_path = tmp_path / "run-unknown-window" / "budget" / "rca_pre_guard.json"
     assert pre_guard_path.exists()
     archived = json.loads(pre_guard_path.read_text())
     assert archived["hard_guard"]["enabled"] is True
@@ -2425,7 +2387,9 @@ def test_call_with_expect_json_interrupts_on_valid_json_message():
                 {
                     "model": {
                         "messages": [
-                            AIMessage(content='{"layer":"QUERY","confidence":0.9,"reasoning":"ok"}')
+                            AIMessage(
+                                content='{"layer":"QUERY","confidence":0.9,"reasoning":"ok"}'
+                            )
                         ]
                     }
                 },
@@ -2436,9 +2400,11 @@ def test_call_with_expect_json_interrupts_on_valid_json_message():
     tool.description = "tool"
     tool.args_schema = None
 
-    with patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model), \
-         patch("langchain.agents.create_agent", return_value=_Agent()), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model),
+        patch("langchain.agents.create_agent", return_value=_Agent()),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         result, _ = ai.call(
             "sys",
@@ -2494,7 +2460,10 @@ def test_call_surfaces_reasoning_content_in_stream_events():
             yield (
                 "messages",
                 (
-                    AIMessage(content="", additional_kwargs={"reasoning_content": "<think>内部推理</think>"}),
+                    AIMessage(
+                        content="",
+                        additional_kwargs={"reasoning_content": "<think>内部推理</think>"},
+                    ),
                     {"langgraph_node": "model"},
                 ),
             )
@@ -2503,7 +2472,10 @@ def test_call_surfaces_reasoning_content_in_stream_events():
                 {
                     "model": {
                         "messages": [
-                            AIMessage(content="最终答案", additional_kwargs={"reasoning_content": "<think>内部推理</think>"})
+                            AIMessage(
+                                content="最终答案",
+                                additional_kwargs={"reasoning_content": "<think>内部推理</think>"},
+                            )
                         ]
                     }
                 },
@@ -2514,9 +2486,11 @@ def test_call_surfaces_reasoning_content_in_stream_events():
     tool.description = "tool"
     tool.args_schema = None
 
-    with patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()), \
-         patch("langchain.agents.create_agent", return_value=_Agent()), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()),
+        patch("langchain.agents.create_agent", return_value=_Agent()),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         ai.call("sys", "q", tools=[tool], stream_queue=event_queue, node_id="layer", max_steps=3)
 
@@ -2525,8 +2499,13 @@ def test_call_surfaces_reasoning_content_in_stream_events():
         events.append(event_queue.get_nowait()[1])
 
     # Reasoning is surfaced on its own channel and never mixed into the answer.
-    assert any(evt.get("type") == "ai_reasoning" and "内部推理" in (evt.get("content") or "") for evt in events)
-    assert not any("内部推理" in (evt.get("content") or "") for evt in events if evt.get("type") == "ai_token")
+    assert any(
+        evt.get("type") == "ai_reasoning" and "内部推理" in (evt.get("content") or "")
+        for evt in events
+    )
+    assert not any(
+        "内部推理" in (evt.get("content") or "") for evt in events if evt.get("type") == "ai_token"
+    )
     message = next(evt for evt in events if evt.get("type") == "ai_message")
     assert message["full_content"] == "最终答案"
 
@@ -2566,7 +2545,10 @@ def test_call_wraps_provider_reasoning_content_for_stream_filters():
                 {
                     "model": {
                         "messages": [
-                            AIMessage(content="最终答案", additional_kwargs={"reasoning_content": "内部推理"})
+                            AIMessage(
+                                content="最终答案",
+                                additional_kwargs={"reasoning_content": "内部推理"},
+                            )
                         ]
                     }
                 },
@@ -2577,9 +2559,11 @@ def test_call_wraps_provider_reasoning_content_for_stream_filters():
     tool.description = "tool"
     tool.args_schema = None
 
-    with patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()), \
-         patch("langchain.agents.create_agent", return_value=_Agent()), \
-         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()):
+    with (
+        patch("app.core.aicall.client.ChatOpenAI", return_value=MagicMock()),
+        patch("langchain.agents.create_agent", return_value=_Agent()),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+    ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         ai.call("sys", "q", tools=[tool], stream_queue=event_queue, node_id="layer", max_steps=3)
 

@@ -159,7 +159,9 @@ def test_build_chinese_report_lines_contains_detail_and_quality_summary(tmp_path
         },
     ]
 
-    text = "\n".join(build_chinese_report_lines([result], 501.0, tmp_path, model_name="openai/Qwen3-32B-AWQ"))
+    text = "\n".join(
+        build_chinese_report_lines([result], 501.0, tmp_path, model_name="openai/Qwen3-32B-AWQ")
+    )
 
     assert "Pod 异常 E2E 准确率报告（盲测模式）" in text
     assert "模型: openai/Qwen3-32B-AWQ" in text

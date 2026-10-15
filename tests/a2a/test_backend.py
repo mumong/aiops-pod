@@ -40,9 +40,7 @@ async def test_backend_parses_aiops_sse_and_uses_query_fast_path():
 
         return StreamingResponse(records(), media_type="text/event-stream")
 
-    client = AiopsBackendClient(
-        _settings(), transport=httpx.ASGITransport(app=backend_app)
-    )
+    client = AiopsBackendClient(_settings(), transport=httpx.ASGITransport(app=backend_app))
     events = [
         event
         async for event in client.stream(
@@ -73,9 +71,7 @@ async def test_backend_rejects_non_json_sse_payload():
             media_type="text/event-stream",
         )
 
-    client = AiopsBackendClient(
-        _settings(), transport=httpx.ASGITransport(app=backend_app)
-    )
+    client = AiopsBackendClient(_settings(), transport=httpx.ASGITransport(app=backend_app))
 
     with pytest.raises(BackendError, match="invalid SSE JSON"):
         _ = [
@@ -96,9 +92,7 @@ async def test_backend_health_reports_unavailable_without_raising():
     async def health():
         return Response(status_code=503)
 
-    client = AiopsBackendClient(
-        _settings(), transport=httpx.ASGITransport(app=backend_app)
-    )
+    client = AiopsBackendClient(_settings(), transport=httpx.ASGITransport(app=backend_app))
     result = await client.health()
 
     assert result["status"] == "unavailable"

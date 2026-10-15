@@ -1,4 +1,5 @@
 """Exercise the real suite orchestrator without sending diagnosis requests."""
+
 import json
 import subprocess
 import sys
@@ -13,37 +14,91 @@ from variant_suite import fixture_manager
 
 
 def setup_runner(monkeypatch, tmp_path, *, cleanup_fails=False):
-    monkeypatch.setattr(sys, "argv", ["run_quality_demo.py", "--foreground", "--scenario", "c02-tag,c06-file",
-                                    "-n", "1", "-c", "1", "--output-dir", str(tmp_path)])
-    monkeypatch.setattr(q.requests, "get", lambda *a, **k: SimpleNamespace(raise_for_status=lambda: None))
-    monkeypatch.setattr(q, "run_command", lambda *a, **k: SimpleNamespace(stdout="https://fixture-recovery-unit-test", returncode=0))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_quality_demo.py",
+            "--foreground",
+            "--scenario",
+            "c02-tag,c06-file",
+            "-n",
+            "1",
+            "-c",
+            "1",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+    monkeypatch.setattr(
+        q.requests, "get", lambda *a, **k: SimpleNamespace(raise_for_status=lambda: None)
+    )
+    monkeypatch.setattr(
+        q,
+        "run_command",
+        lambda *a, **k: SimpleNamespace(stdout="https://fixture-recovery-unit-test", returncode=0),
+    )
     monkeypatch.setattr(q.time, "sleep", lambda seconds: None)
     calls = []
     cleanup = []
+
     def clean(catalog):
         cleanup.append(True)
         if cleanup_fails and len(cleanup) > 1:
-            raise subprocess.CalledProcessError(1, ["kubectl", "delete", "namespace", "owned-fixture"])
+            raise subprocess.CalledProcessError(
+                1, ["kubectl", "delete", "namespace", "owned-fixture"]
+            )
+
     monkeypatch.setattr(q, "cleanup_catalog_namespaces", clean)
     monkeypatch.setattr(q, "apply_scenario", lambda *a: None)
-    pod = {"metadata": {"uid": "current", "name": "workload"}, "status": {"message": "x509: certificate signed by unknown authority"}}
+    pod = {
+        "metadata": {"uid": "current", "name": "workload"},
+        "status": {"message": "x509: certificate signed by unknown authority"},
+    }
     monkeypatch.setattr(q, "_pod_for_case", lambda case: pod)
-    monkeypatch.setattr(q, "_kubectl_json", lambda args: {"items": [{"involvedObject": {"uid": "current"}, "message": "x509: certificate signed by unknown authority"}]})
+    monkeypatch.setattr(
+        q,
+        "_kubectl_json",
+        lambda args: {
+            "items": [
+                {
+                    "involvedObject": {"uid": "current"},
+                    "message": "x509: certificate signed by unknown authority",
+                }
+            ]
+        },
+    )
+
     def gate(case):
         if case["id"] == "c02-tag":
             raise TimeoutError("specific cause gate did not pass")
         return pod
+
     monkeypatch.setattr(q, "wait_for_case_gate", gate)
+
     def postcheck(case, timeout):
         assert timeout == 60
         return True
+
     monkeypatch.setattr(fixture_manager(), "validate_variant", postcheck)
+
     def diagnose(**kwargs):
         calls.append(kwargs["scenario"].id)
-        return {"run_index": kwargs["run_index"], "run_id": "unit-run", "success": True, "elapsed_seconds": 1,
-                "root_cause": {"passed": True, "accuracy": 1},
-                "runbook": {"coverage": 1, "expected": ["pod-crashloop-runtime"], "matched": ["pod-crashloop-runtime"], "passed": True},
-                "evidence": {"completeness": 1, "collected": 1, "planned": 1}}
+        return {
+            "run_index": kwargs["run_index"],
+            "run_id": "unit-run",
+            "success": True,
+            "elapsed_seconds": 1,
+            "root_cause": {"passed": True, "accuracy": 1},
+            "runbook": {
+                "coverage": 1,
+                "expected": ["pod-crashloop-runtime"],
+                "matched": ["pod-crashloop-runtime"],
+                "passed": True,
+            },
+            "evidence": {"completeness": 1, "collected": 1, "planned": 1},
+        }
+
     monkeypatch.setattr(q, "run_diagnosis_once", diagnose)
     return calls
 
@@ -62,7 +117,9 @@ def test_gate_failure_is_archived_and_next_case_runs(monkeypatch, tmp_path):
     console = q.build_console_report(stats, tmp_path)
     assert "未完成全量有效验收" in console and "待复核" in console and "1/2" in console
     assert q._aggregate_scenario_metrics(stats["scenarios"])["root_accuracy"] == 1
-    assert q._aggregate_scenario_metrics(stats["scenarios"])["metric_samples"]["root_accuracy"] == 1
+    assert (
+        q._aggregate_scenario_metrics(stats["scenarios"])["metric_samples"]["root_accuracy"] == 1
+    )
 
 
 def test_cleanup_failure_stops_before_next_case(monkeypatch, tmp_path):
@@ -85,14 +142,17 @@ def test_worker_publishes_partial_completion(monkeypatch, tmp_path):
 def test_runtime_resume_preserves_scores_and_snapshots(tmp_path):
     old = {"version": "v1", "sha256": {"run_quality_demo.py": "old", "evaluator.py": "same"}}
     new = {"version": "v1", "sha256": {"run_quality_demo.py": "new", "evaluator.py": "same"}}
-    stats = {"scoring_manifest": old, "scenarios": [{"runs": [{"run_index": 1, "root_cause": {"accuracy": .5}}]}]}
+    stats = {
+        "scoring_manifest": old,
+        "scenarios": [{"runs": [{"run_index": 1, "root_cause": {"accuracy": 0.5}}]}],
+    }
     with pytest.raises(RuntimeError):
         q.accept_runtime_resume(stats, new, tmp_path, allowed=False)
     q.accept_runtime_resume(stats, new, tmp_path, allowed=True)
     audit = stats["runtime_resume_audit"][0]
     assert audit["preserved_runs"] == 1
     assert json.loads(Path(audit["snapshot"]).read_text())["scoring_manifest"] == old
-    assert stats["scenarios"][0]["runs"][0]["root_cause"]["accuracy"] == .5
+    assert stats["scenarios"][0]["runs"][0]["root_cause"]["accuracy"] == 0.5
 
 
 def test_actual_resume_skips_recorded_runs(monkeypatch, tmp_path):
@@ -119,16 +179,23 @@ def test_expired_events_refresh_once_without_weakening_gate(monkeypatch):
     scenario = SimpleNamespace(members=["c10"])
     catalog = {"c10": {"id": "c10"}}
     attempts, actions = [], []
+
     def gate(case):
         attempts.append(case)
         if len(attempts) == 1:
             raise TimeoutError("Unhealthy event absent")
         return {"metadata": {"uid": "new"}}
+
     monkeypatch.setattr(q, "wait_for_case_gate", gate)
     monkeypatch.setattr(fixture_manager(), "clean", lambda c: actions.append("clean"))
     monkeypatch.setattr(fixture_manager(), "deploy", lambda c: actions.append("deploy"))
     stats = {}
-    assert q.precheck_with_refresh(scenario, catalog, stats, 18, reuse_existing=False)["c10"]["metadata"]["uid"] == "new"
+    assert (
+        q.precheck_with_refresh(scenario, catalog, stats, 18, reuse_existing=False)["c10"][
+            "metadata"
+        ]["uid"]
+        == "new"
+    )
     assert actions == ["clean", "deploy"] and len(attempts) == 2
     assert stats["fixture_refreshes"][0]["run_index"] == 18
     monkeypatch.setattr(q, "wait_for_case_gate", lambda c: (_ for _ in ()).throw(TimeoutError()))

@@ -5,6 +5,7 @@ JMESPath is an evaluation dependency, not a new production tool. Run with the
 existing development environment. Full responses/answers are saved for review;
 the script deliberately does not equate keyword matches with factual correctness.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,9 +25,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 MAX_EXPRESSION = 2048
 MAX_RESULT_BYTES = 12000
 METADATA = (
-    "contract_version", "status", "source", "observed_at", "scope", "window",
-    "coverage", "history_complete", "limitations", "next_continue_token",
-    "remaining_item_count", "resource_version", "raw_ref",
+    "contract_version",
+    "status",
+    "source",
+    "observed_at",
+    "scope",
+    "window",
+    "coverage",
+    "history_complete",
+    "limitations",
+    "next_continue_token",
+    "remaining_item_count",
+    "resource_version",
+    "raw_ref",
 )
 FIELDS = (
     "Snapshot root: pods[]. Pod fields: namespace,name,uid,node,phase,reason,"
@@ -50,7 +61,11 @@ def compute(payload, expression, *, max_bytes=MAX_RESULT_BYTES):
     metadata = {key: copy.deepcopy(payload[key]) for key in METADATA if key in payload}
     if payload.get("status") != "success":
         return {"status": "error", "error": "source_not_successful", "source_metadata": metadata}
-    if not isinstance(expression, str) or not expression.strip() or len(expression) > MAX_EXPRESSION:
+    if (
+        not isinstance(expression, str)
+        or not expression.strip()
+        or len(expression) > MAX_EXPRESSION
+    ):
         return {"status": "error", "error": "invalid_expression_length"}
     try:
         result = jmespath.search(expression, payload)
@@ -58,8 +73,11 @@ def compute(payload, expression, *, max_bytes=MAX_RESULT_BYTES):
     except (jmespath.exceptions.JMESPathError, TypeError, ValueError, RecursionError) as exc:
         return {"status": "error", "error": type(exc).__name__, "detail": str(exc)[:500]}
     packet = {
-        "status": "success", "source_metadata": metadata,
-        "source_record_count": len(payload["pods"]) if isinstance(payload.get("pods"), list) else None,
+        "status": "success",
+        "source_metadata": metadata,
+        "source_record_count": len(payload["pods"])
+        if isinstance(payload.get("pods"), list)
+        else None,
         "executed_expression": expression,
         "result_kind": "null" if result is None else type(result).__name__,
         "result": result,
@@ -69,9 +87,14 @@ def compute(payload, expression, *, max_bytes=MAX_RESULT_BYTES):
         ),
     }
     if len(encode(packet).encode()) > max_bytes:
-        return {"status": "error", "error": "result_too_large", "result_bytes": result_bytes,
-                "max_packet_bytes": max_bytes, "executed_expression": expression,
-                "detail": "Select fewer fields or compute the requested statistic; result was not truncated."}
+        return {
+            "status": "error",
+            "error": "result_too_large",
+            "result_bytes": result_bytes,
+            "max_packet_bytes": max_bytes,
+            "executed_expression": expression,
+            "detail": "Select fewer fields or compute the requested statistic; result was not truncated.",
+        }
     return packet
 
 
@@ -80,20 +103,28 @@ def schema(mode):
         from scripts.evidence_record_trial import record_schema
 
         return record_schema()
-    props = {"namespace": {"type": "string", "description": "Optional exact namespace."},
-             "pod": {"type": "string", "description": "Optional exact Pod; requires namespace."}}
+    props = {
+        "namespace": {"type": "string", "description": "Optional exact namespace."},
+        "pod": {"type": "string", "description": "Optional exact Pod; requires namespace."},
+    }
     description = "Read frozen Pod lifecycle evidence (not current cluster data). " + FIELDS
     if mode == "compute":
         props["expression"] = {
-            "type": "string", "description": (
+            "type": "string",
+            "description": (
                 "Optional standard JMESPath on the snapshot root. Filter/project/count/sort "
                 "what the question needs before returning it. E.g. pods[].{name:name,node:node} "
                 "or length(pods). Preserve identities with relevant facts. Omit for full snapshot."
             ),
         }
-    return {"type": "function", "function": {"name": "query_pod_lifecycle",
-            "description": description, "parameters": {"type": "object", "properties": props,
-                                                       "additionalProperties": False}}}
+    return {
+        "type": "function",
+        "function": {
+            "name": "query_pod_lifecycle",
+            "description": description,
+            "parameters": {"type": "object", "properties": props, "additionalProperties": False},
+        },
+    }
 
 
 def replay(payload, arguments, mode):
@@ -112,9 +143,15 @@ def replay(payload, arguments, mode):
     if payload.get("status") != "success":
         return copy.deepcopy(payload)
     selected = copy.deepcopy(payload)
-    selected["pods"] = [p for p in selected["pods"] if all(
-        p.get(field) == arguments[arg] for arg, field in (("namespace", "namespace"), ("pod", "name"))
-        if arguments.get(arg))]
+    selected["pods"] = [
+        p
+        for p in selected["pods"]
+        if all(
+            p.get(field) == arguments[arg]
+            for arg, field in (("namespace", "namespace"), ("pod", "name"))
+            if arguments.get(arg)
+        )
+    ]
     selected["returned_count"] = len(selected["pods"])
     # Preserve upstream scope/coverage; this is selection within a frozen page.
     if mode == "compute" and "expression" in arguments:
@@ -131,14 +168,26 @@ def oracle(payload):
         for container in pod.get("containers", []):
             previous = container.get("last_state", {}).get("terminated", {})
             if previous.get("reason") == "OOMKilled":
-                reasons.append({"namespace": pod["namespace"], "name": pod["name"],
-                                "uid": pod["uid"], "phase": pod.get("phase"),
-                                "container": container["name"], "ready": container.get("ready"),
-                                "termination": previous,
-                                "restart_count_total": container.get("restart_count_total"),
-                                "restart_count_in_window": container.get("restart_count_in_window")})
-    return {"previous_oom": reasons, "node_counts": nodes, "pod_count": len(payload["pods"]),
-            "coverage": payload.get("coverage"), "history_complete": payload.get("history_complete")}
+                reasons.append(
+                    {
+                        "namespace": pod["namespace"],
+                        "name": pod["name"],
+                        "uid": pod["uid"],
+                        "phase": pod.get("phase"),
+                        "container": container["name"],
+                        "ready": container.get("ready"),
+                        "termination": previous,
+                        "restart_count_total": container.get("restart_count_total"),
+                        "restart_count_in_window": container.get("restart_count_in_window"),
+                    }
+                )
+    return {
+        "previous_oom": reasons,
+        "node_counts": nodes,
+        "pod_count": len(payload["pods"]),
+        "coverage": payload.get("coverage"),
+        "history_complete": payload.get("history_complete"),
+    }
 
 
 def evaluate(payload, question, mode, config, max_calls):
@@ -151,14 +200,32 @@ def evaluate(payload, question, mode, config, max_calls):
     from scripts.evaluate_evidence_view import validate_answer
 
     name, base = _parse_model(config["LLM_MODEL"], config["LLM_API_BASE"])
-    model = ChatOpenAI(model=name, base_url=base, api_key=config["LLM_API_KEY"],
-                       reasoning_effort=config.get("LLM_REASONING_EFFORT", "low"),
-                       max_tokens=2500, timeout=60, max_retries=0)
+    model = ChatOpenAI(
+        model=name,
+        base_url=base,
+        api_key=config["LLM_API_KEY"],
+        reasoning_effort=config.get("LLM_REASONING_EFFORT", "low"),
+        max_tokens=2500,
+        timeout=60,
+        max_retries=0,
+    )
     model = model.bind_tools([schema(mode), QueryAnswer])
-    messages = [SystemMessage(content=QUERY_COLLECT_PROMPT), HumanMessage(content=question +
-                "\n冻结证据实验：只回答这份快照，不代表当前实时环境，不可重新获取下一页。")]
-    record = {"model_calls": 0, "model_seconds": [], "tools": [], "usage": {"input_tokens": 0, "output_tokens": 0},
-              "answer": None, "answer_contract_valid": False, "execution_incomplete": None}
+    messages = [
+        SystemMessage(content=QUERY_COLLECT_PROMPT),
+        HumanMessage(
+            content=question
+            + "\n冻结证据实验：只回答这份快照，不代表当前实时环境，不可重新获取下一页。"
+        ),
+    ]
+    record = {
+        "model_calls": 0,
+        "model_seconds": [],
+        "tools": [],
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "answer": None,
+        "answer_contract_valid": False,
+        "execution_incomplete": None,
+    }
     start = time.monotonic()
     for _ in range(max_calls):
         record["model_calls"] += 1
@@ -181,11 +248,21 @@ def evaluate(payload, question, mode, config, max_calls):
                 record["answer"], record["answer_contract_valid"] = validate_answer(call["args"])
                 break
             tick = time.monotonic()
-            output = (replay(payload, call["args"], mode) if call["name"] == "query_pod_lifecycle"
-                      else {"status": "error", "error": "tool_unavailable_in_frozen_trial"})
+            output = (
+                replay(payload, call["args"], mode)
+                if call["name"] == "query_pod_lifecycle"
+                else {"status": "error", "error": "tool_unavailable_in_frozen_trial"}
+            )
             content = encode(output)
-            record["tools"].append({"name": call["name"], "args": call["args"], "result": output,
-                                    "bytes": len(content.encode()), "seconds": time.monotonic() - tick})
+            record["tools"].append(
+                {
+                    "name": call["name"],
+                    "args": call["args"],
+                    "result": output,
+                    "bytes": len(content.encode()),
+                    "seconds": time.monotonic() - tick,
+                }
+            )
             messages.append(ToolMessage(content=content, tool_call_id=call["id"]))
         if record["answer"] is not None:
             break
@@ -220,8 +297,12 @@ def main():
     }
     cases = args.cases.split(",")
     modes = args.modes.split(",")
-    if (not set(cases) <= questions.keys() or not 1 <= args.repeats <= 10 or not 1 <= args.max_calls <= 10
-            or not set(modes) <= {"raw", "compute", "records"}):
+    if (
+        not set(cases) <= questions.keys()
+        or not 1 <= args.repeats <= 10
+        or not 1 <= args.max_calls <= 10
+        or not set(modes) <= {"raw", "compute", "records"}
+    ):
         parser.error("invalid cases/repeats/max-calls")
     args.output.mkdir(parents=True, exist_ok=False)
     if args.synthetic:
@@ -236,23 +317,37 @@ def main():
     payload = json.loads(payload_bytes)
     payload["raw_ref"] = str(source_path.resolve())
     config = model_config()
-    manifest = {"model": config["LLM_MODEL"], "effort": config.get("LLM_REASONING_EFFORT", "low"),
-                "jmespath": jmespath.__version__, "source": str(source_path),
-                "source_sha256": hashlib.sha256(payload_bytes).hexdigest(), "oracle": oracle(payload),
-                "origin": ("synthetic_input_live_model_pre_tool_trial" if args.synthetic
-                           else "frozen_source_live_model_pre_tool_trial"), "serving_changes": False}
+    manifest = {
+        "model": config["LLM_MODEL"],
+        "effort": config.get("LLM_REASONING_EFFORT", "low"),
+        "jmespath": jmespath.__version__,
+        "source": str(source_path),
+        "source_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "oracle": oracle(payload),
+        "origin": (
+            "synthetic_input_live_model_pre_tool_trial"
+            if args.synthetic
+            else "frozen_source_live_model_pre_tool_trial"
+        ),
+        "serving_changes": False,
+    }
     manifest["synthetic_variant"] = args.synthetic
     manifest["max_model_calls"] = args.max_calls
     manifest["source_code_sha256"] = {}
-    for filename in ("evaluate_evidence_computation.py", "evidence_record_trial.py", "evidence_boundary_fixtures.py"):
+    for filename in (
+        "evaluate_evidence_computation.py",
+        "evidence_record_trial.py",
+        "evidence_boundary_fixtures.py",
+    ):
         implementation = Path(__file__).parent / filename
         content = implementation.read_bytes()
         manifest["source_code_sha256"][filename] = hashlib.sha256(content).hexdigest()
         (args.output / filename).write_bytes(content)
     (args.output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     print(encode({key: manifest[key] for key in ("model", "effort", "origin")}), flush=True)
-    runs = [(case, repeat, mode) for case in cases for repeat in range(args.repeats)
-            for mode in modes]
+    runs = [
+        (case, repeat, mode) for case in cases for repeat in range(args.repeats) for mode in modes
+    ]
     random.Random(907).shuffle(runs)
     for case, repeat, mode in runs:
         try:
@@ -262,8 +357,14 @@ def main():
             result = {"execution_incomplete": type(exc).__name__}
         result.update(case=case, repeat=repeat, mode=mode)
         (args.output / f"{case}-{repeat}-{mode}.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2))
-        print(encode({key: value for key, value in result.items() if key not in {"tools", "answer"}}), flush=True)
+            json.dumps(result, ensure_ascii=False, indent=2)
+        )
+        print(
+            encode(
+                {key: value for key, value in result.items() if key not in {"tools", "answer"}}
+            ),
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 Does not inspect manifests or prescribe Kubernetes repair operations. Only
 literal simple shell commands are supported inside kubectl exec/run.
 """
+
 import fnmatch
 import shlex
 from pathlib import PurePosixPath
@@ -65,7 +66,7 @@ def check_repair_execution(args, policy):
     try:
         if not args or args[0] != "kubectl":
             reject("修复执行入口仅允许 kubectl")
-        front = args[1:args.index("--")] if "--" in args else args[1:]
+        front = args[1 : args.index("--")] if "--" in args else args[1:]
         # kubectl global flags may precede the verb. The transport validator
         # already rejects connection overrides; consume common value options.
         words, skip = [], False
@@ -79,7 +80,7 @@ def check_repair_execution(args, policy):
         verb = words[0] if words else ""
         if verb in {"exec", "run", "debug"}:
             if "--" in args:
-                executable(args[args.index("--") + 1:])
+                executable(args[args.index("--") + 1 :])
             elif verb == "exec":
                 reject("kubectl exec 必须用 -- 明确分隔容器命令")
     except RepairCommandDenied:

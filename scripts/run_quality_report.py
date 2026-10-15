@@ -10,6 +10,7 @@ fan-out. Reads /tmp/aiops/reports/context_archives/<run_id>/ inside the pod:
 
 Pass --root <dir> to read archives copied elsewhere.
 """
+
 import collections
 import glob
 import hashlib
@@ -50,7 +51,9 @@ def report(run_id, root):
     for node, calls in _node_tools(run_dir).items():
         seen = collections.Counter(calls)
         nodes[node] = {
-            "model_rounds": len(glob.glob(os.path.join(run_dir, "budget", f"{node}_agent_guard_*.json"))),
+            "model_rounds": len(
+                glob.glob(os.path.join(run_dir, "budget", f"{node}_agent_guard_*.json"))
+            ),
             "tool_calls": len(calls),
             "repeated_identical_results": sum(count - 1 for count in seen.values() if count > 1),
         }
@@ -68,7 +71,9 @@ def report(run_id, root):
         "location_coverage": handoff.get("coverage"),
         "location_note": (handoff.get("coverage_note") or "")[:80],
         "parallel_groups": [
-            {"group_id": g.get("group_id"), "status": g.get("status")} for g in items if isinstance(g, dict)
+            {"group_id": g.get("group_id"), "status": g.get("status")}
+            for g in items
+            if isinstance(g, dict)
         ],
     }
 
@@ -78,7 +83,7 @@ def main(argv):
     if "--root" in argv:
         index = argv.index("--root")
         root = argv[index + 1]
-        argv = argv[:index] + argv[index + 2:]
+        argv = argv[:index] + argv[index + 2 :]
     if not argv:
         sys.exit(__doc__)
     for run_id in argv:

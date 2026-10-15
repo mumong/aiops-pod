@@ -41,7 +41,10 @@ def test_group_runner_and_async_bridge_propagate_context():
 
     with log_context(run="r3", node="parallel_evidence"):
         lanes = sorted(
-            result for _, result, _ in iter_group_results(["g1", "g2"], lambda g: _rendered(), max_workers=2)
+            result
+            for _, result, _ in iter_group_results(
+                ["g1", "g2"], lambda g: _rendered(), max_workers=2
+            )
         )
         bridged = run_coroutine_sync(coro)
     assert lanes == [" [run=r3 node=parallel_evidence]"] * 2

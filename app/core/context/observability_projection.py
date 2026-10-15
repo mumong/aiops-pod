@@ -18,9 +18,7 @@ from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CONTRACT_VERSION = "aiops.observation.v1"
-SELECTION_STRATEGY = (
-    "information_ranked_pattern_round_robin_budget_scan_no_fault_names"
-)
+SELECTION_STRATEGY = "information_ranked_pattern_round_robin_budget_scan_no_fault_names"
 DEFAULT_LOCAL_TIMEZONE = "Asia/Shanghai"
 IDENTITY_LABELS = {"__name__", "namespace", "pod", "uid", "pod_uid"}
 LOG_FIELDS = (
@@ -70,9 +68,7 @@ def _normalize_timestamp(
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=ZoneInfo(local_timezone))
             result["assumed_timezone"] = local_timezone
-        result["utc"] = parsed.astimezone(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
-        )
+        result["utc"] = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     except (ValueError, ZoneInfoNotFoundError):
         result["normalization_error"] = True
     return result
@@ -109,11 +105,7 @@ def _minimal_entity(payload: dict[str, Any]) -> dict[str, Any]:
 def _query_window(payload: dict[str, Any]) -> dict[str, Any]:
     query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
     window = query.get("time_range") if isinstance(query.get("time_range"), dict) else {}
-    return {
-        key: window.get(key)
-        for key in ("start", "end")
-        if window.get(key) is not None
-    }
+    return {key: window.get(key) for key in ("start", "end") if window.get(key) is not None}
 
 
 def _query_ref(payload: dict[str, Any]) -> dict[str, Any]:
@@ -132,9 +124,7 @@ def _query_ref(payload: dict[str, Any]) -> dict[str, Any]:
         result["execution_count"] = len(query["executions"])
     if payload.get("dimension") == "metrics":
         promql = str(query.get("promql") or "")
-        metric_names = list(
-            dict.fromkeys(re.findall(r"([A-Za-z_:][A-Za-z0-9_:]*)\s*\{", promql))
-        )
+        metric_names = list(dict.fromkeys(re.findall(r"([A-Za-z_:][A-Za-z0-9_:]*)\s*\{", promql)))
         if metric_names:
             result["metric_names"] = metric_names
     elif payload.get("dimension") == "logging":
@@ -186,9 +176,7 @@ def _canonical_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
     facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
     samples = payload.get("samples") if isinstance(payload.get("samples"), list) else []
     facts_by_ref = {
-        str(item.get("ref")): item
-        for item in facts
-        if isinstance(item, dict) and item.get("ref")
+        str(item.get("ref")): item for item in facts if isinstance(item, dict) and item.get("ref")
     }
     samples_by_ref = {
         str(item.get("ref")): item
@@ -199,11 +187,7 @@ def _canonical_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
     query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
 
     for record in canonical:
-        refs = [
-            str(ref)
-            for ref in (record.get("evidence_refs") or [])
-            if str(ref or "").strip()
-        ]
+        refs = [str(ref) for ref in (record.get("evidence_refs") or []) if str(ref or "").strip()]
         source_fact = next(
             (facts_by_ref[ref] for ref in refs if ref in facts_by_ref),
             {},
@@ -213,9 +197,7 @@ def _canonical_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
             {},
         )
         metadata = (
-            deepcopy(record.get("metadata"))
-            if isinstance(record.get("metadata"), dict)
-            else {}
+            deepcopy(record.get("metadata")) if isinstance(record.get("metadata"), dict) else {}
         )
 
         def first_value(*values: Any) -> Any:
@@ -264,13 +246,7 @@ def _canonical_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 source_sample.get("raw_ref"),
             ),
         }
-        metadata.update(
-            {
-                key: value
-                for key, value in enriched.items()
-                if value is not None
-            }
-        )
+        metadata.update({key: value for key, value in enriched.items() if value is not None})
         if metadata:
             record["metadata"] = metadata
     return canonical
@@ -286,8 +262,7 @@ def _record_base(record: dict[str, Any], local_timezone: str) -> dict[str, Any]:
         "directness": record.get("directness"),
         "confidence": record.get("confidence"),
         "evidence_refs": list(
-            record.get("evidence_refs")
-            or ([record.get("ref")] if record.get("ref") else [])
+            record.get("evidence_refs") or ([record.get("ref")] if record.get("ref") else [])
         ),
     }
     timestamp = _normalize_timestamp(record.get("timestamp"), source_system, local_timezone)
@@ -471,9 +446,11 @@ def _counts(payload: dict[str, Any], evidence_count: int) -> dict[str, Any]:
             for item in query["executions"]
             if isinstance(item, dict)
         ]
-        retrieved = sum(value for value in hits if value is not None) if any(
-            value is not None for value in hits
-        ) else None
+        retrieved = (
+            sum(value for value in hits if value is not None)
+            if any(value is not None for value in hits)
+            else None
+        )
     normalized = _integer(upstream.get("normalized"))
     if normalized is None:
         normalized = evidence_count
@@ -517,7 +494,9 @@ def _truncation(payload: dict[str, Any]) -> dict[str, Any]:
     upstream = payload.get("truncation") if isinstance(payload.get("truncation"), dict) else {}
     legacy_truncated = bool(upstream.get("truncated", payload.get("truncated")))
     limits = payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
-    serialization = payload.get("serialization") if isinstance(payload.get("serialization"), dict) else {}
+    serialization = (
+        payload.get("serialization") if isinstance(payload.get("serialization"), dict) else {}
+    )
     response_truncated = serialization.get("response_truncated")
     reasons: list[str] = []
     stages = upstream.get("stages") if isinstance(upstream.get("stages"), list) else []
@@ -606,11 +585,7 @@ def _selection_value_state(item: dict[str, Any]) -> str:
 
 def _selection_profile(item: dict[str, Any]) -> str:
     """Return a compact, case-agnostic signal profile for audit aggregation."""
-    relationship = (
-        item.get("relationship")
-        if isinstance(item.get("relationship"), dict)
-        else {}
-    )
+    relationship = item.get("relationship") if isinstance(item.get("relationship"), dict) else {}
     signal = (
         item.get("metric")
         or item.get("trace_type")
@@ -644,11 +619,7 @@ def _selection_profile(item: dict[str, Any]) -> str:
 
 def _selection_family(item: dict[str, Any]) -> str:
     """Group patterns by their contract-level signal, never by fault names."""
-    relationship = (
-        item.get("relationship")
-        if isinstance(item.get("relationship"), dict)
-        else {}
-    )
+    relationship = item.get("relationship") if isinstance(item.get("relationship"), dict) else {}
     if item.get("metric"):
         return compact_json(["metric", item.get("metric")])
     if item.get("trace_type"):
@@ -706,9 +677,7 @@ def _diverse_order(evidence: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             midpoint = (lower + upper) // 2
             stratified_keys.append(keys[midpoint])
-            next_intervals.extend(
-                ((lower, midpoint - 1), (midpoint + 1, upper))
-            )
+            next_intervals.extend(((lower, midpoint - 1), (midpoint + 1, upper)))
         intervals = next_intervals
 
     # Preserve temporal stratification for equal signals, but let contract
@@ -799,9 +768,7 @@ def _summary_evidence(
         labels = result.get("labels")
         if isinstance(labels, dict):
             result["labels"] = {
-                key: item
-                for key, item in labels.items()
-                if key not in NOISY_METRIC_LABELS
+                key: item for key, item in labels.items() if key not in NOISY_METRIC_LABELS
             }
             if not result["labels"]:
                 result.pop("labels")
@@ -835,14 +802,10 @@ def _summary_evidence(
             result.pop("value_truncated", None)
             result.pop("value_original_length", None)
         if "timestamp" in result:
-            result["timestamp"] = _compact_timestamp_for_summary(
-                result.get("timestamp")
-            )
+            result["timestamp"] = _compact_timestamp_for_summary(result.get("timestamp"))
         data = result.get("data")
         if isinstance(data, dict) and "timestamp" in data:
-            data["timestamp"] = _compact_timestamp_for_summary(
-                data.get("timestamp")
-            )
+            data["timestamp"] = _compact_timestamp_for_summary(data.get("timestamp"))
             # Trace normalization exposes the same instant at the evidence
             # root and inside data. Keep a single model-facing copy.
             if result.get("trace_type") and result.get("timestamp") == data.get("timestamp"):
@@ -921,11 +884,13 @@ def render_observability_summary(
         "source_coverage",
         "negative_observation",
     )
-    base = _compact_control_envelope({
-        key: deepcopy(structured[key])
-        for key in control_keys
-        if structured.get(key) not in (None, "", [], {})
-    })
+    base = _compact_control_envelope(
+        {
+            key: deepcopy(structured[key])
+            for key in control_keys
+            if structured.get(key) not in (None, "", [], {})
+        }
+    )
     counts = base.get("counts")
     if isinstance(counts, dict):
         for key in ("mcp_facts", "mcp_samples"):
@@ -933,8 +898,7 @@ def render_observability_summary(
     evidence = structured.get("evidence") if isinstance(structured.get("evidence"), list) else []
     base["evidence"] = []
     ordered = [
-        _summary_evidence(item, compact=len(evidence) > 1)
-        for item in _diverse_order(evidence)
+        _summary_evidence(item, compact=len(evidence) > 1) for item in _diverse_order(evidence)
     ]
     selected_ids: list[str] = []
     empty_selection = {
@@ -960,9 +924,7 @@ def render_observability_summary(
         candidate_chars = len(compact_json(candidate))
         if candidate_chars > max_chars:
             current_chars = (
-                len(compact_json(base))
-                if "summary_selection" in base
-                else control_envelope_chars
+                len(compact_json(base)) if "summary_selection" in base else control_envelope_chars
             )
             rejected_candidates += 1
             rejection = {
@@ -1002,7 +964,14 @@ def render_observability_summary(
         # to an opaque head truncation.
         minimal = {
             key: base[key]
-            for key in ("contract_version", "tool", "dimension", "status", "coverage", "truncation")
+            for key in (
+                "contract_version",
+                "tool",
+                "dimension",
+                "status",
+                "coverage",
+                "truncation",
+            )
             if key in base
         }
         minimal["summary_selection"] = {
@@ -1019,13 +988,8 @@ def render_observability_summary(
     ]
     selected_evidence = base.get("evidence") or []
     all_patterns = list(dict.fromkeys(_selection_bucket(item) for item in evidence))
-    selected_patterns = {
-        _selection_bucket(item)
-        for item in selected_evidence
-    }
-    omitted_patterns = [
-        pattern for pattern in all_patterns if pattern not in selected_patterns
-    ]
+    selected_patterns = {_selection_bucket(item) for item in selected_evidence}
+    omitted_patterns = [pattern for pattern in all_patterns if pattern not in selected_patterns]
     audit = {
         "evidence_total": len(evidence),
         "evidence_selected": len(selected_evidence),
@@ -1123,15 +1087,11 @@ def project_observability_payload(
             "tool": "read_context_archive",
             "raw_ref": raw_ref,
             "scope": "complete_mcp_response",
-            "mcp_response_complete": structured["truncation"].get(
-                "mcp_response_truncated"
-            )
+            "mcp_response_complete": structured["truncation"].get("mcp_response_truncated")
             is not True,
         }
     structured = {
-        key: value
-        for key, value in structured.items()
-        if value not in (None, "", [], {})
+        key: value for key, value in structured.items() if value not in (None, "", [], {})
     }
     structured.setdefault("evidence_refs", [])
     summary, audit = render_observability_summary(structured, max_chars)

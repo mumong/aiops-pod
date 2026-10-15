@@ -3,6 +3,7 @@
 GET（Query 参数）与 POST（Form 表单）保留各自的参数声明，
 响应统一由 ``_federation_stream_response`` / ``_federation_agent_stream_response`` 生成。
 """
+
 from typing import Generator
 
 from fastapi import APIRouter, Form, Query
@@ -37,7 +38,10 @@ def _federation_stream_response(
                 yield _disabled_message("联邦查询", endpoint_path)
                 return
             logger.info(
-                "[FEDERATION] 开始联邦查询, 子集群数量: %s, 端点: %s, 问题: %s...", len(coordinator._registry.get_enabled_agents()), endpoint_path, question[:60]
+                "[FEDERATION] 开始联邦查询, 子集群数量: %s, 端点: %s, 问题: %s...",
+                len(coordinator._registry.get_enabled_agents()),
+                endpoint_path,
+                question[:60],
             )
             yield from coordinator.ask_stream(
                 question=question,
@@ -70,7 +74,9 @@ def _federation_agent_stream_response(
                 yield _disabled_message("Agent-to-Agent 联邦查询", endpoint_path)
                 return
             logger.info(
-                "[FEDERATION A2A] 开始 Agent-to-Agent 查询, 端点: %s, 问题: %s...", endpoint_path, question[:60]
+                "[FEDERATION A2A] 开始 Agent-to-Agent 查询, 端点: %s, 问题: %s...",
+                endpoint_path,
+                question[:60],
             )
             yield from agent.ask_stream(question=question, endpoint_path=endpoint_path)
         except Exception as exc:
@@ -83,7 +89,9 @@ def _federation_agent_stream_response(
 def _broadcast(q, max_steps, conclusion_max_tokens, endpoint_path, log_message):
     question = fix_double_encoding(q)
     logger.info(log_message, question[:80])
-    return _federation_stream_response(question, max_steps, conclusion_max_tokens, endpoint_path=endpoint_path)
+    return _federation_stream_response(
+        question, max_steps, conclusion_max_tokens, endpoint_path=endpoint_path
+    )
 
 
 def _agent_to_agent(q, max_steps, endpoint_path, log_message):
@@ -95,6 +103,7 @@ def _agent_to_agent(q, max_steps, endpoint_path, log_message):
 # =========================================================================
 # 联邦查询 API：/federation/ask - 多集群并发诊断入口
 # =========================================================================
+
 
 @router.get("/federation/ask")
 async def federation_ask_get(
@@ -111,7 +120,9 @@ async def federation_ask_get(
     curl -G "http://localhost:8000/federation/ask" --data-urlencode "q=哪个集群CPU利用率最高"
     ```
     """
-    return _broadcast(q, max_steps, conclusion_max_tokens, "/ask", "[FEDERATION] 收到联邦查询 (GET): %s...")
+    return _broadcast(
+        q, max_steps, conclusion_max_tokens, "/ask", "[FEDERATION] 收到联邦查询 (GET): %s..."
+    )
 
 
 @router.post("/federation/ask")
@@ -127,12 +138,15 @@ async def federation_ask_post(
     curl -X POST "http://localhost:8000/federation/ask" -d "q=集群有什么问题" -d "max_steps=20"
     ```
     """
-    return _broadcast(q, max_steps, conclusion_max_tokens, "/ask", "[FEDERATION] 收到联邦查询 (POST): %s...")
+    return _broadcast(
+        q, max_steps, conclusion_max_tokens, "/ask", "[FEDERATION] 收到联邦查询 (POST): %s..."
+    )
 
 
 # =========================================================================
 # 联邦查询 API：/federation/query - 多集群并发查询入口
 # =========================================================================
+
 
 @router.get("/federation/query")
 async def federation_query_get(
@@ -140,7 +154,13 @@ async def federation_query_get(
     max_steps: int = Query(30, description="每个子集群最大执行步数", ge=1, le=100),
     conclusion_max_tokens: int = Query(8192, description="子集群查询结论最大 token 数", ge=0),
 ):
-    return _broadcast(q, max_steps, conclusion_max_tokens, "/query", "[FEDERATION] 收到联邦查询模式请求 (GET): %s...")
+    return _broadcast(
+        q,
+        max_steps,
+        conclusion_max_tokens,
+        "/query",
+        "[FEDERATION] 收到联邦查询模式请求 (GET): %s...",
+    )
 
 
 @router.post("/federation/query")
@@ -149,12 +169,19 @@ async def federation_query_post(
     max_steps: int = Form(30, description="每个子集群最大执行步数"),
     conclusion_max_tokens: int = Form(8192, description="子集群查询结论最大 token 数"),
 ):
-    return _broadcast(q, max_steps, conclusion_max_tokens, "/query", "[FEDERATION] 收到联邦查询模式请求 (POST): %s...")
+    return _broadcast(
+        q,
+        max_steps,
+        conclusion_max_tokens,
+        "/query",
+        "[FEDERATION] 收到联邦查询模式请求 (POST): %s...",
+    )
 
 
 # =========================================================================
 # Agent-to-Agent 联邦查询 API：/federation/{ask,query}/v2 - 智能路由
 # =========================================================================
+
 
 @router.get("/federation/ask/v2")
 async def federation_ask_v2_get(
@@ -173,7 +200,9 @@ async def federation_ask_v2_get(
     curl -G "http://localhost:8000/federation/ask/v2" --data-urlencode "q=查询 cluster-24 的 CPU"
     ```
     """
-    return _agent_to_agent(q, max_steps, "/ask", "[FEDERATION A2A] 收到 Agent-to-Agent 查询 (GET): %s...")
+    return _agent_to_agent(
+        q, max_steps, "/ask", "[FEDERATION A2A] 收到 Agent-to-Agent 查询 (GET): %s..."
+    )
 
 
 @router.post("/federation/ask/v2")
@@ -188,7 +217,9 @@ async def federation_ask_v2_post(
     curl -X POST "http://localhost:8000/federation/ask/v2" -d "q=查询集群 1 的 memory 和集群 3 的 cpu"
     ```
     """
-    return _agent_to_agent(q, max_steps, "/ask", "[FEDERATION A2A] 收到 Agent-to-Agent 查询 (POST): %s...")
+    return _agent_to_agent(
+        q, max_steps, "/ask", "[FEDERATION A2A] 收到 Agent-to-Agent 查询 (POST): %s..."
+    )
 
 
 @router.get("/federation/query/v2")
@@ -196,7 +227,9 @@ async def federation_query_v2_get(
     q: str = Query(..., description="查询内容"),
     max_steps: int = Query(30, description="Agent 最大执行步数", ge=1, le=100),
 ):
-    return _agent_to_agent(q, max_steps, "/query", "[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (GET): %s...")
+    return _agent_to_agent(
+        q, max_steps, "/query", "[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (GET): %s..."
+    )
 
 
 @router.post("/federation/query/v2")
@@ -204,4 +237,6 @@ async def federation_query_v2_post(
     q: str = Form(..., description="查询内容"),
     max_steps: int = Form(30, description="Agent 最大执行步数"),
 ):
-    return _agent_to_agent(q, max_steps, "/query", "[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (POST): %s...")
+    return _agent_to_agent(
+        q, max_steps, "/query", "[FEDERATION A2A] 收到 Agent-to-Agent 查询模式请求 (POST): %s..."
+    )

@@ -38,8 +38,15 @@ class ApprovalStore:
         self._decisions: Dict[Tuple[str, str], ApprovalDecision] = {}
         self._closed: set[Tuple[str, str]] = set()
 
-    def create_request(self, run_id: str, kind: str, title: str, payload: Dict[str, Any],
-                       timeout_seconds: float = 600, owner: str = "") -> ApprovalRequest:
+    def create_request(
+        self,
+        run_id: str,
+        kind: str,
+        title: str,
+        payload: Dict[str, Any],
+        timeout_seconds: float = 600,
+        owner: str = "",
+    ) -> ApprovalRequest:
         approval_id = uuid.uuid4().hex[:12]
         request = ApprovalRequest(
             run_id=str(run_id),
@@ -68,7 +75,9 @@ class ApprovalStore:
         with self._condition:
             if key not in self._requests or key in self._closed or key in self._decisions:
                 return False
-            if self._requests[key].owner and not secrets.compare_digest(self._requests[key].owner, owner):
+            if self._requests[key].owner and not secrets.compare_digest(
+                self._requests[key].owner, owner
+            ):
                 return False
             if time.time() >= self._requests[key].expires_at:
                 self._closed.add(key)
@@ -87,13 +96,13 @@ class ApprovalStore:
         with self._condition:
             request = self._requests.get(key)
             if not request or (request.owner and not secrets.compare_digest(request.owner, owner)):
-                return 'unavailable'
+                return "unavailable"
             decision = self._decisions.get(key)
             if decision is not None:
-                return 'approved' if decision.approved else 'rejected'
+                return "approved" if decision.approved else "rejected"
             if time.time() >= request.expires_at:
-                return 'expired'
-            return 'unavailable' if key in self._closed else 'pending'
+                return "expired"
+            return "unavailable" if key in self._closed else "pending"
 
     def poll_decision(self, run_id: str, approval_id: str) -> Optional[ApprovalDecision]:
         key = (run_id, approval_id)
@@ -110,7 +119,9 @@ class ApprovalStore:
             self._closed.add((run_id, approval_id))
             self._condition.notify_all()
 
-    def wait_for_decision(self, run_id: str, approval_id: str, timeout_seconds: float) -> Optional[ApprovalDecision]:
+    def wait_for_decision(
+        self, run_id: str, approval_id: str, timeout_seconds: float
+    ) -> Optional[ApprovalDecision]:
         key = (str(run_id), str(approval_id))
         deadline = time.time() + max(0.0, float(timeout_seconds))
         with self._condition:

@@ -12,10 +12,14 @@ def test_runbook_catalog_empty():
 
 def test_runbook_catalog_from_json(tmp_path):
     catalog_file = tmp_path / "catalog.json"
-    catalog_file.write_text(json.dumps([
-        {"id": "l0-disk", "description": "Disk full", "link": "l0-disk.md"},
-        {"id": "l3-image", "description": "ImagePull", "link": "l3-image.md"},
-    ]))
+    catalog_file.write_text(
+        json.dumps(
+            [
+                {"id": "l0-disk", "description": "Disk full", "link": "l0-disk.md"},
+                {"id": "l3-image", "description": "ImagePull", "link": "l3-image.md"},
+            ]
+        )
+    )
     c = RunbookCatalog.from_json(str(catalog_file))
     assert len(c) == 2
     assert c.catalog[0].id == "l0-disk"

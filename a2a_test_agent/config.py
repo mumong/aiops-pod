@@ -67,13 +67,9 @@ class TestAgentSettings:
             ),
             host=os.getenv("TEST_AGENT_HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=_positive_int("TEST_AGENT_PORT", 8002),
-            request_timeout_seconds=_positive_float(
-                "TEST_AGENT_REQUEST_TIMEOUT_SECONDS", 1800.0
-            ),
+            request_timeout_seconds=_positive_float("TEST_AGENT_REQUEST_TIMEOUT_SECONDS", 1800.0),
             api_token=os.getenv("TEST_AGENT_API_TOKEN", "").strip(),
-            agent_name=os.getenv(
-                "TEST_AGENT_NAME", "A2A Operations Test Delegator"
-            ).strip()
+            agent_name=os.getenv("TEST_AGENT_NAME", "A2A Operations Test Delegator").strip()
             or "A2A Operations Test Delegator",
             agent_version=os.getenv(
                 "TEST_AGENT_VERSION", os.getenv("APP_VERSION", "1.0.0")

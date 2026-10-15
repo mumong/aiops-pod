@@ -1,4 +1,5 @@
 """Serving computed-result contract; no dependencies on the MCP sibling checkout."""
+
 import copy
 import json
 
@@ -11,26 +12,44 @@ from app.core.workflow.stream_contract import project_query_tool_event
 
 @pytest.fixture
 def packet():
-    return {"contract_version": "evidence-records.v1", "status": "success", "coverage": "partial",
-            "record_unit": "pod", "source_metadata": {"scope": {"namespace": None},
-                "observed_at": "2026-10-09T00:00:00Z", "coverage": "partial", "next_continue_token": "next"},
-            "input_rows": 24, "matched_rows": 24, "unknown_filter_rows": 0,
-            "executed_query": {"record_type": "pod"}, "result_type": "records",
-            "columns": ["namespace", "pod", "uid", "ready", "value"],
-            "rows": [{"namespace": "test", "pod": f"pod-{i}", "uid": str(i),
-                      "ready": False, "value": 0} for i in range(24)]}
+    return {
+        "contract_version": "evidence-records.v1",
+        "status": "success",
+        "coverage": "partial",
+        "record_unit": "pod",
+        "source_metadata": {
+            "scope": {"namespace": None},
+            "observed_at": "2026-10-09T00:00:00Z",
+            "coverage": "partial",
+            "next_continue_token": "next",
+        },
+        "input_rows": 24,
+        "matched_rows": 24,
+        "unknown_filter_rows": 0,
+        "executed_query": {"record_type": "pod"},
+        "result_type": "records",
+        "columns": ["namespace", "pod", "uid", "ready", "value"],
+        "rows": [
+            {"namespace": "test", "pod": f"pod-{i}", "uid": str(i), "ready": False, "value": 0}
+            for i in range(24)
+        ],
+    }
 
 
 def test_lossless_observation_and_bounded_display(packet, tmp_path):
     raw = json.dumps(packet)
     obs = ObservationProcessor(archive_root=str(tmp_path), max_observation_chars=200).process(
-        "record-contract", "query_collect", 1, "query_pod_lifecycle", raw)
+        "record-contract", "query_collect", 1, "query_pod_lifecycle", raw
+    )
     assert obs["semantic_success"] is True
     assert obs["summary"] == raw
     assert obs["processor"] == "evidence_records+lossless"
     from pathlib import Path
+
     assert Path(obs["raw_ref"]).read_text() == raw
-    display = project_query_tool_event({"type": "tool_result", "result": raw, **obs})["tool_display"]
+    display = project_query_tool_event({"type": "tool_result", "result": raw, **obs})[
+        "tool_display"
+    ]
     assert display["records_omitted"] == 4
     assert len(display["records"]) == 20
     assert display["records"][0]["value"] == 0
@@ -40,8 +59,11 @@ def test_lossless_observation_and_bounded_display(packet, tmp_path):
 
 
 def test_valid_groups(packet):
-    packet.update(result_type="groups", groups=[{"node": "n1", "count": 14}, {"node": None, "count": 10}],
-                  executed_query={"group_by": "node"})
+    packet.update(
+        result_type="groups",
+        groups=[{"node": "n1", "count": 14}, {"node": None, "count": 10}],
+        executed_query={"group_by": "node"},
+    )
     packet.pop("rows")
     packet.pop("columns")
     parsed, success = parse_record_result(packet)
@@ -54,16 +76,27 @@ def test_empty_selection_and_unknown_are_not_failure(packet):
     parsed, success = parse_record_result(packet)
     assert success is True
     assert parsed["coverage"] == "partial"
-    display = project_query_tool_event({"type": "tool_result", "result": json.dumps(packet)})["tool_display"]
+    display = project_query_tool_event({"type": "tool_result", "result": json.dumps(packet)})[
+        "tool_display"
+    ]
     assert display["records"] == []
     assert display["unknown_filter_rows"] == 12
 
 
-@pytest.mark.parametrize("change", [
-    {"matched_rows": True}, {"matched_rows": 25}, {"unknown_filter_rows": 1},
-    {"columns": ["pod", "pod"]}, {"rows": []}, {"coverage": "present"},
-    {"source_metadata": {}}, {"record_unit": "arbitrary"}, {"result_type": "other"},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"matched_rows": True},
+        {"matched_rows": 25},
+        {"unknown_filter_rows": 1},
+        {"columns": ["pod", "pod"]},
+        {"rows": []},
+        {"coverage": "present"},
+        {"source_metadata": {}},
+        {"record_unit": "arbitrary"},
+        {"result_type": "other"},
+    ],
+)
 def test_malformed_packets_are_not_successful_empty(packet, change):
     packet.update(change)
     parsed, success = parse_record_result(packet)
@@ -72,13 +105,24 @@ def test_malformed_packets_are_not_successful_empty(packet, change):
 
 
 def test_group_counts_checked(packet):
-    packet.update(result_type="groups", groups=[{"node": "n", "count": 2}], executed_query={"group_by": "node"})
+    packet.update(
+        result_type="groups",
+        groups=[{"node": "n", "count": 2}],
+        executed_query={"group_by": "node"},
+    )
     assert parse_record_result(packet)[1] is False
 
 
 def test_errors_preserve_execution_failure():
-    raw = json.dumps({"contract_version": "evidence-records.v1", "status": "error",
-                      "error": "result_too_large", "coverage": "unknown", "source_metadata": {}})
+    raw = json.dumps(
+        {
+            "contract_version": "evidence-records.v1",
+            "status": "error",
+            "error": "result_too_large",
+            "coverage": "unknown",
+            "source_metadata": {},
+        }
+    )
     display = project_query_tool_event({"type": "tool_result", "result": raw})["tool_display"]
     assert display["semantic_success"] is False
     assert display["error"] == "result_too_large"
@@ -93,17 +137,25 @@ def test_unrelated_contracts_unchanged(packet):
 
 
 def test_paged_records_keep_source_counts_and_require_consistent_continuation(packet):
-    packet['rows'] = packet['rows'][:3]
-    packet['source_metadata'].update(coverage='present', next_continue_token='lr1.token.3')
-    packet['pagination'] = {'snapshot_id': 'snapshot', 'offset': 0, 'returned_rows': 3,
-                            'total_rows': 24, 'remaining_rows': 21,
-                            'next_continue_token': 'lr1.token.3', 'source_has_more': False}
+    packet["rows"] = packet["rows"][:3]
+    packet["source_metadata"].update(coverage="present", next_continue_token="lr1.token.3")
+    packet["pagination"] = {
+        "snapshot_id": "snapshot",
+        "offset": 0,
+        "returned_rows": 3,
+        "total_rows": 24,
+        "remaining_rows": 21,
+        "next_continue_token": "lr1.token.3",
+        "source_has_more": False,
+    }
     parsed, success = parse_record_result(packet)
     assert success
-    assert parsed['matched_rows'] == 24 and len(parsed['rows']) == 3
-    display = project_query_tool_event({'type':'tool_result','result':json.dumps(packet)})['tool_display']
-    assert display['pagination']['remaining_rows'] == 21
-    for change in ({'remaining_rows': 0}, {'next_continue_token': None}, {'returned_rows': 24}):
+    assert parsed["matched_rows"] == 24 and len(parsed["rows"]) == 3
+    display = project_query_tool_event({"type": "tool_result", "result": json.dumps(packet)})[
+        "tool_display"
+    ]
+    assert display["pagination"]["remaining_rows"] == 21
+    for change in ({"remaining_rows": 0}, {"next_continue_token": None}, {"returned_rows": 24}):
         broken = copy.deepcopy(packet)
-        broken['pagination'].update(change)
+        broken["pagination"].update(change)
         assert parse_record_result(broken)[1] is False

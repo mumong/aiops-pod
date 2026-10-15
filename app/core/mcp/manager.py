@@ -36,6 +36,7 @@ _cleanup_registered = False
 @dataclass
 class MCPServerInfo:
     """MCP 服务器信息"""
+
     name: str
     description: str
     url: str
@@ -192,7 +193,9 @@ class MCPServerManager:
 
                 if server.process.poll() is not None:
                     stdout, _ = server.process.communicate()
-                    error_msg = stdout.decode("utf-8", errors="ignore")[-500:] if stdout else "未知错误"
+                    error_msg = (
+                        stdout.decode("utf-8", errors="ignore")[-500:] if stdout else "未知错误"
+                    )
                     logger.error("MCP 服务器 %s 启动失败: %s", name, error_msg)
                     server.status = "failed"
                     server.error = error_msg
@@ -372,7 +375,9 @@ def _cleanup_all_processes():
                             process.terminate()
                             time.sleep(0.5)
                         except Exception:
-                            logger.debug("_cleanup_all_processes: falling back after error", exc_info=True)
+                            logger.debug(
+                                "_cleanup_all_processes: falling back after error", exc_info=True
+                            )
 
                     if process.poll() is None:
                         try:
@@ -383,7 +388,9 @@ def _cleanup_all_processes():
                         try:
                             process.kill()
                         except Exception:
-                            logger.debug("_cleanup_all_processes: falling back after error", exc_info=True)
+                            logger.debug(
+                                "_cleanup_all_processes: falling back after error", exc_info=True
+                            )
                 else:
                     process.terminate()
                     try:
@@ -471,9 +478,9 @@ def shutdown_mcp_servers_sync():
                     try:
                         server.process.kill()
                     except Exception:
-                        logger.debug("shutdown_mcp_servers_sync: falling back after error", exc_info=True)
+                        logger.debug(
+                            "shutdown_mcp_servers_sync: falling back after error", exc_info=True
+                        )
         _global_manager = None
 
     _cleanup_all_processes()
-
-

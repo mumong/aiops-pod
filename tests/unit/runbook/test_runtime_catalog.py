@@ -8,7 +8,9 @@ def test_query_reference_is_discoverable_without_polluting_diagnostic_catalog(tm
     from app.core.aicall.builtin_tools import FetchRunbookTool
     from app.core.workflow.nodes.query_answer import QueryCollectNode
 
-    data = yaml.safe_load(Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8"))["data"]
+    data = yaml.safe_load(Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8"))[
+        "data"
+    ]
     name = "private-k8s-query-promql-reference.md"
     guide = data[name]
     (tmp_path / name).write_text(guide, encoding="utf-8")
@@ -105,7 +107,4 @@ def test_exit_137_alone_is_not_forced_to_oomkilled():
 
     assert "exitCode=137 只表示 SIGKILL，不能单独证明 OOM" in text
     assert "`Exit Code 137` 单独不作为 OOM 证据" in text
-    assert (
-        "CrashLoopBackOff + Liveness probe failed + Killing + Exit Code 137"
-        in text
-    )
+    assert "CrashLoopBackOff + Liveness probe failed + Killing + Exit Code 137" in text

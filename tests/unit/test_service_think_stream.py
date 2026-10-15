@@ -257,10 +257,34 @@ def test_text_mode_renders_reasoning_as_plain_line_without_think_tags(monkeypatc
 
     events = [
         {"type": "run_start", "run_id": "r1"},
-        {"type": "thinking", "thinking_type": "ai_reasoning", "node": "layer", "node_name": "定位", "content": "The"},
-        {"type": "thinking", "thinking_type": "ai_reasoning", "node": "layer", "node_name": "定位", "content": " pod"},
-        {"type": "thinking", "thinking_type": "ai_token", "node": "layer", "node_name": "定位", "content": "结论"},
-        {"type": "thinking", "thinking_type": "tool_start", "node": "layer", "node_name": "定位", "tool_name": "t"},
+        {
+            "type": "thinking",
+            "thinking_type": "ai_reasoning",
+            "node": "layer",
+            "node_name": "定位",
+            "content": "The",
+        },
+        {
+            "type": "thinking",
+            "thinking_type": "ai_reasoning",
+            "node": "layer",
+            "node_name": "定位",
+            "content": " pod",
+        },
+        {
+            "type": "thinking",
+            "thinking_type": "ai_token",
+            "node": "layer",
+            "node_name": "定位",
+            "content": "结论",
+        },
+        {
+            "type": "thinking",
+            "thinking_type": "tool_start",
+            "node": "layer",
+            "node_name": "定位",
+            "tool_name": "t",
+        },
     ]
 
     class _Executor:

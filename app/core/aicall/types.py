@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class AICallResult:
     """AI 调用结果（兼容现有 StreamResponse 接口）"""
+
     result: str = ""
     tool_calls: List[Dict] = field(default_factory=list)
     iterations: int = 0
@@ -21,7 +22,8 @@ class AICallResult:
 @dataclass
 class ThinkingEvent:
     """思考事件（实时推送到 stream_queue）"""
-    type: str          # ai_message, tool_start, tool_result, iteration_end
-    node: str = ""     # 所属节点 ID
+
+    type: str  # ai_message, tool_start, tool_result, iteration_end
+    node: str = ""  # 所属节点 ID
     data: Dict = field(default_factory=dict)
     timestamp: float = 0.0

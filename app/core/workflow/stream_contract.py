@@ -19,7 +19,11 @@ def project_query_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
     """Presentation-only projection; never changes the model's observation."""
     if event.get("type") not in {"tool_start", "tool_result"}:
         return {}
-    out = {key: event[key] for key in ("tool_call_id", "tool_args", "raw_ref", "semantic_success", "transport_status") if event.get(key) is not None}
+    out = {
+        key: event[key]
+        for key in ("tool_call_id", "tool_args", "raw_ref", "semantic_success", "transport_status")
+        if event.get(key) is not None
+    }
     if event.get("type") != "tool_result":
         return out
     raw = str(event.get("result") or event.get("result_preview") or "")
@@ -32,12 +36,22 @@ def project_query_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
         parsed = {}
-    structured = parsed if isinstance(parsed, dict) and "coverage" in parsed else _mapping(event.get("structured"))
-    if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict) and "resultType" in parsed["data"]:
+    structured = (
+        parsed
+        if isinstance(parsed, dict) and "coverage" in parsed
+        else _mapping(event.get("structured"))
+    )
+    if (
+        isinstance(parsed, dict)
+        and isinstance(parsed.get("data"), dict)
+        and "resultType" in parsed["data"]
+    ):
         structured = normalize_prometheus_result(parsed)
     elif not structured.get("coverage") and structured.get("status") == "prometheus_empty":
         structured = {**structured, "coverage": "empty", "parse_status": "parsed"}
-    elif (isinstance(parsed, dict) and (parsed.get("error") or parsed.get("status") == "error")) or structured.get("status") == "prometheus_error":
+    elif (
+        isinstance(parsed, dict) and (parsed.get("error") or parsed.get("status") == "error")
+    ) or structured.get("status") == "prometheus_error":
         structured = {**structured, "coverage": "error", "parse_status": "error"}
     facts = structured.get("facts") or []
     out["tool_display"] = {
@@ -49,8 +63,27 @@ def project_query_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
         "unparsed_series": structured.get("unparsed_series", 0),
         "warnings": structured.get("warnings") or [],
         "infos": structured.get("infos") or [],
-        "measurements": [{key: fact.get(key) for key in ("name", "value", "unit", "observed_at", "labels", "timestamp", "sample_count", "sample_window", "point_policy", "value_kind", "stats", "trend_evaluable")}
-                         for fact in facts[:20] if isinstance(fact, dict)],
+        "measurements": [
+            {
+                key: fact.get(key)
+                for key in (
+                    "name",
+                    "value",
+                    "unit",
+                    "observed_at",
+                    "labels",
+                    "timestamp",
+                    "sample_count",
+                    "sample_window",
+                    "point_policy",
+                    "value_kind",
+                    "stats",
+                    "trend_evaluable",
+                )
+            }
+            for fact in facts[:20]
+            if isinstance(fact, dict)
+        ],
         "measurements_omitted": max(0, len(facts) - 20) + (structured.get("facts_omitted") or 0),
         "result_excerpt": raw[:12000],
         "result_excerpt_truncated": len(raw) > 12000,
@@ -64,10 +97,13 @@ def workflow_outcome(state: Mapping[str, Any]) -> str:
     if state.get("request_error"):
         return "error"
     answer_status = _mapping(state.get("query_answer")).get("status")
-    incomplete = any(_mapping(e).get("type") == "execution_incomplete"
-                     for e in state.get("thinking_events") or [])
-    partial_lane = any(_mapping(g).get("status") == "partial"
-                       for g in state.get("autonomous_group_results") or [])
+    incomplete = any(
+        _mapping(e).get("type") == "execution_incomplete"
+        for e in state.get("thinking_events") or []
+    )
+    partial_lane = any(
+        _mapping(g).get("status") == "partial" for g in state.get("autonomous_group_results") or []
+    )
     if incomplete or partial_lane or answer_status in {"partial", "unavailable"}:
         return "partial"
     return "success"
@@ -113,11 +149,13 @@ def _candidate_entities(event: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         or ""
     ).strip()
     if namespace and name:
-        candidates.append({
-            "kind": args.get("kind") or args.get("resource_kind") or "Pod",
-            "namespace": namespace,
-            "name": name,
-        })
+        candidates.append(
+            {
+                "kind": args.get("kind") or args.get("resource_kind") or "Pod",
+                "namespace": namespace,
+                "name": name,
+            }
+        )
     return [candidate for candidate in candidates if candidate]
 
 

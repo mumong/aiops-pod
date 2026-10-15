@@ -58,7 +58,9 @@ def test_worker_context_wraps_execution_in_worker_thread():
     run_coroutine_sync(work, worker_context=_Scope, thread_name="bridge-test")
     assert seen["enter_thread"] == seen["run_thread"]
     assert seen["run_thread"].startswith("bridge-test")
-    deadline = time.monotonic() + 2  # the scope closes as the worker unwinds, after the caller returns
+    deadline = (
+        time.monotonic() + 2
+    )  # the scope closes as the worker unwinds, after the caller returns
     while "exited" not in seen and time.monotonic() < deadline:
         time.sleep(0.01)
     assert seen["exited"]

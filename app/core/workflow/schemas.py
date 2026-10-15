@@ -96,9 +96,9 @@ class FactLedger(BaseModel):
 
     @model_validator(mode="after")
     def normalize_record_count(self) -> "FactLedger":
-        self.scope_entity_ids = list(dict.fromkeys(
-            entity_id for entity_id in self.scope_entity_ids if entity_id
-        ))
+        self.scope_entity_ids = list(
+            dict.fromkeys(entity_id for entity_id in self.scope_entity_ids if entity_id)
+        )
         if not self.scope_entity_ids:
             raise ValueError("Fact Ledger requires at least one scope entity")
         self.record_count = len(self.records)

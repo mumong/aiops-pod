@@ -18,45 +18,72 @@ NORMAL_INSTRUCTION = (
 SHORT_INSTRUCTION = "压缩 evidence 上下文，保留计划、工具事实、错误和证据引用。"
 
 
-@pytest.mark.parametrize("name,expected", [
-    ("WORKING_CONTEXT_SUMMARY_PREFIX", SUMMARY_PREFIX),
-    ("RUNTIME_COMPACTION_INSTRUCTION", NORMAL_INSTRUCTION),
-    ("RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION", SHORT_INSTRUCTION),
-])
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("WORKING_CONTEXT_SUMMARY_PREFIX", SUMMARY_PREFIX),
+        ("RUNTIME_COMPACTION_INSTRUCTION", NORMAL_INSTRUCTION),
+        ("RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION", SHORT_INSTRUCTION),
+    ],
+)
 def test_public_context_policy_exports_preserve_frozen_bytes(name, expected):
     from app.core import prompts
 
     assert getattr(prompts, name).encode() == expected.encode()
 
 
-@pytest.mark.parametrize("max_tokens,instruction", [(101, NORMAL_INSTRUCTION), (100, SHORT_INSTRUCTION)])
-def test_runtime_instruction_boundary_and_serialized_payload_bytes(monkeypatch, max_tokens, instruction):
+@pytest.mark.parametrize(
+    "max_tokens,instruction", [(101, NORMAL_INSTRUCTION), (100, SHORT_INSTRUCTION)]
+)
+def test_runtime_instruction_boundary_and_serialized_payload_bytes(
+    monkeypatch, max_tokens, instruction
+):
     def tokens(serialized, **kwargs):
-        return {"tokens": 101 if json.loads(serialized)["instruction"] == NORMAL_INSTRUCTION else 100}
+        return {
+            "tokens": 101 if json.loads(serialized)["instruction"] == NORMAL_INSTRUCTION else 100
+        }
 
     monkeypatch.setattr(client, "count_tokens", tokens)
     payload = client.AICall._build_runtime_compaction_payload(
-        node_id="evidence", usage_ratio=0.912345, context_window=32000,
-        thinking_events=[], tool_observation_contents=[], max_tokens=max_tokens,
+        node_id="evidence",
+        usage_ratio=0.912345,
+        context_window=32000,
+        thinking_events=[],
+        tool_observation_contents=[],
+        max_tokens=max_tokens,
     )
     expected = {
-        "node_id": "evidence", "usage_ratio": 0.9123, "context_window": 32000,
-        "instruction": instruction, "ai_messages": [], "tool_results": [],
+        "node_id": "evidence",
+        "usage_ratio": 0.9123,
+        "context_window": 32000,
+        "instruction": instruction,
+        "ai_messages": [],
+        "tool_results": [],
         "tool_observation_tail": [],
     }
-    assert json.dumps(payload, ensure_ascii=False).encode() == json.dumps(expected, ensure_ascii=False).encode()
+    assert (
+        json.dumps(payload, ensure_ascii=False).encode()
+        == json.dumps(expected, ensure_ascii=False).encode()
+    )
 
 
 def test_runtime_keeps_normal_instruction_when_text_reduction_fits(monkeypatch):
     def tokens(serialized, **kwargs):
-        return {"tokens": 101 if json.loads(serialized)["ai_messages"] == ["large fixture"] else 100}
+        return {
+            "tokens": 101 if json.loads(serialized)["ai_messages"] == ["large fixture"] else 100
+        }
 
     monkeypatch.setattr(client, "count_tokens", tokens)
-    monkeypatch.setattr(client, "compact_text_to_token_budget", lambda text, **kwargs: "reduced fixture")
+    monkeypatch.setattr(
+        client, "compact_text_to_token_budget", lambda text, **kwargs: "reduced fixture"
+    )
     payload = client.AICall._build_runtime_compaction_payload(
-        node_id="evidence", usage_ratio=0.9, context_window=32000,
+        node_id="evidence",
+        usage_ratio=0.9,
+        context_window=32000,
         thinking_events=[{"type": "ai_message", "content": "large fixture"}],
-        tool_observation_contents=[], max_tokens=100,
+        tool_observation_contents=[],
+        max_tokens=100,
     )
     assert payload["instruction"].encode() == NORMAL_INSTRUCTION.encode()
     assert payload["ai_messages"] == ["reduced fixture"]
@@ -64,7 +91,11 @@ def test_runtime_keeps_normal_instruction_when_text_reduction_fits(monkeypatch):
 
 @pytest.mark.parametrize("compaction_required", [False, True])
 def test_working_summary_prefix_and_insertion_condition(monkeypatch, compaction_required):
-    original = [HumanMessage(content="问题 {literal}"), HumanMessage(content="older"), HumanMessage(content="latest")]
+    original = [
+        HumanMessage(content="问题 {literal}"),
+        HumanMessage(content="older"),
+        HumanMessage(content="latest"),
+    ]
     emitted, snapshots, summary_calls = [], [], []
     archive_ref = "/fixture/compactions/context.before.json"
 
@@ -83,12 +114,22 @@ def test_working_summary_prefix_and_insertion_condition(monkeypatch, compaction_
             )
         return None, {"context_window": 32000}
 
-    monkeypatch.setattr(working_context, "ContextArchive", lambda **kwargs: SimpleNamespace(write_json=write_json))
+    monkeypatch.setattr(
+        working_context, "ContextArchive", lambda **kwargs: SimpleNamespace(write_json=write_json)
+    )
     monkeypatch.setattr(working_context, "summarize_history", summarize)
-    monkeypatch.setattr(working_context, "partition_recent", lambda groups, window: (groups[:-1], groups[-1:]))
+    monkeypatch.setattr(
+        working_context, "partition_recent", lambda groups, window: (groups[:-1], groups[-1:])
+    )
     middleware = working_context.WorkingContextMiddleware(
         SimpleNamespace(_serialize_agent_message=working_context.compact_message),
-        None, None, [], "system", "问题 {literal}", "fixture", "evidence",
+        None,
+        None,
+        [],
+        "system",
+        "问题 {literal}",
+        "fixture",
+        "evidence",
         lambda **event: emitted.append(event),
     )
     monkeypatch.setattr(middleware, "probe", probe)

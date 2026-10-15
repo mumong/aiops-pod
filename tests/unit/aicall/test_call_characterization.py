@@ -11,6 +11,7 @@ Regenerate the snapshot only for intentional behavior changes::
 
     UPDATE_AICALL_GOLDEN=1 python -m pytest tests/unit/aicall/test_call_characterization.py
 """
+
 import json
 import logging
 import os
@@ -89,10 +90,15 @@ def _rich_script():
         ("updates", {"tools": {"messages": [_tool_msg(tool_1.content, "kubectl_get", "c1")]}}),
         ("updates", {"model": {"messages": [second_ai]}}),
         ("updates", {"tools": {"messages": [tool_2, structured_tool]}}),
-        ("updates", {"model": {
-            "messages": [_ai("Final answer: api is healthy.")],
-            "structured_response": _Verdict(status="ok", reason="fine"),
-        }}),
+        (
+            "updates",
+            {
+                "model": {
+                    "messages": [_ai("Final answer: api is healthy.")],
+                    "structured_response": _Verdict(status="ok", reason="fine"),
+                }
+            },
+        ),
         ("custom", {"ignored": True}),
     ]
 
@@ -153,15 +159,19 @@ def harness(monkeypatch, tmp_path):
         ai = AICall(model="openai/test-model", api_key="sk-test")
         trace: List[Any] = []
         if compaction is not None:
+
             def _fake_compact(**kwargs):
-                trace.append(("maybe_compact", kwargs["node_id"], len(kwargs["tool_observation_contents"])))
+                trace.append(
+                    ("maybe_compact", kwargs["node_id"], len(kwargs["tool_observation_contents"]))
+                )
                 return compaction(kwargs)
+
             ai._maybe_compact_runtime_context = _fake_compact
-            ai._compact_langgraph_ai_messages_in_place = (
-                lambda msgs: trace.append(("compact_ai", len(msgs)))
+            ai._compact_langgraph_ai_messages_in_place = lambda msgs: trace.append(
+                ("compact_ai", len(msgs))
             )
-            ai._compact_langgraph_tool_messages_in_place = (
-                lambda msgs: trace.append(("compact_tool", len(msgs)))
+            ai._compact_langgraph_tool_messages_in_place = lambda msgs: trace.append(
+                ("compact_tool", len(msgs))
             )
         final_budget: Dict[str, Any] = {}
         ai._write_final_context_budget = lambda **kw: final_budget.update(kw)
@@ -208,9 +218,10 @@ def harness(monkeypatch, tmp_path):
             },
             "create_agent_keys": sorted((state["create_kwargs"] or {}).keys()),
             "final_budget": {
-                k: final_budget.get(k)
-                for k in ("run_id", "node_id", "final_content")
-            } if final_budget else None,
+                k: final_budget.get(k) for k in ("run_id", "node_id", "final_content")
+            }
+            if final_budget
+            else None,
             "trace": trace,
             # Message templates (not args: those include wall-clock timings).
             "logs": [(r.levelname, r.msg) for r in log_records],
@@ -234,7 +245,7 @@ def _scenarios(run):
 
     json_script = [
         ("updates", {"model": {"messages": [_ai('{"status": "draft"}')]}}),
-        ("updates", {"model": {"messages": [_ai('not json at all')]}}),
+        ("updates", {"model": {"messages": [_ai("not json at all")]}}),
         ("updates", {"model": {"messages": [_ai('```json\n{"status": "final"}\n```')]}}),
         ("updates", {"model": {"messages": [_ai("never reached")]}}),
     ]
@@ -249,7 +260,16 @@ def _scenarios(run):
     )
 
     stop_script = [
-        ("updates", {"model": {"messages": [_ai("", tool_calls=[{"id": "c1", "name": "kubectl_get", "args": {}}])]}}),
+        (
+            "updates",
+            {
+                "model": {
+                    "messages": [
+                        _ai("", tool_calls=[{"id": "c1", "name": "kubectl_get", "args": {}}])
+                    ]
+                }
+            },
+        ),
         ("updates", {"tools": {"messages": [_tool_msg("pods ok", "kubectl_get", "c1")]}}),
         ("updates", {"model": {"messages": [_ai("never reached")]}}),
     ]
@@ -333,7 +353,10 @@ def test_call_timeout_reports_agent_timeout(monkeypatch, tmp_path):
             has_worker_context=callable(worker_context),
         )
         return async_bridge.run_coroutine_sync(
-            factory, timeout=0.2, worker_context=worker_context, thread_name=thread_name,
+            factory,
+            timeout=0.2,
+            worker_context=worker_context,
+            thread_name=thread_name,
         )
 
     monkeypatch.setattr(client_module, "run_coroutine_sync", _bounded_run)
@@ -347,8 +370,12 @@ def test_call_timeout_reports_agent_timeout(monkeypatch, tmp_path):
     ai = AICall(model="openai/test-model", api_key="sk-test")
     q: queue.Queue = queue.Queue()
     result, events = ai.call(
-        "sys", "q", tools=[_Tool("kubectl_get")], max_steps=3,
-        stream_queue=q, node_id="evidence",
+        "sys",
+        "q",
+        tools=[_Tool("kubectl_get")],
+        max_steps=3,
+        stream_queue=q,
+        node_id="evidence",
     )
     assert seen == {"timeout": 90, "thread_name": "aicall-agent", "has_worker_context": True}
     assert [(e["type"], e.get("reason")) for e in events] == [

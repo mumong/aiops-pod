@@ -10,9 +10,7 @@ from app.core.prompts import get_workflow_prompt
 
 
 def test_query_prometheus_runbook_declares_query_and_pod_diagnosis_tool_boundary():
-    configmap = yaml.safe_load(
-        Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8")
-    )
+    configmap = yaml.safe_load(Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8"))
     query_runbook = configmap["data"]["private-k8s-query-promql-reference.md"]
 
     assert "/query" in query_runbook
@@ -23,9 +21,7 @@ def test_query_prometheus_runbook_declares_query_and_pod_diagnosis_tool_boundary
 
 
 def test_oom_and_liveness_runbooks_contain_scoped_query_shape_examples():
-    configmap = yaml.safe_load(
-        Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8")
-    )
+    configmap = yaml.safe_load(Path("deploy/configmap/runbooks.yaml").read_text(encoding="utf-8"))
     oom = configmap["data"]["pod-oomkilled.md"]
     crashloop = configmap["data"]["pod-crashloop-runtime.md"]
     terminating = configmap["data"]["pod-terminating-stuck.md"]
@@ -48,21 +44,20 @@ def test_oom_and_liveness_runbooks_contain_scoped_query_shape_examples():
 
 
 def test_deployed_config_enables_autonomous_observability_and_disables_compatibility_servers():
-    configmap = yaml.safe_load(
-        Path("deploy/configmap/config.yaml").read_text(encoding="utf-8")
-    )
+    configmap = yaml.safe_load(Path("deploy/configmap/config.yaml").read_text(encoding="utf-8"))
     app_config = yaml.safe_load(configmap["data"]["config.yaml"])
 
     autonomous = app_config["mcp_servers"]["aiops-observability-query"]
     assert autonomous["enabled"] is True
-    assert autonomous["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8100/sse"
+    assert (
+        autonomous["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8100/sse"
+    )
     assert autonomous["config"]["mode"] == "sse"
 
     prometheus = app_config["mcp_servers"]["prometheus_tool"]
     assert prometheus["enabled"] is True
     assert (
-        prometheus["config"]["url"]
-        == "http://mcp-server-manager.mcp.svc.cluster.local:8095/sse"
+        prometheus["config"]["url"] == "http://mcp-server-manager.mcp.svc.cluster.local:8095/sse"
     )
     assert prometheus["config"]["mode"] == "sse"
     assert "/query" in prometheus["description"]
@@ -108,8 +103,14 @@ def test_deployed_workflow_config_contains_only_keys_the_code_reads():
     configmap = yaml.safe_load(Path("deploy/configmap/config.yaml").read_text(encoding="utf-8"))
     workflow = yaml.safe_load(configmap["data"]["config.yaml"])["workflow"]
     assert set(workflow) == {
-        "nodes", "max_steps", "structured_runtime", "evidence", "remediation",
-        "think_stream", "observation_summary", "context_compaction",
+        "nodes",
+        "max_steps",
+        "structured_runtime",
+        "evidence",
+        "remediation",
+        "think_stream",
+        "observation_summary",
+        "context_compaction",
     }
     assert workflow["evidence"] == {"parallel": {"enabled": True}}
     assert workflow["structured_runtime"] == {"fallback_enabled": True}

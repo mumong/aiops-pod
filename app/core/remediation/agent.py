@@ -94,9 +94,20 @@ class RemediationAgentExecutor:
                     "actions": [action.__dict__ for action in plan.actions],
                 },
             )
-            yield {**self._approval_event(run_id, plan_request.approval_id, "plan", plan_request.title, plan_request.payload),
-                   "expires_at": plan_request.expires_at, "server_time": time.time()}
-            decision = self.approval_store.wait_for_decision(run_id, plan_request.approval_id, approval_timeout_seconds)
+            yield {
+                **self._approval_event(
+                    run_id,
+                    plan_request.approval_id,
+                    "plan",
+                    plan_request.title,
+                    plan_request.payload,
+                ),
+                "expires_at": plan_request.expires_at,
+                "server_time": time.time(),
+            }
+            decision = self.approval_store.wait_for_decision(
+                run_id, plan_request.approval_id, approval_timeout_seconds
+            )
             if decision is None:
                 yield self._finished(run_id, "timeout", "plan approval timeout")
                 return
@@ -127,7 +138,10 @@ class RemediationAgentExecutor:
                 status = str(decision.status or "").strip().lower()
                 if status not in {"success", "failed"}:
                     status = "failed"
-                    reason = decision.reason or "remediation agent finish decision must include status=success or status=failed"
+                    reason = (
+                        decision.reason
+                        or "remediation agent finish decision must include status=success or status=failed"
+                    )
                 else:
                     reason = decision.reason or "agent finished"
                 if status == "success":
@@ -136,7 +150,11 @@ class RemediationAgentExecutor:
                 yield self._finished(run_id, status, reason)
                 return
 
-            if decision.decision == "run_command" and not decision.command and (decision.dry_run_command or decision.verify_command):
+            if (
+                decision.decision == "run_command"
+                and not decision.command
+                and (decision.dry_run_command or decision.verify_command)
+            ):
                 observations.append(
                     "invalid_decision: run_command was ignored because command is empty. "
                     "Return finish failed/success, or run a concrete kubectl command. "
@@ -145,7 +163,9 @@ class RemediationAgentExecutor:
                 continue
 
             if decision.decision != "run_command" or not decision.command:
-                yield self._finished(run_id, "failed", f"invalid remediation agent decision: {decision}")
+                yield self._finished(
+                    run_id, "failed", f"invalid remediation agent decision: {decision}"
+                )
                 return
 
             commands = [
@@ -157,15 +177,18 @@ class RemediationAgentExecutor:
             # Field names are model output, not authority: a write hidden in
             # dry_run_command or verify_command requires the same approval.
             try:
-                is_write = any(not is_read_only_kubectl_command(command)
-                               for _, command in commands if command)
+                is_write = any(
+                    not is_read_only_kubectl_command(command) for _, command in commands if command
+                )
             except ValueError as exc:
                 yield self._finished(run_id, "failed", str(exc))
                 return
             if is_write:
                 write_count += 1
                 if write_count > cfg.max_write_actions:
-                    yield self._finished(run_id, "failed", "remediation write action limit reached")
+                    yield self._finished(
+                        run_id, "failed", "remediation write action limit reached"
+                    )
                     return
                 if review_mode:
                     action_request = self.approval_store.create_request(
@@ -175,21 +198,31 @@ class RemediationAgentExecutor:
                         title=f"是否执行修复动作 react-{iteration}: {decision.description or decision.command}",
                         payload=decision.__dict__,
                     )
-                    yield {**self._approval_event(
-                        run_id,
-                        action_request.approval_id,
-                        "action",
-                        action_request.title,
-                        action_request.payload,
-                    ), "expires_at": action_request.expires_at, "server_time": time.time()}
+                    yield {
+                        **self._approval_event(
+                            run_id,
+                            action_request.approval_id,
+                            "action",
+                            action_request.title,
+                            action_request.payload,
+                        ),
+                        "expires_at": action_request.expires_at,
+                        "server_time": time.time(),
+                    }
                     action_decision = self.approval_store.wait_for_decision(
                         run_id, action_request.approval_id, approval_timeout_seconds
                     )
                     if action_decision is None:
-                        yield self._finished(run_id, "timeout", f"action react-{iteration} approval timeout")
+                        yield self._finished(
+                            run_id, "timeout", f"action react-{iteration} approval timeout"
+                        )
                         return
                     if not action_decision.approved:
-                        yield self._finished(run_id, "rejected", action_decision.reason or f"action react-{iteration} rejected")
+                        yield self._finished(
+                            run_id,
+                            "rejected",
+                            action_decision.reason or f"action react-{iteration} rejected",
+                        )
                         return
 
             for stage, command in commands:
@@ -202,7 +235,9 @@ class RemediationAgentExecutor:
                     result = self.command_runner(command)
                 except Exception as exc:
                     error_text = str(exc)
-                    if stage == "verify" and _verify_not_found_is_success(decision, command, error_text):
+                    if stage == "verify" and _verify_not_found_is_success(
+                        decision, command, error_text
+                    ):
                         result = (
                             f"{error_text}\n"
                             "verification accepted: target resource is NotFound after deletion/finalizer remediation"
@@ -247,21 +282,22 @@ class RemediationAgentExecutor:
                 }
 
             matched_action = _matched_plan_action(plan, decision.command)
-            if (
-                matched_action is not None
-                and verify_succeeded
-            ):
+            if matched_action is not None and verify_succeeded:
                 completed_action_ids.add(matched_action.id)
                 group_id = str(matched_action.metadata.get("group_id") or "").strip()
                 if group_id:
                     completed_group_ids.add(group_id)
                 if _planned_remediation_complete(plan, completed_action_ids, completed_group_ids):
                     reason = _completion_reason(completed_action_ids, completed_group_ids)
-                    yield self._finished(run_id, "needs_followup", reason + "; recovery has not been verified")
+                    yield self._finished(
+                        run_id, "needs_followup", reason + "; recovery has not been verified"
+                    )
                     return
 
         latest = observations[-1] if observations else ""
-        reason = unhealthy_remediation_reason(latest) or "remediation agent iteration limit reached"
+        reason = (
+            unhealthy_remediation_reason(latest) or "remediation agent iteration limit reached"
+        )
         yield self._finished(run_id, "failed", reason)
 
     def _next_decision(
@@ -291,7 +327,9 @@ class RemediationAgentExecutor:
                     verify_command=action.verify_command or "",
                     risk=action.risk,
                 )
-            return AgentDecision(decision="finish", status="failed", reason="no remediation AI is configured")
+            return AgentDecision(
+                decision="finish", status="failed", reason="no remediation AI is configured"
+            )
 
         prompt = _AGENT_PROMPT
         question = json.dumps(
@@ -317,7 +355,9 @@ class RemediationAgentExecutor:
         return _parse_decision(raw)
 
     @staticmethod
-    def _approval_event(run_id: str, approval_id: str, kind: str, title: str, payload: Dict) -> Dict:
+    def _approval_event(
+        run_id: str, approval_id: str, kind: str, title: str, payload: Dict
+    ) -> Dict:
         return {
             "type": "remediation_approval_required",
             "run_id": run_id,
@@ -343,7 +383,9 @@ _AGENT_PROMPT = LEGACY_REMEDIATION_AGENT_PROMPT
 def _parse_decision(text: str) -> AgentDecision:
     data = _loads_json_object(text)
     if not isinstance(data, dict):
-        return AgentDecision(decision="finish", status="failed", reason="remediation agent did not return JSON")
+        return AgentDecision(
+            decision="finish", status="failed", reason="remediation agent did not return JSON"
+        )
     return AgentDecision(
         decision=str(data.get("decision") or "").strip(),
         description=str(data.get("description") or ""),
@@ -395,14 +437,14 @@ def _planned_remediation_complete(
         return required_group_ids <= completed_group_ids
 
     write_action_ids = {
-        action.id
-        for action in plan.actions
-        if _normalize_command(action.execute_command or "")
+        action.id for action in plan.actions if _normalize_command(action.execute_command or "")
     }
     return bool(write_action_ids) and write_action_ids <= completed_action_ids
 
 
-def _verify_establishes_terminal_success(command: str, result: str, accepted_not_found: bool) -> bool:
+def _verify_establishes_terminal_success(
+    command: str, result: str, accepted_not_found: bool
+) -> bool:
     return False  # Text alone never establishes recovery.
 
 

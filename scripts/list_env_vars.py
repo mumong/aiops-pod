@@ -4,6 +4,7 @@
 Regenerate docs/configuration-env.md with:
     python scripts/list_env_vars.py > docs/configuration-env.md
 """
+
 import ast
 import collections
 from pathlib import Path
@@ -25,12 +26,16 @@ def collect():
     for path in sorted((ROOT / "app").rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         for node in ast.walk(ast.parse(source)):
-            if not (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)):
+            if not (
+                isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)
+            ):
                 continue
             if (ast.get_source_segment(source, node.func) or "") not in READERS:
                 continue
             entry = found[node.args[0].value]
-            entry["defaults"].add(ast.get_source_segment(source, node.args[1]) if len(node.args) > 1 else "—")
+            entry["defaults"].add(
+                ast.get_source_segment(source, node.args[1]) if len(node.args) > 1 else "—"
+            )
             entry["where"].append(f"{path.relative_to(ROOT)}:{node.lineno}")
     return found
 
