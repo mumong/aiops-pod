@@ -3,6 +3,7 @@
 from pydantic import BaseModel
 
 from app.core.aicall.client import AICall
+from app.core.aicall.output_budget import OutputBudget
 
 
 class _Out(BaseModel):
@@ -35,6 +36,9 @@ def _client(monkeypatch, calls, internal_extra_body):
         api_key="sk-test",
         api_base="http://gateway/v1",
         internal_extra_body=internal_extra_body,
+        output_budget=OutputBudget(
+            agent=6000, delivery=10000, compaction=3000, retry_multiplier=2
+        ),
     )
     monkeypatch.setattr(
         ai,

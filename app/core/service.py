@@ -17,6 +17,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 from holmes.plugins.runbooks import RunbookCatalog
 
 from app.core.aicall import AICall
+from app.core.aicall.output_budget import OutputBudget
 from app.core.config import AppConfig
 from app.core.environment import get_config_file_path
 from app.core.federation import (
@@ -416,6 +417,7 @@ class HolmesService:
                     context_compaction_config=self.get_context_compaction_config(),
                     chat_model_extra_body=self.get_chat_model_extra_body_config(_llm_config),
                     internal_extra_body=self.get_internal_extra_body_config(_llm_config),
+                    output_budget=self.get_output_budget_config(_llm_config),
                 )
                 logger.info(
                     "   AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
@@ -604,6 +606,7 @@ class HolmesService:
                 context_compaction_config=self.get_context_compaction_config(),
                 chat_model_extra_body=self.get_chat_model_extra_body_config(),
                 internal_extra_body=self.get_internal_extra_body_config(),
+                output_budget=self.get_output_budget_config(),
             )
         except TypeError:
             # Unit-test fakes may not implement the production constructor extension.
@@ -734,6 +737,21 @@ class HolmesService:
         except (TypeError, ValueError):
             result["hard_guard_preserve_tail_tokens"] = 1200
         return result
+
+    def get_output_budget_config(
+        self,
+        llm_config: Optional[Dict[str, Any]] = None,
+    ) -> OutputBudget:
+        """``llm.output_tokens``: output token reservations per call kind."""
+        cfg = llm_config if isinstance(llm_config, dict) else None
+        if cfg is None:
+            raw_cfg = (
+                getattr(self, "raw_config", {})
+                if isinstance(getattr(self, "raw_config", {}), dict)
+                else {}
+            )
+            cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
+        return OutputBudget.from_config(cfg.get("output_tokens"))
 
     def get_internal_extra_body_config(
         self,

@@ -62,6 +62,7 @@ from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationS
 
 from .errors import ModelStreamStalled, raise_on_model_disconnect
 from .model_streaming import VisibleChatOpenAI as ChatOpenAI
+from .output_budget import MINIMUM_OUTPUT_TOKENS, OutputBudget
 from .streaming import push_event
 from .types import AICallResult
 
@@ -142,36 +143,7 @@ _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
 
 
 _DEFAULT_MAX_TOOL_CALLS_PER_TURN = 16
-_DEFAULT_MAX_OUTPUT_TOKENS = 6000
-_MIN_OUTPUT_TOKENS = 512
-
-
-def _max_output_tokens() -> int:
-    """Per-request output budget (reasoning + answer + tool call). Matches the output
-    reservation used by the context budget; sent to the provider as max_tokens."""
-    try:
-        return max(
-            _MIN_OUTPUT_TOKENS,
-            int(os.getenv("AICALL_MAX_OUTPUT_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS)),
-        )
-    except ValueError:
-        return _DEFAULT_MAX_OUTPUT_TOKENS
-
-
 _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS = 480.0
-
-
-def _delivery_output_tokens() -> int:
-    """Output reserve for tool-free deliveries (RCA / conclusion reports).
-
-    A live RCA report overran the 6000-token default (finish_reason=length), so
-    deliveries reserve more by default; the window guard still bounds the input.
-    """
-    try:
-        value = int(os.getenv("AICALL_DELIVERY_MAX_OUTPUT_TOKENS", 10000))
-    except ValueError:
-        value = 10000
-    return max(_MIN_OUTPUT_TOKENS, value)
 
 
 def _structured_call_timeout_seconds() -> Optional[float]:
@@ -291,6 +263,7 @@ class AICall:
         context_compaction_config: Optional[Dict[str, Any]] = None,
         chat_model_extra_body: Optional[Dict[str, Any]] = None,
         internal_extra_body: Optional[Dict[str, Any]] = None,
+        output_budget: Optional[OutputBudget] = None,
     ):
         """
         Args:
@@ -299,7 +272,10 @@ class AICall:
             api_base: 可选代理地址（覆盖默认 endpoint）
             internal_extra_body: 仅用于内部调用（上下文压缩、结构化收卷）的额外参数，
                 例如关闭推理模型的 thinking，避免推理 token 挤占有限的输出额度。
+            output_budget: 各类调用的输出 token 预留（``llm.output_tokens``）；
+                缺省按环境变量/默认值构造。
         """
+        self.output_budget = output_budget or OutputBudget.from_config()
         self.model = model
         self.model_str = model
         self.api_key = api_key
@@ -366,13 +342,13 @@ class AICall:
         kwargs["http_async_client"] = _build_async_httpx_client(kwargs.get("base_url"), None)
         return ChatOpenAI(**kwargs)
 
-    def create_compaction_model(self, max_tokens: int = 3000):
+    def create_compaction_model(self, max_tokens: Optional[int] = None):
         """Non-streaming internal model for context compaction / summaries."""
         return self._create_chat_model(
             node_id="context_compaction",
             disable_streaming=True,
             internal=True,
-        ).bind(max_tokens=max_tokens)
+        ).bind(max_tokens=int(max_tokens or self.output_budget.compaction))
 
     @staticmethod
     def _is_retryable_stream_eof(exc: Exception) -> bool:
@@ -415,7 +391,7 @@ class AICall:
         node_id = kwargs.pop("node_id", "")
         run_id = kwargs.pop("run_id", "")
         static_context_components = kwargs.pop("static_context_components", None)
-        output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
+        output_reserved = int(kwargs.get("max_tokens") or self.output_budget.agent)
         try:
             (
                 system_prompt,
@@ -581,7 +557,7 @@ class AICall:
         context_compactor = kwargs.pop("context_compactor", None)
         node_id = str(kwargs.get("node_id") or "structured")
         run_id = str(kwargs.get("run_id") or "")
-        output_reserved = int(kwargs.get("max_tokens") or _max_output_tokens())
+        output_reserved = int(kwargs.get("max_tokens") or self.output_budget.agent)
         # Reserved output is also sent as max_tokens: input + output must fit the window.
         kwargs["max_tokens"] = output_reserved
         try:
@@ -705,24 +681,24 @@ class AICall:
     ) -> Optional[Dict[str, Any]]:
         """One retry when a structured delivery returns nothing; ``None`` = no retry.
 
-        Internal settings (no thinking) and the output budget doubled, bounded by
-        what the window still allows after the measured input. Nothing to change
-        means nothing to retry.
+        Internal settings (no thinking) and a larger output reserve from
+        ``OutputBudget.retry_budget``. Nothing to change means nothing to retry.
         """
         retry = dict(kwargs)
         changed = False
         if self.internal_extra_body and not kwargs.get("internal_model"):
             retry["internal_model"] = True
             changed = True
-        current = int(kwargs.get("max_tokens") or _max_output_tokens())
         guard = hard_guard or {}
-        window, used = guard.get("context_window"), guard.get("final_input_tokens")
-        if window and used:
-            room = int(window) - int(used) - int(guard.get("safety_tokens") or 0)
-            larger = min(current * 2, room)
-            if larger > current:
-                retry["max_tokens"] = larger
-                changed = True
+        larger = self.output_budget.retry_budget(
+            int(kwargs.get("max_tokens") or self.output_budget.agent),
+            context_window=guard.get("context_window"),
+            input_tokens=guard.get("final_input_tokens"),
+            safety_tokens=int(guard.get("safety_tokens") or 0),
+        )
+        if larger:
+            retry["max_tokens"] = larger
+            changed = True
         return retry if changed else None
 
     def _call_native_structured(
@@ -739,7 +715,7 @@ class AICall:
         structured_method = kwargs.pop("structured_method", "function_calling")
         hard_guard_metadata = kwargs.pop("hard_guard_metadata", None)
         hard_guard_budget = kwargs.pop("hard_guard_budget", None)
-        output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
+        output_reserved = int(kwargs.get("max_tokens") or self.output_budget.agent)
         try:
             schema_payload = schema.model_json_schema()
         except Exception:
@@ -1334,8 +1310,8 @@ class AICall:
     # call(): setup helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
     def _default_call_context_components(
+        self,
         system_prompt: str,
         question: str,
         tools: Optional[List],
@@ -1350,7 +1326,11 @@ class AICall:
                 "content": tool_schema_payload,
             },
             {"name": "scratchpad_reserved", "category": "reserved", "tokens": 4096},
-            {"name": "output_reserved", "category": "reserved", "tokens": 6000},
+            {
+                "name": "output_reserved",
+                "category": "reserved",
+                "tokens": self.output_budget.agent,
+            },
         ]
 
     def _call_without_agent_loop(
@@ -1380,7 +1360,7 @@ class AICall:
                 response_schema,
                 node_id=node_id,
                 run_id=run_id,
-                max_tokens=_delivery_output_tokens(),
+                max_tokens=self.output_budget.delivery,
                 internal_model=True,
             )
             if parsed is None:
@@ -2732,7 +2712,9 @@ class AICall:
                         "[AICall] agent hard guard budget 写入失败: %s",
                         exc,
                     )
-            guarded_request = AICall._bound_request_output(guarded_request, budget)
+            guarded_request = AICall._bound_request_output(
+                guarded_request, budget, self.output_budget
+            )
             if on_waiting is not None:
                 tokens = ((budget or {}).get("hard_guard") or {}).get("final_input_tokens")
                 on_waiting(
@@ -2757,7 +2739,7 @@ class AICall:
             api_key=self.api_key or "",
         )
         context_window = resolved.get("context_window")
-        output_reserved = self._agent_request_output_reserved(request)
+        output_reserved = self._agent_request_output_reserved(request, self.output_budget)
         safety_margin = int(config["safety_tokens"])
 
         system_content = getattr(getattr(request, "system_message", None), "content", "") or ""
@@ -2969,7 +2951,9 @@ class AICall:
         ]
 
     @staticmethod
-    def _bound_request_output(request: Any, budget: Optional[Dict[str, Any]]) -> Any:
+    def _bound_request_output(
+        request: Any, budget: Optional[Dict[str, Any]], output_budget: OutputBudget
+    ) -> Any:
         """Send max_tokens on every agent model request.
 
         The context window covers input + output (vLLM: 'maximum context length'
@@ -2981,19 +2965,19 @@ class AICall:
         if settings.get("max_tokens") or settings.get("max_completion_tokens"):
             return request
         guard = (budget or {}).get("hard_guard") or {}
-        output_reserved = int(guard.get("output_reserved") or _max_output_tokens())
+        output_reserved = int(guard.get("output_reserved") or output_budget.agent)
         limit = output_reserved
         window, used = guard.get("context_window"), guard.get("final_input_tokens")
         if window and used:
             limit = min(limit, int(window) - int(used) - int(guard.get("safety_tokens") or 0))
-        limit = max(_MIN_OUTPUT_TOKENS, limit)
+        limit = max(MINIMUM_OUTPUT_TOKENS, limit)
         if not hasattr(request, "override"):
             return request
         return request.override(model_settings={**settings, "max_tokens": limit})
 
     @staticmethod
-    def _agent_request_output_reserved(request: Any) -> int:
-        output_reserved = _max_output_tokens()
+    def _agent_request_output_reserved(request: Any, output_budget: OutputBudget) -> int:
+        output_reserved = output_budget.agent
         model_settings = getattr(request, "model_settings", None)
         if isinstance(model_settings, dict):
             try:
@@ -3003,7 +2987,7 @@ class AICall:
                     or output_reserved
                 )
             except (TypeError, ValueError):
-                output_reserved = _max_output_tokens()
+                output_reserved = output_budget.agent
         return output_reserved
 
     def _compact_agent_request_history(

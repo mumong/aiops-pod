@@ -6,49 +6,52 @@
 
 | 变量 | 默认值 | 读取位置 |
 |---|---|---|
-| `AICALL_MAX_OUTPUT_TOKENS` | _DEFAULT_MAX_OUTPUT_TOKENS | app/core/aicall/client.py:149 |
-| `AICALL_MAX_TOOL_CALLS_PER_TURN` | _DEFAULT_MAX_TOOL_CALLS_PER_TURN | app/core/aicall/client.py:188 |
-| `AICALL_MODEL_IDLE_TIMEOUT_SECONDS` | _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS | app/core/aicall/client.py:196 |
-| `AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS` | _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS | app/core/aicall/client.py:162 |
-| `AIOPS_AUTONOMOUS_PARALLEL_WORKERS` | "3" | app/core/remediation/jobs.py:60, app/core/workflow/nodes/autonomous_parallel.py:187 |
-| `AIOPS_COMPACTION_WORKERS` | "3" | app/core/aicall/working_context.py:196 |
-| `AIOPS_CONTEXT_ARCHIVE_ROOT` | "" | app/core/context/archive.py:23 |
-| `AIOPS_EVIDENCE_HISTORY_TOKENS` | "24000" | app/core/context/evidence_policy.py:21 |
-| `AIOPS_EVIDENCE_RECENT_TOKENS` | "8000" | app/core/context/evidence_policy.py:22 |
-| `AIOPS_EVIDENCE_RESULT_TOKENS` | "4096" | app/core/context/evidence_policy.py:20 |
-| `AIOPS_EVIDENCE_VIEW_MODE` | "legacy" | app/core/aicall/builtin_tools.py:273, app/core/context/evidence_policy.py:15, app/core/context/observation.py:158 |
-| `AIOPS_MODEL_METADATA_FILE` | "" | app/core/context/budget.py:345 |
-| `AIOPS_QUERY_TOOL_TIMEOUT_SECONDS` | "60" | app/core/workflow/nodes/query_answer.py:33 |
-| `AIOPS_REPAIR_RECORD_ROOT` | — | app/core/remediation/records.py:29 |
-| `AIOPS_THINK_STREAM_MAX_CHARS` | — | app/core/service.py:595 |
-| `AIOPS_THINK_STREAM_MODE` | — | app/core/service.py:589 |
-| `AIOPS_TIKTOKEN_ENCODING` | "" | app/core/context/budget.py:99, app/core/service.py:150 |
-| `AIOPS_TOKENIZER_JSON_PATH` | "" | app/core/context/budget.py:81, app/core/service.py:144 |
-| `API_HOST` | "0.0.0.0" | app/main.py:164 |
-| `API_PORT` | "8000" | app/main.py:163 |
+| `AICALL_COMPACTION_MAX_OUTPUT_TOKENS` | 3000 | app/core/aicall/output_budget.py:21 |
+| `AICALL_DELIVERY_MAX_OUTPUT_TOKENS` | 10000 | app/core/aicall/output_budget.py:20 |
+| `AICALL_DELIVERY_RETRY_MULTIPLIER` | 2 | app/core/aicall/output_budget.py:22 |
+| `AICALL_MAX_OUTPUT_TOKENS` | 6000 | app/core/aicall/output_budget.py:19 |
+| `AICALL_MAX_TOOL_CALLS_PER_TURN` | _DEFAULT_MAX_TOOL_CALLS_PER_TURN | app/core/aicall/client.py:187 |
+| `AICALL_MODEL_IDLE_TIMEOUT_SECONDS` | _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS | app/core/aicall/client.py:199 |
+| `AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS` | _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS | app/core/aicall/client.py:157 |
+| `AIOPS_AUTONOMOUS_PARALLEL_WORKERS` | "3" | app/core/remediation/jobs.py:88, app/core/workflow/nodes/autonomous_parallel.py:259 |
+| `AIOPS_COMPACTION_WORKERS` | "3" | app/core/aicall/working_context.py:305 |
+| `AIOPS_CONTEXT_ARCHIVE_ROOT` | "" | app/core/context/archive.py:22 |
+| `AIOPS_EVIDENCE_HISTORY_TOKENS` | "24000" | app/core/context/evidence_policy.py:22 |
+| `AIOPS_EVIDENCE_RECENT_TOKENS` | "8000" | app/core/context/evidence_policy.py:23 |
+| `AIOPS_EVIDENCE_RESULT_TOKENS` | "4096" | app/core/context/evidence_policy.py:21 |
+| `AIOPS_EVIDENCE_VIEW_MODE` | "legacy" | app/core/aicall/builtin_tools.py:322, app/core/context/evidence_policy.py:16, app/core/context/observation.py:171 |
+| `AIOPS_MODEL_METADATA_FILE` | "" | app/core/context/budget.py:340 |
+| `AIOPS_QUERY_TOOL_TIMEOUT_SECONDS` | "60" | app/core/workflow/nodes/query_answer.py:32 |
+| `AIOPS_REPAIR_RECORD_ROOT` | — | app/core/remediation/records.py:32 |
+| `AIOPS_THINK_STREAM_MAX_CHARS` | — | app/core/service.py:641 |
+| `AIOPS_THINK_STREAM_MODE` | — | app/core/service.py:635 |
+| `AIOPS_TIKTOKEN_ENCODING` | "" | app/core/context/budget.py:98, app/core/service.py:159 |
+| `AIOPS_TOKENIZER_JSON_PATH` | "" | app/core/context/budget.py:78, app/core/service.py:153 |
+| `API_HOST` | "0.0.0.0" | app/main.py:183 |
+| `API_PORT` | "8000" | app/main.py:182 |
 | `CONFIG_FILE` | — | app/core/environment.py:67 |
-| `DEEPSEEK_API_KEY` | — | app/core/service.py:341 |
-| `HOLMES_INIT_TIMEOUT_SECONDS` | "0" | app/main.py:93 |
-| `HOSTNAME` | "N/A" / 'localhost' | app/core/environment.py:103, app/core/environment.py:109 |
-| `KUBERNETES_SERVICE_HOST` | 'N/A' / — | app/core/environment.py:32, app/core/environment.py:99 |
-| `KUBERNETES_SERVICE_PORT` | 'N/A' | app/core/environment.py:100 |
-| `LANGFUSE_PUBLIC_KEY` | — | app/core/aicall/client.py:2320 |
-| `LANGFUSE_SECRET_KEY` | — | app/core/aicall/client.py:2320 |
-| `LLM_API_BASE` | — | app/core/service.py:358 |
-| `LLM_API_KEY` | — | app/core/service.py:339 |
-| `LLM_MODEL` | — | app/core/service.py:351 |
-| `LLM_REASONING_EFFORT` | "" | app/core/aicall/client.py:287 |
-| `LOG_LEVEL` | "INFO" | app/main.py:23 |
-| `MCP_AUTO_START_LOCAL` | "false" | app/main.py:60 |
-| `METRICS_ENABLED` | "true" / — | app/core/workflow/metrics.py:33, app/core/workflow/metrics.py:42 |
-| `METRICS_EVIDENCE_THRESHOLD` | "0.9" / — | app/core/workflow/metrics.py:32, app/core/workflow/metrics.py:49 |
-| `METRICS_MTTR_THRESHOLD` | "600" / — | app/core/workflow/metrics.py:30, app/core/workflow/metrics.py:45 |
-| `METRICS_RCA_CONFIDENCE_THRESHOLD` | "0.8" / — | app/core/workflow/metrics.py:31, app/core/workflow/metrics.py:47 |
-| `MODEL_CONTEXT_WINDOW` | "" / "32000" / "54000" | app/core/aicall/working_context.py:118, app/core/aicall/working_context.py:155, app/core/aicall/working_context.py:343 … |
-| `OPENAI_API_KEY` | — | app/core/service.py:342 |
+| `DEEPSEEK_API_KEY` | — | app/core/service.py:357 |
+| `HOLMES_INIT_TIMEOUT_SECONDS` | "0" | app/main.py:112 |
+| `HOSTNAME` | "N/A" / "localhost" | app/core/environment.py:103, app/core/environment.py:109 |
+| `KUBERNETES_SERVICE_HOST` | "N/A" / — | app/core/environment.py:32, app/core/environment.py:99 |
+| `KUBERNETES_SERVICE_PORT` | "N/A" | app/core/environment.py:100 |
+| `LANGFUSE_PUBLIC_KEY` | — | app/core/aicall/client.py:2533 |
+| `LANGFUSE_SECRET_KEY` | — | app/core/aicall/client.py:2533 |
+| `LLM_API_BASE` | — | app/core/service.py:374 |
+| `LLM_API_KEY` | — | app/core/service.py:355 |
+| `LLM_MODEL` | — | app/core/service.py:367 |
+| `LLM_REASONING_EFFORT` | "" | app/core/aicall/client.py:302 |
+| `LOG_LEVEL` | "INFO" | app/main.py:24 |
+| `MCP_AUTO_START_LOCAL` | "false" | app/main.py:70 |
+| `METRICS_ENABLED` | "true" / — | app/core/workflow/metrics.py:33, app/core/workflow/metrics.py:46 |
+| `METRICS_EVIDENCE_THRESHOLD` | "0.9" / — | app/core/workflow/metrics.py:32, app/core/workflow/metrics.py:53 |
+| `METRICS_MTTR_THRESHOLD` | "600" / — | app/core/workflow/metrics.py:30, app/core/workflow/metrics.py:49 |
+| `METRICS_RCA_CONFIDENCE_THRESHOLD` | "0.8" / — | app/core/workflow/metrics.py:31, app/core/workflow/metrics.py:51 |
+| `MODEL_CONTEXT_WINDOW` | "" / "32000" / "54000" | app/core/aicall/working_context.py:153, app/core/aicall/working_context.py:250, app/core/aicall/working_context.py:539 … |
+| `OPENAI_API_KEY` | — | app/core/service.py:358 |
 | `POD_NAME` | os.getenv("HOSTNAME", "N/A") | app/core/environment.py:103 |
 | `POD_NAMESPACE` | "N/A" | app/core/environment.py:104 |
-| `REPORTS_DIR` | "/tmp/aiops/reports" | app/api/info_routes.py:18, app/core/federation/agent.py:456, app/core/federation/aggregator.py:101 … |
-| `THINK_STREAM_MAX_CHARS` | — | app/core/service.py:596 |
-| `THINK_STREAM_MODE` | — | app/core/service.py:590 |
-| `WORKFLOW_STREAM_HEARTBEAT_SECONDS` | "15" | app/core/workflow/executor.py:402 |
+| `REPORTS_DIR` | "/tmp/aiops/reports" | app/api/info_routes.py:19, app/core/federation/agent.py:485, app/core/federation/aggregator.py:102 … |
+| `THINK_STREAM_MAX_CHARS` | — | app/core/service.py:642 |
+| `THINK_STREAM_MODE` | — | app/core/service.py:636 |
+| `WORKFLOW_STREAM_HEARTBEAT_SECONDS` | "15" | app/core/workflow/executor.py:434 |
