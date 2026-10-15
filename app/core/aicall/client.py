@@ -622,6 +622,25 @@ class AICall:
                 hard_guard_budget=final_guard_budget,
                 **kwargs,
             )
+            if native is None and self._should_retry_without_thinking(kwargs):
+                # Reproduced with Qwen3.6 + LiteLLM: with thinking enabled the model
+                # reasoned for ~200s and then emitted no function call at all (same at
+                # 6k and 12k max_tokens); the identical request with thinking disabled
+                # delivered a valid result in ~26s. Delivery calls carry no tools, so
+                # nothing is lost by retrying as an internal call.
+                logger.warning(
+                    "[AICall] structured delivery returned nothing for schema=%s; "
+                    "retrying once with internal (no-thinking) settings",
+                    schema.__name__,
+                )
+                native, raw = self._call_native_structured(
+                    system_prompt,
+                    question,
+                    schema,
+                    hard_guard_metadata=hard_guard,
+                    hard_guard_budget=final_guard_budget,
+                    **{**kwargs, "internal_model": True},
+                )
             if native is not None:
                 return native, raw
 
@@ -663,6 +682,9 @@ class AICall:
                 exc,
             )
             return None, raw
+
+    def _should_retry_without_thinking(self, kwargs: Dict[str, Any]) -> bool:
+        return bool(self.internal_extra_body) and not bool(kwargs.get("internal_model"))
 
     def _call_native_structured(
         self,
@@ -1310,6 +1332,9 @@ class AICall:
         if response_schema is not None and max_steps <= 0:
             # Tool-free stages have max_steps=0: use one native structured
             # request, not an agent loop with a zero recursion/time budget.
+            # Tool-free delivery (RCA / conclusion): the model's reasoning belongs in
+            # the report itself. With thinking enabled, Qwen3.6 took ~200s and often
+            # returned no structured output; as an internal call it answers in ~30s.
             parsed, _ = self.call_structured(
                 system_prompt,
                 question,
@@ -1317,6 +1342,7 @@ class AICall:
                 node_id=node_id,
                 run_id=run_id,
                 max_tokens=6000,
+                internal_model=True,
             )
             if parsed is None:
                 self._push(
