@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from app.core.aicall.errors import ModelStreamInterrupted, raise_on_model_disconnect
 from app.core.log_context import log_context
 from app.core.workflow.group_runner import iter_group_results
+from app.core.workflow.pod_identity import complete_pod_namespaces
 
 from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
 from app.core.context.archive import ContextArchive
@@ -68,6 +69,9 @@ def plan_groups(node, state):
         if handoff is None:
             return {"autonomous_groups": []}  # historical input stays serial; no re-extraction
         schema = LocationHandoff if handoff.get("contract_version") == "location-handoff.v1" else DiagnosisHandoff
+        handoff = copy.deepcopy(handoff)
+        completed = complete_pod_namespaces(
+            target.get("entity") for target in handoff.get("targets") or [] if isinstance(target, dict))
         plan = schema.model_validate(handoff)
         targets = [t for t in plan.targets if t.status == "investigate"]
         # Existing lane runtime scopes Pod queries. Other resource kinds retain
@@ -80,7 +84,10 @@ def plan_groups(node, state):
                                "entities": [target.entity.model_dump()]})
         if getattr(node, "current_run_id", ""):
             ContextArchive(run_id=node.current_run_id).write_json("parallel/plan.json", {"input": material, "groups": groups})
-        return {"autonomous_groups": groups}
+        result = {"autonomous_groups": groups}
+        if completed:
+            result["diagnosis_handoff"] = handoff  # identities completed from the API server
+        return result
     except Exception as exc:
         # A formatting/provider failure must not erase the diagnosis or imply health.
         if hasattr(node.ai_call, "_push"):
