@@ -1369,8 +1369,9 @@ class AICall:
                 run.final_content = f"Agent 执行异常: {e}"
 
     def _finalize_structured_delivery(self, run: "_AgentRun", *, system_prompt: str, question: str) -> None:
-        """Bounded protocol recovery: one tool-free structured call when the agent stopped
-        (step limit / timeout / error) before delivering its required structured result.
+        """Bounded protocol recovery: one tool-free structured call when the agent ended
+        without its required structured result - stopped early (step limit / timeout /
+        error) or finished with plain text (e.g. tool-call arguments emitted as text).
 
         Same node, same model, same system prompt; the input is this node's own tool
         observations and analysis. The model still makes every decision; on failure the
@@ -1379,10 +1380,11 @@ class AICall:
         if (
             run.response_schema is None
             or run.structured_response is not None
-            or not run.incomplete_reason
             or (run.cancel_event is not None and run.cancel_event.is_set())
         ):
             return
+        if not run.incomplete_reason:
+            run.incomplete_reason = "no_structured_output"
         material = self._run_material_for_finalization(run, question)
         if not material["observations"] and not material["analysis"]:
             return

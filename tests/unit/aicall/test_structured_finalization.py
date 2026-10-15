@@ -64,7 +64,6 @@ def test_not_triggered_when_delivered_cancelled_unstructured_or_completed():
         {"structured_response": _Out(targets=[])},
         {"cancel_event": (lambda e: (e.set(), e)[1])(threading.Event())},
         {"response_schema": None},
-        {"incomplete_reason": ""},
         {"emitted_ai_messages": [], "tool_observation_contents": []},
     ):
         calls = []
@@ -113,3 +112,14 @@ def test_oversized_material_is_compacted_once_then_delivered(monkeypatch):
     assert len(calls) == 2 and "4 个异常 Pod 摘要" in calls[1]
     assert compacted_inputs[0]["observations"][0]["result"].startswith("query_pod_lifecycle")
     assert run.structured_response == _Out(targets=["t1"])
+
+
+def test_agent_that_ends_with_plain_text_instead_of_the_schema_is_finalized():
+    """Live Qwen run 3c4aad48cd604e7c: layer ended normally after 4 rounds with a
+    tool-argument fragment as text and no LocationOutput."""
+    calls = []
+    run = _run(incomplete_reason="", emitted_ai_messages=[(None, '["namespace", "pod", "uid"]')])
+    _ai(calls, _Out(targets=["a"]))._finalize_structured_delivery(run, system_prompt="S", question="Q")
+    assert len(calls) == 1
+    assert run.incomplete_reason == "no_structured_output"
+    assert run.structured_response == _Out(targets=["a"])
