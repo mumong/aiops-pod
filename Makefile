@@ -17,7 +17,7 @@ DOCKER_TAG := $(VERSION)
 A2A_PUBLIC_HOST ?= $(shell kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
 A2A_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30801
 
-.PHONY: build build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
+.PHONY: build release build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
 	case-list case-list-variants case-render case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean case-clean-variants
 
 .PHONY: help test-unit check check-syntax lint format format-check
@@ -48,6 +48,11 @@ format-check:
 check: check-syntax lint format-check test-unit
 
 build: build-main build-a2a
+
+# Release = the whole sequence in a safe order: both images must exist and be
+# pushed before the running deployment is deleted. (`make delete build push deploy`
+# left the service down twice when build-a2a failed after delete.)
+release: build push delete deploy
 
 build-main:
 	@echo "Building $(DOCKER_NAME):$(DOCKER_TAG)..."

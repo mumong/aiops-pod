@@ -237,6 +237,8 @@ curl -N -G "http://10.2.0.48:30800/query"  --data-urlencode 'q=各节点当前 C
 
 ## 更新与重部署
 
+推荐一条命令完成发布（先构建并推送两个镜像，再删除旧部署并应用新清单）：`VERSION` 加一后执行 `make release`。
+
 修改代码时，在对应仓库更新 VERSION，再按顺序执行：
 
 ```bash

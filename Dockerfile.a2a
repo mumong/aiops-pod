@@ -1,7 +1,5 @@
 FROM python:3.12-slim
 
-ARG VERSION=1.0.0
-
 WORKDIR /app
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -9,9 +7,11 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     A2A_HOST=0.0.0.0 \
-    A2A_PORT=8001 \
-    APP_VERSION=${VERSION}
+    A2A_PORT=8001
 
+# Dependencies first: this layer must not depend on VERSION, otherwise every
+# release re-runs pip install and the build needs network access (it failed twice
+# with "Network is unreachable" and left the service down after `make delete`).
 COPY requirements.a2a.txt .
 RUN pip install --no-cache-dir --no-compile --upgrade pip==26.2.0 \
     && pip install --no-cache-dir --no-compile -r requirements.a2a.txt \
@@ -22,6 +22,9 @@ RUN pip install --no-cache-dir --no-compile --upgrade pip==26.2.0 \
 RUN useradd -m -u 1000 appuser && chown appuser:appuser /app
 
 COPY --chown=appuser:appuser a2a_adapter/ ./a2a_adapter/
+
+ARG VERSION=1.0.0
+ENV APP_VERSION=${VERSION}
 
 USER appuser
 EXPOSE 8001
