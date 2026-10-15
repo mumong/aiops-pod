@@ -172,3 +172,17 @@ def test_bounded_pod_table_shows_every_non_nominal_row_but_keeps_healthy_rows(tm
     assert structured['selection_policy'] == 'status_attention_first_then_source_order'
     assert structured['attention_rows'] >= 4
     assert structured['omitted_rows'] == len(structured['all_rows']) - len(structured['selected_rows'])
+
+
+def test_diagnosis_stages_expose_scoped_tools_only():
+    from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode, _METRIC_CATALOG_TOOLS
+    from app.core.workflow.nodes.query_answer import QueryCollectNode
+
+    layer = DiagnosisStageNode.READ_TOOLS
+    assert {"query_pod_lifecycle", "kubectl_describe", "kubectl_events", "fetch_runbook"} <= layer
+    assert not ({"query_pod_tracing", "query_pod_topology", "execute_pod_promql"} & layer)
+    assert layer < QueryCollectNode.READ_TOOLS  # never wider than the read-only set
+    evidence = DiagnosisEvidenceNode.READ_TOOLS
+    assert not (evidence & _METRIC_CATALOG_TOOLS)
+    assert {"execute_pod_promql", "query_pod_logs", "query_pod_tracing"} <= evidence
+    assert "run_bash_command" not in layer | evidence

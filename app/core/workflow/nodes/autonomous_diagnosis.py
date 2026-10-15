@@ -20,11 +20,32 @@ from app.core.workflow.stage_material import stage_material
 from app.core.workflow.case_result import DiagnosisCaseOutput, EvidenceStageOutput, bind_case_result
 
 
+# Prometheus catalog exploration: metric/label discovery for ad-hoc queries. Diagnosis
+# lanes query Pod metrics via execute_pod_promql; across ~50k archived evidence calls
+# these were used <50 times, yet their schemas were sent on every request.
+_METRIC_CATALOG_TOOLS = frozenset({
+    "get_metric_names", "get_label_values", "get_all_labels", "get_series",
+    "get_metric_metadata", "get_prometheus_target", "list_prometheus_rules",
+})
+
+
 class DiagnosisStageNode(QueryCollectNode):
     stage_id = "layer"
     stage_name = "问题定位"
     stage_prompt = DEEP_LAYER_PROMPT
     collect = True
+    # Location = Pod inventory + verify recent signals + runbook. Deeper evidence
+    # (metrics/logs/traces/topology) belongs to the evidence stage. Historically these
+    # 15 tools covered ~99% of layer calls; the schema shrinks ~8k -> ~3k tokens per
+    # request, which matters for the 54k-token window of small models.
+    READ_TOOLS = frozenset({
+        "query_pod_lifecycle",
+        "kubectl_get_by_name", "kubectl_get_by_kind_in_namespace", "kubectl_get_by_kind_in_cluster",
+        "kubectl_get_yaml", "kubectl_describe", "kubectl_events",
+        "kubectl_logs", "kubectl_previous_logs",
+        "kubernetes_jq_query", "kubernetes_tabular_query", "kubernetes_count",
+        "fetch_runbook", "read_context_archive", "TodoWrite",
+    })
 
     @property
     def node_id(self):
@@ -169,6 +190,7 @@ class DiagnosisEvidenceNode(DiagnosisStageNode):
     stage_id = "evidence"
     stage_name = "证据采集"
     stage_prompt = DEEP_EVIDENCE_PROMPT
+    READ_TOOLS = frozenset(QueryCollectNode.READ_TOOLS - _METRIC_CATALOG_TOOLS)
 
 
 class DiagnosisRootCauseNode(DiagnosisStageNode):
