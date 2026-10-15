@@ -2907,6 +2907,21 @@ class AICall:
                 "additional_kwargs": additional_kwargs,
             })
 
+        def _repeat_notice(source: ToolMessage, current_call_id: str, original_call_id: str) -> ToolMessage:
+            """A repeat of an already-answered call (HTTP 304 style): say so instead of
+            replaying the whole body, so the model notices it is going in circles."""
+            tool_name = source.name or "tool"
+            notice = (
+                f"【重复调用，结果未变化】{tool_name} 的参数与本阶段先前的调用（call_id={original_call_id}）完全相同，"
+                "未重新执行，结果与当时一致，此处省略重复正文。"
+                "若需要当时摘要中未展示的部分，请用 read_context_archive 回读该次结果给出的 raw_ref；"
+                "否则请基于已有结果继续推进，或改用其它工具/参数。"
+            )
+            notice_message = _clone_for_call(source, current_call_id, original_call_id)
+            notice_message.content = notice
+            notice_message.additional_kwargs["aiops_repeat_notice"] = True
+            return notice_message
+
         @wrap_tool_call
         async def deduplicate_tool_call(request, handler):
             tool_call = dict(request.tool_call or {})
@@ -2917,11 +2932,7 @@ class AICall:
                 cached = cache.get(signature)
                 if cached is not None:
                     source, original_call_id = cached
-                    return _clone_for_call(
-                        source,
-                        current_call_id,
-                        original_call_id,
-                    )
+                    return _repeat_notice(source, current_call_id, original_call_id)
 
                 pending = in_flight.get(signature)
                 if pending is None:

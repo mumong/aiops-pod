@@ -1071,17 +1071,23 @@ def test_tool_dedup_middleware_reuses_success_for_same_name_and_args():
     first = asyncio.run(middleware.awrap_tool_call(first_request, handler))
     second = asyncio.run(middleware.awrap_tool_call(second_request, handler))
 
-    assert first.content == second.content
+    # A later identical call is not re-executed; the model is told it repeated itself
+    # (instead of receiving the same body again) and where to find the original.
+    assert first.content == '{"status":"success","pod":"pod-a"}'
+    assert second.content.startswith("【重复调用，结果未变化】kubectl_get_by_name")
+    assert "tc-first" in second.content and "read_context_archive" in second.content
     assert executions == ["tc-first"]
     assert second.tool_call_id == "tc-second"
     assert second.additional_kwargs["aiops_deduplicated"] is True
+    assert second.additional_kwargs["aiops_repeat_notice"] is True
     assert second.additional_kwargs["aiops_original_tool_call_id"] == "tc-first"
 
+    # Mutating returned messages (observation projection) never leaks into the cache.
     first.content = "lossy summary from observation projection"
     first.additional_kwargs["aiops_raw_ref"] = "/prior/artifact"
     second.content = "another lossy summary"
     third = asyncio.run(middleware.awrap_tool_call(second_request, handler))
-    assert third.content == '{"status":"success","pod":"pod-a"}'
+    assert third.content.startswith("【重复调用，结果未变化】")
     assert "aiops_raw_ref" not in third.additional_kwargs
     assert executions == ["tc-first"]
 
