@@ -94,8 +94,7 @@ def handoff_from_messages(messages):
             continue
         if isinstance(payload, dict):
             result.update(protected_handoff(payload))
-    from app.core.context.lifecycle_core import core_from_messages
-    from app.core.context.lifecycle_core import lightweight_handoff
+    from app.core.context.lifecycle_core import core_from_messages, lightweight_handoff
     core = {} if lightweight_handoff({'protected_handoff': result}) else core_from_messages(messages)
     if core:
         result['lifecycle_core'] = core

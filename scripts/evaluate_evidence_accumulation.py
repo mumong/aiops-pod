@@ -8,15 +8,15 @@ import argparse
 import asyncio
 import json
 import os
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.graph.message import add_messages
 from langchain_openai import ChatOpenAI
+from langgraph.graph.message import add_messages
 
 from app.core.aicall.client import AICall, _parse_model
 from app.core.aicall.working_context import WorkingContextMiddleware
@@ -71,7 +71,7 @@ async def evaluate(output):
     (output / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
     compact_at = [r["index"] for r in steps if r["compacted"]]
     assert compact_at, "Replay did not exercise actual compaction"
-    assert all(b - a >= 3 for a, b in zip(compact_at, compact_at[1:])), "Repeated compaction without headroom"
+    assert all(b - a >= 3 for a, b in zip(compact_at, compact_at[1:], strict=False)), "Repeated compaction without headroom"
     assert all(r["after"] <= 24000 for r in steps), "Cumulative limit exceeded after replacement"
     print(json.dumps({"compacted_at": compact_at, "seconds": result["seconds"]}), flush=True)
 

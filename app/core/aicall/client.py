@@ -17,19 +17,18 @@ import os
 import queue
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import ExitStack, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
-from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import anyio
-from pydantic import BaseModel, ValidationError
-from langgraph.errors import GraphRecursionError
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai.chat_models._client_utils import _build_async_httpx_client
-from .model_streaming import VisibleChatOpenAI as ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
 from openai import (
     APIError,
     APIResponseValidationError,
@@ -37,15 +36,9 @@ from openai import (
     APITimeoutError,
     InternalServerError,
 )
+from pydantic import BaseModel, ValidationError
 
-from app.core.prompts import (
-    EVIDENCE_MEMORY_COMPRESSION_PROMPT,
-    RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION,
-    RUNTIME_COMPACTION_INSTRUCTION,
-    STRUCTURED_FINALIZATION_INSTRUCTION,
-)
 from app.core.async_bridge import run_coroutine_sync, run_until_cancelled
-from app.core.log_context import bind_current_context
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import (
     ContextBudgetEstimator,
@@ -56,11 +49,20 @@ from app.core.context.budget import (
     serialize_tool_schema,
 )
 from app.core.context.observation import ObservationProcessor
-from app.core.prompts import get_workflow_prompt
+from app.core.log_context import bind_current_context
+from app.core.prompts import (
+    EVIDENCE_MEMORY_COMPRESSION_PROMPT,
+    RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION,
+    RUNTIME_COMPACTION_INSTRUCTION,
+    STRUCTURED_FINALIZATION_INSTRUCTION,
+    get_workflow_prompt,
+)
 from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
+
+from .errors import ModelStreamStalled, raise_on_model_disconnect
+from .model_streaming import VisibleChatOpenAI as ChatOpenAI
 from .streaming import push_event
 from .types import AICallResult
-from .errors import ModelStreamStalled, raise_on_model_disconnect
 
 logger = logging.getLogger(__name__)
 
@@ -3028,6 +3030,7 @@ class AICall:
     def _build_tool_dedup_middleware(timeout_seconds: float = 0):
         """Deduplicate identical tool executions within one agent call."""
         import asyncio
+
         from langchain.agents.middleware import wrap_tool_call
 
         cache: Dict[str, Tuple[ToolMessage, str]] = {}

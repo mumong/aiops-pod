@@ -128,7 +128,7 @@ async def _sync_response(
         raise
     except Exception as e:
         logger.error("查询出错: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 async def _respond(question, stream, output_format, max_steps, overrides, title):

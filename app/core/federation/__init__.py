@@ -10,10 +10,10 @@ import logging
 from typing import Any, Dict, Generator, List, Optional
 
 from app.core.async_bridge import run_coroutine_sync
-from app.core.federation.registry import AgentRegistry, SubAgentConfig
-from app.core.federation.client import SubAgentResult
-from app.core.federation.aggregator import FederationAggregator
 from app.core.federation.agent import FederationAgent
+from app.core.federation.aggregator import FederationAggregator
+from app.core.federation.client import SubAgentResult
+from app.core.federation.registry import AgentRegistry, SubAgentConfig
 
 logger = logging.getLogger(__name__)
 

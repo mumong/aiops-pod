@@ -1,16 +1,15 @@
+import threading
 from copy import deepcopy
 from types import SimpleNamespace
-import threading
-import time
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.core.remediation.jobs import RepairJobs
-from app.core.remediation.records import RepairRecordStore, RecordUnavailable, PlanConflict
-from app.core.remediation.pod_executor import PodRepairExecutor
 from app.core.remediation.approval import ApprovalStore
+from app.core.remediation.jobs import RepairJobs
+from app.core.remediation.pod_executor import PodRepairExecutor
+from app.core.remediation.records import PlanConflict, RecordUnavailable, RepairRecordStore
 from tests.unit.remediation.test_pod_executor import fixture
 
 

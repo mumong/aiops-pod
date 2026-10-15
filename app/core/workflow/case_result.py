@@ -4,12 +4,11 @@ The model writes diagnostic content. The caller binds run/group/entity identity
 from the assigned task. A full report is stored separately from the bounded
 index sent to the overview model; neither contains execution authorization.
 """
-from copy import deepcopy
 import re
+from copy import deepcopy
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
-
 
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=320)]
 EvidenceRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=640)]

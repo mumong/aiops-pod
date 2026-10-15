@@ -6,7 +6,10 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.core.prompts import POD_REMEDIATION_PROMPT
 from app.core.workflow.nodes.query_answer import (
-    QueryAnswer, QueryCollectNode, _configure_query_runtime, finalize_query_answer,
+    QueryAnswer,
+    QueryCollectNode,
+    _configure_query_runtime,
+    finalize_query_answer,
 )
 
 

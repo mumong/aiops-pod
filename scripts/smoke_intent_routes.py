@@ -7,8 +7,8 @@ Run: .venv/bin/python scripts/smoke_intent_routes.py --pod <backend-pod>
 import argparse
 import base64
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 
 def main():

@@ -1,5 +1,5 @@
-from app.core.workflow.stream_contract import workflow_outcome, project_query_tool_event
 from app.core.workflow.metrics import WorkflowMetrics
+from app.core.workflow.stream_contract import project_query_tool_event, workflow_outcome
 
 
 def test_partial_is_not_success_and_clarification_is_not_failure():
@@ -36,8 +36,9 @@ def test_metrics_count_semantic_failure_and_keep_lanes_separate():
 def test_acquisition_receipts_survive_compaction_and_keep_lane_identity():
     import asyncio
     from types import SimpleNamespace
-    from app.core.workflow.nodes.query_answer import build_working_material
+
     from app.core.aicall.working_context import compact_working_material
+    from app.core.workflow.nodes.query_answer import build_working_material
     events = [
         {'type':'tool_result','tool_name':'query_pod_tracing','tool_args':{'namespace':'n','pod':'p'},
          'status':'success','semantic_success':True,'structured':{'coverage':'present'},'raw_ref':'/trace','lane_id':'g1'},

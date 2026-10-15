@@ -2,8 +2,11 @@ import json
 import threading
 from types import SimpleNamespace
 
+from app.core.workflow.nodes.autonomous_diagnosis import (
+    DiagnosisEvidenceNode,
+    DiagnosisRootCauseNode,
+)
 from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode, plan_groups
-from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode, DiagnosisRootCauseNode
 from app.core.workflow.nodes.query_answer import build_working_material
 
 
@@ -104,6 +107,7 @@ def test_tls_model_failure_stops_branch_before_rca_and_propagates_to_parent(monk
     import httpx
     import pytest
     from openai import InternalServerError
+
     from app.core.aicall.errors import ModelStreamInterrupted, raise_on_model_disconnect
     failure = InternalServerError('utls: TLS handshake: EOF', response=httpx.Response(
         500, request=httpx.Request('POST', 'https://model.invalid/v1/chat/completions')), body={})

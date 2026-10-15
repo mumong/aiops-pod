@@ -1,6 +1,6 @@
-from app.core.workflow.stream_contract import project_query_tool_event
 from app.core.prompts import QUERY_COLLECT_PROMPT, QUERY_CONCLUSION_PROMPT
 from app.core.workflow.nodes import query_answer
+from app.core.workflow.stream_contract import project_query_tool_event
 
 
 def test_prompts_have_single_source():

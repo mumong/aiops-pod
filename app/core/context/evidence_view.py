@@ -10,7 +10,6 @@ from typing import Any
 
 from .budget import estimate_tokens
 
-
 VERSION = "evidence-view.v1"
 DEFAULT_TOKENS = 4096
 MAX_JSON_CHARS = 4_000_000

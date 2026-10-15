@@ -18,7 +18,6 @@ from app.core.context.observability_projection import (
     project_observability_payload,
 )
 
-
 TOOL_BY_DIMENSION = {
     "metrics": "execute_pod_promql",
     "logging": "query_pod_logs",

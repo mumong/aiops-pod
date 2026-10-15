@@ -408,7 +408,7 @@ def test_executor_event_contract_matches_golden(harness, monkeypatch):
         exp, act = expected[scenario], actual[scenario]
         # Compare event-by-event first for a readable failure, then everything.
         assert [e["type"] for e in act["events"]] == [e["type"] for e in exp["events"]], scenario
-        for index, (a, e) in enumerate(zip(act["events"], exp["events"])):
+        for index, (a, e) in enumerate(zip(act["events"], exp["events"], strict=False)):
             assert list(a) == list(e), (scenario, index, "key order")
             assert a == e, (scenario, index)
         assert act == exp, scenario
@@ -419,6 +419,7 @@ def test_heartbeat_names_the_running_stage_not_a_lingering_finished_one():
     """Live run 2e1e601acab74d13: text heartbeats said '问题定位' during parallel lanes."""
     import threading
     from types import SimpleNamespace
+
     from app.core.workflow.executor import _StreamTranslator
 
     t = object.__new__(_StreamTranslator)

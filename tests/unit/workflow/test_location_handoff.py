@@ -5,12 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.context.handoff import protected_handoff, handoff_from_messages
+from app.core.aicall import working_context
+from app.core.context.handoff import handoff_from_messages, protected_handoff
 from app.core.context.lifecycle_core import messages_without_core
 from app.core.workflow.diagnosis_contract import LocationHandoff, scoped_handoff
 from app.core.workflow.nodes.autonomous_parallel import plan_groups
 from app.core.workflow.working_material import build_working_material
-from app.core.aicall import working_context
 
 
 def handoff(count=4):

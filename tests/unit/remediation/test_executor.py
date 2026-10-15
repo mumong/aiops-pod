@@ -134,6 +134,7 @@ def test_executor_marks_unhealthy_verify_as_needs_followup():
 
 def test_run_local_command_times_out(monkeypatch):
     import pytest
+
     from app.core.remediation import executor as remediation_executor
 
     monkeypatch.setattr(remediation_executor, "LOCAL_COMMAND_TIMEOUT_SECONDS", 0.2)

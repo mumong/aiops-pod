@@ -4,8 +4,8 @@
 自动检测运行环境（Kubernetes 集群内/外）并选择对应的配置
 """
 
-import os
 import logging
+import os
 from pathlib import Path
 from typing import Tuple
 

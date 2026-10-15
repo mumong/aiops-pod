@@ -6,18 +6,22 @@ No cluster operations, no repair commands. Failure exits nonzero. This measures
 model target selection separately from deterministic transport preservation.
 """
 import argparse
-import json
-from pathlib import Path
-import uuid
 import base64
+import json
 import subprocess
+import uuid
+from pathlib import Path
 
-from app.core.service import HolmesService
-from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisStageNode, DiagnosisEvidenceNode, DiagnosisRootCauseNode
-from app.core.workflow.nodes.autonomous_parallel import plan_groups
-from app.core.workflow.diagnosis_contract import scoped_handoff
-from app.core.workflow.working_material import build_working_material
 from app.core.context.handoff import protected_handoff
+from app.core.service import HolmesService
+from app.core.workflow.diagnosis_contract import scoped_handoff
+from app.core.workflow.nodes.autonomous_diagnosis import (
+    DiagnosisEvidenceNode,
+    DiagnosisRootCauseNode,
+    DiagnosisStageNode,
+)
+from app.core.workflow.nodes.autonomous_parallel import plan_groups
+from app.core.workflow.working_material import build_working_material
 
 
 def main():
@@ -92,10 +96,11 @@ sys.meta_path.insert(0,Loader())
         parser.error('--archive or --live is required')
     if args.fan_in_replay:
         import asyncio
+
         from app.core.aicall.working_context import compact_working_material
+        from app.core.prompts import DEEP_CONCLUSION_PRESENTATION, QUERY_CONCLUSION_PROMPT
         from app.core.workflow.diagnosis_contract import LocationHandoff
         from app.core.workflow.query_contract import QueryAnswer
-        from app.core.prompts import QUERY_CONCLUSION_PROMPT, DEEP_CONCLUSION_PRESENTATION
         packet = json.loads((args.archive / 'node_inputs/conclusion.input.json').read_text())
         payload = packet['before_compaction']
         def migrate(material):

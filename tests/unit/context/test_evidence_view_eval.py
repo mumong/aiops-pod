@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from scripts.evaluate_evidence_view import archive_reader, cases, validate_answer
 from app.core.aicall.builtin_tools import LegacyReadContextArchiveTool, ReadContextArchiveTool
+from scripts.evaluate_evidence_view import archive_reader, cases, validate_answer
 
 
 def test_missing_requested_fixture_fails_instead_of_silently_skipping(tmp_path):

@@ -2,7 +2,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path("test/e2e/manifests")
 
 EXPECTED_CASES = {

@@ -4,16 +4,17 @@ Reuse diagnosis groups, workflow planning and the existing execution policy.
 Only planning is parallel; command invocations share a serial execution lock.
 Records survive restart; active jobs are not replayed automatically after restart.
 """
-from copy import deepcopy
 import os
 import threading
-import uuid
 import time
+import uuid
+from copy import deepcopy
 
-from app.core.remediation.group_context import diagnosis_groups
-from app.core.remediation.records import RepairRecordStore, RecordUnavailable, PlanConflict
 from app.core.log_context import log_context
+from app.core.remediation.group_context import diagnosis_groups
+from app.core.remediation.records import PlanConflict, RecordUnavailable, RepairRecordStore
 from app.core.workflow.group_runner import iter_group_results
+
 
 class RepairJobs:
     def __init__(self, store=None):
@@ -111,9 +112,9 @@ class RepairJobs:
             return self._execute_in_context(service, owner, job)
 
     def _execute_in_context(self, service, owner, job):
+        from app.core.remediation.models import normalize_remediation_mode
         from app.core.remediation.pod_executor import PodRepairExecutor, run_argv
         from app.core.remediation.policy import CommandPolicy
-        from app.core.remediation.models import normalize_remediation_mode
         job_id = job["job_id"]
         try:
             cfg = deepcopy((service.workflow_config or {}).get("remediation") or {})
@@ -136,7 +137,7 @@ class RepairJobs:
                 if kind == "remediation_approval_required":
                     self._update(job_id, owner, status="awaiting_approval", approval=event)
                 elif kind in {"remediation_tool_start", "remediation_tool_result"}:
-                    def append(payload):
+                    def append(payload, event=event):
                         if payload.get('status') != 'executing':
                             payload['status_started_at'] = time.time()
                         payload.update(status="executing", approval=None)

@@ -15,8 +15,8 @@
 """
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -29,10 +29,10 @@ import httpx
 import litellm
 
 from app.core.async_bridge import run_coroutine_sync
-from app.core.federation.registry import AgentRegistry
-from app.core.federation.toolset import FederationToolset
 from app.core.federation.client import SubAgentClient
+from app.core.federation.registry import AgentRegistry
 from app.core.federation.report_parser import extract_final_answer
+from app.core.federation.toolset import FederationToolset
 from app.core.prompts import FEDERATION_AGENT_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -240,7 +240,7 @@ class FederationAgent:
             client = SubAgentClient()
             try:
                 async def _run():
-                    async for name, chunk in client.query_stream_realtime(
+                    async for _name, chunk in client.query_stream_realtime(
                         agent_cfg,
                         question,
                         max_steps,
@@ -256,7 +256,7 @@ class FederationAgent:
 
         # 启动所有线程
         threads = []
-        for tc, args, cluster_name, agent_cfg in valid_queries:
+        for _tc, _args, cluster_name, agent_cfg in valid_queries:
             t = threading.Thread(
                 target=_stream_cluster,
                 args=(agent_cfg, cluster_name, args.get("question", ""),
@@ -307,7 +307,7 @@ class FederationAgent:
             t.join(timeout=5)
 
         # 组装结果
-        for tc, args, cluster_name, agent_cfg in valid_queries:
+        for tc, _args, cluster_name, _agent_cfg in valid_queries:
             full_text = "".join(cluster_chunks.get(cluster_name, []))
             cluster_reports[cluster_name] = full_text
             self._save_report(cluster_name, type('R', (), {'text': full_text, 'elapsed_seconds': 0})())

@@ -1,7 +1,11 @@
 """Generic command transport checks, not a catalogue of repair strategies."""
 import shlex
 from dataclasses import dataclass
-from app.core.remediation.execution_guard import DEFAULT_ALLOWED_EXEC_COMMANDS, DEFAULT_DENIED_EXECUTABLES
+
+from app.core.remediation.execution_guard import (
+    DEFAULT_ALLOWED_EXEC_COMMANDS,
+    DEFAULT_DENIED_EXECUTABLES,
+)
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,6 @@
 
 import json
 
-
 CONTRACT_VERSION = "evidence-records.v1"
 
 

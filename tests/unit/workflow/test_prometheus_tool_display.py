@@ -1,11 +1,11 @@
 """Both metric protocols share presentation, not query/diagnosis policy."""
-from copy import deepcopy
 import json
+from copy import deepcopy
 
 import pytest
 
-from app.core.context.prometheus_result import normalize_prometheus_result
 from app.core.context.observation import ObservationProcessor
+from app.core.context.prometheus_result import normalize_prometheus_result
 from app.core.workflow.stream_contract import project_query_tool_event
 
 

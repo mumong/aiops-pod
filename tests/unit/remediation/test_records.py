@@ -1,11 +1,15 @@
 import json
-import threading
 
 import pytest
 
-from app.core.remediation.records import RepairRecordStore, RecordUnavailable, PlanConflict, diagnosis_payload
-from app.core.remediation.pod_executor import PodRepairExecutor
 from app.core.remediation.approval import ApprovalStore
+from app.core.remediation.pod_executor import PodRepairExecutor
+from app.core.remediation.records import (
+    PlanConflict,
+    RecordUnavailable,
+    RepairRecordStore,
+    diagnosis_payload,
+)
 from tests.unit.remediation.test_pod_executor import fixture
 
 

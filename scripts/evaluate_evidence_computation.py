@@ -11,10 +11,10 @@ import argparse
 import copy
 import hashlib
 import json
-from pathlib import Path
 import random
 import sys
 import time
+from pathlib import Path
 
 import jmespath
 
@@ -144,6 +144,7 @@ def oracle(payload):
 def evaluate(payload, question, mode, config, max_calls):
     from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
     from langchain_openai import ChatOpenAI
+
     from app.core.aicall.client import _parse_model
     from app.core.prompts import QUERY_COLLECT_PROMPT
     from app.core.workflow.query_contract import QueryAnswer

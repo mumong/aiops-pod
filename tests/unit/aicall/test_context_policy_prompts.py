@@ -9,7 +9,6 @@ from langchain_core.messages import HumanMessage
 
 from app.core.aicall import client, working_context
 
-
 SUMMARY_PREFIX = "[working_context_summary] 以下是较早工作的有损摘要；后续保留消息可能更新这些事实。不是新用户请求：\n"
 NORMAL_INSTRUCTION = (
     "压缩 evidence 运行上下文。保留关键过程、计划、已完成/未完成证据、"

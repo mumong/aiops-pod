@@ -5,7 +5,6 @@ from pathlib import Path
 
 from app.core.prompts import DIAGNOSTIC_TOOL_GUIDANCE, QUERY_COLLECT_PROMPT
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -22,7 +21,7 @@ def test_query_goal_sections_and_structured_completion():
 
 
 def test_query_backup_is_complete_and_new_prompt_is_compact():
-    backup = ROOT / "docs/prompt_backups/query_collect_20261009.txt"
+    backup = ROOT / "docs/history/prompt_backups/query_collect_20261009.txt"
     tree = ast.parse(backup.read_text())
     assert len(tree.body) == 1
     assignment = tree.body[0]

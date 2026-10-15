@@ -20,12 +20,12 @@ A2A_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30801
 .PHONY: build build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
 	case-list case-list-variants case-render case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean case-clean-variants
 
-.PHONY: help test-unit check check-syntax lint
+.PHONY: help test-unit check check-syntax lint format format-check
 
 help:
 	@echo "build-main / build-a2a: container artifacts (Python service, no native binary)"
 	@echo "test-unit: isolated unit tests and Runbook contracts"
-	@echo "check: syntax + unit; lint: static correctness checks"
+	@echo "check: syntax + lint + format-check + unit; lint: ruff E9/F/I/B; format: ruff format"
 	@echo "Setup: CONTRIBUTING.md; baseline: docs/maintenance-normalization.md"
 
 test-unit:
@@ -34,10 +34,18 @@ test-unit:
 check-syntax:
 	$(PYTHON) scripts/check_syntax.py
 
-lint:
-	$(RUFF) check app tests scripts
+LINT_PATHS := app tests scripts a2a_adapter a2a_test_agent tools
 
-check: check-syntax test-unit
+lint:
+	$(RUFF) check $(LINT_PATHS)
+
+format:
+	$(RUFF) format $(LINT_PATHS)
+
+format-check:
+	$(RUFF) format --check $(LINT_PATHS)
+
+check: check-syntax lint format-check test-unit
 
 build: build-main build-a2a
 

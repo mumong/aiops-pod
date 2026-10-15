@@ -1,7 +1,7 @@
 """Bounded presentation of the Prometheus API; no PromQL or unit inference."""
 
-from datetime import datetime, timezone
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 

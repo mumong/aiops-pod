@@ -3,10 +3,17 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph.message import add_messages
+
 from app.core.aicall.client import AICall
-from app.core.aicall.working_context import WorkingContextMiddleware, summarize_history, summary_chunks, compact_message, message_groups
+from app.core.aicall.working_context import (
+    WorkingContextMiddleware,
+    compact_message,
+    message_groups,
+    summarize_history,
+    summary_chunks,
+)
 
 
 class SummaryModel:
@@ -19,8 +26,9 @@ class SummaryModel:
 
 
 def test_compaction_probe_counts_repair_schema_at_budget_boundary(tmp_path, monkeypatch):
-    from app.core.aicall.client import StructuredContextBudgetError
     from langchain.agents.structured_output import ToolStrategy
+
+    from app.core.aicall.client import StructuredContextBudgetError
     from app.core.workflow.nodes.remediation import RepairDraft
     monkeypatch.setenv('AIOPS_CONTEXT_ARCHIVE_ROOT', str(tmp_path))
     client = AICall(model='openai/test', api_key='test')
@@ -190,10 +198,10 @@ def test_compaction_progress_reports_error_and_cancellation():
                             (asyncio.CancelledError(), 'cancelled')]:
         events = []
         class Failed:
-            async def ainvoke(self, *args, **kwargs):
-                raise error
+            async def ainvoke(self, *args, _error=error, **kwargs):
+                raise _error
         with pytest.raises(type(error)):
-            asyncio.run(summarize_history(Failed(), 'q', 'data', lambda **e: events.append(e)))
+            asyncio.run(summarize_history(Failed(), 'q', 'data', lambda _events=events, **e: _events.append(e)))
         assert events[-1]['status'] == expected
 
 

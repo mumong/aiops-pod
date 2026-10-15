@@ -5,8 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-from app.core.context.archive import ContextArchive, get_archive_root
 from app.core.context import budget as budget_module
+from app.core.context.archive import ContextArchive, get_archive_root
 from app.core.context.budget import (
     ContextBudgetEstimator,
     ModelContextResolver,

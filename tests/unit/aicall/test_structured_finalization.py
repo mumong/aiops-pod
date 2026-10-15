@@ -87,8 +87,8 @@ def test_model_transport_failure_during_finalization_stays_fatal():
 
 
 def test_oversized_material_is_compacted_once_then_delivered(monkeypatch):
-    from app.core.aicall.client import StructuredContextBudgetError
     import app.core.aicall.working_context as working_context
+    from app.core.aicall.client import StructuredContextBudgetError
 
     calls, compacted_inputs = [], []
     ai = AICall(model="openai/x", api_key="sk-test", api_base="http://gw/v1")

@@ -1,16 +1,16 @@
 """Execute agent-selected Kubernetes commands with approval and real results."""
-from copy import deepcopy
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import threading
 import time
+from copy import deepcopy
+from pathlib import Path
 
 from app.core.remediation.approval import approval_store
+from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
 from app.core.remediation.policy import CommandPolicy, validate_target_command
-from app.core.remediation.execution_guard import check_repair_execution, RepairCommandDenied
 
 _lock = threading.Lock()
 _command_lock = threading.Lock()

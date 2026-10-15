@@ -8,8 +8,11 @@ import pytest
 
 from app.core.aicall.errors import ModelStreamInterrupted
 from app.core.workflow.graph import build_diagnosis_workflow
+from app.core.workflow.nodes.autonomous_diagnosis import (
+    DiagnosisEvidenceNode,
+    DiagnosisRootCauseNode,
+)
 from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode
-from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode, DiagnosisRootCauseNode
 
 
 @pytest.mark.parametrize('failed_stage', ['layer', 'evidence', 'rca', 'conclusion', 'query_collect', 'remediation'])

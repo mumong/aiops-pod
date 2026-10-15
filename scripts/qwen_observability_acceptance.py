@@ -13,11 +13,11 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.core.context.observability_projection import project_observability_payload
+from jsonschema import ValidationError, validate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
-from jsonschema import ValidationError, validate
 
+from app.core.context.observability_projection import project_observability_payload
 
 TOOL_BY_DIMENSION = {
     "metrics": "execute_pod_promql",
@@ -347,7 +347,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "coverage": summary.get("coverage"),
                 "truncated": (summary.get("truncation") or {}).get("truncated"),
             }
-            for (path, payload), summary in zip(selected, summaries)
+            for (path, payload), summary in zip(selected, summaries, strict=False)
         ],
         "expected_visible_values": expected,
         "qwen_response": parsed,

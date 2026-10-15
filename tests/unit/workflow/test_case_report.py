@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.workflow.case_report import conclude_cases, diagnosis_cases, pack_indexes
-from app.core.remediation.records import diagnosis_payload
 from app.core.remediation.group_context import scoped_diagnosis
+from app.core.remediation.records import diagnosis_payload
+from app.core.workflow.case_report import conclude_cases, diagnosis_cases, pack_indexes
 
 
 def state(count=4):

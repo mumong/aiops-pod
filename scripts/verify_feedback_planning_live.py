@@ -16,10 +16,10 @@ def main():
     parser.add_argument('--expect-actions', action='store_true')
     parser.add_argument('--replay-tools', type=Path, help='Frozen historical evidence; not a live cluster test')
     args = parser.parse_args()
+    from app.core.remediation.executor import RemediationExecutor
+    from app.core.remediation.pod_executor import PodRepairExecutor
     from app.core.service import get_service
     from app.core.workflow.nodes import remediation
-    from app.core.remediation.pod_executor import PodRepairExecutor
-    from app.core.remediation.executor import RemediationExecutor
     def forbidden(*a, **kw):
         raise AssertionError('Planner test must never execute repairs')
     PodRepairExecutor.run = forbidden

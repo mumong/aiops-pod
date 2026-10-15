@@ -11,7 +11,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
-
 logger = logging.getLogger(__name__)
 
 

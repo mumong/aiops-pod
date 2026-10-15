@@ -9,12 +9,11 @@ MCP 相关模块（可选：本地 auto-start + 状态管理）
 from .manager import (
     MCPServerInfo,
     MCPServerManager,
-    get_mcp_manager,
     auto_start_mcp_servers,
+    get_mcp_manager,
     shutdown_mcp_servers,
     shutdown_mcp_servers_sync,
 )
-
 
 __all__ = [
     "MCPServerInfo",

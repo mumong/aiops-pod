@@ -8,21 +8,21 @@ MCP Server Manager（本地 auto-start 可选能力）
 - 默认不启动任何本地子进程（由上层通过环境变量或配置显式开启）
 """
 
-import os
-import sys
-import time
-import signal
 import asyncio
 import atexit
 import logging
+import os
+import signal
 import subprocess
-from pathlib import Path
-from typing import Dict, Optional, Any, List
+import sys
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-import yaml
 import httpx
+import yaml
 
 from app.core.paths import get_project_root
 

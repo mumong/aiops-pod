@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-
 CONTRACT_VERSION = "aiops.observation.v1"
 SELECTION_STRATEGY = (
     "information_ranked_pattern_round_robin_budget_scan_no_fault_names"

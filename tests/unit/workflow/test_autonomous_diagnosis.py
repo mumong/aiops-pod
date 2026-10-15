@@ -3,19 +3,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.workflow.graph import build_diagnosis_workflow
-from app.core.workflow.nodes.request_router import RequestContract
-from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode
-from app.core.context.observation import ObservationProcessor
-from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisRootCauseNode
-from app.core.workflow.nodes.query_answer import QueryConclusionNode
 from app.core.aicall.client import StructuredContextBudgetError
+from app.core.context.observation import ObservationProcessor
+from app.core.workflow.graph import build_diagnosis_workflow
+from app.core.workflow.nodes.autonomous_diagnosis import (
+    DiagnosisEvidenceNode,
+    DiagnosisRootCauseNode,
+)
+from app.core.workflow.nodes.query_answer import QueryConclusionNode
+from app.core.workflow.nodes.request_router import RequestContract
 
 
 def test_legacy_style_prompts_keep_professional_rules_without_old_engine_contracts():
     from app.core.prompts import (
-        DEEP_LAYER_PROMPT, DEEP_EVIDENCE_PROMPT, DEEP_RCA_PROMPT,
         DEEP_CONCLUSION_PRESENTATION,
+        DEEP_EVIDENCE_PROMPT,
+        DEEP_LAYER_PROMPT,
+        DEEP_RCA_PROMPT,
     )
     assert '用户问全集群问题才检查集群范围' in DEEP_LAYER_PROMPT
     assert 'fetch_runbook' in DEEP_LAYER_PROMPT
@@ -176,7 +180,9 @@ def test_bounded_pod_table_shows_every_non_nominal_row_but_keeps_healthy_rows(tm
 
 def test_diagnosis_stages_expose_scoped_tools_only():
     from app.core.workflow.nodes.autonomous_diagnosis import (
-        DiagnosisEvidenceNode, DiagnosisStageNode, _METRIC_CATALOG_TOOLS,
+        _METRIC_CATALOG_TOOLS,
+        DiagnosisEvidenceNode,
+        DiagnosisStageNode,
     )
     from app.core.workflow.nodes.query_answer import QueryCollectNode
 

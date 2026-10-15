@@ -3,9 +3,9 @@ from dataclasses import replace
 
 import pytest
 
-from app.core.remediation.execution_guard import check_repair_execution, RepairCommandDenied
-from app.core.remediation.policy import CommandPolicy
+from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
 from app.core.remediation.pod_executor import PodRepairExecutor
+from app.core.remediation.policy import CommandPolicy
 from tests.unit.remediation.test_pod_executor import fixture
 
 

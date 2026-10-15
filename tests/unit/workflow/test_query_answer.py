@@ -1,10 +1,13 @@
 import json
 from types import SimpleNamespace
 
-from app.core.workflow.graph import build_diagnosis_workflow
-from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
-from app.core.workflow.nodes.query_answer import parse_query_answer
 from app.core.workflow.executor import WorkflowExecutor
+from app.core.workflow.graph import build_diagnosis_workflow
+from app.core.workflow.nodes.query_answer import (
+    QueryCollectNode,
+    QueryConclusionNode,
+    parse_query_answer,
+)
 
 
 def test_query_catalog_uses_author_description_and_preserves_explicit_catalog(tmp_path):

@@ -11,11 +11,13 @@ direct 模式仅包含 query_collect，供内部直接查询。
 import logging
 import time
 from typing import Any, Dict, Optional
-from langgraph.graph import StateGraph, END
+
+from langgraph.graph import END, StateGraph
+
 from app.core.log_context import log_context
-from app.core.workflow.state import WorkflowState
-from app.core.workflow.nodes.request_router import RequestRouterNode
 from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
+from app.core.workflow.nodes.request_router import RequestRouterNode
+from app.core.workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)
 
@@ -108,11 +110,13 @@ def build_diagnosis_workflow(
     if query_mode != "auto":
         logger.warning("未知 query_mode=%s，按 auto 构建工作流", query_mode)
 
-    from app.core.workflow.nodes.remediation import RemediationNode
-    from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode
     from app.core.workflow.nodes.autonomous_diagnosis import (
-        DiagnosisStageNode, DiagnosisEvidenceNode, DiagnosisRootCauseNode,
+        DiagnosisEvidenceNode,
+        DiagnosisRootCauseNode,
+        DiagnosisStageNode,
     )
+    from app.core.workflow.nodes.autonomous_parallel import AutonomousParallelNode
+    from app.core.workflow.nodes.remediation import RemediationNode
     workflow = StateGraph(WorkflowState)
     nodes = [cls(holmes_service, metrics, runbook_catalog) for cls in (
         RequestRouterNode, QueryCollectNode, DiagnosisStageNode,

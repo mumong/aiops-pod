@@ -1,5 +1,12 @@
 """Public model transport errors; presentation only, never retries requests."""
-from openai import APIError, APIConnectionError, APITimeoutError, APIStatusError, InternalServerError, APIResponseValidationError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIResponseValidationError,
+    APIStatusError,
+    APITimeoutError,
+    InternalServerError,
+)
 
 
 class ModelStreamInterrupted(RuntimeError):

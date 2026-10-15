@@ -1,6 +1,8 @@
-from copy import deepcopy
 import json
+from copy import deepcopy
+
 import pytest
+
 from app.core.remediation.group_context import diagnosis_groups, scoped_diagnosis
 from app.core.remediation.records import RecordUnavailable
 

@@ -1,9 +1,9 @@
 import httpx
 import pytest
-from openai import APIError, APIConnectionError, APITimeoutError, AuthenticationError
+from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError
+
 from app.core.aicall.errors import model_transport_message
 from app.core.workflow.nodes.request_router import router_failure
-
 
 REQUEST = httpx.Request('POST', 'https://model.invalid/v1/chat/completions')
 

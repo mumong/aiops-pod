@@ -8,7 +8,6 @@ from __future__ import annotations
 import copy
 import json
 
-
 POD_FIELDS = ["namespace", "pod", "uid", "node", "phase", "reason", "created_at",
               "deletion_timestamp", "conditions"]
 CONTAINER_FIELDS = POD_FIELDS + [

@@ -9,7 +9,6 @@ from typing import Any, Dict, Iterable, Optional
 
 from app.core.remediation.models import RemediationAction, RemediationPlan
 
-
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
 _FACT_LEDGER_REMEDIATION_CONTRACTS = {
     "fact-ledger-authoritative-v1",

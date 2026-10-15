@@ -5,7 +5,8 @@ API Models - 简化的数据模型
 新 API 设计不再需要复杂的请求模型，
 这里只保留响应模型供内部使用。
 """
-from typing import Optional, List
+from typing import List, Optional
+
 from pydantic import BaseModel
 
 

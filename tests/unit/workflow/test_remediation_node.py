@@ -125,9 +125,9 @@ def test_deep_conclusion_never_emits_executable_repair_plan():
 
 @pytest.mark.parametrize('mode', ['review', 'auto'])
 def test_workflow_passes_configured_pod_mode_owner_and_policy(monkeypatch, tmp_path, mode):
+    from app.core.remediation.pod_executor import PodRepairExecutor
     from app.core.workflow.executor import WorkflowExecutor
     from app.core.workflow.nodes.query_answer import QueryCollectNode
-    from app.core.remediation.pod_executor import PodRepairExecutor
     draft = {'targets': [], 'actions': []}
     monkeypatch.setattr(QueryCollectNode, 'execute', lambda self, state: {
         'request_route': 'remediation', 'request_contract': {'namespaces': ['demo']},

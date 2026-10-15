@@ -5,22 +5,21 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.core.prompts import (
+    DEEP_CONCLUSION_PRESENTATION,
+    QUERY_COLLECT_PROMPT,
+    QUERY_CONCLUSION_PROMPT,
+    QUERY_RUNBOOK_CATALOG_HEADER,
+    QUERY_RUNBOOK_DESCRIPTION,
+    QUERY_TASK_AUTHORITY_PREFIX,
+)
+from app.core.runbook.catalog import reference_description
+from app.core.skills.models import Layer
+from app.core.workflow.nodes.focused import FocusedTaskNode
 
 # Re-export legacy imports while keeping contracts separate from orchestration.
 from app.core.workflow.query_contract import QueryAnswer, parse_query_answer
 from app.core.workflow.working_material import build_working_material
-
-from app.core.skills.models import Layer
-from app.core.runbook.catalog import reference_description
-from app.core.workflow.nodes.focused import FocusedTaskNode
-from app.core.prompts import (
-    QUERY_COLLECT_PROMPT,
-    QUERY_CONCLUSION_PROMPT,
-    DEEP_CONCLUSION_PRESENTATION,
-    QUERY_RUNBOOK_DESCRIPTION,
-    QUERY_TASK_AUTHORITY_PREFIX,
-    QUERY_RUNBOOK_CATALOG_HEADER,
-)
 
 
 def _configure_query_runtime(node):
@@ -206,6 +205,7 @@ class QueryConclusionNode(FocusedTaskNode):
                 if "working_context_compaction_required" not in str(exc):
                     raise
                 import asyncio
+
                 from app.core.aicall.working_context import compact_working_material
 
                 model = self.ai_call.create_compaction_model()

@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field
 
 from app.core.prompts import (
     FOCUSED_PROMPT,
+    FOCUSED_REQUEST_TIME_TEMPLATE,
     FOCUSED_RESULT_PROMPT,
     FOCUSED_RUNBOOK_DESCRIPTION_PREFIX,
-    FOCUSED_REQUEST_TIME_TEMPLATE,
 )
 from app.core.skills.models import Layer
 from app.core.workflow.nodes.base import WorkflowNode

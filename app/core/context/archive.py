@@ -6,14 +6,13 @@ state. This keeps LangGraph state and downstream prompts small.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
-
 
 DEFAULT_ARCHIVE_ROOT = "/tmp/aiops/context_archives"
 REPORTS_ARCHIVE_ROOT = "/tmp/aiops/reports/context_archives"

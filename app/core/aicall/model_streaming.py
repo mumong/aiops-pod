@@ -16,7 +16,7 @@ class VisibleChatOpenAI(ChatOpenAI):
     def _create_chat_result(self, response, generation_info=None):
         result = super()._create_chat_result(response, generation_info)
         payload = response if isinstance(response, dict) else response.model_dump()
-        for generation, choice in zip(result.generations, payload.get('choices') or []):
+        for generation, choice in zip(result.generations, payload.get('choices') or [], strict=False):
             message = choice.get('message') or {}
             for key in ('reasoning_content', 'reasoning'):
                 if isinstance(message.get(key), str):

@@ -6,9 +6,6 @@ import hmac
 import logging
 from typing import Any
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-
 from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
@@ -19,6 +16,8 @@ from a2a.types import (
     HTTPAuthSecurityScheme,
     SecurityScheme,
 )
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from a2a_adapter.backend import AiopsBackendClient
 from a2a_adapter.config import AdapterSettings

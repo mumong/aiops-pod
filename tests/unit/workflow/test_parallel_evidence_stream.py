@@ -6,7 +6,6 @@ from app.core.workflow.stream_contract import (
     project_parallel_tool_event,
 )
 
-
 GROUP_ENTITIES = [
     {
         "kind": "Pod",

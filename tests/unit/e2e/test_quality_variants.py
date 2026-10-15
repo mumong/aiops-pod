@@ -1,7 +1,7 @@
 """Root variants must discriminate causes, targets and arithmetic denominators."""
 import sys
-from pathlib import Path
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 

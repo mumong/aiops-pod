@@ -10,32 +10,38 @@
 
 import copy
 import json
-import uuid
-import os
-import time
 import logging
+import os
 import queue
 import re
 import threading
+import time
+import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
-from typing import Generator, Dict, Any, Optional, Tuple
+from typing import Any, Dict, Generator, Optional, Tuple
 
-from app.core.workflow.state import WorkflowState
-from app.core.workflow.graph import build_diagnosis_workflow
-from app.core.log_context import log_context
-from app.core.workflow.metrics import WorkflowMetrics
-from app.core.workflow.stream_contract import project_parallel_tool_event, project_query_tool_event, workflow_outcome
-from app.core.workflow.reporter import (
-    save_report as _save_report_fn,
-    update_metrics_from_state as _update_metrics_fn,
-)
 from app.core.context.archive import ContextArchive
-from app.core.remediation.approval import approval_store
+from app.core.log_context import log_context
 from app.core.remediation.agent import RemediationAgentConfig, RemediationAgentExecutor
+from app.core.remediation.approval import approval_store
 from app.core.remediation.executor import RemediationExecutor
 from app.core.remediation.models import RemediationRuntimeConfig, normalize_remediation_mode
 from app.core.remediation.plans import extract_remediation_plan
+from app.core.workflow.graph import build_diagnosis_workflow
+from app.core.workflow.metrics import WorkflowMetrics
+from app.core.workflow.reporter import (
+    save_report as _save_report_fn,
+)
+from app.core.workflow.reporter import (
+    update_metrics_from_state as _update_metrics_fn,
+)
+from app.core.workflow.state import WorkflowState
+from app.core.workflow.stream_contract import (
+    project_parallel_tool_event,
+    project_query_tool_event,
+    workflow_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -427,8 +433,8 @@ class WorkflowExecutor:
         _save_report_fn(self.REPORTS_DIR, layer, question, full_answer)
 
     def execute_stream(self, question, run_id=None, cancel_event=None, workflow_overrides=None):
-        from app.core.query_sessions import query_sessions, SessionBusy
-        from app.core.remediation.records import RepairRecordStore, RecordUnavailable, PlanConflict
+        from app.core.query_sessions import SessionBusy, query_sessions
+        from app.core.remediation.records import PlanConflict, RecordUnavailable, RepairRecordStore
         overrides = dict(workflow_overrides or {})
         key = overrides.pop("_query_session_key", None)
         if not key:

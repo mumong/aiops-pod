@@ -7,18 +7,27 @@ import asyncio
 import json
 
 from app.core.prompts import (
-    DIAGNOSTIC_TOOL_GUIDANCE, DEEP_LAYER_PROMPT, DEEP_EVIDENCE_PROMPT, DEEP_RCA_PROMPT,
-    AUTONOMOUS_RUNBOOK_CATALOG_HEADER, PARALLEL_LANE_TASK_PREFIX,
+    AUTONOMOUS_RUNBOOK_CATALOG_HEADER,
+    DEEP_EVIDENCE_PROMPT,
+    DEEP_LAYER_PROMPT,
+    DEEP_RCA_PROMPT,
+    DIAGNOSIS_HANDOFF_GUIDANCE,
+    DIAGNOSTIC_TOOL_GUIDANCE,
+    PARALLEL_LANE_TASK_PREFIX,
 )
-from app.core.workflow.nodes.query_answer import (
-    QueryCollectNode, build_working_material, _configure_query_runtime,
+from app.core.workflow.case_result import (
+    DiagnosisCaseOutput,
+    EvidenceStageOutput,
+    bind_case_result,
 )
 from app.core.workflow.diagnosis_contract import LocationOutput
-from app.core.prompts import DIAGNOSIS_HANDOFF_GUIDANCE
+from app.core.workflow.nodes.query_answer import (
+    QueryCollectNode,
+    _configure_query_runtime,
+    build_working_material,
+)
 from app.core.workflow.pod_detection import POD_DETECTION_GUIDANCE, assess_delivery
 from app.core.workflow.stage_material import stage_material
-from app.core.workflow.case_result import DiagnosisCaseOutput, EvidenceStageOutput, bind_case_result
-
 
 # Prometheus catalog exploration: metric/label discovery for ad-hoc queries. Diagnosis
 # lanes query Pod metrics via execute_pod_promql; across ~50k archived evidence calls

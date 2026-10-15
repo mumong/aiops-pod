@@ -21,7 +21,9 @@ _POD_INDEX_ARGV = [
 
 
 def _default_runner(argv: List[str]) -> str:
-    from app.core.remediation.pod_executor import run_argv  # read-only kubectl get, in-cluster identity
+    from app.core.remediation.pod_executor import (
+        run_argv,  # read-only kubectl get, in-cluster identity
+    )
     return run_argv(argv)
 
 

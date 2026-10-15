@@ -3,8 +3,10 @@ import copy
 import json
 
 from app.core.context.handoff import (
-    protected_handoff, handoff_from_messages, shared_runbook_projection,
+    handoff_from_messages,
     project_shared_messages,
+    protected_handoff,
+    shared_runbook_projection,
 )
 from app.core.workflow.working_material import build_working_material
 

@@ -7,7 +7,11 @@ import pytest
 from app.core.aicall.builtin_tools import ReadContextArchiveTool
 from app.core.context.budget import estimate_tokens
 from app.core.context.evidence_view import (
-    build_evidence_view, compact_json, decode_json, encode_json, resolve_pointer,
+    build_evidence_view,
+    compact_json,
+    decode_json,
+    encode_json,
+    resolve_pointer,
 )
 from app.core.context.observation import ObservationProcessor
 

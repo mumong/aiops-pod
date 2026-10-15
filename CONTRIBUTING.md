@@ -9,7 +9,8 @@ by the Dockerfile. `PYTHON` defaults to `.venv/bin/python`; `RUFF` defaults to
 make test-unit
 make test-replay
 make check-syntax
-make lint
+make lint          # ruff check: E9 syntax, F pyflakes, I import order, B bugbear
+make format        # ruff format (line length 99); make format-check only verifies
 make build-main
 ```
 

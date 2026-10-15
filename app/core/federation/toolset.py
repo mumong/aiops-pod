@@ -18,8 +18,8 @@ from holmes.core.tools import Tool, Toolset
 from pydantic import PrivateAttr
 
 from app.core.async_bridge import run_coroutine_sync
-from app.core.federation.registry import AgentRegistry
 from app.core.federation.client import SubAgentClient
+from app.core.federation.registry import AgentRegistry
 from app.core.federation.report_parser import extract_final_answer
 
 logger = logging.getLogger(__name__)

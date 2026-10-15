@@ -1,9 +1,9 @@
 import asyncio
 import copy
 import hashlib
+import json
 import os
 import sys
-import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +13,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-from app.core.aicall.client import AICall
-from app.core.context.budget import count_tokens
-from app.core.context.observation import ObservationProcessor
-from langchain.agents.middleware.types import ToolCallRequest
 from langchain.agents.middleware import ModelRequest
+from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -28,6 +25,10 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from pydantic import Field
+
+from app.core.aicall.client import AICall
+from app.core.context.budget import count_tokens
+from app.core.context.observation import ObservationProcessor
 
 
 def _canonical_fact_record(**overrides):

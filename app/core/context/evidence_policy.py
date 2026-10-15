@@ -1,6 +1,6 @@
 """Per-response and live-history limits, independent of tool names and symptoms."""
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

@@ -63,7 +63,7 @@ async def list_tools():
         return service.get_tools_info()
     except Exception as e:
         logger.error("获取工具列表失败: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/tools/detail")
@@ -77,7 +77,7 @@ async def list_tools_detail():
         return service.get_tools_detail()
     except Exception as e:
         logger.error("获取工具详情失败: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/runbooks")
@@ -98,7 +98,7 @@ async def list_runbooks():
         return {"count": 0, "runbooks": []}
     except Exception as e:
         logger.error("获取 Runbooks 失败: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/artifacts/{artifact_id}")

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import subprocess
 import shlex
+import subprocess
 import time
 from typing import Callable, Dict, Generator, Optional
 
 from app.core.remediation.approval import ApprovalStore, approval_store
-from app.core.remediation.models import RemediationAction, RemediationPlan, normalize_remediation_mode
-
+from app.core.remediation.models import (
+    RemediationAction,
+    RemediationPlan,
+    normalize_remediation_mode,
+)
 
 CommandRunner = Callable[[str], str]
 

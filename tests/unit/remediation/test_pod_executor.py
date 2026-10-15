@@ -1,6 +1,7 @@
 import json
-from copy import deepcopy
 import threading
+from copy import deepcopy
+
 import pytest
 
 from app.core.remediation.approval import ApprovalStore
@@ -176,6 +177,7 @@ def test_cancel_during_approval_is_not_reported_as_timeout():
 def test_local_runner_uses_projected_serviceaccount_without_exposing_token(monkeypatch):
     from pathlib import Path
     from types import SimpleNamespace
+
     from app.core.remediation.pod_executor import run_argv
     monkeypatch.delenv('KUBECONFIG', raising=False)
     monkeypatch.setenv('KUBERNETES_SERVICE_HOST', '10.0.0.1')

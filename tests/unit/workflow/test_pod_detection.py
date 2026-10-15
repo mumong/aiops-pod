@@ -1,10 +1,11 @@
-from copy import deepcopy
 import json
+from copy import deepcopy
+
 import pytest
 
-from app.core.workflow.pod_detection import assess_delivery, after_location
 from app.core.context.observability_projection import _selection_priority, _summary_evidence
 from app.core.remediation.agent import _verify_establishes_terminal_success
+from app.core.workflow.pod_detection import after_location, assess_delivery
 
 
 def healthy():

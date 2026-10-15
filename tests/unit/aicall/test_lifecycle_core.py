@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.context.lifecycle_core import lifecycle_core, merge_cores, core_from_messages
+from app.core.context.lifecycle_core import core_from_messages, lifecycle_core, merge_cores
 from app.core.workflow.working_material import build_working_material
 
 
@@ -137,9 +137,10 @@ def test_diagnosis_projection_preserves_archive_and_query_compatibility(tmp_path
 
 
 def test_oversized_protected_core_fails_without_replacing_original(tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
     from app.core.aicall import working_context as wc
     from app.core.aicall.client import AICall, StructuredContextBudgetError
-    from langchain_core.messages import HumanMessage, AIMessage
     monkeypatch.setenv('AIOPS_CONTEXT_ARCHIVE_ROOT', str(tmp_path))
     client = AICall(model='openai/test', api_key='test')
     async def summary(*args, **kwargs):

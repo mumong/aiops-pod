@@ -4,16 +4,16 @@ The store transports evidence and exact plan versions; it never infers a repair.
 Execution claims and supersession share a file lock, so an old approval cannot
 start a command after a revision has been accepted.
 """
-from contextlib import contextmanager
-from copy import deepcopy
-from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import tempfile
+from contextlib import contextmanager
+from copy import deepcopy
+from datetime import datetime, timezone
+from pathlib import Path
 
 
 class RecordUnavailable(ValueError):

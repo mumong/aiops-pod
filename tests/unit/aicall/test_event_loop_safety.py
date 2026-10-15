@@ -1,11 +1,11 @@
+import json
+import queue
 import sys
 import types
-import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Literal
 from unittest.mock import MagicMock, patch
-import queue
 
 import httpx
 import pytest
@@ -25,7 +25,6 @@ from pydantic import BaseModel, Field
 
 from app.core.aicall.client import AICall
 from app.core.context.budget import count_tokens, serialize_tool_schema
-
 
 # Representative structured-output schema for AICall.call_structured tests
 # (copied from the former workflow EvidencePlanOutput contract).

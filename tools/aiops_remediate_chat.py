@@ -18,7 +18,6 @@ from urllib.parse import urlencode
 
 import requests
 
-
 APPROVAL_RE = re.compile(r"-d\s+run_id=(?P<run_id>\S+)\s+-d\s+approval_id=(?P<approval_id>\S+)")
 APPROVE_WORDS = {"approve", "approved", "yes", "y"}
 REJECT_WORDS = {"reject", "rejected", "no", "n"}

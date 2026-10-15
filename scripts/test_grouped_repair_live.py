@@ -5,10 +5,10 @@ Approves only reviewed commands for the named fixtures, never global auto mode.
 """
 import argparse
 import json
-from pathlib import Path
 import shlex
 import subprocess
 import time
+from pathlib import Path
 
 import requests
 

@@ -16,7 +16,8 @@ from typing import Any, Callable, Dict, Iterator, TypeVar
 T = TypeVar("T")
 
 _FIELDS = ("run", "node", "lane")
-_context: contextvars.ContextVar[Dict[str, str]] = contextvars.ContextVar("aiops_log_context", default={})
+_EMPTY: Dict[str, str] = {}
+_context: contextvars.ContextVar[Dict[str, str]] = contextvars.ContextVar("aiops_log_context", default=_EMPTY)
 
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s -%(log_context)s %(message)s"
 

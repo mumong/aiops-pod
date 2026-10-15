@@ -8,7 +8,7 @@ import pytest
 
 DEMO = Path(__file__).resolve().parents[3] / "test/aiops_quality_e2e"
 sys.path.insert(0, str(DEMO))
-from run_quality_demo import build_readme, write_readme_reports, write_checkpoint
+from run_quality_demo import build_readme, write_checkpoint, write_readme_reports
 
 
 def run(index=1, *, root=True, rb=1.0, evidence=1.0):

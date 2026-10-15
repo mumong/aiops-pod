@@ -4,8 +4,8 @@ Does not inspect manifests or prescribe Kubernetes repair operations. Only
 literal simple shell commands are supported inside kubectl exec/run.
 """
 import fnmatch
-from pathlib import PurePosixPath
 import shlex
+from pathlib import PurePosixPath
 
 DEFAULT_DENIED_EXECUTABLES = frozenset({"rm"})
 # Empty disables the optional executable allowlist; explicit deny still wins.

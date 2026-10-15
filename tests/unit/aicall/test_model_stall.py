@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.aicall.client import AICall, _STREAM_END
+from app.core.aicall.client import _STREAM_END, AICall
 from app.core.aicall.errors import ModelStreamInterrupted, ModelStreamStalled, model_error_code
 
 

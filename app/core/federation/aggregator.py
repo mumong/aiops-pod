@@ -19,12 +19,12 @@ from typing import Generator, List, Optional
 
 import litellm
 
-from app.core.prompts import (
-    FEDERATION_SYNTHESIS_PROMPT,
-    FEDERATION_COMPRESSION_PROMPT,
-)
 from app.core.federation.client import SubAgentClient, SubAgentResult
 from app.core.federation.registry import AgentRegistry
+from app.core.prompts import (
+    FEDERATION_COMPRESSION_PROMPT,
+    FEDERATION_SYNTHESIS_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -260,5 +260,5 @@ class FederationAggregator:
             logger.error("[FEDERATION] LLM 合成失败: %s", exc, exc_info=True)
             yield f"\n\n❌ LLM 合成失败: {exc}\n"
             yield "\n**各子集群原始报告（未合成）：**\n\n"
-            for name, url, text, _ in contents:
+            for name, _url, text, _ in contents:
                 yield f"---\n### 集群: {name}\n\n{text}\n\n"

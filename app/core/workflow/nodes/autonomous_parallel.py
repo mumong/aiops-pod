@@ -1,22 +1,22 @@
 """Bounded independent Pod lanes, without legacy diagnostic publication gates."""
 import copy
 import os
-import time
 import threading
+import time
 from typing import Any, Dict, List, Optional
-from app.core.aicall.errors import ModelStreamInterrupted, raise_on_model_disconnect
-from app.core.log_context import log_context
-from app.core.workflow.group_runner import iter_group_results
-from app.core.workflow.pod_identity import complete_pod_namespaces
 
-from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
+from app.core.aicall.errors import ModelStreamInterrupted, raise_on_model_disconnect
 from app.core.context.archive import ContextArchive
+from app.core.log_context import log_context
 from app.core.prompts import (
-    PARALLEL_LANE_QUESTION_TEMPLATE,
     PARALLEL_FANIN_INSTRUCTION,
+    PARALLEL_LANE_QUESTION_TEMPLATE,
 )
+from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
+from app.core.workflow.group_runner import iter_group_results
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.query_answer import build_working_material
+from app.core.workflow.pod_identity import complete_pod_namespaces
 from app.core.workflow.stage_material import branch_state
 
 
@@ -113,7 +113,10 @@ class AutonomousParallelNode(WorkflowNode):
             return self._run_lane_in_context(group, state)
 
     def _run_lane_in_context(self, group, state):
-        from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode, DiagnosisRootCauseNode
+        from app.core.workflow.nodes.autonomous_diagnosis import (
+            DiagnosisEvidenceNode,
+            DiagnosisRootCauseNode,
+        )
         started_at = time.time()
         # Never share the mutable AICall memory/compaction policy between workers.
         client = self.holmes_service._build_request_scoped_ai_call()

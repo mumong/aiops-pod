@@ -23,12 +23,14 @@ from app.core.workflow.fact_contract import (
 )
 
 from .archive import ContextArchive, get_archive_root
-from .prometheus_result import normalize_prometheus_result
 from .observability_projection import (
     CONTRACT_VERSION as OBSERVABILITY_PROJECTION_VERSION,
+)
+from .observability_projection import (
     project_observability_payload,
     render_observability_summary,
 )
+from .prometheus_result import normalize_prometheus_result
 
 logger = logging.getLogger(__name__)
 

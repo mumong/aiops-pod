@@ -19,13 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import yaml
 
+from app.core.aicall.builtin_tools import get_builtin_tools
 from app.core.aicall.client import AICall
 from app.core.aicall.tools import load_mcp_tools
-from app.core.aicall.builtin_tools import get_builtin_tools
-from app.core.workflow.nodes.request_router import RequestRouterNode
-from app.core.workflow.nodes.focused import FocusedTaskNode
 from app.core.workflow.executor import WorkflowExecutor
-
+from app.core.workflow.nodes.focused import FocusedTaskNode
+from app.core.workflow.nodes.request_router import RequestRouterNode
 
 QUESTIONS = [
     ("global", "我的集群有什么问题？", "full_diagnosis"),

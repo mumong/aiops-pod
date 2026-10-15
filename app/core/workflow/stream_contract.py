@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import json
-
 from typing import Any, Mapping
 
 from pydantic import BaseModel
 
 from app.core.context.prometheus_result import normalize_prometheus_result
 from app.core.context.record_result import record_display
-
 from app.core.workflow.fact_contract import OBSERVABILITY_QUERY_TOOL_DIMENSIONS
 from app.core.workflow.schemas import GroupEntity
-
 
 PARALLEL_EVIDENCE_STREAM_CONTRACT_VERSION = "aiops.parallel-evidence-stream.v1"
 

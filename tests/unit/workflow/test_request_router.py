@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,7 +92,8 @@ def test_model_500_is_not_misreported_as_lost_history_or_ambiguous_question():
 
 def test_timeout_and_connection_failures_have_distinct_presentation():
     import httpx
-    from openai import APITimeoutError, APIConnectionError
+    from openai import APIConnectionError, APITimeoutError
+
     from app.core.workflow.nodes.request_router import router_failure
     request = httpx.Request('POST', 'http://model.invalid')
     assert router_failure(APITimeoutError(request))['code'] == 'model_timeout'
@@ -101,9 +102,11 @@ def test_timeout_and_connection_failures_have_distinct_presentation():
 
 def test_native_structured_can_propagate_original_provider_failure(monkeypatch):
     monkeypatch.setenv('MODEL_CONTEXT_WINDOW', '54000')
+    from contextlib import nullcontext
+
     import httpx
     from openai import InternalServerError
-    from contextlib import nullcontext
+
     from app.core.aicall.client import AICall
     failure = InternalServerError('provider failure', response=httpx.Response(500,
         request=httpx.Request('POST', 'http://model.invalid')), body={})
@@ -124,6 +127,7 @@ def test_native_structured_can_propagate_original_provider_failure(monkeypatch):
 def test_router_error_reaches_sse_snapshot_and_final_without_query(monkeypatch, tmp_path):
     import httpx
     from openai import InternalServerError
+
     from app.core.workflow.executor import WorkflowExecutor
     failure = InternalServerError('private', response=httpx.Response(500,
         request=httpx.Request('POST', 'http://model.invalid')), body={})

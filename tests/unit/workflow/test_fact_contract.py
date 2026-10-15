@@ -9,7 +9,6 @@ from app.core.workflow.fact_contract import (
 )
 from app.core.workflow.schemas import FactRecord
 
-
 _OPTIONAL_FACT_FIELDS = {
     "namespace",
     "entity_name",

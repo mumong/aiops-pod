@@ -1,7 +1,6 @@
 import importlib.util
 from pathlib import Path
 
-
 MODULE_PATH = Path(__file__).parents[3] / "scripts" / "observability_summary_experiment.py"
 SPEC = importlib.util.spec_from_file_location("observability_summary_experiment", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None

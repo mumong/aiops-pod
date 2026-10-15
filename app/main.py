@@ -3,13 +3,13 @@
 HolmesGPT API Server
 FastAPI 应用入口，只负责应用配置和启动
 """
-import os
 import asyncio
 import logging
+import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 
 from app.api import register_routes
 from app.core.log_context import LOG_FORMAT, LogContextFilter

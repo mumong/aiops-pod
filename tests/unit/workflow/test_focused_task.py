@@ -1,11 +1,10 @@
 from types import SimpleNamespace
 
-from app.core.workflow.nodes.focused import FocusedResult, FocusedTaskNode
-from app.core.workflow.nodes.request_router import RequestContract
-from app.core.workflow.graph import build_diagnosis_workflow
 from app.core.context.observation import ObservationProcessor
 from app.core.workflow.executor import WorkflowExecutor
-from app.core.workflow.nodes.request_router import RequestRouterNode
+from app.core.workflow.graph import build_diagnosis_workflow
+from app.core.workflow.nodes.focused import FocusedResult, FocusedTaskNode
+from app.core.workflow.nodes.request_router import RequestContract, RequestRouterNode
 
 
 def test_focused_no_diagnostic_prompt_and_no_writes():
@@ -77,7 +76,7 @@ def test_auto_graph_model_selects_lightweight_scoped_request():
 def test_focused_executor_emits_final_without_enabling_remediation(monkeypatch, tmp_path):
     monkeypatch.setattr(RequestRouterNode, "execute", lambda self, state: {
         "request_route": "focused", "request_contract": {"task": "query"}})
-    from app.core.workflow.nodes.query_answer import QueryCollectNode, QueryConclusionNode
+    from app.core.workflow.nodes.query_answer import QueryCollectNode
     monkeypatch.setattr(QueryCollectNode, "execute", lambda self, state: {
         "query_draft": "CPU 查询结果",
         "conclusion": "CPU 查询结果", "conclusion_formatted": "CPU 查询结果"})

@@ -22,25 +22,26 @@ Prompt 管理：
 
 from typing import Optional
 
-# 状态模型
-from .state import WorkflowState
+from .executor import WorkflowExecutor
+
+# 工作流图和执行器
+from .graph import build_diagnosis_workflow
+
+# 指标模块
+from .metrics import (
+    NodeMetrics,
+    WorkflowMetrics,
+    finish_workflow_metrics,
+    get_current_metrics,
+    # 以下全局函数已废弃，保留兼容导入
+    start_workflow_metrics,
+)
 
 # 节点基类
 from .nodes.base import WorkflowNode
 
-# 工作流图和执行器
-from .graph import build_diagnosis_workflow
-from .executor import WorkflowExecutor
-
-# 指标模块
-from .metrics import (
-    WorkflowMetrics,
-    NodeMetrics,
-    # 以下全局函数已废弃，保留兼容导入
-    start_workflow_metrics,
-    finish_workflow_metrics,
-    get_current_metrics,
-)
+# 状态模型
+from .state import WorkflowState
 
 __all__ = [
     # 状态和节点

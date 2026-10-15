@@ -7,10 +7,20 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph.message import add_messages
 
 from app.core.aicall.builtin_tools import LegacyReadContextArchiveTool, ReadContextArchiveTool
-from app.core.aicall.working_context import WorkingContextMiddleware, compact_message, message_groups, source_receipts
+from app.core.aicall.working_context import (
+    WorkingContextMiddleware,
+    compact_message,
+    message_groups,
+    source_receipts,
+)
 from app.core.context.budget import estimate_tokens
 from app.core.context.evidence_policy import EvidencePolicy
-from app.core.context.evidence_view import build_evidence_view, compact_json, decode_json, encode_json
+from app.core.context.evidence_view import (
+    build_evidence_view,
+    compact_json,
+    decode_json,
+    encode_json,
+)
 
 
 class Client:
@@ -66,7 +76,7 @@ def test_serial_growth_has_headroom_not_compaction_every_call(tmp_path, monkeypa
         assert mw.tool_history_tokens(state) <= 24000
     assert len(compact_at) >= 2
     assert compact_at[0] >= 5
-    assert all(b - a >= 4 for a, b in zip(compact_at, compact_at[1:]))
+    assert all(b - a >= 4 for a, b in zip(compact_at, compact_at[1:], strict=False))
     assert len(model.calls) == len(compact_at)
     assert any("累计工具证据" in e.get("content", "") for e in events)
 
@@ -181,7 +191,7 @@ def test_source_refs_survive_compaction_and_node_handoff(tmp_path, monkeypatch):
 @pytest.mark.parametrize("values", [(4096, 6000, 8000), (256, 24000, 8000), (9000, 24000, 8000)])
 def test_invalid_configuration_fails_explicitly(monkeypatch, values):
     monkeypatch.setenv("AIOPS_EVIDENCE_VIEW_MODE", "compact")
-    for key, value in zip(("RESULT", "HISTORY", "RECENT"), values):
+    for key, value in zip(("RESULT", "HISTORY", "RECENT"), values, strict=False):
         monkeypatch.setenv(f"AIOPS_EVIDENCE_{key}_TOKENS", str(value))
     with pytest.raises(ValueError, match="Evidence budgets"):
         EvidencePolicy.from_env()

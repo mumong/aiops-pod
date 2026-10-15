@@ -14,7 +14,6 @@ from app.core.workflow.schemas import (
     FactRecord,
 )
 
-
 FACT_LEDGER_VERSION = "aiops.fact-ledger.v1"
 MAX_FACT_RECORDS = 48
 OBSERVABILITY_QUERY_TOOL_DIMENSIONS = {

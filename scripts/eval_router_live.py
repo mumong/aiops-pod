@@ -1,11 +1,10 @@
 """Opt-in real-model intent evaluation. Classifies only; never runs cluster tools."""
 import argparse
 import ast
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-
 
 CASES = [
     ('我的集群pod有什么问题？', 'full_diagnosis', 'cluster'),
@@ -57,7 +56,7 @@ def main():
         if not path:
             continue
         prompt = literal(path, 'REQUEST_ROUTER_PROMPT')
-        def evaluate(case):
+        def evaluate(case, prompt=prompt):
             client = AICall(model=os.environ['LLM_MODEL'], api_key=os.environ['LLM_API_KEY'],
                             api_base=os.environ['LLM_API_BASE'])
             q = json.dumps({'question': case['question'], 'history': case.get('history', [])}, ensure_ascii=False)

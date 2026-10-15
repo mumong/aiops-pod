@@ -1,7 +1,8 @@
 """Pure projections for shared evidence and the latest working context."""
 
 from datetime import datetime, timezone
-from app.core.context.handoff import shared_runbook_projection, project_shared_messages
+
+from app.core.context.handoff import project_shared_messages, shared_runbook_projection
 
 
 def evidence_receipts(events):
@@ -56,7 +57,11 @@ def build_working_material(state):
     )
     shared = state.get("shared_runbooks") or []
     shared_refs = {item["raw_ref"] for item in shared if item.get("raw_ref")}
-    from app.core.context.lifecycle_core import core_from_material, observation_reference, material_without_core
+    from app.core.context.lifecycle_core import (
+        core_from_material,
+        material_without_core,
+        observation_reference,
+    )
     protected = dict(events[last_compaction].get('protected_handoff') or {}) if last_compaction >= 0 else {}
     if state.get('diagnosis_handoff') is not None:
         protected['diagnosis_handoff'] = state['diagnosis_handoff']

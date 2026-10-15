@@ -62,8 +62,9 @@ def test_compaction_cannot_reinflate_stage_protection():
 def test_evidence_core_survives_only_into_own_rca(monkeypatch):
     import json
     from types import SimpleNamespace
-    from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode
+
     from app.core.context.handoff import protected_handoff
+    from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode
     node = DiagnosisEvidenceNode()
     node.ai_call = SimpleNamespace()
     core = {"key_facts": [{"statement": "原始错误", "observed_at": "",
@@ -84,6 +85,7 @@ def test_evidence_core_survives_only_into_own_rca(monkeypatch):
 def test_real_rca_node_publishes_report_and_index_to_archive(tmp_path, monkeypatch):
     import json
     from types import SimpleNamespace
+
     from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisRootCauseNode
     monkeypatch.setenv("AIOPS_CONTEXT_ARCHIVE_ROOT", str(tmp_path))
     node = DiagnosisRootCauseNode()
@@ -112,6 +114,7 @@ def test_real_rca_node_publishes_report_and_index_to_archive(tmp_path, monkeypat
 def test_actual_compactor_keeps_selected_core_and_not_lifecycle(monkeypatch):
     import asyncio
     import json
+
     from app.core.aicall.working_context import compact_working_material
     state = source()
     core = {"key_facts": [{"statement": "关键原始错误", "evidence_refs": ["/raw/log"]}],

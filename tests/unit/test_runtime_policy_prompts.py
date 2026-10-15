@@ -8,8 +8,6 @@ import pytest
 from app.core import prompts
 from app.core.workflow.nodes import base, query_answer
 from app.core.workflow.nodes.focused import FocusedTaskNode
-from app.core.workflow.nodes.remediation import RepairDraft
-
 
 # Frozen pre-extraction bytes, deliberately independent of production constants.
 AUTO_LINE = "当前修复模式为 auto：结构化修复计划中的安全动作可由修复执行器自动审批并执行。"

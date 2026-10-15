@@ -8,9 +8,9 @@
 - 每个节点的 LLM 分析结果都被保存，供下游节点使用
 """
 
-from typing import TypedDict, Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional, TypedDict
 
-from app.core.skills.models import Layer, DeterministicDecision, EvidenceItem
+from app.core.skills.models import DeterministicDecision, EvidenceItem, Layer
 
 
 class WorkflowState(TypedDict, total=False):

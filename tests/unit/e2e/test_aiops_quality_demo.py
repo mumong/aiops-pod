@@ -3,21 +3,21 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-
 DEMO_DIR = Path("test/aiops_quality_e2e").resolve()
 if str(DEMO_DIR) not in sys.path:
     sys.path.insert(0, str(DEMO_DIR))
 
+import run_quality_demo as quality_demo  # noqa: E402
 from evaluator import (  # noqa: E402
     EvidenceExpectation,
     EvidenceLaneScore,
     EvidenceScore,
     RootCauseExpectation,
     extract_root_claims,
-    score_runbooks,
-    score_evidence_lanes,
     score_evidence_contract,
+    score_evidence_lanes,
     score_root_causes,
+    score_runbooks,
 )
 from run_quality_demo import (  # noqa: E402
     ARCHIVE_END,
@@ -25,11 +25,11 @@ from run_quality_demo import (  # noqa: E402
     QUALITY_THRESHOLDS,
     SCORING_VERSION,
     DiagnosisResult,
+    _aggregate_runs,
     _parse_archive_stdout,
     _sse_events,
-    _aggregate_runs,
-    build_summary,
     build_console_report,
+    build_summary,
     default_output_dir,
     launch_protected_worker,
     load_scenarios,
@@ -38,7 +38,6 @@ from run_quality_demo import (  # noqa: E402
     run_diagnosis_once,
     select_scenarios,
 )
-import run_quality_demo as quality_demo  # noqa: E402
 
 
 def _expectation(root_id, include_all, include_any=(), exclude_any=()):

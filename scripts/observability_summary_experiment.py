@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-
 CONTRACT_VERSION = "aiops.observability-agent-evidence.shadow.v1"
 IDENTITY_LABELS = {"__name__", "namespace", "pod", "uid", "pod_uid"}
 CONTROL_FIELDS = {

@@ -1,14 +1,13 @@
 import os
 import sys
 
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
+from app.core.context.observation import ObservationProcessor
 from app.core.workflow.schemas import (
     FactLedger,
     FactRecord,
 )
-from app.core.context.observation import ObservationProcessor
 
 
 def test_prometheus_http_error_is_semantic_failure():

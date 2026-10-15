@@ -19,7 +19,7 @@ def test_internal_calls_merge_internal_extra_body_and_main_calls_do_not():
     assert _extra_body(main)["chat_template_kwargs"] == {"foo": 1}
     assert _extra_body(internal)["chat_template_kwargs"] == {"foo": 1, "enable_thinking": False}
     assert internal.kwargs["max_tokens"] == 1234
-    assert getattr(internal, "bound").streaming is False
+    assert internal.bound.streaming is False
 
 
 def test_no_internal_extra_body_by_default():

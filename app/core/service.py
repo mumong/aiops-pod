@@ -4,25 +4,30 @@ AIOps Copilot Service
 负责 AI 服务的初始化、配置和查询执行
 唯一模式：AICall (LangGraph) + Workflow
 """
-import os
-import logging
-import threading
 import json
+import logging
+import os
+import threading
 import time
-from pathlib import Path
-from typing import Optional, Tuple, Any, Generator, Dict, List
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from holmes.plugins.runbooks import RunbookCatalog
 
-from app.core.config import AppConfig
-from app.core.runbook import RunbookManager
-from app.core.paths import get_app_version, get_project_root
-from app.core.environment import get_config_file_path
-from app.core.holmes.streaming import create_sse_message_cn, format_duration
-from app.core.holmes.config_loader import load_holmes_config_from_yaml
-from app.core.federation import get_federation_coordinator, FederationCoordinator, get_federation_agent, FederationAgent
 from app.core.aicall import AICall
+from app.core.config import AppConfig
+from app.core.environment import get_config_file_path
+from app.core.federation import (
+    FederationAgent,
+    FederationCoordinator,
+    get_federation_agent,
+    get_federation_coordinator,
+)
+from app.core.holmes.config_loader import load_holmes_config_from_yaml
+from app.core.holmes.streaming import create_sse_message_cn, format_duration
+from app.core.paths import get_app_version, get_project_root
+from app.core.runbook import RunbookManager
 
 logger = logging.getLogger(__name__)
 

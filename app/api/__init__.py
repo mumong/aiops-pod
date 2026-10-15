@@ -3,8 +3,8 @@ API 模块
 定义所有 API 端点和路由
 """
 
+from .models import QueryResult, ToolCallInfo
 from .routes import register_routes
-from .models import ToolCallInfo, QueryResult
 
 __all__ = [
     "register_routes",

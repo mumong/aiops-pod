@@ -5,15 +5,15 @@ Depth and scope are independent. Structured validation does not rewrite the
 model's route; both branches retain the original question and scope.
 """
 
-from typing import Any, Literal
-import time
-
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from openai import APIStatusError, APITimeoutError
-from app.core.prompts import REQUEST_ROUTER_PROMPT
 import json
+import time
 from datetime import datetime, timezone
+from typing import Any, Literal
 
+from openai import APIStatusError, APITimeoutError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from app.core.prompts import REQUEST_ROUTER_PROMPT
 from app.core.workflow.nodes.base import WorkflowNode
 
 
@@ -74,8 +74,8 @@ class RequestRouterNode(WorkflowNode):
         return False
 
     def execute(self, state):
-        from app.core.workflow.nodes.query_answer import _configure_query_runtime
         from app.core.aicall.client import StructuredContextBudgetError
+        from app.core.workflow.nodes.query_answer import _configure_query_runtime
         _configure_query_runtime(self)
         question = state.get("original_question") or state.get("question", "")
         if state.get("repair_entry_requested"):
@@ -120,6 +120,7 @@ class RequestRouterNode(WorkflowNode):
                 if "working_context_compaction_required" not in str(exc):
                     raise
                 import asyncio
+
                 from app.core.aicall.working_context import compact_working_material
                 model = self.ai_call.create_compaction_model()
                 reduced = asyncio.run(compact_working_material(model, {

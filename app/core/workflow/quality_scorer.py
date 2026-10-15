@@ -13,11 +13,11 @@
 - 每个维度和惩罚项都有明确的数据来源和计算规则
 """
 
+import json
 import logging
 import re
-import json
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

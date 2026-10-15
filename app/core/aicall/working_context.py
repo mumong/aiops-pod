@@ -1,17 +1,22 @@
 """Intent-aware, persistent replacement of an agent's working history."""
 
-import json
 import asyncio
+import json
 import os
+
 from langchain.agents.middleware import AgentMiddleware, ModelRequest
-from langchain_core.messages import HumanMessage, SystemMessage, RemoveMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from app.core.context.archive import ContextArchive
-from app.core.context.handoff import protected_handoff, handoff_from_messages
-from app.core.context.lifecycle_core import material_without_core, messages_without_core, core_notice
 from app.core.context.budget import count_tokens
 from app.core.context.evidence_policy import EvidencePolicy
+from app.core.context.handoff import handoff_from_messages, protected_handoff
+from app.core.context.lifecycle_core import (
+    core_notice,
+    material_without_core,
+    messages_without_core,
+)
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT as SUMMARY_PROMPT
 from app.core.prompts import WORKING_CONTEXT_SUMMARY_PREFIX
 

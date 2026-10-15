@@ -4,10 +4,9 @@ Every returned entity is retained. Only detail fields are projected away; raw
 archives remain authoritative. No size limit or model summary edits this core.
 """
 import copy
-import json
 import hashlib
+import json
 from datetime import datetime, timezone
-
 
 CORE_VERSION = 'pod-lifecycle-core.v1'
 INVENTORY_VERSION = 'pod-lifecycle-inventory.v1'

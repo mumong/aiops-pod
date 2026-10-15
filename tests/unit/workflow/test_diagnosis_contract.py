@@ -5,13 +5,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.workflow.diagnosis_contract import DiagnosisHandoff, scoped_handoff
-from app.core.workflow.nodes.autonomous_parallel import plan_groups
-from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisStageNode, DiagnosisEvidenceNode, DiagnosisRootCauseNode
-from app.core.workflow.working_material import build_working_material
-from app.core.context.handoff import protected_handoff, handoff_from_messages
-from app.core.remediation.records import diagnosis_payload
+from app.core.context.handoff import handoff_from_messages, protected_handoff
 from app.core.remediation.group_context import scoped_diagnosis
+from app.core.remediation.records import diagnosis_payload
+from app.core.workflow.diagnosis_contract import DiagnosisHandoff, scoped_handoff
+from app.core.workflow.nodes.autonomous_diagnosis import (
+    DiagnosisEvidenceNode,
+    DiagnosisRootCauseNode,
+    DiagnosisStageNode,
+)
+from app.core.workflow.nodes.autonomous_parallel import plan_groups
+from app.core.workflow.working_material import build_working_material
 
 
 def packet(count=4, kind="Pod"):

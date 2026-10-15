@@ -11,8 +11,13 @@ DEMO = Path(__file__).resolve().parents[3] / "test/aiops_quality_e2e"
 sys.path.insert(0, str(DEMO))
 from evaluator import extract_root_claims, score_root_causes, score_runbooks
 from run_quality_demo import (
-    load_scenarios, exclusive_lock, atomic_write, scoring_manifest,
-    rescore_existing_report, evaluation_warnings, build_console_report,
+    atomic_write,
+    build_console_report,
+    evaluation_warnings,
+    exclusive_lock,
+    load_scenarios,
+    rescore_existing_report,
+    scoring_manifest,
 )
 
 
