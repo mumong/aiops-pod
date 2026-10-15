@@ -175,7 +175,9 @@ def test_bounded_pod_table_shows_every_non_nominal_row_but_keeps_healthy_rows(tm
 
 
 def test_diagnosis_stages_expose_scoped_tools_only():
-    from app.core.workflow.nodes.autonomous_diagnosis import DiagnosisEvidenceNode, _METRIC_CATALOG_TOOLS
+    from app.core.workflow.nodes.autonomous_diagnosis import (
+        DiagnosisEvidenceNode, DiagnosisStageNode, _METRIC_CATALOG_TOOLS,
+    )
     from app.core.workflow.nodes.query_answer import QueryCollectNode
 
     layer = DiagnosisStageNode.READ_TOOLS
