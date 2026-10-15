@@ -100,3 +100,19 @@ def test_stall_is_reported_even_if_the_stream_is_slow_to_cancel():
         return time.monotonic() - started
 
     assert asyncio.run(main()) < 1.5
+
+
+def test_stall_error_names_what_the_agent_was_waiting_on():
+    run = SimpleNamespace(pending_tool_calls=0, node_id="layer", iteration=5,
+                          waiting_on="本节点第 6 次模型请求（已发出，输入约 25096 tokens）")
+
+    async def main():
+        with pytest.raises(ModelStreamStalled) as info:
+            await AICall._next_stream_chunk(_Stream([]), run, 0.1)
+        return info.value
+
+    err = asyncio.run(main())
+    assert "第 6 次模型请求" in str(err) and "25096" in str(err)
+    assert err.waiting_on.startswith("本节点第 6 次")
+    compaction = ModelStreamStalled(180, waiting_on="上下文压缩（内部摘要模型调用，压缩早期工作历史）")
+    assert "上下文压缩" in str(compaction) and model_error_code(compaction) == "model_stalled"

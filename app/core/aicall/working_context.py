@@ -273,12 +273,14 @@ async def summarize_history(model, question, serialized, progress=None, *, windo
 
 
 class WorkingContextMiddleware(AgentMiddleware):
-    def __init__(self, client, model, summary_model, tools, system_prompt, question, run_id, node_id, emit, response_format=None):
+    def __init__(self, client, model, summary_model, tools, system_prompt, question, run_id, node_id, emit, response_format=None,
+                 on_waiting=None):
         self.client, self.model, self.summary_model = client, model, summary_model
         self.tools, self.system_prompt, self.question = tools, system_prompt, question
         self.run_id, self.node_id, self.emit = run_id, node_id, emit
         self.sequence = 0
         self.response_format = response_format
+        self.on_waiting = on_waiting
         self.evidence_policy = EvidencePolicy.from_env()
 
     @staticmethod
@@ -359,6 +361,8 @@ class WorkingContextMiddleware(AgentMiddleware):
         self.emit(type="runtime_status", status="running", content=(
             "累计工具证据达到工作预算，正在整理早期历史；近期完整交互与原文归档保留，完成后继续。"
             if trigger == "evidence_history_budget" else "上下文达到预算，正在整理早期历史并保留近期完整交互。"))
+        if self.on_waiting is not None:
+            self.on_waiting("上下文压缩（内部摘要模型调用，压缩早期工作历史）")
         summary = await summarize_history(self.summary_model, self.question,
                                           history, self.emit, window=window, sections=sections, stats=stats)
         # Keep provenance outside model-written text as well as in the snapshot.

@@ -13,10 +13,12 @@ class ModelStreamStalled(ModelStreamInterrupted):
 
     error_code = "model_stalled"
 
-    def __init__(self, idle_seconds: float):
+    def __init__(self, idle_seconds: float, waiting_on: str = ""):
         self.idle_seconds = idle_seconds
+        self.waiting_on = waiting_on
+        detail = f"等待「{waiting_on}」" if waiting_on else "等待模型输出"
         super().__init__(
-            f"模型服务停滞：等待模型输出已超过 {idle_seconds:g} 秒未收到任何数据（模型或 LLM 网关无响应），"
+            f"模型服务停滞：{detail}已超过 {idle_seconds:g} 秒未收到任何数据（模型或 LLM 网关无响应），"
             "不是诊断流程卡住。本次运行已终止，已采集内容保留，请稍后重新发起。"
         )
 

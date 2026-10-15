@@ -218,6 +218,7 @@ class _AgentRun:
     model_request_started_at: float = 0.0
     pending_tool_calls: int = 0  # >0 while tools run; idle watchdog only applies when waiting on the model
     incomplete_reason: str = ""  # agent_timeout / step_limit / agent_error when the stream did not finish
+    waiting_on: str = "模型响应"  # what the agent is currently waiting for (named in stall errors)
     all_tool_calls: List[Dict] = field(default_factory=list)
     content_buffer: List[str] = field(default_factory=list)  # token 级别的文本片段
     tool_observation_contents: List[str] = field(default_factory=list)
@@ -1182,6 +1183,7 @@ class AICall:
                 stream_queue=stream_queue,
                 thinking_events=thinking_events,
                 response_format=response_format,
+                on_waiting=lambda text: setattr(run, "waiting_on", text),
             ),
             input_messages=input_messages,
             config=config,
@@ -1296,6 +1298,7 @@ class AICall:
         thinking_events: List[Dict],
         response_format: Any,
         disable_streaming: bool = False,
+        on_waiting: Optional[Callable[[str], None]] = None,
     ):
         # 创建 LangChain Agent (create_agent，替代已废弃的 create_react_agent)
         from langchain.agents import create_agent
@@ -1317,6 +1320,7 @@ class AICall:
                 self._build_context_hard_guard_middleware(
                     node_id=node_id or "agent",
                     run_id=run_id,
+                    on_waiting=on_waiting,
                 ),
                 self._build_tool_dedup_middleware(getattr(self, "query_tool_timeout", 0)),
             ],
@@ -1330,6 +1334,7 @@ class AICall:
                 run_id, node_id or "agent",
                 lambda **event: self._push(stream_queue, node_id, thinking_events, **event),
                 response_format=response_format,
+                on_waiting=on_waiting,
             ))
         if response_format is not None:
             create_agent_kwargs["response_format"] = response_format
@@ -1596,11 +1601,12 @@ class AICall:
             # Do not await the cancellation: a stream stuck on an in-flight request may
             # take minutes to unwind, which would hide the stall from the user.
             step.cancel()
+            waiting_on = getattr(run, "waiting_on", "") or "模型响应"
             logger.warning(
-                "[AICall] 模型流停滞：%ss 未收到任何输出 (node=%s, iteration=%d)",
-                idle_limit, run.node_id, run.iteration,
+                "[AICall] 模型流停滞：%ss 未收到任何输出 (node=%s, iteration=%d, 等待：%s)",
+                idle_limit, run.node_id, run.iteration, waiting_on,
             )
-            raise ModelStreamStalled(idle_limit)
+            raise ModelStreamStalled(idle_limit, waiting_on=waiting_on)
         try:
             return step.result()
         except StopAsyncIteration:
@@ -2436,6 +2442,7 @@ class AICall:
         *,
         node_id: str,
         run_id: str,
+        on_waiting: Optional[Callable[[str], None]] = None,
     ):
         """Bound every LangGraph model request before it reaches the provider."""
         from langchain.agents.middleware import wrap_model_call
@@ -2476,6 +2483,12 @@ class AICall:
                         "[AICall] agent hard guard budget 写入失败: %s",
                         exc,
                     )
+            if on_waiting is not None:
+                tokens = ((budget or {}).get("hard_guard") or {}).get("final_input_tokens")
+                on_waiting(
+                    f"本节点第 {request_sequence} 次模型请求（已发出，输入约 {tokens} tokens）"
+                    if tokens else f"本节点第 {request_sequence} 次模型请求（已发出）"
+                )
             return await handler(guarded_request)
 
         return guard_model_request
