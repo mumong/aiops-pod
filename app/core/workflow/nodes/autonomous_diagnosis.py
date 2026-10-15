@@ -77,7 +77,7 @@ class DiagnosisStageNode(QueryCollectNode):
             if "working_context_compaction_required" not in str(exc):
                 raise
             from app.core.aicall.working_context import compact_working_material
-            model = self.ai_call._create_chat_model(node_id="context_compaction", disable_streaming=True).bind(max_tokens=3000)
+            model = self.ai_call.create_compaction_model()
             compact = asyncio.run(compact_working_material(
                 model, material,
                 lambda **event: self.ai_call._push(self._event_queue, self.node_id, events, **event),

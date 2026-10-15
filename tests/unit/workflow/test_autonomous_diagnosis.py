@@ -128,7 +128,7 @@ def test_heavy_table_summary_does_not_select_only_abnormal_objects(tmp_path, nod
 def test_tool_free_nodes_compact_oversized_material_instead_of_truncating(node_class, monkeypatch):
     node = node_class()
     model = SimpleNamespace(bind=lambda **kw: object())
-    node.ai_call = SimpleNamespace(_create_chat_model=lambda **kw: model, _push=lambda *a, **kw: None)
+    node.ai_call = SimpleNamespace(create_compaction_model=lambda **kw: model.bind(), _push=lambda *a, **kw: None)
     calls, summaries = [], []
     async def summarize(model, question, material, *args, **kwargs):
         summaries.append((question, material))

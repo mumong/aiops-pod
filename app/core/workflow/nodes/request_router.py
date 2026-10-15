@@ -121,7 +121,7 @@ class RequestRouterNode(WorkflowNode):
                     raise
                 import asyncio
                 from app.core.aicall.working_context import compact_working_material
-                model = self.ai_call._create_chat_model(node_id="context_compaction", disable_streaming=True).bind(max_tokens=3000)
+                model = self.ai_call.create_compaction_model()
                 reduced = asyncio.run(compact_working_material(model, {
                     "question": question, "working_summary": context["working_summary"],
                     "recent_interactions": [{"type": "human", "content": json.dumps(turn, ensure_ascii=False)}

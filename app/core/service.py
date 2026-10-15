@@ -400,6 +400,7 @@ class HolmesService:
                     observation_summary_max_chars=summary_max_chars,
                     context_compaction_config=self.get_context_compaction_config(),
                     chat_model_extra_body=self.get_chat_model_extra_body_config(_llm_config),
+                    internal_extra_body=self.get_internal_extra_body_config(_llm_config),
                 )
                 logger.info("   AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
                            final_model, summary_mode, summary_max_chars, time.time() - step_start)
@@ -563,6 +564,7 @@ class HolmesService:
                 observation_summary_max_chars=summary_max_chars,
                 context_compaction_config=self.get_context_compaction_config(),
                 chat_model_extra_body=self.get_chat_model_extra_body_config(),
+                internal_extra_body=self.get_internal_extra_body_config(),
             )
         except TypeError:
             # Unit-test fakes may not implement the production constructor extension.
@@ -687,6 +689,19 @@ class HolmesService:
         except (TypeError, ValueError):
             result["hard_guard_preserve_tail_tokens"] = 1200
         return result
+
+    def get_internal_extra_body_config(
+        self,
+        llm_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """``llm.internal_extra_body``: extra request options for internal calls only
+        (context compaction, structured finalization), e.g. disabling model thinking."""
+        cfg = llm_config if isinstance(llm_config, dict) else None
+        if cfg is None:
+            raw_cfg = getattr(self, "raw_config", {}) if isinstance(getattr(self, "raw_config", {}), dict) else {}
+            cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
+        extra_body = cfg.get("internal_extra_body", {})
+        return dict(extra_body) if isinstance(extra_body, dict) else {}
 
     def get_chat_model_extra_body_config(
         self,

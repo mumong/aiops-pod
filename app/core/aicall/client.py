@@ -111,6 +111,17 @@ class StructuredContextBudgetError(RuntimeError):
 
 
 _STREAM_END = object()
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
 _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
 
 
@@ -175,12 +186,15 @@ class AICall:
         observation_summary_max_chars: int = 3000,
         context_compaction_config: Optional[Dict[str, Any]] = None,
         chat_model_extra_body: Optional[Dict[str, Any]] = None,
+        internal_extra_body: Optional[Dict[str, Any]] = None,
     ):
         """
         Args:
             model: litellm 格式模型名，如 "deepseek/deepseek-chat"
             api_key: API Key
             api_base: 可选代理地址（覆盖默认 endpoint）
+            internal_extra_body: 仅用于内部调用（上下文压缩、结构化收卷）的额外参数，
+                例如关闭推理模型的 thinking，避免推理 token 挤占有限的输出额度。
         """
         self.model = model
         self.model_str = model
@@ -191,6 +205,7 @@ class AICall:
         self.observation_summary_max_chars = max(200, int(observation_summary_max_chars or 3000))
         self.context_compaction_config = dict(context_compaction_config or {})
         self.chat_model_extra_body = deepcopy(chat_model_extra_body or {})
+        self.internal_extra_body = deepcopy(internal_extra_body or {})
 
         model_name, base_url = _parse_model(model, api_base)
         self._chat_model_kwargs: Dict[str, Any] = {
@@ -214,17 +229,29 @@ class AICall:
         session_id: Optional[str] = None,
         node_id: str = "",
         disable_streaming: bool = False,
+        internal: bool = False,
     ):
-        """按次创建 ChatOpenAI，避免跨 asyncio event loop 复用底层 async client。"""
+        """按次创建 ChatOpenAI，避免跨 asyncio event loop 复用底层 async client。
+
+        ``internal=True`` 用于不面向用户的内部调用，合并 ``internal_extra_body``。
+        """
         kwargs = dict(self._chat_model_kwargs)
         if disable_streaming:
             kwargs["streaming"] = False
             kwargs["disable_streaming"] = True
         metadata = self._session_metadata(session_id, node_id)
         extra_body = self._build_extra_body(session_id, node_id, metadata)
+        if internal and self.internal_extra_body:
+            extra_body = _deep_merge(extra_body, self.internal_extra_body)
         if extra_body:
             kwargs["extra_body"] = extra_body
         return ChatOpenAI(**kwargs)
+
+    def create_compaction_model(self, max_tokens: int = 3000):
+        """Non-streaming internal model for context compaction / summaries."""
+        return self._create_chat_model(
+            node_id="context_compaction", disable_streaming=True, internal=True,
+        ).bind(max_tokens=max_tokens)
 
     @staticmethod
     def _is_retryable_stream_eof(exc: Exception) -> bool:
@@ -1228,9 +1255,7 @@ class AICall:
         }
         if getattr(self, "query_context_state_compaction", False):
             from app.core.aicall.working_context import WorkingContextMiddleware
-            summary_model = self._create_chat_model(
-                node_id="context_compaction", disable_streaming=True,
-            ).bind(max_tokens=3000)
+            summary_model = self.create_compaction_model()
             create_agent_kwargs["middleware"].insert(0, WorkingContextMiddleware(
                 self, agent_model, summary_model, tools, system_prompt,
                 getattr(self, "working_context_original_question", None) or question,

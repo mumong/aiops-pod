@@ -208,9 +208,7 @@ class QueryConclusionNode(FocusedTaskNode):
                 import asyncio
                 from app.core.aicall.working_context import compact_working_material
 
-                model = self.ai_call._create_chat_model(
-                    node_id="context_compaction", disable_streaming=True
-                ).bind(max_tokens=3000)
+                model = self.ai_call.create_compaction_model()
                 compact_payload = asyncio.run(
                     compact_working_material(
                         model,
