@@ -6,10 +6,7 @@
 
 FROM python:3.12-slim
 
-# 构建参数
-ARG VERSION=1.0.0
-ARG COMMIT_HASH=unknown
-ARG BUILD_TIME=unknown
+# 构建参数（只放依赖层需要的；VERSION 等在依赖层之后声明，避免每次发布都重装依赖）
 ARG KUBECTL_VERSION=v1.29.15
 ARG HELM_VERSION=v3.14.4
 
@@ -68,6 +65,12 @@ RUN pip install --no-cache-dir --no-compile --upgrade pip==26.2.0 \
 RUN useradd -m -u 1000 appuser \
     && mkdir -p /app/config \
     && chown appuser:appuser /app /app/config
+
+# 版本信息在依赖层之后进入镜像：VERSION 变化只影响以下层，apt/pip 层保持缓存，
+# 发布不依赖外网（2026-10-15 两次发布因 apt/pip 走不通网络而失败）。
+ARG VERSION=1.0.0
+ARG COMMIT_HASH=unknown
+ARG BUILD_TIME=unknown
 
 # 复制应用代码
 COPY --chown=appuser:appuser app/ ./app/
