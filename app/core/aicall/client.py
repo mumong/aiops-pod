@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from copy import deepcopy
 from dataclasses import dataclass, field
 from contextlib import ExitStack, contextmanager, nullcontext
@@ -43,6 +44,7 @@ from app.core.prompts import (
     STRUCTURED_FINALIZATION_INSTRUCTION,
 )
 from app.core.async_bridge import run_coroutine_sync, run_until_cancelled
+from app.core.log_context import bind_current_context
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import (
     ContextBudgetEstimator,
@@ -135,6 +137,37 @@ _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
 
 
 _DEFAULT_MAX_TOOL_CALLS_PER_TURN = 16
+_DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS = 480.0
+
+
+def _structured_call_timeout_seconds() -> Optional[float]:
+    """Absolute deadline for one non-streaming structured call (0 disables).
+
+    Non-streaming calls are not covered by the stream idle watchdog, and gateways
+    that send keepalive bytes defeat the SDK read timeout (observed >13 min).
+    """
+    try:
+        value = float(os.getenv("AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS", _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS))
+    except ValueError:
+        value = _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS
+    return value if value > 0 else None
+
+
+def _call_with_deadline(fn: Callable[[], Any], timeout: Optional[float], *, what: str) -> Any:
+    """Run a blocking call with an absolute deadline; on expiry the caller is released
+    (the abandoned request finishes in its worker thread) and TimeoutError is raised."""
+    if timeout is None:
+        return fn()
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aicall-deadline")
+    try:
+        future = pool.submit(bind_current_context(fn))
+        try:
+            return future.result(timeout=timeout)
+        except FutureTimeoutError:
+            logger.warning("[AICall] %s 超过 %ss 未返回，放弃等待", what, timeout)
+            raise TimeoutError(f"模型响应超过 {timeout:g} 秒未完成") from None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _max_tool_calls_per_turn() -> int:
@@ -651,10 +684,14 @@ class AICall:
             structured_model = model.with_structured_output(schema, method=structured_method)
             invoke_config = self._build_langchain_config(session_id, node_id=node_id or "structured")
             with self._langfuse_session_scope(session_id, node_id or "structured"):
-                result = (
-                    structured_model.invoke(messages, config=invoke_config)
-                    if invoke_config
-                    else structured_model.invoke(messages)
+                result = _call_with_deadline(
+                    lambda: (
+                        structured_model.invoke(messages, config=invoke_config)
+                        if invoke_config
+                        else structured_model.invoke(messages)
+                    ),
+                    _structured_call_timeout_seconds(),
+                    what=f"structured call node={node_id or 'structured'} schema={schema.__name__}",
                 )
             if isinstance(result, schema):
                 raw = result.model_dump_json()
