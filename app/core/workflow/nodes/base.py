@@ -36,6 +36,20 @@ class WorkflowNode(ABC):
     所有工作流节点必须继承此类并实现 execute 方法
     """
 
+    # Tool names listed here are presented to the model first (stable order for the
+    # rest). Small models lean towards the first look-alike entries of a long tool
+    # list; a node states which capabilities matter most without hiding the others.
+    PREFERRED_TOOLS: tuple = ()
+
+    def order_tools(self, tools):
+        preferred = {name: index for index, name in enumerate(self.PREFERRED_TOOLS)}
+        if not preferred:
+            return list(tools)
+        return sorted(
+            tools,
+            key=lambda tool: preferred.get(str(getattr(tool, "name", "") or ""), len(preferred)),
+        )
+
     # 实例级事件队列：当不为 None 时，_call_llm 使用 call_with_stream_and_queue
     # 以便 executor 实时读取 thinking 事件（每个请求独立）
     _event_queue: Optional[queue.Queue] = None
@@ -266,6 +280,7 @@ class WorkflowNode(ABC):
                 for tool in tools
                 if str(getattr(tool, "name", "") or "") not in blocked_tool_names
             ]
+        tools = self.order_tools(tools)
         run_id = getattr(self, "current_run_id", "") or kwargs.pop("run_id", "")
         tool_schema_payload = serialize_tool_schema(tools)
         static_context_components = [

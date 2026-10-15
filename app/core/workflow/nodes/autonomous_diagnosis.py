@@ -317,6 +317,13 @@ class DiagnosisEvidenceNode(DiagnosisStageNode):
     # metrics/logs/traces/topology plus its own Kubernetes objects. Cluster listing, grep
     # and catalog tools stay out; 30 -> 17 schemas (~6.6k -> ~3.8k tokens per request)
     # and fewer look-alike choices for small models.
+    # Real observability data first in the tool list; the rest keep service order.
+    PREFERRED_TOOLS = (
+        "execute_pod_promql",
+        "query_pod_logs",
+        "query_pod_tracing",
+        "query_pod_topology",
+    )
     READ_TOOLS = frozenset(
         {
             "execute_pod_promql",
