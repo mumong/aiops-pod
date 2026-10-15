@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import threading
-from contextlib import AbstractContextManager, nullcontext, suppress
+import time
+from contextlib import AbstractContextManager, nullcontext
 from typing import Awaitable, Callable, Optional, TypeVar
 
 from app.core.log_context import bind_current_context
@@ -17,6 +18,7 @@ T = TypeVar("T")
 # cancellation (e.g. blocked in synchronous I/O).
 _CANCEL_GRACE_SECONDS = 5.0
 _CANCEL_POLL_SECONDS = 0.5
+_OUTCOME_POLL_SECONDS = 0.05
 
 
 def run_coroutine_sync(
@@ -28,26 +30,57 @@ def run_coroutine_sync(
 ) -> T:
     """Run ``factory()`` in a private event loop on a dedicated worker thread.
 
-    On timeout the coroutine is cancelled inside its own loop and
-    ``TimeoutError`` is raised; the caller never blocks waiting for a worker
-    that refuses to stop.
+    The outcome is handed to the caller as soon as the coroutine finishes or the
+    timeout fires - before the loop's teardown, which waits for cancelled tasks.
+    A coroutine slow to honour cancellation (e.g. a stream whose cleanup awaits an
+    in-flight HTTP request) therefore never delays the caller; it finishes
+    unwinding in the background worker thread.
     """
+    outcome: concurrent.futures.Future = concurrent.futures.Future()
 
-    async def _bounded() -> T:
-        if timeout is None:
-            return await factory()
-        return await asyncio.wait_for(factory(), timeout)
+    async def _main() -> None:
+        try:
+            task = asyncio.ensure_future(factory())
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+            if not done:
+                task.cancel()  # do not await: cancellation may be slow
+                raise TimeoutError(f"coroutine did not finish within {timeout}s")
+            outcome.set_result(task.result())
+        except BaseException as exc:  # deliver every outcome, including cancellation
+            if not outcome.done():
+                outcome.set_exception(exc)
 
-    def _worker() -> T:
+    def _worker() -> None:
         with (worker_context or nullcontext)():
-            return asyncio.run(_bounded())
+            asyncio.run(_main())
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name)
     try:
-        future = pool.submit(bind_current_context(_worker))
-        return future.result(timeout=None if timeout is None else timeout + _CANCEL_GRACE_SECONDS)
+        worker = pool.submit(bind_current_context(_worker))
+        return _await_outcome(outcome, worker, None if timeout is None else timeout + _CANCEL_GRACE_SECONDS)
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _await_outcome(outcome, worker, timeout: Optional[float]):
+    """Return the coroutine outcome; surface a worker that failed before producing one
+    (e.g. its context manager raised) instead of waiting forever."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        # Check done() first: the outcome itself may be a TimeoutError, which is the
+        # same class as concurrent.futures.TimeoutError.
+        concurrent.futures.wait([outcome], timeout=_OUTCOME_POLL_SECONDS)
+        if outcome.done():
+            return outcome.result()
+        try:
+            worker.result(timeout=0)
+        except concurrent.futures.TimeoutError:
+            pass  # worker still running
+        else:
+            if not outcome.done():
+                raise RuntimeError("async bridge worker exited without an outcome")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("async bridge worker did not report an outcome in time")
 
 
 async def run_until_cancelled(
@@ -69,9 +102,7 @@ async def run_until_cancelled(
         while not task.done():
             await asyncio.wait({task}, timeout=poll_seconds)
             if cancel_event.is_set() and not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+                task.cancel()  # do not await: a slow-to-cancel stream must not delay the stop
                 return None
         return task.result()
     finally:

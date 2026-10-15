@@ -78,3 +78,25 @@ def test_executor_error_event_reports_model_stall():
     assert len(errors) == 1 and not any(e["type"] == "final" for e in events)
     assert errors[0]["error_code"] == "model_stalled"
     assert "模型服务停滞" in errors[0]["error"]
+
+
+def test_stall_is_reported_even_if_the_stream_is_slow_to_cancel():
+    import time
+
+    class _SlowCancelStream(_Stream):
+        async def __anext__(self):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(3)  # cleanup waiting on an in-flight request
+                raise
+
+    run = SimpleNamespace(pending_tool_calls=0, node_id="layer", iteration=8)
+
+    async def main():
+        started = time.monotonic()
+        with pytest.raises(ModelStreamStalled):
+            await AICall._next_stream_chunk(_SlowCancelStream([]), run, 0.2)
+        return time.monotonic() - started
+
+    assert asyncio.run(main()) < 1.5

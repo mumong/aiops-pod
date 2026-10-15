@@ -1508,16 +1508,23 @@ class AICall:
             stream_mode=["updates", "messages"],
             version="v2",
         )
+        stalled = False
         try:
             while True:
-                chunk = await self._next_stream_chunk(stream, run, idle_limit)
+                try:
+                    chunk = await self._next_stream_chunk(stream, run, idle_limit)
+                except ModelStreamStalled:
+                    stalled = True
+                    raise
                 if chunk is _STREAM_END:
                     return
                 if await self._process_stream_chunk(run, chunk):
                     return
         finally:
+            # After a stall the generator still has a cancelled __anext__ unwinding;
+            # aclose() would block on it, so leave its cleanup to the event loop.
             aclose = getattr(stream, "aclose", None)
-            if aclose is not None:
+            if aclose is not None and not stalled:
                 await aclose()
 
     @staticmethod
@@ -1528,16 +1535,21 @@ class AICall:
         no tool call is outstanding (i.e. the agent is waiting on the model).
         """
         timeout = idle_limit if idle_limit > 0 and run.pending_tool_calls == 0 else None
-        try:
-            return await asyncio.wait_for(stream.__anext__(), timeout)
-        except StopAsyncIteration:
-            return _STREAM_END
-        except asyncio.TimeoutError:
+        step = asyncio.ensure_future(stream.__anext__())
+        done, _ = await asyncio.wait({step}, timeout=timeout)
+        if not done:
+            # Do not await the cancellation: a stream stuck on an in-flight request may
+            # take minutes to unwind, which would hide the stall from the user.
+            step.cancel()
             logger.warning(
                 "[AICall] 模型流停滞：%ss 未收到任何输出 (node=%s, iteration=%d)",
                 idle_limit, run.node_id, run.iteration,
             )
-            raise ModelStreamStalled(idle_limit) from None
+            raise ModelStreamStalled(idle_limit)
+        try:
+            return step.result()
+        except StopAsyncIteration:
+            return _STREAM_END
 
     async def _process_stream_chunk(self, run: "_AgentRun", chunk: Any) -> bool:
         """Handle one astream chunk; return True to stop consuming the stream."""
