@@ -142,6 +142,7 @@ def build_diagnosis_workflow(
     for node in nodes:
         if node.node_id == "layer":
             node.autonomous_parallel_enabled = (parallel_config or {}).get("enabled", True)
+            node.autonomous_parallel_workers = (parallel_config or {}).get("max_workers")
         workflow.add_node(node.node_id, _wrap_node_execute(node))
     workflow.set_entry_point("request_router")
     workflow.add_conditional_edges(

@@ -122,6 +122,22 @@ def plan_groups(node, state):
 
 
 class AutonomousParallelNode(WorkflowNode):
+    # workflow.evidence.parallel.max_workers (config) > AIOPS_AUTONOMOUS_PARALLEL_WORKERS
+    # (env) > 3. The model service's admission control remains the real capacity limit;
+    # this bounds how many lanes one request pushes at it at once.
+    DEFAULT_LANE_WORKERS = 3
+    MAX_LANE_WORKERS = 8
+    autonomous_parallel_workers = None
+
+    def lane_workers(self) -> int:
+        value = self.autonomous_parallel_workers
+        if value in (None, "", 0):
+            value = os.getenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", self.DEFAULT_LANE_WORKERS)
+        try:
+            return max(1, min(self.MAX_LANE_WORKERS, int(value)))
+        except (TypeError, ValueError):
+            return self.DEFAULT_LANE_WORKERS
+
     def __init__(self, holmes_service=None, metrics=None, runbook_catalog=None):
         self.holmes_service, self.metrics, self.runbook_catalog = (
             holmes_service,
@@ -256,7 +272,7 @@ class AutonomousParallelNode(WorkflowNode):
 
         self.cancel_event = BranchStop()
         groups = state.get("autonomous_groups") or []
-        workers = max(1, min(8, int(os.getenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", "3"))))
+        workers = self.lane_workers()
         results, events = {}, list(state.get("thinking_events") or [])
         for group, value, error in iter_group_results(
             groups,
