@@ -161,6 +161,19 @@ def _max_output_tokens() -> int:
 _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS = 480.0
 
 
+def _delivery_output_tokens() -> int:
+    """Output reserve for tool-free deliveries (RCA / conclusion reports).
+
+    A live RCA report overran the 6000-token default (finish_reason=length), so
+    deliveries reserve more by default; the window guard still bounds the input.
+    """
+    try:
+        value = int(os.getenv("AICALL_DELIVERY_MAX_OUTPUT_TOKENS", 10000))
+    except ValueError:
+        value = 10000
+    return max(_MIN_OUTPUT_TOKENS, value)
+
+
 def _structured_call_timeout_seconds() -> Optional[float]:
     """Absolute deadline for one non-streaming structured call (0 disables).
 
@@ -622,16 +635,20 @@ class AICall:
                 hard_guard_budget=final_guard_budget,
                 **kwargs,
             )
-            if native is None and self._should_retry_without_thinking(kwargs):
-                # Reproduced with Qwen3.6 + LiteLLM: with thinking enabled the model
-                # reasoned for ~200s and then emitted no function call at all (same at
-                # 6k and 12k max_tokens); the identical request with thinking disabled
-                # delivered a valid result in ~26s. Delivery calls carry no tools, so
-                # nothing is lost by retrying as an internal call.
+            retry_kwargs = (
+                self._delivery_retry_kwargs(kwargs, hard_guard) if native is None else None
+            )
+            if retry_kwargs:
+                # Live lanes: the model wrote a report longer than the reserved output
+                # (finish_reason=length, arguments cut mid-JSON -> no result), or, with
+                # thinking enabled, reasoned ~200s and emitted no function call. Delivery
+                # calls carry no tools: retry once as an internal call with the largest
+                # output budget the window still allows.
                 logger.warning(
                     "[AICall] structured delivery returned nothing for schema=%s; "
-                    "retrying once with internal (no-thinking) settings",
+                    "retrying once (internal settings, max_tokens=%s)",
                     schema.__name__,
+                    retry_kwargs.get("max_tokens"),
                 )
                 native, raw = self._call_native_structured(
                     system_prompt,
@@ -639,7 +656,7 @@ class AICall:
                     schema,
                     hard_guard_metadata=hard_guard,
                     hard_guard_budget=final_guard_budget,
-                    **{**kwargs, "internal_model": True},
+                    **retry_kwargs,
                 )
             if native is not None:
                 return native, raw
@@ -683,8 +700,30 @@ class AICall:
             )
             return None, raw
 
-    def _should_retry_without_thinking(self, kwargs: Dict[str, Any]) -> bool:
-        return bool(self.internal_extra_body) and not bool(kwargs.get("internal_model"))
+    def _delivery_retry_kwargs(
+        self, kwargs: Dict[str, Any], hard_guard: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """One retry when a structured delivery returns nothing; ``None`` = no retry.
+
+        Internal settings (no thinking) and the output budget doubled, bounded by
+        what the window still allows after the measured input. Nothing to change
+        means nothing to retry.
+        """
+        retry = dict(kwargs)
+        changed = False
+        if self.internal_extra_body and not kwargs.get("internal_model"):
+            retry["internal_model"] = True
+            changed = True
+        current = int(kwargs.get("max_tokens") or _max_output_tokens())
+        guard = hard_guard or {}
+        window, used = guard.get("context_window"), guard.get("final_input_tokens")
+        if window and used:
+            room = int(window) - int(used) - int(guard.get("safety_tokens") or 0)
+            larger = min(current * 2, room)
+            if larger > current:
+                retry["max_tokens"] = larger
+                changed = True
+        return retry if changed else None
 
     def _call_native_structured(
         self,
@@ -1341,7 +1380,7 @@ class AICall:
                 response_schema,
                 node_id=node_id,
                 run_id=run_id,
-                max_tokens=6000,
+                max_tokens=_delivery_output_tokens(),
                 internal_model=True,
             )
             if parsed is None:
