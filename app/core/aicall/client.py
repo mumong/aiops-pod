@@ -134,6 +134,17 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
 
 
+_DEFAULT_MAX_TOOL_CALLS_PER_TURN = 16
+
+
+def _max_tool_calls_per_turn() -> int:
+    """Tool calls executed per model message (0 disables); guards degenerate repetition."""
+    try:
+        return max(0, int(os.getenv("AICALL_MAX_TOOL_CALLS_PER_TURN", _DEFAULT_MAX_TOOL_CALLS_PER_TURN)))
+    except ValueError:
+        return _DEFAULT_MAX_TOOL_CALLS_PER_TURN
+
+
 def _model_idle_timeout_seconds() -> float:
     """Max silence while waiting on the model before declaring a stall (0 disables)."""
     try:
@@ -2922,6 +2933,7 @@ class AICall:
 
         cache: Dict[str, Tuple[ToolMessage, str]] = {}
         in_flight: Dict[str, Tuple[Any, str]] = {}
+        max_calls_per_turn = _max_tool_calls_per_turn()
         lock = asyncio.Lock()
 
         def _clone_for_call(
@@ -2940,14 +2952,17 @@ class AICall:
                 "additional_kwargs": additional_kwargs,
             })
 
-        def _repeat_notice(source: ToolMessage, current_call_id: str, original_call_id: str) -> ToolMessage:
+        def _repeat_notice(
+            source: ToolMessage, current_call_id: str, original_call_id: str, *, same_turn: bool = False,
+        ) -> ToolMessage:
             """A repeat of an already-answered call (HTTP 304 style): say so instead of
             replaying the whole body, so the model notices it is going in circles."""
             tool_name = source.name or "tool"
+            where = "本轮中另一调用" if same_turn else "本阶段先前的调用"
             notice = (
-                f"【重复调用，结果未变化】{tool_name} 的参数与本阶段先前的调用（call_id={original_call_id}）完全相同，"
-                "未重新执行，结果与当时一致，此处省略重复正文。"
-                "若需要当时摘要中未展示的部分，请用 read_context_archive 回读该次结果给出的 raw_ref；"
+                f"【重复调用，结果未变化】{tool_name} 的参数与{where}（call_id={original_call_id}）完全相同，"
+                "未重新执行，结果见该调用，此处省略重复正文。"
+                "若需要该结果摘要中未展示的部分，请用 read_context_archive 回读其 raw_ref；"
                 "否则请基于已有结果继续推进，或改用其它工具/参数。"
             )
             notice_message = _clone_for_call(source, current_call_id, original_call_id)
@@ -2960,6 +2975,20 @@ class AICall:
             tool_call = dict(request.tool_call or {})
             signature = AICall._tool_execution_signature(tool_call)
             current_call_id = str(tool_call.get("id") or "")
+
+            position = AICall._tool_call_position(request, current_call_id)
+            if max_calls_per_turn and position is not None and position[0] >= max_calls_per_turn:
+                index, total = position
+                return ToolMessage(
+                    content=(
+                        f"【未执行：本轮工具调用过多】本轮共发起 {total} 个工具调用，超过上限 {max_calls_per_turn}，"
+                        f"第 {index + 1} 个及之后的调用未执行。请先基于已返回的结果推进，"
+                        "需要更多数据时合并查询条件或分批发起。"
+                    ),
+                    tool_call_id=current_call_id,
+                    name=str(tool_call.get("name") or "unknown"),
+                    additional_kwargs={"aiops_turn_cap": True},
+                )
 
             async with lock:
                 cached = cache.get(signature)
@@ -3038,6 +3067,9 @@ class AICall:
                 # never archives a previously generated summary as raw output.
                 return result.model_copy(deep=True)
 
+            if getattr(result, "status", "success") == "success":
+                # Identical calls in the same turn: one full result, notices for the rest.
+                return _repeat_notice(result, current_call_id, original_call_id, same_turn=True)
             return _clone_for_call(
                 result,
                 current_call_id,
@@ -3045,6 +3077,21 @@ class AICall:
             )
 
         return deduplicate_tool_call
+
+    @staticmethod
+    def _tool_call_position(request: Any, call_id: str) -> Optional[Tuple[int, int]]:
+        """(index, total) of this call within the model message that issued it."""
+        state = getattr(request, "state", None)
+        messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+        for message in reversed(messages or []):
+            calls = getattr(message, "tool_calls", None)
+            if not calls:
+                continue
+            ids = [str(call.get("id") or "") for call in calls]
+            if call_id in ids:
+                return ids.index(call_id), len(ids)
+            return None
+        return None
 
     @staticmethod
     def _tool_result_signature(msg: Any, tool_name: str, tool_content: str) -> str:
