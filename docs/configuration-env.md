@@ -6,9 +6,10 @@
 
 | 变量 | 默认值 | 读取位置 |
 |---|---|---|
-| `AICALL_MAX_TOOL_CALLS_PER_TURN` | _DEFAULT_MAX_TOOL_CALLS_PER_TURN | app/core/aicall/client.py:176 |
-| `AICALL_MODEL_IDLE_TIMEOUT_SECONDS` | _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS | app/core/aicall/client.py:184 |
-| `AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS` | _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS | app/core/aicall/client.py:150 |
+| `AICALL_MAX_OUTPUT_TOKENS` | _DEFAULT_MAX_OUTPUT_TOKENS | app/core/aicall/client.py:149 |
+| `AICALL_MAX_TOOL_CALLS_PER_TURN` | _DEFAULT_MAX_TOOL_CALLS_PER_TURN | app/core/aicall/client.py:188 |
+| `AICALL_MODEL_IDLE_TIMEOUT_SECONDS` | _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS | app/core/aicall/client.py:196 |
+| `AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS` | _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS | app/core/aicall/client.py:162 |
 | `AIOPS_AUTONOMOUS_PARALLEL_WORKERS` | "3" | app/core/remediation/jobs.py:60, app/core/workflow/nodes/autonomous_parallel.py:187 |
 | `AIOPS_COMPACTION_WORKERS` | "3" | app/core/aicall/working_context.py:196 |
 | `AIOPS_CONTEXT_ARCHIVE_ROOT` | "" | app/core/context/archive.py:23 |
@@ -31,19 +32,19 @@
 | `HOSTNAME` | "N/A" / 'localhost' | app/core/environment.py:103, app/core/environment.py:109 |
 | `KUBERNETES_SERVICE_HOST` | 'N/A' / — | app/core/environment.py:32, app/core/environment.py:99 |
 | `KUBERNETES_SERVICE_PORT` | 'N/A' | app/core/environment.py:100 |
-| `LANGFUSE_PUBLIC_KEY` | — | app/core/aicall/client.py:2295 |
-| `LANGFUSE_SECRET_KEY` | — | app/core/aicall/client.py:2295 |
+| `LANGFUSE_PUBLIC_KEY` | — | app/core/aicall/client.py:2320 |
+| `LANGFUSE_SECRET_KEY` | — | app/core/aicall/client.py:2320 |
 | `LLM_API_BASE` | — | app/core/service.py:358 |
 | `LLM_API_KEY` | — | app/core/service.py:339 |
 | `LLM_MODEL` | — | app/core/service.py:351 |
-| `LLM_REASONING_EFFORT` | "" | app/core/aicall/client.py:274 |
+| `LLM_REASONING_EFFORT` | "" | app/core/aicall/client.py:287 |
 | `LOG_LEVEL` | "INFO" | app/main.py:23 |
 | `MCP_AUTO_START_LOCAL` | "false" | app/main.py:60 |
 | `METRICS_ENABLED` | "true" / — | app/core/workflow/metrics.py:33, app/core/workflow/metrics.py:42 |
 | `METRICS_EVIDENCE_THRESHOLD` | "0.9" / — | app/core/workflow/metrics.py:32, app/core/workflow/metrics.py:49 |
 | `METRICS_MTTR_THRESHOLD` | "600" / — | app/core/workflow/metrics.py:30, app/core/workflow/metrics.py:45 |
 | `METRICS_RCA_CONFIDENCE_THRESHOLD` | "0.8" / — | app/core/workflow/metrics.py:31, app/core/workflow/metrics.py:47 |
-| `MODEL_CONTEXT_WINDOW` | "" / "32000" / "54000" | app/core/aicall/working_context.py:118, app/core/aicall/working_context.py:155, app/core/aicall/working_context.py:341 … |
+| `MODEL_CONTEXT_WINDOW` | "" / "32000" / "54000" | app/core/aicall/working_context.py:118, app/core/aicall/working_context.py:155, app/core/aicall/working_context.py:343 … |
 | `OPENAI_API_KEY` | — | app/core/service.py:342 |
 | `POD_NAME` | os.getenv("HOSTNAME", "N/A") | app/core/environment.py:103 |
 | `POD_NAMESPACE` | "N/A" | app/core/environment.py:104 |

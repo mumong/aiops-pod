@@ -138,6 +138,17 @@ _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
 
 
 _DEFAULT_MAX_TOOL_CALLS_PER_TURN = 16
+_DEFAULT_MAX_OUTPUT_TOKENS = 6000
+_MIN_OUTPUT_TOKENS = 512
+
+
+def _max_output_tokens() -> int:
+    """Per-request output budget (reasoning + answer + tool call). Matches the output
+    reservation used by the context budget; sent to the provider as max_tokens."""
+    try:
+        return max(_MIN_OUTPUT_TOKENS, int(os.getenv("AICALL_MAX_OUTPUT_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS)))
+    except ValueError:
+        return _DEFAULT_MAX_OUTPUT_TOKENS
 _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS = 480.0
 
 
@@ -517,7 +528,9 @@ class AICall:
         context_compactor = kwargs.pop("context_compactor", None)
         node_id = str(kwargs.get("node_id") or "structured")
         run_id = str(kwargs.get("run_id") or "")
-        output_reserved = int(kwargs.get("max_tokens", 6000) or 6000)
+        output_reserved = int(kwargs.get("max_tokens") or _max_output_tokens())
+        # Reserved output is also sent as max_tokens: input + output must fit the window.
+        kwargs["max_tokens"] = output_reserved
         try:
             (
                 system_prompt,
@@ -2482,6 +2495,7 @@ class AICall:
                         "[AICall] agent hard guard budget 写入失败: %s",
                         exc,
                     )
+            guarded_request = AICall._bound_request_output(guarded_request, budget)
             if on_waiting is not None:
                 tokens = ((budget or {}).get("hard_guard") or {}).get("final_input_tokens")
                 on_waiting(
@@ -2723,8 +2737,31 @@ class AICall:
         ]
 
     @staticmethod
+    def _bound_request_output(request: Any, budget: Optional[Dict[str, Any]]) -> Any:
+        """Send max_tokens on every agent model request.
+
+        The context window covers input + output (vLLM: 'maximum context length'
+        is prompt + max_tokens). The budget already reserves output tokens, but the
+        request never said so: vLLM then allowed generation up to the whole remaining
+        window (~35k tokens / ~10 min at ~57 tok/s for runaway repetition).
+        """
+        settings = dict(getattr(request, "model_settings", None) or {})
+        if settings.get("max_tokens") or settings.get("max_completion_tokens"):
+            return request
+        guard = (budget or {}).get("hard_guard") or {}
+        output_reserved = int(guard.get("output_reserved") or _max_output_tokens())
+        limit = output_reserved
+        window, used = guard.get("context_window"), guard.get("final_input_tokens")
+        if window and used:
+            limit = min(limit, int(window) - int(used) - int(guard.get("safety_tokens") or 0))
+        limit = max(_MIN_OUTPUT_TOKENS, limit)
+        if not hasattr(request, "override"):
+            return request
+        return request.override(model_settings={**settings, "max_tokens": limit})
+
+    @staticmethod
     def _agent_request_output_reserved(request: Any) -> int:
-        output_reserved = 6000
+        output_reserved = _max_output_tokens()
         model_settings = getattr(request, "model_settings", None)
         if isinstance(model_settings, dict):
             try:
@@ -2734,7 +2771,7 @@ class AICall:
                     or output_reserved
                 )
             except (TypeError, ValueError):
-                output_reserved = 6000
+                output_reserved = _max_output_tokens()
         return output_reserved
 
     def _compact_agent_request_history(
