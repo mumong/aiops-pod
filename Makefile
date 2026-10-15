@@ -14,6 +14,13 @@ VERSION ?= $(shell cat VERSION)
 PYTHON ?= .venv/bin/python
 RUFF ?= .venv-quality/bin/ruff
 DOCKER_TAG := $(VERSION)
+# pip inside `docker build` needs the host's network/proxy on this build host:
+# the default bridge network reported "Network is unreachable" and broke releases.
+BUILD_NETWORK ?= host
+DOCKER_BUILD := docker build --network=$(BUILD_NETWORK) \
+	$(if $(http_proxy),--build-arg http_proxy=$(http_proxy),) \
+	$(if $(https_proxy),--build-arg https_proxy=$(https_proxy),) \
+	$(if $(no_proxy),--build-arg no_proxy=$(no_proxy),)
 A2A_PUBLIC_HOST ?= $(shell kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
 A2A_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30801
 
@@ -56,15 +63,15 @@ release: build push delete deploy
 
 build-main:
 	@echo "Building $(DOCKER_NAME):$(DOCKER_TAG)..."
-	docker build -t $(DOCKER_NAME):$(DOCKER_TAG) .
+	$(DOCKER_BUILD) -t $(DOCKER_NAME):$(DOCKER_TAG) .
 
 build-a2a:
 	@echo "Building $(A2A_DOCKER_NAME):$(DOCKER_TAG)..."
-	docker build --build-arg VERSION=$(DOCKER_TAG) -f Dockerfile.a2a -t $(A2A_DOCKER_NAME):$(DOCKER_TAG) .
+	$(DOCKER_BUILD) --build-arg VERSION=$(DOCKER_TAG) -f Dockerfile.a2a -t $(A2A_DOCKER_NAME):$(DOCKER_TAG) .
 
 build-a2a-test-agent:
 	@echo "Building $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG)..."
-	docker build --build-arg VERSION=$(DOCKER_TAG) -f Dockerfile.a2a-test-agent -t $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG) .
+	$(DOCKER_BUILD) --build-arg VERSION=$(DOCKER_TAG) -f Dockerfile.a2a-test-agent -t $(A2A_TEST_AGENT_DOCKER_NAME):$(DOCKER_TAG) .
 
 build-all: build build-a2a-test-agent
 
