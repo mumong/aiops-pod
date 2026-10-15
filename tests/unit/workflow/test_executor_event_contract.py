@@ -413,3 +413,21 @@ def test_executor_event_contract_matches_golden(harness, monkeypatch):
             assert a == e, (scenario, index)
         assert act == exp, scenario
     assert sorted(actual) == sorted(expected)
+
+
+def test_heartbeat_names_the_running_stage_not_a_lingering_finished_one():
+    """Live run 2e1e601acab74d13: text heartbeats said '问题定位' during parallel lanes."""
+    import threading
+    from types import SimpleNamespace
+    from app.core.workflow.executor import _StreamTranslator
+
+    t = object.__new__(_StreamTranslator)
+    t.heartbeat_interval_s, t.last_event_ts, t.seq, t.run_id = 1, 0, 0, "r"
+    t.current_nodes = {"layer", "parallel_evidence"}
+    t.completed_nodes = {"layer"}
+    t.node_start_times = {"layer": 1.0, "parallel_evidence": 2.0}
+    t.executor = SimpleNamespace(_get_node_display_name=lambda n: {"parallel_evidence": "分组并发诊断"}.get(n, n))
+    alive = threading.Thread(target=lambda: None)
+    alive.is_alive = lambda: True
+    [event] = list(t._maybe_heartbeat(alive))
+    assert event["node"] == "parallel_evidence" and event["node_name"] == "分组并发诊断"

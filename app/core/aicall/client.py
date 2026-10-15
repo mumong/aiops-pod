@@ -297,12 +297,16 @@ class AICall:
         node_id: str = "",
         disable_streaming: bool = False,
         internal: bool = False,
+        max_tokens: Optional[int] = None,
     ):
         """按次创建 ChatOpenAI，避免跨 asyncio event loop 复用底层 async client。
 
         ``internal=True`` 用于不面向用户的内部调用，合并 ``internal_extra_body``。
+        ``max_tokens`` 走构造参数：``.bind(max_tokens=...)`` 会被 ``with_structured_output`` 丢弃。
         """
         kwargs = dict(self._chat_model_kwargs)
+        if max_tokens:
+            kwargs["max_tokens"] = int(max_tokens)
         if disable_streaming:
             kwargs["streaming"] = False
             kwargs["disable_streaming"] = True
@@ -689,6 +693,7 @@ class AICall:
         messages.append(HumanMessage(content=question))
 
         internal_model = bool(kwargs.pop("internal_model", False))
+        max_tokens = kwargs.pop("max_tokens", None)
         session_id = self._normalize_langfuse_session_id(run_id)
         try:
             model = self._create_chat_model(
@@ -696,6 +701,7 @@ class AICall:
                 node_id=node_id or "structured",
                 disable_streaming=True,
                 internal=internal_model,
+                max_tokens=max_tokens,
             )
             if kwargs:
                 model = model.bind(**kwargs)

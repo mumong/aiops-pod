@@ -37,3 +37,25 @@ def test_env_configures_the_output_budget(monkeypatch):
     monkeypatch.setenv("AICALL_MAX_OUTPUT_TOKENS", "3000")
     req = AICall._bound_request_output(_Request(), {"hard_guard": {}})
     assert req.model_settings["max_tokens"] == 3000
+
+
+def test_structured_calls_keep_max_tokens_through_with_structured_output():
+    """.bind(max_tokens=...) is dropped by with_structured_output; it must be a constructor field."""
+    from pydantic import BaseModel
+
+    class _S(BaseModel):
+        ok: bool
+
+    ai = AICall(model="openai/m", api_key="sk-test", api_base="http://gw/v1")
+    captured = {}
+    original = ai._create_chat_model
+
+    def spy(**kw):
+        model = original(**kw)
+        captured["model"] = model
+        return model
+
+    ai._create_chat_model = spy
+    ai._bind_session_metadata = lambda model, *a, **k: model
+    ai._call_native_structured("sys", "q", _S, node_id="rca", max_tokens=1234, raise_on_error=False)
+    assert captured["model"].max_tokens == 1234

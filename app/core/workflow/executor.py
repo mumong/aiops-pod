@@ -174,7 +174,10 @@ class _StreamTranslator:
             and worker.is_alive()
             and now - self.last_event_ts >= self.heartbeat_interval_s
         ):
-            heartbeat_node_id = sorted(self.current_nodes)[0]
+            # Name the stage actually running: the latest-started unfinished node (a
+            # finished node can linger in current_nodes via a trailing LangGraph update).
+            active = [n for n in self.current_nodes if n not in self.completed_nodes] or list(self.current_nodes)
+            heartbeat_node_id = max(active, key=lambda n: (self.node_start_times.get(n, 0.0), n))
             yield {
                 "type": "heartbeat",
                 "id": f"{self.run_id}-heartbeat-{self.seq}",
