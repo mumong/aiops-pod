@@ -40,6 +40,7 @@ from app.core.prompts import (
     EVIDENCE_MEMORY_COMPRESSION_PROMPT,
     RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION,
     RUNTIME_COMPACTION_INSTRUCTION,
+    STRUCTURED_FINALIZATION_INSTRUCTION,
 )
 from app.core.async_bridge import run_coroutine_sync, run_until_cancelled
 from app.core.context.archive import ContextArchive
@@ -113,6 +114,14 @@ class StructuredContextBudgetError(RuntimeError):
 _STREAM_END = object()
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_think(text: Any) -> str:
+    """Drop visible reasoning blocks; they are not analysis results."""
+    return _THINK_BLOCK.sub("", str(text or "")).strip()
+
+
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = deepcopy(base)
     for key, value in override.items():
@@ -163,6 +172,7 @@ class _AgentRun:
     compaction_count: int = 0
     model_request_started_at: float = 0.0
     pending_tool_calls: int = 0  # >0 while tools run; idle watchdog only applies when waiting on the model
+    incomplete_reason: str = ""  # agent_timeout / step_limit / agent_error when the stream did not finish
     all_tool_calls: List[Dict] = field(default_factory=list)
     content_buffer: List[str] = field(default_factory=list)  # token 级别的文本片段
     tool_observation_contents: List[str] = field(default_factory=list)
@@ -613,12 +623,14 @@ class AICall:
             messages.append(SystemMessage(content=system_prompt))
         messages.append(HumanMessage(content=question))
 
+        internal_model = bool(kwargs.pop("internal_model", False))
         session_id = self._normalize_langfuse_session_id(run_id)
         try:
             model = self._create_chat_model(
                 session_id=session_id,
                 node_id=node_id or "structured",
                 disable_streaming=True,
+                internal=internal_model,
             )
             if kwargs:
                 model = model.bind(**kwargs)
@@ -1121,6 +1133,7 @@ class AICall:
             max_steps=max_steps,
             session_id=session_id,
         )
+        self._finalize_structured_delivery(run, system_prompt=system_prompt, question=question)
         return self._finish_agent_call(
             run,
             call_start=call_start,
@@ -1335,11 +1348,13 @@ class AICall:
                 thread_name="aicall-agent",
             )
         except TimeoutError:
+            run.incomplete_reason = "agent_timeout"
             self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason="agent_timeout")
             logger.warning("[AICall] agent 执行超时 (%ss)", agent_timeout)
             if not run.final_content:
                 run.final_content = "Agent 执行超时"
         except GraphRecursionError as e:
+            run.incomplete_reason = "step_limit"
             self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason="step_limit")
             recursion_msg = str(e).splitlines()[0].strip()
             logger.warning("[AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
@@ -1348,9 +1363,68 @@ class AICall:
         except Exception as e:
             raise_on_model_disconnect(e)
             logger.error("[AICall] agent 执行异常: %s", e, exc_info=True)
+            run.incomplete_reason = "agent_error"
             self._push(run.stream_queue, node_id, run.thinking_events, type="execution_incomplete", reason=str(e))
             if not run.final_content:
                 run.final_content = f"Agent 执行异常: {e}"
+
+    def _finalize_structured_delivery(self, run: "_AgentRun", *, system_prompt: str, question: str) -> None:
+        """Bounded protocol recovery: one tool-free structured call when the agent stopped
+        (step limit / timeout / error) before delivering its required structured result.
+
+        Same node, same model, same system prompt; the input is this node's own tool
+        observations and analysis. The model still makes every decision; on failure the
+        caller's existing "delivery invalid" path applies unchanged.
+        """
+        if (
+            run.response_schema is None
+            or run.structured_response is not None
+            or not run.incomplete_reason
+            or (run.cancel_event is not None and run.cancel_event.is_set())
+        ):
+            return
+        material = self._run_material_for_finalization(run)
+        if not material:
+            return
+        node_id = run.node_id
+        self._push(run.stream_queue, node_id, run.thinking_events, type="runtime_status", status="running",
+                   content="调查预算已用尽，正在依据已采集结果提交本阶段结构化结论")
+        final_question = f"{question}\n\n{STRUCTURED_FINALIZATION_INSTRUCTION}\n\n{material}"
+        started = time.time()
+        try:
+            parsed, _raw = self.call_structured(
+                system_prompt, final_question, run.response_schema,
+                node_id=node_id or "structured", run_id=run.run_id, internal_model=True,
+            )
+        except Exception as exc:
+            raise_on_model_disconnect(exc)
+            logger.warning("[AICall] 收卷结构化交付失败 (node=%s, reason=%s): %s",
+                           node_id, run.incomplete_reason, exc)
+            parsed = None
+        status = "success" if parsed is not None else "failed"
+        logger.info("[AICall] 收卷结构化交付 %s | node=%s | reason=%s | %.1fs",
+                    status, node_id, run.incomplete_reason, time.time() - started)
+        self._record(run.thinking_events, "structured_finalization", node_id,
+                     status=status, reason=run.incomplete_reason)
+        if parsed is not None:
+            run.structured_response = parsed
+
+    @staticmethod
+    def _run_material_for_finalization(run: "_AgentRun") -> str:
+        """This node's own analysis text and bounded tool observations, in order."""
+        analysis = [_strip_think(text) for _, text in run.emitted_ai_messages]
+        analysis = [text for text in analysis if text.strip()]
+        observations = [text for text in run.tool_observation_contents if str(text).strip()]
+        if not analysis and not observations:
+            return ""
+        parts = []
+        if observations:
+            parts.append("## 本阶段已获得的工具结果（按调用顺序）")
+            parts.extend(f"### 结果 {index}\n{text}" for index, text in enumerate(observations, 1))
+        if analysis:
+            parts.append("## 本阶段已形成的分析")
+            parts.extend(analysis)
+        return "\n\n".join(parts)
 
     def _finish_agent_call(
         self,
