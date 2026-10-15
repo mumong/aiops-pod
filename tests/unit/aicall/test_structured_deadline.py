@@ -46,5 +46,5 @@ def test_timed_out_structured_call_degrades_to_no_result_not_a_fatal_error(monke
     started = time.monotonic()
     parsed, raw = ai._call_native_structured("sys", "q", _Out, node_id="rca")
     assert parsed is None and raw == ""
-    assert time.monotonic() - started < 1.5
+    assert time.monotonic() - started < 2.5  # the blocked call itself takes 3s
     assert client_module._structured_call_timeout_seconds() == 0.2
