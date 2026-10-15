@@ -32,6 +32,32 @@ from .observability_projection import (
 
 logger = logging.getLogger(__name__)
 
+
+_NOMINAL_TABLE_STATUSES = {"running", "completed", "succeeded"}
+
+
+def _table_rows_needing_attention(header: str, rows: list) -> list:
+    """Indexes of rows whose READY (x/y with x<y) or STATUS column is not nominal.
+
+    Purely column-based ordering for bounded views; returns [] for tables without
+    both READY and STATUS columns (other resource kinds keep source order).
+    """
+    columns = [c.strip().upper() for c in re.split(r"[ \t]{2,}", header.strip()) if c.strip()]
+    if "READY" not in columns or "STATUS" not in columns:
+        return []
+    ready_at, status_at = columns.index("READY"), columns.index("STATUS")
+    flagged = []
+    for index, row in enumerate(rows):
+        cells = [c.strip() for c in re.split(r"[ \t]{2,}", row.strip())]
+        if len(cells) <= max(ready_at, status_at):
+            continue
+        status = cells[status_at].lower()
+        ready = re.fullmatch(r"(\d+)/(\d+)", cells[ready_at])
+        not_ready = bool(ready) and int(ready.group(1)) < int(ready.group(2)) and status != "completed"
+        if status not in _NOMINAL_TABLE_STATUSES or not_ready:
+            flagged.append(index)
+    return flagged
+
 Summarizer = Callable[[str, str, str], Optional[str]]
 
 
@@ -234,13 +260,18 @@ class ObservationProcessor:
         if (targeted_summary or node_id in {"focused", "query_collect"}) and processor == "k8s_table" and structured.get("status") == "table_summarized":
             # A task-oriented query must not silently discard healthy objects.
             # Keep the full returned inventory in the archive; the model sees a
-            # bounded prefix with explicit coverage, never an abnormal-only view.
+            # bounded selection with explicit coverage, never an abnormal-only view.
+            # Rows whose objective STATUS/READY columns are not nominal are shown
+            # first so a bounded view cannot hide them behind healthy rows.
             rows = [line for line in raw.splitlines() if line.strip()][1:]
             structured["all_rows"] = rows
+            header_raw = structured.get("header", "").strip()
+            attention = _table_rows_needing_attention(header_raw, rows)
+            ordered = [rows[i] for i in attention] + [row for i, row in enumerate(rows) if i not in set(attention)]
             selected = []
-            header = re.sub(r"[ \t]{2,}", "  ", structured.get("header", "").strip())
+            header = re.sub(r"[ \t]{2,}", "  ", header_raw)
             used = len(header) + 350
-            for row in rows:
+            for row in ordered:
                 display_row = re.sub(r"[ \t]{2,}", "  ", row.strip())
                 if used + len(display_row) + 1 > self.max_observation_chars:
                     continue
@@ -248,10 +279,18 @@ class ObservationProcessor:
                 used += len(display_row) + 1
             structured["selected_rows"] = selected
             structured["omitted_rows"] = len(rows) - len(selected)
-            structured["selection_policy"] = "source_order_not_health_filtered"
+            structured["attention_rows"] = len(attention)
+            structured["selection_policy"] = (
+                "status_attention_first_then_source_order" if attention else "source_order_not_health_filtered"
+            )
+            ordering_note = (
+                f"其中 STATUS/READY 非常态的 {len(attention)} 行排在最前（仅按字段排序，不代表诊断结论），其余按原顺序。"
+                if attention else ""
+            )
             summary = (
                 f"{tool}: 返回 {len(rows)} 行，展示 {len(selected)} 行，省略 {len(rows) - len(selected)} 行。"
-                "未展示不代表不存在；需要全部对象时缩小查询范围或按 raw_ref 回读。\n"
+                + ordering_note
+                + "未展示不代表不存在；需要全部对象时缩小查询范围或按 raw_ref 回读。\n"
                 + header + "\n" + "\n".join(selected)
             )
 

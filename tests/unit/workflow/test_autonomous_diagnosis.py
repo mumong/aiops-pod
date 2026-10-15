@@ -154,3 +154,21 @@ def test_tool_free_nodes_compact_oversized_material_instead_of_truncating(node_c
     assert calls[1]['working_summary'].endswith('/raw/describe')
     assert calls[1]['observations'] == []
     assert output
+
+
+def test_bounded_pod_table_shows_every_non_nominal_row_but_keeps_healthy_rows(tmp_path):
+    """Real 72-row `kubectl get pods -A` (run cf87e8500cf641a4): the Terminating Pod was
+    row 13 and fell outside the 11 rows shown in source order."""
+    from pathlib import Path
+    raw = (Path(__file__).parents[2] / 'fixtures/observability/kubectl_pods_all_namespaces.txt').read_text()
+    processor = ObservationProcessor(archive_root=str(tmp_path))
+    result = processor.process(run_id='scope', node_id='layer', sequence=1,
+                               tool_name='kubectl_get_by_kind_in_cluster', raw_content=raw, preserve_raw=True)
+    summary = result['summary']
+    for needle in ('CreateContainerConfigError', 'CrashLoopBackOff', 'workload-5487445f9-k4648', 'Terminating'):
+        assert needle in summary
+    assert 'fpga-operator' in summary  # healthy rows still shown: not an abnormal-only view
+    structured = result['structured']
+    assert structured['selection_policy'] == 'status_attention_first_then_source_order'
+    assert structured['attention_rows'] >= 4
+    assert structured['omitted_rows'] == len(structured['all_rows']) - len(structured['selected_rows'])
