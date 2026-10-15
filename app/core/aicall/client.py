@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import anyio
 from pydantic import BaseModel, ValidationError
 from langgraph.errors import GraphRecursionError
+from langchain_openai.chat_models._client_utils import _build_async_httpx_client
 from .model_streaming import VisibleChatOpenAI as ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from openai import (
@@ -299,6 +300,12 @@ class AICall:
             extra_body = _deep_merge(extra_body, self.internal_extra_body)
         if extra_body:
             kwargs["extra_body"] = extra_body
+        # langchain_openai otherwise shares one process-wide AsyncClient (lru_cache per
+        # base_url/timeout) across every instance. Agent calls and parallel lanes run in
+        # separate event loops, and httpx pools are loop-bound: a connection cleaned up
+        # from another (closed) loop raised "Event loop is closed", surfacing as a
+        # spurious 'LLM API 服务连接中断'. Each instance lives inside one call/loop.
+        kwargs["http_async_client"] = _build_async_httpx_client(kwargs.get("base_url"), None)
         return ChatOpenAI(**kwargs)
 
     def create_compaction_model(self, max_tokens: int = 3000):
