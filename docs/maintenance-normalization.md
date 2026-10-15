@@ -71,7 +71,7 @@ MCP 统一 8 个标准工具服务入口的日志/结果封装，抽离启动命
 独立安全扫描已有基线，但依赖可达性复核、修复后复扫、JS Retire 和 sidecar 扫描尚未完成。
 
 后续补齐：Retire 5.7.0 前端源码/dist 扫描无发现，A2A sidecar 镜像有已记录漏洞；
-详见 [安全审查](security-review.md)。私有 Secret 已从 Git 索引移除，本地文件字节
+详见 [安全审查](history/security-review.md)。私有 Secret 已从 Git 索引移除，本地文件字节
 保持不变，未修改线上 Secret、未 commit。公共示例置于 config/examples，避免递归部署
 覆盖真实配置；新增示例与 Deployment Secret 引用契约测试通过。
 
