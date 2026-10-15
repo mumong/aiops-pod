@@ -36,9 +36,13 @@ MCP 查询和前端实现在独立仓库，不属于本仓库运行代码。接�
 
 路由历史包含用户问题、助手回答、范围与观测时间。助手回答用于识别上一轮查询后新发现的对象（例如“刚才那个异常 Pod”），不被当作当前状态证据；原始工具正文不重复塞入路由。超预算走共享压缩，不预先删掉回答。
 
-深度节点实现见 [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py)，分组实现见 [autonomous_parallel.py](../app/core/workflow/nodes/autonomous_parallel.py)。定位 Agent 直接输出结构化目标；代码分配组，不再二次调用模型从文字提取对象。每组独立客户端、工作上下文和归档；代码默认最多3组同时执行，部署配置为5，更多组排队，`AIOPS_AUTONOMOUS_PARALLEL_WORKERS` 可配置1–8。不进入旧节点的程序基线、强制三维计划、提前停止或因果发布门槛。
+深度节点实现见 [autonomous_diagnosis.py](../app/core/workflow/nodes/autonomous_diagnosis.py)，分组实现见 [autonomous_parallel.py](../app/core/workflow/nodes/autonomous_parallel.py)。定位 Agent 直接输出结构化目标；代码分配组，不再二次调用模型从文字提取对象。每组独立客户端、工作上下文和归档；并发上限由 `AIOPS_AUTONOMOUS_PARALLEL_WORKERS` 控制（见 [configuration-env.md](configuration-env.md)），模型服务的 admission control 是最终容量边界。不进入旧节点的程序基线、强制三维计划、提前停止或因果发布门槛。
 
-定位使用 [location-handoff.v1](structured-diagnosis-handoff-20261012.md)：可压缩的分析文字之外，只保护稳定目标、简短现象、处理状态和引用，分组直接读取清单。取证与 RCA 仍输出文字；生命周期明细与分析过程可以摘要，不再作为免压缩的全量保护数据。非 Pod 目标兼容单路诊断，不能因不适用 Pod 并发执行器而丢弃。
+**定位阶段的清单投影**：`query_pod_lifecycle` 列表结果进入模型前经 `lifecycle_core.inventory_view` 投影——需要关注的 Pod 保留完整生命周期记录，当前快照正常的 Pod（Running+Ready、容器全部 running/ready、窗口内无终止或重启、未删除；或 Succeeded）只按命名空间列成花名册并给出判据。真实 73 Pod 页从约 15.8k tokens 降到约 1.9k；归档与 structured 仍保留全部 Pod，花名册不是健康结论。单 Pod 范围和正常 Pod 少于 4 个时不投影。
+
+**取证 lane 的工具面**：lane 只拥有一个 Pod（namespace/name/uid 来自定位交接），暴露 17 个工具：`execute_pod_promql`、`query_pod_logs`、`query_pod_tracing`、`query_pod_topology`、`query_pod_lifecycle`、本 Pod 的 describe/events/yaml/get_by_name、当前/previous/容器日志、通用 Prometheus 即时/区间查询、`fetch_runbook`、`read_context_archive`。集群列表、grep、目录类和 TodoWrite 不在 lane 内。`execute_pod_promql` 被拒绝或返回空时，MCP 会在 `limitations` 中列出该 Pod 实际存在的指标名，供模型按目的选择。
+
+定位使用 [location-handoff.v1](history/structured-diagnosis-handoff-20261012.md)：可压缩的分析文字之外，只保护稳定目标、简短现象、处理状态和引用，分组直接读取清单。取证与 RCA 仍输出文字；生命周期明细与分析过程可以摘要，不再作为免压缩的全量保护数据。非 Pod 目标兼容单路诊断，不能因不适用 Pod 并发执行器而丢弃。
 
 分支 `question/request_contract` 是该 Pod 子任务，`original_question/original_request_contract` 保留完整父任务。共享定位记录是参考，不是要求每组重新检查全部对象。任一组失败保留已取得证据和失败原因，其他组继续；最终汇总包含每组结果和限制，不因未满足旧 RCA schema 丢弃整组。前端展示真实分组工具事件，多个模型的逐字片段不混排。
 
@@ -48,7 +52,7 @@ MCP 查询和前端实现在独立仓库，不属于本仓库运行代码。接�
 
 2026-09-18 更新：旧历史需要至少三段时，默认最多三路并行提取证据卡，再按源顺序合并为一份工作摘要；一至两段仍走原串行流程。`AIOPS_COMPACTION_WORKERS=1` 可回退串行。每段都消费，不为了摘要加速裁掉历史；空摘要、超预算、输出被截断或分段失败均不替换旧状态，未完成兄弟任务取消。所有摘要提示词统一位于 `app/core/prompts.py`。这是每次压缩的并发上限，不是整个服务的全局请求限流。
 
-步数是 LangGraph recursion_limit，不等于工具调用数；定位 24、取证 32，仍有上限。工具业务拒绝/失败同时进入事件状态与失败计数，成功空查询仍区别于调用错误；报告/执行未完整时 final.status=partial，不再顶层误报 success。独立诊断组展示各自进度与执行状态；父节点未完成保留为整体限制，不把所有已完成子组自动标成失败。
+步数是 LangGraph recursion_limit，不等于工具调用数；当前部署定位/取证/查询各 48（`workflow.max_steps`），到达上限时进入结构化收卷而不是直接丢弃结果。工具业务拒绝/失败同时进入事件状态与失败计数，成功空查询仍区别于调用错误；报告/执行未完整时 final.status=partial，不再顶层误报 success。独立诊断组展示各自进度与执行状态；父节点未完成保留为整体限制，不把所有已完成子组自动标成失败。
 
 `evidence_receipts` 在节点交接及整包压缩后保留工具/对象/返回状态/原文引用的轻量记录，防止把摘要未展示误认为未采集。记录只证明调用与返回，不证明根因或数据足够，模型仍自主取证与判断。并发看板保留终态未返回调用，但显示为“阶段已结束，不再等待”，不伪装为持续执行。
 
@@ -185,11 +189,7 @@ Conclusion 使用最近一次工作摘要和此后新取得的工具结果，不
 
 默认摘要不是纯代码：表格、事件等使用规则提取，部分通用返回调用 LLM 摘要。原文保存不等于模型看过原文。常见输入缩短位置包括工具摘要限长、摘要模型原文预览、归档分页、运行时历史压缩、模型调用前预算裁剪；原文实验绕过逐次工具摘要，但仍在超预算时压缩输入。压缩是有损的，不保证所有关键字段进入模型，也不保证单位解释或诊断推理正确，需要对照调用参数、原始值与最终答案复核。
 
-当前配置为 rca_mode=lite，组内正式 RCA 主要使用已采证据推理，不再重复进行取证工具循环。
-
-仓库默认关闭 rca_validation.enabled 和 rca_context.fact_ledger_enabled，启用有界 evidence LLM analysis 作为辅助推理材料；因此不能把当前报告说成“全部经过 Fact Ledger 严格因果验证”。相关合同和校验实现仍保留在 [fact_contract.py](../app/core/workflow/fact_contract.py)，开关状态改变时需重新验证效果。
-
-Conclusion 默认 presentation_mode=agent：各组按本组证据和 RCA 生成片段，代码组织总览与顺序；可切换确定性展示。结构字段合法、引用存在、Plan 完成，都不等价于根因正确。
+组内正式 RCA 无工具，只依据已采证据推理。Fact Ledger 严格因果校验未启用（合同实现仍在 [fact_contract.py](../app/core/workflow/fact_contract.py)），不能把当前报告说成“全部经过严格因果验证”。`workflow` 配置只保留代码实际读取的键（nodes、max_steps、structured_runtime、evidence.parallel、remediation、think_stream、observation_summary、context_compaction），由 `test_deployed_workflow_config_contains_only_keys_the_code_reads` 钉住。结构字段合法、引用存在，都不等价于根因正确。
 
 实际复核必须区分事实和解释，例如 137 不能独立证明 OOM，/work 的 200 不能证明 /health 探针健康。
 

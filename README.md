@@ -276,6 +276,7 @@ make delete deploy
 | [质量测试](test/aiops_quality_e2e/README.md)             | 单场景、多根因、四项指标与报告             |
 | [开发与贡献](CONTRIBUTING.md) | 本地检查、模块边界、编码约定与审核要求 |
 | [规范化验收记录](docs/maintenance-normalization.md) | 修改前基线、回归结果和未完成项 |
+| [过程记录](docs/history/) | 按日期归档的验证、发布与交接记录，只供复核，不是当前使用指南 |
 
 
 报告和工具归档默认写入 Pod 内的 `/tmp/aiops/reports`（PVC）。源码实现与当前线上版本可能不同，历史测试成绩不能直接代表当前部署效果。

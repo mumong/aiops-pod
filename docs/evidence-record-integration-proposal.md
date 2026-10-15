@@ -110,7 +110,7 @@ the deployed `gpt-6-luna` tests establish 28B model behavior.
 
 Approved and deployed on 2026-10-09: optional selection/counting on the lifecycle
 tool, with backend and frontend compatibility. See
-[release verification](evidence-record-release-20261009.md) for exact artifacts,
+[release verification](history/evidence-record-release-20261009.md) for exact artifacts,
 live runs and limitations.
 
 ## Configuration and examples
