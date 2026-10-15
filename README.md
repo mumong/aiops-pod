@@ -279,6 +279,7 @@ make delete deploy
 | [开发与贡献](CONTRIBUTING.md) | 本地检查、模块边界、编码约定与审核要求 |
 | [规范化验收记录](docs/maintenance-normalization.md) | 修改前基线、回归结果和未完成项 |
 | [过程记录](docs/history/) | 按日期归档的验证、发布与交接记录，只供复核，不是当前使用指南 |
+| 历史测试报告 | 已于 2026-10-15 移出仓库到 `../_archive/robusta-testreports/`（git 标签 `checkpoint-20261015-before-global-cleanup` 之前的历史仍可回溯）；`testreports/` 仅作测试工具输出目录，不再纳入版本控制 |
 
 
 报告和工具归档默认写入 Pod 内的 `/tmp/aiops/reports`（PVC）。源码实现与当前线上版本可能不同，历史测试成绩不能直接代表当前部署效果。
