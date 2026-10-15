@@ -1659,13 +1659,18 @@ class AICall:
             return
         if isinstance(metadata, dict) and metadata.get("aiops_internal_compaction"):
             return
+        langgraph_node = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
+        if langgraph_node == "tools":
+            return
+        reasoning_text = self._extract_reasoning_text(token_msg)
+        if reasoning_text:
+            push_event(run.stream_queue, "ai_reasoning", run.node_id,
+                       content=reasoning_text, iteration=run.iteration)
         token_text = self._extract_visible_ai_text(token_msg)
         if token_text:
-            langgraph_node = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
-            if langgraph_node != "tools":
-                run.content_buffer.append(token_text)
-                push_event(run.stream_queue, "ai_token", run.node_id,
-                           content=token_text, iteration=run.iteration)
+            run.content_buffer.append(token_text)
+            push_event(run.stream_queue, "ai_token", run.node_id,
+                       content=token_text, iteration=run.iteration)
 
     def _should_stop_after_update(self, run: "_AgentRun") -> bool:
         node_id = run.node_id
@@ -2204,10 +2209,14 @@ class AICall:
 
     @staticmethod
     def _extract_visible_ai_text(message: Any) -> str:
-        """Return stream-visible AI text, including reasoning fields from compatible gateways."""
+        """Answer channel only: the model's content, without provider reasoning.
+
+        Reasoning (``reasoning_content`` / ``reasoning`` / reasoning blocks) is a
+        separate channel - see ``_extract_reasoning_text``. Mixing it into content
+        leaked private reasoning into node outputs and glued it to the analysis text.
+        """
         if message is None:
             return ""
-
         content = getattr(message, "content", None) or ""
         if isinstance(content, list):
             visible = []
@@ -2216,15 +2225,23 @@ class AICall:
                     visible.append(block)
                 elif isinstance(block, dict) and block.get('type') in {'text', 'output_text'}:
                     visible.append(str(block.get('text') or ''))
-                elif isinstance(block, dict) and block.get('type') == 'reasoning':
-                    summary = ''.join(str(item.get('text') or '') for item in block.get('summary', [])
-                                      if isinstance(item, dict) and item.get('type') == 'summary_text')
-                    if summary:
-                        visible.append(AICall._normalize_reasoning_text(summary))
             content = ''.join(visible)
+        return str(content or "")
+
+    @staticmethod
+    def _extract_reasoning_text(message: Any) -> str:
+        """Reasoning channel: provider reasoning fields or reasoning-block summaries."""
+        if message is None:
+            return ""
+        parts = []
+        content = getattr(message, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'reasoning':
+                    parts.extend(str(item.get('text') or '') for item in block.get('summary', [])
+                                 if isinstance(item, dict) and item.get('type') == 'summary_text')
         additional_kwargs = getattr(message, "additional_kwargs", None) or {}
         response_metadata = getattr(message, "response_metadata", None) or {}
-
         reasoning = (
             additional_kwargs.get("reasoning_content")
             or additional_kwargs.get("reasoning")
@@ -2232,27 +2249,9 @@ class AICall:
             or response_metadata.get("reasoning")
             or ""
         )
-
         if reasoning:
-            reasoning_text = AICall._normalize_reasoning_text(str(reasoning))
-        else:
-            reasoning_text = ""
-
-        if reasoning_text and content:
-            return f"{reasoning_text}{content}"
-        if reasoning_text:
-            return reasoning_text
-        return str(content or "")
-
-    @staticmethod
-    def _normalize_reasoning_text(reasoning: str) -> str:
-        """Wrap provider reasoning as `<think>` so stream filters can apply."""
-        text = str(reasoning or "")
-        if not text.strip():
-            return ""
-        if "<think>" in text.lower() and "</think>" in text.lower():
-            return text
-        return f"<think>{text}</think>"
+            parts.append(str(reasoning))
+        return re.sub(r"</?think>", "", "".join(parts), flags=re.IGNORECASE)
 
     @staticmethod
     def _serialize_structured_response(value: Any) -> str:

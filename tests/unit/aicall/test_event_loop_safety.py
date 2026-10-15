@@ -2521,17 +2521,15 @@ def test_call_surfaces_reasoning_content_in_stream_events():
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         ai.call("sys", "q", tools=[tool], stream_queue=event_queue, node_id="layer", max_steps=3)
 
-    seen_ai_token = False
-    seen_ai_message = False
+    events = []
     while not event_queue.empty():
-        _, evt = event_queue.get_nowait()
-        if evt.get("type") == "ai_token" and "内部推理" in (evt.get("content") or ""):
-            seen_ai_token = True
-        if evt.get("type") == "ai_message" and "内部推理" in (evt.get("full_content") or ""):
-            seen_ai_message = True
+        events.append(event_queue.get_nowait()[1])
 
-    assert seen_ai_token is True
-    assert seen_ai_message is True
+    # Reasoning is surfaced on its own channel and never mixed into the answer.
+    assert any(evt.get("type") == "ai_reasoning" and "内部推理" in (evt.get("content") or "") for evt in events)
+    assert not any("内部推理" in (evt.get("content") or "") for evt in events if evt.get("type") == "ai_token")
+    message = next(evt for evt in events if evt.get("type") == "ai_message")
+    assert message["full_content"] == "最终答案"
 
 
 def test_call_wraps_provider_reasoning_content_for_stream_filters():
@@ -2591,10 +2589,10 @@ def test_call_wraps_provider_reasoning_content_for_stream_filters():
         _, evt = event_queue.get_nowait()
         queued_events.append(evt)
 
-    token_event = next(evt for evt in queued_events if evt.get("type") == "ai_token")
+    reasoning_event = next(evt for evt in queued_events if evt.get("type") == "ai_reasoning")
     message_event = next(evt for evt in queued_events if evt.get("type") == "ai_message")
-    assert token_event["content"] == "<think>内部推理</think>"
-    assert message_event["full_content"].startswith("<think>内部推理</think>最终答案")
+    assert reasoning_event["content"] == "内部推理"
+    assert message_event["full_content"] == "最终答案"
 
 
 def test_extract_usage_metadata_supports_usage_metadata_and_token_usage():

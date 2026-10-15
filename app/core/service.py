@@ -1033,8 +1033,13 @@ class HolmesService:
                         _token_stream_buffer = ""
                     if content:
                         yield emit(f"   💭 [{node_name}] AI: {content[:500]}")
-                elif think_type == "ai_token":
-                    token_text = think_filter.filter_token(event.get("content", ""))
+                elif think_type in ("ai_token", "ai_reasoning"):
+                    # Reasoning arrives on its own channel; text mode keeps showing it through
+                    # the existing <think> filter (full / truncated / hidden).
+                    raw_token = event.get("content", "") or ""
+                    if think_type == "ai_reasoning" and raw_token:
+                        raw_token = f"<think>{raw_token}</think>"
+                    token_text = think_filter.filter_token(raw_token)
                     if token_text:
                         if not _token_streaming_active:
                             yield f"   💭 [{node_name}] "
