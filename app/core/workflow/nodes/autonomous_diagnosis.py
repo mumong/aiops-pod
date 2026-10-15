@@ -20,6 +20,7 @@ from app.core.workflow.case_result import (
     DiagnosisCaseOutput,
     EvidenceStageOutput,
     bind_case_result,
+    evidence_fallback_report,
 )
 from app.core.workflow.diagnosis_contract import LocationOutput
 from app.core.workflow.nodes.query_answer import (
@@ -215,14 +216,22 @@ class DiagnosisStageNode(QueryCollectNode):
                 draft = case["report"]
             except (ValueError, TypeError) as exc:
                 archive.write_text("cases/invalid-output.txt", raw)
-                draft = "本组诊断结果交付不完整；已保留采集记录，不能据此确认根因或恢复。"
+                summary = "本组诊断结果交付不完整；已保留采集记录，不能据此确认根因或恢复。"
+                # The evidence stage already delivered tool-backed facts for this group;
+                # show them instead of an empty placeholder (still marked partial).
+                draft = (
+                    evidence_fallback_report(
+                        state.get("diagnosis_evidence_handoff"), state.get("evidence_analysis")
+                    )
+                    or summary
+                )
                 case = {
                     "contract_version": "diagnosis-case.v1",
                     "group_id": group_id,
                     "target": target,
                     "execution_status": "partial",
                     "outcome": "inconclusive",
-                    "summary": draft,
+                    "summary": summary,
                     "report": draft,
                     "result_ref": result_ref,
                     "unresolved": ["RCA 结构化结果或目标身份无效"],

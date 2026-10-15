@@ -111,3 +111,35 @@ def case_index(result):
         "certainty": result.get("certainty", "unknown"),
         "result_ref": result.get("result_ref"),
     }
+
+
+def evidence_fallback_report(evidence_handoff, evidence_analysis=""):
+    """Report built from this group's own evidence when RCA delivered nothing.
+
+    Facts and open questions come verbatim from the evidence stage (tool-backed);
+    no cause is inferred here. Returns "" when there is nothing real to show.
+    """
+    handoff = evidence_handoff if isinstance(evidence_handoff, dict) else {}
+    facts = [
+        f for f in handoff.get("key_facts") or [] if isinstance(f, dict) and f.get("statement")
+    ]
+    unresolved = [str(u) for u in handoff.get("unresolved") or [] if u]
+    analysis = str(evidence_analysis or "").strip()
+    if not facts and not analysis:
+        return ""
+    lines = [
+        "### 诊断结论",
+        "根因分析阶段未交付结构化结果；以下是本组取证阶段的真实观察，不构成根因结论。",
+    ]
+    if analysis:
+        lines += ["", "### 取证分析", analysis]
+    if facts:
+        lines += ["", "### 关键证据", "| 观察 | 时间 | 证据引用 |", "|---|---|---|"]
+        for fact in facts:
+            refs = ", ".join(f"`{r}`" for r in fact.get("evidence_refs") or [])
+            lines.append(
+                f"| {fact['statement']} | {fact.get('observed_at') or '—'} | {refs or '—'} |"
+            )
+    if unresolved:
+        lines += ["", "### 待核实"] + [f"- {item}" for item in unresolved]
+    return "\n".join(lines)
