@@ -12,7 +12,7 @@ log() { echo "$(ts) $*" | tee -a $D/log.txt >&2; }
 record() { RESULTS+=("$1|$2|$3"); log "[$1] $2 — $3"; }
 pass() { record PASS "$1" "$2"; }
 fail() { record FAIL "$1" "$2"; }
-check() { if eval "$1"; then pass "$2" "$3"; else fail "$2" "$3"; fi; }
+check() { if eval "$1"; then pass "$2" "$3"; return 0; else fail "$2" "$3"; return 1; fi; }
 jget() { python3 - "$1" "$2" <<'PY' 2>/dev/null
 import json,sys
 v=json.load(open(sys.argv[1]))
@@ -40,8 +40,8 @@ diagnose() {
   done
   echo "$rid"
 }
-start_batch() { curl -s -m 60 -b $J -c $J -X POST "$B/repair/batches" -H 'Content-Type: application/json' -d "{\"diagnosis_run_id\":\"$1\"}" -o $D/batch.json; jget $D/batch.json "['groups'][0]['job_id']"; }
-job() { curl -s -m 30 -b $J "$B/repair/jobs/$1" -o $D/job.json; jget $D/job.json "['status']"; }
+start_batch() { curl -s -m 60 -b $J -c $J -X POST "$B/repair/batches" -H 'Content-Type: application/json' -d "{\"diagnosis_run_id\":\"$1\"}" -o $D/batch.json; jget $D/batch.json groups.0.job_id; }
+job() { curl -s -m 30 -b $J "$B/repair/jobs/$1" -o $D/job.json; jget $D/job.json status; }
 # wait_status <job> <seconds> <status...>: poll until status in the list; prints final status
 wait_status() {
   local jid=$1 limit=$2; shift 2; local deadline=$(( $(date +%s) + limit )) st=""

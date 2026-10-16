@@ -66,4 +66,4 @@ if [ -n "$NS" ]; then
   check '[ "$(python3 -c "import json;e=json.load(open(\"$D/job.json\")).get(\"events\") or [];print(sum(1 for x in e if x.get(\"type\")==\"remediation_tool_start\" and x.get(\"approval\")==\"auto\"))")" -ge 1 ]' "自动执行开关：命令事件标记 approval=auto，无审批请求" "$(jget $D/job.json result.reason | cut -c1-80)"
   curl -s -X DELETE $B/repair/policy/mode -H "X-AIOps-Admin-Token: $TOKEN" -o /dev/null; log "已恢复 review"
 fi
-summary
+summary; exit $?

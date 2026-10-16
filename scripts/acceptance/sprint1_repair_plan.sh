@@ -23,4 +23,4 @@ ST2=$(wait_status $JOB2 900 planned awaiting_approval executing verifying failed
 check '[ "$ST2" = planned ] || [ "$ST2" = awaiting_approval ]' "新版本方案生成（v$(jget $D/job.json version) status=$ST2)" "$(jget $D/job.json error)"
 check '[ "$(jget $D/job.json history.#)" -ge 1 ]' "旧版本进入历史记录，新版本携带用户意见" "feedback=$(jget $D/job.json feedback.text | cut -c1-40)"
 curl -s -m 30 -b $J -X POST "$B/repair/jobs/$JOB2/cancel" -o /dev/null
-summary
+summary; exit $?

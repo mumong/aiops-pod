@@ -28,4 +28,4 @@ PY
          check 'kubectl -n $NS get pod -l app=workload -o jsonpath="{.items[0].status.containerStatuses[0].ready}" | grep -q true && [ "$R0" = "$R1" ]' "$C 复核：Running/Ready 且 60 秒无新增重启" "restarts $R0→$R1";;
   esac
 done
-summary
+summary; exit $?
