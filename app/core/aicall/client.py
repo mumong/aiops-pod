@@ -60,10 +60,12 @@ from app.core.prompts import (
 )
 from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
 
-from .errors import ModelStreamStalled, raise_on_model_disconnect
+from .errors import ModelStreamStalled, public_error_text, raise_on_model_disconnect
+from .guards import AgentGuards
 from .model_streaming import VisibleChatOpenAI as ChatOpenAI
 from .output_budget import MINIMUM_OUTPUT_TOKENS, OutputBudget
 from .streaming import push_event
+from .tool_call_repair import repair_tool_call_arguments
 from .types import AICallResult
 
 logger = logging.getLogger(__name__)
@@ -142,7 +144,6 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
 
 
-_DEFAULT_MAX_TOOL_CALLS_PER_TURN = 16
 _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS = 480.0
 
 
@@ -178,16 +179,6 @@ def _call_with_deadline(fn: Callable[[], Any], timeout: Optional[float], *, what
             raise TimeoutError(f"模型响应超过 {timeout:g} 秒未完成") from None
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
-
-
-def _max_tool_calls_per_turn() -> int:
-    """Tool calls executed per model message (0 disables); guards degenerate repetition."""
-    try:
-        return max(
-            0, int(os.getenv("AICALL_MAX_TOOL_CALLS_PER_TURN", _DEFAULT_MAX_TOOL_CALLS_PER_TURN))
-        )
-    except ValueError:
-        return _DEFAULT_MAX_TOOL_CALLS_PER_TURN
 
 
 def _model_idle_timeout_seconds() -> float:
@@ -264,6 +255,7 @@ class AICall:
         chat_model_extra_body: Optional[Dict[str, Any]] = None,
         internal_extra_body: Optional[Dict[str, Any]] = None,
         output_budget: Optional[OutputBudget] = None,
+        agent_guards: Optional[AgentGuards] = None,
     ):
         """
         Args:
@@ -276,6 +268,7 @@ class AICall:
                 缺省按环境变量/默认值构造。
         """
         self.output_budget = output_budget or OutputBudget.from_config()
+        self.agent_guards = agent_guards or AgentGuards.from_config()
         self.model = model
         self.model_str = model
         self.api_key = api_key
@@ -1450,7 +1443,9 @@ class AICall:
                     run_id=run_id,
                     on_waiting=on_waiting,
                 ),
-                self._build_tool_dedup_middleware(getattr(self, "query_tool_timeout", 0)),
+                self._build_tool_dedup_middleware(
+                    getattr(self, "query_tool_timeout", 0), guards=self.agent_guards
+                ),
             ],
         }
         if getattr(self, "query_context_state_compaction", False):
@@ -1581,15 +1576,17 @@ class AICall:
             raise_on_model_disconnect(e)
             logger.error("[AICall] agent 执行异常: %s", e, exc_info=True)
             run.incomplete_reason = "agent_error"
+            # Provider error bodies stay in the log; users and session history get a
+            # safe description (a leaked body once became part of the next question).
             self._push(
                 run.stream_queue,
                 node_id,
                 run.thinking_events,
                 type="execution_incomplete",
-                reason=str(e),
+                reason=public_error_text(e),
             )
             if not run.final_content:
-                run.final_content = f"Agent 执行异常: {e}"
+                run.final_content = f"Agent 执行异常: {public_error_text(e)}"
 
     def _finalize_structured_delivery(
         self, run: "_AgentRun", *, system_prompt: str, question: str
@@ -2743,7 +2740,18 @@ class AICall:
         safety_margin = int(config["safety_tokens"])
 
         system_content = getattr(getattr(request, "system_message", None), "content", "") or ""
-        messages = list(getattr(request, "messages", None) or [])
+        messages, repaired = repair_tool_call_arguments(
+            list(getattr(request, "messages", None) or [])
+        )
+        if repaired:
+            logger.warning(
+                "[AICall] repaired %d assistant message(s) with malformed tool-call arguments "
+                "before sending (node=%s)",
+                repaired,
+                node_id,
+            )
+            if hasattr(request, "override"):
+                request = request.override(messages=messages)
         messages_payload = [self._serialize_agent_message(message) for message in messages]
         tool_schema_payload = serialize_tool_schema(getattr(request, "tools", None) or [])
         response_schema_payload = self._serialize_agent_response_format(
@@ -3222,15 +3230,20 @@ class AICall:
         return f"name:{name}|args:{args_str}"
 
     @staticmethod
-    def _build_tool_dedup_middleware(timeout_seconds: float = 0):
+    def _build_tool_dedup_middleware(
+        timeout_seconds: float = 0, guards: Optional[AgentGuards] = None
+    ):
         """Deduplicate identical tool executions within one agent call."""
         import asyncio
 
         from langchain.agents.middleware import wrap_tool_call
 
+        guards = guards or AgentGuards.from_config()
         cache: Dict[str, Tuple[ToolMessage, str]] = {}
         in_flight: Dict[str, Tuple[Any, str]] = {}
-        max_calls_per_turn = _max_tool_calls_per_turn()
+        repeats: Dict[str, int] = {}
+        max_calls_per_turn = guards.max_tool_calls_per_turn
+        max_identical_calls = guards.max_identical_calls
         lock = asyncio.Lock()
 
         def _clone_for_call(
@@ -3260,6 +3273,7 @@ class AICall:
             original_call_id: str,
             *,
             same_turn: bool = False,
+            repeat_count: int = 1,
         ) -> ToolMessage:
             """A repeat of an already-answered call (HTTP 304 style): say so instead of
             replaying the whole body, so the model notices it is going in circles."""
@@ -3271,9 +3285,16 @@ class AICall:
                 "若需要该结果摘要中未展示的部分，请用 read_context_archive 回读其 raw_ref；"
                 "否则请基于已有结果继续推进，或改用其它工具/参数。"
             )
+            if max_identical_calls and repeat_count >= max_identical_calls:
+                notice = (
+                    f"【同一调用已重复 {repeat_count} 次，达到上限 {max_identical_calls}】{tool_name} 的参数"
+                    f"与 call_id={original_call_id} 完全相同。继续重复不会得到新信息："
+                    "请立即基于已有结果给出本阶段的最终输出；确实需要其它数据时改用不同参数或工具。"
+                )
             notice_message = _clone_for_call(source, current_call_id, original_call_id)
             notice_message.content = notice
             notice_message.additional_kwargs["aiops_repeat_notice"] = True
+            notice_message.additional_kwargs["aiops_repeat_count"] = repeat_count
             return notice_message
 
         @wrap_tool_call
@@ -3300,7 +3321,10 @@ class AICall:
                 cached = cache.get(signature)
                 if cached is not None:
                     source, original_call_id = cached
-                    return _repeat_notice(source, current_call_id, original_call_id)
+                    repeats[signature] = repeats.get(signature, 0) + 1
+                    return _repeat_notice(
+                        source, current_call_id, original_call_id, repeat_count=repeats[signature]
+                    )
 
                 pending = in_flight.get(signature)
                 if pending is None:

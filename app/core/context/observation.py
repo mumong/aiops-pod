@@ -270,7 +270,17 @@ class ObservationProcessor:
             and tool in self.QUERY_SUMMARY_TOOLS
             and len(raw) > self.QUERY_SUMMARY_MIN_CHARS
         )
-        if targeted_summary:
+        # Any other large result (e.g. a 23 KB get_prometheus_target dump) is bounded
+        # too: the raw text is archived, the model gets a capped head plus the
+        # omission and the read-back hint. Runbooks and explicit archive reads stay whole.
+        oversize_generic = (
+            preserve_raw
+            and not targeted_summary
+            and tool not in self.FULL_PASSTHROUGH_TOOLS
+            and tool != "read_context_archive"
+            and len(raw) > self.QUERY_SUMMARY_MIN_CHARS
+        )
+        if targeted_summary or oversize_generic:
             preserve_raw = False
         if preserve_raw:
             try:
@@ -2828,8 +2838,21 @@ class ObservationProcessor:
 
     def _generic_summary(self, tool: str, raw: str) -> str:
         lines = [ln for ln in raw.splitlines() if ln.strip()]
-        head = "\n".join(lines[:40])
-        return f"{tool} 输出摘要: raw_chars={len(raw)} lines={len(lines)}\n{head}"
+        limit = max(500, int(self.max_observation_chars))
+        head_lines, used = [], 0
+        for line in lines:
+            if head_lines and used + len(line) + 1 > limit:
+                break
+            head_lines.append(line[:limit])
+            used += len(line) + 1
+        head = "\n".join(head_lines)
+        if len(head_lines) >= len(lines) and len(head) >= len(raw.strip()) - 1:
+            return f"{tool} 输出摘要: raw_chars={len(raw)} lines={len(lines)}\n{head}"
+        omitted_lines = len(lines) - len(head_lines)
+        return (
+            f"{tool} 输出摘要: raw_chars={len(raw)} lines={len(lines)}，展示前 {len(head_lines)} 行，"
+            f"省略 {omitted_lines} 行；完整原文已归档，需要时用 read_context_archive 按 raw_ref 回读。\n{head}"
+        )
 
     def _extract_prometheus_result(self, tool: str, raw: str) -> tuple[Dict[str, Any], str, str]:
         try:

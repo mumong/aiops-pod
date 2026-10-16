@@ -1,0 +1,42 @@
+"""Deterministic guards on the agent tool loop (``llm.agent_guards``)."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional
+
+# Config key -> (environment override, default)
+_FIELDS = {
+    "max_tool_calls_per_turn": ("AICALL_MAX_TOOL_CALLS_PER_TURN", 16),
+    "max_identical_calls": ("AICALL_MAX_IDENTICAL_CALLS", 3),
+}
+
+
+@dataclass(frozen=True)
+class AgentGuards:
+    """``max_tool_calls_per_turn``: tool calls executed per model message (0 = no cap).
+    ``max_identical_calls``: how often the same call (tool + arguments) may be repeated
+    in one stage before the repeat notice tells the model to stop and deliver."""
+
+    max_tool_calls_per_turn: int = _FIELDS["max_tool_calls_per_turn"][1]
+    max_identical_calls: int = _FIELDS["max_identical_calls"][1]
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Optional[Mapping[str, Any]] = None,
+        environ: Optional[Mapping[str, str]] = None,
+    ) -> "AgentGuards":
+        env = os.environ if environ is None else environ
+        source = config if isinstance(config, Mapping) else {}
+        values = {}
+        for name, (env_name, default) in _FIELDS.items():
+            raw = env.get(env_name)
+            if raw in (None, ""):
+                raw = source.get(name, default)
+            try:
+                values[name] = max(0, int(raw))
+            except (TypeError, ValueError):
+                values[name] = default
+        return cls(**values)

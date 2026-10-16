@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.core.aicall.errors import public_error_text
 from app.core.prompts import (
     DEEP_CONCLUSION_PRESENTATION,
     QUERY_COLLECT_PROMPT,
@@ -130,7 +131,7 @@ class QueryCollectNode(FocusedTaskNode):
             )
             raw = response.result or ""
         except StructuredContextBudgetError as exc:
-            events = [{"type": "execution_incomplete", "reason": str(exc)}]
+            events = [{"type": "execution_incomplete", "reason": public_error_text(exc)}]
             raw = QueryAnswer(
                 intent=question,
                 scope="本次请求范围",

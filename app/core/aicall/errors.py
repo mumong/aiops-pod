@@ -90,3 +90,18 @@ def model_transport_message(exc):
             return "LLM API 服务连接中断，未能完成本次回答，请稍后重试。"
         current = current.__cause__ or current.__context__
     return None
+
+
+def public_error_text(exc: BaseException) -> str:
+    """Error text that may reach users and session history.
+
+    Our own stream/deadline errors already carry a safe message; anything else is
+    reduced to the exception class and HTTP status, never the provider body.
+    """
+    if isinstance(exc, (ModelStreamInterrupted, ModelStreamStalled, TimeoutError)):
+        return str(exc) or type(exc).__name__
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    suffix = f"，HTTP {status}" if status else ""
+    return f"模型服务请求失败（{type(exc).__name__}{suffix}）"
