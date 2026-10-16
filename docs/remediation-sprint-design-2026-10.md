@@ -139,3 +139,5 @@
 | 验收脚本本身：`local a=$1 b=$((a))` 展开早于赋值；标签猜错 | 脚本缺陷 | 已修，复核改用 Deployment readyReplicas |
 
 Sprint 2 接口层：`sprint2_policy_and_switch.sh` 8/8 通过（25 条高危命令全部拦截并带规则名，6 条合规命令放行，无令牌 403，切换/恢复写审计）。
+
+Sprint 2 真实链路（`sprint2_policy_and_switch.sh aiops-case-04`，14/14 通过）：review 模式下任务停在 `awaiting_approval` 且无任何执行事件 → 拒绝后终态 `rejected`、仍无执行事件；管理员令牌切 auto 后新任务 `mode=auto / mode_source=runtime`，命令事件 `approval=auto`，无审批请求，`recovered`（Pending/CreateContainerConfigError → Running/Ready，25 秒）；随后恢复 review，全部写入审计。Sprint 1（`sprint1_repair_plan.sh aiops-case-04`，11/11 通过）：v1 被 v2 替代后状态 `superseded`、v2 由脚本结尾取消为 `cancelled`，均为设计内终态，case-04 在该脚本中未被修改。
