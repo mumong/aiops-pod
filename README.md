@@ -18,6 +18,44 @@ Kubernetes Pod 排障需要结合资源状态、事件、日志、指标和链�
 
 Agent 负责规划和解释，MCP 查询真实数据，Runbook 提供排障知识。
 
+## 效果展示
+
+以下为实际运行截图，展示从自然语言查询、故障诊断到人工审批修复的使用流程。不同截图的界面样式可能有所差异，具体以部署版本为准。点击图片可查看原图。
+
+### 自然语言查询与资源使用率
+
+输入“查询我各个节点的 CPU 和内存使用率”，查看查询目标、运行详情和分析过程。
+
+![自然语言查询节点 CPU 和内存使用率](docs/screenshots/resource-query-overview.png)
+
+展开工具调用，查看 Prometheus 查询参数与返回结果，追溯结论的数据来源。
+
+![Prometheus 工具调用详情与查询参数](docs/screenshots/resource-query-tool-details.png)
+
+最终按节点汇总 CPU、内存使用率，并展示对应的 PromQL 查询表达式。
+
+![各节点 CPU 和内存使用率汇总](docs/screenshots/node-cpu-memory-results.png)
+
+### 异常诊断与根因分析
+
+汇总多个异常 Pod 的状态与关键信息，按组展示 Kubernetes 状态、事件和监控指标等现场证据。
+
+![多 Pod 异常概览与分组诊断证据](docs/screenshots/pod-diagnosis-evidence.png)
+
+结合容器内存限制、日志和指标，展示从内存增长到 OOM、进程退出及 CrashLoopBackOff 的因果链。
+
+![OOM 故障的证据关联与根因分析](docs/screenshots/oom-root-cause-analysis.png)
+
+### 人工审批与修复结果
+
+诊断后展示修复方案、执行与验证命令，以及阶段耗时和调用统计，由用户审阅并批准修复方案。
+
+![修复方案与人工审批界面](docs/screenshots/remediation-approval.png)
+
+修复方案和具体动作分别审批后，展示执行后的验证结果；图中为解除 finalizer 删除阻塞的修复流程完成示例。
+
+![修复方案及动作审批通过后的完成状态](docs/screenshots/remediation-completed.png)
+
 ## 配套项目与可观测性组件
 
 
