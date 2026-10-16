@@ -8,6 +8,7 @@ execution and the ``/repair/policy/check`` endpoint share ``check_command``.
 
 from __future__ import annotations
 
+import json
 import shlex
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -325,6 +326,41 @@ def named_resources(command: str) -> List[Tuple[str, str]]:
     return pairs
 
 
+def _patch_payload_error(args: List[str]) -> str:
+    """Well-formedness of ``kubectl patch -p/--patch`` payloads, checked before approval.
+
+    A payload the API server will reject (live: a hand-written strategic merge with
+    a missing bracket) must fail at planning, where the model can fix it, not after
+    a human approved it. Only JSON syntax and the json-patch op shape are checked;
+    the content of the change is the reviewer's call.
+    """
+    if len(args) < 2 or args[1] != "patch" and "patch" not in args[1:3]:
+        return ""
+    patch_type = "strategic"
+    payload = None
+    for index, arg in enumerate(args):
+        name, has_value, value = arg.partition("=")
+        if name in {"-p", "--patch"}:
+            payload = value if has_value else (args[index + 1] if index + 1 < len(args) else None)
+        elif name == "--type":
+            patch_type = (value if has_value else (args[index + 1] if index + 1 < len(args) else "")).strip("'\"")
+    if payload is None:
+        return ""
+    try:
+        parsed = json.loads(payload)
+    except ValueError as exc:
+        return f"patch 内容不是合法 JSON（{exc.msg}，位置 {exc.pos}）；请修正后重新提交"
+    if patch_type == "json":
+        if not isinstance(parsed, list) or not all(
+            isinstance(op, dict) and isinstance(op.get("op"), str) and isinstance(op.get("path"), str)
+            for op in parsed
+        ):
+            return "--type=json 的 patch 必须是 [{op, path, value?}] 操作列表"
+    elif not isinstance(parsed, dict):
+        return f"--type={patch_type} 的 patch 必须是 JSON 对象"
+    return ""
+
+
 def check_command(command: str, policy: Optional[CommandPolicy] = None) -> CommandVerdict:
     """Evaluate every rule; the first violated rule names the verdict."""
     policy = policy or CommandPolicy()
@@ -396,6 +432,10 @@ def check_command(command: str, policy: Optional[CommandPolicy] = None) -> Comma
                 operation,
                 argv,
             )
+
+    patch_error = _patch_payload_error(args)
+    if patch_error:
+        return deny("malformed_patch", patch_error, operation, argv)
 
     try:
         check_repair_execution(args, policy)

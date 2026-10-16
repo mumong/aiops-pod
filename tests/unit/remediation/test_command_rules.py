@@ -114,3 +114,24 @@ def test_invalid_configuration_is_rejected_not_ignored():
         CommandPolicy.from_config({"denied_flags": "--force"})
     with pytest.raises(ValueError):
         CommandPolicy.from_config({"denied_resource_kinds": [""]})
+
+
+@pytest.mark.parametrize(
+    "command,fragment",
+    [
+        ("kubectl patch deployment workload -n demo -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"app\"}}}}}'", "不是合法 JSON"),
+        ("kubectl patch deployment/api -n demo --type=json -p '{\"op\":\"replace\"}'", "操作列表"),
+        ("kubectl patch deployment/api -n demo --type=json -p '[{\"path\":\"/x\"}]'", "操作列表"),
+        ("kubectl patch deployment/api -n demo --type=merge -p '[1,2]'", "JSON 对象"),
+    ],
+)
+def test_malformed_patch_payloads_fail_at_planning(command, fragment):
+    verdict = check_command(command)
+    assert verdict.allowed is False and verdict.rule == "malformed_patch"
+    assert fragment in verdict.reason
+
+
+def test_well_formed_patches_pass():
+    assert check_command("kubectl patch deployment/api -n demo --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/replicas\",\"value\":2}]'").allowed
+    assert check_command("kubectl patch pod/x -n demo --type merge -p '{\"metadata\":{\"finalizers\":null}}'").allowed
+    assert check_command("kubectl patch deployment workload -n demo -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"app\",\"env\":[{\"name\":\"A\",\"value\":\"b\"}]}]}}}}'").allowed
