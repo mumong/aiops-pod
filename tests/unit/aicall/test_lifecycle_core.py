@@ -183,7 +183,34 @@ def test_diagnosis_projection_preserves_archive_and_query_compatibility(tmp_path
     assert Path(result["raw_ref"]).read_text() == raw
     assert result["structured"]["pods"] == snapshot()["pods"]
     if node == "query_collect":
-        assert result["summary"] == raw
+        assert result["summary"] == raw  # small QUERY results stay exact
+        big = snapshot()
+        nominal = dict(
+            big["pods"][0],
+            deletion_timestamp=None,
+            conditions=[{"type": "Ready", "status": "True"}],
+            containers=[
+                {
+                    "name": "app",
+                    "role": "app",
+                    "ready": True,
+                    "state": {"running": {}},
+                    "termination_within_window": False,
+                }
+            ],
+        )
+        big["pods"] = [dict(nominal, name=f"pod-{i}", uid=f"u{i}") for i in range(120)]
+        big_raw = json.dumps(big)
+        assert len(big_raw) > ObservationProcessor.QUERY_SUMMARY_MIN_CHARS
+        bounded = ObservationProcessor(archive_root=str(tmp_path)).process(
+            "test", node, 2, "query_pod_lifecycle", big_raw
+        )
+        view = json.loads(bounded["summary"])
+        assert (
+            view["contract_version"] == "pod-lifecycle-inventory.v1"
+            and view["nominal_count"] == 120
+        )
+        assert len(bounded["summary"]) < len(big_raw) / 4
     else:
         assert json.loads(result["summary"])["contract_version"] == "pod-lifecycle-core.v1"
         assert core_from_messages(

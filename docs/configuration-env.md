@@ -12,23 +12,24 @@
 | `AICALL_MAX_IDENTICAL_CALLS` | 3 | app/core/aicall/guards.py:12 |
 | `AICALL_MAX_OUTPUT_TOKENS` | 6000 | app/core/aicall/output_budget.py:19 |
 | `AICALL_MAX_TOOL_CALLS_PER_TURN` | 16 | app/core/aicall/guards.py:11 |
-| `AICALL_MODEL_IDLE_TIMEOUT_SECONDS` | _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS | app/core/aicall/client.py:190 |
+| `AICALL_MODEL_IDLE_TIMEOUT_SECONDS` | _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS | app/core/aicall/client.py:195 |
 | `AICALL_RECENT_KEEP_RATIO` | 0.15 | app/core/context/window_policy.py:18 |
 | `AICALL_RECENT_KEEP_TOKENS` | 8000 | app/core/context/window_policy.py:17 |
+| `AICALL_REPEAT_PAGE_CHARS` | 3000 | app/core/aicall/guards.py:13 |
 | `AICALL_ROUTER_MAX_OUTPUT_TOKENS` | 1200 | app/core/aicall/output_budget.py:22 |
-| `AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS` | _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS | app/core/aicall/client.py:158 |
+| `AICALL_STRUCTURED_CALL_TIMEOUT_SECONDS` | _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS | app/core/aicall/client.py:163 |
 | `AIOPS_AUTONOMOUS_PARALLEL_WORKERS` | "3" / self.DEFAULT_LANE_WORKERS | app/core/remediation/jobs.py:88, app/core/workflow/nodes/autonomous_parallel.py:135 |
 | `AIOPS_COMPACTION_WORKERS` | "3" | app/core/aicall/working_context.py:306 |
 | `AIOPS_CONTEXT_ARCHIVE_ROOT` | "" | app/core/context/archive.py:22 |
 | `AIOPS_EVIDENCE_HISTORY_TOKENS` | "24000" | app/core/context/evidence_policy.py:22 |
 | `AIOPS_EVIDENCE_RECENT_TOKENS` | "8000" | app/core/context/evidence_policy.py:23 |
 | `AIOPS_EVIDENCE_RESULT_TOKENS` | "4096" | app/core/context/evidence_policy.py:21 |
-| `AIOPS_EVIDENCE_VIEW_MODE` | "legacy" | app/core/aicall/builtin_tools.py:322, app/core/context/evidence_policy.py:16, app/core/context/observation.py:171 |
+| `AIOPS_EVIDENCE_VIEW_MODE` | "legacy" | app/core/aicall/builtin_tools.py:329, app/core/context/evidence_policy.py:16, app/core/context/observation.py:171 |
 | `AIOPS_MODEL_METADATA_FILE` | "" | app/core/context/budget.py:340 |
 | `AIOPS_QUERY_TOOL_TIMEOUT_SECONDS` | "60" | app/core/workflow/nodes/query_answer.py:33 |
 | `AIOPS_REPAIR_RECORD_ROOT` | — | app/core/remediation/records.py:32 |
-| `AIOPS_THINK_STREAM_MAX_CHARS` | — | app/core/service.py:649 |
-| `AIOPS_THINK_STREAM_MODE` | — | app/core/service.py:643 |
+| `AIOPS_THINK_STREAM_MAX_CHARS` | — | app/core/service.py:652 |
+| `AIOPS_THINK_STREAM_MODE` | — | app/core/service.py:646 |
 | `AIOPS_TIKTOKEN_ENCODING` | "" | app/core/context/budget.py:98, app/core/service.py:160 |
 | `AIOPS_TOKENIZER_JSON_PATH` | "" | app/core/context/budget.py:78, app/core/service.py:154 |
 | `API_HOST` | "0.0.0.0" | app/main.py:183 |
@@ -39,12 +40,12 @@
 | `HOSTNAME` | "N/A" / "localhost" | app/core/environment.py:103, app/core/environment.py:109 |
 | `KUBERNETES_SERVICE_HOST` | "N/A" / — | app/core/environment.py:32, app/core/environment.py:99 |
 | `KUBERNETES_SERVICE_PORT` | "N/A" | app/core/environment.py:100 |
-| `LANGFUSE_PUBLIC_KEY` | — | app/core/aicall/client.py:2530 |
-| `LANGFUSE_SECRET_KEY` | — | app/core/aicall/client.py:2530 |
+| `LANGFUSE_PUBLIC_KEY` | — | app/core/aicall/client.py:2556 |
+| `LANGFUSE_SECRET_KEY` | — | app/core/aicall/client.py:2556 |
 | `LLM_API_BASE` | — | app/core/service.py:375 |
 | `LLM_API_KEY` | — | app/core/service.py:356 |
 | `LLM_MODEL` | "" / — | app/core/service.py:368, app/core/workflow/case_report.py:100 |
-| `LLM_REASONING_EFFORT` | "" | app/core/aicall/client.py:295 |
+| `LLM_REASONING_EFFORT` | "" | app/core/aicall/client.py:304 |
 | `LOG_LEVEL` | "INFO" | app/main.py:24 |
 | `MCP_AUTO_START_LOCAL` | "false" | app/main.py:70 |
 | `METRICS_ENABLED` | "true" / — | app/core/workflow/metrics.py:33, app/core/workflow/metrics.py:46 |
@@ -56,6 +57,6 @@
 | `POD_NAME` | os.getenv("HOSTNAME", "N/A") | app/core/environment.py:103 |
 | `POD_NAMESPACE` | "N/A" | app/core/environment.py:104 |
 | `REPORTS_DIR` | "/tmp/aiops/reports" | app/api/info_routes.py:19, app/core/federation/agent.py:485, app/core/federation/aggregator.py:102 … |
-| `THINK_STREAM_MAX_CHARS` | — | app/core/service.py:650 |
-| `THINK_STREAM_MODE` | — | app/core/service.py:644 |
+| `THINK_STREAM_MAX_CHARS` | — | app/core/service.py:653 |
+| `THINK_STREAM_MODE` | — | app/core/service.py:647 |
 | `WORKFLOW_STREAM_HEARTBEAT_SECONDS` | "15" | app/core/workflow/executor.py:434 |

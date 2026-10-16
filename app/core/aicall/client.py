@@ -3268,8 +3268,34 @@ class AICall:
         cache: Dict[str, Tuple[ToolMessage, str]] = {}
         in_flight: Dict[str, Tuple[Any, str]] = {}
         repeats: Dict[str, int] = {}
+        pages_served: Dict[str, int] = {}
         max_calls_per_turn = guards.max_tool_calls_per_turn
         max_identical_calls = guards.max_identical_calls
+        page_chars = max(0, int(guards.repeat_page_chars or 0))
+
+        def _raw_page(
+            source: ToolMessage, current_call_id: str, original_call_id: str, repeat: int
+        ):
+            """Repeat k of a call whose raw result was larger than one page -> raw slice k.
+
+            A small model repeats a call when the bounded view did not show what it
+            wanted; serving the next slice answers that without a new execution. None
+            when the result fits in one page or the slices are used up."""
+            text = source.content if isinstance(source.content, str) else ""
+            if not page_chars or len(text) <= page_chars:
+                return None
+            pages = (len(text) + page_chars - 1) // page_chars
+            if repeat >= pages:
+                return None
+            start = repeat * page_chars
+            page = _clone_for_call(source, current_call_id, original_call_id)
+            page.content = (
+                f"【重复调用：返回同一结果的原始内容第 {repeat + 1}/{pages} 段（每段 {page_chars} 字符），"
+                f"不是新数据；call_id={original_call_id}】\n" + text[start : start + page_chars]
+            )
+            page.additional_kwargs["aiops_repeat_page"] = repeat + 1
+            return page
+
         lock = asyncio.Lock()
 
         def _clone_for_call(
@@ -3348,16 +3374,24 @@ class AICall:
                 if cached is not None:
                     source, original_call_id = cached
                     repeats[signature] = repeats.get(signature, 0) + 1
-                    # One notice at the limit; one more identical call after it proves the
-                    # loop is degenerate (live: 6 repeats in a row), so stop deterministically.
-                    if max_identical_calls and repeats[signature] > max_identical_calls:
+                    paged = _raw_page(
+                        source, current_call_id, original_call_id, repeats[signature]
+                    )
+                    if paged is not None:
+                        pages_served[signature] = pages_served.get(signature, 0) + 1
+                        return paged
+                    # Repeats that received a new raw slice were productive; only the ones
+                    # after that count. One notice at the limit; one more identical call
+                    # after it proves the loop is degenerate (live: 6 repeats in a row).
+                    idle_repeats = repeats[signature] - pages_served.get(signature, 0)
+                    if max_identical_calls and idle_repeats > max_identical_calls:
                         raise RepeatLimitReached(
                             str(tool_call.get("name") or "tool"),
-                            repeats[signature],
+                            idle_repeats,
                             max_identical_calls,
                         )
                     return _repeat_notice(
-                        source, current_call_id, original_call_id, repeat_count=repeats[signature]
+                        source, current_call_id, original_call_id, repeat_count=idle_repeats
                     )
 
                 pending = in_flight.get(signature)

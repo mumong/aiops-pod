@@ -10,6 +10,7 @@ from typing import Any, Mapping, Optional
 _FIELDS = {
     "max_tool_calls_per_turn": ("AICALL_MAX_TOOL_CALLS_PER_TURN", 16),
     "max_identical_calls": ("AICALL_MAX_IDENTICAL_CALLS", 3),
+    "repeat_page_chars": ("AICALL_REPEAT_PAGE_CHARS", 3000),
 }
 
 
@@ -17,10 +18,13 @@ _FIELDS = {
 class AgentGuards:
     """``max_tool_calls_per_turn``: tool calls executed per model message (0 = no cap).
     ``max_identical_calls``: how often the same call (tool + arguments) may be repeated
-    in one stage before the repeat notice tells the model to stop and deliver."""
+    in one stage before the repeat notice tells the model to stop and deliver.
+    ``repeat_page_chars``: when the first result was bounded, each repeat of the same
+    call serves the next slice of the archived raw output of this size (0 disables)."""
 
     max_tool_calls_per_turn: int = _FIELDS["max_tool_calls_per_turn"][1]
     max_identical_calls: int = _FIELDS["max_identical_calls"][1]
+    repeat_page_chars: int = _FIELDS["repeat_page_chars"][1]
 
     @classmethod
     def from_config(

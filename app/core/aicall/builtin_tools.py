@@ -168,6 +168,13 @@ class ReadContextArchiveTool(BaseTool):
         if not any(self._is_relative_to(resolved, root) for root in allowed):
             allowed_text = ", ".join(str(p) for p in allowed)
             logger.warning("[read_context_archive] 非法路径: %s", requested)
+            runbook_id = Path(str(requested)).name
+            if runbook_id.endswith(".md"):
+                # Live: the model asked this tool for a runbook; point it at the right one.
+                return (
+                    f"Error: '{requested}' 不是归档路径。Runbook 请用 fetch_runbook(runbook_id="
+                    f"'{runbook_id[:-3]}') 读取；本工具只读取 raw_ref/summary_ref 等归档文件。"
+                )
             return f"Error: archive_path '{requested}' is not under allowed archive roots: [{allowed_text}]"
 
         if not resolved.is_file():

@@ -231,9 +231,12 @@ class ObservationProcessor:
             structured, semantic_success = self._parse_lifecycle_observation(raw)
             from .lifecycle_core import INVENTORY_VERSION, inventory_view, lifecycle_core
 
+            large_page = len(raw) > self.QUERY_SUMMARY_MIN_CHARS
+            # Diagnosis nodes always read the compact core; QUERY keeps small results exact
+            # and only projects pages that would otherwise flood the window (live: 93 KB).
             core = (
                 lifecycle_core(structured)
-                if semantic_success and node_id in {"layer", "evidence"}
+                if semantic_success and (node_id in {"layer", "evidence"} or large_page)
                 else {}
             )
             view = inventory_view(core) if core else {}
