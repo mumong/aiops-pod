@@ -34,3 +34,25 @@ def test_replicaset_name_passed_as_deployment_is_rejected():
 def test_verified_owner_and_pod_commands_pass():
     RepairDraft.model_validate(_draft("kubectl patch deployment/workload -n aiops-case-09 --type=json -p '[]'"))
     RepairDraft.model_validate(_draft("kubectl patch pod/workload-5487445f9-k4648 -n aiops-case-09 --type=merge -p '{}'"))
+
+
+def test_targets_without_assessments_are_rejected():
+    draft = _draft("kubectl patch deployment/workload -n aiops-case-09 --type=json -p '[]'")
+    draft["assessments"] = []
+    draft["actions"] = []
+    with pytest.raises(ValueError) as info:
+        RepairDraft.model_validate(draft)
+    assert "assessments" in str(info.value)
+
+
+def test_kubectl_write_in_prose_without_actions_is_rejected():
+    draft = _draft("kubectl patch deployment/workload -n aiops-case-09 --type=json -p '[]'")
+    draft["actions"] = []
+    draft["assessments"] = [{"group_id": "single", "status": "needs_input", "reason": "x"}]
+    draft["answer"] = "修复步骤：\n```bash\nkubectl patch deployment workload -n aiops-case-06 -p '{}'\n```"
+    with pytest.raises(ValueError) as info:
+        RepairDraft.model_validate(draft)
+    assert "actions 为空" in str(info.value)
+    # Read-only commands in prose are explanation, not an unsubmitted plan.
+    draft["answer"] = "可用 `kubectl describe pod x` 复查；\nkubectl get pods -n demo"
+    RepairDraft.model_validate(draft)

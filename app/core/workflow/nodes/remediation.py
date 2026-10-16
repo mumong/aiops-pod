@@ -87,11 +87,34 @@ class RepairDraft(QueryAnswer):
         decisions = {item.group_id: item for item in self.assessments}
         if len(decisions) != len(self.assessments) or any(g not in groups for g in decisions):
             raise ValueError("assessments 必须唯一关联已列出的目标")
+        # Every listed target gets an explicit decision; prose is not a plan. Live run
+        # 78d29cdd5bc94230 put the correct kubectl patch in `answer` with empty
+        # actions/assessments and the executor could only skip.
+        if self.status == "answered" and self.targets and not self.actions and not self.assessments:
+            raise ValueError(
+                "没有 actions 时，每个 target 都必须在 assessments 中给出 "
+                "ready/needs_input/not_actionable/needs_evidence 判断及原因"
+            )
+        if not self.actions and _mentions_kubectl_command(self.answer):
+            raise ValueError(
+                "answer 中出现了 kubectl 命令但 actions 为空：可执行命令必须作为 actions 提交（含 group_id、"
+                "description、risk、execute_command、rollback_advice），正文只做说明"
+            )
         actionable = {a.group_id for a in self.actions}
         for gid, decision in decisions.items():
             if (decision.status == "ready") != (gid in actionable):
                 raise ValueError("ready 必须有对应动作；其他规划状态不能包含执行动作")
         return self
+
+
+def _mentions_kubectl_command(text):
+    """A fenced or line-leading kubectl write in prose (describe/get/logs are explanation)."""
+    import re
+
+    for match in re.finditer(r"(?m)^\s*(?:\$\s*)?kubectl\s+([a-z-]+)", text or ""):
+        if match.group(1) not in {"get", "describe", "logs", "top", "explain", "events", "wait", "rollout"}:
+            return True
+    return False
 
 
 class RemediationNode(QueryCollectNode):
