@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.api.common import current_service, logger
 from app.core.context.archive import get_archive_root
@@ -55,6 +55,34 @@ async def health_check():
     """健康检查"""
     service = current_service()
     return service.health_check()
+
+
+def readiness(health: dict) -> tuple[int, dict]:
+    """Ready = initialized AND every configured MCP server connected.
+
+    A Pod that answers /health but has no tools would receive traffic during a
+    rolling release (live: 0/5 servers for 42 s after an MCP restart); readiness
+    waits for the tools, liveness-style /health stays permissive.
+    """
+    failed = list(health.get("mcp_failed_servers") or [])
+    ready = bool(health.get("ai_initialized")) and not failed
+    body = {
+        "ready": ready,
+        "status": health.get("status"),
+        "mcp_failed_servers": failed,
+        "version": health.get("version"),
+    }
+    return (200 if ready else 503), body
+
+
+@router.get("/ready")
+async def ready_check():
+    service = current_service()
+    retry = getattr(service, "_retry_failed_mcp_servers", None)
+    if callable(retry):
+        retry()  # non-blocking, rate-limited reconnect of servers that failed at start
+    code, body = readiness(service.health_check())
+    return JSONResponse(status_code=code, content=body)
 
 
 @router.get("/tools")

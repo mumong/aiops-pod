@@ -100,6 +100,7 @@ def test_route_table_order_and_names_are_stable(monkeypatch):
         ("/remediation/approve", ["POST"], "remediation_approve"),
         ("/", ["GET"], "root"),
         ("/health", ["GET"], "health_check"),
+        ("/ready", ["GET"], "ready_check"),
         ("/tools", ["GET"], "list_tools"),
         ("/tools/detail", ["GET"], "list_tools_detail"),
         ("/runbooks", ["GET"], "list_runbooks"),
