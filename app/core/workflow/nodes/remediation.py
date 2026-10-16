@@ -50,6 +50,28 @@ class RepairDraft(QueryAnswer):
     runbook_unavailable_reason: str = ""
     assessments: list[RepairAssessment] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def bind_single_group(cls, data):
+        """With exactly one target there is no ambiguity: bind actions/assessments to it.
+
+        A bookkeeping field, not a strategy decision; the model still chooses every
+        command. Live: a retry fixed a piped command and broke `group_id` instead.
+        """
+        if not isinstance(data, dict):
+            return data
+        targets = data.get("targets") or []
+        if len(targets) != 1 or not isinstance(targets[0], dict) or not targets[0].get("group_id"):
+            return data
+        gid = targets[0]["group_id"]
+        for key in ("actions", "assessments"):
+            items = data.get(key) or []
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict) and item.get("group_id") != gid:
+                        item["group_id"] = gid
+        return data
+
     @model_validator(mode="after")
     def command_contract(self):
         # Validate transport/schema only; the agent chooses the repair strategy.

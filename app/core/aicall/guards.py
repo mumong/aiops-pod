@@ -12,6 +12,7 @@ _FIELDS = {
     "max_identical_calls": ("AICALL_MAX_IDENTICAL_CALLS", 3),
     "repeat_page_chars": ("AICALL_REPEAT_PAGE_CHARS", 3000),
     "idle_round_min_calls": ("AICALL_IDLE_ROUND_MIN_CALLS", 2),
+    "structured_validation_retries": ("AICALL_STRUCTURED_VALIDATION_RETRIES", 2),
 }
 _FLAGS = {
     "finalize_on_idle_round": ("AICALL_FINALIZE_ON_IDLE_ROUND", True),
@@ -35,6 +36,10 @@ class AgentGuards:
     # is a normal re-check (live: a layer node was cut after 2 rounds); whole rounds of
     # 4-7 stale calls are the degenerate pattern this guard targets.
     idle_round_min_calls: int = _FIELDS["idle_round_min_calls"][1]
+    # Tool-free structured deliveries that fail schema validation are retried this many
+    # times, each retry carrying the validation error (live: the model fixed a piped
+    # command on retry 1 and broke the group_id binding instead; one retry was not enough).
+    structured_validation_retries: int = _FIELDS["structured_validation_retries"][1]
     # A round whose every tool call repeats an already answered call carries no new
     # request: end the loop and deliver from material (the model was done anyway).
     finalize_on_idle_round: bool = _FLAGS["finalize_on_idle_round"][1]

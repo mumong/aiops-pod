@@ -56,3 +56,19 @@ def test_kubectl_write_in_prose_without_actions_is_rejected():
     # Read-only commands in prose are explanation, not an unsubmitted plan.
     draft["answer"] = "可用 `kubectl describe pod x` 复查；\nkubectl get pods -n demo"
     RepairDraft.model_validate(draft)
+
+
+def test_single_target_binds_stray_group_ids():
+    draft = _draft("kubectl patch deployment/workload -n aiops-case-09 --type=json -p '[]'")
+    draft["actions"][0]["group_id"] = "g1"  # model invented a different label
+    draft["assessments"][0]["group_id"] = "group-1"
+    parsed = RepairDraft.model_validate(draft)
+    assert parsed.actions[0].group_id == "single" and parsed.assessments[0].group_id == "single"
+
+
+def test_multiple_targets_keep_strict_binding():
+    draft = _draft("kubectl patch deployment/workload -n aiops-case-09 --type=json -p '[]'")
+    draft["targets"].append({**draft["targets"][0], "group_id": "other", "pod": "p2"})
+    draft["actions"][0]["group_id"] = "nope"
+    with pytest.raises(ValueError):
+        RepairDraft.model_validate(draft)

@@ -642,7 +642,9 @@ class AICall:
                 self._delivery_retry_kwargs(kwargs, hard_guard) if native is None else None
             )
             validation_error = self._last_structured_error if native is None else ""
-            if retry_kwargs or validation_error:
+            attempts_left = max(1, int(getattr(self.agent_guards, "structured_validation_retries", 2) or 1))
+            while native is None and (retry_kwargs or validation_error) and attempts_left > 0:
+                attempts_left -= 1
                 # Live lanes: the model wrote a report longer than the reserved output
                 # (finish_reason=length, arguments cut mid-JSON -> no result), or, with
                 # thinking enabled, reasoned ~200s and emitted no function call. Delivery
@@ -665,6 +667,7 @@ class AICall:
                     retry_kwargs.get("max_tokens"),
                     bool(validation_error),
                 )
+                self._last_structured_error = ""
                 native, raw = self._call_native_structured(
                     system_prompt,
                     retry_question,
@@ -673,6 +676,10 @@ class AICall:
                     hard_guard_budget=final_guard_budget,
                     **retry_kwargs,
                 )
+                # Only validation failures earn another attempt; an empty response does not.
+                validation_error = self._last_structured_error if native is None else ""
+                if native is None and not validation_error:
+                    break
             if native is not None:
                 return native, raw
 
