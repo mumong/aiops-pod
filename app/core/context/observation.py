@@ -408,6 +408,7 @@ class ObservationProcessor:
         )
         deterministic_summary = (
             targeted_summary
+            or oversize_generic
             or tool in self.AIOPS_CASE_TOOLS
             or tool in self.OBSERVABILITY_QUERY_TOOLS
             or (node_id in {"focused", "query_collect"} and processor == "k8s_table")

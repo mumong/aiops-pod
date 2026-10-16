@@ -92,16 +92,36 @@ def model_transport_message(exc):
     return None
 
 
+class RepeatLimitReached(RuntimeError):
+    """The agent kept issuing one identical tool call past ``max_identical_calls``.
+
+    Raised from the dedup middleware to end the tool loop deterministically; the
+    run then delivers from what it already has (structured finalization).
+    """
+
+    def __init__(self, tool_name: str, repeats: int, limit: int):
+        self.tool_name, self.repeats, self.limit = tool_name, repeats, limit
+        super().__init__(
+            f"同一工具调用 {tool_name} 已重复 {repeats} 次（上限 {limit}），停止本阶段调查并基于已有结果交付"
+        )
+
+
 def public_error_text(exc: BaseException) -> str:
     """Error text that may reach users and session history.
 
-    Our own stream/deadline errors already carry a safe message; anything else is
-    reduced to the exception class and HTTP status, never the provider body.
+    Provider / transport errors (openai, httpx, anything carrying an HTTP status) are
+    reduced to the exception class and status, never the provider body. Our own
+    errors already carry a safe, meaningful message and are passed through.
     """
-    if isinstance(exc, (ModelStreamInterrupted, ModelStreamStalled, TimeoutError)):
-        return str(exc) or type(exc).__name__
     status = getattr(exc, "status_code", None)
     if status is None:
         status = getattr(getattr(exc, "response", None), "status_code", None)
+    provider_error = status is not None or type(exc).__module__.split(".")[0] in {
+        "openai",
+        "httpx",
+        "httpcore",
+    }
+    if not provider_error:
+        return str(exc) or type(exc).__name__
     suffix = f"，HTTP {status}" if status else ""
     return f"模型服务请求失败（{type(exc).__name__}{suffix}）"

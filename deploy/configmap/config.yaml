@@ -53,9 +53,10 @@ data:
         compaction: 3000    # 上下文压缩与摘要
         router: 1200        # 意图路由（RequestContract 分类，内部调用、不带 thinking）
       # 这些节点的 agent 工具循环按 internal_extra_body 发出（Qwen：不带 thinking，instruct 采样）。
-      # 模型仍然选工具、读数、作答，只是不再在每轮前输出长推理。快速查询先开启观察；
-      # 深度诊断节点（layer/evidence/remediation）保持 thinking。置为 [] 即全部恢复 thinking。
-      no_thinking_nodes: [query_collect]
+      # 实测（2026-10-16，run 9f528fdad65e4c23）：Qwen3.6-35B-A3B 关 thinking 后在工具循环里
+      # 退化——同一 kubectl 调用重复 6 次、从未调用 Prometheus、48 步耗尽。无工具的单次结构化
+      # 交付（路由/RCA）关 thinking 有效，多步工具规划不行。保持为空；换模型后可按节点试开。
+      no_thinking_nodes: []
       # 工具循环的确定性护栏（环境变量 AICALL_MAX_TOOL_CALLS_PER_TURN / AICALL_MAX_IDENTICAL_CALLS 可覆盖）
       agent_guards:
         max_tool_calls_per_turn: 16   # 单条模型消息最多执行的工具调用数，0 不限

@@ -20,7 +20,7 @@ def process(tmp_path, tool, raw, node="query_collect"):
     )
 
 
-@pytest.mark.parametrize("tool", ["read_context_archive", "fetch_runbook", "custom_tool"])
+@pytest.mark.parametrize("tool", ["read_context_archive", "fetch_runbook"])
 @pytest.mark.parametrize("node", ["query_collect", "layer", "evidence"])
 def test_excluded_tools_remain_exact(tmp_path, tool, node):
     raw = "original\n" * 2000
@@ -239,3 +239,14 @@ def test_pod_metrics_preserve_runtime_identity_and_whole_time_series(tmp_path, n
     assert "省略" in result["summary"]
     assert "raw_ref" in result["summary"]
     assert Path(result["raw_ref"]).read_text() == raw
+
+
+@pytest.mark.parametrize("node", ["query_collect", "layer", "evidence"])
+def test_unlisted_tool_small_output_exact_large_output_bounded(tmp_path, node):
+    small = "original\n" * 100
+    assert process(tmp_path, "custom_tool", small, node)["summary"] == small
+    large = "original\n" * 2000
+    result = process(tmp_path, "custom_tool", large, node)
+    assert len(result["summary"]) < len(large) / 3
+    assert "省略" in result["summary"] and "read_context_archive" in result["summary"]
+    assert open(result["raw_ref"], encoding="utf-8").read() == large

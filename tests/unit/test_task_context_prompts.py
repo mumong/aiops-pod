@@ -143,27 +143,27 @@ CASES = {
 
 EXPECTED_DIGESTS = {
     # Handoff fields + optional shared Runbook guidance; tool contracts unchanged.
-    "DiagnosisStageNode-False-False": "b91089b2cbe392d513d987513c1dcfbacc2eb61670864107b2a7eee3f9fadaa9",
-    "DiagnosisStageNode-False-True": "b1923acea24d43010e745f363f06937786323c7a047d74e2aa415d75a6df1f6e",
-    "DiagnosisStageNode-True-False": "70f9cd4abe25f98b601f0702524044bef65bfea4d3010dec425e12549a4df5c6",
-    "DiagnosisStageNode-True-True": "0827375a2b55d7272445736c4d2c54b0bc7ae7eead39135c87a025c24be1a0fe",
-    "DiagnosisEvidenceNode-False-False": "59dc9ec294861fbe1dcd81437d4744ad23000f2af76d8a51b2e28152af55ce96",
-    "DiagnosisEvidenceNode-False-True": "3e32f76d15fe7dff88e611084d04c6c0d4acfd7a5007ad19d76ee843955a8c1b",
-    "DiagnosisEvidenceNode-True-False": "9f35591bc2f2105052d84c9451a961aaf634ccc14b3f1f799815020e0da90077",
-    "DiagnosisEvidenceNode-True-True": "7dd99691e1699139c35407255713f5a082119ff4c7d095d792f1dc6f02dd2fbb",
-    "DiagnosisRootCauseNode-False-False": "5cf85e3d584bf1a21dbd8f9cb4c1648f35daac7f504365a65aa9cab1066a0026",
-    "DiagnosisRootCauseNode-False-True": "5cf85e3d584bf1a21dbd8f9cb4c1648f35daac7f504365a65aa9cab1066a0026",
-    "DiagnosisRootCauseNode-True-False": "7191cc1f8882dca4f0fa2949187d3951111f9069fddf83b108a6fcf7a411670c",
-    "DiagnosisRootCauseNode-True-True": "7191cc1f8882dca4f0fa2949187d3951111f9069fddf83b108a6fcf7a411670c",
+    "DiagnosisStageNode-False-False": "a8b15358198f5ca36541634c13f8775766e573aa2cca726c7e34f8f6e4dc0613",
+    "DiagnosisStageNode-False-True": "523efee88c76a8fd0f66355b4ed8f36b7971df116294416122ae3f3eb44c367e",
+    "DiagnosisStageNode-True-False": "faa8d2662bd71bcf9ee8659f136f58b9692906fdc6c0113d192c0405ec2bf32e",
+    "DiagnosisStageNode-True-True": "f9ad6e891ba5b9a8b97af25d45c045a8f17c8b11bbca48d3b61c612bf4584499",
+    "DiagnosisEvidenceNode-False-False": "a13e66910024ca8025bb49bc76aae97de677bf2bf5b751c467457d0ddc879bd9",
+    "DiagnosisEvidenceNode-False-True": "1e2b33a11984a6ca7b0bddbe2bccae56e6168771723357efad90b09e0d1845bb",
+    "DiagnosisEvidenceNode-True-False": "876472c7d50b825567d8780f33ae6f500185417c940f69cc880a5b728c5d9334",
+    "DiagnosisEvidenceNode-True-True": "7574d60f0976c92a5550374ee59ea406129ad844652e5ed4b75fe43dfe6c016f",
+    "DiagnosisRootCauseNode-False-False": "4555b28ab5645f51163cdbcb7db23146735b8247a5ca3cf88511186f9ac8d623",
+    "DiagnosisRootCauseNode-False-True": "4555b28ab5645f51163cdbcb7db23146735b8247a5ca3cf88511186f9ac8d623",
+    "DiagnosisRootCauseNode-True-False": "6a3e91076687a27208bf89edc2dd7fe11cfecba2811d43bc14802e7c0207a300",
+    "DiagnosisRootCauseNode-True-True": "6a3e91076687a27208bf89edc2dd7fe11cfecba2811d43bc14802e7c0207a300",
     "focused-query-False": "870561bee4aa85c3c0371116af3e58b6cad46c7fba6ad7acd0e4245c4065be13",
     "focused-query-True": "870561bee4aa85c3c0371116af3e58b6cad46c7fba6ad7acd0e4245c4065be13",
     "focused-explain-False": "107d2504391ad261c5e65510f7c964998dc5f00e0242bcf944b3947d9aa45c8a",
     "focused-explain-True": "107d2504391ad261c5e65510f7c964998dc5f00e0242bcf944b3947d9aa45c8a",
     # Metric guidance intentionally updated in query/deep; focused stays unchanged.
-    "query-False-query": "91655d35862d829761f7f1edc1f3d163bb1a83d1b1bc6e1091c1a3a059e1c967",
-    "query-False-operate": "bdc102f83401599602fc55716b19d3c90cfd292463956f6d2736207928305d77",
-    "query-True-query": "6cc32df21cc97aaed6dd5bcbb1dcbcde3dcb3eaead3500c112e31e949a4940d2",
-    "query-True-operate": "1702de940192615c3c7f056da46c8dee5e8efff8446c4b73eae326a324d5fe6e",
+    "query-False-query": "ce3933556f79373e28f6d6a33d988a8f6dfb59ab9cce8b3ec38c38ad225c0b33",
+    "query-False-operate": "3cf7e4fb347e0a6b42c9ad969547301cc911d8a2ddb1d7e875cea5d1fe912902",
+    "query-True-query": "85899105864f7640ca9e3f8f3d8ee249f21e014a451a3daf667f7c9f1232231f",
+    "query-True-operate": "c62db0b701d44a14d38c046bc7a997445cd39933bde7418f2683e7ea1fbbe047",
 }
 
 

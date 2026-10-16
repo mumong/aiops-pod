@@ -347,6 +347,11 @@ def test_aicall_stream_handles_noop_and_replacement_updates(tmp_path, monkeypatc
     summary_model = FakeMessagesListChatModel(
         responses=[AIMessage(content="目录已采集，原任务查 CPU。")]
     )
+    from app.core.context.observation import ObservationProcessor
+
+    # This test exercises compaction of a large raw tool result; keep the result whole
+    # instead of letting the generic size cap bound it first.
+    monkeypatch.setattr(ObservationProcessor, "QUERY_SUMMARY_MIN_CHARS", 10**9)
     client = AICall(model="openai/test", api_key="test")
     client.query_context_state_compaction = True
     client.query_raw_passthrough = True

@@ -84,8 +84,11 @@ def test_aicall_process_tool_observation_returns_bounded_summary(tmp_path):
     assert processed["raw_ref"].endswith(".raw.txt")
 
 
-def test_raw_experiment_preserves_entire_tool_output(tmp_path):
-    def forbidden(**kwargs):
+def test_raw_experiment_archives_entire_tool_output_and_bounds_the_model_view(tmp_path):
+    """Raw mode never calls a summarizer; the full output is archived and readable, while
+    the model sees a deterministic bounded head (a 23 KB dump once entered the context whole)."""
+
+    def forbidden(*args, **kwargs):
         raise AssertionError("Raw experiment must not invoke a summarizer")
 
     processor = ObservationProcessor(
@@ -100,9 +103,10 @@ def test_raw_experiment_preserves_entire_tool_output(tmp_path):
         raw_content=raw,
         preserve_raw=True,
     )
-    assert result["summary"] == raw
-    assert Path(result["raw_ref"]).read_text() == raw
-    assert Path(result["summary_ref"]).read_text() == raw
+    assert open(result["raw_ref"], encoding="utf-8").read() == raw
+    assert result["summary_chars"] < 1500
+    assert "省略" in result["summary"] and "read_context_archive" in result["summary"]
+    assert "TAIL_SENTINEL" not in result["summary"]
 
 
 def test_query_tool_timeout_isolated_for_duplicate_waiters():

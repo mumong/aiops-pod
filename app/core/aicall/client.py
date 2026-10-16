@@ -60,7 +60,12 @@ from app.core.prompts import (
 )
 from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
 
-from .errors import ModelStreamStalled, public_error_text, raise_on_model_disconnect
+from .errors import (
+    ModelStreamStalled,
+    RepeatLimitReached,
+    public_error_text,
+    raise_on_model_disconnect,
+)
 from .guards import AgentGuards
 from .model_streaming import VisibleChatOpenAI as ChatOpenAI
 from .output_budget import MINIMUM_OUTPUT_TOKENS, OutputBudget
@@ -1577,6 +1582,18 @@ class AICall:
             logger.warning("[AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
             if not run.final_content:
                 run.final_content = f"达到最大工具执行步数限制: {recursion_msg}"
+        except RepeatLimitReached as e:
+            logger.warning("[AICall] %s (node=%s)", e, node_id)
+            run.incomplete_reason = "repeat_limit"
+            self._push(
+                run.stream_queue,
+                node_id,
+                run.thinking_events,
+                type="execution_incomplete",
+                reason=str(e),
+            )
+            if not run.final_content:
+                run.final_content = str(e)
         except Exception as e:
             raise_on_model_disconnect(e)
             logger.error("[AICall] agent 执行异常: %s", e, exc_info=True)
@@ -3327,6 +3344,14 @@ class AICall:
                 if cached is not None:
                     source, original_call_id = cached
                     repeats[signature] = repeats.get(signature, 0) + 1
+                    # One notice at the limit; one more identical call after it proves the
+                    # loop is degenerate (live: 6 repeats in a row), so stop deterministically.
+                    if max_identical_calls and repeats[signature] > max_identical_calls:
+                        raise RepeatLimitReached(
+                            str(tool_call.get("name") or "tool"),
+                            repeats[signature],
+                            max_identical_calls,
+                        )
                     return _repeat_notice(
                         source, current_call_id, original_call_id, repeat_count=repeats[signature]
                     )
