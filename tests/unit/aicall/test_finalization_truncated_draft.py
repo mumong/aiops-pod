@@ -1,8 +1,8 @@
 """A max_tokens-truncated draft is not finalization material."""
 
-from langchain_core.messages import AIMessage
-
 from types import SimpleNamespace
+
+from langchain_core.messages import AIMessage
 
 from app.core.aicall.client import AICall
 from app.core.aicall.output_budget import OutputBudget

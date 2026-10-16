@@ -53,6 +53,11 @@ def _lane_outcomes(root: str, run_id: str) -> List[Dict[str, Any]]:
     return out
 
 
+def archived_run_report(run_id: str, root: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The report written at the end of the run (has outcome/elapsed/final state)."""
+    return _load(os.path.join(root or get_archive_root(), run_id, "run_report.json"))
+
+
 def build_run_report(
     run_id: str,
     *,
@@ -101,6 +106,11 @@ def build_run_report(
                 "rounds": len(l["rounds"]),
                 "tools": l["counts"],
                 "tools_by_name": l["tools_by_name"],
+                "errors": [
+                    {"tool": t.get("tool"), "head": t.get("error_head")}
+                    for t in l.get("tools") or []
+                    if t.get("error_head")
+                ][:8],
                 "incomplete_reason": l["incomplete_reason"],
             }
             for l in ledgers
@@ -148,6 +158,15 @@ def render_markdown(report: Dict[str, Any]) -> str:
         lines.append(
             f"| {c['run_id'][-5:]}/{c['node']} | {c['duration_s']} | {c['model_s']} | {c['rounds']} | {t.get('tool_calls')} | {t.get('executed')} | {t.get('repeat_notices')} | {t.get('repeat_pages')} | {t.get('turn_capped')} | {t.get('tool_errors')} | {c.get('incomplete_reason') or ''} |"
         )
+    lines.append("")
+    for c in report.get("calls") or []:
+        if c.get("tools_by_name"):
+            mix = ", ".join(
+                f"{k}×{v}" for k, v in sorted(c["tools_by_name"].items(), key=lambda kv: -kv[1])
+            )
+            lines.append(f"- {c['node']} 工具组合：{mix}")
+        for e in c.get("errors") or []:
+            lines.append(f"  - 错误 `{e['tool']}`：{str(e['head']).replace(chr(10), ' ')[:140]}")
     lines.append("")
     lines += ["## 发现（工程异常类型）"]
     if not report.get("findings"):

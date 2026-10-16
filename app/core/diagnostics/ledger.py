@@ -78,6 +78,11 @@ def build_call_ledger(
                 "raw_chars": record.get("raw_chars"),
                 "summary_chars": record.get("summary_chars"),
                 "raw_ref": record.get("raw_ref"),
+                "error_head": (
+                    str(record.get("result") or "")[:160]
+                    if record.get("status") == "error" or record.get("semantic_success") is False
+                    else None
+                ),
             }
         )
     counts = {

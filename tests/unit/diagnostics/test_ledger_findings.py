@@ -30,7 +30,7 @@ def _events(rounds, extra=()):
     return out
 
 
-def _tool(name, guard=None, status="success", raw=100, summ=100):
+def _tool(name, guard=None, status="success", raw=100, summ=100, result="ok"):
     return {
         "tool_name": name,
         "tool_args": {"q": name},
@@ -40,7 +40,31 @@ def _tool(name, guard=None, status="success", raw=100, summ=100):
         "summary_chars": summ,
         "semantic_success": status == "success",
         "raw_ref": "/a.raw.txt",
+        "result": result,
     }
+
+
+def test_tool_errors_surface_in_ledger_and_markdown(tmp_path):
+    events = _events([(1000, 50, 2)])
+    tools = [
+        _tool(
+            "execute_pod_promql", status="error", result='{"error":{"code":"missing_pod_scope"}}'
+        ),
+        _tool("ok"),
+    ]
+    ledger = build_call_ledger(
+        run_id="r", node_id="query_collect", events=events, tool_calls=tools, duration_ms=1000
+    )
+    assert (
+        ledger["tools"][0]["error_head"].startswith('{"error"')
+        and ledger["tools"][1]["error_head"] is None
+    )
+    (tmp_path / "r" / "ledger").mkdir(parents=True)
+    (tmp_path / "r" / "ledger" / "query_collect.json").write_text(
+        json.dumps(ledger), encoding="utf-8"
+    )
+    md = render_markdown(build_run_report("r", root=str(tmp_path)))
+    assert "工具组合：" in md and "missing_pod_scope" in md
 
 
 def test_guard_of_maps_tool_message_flags():

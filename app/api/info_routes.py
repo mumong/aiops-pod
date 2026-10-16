@@ -122,10 +122,13 @@ async def get_run_report(run_id: str):
     """Run report (ledger summary + engineering findings) from the context archive."""
     import re
 
-    from app.core.diagnostics.report import build_run_report, load_ledgers
+    from app.core.diagnostics.report import archived_run_report, build_run_report, load_ledgers
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", run_id):
         raise HTTPException(status_code=400, detail="invalid run_id")
+    archived = archived_run_report(run_id)
+    if archived:
+        return archived
     if not load_ledgers(get_archive_root(), run_id):
         raise HTTPException(status_code=404, detail="run not found or no ledger archived")
     return build_run_report(run_id)
@@ -135,13 +138,21 @@ async def get_run_report(run_id: str):
 async def get_run_report_markdown(run_id: str):
     import re
 
-    from app.core.diagnostics.report import build_run_report, load_ledgers, render_markdown
+    from app.core.diagnostics.report import (
+        archived_run_report,
+        build_run_report,
+        load_ledgers,
+        render_markdown,
+    )
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", run_id):
         raise HTTPException(status_code=400, detail="invalid run_id")
-    if not load_ledgers(get_archive_root(), run_id):
-        raise HTTPException(status_code=404, detail="run not found or no ledger archived")
-    return PlainTextResponse(render_markdown(build_run_report(run_id)), media_type="text/markdown")
+    report = archived_run_report(run_id)
+    if report is None:
+        if not load_ledgers(get_archive_root(), run_id):
+            raise HTTPException(status_code=404, detail="run not found or no ledger archived")
+        report = build_run_report(run_id)
+    return PlainTextResponse(render_markdown(report), media_type="text/markdown")
 
 
 @router.get("/api/v1/mcp/status")
