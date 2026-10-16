@@ -2862,6 +2862,7 @@ class AICall:
                         "[AICall] agent hard guard budget 写入失败: %s",
                         exc,
                     )
+                self._write_request_trace(run_id, node_id, request_sequence, guarded_request)
             guarded_request = AICall._bound_request_output(
                 guarded_request, budget, self.output_budget
             )
@@ -2875,6 +2876,28 @@ class AICall:
             return await handler(guarded_request)
 
         return guard_model_request
+
+    @staticmethod
+    def _write_request_trace(run_id: str, node_id: str, sequence: int, request: Any) -> None:
+        """Archive what the model sees this round (roles, reasoning, tool calls)."""
+        try:
+            from app.core.diagnostics.request_trace import describe_messages, repeated_call_digests
+
+            rows = describe_messages(list(getattr(request, "messages", None) or []))
+            ContextArchive(run_id=run_id).write_json(
+                f"requests/{node_id}-{sequence:03d}.json",
+                {
+                    "node": node_id,
+                    "sequence": sequence,
+                    "messages": rows,
+                    "repeated_calls": repeated_call_digests(rows),
+                    "history_reasoning_field": getattr(
+                        getattr(request, "model", None), "history_reasoning_field", ""
+                    ),
+                },
+            )
+        except Exception as exc:  # derived data only
+            logger.debug("[AICall] request trace 写入失败: %s", exc)
 
     def _guard_agent_model_request(
         self,
