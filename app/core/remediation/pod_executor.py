@@ -216,6 +216,7 @@ class PodRepairExecutor:
                     except Exception as exc:
                         before[target["group_id"]] = {"exists": None, "error": str(exc)[:200]}
             total_actions, done_actions = len(prepared), 0
+            verify_failures = []
             for action, target, original, stages in prepared:
                 approval_marker = "auto"
                 if max_duration and time.time() - started_at > max_duration:
@@ -328,6 +329,40 @@ class PodRepairExecutor:
                             mode=mode,
                             error=str(exc)[:300],
                         )
+                        if stage == "verify" and watch is not None:
+                            # A model-written verify command is a heuristic (live: a bare
+                            # `kubectl get` on a Pod whose deletion was the goal returned
+                            # NotFound). The status-only recovery watch is the ground truth;
+                            # record the failure, keep it visible, and let the watch decide.
+                            verify_failures.append(
+                                {"action_id": action["id"], "command": command, "error": str(exc)[:600]}
+                            )
+                            if record_store:
+                                record_store.transition(
+                                    run_id,
+                                    owner,
+                                    "executing",
+                                    {
+                                        "action_id": action["id"],
+                                        "stage": stage,
+                                        "command": command,
+                                        "status": "failed",
+                                        "result": str(exc)[:6000],
+                                    },
+                                )
+                            yield {
+                                "type": "remediation_tool_result",
+                                "run_id": run_id,
+                                "group_id": action["group_id"],
+                                "action_id": action["id"],
+                                "stage": stage,
+                                "command": command,
+                                "status": "failed",
+                                "result_preview": str(exc)[:6000],
+                                "result_truncated": len(str(exc)) > 6000,
+                                "verify_deferred_to_recovery": True,
+                            }
+                            continue
                         if record_store:
                             record_store.transition(
                                 run_id,
@@ -423,6 +458,9 @@ class PodRepairExecutor:
             details = "；".join(
                 f"{item['group_id']}：{item['reason']}" for item in summary.get("targets", [])
             )
+            if verify_failures:
+                summary["verify_failures"] = verify_failures
+                details += "；方案自带的验证命令未通过（见执行事件），以恢复观察为准"
             reason = {
                 "recovered": executed_note + f"，目标已恢复（{details}）",
                 "not_recovered": executed_note + f"，但在 {summary['timeout_seconds']} 秒内未观察到恢复（{details}）；请复查，未自动回滚",

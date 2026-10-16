@@ -94,3 +94,41 @@ def test_overall_deadline_stops_before_the_next_action(monkeypatch):
     assert final["status"] == "timeout" and final["error_code"] == "execution_deadline"
     assert "已完成 1/2 个动作" in final["reason"]
     assert len([c for c in calls if c[1] == "set"]) == 1  # second action never started
+
+
+def test_failed_verify_defers_to_recovery_watch_when_enabled():
+    draft, _, _, _ = fixture()
+    draft["actions"][0]["verify_command"] = "kubectl get pod/api-1 -n demo"
+    clock = _Clock()
+    gets = []
+
+    def runner(argv):
+        if argv[1] == "get":
+            gets.append(argv)
+            if len(gets) == 2:  # the model's verify: bare get on a Pod that is (expectedly) gone
+                raise RuntimeError('Error from server (NotFound): pods "api-1" not found')
+            return _pod(ready=True)
+        return "ok"
+
+    events = list(PodRepairExecutor(runner=runner).run(
+        "verify-defer", draft, mode="auto", recovery=RecoveryConfig(timeout_seconds=60, poll_seconds=5, settle_seconds=0),
+        watch_factory=_factory(clock)))
+    verify = [e for e in events if e["type"] == "remediation_tool_result" and e["stage"] == "verify"][0]
+    assert verify["status"] == "failed" and verify["verify_deferred_to_recovery"] is True
+    final = events[-1]
+    assert final["status"] == "recovered"
+    assert final["recovery"]["verify_failures"][0]["command"] == "kubectl get pod/api-1 -n demo"
+    assert "验证命令未通过" in final["reason"]
+
+
+def test_failed_verify_is_terminal_without_recovery_watch():
+    draft, _, _, _ = fixture()
+    draft["actions"][0]["verify_command"] = "kubectl get pod/api-1 -n demo"
+
+    def runner(argv):
+        if argv[1] == "get":
+            raise RuntimeError("NotFound")
+        return "ok"
+
+    events = list(PodRepairExecutor(runner=runner).run("verify-plain", draft, mode="auto"))
+    assert events[-1]["status"] == "failed"
