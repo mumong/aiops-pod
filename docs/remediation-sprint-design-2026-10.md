@@ -117,3 +117,25 @@
 | 验收脚本 `scripts/acceptance/` | — | 见本文 §1–§3 与部署指南 |
 
 伴随修复：`AgentGuards.finalize_on_idle_round`（12.0.33）。请求轨迹（`requests/<node>-NNN.json`）证明模型在"证据完整、准备输出结构化结果"时发出的是旧调用的复制；一整轮无新查询即收卷交付，不再等到重复上限。
+
+### 5.1 真实集群验收结果（2026-10-16 晚，robusta 12.0.38 / mcpstander 7.0.44 / 前端 0.1.62）
+
+| 场景 | 诊断 | 方案 | 执行与恢复 | 复核 |
+|---|---|---|---|---|
+| c11 Terminating（finalizer 阻塞） | run `d61d9d5574264c50`，cause 指出 finalizer `aiops.lab/hold` | 1 个动作，review 模式审批后执行 | `recovered`：原 Pod 已完成删除 | kubectl：workload 已消失 |
+| c09 Ready 0/1（Readiness 端口 8081→8080） | run `5961256484444254` | json patch readinessProbe 端口 | `recovered`：Running/Ready 且 20 秒无新增重启 | Deployment readyReplicas=1，探针端口 8080 |
+| c06 CrashLoopBackOff（环境变量名 APP_CONF_PATH→APP_CONFIG_PATH） | run `b217ff12b12144d4` | json patch env[1].name | `recovered`：新 Pod Running/Ready，重启 16→0，25 秒 | Deployment 就绪，60 秒无新增重启 |
+
+验收过程中暴露并修掉的工程缺口（全部通用，不含故障特判）：
+
+| 现象 | 根因 | 修复 |
+|---|---|---|
+| c11 首轮被判为"外部删除、非故障" | 整个诊断与规划没有任何工具输出包含 finalizer：lifecycle 工具只给 deletionTimestamp，`kubectl describe` 不显示 finalizers | mcpstander 7.0.44 lifecycle 记录增加 `finalizers / deletion_grace_period_seconds / terminating_seconds`，robusta 12.0.36 投影透传 |
+| 诊断在 2 轮后被"空转收卷"截断 | 空转判定把单个重复调用也算作整轮空转 | `idle_round_min_calls: 2`（12.0.35） |
+| 规划结构化交付两次失败后放弃 | 重试时模型不知道上次为何未通过校验 | 结构化重试把校验错误写进提示（12.0.35） |
+| 方案把 `deployment workload-5487445f9`（ReplicaSet 名）当控制器 | 命令中的控制器名未与诊断核实的归属比对 | RepairDraft 归属一致性校验（12.0.35） |
+| c06 方案把正确命令写在正文里，actions 为空，执行器只能 skipped | schema 允许无 actions 且无 assessments 的"回答" | 无 actions 必须逐目标给 assessments；正文含 kubectl 写命令而 actions 为空即拒绝（12.0.37） |
+| c06 审批后 patch 被 API server 以 JSON 语法错误拒绝 | patch 内容只在执行时由 API server 校验 | `malformed_patch` 规则：规划阶段校验 JSON 语法与 json-patch 形态（12.0.38） |
+| 验收脚本本身：`local a=$1 b=$((a))` 展开早于赋值；标签猜错 | 脚本缺陷 | 已修，复核改用 Deployment readyReplicas |
+
+Sprint 2 接口层：`sprint2_policy_and_switch.sh` 8/8 通过（25 条高危命令全部拦截并带规则名，6 条合规命令放行，无令牌 403，切换/恢复写审计）。
