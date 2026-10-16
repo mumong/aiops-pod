@@ -53,7 +53,7 @@ class RepairDraft(QueryAnswer):
     @model_validator(mode="after")
     def command_contract(self):
         # Validate transport/schema only; the agent chooses the repair strategy.
-        from app.core.remediation.policy import validate_target_command
+        from app.core.remediation.policy import named_resources, validate_target_command
 
         groups = {target.group_id: target for target in self.targets}
         if len(groups) != len(self.targets):
@@ -73,6 +73,17 @@ class RepairDraft(QueryAnswer):
                 if not command and stage in {"dry_run", "verify"}:
                     continue
                 validate_target_command(command, allowed)
+                # Identity, not strategy: a command that names the target's controller
+                # kind must name the controller the diagnosis verified (live: a plan
+                # patched "deployment workload-5487445f9", the ReplicaSet's name).
+                owner_kind = (target.owner_kind or "").strip().lower()
+                if owner_kind and target.owner_name:
+                    for kind, name in named_resources(command):
+                        if kind == owner_kind and name != target.owner_name:
+                            raise ValueError(
+                                f"{stage}_command 中的 {owner_kind} 名称 {name} 与目标 Pod 的控制器 "
+                                f"{target.owner_kind}/{target.owner_name} 不一致；请使用核实过的控制器名称"
+                            )
         decisions = {item.group_id: item for item in self.assessments}
         if len(decisions) != len(self.assessments) or any(g not in groups for g in decisions):
             raise ValueError("assessments 必须唯一关联已列出的目标")

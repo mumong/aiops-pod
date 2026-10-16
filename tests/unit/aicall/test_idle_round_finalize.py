@@ -83,3 +83,18 @@ def test_guard_flag_parses_from_config_and_env():
         ).finalize_on_idle_round
         is True
     )
+
+
+def test_single_repeated_call_round_is_a_recheck_not_idle():
+    a = {"pod": "a"}
+    out = _drive([[("c1", a)], [("c2", a)]], AgentGuards(16, 3, 3000))
+    assert "重复调用" in out[1].content  # notice only; loop continues
+
+
+def test_min_calls_is_configurable():
+    a, b, c = {"pod": "a"}, {"pod": "b"}, {"pod": "c"}
+    guards = AgentGuards(16, 3, 3000, idle_round_min_calls=3)
+    out = _drive([[("c1", a), ("c2", b)], [("c3", a), ("c4", b)]], guards)
+    assert all("重复调用" in m.content for m in out[2:])
+    with pytest.raises(IdleRoundReached):
+        _drive([[("c1", a), ("c2", b), ("c5", c)], [("c3", a), ("c4", b), ("c6", c)]], guards)

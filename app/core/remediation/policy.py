@@ -24,6 +24,7 @@ __all__ = [
     "CommandVerdict",
     "RepairCommandDenied",
     "check_command",
+    "named_resources",
     "validate_target_command",
 ]
 
@@ -291,6 +292,37 @@ def _resource_kinds(words: List[str], operation: str) -> List[str]:
         else:
             break  # names after the kind
     return kinds
+
+
+def named_resources(command: str) -> List[Tuple[str, str]]:
+    """``(kind, name)`` pairs a kubectl command names positionally; empty when unparsable.
+
+    Identity helper for validators (e.g. "the Deployment in the command must be the
+    Pod's owner"); it does not judge the operation.
+    """
+    try:
+        args = shlex.split(command or "")
+    except ValueError:
+        return []
+    if len(args) < 2 or args[0] != "kubectl":
+        return []
+    words, _ = _words_and_flags(_split_prefix(args))
+    if not words:
+        return []
+    verb = words[0]
+    operation = "_".join(words[:2]) if verb in {"set", "rollout", "auth"} and len(words) > 1 else verb
+    start = 2 if operation.startswith(("set_", "rollout_", "auth_")) else 1
+    pairs: List[Tuple[str, str]] = []
+    kind = ""
+    for token in words[start:]:
+        if "/" in token:
+            k, _, name = token.partition("/")
+            pairs.append((_normalize_kind(k), name))
+        elif not kind:
+            kind = _normalize_kind(token)
+        else:
+            pairs.append((kind, token))
+    return pairs
 
 
 def check_command(command: str, policy: Optional[CommandPolicy] = None) -> CommandVerdict:

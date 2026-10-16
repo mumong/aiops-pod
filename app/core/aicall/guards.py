@@ -11,6 +11,7 @@ _FIELDS = {
     "max_tool_calls_per_turn": ("AICALL_MAX_TOOL_CALLS_PER_TURN", 16),
     "max_identical_calls": ("AICALL_MAX_IDENTICAL_CALLS", 3),
     "repeat_page_chars": ("AICALL_REPEAT_PAGE_CHARS", 3000),
+    "idle_round_min_calls": ("AICALL_IDLE_ROUND_MIN_CALLS", 2),
 }
 _FLAGS = {
     "finalize_on_idle_round": ("AICALL_FINALIZE_ON_IDLE_ROUND", True),
@@ -30,6 +31,10 @@ class AgentGuards:
     max_tool_calls_per_turn: int = _FIELDS["max_tool_calls_per_turn"][1]
     max_identical_calls: int = _FIELDS["max_identical_calls"][1]
     repeat_page_chars: int = _FIELDS["repeat_page_chars"][1]
+    # Minimum calls in a round before "all repeats" counts as idle. One repeated call
+    # is a normal re-check (live: a layer node was cut after 2 rounds); whole rounds of
+    # 4-7 stale calls are the degenerate pattern this guard targets.
+    idle_round_min_calls: int = _FIELDS["idle_round_min_calls"][1]
     # A round whose every tool call repeats an already answered call carries no new
     # request: end the loop and deliver from material (the model was done anyway).
     finalize_on_idle_round: bool = _FLAGS["finalize_on_idle_round"][1]

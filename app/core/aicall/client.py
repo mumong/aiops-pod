@@ -629,6 +629,7 @@ class AICall:
                     exc,
                 )
         if use_native:
+            self._last_structured_error = ""
             native, raw = self._call_native_structured(
                 system_prompt,
                 question,
@@ -640,21 +641,33 @@ class AICall:
             retry_kwargs = (
                 self._delivery_retry_kwargs(kwargs, hard_guard) if native is None else None
             )
-            if retry_kwargs:
+            validation_error = self._last_structured_error if native is None else ""
+            if retry_kwargs or validation_error:
                 # Live lanes: the model wrote a report longer than the reserved output
                 # (finish_reason=length, arguments cut mid-JSON -> no result), or, with
                 # thinking enabled, reasoned ~200s and emitted no function call. Delivery
                 # calls carry no tools: retry once as an internal call with the largest
-                # output budget the window still allows.
+                # output budget the window still allows. When the output existed but
+                # failed schema validation, the retry says exactly what was wrong
+                # (live: RepairDraft rejected twice for shell operators in a command,
+                # the model never learning why).
+                retry_kwargs = retry_kwargs or dict(kwargs)
+                retry_question = question
+                if validation_error:
+                    retry_question = (
+                        f"{question}\n\n# 上次结构化输出未通过校验，请修正后重新输出完整 JSON\n"
+                        f"{validation_error}"
+                    )
                 logger.warning(
                     "[AICall] structured delivery returned nothing for schema=%s; "
-                    "retrying once (internal settings, max_tokens=%s)",
+                    "retrying once (internal settings, max_tokens=%s, validation_feedback=%s)",
                     schema.__name__,
                     retry_kwargs.get("max_tokens"),
+                    bool(validation_error),
                 )
                 native, raw = self._call_native_structured(
                     system_prompt,
-                    question,
+                    retry_question,
                     schema,
                     hard_guard_metadata=hard_guard,
                     hard_guard_budget=final_guard_budget,
@@ -849,6 +862,8 @@ class AICall:
                 schema.__name__,
                 exc,
             )
+            # Remembered for one retry: the model is told what failed validation.
+            self._last_structured_error = str(exc)[:800]
             if raise_on_error:
                 raise
             return None, ""
@@ -3448,6 +3463,7 @@ class AICall:
         max_identical_calls = guards.max_identical_calls
         page_chars = max(0, int(guards.repeat_page_chars or 0))
         finalize_on_idle_round = bool(getattr(guards, "finalize_on_idle_round", True))
+        idle_round_min_calls = max(1, int(getattr(guards, "idle_round_min_calls", 2) or 1))
         # Per model round: how many of its calls were answered by a repeat notice.
         turns: Dict[Tuple[str, ...], Dict[str, int]] = {}
 
@@ -3462,7 +3478,11 @@ class AICall:
             turn["seen"] += 1
             if kind == "notice":
                 turn["idle"] += 1
-            if turn["seen"] == len(ids) and turn["idle"] == len(ids):
+            if (
+                len(ids) >= idle_round_min_calls
+                and turn["seen"] == len(ids)
+                and turn["idle"] == len(ids)
+            ):
                 raise IdleRoundReached(len(ids))
 
         def _raw_page(

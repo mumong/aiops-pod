@@ -23,7 +23,13 @@ def diagnosis_groups(record):
             "summary": _group_summary(group),
         }
         for group in groups
-    ] or [{"group_id": "single", "target": None, "summary": None}]
+    ] or [
+        {
+            "group_id": "single",
+            "target": None,
+            "summary": _group_summary({"analysis": (record.get("payload") or {}).get("report")}),
+        }
+    ]
 
 
 def _group_summary(group):
