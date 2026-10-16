@@ -245,6 +245,8 @@ class _AgentRun:
     all_tool_calls: List[Dict] = field(default_factory=list)
     content_buffer: List[str] = field(default_factory=list)  # token 级别的文本片段
     tool_observation_contents: List[str] = field(default_factory=list)
+    # Parallel to tool_observation_contents: which call produced each observation.
+    tool_observation_calls: List[Dict[str, Any]] = field(default_factory=list)
     seen_tool_call_signatures: Set[Any] = field(default_factory=set)
     seen_tool_result_signatures: Set[Any] = field(default_factory=set)
     tool_args_by_call_id: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -1740,13 +1742,24 @@ class AICall:
                 )
             else:
                 analysis.append(_strip_think(text))
+        # Which call produced a result is known here and is what tells two
+        # similar-looking payloads apart (CPU vs memory vectors, live run
+        # 66662a8287ce4dac); it goes in front of the result.
+        calls = list(getattr(run, "tool_observation_calls", None) or [])
+        observations = []
+        for index, text in enumerate(run.tool_observation_contents, 1):
+            if not str(text).strip():
+                continue
+            item: Dict[str, Any] = {"order": index}
+            call = calls[index - 1] if index - 1 < len(calls) else None
+            if isinstance(call, dict) and call.get("tool"):
+                item["tool"] = call["tool"]
+                item["args"] = call.get("args") or {}
+            item["result"] = str(text)
+            observations.append(item)
         return {
             "question": question,
-            "observations": [
-                {"order": index, "result": str(text)}
-                for index, text in enumerate(run.tool_observation_contents, 1)
-                if str(text).strip()
-            ],
+            "observations": observations,
             "analysis": [text for text in analysis if text.strip()],
         }
 
@@ -2205,6 +2218,12 @@ class AICall:
         )
         bounded_content = observation.get("summary", tool_content)
         run.tool_observation_contents.append(bounded_content)
+        run.tool_observation_calls.append(
+            {
+                "tool": tool_name,
+                "args": run.tool_args_by_call_id.get(str(getattr(msg, "tool_call_id", None)), {}),
+            }
+        )
         self._write_back_bounded_tool_message(msg, bounded_content, observation)
         status, transport_status = self._tool_result_status(msg, observation)
         tool_call_id = getattr(msg, "tool_call_id", None)
@@ -2448,6 +2467,7 @@ class AICall:
                 static_context_components=run.static_context_components,
                 thinking_events=run.thinking_events,
                 tool_observation_contents=run.tool_observation_contents,
+                tool_observation_calls=run.tool_observation_calls,
             ),
         )
         if compacted:
@@ -3343,6 +3363,23 @@ class AICall:
         return f"name:{name}|args:{args_str}"
 
     @staticmethod
+    def repeat_call_notice(tool_name: str, original_call_id: str, *, same_turn: bool = False) -> str:
+        """Text returned instead of re-running an identical call (HTTP 304 style).
+
+        It must steer towards answering: the earlier wording ended with "或改用其它
+        工具/参数", which a small model read as an instruction to rotate tools (live
+        run 66662a8287ce4dac cycled three tools for eight rounds with all data in hand).
+        """
+        where = "本轮中另一调用" if same_turn else "本阶段先前的调用"
+        return (
+            f"【重复调用，结果未变化】{tool_name} 的参数与{where}（call_id={original_call_id}）完全相同，"
+            "未重新执行，结果见该调用，此处省略重复正文。"
+            "该结果已在上下文中：若回答问题所需的数据已齐全，请直接给出最终回答；"
+            "若需要该结果摘要中未展示的部分，用 read_context_archive 回读其 raw_ref；"
+            "只有确实缺少其它数据时才换参数查询。"
+        )
+
+    @staticmethod
     def _tool_execution_signature(tool_call: Dict[str, Any]) -> str:
         """Return a stable execution key independent of provider call IDs."""
         name = str(tool_call.get("name") or "unknown")
@@ -3434,13 +3471,7 @@ class AICall:
             """A repeat of an already-answered call (HTTP 304 style): say so instead of
             replaying the whole body, so the model notices it is going in circles."""
             tool_name = source.name or "tool"
-            where = "本轮中另一调用" if same_turn else "本阶段先前的调用"
-            notice = (
-                f"【重复调用，结果未变化】{tool_name} 的参数与{where}（call_id={original_call_id}）完全相同，"
-                "未重新执行，结果见该调用，此处省略重复正文。"
-                "若需要该结果摘要中未展示的部分，请用 read_context_archive 回读其 raw_ref；"
-                "否则请基于已有结果继续推进，或改用其它工具/参数。"
-            )
+            notice = AICall.repeat_call_notice(tool_name, original_call_id, same_turn=same_turn)
             if max_identical_calls and repeat_count >= max_identical_calls:
                 notice = (
                     f"【同一调用已重复 {repeat_count} 次，达到上限 {max_identical_calls}】{tool_name} 的参数"
@@ -3714,6 +3745,7 @@ class AICall:
         static_context_components: List[Dict[str, Any]],
         thinking_events: List[Dict[str, Any]],
         tool_observation_contents: List[str],
+        tool_observation_calls: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         config = self._runtime_compaction_config()
         if getattr(self, "query_raw_passthrough", False):
@@ -3843,6 +3875,8 @@ class AICall:
         }
         self._compact_thinking_events_in_place(thinking_events, compact_event)
         tool_observation_contents[:] = [compact_text]
+        if tool_observation_calls is not None:
+            tool_observation_calls[:] = [{"tool": "context_compaction", "args": {}}]
         logger.info(
             "[AICall] runtime context compacted | node=%s usage=%.0f%% window=%s",
             node_text or "unknown",
