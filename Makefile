@@ -56,10 +56,10 @@ check: check-syntax lint format-check test-unit
 
 build: build-main build-a2a
 
-# Release = the whole sequence in a safe order: both images must exist and be
-# pushed before the running deployment is deleted. (`make delete build push deploy`
-# left the service down twice when build-a2a failed after delete.)
-release: build push delete deploy
+# Release = build and push both images, then a rolling `deploy` (no delete):
+# the old Pod keeps serving until the new one is Ready, and a failed rollout is
+# undone automatically. `make delete` stays available for manual resets.
+release: build push deploy
 
 build-main:
 	@echo "Building $(DOCKER_NAME):$(DOCKER_TAG)..."
@@ -105,7 +105,12 @@ deploy:
 	@kubectl create namespace aiops --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f deploy/ --recursive
 	@echo "Waiting for rollout to complete..."
-	kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s
+	@kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s || { \
+		echo "Rollout failed; rolling back to the previous ReplicaSet..."; \
+		kubectl -n aiops logs deployment/aiops-copilot -c aiops-copilot --tail=40 2>/dev/null | tail -40; \
+		kubectl rollout undo deployment/aiops-copilot -n aiops; \
+		kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s; \
+		exit 1; }
 	@if kubectl get deployment/aiops-copilot-frontend -n aiops >/dev/null 2>&1; then \
 		echo "Refreshing frontend DNS after backend Service recreation..."; \
 		kubectl rollout restart deployment/aiops-copilot-frontend -n aiops; \

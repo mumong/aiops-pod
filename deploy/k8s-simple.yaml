@@ -9,6 +9,13 @@ metadata:
   namespace: aiops
 spec:
   replicas: 1
+  # Zero-downtime releases: the old Pod keeps serving until the new one is Ready;
+  # a crashing image never takes the service down (12.0.25 did, before this).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: aiops-copilot
@@ -31,9 +38,16 @@ spec:
           imagePullPolicy: IfNotPresent # 每次都拉取最新镜像
           ports:
             - containerPort: 8000
+          # Readiness gates the rolling update: traffic and the old Pod's removal wait
+          # for a serving backend, not merely a started container.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 30
           env:
-            - name: AIOPS_AUTONOMOUS_PARALLEL_WORKERS
-              value: "5"
             - name: LLM_API_KEY
               valueFrom:
                 secretKeyRef:

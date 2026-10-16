@@ -13,7 +13,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import register_routes
-from app.core.log_context import LOG_FORMAT, LogContextFilter, log_formatter_for_env
+from app.core.log_context import (
+    LOG_FORMAT,
+    LogContextFilter,
+    log_formatter_for_env,
+    uvicorn_log_config,
+)
 from app.core.paths import get_app_version
 
 # 配置日志（通过 LOG_LEVEL 环境变量控制，默认 INFO）
@@ -197,56 +202,7 @@ def main():
 
     # uvicorn log_config 必须使用与 _log_level 一致的级别，否则会覆盖 basicConfig
     _level_name = logging.getLevelName(_log_level)  # e.g. "DEBUG", "INFO"
-    log_config = {
-        "version": 1,
-        "disable_existing_loggers": False,
-        "formatters": {
-            "default": {
-                "()": "app.core.log_context.log_formatter_for_env",
-            },
-            "access": {
-                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            },
-        },
-        "filters": {
-            "log_context": {"()": LogContextFilter},
-        },
-        "handlers": {
-            "default": {
-                "formatter": "default",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stdout",
-                "filters": ["log_context"],
-            },
-            "access": {
-                "formatter": "access",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stdout",
-            },
-        },
-        "loggers": {
-            "uvicorn": {
-                "handlers": ["default"],
-                "level": "INFO",
-                "propagate": False,
-            },
-            "uvicorn.access": {
-                "handlers": ["access"],
-                "level": "INFO",
-                "propagate": False,
-            },
-            # 确保 app.* logger 在 uvicorn dictConfig 后仍保持用户设定的级别
-            "app": {
-                "handlers": ["default"],
-                "level": _level_name,
-                "propagate": False,
-            },
-        },
-        "root": {
-            "level": _level_name,
-            "handlers": ["default"],
-        },
-    }
+    log_config = uvicorn_log_config(_level_name)
 
     config = uvicorn.Config(
         app,

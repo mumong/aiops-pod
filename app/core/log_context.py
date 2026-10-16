@@ -64,12 +64,46 @@ class JsonLogFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def log_formatter_for_env() -> logging.Formatter:
+def log_formatter_for_env(**_ignored: Any) -> logging.Formatter:
+    """Formatter factory for logging.config (`"()"`); uvicorn passes ``use_colors``."""
     import os
 
     if os.getenv("AIOPS_LOG_FORMAT", "text").strip().lower() == "json":
         return JsonLogFormatter()
     return logging.Formatter(LOG_FORMAT)
+
+
+def uvicorn_log_config(level_name: str) -> dict:
+    """dictConfig for uvicorn that keeps our formatter, context filter and app level."""
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {"()": "app.core.log_context.log_formatter_for_env"},
+            "access": {"format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"},
+        },
+        "filters": {"log_context": {"()": LogContextFilter}},
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+                "filters": ["log_context"],
+            },
+            "access": {
+                "formatter": "access",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+            # app.* keeps the user's level after uvicorn's dictConfig
+            "app": {"handlers": ["default"], "level": level_name, "propagate": False},
+        },
+        "root": {"level": level_name, "handlers": ["default"]},
+    }
 
 
 class LogContextFilter(logging.Filter):
