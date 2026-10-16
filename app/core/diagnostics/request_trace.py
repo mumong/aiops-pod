@@ -35,8 +35,16 @@ def describe_messages(messages: List[Any]) -> List[Dict[str, Any]]:
     """One compact dict per message, in send order."""
     rows: List[Dict[str, Any]] = []
     for index, message in enumerate(messages):
-        role = str(getattr(message, "type", None) or getattr(message, "role", None) or type(message).__name__)
-        row: Dict[str, Any] = {"index": index, "role": role, "chars": _text_len(getattr(message, "content", ""))}
+        role = str(
+            getattr(message, "type", None)
+            or getattr(message, "role", None)
+            or type(message).__name__
+        )
+        row: Dict[str, Any] = {
+            "index": index,
+            "role": role,
+            "chars": _text_len(getattr(message, "content", "")),
+        }
         extra = getattr(message, "additional_kwargs", None) or {}
         reasoning = extra.get("reasoning_content") or extra.get("reasoning")
         if isinstance(reasoning, str) and reasoning.strip():
@@ -44,7 +52,11 @@ def describe_messages(messages: List[Any]) -> List[Dict[str, Any]]:
         calls = getattr(message, "tool_calls", None) or []
         if calls:
             row["tool_calls"] = [
-                {"name": call.get("name"), "args": _digest(call.get("args") or {}), "id": call.get("id")}
+                {
+                    "name": call.get("name"),
+                    "args": _digest(call.get("args") or {}),
+                    "id": call.get("id"),
+                }
                 for call in calls
                 if isinstance(call, dict)
             ]

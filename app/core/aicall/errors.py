@@ -106,6 +106,23 @@ class RepeatLimitReached(RuntimeError):
         )
 
 
+class IdleRoundReached(RuntimeError):
+    """A whole model round asked only for results it already had.
+
+    Live runs (15d77453575a4ded, 7bdb83277e294cdc): the model's reasoning said
+    "evidence complete, now output the structured result", yet the emitted turn
+    was a copy of earlier tool calls. A round with zero new information requests
+    is the model signalling completion; the loop ends and the stage delivers
+    from its material instead of burning rounds on repeat notices.
+    """
+
+    def __init__(self, calls: int):
+        self.calls = calls
+        super().__init__(
+            f"本轮 {calls} 个工具调用全部重复了此前已返回的调用，没有新的查询；视为调查完成，基于已有结果交付"
+        )
+
+
 def public_error_text(exc: BaseException) -> str:
     """Error text that may reach users and session history.
 

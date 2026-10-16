@@ -28,6 +28,9 @@ from tests.unit.remediation.test_pod_executor import fixture
         "sh -c 'echo hi > /tmp/a'",
         "sh /tmp/script.sh",
         "sh -c 'echo $(date)'",
+        "mkfs.ext4 /dev/test",
+        "kill -9 1",
+        "sh -c 'nsenter -t 1 -m'",
     ],
 )
 def test_denies_literal_destructive_or_uninspectable_execution(inner):
@@ -52,7 +55,7 @@ def test_denies_literal_destructive_or_uninspectable_execution(inner):
         "kubectl exec pod/test -n demo -- curl http://service/health",
         "kubectl exec pod/test -n demo -- python3 -c 'print(1)'",
         "kubectl exec pod/test -n demo -- unlink /tmp/a",
-        "kubectl exec pod/test -n demo -- mkfs.ext4 /dev/test",
+        "kubectl exec pod/test -n demo -- killer-app --flag",
     ],
 )
 def test_normal_repairs_and_data_are_not_substring_blocked(command):
@@ -74,7 +77,9 @@ def test_invalid_configuration_cannot_silently_disable_guard(value):
 
 
 def test_configuration_defaults_and_explicit_override():
-    assert CommandPolicy.from_config({}).denied_executables == frozenset({"rm"})
+    assert {"rm", "dd", "mkfs*", "kill", "nsenter"} <= CommandPolicy.from_config(
+        {}
+    ).denied_executables
     assert not CommandPolicy.from_config({}).allowed_exec_commands
     configured = CommandPolicy.from_config(
         {"denied_executables": [], "allowed_exec_commands": ["rm"]}

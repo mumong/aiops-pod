@@ -62,6 +62,7 @@ from app.core.prompts import (
 from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
 
 from .errors import (
+    IdleRoundReached,
     ModelStreamStalled,
     RepeatLimitReached,
     public_error_text,
@@ -1606,9 +1607,11 @@ class AICall:
             logger.warning("[AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
             if not run.final_content:
                 run.final_content = f"达到最大工具执行步数限制: {recursion_msg}"
-        except RepeatLimitReached as e:
+        except (RepeatLimitReached, IdleRoundReached) as e:
             logger.warning("[AICall] %s (node=%s)", e, node_id)
-            run.incomplete_reason = "repeat_limit"
+            run.incomplete_reason = (
+                "idle_round" if isinstance(e, IdleRoundReached) else "repeat_limit"
+            )
             self._push(
                 run.stream_queue,
                 node_id,
@@ -3392,7 +3395,9 @@ class AICall:
         return f"name:{name}|args:{args_str}"
 
     @staticmethod
-    def repeat_call_notice(tool_name: str, original_call_id: str, *, same_turn: bool = False) -> str:
+    def repeat_call_notice(
+        tool_name: str, original_call_id: str, *, same_turn: bool = False
+    ) -> str:
         """Text returned instead of re-running an identical call (HTTP 304 style).
 
         It must steer towards answering: the earlier wording ended with "或改用其它
@@ -3442,6 +3447,23 @@ class AICall:
         max_calls_per_turn = guards.max_tool_calls_per_turn
         max_identical_calls = guards.max_identical_calls
         page_chars = max(0, int(guards.repeat_page_chars or 0))
+        finalize_on_idle_round = bool(getattr(guards, "finalize_on_idle_round", True))
+        # Per model round: how many of its calls were answered by a repeat notice.
+        turns: Dict[Tuple[str, ...], Dict[str, int]] = {}
+
+        def _note_turn(request, kind: str) -> None:
+            """Raise IdleRoundReached when the whole round repeated answered calls."""
+            if not finalize_on_idle_round:
+                return
+            ids = AICall._turn_call_ids(request, str((request.tool_call or {}).get("id") or ""))
+            if not ids:
+                return
+            turn = turns.setdefault(ids, {"seen": 0, "idle": 0})
+            turn["seen"] += 1
+            if kind == "notice":
+                turn["idle"] += 1
+            if turn["seen"] == len(ids) and turn["idle"] == len(ids):
+                raise IdleRoundReached(len(ids))
 
         def _raw_page(
             source: ToolMessage, current_call_id: str, original_call_id: str, repeat: int
@@ -3522,6 +3544,8 @@ class AICall:
             position = AICall._tool_call_position(request, current_call_id)
             if max_calls_per_turn and position is not None and position[0] >= max_calls_per_turn:
                 index, total = position
+                async with lock:
+                    _note_turn(request, "capped")
                 return ToolMessage(
                     content=(
                         f"【未执行：本轮工具调用过多】本轮共发起 {total} 个工具调用，超过上限 {max_calls_per_turn}，"
@@ -3554,9 +3578,11 @@ class AICall:
                             idle_repeats,
                             max_identical_calls,
                         )
-                    return _repeat_notice(
+                    notice = _repeat_notice(
                         source, current_call_id, original_call_id, repeat_count=idle_repeats
                     )
+                    _note_turn(request, "notice")
+                    return notice
 
                 pending = in_flight.get(signature)
                 if pending is None:
@@ -3618,6 +3644,9 @@ class AICall:
                     async with lock:
                         in_flight.pop(signature, None)
 
+            async with lock:
+                _note_turn(request, "executed")
+
             if not isinstance(result, ToolMessage):
                 return result
 
@@ -3640,6 +3669,21 @@ class AICall:
             )
 
         return deduplicate_tool_call
+
+    @staticmethod
+    def _turn_call_ids(request: Any, call_id: str) -> Tuple[str, ...]:
+        """Ids of every tool call in the model message that issued ``call_id``."""
+        state = getattr(request, "state", None)
+        messages = (
+            state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+        )
+        for message in reversed(messages or []):
+            calls = getattr(message, "tool_calls", None)
+            if not calls:
+                continue
+            ids = tuple(str(call.get("id") or "") for call in calls)
+            return ids if call_id in ids else ()
+        return ()
 
     @staticmethod
     def _tool_call_position(request: Any, call_id: str) -> Optional[Tuple[int, int]]:

@@ -369,6 +369,16 @@ async def remediation_approve(
         reviewer,
         reason,
     )
+    from app.core.remediation.audit import audit_event
+
+    audit_event(
+        "approval_decided",
+        run_id=run_id,
+        approval_id=approval_id,
+        approved=bool(approved),
+        reviewer=reviewer,
+        reason=reason,
+    )
     return {
         "success": True,
         "run_id": run_id,

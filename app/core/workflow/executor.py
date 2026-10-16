@@ -1081,15 +1081,17 @@ class WorkflowExecutor:
     ) -> Generator[Dict, None, None]:
         from app.core.remediation.pod_executor import PodRepairExecutor
         from app.core.remediation.policy import CommandPolicy
+        from app.core.remediation.settings import repair_settings
 
         final_state = stream.final_state
         policy = CommandPolicy.from_config(remediation_cfg)
+        effective = repair_settings.effective(remediation_cfg)
         for repair_event in PodRepairExecutor().run(
             run_id,
             final_state.get("remediation_draft"),
             owner=overrides.get("_remediation_owner", ""),
-            mode=normalize_remediation_mode(remediation_cfg.get("mode")),
-            timeout=_int_config(remediation_cfg, "approval_timeout_seconds", 600),
+            mode=effective["mode"],
+            timeout=int(effective["approval_timeout_seconds"]),
             cancel=cancel_event,
             policy=policy,
             request_contract=final_state.get("request_contract"),

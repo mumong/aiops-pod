@@ -18,8 +18,11 @@ def _loop():
             tool_calls=[{"id": "c1", "name": "kubectl", "args": {"kind": "nodes"}}],
         ),
         ToolMessage(content="master node1", tool_call_id="c1"),
-        AIMessage(content="", additional_kwargs={"reasoning": "now prometheus"},
-                  tool_calls=[{"id": "c2", "name": "promql", "args": {"q": "up"}}]),
+        AIMessage(
+            content="",
+            additional_kwargs={"reasoning": "now prometheus"},
+            tool_calls=[{"id": "c2", "name": "promql", "args": {"q": "up"}}],
+        ),
         ToolMessage(content="{}", tool_call_id="c2"),
     ]
 
@@ -42,7 +45,10 @@ def test_default_keeps_requests_unchanged():
 
 
 def test_helper_tolerates_mismatched_or_empty_reasoning():
-    messages = [HumanMessage(content="q"), AIMessage(content="x", additional_kwargs={"reasoning": " "})]
+    messages = [
+        HumanMessage(content="q"),
+        AIMessage(content="x", additional_kwargs={"reasoning": " "}),
+    ]
     dicts = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "x"}]
     assert feed_back_history_reasoning(messages, dicts, "reasoning") == 0
     assert feed_back_history_reasoning(messages, dicts[:1], "reasoning") == 0
@@ -50,6 +56,10 @@ def test_helper_tolerates_mismatched_or_empty_reasoning():
 
 
 def test_aicall_passes_the_field_to_every_chat_model():
-    ai = AICall(model="openai/x", api_key="k", api_base="http://gw/v1", history_reasoning_field="reasoning")
+    ai = AICall(
+        model="openai/x", api_key="k", api_base="http://gw/v1", history_reasoning_field="reasoning"
+    )
     assert ai._chat_model_kwargs["history_reasoning_field"] == "reasoning"
-    assert "history_reasoning_field" not in AICall(model="openai/x", api_key="k")._chat_model_kwargs
+    assert (
+        "history_reasoning_field" not in AICall(model="openai/x", api_key="k")._chat_model_kwargs
+    )

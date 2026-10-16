@@ -64,6 +64,16 @@ def classify_ledger(
                 "deterministic stop; answer delivered from existing material",
             )
         )
+    if reason == "idle_round":
+        out.append(
+            _finding(
+                "idle_round_stop",
+                "info",
+                where,
+                "a whole round repeated already answered calls; loop ended, delivered from material",
+                "model signalled completion while emitting stale tool calls (see requests/ trace)",
+            )
+        )
     if ledger.get("guards", {}).get("args_repaired"):
         out.append(
             _finding(

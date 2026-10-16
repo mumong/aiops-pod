@@ -8,13 +8,57 @@ import fnmatch
 import shlex
 from pathlib import PurePosixPath
 
-DEFAULT_DENIED_EXECUTABLES = frozenset({"rm"})
+# Destructive or host-level executables inside ``kubectl exec``; glob patterns allowed.
+DEFAULT_DENIED_EXECUTABLES = frozenset(
+    {
+        "rm",
+        "mkfs*",
+        "dd",
+        "shutdown",
+        "reboot",
+        "halt",
+        "poweroff",
+        "init",
+        "telinit",
+        "fdisk",
+        "sfdisk",
+        "parted",
+        "wipefs",
+        "blkdiscard",
+        "nsenter",
+        "chroot",
+        "mount",
+        "umount",
+        "iptables",
+        "ip6tables",
+        "nft",
+        "kill",
+        "killall",
+        "pkill",
+        "crontab",
+        "useradd",
+        "usermod",
+        "userdel",
+        "passwd",
+        "chpasswd",
+        "su",
+        "sudo",
+    }
+)
 # Empty disables the optional executable allowlist; explicit deny still wins.
 DEFAULT_ALLOWED_EXEC_COMMANDS = frozenset()
 
 
 class RepairCommandDenied(ValueError):
-    """Expected policy refusal; never an actual command execution failure."""
+    """Expected policy refusal; never an actual command execution failure.
+
+    ``rule`` names the policy rule (``denied_executables``, ``denied_operations`` ...)
+    so every refusal is explainable to the reviewer and the acceptance tester.
+    """
+
+    def __init__(self, message: str, rule: str = ""):
+        super().__init__(message)
+        self.rule = rule
 
 
 def check_repair_execution(args, policy):
@@ -22,8 +66,8 @@ def check_repair_execution(args, policy):
     denied = policy.denied_executables
     allowed = policy.allowed_exec_commands
 
-    def reject(reason):
-        raise RepairCommandDenied("修复命令未执行：" + reason)
+    def reject(reason, rule="denied_executables"):
+        raise RepairCommandDenied("修复命令未执行：" + reason, rule=rule)
 
     def shell_script(script, depth):
         # Deliberately no expansion, interpretation, loops, redirects or scripts.
@@ -61,7 +105,7 @@ def check_repair_execution(args, policy):
                 reject("包装命令参数无法可靠检查")
             executable(argv[1:], depth + 1)
         elif allowed and name not in allowed:
-            reject("容器内命令不在 allowed_exec_commands：" + name)
+            reject("容器内命令不在 allowed_exec_commands：" + name, "allowed_exec_commands")
 
     try:
         if not args or args[0] != "kubectl":

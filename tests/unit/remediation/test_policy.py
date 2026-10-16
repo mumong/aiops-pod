@@ -16,11 +16,9 @@ TARGETS = {("demo", "pod", "api-123"), ("demo", "deployment", "api")}
         "kubectl create serviceaccount worker -n demo",
         "kubectl set env deployment/api -n demo MODE=normal",
         "kubectl scale deployment/api -n demo --replicas=2",
-        "kubectl delete pod/api-123 -n demo",
         "kubectl get pod/other -n demo",
         "kubectl get secret/token -n demo",
         "kubectl exec pod/api-123 -n demo -- echo ok",
-        "kubectl apply -n demo -f https://example.invalid/pod.yaml",
         """kubectl patch deployment/api -n demo --type=merge -p '{"spec":{"replicas":2}}' """,
     ],
 )
@@ -38,6 +36,9 @@ def test_exact_targets_allowed(command):
         "kubectl get pod/api-123 -n demo --kubeconfig=/tmp/config",
         "kubectl get pods -n demo ; rm -rf /tmp/a",
         "kubectl config use-context other",
+        # Default high-risk blacklist (Sprint 2): not reviewable as one bounded change.
+        "kubectl delete pod/api-123 -n demo",
+        "kubectl apply -n demo -f https://example.invalid/pod.yaml",
     ],
 )
 def test_dangerous_or_out_of_scope_commands_rejected(command):

@@ -10,11 +10,13 @@ from copy import deepcopy
 from pathlib import Path
 
 from app.core.remediation.approval import approval_store
+from app.core.remediation.audit import audit_event
 from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
 from app.core.remediation.policy import CommandPolicy, validate_target_command
 
 _lock = threading.Lock()
 _command_lock = threading.Lock()
+COMMAND_TIMEOUT_SECONDS = int(os.getenv("AIOPS_REPAIR_COMMAND_TIMEOUT", "60"))
 _busy: set[tuple[str, str, str]] = set()
 
 
@@ -56,9 +58,19 @@ def run_argv(args):
             path.write_text(json.dumps(config))
             path.chmod(0o600)
             env["KUBECONFIG"] = str(path)
-        result = subprocess.run(
-            args, capture_output=True, text=True, timeout=60, check=False, env=env
-        )
+        try:
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=COMMAND_TIMEOUT_SECONDS,
+                check=False,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"命令执行超时（{COMMAND_TIMEOUT_SECONDS} 秒），结果未知：命令可能已部分生效，请复查资源状态"
+            ) from exc
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout or "kubectl failed")[:3000])
     return result.stdout
@@ -129,10 +141,23 @@ class PodRepairExecutor:
                     command = action.get(stage + "_command")
                     if not command:
                         continue
-                    argv, operation = validate_target_command(command, objects, policy)
                     try:
+                        # One rule engine for verbs, flags, kinds and in-container
+                        # executables; every refusal names its rule.
+                        argv, operation = validate_target_command(command, objects, policy)
                         check_repair_execution(argv, policy)
                     except RepairCommandDenied as exc:
+                        rule = getattr(exc, "rule", "") or "policy"
+                        audit_event(
+                            "command_denied",
+                            run_id=run_id,
+                            group_id=action["group_id"],
+                            action_id=action["id"],
+                            stage=stage,
+                            rule=rule,
+                            command=command,
+                            reason=str(exc),
+                        )
                         yield {
                             "type": "remediation_tool_result",
                             "run_id": run_id,
@@ -142,13 +167,14 @@ class PodRepairExecutor:
                             "command": command,
                             "status": "failed",
                             "error_code": "repair_command_denied",
+                            "rule": rule,
                             "execution_skipped": True,
                             "result_preview": str(exc),
                             "result_truncated": False,
                         }
                         yield finish(
                             "blocked",
-                            str(exc) + "；本计划尚未执行任何命令，请调整方案后重新提交",
+                            f"命中高危命令规则 {rule}：{exc}；本计划尚未执行任何命令，请调整方案后重新提交",
                             "repair_command_denied",
                         )
                         return
@@ -165,6 +191,7 @@ class PodRepairExecutor:
                 _busy.update(scopes)
                 reserved = scopes
             for action, target, original, stages in prepared:
+                approval_marker = "auto"
                 if record_store and not record_store.current(run_id, owner):
                     yield finish("superseded", "方案已被修改请求替代，旧审批不可继续执行")
                     return
@@ -220,9 +247,13 @@ class PodRepairExecutor:
                         return
                     if decision is None or not decision.approved:
                         yield finish(
-                            "rejected" if decision else "timeout", "修复未获有效批准，未执行"
+                            "rejected" if decision else "timeout",
+                            "用户拒绝了该动作，未执行"
+                            if decision
+                            else f"审批超时（{int(timeout)} 秒内未批准），未执行",
                         )
                         return
+                    approval_marker = request.approval_id
                 for stage, command, argv in stages:
                     if record_store and not record_store.transition(run_id, owner, "executing"):
                         yield finish("superseded", "方案已被修改请求替代，未执行旧命令")
@@ -240,6 +271,10 @@ class PodRepairExecutor:
                         "stage": stage,
                         "command": command,
                         "status": "running",
+                        # "auto" = executed without a human decision (mode=auto);
+                        # otherwise the approval id that authorised this exact command.
+                        "approval": approval_marker,
+                        "mode": mode,
                     }
                     try:
                         with _command_lock:
@@ -248,6 +283,17 @@ class PodRepairExecutor:
                                 return
                             output = self.runner(argv)
                     except Exception as exc:
+                        audit_event(
+                            "command_executed",
+                            run_id=run_id,
+                            action_id=action["id"],
+                            stage=stage,
+                            command=command,
+                            status="failed",
+                            approval=approval_marker,
+                            mode=mode,
+                            error=str(exc)[:300],
+                        )
                         if record_store:
                             record_store.transition(
                                 run_id,
@@ -277,6 +323,16 @@ class PodRepairExecutor:
                             "修复命令或验证失败；已尝试的写操作可能生效，请复查状态，未自动回滚",
                         )
                         return
+                    audit_event(
+                        "command_executed",
+                        run_id=run_id,
+                        action_id=action["id"],
+                        stage=stage,
+                        command=command,
+                        status="success",
+                        approval=approval_marker,
+                        mode=mode,
+                    )
                     if record_store:
                         record_store.transition(
                             run_id,
@@ -303,7 +359,12 @@ class PodRepairExecutor:
                     }
             yield finish(
                 "needs_followup",
-                "已执行批准的命令并返回实际结果；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态",
+                (
+                    "已按自动执行模式执行全部命令（未经人工审批）并返回实际结果"
+                    if mode == "auto"
+                    else "已执行批准的命令并返回实际结果"
+                )
+                + "；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态",
             )
         except Exception as exc:
             yield finish("blocked", str(exc))

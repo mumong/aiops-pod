@@ -165,15 +165,19 @@ class RepairJobs:
             return self._execute_in_context(service, owner, job)
 
     def _execute_in_context(self, service, owner, job):
-        from app.core.remediation.models import normalize_remediation_mode
         from app.core.remediation.pod_executor import PodRepairExecutor, run_argv
         from app.core.remediation.policy import CommandPolicy
+        from app.core.remediation.settings import repair_settings
 
         job_id = job["job_id"]
         try:
             cfg = deepcopy((service.workflow_config or {}).get("remediation") or {})
-            self._update(job_id, owner, mode=normalize_remediation_mode(cfg.get("mode")))
-            if not cfg.get("enabled", False):
+            # Config baseline + TTL-bound runtime override, decided once per job and recorded.
+            effective = repair_settings.effective(cfg)
+            self._update(
+                job_id, owner, mode=effective["mode"], mode_source=effective["mode_source"]
+            )
+            if not effective["enabled"]:
                 self._update(job_id, owner, status="execution_disabled")
                 return
             record = self.store.load(job_id, owner, "plan")
@@ -187,8 +191,8 @@ class RepairJobs:
                 job_id,
                 record["payload"].get("draft"),
                 owner=owner,
-                mode=normalize_remediation_mode(cfg.get("mode")),
-                timeout=int(cfg.get("approval_timeout_seconds", 600)),
+                mode=effective["mode"],
+                timeout=int(effective["approval_timeout_seconds"]),
                 cancel=self.cancellations[job_id],
                 policy=CommandPolicy.from_config(cfg),
                 request_contract=record["payload"].get("request_contract"),
@@ -295,6 +299,7 @@ class RepairJobs:
                         "stage",
                         "error",
                         "mode",
+                        "mode_source",
                     )
                 }
             )

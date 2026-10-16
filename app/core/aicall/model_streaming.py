@@ -50,7 +50,9 @@ class VisibleChatOpenAI(ChatOpenAI):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         if self.history_reasoning_field and isinstance(payload.get("messages"), list):
             messages = self._convert_input(input_).to_messages()
-            feed_back_history_reasoning(messages, payload["messages"], self.history_reasoning_field)
+            feed_back_history_reasoning(
+                messages, payload["messages"], self.history_reasoning_field
+            )
         return payload
 
     def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class, base_generation_info):

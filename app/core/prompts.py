@@ -413,6 +413,7 @@ STRUCTURED_FINALIZATION_HEADERS = {
     "agent_timeout": "# 收卷：本阶段运行时限已到",
     "agent_error": "# 收卷：本阶段因模型服务错误提前结束",
     "repeat_limit": "# 收卷：本阶段因同一调用反复重复而停止",
+    "idle_round": "# 收卷：本阶段最后一轮没有提出任何新查询（全部是已返回过的调用），视为调查已完成",
     "no_structured_output": "# 收卷：本阶段调查已由你自行结束，但尚未提交结构化结果（预算并未耗尽，不要声称预算或工具额度不足）",
 }
 
