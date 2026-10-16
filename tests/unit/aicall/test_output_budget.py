@@ -5,11 +5,15 @@ from app.core.aicall.output_budget import MINIMUM_OUTPUT_TOKENS, OutputBudget
 
 
 def test_defaults_config_and_env_precedence():
-    assert OutputBudget.from_config(None, environ={}) == OutputBudget(6000, 10000, 3000, 2)
+    assert OutputBudget.from_config(None, environ={}) == OutputBudget(
+        agent=6000, delivery=10000, compaction=3000, router=1200, retry_multiplier=2
+    )
     configured = OutputBudget.from_config(
         {"agent": 4000, "delivery": 8000, "compaction": 2000, "retry_multiplier": 3}, environ={}
     )
-    assert configured == OutputBudget(4000, 8000, 2000, 3)
+    assert configured == OutputBudget(
+        agent=4000, delivery=8000, compaction=2000, router=1200, retry_multiplier=3
+    )
     overridden = OutputBudget.from_config(
         {"agent": 4000},
         environ={"AICALL_MAX_OUTPUT_TOKENS": "7000", "AICALL_DELIVERY_MAX_OUTPUT_TOKENS": ""},

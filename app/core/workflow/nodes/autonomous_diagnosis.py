@@ -47,6 +47,29 @@ _METRIC_CATALOG_TOOLS = frozenset(
 )
 
 
+def serial_case_target(handoff):
+    """Identity of the single serial case: every target the location stage handed over.
+
+    The serial path runs whenever lane fan-out is not possible (a non-Pod target such
+    as the owning Deployment, a Pod without namespace, historical input). Its one RCA
+    then covers all of those targets, so the case identity lists all of them; a valid
+    report must not be discarded because the handoff named more than one object.
+    """
+    targets = [
+        t
+        for t in (handoff or {}).get("targets") or []
+        if isinstance(t, dict) and t.get("target_id") and isinstance(t.get("entity"), dict)
+    ]
+    active = [t for t in targets if t.get("status", "investigate") == "investigate"] or targets
+    if not active:
+        return None
+    return {
+        "group_id": "single",
+        "target_id": "+".join(t["target_id"] for t in active),
+        "entities": [t["entity"] for t in active],
+    }
+
+
 class DiagnosisStageNode(QueryCollectNode):
     stage_id = "layer"
     stage_name = "问题定位"
@@ -198,15 +221,9 @@ class DiagnosisStageNode(QueryCollectNode):
             archive = ContextArchive(
                 run_id=getattr(self, "current_run_id", "") or state.get("run_id", "unknown")
             )
-            target = state.get("diagnosis_target")
-            if not target:
-                selected = (state.get("diagnosis_handoff") or {}).get("targets") or []
-                if len(selected) == 1:
-                    target = {
-                        "group_id": "single",
-                        "target_id": selected[0]["target_id"],
-                        "entities": [selected[0]["entity"]],
-                    }
+            target = state.get("diagnosis_target") or serial_case_target(
+                state.get("diagnosis_handoff")
+            )
             group_id = (target or {}).get("group_id", "single")
             result_ref = str(archive.root / "cases/result.json")
             try:

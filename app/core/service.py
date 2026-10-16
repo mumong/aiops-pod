@@ -408,6 +408,7 @@ class HolmesService:
                 step_start = time.time()
                 logger.info("创建 AICall 实例 (LangGraph)...")
                 summary_mode, summary_max_chars = self.get_observation_summary_config()
+                self.install_window_policy()
                 self.ai_call = AICall(
                     model=final_model,
                     api_key=final_api_key,
@@ -676,6 +677,14 @@ class HolmesService:
         except (TypeError, ValueError):
             max_chars = 3000
         return normalized_mode, max(200, max_chars)
+
+    def install_window_policy(self) -> None:
+        """workflow.context_compaction.recent_keep_* -> process-wide WindowPolicy."""
+        from app.core.context import window_policy
+
+        wf_cfg = self.workflow_config if isinstance(self.workflow_config, dict) else {}
+        cfg = wf_cfg.get("context_compaction", {}) if isinstance(wf_cfg, dict) else {}
+        window_policy.configure(window_policy.WindowPolicy.from_config(cfg))
 
     def get_context_compaction_config(self) -> Dict[str, Any]:
         """获取运行时上下文压缩配置。

@@ -126,7 +126,7 @@ class AutonomousParallelNode(WorkflowNode):
     # (env) > 3. The model service's admission control remains the real capacity limit;
     # this bounds how many lanes one request pushes at it at once.
     DEFAULT_LANE_WORKERS = 3
-    MAX_LANE_WORKERS = 8
+    MAX_LANE_WORKERS = 16
     autonomous_parallel_workers = None
 
     def lane_workers(self) -> int:

@@ -8,6 +8,7 @@ from langchain.agents.middleware import AgentMiddleware, ModelRequest
 from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from app.core.context import window_policy
 from app.core.context.archive import ContextArchive
 from app.core.context.budget import count_tokens
 from app.core.context.evidence_policy import EvidencePolicy
@@ -129,7 +130,7 @@ def message_groups(messages):
 
 def partition_recent(groups, window, *, keep_tokens=None):
     """Shared atomic suffix policy for agents and inter-node material."""
-    keep_budget = min(8000, int(window * 0.15))
+    keep_budget = window_policy.current().recent_budget(window)
     if keep_tokens is not None:
         keep_budget = min(keep_budget, keep_tokens)
     used, cut = 0, len(groups)

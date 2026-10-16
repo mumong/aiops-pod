@@ -51,6 +51,7 @@ data:
         agent: 6000         # 工具循环中的单轮模型输出（推理 + 回答 + 工具调用）
         delivery: 10000     # 无工具的结构化交付（RCA / 总结报告）；实测 6000 会被小模型的长报告撑满
         compaction: 3000    # 上下文压缩与摘要
+        router: 1200        # 意图路由（RequestContract 分类，内部调用、不带 thinking）
         retry_multiplier: 2 # 交付返回空时，重试一次的预留倍数（受窗口剩余空间约束）
       # 仅用于内部调用（上下文压缩/摘要、结构化收卷），不影响面向用户的推理流。
       # 推理模型的 thinking 会挤占内部调用有限的 max_tokens，导致"摘要输出被截断"。
@@ -197,12 +198,13 @@ data:
 
       evidence:
         # Pod lane 扇出：每个待调查 Pod 使用同一独立 evidence + 正式 RCA 契约。
-        # max_workers 限制一次请求同时推给模型服务的 lane 数（1–8；更多目标排队）；
-        # 实测 5 个 lane 同时压单台 vLLM 时整体 18 分钟，3 个更稳。环境变量
-        # AIOPS_AUTONOMOUS_PARALLEL_WORKERS 仅在未配置时生效。
+        # max_workers = 一次请求里同时运行的 Pod 诊断 agent（evidence + RCA lane）数，
+        # 上限 16，超出的目标排队。每个 lane 是一条独立的模型请求流，容量边界是
+        # vLLM 的并发/KV cache；当前 KV cache 占用很低，按 10 配置。
+        # 环境变量 AIOPS_AUTONOMOUS_PARALLEL_WORKERS 仅在未配置时生效。
         parallel:
           enabled: true
-          max_workers: 3
+          max_workers: 10
 
       # --------------------------------------------------------------------
       # 4.1 Post-Diagnosis Remediation
@@ -238,7 +240,14 @@ data:
         mode: rule
         max_chars: 3000
 
-      # 上下文压缩: evidence 上下文超过 trigger_ratio 时压缩历史工具观察。
+      # 上下文治理。模型窗口大小只有一个来源：Secret 的 MODEL_CONTEXT_WINDOW
+      # （或 llm.context_window）。LLM 侧调整窗口（如 54K -> 128K）时只改那一处；
+      # 下面都是比例或绝对预留量：
+      #   - hard_guard_input_ratio：调用前输入上限 = 窗口 × 比例，再扣输出预留与安全余量
+      #   - recent_keep_ratio / recent_keep_tokens：压缩时保留的近期完整交互 = min(两者)
+      #   - llm.output_tokens：各类调用的输出预留（见上）
+      #   - max_context_window：仅限制旧的"运行时轻量压缩"路径在多大的窗口内启用；
+      #     当前 54K 已超过它，实际压缩由 WorkingContextMiddleware（hard guard）完成
       context_compaction:
         enabled: true
         nodes:
@@ -247,8 +256,8 @@ data:
         trigger_ratio: 0.70
         max_compactions_per_call: 1
         summary_max_tokens: 1200
-        # 调用模型前检查总输入预算；比例设为 90%，仍受输出预留和安全余量约束。
-        # 54K、输出预留 6000、安全 2000、估算余量 256 时实际输入上限为 45744。
+        recent_keep_ratio: 0.15
+        recent_keep_tokens: 8000
         hard_guard_enabled: true
         hard_guard_input_ratio: 0.90
         hard_guard_safety_tokens: 2000

@@ -13,6 +13,7 @@ from typing import Any, Literal
 from openai import APIStatusError, APITimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.core.aicall.output_budget import OutputBudget
 from app.core.prompts import REQUEST_ROUTER_PROMPT
 from app.core.workflow.nodes.base import WorkflowNode
 
@@ -165,7 +166,14 @@ class RequestRouterNode(WorkflowNode):
                     schema=RequestContract,
                     node_id=self.node_id,
                     run_id=getattr(self, "current_run_id", ""),
-                    max_tokens=1200,
+                    # Classification only: no tools, no user-facing reasoning. As an
+                    # internal (no-thinking) call it answers in seconds; with thinking
+                    # on, 2 of 4 live router calls today ended in a gateway HTTP 500
+                    # after ~60s of reasoning against a small output reserve.
+                    max_tokens=(
+                        getattr(self.ai_call, "output_budget", None) or OutputBudget.from_config()
+                    ).router,
+                    internal_model=True,
                     raise_on_error=True,
                 )
 

@@ -112,5 +112,5 @@ def test_deployed_workflow_config_contains_only_keys_the_code_reads():
         "observation_summary",
         "context_compaction",
     }
-    assert workflow["evidence"] == {"parallel": {"enabled": True, "max_workers": 3}}
+    assert workflow["evidence"] == {"parallel": {"enabled": True, "max_workers": 10}}
     assert workflow["structured_runtime"] == {"fallback_enabled": True}

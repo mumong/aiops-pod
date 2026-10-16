@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.aicall.errors import raise_on_model_disconnect
-from app.core.context.budget import count_tokens
+from app.core.context.budget import ModelContextResolver, count_tokens
 from app.core.workflow.case_result import case_index
 
 
@@ -96,7 +96,9 @@ def conclude_cases(node, state):
     failed = False
     inputs = []
     try:
-        window = int(os.getenv("MODEL_CONTEXT_WINDOW", "54000"))
+        window = int(
+            ModelContextResolver().resolve(os.getenv("LLM_MODEL", "")).get("context_window") or 0
+        )
         overhead = count_tokens(
             OVERVIEW_PROMPT
             + json.dumps(context, ensure_ascii=False)

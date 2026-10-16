@@ -19,6 +19,7 @@ _FIELDS = {
     "agent": ("AICALL_MAX_OUTPUT_TOKENS", 6000),
     "delivery": ("AICALL_DELIVERY_MAX_OUTPUT_TOKENS", 10000),
     "compaction": ("AICALL_COMPACTION_MAX_OUTPUT_TOKENS", 3000),
+    "router": ("AICALL_ROUTER_MAX_OUTPUT_TOKENS", 1200),
     "retry_multiplier": ("AICALL_DELIVERY_RETRY_MULTIPLIER", 2),
 }
 
@@ -30,12 +31,14 @@ class OutputBudget:
     ``agent``: one tool-loop model turn (reasoning + answer + tool call).
     ``delivery``: a tool-free structured delivery (RCA / conclusion report).
     ``compaction``: context compaction and summaries.
+    ``router``: the intent classification (RequestContract) at the start of a run.
     ``retry_multiplier``: growth of the reserve when a delivery returns nothing.
     """
 
     agent: int = _FIELDS["agent"][1]
     delivery: int = _FIELDS["delivery"][1]
     compaction: int = _FIELDS["compaction"][1]
+    router: int = _FIELDS["router"][1]
     retry_multiplier: int = _FIELDS["retry_multiplier"][1]
 
     @classmethod
