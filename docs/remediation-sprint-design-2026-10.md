@@ -141,3 +141,11 @@
 Sprint 2 接口层：`sprint2_policy_and_switch.sh` 8/8 通过（25 条高危命令全部拦截并带规则名，6 条合规命令放行，无令牌 403，切换/恢复写审计）。
 
 Sprint 2 真实链路（`sprint2_policy_and_switch.sh aiops-case-04`，14/14 通过）：review 模式下任务停在 `awaiting_approval` 且无任何执行事件 → 拒绝后终态 `rejected`、仍无执行事件；管理员令牌切 auto 后新任务 `mode=auto / mode_source=runtime`，命令事件 `approval=auto`，无审批请求，`recovered`（Pending/CreateContainerConfigError → Running/Ready，25 秒）；随后恢复 review，全部写入审计。Sprint 1（`sprint1_repair_plan.sh aiops-case-04`，11/11 通过）：v1 被 v2 替代后状态 `superseded`、v2 由脚本结尾取消为 `cancelled`，均为设计内终态，case-04 在该脚本中未被修改。
+
+### 5.2 最终验收记录（2026-10-16 22:25–22:42，robusta 12.0.40 / mcpstander 7.0.44 / 前端 0.1.62）
+
+`scripts/acceptance/sprint3_scenarios.sh all`（含重置）一次完整运行 **13/13 通过**：c11 `9f76f1917324472d`（finalizer 移除后原 Pod 已删除）、c09 `fa733196969e49a5`（探针端口修正，readyReplicas=1）、c06 `7df6d1fde5064897`（环境变量名修正，重启 0→0）。
+
+真实浏览器端到端（`frountind/tests/live-repair-e2e.browser.py`，Chromium 操作已部署前端，case-04）**9/9 步通过、0 页面错误**：聊天框发起诊断 143 秒完成 → 安全面板显示"人工审批"徽标与拦截规则 → 命令安全检查拦截 `kubectl delete ns demo --force`（高危动词黑名单）并放行 finalizer patch → 管理员切换为自动执行（运行时覆盖）再恢复配置值 → 生成方案（对象/异常原因/命令）→ 点击"批准此动作" → "执行后恢复观察：已恢复"，事件显示实际命令与审批 ID。截图：`live-repair-plan.png`、`live-repair.png`（验收工作目录）。
+
+12.0.39/12.0.40 在前两轮完整运行中补上的通用护栏：模型写的验证命令失败不再终止（记录并交给恢复观察判定）；结构化交付校验失败带错误重试次数可配置（默认 2）；单目标时 group_id 自动绑定；`pod_spec_immutable` 规则（Pod spec 的 env/探针/资源等改动必须打到控制器模板，规划阶段即拒绝并给出提示）。
