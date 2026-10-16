@@ -408,6 +408,28 @@ L4:应用层 L3:服务网络层 L2:工作负载层 L1:集群节点层 L0:基础�
 # 使用场景: agent 步数/时间预算用尽但尚未提交结构化结果时的一次性“收卷”调用
 # （AICall._finalize_structured_delivery）。同节点、同模型、同系统提示，不带工具。
 # ----------------------------------------------------------------------------
+STRUCTURED_FINALIZATION_HEADERS = {
+    "step_limit": "# 收卷：本阶段调查步数预算已用尽",
+    "agent_timeout": "# 收卷：本阶段运行时限已到",
+    "agent_error": "# 收卷：本阶段因模型服务错误提前结束",
+    "repeat_limit": "# 收卷：本阶段因同一调用反复重复而停止",
+    "no_structured_output": "# 收卷：本阶段调查已由你自行结束，但尚未提交结构化结果（预算并未耗尽，不要声称预算或工具额度不足）",
+}
+
+
+def finalization_instruction(reason):
+    """Finalization prompt whose first line states the real stop reason.
+
+    A generic "budget exhausted" header made the model tell users the budget ran
+    out when it had simply stopped calling tools (live run c58b862595a64d53).
+    """
+    header = (
+        STRUCTURED_FINALIZATION_HEADERS.get(reason)
+        or STRUCTURED_FINALIZATION_HEADERS["step_limit"]
+    )
+    return header + STRUCTURED_FINALIZATION_INSTRUCTION.split("\n", 1)[1]
+
+
 STRUCTURED_FINALIZATION_INSTRUCTION = """# 收卷：本阶段调查预算已用尽
 不要再调用任何工具。仅依据下方本阶段已完成调查得到的工具结果与分析，按要求的结构化格式提交本阶段结果。
 已核实的事实照实提交；未核实、未覆盖或因预算中断的部分，在对应字段（如 coverage、unresolved、missing）中如实标注。

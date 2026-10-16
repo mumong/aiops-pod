@@ -55,7 +55,7 @@ from app.core.prompts import (
     EVIDENCE_MEMORY_COMPRESSION_PROMPT,
     RUNTIME_COMPACTION_BUDGET_EXCEEDED_INSTRUCTION,
     RUNTIME_COMPACTION_INSTRUCTION,
-    STRUCTURED_FINALIZATION_INSTRUCTION,
+    finalization_instruction,
     get_workflow_prompt,
 )
 from app.core.workflow.schemas import ContextCompactionSummary, ToolObservationSummary
@@ -1639,13 +1639,17 @@ class AICall:
             run.thinking_events,
             type="runtime_status",
             status="running",
-            content="调查预算已用尽，正在依据已采集结果提交本阶段结构化结论",
+            content=(
+                "本阶段已结束，正在依据已采集结果提交结构化结论"
+                if run.incomplete_reason == "no_structured_output"
+                else "调查预算已用尽，正在依据已采集结果提交本阶段结构化结论"
+            ),
         )
         started = time.time()
 
         def deliver(payload: Dict[str, Any]) -> Optional[BaseModel]:
             final_question = (
-                f"{question}\n\n{STRUCTURED_FINALIZATION_INSTRUCTION}\n\n"
+                f"{question}\n\n{finalization_instruction(run.incomplete_reason)}\n\n"
                 + json.dumps(payload, ensure_ascii=False, default=str)
             )
             parsed, _raw = self.call_structured(
