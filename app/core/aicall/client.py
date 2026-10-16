@@ -1724,13 +1724,22 @@ class AICall:
         if parsed is not None:
             run.structured_response = parsed
 
-    @staticmethod
-    def _run_material_for_finalization(run: "_AgentRun", question: str) -> Dict[str, Any]:
+    def _run_material_for_finalization(self, run: "_AgentRun", question: str) -> Dict[str, Any]:
         """This node's own bounded tool observations and analysis, in call order.
 
         Shaped like node working material so compact_working_material can reduce it.
+        A message cut off by max_tokens is incomplete by definition: its text is
+        replaced by a marker so the delivery leans on tool results (live run
+        32586686d1ae47a0 copied inverted numbers from a truncated draft).
         """
-        analysis = [_strip_think(text) for _, text in run.emitted_ai_messages]
+        analysis = []
+        for msg, text in run.emitted_ai_messages:
+            if self._is_truncated_message(msg):
+                analysis.append(
+                    "[本轮模型输出因达到输出上限被截断，内容不完整，不作为分析依据；以工具结果为准]"
+                )
+            else:
+                analysis.append(_strip_think(text))
         return {
             "question": question,
             "observations": [
@@ -1740,6 +1749,14 @@ class AICall:
             ],
             "analysis": [text for text in analysis if text.strip()],
         }
+
+    def _is_truncated_message(self, msg: Any) -> bool:
+        metadata = getattr(msg, "response_metadata", None) or {}
+        if str(metadata.get("finish_reason") or "").lower() == "length":
+            return True
+        usage = self._extract_usage_metadata(msg)
+        output_tokens = int(usage.get("output_tokens") or 0) if usage else 0
+        return bool(output_tokens) and output_tokens >= int(self.output_budget.agent)
 
     def _finish_agent_call(
         self,

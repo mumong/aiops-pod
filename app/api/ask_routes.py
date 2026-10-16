@@ -11,6 +11,7 @@ from typing import Generator, Optional
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.api.common import current_service, fix_double_encoding, logger, streaming_response
 
@@ -118,7 +119,10 @@ async def _sync_response(
     """生成同步响应"""
     try:
         service = current_service()
-        result = service.execute_query(
+        # execute_query is synchronous and runs for minutes; off the event loop, or
+        # /health, SSE heartbeats and every other request hang until it returns.
+        result = await run_in_threadpool(
+            service.execute_query,
             question=question,
             max_steps=max_steps,
             workflow_overrides=workflow_overrides,
