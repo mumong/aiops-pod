@@ -42,6 +42,25 @@ stringData:
 
 A2A 可增加 A2A_API_TOKEN。模型需要支持工具调用；配置中的 llm.extra_body 是模型服务特定参数，不支持 Qwen chat_template_kwargs 的服务应移除或改成对应参数。
 
+### 模型循环的配置旋钮（config.yaml `llm` / `workflow`）
+
+这些参数决定小模型在工具循环里的稳定性，全部是配置而不是代码常量；换模型后按 `run_report.md` 的观测调整，不要为具体故障类型加规则。
+
+| 键 | 当前值 | 作用 |
+|---|---|---|
+| `llm.output_tokens.agent / delivery / compaction / router` | 4000 / 10000 / 3000 / 1200 | 各类调用的 `max_tokens` 预留：工具循环单轮、无工具结构化交付、压缩摘要、意图路由。被截断（`finish_reason=length`）的轮次不进入收卷材料。环境变量 `AICALL_*_MAX_OUTPUT_TOKENS` 可覆盖单项 |
+| `llm.agent_guards.max_tool_calls_per_turn` | 16 | 单条模型消息最多执行的工具调用数，超出部分不执行并提示 |
+| `llm.agent_guards.max_identical_calls` | 3 | 同一工具+参数在一个阶段内最多重复次数：重复不执行、只回"结果未变化，数据已齐全请直接作答"；再多一次即停止本阶段并基于已有材料交付（报告 `repeat_limit_stop`） |
+| `llm.agent_guards.repeat_page_chars` | 3000 | 首次结果被截断时，重复同一调用改为返回原始结果的下一段 |
+| `llm.history_reasoning_field` | `reasoning` | 工具循环内把前几轮的模型 reasoning 以该请求字段回传。Qwen3 对话模板只渲染最后一条用户消息之后的 assistant reasoning，不回传时模型会复发上一轮的同一调用；vLLM 0.19 + Qwen3.6 读 `reasoning`，旧 Qwen3 模板读 `reasoning_content`，DeepSeek 拒收该字段时留空关闭 |
+| `llm.no_thinking_nodes` | `[]` | 以内部（不带 thinking）设置运行工具循环的节点；Qwen3.6 实测关 thinking 后工具规划退化，保持为空 |
+| `llm.internal_extra_body` | 关 thinking + instruct 采样 | 只用于路由、压缩、结构化收卷等内部调用 |
+| `workflow.max_steps.<node>` | 48 / 64 | LangGraph 递归上限，到顶进入结构化收卷而不是丢弃结果 |
+| `workflow.context_compaction.recent_keep_ratio / recent_keep_tokens` | 0.15 / 8000 | 压缩时保留的近期原文上限 |
+| `workflow.evidence.parallel.max_workers` | 10 | 多 Pod 取证 lane 并发（上限 16） |
+
+每个护栏触发都会在 `run_report.md` 的"发现"里出现，并在最终回答的 `missing` 中如实标注"执行未完成"的原因，不会伪装成完整结果。
+
 当前 MCP 默认使用集群 DNS，例如 http://mcp-server-manager.mcp.svc.cluster.local:8100/sse。外部 MCP 要改为可达地址，并核实查询的是目标集群。单集群关闭 federation.enabled，避免向示例子集群地址发请求。
 
 清单申请 aiops-reports-pvc，容量 20Gi、ReadWriteOnce；需要默认 StorageClass 或匹配 PV。修改仓库前缀时同步核对 Makefile 与清单：版本替换只匹配 Makefile 当前定义的镜像前缀，initContainer 镜像不会跟随主镜像版本更新。
