@@ -49,7 +49,8 @@ wait_status() {
   echo "$st"; return 1
 }
 approve_all() { # approve every pending action of a job until it leaves awaiting_approval; prints count
-  local jid=$1 limit=${2:-900} n=0 deadline=$(( $(date +%s) + limit )) st aid arun ds
+  local jid=$1 limit=${2:-900} n=0 st aid arun ds
+  local deadline=$(( $(date +%s) + limit ))  # separate statement: expansion precedes `local` assignment
   while [ $(date +%s) -lt $deadline ]; do
     st=$(job $jid)
     case "$st" in
