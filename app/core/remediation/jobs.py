@@ -52,6 +52,7 @@ class RepairJobs:
             "status_started_at": time.time(),
             "feedback": feedback,
             "previous_job_id": group.get("job_id"),
+            "diagnosis_summary": group.get("summary"),
         }
         self.store.save("job-" + job_id, owner, None, "repair_job", payload)
         self.cancellations[job_id] = threading.Event()
@@ -167,6 +168,7 @@ class RepairJobs:
     def _execute_in_context(self, service, owner, job):
         from app.core.remediation.pod_executor import PodRepairExecutor, run_argv
         from app.core.remediation.policy import CommandPolicy
+        from app.core.remediation.recovery import RecoveryConfig
         from app.core.remediation.settings import repair_settings
 
         job_id = job["job_id"]
@@ -197,10 +199,20 @@ class RepairJobs:
                 policy=CommandPolicy.from_config(cfg),
                 request_contract=record["payload"].get("request_contract"),
                 record_store=self.store,
+                recovery=RecoveryConfig.from_config(cfg),
+                max_duration=int(cfg.get("max_duration_seconds") or 0),
             ):
                 kind = event.get("type")
                 if kind == "remediation_approval_required":
                     self._update(job_id, owner, status="awaiting_approval", approval=event)
+                elif kind == "remediation_recovery":
+
+                    def observe(payload, event=event):
+                        if payload.get("status") != "verifying":
+                            payload["status_started_at"] = time.time()
+                        payload.update(status="verifying", approval=None, recovery=event)
+
+                    self.store.update_payload("job-" + job_id, owner, observe)
                 elif kind in {"remediation_tool_start", "remediation_tool_result"}:
 
                     def append(payload, event=event):
@@ -236,6 +248,7 @@ class RepairJobs:
             "planned",
             "awaiting_approval",
             "executing",
+            "verifying",
         }:
             job.update(
                 status="interrupted",
@@ -300,6 +313,7 @@ class RepairJobs:
                         "error",
                         "mode",
                         "mode_source",
+                        "diagnosis_summary",
                     )
                 }
             )

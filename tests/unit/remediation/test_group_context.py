@@ -54,7 +54,7 @@ def test_group_identity_and_single_legacy_diagnosis():
     with pytest.raises(RecordUnavailable):
         scoped_diagnosis(fixture(), "missing")
     source = {"run_id": "old", "payload": {"report": "single diagnostic report"}}
-    assert diagnosis_groups(source) == [{"group_id": "single", "target": None}]
+    assert diagnosis_groups(source) == [{"group_id": "single", "target": None, "summary": None}]
     assert scoped_diagnosis(source, "single") == source
     source = fixture()
     source["payload"]["groups"].append(source["payload"]["groups"][0])

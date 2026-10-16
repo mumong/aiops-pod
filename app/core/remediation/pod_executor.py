@@ -13,6 +13,7 @@ from app.core.remediation.approval import approval_store
 from app.core.remediation.audit import audit_event
 from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
 from app.core.remediation.policy import CommandPolicy, validate_target_command
+from app.core.remediation.recovery import RecoveryConfig, RecoveryWatch
 
 _lock = threading.Lock()
 _command_lock = threading.Lock()
@@ -92,16 +93,26 @@ class PodRepairExecutor:
         policy=None,
         request_contract=None,
         record_store=None,
+        recovery: RecoveryConfig | None = None,
+        max_duration=0,
+        watch_factory=None,
     ):
+        """``recovery`` enables the status-only recovery watch after the commands;
+        ``max_duration`` (seconds, 0 = off) bounds the whole execution so a stuck
+        approval or a long action never leaves the job open-ended."""
         draft = deepcopy(draft)
         policy = policy or CommandPolicy()
+        started_at = time.time()
+        max_duration = int(max_duration or 0)
 
-        def finish(status, reason, error_code=None):
+        def finish(status, reason, error_code=None, **extra):
             event = {
                 "type": "remediation_finished",
                 "run_id": run_id,
                 "status": status,
                 "reason": reason,
+                "elapsed_seconds": int(time.time() - started_at),
+                **extra,
             }
             if error_code:
                 event["error_code"] = error_code
@@ -190,8 +201,31 @@ class PodRepairExecutor:
                     raise ValueError("目标已有待审或执行中的修复，请等待完成")
                 _busy.update(scopes)
                 reserved = scopes
+            # Baseline for the recovery judgement: the target's state before any command.
+            watch = None
+            before = {}
+            watched = []
+            if recovery is not None:
+                watch = (watch_factory or RecoveryWatch)(self.runner, recovery)
+                for _, target, _, _ in prepared:
+                    if target["group_id"] in before:
+                        continue
+                    watched.append(target)
+                    try:
+                        before[target["group_id"]] = watch.observe(target)
+                    except Exception as exc:
+                        before[target["group_id"]] = {"exists": None, "error": str(exc)[:200]}
+            total_actions, done_actions = len(prepared), 0
             for action, target, original, stages in prepared:
                 approval_marker = "auto"
+                if max_duration and time.time() - started_at > max_duration:
+                    yield finish(
+                        "timeout",
+                        f"整体执行时限 {max_duration} 秒已到：已完成 {done_actions}/{total_actions} 个动作，"
+                        "未开始后续动作；已执行动作不会自动回滚",
+                        "execution_deadline",
+                    )
+                    return
                 if record_store and not record_store.current(run_id, owner):
                     yield finish("superseded", "方案已被修改请求替代，旧审批不可继续执行")
                     return
@@ -357,15 +391,44 @@ class PodRepairExecutor:
                         "result_preview": str(output)[:6000],
                         "result_truncated": len(str(output)) > 6000,
                     }
-            yield finish(
-                "needs_followup",
-                (
-                    "已按自动执行模式执行全部命令（未经人工审批）并返回实际结果"
-                    if mode == "auto"
-                    else "已执行批准的命令并返回实际结果"
-                )
-                + "；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态",
+                done_actions += 1
+            executed_note = (
+                "已按自动执行模式执行全部命令（未经人工审批）"
+                if mode == "auto"
+                else "已执行批准的命令"
             )
+            if watch is None:
+                yield finish(
+                    "needs_followup",
+                    executed_note + "并返回实际结果；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态",
+                )
+                return
+            # Recovery watch: read-only observation until recovered or timed out.
+            if record_store:
+                record_store.transition(run_id, owner, "verifying")
+            progress = watch.run(watched, before)
+            summary = None
+            while True:
+                try:
+                    event = next(progress)
+                except StopIteration as stop:
+                    summary = stop.value
+                    break
+                if cancel and cancel.is_set():
+                    progress.close()
+                    yield finish("cancelled", "恢复观察被取消；命令已执行，恢复状态未确认", recovery=None)
+                    return
+                yield {**event, "run_id": run_id}
+            status = summary["status"]
+            details = "；".join(
+                f"{item['group_id']}：{item['reason']}" for item in summary.get("targets", [])
+            )
+            reason = {
+                "recovered": executed_note + f"，目标已恢复（{details}）",
+                "not_recovered": executed_note + f"，但在 {summary['timeout_seconds']} 秒内未观察到恢复（{details}）；请复查，未自动回滚",
+                "needs_followup": executed_note + f"，但无法确认恢复状态（{details}）",
+            }[status]
+            yield finish(status, reason, recovery=summary)
         except Exception as exc:
             yield finish("blocked", str(exc))
         finally:

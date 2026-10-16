@@ -1081,6 +1081,7 @@ class WorkflowExecutor:
     ) -> Generator[Dict, None, None]:
         from app.core.remediation.pod_executor import PodRepairExecutor
         from app.core.remediation.policy import CommandPolicy
+        from app.core.remediation.recovery import RecoveryConfig
         from app.core.remediation.settings import repair_settings
 
         final_state = stream.final_state
@@ -1096,6 +1097,8 @@ class WorkflowExecutor:
             policy=policy,
             request_contract=final_state.get("request_contract"),
             record_store=record_store,
+            recovery=RecoveryConfig.from_config(remediation_cfg),
+            max_duration=_int_config(remediation_cfg, "max_duration_seconds", 0),
         ):
             seq = stream.next_seq()
             yield {

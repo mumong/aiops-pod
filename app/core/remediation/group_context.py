@@ -17,9 +17,23 @@ def diagnosis_groups(record):
     ) != len(identifiers):
         raise RecordUnavailable("诊断分组标识缺失或重复，请重新生成诊断")
     return [
-        {"group_id": group["group_id"], "target": deepcopy(group.get("target"))}
+        {
+            "group_id": group["group_id"],
+            "target": deepcopy(group.get("target")),
+            "summary": _group_summary(group),
+        }
         for group in groups
-    ] or [{"group_id": "single", "target": None}]
+    ] or [{"group_id": "single", "target": None, "summary": None}]
+
+
+def _group_summary(group):
+    """The diagnosis's own one-line cause for this group (historical, not current state)."""
+    result = group.get("diagnosis_result") or {}
+    for value in (result.get("summary"), result.get("root_cause"), result.get("report"), group.get("analysis")):
+        text = str(value or "").strip()
+        if text:
+            return text[:400]
+    return None
 
 
 def scoped_diagnosis(record, group_id):
