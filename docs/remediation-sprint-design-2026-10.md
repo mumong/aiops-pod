@@ -103,3 +103,17 @@
 5. 验收脚本三份 + 文档（GUIDE / README / 本文"验收记录"节）。
 
 每一步都有单元测试和接口契约测试；真实集群验证用上面的脚本，Boss 亲测用前端。
+
+## 5. 实施记录（2026-10-16）
+
+| 项 | 版本 | 状态 |
+|---|---|---|
+| 2.1 规则引擎 `policy.check_command`、默认黑名单、`GET /repair/policy`、`POST /repair/policy/check`、审计 | robusta 12.0.33 | 已上线；`sprint2_policy_and_switch.sh` 接口层 8/8 通过（25 条高危全拦、6 条合规放行） |
+| 2.2 运行时开关 `PUT/DELETE /repair/policy/mode`（令牌 + TTL）、任务记录 `mode_source`、事件 `approval=auto` | robusta 12.0.33 | 已上线；无令牌 403、切换与恢复写审计 |
+| 前端：策略徽标、规则列表、命令安全检查、管理员切换、拦截规则与审批来源展示 | frontend 0.1.61 | 已上线 |
+| 3.1/3.2 恢复观察 `recovery.py`、`recovered/not_recovered/needs_followup`、整体时限 `timeout`、命令超时文案 | robusta 12.0.34 | 已上线 |
+| 前端：恢复观察进度、执行前后对比表、超时反馈、异常原因行 | frontend 0.1.62 | 已上线 |
+| 1 方案卡片"异常原因（来自诊断）" | robusta 12.0.34 / frontend 0.1.62 | 已上线 |
+| 验收脚本 `scripts/acceptance/` | — | 见本文 §1–§3 与部署指南 |
+
+伴随修复：`AgentGuards.finalize_on_idle_round`（12.0.33）。请求轨迹（`requests/<node>-NNN.json`）证明模型在"证据完整、准备输出结构化结果"时发出的是旧调用的复制；一整轮无新查询即收卷交付，不再等到重复上限。

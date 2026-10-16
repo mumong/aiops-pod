@@ -61,6 +61,25 @@ A2A 可增加 A2A_API_TOKEN。模型需要支持工具调用；配置中的 llm.
 
 每个护栏触发都会在 `run_report.md` 的"发现"里出现，并在最终回答的 `missing` 中如实标注"执行未完成"的原因，不会伪装成完整结果。
 
+### 修复安全控制（高危命令黑名单 / 审批与自动执行开关 / 恢复观察）
+
+| 能力 | 怎么看、怎么试 |
+|---|---|
+| 高危命令规则 | `GET /repair/policy` 列出生效规则（禁止动词、强制/批量参数、禁止写入的资源、容器内禁止命令）；`POST /repair/policy/check {"commands":[...]}` 逐条返回 `allowed/rule/reason`，**不执行**。前端修复面板"命令安全检查"调用同一接口。规划、执行预检、检查接口共用一套引擎，拒绝时带规则名并写审计 |
+| 人工审批 | `mode: review`（配置默认）：每个动作先出现审批请求，批准后执行审批时的命令快照；拒绝、超时（`approval_timeout_seconds`）、取消都不执行 |
+| 自动执行开关 | `PUT /repair/policy/mode {"mode":"auto","reason":"…","ttl_minutes":30}`，请求头 `X-AIOps-Admin-Token`（Secret `AIOPS_ADMIN_TOKEN`，未配置则开关不可用）。覆盖到期自动回到配置值；`DELETE` 立即恢复。只影响之后创建的任务；任务记录 `mode` 与 `mode_source`，命令事件带 `approval: "auto"` 或审批 ID |
+| 审计 | `GET /repair/audit?kind=mode_changed|approval_decided|command_executed|command_denied`（管理员令牌或原会话 Cookie）；文件 `repair_records/audit.jsonl` |
+| 恢复观察与超时 | 命令执行完后只读轮询目标 Pod（`workflow.remediation.recovery`），`recovered` / `not_recovered`（超时反馈，附最后一次观测）/ `needs_followup`；整体执行时限 `max_duration_seconds` 到时终态 `timeout` |
+
+验收脚本（对运行中的服务执行，打印 PASS/FAIL 表，任一 FAIL 退出非零）：
+
+```bash
+scripts/acceptance/sprint1_repair_plan.sh aiops-case-09          # 从诊断报告进入修复 → 对象/原因/命令 → 对话修改生成新版本
+scripts/acceptance/sprint2_policy_and_switch.sh                  # 黑名单 25 条高危命令全拦 + 6 条合规放行；开关需令牌、带 TTL、写审计
+scripts/acceptance/sprint2_policy_and_switch.sh aiops-case-09    # 追加真实链路：review 等待审批→拒绝不执行；auto 直接执行并标记
+scripts/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/c11 → 诊断 → 修复 → 恢复观察 → kubectl 复核
+```
+
 当前 MCP 默认使用集群 DNS，例如 http://mcp-server-manager.mcp.svc.cluster.local:8100/sse。外部 MCP 要改为可达地址，并核实查询的是目标集群。单集群关闭 federation.enabled，避免向示例子集群地址发请求。
 
 清单申请 aiops-reports-pvc，容量 20Gi、ReadWriteOnce；需要默认 StorageClass 或匹配 PV。修改仓库前缀时同步核对 Makefile 与清单：版本替换只匹配 Makefile 当前定义的镜像前缀，initContainer 镜像不会跟随主镜像版本更新。

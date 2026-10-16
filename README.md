@@ -255,7 +255,7 @@ make case-clean CASE=c04
 
 深度诊断没有可执行计划时，报告下提供“生成修复方案并审阅”入口；点击仅发起同会话规划，不代表批准。前端按组展示预演、执行和验证结果；命令失败、审批取消与待复查状态分别显示。
 
-`workflow.remediation.enabled` 控制开关，`executor: pod` 使用受限执行器，`mode: review` 为默认人工审批，`mode: auto` 仅适合已授权的受控环境。`approval_timeout_seconds` 控制审批时间；`allowed_operations`／`denied_operations` 可进一步收紧命令策略，黑名单优先。普通查询不会因报告包含命令就变成写操作。
+`workflow.remediation.enabled` 控制开关，`executor: pod` 使用受限执行器，`mode: review` 为默认人工审批，`mode: auto` 仅适合已授权的受控环境；管理员可凭 Secret 中的 `AIOPS_ADMIN_TOKEN` 通过 `PUT /repair/policy/mode` 做有时限的运行时切换，变更写入审计。高危命令规则（禁止动词、强制/批量参数、集群级资源写入、容器内破坏性命令）默认启用，`GET /repair/policy` 可查、`POST /repair/policy/check` 可干跑验证，拒绝时带规则名。命令执行后进入恢复观察，结果为已恢复、超时未恢复或待复查。普通查询不会因报告包含命令就变成写操作。详见[部署指南](docs/GUIDE.md)的"修复安全控制"一节与[三个 Sprint 的设计与验收方案](docs/remediation-sprint-design-2026-10.md)。
 
 当前默认写操作限于已核实 Pod／控制器的资源调整、受限 JSON Patch 和滚动重启；禁止任意 Shell、删除、跨集群或权限变更。命令成功不等于根因已消除，仍需结合验证结果复查。审批和修复互斥状态为进程内存，Pod 重启后需重新发起；不要据此部署多副本修复执行器。
 
