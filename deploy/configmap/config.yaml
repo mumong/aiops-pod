@@ -60,6 +60,12 @@ data:
       # 退化——同一 kubectl 调用重复 6 次、从未调用 Prometheus、48 步耗尽。无工具的单次结构化
       # 交付（路由/RCA）关 thinking 有效，多步工具规划不行。保持为空；换模型后可按节点试开。
       no_thinking_nodes: []
+      # 工具循环内把前几轮的 reasoning 以此请求字段回传给模型。Qwen3 模板只渲染"最后一条用户消息之后"
+      # 的 assistant reasoning（即当前工具循环），之前一直没回传，模型看到自己每一轮都是空 <think> +
+      # 工具调用，于是在新一轮 reasoning 里计划查 Prometheus、实际却复发上一轮的同一调用
+      # （run 66662a8287ce4dac / ba91d54860594961）。vLLM 0.19 + Qwen3.6 读 `reasoning`（实测经网关
+      # prompt_tokens 279→307），旧 Qwen3 模板读 `reasoning_content`；DeepSeek 会拒绝该字段，留空关闭。
+      history_reasoning_field: reasoning
       # 工具循环的确定性护栏（环境变量 AICALL_MAX_TOOL_CALLS_PER_TURN / AICALL_MAX_IDENTICAL_CALLS 可覆盖）
       agent_guards:
         max_tool_calls_per_turn: 16   # 单条模型消息最多执行的工具调用数，0 不限

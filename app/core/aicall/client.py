@@ -271,10 +271,13 @@ class AICall:
         output_budget: Optional[OutputBudget] = None,
         agent_guards: Optional[AgentGuards] = None,
         no_thinking_nodes: Optional[Iterable[str]] = None,
+        history_reasoning_field: str = "",
     ):
         """
         Args:
             model: litellm 格式模型名，如 "deepseek/deepseek-chat"
+            history_reasoning_field: 工具循环内把前几轮的 reasoning 以该请求字段回传
+                （``llm.history_reasoning_field``，Qwen3.6/vLLM 0.19 为 ``reasoning``）；空则不回传。
             api_key: API Key
             api_base: 可选代理地址（覆盖默认 endpoint）
             internal_extra_body: 仅用于内部调用（上下文压缩、结构化收卷）的额外参数，
@@ -288,6 +291,7 @@ class AICall:
         # Agent loops of these nodes run with the internal (no-thinking, instruct
         # sampling) settings: ``llm.no_thinking_nodes`` in config.
         self.no_thinking_nodes = frozenset(str(n) for n in (no_thinking_nodes or []) if n)
+        self.history_reasoning_field = str(history_reasoning_field or "").strip()
         self.model = model
         self.model_str = model
         self.api_key = api_key
@@ -309,6 +313,8 @@ class AICall:
             "stream_usage": True,  # 让 OpenAI-compatible 网关返回 usage_metadata
             "max_retries": 0,  # A failed model request is surfaced, never silently replayed.
         }
+        if self.history_reasoning_field:
+            self._chat_model_kwargs["history_reasoning_field"] = self.history_reasoning_field
         if base_url:
             self._chat_model_kwargs["base_url"] = base_url
         reasoning_effort = os.getenv("LLM_REASONING_EFFORT", "").strip()

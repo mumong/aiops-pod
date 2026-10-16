@@ -422,6 +422,7 @@ class HolmesService:
                     output_budget=self.get_output_budget_config(_llm_config),
                     agent_guards=self.get_agent_guards_config(_llm_config),
                     no_thinking_nodes=self.get_no_thinking_nodes_config(_llm_config),
+                    history_reasoning_field=self.get_history_reasoning_field_config(_llm_config),
                 )
                 logger.info(
                     "   AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
@@ -613,6 +614,7 @@ class HolmesService:
                 output_budget=self.get_output_budget_config(),
                 agent_guards=self.get_agent_guards_config(),
                 no_thinking_nodes=self.get_no_thinking_nodes_config(),
+                history_reasoning_field=self.get_history_reasoning_field_config(),
             )
         except TypeError:
             # Unit-test fakes may not implement the production constructor extension.
@@ -625,6 +627,7 @@ class HolmesService:
                 output_budget=self.get_output_budget_config(),
                 agent_guards=self.get_agent_guards_config(),
                 no_thinking_nodes=self.get_no_thinking_nodes_config(),
+                history_reasoning_field=self.get_history_reasoning_field_config(),
             )
 
     def get_think_stream_config(self) -> Tuple[str, int]:
@@ -773,6 +776,23 @@ class HolmesService:
             cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
         nodes = cfg.get("no_thinking_nodes") or []
         return [str(n) for n in nodes] if isinstance(nodes, (list, tuple)) else []
+
+    def get_history_reasoning_field_config(
+        self,
+        llm_config: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """``llm.history_reasoning_field``: request field that carries previous in-loop
+        reasoning back to the model (``reasoning`` for Qwen3.6 on vLLM 0.19); empty = off."""
+        cfg = llm_config if isinstance(llm_config, dict) else None
+        if cfg is None:
+            raw_cfg = (
+                getattr(self, "raw_config", {})
+                if isinstance(getattr(self, "raw_config", {}), dict)
+                else {}
+            )
+            cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
+        value = cfg.get("history_reasoning_field")
+        return str(value).strip() if isinstance(value, str) else ""
 
     def get_agent_guards_config(
         self,
