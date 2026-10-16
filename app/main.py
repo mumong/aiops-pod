@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import register_routes
-from app.core.log_context import LOG_FORMAT, LogContextFilter
+from app.core.log_context import LOG_FORMAT, LogContextFilter, log_formatter_for_env
 from app.core.paths import get_app_version
 
 # 配置日志（通过 LOG_LEVEL 环境变量控制，默认 INFO）
@@ -25,6 +25,7 @@ _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), loggi
 logging.basicConfig(level=_log_level, format=LOG_FORMAT, force=True)
 for _handler in logging.getLogger().handlers:
     _handler.addFilter(LogContextFilter())
+    _handler.setFormatter(log_formatter_for_env())  # AIOPS_LOG_FORMAT=json -> JSON lines
 logger = logging.getLogger(__name__)
 
 # 确保所有 app.* 模块的日志级别统一受控
@@ -201,7 +202,7 @@ def main():
         "disable_existing_loggers": False,
         "formatters": {
             "default": {
-                "format": LOG_FORMAT,
+                "()": "app.core.log_context.log_formatter_for_env",
             },
             "access": {
                 "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",

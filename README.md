@@ -278,6 +278,7 @@ make delete deploy
 | [质量测试](test/aiops_quality_e2e/README.md)             | 单场景、多根因、四项指标与报告             |
 | [开发与贡献](CONTRIBUTING.md) | 本地检查、模块边界、编码约定与审核要求 |
 | [规范化验收记录](docs/maintenance-normalization.md) | 修改前基线、回归结果和未完成项 |
+| [运行诊断](docs/run-diagnostics.md) | 每次运行的账本、工程异常分类、`/runs/{run_id}` 报告与日志约定 |
 | [过程记录](docs/history/) | 按日期归档的验证、发布与交接记录，只供复核，不是当前使用指南 |
 | 历史测试报告 | 已于 2026-10-15 移出仓库到 `../_archive/robusta-testreports/`（git 标签 `checkpoint-20261015-before-global-cleanup` 之前的历史仍可回溯）；`testreports/` 仅作测试工具输出目录，不再纳入版本控制 |
 

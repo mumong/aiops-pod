@@ -50,6 +50,7 @@ from app.core.context.budget import (
     serialize_tool_schema,
 )
 from app.core.context.observation import ObservationProcessor
+from app.core.diagnostics.ledger import build_call_ledger, guard_of
 from app.core.log_context import bind_current_context
 from app.core.prompts import (
     EVIDENCE_MEMORY_COMPRESSION_PROMPT,
@@ -150,6 +151,12 @@ _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 180.0
 
 
 _DEFAULT_STRUCTURED_CALL_TIMEOUT_SECONDS = 480.0
+
+
+def _safe_ledger_name(node_id: str) -> str:
+    return (
+        "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(node_id))[:64] or "agent"
+    )
 
 
 def _structured_call_timeout_seconds() -> Optional[float]:
@@ -275,6 +282,7 @@ class AICall:
         """
         self.output_budget = output_budget or OutputBudget.from_config()
         self.agent_guards = agent_guards or AgentGuards.from_config()
+        self._open_async_clients: Dict[str, List[Any]] = {}
         # Agent loops of these nodes run with the internal (no-thinking, instruct
         # sampling) settings: ``llm.no_thinking_nodes`` in config.
         self.no_thinking_nodes = frozenset(str(n) for n in (no_thinking_nodes or []) if n)
@@ -342,6 +350,13 @@ class AICall:
         # from another (closed) loop raised "Event loop is closed", surfacing as a
         # spurious 'LLM API 服务连接中断'. Each instance lives inside one call/loop.
         kwargs["http_async_client"] = _build_async_httpx_client(kwargs.get("base_url"), None)
+        if not disable_streaming:
+            # Streaming agent clients bind to the agent's private event loop; close them
+            # there (see _stream_agent_run) instead of letting GC try on a closed loop
+            # ("Task exception was never retrieved ... Event loop is closed").
+            self._open_async_clients.setdefault(node_id or "agent", []).append(
+                kwargs["http_async_client"]
+            )
         return ChatOpenAI(**kwargs)
 
     def create_compaction_model(self, max_tokens: Optional[int] = None):
@@ -1452,6 +1467,7 @@ class AICall:
                     node_id=node_id or "agent",
                     run_id=run_id,
                     on_waiting=on_waiting,
+                    thinking_events=thinking_events,
                 ),
                 self._build_tool_dedup_middleware(
                     getattr(self, "query_tool_timeout", 0), guards=self.agent_guards
@@ -1770,13 +1786,51 @@ class AICall:
             run.tool_call_count,
             len(final_content),
         )
+        self._write_call_ledger(run, total_ms)
         return result, thinking_events
+
+    def _write_call_ledger(self, run: "_AgentRun", total_ms: float) -> None:
+        if not run.run_id:
+            return
+        try:
+            ledger = build_call_ledger(
+                run_id=run.run_id,
+                node_id=run.node_id or "agent",
+                events=run.thinking_events,
+                tool_calls=run.all_tool_calls,
+                duration_ms=total_ms,
+                incomplete_reason=run.incomplete_reason,
+                structured_delivered=(
+                    None if run.response_schema is None else run.structured_response is not None
+                ),
+            )
+            ContextArchive(run_id=run.run_id).write_json(
+                f"ledger/{_safe_ledger_name(run.node_id or 'agent')}.json", ledger
+            )
+        except Exception as exc:  # diagnostics never break the call
+            logger.debug("[AICall] ledger skipped: %s", exc)
 
     # ------------------------------------------------------------------
     # call(): agent stream consumption
     # ------------------------------------------------------------------
 
     async def _stream_agent_run(
+        self,
+        agent: Any,
+        input_messages: Dict[str, Any],
+        config: Dict[str, Any],
+        run: "_AgentRun",
+    ) -> None:
+        try:
+            await self._stream_agent_run_inner(agent, input_messages, config, run)
+        finally:
+            for client in self._open_async_clients.pop(run.node_id or "agent", []):
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+
+    async def _stream_agent_run_inner(
         self,
         agent: Any,
         input_messages: Dict[str, Any],
@@ -2145,11 +2199,16 @@ class AICall:
         additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
         deduplicated = bool(additional_kwargs.get("aiops_deduplicated"))
         original_tool_call_id = additional_kwargs.get("aiops_original_tool_call_id")
+        guard = guard_of(additional_kwargs)
+        self._archive_tool_call(
+            observation.get("raw_ref"), tool_call_id, tool_name, tool_args, guard
+        )
         run.all_tool_calls.append(
             {
                 "tool_name": tool_name,
                 "tool_args": tool_args,
                 "status": status,
+                "guard": guard,
                 "result": bounded_content,
                 "raw_ref": observation.get("raw_ref"),
                 "structured_ref": observation.get("structured_ref"),
@@ -2251,6 +2310,29 @@ class AICall:
             msg.additional_kwargs = additional_kwargs
         except Exception as exc:
             logger.warning("[AICall] ToolMessage 内容压缩回写失败: %s", exc)
+
+    @staticmethod
+    def _archive_tool_call(raw_ref, tool_call_id, tool_name, tool_args, guard) -> None:
+        """Arguments next to the raw result (`.call.json`); a run is unreadable without them."""
+        if not raw_ref or not str(raw_ref).endswith(".raw.txt"):
+            return
+        try:
+            with open(str(raw_ref)[: -len(".raw.txt")] + ".call.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "tool": tool_name,
+                        "call_id": tool_call_id,
+                        "args": tool_args,
+                        "guard": guard,
+                        "at": time.time(),
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=1,
+                    default=str,
+                )
+        except OSError as exc:
+            logger.debug("tool call archive skipped: %s", exc)
 
     @staticmethod
     def _tool_result_status(msg: Any, observation: Dict[str, Any]) -> Tuple[str, str]:
@@ -2695,6 +2777,7 @@ class AICall:
         node_id: str,
         run_id: str,
         on_waiting: Optional[Callable[[str], None]] = None,
+        thinking_events: Optional[List[Dict]] = None,
     ):
         """Bound every LangGraph model request before it reaches the provider."""
         from langchain.agents.middleware import wrap_model_call
@@ -2709,6 +2792,7 @@ class AICall:
                 guarded_request, budget = self._guard_agent_model_request(
                     request,
                     node_id=node_id,
+                    thinking_events=thinking_events,
                 )
             except StructuredContextBudgetError as exc:
                 if run_id and isinstance(exc.pre_budget, dict):
@@ -2754,6 +2838,7 @@ class AICall:
         request: Any,
         *,
         node_id: str,
+        thinking_events: Optional[List[Dict]] = None,
     ) -> Tuple[Any, Dict[str, Any]]:
         config = self._structured_hard_guard_config()
         resolved = ModelContextResolver().resolve(
@@ -2776,6 +2861,8 @@ class AICall:
                 repaired,
                 node_id,
             )
+            if thinking_events is not None:
+                self._record(thinking_events, "tool_call_args_repaired", node_id, count=repaired)
             if hasattr(request, "override"):
                 request = request.override(messages=messages)
         messages_payload = [self._serialize_agent_message(message) for message in messages]

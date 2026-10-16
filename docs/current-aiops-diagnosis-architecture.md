@@ -195,6 +195,8 @@ Conclusion 使用最近一次工作摘要和此后新取得的工具结果，不
 
 ## 归档与运行排查
 
+运行结束后先看 `run_report.md` / `GET /runs/{run_id}`：节点耗时、每个模型调用的轮次与工具账本、护栏触发和工程异常发现，见 [运行诊断](run-diagnostics.md)。
+
 部署后报告默认位于 PVC 的 /tmp/aiops/reports，归档根由 AIOPS_CONTEXT_ARCHIVE_ROOT 指定。
 
 | 路径（相对 context_archives） | 内容 |

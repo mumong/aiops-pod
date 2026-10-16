@@ -104,6 +104,8 @@ def test_route_table_order_and_names_are_stable(monkeypatch):
         ("/tools/detail", ["GET"], "list_tools_detail"),
         ("/runbooks", ["GET"], "list_runbooks"),
         ("/artifacts/{artifact_id}", ["GET"], "get_artifact"),
+        ("/runs/{run_id}", ["GET"], "get_run_report"),
+        ("/runs/{run_id}/report.md", ["GET"], "get_run_report_markdown"),
         ("/api/v1/mcp/status", ["GET"], "get_mcp_status"),
         ("/reports", ["GET"], "list_reports"),
         ("/reports/{filename}", ["GET"], "get_report"),

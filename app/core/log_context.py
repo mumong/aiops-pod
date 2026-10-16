@@ -45,6 +45,33 @@ def bind_current_context(fn: Callable[..., T]) -> Callable[..., T]:
     return _run
 
 
+class JsonLogFormatter(logging.Formatter):
+    """One JSON object per line with the bound run/node/lane fields (AIOPS_LOG_FORMAT=json)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json
+
+        current = _context.get()
+        payload = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            **{key: current[key] for key in _FIELDS if key in current},
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def log_formatter_for_env() -> logging.Formatter:
+    import os
+
+    if os.getenv("AIOPS_LOG_FORMAT", "text").strip().lower() == "json":
+        return JsonLogFormatter()
+    return logging.Formatter(LOG_FORMAT)
+
+
 class LogContextFilter(logging.Filter):
     """Expose bound fields as ``%(log_context)s`` (e.g. `` [run=ab12 node=layer]``)."""
 

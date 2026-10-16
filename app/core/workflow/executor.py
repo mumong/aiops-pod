@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Generator, Optional, Tuple
 
 from app.core.context.archive import ContextArchive
+from app.core.diagnostics.report import write_run_report
 from app.core.log_context import log_context
 from app.core.remediation.agent import RemediationAgentConfig, RemediationAgentExecutor
 from app.core.remediation.approval import approval_store
@@ -834,6 +835,13 @@ class WorkflowExecutor:
         task_route = final_state.get("request_route")
         self._save_report(final_state.get("layer"), question, full_answer)
         self._log_timing_breakdown(metrics)
+        write_run_report(
+            run_id,
+            final_state=final_state,
+            node_durations_ms={k: v.duration_ms for k, v in metrics.nodes.items()},
+            elapsed_seconds=time.time() - total_start,
+            outcome=outcome,
+        )
 
         repair_record, record_store, record_failed = self._persist_repair_record(
             run_id,

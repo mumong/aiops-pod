@@ -6,8 +6,8 @@ Regenerate docs/configuration-env.md with:
 """
 
 import ast
-import re
 import collections
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

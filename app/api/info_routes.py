@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 from app.api.common import current_service, logger
+from app.core.context.archive import get_archive_root
 from app.core.holmes.artifacts import get_artifact_store
 from app.core.paths import get_app_version
 
@@ -114,6 +115,33 @@ async def get_artifact(artifact_id: str):
     if not artifact:
         raise HTTPException(status_code=404, detail="artifact not found or expired")
     return PlainTextResponse(content=artifact.content, media_type=artifact.content_type)
+
+
+@router.get("/runs/{run_id}")
+async def get_run_report(run_id: str):
+    """Run report (ledger summary + engineering findings) from the context archive."""
+    import re
+
+    from app.core.diagnostics.report import build_run_report, load_ledgers
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", run_id):
+        raise HTTPException(status_code=400, detail="invalid run_id")
+    if not load_ledgers(get_archive_root(), run_id):
+        raise HTTPException(status_code=404, detail="run not found or no ledger archived")
+    return build_run_report(run_id)
+
+
+@router.get("/runs/{run_id}/report.md")
+async def get_run_report_markdown(run_id: str):
+    import re
+
+    from app.core.diagnostics.report import build_run_report, load_ledgers, render_markdown
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", run_id):
+        raise HTTPException(status_code=400, detail="invalid run_id")
+    if not load_ledgers(get_archive_root(), run_id):
+        raise HTTPException(status_code=404, detail="run not found or no ledger archived")
+    return PlainTextResponse(render_markdown(build_run_report(run_id)), media_type="text/markdown")
 
 
 @router.get("/api/v1/mcp/status")
