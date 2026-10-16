@@ -135,3 +135,33 @@ def test_well_formed_patches_pass():
     assert check_command("kubectl patch deployment/api -n demo --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/replicas\",\"value\":2}]'").allowed
     assert check_command("kubectl patch pod/x -n demo --type merge -p '{\"metadata\":{\"finalizers\":null}}'").allowed
     assert check_command("kubectl patch deployment workload -n demo -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"app\",\"env\":[{\"name\":\"A\",\"value\":\"b\"}]}]}}}}'").allowed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kubectl -n demo patch pod workload-1 --type=json -p '[{\"op\":\"add\",\"path\":\"/spec/containers/0/env/-\",\"value\":{\"name\":\"A\",\"value\":\"b\"}}]'",
+        "kubectl patch pod/workload-1 -n demo --type=merge -p '{\"spec\":{\"containers\":[{\"name\":\"app\",\"readinessProbe\":{\"httpGet\":{\"port\":8080}}}]}}'",
+        "kubectl set env pod/workload-1 -n demo A=b",
+        "kubectl set resources pod/workload-1 -n demo --limits=memory=256Mi",
+    ],
+)
+def test_pod_spec_mutations_are_sent_to_the_controller(command):
+    verdict = check_command(command)
+    assert verdict.allowed is False and verdict.rule == "pod_spec_immutable", verdict
+    assert "控制器" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kubectl patch pod/workload-1 -n demo --type=merge -p '{\"metadata\":{\"finalizers\":null}}'",
+        "kubectl patch pod/workload-1 -n demo --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/containers/0/image\",\"value\":\"nginx:1.25\"}]'",
+        "kubectl patch pod/workload-1 -n demo --type=merge -p '{\"spec\":{\"terminationGracePeriodSeconds\":5}}'",
+        "kubectl patch deployment/workload -n demo --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/env/1/name\",\"value\":\"APP_CONFIG_PATH\"}]'",
+        "kubectl set env deployment/workload -n demo APP_CONFIG_PATH=/etc/app.json",
+        "kubectl label pod/workload-1 -n demo tier=web",
+    ],
+)
+def test_mutable_pod_fields_and_controller_writes_pass(command):
+    assert check_command(command).allowed is True, check_command(command)

@@ -9,6 +9,7 @@ execution and the ``/repair/policy/check`` endpoint share ``check_command``.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -361,6 +362,58 @@ def _patch_payload_error(args: List[str]) -> str:
     return ""
 
 
+# Pod spec fields the API server lets you change in place (everything else is immutable).
+_POD_MUTABLE_JSON_PATHS = re.compile(
+    r"^/spec/(?:(?:containers|initContainers)/\d+/image|tolerations(?:/.*)?|activeDeadlineSeconds|terminationGracePeriodSeconds)$"
+)
+
+
+def _pod_spec_mutation_error(args: List[str], operation: str, words: List[str]) -> str:
+    """A write that edits a running Pod's spec will be refused by Kubernetes.
+
+    Pod spec is immutable except image, tolerations (additions), activeDeadlineSeconds
+    and terminationGracePeriodSeconds; env, command, probes, resources, volumes must be
+    changed on the controller template. Catching this at planning sends the model to
+    the Deployment/StatefulSet instead of letting a reviewer approve a doomed command
+    (live: `kubectl patch pod ... /spec/containers/0/env/-` -> "Forbidden").
+    """
+    kinds = _resource_kinds(words, operation)
+    if "pod" not in kinds:
+        return ""
+    hint = "Pod 的 spec（env/command/探针/资源/卷等）不可原地修改；请对其控制器（Deployment/StatefulSet 等）的 Pod 模板执行变更"
+    if operation in {"set_env", "set_resources", "set_selector", "set_serviceaccount", "set_subject"}:
+        return hint
+    if operation != "patch":
+        return ""
+    patch_type, payload = "strategic", None
+    for index, arg in enumerate(args):
+        name, has_value, value = arg.partition("=")
+        if name in {"-p", "--patch"}:
+            payload = value if has_value else (args[index + 1] if index + 1 < len(args) else None)
+        elif name == "--type":
+            patch_type = (value if has_value else (args[index + 1] if index + 1 < len(args) else "")).strip("'\"")
+    if payload is None:
+        return ""
+    try:
+        parsed = json.loads(payload)
+    except ValueError:
+        return ""  # malformed_patch already reports syntax
+    if patch_type == "json" and isinstance(parsed, list):
+        bad = [op.get("path") for op in parsed if isinstance(op, dict) and str(op.get("path", "")).startswith("/spec") and not _POD_MUTABLE_JSON_PATHS.match(str(op.get("path", "")))]
+        return f"{hint}（路径 {', '.join(map(str, bad))}）" if bad else ""
+    if isinstance(parsed, dict) and isinstance(parsed.get("spec"), dict):
+        spec = parsed["spec"]
+        for key, value in spec.items():
+            if key in {"activeDeadlineSeconds", "terminationGracePeriodSeconds", "tolerations"}:
+                continue
+            if key in {"containers", "initContainers"} and isinstance(value, list) and all(
+                isinstance(c, dict) and set(c) <= {"name", "image"} for c in value
+            ):
+                continue
+            return f"{hint}（spec.{key}）"
+    return ""
+
+
 def check_command(command: str, policy: Optional[CommandPolicy] = None) -> CommandVerdict:
     """Evaluate every rule; the first violated rule names the verdict."""
     policy = policy or CommandPolicy()
@@ -436,6 +489,10 @@ def check_command(command: str, policy: Optional[CommandPolicy] = None) -> Comma
     patch_error = _patch_payload_error(args)
     if patch_error:
         return deny("malformed_patch", patch_error, operation, argv)
+    if write:
+        immutable = _pod_spec_mutation_error(args, operation, words)
+        if immutable:
+            return deny("pod_spec_immutable", immutable, operation, argv)
 
     try:
         check_repair_execution(args, policy)
