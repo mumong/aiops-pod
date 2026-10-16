@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def _default_runner(argv: List[str]) -> str:
 
 
 def complete_pod_namespaces(
-    entities: Iterable[Dict[str, Any]], runner: Callable[[List[str]], str] = _default_runner
+    entities: Iterable[Dict[str, Any]], runner: Optional[Callable[[List[str]], str]] = None
 ) -> int:
     """Fill missing namespaces of Pod entities in place; return how many were filled."""
     missing = [
@@ -47,7 +47,9 @@ def complete_pod_namespaces(
     if not missing:
         return 0
     try:
-        listing = runner(_POD_INDEX_ARGV)
+        # Resolved at call time so tests (and operators) can substitute the index
+        # source; a definition-time default silently read the live cluster.
+        listing = (runner or _default_runner)(_POD_INDEX_ARGV)
     except Exception as exc:  # identity completion is best effort; caller keeps the serial path
         logger.warning("[pod_identity] Pod 命名空间补全失败: %s", exc)
         return 0

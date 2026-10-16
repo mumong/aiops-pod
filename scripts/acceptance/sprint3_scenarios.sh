@@ -4,6 +4,9 @@
 # c11 Terminating（finalizer 阻塞）、c09 Ready 0/1（Readiness 端口错）、c06 CrashLoopBackOff（启动脚本/变量错）。
 # 会真实修改 aiops-case-06/09/11；审批由脚本自动批准（review 模式），不替模型选命令。
 source "$(dirname "$0")/lib.sh"
+# The cases' Pods are owned by Deployment "workload"; select them by the owner's selector, not a guessed label.
+workload_pods() { kubectl -n "$1" get pods -o json | python3 -c "import json,sys;[print(i['metadata']['name'],i['status']['phase'],'ready=' + str(any(c.get('ready') for c in i['status'].get('containerStatuses',[])))) for i in json.load(sys.stdin)['items'] if i['metadata']['name'].startswith('workload-') and not i['metadata'].get('deletionTimestamp')]"; }
+workload_restarts() { kubectl -n "$1" get pods -o json | python3 -c "import json,sys;print(sum(c.get('restartCount',0) for i in json.load(sys.stdin)['items'] if i['metadata']['name'].startswith('workload-') and not i['metadata'].get('deletionTimestamp') for c in i['status'].get('containerStatuses',[])))"; }
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SEL=${1:?c06|c09|c11|all}; RESET=1; [ "${2:-}" = --no-reset ] && RESET=0
 case $SEL in all) CASES="c11 c09 c06";; *) CASES=$SEL;; esac
@@ -23,9 +26,9 @@ for t in r.get('targets',[]): print('  before:',t.get('before'),'\n  after :',t.
 PY
   case $C in
     c11) check '! kubectl -n $NS get pod workload >/dev/null 2>&1' "$C 复核：Terminating Pod 已消失" "$(kubectl -n $NS get pod 2>&1 | head -3 | tr '\n' ' ')";;
-    c09) check 'kubectl -n $NS get pod -l app=workload -o jsonpath="{.items[*].status.containerStatuses[0].ready}" | grep -q true' "$C 复核：workload Ready 1/1" "$(kubectl -n $NS get pod -l app=workload --no-headers 2>&1 | head -2 | tr '\n' ' ')";;
-    c06) R0=$(kubectl -n $NS get pod -l app=workload -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'); sleep 60; R1=$(kubectl -n $NS get pod -l app=workload -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}')
-         check 'kubectl -n $NS get pod -l app=workload -o jsonpath="{.items[0].status.containerStatuses[0].ready}" | grep -q true && [ "$R0" = "$R1" ]' "$C 复核：Running/Ready 且 60 秒无新增重启" "restarts $R0→$R1";;
+    c09) check '[ "$(kubectl -n $NS get deploy workload -o jsonpath="{.status.readyReplicas}")" = "1" ]' "$C 复核：Deployment workload readyReplicas=1" "$(workload_pods $NS | tr '\n' ' ')";;
+    c06) R0=$(workload_restarts $NS); sleep 60; R1=$(workload_restarts $NS)
+         check '[ "$(kubectl -n $NS get deploy workload -o jsonpath="{.status.readyReplicas}")" = "1" ] && [ "$R0" = "$R1" ]' "$C 复核：Deployment 就绪且 60 秒无新增重启" "restarts $R0→$R1 · $(workload_pods $NS | tr '\n' ' ')";;
   esac
 done
 summary; exit $?

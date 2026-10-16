@@ -132,8 +132,11 @@ def lifecycle_core(value, raw_ref=None):
                 "phase",
                 "reason",
                 "deletion_timestamp",
+                "deletion_grace_period_seconds",
+                "terminating_seconds",
+                "finalizers",
             )
-            if pod.get(k) is not None
+            if pod.get(k) not in (None, [])
         }
         # Keyed conditions remove repeated field names without classifying health.
         # Missing/null values remain unknown, never converted to healthy defaults.
