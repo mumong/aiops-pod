@@ -421,6 +421,7 @@ class HolmesService:
                     internal_extra_body=self.get_internal_extra_body_config(_llm_config),
                     output_budget=self.get_output_budget_config(_llm_config),
                     agent_guards=self.get_agent_guards_config(_llm_config),
+                    no_thinking_nodes=self.get_no_thinking_nodes_config(_llm_config),
                 )
                 logger.info(
                     "   AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
@@ -611,6 +612,7 @@ class HolmesService:
                 internal_extra_body=self.get_internal_extra_body_config(),
                 output_budget=self.get_output_budget_config(),
                 agent_guards=self.get_agent_guards_config(),
+                no_thinking_nodes=self.get_no_thinking_nodes_config(),
             )
         except TypeError:
             # Unit-test fakes may not implement the production constructor extension.
@@ -622,6 +624,7 @@ class HolmesService:
                 internal_extra_body=self.get_internal_extra_body_config(),
                 output_budget=self.get_output_budget_config(),
                 agent_guards=self.get_agent_guards_config(),
+                no_thinking_nodes=self.get_no_thinking_nodes_config(),
             )
 
     def get_think_stream_config(self) -> Tuple[str, int]:
@@ -753,6 +756,23 @@ class HolmesService:
         except (TypeError, ValueError):
             result["hard_guard_preserve_tail_tokens"] = 1200
         return result
+
+    def get_no_thinking_nodes_config(
+        self,
+        llm_config: Optional[Dict[str, Any]] = None,
+    ) -> list:
+        """``llm.no_thinking_nodes``: agent nodes whose tool loop runs with internal
+        (no-thinking) settings; the model still calls tools and answers."""
+        cfg = llm_config if isinstance(llm_config, dict) else None
+        if cfg is None:
+            raw_cfg = (
+                getattr(self, "raw_config", {})
+                if isinstance(getattr(self, "raw_config", {}), dict)
+                else {}
+            )
+            cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
+        nodes = cfg.get("no_thinking_nodes") or []
+        return [str(n) for n in nodes] if isinstance(nodes, (list, tuple)) else []
 
     def get_agent_guards_config(
         self,

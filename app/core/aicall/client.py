@@ -24,7 +24,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import anyio
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -256,6 +256,7 @@ class AICall:
         internal_extra_body: Optional[Dict[str, Any]] = None,
         output_budget: Optional[OutputBudget] = None,
         agent_guards: Optional[AgentGuards] = None,
+        no_thinking_nodes: Optional[Iterable[str]] = None,
     ):
         """
         Args:
@@ -269,6 +270,9 @@ class AICall:
         """
         self.output_budget = output_budget or OutputBudget.from_config()
         self.agent_guards = agent_guards or AgentGuards.from_config()
+        # Agent loops of these nodes run with the internal (no-thinking, instruct
+        # sampling) settings: ``llm.no_thinking_nodes`` in config.
+        self.no_thinking_nodes = frozenset(str(n) for n in (no_thinking_nodes or []) if n)
         self.model = model
         self.model_str = model
         self.api_key = api_key
@@ -1429,6 +1433,7 @@ class AICall:
                 session_id=session_id,
                 node_id=node_id or "agent",
                 disable_streaming=disable_streaming,
+                internal=(node_id or "agent") in self.no_thinking_nodes,
             ),
             session_id,
             node_id=node_id or "agent",
