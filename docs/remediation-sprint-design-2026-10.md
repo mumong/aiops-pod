@@ -166,3 +166,5 @@ Sprint 2 真实链路（`sprint2_policy_and_switch.sh aiops-case-04`，14/14 通
 
 完整 Sprint 3 套件在 12.0.42 上重跑（2026-10-19 10:23–10:50，`sprint3_scenarios.sh all`，重置通过后三场景）**13/13 通过**：c11 `715bba7c0d6e4502`（finalizer 移除，原 Pod 已删除）、c09 `60e83ba5f053456a`（readyReplicas=1）、c06 `02414cf1409c4e2c`（重启 0→0）。四个夹具与 `aiops-case-66` 之后均已重置为故障态，供人工验收。
 
+
+Sprint 2 真实链路在 12.0.42 / 前端 0.1.63 上复测（2026-10-19 11:57，case-04，`sprint2_policy_and_switch.sh aiops-case-04`）**14/14 通过**：25 条高危命令全部拦截、6 条合规命令放行；无令牌 403；切换与恢复写审计；review 模式等待审批且批准前无执行事件，拒绝后 `rejected`；切 auto 后新任务 `approval=auto`、`recovered`；结束后恢复 review。前端 0.1.63 起安全面板只展示执行方式与拦截规则，命令判定与模式切换通过接口进行。
