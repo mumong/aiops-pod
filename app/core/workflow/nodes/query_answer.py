@@ -161,6 +161,22 @@ class QueryConclusionNode(FocusedTaskNode):
     def node_name(self):
         return "查询结果整理"
 
+    def _healthy_check_output(self, state, assessment):
+        """Verified healthy location result: fixed-format report, no model call."""
+        from app.core.workflow.pod_detection import healthy_check_report
+
+        text = healthy_check_report(assessment)
+        answer = QueryAnswer(
+            intent=state.get("original_question") or state.get("question", ""),
+            scope=assessment.get("scope") or "本次请求范围",
+            status="answered",
+            answer=text,
+            evidence_refs=[r for r in assessment.get("evidence_refs") or [] if r],
+        )
+        return finalize_query_answer(
+            self, state, answer.model_dump_json(), [], require_structured=True
+        )
+
     def execute(self, state):
         _configure_query_runtime(self)
         if (
@@ -174,6 +190,13 @@ class QueryConclusionNode(FocusedTaskNode):
                 self.ai_call.query_session_context = {}
             return conclude_cases(self, state)
         events = state.get("thinking_events") or []
+        assessment = (state.get("diagnosis_handoff") or {}).get("pod_assessment") or {}
+        if (
+            (state.get("request_contract") or {}).get("route") == "full_diagnosis"
+            and assessment.get("status") == "healthy"
+            and not state.get("rca_analysis")
+        ):
+            return self._healthy_check_output(state, assessment)
         payload = build_working_material(state)
         payload["request_contract"] = state.get("request_contract")
         payload["pod_assessment"] = (state.get("diagnosis_handoff") or {}).get("pod_assessment")

@@ -13,6 +13,7 @@ _FIELDS = {
     "repeat_page_chars": ("AICALL_REPEAT_PAGE_CHARS", 3000),
     "idle_round_min_calls": ("AICALL_IDLE_ROUND_MIN_CALLS", 2),
     "structured_validation_retries": ("AICALL_STRUCTURED_VALIDATION_RETRIES", 2),
+    "runaway_round_retries": ("AICALL_RUNAWAY_ROUND_RETRIES", 1),
 }
 _FLAGS = {
     "finalize_on_idle_round": ("AICALL_FINALIZE_ON_IDLE_ROUND", True),
@@ -43,6 +44,11 @@ class AgentGuards:
     # A round whose every tool call repeats an already answered call carries no new
     # request: end the loop and deliver from material (the model was done anyway).
     finalize_on_idle_round: bool = _FLAGS["finalize_on_idle_round"][1]
+    # A round that spends the whole output reserve on reasoning and emits no tool call
+    # (or no delivery) is retried this many times with a short "act now" note. Live
+    # 2026-10-19: such rounds cost 70-100 s and ended layer/evidence/repair stages early
+    # (runs 1bbfc5ea, 7e55538b, 3c052423-g1, 4285ef7a). 0 disables.
+    runaway_round_retries: int = _FIELDS["runaway_round_retries"][1]
 
     @classmethod
     def from_config(

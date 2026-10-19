@@ -84,6 +84,11 @@ _PROVIDER_BASE_URLS = {
     "openai": None,  # 默认
 }
 
+# Ephemeral note for a retried runaway round; it is not written back into the history.
+RUNAWAY_ROUND_NOTE = (
+    "上一轮思考用尽了输出上限，没有产生任何动作。本轮请把思考控制在几句话内："
+    "直接调用下一步需要的工具；证据已足够时直接提交结果。"
+)
 _PROVIDER_REQUEST_OVERHEAD_TOKENS = 64
 _ESTIMATOR_DRIFT_RESERVE_TOKENS = 256
 _RETRYABLE_STREAM_INTERRUPTION_SIGNATURES = (
@@ -1847,6 +1852,16 @@ class AICall:
             "analysis": [text for text in analysis if text.strip()],
         }
 
+    def _is_runaway_response(self, response: Any) -> bool:
+        """Whole output reserve spent with no tool call and no delivery: nothing to act on."""
+        messages = getattr(response, "result", None)
+        if messages is None:
+            messages = [response]
+        ai = next((m for m in reversed(messages or []) if isinstance(m, AIMessage)), None)
+        if ai is None or ai.tool_calls or getattr(response, "structured_response", None):
+            return False
+        return self._is_truncated_message(ai)
+
     def _is_truncated_message(self, msg: Any) -> bool:
         metadata = getattr(msg, "response_metadata", None) or {}
         if str(metadata.get("finish_reason") or "").lower() == "length":
@@ -2951,7 +2966,36 @@ class AICall:
                     if tokens
                     else f"本节点第 {request_sequence} 次模型请求（已发出）"
                 )
-            return await handler(guarded_request)
+            response = await handler(guarded_request)
+            for attempt in range(int(getattr(self.agent_guards, "runaway_round_retries", 0))):
+                if not self._is_runaway_response(response):
+                    break
+                logger.warning(
+                    "[AICall] runaway round | node=%s request=%s retry=%s/%s",
+                    node_id,
+                    request_sequence,
+                    attempt + 1,
+                    self.agent_guards.runaway_round_retries,
+                )
+                if thinking_events is not None:
+                    thinking_events.append(
+                        {
+                            "type": "runaway_round_retry",
+                            "node": node_id,
+                            "request": request_sequence,
+                        }
+                    )
+                if on_waiting is not None:
+                    on_waiting("上一轮思考用尽输出上限且未产生动作，正在重试本轮")
+                response = await handler(
+                    guarded_request.override(
+                        messages=[
+                            *guarded_request.messages,
+                            HumanMessage(content=RUNAWAY_ROUND_NOTE),
+                        ]
+                    )
+                )
+            return response
 
         return guard_model_request
 

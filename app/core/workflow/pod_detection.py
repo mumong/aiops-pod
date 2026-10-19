@@ -37,6 +37,30 @@ abnormal 保留所有待调查 Pod；inconclusive 明确缺口，不编造故障
 """
 
 
+def healthy_check_report(assessment):
+    """Fixed-format report for a check the code already verified as healthy.
+
+    ``assess_delivery`` only keeps ``healthy`` when coverage is complete, nothing is
+    pending and recent signals were reviewed, so restating it needs no model call.
+    """
+    lines = [
+        "### 检查结论：未发现 Pod 异常（Healthy）",
+        "",
+        f"- **检查范围**：{assessment.get('scope') or '本次请求范围'}",
+        f"- **检查时间**：{assessment.get('observed_at') or '—'}",
+        f"- **依据**：{assessment.get('reason') or '—'}",
+        "- **近期线索**：已核实（当前状态与近 10 分钟的终止、重启线索）",
+    ]
+    refs = [r for r in assessment.get("evidence_refs") or [] if r]
+    if refs:
+        lines.append("- **证据引用**：" + "、".join(f"`{r}`" for r in refs[:5]))
+    lines += [
+        "",
+        "本次为 Pod 异常检测：检查当前状态与近 10 分钟线索，不代表业务或集群其他层面全部健康。",
+    ]
+    return "\n".join(lines)
+
+
 def assess_delivery(handoff, events, material=None):
     assessment = handoff.get("pod_assessment")
     if not isinstance(assessment, dict):

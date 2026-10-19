@@ -149,3 +149,46 @@ def test_plain_text_is_not_machine_verified_recovery(text):
     assert not _verify_establishes_terminal_success(
         "kubectl rollout status deployment/x", text, False
     )
+
+
+def test_verified_healthy_check_is_reported_without_a_model_call():
+    # Live 2026-10-19 (run 7e55538bc3c648d7): after location the conclusion model took
+    # 39 s to restate a check the code had already verified.
+    from app.core.workflow.nodes import query_answer
+
+    node = query_answer.QueryConclusionNode()
+    node._archive_node_input = lambda payload: None
+    node._archive_node_output = lambda output: None
+    node._call_llm = lambda *a, **k: (_ for _ in ()).throw(AssertionError("model called"))
+    assessment = {
+        "status": "healthy",
+        "scope": "全集群 Pod（108 个容器）",
+        "observed_at": "2026-10-19T09:58:08Z",
+        "recent_signals_reviewed": True,
+        "unresolved": [],
+        "evidence_refs": ["/archive/tools/001.raw.txt"],
+        "reason": "全部 Running 且 Ready，近 10 分钟无终止或重启",
+    }
+    out = node.execute(
+        {
+            "question": "我的集群有什么问题",
+            "request_time_utc": "fixed",
+            "request_contract": {"route": "full_diagnosis", "scope": "cluster"},
+            "diagnosis_handoff": {
+                "pod_assessment": assessment,
+                "targets": [],
+                "coverage": "complete",
+            },
+        }
+    )
+    answer = out["query_answer"]
+    assert (
+        answer["status"] == "answered" and answer["evidence_refs"] == assessment["evidence_refs"]
+    )
+    for text in (
+        "未发现 Pod 异常",
+        "全集群 Pod（108 个容器）",
+        "2026-10-19T09:58:08Z",
+        "全部 Running",
+    ):
+        assert text in out["conclusion"]
