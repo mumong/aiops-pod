@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.aicall.errors import raise_on_model_disconnect
 from app.core.context.budget import ModelContextResolver, count_tokens
+from app.core.remediation.group_context import SETTLED_OUTCOMES
 from app.core.workflow.case_result import case_index
 from app.core.workflow.group_runner import group_display_name
 
@@ -16,6 +17,17 @@ from app.core.workflow.group_runner import group_display_name
 class OverviewOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     overview: str = Field(min_length=1, max_length=2400)
+
+
+def scope_label(target):
+    """Readable scope of a case that covers the request rather than located objects."""
+    pods = target.get("pod_names") or []
+    namespaces = target.get("namespaces") or []
+    if pods:
+        return "、".join(pods)
+    if namespaces:
+        return "、".join(f"命名空间 {ns}" for ns in namespaces)
+    return {"cluster": "全集群", "namespace": "命名空间"}.get(target.get("scope"), "请求范围")
 
 
 def diagnosis_cases(state):
@@ -139,11 +151,17 @@ def conclude_cases(node, state):
         failed = True
         events.append({"type": "execution_incomplete", "node": "conclusion", "reason": str(exc)})
     complete = sum(case.get("execution_status") == "completed" for case in cases)
-    header = f"诊断对象：{len(cases)} 组；完整交付：{complete} 组；未完整交付：{len(cases) - complete} 组。"
+    settled = sum(case.get("outcome") in SETTLED_OUTCOMES for case in cases)
+    header = (
+        f"诊断对象：{len(cases)} 组；完整交付：{complete} 组；未完整交付：{len(cases) - complete} 组；"
+        f"需要处理：{len(cases) - settled} 组。"
+    )
     sections = ["## 诊断总览", header, overview]
     for case in cases:
         entities = (case.get("target") or {}).get("entities") or []
-        label = "、".join(f"{e.get('namespace', '')}/{e.get('name', '')}" for e in entities)
+        label = "、".join(
+            f"{e.get('namespace', '')}/{e.get('name', '')}" for e in entities
+        ) or scope_label(case.get("target") or {})
         sections.extend(
             [
                 f"## {group_display_name(case['group_id'])} · {label}",

@@ -51,7 +51,10 @@ class DiagnosisCaseOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    outcome: Literal["abnormal", "recovered", "inconclusive"]
+    outcome: Literal["abnormal", "recovered", "inconclusive", "healthy"] = Field(
+        description="abnormal 当前存在异常；recovered 异常已恢复；healthy 范围内未发现需要处理的异常；"
+        "inconclusive 证据不足无法判断"
+    )
     summary: ShortText
     cause: str = Field(default="", max_length=480)
     certainty: Literal["unknown", "hypothesis", "supported", "confirmed"]
@@ -173,6 +176,27 @@ def label_evidence_sources(report):
     return "\n".join(lines)
 
 
+SCOPE_TARGET_ID = "request-scope"
+
+
+def request_scope_target(contract):
+    """Identity of a case that covers the requested scope when no object was located.
+
+    Used only by the serial path when location handed over no target (for example a
+    healthy cluster, or a location stage that failed): the RCA still reports on the
+    scope the user asked about instead of being discarded for lacking an object.
+    """
+    contract = contract or {}
+    return {
+        "group_id": "single",
+        "target_id": SCOPE_TARGET_ID,
+        "entities": [],
+        "scope": contract.get("scope") or "unspecified",
+        "namespaces": list(contract.get("namespaces") or []),
+        "pod_names": list(contract.get("pod_names") or []),
+    }
+
+
 def bind_case_result(output, *, group_id, target, result_ref):
     """Assign identity outside model output; history remains in its archive."""
     parsed = DiagnosisCaseOutput.model_validate(output).model_dump()
@@ -181,7 +205,11 @@ def bind_case_result(output, *, group_id, target, result_ref):
     )
     if not isinstance(group_id, str) or not group_id.strip():
         raise ValueError("case group_id is required")
-    if not isinstance(target, dict) or not target.get("target_id") or not target.get("entities"):
+    if (
+        not isinstance(target, dict)
+        or not target.get("target_id")
+        or not (target.get("entities") or target.get("target_id") == SCOPE_TARGET_ID)
+    ):
         raise ValueError("assigned target identity is required")
     if not isinstance(result_ref, str) or not result_ref.strip():
         raise ValueError("case result archive reference is required")

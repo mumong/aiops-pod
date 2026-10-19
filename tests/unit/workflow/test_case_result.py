@@ -200,3 +200,24 @@ def test_report_groups_are_named_for_people_not_by_machine_id():
 
     assert group_display_name("g3") == "异常组 3"
     assert group_display_name("custom") == "custom"
+
+
+def test_scope_case_without_location_target_delivers_a_healthy_verdict():
+    # Live 2026-10-19 (run 354362a291394218): location ran out of output, the serial
+    # path found every Pod Running/Ready, and the valid RCA was discarded for lacking
+    # a target identity, so a healthy cluster was reported as partial/inconclusive.
+    from app.core.workflow.case_result import request_scope_target
+
+    target = request_scope_target({"scope": "cluster", "namespaces": [], "pod_names": []})
+    assert target["target_id"] == "request-scope" and target["entities"] == []
+    data = output()
+    data.update(outcome="healthy", summary="未发现异常", certainty="confirmed")
+    result = bind_case_result(data, group_id="single", target=target, result_ref="/r.json")
+    assert result["outcome"] == "healthy" and result["execution_status"] == "completed"
+    with pytest.raises(ValueError):
+        bind_case_result(
+            output(),
+            group_id="g1",
+            target={"target_id": "x", "entities": []},
+            result_ref="/r.json",
+        )

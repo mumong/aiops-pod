@@ -229,9 +229,65 @@ class RemediationNode(QueryCollectNode):
     def node_name(self):
         return "制定 Pod 修复方案"
 
+    @staticmethod
+    def _group_dispatch(state):
+        """Hand a chat repair request to the per-group batch when a grouped diagnosis exists.
+
+        Returns ``{"diagnosis_run_id", "group_ids"}`` (empty ids: nothing left to repair)
+        or None to plan here: no grouped diagnosis, a job already scoped to one group,
+        a revision of an earlier plan, or a request naming objects the diagnosis lacks.
+        """
+        from app.core.remediation.group_context import repairable_groups, select_groups
+
+        context = state.get("repair_context") or {}
+        record = context.get("diagnosis")
+        if not isinstance(record, dict) or context.get("previous_plan"):
+            return None
+        payload = record.get("payload") or {}
+        if payload.get("contract_version") != "diagnosis-record.v2" or payload.get("group_id"):
+            return None
+        open_groups = repairable_groups(record)
+        selected = select_groups(open_groups, state.get("request_contract"))
+        if open_groups and not selected:
+            return None  # the user named something else; plan it here
+        return {
+            "diagnosis_run_id": record.get("run_id"),
+            "group_ids": [g["group_id"] for g in selected],
+        }
+
+    def _dispatch_output(self, state, question, dispatch):
+        from app.core.workflow.group_runner import group_display_name
+
+        if dispatch["group_ids"]:
+            lines = "\n".join(f"- {group_display_name(g)}" for g in dispatch["group_ids"])
+            text = (
+                "已按上一轮诊断的异常组分别生成修复方案（每组一个独立规划任务，并行进行），"
+                f"完成后按组展示方案并等待审批：\n\n{lines}"
+            )
+        else:
+            text = "上一轮诊断未发现需要修复的异常组，本次不生成修复方案。"
+        answer = QueryAnswer(
+            intent=question, scope="上一轮诊断的异常组", status="answered", answer=text
+        )
+        output = finalize_query_answer(
+            self, state, answer.model_dump_json(), [], require_structured=True
+        )
+        output.update(
+            request_route="remediation",
+            remediation_draft=None,
+            remediation_dispatch=dispatch,
+            conclusion=text,
+            conclusion_formatted=text,
+        )
+        self._archive_node_output(output)
+        return output
+
     def execute(self, state):
         _configure_query_runtime(self)
         question = state.get("original_question") or state.get("question", "")
+        dispatch = self._group_dispatch(state)
+        if dispatch is not None:
+            return self._dispatch_output(state, question, dispatch)
         self.ai_call.query_session_context = state.get("query_session_context") or {}
         self.ai_call.working_context_original_question = question
         catalog = self._prepare_query_tools()

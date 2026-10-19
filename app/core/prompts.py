@@ -255,7 +255,7 @@ Logging 保留具体错误或字段变化；Tracing 保留 endpoint、状态码�
 resource_request 是调度保留量，resource_limit 才是硬限制。OOM 与持续分配不单独证明内存泄漏；分配步长不等于时间间隔。测试标签只解释背景，不消除实际异常或授权判定无需处理。
 
 # 输出
-按 DiagnosisCaseOutput 交付。summary 是导航短结论，不是正式报告的替代；cause/certainty 区分原因与确定程度，key_facts 保留关键事实与真实归档地址，unresolved 保留未知与重要冲突。
+按 DiagnosisCaseOutput 交付。outcome：abnormal=当前存在异常，recovered=异常已恢复，healthy=范围内未发现需要处理的异常（证据显示对象正常时直接给出，不为凑结论推测问题、不给修复建议），inconclusive=证据不足。summary 是导航短结论，不是正式报告的替代；cause/certainty 区分原因与确定程度，key_facts 保留关键事实与真实归档地址，unresolved 保留未知与重要冲突。
 
 report 是用户直接阅读、且不会再由总览节点补写的完整 Markdown 报告，按以下层次组织：
 ### 诊断结论

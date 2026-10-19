@@ -32,10 +32,51 @@ def diagnosis_groups(record):
     ]
 
 
+# A group whose RCA found nothing to fix (or found it already recovered) gets no job.
+SETTLED_OUTCOMES = frozenset({"healthy", "recovered"})
+
+
+def repairable_groups(record):
+    """Groups that still need a repair decision; legacy records count as unresolved."""
+    payload = record.get("payload") or {}
+    raw_groups = payload.get("groups") or []
+    groups = diagnosis_groups(record)
+    if not raw_groups:
+        # v2 without cases: the diagnosis found nothing; legacy single reports stay eligible.
+        return [] if payload.get("contract_version") == "diagnosis-record.v2" else groups
+    return [
+        group
+        for group, raw in zip(groups, raw_groups, strict=True)
+        if str(((raw or {}).get("diagnosis_result") or {}).get("outcome") or "")
+        not in SETTLED_OUTCOMES
+    ]
+
+
+def select_groups(groups, contract):
+    """Groups the request names (pods, else namespaces); an unscoped request keeps all."""
+    contract = contract or {}
+    pods = set(contract.get("pod_names") or [])
+    namespaces = set(contract.get("namespaces") or [])
+    if not pods and not namespaces:
+        return list(groups)
+
+    def entities(group):
+        return ((group.get("target") or {}).get("entities")) or []
+
+    if pods:
+        return [g for g in groups if any(e.get("name") in pods for e in entities(g))]
+    return [g for g in groups if any(e.get("namespace") in namespaces for e in entities(g))]
+
+
 def _group_summary(group):
     """The diagnosis's own one-line cause for this group (historical, not current state)."""
     result = group.get("diagnosis_result") or {}
-    for value in (result.get("summary"), result.get("root_cause"), result.get("report"), group.get("analysis")):
+    for value in (
+        result.get("summary"),
+        result.get("root_cause"),
+        result.get("report"),
+        group.get("analysis"),
+    ):
         text = str(value or "").strip()
         if text:
             return text[:400]

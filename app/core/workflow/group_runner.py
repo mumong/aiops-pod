@@ -13,8 +13,11 @@ from app.core.log_context import bind_current_context
 
 def group_display_name(group_id):
     """ "g3" → "异常组 3" for people; the id itself stays the machine key."""
-    match = re.fullmatch(r"g(\d+)", str(group_id or "").strip())
-    return f"异常组 {match.group(1)}" if match else str(group_id or "")
+    value = str(group_id or "").strip()
+    if value == "single":
+        return "整体诊断"
+    match = re.fullmatch(r"g(\d+)", value)
+    return f"异常组 {match.group(1)}" if match else value
 
 
 DEFAULT_LANE_WORKERS = 3

@@ -5,15 +5,21 @@ Only planning is parallel; command invocations share a serial execution lock.
 Records survive restart; active jobs are not replayed automatically after restart.
 """
 
+import hashlib
 import threading
 import time
 import uuid
 from copy import deepcopy
 
 from app.core.log_context import log_context
-from app.core.remediation.group_context import diagnosis_groups
+from app.core.remediation.group_context import repairable_groups
 from app.core.remediation.records import PlanConflict, RecordUnavailable, RepairRecordStore
 from app.core.workflow.group_runner import iter_group_results, resolve_lane_workers
+
+# Job statuses that can still change; anything else is a final outcome.
+ACTIVE_JOB_STATUSES = frozenset(
+    {"queued", "planning", "planned", "awaiting_approval", "executing", "verifying"}
+)
 
 
 class RepairJobs:
@@ -57,11 +63,29 @@ class RepairJobs:
         self.cancellations[job_id] = threading.Event()
         return payload
 
-    def start(self, service, owner, diagnosis_id, question):
+    def start(self, service, owner, diagnosis_id, question, group_ids=None):
+        """One durable batch per (diagnosis, selected groups); retries return the same batch.
+
+        Only groups whose RCA left something unresolved get a job; a healthy diagnosis
+        is refused instead of planning repairs for nothing. ``group_ids`` narrows the
+        batch (a chat request naming one Pod must not plan, or auto-execute, the rest).
+        """
         source = self.store.load(diagnosis_id, owner, "diagnosis")
-        groups = diagnosis_groups(source)
+        groups = repairable_groups(source)
+        if group_ids is not None:
+            wanted = set(group_ids)
+            groups = [g for g in groups if g["group_id"] in wanted]
+        if not groups:
+            raise PlanConflict("该诊断未发现需要修复的异常组，无需生成修复方案")
         # One durable workspace per diagnosis: retries must not launch writes twice.
         batch_id = "batch-" + diagnosis_id
+        if group_ids is not None and len(groups) < len(repairable_groups(source)):
+            batch_id += (
+                "-"
+                + hashlib.sha1(
+                    ",".join(sorted(g["group_id"] for g in groups)).encode()
+                ).hexdigest()[:8]
+            )
         with self.lock:
             try:
                 return self.batch(batch_id, owner)
@@ -319,6 +343,10 @@ class RepairJobs:
                         "diagnosis_summary",
                     )
                 }
+            )
+            # API clients approve with this id (POST /repair/jobs/{job_id}/approve).
+            batch["groups"][-1]["pending_approval_id"] = (job.get("approval") or {}).get(
+                "approval_id"
             )
         return batch
 

@@ -21,6 +21,7 @@ from app.core.workflow.case_result import (
     EvidenceStageOutput,
     bind_case_result,
     evidence_fallback_report,
+    request_scope_target,
 )
 from app.core.workflow.diagnosis_contract import LocationOutput
 from app.core.workflow.nodes.query_answer import (
@@ -221,8 +222,10 @@ class DiagnosisStageNode(QueryCollectNode):
             archive = ContextArchive(
                 run_id=getattr(self, "current_run_id", "") or state.get("run_id", "unknown")
             )
-            target = state.get("diagnosis_target") or serial_case_target(
-                state.get("diagnosis_handoff")
+            target = (
+                state.get("diagnosis_target")
+                or serial_case_target(state.get("diagnosis_handoff"))
+                or request_scope_target(state.get("request_contract"))
             )
             group_id = (target or {}).get("group_id", "single")
             result_ref = str(archive.root / "cases/result.json")

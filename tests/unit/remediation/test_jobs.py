@@ -270,3 +270,103 @@ def test_repair_planning_fan_out_uses_the_diagnosis_lane_limit(tmp_path, monkeyp
     service = SimpleNamespace(workflow_config={"evidence": {"parallel": {"max_workers": 10}}})
     jobs.start(service, owner, "d", "repair")
     assert done.wait(3), "all four groups must plan at the same time"
+
+
+def _v2(*outcomes):
+    return {
+        "contract_version": "diagnosis-record.v2",
+        "request_contract": {"scope": "cluster"},
+        "groups": [
+            {
+                "group_id": f"g{i}",
+                "target": {
+                    "target_id": f"t{i}",
+                    "entities": [{"kind": "Pod", "namespace": f"ns{i}", "name": f"p{i}"}],
+                },
+                "status": "completed",
+                "diagnosis_result": {"outcome": outcome, "summary": f"s{i}"},
+            }
+            for i, outcome in enumerate(outcomes, start=1)
+        ],
+    }
+
+
+def test_only_unresolved_groups_are_repairable():
+    from app.core.remediation.group_context import repairable_groups, select_groups
+
+    record = {"payload": _v2("abnormal", "healthy", "recovered", "inconclusive")}
+    assert [g["group_id"] for g in repairable_groups(record)] == ["g1", "g4"]
+    assert repairable_groups({"payload": _v2()}) == []  # healthy run: nothing to repair
+    groups = repairable_groups(record)
+    assert [g["group_id"] for g in select_groups(groups, {"pod_names": ["p4"]})] == ["g4"]
+    assert [g["group_id"] for g in select_groups(groups, {"namespaces": ["ns1"]})] == ["g1"]
+    assert [g["group_id"] for g in select_groups(groups, {"scope": "cluster"})] == ["g1", "g4"]
+    assert select_groups(groups, {"pod_names": ["other"]}) == []
+
+
+def test_batch_rejects_healthy_diagnosis_and_scopes_to_selected_groups(tmp_path, monkeypatch):
+    jobs = RepairJobs(RepairRecordStore(tmp_path))
+    owner = "a" * 64
+    monkeypatch.setattr(jobs, "_plan_batch", lambda *a, **k: None)
+    jobs.store.save("healthy", owner, None, "diagnosis", _v2("healthy"))
+    with pytest.raises(PlanConflict, match="未发现需要修复"):
+        jobs.start(None, owner, "healthy", "repair")
+    jobs.store.save("d", owner, None, "diagnosis", _v2("abnormal", "abnormal", "healthy"))
+    scoped = jobs.start(None, owner, "d", "repair", group_ids=["g2"])
+    assert [g["group_id"] for g in scoped["groups"]] == ["g2"]
+    full = jobs.start(None, owner, "d", "repair")
+    assert [g["group_id"] for g in full["groups"]] == ["g1", "g2"]
+    assert scoped["batch_id"] != full["batch_id"]
+    assert (
+        jobs.start(None, owner, "d", "repair", group_ids=["g2"])["batch_id"] == scoped["batch_id"]
+    )
+
+
+def _api(tmp_path, monkeypatch):
+    import app.api.repair_routes as routes
+
+    jobs, owner = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes, "repair_jobs", jobs)
+    monkeypatch.setattr(routes, "get_service", lambda: None)
+    app = FastAPI()
+    routes.register_repair_routes(app)
+    client = TestClient(app)
+    client.cookies.set("aiops_query_owner", owner)
+    return routes, jobs, owner, client
+
+
+def test_json_approval_resolves_only_the_jobs_pending_request(tmp_path, monkeypatch):
+    from app.core.remediation.approval import approval_store
+
+    routes, jobs, owner, client = _api(tmp_path, monkeypatch)
+    job = client.post("/repair/batches", json={"diagnosis_run_id": "d"}).json()["groups"][0]
+    job_id = job["job_id"]
+    request = approval_store.create_request(
+        job_id, "action", "patch", {"id": "a1"}, timeout_seconds=60, owner=owner
+    )
+    jobs._update(
+        job_id, owner, status="awaiting_approval", approval={"approval_id": request.approval_id}
+    )
+    url = f"/repair/jobs/{job_id}/approve"
+    wrong = client.post(url, json={"approval_id": "other", "approved": True})
+    assert wrong.status_code == 409
+    ok = client.post(
+        url, json={"approval_id": request.approval_id, "approved": True, "reviewer": "api-user"}
+    )
+    assert ok.status_code == 200 and ok.json()["job_id"] == job_id
+    assert approval_store.decision_status(job_id, request.approval_id, owner) == "approved"
+    batch = client.get("/repair/batches/batch-d").json()
+    assert batch["groups"][0]["pending_approval_id"] == request.approval_id
+
+
+def test_batch_events_stream_until_every_job_is_terminal(tmp_path, monkeypatch):
+    routes, jobs, owner, client = _api(tmp_path, monkeypatch)
+    monkeypatch.setattr(routes, "BATCH_EVENT_POLL_SECONDS", 0.01)
+    groups = client.post("/repair/batches", json={"diagnosis_run_id": "d"}).json()["groups"]
+    for group in groups:
+        jobs._update(group["job_id"], owner, status="recovered")
+    with client.stream("GET", "/repair/batches/batch-d/events") as response:
+        assert response.headers["content-type"].startswith("text/event-stream")
+        body = "".join(response.iter_text())
+    assert "event: batch" in body and "event: end" in body
+    assert '"status": "recovered"' in body

@@ -91,6 +91,8 @@ def test_route_table_order_and_names_are_stable(monkeypatch):
         ("/repair/batches/{batch_id}", ["GET"], "batch"),
         ("/repair/jobs/{job_id}", ["GET"], "detail"),
         ("/repair/jobs/{job_id}/feedback", ["POST"], "feedback"),
+        ("/repair/jobs/{job_id}/approve", ["POST"], "approve"),
+        ("/repair/batches/{batch_id}/events", ["GET"], "batch_events"),
         ("/repair/jobs/{job_id}/cancel", ["POST"], "cancel"),
         ("/repair/policy", ["GET"], "policy"),
         ("/repair/policy/check", ["POST"], "policy_check"),

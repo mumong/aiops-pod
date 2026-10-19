@@ -1,13 +1,16 @@
 """Transport-independent repair workspaces. Ownership uses the existing cookie."""
 
+import asyncio
+import json
 import re
 from typing import List, Optional
 
 from fastapi import HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.remediation.audit import read_audit
-from app.core.remediation.jobs import repair_jobs
+from app.core.remediation.jobs import ACTIVE_JOB_STATUSES, repair_jobs
 from app.core.remediation.policy import CommandPolicy, check_command
 from app.core.remediation.records import PlanConflict, RecordUnavailable
 from app.core.remediation.settings import (
@@ -33,6 +36,18 @@ class RepairFeedback(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: int = Field(ge=1)
     feedback: str = Field(min_length=1, max_length=8000)
+
+
+class JobApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approval_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    approved: bool
+    reviewer: str = Field(default="", max_length=100)
+    reason: str = Field(default="", max_length=500)
+
+
+BATCH_EVENT_POLL_SECONDS = 2.0
+BATCH_EVENT_HEARTBEAT_SECONDS = 15.0
 
 
 class PolicyCheck(BaseModel):
@@ -107,6 +122,69 @@ def register_repair_routes(app):
             raise HTTPException(422, "反馈内容不能为空")
         return call(
             repair_jobs.revise, get_service(), identity, job_id, body.version, body.feedback
+        )
+
+    @app.post("/repair/jobs/{job_id}/approve")
+    def approve(request: Request, job_id: str, body: JobApproval):
+        """Approve or reject the job's pending action (JSON twin of /remediation/approve)."""
+        from app.core.remediation.approval import approval_store
+        from app.core.remediation.audit import audit_event
+
+        identity = owner(request)
+        job = call(repair_jobs.detail, job_id, identity)
+        if (job.get("approval") or {}).get("approval_id") != body.approval_id:
+            raise HTTPException(409, "该审批不是本任务当前待审批的动作，请刷新任务状态")
+        if not approval_store.resolve(
+            run_id=job_id,
+            approval_id=body.approval_id,
+            approved=body.approved,
+            reviewer=body.reviewer,
+            reason=body.reason,
+            owner=identity,
+        ):
+            raise HTTPException(404, "审批请求不存在或已失效")
+        audit_event(
+            "approval_decided",
+            run_id=job_id,
+            approval_id=body.approval_id,
+            approved=body.approved,
+            reviewer=body.reviewer,
+            reason=body.reason,
+            channel="api",
+        )
+        return call(repair_jobs.detail, job_id, identity)
+
+    @app.get("/repair/batches/{batch_id}/events")
+    async def batch_events(request: Request, batch_id: str):
+        """SSE: ``batch`` on every change, ``end`` once no job can change any more."""
+        identity = owner(request)
+        call(repair_jobs.batch, batch_id, identity)
+
+        async def stream():
+            last, quiet = None, 0.0
+            while not await request.is_disconnected():
+                try:
+                    snapshot = repair_jobs.batch(batch_id, identity)
+                except Exception as exc:  # record removed or unreadable mid-stream
+                    yield f"event: error\ndata: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
+                    return
+                text = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
+                if text != last:
+                    yield f"event: batch\ndata: {text}\n\n"
+                    last, quiet = text, 0.0
+                if all(g.get("status") not in ACTIVE_JOB_STATUSES for g in snapshot["groups"]):
+                    yield "event: end\ndata: {}\n\n"
+                    return
+                if quiet >= BATCH_EVENT_HEARTBEAT_SECONDS:
+                    yield ": ping\n\n"
+                    quiet = 0.0
+                await asyncio.sleep(BATCH_EVENT_POLL_SECONDS)
+                quiet += BATCH_EVENT_POLL_SECONDS
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     @app.post("/repair/jobs/{job_id}/cancel")

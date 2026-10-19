@@ -124,6 +124,7 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
   - 组数大于 1 → 并发诊断；
   - 否则 → 串行 evidence → rca。
 - 分组出错时降级为单路诊断，并提示"分组暂不可用"，不丢弃诊断结果。
+- 定位没有交出目标（例如全部正常，或定位阶段失败）时走串行诊断，RCA 以"请求范围"作为身份交付（`request_scope_target`），健康结论用 `outcome=healthy`，不会再因缺少目标身份被判无效（run 354362a291394218）。
 - 多卡片是否出现取决于 layer 是否交出多个目标。分组本身是确定性的，有几个目标就开几组。
 
 ### 4.5 ④ 并发诊断（parallel_evidence）
@@ -144,7 +145,7 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 | 阶段 | 方式 | 输出契约 | 失败处理 |
 |---|---|---|---|
 | evidence（取证） | Agent 循环，开启 thinking，最多 48 步 | `EvidenceStageOutput`：`analysis`、`key_facts`（≤8，每条带真实 `evidence_refs`）、`unresolved`（≤6）、`runbook_refs` | 交接置空，unresolved 写"证据结构化交接无效"，记 `execution_incomplete` |
-| rca（根因） | 无工具的单次结构化交付，输出上限 `delivery=10000` | `DiagnosisCaseOutput`：`outcome`、`summary`、`cause`、`certainty`（unknown/hypothesis/supported/confirmed）、`key_facts`、`unresolved`、`report` | 原文存入 `cases/invalid-output.txt`；用 evidence 阶段的真实事实生成兜底报告（注明"不构成根因结论"），标记 partial |
+| rca（根因） | 无工具的单次结构化交付，输出上限 `delivery=10000` | `DiagnosisCaseOutput`：`outcome`（abnormal / recovered / healthy / inconclusive）、`summary`、`cause`、`certainty`（unknown/hypothesis/supported/confirmed）、`key_facts`、`unresolved`、`report` | 原文存入 `cases/invalid-output.txt`；用 evidence 阶段的真实事实生成兜底报告（注明"不构成根因结论"），标记 partial |
 
 **RCA 交付后的代码处理**（`bind_case_result`）：
 1. 组 ID、目标身份、归档路径由代码绑定，模型不能改写，也不能注入修复命令。
@@ -242,7 +243,9 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 
 ## 5. 修复生命周期
 
-### 5.1 ⑥ 发起（从诊断报告进入）
+### 5.1 ⑥ 发起（三种入口，同一种按组批次）
+
+入口：报告下的按钮（`POST /repair/batches`）、`/ask ... repair=plan`（诊断完成后自动建批次）、同一会话里的对话请求（"修复刚刚的问题"）。对话请求在会话已有分组诊断时，由 `RemediationNode._group_dispatch` 直接转成批次，不再让一个 Agent 处理整份诊断；点名的 Pod 只选它所在的组；诊断全部 healthy/recovered 时直接答复"无需修复"。会话没有诊断时才由单个 Agent 现场规划（见 [API 待办](api.md#7-待办a2a-与-api-身份已记录未实现)）。只有结论为 abnormal / inconclusive 的组会生成任务。
 
 ```
 "生成自动修复方案" → POST /repair/batches {diagnosis_run_id}

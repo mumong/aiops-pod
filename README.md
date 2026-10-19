@@ -310,6 +310,7 @@ make delete deploy
 | 文档 | 内容 |
 |---|---|
 | [核心流程与模块架构](docs/ARCHITECTURE.md) | 从用户输入到修复与恢复观察的完整生命周期、数据契约、工具结果处理、上下文压缩、边界与已知限制 |
+| [HTTP API](docs/api.md) | curl 完成查询、深度诊断、修复、审批与观察的完整流程；A2A 与 API 身份待办 |
 | [部署与运维](docs/GUIDE.md) | 配置、发布、权限、联邦及常见排查 |
 | [运行诊断](docs/run-diagnostics.md) | 每次运行的账本、工程异常分类、`/runs/{run_id}` 报告 |
 | [LLM 自身异常记录](docs/llm-model-anomalies.md) | 模型/推理服务自身问题的现象与外部佐证 |

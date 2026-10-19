@@ -33,6 +33,7 @@ class WorkflowState(TypedDict, total=False):
     request_route: Optional[str]
     request_error: Optional[Dict[str, Any]]
     remediation_draft: Optional[Dict[str, Any]]
+    remediation_dispatch: Optional[Dict[str, Any]]  # chat repair handed to per-group jobs
     repair_context: Optional[Dict[str, Any]]
     repair_entry_requested: bool
     diagnosis_target: Optional[Dict[str, Any]]

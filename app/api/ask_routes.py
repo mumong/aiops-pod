@@ -34,6 +34,16 @@ def _diagnosis_workflow_overrides() -> dict:
     }
 
 
+def _diagnosis_overrides_with_repair(repair: Optional[str], session_id: Optional[str]) -> dict:
+    """``repair=plan`` starts the per-group repair batch after a deep diagnosis."""
+    overrides = _diagnosis_workflow_overrides()
+    if repair == "plan":
+        if not session_id:
+            raise HTTPException(status_code=400, detail="repair=plan 需要 session_id")
+        overrides["_auto_repair_plan"] = True
+    return overrides
+
+
 def _query_workflow_overrides() -> dict:
     return {"query_mode": "auto"}
 
@@ -178,6 +188,11 @@ async def ask_get(
     session_id: Optional[str] = Query(
         None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
     ),
+    repair: Optional[str] = Query(
+        None,
+        pattern="^plan$",
+        description="repair=plan：深度诊断完成后自动按异常组生成修复方案（需要 session_id）",
+    ),
 ):
     """
     🔍 智能运维查询（GET 方式）
@@ -202,7 +217,7 @@ async def ask_get(
         format,
         max_steps,
         session_id,
-        _diagnosis_workflow_overrides(),
+        _diagnosis_overrides_with_repair(repair, session_id),
         DIAGNOSIS_TITLE,
         "收到查询: %s...",
     )
@@ -220,6 +235,11 @@ async def ask_post(
     ),
     session_id: Optional[str] = Form(
         None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
+    ),
+    repair: Optional[str] = Form(
+        None,
+        pattern="^plan$",
+        description="repair=plan：深度诊断完成后自动按异常组生成修复方案（需要 session_id）",
     ),
 ):
     """
@@ -242,7 +262,7 @@ async def ask_post(
         format,
         max_steps,
         session_id,
-        _diagnosis_workflow_overrides(),
+        _diagnosis_overrides_with_repair(repair, session_id),
         DIAGNOSIS_TITLE,
         "收到查询 (POST): %s...",
     )

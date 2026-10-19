@@ -843,12 +843,22 @@ class WorkflowExecutor:
             outcome=outcome,
         )
 
-        repair_record, record_store, record_failed = self._persist_repair_record(
-            run_id,
-            question,
-            final_state,
-            overrides,
+        dispatch = final_state.get("remediation_dispatch")
+        if dispatch:
+            # Chat repair handed to per-group jobs: no single-agent plan record or inline run.
+            repair_record, record_store, record_failed = None, None, False
+        else:
+            repair_record, record_store, record_failed = self._persist_repair_record(
+                run_id,
+                question,
+                final_state,
+                overrides,
+            )
+        repair_batch, batch_note = self._start_repair_batch(
+            question, final_state, overrides, repair_record
         )
+        if batch_note:
+            full_answer += f"\n\n{batch_note}"
         if record_failed:
             if task_route == "remediation":
                 final_state["remediation_draft"] = None
@@ -881,6 +891,7 @@ class WorkflowExecutor:
                     "run_id": run_id,
                     "kind": repair_record["kind"],
                     "source_run_id": repair_record.get("source_run_id"),
+                    "repairable": self._record_repairable(repair_record),
                 }
                 if repair_record
                 else None
@@ -888,6 +899,7 @@ class WorkflowExecutor:
             "repair_plan": final_state.get("remediation_draft")
             if task_route == "remediation"
             else None,
+            "repair_batch": repair_batch,
             **(
                 {"_query_session_memory": final_state.get("query_session_memory")}
                 if overrides.get("_query_session_context") is not None
@@ -895,15 +907,16 @@ class WorkflowExecutor:
             ),
         }
 
-        yield from self._remediation_events(
-            run_id,
-            stream,
-            wf_config,
-            overrides,
-            full_answer,
-            cancel_event,
-            record_store if repair_record else None,
-        )
+        if not dispatch:
+            yield from self._remediation_events(
+                run_id,
+                stream,
+                wf_config,
+                overrides,
+                full_answer,
+                cancel_event,
+                record_store if repair_record else None,
+            )
 
         seq = stream.next_seq()
         yield {
@@ -980,6 +993,65 @@ class WorkflowExecutor:
         )
         logger.info("   总计: %.1fs", metrics.total_duration_seconds)
         logger.info("=" * 60)
+
+    @staticmethod
+    def _record_repairable(record: Dict[str, Any]) -> bool:
+        """Whether a saved record still has something to repair (diagnosis: an open group)."""
+        if record.get("kind") != "diagnosis":
+            return True
+        from app.core.remediation.group_context import repairable_groups
+
+        return bool(repairable_groups(record))
+
+    def _start_repair_batch(
+        self,
+        question: str,
+        final_state: WorkflowState,
+        overrides: Dict[str, Any],
+        repair_record: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Start the per-group repair batch a request asked for; ``(batch, note)``.
+
+        Two entries share the button's batch: a chat repair request the remediation node
+        dispatched, and ``/ask ... repair=plan`` after a deep diagnosis. Planning only:
+        every command still goes through policy, approval or auto mode, and recovery.
+        """
+        dispatch = final_state.get("remediation_dispatch")
+        owner = overrides.get("_remediation_owner")
+        if dispatch:
+            diagnosis_id, group_ids = dispatch.get("diagnosis_run_id"), dispatch.get("group_ids")
+            if not group_ids:
+                return None, ""
+        elif (
+            overrides.get("_auto_repair_plan")
+            and repair_record
+            and repair_record.get("kind") == "diagnosis"
+        ):
+            diagnosis_id, group_ids = repair_record["run_id"], None
+        else:
+            return None, ""
+        if not owner:
+            return None, "修复任务需要会话身份（session_id），本次未创建。"
+        from app.core.remediation.jobs import repair_jobs
+        from app.core.remediation.records import PlanConflict, RecordUnavailable
+
+        try:
+            batch = repair_jobs.start(
+                self.holmes_service, owner, diagnosis_id, question, group_ids=group_ids
+            )
+        except (PlanConflict, RecordUnavailable) as exc:
+            return None, str(exc)
+        return (
+            {
+                "batch_id": batch["batch_id"],
+                "diagnosis_run_id": diagnosis_id,
+                "groups": [
+                    {k: g.get(k) for k in ("group_id", "job_id", "status", "target")}
+                    for g in batch.get("groups") or []
+                ],
+            },
+            "",
+        )
 
     @staticmethod
     def _persist_repair_record(
