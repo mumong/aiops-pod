@@ -370,3 +370,18 @@ def test_batch_events_stream_until_every_job_is_terminal(tmp_path, monkeypatch):
         body = "".join(response.iter_text())
     assert "event: batch" in body and "event: end" in body
     assert '"status": "recovered"' in body
+
+
+def test_location_without_targets_is_not_repairable():
+    from app.core.remediation.group_context import repairable_groups
+
+    no_target = {
+        "payload": {
+            "diagnosis_handoff": {"targets": [], "pod_assessment": {"status": "inconclusive"}}
+        }
+    }
+    assert repairable_groups(no_target) == []
+    pending = {"payload": {"diagnosis_handoff": {"targets": [{"status": "investigate"}]}}}
+    assert [g["group_id"] for g in repairable_groups(pending)] == ["single"]
+    legacy = {"payload": {"report": "old"}}
+    assert [g["group_id"] for g in repairable_groups(legacy)] == ["single"]

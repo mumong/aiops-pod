@@ -42,8 +42,19 @@ def repairable_groups(record):
     raw_groups = payload.get("groups") or []
     groups = diagnosis_groups(record)
     if not raw_groups:
-        # v2 without cases: the diagnosis found nothing; legacy single reports stay eligible.
-        return [] if payload.get("contract_version") == "diagnosis-record.v2" else groups
+        # v2 without cases, or a location that handed over nothing to investigate (the
+        # healthy / no-target path), found nothing to repair. Older single reports
+        # without a stored handoff stay eligible.
+        if payload.get("contract_version") == "diagnosis-record.v2":
+            return []
+        handoff = payload.get("diagnosis_handoff")
+        if isinstance(handoff, dict) and not any(
+            t.get("status", "investigate") == "investigate"
+            for t in handoff.get("targets") or []
+            if isinstance(t, dict)
+        ):
+            return []
+        return groups
     return [
         group
         for group, raw in zip(groups, raw_groups, strict=True)

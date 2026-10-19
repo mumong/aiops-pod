@@ -1692,11 +1692,13 @@ class AICall:
             run.incomplete_reason = (
                 "idle_round" if isinstance(e, IdleRoundReached) else "repeat_limit"
             )
+            # An idle round means the model was done (every call repeated an answered
+            # one): an info event, not missing work. Repeat limits remain incomplete.
             self._push(
                 run.stream_queue,
                 node_id,
                 run.thinking_events,
-                type="execution_incomplete",
+                type=self._loop_stop_event_type(e),
                 reason=str(e),
             )
             if not run.final_content:
@@ -1851,6 +1853,12 @@ class AICall:
             "observations": observations,
             "analysis": [text for text in analysis if text.strip()],
         }
+
+    @staticmethod
+    def _loop_stop_event_type(exc: Exception) -> str:
+        """An idle round means the model was done (every call repeated an answered one):
+        an info event, not missing work. A repeat limit stays an incomplete stage."""
+        return "loop_finished" if isinstance(exc, IdleRoundReached) else "execution_incomplete"
 
     def _is_runaway_response(self, response: Any) -> bool:
         """Whole output reserve spent with no tool call and no delivery: nothing to act on."""

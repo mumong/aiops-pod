@@ -61,6 +61,20 @@ def healthy_check_report(assessment):
     return "\n".join(lines)
 
 
+INVENTORY_TOOL = "query_pod_lifecycle"
+
+
+def _scope_key(tool, args):
+    """Same tool over the same object scope (filters and fields may differ)."""
+    args = args if isinstance(args, dict) else {}
+    return (
+        tool,
+        str(args.get("namespace") or ""),
+        str(args.get("label_selector") or ""),
+        str(args.get("pod") or args.get("name") or ""),
+    )
+
+
 def assess_delivery(handoff, events, material=None):
     assessment = handoff.get("pod_assessment")
     if not isinstance(assessment, dict):
@@ -79,7 +93,7 @@ def assess_delivery(handoff, events, material=None):
         problems.append("仍有待核实或暂缓的目标")
     if not assessment.get("recent_signals_reviewed") or assessment.get("unresolved"):
         problems.append("近期线索或未解决事项尚未核实")
-    refs, continuations, consumed = set(), set(), set()
+    refs, consumed = set(), set()
     # IDs in producer-owned source maps are as valid as archive paths; prose is not.
     protected = (material or {}).get("protected_handoff") or {}
     sources = (protected.get("lifecycle_core") or {}).get("sources") or {}
@@ -97,38 +111,70 @@ def assess_delivery(handoff, events, material=None):
             for k in ("raw_ref", "structured_ref", "summary_ref")
             if isinstance(observation.get(k), str)
         )
+    inventory_refs, other_failures = [], []
+    inventory_failed = False
+    continuations, complete_scopes = {}, set()
     for event in events:
         if event.get("type") == "execution_incomplete":
             problems.append("本次执行存在未完成事项")
-        if event.get("type") != "tool_result":
-            continue
+        if event.get("type") != "tool_result" or event.get("deduplicated"):
+            continue  # repeat notices are the guard's own messages, not collection
+        tool = event.get("tool_name")
         args = event.get("tool_args") or {}
         if isinstance(args, dict) and args.get("continue_token"):
             consumed.add(args["continue_token"])
-        if event.get("status") in ("error", "failed") or event.get("semantic_success") is False:
-            problems.append("采集存在失败或未解析结果")
+        raw = event.get("result") or event.get("result_preview") or ""
+        try:
+            packet = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            packet = {}
+        packet = packet if isinstance(packet, dict) else {}
+        if (
+            event.get("status") in ("error", "failed")
+            or event.get("semantic_success") is False
+            or packet.get("status") == "error"
+        ):
+            if tool and tool != INVENTORY_TOOL:
+                other_failures.append(tool)
+            else:
+                inventory_failed = True
             continue
         refs.update(
             event[k]
             for k in ("raw_ref", "structured_ref", "summary_ref")
             if isinstance(event.get(k), str)
         )
-        raw = event.get("result") or event.get("result_preview") or ""
-        try:
-            packet = json.loads(raw) if isinstance(raw, str) else raw
-        except (ValueError, TypeError):
-            packet = {}
-        if isinstance(packet, dict):
-            if packet.get("status") == "error":
-                problems.append("源端查询失败")
-            token = packet.get("next_continue_token") or (packet.get("pagination") or {}).get(
-                "next_continue_token"
-            )
-            if token:
-                continuations.add(token)
-    if continuations - consumed:
+        pagination = packet.get("pagination") or {}
+        token = packet.get("next_continue_token") or pagination.get("next_continue_token")
+        scope = _scope_key(tool, args)
+        if token:
+            continuations[token] = scope
+        elif tool == INVENTORY_TOOL and not pagination.get("source_has_more"):
+            complete_scopes.add(scope)  # a later complete read of the same scope
+        if tool == INVENTORY_TOOL and isinstance(event.get("raw_ref"), str):
+            inventory_refs.append(event["raw_ref"])
+    outstanding = {
+        t
+        for t, scope in continuations.items()
+        if t not in consumed and scope not in complete_scopes
+    }
+    if outstanding:
         problems.append("存在未续读的数据页")
+    if inventory_failed:
+        problems.append("采集存在失败或未解析结果")
+    inventory_complete = bool(inventory_refs) and not outstanding and not inventory_failed
+    if other_failures:
+        if inventory_complete:
+            # Exploratory side queries do not change a complete Pod inventory; say so.
+            note = f"（另有与 Pod 状态判断无关的查询失败：{'、'.join(dict.fromkeys(other_failures))}）"
+            assessment["reason"] = (str(assessment.get("reason") or "") + note)[:600]
+        else:
+            problems.append("采集存在失败或未解析结果")
     cited = set(assessment.get("evidence_refs") or [])
+    if not cited and inventory_complete:
+        # The model cited nothing; the code knows which successful reads the verdict rests on.
+        assessment["evidence_refs"] = list(dict.fromkeys(inventory_refs))[:5]
+        cited = set(assessment["evidence_refs"])
     if not cited or not cited <= refs:
         problems.append("健康判断缺少本次真实工具引用")
     if problems:

@@ -192,3 +192,76 @@ def test_verified_healthy_check_is_reported_without_a_model_call():
         "全部 Running",
     ):
         assert text in out["conclusion"]
+
+
+# ---- live 2026-10-19 (runs 805ff1d4, 9d9f3ecf): a fully Running/Ready cluster stayed
+# inconclusive because of the guard's own notices and a superseded first page ----------
+
+
+def _lifecycle(ref, result, args=None, **extra):
+    return {
+        "type": "tool_result",
+        "tool_name": "query_pod_lifecycle",
+        "tool_args": args or {"record_type": "pod"},
+        "status": "success",
+        "raw_ref": ref,
+        "result": json.dumps(result),
+        **extra,
+    }
+
+
+def test_repeat_notices_and_idle_finish_do_not_downgrade_health():
+    records = events() + [
+        {
+            "type": "tool_result",
+            "tool_name": "query_pod_lifecycle",
+            "status": "error",
+            "deduplicated": True,
+            "result": "【重复调用，结果未变化】",
+        },
+        {"type": "loop_finished", "reason": "idle_round"},
+    ]
+    assert assess_delivery(healthy(), records)["pod_assessment"]["status"] == "healthy"
+
+
+def test_page_superseded_by_a_complete_query_of_the_same_scope_is_not_a_gap():
+    first = _lifecycle(
+        "/raw/a", {"status": "success", "pagination": {"next_continue_token": "t1"}}
+    )
+    complete = _lifecycle(
+        "/raw/1",
+        {"status": "success", "groups": [{"phase": "Running", "count": 108}]},
+        args={"record_type": "pod", "group_by": "phase"},
+    )
+    assert assess_delivery(healthy(), [first, complete])["pod_assessment"]["status"] == "healthy"
+    other_scope = _lifecycle("/raw/1", {"status": "success"}, args={"namespace": "other"})
+    assert (
+        assess_delivery(healthy(), [first, other_scope])["pod_assessment"]["status"]
+        == "inconclusive"
+    )
+
+
+def test_uncited_health_uses_the_successful_inventory_reads():
+    data = healthy()
+    data["pod_assessment"]["evidence_refs"] = []
+    records = [_lifecycle("/raw/inv", {"status": "success"})]
+    result = assess_delivery(data, records)["pod_assessment"]
+    assert result["status"] == "healthy" and result["evidence_refs"] == ["/raw/inv"]
+
+
+def test_unrelated_failed_query_is_noted_once_inventory_is_complete():
+    records = [
+        _lifecycle("/raw/1", {"status": "success"}),
+        {
+            "type": "tool_result",
+            "tool_name": "kubernetes_tabular_query",
+            "status": "error",
+            "result": "Command failed (exit 1)",
+        },
+    ]
+    result = assess_delivery(healthy(), records)["pod_assessment"]
+    assert result["status"] == "healthy" and "kubernetes_tabular_query" in result["reason"]
+    failed_inventory = [_lifecycle("/raw/1", {"status": "error"}, status="error")]
+    assert (
+        assess_delivery(healthy(), failed_inventory)["pod_assessment"]["status"] == "inconclusive"
+    )

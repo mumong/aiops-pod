@@ -98,3 +98,10 @@ def test_min_calls_is_configurable():
     assert all("重复调用" in m.content for m in out[2:])
     with pytest.raises(IdleRoundReached):
         _drive([[("c1", a), ("c2", b), ("c5", c)], [("c3", a), ("c4", b), ("c6", c)]], guards)
+
+
+def test_idle_finish_is_reported_as_finished_not_incomplete():
+    from app.core.aicall.errors import RepeatLimitReached
+
+    assert AICall._loop_stop_event_type(IdleRoundReached(2)) == "loop_finished"
+    assert AICall._loop_stop_event_type(RepeatLimitReached("x", 4, 3)) == "execution_incomplete"
