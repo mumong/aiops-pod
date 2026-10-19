@@ -129,16 +129,28 @@ def message_groups(messages):
 
 
 def partition_recent(groups, window, *, keep_tokens=None):
-    """Shared atomic suffix policy for agents and inter-node material."""
-    keep_budget = window_policy.current().recent_budget(window)
+    """Shared atomic suffix policy for agents and inter-node material.
+
+    Keeps at most ``recent_keep_interactions`` complete interactions verbatim. The
+    newest one stays up to ``latest_budget`` (the model acts on it next); any further
+    one must fit within ``recent_keep_ratio`` of the window. Everything older goes to
+    the working memory, which gets the larger budget (see ``window_policy``).
+    """
+    policy = window_policy.current()
+    keep_budget = policy.recent_budget(window)
+    latest_budget = policy.latest_budget(window)
     if keep_tokens is not None:
         keep_budget = min(keep_budget, keep_tokens)
+        latest_budget = min(latest_budget, max(keep_budget, keep_tokens))
     used, cut = 0, len(groups)
     for group in reversed(groups):
+        kept = len(groups) - cut
+        if kept >= policy.recent_keep_interactions:
+            break
         cost = count_tokens(json.dumps([compact_message(m) for m in group], ensure_ascii=False))[
             "tokens"
         ]
-        if used + cost > keep_budget:
+        if used + cost > (latest_budget if kept == 0 else keep_budget):
             break
         used += cost
         cut -= 1
@@ -252,7 +264,9 @@ def summary_chunks(question, serialized, *, window=None, sections=None):
     # Reserve space for the rolling summary, output and protocol/estimation error.
     input_limit = min(int(window * 0.72), window - 5000)
     prefix = SUMMARY_PROMPT + json.dumps({"original_question": question}, ensure_ascii=False)
-    capacity = input_limit - count_tokens(prefix)["tokens"] - 6000
+    # The rolling working memory rides along with every chunk; reserve it plus output.
+    reserve = max(6000, 2 * window_policy.current().summary_budget(window))
+    capacity = input_limit - count_tokens(prefix)["tokens"] - reserve
     if capacity < 512:
         raise RuntimeError("摘要输入预算不足，未删除历史")
 
@@ -296,6 +310,11 @@ async def summarize_history(
     """Prefer a single call; every input unit is consumed if segmentation is needed."""
     summary = ""
     stats = stats if stats is not None else {}
+    window = window or int(os.getenv("MODEL_CONTEXT_WINDOW", "32000"))
+    budget = window_policy.current().summary_budget(window)
+    card_budget = max(400, int(budget * 0.6))
+    # Token slack for tokenizer drift between our estimate and the provider's count.
+    accept_limit = int(budget * 1.15) + 64
     chunks, input_limit = summary_chunks(question, serialized, window=window, sections=sections)
     total = len(chunks)
 
@@ -324,6 +343,7 @@ async def summarize_history(
                         content=json.dumps(
                             {
                                 "mode": "map",
+                                "summary_budget_tokens": card_budget,
                                 "original_question": question,
                                 "chunk_index": index,
                                 "is_last_chunk": index == total - 1,
@@ -338,7 +358,9 @@ async def summarize_history(
                     > input_limit
                 ):
                     raise RuntimeError("摘要请求超过预算，未删除历史")
-                bounded_model = model.bind(max_tokens=2000) if hasattr(model, "bind") else model
+                bounded_model = (
+                    model.bind(max_tokens=card_budget) if hasattr(model, "bind") else model
+                )
                 stats["calls"] = stats.get("calls", 0) + 1
                 response = await bounded_model.ainvoke(
                     request,
@@ -348,7 +370,7 @@ async def summarize_history(
                 if (
                     not isinstance(card, str)
                     or not card.strip()
-                    or count_tokens(card)["tokens"] > 5000
+                    or count_tokens(card)["tokens"] > accept_limit
                 ):
                     raise RuntimeError("分段摘要为空或超预算，未替换历史")
                 if (getattr(response, "response_metadata", {}) or {}).get(
@@ -400,6 +422,7 @@ async def summarize_history(
                     content=json.dumps(
                         {
                             "original_question": question,
+                            "summary_budget_tokens": budget,
                             "working_summary": summary,
                             "mode": "reduce" if parallel is False else "rolling",
                             "chunk_index": index,
@@ -415,7 +438,8 @@ async def summarize_history(
             if count_tokens(SUMMARY_PROMPT + request[-1].content)["tokens"] + 512 > input_limit:
                 raise RuntimeError("摘要请求超过预算，未删除历史")
             stats["calls"] = stats.get("calls", 0) + 1
-            response = await model.ainvoke(
+            bounded_model = model.bind(max_tokens=budget) if hasattr(model, "bind") else model
+            response = await bounded_model.ainvoke(
                 request,
                 config={"tags": ["nostream"], "metadata": {"aiops_internal_compaction": True}},
             )
@@ -432,10 +456,7 @@ async def summarize_history(
         if not isinstance(summary, str) or not summary.strip():
             notify("error", "上下文整理返回空内容，未替换工作历史。")
             raise RuntimeError("上下文整理返回空内容，未替换原工作历史")
-        if (
-            len(summary) > 18000
-            or count_tokens(json.dumps(summary, ensure_ascii=False))["tokens"] > 5000
-        ):
+        if count_tokens(json.dumps(summary, ensure_ascii=False))["tokens"] > accept_limit:
             notify("error", "上下文整理结果过长，未替换工作历史。")
             raise RuntimeError("上下文整理未遵守输出预算，未替换原工作历史")
         offset += len(chunk)

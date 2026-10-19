@@ -301,7 +301,10 @@ data:
       # （或 llm.context_window）。LLM 侧调整窗口（如 54K -> 128K）时只改那一处；
       # 下面都是比例或绝对预留量：
       #   - hard_guard_input_ratio：调用前输入上限 = 窗口 × 比例，再扣输出预留与安全余量
-      #   - recent_keep_ratio / recent_keep_tokens：压缩时保留的近期完整交互 = min(两者)
+      #   - 压缩策略"重前期"（2026-10-19）：决定性事实大多在前中期取得，触发压缩时
+      #     近期原文只保留最近 recent_keep_interactions 次完整交互（最新一次最多占窗口 15%，
+      #     其余合计不超过 recent_keep_ratio × 窗口），较早历史整理成工作记忆，
+      #     工作记忆输出预算 = summary_output_ratio × 窗口（54K≈4320 / 30K≈2400 / 70K≈5600）
       #   - llm.output_tokens：各类调用的输出预留（见上）
       #   - max_context_window：仅限制旧的"运行时轻量压缩"路径在多大的窗口内启用；
       #     当前 54K 已超过它，实际压缩由 WorkingContextMiddleware（hard guard）完成
@@ -313,8 +316,9 @@ data:
         trigger_ratio: 0.70
         max_compactions_per_call: 1
         summary_max_tokens: 1200
-        recent_keep_ratio: 0.15
-        recent_keep_tokens: 8000
+        recent_keep_interactions: 2
+        recent_keep_ratio: 0.06
+        summary_output_ratio: 0.08
         hard_guard_enabled: true
         hard_guard_input_ratio: 0.90
         hard_guard_safety_tokens: 2000

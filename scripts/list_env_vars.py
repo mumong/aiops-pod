@@ -38,14 +38,15 @@ def collect():
                 ast.get_source_segment(source, node.args[1]) if len(node.args) > 1 else "—"
             )
             entry["where"].append(f"{path.relative_to(ROOT)}:{node.lineno}")
-        # Env tables: {"field": ("ENV_NAME", default), ...} (see aicall/output_budget.py).
+        # Env tables: {"field": ("ENV_NAME", default[, bounds...]), ...} (output_budget.py,
+        # window_policy.py).
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, ast.Dict):
                 continue
             for value in node.values:
                 if not (
                     isinstance(value, ast.Tuple)
-                    and len(value.elts) == 2
+                    and len(value.elts) >= 2
                     and isinstance(value.elts[0], ast.Constant)
                     and isinstance(value.elts[0].value, str)
                     and re.fullmatch(r"[A-Z][A-Z0-9_]+", value.elts[0].value)

@@ -57,7 +57,7 @@ A2A 可增加 A2A_API_TOKEN。模型需要支持工具调用；配置中的 llm.
 | `llm.no_thinking_nodes` | `[]` | 以内部（不带 thinking）设置运行工具循环的节点；Qwen3.6 实测关 thinking 后工具规划退化，保持为空 |
 | `llm.internal_extra_body` | 关 thinking + instruct 采样 | 只用于路由、压缩、结构化收卷等内部调用 |
 | `workflow.max_steps.<node>` | 48 / 64 | LangGraph 递归上限，到顶进入结构化收卷而不是丢弃结果 |
-| `workflow.context_compaction.recent_keep_ratio / recent_keep_tokens` | 0.15 / 8000 | 压缩时保留的近期原文上限 |
+| `workflow.context_compaction.recent_keep_interactions / recent_keep_ratio / summary_output_ratio` | 2 / 0.06 / 0.08 | 压缩"重前期"：近期原文最多保留 2 次完整交互（最新一次 ≤ 窗口 15%，其余 ≤ 窗口 6%），较早历史的工作记忆预算 = 窗口 × 8% |
 | `workflow.evidence.parallel.max_workers` | 10 | 多 Pod 取证 lane 并发（上限 16） |
 
 每个护栏触发都会在 `run_report.md` 的"发现"里出现，并在最终回答的 `missing` 中如实标注"执行未完成"的原因，不会伪装成完整结果。
