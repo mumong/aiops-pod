@@ -54,4 +54,4 @@
 - 分类规则只描述 Agent 行为，不含任何 Kubernetes 故障语义；新 Pod、新异常类型不需要改这里。
 - 新增护栏时：在工具消息上加 `aiops_*` 标记或记录一个事件，再在 `findings.py` 加一条规则。
 
-已确认属于模型或推理服务自身的异常及外部记录见 [LLM 自身异常记录](llm-model-anomalies.md)。
+模型或推理服务自身的异常及外部记录见 [LLM 自身异常记录](llm-model-anomalies.md)。
