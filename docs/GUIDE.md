@@ -66,7 +66,7 @@ A2A 可增加 A2A_API_TOKEN。模型需要支持工具调用；配置中的 llm.
 
 | 能力 | 怎么看、怎么试 |
 |---|---|
-| 高危命令规则 | `GET /repair/policy` 列出生效规则（禁止动词、强制/批量参数、禁止写入的资源、容器内禁止命令）；`POST /repair/policy/check {"commands":[...]}` 逐条返回 `allowed/rule/reason`，**不执行**。前端修复面板"命令安全检查"调用同一接口。规划、执行预检、检查接口共用一套引擎，拒绝时带规则名并写审计 |
+| 高危命令规则 | `GET /repair/policy` 列出生效规则（禁止动词、强制/批量参数、禁止写入的资源、容器内禁止命令）；`POST /repair/policy/check {"commands":[...]}` 逐条返回 `allowed/rule/reason`，**不执行**。前端修复面板只展示执行方式与拦截规则，命令检查与模式切换通过接口进行。规划、执行预检、检查接口共用一套引擎，拒绝时带规则名并写审计 |
 | 人工审批 | `mode: review`（配置默认）：每个动作先出现审批请求，批准后执行审批时的命令快照；拒绝、超时（`approval_timeout_seconds`）、取消都不执行 |
 | 自动执行开关 | `PUT /repair/policy/mode {"mode":"auto","reason":"…","ttl_minutes":30}`，请求头 `X-AIOps-Admin-Token`（Secret `AIOPS_ADMIN_TOKEN`，未配置则开关不可用）。覆盖到期自动回到配置值；`DELETE` 立即恢复。只影响之后创建的任务；任务记录 `mode` 与 `mode_source`，命令事件带 `approval: "auto"` 或审批 ID |
 | 审计 | `GET /repair/audit?kind=mode_changed|approval_decided|command_executed|command_denied`（管理员令牌或原会话 Cookie）；文件 `repair_records/audit.jsonl` |
