@@ -216,6 +216,7 @@ class QueryConclusionNode(FocusedTaskNode):
         from app.core.aicall.client import StructuredContextBudgetError
 
         final_compacted_summary = None
+        pod_check = False
         try:
             prompt = QUERY_CONCLUSION_PROMPT
             if (payload.get("request_contract") or {}).get("route") == "full_diagnosis":
@@ -223,6 +224,7 @@ class QueryConclusionNode(FocusedTaskNode):
                 if assessment.get("status") in ("healthy", "inconclusive") and not state.get(
                     "rca_analysis"
                 ):
+                    pod_check = True
                     prompt += "\n这是定位后直接结束的 Pod 检查，只输出简短检查结论、范围/时间/数量、关键依据及限制。不要套用异常概览、根因、三维证据表，不把没有调查的无关维度列成待办。inconclusive 必须明确具体缺口。历史累计重启不冒充近期异常；仅当近期线索仍未解释才列为待核实。"
                 else:
                     prompt += "\n" + DEEP_CONCLUSION_PRESENTATION
@@ -238,6 +240,10 @@ class QueryConclusionNode(FocusedTaskNode):
                     force_no_tools=True,
                     skip_remediation_policy=True,
                     expect_json=True,
+                    # A location-only Pod check restates collected facts: one tool-free
+                    # structured delivery (internal, no thinking) like RCA, not a
+                    # streamed thinking call (runs c187251f / 3dab7e34: 28 s / 64 s).
+                    **({"response_schema": QueryAnswer} if pod_check else {}),
                 )
 
             try:

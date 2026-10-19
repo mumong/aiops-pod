@@ -278,3 +278,24 @@ def test_step_limit_after_a_complete_inventory_is_noted_not_blocking():
     assert assess_delivery(pending, records)["pod_assessment"]["status"] == "inconclusive"
     no_inventory = events() + [{"type": "execution_incomplete"}]
     assert assess_delivery(healthy(), no_inventory)["pod_assessment"]["status"] == "inconclusive"
+
+
+def test_repeat_notice_text_and_corrected_failures_do_not_block():
+    # Live run 3dab7e34: notices carried no flag, and two early group_by mistakes were
+    # followed by successful reads of the same scope.
+    records = [
+        _lifecycle("/raw/x", {"status": "error"}, status="error"),
+        _lifecycle("/raw/1", {"status": "success"}),
+        {
+            "type": "tool_result",
+            "tool_name": "query_pod_lifecycle",
+            "status": "error",
+            "result": "【重复调用，结果未变化】query_pod_lifecycle 的参数……",
+        },
+    ]
+    assert assess_delivery(healthy(), records)["pod_assessment"]["status"] == "healthy"
+    uncorrected = [
+        _lifecycle("/raw/1", {"status": "success"}),
+        _lifecycle("/raw/y", {"status": "error"}, args={"namespace": "b"}, status="error"),
+    ]
+    assert assess_delivery(healthy(), uncorrected)["pod_assessment"]["status"] == "inconclusive"

@@ -64,6 +64,14 @@ def healthy_check_report(assessment):
 INVENTORY_TOOL = "query_pod_lifecycle"
 
 
+def _is_repeat_notice(event):
+    """The dedup guard's own answer to a repeated call (flag, or its fixed prefix)."""
+    if event.get("deduplicated"):
+        return True
+    text = event.get("result") or event.get("result_preview") or ""
+    return isinstance(text, str) and text.lstrip().startswith("【重复调用")
+
+
 def _scope_key(tool, args):
     """Same tool over the same object scope (filters and fields may differ)."""
     args = args if isinstance(args, dict) else {}
@@ -112,13 +120,13 @@ def assess_delivery(handoff, events, material=None):
             if isinstance(observation.get(k), str)
         )
     inventory_refs, other_failures = [], []
-    inventory_failed = False
+    failed_scopes = set()
     continuations, complete_scopes = {}, set()
     incomplete = False
     for event in events:
         if event.get("type") == "execution_incomplete":
             incomplete = True
-        if event.get("type") != "tool_result" or event.get("deduplicated"):
+        if event.get("type") != "tool_result" or _is_repeat_notice(event):
             continue  # repeat notices are the guard's own messages, not collection
         tool = event.get("tool_name")
         args = event.get("tool_args") or {}
@@ -138,7 +146,7 @@ def assess_delivery(handoff, events, material=None):
             if tool and tool != INVENTORY_TOOL:
                 other_failures.append(tool)
             else:
-                inventory_failed = True
+                failed_scopes.add(_scope_key(tool, args))
             continue
         refs.update(
             event[k]
@@ -148,6 +156,7 @@ def assess_delivery(handoff, events, material=None):
         pagination = packet.get("pagination") or {}
         token = packet.get("next_continue_token") or pagination.get("next_continue_token")
         scope = _scope_key(tool, args)
+        failed_scopes.discard(scope)  # a later success in the same scope corrected it
         if token:
             continuations[token] = scope
         elif tool == INVENTORY_TOOL and not pagination.get("source_has_more"):
@@ -161,9 +170,9 @@ def assess_delivery(handoff, events, material=None):
     }
     if outstanding:
         problems.append("存在未续读的数据页")
-    if inventory_failed:
+    if failed_scopes:
         problems.append("采集存在失败或未解析结果")
-    inventory_complete = bool(inventory_refs) and not outstanding and not inventory_failed
+    inventory_complete = bool(inventory_refs) and not outstanding and not failed_scopes
     pending = any(
         t.get("status", "investigate") in ("investigate", "deferred")
         for t in handoff.get("targets", [])
