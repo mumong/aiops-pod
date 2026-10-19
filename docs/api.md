@@ -62,7 +62,7 @@ curl -N -c $J -b $J -X POST $B/ask -d 'q=我的集群 pod 有什么问题' \
 curl -N -c $J -b $J -X POST $B/ask -d 'q=修复刚刚的问题' -d session_id=$S -d stream=true -d format=sse
 ```
 
-只有诊断结论为 abnormal / inconclusive 的组会生成任务；全部 healthy / recovered 时返回 409"未发现需要修复的异常组"。同一诊断、同一组选择重复发起，返回同一个批次。
+带 `repair=plan` 时，如果会话里还没有诊断（例如直接说"诊断并修复 xx"），会先做深度诊断再自动建批次，审批一律走批次；不带 `repair=plan` 的对话行为不变。只有诊断结论为 abnormal / inconclusive 的组会生成任务；全部 healthy / recovered 时返回 409"未发现需要修复的异常组"。同一诊断、同一组选择重复发起，返回同一个批次。
 
 ## 5. 查看方案、审批、观察结果
 
