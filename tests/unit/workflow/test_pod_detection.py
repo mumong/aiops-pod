@@ -179,12 +179,14 @@ def test_verified_healthy_check_is_reported_without_a_model_call():
                 "targets": [],
                 "coverage": "complete",
             },
+            "thinking_events": [{"type": "execution_incomplete", "reason": "step_limit"}],
         }
     )
     answer = out["query_answer"]
     assert (
         answer["status"] == "answered" and answer["evidence_refs"] == assessment["evidence_refs"]
     )
+    assert not answer["missing"] and "执行未完成" not in out["conclusion"]
     for text in (
         "未发现 Pod 异常",
         "全集群 Pod（108 个容器）",
@@ -265,3 +267,14 @@ def test_unrelated_failed_query_is_noted_once_inventory_is_complete():
     assert (
         assess_delivery(healthy(), failed_inventory)["pod_assessment"]["status"] == "inconclusive"
     )
+
+
+def test_step_limit_after_a_complete_inventory_is_noted_not_blocking():
+    records = [_lifecycle("/raw/1", {"status": "success"}), {"type": "execution_incomplete"}]
+    result = assess_delivery(healthy(), records)["pod_assessment"]
+    assert result["status"] == "healthy" and "步数上限" in result["reason"]
+    pending = healthy()
+    pending["targets"] = [{"status": "investigate"}]
+    assert assess_delivery(pending, records)["pod_assessment"]["status"] == "inconclusive"
+    no_inventory = events() + [{"type": "execution_incomplete"}]
+    assert assess_delivery(healthy(), no_inventory)["pod_assessment"]["status"] == "inconclusive"

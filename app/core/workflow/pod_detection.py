@@ -114,9 +114,10 @@ def assess_delivery(handoff, events, material=None):
     inventory_refs, other_failures = [], []
     inventory_failed = False
     continuations, complete_scopes = {}, set()
+    incomplete = False
     for event in events:
         if event.get("type") == "execution_incomplete":
-            problems.append("本次执行存在未完成事项")
+            incomplete = True
         if event.get("type") != "tool_result" or event.get("deduplicated"):
             continue  # repeat notices are the guard's own messages, not collection
         tool = event.get("tool_name")
@@ -163,6 +164,18 @@ def assess_delivery(handoff, events, material=None):
     if inventory_failed:
         problems.append("采集存在失败或未解析结果")
     inventory_complete = bool(inventory_refs) and not outstanding and not inventory_failed
+    pending = any(
+        t.get("status", "investigate") in ("investigate", "deferred")
+        for t in handoff.get("targets", [])
+    )
+    if incomplete:
+        if inventory_complete and not pending:
+            # The stage ran out of steps after the inventory was complete and nothing was
+            # pending (live: run 69c93246 kept reading unrelated YAML until step_limit).
+            note = "（定位阶段在步数上限结束；Pod 清单已完整，未留下待调查目标）"
+            assessment["reason"] = (str(assessment.get("reason") or "") + note)[:600]
+        else:
+            problems.append("本次执行存在未完成事项")
     if other_failures:
         if inventory_complete:
             # Exploratory side queries do not change a complete Pod inventory; say so.

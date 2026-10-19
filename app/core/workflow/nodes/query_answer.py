@@ -173,8 +173,18 @@ class QueryConclusionNode(FocusedTaskNode):
             answer=text,
             evidence_refs=[r for r in assessment.get("evidence_refs") or [] if r],
         )
+        # assess_delivery only kept "healthy" after judging any stage incompleteness
+        # harmless (and wrote that into the reason); do not re-add it as a missing item.
+        settled = {
+            **state,
+            "thinking_events": [
+                e
+                for e in state.get("thinking_events") or []
+                if e.get("type") != "execution_incomplete"
+            ],
+        }
         return finalize_query_answer(
-            self, state, answer.model_dump_json(), [], require_structured=True
+            self, settled, answer.model_dump_json(), [], require_structured=True
         )
 
     def execute(self, state):
