@@ -14,6 +14,7 @@ from app.core.remediation.audit import audit_event
 from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
 from app.core.remediation.policy import CommandPolicy, validate_target_command
 from app.core.remediation.recovery import RecoveryConfig, RecoveryWatch
+from app.core.workflow.group_runner import group_display_name
 
 _lock = threading.Lock()
 _command_lock = threading.Lock()
@@ -456,7 +457,8 @@ class PodRepairExecutor:
                 yield {**event, "run_id": run_id}
             status = summary["status"]
             details = "；".join(
-                f"{item['group_id']}：{item['reason']}" for item in summary.get("targets", [])
+                f"{group_display_name(item['group_id'])}：{item['reason']}"
+                for item in summary.get("targets", [])
             )
             if verify_failures:
                 summary["verify_failures"] = verify_failures

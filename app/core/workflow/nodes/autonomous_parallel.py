@@ -13,7 +13,11 @@ from app.core.prompts import (
     PARALLEL_LANE_QUESTION_TEMPLATE,
 )
 from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
-from app.core.workflow.group_runner import iter_group_results, resolve_lane_workers
+from app.core.workflow.group_runner import (
+    group_display_name,
+    iter_group_results,
+    resolve_lane_workers,
+)
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.query_answer import build_working_material
 from app.core.workflow.pod_identity import complete_pod_namespaces
@@ -219,7 +223,7 @@ class AutonomousParallelNode(WorkflowNode):
                         [],
                         type="runtime_status",
                         status="running",
-                        content=f"{group['group_id']}：正在{'采集证据' if node.collect else '分析根因'}",
+                        content=f"{group_display_name(group['group_id'])}：正在{'采集证据' if node.collect else '分析根因'}",
                     )
                 local.update(node.execute(local))
             except Exception as exc:
@@ -284,7 +288,12 @@ class AutonomousParallelNode(WorkflowNode):
                     "status": "partial",
                     "error": str(error),
                 }
-                lane_events = [{"type": "execution_incomplete", "reason": f"{gid}: {error}"}]
+                lane_events = [
+                    {
+                        "type": "execution_incomplete",
+                        "reason": f"{group_display_name(gid)}: {error}",
+                    }
+                ]
                 if state.get("diagnosis_handoff") and group.get("target_id"):
                     retained = scoped_handoff(state["diagnosis_handoff"], group["target_id"])
                     result["material"] = {
@@ -301,7 +310,7 @@ class AutonomousParallelNode(WorkflowNode):
                     {
                         "type": "execution_incomplete",
                         "lane_id": gid,
-                        "reason": f"{gid}: {result.get('error') or 'partial'}",
+                        "reason": f"{group_display_name(gid)}: {result.get('error') or 'partial'}",
                     }
                 )
             if getattr(self, "ai_call", None):
@@ -316,7 +325,7 @@ class AutonomousParallelNode(WorkflowNode):
                     [],
                     type="runtime_status",
                     status="complete",
-                    content=f"{gid}：{'部分完成' if result['status'] == 'partial' else '分支已结束'}",
+                    content=f"{group_display_name(gid)}：{'部分完成' if result['status'] == 'partial' else '分支已结束'}",
                 )
                 self.ai_call._push(
                     self._event_queue,
@@ -324,7 +333,7 @@ class AutonomousParallelNode(WorkflowNode):
                     [],
                     type="runtime_status",
                     status="running",
-                    content=f"分组诊断已结束 {len(results)}/{len(groups)}；{gid}：{'部分完成' if result['status'] == 'partial' else '已结束'}",
+                    content=f"分组诊断已结束 {len(results)}/{len(groups)}；{group_display_name(gid)}：{'部分完成' if result['status'] == 'partial' else '已结束'}",
                 )
         ordered = [results[g["group_id"]] for g in groups]
         warnings = list(state.get("warnings") or [])

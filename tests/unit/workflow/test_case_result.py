@@ -196,7 +196,7 @@ def test_source_cell_already_naming_its_dimension_is_not_labelled_twice():
 
 
 def test_report_groups_are_named_for_people_not_by_machine_id():
-    from app.core.workflow.case_report import group_display_name
+    from app.core.workflow.group_runner import group_display_name
 
     assert group_display_name("g3") == "异常组 3"
     assert group_display_name("custom") == "custom"

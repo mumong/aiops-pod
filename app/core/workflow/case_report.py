@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 from copy import deepcopy
 from datetime import datetime, timezone
 
@@ -11,17 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.core.aicall.errors import raise_on_model_disconnect
 from app.core.context.budget import ModelContextResolver, count_tokens
 from app.core.workflow.case_result import case_index
+from app.core.workflow.group_runner import group_display_name
 
 
 class OverviewOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     overview: str = Field(min_length=1, max_length=2400)
-
-
-def group_display_name(group_id):
-    """ "g3" → "异常组 3" for people; the id itself stays the machine key."""
-    match = re.fullmatch(r"g(\d+)", str(group_id or "").strip())
-    return f"异常组 {match.group(1)}" if match else str(group_id or "")
 
 
 def diagnosis_cases(state):
