@@ -49,6 +49,9 @@ class AdapterSettings:
     request_timeout_seconds: float = 1800.0
     connect_timeout_seconds: float = 10.0
     api_token: str = ""
+    # Token of this adapter's API principal on the backend (AIOPS_API_TOKENS); enables
+    # sessions per A2A context and the repair skill. Empty: query/diagnosis only.
+    backend_api_token: str = ""
     agent_name: str = "Kubernetes AIOps Copilot"
     agent_version: str = "1.0.0"
 
@@ -69,6 +72,7 @@ class AdapterSettings:
             request_timeout_seconds=_positive_float("A2A_REQUEST_TIMEOUT_SECONDS", 1800.0),
             connect_timeout_seconds=_positive_float("A2A_CONNECT_TIMEOUT_SECONDS", 10.0),
             api_token=os.getenv("A2A_API_TOKEN", "").strip(),
+            backend_api_token=os.getenv("A2A_BACKEND_API_TOKEN", "").strip(),
             agent_name=os.getenv("A2A_AGENT_NAME", "Kubernetes AIOps Copilot").strip()
             or "Kubernetes AIOps Copilot",
             agent_version=os.getenv("A2A_AGENT_VERSION", os.getenv("APP_VERSION", "1.0.0")).strip()

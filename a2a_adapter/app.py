@@ -82,6 +82,23 @@ def build_agent_card(settings: AdapterSettings) -> AgentCard:
                 tags=["kubernetes", "metrics", "prometheus", "query"],
                 examples=["查询当前集群各 Node 的 CPU 和内存使用率。"],
             ),
+            AgentSkill(
+                id="kubernetes-repair",
+                name="Kubernetes Pod repair with human approval",
+                description=(
+                    "Set metadata aiops_mode=repair. Diagnoses (or reuses this context's "
+                    "diagnosis), plans one repair job per abnormal group, and pauses in "
+                    "input-required with each action and its approval_id. Reply in the same "
+                    "task with a DataPart {approval_id, approved, reviewer} or text "
+                    "'批准 <approval_id>' / '拒绝 <approval_id>'. High-risk command rules run "
+                    "before any approval; results include the recovery verdict."
+                ),
+                tags=["kubernetes", "aiops", "remediation", "human-in-the-loop"],
+                examples=[
+                    "诊断并修复 aiops-case-11 命名空间中的异常 Pod",
+                    "修复刚刚的问题",
+                ],
+            ),
         ],
         security=security,
         security_schemes=schemes,

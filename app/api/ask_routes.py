@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.common import current_service, fix_double_encoding, logger, streaming_response
+from app.api.identity import principal
 
 router = APIRouter()
 
@@ -63,7 +64,8 @@ def _query_session_owner(request, session_id, overrides):
     overrides["_plan_run_id"] = plan_id
     if not session_id:
         return None
-    owner = request.cookies.get("aiops_query_owner", "")
+    caller = principal(request)  # API token callers keep a stable owner without cookies
+    owner = caller.owner if caller else request.cookies.get("aiops_query_owner", "")
     if not re.fullmatch(r"[0-9a-f]{64}", owner):
         owner = secrets.token_hex(32)
     overrides["_query_session_key"] = (owner, session_id)
@@ -362,15 +364,18 @@ async def remediation_approve(
     reviewer: str = Form("", description="审批人"),
     reason: str = Form("", description="审批原因"),
 ):
+    from app.api.identity import principal, request_owner
     from app.core.remediation.approval import approval_store
 
+    caller = principal(request)
+    reviewer = reviewer or (caller.name if caller else "")
     ok = approval_store.resolve(
         run_id=run_id,
         approval_id=approval_id,
         approved=approved,
         reviewer=reviewer,
         reason=reason,
-        owner=request.cookies.get("aiops_query_owner", ""),
+        owner=request_owner(request),
     )
     if not ok:
         logger.warning(

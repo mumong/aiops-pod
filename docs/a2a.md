@@ -31,6 +31,10 @@ A2A Client
 
 首版不支持 Push Notification，也不通过 A2A 开放自动修复写操作。
 
+### 1.1 修复技能（kubernetes-repair）
+
+`metadata.aiops_mode=repair` 时，适配器诊断（或复用同一 contextId 的诊断）并按异常组生成修复方案；有待审批动作时任务进入 `input-required`，调用方在同一任务回复 `{approval_id, approved, reviewer}`（DataPart）或文本"批准/拒绝 <approval_id>"，适配器调用后端审批接口后继续，结束时返回各组恢复结果。需要配置 `A2A_BACKEND_API_TOKEN`（后端 `AIOPS_API_TOKENS` 中的 `a2a` 身份）。完整 curl 示例见 [HTTP API 第 7 节](api.md#7-a2a-调用含修复与人工审批)。
+
 ## 2. 本地启动
 
 A2A Adapter 必须使用独立虚拟环境。不要把它安装到 HolmesGPT 的 `.venv`：

@@ -124,6 +124,7 @@ async def test_agent_card_is_discoverable_and_declares_protocol_capabilities():
     assert {skill["id"] for skill in card["skills"]} == {
         "kubernetes-diagnosis",
         "kubernetes-query",
+        "kubernetes-repair",
     }
 
 

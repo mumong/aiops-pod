@@ -385,3 +385,42 @@ def test_location_without_targets_is_not_repairable():
     assert [g["group_id"] for g in repairable_groups(pending)] == ["single"]
     legacy = {"payload": {"report": "old"}}
     assert [g["group_id"] for g in repairable_groups(legacy)] == ["single"]
+
+
+def test_api_principal_reaches_its_batches_and_is_the_default_reviewer(tmp_path, monkeypatch):
+    import app.api.repair_routes as routes
+    from app.api.identity import principal_owner
+    from app.core.remediation.approval import approval_store
+
+    monkeypatch.setenv("AIOPS_API_TOKENS", "a2a=tok-a2a")
+    jobs = RepairJobs(RepairRecordStore(tmp_path))
+    owner = principal_owner("a2a")
+    jobs.store.save("d", owner, None, "diagnosis", {"groups": [{"group_id": "g1"}]})
+    monkeypatch.setattr(jobs, "_plan_batch", lambda *args: None)
+    monkeypatch.setattr(routes, "repair_jobs", jobs)
+    monkeypatch.setattr(routes, "get_service", lambda: None)
+    audit = []
+    monkeypatch.setattr(
+        "app.core.remediation.audit.audit_event", lambda kind, **f: audit.append(f)
+    )
+    app = FastAPI()
+    routes.register_repair_routes(app)
+    client = TestClient(app)
+    auth = {"Authorization": "Bearer tok-a2a"}
+    assert client.post("/repair/batches", json={"diagnosis_run_id": "d"}).status_code == 401
+    job_id = client.post("/repair/batches", json={"diagnosis_run_id": "d"}, headers=auth).json()[
+        "groups"
+    ][0]["job_id"]
+    request = approval_store.create_request(job_id, "action", "t", {}, owner=owner)
+    jobs._update(
+        job_id, owner, status="awaiting_approval", approval={"approval_id": request.approval_id}
+    )
+    ok = client.post(
+        f"/repair/jobs/{job_id}/approve",
+        json={"approval_id": request.approval_id, "approved": True},
+        headers=auth,
+    )
+    assert ok.status_code == 200
+    assert audit[-1]["reviewer"] == "a2a" and audit[-1]["principal"] == "a2a"
+    bad = client.get("/repair/batches/batch-d", headers={"Authorization": "Bearer nope"})
+    assert bad.status_code == 401

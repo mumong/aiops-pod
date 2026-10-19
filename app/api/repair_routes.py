@@ -2,13 +2,13 @@
 
 import asyncio
 import json
-import re
 from typing import List, Optional
 
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.identity import principal, request_owner
 from app.core.remediation.audit import read_audit
 from app.core.remediation.jobs import ACTIVE_JOB_STATUSES, repair_jobs
 from app.core.remediation.policy import CommandPolicy, check_command
@@ -87,9 +87,10 @@ def _policy_view():
 
 def register_repair_routes(app):
     def owner(request):
-        value = request.cookies.get("aiops_query_owner", "")
-        if not re.fullmatch(r"[a-f0-9]{64}", value):
-            raise HTTPException(401, "请使用原诊断会话的身份访问修复记录")
+        # Browser: the owner cookie. Scripts / A2A: an API token (see app.api.identity).
+        value = request_owner(request)
+        if not value:
+            raise HTTPException(401, "请使用原诊断会话的身份（cookie 或 API 令牌）访问修复记录")
         return value
 
     def call(fn, *args):
@@ -131,6 +132,8 @@ def register_repair_routes(app):
         from app.core.remediation.audit import audit_event
 
         identity = owner(request)
+        caller = principal(request)
+        reviewer = body.reviewer or (caller.name if caller else "")
         job = call(repair_jobs.detail, job_id, identity)
         if (job.get("approval") or {}).get("approval_id") != body.approval_id:
             raise HTTPException(409, "该审批不是本任务当前待审批的动作，请刷新任务状态")
@@ -138,7 +141,7 @@ def register_repair_routes(app):
             run_id=job_id,
             approval_id=body.approval_id,
             approved=body.approved,
-            reviewer=body.reviewer,
+            reviewer=reviewer,
             reason=body.reason,
             owner=identity,
         ):
@@ -148,9 +151,10 @@ def register_repair_routes(app):
             run_id=job_id,
             approval_id=body.approval_id,
             approved=body.approved,
-            reviewer=body.reviewer,
+            reviewer=reviewer,
             reason=body.reason,
             channel="api",
+            principal=caller.name if caller else None,
         )
         return call(repair_jobs.detail, job_id, identity)
 

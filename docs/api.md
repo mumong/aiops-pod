@@ -6,14 +6,18 @@
 
 | 概念 | 说明 |
 |---|---|
+| API 令牌（推荐给脚本 / Agent） | 请求头 `Authorization: Bearer <token>` 或 `X-AIOps-API-Token: <token>`。令牌配置在 Secret `AIOPS_API_TOKENS`（`name=token,...`），每个 name 是一个独立身份，记录归属于它，审批人默认就是这个 name 并写入审计；令牌不匹配返回 401。带令牌时不需要 cookie |
 | `session_id` | 调用方自取的会话 ID，16–128 字符（字母、数字、`_`、`-`）。同一会话内的问答构成上下文，"修复刚刚的问题"靠它找到上一轮诊断 |
-| owner cookie | 首次带 `session_id` 调用 `/ask` 或 `/query` 时，服务端下发 HttpOnly cookie `aiops_query_owner`（64 位十六进制）。诊断记录、修复任务和审批都绑定这个身份；**之后的修复接口必须带上同一个 cookie**，否则返回 401 |
+| owner cookie（浏览器） | 首次带 `session_id` 调用 `/ask` 或 `/query` 时，服务端下发 HttpOnly cookie `aiops_query_owner`（64 位十六进制）。诊断记录、修复任务和审批都绑定这个身份；**之后的修复接口必须带上同一个 cookie**，否则返回 401 |
 | curl 用法 | `-c jar.txt -b jar.txt` 保存并回传 cookie |
 
 ```bash
 B=http://10.2.0.48:30800
-J=jar.txt
 S=my-api-session-0001
+# 方式一：API 令牌（下文的 -c/-b 换成 -H "$AUTH" 即可）
+AUTH="Authorization: Bearer <AIOPS_API_TOKENS 中的令牌>"
+# 方式二：cookie jar
+J=jar.txt
 ```
 
 ## 2. 快速查询
@@ -99,16 +103,42 @@ curl -H 'X-AIOps-Admin-Token: <token>' -H 'Content-Type: application/json' \
 curl -H 'X-AIOps-Admin-Token: <token>' $B/repair/audit
 ```
 
-## 7. 待办：A2A 与 API 身份（已记录，未实现）
+## 7. A2A 调用（含修复与人工审批）
 
-现状：A2A 适配器（[a2a](a2a.md)）只有查询与诊断两个技能，调用 `/ask`、`/query` 时不带 `session_id` 和 cookie，因此：没有会话上下文、不保存诊断记录、无法发起修复；审批事件不转发，也没有使用 A2A 的 `input-required` 状态；修复路由会返回"人工修复需要会话归属"。
+A2A 服务（Agent Card：`http://<host>:30801/.well-known/agent-card.json`）提供三个技能：`kubernetes-query`、`kubernetes-diagnosis`、`kubernetes-repair`。适配器以 Secret 中 `A2A_BACKEND_API_TOKEN`（`AIOPS_API_TOKENS` 里的 `a2a` 身份）访问后端；每个 A2A `contextId` 对应一个后端会话，所以同一上下文里"修复刚刚的问题"能找到之前的诊断。
+
+修复流程（JSON-RPC `message/send`，`metadata.aiops_mode=repair`）：
+
+```bash
+A=http://10.2.0.48:30801
+# 1) 发起：诊断（或复用本上下文的诊断）并按组生成修复方案
+curl -s -X POST $A/ -H 'Content-Type: application/json' -d '{
+  "jsonrpc":"2.0","id":"1","method":"message/send",
+  "params":{"metadata":{"aiops_mode":"repair"},
+            "message":{"kind":"message","role":"user","messageId":"m1",
+                       "parts":[{"kind":"text","text":"诊断并修复 aiops-case-09 命名空间中的异常 Pod"}]}}}'
+# -> result.status.state = "input-required"
+#    result.status.message.parts[] 含文本（每组动作、命令、风险、回滚）和
+#    DataPart {"batch_id": "...", "approvals": [{"job_id","group_id","approval_id","execute_command",...}]}
+
+# 2) 在同一任务里回复审批（taskId / contextId 取自上一步结果）
+curl -s -X POST $A/ -H 'Content-Type: application/json' -d '{
+  "jsonrpc":"2.0","id":"2","method":"message/send",
+  "params":{"message":{"kind":"message","role":"user","messageId":"m2",
+                       "taskId":"<task id>","contextId":"<context id>",
+                       "parts":[{"kind":"data","data":{"approval_id":"<approval_id>","approved":true,"reviewer":"ops-bot"}}]}}}'
+#    也可用文本：{"kind":"text","text":"批准 <approval_id>"} 或 "拒绝 <approval_id>"
+# -> 执行 → 恢复观察；若还有下一个待审批动作，任务再次进入 input-required；
+#    全部结束后 state = "completed"，artifact kubernetes-aiops-repair.md 含每组结果（含 DataPart results）
+```
+
+安全边界与前端一致：审批前先过高危命令规则；review 模式下每个动作都要审批，超时不执行；`message/stream` 同样可用（进度以 status-update 推送）。未配置 `A2A_BACKEND_API_TOKEN` 时修复技能直接拒绝，查询与诊断不受影响。
+
+## 8. 待办（已记录，未实现）
 
 | # | 待办 | 说明 |
 |---|---|---|
-| 1 | API 身份不依赖 cookie | 增加请求头方式（如 API 令牌映射 owner），审批人即调用方身份并写入审计 |
-| 2 | A2A 会话映射 | A2A `contextId` → `session_id`，认证主体 → owner，使多轮"修复刚刚的问题"成立 |
-| 3 | A2A 修复技能 | 新增 `kubernetes-repair`：内部调用 `/repair/batches`，把任务进度作为 A2A 状态更新 |
-| 4 | A2A 人工审批 | 任务 `awaiting_approval` 时 A2A 任务转 `input-required`，附各组方案与 `approval_id`；调用方在同一任务回复 `{approval_id, approved, reviewer}`，适配器调用 `/repair/jobs/{id}/approve` 后继续 |
-| 5 | 无诊断时的对话修复 | 会话没有诊断就说"修复…"时，仍由单个 Agent 现场调查规划；建议先自动做该 Pod 的诊断再进入按组批次，控制器链按请求中的 Pod 直接解析 |
-| 6 | 编造配置值 | 方案写入 Secret / ConfigMap 的值必须来自证据或用户输入（run d09fc5c84ff54eb8 曾补了一个虚构的 Secret 值） |
-| 7 | 死代码清理 | `client._maybe_compact_runtime_context` 等旧运行时压缩路径无调用方 |
+| 1 | 无诊断时的对话修复 | 会话没有诊断就说"修复…"时，仍由单个 Agent 现场调查规划；建议先自动做该 Pod 的诊断再进入按组批次，控制器链按请求中的 Pod 直接解析 |
+| 2 | 编造配置值 | 方案写入 Secret / ConfigMap 的值必须来自证据或用户输入（run d09fc5c84ff54eb8 曾补了一个虚构的 Secret 值） |
+| 3 | A2A 调用方身份细分 | 目前所有 A2A 调用方共用适配器的 `a2a` 身份（会话按 contextId 隔离，审批人取调用方填写的 reviewer）；如需按调用方隔离记录，可把 A2A 认证主体映射为各自的 API 身份 |
+| 4 | 死代码清理 | `client._maybe_compact_runtime_context` 等旧运行时压缩路径无调用方 |
