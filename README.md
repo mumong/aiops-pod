@@ -259,9 +259,9 @@ make case-clean CASE=c04
 
 当前默认写操作限于已核实 Pod／控制器的资源调整、受限 JSON Patch 和滚动重启；禁止任意 Shell、删除、跨集群或权限变更。命令成功不等于根因已消除，仍需结合验证结果复查。审批和修复互斥状态为进程内存，Pod 重启后需重新发起；不要据此部署多副本修复执行器。
 
-2026-09-20 按管理员要求，AIOps/MCP 的 Kubernetes RBAC 已开放集群管理权限；这是凭据层权限，不取消上述 Agent 命令策略和人工审批。常见故障的可修复条件、仅缓解与需人工分流见 [修复适用范围](docs/pod-repair-eligibility.md)。无限增长型 OOM 默认不再反复扩容。
+2026-09-20 按管理员要求，AIOps/MCP 的 Kubernetes RBAC 已开放集群管理权限；这是凭据层权限，不取消上述 Agent 命令策略和人工审批。修复规划、执行、恢复观察的完整生命周期与边界见[核心流程与模块架构](docs/ARCHITECTURE.md)第 5 节。无限增长型 OOM 默认不再反复扩容。
 
-DeepSeek 联调使用独立 `aiops-deepseek-remediation` Secret，原模型 Secret 保留。部署前需准备该 Secret 的 `LLM_API_KEY`、`LLM_MODEL`、`LLM_API_BASE`；不要将真实密钥提交 Git。[实现与验收记录](docs/pod-remediation-delivery.md)。
+DeepSeek 联调使用独立 `aiops-deepseek-remediation` Secret，原模型 Secret 保留。部署前需准备该 Secret 的 `LLM_API_KEY`、`LLM_MODEL`、`LLM_API_BASE`；不要将真实密钥提交 Git。
 
 `/query` 与 `/ask` 先由 Agent 理解意图并输出 JSON 路由：日常查询和快速初查由查询 Agent 直接生成结构化答案，不再调用独立总结模型；Pod、命名空间或集群根因诊断走“定位 → 取证 → 根因 → 总结”，多个 Pod 可分组并发取证和分析。深度诊断不等于全量扫描，各节点围绕原问题自主选择只读工具和 Runbook，不执行固定采集兜底。前端显示 Markdown，SSE 的 `query_answer` 包含意图、范围、状态、正文、来源与缺失项；结构正确不代表诊断已核验。两接口共享 session_id 会话记忆及 54k 环境配置下的自动上下文压缩；进程内记忆在 Pod 重启后丢失。
 
@@ -307,21 +307,33 @@ make delete deploy
 
 ## 核心文档
 
+| 文档 | 内容 |
+|---|---|
+| [核心流程与模块架构](docs/ARCHITECTURE.md) | 从用户输入到修复与恢复观察的完整生命周期、数据契约、工具结果处理、上下文压缩、边界与已知限制 |
+| [部署与运维](docs/GUIDE.md) | 配置、发布、权限、联邦及常见排查 |
+| [运行诊断](docs/run-diagnostics.md) | 每次运行的账本、工程异常分类、`/runs/{run_id}` 报告 |
+| [LLM 自身异常记录](docs/llm-model-anomalies.md) | 模型/推理服务自身问题的现象与外部佐证 |
+| [修复三个 Sprint](docs/remediation-sprint-design-2026-10.md) | 修复链路需求、设计与验收记录 |
+| [可观测性采集](docs/observability.md) | MCP 工具、PromQL 示例、日志与链路、结果含义 |
+| [A2A](docs/a2a.md) | 标准协议、客户端、鉴权与真实 Agent-to-Agent 测试 |
+| [环境变量](docs/configuration-env.md) | 由 `scripts/list_env_vars.py` 生成 |
+| [异常环境](test/pod-anomaly-cases/README.md) | 故障部署、验证和安全清理（`make case-*` / `make repair-cases-*`） |
+| [质量测试](test/aiops_quality_e2e/README.md) | 单场景、多根因、四项指标与报告 |
 
-| 文档                                                   | 内容                          |
-| ---------------------------------------------------- | --------------------------- |
-| [部署与运维](docs/GUIDE.md)                               | 配置、发布、权限、联邦及常见排查            |
-| [核心实现](docs/current-aiops-diagnosis-architecture.md) | 请求、Pod 分组、规划取证、RCA、上下文与归档   |
-| [可观测性采集](docs/observability.md)                      | MCP 工具、PromQL 示例、日志与链路、结果含义 |
-| [A2A 接入](docs/a2a-server.md)                         | 标准协议、客户端及鉴权                 |
-| [异常环境](test/pod-anomaly-cases/README.md)             | 故障部署、验证和安全清理                |
-| [质量测试](test/aiops_quality_e2e/README.md)             | 单场景、多根因、四项指标与报告             |
-| [开发与贡献](CONTRIBUTING.md) | 本地检查、模块边界、编码约定与审核要求 |
-| [规范化验收记录](docs/maintenance-normalization.md) | 修改前基线、回归结果和未完成项 |
-| [运行诊断](docs/run-diagnostics.md) | 每次运行的账本、工程异常分类、`/runs/{run_id}` 报告与日志约定 |
-| [过程记录](docs/history/) | 按日期归档的验证、发布与交接记录，只供复核，不是当前使用指南 |
-| 历史测试报告 | 已于 2026-10-15 移出仓库到 `../_archive/robusta-testreports/`（git 标签 `checkpoint-20261015-before-global-cleanup` 之前的历史仍可回溯）；`testreports/` 仅作测试工具输出目录，不再纳入版本控制 |
+历史过程记录、旧交接文档已从仓库移除，可通过 git 历史（标签 `baseline-20261019-run-3c052423` 之前）回溯。
 
+## 开发
+
+Python 3.12（与镜像一致）。运行时依赖 `requirements.runtime.txt`（HolmesGPT 由 Dockerfile 单独安装），开发工具 `requirements.dev.txt`，A2A 依赖 `requirements.a2a*.txt`（独立虚拟环境 `.venv-a2a`）。
+
+```sh
+make check          # 语法 + lint（ruff E9/F/I/B）+ 格式检查 + 单元测试
+make test-unit      # 仅单元测试（tests/unit）
+make test-a2a       # A2A 测试（需 .venv-a2a）
+make release        # 构建并推送镜像后滚动部署
+```
+
+目录：`app/` 服务代码，`a2a_adapter/` A2A 适配器，`a2a_test_agent/` A2A 测试 Agent，`deploy/` K8s 清单与配置，`tests/` 自动化回归，`test/` 故障环境与质量评测工具，`scripts/` 运行报告、环境变量文档生成与验收脚本，`tools/` 命令行客户端，`config/examples/` Secret 示例。提示词只从 `app/core/prompts.py` 引入；修改提示词需配套行为测试。
 
 报告和工具归档默认写入 Pod 内的 `/tmp/aiops/reports`（PVC）。源码实现与当前线上版本可能不同，历史测试成绩不能直接代表当前部署效果。
 

@@ -158,7 +158,7 @@ RBAC 由 Kubernetes API 实时执行，权限变更通常不需要重启 Pod；�
 - make deploy-master：修改本地 federation.enabled 为 true 后部署。
 - make deploy-slave：修改为 false 后部署。
 - /federation/ask/v2、/federation/query/v2：主 Agent 选择子集群。
-- 标准 A2A 的发现、JSON-RPC、SSE 和鉴权见 [A2A 指南](a2a-server.md)，不要与联邦 HTTP 接口混用。
+- 标准 A2A 的发现、JSON-RPC、SSE 和鉴权见 [A2A 指南](a2a.md)，不要与联邦 HTTP 接口混用。
 
 ## 7. 排查入口
 
@@ -171,4 +171,4 @@ RBAC 由 Kubernetes API 实时执行，权限变更通常不需要重启 Pod；�
 | 日志/链路 empty | 容器是否启动、流量、采集延迟、查询条件及埋点 |
 | 报告与现场冲突 | run_id、Pod UID、时间窗、原始归档；不能用旧报告替代当前观测 |
 
-报告路径、组 ID 和 Langfuse 定位见[核心实现](current-aiops-diagnosis-architecture.md#归档与运行排查)。
+报告路径、组 ID 和 Langfuse 定位见[核心流程与模块架构](ARCHITECTURE.md#7-归档布局)。

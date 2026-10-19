@@ -98,7 +98,7 @@ MCP 返回仍受查询时间窗、条数和数据源能力限制；Agent 摘要�
 
 ## 一个真实例子：为什么要保留字段含义
 
-[c10-timeout 第 1 次报告](../testreports/aiops_quality_expanded-c0e3e093e80c_20260910_181943/c10-timeout/run-01-111899003f6d4385/report.md)记录：
+c10-timeout 第 1 次报告（2026-09-10 质量测试，报告已移出仓库）记录：
 
 - Kubernetes：Liveness probe failed，context deadline exceeded。
 - Tracing：GET /health，duration_us 约 3001350–3001920，即约 3 秒。
@@ -117,4 +117,4 @@ MCP 返回仍受查询时间窗、条数和数据源能力限制；Agent 摘要�
 2. **上下文**：raw 可回读，structured 和 summary 保持来源关系；预算省略可见，正常值与零值不因“不是错误”就被误删。
 3. **诊断**：模型是否选对接口/时段，是否误解单位、流向、终止原因，是否把假设写成确认根因。
 
-基础实现入口见[核心实现](current-aiops-diagnosis-architecture.md)。历史测试与人工审阅只能说明对应批次，不作为当前部署已验收的声明。
+基础实现入口见[核心流程与模块架构](ARCHITECTURE.md)。历史测试与人工审阅只能说明对应批次，不作为当前部署已验收的声明。

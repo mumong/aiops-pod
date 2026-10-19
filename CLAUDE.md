@@ -1,6 +1,6 @@
 # 维护约定
 
-本仓库是 K8s AIOps Copilot。项目介绍与入口见 [README](README.md)，模块职责和当前默认行为见[核心实现](docs/current-aiops-diagnosis-architecture.md)。不要把历史实验结论作为当前架构约束。
+本仓库是 K8s AIOps Copilot。项目介绍与入口见 [README](README.md)，模块职责和当前默认行为见[核心流程与模块架构](docs/ARCHITECTURE.md)。不要把历史实验结论作为当前架构约束。
 
 ## 修改入口
 
@@ -25,4 +25,4 @@
 - 核心说明只保留一份来源文档，其余位置引用。过程记录不要当作当前使用指南。
 - 更新文档时校验相对链接和示例命令；历史报告保留原分及批次，不随文档更新改写。
 
-A2A 使用独立依赖环境，参见 [A2A 指南](docs/a2a-server.md)。测试和部署命令以相应 README 为准，不在本文件重复维护。
+A2A 使用独立依赖环境，参见 [A2A 指南](docs/a2a.md)。测试和部署命令以相应 README 为准，不在本文件重复维护。

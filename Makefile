@@ -33,7 +33,7 @@ help:
 	@echo "build-main / build-a2a: container artifacts (Python service, no native binary)"
 	@echo "test-unit: isolated unit tests and Runbook contracts"
 	@echo "check: syntax + lint + format-check + unit; lint: ruff E9/F/I/B; format: ruff format"
-	@echo "Setup: CONTRIBUTING.md; baseline: docs/maintenance-normalization.md"
+	@echo "Docs: README.md, docs/ARCHITECTURE.md"
 
 test-unit:
 	$(PYTHON) -m pytest -q
