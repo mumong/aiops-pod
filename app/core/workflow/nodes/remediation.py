@@ -261,8 +261,9 @@ class RemediationNode(QueryCollectNode):
         if dispatch["group_ids"]:
             lines = "\n".join(f"- {group_display_name(g)}" for g in dispatch["group_ids"])
             text = (
-                "已按上一轮诊断的异常组分别生成修复方案（每组一个独立规划任务，并行进行），"
-                f"完成后按组展示方案并等待审批：\n\n{lines}"
+                "已转入上一轮诊断的按组修复批次（每组一个独立规划任务，并行进行；"
+                "同一诊断已有批次时沿用原批次）。各组方案、状态和审批见下方修复工作区：\n\n"
+                f"{lines}"
             )
         else:
             text = "上一轮诊断未发现需要修复的异常组，本次不生成修复方案。"
