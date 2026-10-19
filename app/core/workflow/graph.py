@@ -100,7 +100,8 @@ def build_diagnosis_workflow(
         runbook_catalog: RunbookCatalog 实例
         node_config: 兼容旧调用方的节点开关；auto/direct 图不使用
         query_mode: "auto"（默认）或 "direct"
-        parallel_config: {"enabled": bool}，控制 layer 是否允许多组并发 lane
+        parallel_config: {"enabled": bool, "max_workers": int}；enabled 控制 layer 是否分组，
+            max_workers 限制 parallel_evidence 同时运行的 lane 数
 
     Returns:
         (compiled_workflow, node_instances)
@@ -142,6 +143,7 @@ def build_diagnosis_workflow(
     for node in nodes:
         if node.node_id == "layer":
             node.autonomous_parallel_enabled = (parallel_config or {}).get("enabled", True)
+        if node.node_id == "parallel_evidence":
             node.autonomous_parallel_workers = (parallel_config or {}).get("max_workers")
         workflow.add_node(node.node_id, _wrap_node_execute(node))
     workflow.set_entry_point("request_router")

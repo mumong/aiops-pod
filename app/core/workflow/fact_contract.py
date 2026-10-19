@@ -23,6 +23,24 @@ OBSERVABILITY_QUERY_TOOL_DIMENSIONS = {
     "query_pod_topology": "topology",
 }
 OBSERVABILITY_QUERY_TOOLS = frozenset(OBSERVABILITY_QUERY_TOOL_DIMENSIONS)
+PROMETHEUS_TOOLS = frozenset(
+    {"execute_prometheus_instant_query", "execute_prometheus_range_query"}
+)
+
+
+def tool_dimension(tool_name: str) -> str:
+    """Observability dimension of a tool's result; one mapping for cards and reports."""
+    name = str(tool_name or "").strip().lower()
+    if name in OBSERVABILITY_QUERY_TOOL_DIMENSIONS:
+        return OBSERVABILITY_QUERY_TOOL_DIMENSIONS[name]
+    if name in PROMETHEUS_TOOLS:
+        return "metrics"
+    if name.startswith("kubectl_") and "logs" in name:
+        return "logging"
+    if name.startswith(("kubectl_", "kubernetes_")) or name == "query_pod_lifecycle":
+        return "kubernetes"
+    return "other"
+
 
 _FORBIDDEN_KEYS = {
     "diagnosis",

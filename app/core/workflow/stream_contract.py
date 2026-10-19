@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from app.core.context.prometheus_result import normalize_prometheus_result
 from app.core.context.record_result import record_display
-from app.core.workflow.fact_contract import OBSERVABILITY_QUERY_TOOL_DIMENSIONS
+from app.core.workflow.fact_contract import tool_dimension
 from app.core.workflow.schemas import GroupEntity
 
 PARALLEL_EVIDENCE_STREAM_CONTRACT_VERSION = "aiops.parallel-evidence-stream.v1"
@@ -182,16 +182,7 @@ def _dimension(event: Mapping[str, Any]) -> str:
     explicit = str(structured.get("dimension") or "").strip().lower()
     if explicit:
         return explicit
-    tool_name = str(event.get("tool_name") or "").strip().lower()
-    if tool_name in OBSERVABILITY_QUERY_TOOL_DIMENSIONS:
-        return OBSERVABILITY_QUERY_TOOL_DIMENSIONS[tool_name]
-    if tool_name in {"execute_prometheus_instant_query", "execute_prometheus_range_query"}:
-        return "metrics"
-    if tool_name.startswith("kubectl_") and "logs" in tool_name:
-        return "logging"
-    if tool_name.startswith(("kubectl_", "kubernetes_")):
-        return "kubernetes"
-    return "other"
+    return tool_dimension(str(event.get("tool_name") or ""))
 
 
 def build_parallel_evidence_stream_context(

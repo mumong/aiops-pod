@@ -20,3 +20,14 @@ def test_config_wins_over_env_and_both_are_clamped(monkeypatch):
     assert _node(50, monkeypatch).lane_workers() == 16
     assert _node(10, monkeypatch).lane_workers() == 10
     assert _node("many", monkeypatch).lane_workers() == 3
+
+
+def test_configured_max_workers_reaches_the_node_that_runs_the_lanes():
+    # Live 2026-10-19 (run 411cbba3bf2e4b74): max_workers=10 was set on `layer`, the
+    # fan-out node kept the default 3 and the 4th lane queued for 107 s.
+    from app.core.workflow.graph import build_diagnosis_workflow
+
+    _, nodes = build_diagnosis_workflow(parallel_config={"enabled": True, "max_workers": 10})
+    by_id = {node.node_id: node for node in nodes}
+    assert by_id["parallel_evidence"].lane_workers() == 10
+    assert by_id["layer"].autonomous_parallel_enabled is True

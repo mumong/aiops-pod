@@ -24,7 +24,11 @@ def test_report_renders_evidence_facts_and_open_questions_without_inferring_a_ca
         "| Pod 处于 Terminating，finalizer aiops.lab/hold 未释放 | 2026-10-15T10:30:00Z |"
         in report
     )
-    assert "`ref-2`" in report and "- finalizer 为何未自动释放" in report
+    assert (
+        "`ref-2`" in report
+        and "尚未确认：finalizer 为何未自动释放" in report
+        and "待核实" not in report
+    )
     assert "### 取证分析\n容器已退出但对象仍在。" in report
 
 
