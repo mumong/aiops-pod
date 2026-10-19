@@ -229,6 +229,22 @@ class RequestRouterNode(WorkflowNode):
         finally:
             if self.metrics is not None:
                 self.metrics.record_llm_call(self.node_id, (time.monotonic() - started) * 1000)
+        if (
+            contract.route == "remediation"
+            and state.get("repair_auto_plan")
+            and not (state.get("repair_context") or {}).get("diagnosis")
+        ):
+            # repair=plan (API / A2A) with no diagnosis in the session: diagnose first;
+            # the executor then starts the per-group batch, whose approvals API callers
+            # can see. The web chat never sets repair=plan and keeps its route.
+            contract = contract.model_copy(
+                update={
+                    "route": "full_diagnosis",
+                    "task": "diagnose",
+                    "scope_basis": (contract.scope_basis + "；" if contract.scope_basis else "")
+                    + "repair=plan 且会话中尚无诊断：先诊断，再按异常组生成修复方案",
+                }
+            )
         output = {
             "request_contract": contract.model_dump(),
             "request_route": contract.route,

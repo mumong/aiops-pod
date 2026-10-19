@@ -240,3 +240,37 @@ def test_router_receives_answer_discovered_targets_even_after_clarification(ques
     node.ai_call = SimpleNamespace(call_structured=classify)
     result = node.execute({"question": question, "query_session_context": {"turns": turns}})
     assert result["request_contract"]["pod_names"] == ["workload-abc"]
+
+
+def _repair_router():
+    node = RequestRouterNode()
+    node.ai_call = SimpleNamespace(
+        call_structured=lambda **kw: (
+            RequestContract(
+                route="remediation", task="repair", scope="namespace", namespaces=["aiops-case-09"]
+            ),
+            "",
+        )
+    )
+    return node
+
+
+def test_repair_plan_without_a_diagnosis_diagnoses_first():
+    # Live 2026-10-19 (A2A run 5b804cc9): "诊断并修复 …" in a fresh session went to
+    # single-agent planning and waited for an inline approval API/A2A callers never see.
+    result = _repair_router().execute(
+        {"question": "诊断并修复 aiops-case-09", "repair_auto_plan": True}
+    )
+    assert result["request_route"] == "full_diagnosis"
+    contract = result["request_contract"]
+    assert contract["task"] == "diagnose" and contract["namespaces"] == ["aiops-case-09"]
+
+
+def test_repair_plan_with_a_diagnosis_or_without_the_flag_keeps_remediation():
+    with_diagnosis = {
+        "question": "修复刚刚的问题",
+        "repair_auto_plan": True,
+        "repair_context": {"diagnosis": {"run_id": "d"}},
+    }
+    assert _repair_router().execute(with_diagnosis)["request_route"] == "remediation"
+    assert _repair_router().execute({"question": "修复"})["request_route"] == "remediation"

@@ -36,6 +36,7 @@ class WorkflowState(TypedDict, total=False):
     remediation_dispatch: Optional[Dict[str, Any]]  # chat repair handed to per-group jobs
     repair_context: Optional[Dict[str, Any]]
     repair_entry_requested: bool
+    repair_auto_plan: bool  # /ask repair=plan: diagnose first when no diagnosis exists
     diagnosis_target: Optional[Dict[str, Any]]
     autonomous_groups: List[Dict[str, Any]]
     diagnosis_handoff: Optional[Dict[str, Any]]  # stage-owned targets and cited facts

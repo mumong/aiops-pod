@@ -756,6 +756,7 @@ class WorkflowExecutor:
         return {
             "repair_context": overrides.get("_repair_context"),
             "repair_entry_requested": bool(overrides.get("_repair_entry_requested")),
+            "repair_auto_plan": bool(overrides.get("_auto_repair_plan")),
             "question": question,
             "original_question": question,
             "request_time_utc": datetime.now(timezone.utc).isoformat(),
