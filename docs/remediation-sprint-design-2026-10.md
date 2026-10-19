@@ -164,3 +164,5 @@ Sprint 2 真实链路（`sprint2_policy_and_switch.sh aiops-case-04`，14/14 通
 
 12.0.42 复测（`aiops-case-66` 重建后，run `eb5be763130846d0` / job `417b082d615f4e58`）**4/4 通过**：目标 owner 由集群事实填为 `Deployment/workload`，方案为 `kubectl patch deployment workload … /spec/template/spec/containers/0/command`，批准后新 Pod Running/Ready，恢复观察 20 秒判定 `recovered`，60 秒无新增重启，Deployment 模板 command 已是 `/opt/startup/bootstrap.py`。该场景的清单保存在 `scripts/acceptance/fixtures/c06-script-path.yaml`。
 
+完整 Sprint 3 套件在 12.0.42 上重跑（2026-10-19 10:23–10:50，`sprint3_scenarios.sh all`，重置通过后三场景）**13/13 通过**：c11 `715bba7c0d6e4502`（finalizer 移除，原 Pod 已删除）、c09 `60e83ba5f053456a`（readyReplicas=1）、c06 `02414cf1409c4e2c`（重启 0→0）。四个夹具与 `aiops-case-66` 之后均已重置为故障态，供人工验收。
+
