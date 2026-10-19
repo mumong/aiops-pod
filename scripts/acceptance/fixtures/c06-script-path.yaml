@@ -1,0 +1,326 @@
+# CrashLoopBackOff：启动脚本路径错误（command 指向不存在的 /opt/start/bootstrap.py，退出 2）。
+# 由 test/pod-anomaly-cases/cases/crashloop-runtime 渲染后只改 command 与环境变量名，命名空间 aiops-case-66；
+# 用于 Sprint 3 需求表中“启动脚本路径错误”的字面场景：kubectl apply -f 本文件，等待 CrashLoopBackOff 后
+# 在前端或 API 对 aiops-case-66 诊断→生成修复方案→批准。清理：kubectl delete -f 本文件。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-case-66
+---
+apiVersion: v1
+data:
+  driver.py: "import json\nimport os\nimport secrets\nimport time\nimport urllib.request\n\
+    \ntarget = os.getenv(\"TARGET_URL\", \"http://workload:8080/work\")\nrun_id =\
+    \ os.environ[\"CASE_RUN_ID\"]\nwhile True:\n    trace_id = secrets.token_hex(16)\n\
+    \    parent_span_id = secrets.token_hex(8)\n    request = urllib.request.Request(target,\
+    \ headers={\n        \"traceparent\": f\"00-{trace_id}-{parent_span_id}-01\",\n\
+    \        \"x-aiops-case-run-id\": run_id,\n    })\n    status = 0\n    try:\n\
+    \        with urllib.request.urlopen(request, timeout=1.8) as response:\n    \
+    \        status = response.status\n            response.read(65536)\n    except\
+    \ Exception as exc:\n        status = getattr(exc, \"code\", 0)\n    print(json.dumps({\"\
+    timestamp\": time.time(), \"event\": \"traffic_result\", \"http_status\": status,\n\
+    \                      \"trace_id\": trace_id, \"case_run_id\": run_id}, separators=(\"\
+    ,\", \":\")), flush=True)\n    time.sleep(2)\n"
+  server.py: "import json\nimport os\nimport secrets\nimport threading\nimport time\n\
+    import urllib.request\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n\
+    \nMAX_BODY_BYTES = 65536\nSTATE = {\n    \"requests\": 0,\n    \"errors\": 0,\n\
+    \    \"duration_ms_total\": 0.0,\n    \"allocated_mib\": 0,\n    \"started_at\"\
+    : time.time(),\n}\nALLOCATIONS = []\n\ndef now_ns():\n    return time.time_ns()\n\
+    \ndef context(headers):\n    raw = headers.get(\"traceparent\", \"\")\n    parts\
+    \ = raw.split(\"-\")\n    if len(parts) == 4 and len(parts[1]) == 32 and len(parts[2])\
+    \ == 16:\n        try:\n            int(parts[1] + parts[2], 16)\n           \
+    \ return parts[1].lower(), secrets.token_hex(8)\n        except ValueError:\n\
+    \            pass\n    return secrets.token_hex(16), secrets.token_hex(8)\n\n\
+    def attr(key, value):\n    field = \"boolValue\" if isinstance(value, bool) else\
+    \ \"intValue\" if isinstance(value, int) else \"stringValue\"\n    return {\"\
+    key\": key, \"value\": {field: value}}\n\ndef export_span(trace_id, span_id, parent_span_id,\
+    \ status, started, ended, case_run_id):\n    endpoint = os.getenv(\"OTLP_HTTP_ENDPOINT\"\
+    , \"http://lgtm.monitor.svc:4318/v1/traces\")\n    pod = os.getenv(\"POD_NAME\"\
+    , \"unknown\")\n    service = os.getenv(\"OTEL_SERVICE_NAME\", \"aiops-lab-workload\"\
+    )\n    mode = os.getenv(\"FAILURE_MODE\", \"normal\")\n    payload = {\n     \
+    \   \"resourceSpans\": [{\n            \"resource\": {\"attributes\": [attr(\"\
+    service.name\", service), attr(\"k8s.pod.name\", pod),\n                     \
+    \                      attr(\"k8s.namespace.name\", os.getenv(\"POD_NAMESPACE\"\
+    , \"unknown\")),\n                                           attr(\"aiops.case_run_id\"\
+    , case_run_id)]},\n            \"scopeSpans\": [{\"scope\": {\"name\": \"aiops-lab\"\
+    }, \"spans\": [{\n                \"traceId\": trace_id, \"spanId\": span_id,\
+    \ \"parentSpanId\": parent_span_id,\n                \"name\": \"GET /work\",\
+    \ \"kind\": 2,\n                \"startTimeUnixNano\": str(started), \"endTimeUnixNano\"\
+    : str(ended),\n                \"attributes\": [attr(\"http.request.method\",\
+    \ \"GET\"), attr(\"http.route\", \"/work\"),\n                               attr(\"\
+    http.response.status_code\", status), attr(\"aiops.observed_mode\", mode)],\n\
+    \                \"status\": {\"code\": 2 if status >= 500 else 1}\n         \
+    \   }]}]\n        }]\n    }\n    request = urllib.request.Request(endpoint, data=json.dumps(payload).encode(),\n\
+    \                                     headers={\"Content-Type\": \"application/json\"\
+    }, method=\"POST\")\n    try:\n        with urllib.request.urlopen(request, timeout=1.5):\n\
+    \            pass\n    except Exception as exc:\n        print(json.dumps({\"\
+    timestamp\": time.time(), \"event\": \"otlp_export\", \"level\": \"warning\",\n\
+    \                          \"message\": type(exc).__name__, \"trace_id\": trace_id},\
+    \ separators=(\",\", \":\")), flush=True)\n\ndef exit_later(code):\n    timer\
+    \ = threading.Timer(0.2, lambda: os._exit(code))\n    timer.daemon = True\n  \
+    \  timer.start()\n\nclass Handler(BaseHTTPRequestHandler):\n    server_version\
+    \ = \"aiops-lab\"\n\n    def log_message(self, *_args):\n        return\n\n  \
+    \  def send_text(self, status, body, content_type=\"application/json\"):\n   \
+    \     encoded = body.encode()\n        self.send_response(status)\n        self.send_header(\"\
+    Content-Type\", content_type)\n        self.send_header(\"Content-Length\", str(len(encoded)))\n\
+    \        self.end_headers()\n        self.wfile.write(encoded)\n\n    def do_POST(self):\n\
+    \        size = min(int(self.headers.get(\"content-length\", \"0\") or 0), MAX_BODY_BYTES)\n\
+    \        if size:\n            self.rfile.read(size)\n        self.do_GET()\n\n\
+    \    def do_GET(self):\n        if self.path == \"/metrics\":\n            lines\
+    \ = [\n                \"# TYPE aiops_lab_requests_total counter\",\n        \
+    \        f\"aiops_lab_requests_total {STATE['requests']}\",\n                \"\
+    # TYPE aiops_lab_errors_total counter\",\n                f\"aiops_lab_errors_total\
+    \ {STATE['errors']}\",\n                \"# TYPE aiops_lab_duration_ms_total counter\"\
+    ,\n                f\"aiops_lab_duration_ms_total {STATE['duration_ms_total']}\"\
+    ,\n                \"# TYPE aiops_lab_allocated_mib gauge\",\n               \
+    \ f\"aiops_lab_allocated_mib {STATE['allocated_mib']}\",\n            ]\n    \
+    \        return self.send_text(200, \"\\n\".join(lines) + \"\\n\", \"text/plain;\
+    \ version=0.0.4\")\n        mode = os.getenv(\"FAILURE_MODE\", \"normal\")\n \
+    \       if self.path == \"/ready\":\n            return self.send_text(503 if\
+    \ mode == \"readiness_fail\" else 200, '{\"ready\":false}' if mode == \"readiness_fail\"\
+    \ else '{\"ready\":true}')\n        if self.path == \"/health\":\n           \
+    \ failed = mode == \"liveness_fail\" and STATE[\"requests\"] >= 3\n          \
+    \  return self.send_text(500 if failed else 200, '{\"healthy\":false}' if failed\
+    \ else '{\"healthy\":true}')\n        if self.path != \"/work\":\n           \
+    \ return self.send_text(404, '{\"error\":\"not_found\"}')\n\n        started =\
+    \ now_ns()\n        STATE[\"requests\"] += 1\n        status, level, message =\
+    \ 200, \"info\", \"request completed\"\n        pending_exit = 0\n        if mode\
+    \ == \"runtime_exit\" and STATE[\"requests\"] >= 2:\n            status, level,\
+    \ message = 500, \"error\", \"runtime process exiting\"\n            pending_exit\
+    \ = 2\n        elif mode == \"config_missing_exit\":\n            status, level,\
+    \ message = 500, \"error\", \"CONFIG_MISSING\"\n            if STATE[\"requests\"\
+    ] >= 3:\n                pending_exit = 78\n        elif mode == \"oom_growth\"\
+    :\n            step = max(1, int(os.getenv(\"OOM_STEP_MIB\", \"8\")))\n      \
+    \      ALLOCATIONS.append(bytearray(step * 1024 * 1024))\n            STATE[\"\
+    allocated_mib\"] += step\n            message = \"memory allocation advanced\"\
+    \n        elif mode == \"readiness_fail\":\n            status, level, message\
+    \ = 503, \"error\", \"dependency unavailable\"\n        if status >= 500:\n  \
+    \          STATE[\"errors\"] += 1\n        ended = now_ns()\n        duration_ms\
+    \ = (ended - started) / 1_000_000\n        STATE[\"duration_ms_total\"] += duration_ms\n\
+    \        trace_id, span_id = context(self.headers)\n        parent = self.headers.get(\"\
+    traceparent\", \"\").split(\"-\")[2] if len(self.headers.get(\"traceparent\",\
+    \ \"\").split(\"-\")) == 4 else \"\"\n        case_run_id = self.headers.get(\"\
+    x-aiops-case-run-id\", \"unknown\")[:128]\n        log = {\"timestamp\": time.time(),\
+    \ \"event\": \"http_request\", \"level\": level, \"message\": message,\n     \
+    \          \"http_status\": status, \"path\": \"/work\", \"duration_ms\": duration_ms,\n\
+    \               \"case_run_id\": case_run_id, \"trace_id\": trace_id, \"span_id\"\
+    : span_id,\n               \"pod\": os.getenv(\"POD_NAME\", \"unknown\"), \"service\"\
+    : os.getenv(\"OTEL_SERVICE_NAME\", \"aiops-lab-workload\"),\n               \"\
+    allocated_mib\": STATE[\"allocated_mib\"]}\n        print(json.dumps(log, separators=(\"\
+    ,\", \":\")), flush=True)\n        export_span(trace_id, span_id, parent, status,\
+    \ started, ended, case_run_id)\n        self.send_text(status, json.dumps({\"\
+    status\": status, \"trace_id\": trace_id, \"allocated_mib\": STATE[\"allocated_mib\"\
+    ]}))\n        if pending_exit:\n            exit_later(pending_exit)\n\nserver\
+    \ = ThreadingHTTPServer((\"0.0.0.0\", int(os.getenv(\"HTTP_PORT\", \"8080\"))),\
+    \ Handler)\nprint(json.dumps({\"timestamp\": time.time(), \"event\": \"server_started\"\
+    ,\n                  \"listen_port\": server.server_port}), flush=True)\nserver.serve_forever()\n"
+kind: ConfigMap
+metadata:
+  name: workload-code
+  namespace: aiops-case-66
+---
+apiVersion: v1
+data:
+  app.json: '{"http_port": 8080}
+
+    '
+kind: ConfigMap
+metadata:
+  name: workload-settings
+  namespace: aiops-case-66
+---
+apiVersion: v1
+data:
+  bootstrap.py: "import json\nimport os\nimport runpy\nimport sys\nimport time\n\n\
+    def fail(message):\n    print(json.dumps({\"timestamp\": time.time(), \"event\"\
+    : \"startup_error\",\n                      \"level\": \"error\", \"message\"\
+    : message}), flush=True)\n    sys.exit(2)\n\nconfig_path = os.environ.get(\"APP_CONFIG_PATH\"\
+    )\nif not config_path:\n    fail(\"APP_CONFIG_PATH is required\")\ntry:\n    with\
+    \ open(config_path, encoding=\"utf-8\") as stream:\n        config = json.load(stream)\n\
+    \    port = config[\"http_port\"]\n    if type(port) is not int or not 1024 <=\
+    \ port <= 65535:\n        raise ValueError(\"http_port must be an integer between\
+    \ 1024 and 65535\")\nexcept (OSError, ValueError, KeyError, TypeError) as exc:\n\
+    \    fail(\"Cannot load application configuration: \" + str(exc))\nos.environ[\"\
+    HTTP_PORT\"] = str(port)\nprint(json.dumps({\"timestamp\": time.time(), \"event\"\
+    : \"config_loaded\",\n                  \"path\": config_path, \"http_port\":\
+    \ port}), flush=True)\nrunpy.run_path(\"/opt/aiops/server.py\", run_name=\"__main__\"\
+    )\n"
+kind: ConfigMap
+metadata:
+  name: workload-startup
+  namespace: aiops-case-66
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: workload
+  name: workload
+  namespace: aiops-case-66
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/name: workload
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: traffic-driver
+  name: traffic-driver
+  namespace: aiops-case-66
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traffic-driver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traffic-driver
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - command:
+        - python3
+        - /opt/aiops/driver.py
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        - name: TARGET_URL
+          value: http://workload:8080/work
+        - name: CASE_RUN_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        image: xnet.registry.io:8443/observability/python:3-alpine
+        imagePullPolicy: IfNotPresent
+        name: driver
+        resources:
+          limits:
+            cpu: 100m
+            memory: 48Mi
+          requests:
+            cpu: 10m
+            memory: 16Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /opt/aiops
+          name: code
+          readOnly: true
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - configMap:
+          name: workload-code
+        name: code
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: workload
+  name: workload
+  namespace: aiops-case-66
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: workload
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8080'
+        prometheus.io/scrape: 'true'
+      labels:
+        aiops.lab/case-id: c06
+        app.kubernetes.io/name: workload
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - command:
+        - python3
+        - /opt/start/bootstrap.py
+        env:
+        - name: FAILURE_MODE
+          value: normal
+        - name: APP_CONFIG_PATH
+          value: /etc/workload/app.json
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        - name: OTLP_HTTP_ENDPOINT
+          value: http://lgtm.monitor.svc:4318/v1/traces
+        - name: OTEL_SERVICE_NAME
+          value: aiops-lab-workload
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        image: xnet.registry.io:8443/observability/python:3-alpine
+        imagePullPolicy: IfNotPresent
+        name: app
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 3
+          timeoutSeconds: 2
+        resources:
+          limits:
+            cpu: 200m
+            memory: 96Mi
+          requests:
+            cpu: 20m
+            memory: 24Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /opt/startup
+          name: startup
+          readOnly: true
+        - mountPath: /etc/workload
+          name: settings
+          readOnly: true
+        - mountPath: /opt/aiops
+          name: code
+          readOnly: true
+      securityContext:
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - configMap:
+          name: workload-startup
+        name: startup
+      - configMap:
+          name: workload-settings
+        name: settings
+      - configMap:
+          name: workload-code
+        name: code

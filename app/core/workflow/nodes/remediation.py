@@ -1,11 +1,13 @@
 """Read-only preparation of a Pod remediation plan; never executes writes."""
 
 import json
-from typing import Literal
+import logging
+from typing import ClassVar, Dict, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from app.core.prompts import POD_REMEDIATION_PROMPT
+from app.core.remediation.ownership import ControllerChain, chains_for_targets, managed_write_error
 from app.core.workflow.nodes.query_answer import (
     QueryAnswer,
     QueryCollectNode,
@@ -49,6 +51,48 @@ class RepairDraft(QueryAnswer):
     actions: list[RepairAction] = Field(default_factory=list)
     runbook_unavailable_reason: str = ""
     assessments: list[RepairAssessment] = Field(default_factory=list)
+
+    # Cluster facts bound per planning call (``with_controller_chains``): the Pod's
+    # ownerReferences chain, keyed "namespace/pod". Empty = unknown, nothing enforced.
+    controller_chains: ClassVar[Dict[str, ControllerChain]] = {}
+
+    @classmethod
+    def with_controller_chains(cls, chains: Dict[str, ControllerChain]):
+        """A schema bound to this call's ownership facts; the tool name stays RepairDraft."""
+        if not chains:
+            return cls
+        return type(
+            cls.__name__, (cls,), {"controller_chains": dict(chains), "__module__": cls.__module__}
+        )
+
+    @classmethod
+    def chain_for(cls, namespace: str, pod: str):
+        return cls.controller_chains.get(f"{namespace}/{pod}")
+
+    @model_validator(mode="before")
+    @classmethod
+    def bind_controller_facts(cls, data):
+        """Owner identity comes from the cluster, not from the model, when it is known."""
+        if not isinstance(data, dict) or not cls.controller_chains:
+            return data
+        for target in data.get("targets") or []:
+            if not isinstance(target, dict):
+                continue
+            chain = cls.chain_for(str(target.get("namespace") or ""), str(target.get("pod") or ""))
+            if chain is None:
+                continue
+            root = chain.root
+            if root is not None:
+                target["owner_kind"], target["owner_name"], target["owner_uid"] = (
+                    root.kind,
+                    root.name,
+                    root.uid,
+                )
+            elif chain.complete:
+                target["owner_kind"], target["owner_name"], target["owner_uid"] = "", "", ""
+            if chain.pod and chain.pod.uid and not target.get("pod_uid"):
+                target["pod_uid"] = chain.pod.uid
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -95,6 +139,14 @@ class RepairDraft(QueryAnswer):
                 if not command and stage in {"dry_run", "verify"}:
                     continue
                 validate_target_command(command, allowed)
+                # Write where the controller writes: a managed member of the ownership
+                # chain (ReplicaSet under a Deployment, Job under a CronJob) is rewritten
+                # by its controller, so a patch there is accepted and changes nothing.
+                managed = managed_write_error(
+                    command, type(self).chain_for(target.namespace, target.pod)
+                )
+                if managed:
+                    raise ValueError(f"{stage}_command：{managed}")
                 # Identity, not strategy: a command that names the target's controller
                 # kind must name the controller the diagnosis verified (live: a plan
                 # patched "deployment workload-5487445f9", the ReplicaSet's name).
@@ -112,7 +164,12 @@ class RepairDraft(QueryAnswer):
         # Every listed target gets an explicit decision; prose is not a plan. Live run
         # 78d29cdd5bc94230 put the correct kubectl patch in `answer` with empty
         # actions/assessments and the executor could only skip.
-        if self.status == "answered" and self.targets and not self.actions and not self.assessments:
+        if (
+            self.status == "answered"
+            and self.targets
+            and not self.actions
+            and not self.assessments
+        ):
             raise ValueError(
                 "没有 actions 时，每个 target 都必须在 assessments 中给出 "
                 "ready/needs_input/not_actionable/needs_evidence 判断及原因"
@@ -134,7 +191,16 @@ def _mentions_kubectl_command(text):
     import re
 
     for match in re.finditer(r"(?m)^\s*(?:\$\s*)?kubectl\s+([a-z-]+)", text or ""):
-        if match.group(1) not in {"get", "describe", "logs", "top", "explain", "events", "wait", "rollout"}:
+        if match.group(1) not in {
+            "get",
+            "describe",
+            "logs",
+            "top",
+            "explain",
+            "events",
+            "wait",
+            "rollout",
+        }:
             return True
     return False
 
@@ -143,6 +209,21 @@ class RemediationNode(QueryCollectNode):
     @property
     def node_id(self):
         return "remediation"
+
+    def _controller_chains(self, diagnosis) -> Dict[str, ControllerChain]:
+        """Read-only ownerReferences lookups for the group's Pods; failures leave it empty."""
+        targets = [
+            g.get("target") for g in (diagnosis or {}).get("groups", []) if isinstance(g, dict)
+        ]
+        if not targets:
+            return {}
+        try:
+            from app.core.remediation.executor import run_local_command
+
+            return chains_for_targets(targets, run_local_command)
+        except Exception as exc:  # planning continues without ownership facts
+            logging.getLogger(__name__).warning("[remediation] 控制器链解析失败: %s", exc)
+            return {}
 
     @property
     def node_name(self):
@@ -157,6 +238,8 @@ class RemediationNode(QueryCollectNode):
         diagnosis = ((state.get("repair_context") or {}).get("diagnosis") or {}).get(
             "payload"
         ) or {}
+        chains = self._controller_chains(diagnosis)
+        schema = RepairDraft.with_controller_chains(chains)
         material = {
             "question": question,
             "request_contract": state.get("request_contract"),
@@ -170,6 +253,8 @@ class RemediationNode(QueryCollectNode):
             ),
             "latest_diagnosis": state.get("conclusion") or state.get("query_draft"),
             "repair_context": state.get("repair_context"),
+            # Cluster facts: where each Pod's spec is owned (writes go to the root).
+            "controller_chains": {key: chain.to_dict() for key, chain in chains.items()},
         }
         self._archive_node_input(material)
         response, events = self._call_llm(
@@ -182,7 +267,7 @@ class RemediationNode(QueryCollectNode):
             },
             skip_remediation_policy=True,
             expect_json=True,
-            response_schema=RepairDraft,
+            response_schema=schema,
         )
         # Fail closed if the schema is invalid; prose is never an executable plan.
         if getattr(self, "current_run_id", None):
@@ -199,7 +284,7 @@ class RemediationNode(QueryCollectNode):
             )
         planning_error = None
         try:
-            draft = RepairDraft.model_validate_json(response.result or "")
+            draft = schema.model_validate_json(response.result or "")
         except ValueError:
             reasons = [
                 str(e.get("reason", "")) for e in events if e.get("type") == "execution_incomplete"

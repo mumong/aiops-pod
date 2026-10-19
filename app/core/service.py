@@ -423,6 +423,7 @@ class HolmesService:
                     agent_guards=self.get_agent_guards_config(_llm_config),
                     no_thinking_nodes=self.get_no_thinking_nodes_config(_llm_config),
                     history_reasoning_field=self.get_history_reasoning_field_config(_llm_config),
+                    structured_tool_choice=self.get_structured_tool_choice_config(_llm_config),
                 )
                 logger.info(
                     "   AICall 实例创建完成 (model=%s, observation_summary=%s/%d, %.2fs)",
@@ -615,6 +616,7 @@ class HolmesService:
                 agent_guards=self.get_agent_guards_config(),
                 no_thinking_nodes=self.get_no_thinking_nodes_config(),
                 history_reasoning_field=self.get_history_reasoning_field_config(),
+                structured_tool_choice=self.get_structured_tool_choice_config(),
             )
         except TypeError:
             # Unit-test fakes may not implement the production constructor extension.
@@ -628,6 +630,7 @@ class HolmesService:
                 agent_guards=self.get_agent_guards_config(),
                 no_thinking_nodes=self.get_no_thinking_nodes_config(),
                 history_reasoning_field=self.get_history_reasoning_field_config(),
+                structured_tool_choice=self.get_structured_tool_choice_config(),
             )
 
     def get_think_stream_config(self) -> Tuple[str, int]:
@@ -793,6 +796,24 @@ class HolmesService:
             cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
         value = cfg.get("history_reasoning_field")
         return str(value).strip() if isinstance(value, str) else ""
+
+    def get_structured_tool_choice_config(
+        self,
+        llm_config: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """``llm.structured_tool_choice``: ``auto`` (schema as the only tool, model-native
+        arguments, Pydantic validation here) or ``named`` (``with_structured_output``)."""
+        from app.core.aicall.structured_transport import normalize_tool_choice
+
+        cfg = llm_config if isinstance(llm_config, dict) else None
+        if cfg is None:
+            raw_cfg = (
+                getattr(self, "raw_config", {})
+                if isinstance(getattr(self, "raw_config", {}), dict)
+                else {}
+            )
+            cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
+        return normalize_tool_choice(cfg.get("structured_tool_choice"))
 
     def get_agent_guards_config(
         self,

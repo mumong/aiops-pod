@@ -53,6 +53,7 @@ A2A 可增加 A2A_API_TOKEN。模型需要支持工具调用；配置中的 llm.
 | `llm.agent_guards.max_identical_calls` | 3 | 同一工具+参数在一个阶段内最多重复次数：重复不执行、只回"结果未变化，数据已齐全请直接作答"；再多一次即停止本阶段并基于已有材料交付（报告 `repeat_limit_stop`） |
 | `llm.agent_guards.repeat_page_chars` | 3000 | 首次结果被截断时，重复同一调用改为返回原始结果的下一段 |
 | `llm.history_reasoning_field` | `reasoning` | 工具循环内把前几轮的模型 reasoning 以该请求字段回传。Qwen3 对话模板只渲染最后一条用户消息之后的 assistant reasoning，不回传时模型会复发上一轮的同一调用；vLLM 0.19 + Qwen3.6 读 `reasoning`，旧 Qwen3 模板读 `reasoning_content`，DeepSeek 拒收该字段时留空关闭 |
+| `llm.structured_tool_choice` | `auto` | 结构化交付（RCA/结论/修复方案 JSON）的函数调用方式。`auto`：schema 作为唯一工具、`tool_choice=auto`，模型按原生格式写参数，服务端 Pydantic 校验，被拒的原始回复归档到 `structured/<node>-rejected-NNN.json`（含 `finish_reason`、usage、原始参数）；`named`：`with_structured_output` 指名 tool_choice，vLLM 走语法约束解码，实测 Qwen3.6 在约束下不转义字符串内双引号，首个内层引号即截断字段、后续字段丢失（run 6ec40015e1024f8a） |
 | `llm.no_thinking_nodes` | `[]` | 以内部（不带 thinking）设置运行工具循环的节点；Qwen3.6 实测关 thinking 后工具规划退化，保持为空 |
 | `llm.internal_extra_body` | 关 thinking + instruct 采样 | 只用于路由、压缩、结构化收卷等内部调用 |
 | `workflow.max_steps.<node>` | 48 / 64 | LangGraph 递归上限，到顶进入结构化收卷而不是丢弃结果 |

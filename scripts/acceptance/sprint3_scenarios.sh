@@ -3,6 +3,8 @@
 #   scripts/acceptance/sprint3_scenarios.sh <c06|c09|c11|all> [--no-reset]
 # c11 Terminating（finalizer 阻塞）、c09 Ready 0/1（Readiness 端口错）、c06 CrashLoopBackOff（启动脚本/变量错）。
 # 会真实修改 aiops-case-06/09/11；审批由脚本自动批准（review 模式），不替模型选命令。
+# 需求表中 CrashLoopBackOff 的字面场景"启动脚本路径错误"见 fixtures/c06-script-path.yaml（命名空间 aiops-case-66），
+# apply 后用相同链路（诊断→建批次→批准→恢复观察）验证；c06 本身是启动脚本读取配置路径的变量名错误。
 source "$(dirname "$0")/lib.sh"
 # The cases' Pods are owned by Deployment "workload"; select them by the owner's selector, not a guessed label.
 workload_pods() { kubectl -n "$1" get pods -o json | python3 -c "import json,sys;[print(i['metadata']['name'],i['status']['phase'],'ready=' + str(any(c.get('ready') for c in i['status'].get('containerStatuses',[])))) for i in json.load(sys.stdin)['items'] if i['metadata']['name'].startswith('workload-') and not i['metadata'].get('deletionTimestamp')]"; }

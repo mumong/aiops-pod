@@ -66,6 +66,13 @@ data:
       # （run 66662a8287ce4dac / ba91d54860594961）。vLLM 0.19 + Qwen3.6 读 `reasoning`（实测经网关
       # prompt_tokens 279→307），旧 Qwen3 模板读 `reasoning_content`；DeepSeek 会拒绝该字段，留空关闭。
       history_reasoning_field: reasoning
+      # 结构化交付（RCA/结论/修复方案等 JSON 结果）的函数调用方式。
+      # auto：把结果 schema 作为唯一工具、tool_choice=auto，模型按原生格式写参数，服务端用 Pydantic 校验。
+      # named：with_structured_output 指名 tool_choice，vLLM 对参数做语法约束解码；实测 Qwen3.6 在约束下
+      # 不转义字符串内的双引号，首个内层引号就结束字段，后续字段整体丢失（2026-10-19 run 6ec40015e1024f8a：
+      # 修复方案三次都在 -p='[{" 处断掉、actions 为空；网关探测 named/required 必现、auto 不出现）。
+      # 此前归为"模型把命令写在正文、patch JSON 畸形"的现象同源。换模型或网关后可对照 auto/named 复测。
+      structured_tool_choice: auto
       # 工具循环的确定性护栏（环境变量 AICALL_MAX_TOOL_CALLS_PER_TURN / AICALL_MAX_IDENTICAL_CALLS 可覆盖）
       agent_guards:
         max_tool_calls_per_turn: 16   # 单条模型消息最多执行的工具调用数，0 不限

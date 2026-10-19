@@ -13,6 +13,8 @@ import hashlib
 import json
 from typing import Any, Dict, List
 
+REASONING_TAIL_CHARS = 400
+
 
 def _digest(value: Any) -> str:
     try:
@@ -49,6 +51,9 @@ def describe_messages(messages: List[Any]) -> List[Dict[str, Any]]:
         reasoning = extra.get("reasoning_content") or extra.get("reasoning")
         if isinstance(reasoning, str) and reasoning.strip():
             row["reasoning_chars"] = len(reasoning)
+            # The tail is where the model states what it is about to do; enough to
+            # tell a planned call from a re-issued one without storing the transcript.
+            row["reasoning_tail"] = reasoning.strip()[-REASONING_TAIL_CHARS:]
         calls = getattr(message, "tool_calls", None) or []
         if calls:
             row["tool_calls"] = [

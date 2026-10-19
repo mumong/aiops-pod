@@ -72,6 +72,7 @@ from .guards import AgentGuards
 from .model_streaming import VisibleChatOpenAI as ChatOpenAI
 from .output_budget import MINIMUM_OUTPUT_TOKENS, OutputBudget
 from .streaming import push_event
+from .structured_transport import normalize_tool_choice, parse_structured_tool_message
 from .tool_call_repair import repair_tool_call_arguments
 from .types import AICallResult
 
@@ -273,12 +274,17 @@ class AICall:
         agent_guards: Optional[AgentGuards] = None,
         no_thinking_nodes: Optional[Iterable[str]] = None,
         history_reasoning_field: str = "",
+        structured_tool_choice: str = "auto",
     ):
         """
         Args:
             model: litellm 格式模型名，如 "deepseek/deepseek-chat"
             history_reasoning_field: 工具循环内把前几轮的 reasoning 以该请求字段回传
                 （``llm.history_reasoning_field``，Qwen3.6/vLLM 0.19 为 ``reasoning``）；空则不回传。
+            structured_tool_choice: 结构化交付的函数调用方式（``llm.structured_tool_choice``）。
+                ``auto``：把 schema 作为唯一工具、``tool_choice=auto``，模型按原生格式写参数，
+                这里用 Pydantic 校验；``named``：``with_structured_output``（指名 tool_choice，
+                vLLM 走语法约束解码，Qwen3.6 在字符串内不转义双引号，首个内层引号即截断字段）。
             api_key: API Key
             api_base: 可选代理地址（覆盖默认 endpoint）
             internal_extra_body: 仅用于内部调用（上下文压缩、结构化收卷）的额外参数，
@@ -293,6 +299,8 @@ class AICall:
         # sampling) settings: ``llm.no_thinking_nodes`` in config.
         self.no_thinking_nodes = frozenset(str(n) for n in (no_thinking_nodes or []) if n)
         self.history_reasoning_field = str(history_reasoning_field or "").strip()
+        self.structured_tool_choice = normalize_tool_choice(structured_tool_choice)
+        self._structured_rejections = 0
         self.model = model
         self.model_str = model
         self.api_key = api_key
@@ -642,7 +650,9 @@ class AICall:
                 self._delivery_retry_kwargs(kwargs, hard_guard) if native is None else None
             )
             validation_error = self._last_structured_error if native is None else ""
-            attempts_left = max(1, int(getattr(self.agent_guards, "structured_validation_retries", 2) or 1))
+            attempts_left = max(
+                1, int(getattr(self.agent_guards, "structured_validation_retries", 2) or 1)
+            )
             while native is None and (retry_kwargs or validation_error) and attempts_left > 0:
                 attempts_left -= 1
                 # Live lanes: the model wrote a report longer than the reserved output
@@ -834,12 +844,18 @@ class AICall:
             if kwargs:
                 model = model.bind(**kwargs)
             model = self._bind_session_metadata(model, session_id, node_id=node_id or "structured")
-            if not hasattr(model, "with_structured_output"):
-                return None, ""
-            structured_model = model.with_structured_output(schema, method=structured_method)
             invoke_config = self._build_langchain_config(
                 session_id, node_id=node_id or "structured"
             )
+            use_tool_call = self.structured_tool_choice == "auto" and hasattr(model, "bind_tools")
+            if use_tool_call:
+                # One ordinary tool call, tool_choice=auto: no server-side grammar, the
+                # model escapes its own strings; Pydantic enforces the schema here.
+                structured_model = model.bind_tools([schema], tool_choice="auto")
+            elif not hasattr(model, "with_structured_output"):
+                return None, ""
+            else:
+                structured_model = model.with_structured_output(schema, method=structured_method)
             with self._langfuse_session_scope(session_id, node_id or "structured"):
                 result = _call_with_deadline(
                     lambda: (
@@ -850,6 +866,23 @@ class AICall:
                     _structured_call_timeout_seconds(),
                     what=f"structured call node={node_id or 'structured'} schema={schema.__name__}",
                 )
+            if use_tool_call:
+                parsed, error, record = parse_structured_tool_message(
+                    result, schema, text_fallback=self.extract_json_payload
+                )
+                if parsed is not None:
+                    return parsed, parsed.model_dump_json()
+                logger.warning(
+                    "[AICall] structured tool call rejected for schema=%s finish_reason=%s: %s",
+                    schema.__name__,
+                    record.get("finish_reason"),
+                    error[:300],
+                )
+                self._last_structured_error = error
+                self._archive_structured_rejection(run_id, node_id or "structured", record)
+                if raise_on_error:
+                    raise ValueError(error)
+                return None, str(record.get("arguments") or "")
             if isinstance(result, schema):
                 raw = result.model_dump_json()
                 return result, raw
@@ -871,9 +904,29 @@ class AICall:
             )
             # Remembered for one retry: the model is told what failed validation.
             self._last_structured_error = str(exc)[:800]
+            self._archive_structured_rejection(
+                run_id,
+                node_id or "structured",
+                {"schema": schema.__name__, "transport": "named", "error": str(exc)[:4000]},
+            )
             if raise_on_error:
                 raise
             return None, ""
+
+    def _archive_structured_rejection(
+        self, run_id: str, node_id: str, record: Dict[str, Any]
+    ) -> None:
+        """Keep what the model actually returned when a structured delivery is rejected."""
+        if not run_id:
+            return
+        self._structured_rejections += 1
+        try:
+            ContextArchive(run_id=run_id).write_json(
+                f"structured/{node_id}-rejected-{self._structured_rejections:03d}.json",
+                {"node": node_id, **record},
+            )
+        except Exception as exc:
+            logger.warning("[AICall] structured rejection 归档失败: %s", exc)
 
     def _prepare_structured_call_context(
         self,

@@ -149,3 +149,18 @@ Sprint 2 真实链路（`sprint2_policy_and_switch.sh aiops-case-04`，14/14 通
 真实浏览器端到端（`frountind/tests/live-repair-e2e.browser.py`，Chromium 操作已部署前端，case-04）**9/9 步通过、0 页面错误**：聊天框发起诊断 143 秒完成 → 安全面板显示"人工审批"徽标与拦截规则 → 命令安全检查拦截 `kubectl delete ns demo --force`（高危动词黑名单）并放行 finalizer patch → 管理员切换为自动执行（运行时覆盖）再恢复配置值 → 生成方案（对象/异常原因/命令）→ 点击"批准此动作" → "执行后恢复观察：已恢复"，事件显示实际命令与审批 ID。截图：`live-repair-plan.png`、`live-repair.png`（验收工作目录）。
 
 12.0.39/12.0.40 在前两轮完整运行中补上的通用护栏：模型写的验证命令失败不再终止（记录并交给恢复观察判定）；结构化交付校验失败带错误重试次数可配置（默认 2）；单目标时 group_id 自动绑定；`pod_spec_immutable` 规则（Pod spec 的 env/探针/资源等改动必须打到控制器模板，规划阶段即拒绝并给出提示）。
+
+### 5.3 字面场景复核与结构化传输缺陷（2026-10-19，robusta 12.0.41）
+
+需求表里 CrashLoopBackOff 一项写的是"启动脚本路径错误"，而 c06 夹具的故障是启动脚本读取配置路径的环境变量名错误。为了不让验收停在措辞上，用临时命名空间 `aiops-case-66`（c06 清单渲染后只改一处：`command` 指向不存在的 `/opt/start/bootstrap.py`，`CrashLoopBackOff` / 退出 2）跑完整链路。诊断（run `78d514ee007542c1`）准确指出 command 路径与 ConfigMap 挂载路径不一致；但修复方案三次结构化输出都被拒（job `6ec40015e1024f8a`）。
+
+根因不在模型对该场景的理解，而在结构化交付的传输方式：`with_structured_output(method="function_calling")` 指名 `tool_choice`，vLLM 对参数做语法约束解码，Qwen3.6 在约束下不转义字符串内的双引号，首个内层引号（`-p='[{"`）就结束该字段，`actions` 整体丢失。直接对网关探测：`tool_choice` 指名 / `required` / `response_format=json_schema` 都在同一位置断掉；`tool_choice=auto` 正常转义。此前 §5.1 中"命令写在正文、actions 为空"（12.0.37）与"patch JSON 畸形"（12.0.38）两条都是同一缺陷的不同表现。
+
+处理（通用，无场景分支）：`llm.structured_tool_choice=auto`——schema 作为唯一工具、`tool_choice=auto`，服务端 Pydantic 校验；`finish_reason=length` 的部分 JSON 按截断拒绝；写成 JSON 字符串的列表字段按原样解码；被拒回复的 `finish_reason` / usage / 原始参数归档到 `structured/<node>-rejected-NNN.json`；请求存档每条 assistant 消息附 `reasoning_tail`，用于回看重复调用前模型在想什么。复测记录见下。
+
+12.0.41 复测（job `fb639f92ad5c4a32`）：方案完整生成，含引号的 json patch 命令原样通过校验与执行——传输缺陷已消除。暴露下一层问题：方案把 patch 打在 **ReplicaSet** `workload-7bf9698f49` 上，命令成功、Deployment 随即覆盖、恢复观察 180 秒超时如实报 `not_recovered`。根因是目标的控制器归属由模型自填（`owner_kind/owner_name`），而 Kubernetes 的规则是"受控对象的 spec 由其控制器改写"。
+
+处理（12.0.42，`app/core/remediation/ownership.py`，通用）：规划前用只读 `kubectl get -o json` 沿 ownerReferences 把每个目标 Pod 的所有权链走到顶（Pod→ReplicaSet→Deployment、Pod→Job→CronJob、裸 Pod 无 root），作为事实 `controller_chains` 注入规划材料；`RepairDraft.with_controller_chains` 绑定本次事实：目标的 owner 字段以集群事实覆盖模型猜测，对链上受控成员（非 root）的写命令在规划阶段拒绝并指出 root（读命令不受影响，链外对象不判）。不区分工作负载类型，不解析失败时退化为不校验。
+
+12.0.42 复测（`aiops-case-66` 重建后，run `eb5be763130846d0` / job `417b082d615f4e58`）**4/4 通过**：目标 owner 由集群事实填为 `Deployment/workload`，方案为 `kubectl patch deployment workload … /spec/template/spec/containers/0/command`，批准后新 Pod Running/Ready，恢复观察 20 秒判定 `recovered`，60 秒无新增重启，Deployment 模板 command 已是 `/opt/startup/bootstrap.py`。该场景的清单保存在 `scripts/acceptance/fixtures/c06-script-path.yaml`。
+
