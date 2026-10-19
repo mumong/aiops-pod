@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 
@@ -15,6 +16,12 @@ from app.core.workflow.case_result import case_index
 class OverviewOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     overview: str = Field(min_length=1, max_length=2400)
+
+
+def group_display_name(group_id):
+    """ "g3" → "异常组 3" for people; the id itself stays the machine key."""
+    match = re.fullmatch(r"g(\d+)", str(group_id or "").strip())
+    return f"异常组 {match.group(1)}" if match else str(group_id or "")
 
 
 def diagnosis_cases(state):
@@ -144,7 +151,10 @@ def conclude_cases(node, state):
         entities = (case.get("target") or {}).get("entities") or []
         label = "、".join(f"{e.get('namespace', '')}/{e.get('name', '')}" for e in entities)
         sections.extend(
-            [f"## {case['group_id']} · {label}", case.get("report") or "本组未交付报告。"]
+            [
+                f"## {group_display_name(case['group_id'])} · {label}",
+                case.get("report") or "本组未交付报告。",
+            ]
         )
     answer = "\n\n".join(sections)
     contract = state.get("request_contract") or {}

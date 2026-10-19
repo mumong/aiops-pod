@@ -316,7 +316,7 @@ async def summarize_history(
             async with gate:
                 notify(
                     "running",
-                    f"正在并行整理较早上下文：已完成 {done}/{total} 段，最多 {workers} 路；随后合并为一份工作记忆。",
+                    f"压缩上下文中…已完成 {done}/{total} 段（最多 {workers} 路并行），随后合并为一份工作记忆。",
                 )
                 request = [
                     SystemMessage(content=SUMMARY_PROMPT),
@@ -572,9 +572,9 @@ class WorkingContextMiddleware(AgentMiddleware):
             type="runtime_status",
             status="running",
             content=(
-                "累计工具证据达到工作预算，正在整理早期历史；近期完整交互与原文归档保留，完成后继续。"
+                "压缩上下文中…（累计工具证据达到工作预算）整理早期历史；近期完整交互与原文归档保留，完成后继续。"
                 if trigger == "evidence_history_budget"
-                else "上下文达到预算，正在整理早期历史并保留近期完整交互。"
+                else "压缩上下文中…（上下文达到预算）整理早期历史并保留近期完整交互，完成后继续。"
             ),
         )
         if self.on_waiting is not None:
@@ -647,5 +647,10 @@ class WorkingContextMiddleware(AgentMiddleware):
             retained_messages=[
                 compact_message(m, include_refs=self.evidence_policy.enabled) for m in retained
             ],
+        )
+        self.emit(
+            type="runtime_status",
+            status="running",
+            content="上下文压缩完成，继续调查。",
         )
         return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *replacement]}

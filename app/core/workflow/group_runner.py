@@ -4,9 +4,27 @@ No diagnosis, repair strategy, approval or resource mutation belongs here.
 Each worker owns its client and mutable state; results retain the input identity.
 """
 
+import os
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from app.core.log_context import bind_current_context
+
+DEFAULT_LANE_WORKERS = 3
+MAX_LANE_WORKERS = 16
+
+
+def resolve_lane_workers(config_value=None):
+    """Lanes run at once: config > AIOPS_AUTONOMOUS_PARALLEL_WORKERS > 3, clamped to 1..16.
+
+    Shared by diagnosis lanes and repair planning so one setting governs both.
+    """
+    value = config_value
+    if value in (None, "", 0):
+        value = os.getenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", DEFAULT_LANE_WORKERS)
+    try:
+        return max(1, min(MAX_LANE_WORKERS, int(value)))
+    except (TypeError, ValueError):
+        return DEFAULT_LANE_WORKERS
 
 
 def iter_group_results(groups, worker, *, max_workers, cancel=None):

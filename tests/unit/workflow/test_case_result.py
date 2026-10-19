@@ -165,7 +165,7 @@ def test_evidence_table_source_cells_carry_the_observability_dimension():
     assert lines[9].startswith("| Metrics · execute_pod_promql |")
     assert lines[10].startswith("| **Logging** · **应用日志**<br>(04:42) |")
     assert lines[11].startswith("| **Metrics** · Prometheus 指标 |")
-    assert lines[12].startswith("| **Tracing** · Tracing/DeepFlow |")
+    assert lines[12].startswith("| Tracing/DeepFlow |")  # already names its dimension
     assert lines[13].startswith("| **Kubernetes** · Pod YAML 配置 |")
     assert lines[14].startswith("| 运维说明 |")
     assert lines[-1] == "| query_pod_logs | 表外不动 |"
@@ -179,3 +179,24 @@ def test_tool_dimension_is_one_mapping_for_cards_and_reports():
     assert tool_dimension("query_pod_topology") == "topology"
     assert tool_dimension("query_pod_lifecycle") == "kubernetes"
     assert tool_dimension("fetch_runbook") == "other"
+
+
+def test_source_cell_already_naming_its_dimension_is_not_labelled_twice():
+    data = output()
+    data["report"] = (
+        "### 关键证据\n| 来源 | 结果 | 作用 |\n|---|---|---|\n"
+        "| **Kubernetes / Lifecycle**<br>05:56 | x | y |\n"
+        "| **Logging / Elasticsearch** | x | y |\n"
+        "| **ConfigMap / 06:31Z** | x | y |\n"
+    )
+    lines = bound(data)["report"].splitlines()
+    assert lines[3] == "| **Kubernetes / Lifecycle**<br>05:56 | x | y |"
+    assert lines[4] == "| **Logging / Elasticsearch** | x | y |"
+    assert lines[5].startswith("| **Kubernetes** · **ConfigMap / 06:31Z** |")
+
+
+def test_report_groups_are_named_for_people_not_by_machine_id():
+    from app.core.workflow.case_report import group_display_name
+
+    assert group_display_name("g3") == "异常组 3"
+    assert group_display_name("custom") == "custom"

@@ -245,3 +245,28 @@ def test_group_job_reuses_auto_policy_and_records_execution(tmp_path, monkeypatc
     assert result["approval"] is None
     assert len(result["events"]) == 4
     assert job["job_id"] not in jobs.cancellations
+
+
+def test_repair_planning_fan_out_uses_the_diagnosis_lane_limit(tmp_path, monkeypatch):
+    # Live 2026-10-19: four repair groups, the 4th waited ~3.5 min because planning
+    # read only AIOPS_AUTONOMOUS_PARALLEL_WORKERS (default 3), never the config.
+    monkeypatch.delenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", raising=False)
+    jobs = RepairJobs(RepairRecordStore(tmp_path))
+    owner = "a" * 64
+    groups = [{"group_id": f"g{i}"} for i in range(1, 5)]
+    jobs.store.save("d", owner, None, "diagnosis", {"groups": groups})
+    barrier = threading.Barrier(4)
+    planned = []
+    done = threading.Event()
+
+    def plan(service, identity, job, question):
+        barrier.wait(timeout=3)
+        planned.append(job["group_id"])
+        if len(planned) == 4:
+            done.set()
+        return False
+
+    monkeypatch.setattr(jobs, "_plan", plan)
+    service = SimpleNamespace(workflow_config={"evidence": {"parallel": {"max_workers": 10}}})
+    jobs.start(service, owner, "d", "repair")
+    assert done.wait(3), "all four groups must plan at the same time"

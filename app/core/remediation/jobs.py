@@ -5,7 +5,6 @@ Only planning is parallel; command invocations share a serial execution lock.
 Records survive restart; active jobs are not replayed automatically after restart.
 """
 
-import os
 import threading
 import time
 import uuid
@@ -14,7 +13,7 @@ from copy import deepcopy
 from app.core.log_context import log_context
 from app.core.remediation.group_context import diagnosis_groups
 from app.core.remediation.records import PlanConflict, RecordUnavailable, RepairRecordStore
-from app.core.workflow.group_runner import iter_group_results
+from app.core.workflow.group_runner import iter_group_results, resolve_lane_workers
 
 
 class RepairJobs:
@@ -86,7 +85,11 @@ class RepairJobs:
         return self.batch(batch_id, owner)
 
     def _plan_batch(self, service, owner, jobs, question):
-        workers = max(1, min(8, int(os.getenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", "3"))))
+        # Same limit as the diagnosis lanes (workflow.evidence.parallel.max_workers).
+        parallel = ((getattr(service, "workflow_config", None) or {}).get("evidence") or {}).get(
+            "parallel"
+        ) or {}
+        workers = resolve_lane_workers(parallel.get("max_workers"))
         for job, result, error in iter_group_results(
             jobs, lambda item: self._plan(service, owner, item, question), max_workers=workers
         ):

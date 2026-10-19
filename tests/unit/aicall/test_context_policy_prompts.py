@@ -144,5 +144,10 @@ def test_working_summary_prefix_and_insertion_condition(monkeypatch, compaction_
     assert replacement[2].content.encode() == expected.encode()
     assert replacement[1].content == "问题 {literal}"
     assert replacement[3] is original[-1]
-    assert emitted[-1]["type"] == "context_compacted"
+    assert emitted[-2]["type"] == "context_compacted"
+    assert emitted[-1] == {
+        "type": "runtime_status",
+        "status": "running",
+        "content": "上下文压缩完成，继续调查。",
+    }
     assert len(summary_calls) == 1

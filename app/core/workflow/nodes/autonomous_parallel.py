@@ -1,7 +1,6 @@
 """Bounded independent Pod lanes, without legacy diagnostic publication gates."""
 
 import copy
-import os
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -14,7 +13,7 @@ from app.core.prompts import (
     PARALLEL_LANE_QUESTION_TEMPLATE,
 )
 from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
-from app.core.workflow.group_runner import iter_group_results
+from app.core.workflow.group_runner import iter_group_results, resolve_lane_workers
 from app.core.workflow.nodes.base import WorkflowNode
 from app.core.workflow.nodes.query_answer import build_working_material
 from app.core.workflow.pod_identity import complete_pod_namespaces
@@ -125,18 +124,10 @@ class AutonomousParallelNode(WorkflowNode):
     # workflow.evidence.parallel.max_workers (config) > AIOPS_AUTONOMOUS_PARALLEL_WORKERS
     # (env) > 3. The model service's admission control remains the real capacity limit;
     # this bounds how many lanes one request pushes at it at once.
-    DEFAULT_LANE_WORKERS = 3
-    MAX_LANE_WORKERS = 16
     autonomous_parallel_workers = None
 
     def lane_workers(self) -> int:
-        value = self.autonomous_parallel_workers
-        if value in (None, "", 0):
-            value = os.getenv("AIOPS_AUTONOMOUS_PARALLEL_WORKERS", self.DEFAULT_LANE_WORKERS)
-        try:
-            return max(1, min(self.MAX_LANE_WORKERS, int(value)))
-        except (TypeError, ValueError):
-            return self.DEFAULT_LANE_WORKERS
+        return resolve_lane_workers(self.autonomous_parallel_workers)
 
     def __init__(self, holmes_service=None, metrics=None, runbook_catalog=None):
         self.holmes_service, self.metrics, self.runbook_catalog = (

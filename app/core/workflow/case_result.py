@@ -80,13 +80,20 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _DROPPED_SECTION = re.compile(r"^待核实")
 _EVIDENCE_SECTION = re.compile(r"^关键证据")
 _TOOL_NAME = re.compile(r"\b((?:kubectl|kubernetes|execute|query)_[a-z_]+)\b")
-_LABELLED = re.compile(r"^(kubernetes|metrics|logging|tracing|topology)\s*·")
+# A cell that already opens with its dimension ("Kubernetes / Lifecycle", "Metrics · …").
+_LABELLED = re.compile(r"^(kubernetes|metrics|logging|tracing|topology)(?![a-z])")
 # Fallback when the cell names a category instead of a tool; first match wins.
 _SOURCE_KEYWORDS = (
     ("tracing", re.compile(r"tracing|trace|span|deepflow|链路")),
     ("metrics", re.compile(r"prometheus|promql|metric|指标")),
     ("logging", re.compile(r"logging|\blogs?\b|日志")),
-    ("kubernetes", re.compile(r"kubernetes|kubectl|\bk8s\b|\bpod\b|事件|yaml|生命周期")),
+    (
+        "kubernetes",
+        re.compile(
+            r"kubernetes|kubectl|\bk8s\b|\bpod\b|configmap|secret|deployment|describe|"
+            r"events?\b|lifecycle|事件|yaml|生命周期"
+        ),
+    ),
 )
 DIMENSION_LABELS = {
     "kubernetes": "Kubernetes",

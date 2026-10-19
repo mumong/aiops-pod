@@ -229,3 +229,18 @@ def test_non_parallel_projection_does_not_expand_existing_sse_payload():
     )
 
     assert projected == {}
+
+
+def test_lane_reasoning_carries_its_group_so_each_card_streams_its_own_thinking():
+    # Live 2026-10-19 (run 3c05242319a449de): ai_reasoning had no parallel_group_id,
+    # so every lane's thinking landed in one node-level stream.
+    projected = project_parallel_tool_event(
+        {
+            "type": "ai_reasoning",
+            "node": "parallel_evidence",
+            "lane_stage": "evidence",
+            "parallel_context": _parallel_context(),
+        }
+    )
+
+    assert projected == {"lane_stage": "evidence", "parallel_group_id": "g3"}
