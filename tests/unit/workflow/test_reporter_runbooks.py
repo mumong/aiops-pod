@@ -245,7 +245,8 @@ def test_autonomous_observability_runtime_switches_are_deployed():
     assert "/ask" in servers["prometheus_tool"]["description"]
     assert "execute_pod_promql" in servers["prometheus_tool"]["description"]
     assert config["workflow"]["evidence"]["parallel"]["enabled"] is True
-    assert config["workflow"]["context_compaction"]["trigger_ratio"] == 0.70
+    assert config["workflow"]["context_compaction"]["hard_guard_input_ratio"] == 0.90
+    assert "trigger_ratio" not in config["workflow"]["context_compaction"]  # old path, no callers
 
 
 def test_primary_runbooks_offer_query_guidance_without_fixed_tool_sequence():

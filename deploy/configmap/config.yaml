@@ -1,6 +1,10 @@
 # ============================================================================
-# ConfigMap - 应用配置文件
+# ConfigMap - AIOps Copilot 运行配置
 # ============================================================================
+# 分类：1 模型调用  2 语言  3 工具(MCP)  4 诊断流程  5 修复与执行
+#       6 输出与上下文  7 质量评分(旧，已关闭)  8 联邦查询
+# 模型地址/密钥/窗口不在这里：Secret 中的 LLM_API_KEY / LLM_MODEL / LLM_API_BASE /
+# MODEL_CONTEXT_WINDOW。改完本文件需重新部署（make release）；修复模式可用运行时开关临时覆盖。
 
 apiVersion: v1
 kind: ConfigMap
@@ -9,92 +13,29 @@ metadata:
   namespace: aiops
 data:
   config.yaml: |
-    # ========================================================================
-    # AIOps Copilot Runtime Config
-    # ========================================================================
-    # 常用修改入口:
-    # 1. 模型思考开关: llm.extra_body.chat_template_kwargs.enable_thinking
-    # 2. MCP 工具开关: mcp_servers.<server>.enabled
-    # 3. 诊断节点开关/步数: workflow.nodes / workflow.max_steps
-    # 4. 修复执行方式: workflow.remediation
-    # 5. 流式输出和上下文压缩: workflow.think_stream / workflow.context_compaction
-    # 6. 质量指标和联邦查询: metrics / federation
-    #
-    # 修复模式快速参考:
-    # - workflow.remediation.executor=deterministic:
-    #   按 conclusion JSON 中的 dry_run/execute/verify 命令顺序执行，速度快。
-    # - workflow.remediation.executor=react:
-    #   LLM 根据真实 observation 多轮决策，适合“命令执行后仍未恢复”的闭环修复。
-    # - workflow.remediation.mode=review:
-    #   plan 和每个写动作都需要人工 approve。
-    # - workflow.remediation.mode=auto:
-    #   自动执行，适合 e2e 或受控实验环境，生产谨慎开启。
-    # 旧环境变量和请求参数 remediate 不再控制修复执行。
-
     # ------------------------------------------------------------------------
-    # 1. LLM / Model Transport
+    # 1. 模型调用
     # ------------------------------------------------------------------------
-    # LLM 连接与模型容量配置只从 Secret/Env 注入：
-    # LLM_API_KEY / LLM_MODEL / LLM_API_BASE / MODEL_CONTEXT_WINDOW /
-    # AIOPS_TOKENIZER_JSON_PATH / AIOPS_TIKTOKEN_ENCODING
-    # ConfigMap 不再放默认模型，避免与 Secret 产生双配置冲突。
     llm:
-      # Provider-specific OpenAI-compatible request options.
-      # Qwen3 local inference can otherwise spend minutes emitting `<think>`
-      # before each tool call. This is model transport control, not workflow
-      # business logic.
-      extra_body: {}  # DeepSeek；Qwen 专属 chat_template_kwargs 不跨供应商发送
-      # 各类调用的输出 token 预留（发送为 max_tokens；输入仍受上下文窗口门禁约束）。
-      # 环境变量 AICALL_MAX_OUTPUT_TOKENS / AICALL_DELIVERY_MAX_OUTPUT_TOKENS /
-      # AICALL_COMPACTION_MAX_OUTPUT_TOKENS / AICALL_DELIVERY_RETRY_MULTIPLIER 可覆盖单项。
-      output_tokens:
-        # 工具循环单轮输出（推理 + 回答 + 工具调用）。实测 2026-10-16：有效轮次最多 ~2.8k tokens，
-        # 而 Qwen3.6 失控的推理轮会打满预留且不产出工具调用（6000 ≈ 104s/轮，5 次运行中 3 次）。
-        # 4000 把一次失控的代价压到 ~70s，被截断的消息不进收卷材料；换模型后按观测调整。
-        agent: 4000
-        delivery: 10000     # 无工具的结构化交付（RCA / 总结报告）；实测 6000 会被小模型的长报告撑满
-        compaction: 3000    # 上下文压缩与摘要
-        router: 1200        # 意图路由（RequestContract 分类，内部调用、不带 thinking）
-      # 这些节点的 agent 工具循环按 internal_extra_body 发出（Qwen：不带 thinking，instruct 采样）。
-      # 实测（2026-10-16，run 9f528fdad65e4c23）：Qwen3.6-35B-A3B 关 thinking 后在工具循环里
-      # 退化——同一 kubectl 调用重复 6 次、从未调用 Prometheus、48 步耗尽。无工具的单次结构化
-      # 交付（路由/RCA）关 thinking 有效，多步工具规划不行。保持为空；换模型后可按节点试开。
-      no_thinking_nodes: []
-      # 工具循环内把前几轮的 reasoning 以此请求字段回传给模型。Qwen3 模板只渲染"最后一条用户消息之后"
-      # 的 assistant reasoning（即当前工具循环），之前一直没回传，模型看到自己每一轮都是空 <think> +
-      # 工具调用，于是在新一轮 reasoning 里计划查 Prometheus、实际却复发上一轮的同一调用
-      # （run 66662a8287ce4dac / ba91d54860594961）。vLLM 0.19 + Qwen3.6 读 `reasoning`（实测经网关
-      # prompt_tokens 279→307），旧 Qwen3 模板读 `reasoning_content`；DeepSeek 会拒绝该字段，留空关闭。
-      history_reasoning_field: reasoning
-      # 结构化交付（RCA/结论/修复方案等 JSON 结果）的函数调用方式。
-      # auto：把结果 schema 作为唯一工具、tool_choice=auto，模型按原生格式写参数，服务端用 Pydantic 校验。
-      # named：with_structured_output 指名 tool_choice，vLLM 对参数做语法约束解码；实测 Qwen3.6 在约束下
-      # 不转义字符串内的双引号，首个内层引号就结束字段，后续字段整体丢失（2026-10-19 run 6ec40015e1024f8a：
-      # 修复方案三次都在 -p='[{" 处断掉、actions 为空；网关探测 named/required 必现、auto 不出现）。
-      # 此前归为"模型把命令写在正文、patch JSON 畸形"的现象同源。换模型或网关后可对照 auto/named 复测。
-      structured_tool_choice: auto
-      # 工具循环的确定性护栏（环境变量 AICALL_MAX_TOOL_CALLS_PER_TURN / AICALL_MAX_IDENTICAL_CALLS 可覆盖）
-      agent_guards:
-        max_tool_calls_per_turn: 16   # 单条模型消息最多执行的工具调用数，0 不限
-        max_identical_calls: 3        # 同一调用（工具+参数）在一个阶段内最多重复次数，再多一次即停止本阶段并交付
-        repeat_page_chars: 3000       # 首次结果被截断时，重复同一调用依次返回原始结果的下一段（0 关闭）
-        # 一整轮工具调用全部是已返回过的调用（没有任何新查询）时直接收卷交付。实测（run 7bdb83277e294cdc）
-        # 模型推理写着"证据完整，输出结构化结果"，发出的却是旧调用的复制；这种轮次等于模型已完成。
-        finalize_on_idle_round: true
-        idle_round_min_calls: 2       # 少于此数的轮次不按"空转"处理：单个重复调用是正常复核
-        structured_validation_retries: 2  # 无工具结构化交付未通过 schema 校验时，带错误重试的次数
-        # 一轮把输出预留全部用在思考上、既没调用工具也没交付时，带"直接行动"提示重试的次数
-        # （提示只用于这次请求，不写入历史）。0 关闭。
-        runaway_round_retries: 1
-        retry_multiplier: 2 # 交付返回空时，重试一次的预留倍数（受窗口剩余空间约束）
-      # 仅用于内部调用（上下文压缩/摘要、结构化收卷），不影响面向用户的推理流。
-      # 推理模型的 thinking 会挤占内部调用有限的 max_tokens，导致"摘要输出被截断"。
-      # 已验证：Qwen3.8-27B(LiteLLM) 生效；gpt-6-luna(CPA) 忽略该字段。
-      # 切换到拒绝未知字段的供应商时置为 {}。
-      # 采样参数取 Qwen3.6 官方模型卡非思考（instruct）模式推荐值：temperature 0.7 / top_p 0.8 / top_k 20
-      # （https://huggingface.co/Qwen/Qwen3.6-27B）。刻意不设 presence_penalty=1.5：内部调用产出结构化 JSON，
-      # 键名/引号天然重复，惩罚可能扭曲输出；官方亦提示其可能导致语言混杂。gpt-6-luna(CPA) 已验证兼容。
-      internal_extra_body:
+      extra_body: {}                # 面向用户的调用附加请求字段（空=不加）
+      output_tokens:                # 各类调用的 max_tokens（环境变量 AICALL_*_MAX_OUTPUT_TOKENS 可覆盖）
+        agent: 4000                 # 工具循环单轮；Qwen3.6 失控推理会打满，4000 把代价压到 ~70s
+        delivery: 10000             # 无工具的结构化交付（RCA / 总结报告）
+        compaction: 3000            # 上下文压缩与摘要
+        router: 1200                # 意图路由
+      no_thinking_nodes: []         # 关 thinking 的节点；Qwen3.6 工具循环关 thinking 会退化，保持为空
+      history_reasoning_field: reasoning  # 工具循环内回传前几轮推理的字段（vLLM 0.19+Qwen3.6）；DeepSeek 置空
+      structured_tool_choice: auto  # 结构化结果的调用方式；named 会触发 vLLM 约束解码，Qwen 引号转义出错
+      agent_guards:                 # 工具循环护栏（每个 Agent 阶段生效）
+        max_tool_calls_per_turn: 16       # 单条模型消息最多执行的工具调用数，0 不限
+        max_identical_calls: 3            # 同一调用（工具+参数）最多重复次数，超过即停止本阶段并交付
+        repeat_page_chars: 3000           # 结果被截断时，重复调用依次返回原文下一段（0 关闭）
+        finalize_on_idle_round: true      # 一整轮全是已返回过的调用时直接交付
+        idle_round_min_calls: 2           # 少于此数的轮次不算空转
+        structured_validation_retries: 2  # 结构化交付未通过校验时的重试次数
+        runaway_round_retries: 1          # 一轮只思考、无工具无交付时的重试次数（0 关闭）
+        retry_multiplier: 2               # 交付为空时重试的输出预留倍数
+      internal_extra_body:          # 内部调用（压缩、收卷）专用：不带 thinking，Qwen 官方 instruct 采样参数
         chat_template_kwargs:
           enable_thinking: false
         temperature: 0.7
@@ -102,20 +43,16 @@ data:
         top_k: 20
 
     # ------------------------------------------------------------------------
-    # 2. Language / i18n
+    # 2. 语言（zh / en）
     # ------------------------------------------------------------------------
-    # i18n 配置 控制提示词和输出形式是中文zh还是英文en
     i18n:
       prompt_language: zh
       response_language: zh
 
     # ------------------------------------------------------------------------
-    # 3. Tooling / MCP Servers
+    # 3. 工具：全部由 MCP Server 提供（内置工具集关闭）
     # ------------------------------------------------------------------------
-    # 内置工具集配置（全部关闭，所有能力由 MCP Server 提供）
     toolsets: {}
-
-    # 第三方 MCP 服务器配置（主力工具，全部启用）
     mcp_servers:
       k8s-mcp-service:
         description: "K8s MCP - kubectl get/describe/logs/events/yaml/table 等只读资源查询"
@@ -123,80 +60,60 @@ data:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8093/sse"
           mode: "sse"
         enabled: true
-
       helmcharts:
         description: "Helm MCP - helm list/status/values 等"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8092/sse"
           mode: "sse"
         enabled: false
-
       bash_tool:
         description: "Bash MCP - 执行 bash 命令"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8094/sse"
           mode: "sse"
         enabled: true
-
       prometheus_tool:
         description: "Query-only Prometheus MCP - 仅供 /query 的 node/cluster 通用 PromQL；/ask Pod 异常诊断必须使用 execute_pod_promql"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8095/sse"
           mode: "sse"
         enabled: true
-
-      # ------------------------------------------------------------------------
-      # AIOps 可观测 MCP - 自主组合查询，默认启用
-      # Qwen 选择 Pod 级 PromQL、日志过滤条件和链路过滤条件。
-      # ------------------------------------------------------------------------
-      aiops-observability-query:
+      aiops-observability-query:    # 主力：Pod 级 Prometheus / 日志 / 链路 / 拓扑自主查询
         description: "Pod 级自主可观测性查询 MCP - Qwen 按诊断目的组合 Prometheus、ES/Filebeat、DeepFlow/Tempo 查询"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8100/sse"
           mode: "sse"
         enabled: true
-
-      # ------------------------------------------------------------------------
-      # AIOps 可观测 MCP - 粗粒度兼容路径，默认关闭
-      # ------------------------------------------------------------------------
-      aiops-case-coarse:
+      aiops-case-coarse:            # 旧：粗粒度一次性采集
         description: "AIOps Case MCP - 根据异常 Pod 实时采集 metrics/logs/traces/topology 并生成 case summary"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8089/sse"
           mode: "sse"
         enabled: false
-
-      # ------------------------------------------------------------------------
-      # AIOps 可观测 MCP - 细粒度工具，默认关闭，调试/专家模式使用
-      # ------------------------------------------------------------------------
-      aiops-observability-fine:
+      aiops-observability-fine:     # 旧：细粒度单项查询（调试用）
         description: "AIOps Fine MCP - 单独查询 Prometheus/ES/DeepFlow/K8s/topology 的 Pod 级观测工具"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8090/sse"
           mode: "sse"
         enabled: false
-      
       core-investigation:
         description: "Core Investigation MCP - TodoWrite 任务分解与规划"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8098/sse"
           mode: "sse"
         enabled: true
-
-      runbook:
+      runbook:                      # Runbook 已由内置 fetch_runbook 提供
         description: "Runbook MCP - 获取 Runbook 排障知识库"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8099/sse"
           mode: "sse"
         enabled: false
-
       internete:
         description: "Internet MCP - 网页抓取"
         config:
           url: "http://mcp-server-manager.mcp.svc.cluster.local:8096/sse"
           mode: "sse"
         enabled: false
-
       connectivity_check_tool:
         description: "TCP 连通性检查"
         config:
@@ -204,171 +121,92 @@ data:
           mode: "sse"
         enabled: false
 
-    # ------------------------------------------------------------------------
-    # 4. Diagnosis Workflow
-    # ------------------------------------------------------------------------
-    # 工作流配置
     workflow:
-      # 节点启用/禁用（false 跳过该节点，conclusion 不可禁用）
-      nodes:
+      # ----------------------------------------------------------------------
+      # 4. 诊断流程
+      # ----------------------------------------------------------------------
+      nodes:                        # 节点开关（conclusion 不可关）
         layer: true
         evidence: true
         rca: true
         conclusion: true
-
-      # max_steps 直接作为 LangGraph recursion_limit，不做公式转换
-      # recursion 包含模型/工具/中间件状态更新，不等于工具数量；保留有界退出。
-      max_steps:
+      max_steps:                    # 每个 Agent 的 LangGraph 步数上限（一轮工具调用约 3 步；0=不带工具）
         query_collect: 48
         remediation: 64
-        layer: 48   # 32 只够小模型约 11 轮（每轮约 3 个图步）；与 evidence/query_collect 一致
+        layer: 48
         evidence: 48
         rca: 0
         conclusion: 0
-
-      # 结构化交付失败时是否允许回退到文本交付（layer/evidence/rca）。
       structured_runtime:
-        fallback_enabled: true
-
+        fallback_enabled: true      # 结构化交付失败时允许回退到文本交付
       evidence:
-        # Pod lane 扇出：每个待调查 Pod 使用同一独立 evidence + 正式 RCA 契约。
-        # max_workers = 一次请求里同时运行的 Pod 诊断 agent（evidence + RCA lane）数，
-        # 上限 16，超出的目标排队。每个 lane 是一条独立的模型请求流，容量边界是
-        # vLLM 的并发/KV cache；当前 KV cache 占用很低，按 10 配置。
-        # 环境变量 AIOPS_AUTONOMOUS_PARALLEL_WORKERS 仅在未配置时生效。
-        parallel:
+        parallel:                   # 每个异常组一条独立 lane（取证 + 根因），修复规划共用该并发上限
           enabled: true
-          max_workers: 10
+          max_workers: 10           # 同时运行的 lane 数（1–16），超出排队
 
-      # --------------------------------------------------------------------
-      # 4.1 Post-Diagnosis Remediation
-      # --------------------------------------------------------------------
-      # 修复执行: executor=deterministic 固定执行计划；executor=react 由 LLM 多轮观察后决策。
+      # ----------------------------------------------------------------------
+      # 5. 修复与执行
+      # ----------------------------------------------------------------------
+      # 运行时开关：PUT /repair/policy/mode（请求头 X-AIOps-Admin-Token）可在 TTL 内覆盖
+      # mode / approval_timeout_seconds，到期回到这里；GET /repair/policy 查看生效值。
+      # 高危规则可用 POST /repair/policy/check {"commands":[...]} 干跑，不执行命令。
       remediation:
-        enabled: true
-        executor: pod               # 通用 kubectl 执行；Agent 规划，按 mode 审阅，无故障专用脚本
-        mode: review                 # review=人工审批；auto=自动执行
-        # mode: auto
-        approval_timeout_seconds: 600
-        # 运行时开关：PUT /repair/policy/mode（需 Secret AIOPS_ADMIN_TOKEN）可在 TTL 内覆盖 mode /
-        # approval_timeout_seconds，到期自动回到这里的配置值；GET /repair/policy 查看生效值与来源。
-        #
-        # 高危命令规则（只看命令形态，不看故障类型；deny 优先；每次拒绝都带规则名）：
-        # - denied_operations：kubectl 动词（set/rollout/auth 取两段，如 rollout_restart）
-        # - denied_flags：强制 / 批量参数
-        # - bulk_selector_on_write：写动词配 -l/--selector/--field-selector 视为批量，拒绝
-        # - denied_resource_kinds：写动词作用于这些 kind（含缩写、复数）时拒绝，读不受限
-        # - denied_executables：kubectl exec/run/debug 内层命令，支持通配符；sh 只接受可检查的字面量 -c
-        # - allowed_exec_commands：可选的内层命令白名单（空=关闭）
-        # 可用 POST /repair/policy/check {"commands":[...]} 干跑验证，不执行任何命令。
+        enabled: true               # false：只出方案，不执行
+        executor: pod               # 通用 kubectl 执行器
+        mode: auto                  # review=每个动作人工审批；auto=自动执行（生产慎用）
+        approval_timeout_seconds: 600   # review 下等待审批的时长，超时不执行
+        max_duration_seconds: 900   # 单个任务整体时限（审批等待 + 命令），到时终态 timeout
+
+        # 高危命令规则：只看命令形态，命中任一条即拒绝（blocked），不执行任何命令
         denied_operations: [delete, apply, replace, edit, run, debug, drain, cordon, uncordon, taint,
-                            cp, port-forward, proxy, attach, auth, certificate]
+                            cp, port-forward, proxy, attach, auth, certificate]   # kubectl 动词
         denied_flags: [--force, --grace-period, --all, --all-namespaces, -A, --now, --cascade, --overwrite]
-        bulk_selector_on_write: true
+        bulk_selector_on_write: true    # 写操作带 -l / --selector / --field-selector 视为批量，拒绝
         denied_resource_kinds: [node, namespace, clusterrole, clusterrolebinding, role, rolebinding,
                                 persistentvolume, storageclass, customresourcedefinition,
                                 mutatingwebhookconfiguration, validatingwebhookconfiguration,
-                                apiservice, priorityclass, certificatesigningrequest]
+                                apiservice, priorityclass, certificatesigningrequest]  # 写这些资源拒绝，读不限
         denied_executables: [rm, "mkfs*", dd, shutdown, reboot, halt, poweroff, init, telinit, fdisk, sfdisk,
                              parted, wipefs, blkdiscard, nsenter, chroot, mount, umount, iptables, ip6tables,
                              nft, kill, killall, pkill, crontab, useradd, usermod, userdel, passwd, chpasswd,
-                             su, sudo]
-        allowed_exec_commands: []
-        max_iterations: 10           # react 最大思考/观察轮次
-        max_write_actions: 10        # react 最多执行多少个写动作
-        max_duration_seconds: 900    # 单个修复任务的整体执行时限（审批等待 + 命令），到时终态 timeout
-        verify_settle_seconds: 5   # 写动作后等待再验证单位秒
-        # 命令执行完成后的恢复观察（只读 kubectl get，只看 Pod 状态：删除完成 / Running+Ready 且无新增重启）。
-        # 超过 timeout_seconds 仍未满足 → 终态 not_recovered（超时反馈，附最后一次观测）；timeout_seconds: 0 关闭。
-        recovery:
-          timeout_seconds: 180
+                             su, sudo]  # kubectl exec 内层命令（支持通配符）
+        allowed_exec_commands: []   # exec 内层命令白名单，空=不启用
+
+        recovery:                   # 执行后的恢复观察（只读）：Pod Running+Ready 且无新增重启，或删除完成
+          timeout_seconds: 180      # 超时仍未恢复 → not_recovered；0 关闭观察
           poll_seconds: 5
-          settle_seconds: 20
+          settle_seconds: 20        # 达标后需稳定的秒数
 
-      # --------------------------------------------------------------------
-      # 4.2 Streaming / Context Control
-      # --------------------------------------------------------------------
-      # `<think>` 展示: full=完整展示；truncated=截断展示；hidden=隐藏。
-      think_stream:
-        # mode: hidden
-        # mode: truncated
+      # ----------------------------------------------------------------------
+      # 6. 输出与上下文
+      # ----------------------------------------------------------------------
+      think_stream:                 # 模型思考的展示：full / truncated / hidden
         mode: full
-        max_chars: 1200
-
-      # 工具输出摘要: rule=规则摘要；ai=额外 LLM 摘要，更慢。
-      observation_summary:
+        max_chars: 1200             # truncated 模式下每段最多字符
+      observation_summary:          # 工具结果给模型前的摘要：rule=规则摘要；ai=额外 LLM 摘要（更慢）
         mode: rule
         max_chars: 3000
-
-      # 上下文治理。模型窗口大小只有一个来源：Secret 的 MODEL_CONTEXT_WINDOW
-      # （或 llm.context_window）。LLM 侧调整窗口（如 54K -> 128K）时只改那一处；
-      # 下面都是比例或绝对预留量：
-      #   - hard_guard_input_ratio：调用前输入上限 = 窗口 × 比例，再扣输出预留与安全余量
-      #   - 压缩策略"重前期"（2026-10-19）：决定性事实大多在前中期取得，触发压缩时
-      #     近期原文只保留最近 recent_keep_interactions 次完整交互（最新一次最多占窗口 15%，
-      #     其余合计不超过 recent_keep_ratio × 窗口），较早历史整理成工作记忆，
-      #     工作记忆输出预算 = summary_output_ratio × 窗口（54K≈4320 / 30K≈2400 / 70K≈5600）
-      #   - llm.output_tokens：各类调用的输出预留（见上）
-      #   - max_context_window：仅限制旧的"运行时轻量压缩"路径在多大的窗口内启用；
-      #     当前 54K 已超过它，实际压缩由 WorkingContextMiddleware（hard guard）完成
-      context_compaction:
+      context_compaction:           # 上下文压缩：输入接近窗口上限时，较早历史整理成工作记忆
         enabled: true
         nodes:
           - evidence
-        max_context_window: 35000
-        trigger_ratio: 0.70
-        max_compactions_per_call: 1
-        summary_max_tokens: 1200
-        recent_keep_interactions: 2
-        recent_keep_ratio: 0.06
-        summary_output_ratio: 0.08
         hard_guard_enabled: true
-        hard_guard_input_ratio: 0.90
+        hard_guard_input_ratio: 0.90      # 调用前输入上限 = 窗口 × 比例（再扣输出预留与余量）
         hard_guard_safety_tokens: 2000
         hard_guard_preserve_tail_tokens: 1200
+        recent_keep_interactions: 2       # 压缩时原样保留最近几次完整交互
+        recent_keep_ratio: 0.06           # 这些交互合计不超过窗口的比例（最新一次最多 15%）
+        summary_output_ratio: 0.08        # 工作记忆输出预算占窗口的比例
 
     # ------------------------------------------------------------------------
-    # 5. Quality Metrics
+    # 7. 质量评分（旧版加权置信度，已关闭；诊断可信度看每组结论的 certainty）
     # ------------------------------------------------------------------------
-    # 质量指标配置
     metrics:
-      enabled: false  # 是否在输出中显示质量指标（false 时只显示性能统计和诊断追踪）
-      thresholds:
-        mttr_seconds: 600
-        rca_confidence: 0.8
-        evidence_completeness: 0.9
-      confidence_dimensions:
-        evidence_strength:
-          weight: 0.35
-          description: "加权证据完整率"
-        causal_chain:
-          weight: 0.20
-          description: "因果链完整性"
-        tool_coverage:
-          weight: 0.10
-          description: "关键探针覆盖率"
-        runbook_match:
-          weight: 0.15
-          description: "Runbook 匹配质量"
-        llm_self_score:
-          weight: 0.20
-          description: "LLM 自评分数"
-      penalties:
-        critical_missing: 0.15
-        critical_missing_cap: 0.45
-        fallback_applied: 0.05
-      evidence_level_weights:
-        CRITICAL: 1.0
-        IMPORTANT: 0.6
-        SUPPLEMENTARY: 0.3
-      baseline:
-        with_evidence: 0.80
-        with_root_cause: 0.75
+      enabled: false
 
     # ------------------------------------------------------------------------
-    # 6. Federation
+    # 8. 联邦查询（/federation/ask，多集群）
     # ------------------------------------------------------------------------
-    # 联邦查询配置
     federation:
       enabled: true
       max_tokens_per_agent: 0

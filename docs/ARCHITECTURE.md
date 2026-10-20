@@ -222,7 +222,7 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 | 前端 | "压缩上下文中…" → "上下文压缩完成，继续调查" | — |
 | 归档 | `compactions/<node>-NNN.before/after.json` | — |
 
-注意：`context_compaction.max_context_window=35000` 与 `trigger_ratio=0.70` 属于旧的"运行时压缩"路径，**只在模型窗口 ≤ 35000 时生效**，当前窗口 54000 下不会触发；`AIOPS_EVIDENCE_VIEW_MODE` 未开启，按证据预算的压缩也不生效。实测最近 1110 轮请求输入中位数约 14k、P90 约 23k、最大约 49k，压缩很少触发。
+注意：旧的"运行时压缩"路径（代码默认 `max_context_window=35000` / `trigger_ratio=0.70`，已从部署配置删除）只在模型窗口 ≤ 35000 时生效，当前窗口 54000 下不会触发；`AIOPS_EVIDENCE_VIEW_MODE` 未开启，按证据预算的压缩也不生效。实测最近 1110 轮请求输入中位数约 14k、P90 约 23k、最大约 49k，压缩很少触发。
 
 ### 4.8 结构化交付与收卷
 
