@@ -227,6 +227,7 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 ### 4.8 结构化交付与收卷
 
 - **交付方式**：结果 schema 作为工具挂进工具列表，`tool_choice=auto`（`llm.structured_tool_choice`），服务端用 Pydantic 校验（[structured_transport.py](../app/core/aicall/structured_transport.py)）。不用指名 tool_choice，原因是 vLLM 的语法约束解码会让 Qwen3.6 不转义内层引号，字段在第一个引号处被截断。
+- **循环内 tool_choice**：`create_agent` 带 ToolStrategy 时每轮强制 `tool_choice=any`（网关 `required`），小模型收尾时会复制上一条调用而不是调交卷工具。`llm.loop_tool_choice`（字符串或按节点映射，默认 `auto`）用 `AutoToolChoiceChatOpenAI` 改为 `auto`：一轮可以文本结束，再由收卷交付给出结构化结果。A/B 数据见 [llm-model-anomalies.md](llm-model-anomalies.md) §1.1。
 - **校验失败**：把错误反馈给模型重试，最多 `structured_validation_retries=2` 次。
 - **`finish_reason=length` 一律拒收**：LangChain 会把截断的参数补成不完整的字典，不能当作有效结果。
 - **被拒回复归档**：`structured/<node>-rejected-NNN.json`，含实际参数、结束原因和错误。

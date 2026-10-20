@@ -47,9 +47,18 @@
 2. vLLM 对 `required` 的实现是语法约束解码（见下方来源），与第 3 节"指名函数时字段截断"是同一条解码路径。
 3. 重复通知文本写着"请直接给出最终回答"，而在 `required` 下"直接回答"仍然必须是一次工具调用；104 次重复紧跟在通知之后。
 
-**可选的工程改法**（未实施，待决定）：循环内不用 `ToolStrategy`，把 schema 作为普通工具绑定并让 `tool_choice=auto`，
-模型以纯文本结束时再做一次结构化补交付（现有 `_build_structured_delivery` 路径已支持）。预期收益：收尾时不再被迫选工具、不走语法约束解码；
-风险：模型可能以纯文本提前结束，需要靠补交付兜底。
+**工程改法（已上线 12.0.63）**：`llm.loop_tool_choice`（字符串全局，或按节点映射）。`auto` 时工具循环用 `AutoToolChoiceChatOpenAI`，
+把 create_agent 下发的 `any/required` 改为 `auto`；模型以文本收尾后由现有收卷路径交付结构化结果。本地 A/B（同集群、同网关、同 MCP，注入 case-04/06/09/11）：
+
+| 场景 | required | auto |
+|---|---|---|
+| 轻量查询 4 题 | 3/4 partial，19 次重复 | 4/4 answered，0 重复 |
+| 全集群深度诊断 | 707 s，92 次调用 / 44 次重复，1 条 lane 空转收卷 | 437 s，57 次调用 / 1 次重复，4 条 lane 正常交付 |
+| 四组结论 | 4/4 正确 | 4/4 正确 |
+| 修复规划 4 组 | 3/4 出方案，1 组撞重复上限失败 | 4/4 出方案，0 重复（case-04 有一次空转重试 + 校验拒收，382 s） |
+| 定向诊断 case-06 | 280 s，7 次重复 | 177 s，0 重复 |
+
+代价：正常以文本结束的阶段多一次收卷交付（约 12–30 s），`incomplete_reason=no_structured_output` 会出现在这类正常结束的报告里。
 
 来源：[vLLM 文档 Tool Calling（required 走 guided decoding）](https://docs.vllm.ai/en/v0.10.2/features/tool_calling.html)、
 [LangChain create_agent 结构化输出](https://docs.langchain.com/oss/python/langchain/structured-output)、
