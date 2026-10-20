@@ -70,6 +70,33 @@ from .errors import (
 )
 from .guards import AgentGuards
 from .model_streaming import VisibleChatOpenAI as ChatOpenAI
+
+LOOP_TOOL_CHOICE_MODES = ("required", "auto")
+
+
+def normalize_loop_tool_choice(value: Any, default: str = "required") -> str:
+    """``llm.loop_tool_choice``: how the tool loop binds its tools each round."""
+    text = str(value or "").strip().lower()
+    return text if text in LOOP_TOOL_CHOICE_MODES else default
+
+
+class AutoToolChoiceChatOpenAI(ChatOpenAI):
+    """ChatOpenAI that never forces a tool call.
+
+    ``create_agent`` binds ToolStrategy tools with ``tool_choice="any"`` (OpenAI wire:
+    ``required``) for every round, so the model has no "stop" move: finishing must be a
+    tool call, and vLLM grammar-decodes each round. Live traces (2026-10-20) show the
+    model deciding "信息已充分，提交最终方案" and then re-emitting its previous tool call
+    instead of the long schema tool. With ``auto`` the model may end with text; the
+    existing finalization then delivers the schema from the collected material.
+    """
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        if tool_choice in ("any", "required"):
+            tool_choice = "auto"
+        return super().bind_tools(tools, tool_choice=tool_choice, **kwargs)
+
+
 from .output_budget import MINIMUM_OUTPUT_TOKENS, OutputBudget
 from .streaming import push_event
 from .structured_transport import normalize_tool_choice, parse_structured_tool_message
@@ -280,6 +307,7 @@ class AICall:
         no_thinking_nodes: Optional[Iterable[str]] = None,
         history_reasoning_field: str = "",
         structured_tool_choice: str = "auto",
+        loop_tool_choice: str = "required",
     ):
         """
         Args:
@@ -305,6 +333,9 @@ class AICall:
         self.no_thinking_nodes = frozenset(str(n) for n in (no_thinking_nodes or []) if n)
         self.history_reasoning_field = str(history_reasoning_field or "").strip()
         self.structured_tool_choice = normalize_tool_choice(structured_tool_choice)
+        # ``llm.loop_tool_choice``: ``required`` keeps create_agent's forced tool call;
+        # ``auto`` lets a round end with text (see AutoToolChoiceChatOpenAI).
+        self.loop_tool_choice = normalize_loop_tool_choice(loop_tool_choice)
         self._structured_rejections = 0
         self.model = model
         self.model_str = model
@@ -348,6 +379,7 @@ class AICall:
         disable_streaming: bool = False,
         internal: bool = False,
         max_tokens: Optional[int] = None,
+        model_cls: Optional[type] = None,
     ):
         """按次创建 ChatOpenAI，避免跨 asyncio event loop 复用底层 async client。
 
@@ -379,7 +411,11 @@ class AICall:
             self._open_async_clients.setdefault(node_id or "agent", []).append(
                 kwargs["http_async_client"]
             )
-        return ChatOpenAI(**kwargs)
+        return (model_cls or ChatOpenAI)(**kwargs)
+
+    def _agent_model_class(self) -> type:
+        """The chat model class for the tool loop (``llm.loop_tool_choice``)."""
+        return AutoToolChoiceChatOpenAI if self.loop_tool_choice == "auto" else ChatOpenAI
 
     def create_compaction_model(self, max_tokens: Optional[int] = None):
         """Non-streaming internal model for context compaction / summaries."""
@@ -1543,6 +1579,7 @@ class AICall:
                 node_id=node_id or "agent",
                 disable_streaming=disable_streaming,
                 internal=(node_id or "agent") in self.no_thinking_nodes,
+                model_cls=self._agent_model_class(),
             ),
             session_id,
             node_id=node_id or "agent",
