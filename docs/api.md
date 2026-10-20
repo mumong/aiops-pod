@@ -143,3 +143,4 @@ curl -s -X POST $A/ -H 'Content-Type: application/json' -d '{
 | 3 | A2A 调用方身份细分 | 目前所有 A2A 调用方共用适配器的 `a2a` 身份（会话按 contextId 隔离，审批人取调用方填写的 reviewer）；如需按调用方隔离记录，可把 A2A 认证主体映射为各自的 API 身份 |
 | 4 | 死代码清理 | `client._maybe_compact_runtime_context` 等旧运行时压缩路径无调用方 |
 | 5 | 执行类请求 | 已实现（2026-10-20）：路由到 focused/operate，轻量路由直接执行 bash/kubectl/helm；高危规则为唯一硬闸，执行与拦截写审计；不审批。见 ARCHITECTURE §5 |
+| 6 | API 令牌管理接口 | 2026-10-20 记录，优先级在网页端逻辑稳定之后。现状：令牌写死在 Secret `AIOPS_API_TOKENS`（`名字=令牌`），新增调用方需改 Secret 并重启，无过期、无单独吊销、所有调用方权限相同。设计：以 `AIOPS_ADMIN_TOKEN` 为根钥匙，提供仅管理员可调的创建（名字、权限范围只读/可修复、有效期，明文只返回一次）、列出（不含明文，含最近使用时间）、吊销（立即生效、免重启）接口；服务端只存哈希，与修复记录同目录持久化；Secret 中现有条目保留为启动时固定调用方（A2A 继续使用）；创建、吊销、认证失败写审计；权限范围在 `app/api/identity.py` 校验。不做调用方自助生成。约 1 天含测试与文档 |
