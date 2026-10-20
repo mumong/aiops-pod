@@ -243,7 +243,9 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 
 ## 5. 修复与执行生命周期
 
-修复与执行节点（内部 id 仍为 `remediation`）负责：制定变更方案 → 高危命令规则 → 人工审批（或 auto 模式）→ 执行 → 恢复观察。修复是它当前唯一的入口任务；执行类请求（如"用 helm 部署 xx"）走同一条审批与执行链路的设计见 [API 待办](api.md#8-待办已记录未实现)。
+修复节点（内部 id `remediation`）只负责**已有异常的修复**：制定变更方案 → 高危命令规则 → 人工审批（或 auto 模式）→ 执行 → 恢复观察。
+
+**执行请求**（用户给出明确对象和动作："卸载 default/cloud-server"、"用 helm 部署 xx"、"删除/重启 xx"、"执行 kubectl/helm 命令"）不进修复节点，由路由器标为 `focused / operate`，在轻量路由上直接执行（[operate_tools.py](../app/core/workflow/operate_tools.py)）：写工具（`run_bash_command`、`kubectl_run_image`、`helm_install/upgrade/uninstall/rollback`）在调用前过同一套高危规则——bash 里的 kubectl 命令走 `CommandPolicy`，任何 shell 命令按 `denied_executables` 逐个可执行位置检查——命中即不执行并返回规则名；执行与拦截都写入修复审计（`command_executed` / `execution_denied`，含调用者、命令、结果摘要）。不审批、不做恢复观察。设计依据：run 3453c7ecdddc40bf 把 "helm delete" 送进修复节点，被 RepairDraft 的 group_id / kubectl-only 契约连续打回。
 
 ### 5.1 ⑥ 发起（三种入口，同一种按组批次）
 
