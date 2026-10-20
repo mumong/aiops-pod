@@ -346,6 +346,7 @@ class HolmesService:
 
                 _llm_config = _raw_config.get("llm", {}) or {}
                 self.workflow_config = _raw_config.get("workflow", {}) or {}
+                self._use_configured_command_policy()
                 self.metrics_config = _raw_config.get("metrics", {}) or {}
                 self.raw_config = _raw_config
 
@@ -820,6 +821,19 @@ class HolmesService:
             )
             cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
         return normalize_tool_choice(cfg.get("structured_tool_choice"))
+
+    def _use_configured_command_policy(self) -> None:
+        """One rule set for planning, execution and the published policy."""
+        from app.core.remediation.policy import CommandPolicy, use_policy
+
+        remediation = (self.workflow_config or {}).get("remediation")
+        try:
+            use_policy(
+                CommandPolicy.from_config(remediation if isinstance(remediation, dict) else {})
+            )
+        except ValueError as exc:
+            logger.error("高危命令规则配置无效，使用内置默认规则: %s", exc)
+            use_policy(None)
 
     def get_loop_tool_choice_config(
         self,

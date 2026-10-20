@@ -28,6 +28,8 @@ __all__ = [
     "check_command",
     "named_resources",
     "validate_target_command",
+    "active_policy",
+    "use_policy",
 ]
 
 # kubectl verbs that cannot be reviewed as one bounded change (arbitrary manifests,
@@ -242,7 +244,34 @@ class CommandPolicy:
             "denied_executables": sorted(self.denied_executables),
             "allowed_exec_commands": sorted(self.allowed_exec_commands),
             "read_only_operations": sorted(READ_ONLY_OPERATIONS),
+            # Display view: what a person reads as "the blacklist".
+            "kubernetes": {
+                "commands": sorted(self.denied_operations),
+                "resources": sorted(self.denied_resource_kinds),
+                "batch": sorted(self.denied_flags)
+                + (
+                    ["-l/--selector/--field-selector（写操作）"]
+                    if self.bulk_selector_on_write
+                    else []
+                ),
+            },
+            "shell": sorted(self.denied_executables),
         }
+
+
+# The policy every unparameterised check uses: set from workflow.remediation at startup
+# so planning, ownership checks, execution and the published rules are one set.
+_ACTIVE: Optional[CommandPolicy] = None
+
+
+def use_policy(policy: Optional[CommandPolicy]) -> None:
+    global _ACTIVE
+    _ACTIVE = policy
+
+
+def active_policy() -> CommandPolicy:
+    """The configured policy; the built-in defaults only when no configuration was loaded."""
+    return _ACTIVE or CommandPolicy()
 
 
 def _normalize_kind(token: str) -> str:
@@ -312,7 +341,9 @@ def named_resources(command: str) -> List[Tuple[str, str]]:
     if not words:
         return []
     verb = words[0]
-    operation = "_".join(words[:2]) if verb in {"set", "rollout", "auth"} and len(words) > 1 else verb
+    operation = (
+        "_".join(words[:2]) if verb in {"set", "rollout", "auth"} and len(words) > 1 else verb
+    )
     start = 2 if operation.startswith(("set_", "rollout_", "auth_")) else 1
     pairs: List[Tuple[str, str]] = []
     kind = ""
@@ -344,7 +375,9 @@ def _patch_payload_error(args: List[str]) -> str:
         if name in {"-p", "--patch"}:
             payload = value if has_value else (args[index + 1] if index + 1 < len(args) else None)
         elif name == "--type":
-            patch_type = (value if has_value else (args[index + 1] if index + 1 < len(args) else "")).strip("'\"")
+            patch_type = (
+                value if has_value else (args[index + 1] if index + 1 < len(args) else "")
+            ).strip("'\"")
     if payload is None:
         return ""
     try:
@@ -353,7 +386,9 @@ def _patch_payload_error(args: List[str]) -> str:
         return f"patch 内容不是合法 JSON（{exc.msg}，位置 {exc.pos}）；请修正后重新提交"
     if patch_type == "json":
         if not isinstance(parsed, list) or not all(
-            isinstance(op, dict) and isinstance(op.get("op"), str) and isinstance(op.get("path"), str)
+            isinstance(op, dict)
+            and isinstance(op.get("op"), str)
+            and isinstance(op.get("path"), str)
             for op in parsed
         ):
             return "--type=json 的 patch 必须是 [{op, path, value?}] 操作列表"
@@ -381,7 +416,13 @@ def _pod_spec_mutation_error(args: List[str], operation: str, words: List[str]) 
     if "pod" not in kinds:
         return ""
     hint = "Pod 的 spec（env/command/探针/资源/卷等）不可原地修改；请对其控制器（Deployment/StatefulSet 等）的 Pod 模板执行变更"
-    if operation in {"set_env", "set_resources", "set_selector", "set_serviceaccount", "set_subject"}:
+    if operation in {
+        "set_env",
+        "set_resources",
+        "set_selector",
+        "set_serviceaccount",
+        "set_subject",
+    }:
         return hint
     if operation != "patch":
         return ""
@@ -391,7 +432,9 @@ def _pod_spec_mutation_error(args: List[str], operation: str, words: List[str]) 
         if name in {"-p", "--patch"}:
             payload = value if has_value else (args[index + 1] if index + 1 < len(args) else None)
         elif name == "--type":
-            patch_type = (value if has_value else (args[index + 1] if index + 1 < len(args) else "")).strip("'\"")
+            patch_type = (
+                value if has_value else (args[index + 1] if index + 1 < len(args) else "")
+            ).strip("'\"")
     if payload is None:
         return ""
     try:
@@ -399,15 +442,23 @@ def _pod_spec_mutation_error(args: List[str], operation: str, words: List[str]) 
     except ValueError:
         return ""  # malformed_patch already reports syntax
     if patch_type == "json" and isinstance(parsed, list):
-        bad = [op.get("path") for op in parsed if isinstance(op, dict) and str(op.get("path", "")).startswith("/spec") and not _POD_MUTABLE_JSON_PATHS.match(str(op.get("path", "")))]
+        bad = [
+            op.get("path")
+            for op in parsed
+            if isinstance(op, dict)
+            and str(op.get("path", "")).startswith("/spec")
+            and not _POD_MUTABLE_JSON_PATHS.match(str(op.get("path", "")))
+        ]
         return f"{hint}（路径 {', '.join(map(str, bad))}）" if bad else ""
     if isinstance(parsed, dict) and isinstance(parsed.get("spec"), dict):
         spec = parsed["spec"]
         for key, value in spec.items():
             if key in {"activeDeadlineSeconds", "terminationGracePeriodSeconds", "tolerations"}:
                 continue
-            if key in {"containers", "initContainers"} and isinstance(value, list) and all(
-                isinstance(c, dict) and set(c) <= {"name", "image"} for c in value
+            if (
+                key in {"containers", "initContainers"}
+                and isinstance(value, list)
+                and all(isinstance(c, dict) and set(c) <= {"name", "image"} for c in value)
             ):
                 continue
             return f"{hint}（spec.{key}）"
@@ -416,7 +467,7 @@ def _pod_spec_mutation_error(args: List[str], operation: str, words: List[str]) 
 
 def check_command(command: str, policy: Optional[CommandPolicy] = None) -> CommandVerdict:
     """Evaluate every rule; the first violated rule names the verdict."""
-    policy = policy or CommandPolicy()
+    policy = policy or active_policy()
 
     def deny(
         rule: str, reason: str, operation: str = "", argv: Tuple[str, ...] = ()

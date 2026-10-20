@@ -12,7 +12,7 @@ from pathlib import Path
 from app.core.remediation.approval import approval_store
 from app.core.remediation.audit import audit_event
 from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
-from app.core.remediation.policy import CommandPolicy, validate_target_command
+from app.core.remediation.policy import active_policy, validate_target_command
 from app.core.remediation.recovery import RecoveryConfig, RecoveryWatch
 from app.core.workflow.group_runner import group_display_name
 
@@ -102,7 +102,7 @@ class PodRepairExecutor:
         ``max_duration`` (seconds, 0 = off) bounds the whole execution so a stuck
         approval or a long action never leaves the job open-ended."""
         draft = deepcopy(draft)
-        policy = policy or CommandPolicy()
+        policy = policy or active_policy()
         started_at = time.time()
         max_duration = int(max_duration or 0)
 
@@ -336,7 +336,11 @@ class PodRepairExecutor:
                             # NotFound). The status-only recovery watch is the ground truth;
                             # record the failure, keep it visible, and let the watch decide.
                             verify_failures.append(
-                                {"action_id": action["id"], "command": command, "error": str(exc)[:600]}
+                                {
+                                    "action_id": action["id"],
+                                    "command": command,
+                                    "error": str(exc)[:600],
+                                }
                             )
                             if record_store:
                                 record_store.transition(
@@ -436,7 +440,8 @@ class PodRepairExecutor:
             if watch is None:
                 yield finish(
                     "needs_followup",
-                    executed_note + "并返回实际结果；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态",
+                    executed_note
+                    + "并返回实际结果；命令成功不等于 Pod 根因已消除，请按证据判断恢复状态",
                 )
                 return
             # Recovery watch: read-only observation until recovered or timed out.
@@ -452,7 +457,9 @@ class PodRepairExecutor:
                     break
                 if cancel and cancel.is_set():
                     progress.close()
-                    yield finish("cancelled", "恢复观察被取消；命令已执行，恢复状态未确认", recovery=None)
+                    yield finish(
+                        "cancelled", "恢复观察被取消；命令已执行，恢复状态未确认", recovery=None
+                    )
                     return
                 yield {**event, "run_id": run_id}
             status = summary["status"]
@@ -465,7 +472,8 @@ class PodRepairExecutor:
                 details += "；方案自带的验证命令未通过（见执行事件），以恢复观察为准"
             reason = {
                 "recovered": executed_note + f"，目标已恢复（{details}）",
-                "not_recovered": executed_note + f"，但在 {summary['timeout_seconds']} 秒内未观察到恢复（{details}）；请复查，未自动回滚",
+                "not_recovered": executed_note
+                + f"，但在 {summary['timeout_seconds']} 秒内未观察到恢复（{details}）；请复查，未自动回滚",
                 "needs_followup": executed_note + f"，但无法确认恢复状态（{details}）",
             }[status]
             yield finish(status, reason, recovery=summary)
