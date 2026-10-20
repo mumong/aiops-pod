@@ -142,4 +142,4 @@ curl -s -X POST $A/ -H 'Content-Type: application/json' -d '{
 | 2 | 编造配置值 | 方案写入 Secret / ConfigMap 的值必须来自证据或用户输入（run d09fc5c84ff54eb8 曾补了一个虚构的 Secret 值）。已缓解：规划材料给出被引用对象的键名（不含值），提示词要求向用户索取新值；尚无代码层校验 |
 | 3 | A2A 调用方身份细分 | 目前所有 A2A 调用方共用适配器的 `a2a` 身份（会话按 contextId 隔离，审批人取调用方填写的 reviewer）；如需按调用方隔离记录，可把 A2A 认证主体映射为各自的 API 身份 |
 | 4 | 死代码清理 | `client._maybe_compact_runtime_context` 等旧运行时压缩路径无调用方 |
-| 5 | 执行类请求 | "用 helm 部署 xx"这类不针对故障的变更，计划复用修复与执行节点：方案 → 高危规则 → 审批 → 执行 → 验证。需要：路由新增执行意图（当前普通资源操作归 focused/operate）；执行器支持 kubectl 之外的命令（helm 等，需单独的命令规则与只读预演，如 `helm template` / `--dry-run`）；`denied_operations` 中的 apply 等需要按执行任务重新评估 |
+| 5 | 执行类请求 | 修复与执行节点的第二种任务：用户说"执行 xx 实现 xx""帮我部署 xx"时，快速理解意图后直接执行，不走人工审批；不限定手段（kubectl、helm、bash 等）。修复仍是当前核心并保持审批。要做：路由新增执行意图（当前普通资源操作归 focused/operate）；执行器支持 kubectl 之外的命令；执行任务不审批，但保留高危命令规则（命中即拒绝，作为唯一硬闸）、身份与审计、超时；`denied_operations` 等规则按执行任务单独配置 |
