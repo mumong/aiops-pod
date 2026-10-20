@@ -157,19 +157,18 @@ data:
         approval_timeout_seconds: 600   # review 下等待审批的时长，超时不执行
         max_duration_seconds: 900   # 单个任务整体时限（审批等待 + 命令），到时终态 timeout
 
-        # 高危命令规则：只看命令形态，命中任一条即拒绝（blocked），不执行任何命令
-        denied_operations: [delete, apply, replace, edit, run, debug, drain, cordon, uncordon, taint,
-                            cp, port-forward, proxy, attach, auth, certificate]   # kubectl 动词
-        denied_flags: [--force, --grace-period, --all, --all-namespaces, -A, --now, --cascade, --overwrite]
+        # 高危命令规则：只看命令形态，命中任一条即拒绝（blocked），不执行任何命令。
+        # 2026-10-20 收窄为核心危险操作；delete/apply/patch/scale/rollout 等常规修复动作放行，
+        # 仍受"只改本组对象及其控制器"的范围校验。容器内命令名单与 mcpstander bash 工具
+        # 的 BASH_BLOCKED_COMMANDS 保持一致。
+        denied_operations: [drain, taint, cp, port-forward, proxy, attach, auth, certificate, edit]
+        denied_flags: [--all, --all-namespaces, -A]          # 批量参数
         bulk_selector_on_write: true    # 写操作带 -l / --selector / --field-selector 视为批量，拒绝
-        denied_resource_kinds: [node, namespace, clusterrole, clusterrolebinding, role, rolebinding,
-                                persistentvolume, storageclass, customresourcedefinition,
-                                mutatingwebhookconfiguration, validatingwebhookconfiguration,
-                                apiservice, priorityclass, certificatesigningrequest]  # 写这些资源拒绝，读不限
-        denied_executables: [rm, "mkfs*", dd, shutdown, reboot, halt, poweroff, init, telinit, fdisk, sfdisk,
-                             parted, wipefs, blkdiscard, nsenter, chroot, mount, umount, iptables, ip6tables,
-                             nft, kill, killall, pkill, crontab, useradd, usermod, userdel, passwd, chpasswd,
-                             su, sudo]  # kubectl exec 内层命令（支持通配符）
+        denied_resource_kinds: [node, namespace, customresourcedefinition, persistentvolume, storageclass,
+                                clusterrole, clusterrolebinding,
+                                mutatingwebhookconfiguration, validatingwebhookconfiguration]  # 写这些资源拒绝，读不限
+        denied_executables: [rm, dd, "mkfs*", fdisk, sfdisk, parted, wipefs, blkdiscard, shred,
+                             shutdown, reboot, halt, poweroff]  # kubectl exec/run/debug 内层命令（支持通配符）
         allowed_exec_commands: []   # exec 内层命令白名单，空=不启用
 
         recovery:                   # 执行后的恢复观察（只读）：Pod Running+Ready 且无新增重启，或删除完成

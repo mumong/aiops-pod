@@ -295,10 +295,10 @@ answer:        给人看的方案说明
 1. **生效模式**：配置 `remediation.mode`（review / auto）加上管理员临时覆盖（`PUT /repair/policy/mode`，需 `X-AIOps-Admin-Token`，带 TTL，持久化，到期自动恢复）。`enabled=false` 时终态为 execution_disabled。
 2. **策略预检**：在申请任何审批之前，检查所有动作的所有阶段：
    - 传输：只允许单条 kubectl 命令，不允许 shell 管道或重定向；
-   - `denied_operations`：delete apply replace edit run debug drain cordon …
-   - `denied_flags`：--force --grace-period --all -A --now --cascade --overwrite
-   - `denied_resource_kinds`：node namespace clusterrole … CRD webhook …
-   - `denied_executables`（容器内执行）：rm dd mkfs* shutdown kill iptables sudo …
+   - `denied_operations`：drain taint cp port-forward proxy attach auth certificate edit（2026-10-20 收窄：delete / apply / patch / scale / rollout 等常规修复动作放行，仍受范围校验）
+   - `denied_flags`：--all --all-namespaces -A（批量）
+   - `denied_resource_kinds`：node namespace CRD PV storageclass clusterrole(binding) webhook（写拒绝，读不限）
+   - `denied_executables`（容器内执行，与 mcpstander bash 工具的 `BASH_BLOCKED_COMMANDS` 同一份名单）：rm dd mkfs* fdisk sfdisk parted wipefs blkdiscard shred shutdown reboot halt poweroff
    - `bulk_selector_on_write`：写操作禁止批量选择器。
 
    命中任一条：审计记 `command_denied`（含规则名），终态为 **blocked**，并说明"本计划尚未执行任何命令"。

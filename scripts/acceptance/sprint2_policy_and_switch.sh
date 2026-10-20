@@ -8,13 +8,13 @@ NS=${1:-}
 TOKEN=$(admin_token)
 # ---- 1. 黑名单 ----
 DANGEROUS=(
- "kubectl delete pod/x -n demo" "kubectl delete ns demo --force --grace-period=0" "kubectl delete deployment api -n demo"
- "kubectl apply -f https://example.invalid/x.yaml" "kubectl replace -f /tmp/x.yaml" "kubectl edit deployment/api -n demo"
- "kubectl run shell --image=busybox -n demo -- sh" "kubectl debug node/node1 -it --image=busybox" "kubectl drain node1 --ignore-daemonsets"
- "kubectl cordon node1" "kubectl taint nodes node1 k=v:NoSchedule" "kubectl cp /etc/passwd demo/x:/tmp/p"
- "kubectl patch pod/x -n demo --all -p '{}'" "kubectl scale deployment --all --replicas=0 -A" "kubectl patch deployment api -n demo -l app=api -p '{}'"
- "kubectl patch node/node1 -p '{}'" "kubectl patch clusterrolebinding/admin -p '{}'" "kubectl label ns demo team=x"
- "kubectl exec pod/x -n demo -- rm -rf /data" "kubectl exec pod/x -n demo -- sh -c 'kill -9 1'" "kubectl exec pod/x -n demo -- dd if=/dev/zero of=/dev/sda"
+ "kubectl drain node1 --ignore-daemonsets" "kubectl taint nodes node1 k=v:NoSchedule" "kubectl cp /etc/passwd demo/x:/tmp/p"
+ "kubectl edit deployment/api -n demo" "kubectl port-forward pod/x 8080:80 -n demo" "kubectl auth can-i delete pods"
+ "kubectl patch pod/x -n demo --all -p '{}'" "kubectl scale deployment --all --replicas=0 -A" "kubectl delete pods --all-namespaces"
+ "kubectl patch deployment api -n demo -l app=api -p '{}'"
+ "kubectl patch node/node1 -p '{}'" "kubectl delete ns demo" "kubectl patch clusterrolebinding/admin -p '{}'" "kubectl delete crd widgets.example.com"
+ "kubectl exec pod/x -n demo -- rm -rf /data" "kubectl exec pod/x -n demo -- sh -c 'rm /tmp/app.lock'" "kubectl exec pod/x -n demo -- dd if=/dev/zero of=/dev/sda"
+ "kubectl exec pod/x -n demo -- mkfs.ext4 /dev/sdb" "kubectl exec pod/x -n demo -- reboot" "kubectl run shell --image=busybox -n demo -- rm -rf /"
  "kubectl get pods -n demo ; rm -rf /" "kubectl get pods --kubeconfig=/tmp/c" "kubectl config use-context prod" "bash -c 'kubectl get pods'"
 )
 SAFE=(
@@ -22,6 +22,8 @@ SAFE=(
  "kubectl patch deployment/api -n demo --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/readinessProbe/httpGet/port\",\"value\":8080}]'"
  "kubectl set env deployment/api -n demo APP_CONFIG_PATH=/etc/workload/app.json"
  "kubectl rollout restart deployment/api -n demo" "kubectl get pod/x -n demo -o json" "kubectl exec pod/x -n demo -- curl -s http://localhost:8080/ready"
+ "kubectl delete pod/x -n demo" "kubectl delete pod/x -n demo --force --grace-period=0" "kubectl apply -f /tmp/fixed.yaml -n demo"
+ "kubectl scale deployment/api -n demo --replicas=2" "kubectl cordon node1" "kubectl exec pod/x -n demo -- kill -HUP 1"
 )
 python3 - "$B" "$D" "${#DANGEROUS[@]}" "${DANGEROUS[@]}" "${SAFE[@]}" <<'PY'
 import json,sys,urllib.request
@@ -38,7 +40,7 @@ import json;res=json.load(open('$D/check.json'));n=${#DANGEROUS[@]}
 print(sum(1 for r in res[:n] if not r['allowed']), sum(1 for r in res[:n] if r['allowed']), sum(1 for r in res[n:] if r['allowed']), sum(1 for r in res[n:] if not r['allowed']))")"
 check '[ "$LEAKED" = 0 ]' "高危命令黑名单拦截：${#DANGEROUS[@]} 条高危命令全部被拦截且带规则名" "拦截 $BLOCKED，漏放 $LEAKED"
 check '[ "$WRONG" = 0 ]' "合规修复命令不被误拦：${#SAFE[@]} 条" "放行 $ALLOWED，误拦 $WRONG"
-check "curl -s $B/repair/policy | python3 -c \"import json,sys;d=json.load(sys.stdin);assert len(d['rules']['denied_operations'])>=10 and 'rm' in d['rules']['denied_executables']\"" "GET /repair/policy 公布生效规则" "可在前端“查看拦截规则”核对"
+check "curl -s $B/repair/policy | python3 -c \"import json,sys;d=json.load(sys.stdin);assert 'drain' in d['rules']['denied_operations'] and 'rm' in d['rules']['denied_executables']\"" "GET /repair/policy 公布生效规则" "可在前端“查看拦截规则”核对"
 # ---- 2. 开关（接口层） ----
 check '[ -n "$TOKEN" ]' "运行时开关可用（Secret 已配置 AIOPS_ADMIN_TOKEN）" "" || { summary; exit 1; }
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT $B/repair/policy/mode -H 'Content-Type: application/json' -d '{"mode":"auto"}')
