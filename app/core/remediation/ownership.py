@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.core.remediation.policy import _normalize_kind, check_command, named_resources
+from app.core.remediation.write_facts import pod_state, spec_digest
 
 Runner = Callable[[str], str]
 
@@ -59,6 +60,8 @@ class ControllerChain:
     namespace: str
     links: List[OwnerLink] = field(default_factory=list)  # Pod first, root last
     complete: bool = True  # False when a lookup failed before reaching the top
+    pod_state: Dict[str, Any] = field(default_factory=dict)  # see write_facts.pod_state
+    write_target: Dict[str, Any] = field(default_factory=dict)  # root (or bare Pod) spec digest
 
     @property
     def pod(self) -> Optional[OwnerLink]:
@@ -85,6 +88,8 @@ class ControllerChain:
             ],
             "root": self.root.label() if self.root else None,
             "complete": self.complete,
+            **({"pod_state": self.pod_state} if self.pod_state else {}),
+            **({"write_target": self.write_target} if self.write_target else {}),
         }
 
 
@@ -125,6 +130,7 @@ def resolve_controller_chain(
     if current is None:
         return ControllerChain(namespace=namespace, links=[OwnerLink("Pod", pod)], complete=False)
     links.append(OwnerLink("Pod", pod, str((current.get("metadata") or {}).get("uid") or "")))
+    state = pod_state(current)
     for _ in range(max_depth):
         ref = _controller_ref(current)
         if ref is None:
@@ -143,7 +149,14 @@ def resolve_controller_chain(
         if current is None:
             complete = False
             break
-    return ControllerChain(namespace=namespace, links=links, complete=complete)
+    write_target = spec_digest(current) if complete and current is not None else {}
+    return ControllerChain(
+        namespace=namespace,
+        links=links,
+        complete=complete,
+        pod_state=state,
+        write_target=write_target,
+    )
 
 
 def managed_write_error(command: str, chain: Optional[ControllerChain]) -> str:
