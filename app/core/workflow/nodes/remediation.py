@@ -2,11 +2,13 @@
 
 import json
 import logging
+import re
 from typing import ClassVar, Dict, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from app.core.prompts import POD_REMEDIATION_PROMPT
+from app.core.remediation.execution_guard import RepairCommandDenied
 from app.core.remediation.ownership import ControllerChain, chains_for_targets, managed_write_error
 from app.core.workflow.nodes.query_answer import (
     QueryAnswer,
@@ -14,6 +16,21 @@ from app.core.workflow.nodes.query_answer import (
     _configure_query_runtime,
     finalize_query_answer,
 )
+
+_POLICY_BLOCK = re.compile(r"高危规则拦截（([\w.]+)）：(.+?)；")
+
+
+def policy_block_message(reasons) -> str:
+    """'方案中的命令被高危规则拦截…' when the plan failed on blacklisted commands, else ''."""
+    hits = []
+    for reason in reasons or []:
+        for rule, command in _POLICY_BLOCK.findall(str(reason)):
+            item = f"{command.strip()}（{rule}）"
+            if item not in hits:
+                hits.append(item)
+    if not hits:
+        return ""
+    return "方案中的命令被高危规则拦截：" + "；".join(hits[:3]) + "，未写入方案，也未执行"
 
 
 class RepairTarget(BaseModel):
@@ -151,7 +168,14 @@ class RepairDraft(QueryAnswer):
             ):
                 if not command and stage in {"dry_run", "verify"}:
                     continue
-                validate_target_command(command, allowed)
+                try:
+                    validate_target_command(command, allowed)
+                except RepairCommandDenied as denied:
+                    # Tagged so a plan that fails only on policy is reported as such.
+                    raise ValueError(
+                        f"高危规则拦截（{denied.rule or 'policy'}）：{command}；"
+                        "该命令不能进入方案，请改用不在黑名单中的方式，或不提交该动作并在 answer 说明"
+                    ) from None
                 # Write where the controller writes: a managed member of the ownership
                 # chain (ReplicaSet under a Deployment, Job under a CronJob) is rewritten
                 # by its controller, so a patch there is accepted and changes nothing.
@@ -385,8 +409,11 @@ class RemediationNode(QueryCollectNode):
                 )
                 for r in reasons
             )
+            blocked = policy_block_message(reasons)
             failure = (
-                "模型服务连接中断，方案未生成"
+                blocked
+                if blocked
+                else "模型服务连接中断，方案未生成"
                 if interrupted
                 else "上下文整理或预算检查未完成"
                 if any("compaction" in r for r in reasons)
@@ -397,7 +424,11 @@ class RemediationNode(QueryCollectNode):
                 else "未获得完整有效的结构化修复方案"
             )
             planning_error = {
-                "code": "model_connection_interrupted" if interrupted else "planning_incomplete",
+                "code": "policy_blocked"
+                if blocked
+                else "model_connection_interrupted"
+                if interrupted
+                else "planning_incomplete",
                 "message": failure + "。尚未执行修复，可重新生成本组方案。",
             }
             draft = RepairDraft(
