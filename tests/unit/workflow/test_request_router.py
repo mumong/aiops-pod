@@ -20,7 +20,10 @@ def test_ordinary_operation_contract_keeps_focused_route_and_session_scope():
     assert contract.task == "operate"
     assert contract.pod_names == []
     assert "卸载 Helm Release" in REQUEST_ROUTER_PROMPT
-    assert "“卸载 xx”“删除 xx”“重启 xx”这类已经说明对象和动作的指令是执行请求" in REQUEST_ROUTER_PROMPT
+    assert (
+        "“卸载 xx”“删除 xx”“重启 xx”这类已经说明对象和动作的指令是执行请求"
+        in REQUEST_ROUTER_PROMPT
+    )
     assert "不再次发起修复" in REQUEST_ROUTER_PROMPT
 
 
@@ -299,3 +302,14 @@ def test_unsupported_request_stops_with_a_clear_reason_not_a_format_error():
     assert "不在支持范围" in result["conclusion"] and "未执行任何命令" in result["conclusion"]
     assert "格式异常" not in result["conclusion"]
     assert result["request_contract"]["route"] == "unsupported"
+
+
+def test_router_prompt_routes_in_pod_commands_to_the_executor():
+    """Live 2026-10-20 (feb539aad5ea4c69): "在 <ns> 的 <pod> Pod 里执行 rm ..." was refused
+    as a host operation, so the blacklist never saw it. In-Pod commands are cluster
+    execution; the rules decide, not the router."""
+    from app.core.prompts import QUERY_COLLECT_PROMPT, REQUEST_ROUTER_PROMPT
+
+    assert "等同 kubectl exec" in REQUEST_ROUTER_PROMPT
+    assert "路由不提前拒绝" in REQUEST_ROUTER_PROMPT
+    assert "kubectl_run_image 只在用户要求新起临时 Pod 时使用" in QUERY_COLLECT_PROMPT

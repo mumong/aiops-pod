@@ -161,10 +161,10 @@ EXPECTED_DIGESTS = {
     "focused-explain-False": "107d2504391ad261c5e65510f7c964998dc5f00e0242bcf944b3947d9aa45c8a",
     "focused-explain-True": "107d2504391ad261c5e65510f7c964998dc5f00e0242bcf944b3947d9aa45c8a",
     # Metric guidance intentionally updated in query/deep; focused stays unchanged.
-    "query-False-query": "1a5ebdcae1afc765dcae60a642c9a650a9417d72c4e090331a79859173a91d4f",
-    "query-False-operate": "ab76765b021fca92bcd36a5aa7dfc29550879b0b6db780c88f7569cd7b222848",
-    "query-True-query": "e5075d66a4e7159c68c3207c1474189d5715bead9aaaa5bf2e68357c6b520b08",
-    "query-True-operate": "a041d4bb3073ce5958531f805a3d8f468c70f5ef7c230447a60ff72ef3522fdf",
+    "query-False-query": "f136b19eacf06cb3ea9b7d13f097a13431a13d4a33152b9888a01acf90a15398",
+    "query-False-operate": "7aa3b982825a560402e958a61a5f04f17263a6493d3945b95a6f2b8f1ccb1eb4",
+    "query-True-query": "3e70aa52249f95d663be7e77d2c6c64048962e4c52d34f242067047f3fc92cf7",
+    "query-True-operate": "ac24ff17fb758b0c8fb0ff0ff3e769d821d48edb5553b74c63509cc1ff48208c",
 }
 
 

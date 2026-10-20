@@ -1007,7 +1007,10 @@ class HolmesService:
         """执行查询并返回结果（收集流式工作流输出为完整文本）"""
         start_time = datetime.now()
         try:
-            if api_key or model or max_steps != 50:
+            # Only an explicit client change re-initialises. max_steps is not read by
+            # the workflow; resetting on it tore the shared service down on every
+            # sync /ask (default 20) and raced concurrent requests.
+            if api_key or model:
                 self.config = None
                 self.ai_call = None
             self.initialize(api_key=api_key, model=model, max_steps=max_steps)
