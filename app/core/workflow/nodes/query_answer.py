@@ -17,6 +17,7 @@ from app.core.prompts import (
 from app.core.runbook.catalog import reference_description
 from app.core.skills.models import Layer
 from app.core.workflow.nodes.focused import FocusedTaskNode
+from app.core.workflow.operate_tools import HELM_READ_TOOLS, WRITE_TOOLS, guard_write_tool
 
 # Re-export legacy imports while keeping contracts separate from orchestration.
 from app.core.workflow.query_contract import QueryAnswer, parse_query_answer
@@ -35,23 +36,53 @@ def _configure_query_runtime(node):
 
 
 class QueryCollectNode(FocusedTaskNode):
-    WRITE_TOOLS = {"run_bash_command", "kubectl_run_image"}
+    # Explicit execution requests (task=operate): run directly behind the high-risk rules
+    # and the audit (``operate_tools``); never through the repair node's plan/approval.
+    WRITE_TOOLS = set(WRITE_TOOLS)
 
     def _allowed_query_tools(self, state):
         # Ordinary operations stay on QUERY; diagnostic subclasses keep READ_TOOLS.
         contract = state.get("request_contract") or {}
         return self.READ_TOOLS | (self.WRITE_TOOLS if contract.get("task") == "operate" else set())
 
-    READ_TOOLS = FocusedTaskNode.READ_TOOLS | {
-        "kubernetes_count",
-        "kubernetes_jq_query",
-        "kubernetes_tabular_query",
-        "kubectl_logs_grep",
-        "kubectl_logs_all_containers_grep",
-        "get_prometheus_target",
-        "list_prometheus_rules",
-        "TodoWrite",
-    }
+    def _guard_write_tools(self, state):
+        """Wrap the write tools for this request: deny by rule, otherwise run and audit."""
+        from app.core.remediation.policy import CommandPolicy
+
+        contract = state.get("request_contract") or {}
+        if contract.get("task") != "operate":
+            return
+        wf_config = self._get_workflow_config()
+        cfg = wf_config.get("remediation") if isinstance(wf_config, dict) else None
+        policy = CommandPolicy.from_config(cfg if isinstance(cfg, dict) else {})
+        principal = str(state.get("remediation_principal") or state.get("query_session_key") or "")
+        self.tools = [
+            guard_write_tool(
+                tool,
+                policy,
+                principal=principal,
+                question=str(state.get("original_question") or state.get("question") or ""),
+            )
+            if getattr(tool, "name", "") in self.WRITE_TOOLS
+            and callable(getattr(tool, "invoke", None))  # only a real, invokable tool
+            else tool
+            for tool in getattr(self, "tools", []) or []
+        ]
+
+    READ_TOOLS = (
+        FocusedTaskNode.READ_TOOLS
+        | set(HELM_READ_TOOLS)
+        | {
+            "kubernetes_count",
+            "kubernetes_jq_query",
+            "kubernetes_tabular_query",
+            "kubectl_logs_grep",
+            "kubectl_logs_all_containers_grep",
+            "get_prometheus_target",
+            "list_prometheus_rules",
+            "TodoWrite",
+        }
+    )
 
     def _prepare_query_tools(self):
         catalog = {
@@ -99,6 +130,7 @@ class QueryCollectNode(FocusedTaskNode):
             self.ai_call.query_session_context = state.get("query_session_context") or {}
             self.ai_call.working_context_original_question = question
         catalog = self._prepare_query_tools()
+        self._guard_write_tools(state)
         self._archive_node_input(
             {
                 "question": question,
