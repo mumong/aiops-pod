@@ -245,7 +245,7 @@ class RemediationNode(QueryCollectNode):
 
     @property
     def node_name(self):
-        return "制定 Pod 修复方案"
+        return "修复与执行"
 
     @staticmethod
     def _group_dispatch(state):

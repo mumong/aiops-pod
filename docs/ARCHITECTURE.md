@@ -241,7 +241,9 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 - **结束后**：诊断记录 `diagnosis-record.v2` 按组落盘，供修复使用；同时生成 `run_report.md` 与 `ledger/*.json`。
 - **实例**：总结 2.1 秒，总耗时 381 秒。
 
-## 5. 修复生命周期
+## 5. 修复与执行生命周期
+
+修复与执行节点（内部 id 仍为 `remediation`）负责：制定变更方案 → 高危命令规则 → 人工审批（或 auto 模式）→ 执行 → 恢复观察。修复是它当前唯一的入口任务；执行类请求（如"用 helm 部署 xx"）走同一条审批与执行链路的设计见 [API 待办](api.md#8-待办已记录未实现)。
 
 ### 5.1 ⑥ 发起（三种入口，同一种按组批次）
 
@@ -263,8 +265,9 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 - 本组历史报告、关键事实、未确认项与引用，并附说明"不是执行授权，生成方案前可自主核实"；
 - 收窄后的 `request_contract`；
 - **控制器链**：代码用只读 `kubectl get -o json` 沿 `ownerReferences` 走到顶层（如 Pod → ReplicaSet → Deployment，最多 6 层）。
+- **写入对象事实**（[write_facts.py](../app/core/remediation/write_facts.py)，随控制器链一起读取，不额外调用模型）：`write_target` 为顶层控制器（裸 Pod 为 Pod 本身）的 Pod 模板摘要（容器、env 引用、探针、资源、卷，`template_path` 指出 patch 路径）；`pod_state` 为 Pod 当前阶段、删除状态与容器状态；`config_refs` 为模板引用的 Secret/ConfigMap 是否存在及键名。值从不读取（go-template 只输出键名），需要写入新值时只能向用户索取。
 
-**Agent**：只读工具（写工具屏蔽），最多 `max_steps.remediation=64` 步，可自行核实当前状态。
+**Agent**：只读工具（写工具屏蔽），最多 `max_steps.remediation=64` 步。上述事实足以构造命令时直接出方案，只在缺字段时补查（f8e56239 批次之前，4 个规划各用 2.0–3.8 分钟，主要在分页重读同一份 YAML）。
 
 **输出 `RepairDraft`**（schema 按本次控制器链绑定）：
 ```

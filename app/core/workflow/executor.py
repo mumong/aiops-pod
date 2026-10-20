@@ -1366,7 +1366,7 @@ class WorkflowExecutor:
             "evidence": "证据链采集",
             "rca": "根因分析",
             "conclusion": "汇总总结",
-            "remediation": "制定 Pod 修复方案",
+            "remediation": "修复与执行",
         }
         return name_map.get(node_id, node_id)
 

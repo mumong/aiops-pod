@@ -62,7 +62,7 @@ def test_planning_stream_name_does_not_claim_execution():
     from app.core.workflow.executor import WorkflowExecutor
 
     executor = object.__new__(WorkflowExecutor)
-    assert executor._get_node_display_name("remediation") == "制定 Pod 修复方案"
+    assert executor._get_node_display_name("remediation") == "修复与执行"
 
 
 def test_explicit_repair_entry_routes_without_model_guessing():
