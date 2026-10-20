@@ -15,6 +15,47 @@
 - 官方模型卡也承认存在"无休止的重复"，并建议用 `presence_penalty`（0–2）来缓解：[Qwen3.6-35B-A3B 模型卡](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
 - 机制层面的研究：上下文里重复越多，模型越倾向继续重复（自我强化效应）：[Xu et al., NeurIPS 2022](https://arxiv.org/pdf/2206.02369)
 
+### 1.1 机制分析（2026-10-20，基于 211 次线上运行轨迹 + Langfuse 原始返回）
+
+**问题**：重复的是"同一工具 + 完全相同的参数"。它是在要新结果吗？为什么参数不变？
+
+**数据**（含请求轨迹的 211 次运行，145 次出现重复，共 597 次跨轮重复 + 77 次同轮重复）：
+
+| 重复前模型的思考内容 | 次数 | 说明 |
+|---|---|---|
+| 明确写着"信息已充分 / 提交最终方案 / 直接回答 / 准备输出 XxxOutput" | 153 | 不想要数据，想交卷；发出的却是旧调用 |
+| 计划换参数（continue_token、where 过滤、另一个命名空间） | 46 | 想法是新查询，输出却抄了旧参数（layer 节点为主） |
+| 想刷新状态（"再次确认是否恢复"） | 27 | 真的想重新观测（remediation 为主） |
+| 其它 / 思考尾部未记录 | 371 | 大多没有提到要查新东西 |
+
+重复调用等于**上一轮**调用的占 61%（327/533），落在最近两轮内的占 80%。
+
+**Langfuse 原始返回佐证**（run `29e760da`、`54429f28`）：`reasoning_content` 为"信息已充分。提交最终方案。"，
+同一条返回的 `tool_calls` 却是前几轮用过的 `kubectl_get_yaml`/`kubernetes_tabular_query`（参数逐字相同）；
+`54429f28` 第 5 轮的思考里已经把 Helm Release 表格整段写完，动作仍是 `helm_list({})` 第三次。
+
+**结论**：绝大多数重复不是"需要新结果"，而是**模型决定收尾时，输出端复制了上下文里最近的工具调用**。参数一样正是因为它是复制而不是重新组参：
+现成的 token 序列在上下文里出现过多次，续写它的损失最低；Xu et al. 2022 描述的自我强化效应会让每次重复进一步提高下一次重复的概率。
+
+**我们这边的工程因素**（不是纯模型问题）：
+
+1. 整个工具循环运行在 `tool_choice=required` 下。LangChain `create_agent` 只要带 `response_format=ToolStrategy`，
+   就把 `tool_choice` 固定为 `any`（OpenAI 兼容层即 `required`），Langfuse 的 modelParameters 可见。
+   因此模型没有"不调工具、直接结束"的出口：收尾必须以调用 schema 工具（QueryAnswer / RepairDraft / EvidenceStageOutput）的形式完成，
+   该工具是工具列表里最后、最长的一个；而"抄上一条调用"是更短、更熟悉的合法输出。
+   `llm.structured_tool_choice=auto`（12.0.41）只改了循环结束后的补交付调用，没有改循环本身。
+2. vLLM 对 `required` 的实现是语法约束解码（见下方来源），与第 3 节"指名函数时字段截断"是同一条解码路径。
+3. 重复通知文本写着"请直接给出最终回答"，而在 `required` 下"直接回答"仍然必须是一次工具调用；104 次重复紧跟在通知之后。
+
+**可选的工程改法**（未实施，待决定）：循环内不用 `ToolStrategy`，把 schema 作为普通工具绑定并让 `tool_choice=auto`，
+模型以纯文本结束时再做一次结构化补交付（现有 `_build_structured_delivery` 路径已支持）。预期收益：收尾时不再被迫选工具、不走语法约束解码；
+风险：模型可能以纯文本提前结束，需要靠补交付兜底。
+
+来源：[vLLM 文档 Tool Calling（required 走 guided decoding）](https://docs.vllm.ai/en/v0.10.2/features/tool_calling.html)、
+[LangChain create_agent 结构化输出](https://docs.langchain.com/oss/python/langchain/structured-output)、
+[LangChain 论坛：ToolStrategy + 工具时循环到递归上限](https://forum.langchain.com/t/create-agent-toolstrategy-tools-structured-output-not-working-across-models-langchain-1-0-2/2293)、
+`langchain/agents/factory.py`（`tool_choice = "any" if structured_output_tools else request.tool_choice`）。
+
 ## 2. 一轮思考把输出额度用光，却没有发出任何工具调用
 
 **现象**：某一轮把 4000 个输出 token 全部花在思考上，耗时 70–100 秒，`tool_calls=0`，这一阶段因此拿不到结果。
