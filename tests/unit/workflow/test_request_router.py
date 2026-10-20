@@ -274,3 +274,27 @@ def test_repair_plan_with_a_diagnosis_or_without_the_flag_keeps_remediation():
     }
     assert _repair_router().execute(with_diagnosis)["request_route"] == "remediation"
     assert _repair_router().execute({"question": "修复"})["request_route"] == "remediation"
+
+
+def test_unsupported_request_stops_with_a_clear_reason_not_a_format_error():
+    """Live 02cf7ca2a72948c6: "执行 rm /tmp/x" on the host → the model answered
+    route=unsupported (a refusal), the schema rejected it and the person saw
+    "输出格式异常，请重试" instead of "不在支持范围"."""
+    node = RequestRouterNode()
+    node.ai_call = SimpleNamespace(
+        call_structured=lambda **kwargs: (
+            RequestContract(
+                route="unsupported",
+                task="unsupported",
+                scope="unspecified",
+                clarification="主机上的文件删除不在支持范围",
+            ),
+            "",
+        )
+    )
+    result = node.execute({"question": "帮我执行命令 rm /tmp/x"})
+    assert result["request_route"] == "stop"
+    assert result["request_error"]["code"] == "unsupported_request"
+    assert "不在支持范围" in result["conclusion"] and "未执行任何命令" in result["conclusion"]
+    assert "格式异常" not in result["conclusion"]
+    assert result["request_contract"]["route"] == "unsupported"

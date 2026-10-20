@@ -21,8 +21,8 @@ from app.core.workflow.nodes.base import WorkflowNode
 class RequestContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    route: Literal["full_diagnosis", "focused", "clarify", "remediation"] = Field(
-        description="处理深度；full_diagnosis 不代表扩大到全集群"
+    route: Literal["full_diagnosis", "focused", "clarify", "remediation", "unsupported"] = Field(
+        description="处理深度；full_diagnosis 不代表扩大到全集群；unsupported=请求不在支持范围"
     )
     task: Literal[
         "inspect", "query", "diagnose", "explain", "mixed", "unsupported", "repair", "operate"
@@ -229,6 +229,27 @@ class RequestRouterNode(WorkflowNode):
         finally:
             if self.metrics is not None:
                 self.metrics.record_llm_call(self.node_id, (time.monotonic() - started) * 1000)
+        if contract.route == "unsupported":
+            # A refusal is an answer, not a format error: say why, run nothing.
+            reason = (
+                contract.clarification or ""
+            ).strip() or "任意主机或非 Pod 的破坏性操作不在支持范围"
+            failure = {
+                "code": "unsupported_request",
+                "title": "请求不在支持范围",
+                "message": f"{reason}。本次未执行任何命令，也未启动集群查询或诊断。",
+                "http_status": None,
+                "history_loaded": bool(context["history"] or context["working_summary"]),
+            }
+            output = {
+                "request_contract": contract.model_dump(),
+                "request_route": "stop",
+                "request_error": failure,
+                "conclusion": f"{failure['title']}\n\n{failure['message']}",
+                "errors": [*(state.get("errors") or []), "request_router: unsupported_request"],
+            }
+            self._archive_node_output(output)
+            return output
         if (
             contract.route == "remediation"
             and state.get("repair_auto_plan")
