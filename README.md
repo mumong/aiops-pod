@@ -1,5 +1,7 @@
 # K8s AIOps Copilot
 
+[English](README.en.md) | **中文**
+
 面向 Kubernetes 的智能运维诊断助手。使用自然语言查询集群，按异常 Pod 独立采集现场证据，再生成包含现象、根因、依据和未知项的诊断报告。
 
 ## 项目背景
@@ -247,21 +249,26 @@ make case-clean CASE=c04
 
 ## 其他使用方式
 
-### Pod 修复（默认人工审批）
+### 执行命令与 Pod 修复（默认人工审批）
 
-普通资源操作与故障修复分开：明确要求创建测试 Pod、创建/修改资源时走 query 的 `focused/operate`，通过 MCP 执行后读取真实状态，不套故障修复计划。此路径已开放写工具，普通明确操作不额外弹出修复审批卡；高风险操作由 Agent 先澄清确认范围。MCP 危险命令拦截保留，但不是严格的资源级写白名单；管理员级 RBAC 下应限制服务访问对象。纯查询和深度诊断不开放这条直接写入通道。
+两条路径，职责分开：
 
-同一前端会话先诊断，再输入“帮我修复刚才的 Pod”，会进入独立修复规划路由。规划依据最近上下文、真实 Pod／控制器状态与 Runbook；命令在审批卡片中展示，批准后才执行，倒计时结束取消而非自动批准。深度诊断可在原总结调用中附修复计划，无需每次额外增加规划节点。
+- **执行明确的命令**（如"卸载 default/cloud-server""在 xx Pod 里执行 ls /tmp""helm list"）：走轻量路由 `focused/operate`，Agent 直接执行，之后最多做一次只读确认，不制定修复方案、不弹审批卡。高危命令规则是唯一的闸门，执行与拦截都写审计。
+- **修复已诊断的异常**（报告下"生成修复方案"，或会话中说"修复刚才的问题"）：按异常组并发规划，每组一个独立任务；方案中的命令先过高危规则，再按执行方式审批后执行，最后进入恢复观察（已恢复 / 超时未恢复 / 待复查）。
 
-深度诊断没有可执行计划时，报告下提供“生成修复方案并审阅”入口；点击仅发起同会话规划，不代表批准。前端按组展示预演、执行和验证结果；命令失败、审批取消与待复查状态分别显示。
+**执行方式**：`workflow.remediation.mode: review`（默认，每个动作人工审批，超时取消而非自动批准）或 `auto`（自动执行，仅限受控环境）。管理员可凭 Secret 中的 `AIOPS_ADMIN_TOKEN` 调 `PUT /repair/policy/mode` 做有时限的运行时切换，变更写审计。
 
-`workflow.remediation.enabled` 控制开关，`executor: pod` 使用受限执行器，`mode: review` 为默认人工审批，`mode: auto` 仅适合已授权的受控环境；管理员可凭 Secret 中的 `AIOPS_ADMIN_TOKEN` 通过 `PUT /repair/policy/mode` 做有时限的运行时切换，变更写入审计。高危命令规则（禁止动词、强制/批量参数、集群级资源写入、容器内破坏性命令）默认启用，`GET /repair/policy` 可查、`POST /repair/policy/check` 可干跑验证，拒绝时带规则名。命令执行后进入恢复观察，结果为已恢复、超时未恢复或待复查。普通查询不会因报告包含命令就变成写操作。详见[部署指南](docs/GUIDE.md)的"修复安全控制"一节与[三个 Sprint 的设计与验收方案](docs/remediation-sprint-design-2026-10.md)。
+**高危命令规则**（网页修复区"查看拦截规则"，`GET /repair/policy` 可查，`POST /repair/policy/check` 可干跑）分三类，规划、执行、对话三条路径使用同一套：
 
-当前默认写操作限于已核实 Pod／控制器的资源调整、受限 JSON Patch 和滚动重启；禁止任意 Shell、删除、跨集群或权限变更。命令成功不等于根因已消除，仍需结合验证结果复查。审批和修复互斥状态为进程内存，Pod 重启后需重新发起；不要据此部署多副本修复执行器。
+| 类别 | 内容 | 处理 |
+|---|---|---|
+| 绝对禁止 | Kubernetes：`taint`、`edit`、`cp`、`port-forward` 等；写节点、CRD、集群角色等集群级资源；`--all`/`-A` 批量操作。Shell：`dd`、`mkfs`、`reboot`、`shutdown` 等 | 任何情况都不执行，拒绝时带规则名 |
+| 需人工审批 | `drain`、删除/修改命名空间、Pod 内 `rm` | 对话中拦截；修复方案中可用，执行前强制人工审批，**自动执行模式也一样** |
+| 普通修复动作 | `delete pod`、`patch`、`set env`、`rollout restart`、`scale` 等 | 按执行方式审批或自动执行，仍受"只改本组对象及其控制器"的范围校验 |
 
-2026-09-20 按管理员要求，AIOps/MCP 的 Kubernetes RBAC 已开放集群管理权限；这是凭据层权限，不取消上述 Agent 命令策略和人工审批。修复规划、执行、恢复观察的完整生命周期与边界见[核心流程与模块架构](docs/ARCHITECTURE.md)第 5 节。无限增长型 OOM 默认不再反复扩容。
+MCP 的 bash 工具另有一道闸，Agent 自己执行不了 Shell 禁止命令和 `rm`；经批准的高危命令由后端修复执行器执行。验收步骤见[高危命令黑名单验收](docs/acceptance-blacklist.md)，生命周期与边界见[核心流程与模块架构](docs/ARCHITECTURE.md)第 5 节。
 
-DeepSeek 联调使用独立 `aiops-deepseek-remediation` Secret，原模型 Secret 保留。部署前需准备该 Secret 的 `LLM_API_KEY`、`LLM_MODEL`、`LLM_API_BASE`；不要将真实密钥提交 Git。
+命令成功不等于根因已消除，仍需结合恢复观察复查。审批和修复互斥状态为进程内存，Pod 重启后需重新发起；不要据此部署多副本修复执行器。AIOps/MCP 的 Kubernetes RBAC 为集群管理权限，这是凭据层权限，不取消上述命令规则和人工审批。
 
 `/query` 与 `/ask` 先由 Agent 理解意图并输出 JSON 路由：日常查询和快速初查由查询 Agent 直接生成结构化答案，不再调用独立总结模型；Pod、命名空间或集群根因诊断走“定位 → 取证 → 根因 → 总结”，多个 Pod 可分组并发取证和分析。深度诊断不等于全量扫描，各节点围绕原问题自主选择只读工具和 Runbook，不执行固定采集兜底。前端显示 Markdown，SSE 的 `query_answer` 包含意图、范围、状态、正文、来源与缺失项；结构正确不代表诊断已核验。两接口共享 session_id 会话记忆及 54k 环境配置下的自动上下文压缩；进程内记忆在 Pod 重启后丢失。
 
@@ -314,6 +321,7 @@ make delete deploy
 | [部署与运维](docs/GUIDE.md) | 配置、发布、权限、联邦及常见排查 |
 | [运行诊断](docs/run-diagnostics.md) | 每次运行的账本、工程异常分类、`/runs/{run_id}` 报告 |
 | [LLM 自身异常记录](docs/llm-model-anomalies.md) | 模型/推理服务自身问题的现象与外部佐证 |
+| [高危命令验收](docs/acceptance-blacklist.md) | 黑名单与需人工审批命令的标准验收步骤 |
 | [修复三个 Sprint](docs/remediation-sprint-design-2026-10.md) | 修复链路需求、设计与验收记录 |
 | [可观测性采集](docs/observability.md) | MCP 工具、PromQL 示例、日志与链路、结果含义 |
 | [A2A](docs/a2a.md) | 标准协议、客户端、鉴权与真实 Agent-to-Agent 测试 |
