@@ -247,7 +247,7 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 
 ### 5.1 ⑥ 发起（三种入口，同一种按组批次）
 
-入口：报告下的按钮（`POST /repair/batches`）、`/ask ... repair=plan`（诊断完成后自动建批次）、同一会话里的对话请求（"修复刚刚的问题"）。对话请求在会话已有分组诊断时，由 `RemediationNode._group_dispatch` 直接转成批次，不再让一个 Agent 处理整份诊断；点名的 Pod 只选它所在的组；诊断全部 healthy/recovered 时直接答复"无需修复"。API / A2A 带 `repair=plan` 且会话没有诊断时，路由改为先深度诊断、再自动建批次；网页对话（不带该参数）在会话没有诊断时仍由单个 Agent 现场规划（见 [API 待办](api.md#8-待办已记录未实现)）。只有结论为 abnormal / inconclusive 的组会生成任务。
+入口：报告下的按钮（`POST /repair/batches`）、`/ask ... repair=plan`（诊断完成后自动建批次）、同一会话里的对话请求（"修复刚刚的问题"）。**auto 模式下诊断结束后自动建批次**（等同 `repair=plan`，不需要点击；方案自动执行，只有命中高危规则的任务停在 blocked 等人工反馈）。对话请求在会话已有分组诊断时，由 `RemediationNode._group_dispatch` 直接转成批次，不再让一个 Agent 处理整份诊断；点名的 Pod 只选它所在的组；诊断全部 healthy/recovered 时直接答复"无需修复"。API / A2A 带 `repair=plan` 且会话没有诊断时，路由改为先深度诊断、再自动建批次；网页对话（不带该参数）在会话没有诊断时仍由单个 Agent 现场规划（见 [API 待办](api.md#8-待办已记录未实现)）。只有结论为 abnormal / inconclusive 的组会生成任务。
 
 ```
 "生成自动修复方案" → POST /repair/batches {diagnosis_run_id}
