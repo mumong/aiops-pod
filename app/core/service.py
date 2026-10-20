@@ -12,9 +12,12 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional, Tuple
 
 from holmes.plugins.runbooks import RunbookCatalog
+
+if TYPE_CHECKING:
+    from app.core.aicall.client import LoopToolChoice
 
 from app.core.aicall import AICall
 from app.core.aicall.guards import AgentGuards
@@ -821,10 +824,11 @@ class HolmesService:
     def get_loop_tool_choice_config(
         self,
         llm_config: Optional[Dict[str, Any]] = None,
-    ) -> str:
+    ) -> "LoopToolChoice":
         """``llm.loop_tool_choice``: ``required`` (create_agent forces a tool call every
-        round) or ``auto`` (a round may end with text; finalization delivers the schema)."""
-        from app.core.aicall.client import normalize_loop_tool_choice
+        round) or ``auto`` (a round may end with text; finalization delivers the schema).
+        A string applies to every node; a mapping sets nodes with ``default``."""
+        from app.core.aicall.client import LoopToolChoice
 
         cfg = llm_config if isinstance(llm_config, dict) else None
         if cfg is None:
@@ -834,7 +838,7 @@ class HolmesService:
                 else {}
             )
             cfg = raw_cfg.get("llm", {}) if isinstance(raw_cfg.get("llm", {}), dict) else {}
-        return normalize_loop_tool_choice(cfg.get("loop_tool_choice"))
+        return LoopToolChoice.parse(cfg.get("loop_tool_choice"))
 
     def get_agent_guards_config(
         self,

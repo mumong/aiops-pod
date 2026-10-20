@@ -75,9 +75,40 @@ LOOP_TOOL_CHOICE_MODES = ("required", "auto")
 
 
 def normalize_loop_tool_choice(value: Any, default: str = "required") -> str:
-    """``llm.loop_tool_choice``: how the tool loop binds its tools each round."""
+    """One ``llm.loop_tool_choice`` value: how a tool loop binds its tools each round."""
     text = str(value or "").strip().lower()
     return text if text in LOOP_TOOL_CHOICE_MODES else default
+
+
+class LoopToolChoice:
+    """``llm.loop_tool_choice`` resolved per node.
+
+    A string applies to every tool loop; a mapping names nodes (``query_collect``,
+    ``layer``, ``evidence``, ``remediation`` ...) with ``default`` for the rest.
+    """
+
+    def __init__(self, default: str = "required", per_node: Optional[Dict[str, str]] = None):
+        self.default = normalize_loop_tool_choice(default)
+        self.per_node = {
+            str(node): normalize_loop_tool_choice(value, self.default)
+            for node, value in (per_node or {}).items()
+            if str(node) != "default"
+        }
+
+    @classmethod
+    def parse(cls, value: Any) -> "LoopToolChoice":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            return cls(default=value.get("default", "required"), per_node=value)
+        return cls(default=normalize_loop_tool_choice(value))
+
+    def for_node(self, node_id: str) -> str:
+        return self.per_node.get(str(node_id or ""), self.default)
+
+    def __str__(self) -> str:
+        parts = [f"default={self.default}"] + [f"{k}={v}" for k, v in self.per_node.items()]
+        return ", ".join(parts)
 
 
 class AutoToolChoiceChatOpenAI(ChatOpenAI):
@@ -307,7 +338,7 @@ class AICall:
         no_thinking_nodes: Optional[Iterable[str]] = None,
         history_reasoning_field: str = "",
         structured_tool_choice: str = "auto",
-        loop_tool_choice: str = "required",
+        loop_tool_choice: Any = "required",
     ):
         """
         Args:
@@ -334,8 +365,8 @@ class AICall:
         self.history_reasoning_field = str(history_reasoning_field or "").strip()
         self.structured_tool_choice = normalize_tool_choice(structured_tool_choice)
         # ``llm.loop_tool_choice``: ``required`` keeps create_agent's forced tool call;
-        # ``auto`` lets a round end with text (see AutoToolChoiceChatOpenAI).
-        self.loop_tool_choice = normalize_loop_tool_choice(loop_tool_choice)
+        # ``auto`` lets a round end with text (see AutoToolChoiceChatOpenAI). Per node.
+        self.loop_tool_choice = LoopToolChoice.parse(loop_tool_choice)
         self._structured_rejections = 0
         self.model = model
         self.model_str = model
@@ -413,9 +444,10 @@ class AICall:
             )
         return (model_cls or ChatOpenAI)(**kwargs)
 
-    def _agent_model_class(self) -> type:
-        """The chat model class for the tool loop (``llm.loop_tool_choice``)."""
-        return AutoToolChoiceChatOpenAI if self.loop_tool_choice == "auto" else ChatOpenAI
+    def _agent_model_class(self, node_id: str = "") -> type:
+        """The chat model class for this node's tool loop (``llm.loop_tool_choice``)."""
+        choice = self.loop_tool_choice.for_node(node_id)
+        return AutoToolChoiceChatOpenAI if choice == "auto" else ChatOpenAI
 
     def create_compaction_model(self, max_tokens: Optional[int] = None):
         """Non-streaming internal model for context compaction / summaries."""
@@ -1579,7 +1611,7 @@ class AICall:
                 node_id=node_id or "agent",
                 disable_streaming=disable_streaming,
                 internal=(node_id or "agent") in self.no_thinking_nodes,
-                model_cls=self._agent_model_class(),
+                model_cls=self._agent_model_class(node_id or "agent"),
             ),
             session_id,
             node_id=node_id or "agent",

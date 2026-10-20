@@ -39,8 +39,8 @@ def test_loop_tool_choice_defaults_to_required_and_accepts_auto():
     assert normalize_loop_tool_choice(None) == "required"
     assert normalize_loop_tool_choice("AUTO ") == "auto"
     assert normalize_loop_tool_choice("named") == "required"
-    assert _client().loop_tool_choice == "required"
-    assert _client(loop_tool_choice="auto").loop_tool_choice == "auto"
+    assert _client().loop_tool_choice.for_node("evidence") == "required"
+    assert _client(loop_tool_choice="auto").loop_tool_choice.for_node("evidence") == "auto"
 
 
 def test_auto_model_turns_forced_tool_choice_into_auto_and_keeps_the_rest():
@@ -66,5 +66,5 @@ def test_service_reads_loop_tool_choice_from_llm_config():
     from app.core.service import HolmesService
 
     read = HolmesService.get_loop_tool_choice_config
-    assert read(None, {"loop_tool_choice": "auto"}) == "auto"
-    assert read(None, {}) == "required"
+    assert read(None, {"loop_tool_choice": "auto"}).for_node("layer") == "auto"
+    assert read(None, {}).for_node("layer") == "required"
