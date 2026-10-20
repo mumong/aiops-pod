@@ -76,7 +76,7 @@ A2A 可增加 A2A_API_TOKEN。模型需要支持工具调用；配置中的 llm.
 
 ```bash
 scripts/acceptance/sprint1_repair_plan.sh aiops-case-09          # 从诊断报告进入修复 → 对象/原因/命令 → 对话修改生成新版本
-scripts/acceptance/sprint2_policy_and_switch.sh                  # 黑名单 25 条高危命令全拦 + 6 条合规放行；开关需令牌、带 TTL、写审计
+scripts/acceptance/sprint2_policy_and_switch.sh                  # 黑名单 24 条高危命令全拦 + 12 条合规放行；开关需令牌、带 TTL、写审计
 scripts/acceptance/sprint2_policy_and_switch.sh aiops-case-09    # 追加真实链路：review 等待审批→拒绝不执行；auto 直接执行并标记
 scripts/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/c11 → 诊断 → 修复 → 恢复观察 → kubectl 复核
 ```
