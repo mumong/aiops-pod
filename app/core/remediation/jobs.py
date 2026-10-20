@@ -173,7 +173,7 @@ class RepairJobs:
                 return False
             elif event.get("type") in {"node_start", "node_complete"}:
                 self._update(job["job_id"], owner, stage=event.get("node_name"))
-        self._update(job["job_id"], owner, planning_progress=progress.snapshot())
+        self._update(job["job_id"], owner, planning_progress=progress.snapshot(final=True))
         if self.cancellations[job["job_id"]].is_set():
             self._update(job["job_id"], owner, status="cancelled")
             return False

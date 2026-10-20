@@ -111,3 +111,10 @@ def test_planning_job_records_its_progress(tmp_path, monkeypatch):
     detail = jobs.detail(job["job_id"], owner)
     assert detail["planning_progress"]["tools"][0]["name"] == "kubectl_describe"
     assert detail["planning_progress"]["tools"][0]["status"] == "success"
+
+
+def test_calls_still_running_when_planning_ends_are_marked_unfinished():
+    progress = PlanningProgress(clock=lambda: 0.0)
+    progress.add(_thinking("tool_start", tool_name="t", tool_call_id="a"))
+    assert progress.snapshot(final=True)["tools"][0]["status"] == "unfinished"
+    assert progress.snapshot()["tools"][0]["status"] == "running"

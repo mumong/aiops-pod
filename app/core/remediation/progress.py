@@ -82,5 +82,10 @@ class PlanningProgress:
         self._flushed_at = self._clock()
         return True
 
-    def snapshot(self) -> Dict[str, Any]:
-        return {"tools": [dict(row) for row in self.tools], "reasoning": self.reasoning}
+    def snapshot(self, final: bool = False) -> Dict[str, Any]:
+        """``final``: the run is over, so a call still running never returned."""
+        tools = [
+            {**row, "status": "unfinished"} if final and row["status"] == "running" else dict(row)
+            for row in self.tools
+        ]
+        return {"tools": tools, "reasoning": self.reasoning}
