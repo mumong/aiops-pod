@@ -50,3 +50,30 @@ def test_group_runner_and_async_bridge_propagate_context():
     assert lanes == [" [run=r3 node=parallel_evidence]"] * 2
     assert bridged == " [run=r3 node=parallel_evidence]"
     assert asyncio.run(coro()) == ""
+
+
+def test_thread_handoff_carries_log_fields_but_not_the_callers_run_context():
+    """Parallel lanes start inside the workflow graph's node. A full context copy also
+    carried LangChain/LangGraph's run context, and only one lane's model tokens reached
+    its stream (live runs f8e56239b1b74313, 9a414a4f611a4f4c: reasoning for one group)."""
+    import contextvars
+    import threading
+
+    from app.core.log_context import _context, bind_current_context, log_context
+
+    foreign = contextvars.ContextVar("caller_run_context", default="unset")
+    seen = {}
+
+    def worker():
+        seen["log"] = dict(_context.get())
+        seen["foreign"] = foreign.get()
+
+    token = foreign.set("outer-graph-config")
+    try:
+        with log_context(run="r1", lane="g2"):
+            thread = threading.Thread(target=bind_current_context(worker))
+            thread.start()
+            thread.join()
+    finally:
+        foreign.reset(token)
+    assert seen == {"log": {"run": "r1", "lane": "g2"}, "foreign": "unset"}

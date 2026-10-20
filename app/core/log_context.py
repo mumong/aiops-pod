@@ -36,11 +36,21 @@ def log_context(**fields: Any) -> Iterator[None]:
 
 
 def bind_current_context(fn: Callable[..., T]) -> Callable[..., T]:
-    """Wrap ``fn`` so it runs in a copy of the caller's context (for threads)."""
-    ctx = contextvars.copy_context()
+    """Wrap ``fn`` so it runs with the caller's log fields, in an otherwise fresh context.
+
+    Only the correlation fields cross the thread boundary. A full ``copy_context()``
+    also carried LangChain/LangGraph's run context of the workflow node that started
+    the work; agents started under it in parallel lanes became children of that one
+    run and only one lane's model tokens reached its stream (live f8e56239b1b74313).
+    """
+    fields = _context.get()
+
+    def _bound(*args: Any, **kwargs: Any) -> T:
+        _context.set(fields)
+        return fn(*args, **kwargs)
 
     def _run(*args: Any, **kwargs: Any) -> T:
-        return ctx.run(fn, *args, **kwargs)
+        return contextvars.Context().run(_bound, *args, **kwargs)
 
     return _run
 
