@@ -337,3 +337,30 @@ def test_planning_node_injects_chain_facts_and_binds_the_schema(monkeypatch):
         seen["schema"].controller_chains == {"ns/p1": chain}
         and seen["schema"].__name__ == "RepairDraft"
     )
+
+
+def test_planning_node_resolves_chains_from_the_request_without_a_diagnosis(monkeypatch):
+    """The node runs on its own too ("修复 ns/p1"): its targets come from the request."""
+
+    from app.core.workflow.nodes import remediation as module
+
+    node = module.RemediationNode()
+    seen = {}
+
+    def chains(targets, runner):
+        seen["targets"] = targets
+        return {}
+
+    monkeypatch.setattr(module, "chains_for_targets", chains)
+    node._controller_chains({}, {"namespaces": ["ns"], "pod_names": ["p1", "p2"], "scope": "pod"})
+    assert seen["targets"] == [
+        {
+            "entities": [
+                {"kind": "Pod", "namespace": "ns", "name": "p1"},
+                {"kind": "Pod", "namespace": "ns", "name": "p2"},
+            ]
+        }
+    ]
+    seen.clear()
+    node._controller_chains({}, {"namespaces": ["a", "b"], "pod_names": ["p1"]})
+    assert "targets" not in seen  # ambiguous namespace: nothing guessed

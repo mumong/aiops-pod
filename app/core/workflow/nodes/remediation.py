@@ -205,34 +205,30 @@ def _mentions_kubectl_command(text):
     return False
 
 
+def _request_targets(contract):
+    """Pods named in the request, when their namespace is unambiguous."""
+    contract = contract or {}
+    namespaces = [n for n in contract.get("namespaces") or [] if n]
+    pods = [p for p in contract.get("pod_names") or [] if p]
+    if len(namespaces) != 1 or not pods:
+        return []
+    return [{"entities": [{"kind": "Pod", "namespace": namespaces[0], "name": p} for p in pods]}]
+
+
 class RemediationNode(QueryCollectNode):
     @property
     def node_id(self):
         return "remediation"
 
-    @staticmethod
-    def _chain_facts(chains: Dict[str, ControllerChain]) -> Dict[str, dict]:
-        """Chains for the planner, with the referenced Secret/ConfigMap key names."""
-        from app.core.remediation.executor import run_local_command
-        from app.core.remediation.write_facts import config_refs, referenced_configs
+    def _controller_chains(self, diagnosis, request_contract=None) -> Dict[str, ControllerChain]:
+        """Read-only ownerReferences lookups for the Pods being repaired; failures leave it empty.
 
-        facts = {}
-        for key, chain in chains.items():
-            data = chain.to_dict()
-            refs = referenced_configs(chain.write_target)
-            if refs:
-                try:
-                    data["config_refs"] = config_refs(chain.namespace, refs, run_local_command)
-                except Exception as exc:  # planning continues; the model can still look
-                    logging.getLogger(__name__).warning("[remediation] 配置引用读取失败: %s", exc)
-            facts[key] = data
-        return facts
-
-    def _controller_chains(self, diagnosis) -> Dict[str, ControllerChain]:
-        """Read-only ownerReferences lookups for the group's Pods; failures leave it empty."""
+        Targets come from the diagnosis group when there is one, otherwise from the
+        request itself, so the node also works without an upstream diagnosis.
+        """
         targets = [
             g.get("target") for g in (diagnosis or {}).get("groups", []) if isinstance(g, dict)
-        ]
+        ] or _request_targets(request_contract)
         if not targets:
             return {}
         try:
@@ -313,7 +309,7 @@ class RemediationNode(QueryCollectNode):
         diagnosis = ((state.get("repair_context") or {}).get("diagnosis") or {}).get(
             "payload"
         ) or {}
-        chains = self._controller_chains(diagnosis)
+        chains = self._controller_chains(diagnosis, state.get("request_contract"))
         schema = RepairDraft.with_controller_chains(chains)
         material = {
             "question": question,
@@ -329,8 +325,7 @@ class RemediationNode(QueryCollectNode):
             "latest_diagnosis": state.get("conclusion") or state.get("query_draft"),
             "repair_context": state.get("repair_context"),
             # Cluster facts: where each Pod's spec is owned (writes go to the root).
-            # plus the write target's current spec, the Pod's state and referenced config keys.
-            "controller_chains": self._chain_facts(chains),
+            "controller_chains": {key: chain.to_dict() for key, chain in chains.items()},
         }
         self._archive_node_input(material)
         response, events = self._call_llm(

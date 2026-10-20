@@ -264,10 +264,9 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 **输入**（`scoped_diagnosis` 只截取本组）：
 - 本组历史报告、关键事实、未确认项与引用，并附说明"不是执行授权，生成方案前可自主核实"；
 - 收窄后的 `request_contract`；
-- **控制器链**：代码用只读 `kubectl get -o json` 沿 `ownerReferences` 走到顶层（如 Pod → ReplicaSet → Deployment，最多 6 层）。
-- **写入对象事实**（[write_facts.py](../app/core/remediation/write_facts.py)，随控制器链一起读取，不额外调用模型）：`write_target` 为顶层控制器（裸 Pod 为 Pod 本身）的 Pod 模板摘要（容器、env 引用、探针、资源、卷，`template_path` 指出 patch 路径）；`pod_state` 为 Pod 当前阶段、删除状态与容器状态；`config_refs` 为模板引用的 Secret/ConfigMap 是否存在及键名。值从不读取（go-template 只输出键名），需要写入新值时只能向用户索取。
+- **控制器链**（有诊断时取诊断目标，否则取请求中的 Pod）：代码用只读 `kubectl get -o json` 沿 `ownerReferences` 走到顶层（如 Pod → ReplicaSet → Deployment，最多 6 层）。
 
-**Agent**：只读工具（写工具屏蔽），最多 `max_steps.remediation=64` 步。上述事实足以构造命令时直接出方案，只在缺字段时补查（f8e56239 批次之前，4 个规划各用 2.0–3.8 分钟，主要在分页重读同一份 YAML）。
+**Agent**：只读工具（写工具屏蔽），最多 `max_steps.remediation=64` 步，自行读取要修改对象的当前配置（必要时分页）。节点不依赖上游诊断：没有诊断时，修复对象和控制器链取自请求中的 namespace/Pod。
 
 **输出 `RepairDraft`**（schema 按本次控制器链绑定）：
 ```

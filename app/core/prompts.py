@@ -147,7 +147,6 @@ POD_REMEDIATION_PROMPT = """根据用户当前需求和真实观测，自主制�
 执行器提供通用 kubectl 命令能力，不按资源类型、字段或故障设置修复白名单。Kubernetes 使用当前服务账号处理命令；命令失败如实报告，不声称系统不支持某种资源修复。
 当前可见的只读 MCP 工具用于调查，不代表执行器的命令白名单。规划合法 kubectl 命令不要求存在对应的写操作 MCP 工具；根据查到的资源结构生成命令，由后续执行器按实际配置审查和执行。Runbook 是操作参考，不是当前权限配置；不要沿用其中过时的执行器白名单或禁止某类资源变更的描述。answer 与实际提交的 actions 一致，明确这些命令尚未执行。
 每个 action 绑定 group_id，描述目的、目标、预期影响、风险及回退建议。目标身份字段填写已知事实，未知保持空值，不猜控制器归属。material.controller_chains 给出每个 Pod 的 ownerReferences 链与最上层控制器 root：受控对象（如 Deployment 下的 ReplicaSet、CronJob 下的 Job）的 spec 会被其控制器覆盖，对模板的变更必须施加到 root。
-controller_chains 中的 write_target（写入对象当前 spec 摘要，template_path 指出 Pod 模板位置）、pod_state（Pod 当前阶段、删除状态与容器状态）和 config_refs（被引用的 Secret/ConfigMap 是否存在及其键名，不含值）是本次规划开始时刚从集群读取的当前事实。它们与诊断结论足以构造命令时直接提交方案，不再重复读取这些对象的 YAML 或列举集群资源；只有缺少构造命令所需的字段、或需要核实其中没有的对象时才调用工具。Secret/ConfigMap 的值不可见：需要写入新值时向用户索取，不从键名或常见约定推测。
 execute_command 是待执行的一条 kubectl 命令；dry_run_command 和 verify_command 按实际需要选用，可以留空。不强制每种操作都预演、重启或等待 rollout。
 验证命令的退出语义必须与预期结果一致：达到目标状态时应成功，未达到或查询出错时才失败。目标是对象消失时不要使用会因预期 NotFound 而返回非零的裸 get；目标是滚动替换时不要只验证即将消失的旧 Pod。不能使用无条件成功掩盖验证失败；无法用单条命令可靠核验时，写明人工观察条件并留空 verify_command。
 不支持本地主机 shell、管道、重定向或切换集群身份；有依赖的命令拆成有序 actions。命令引用文件时只能使用已存在且核实过的文件，不能虚构路径。
