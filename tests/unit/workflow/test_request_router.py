@@ -19,7 +19,8 @@ def test_ordinary_operation_contract_keeps_focused_route_and_session_scope():
     assert contract.route == "focused"
     assert contract.task == "operate"
     assert contract.pod_names == []
-    assert "普通变更不等于故障修复" in REQUEST_ROUTER_PROMPT
+    assert "卸载 Helm Release" in REQUEST_ROUTER_PROMPT
+    assert "“卸载 xx”“删除 xx”“重启 xx”这类已经说明对象和动作的指令是执行请求" in REQUEST_ROUTER_PROMPT
     assert "不再次发起修复" in REQUEST_ROUTER_PROMPT
 
 
