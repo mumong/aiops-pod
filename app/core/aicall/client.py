@@ -2288,11 +2288,37 @@ class AICall:
                 iteration=run.iteration,
             )
 
+    @staticmethod
+    def _is_structured_retry_message(run: "_AgentRun", msg: Any, tool_name: str) -> bool:
+        """A ToolMessage answering a structured-output call that failed validation."""
+        if not run.structured_output_tool_names:
+            return False
+        call_id = str(getattr(msg, "tool_call_id", "") or "")
+        content = msg.content if isinstance(msg.content, str) else str(msg.content or "")
+        known_call = call_id in run.tool_args_by_call_id
+        return (not tool_name and not known_call) or (
+            not known_call
+            and content.lstrip().startswith("Error: Failed to parse structured output")
+        )
+
     async def _handle_agent_tool_message(self, run: "_AgentRun", msg: Any) -> None:
         """Process one tool result: dedup, observation, events, compaction."""
         node_id = run.node_id
         # 工具执行结果
         tool_name = getattr(msg, "name", "") or ""
+        if self._is_structured_retry_message(run, msg, tool_name):
+            # LangChain's "Failed to parse structured output ... Please fix your mistakes"
+            # ToolMessage carries no tool name; it is a retry prompt for the model, not a
+            # tool result for people (live 3453c7ecdddc40bf showed it raw in the UI).
+            push_event(
+                run.stream_queue,
+                "runtime_status",
+                node_id,
+                status="running",
+                content="结构化结果未通过校验，正在重试",
+                iteration=run.iteration,
+            )
+            return
         if tool_name in run.structured_output_tool_names:
             logger.debug(
                 "[AICall] 跳过结构化输出 tool_result 统计 | node=%s schema=%s",
