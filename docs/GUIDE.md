@@ -172,3 +172,5 @@ RBAC 由 Kubernetes API 实时执行，权限变更通常不需要重启 Pod；�
 | 报告与现场冲突 | run_id、Pod UID、时间窗、原始归档；不能用旧报告替代当前观测 |
 
 报告路径、组 ID 和 Langfuse 定位见[核心流程与模块架构](ARCHITECTURE.md#7-归档布局)。
+
+- 验收：高危命令黑名单拦截的标准测试流程见 [acceptance-blacklist.md](acceptance-blacklist.md)。
