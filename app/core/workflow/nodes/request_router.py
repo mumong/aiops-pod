@@ -231,9 +231,9 @@ class RequestRouterNode(WorkflowNode):
                 self.metrics.record_llm_call(self.node_id, (time.monotonic() - started) * 1000)
         if contract.route == "unsupported":
             # A refusal is an answer, not a format error: say why, run nothing.
-            reason = (
-                contract.clarification or ""
-            ).strip() or "任意主机或非 Pod 的破坏性操作不在支持范围"
+            reason = (contract.clarification or "").strip().rstrip("。.") or (
+                "任意主机或非 Pod 的破坏性操作不在支持范围"
+            )
             failure = {
                 "code": "unsupported_request",
                 "title": "请求不在支持范围",
