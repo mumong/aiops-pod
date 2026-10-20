@@ -881,6 +881,12 @@ data:
     4. `kubectl get node <node> -o wide`: important，确认 Pod 所在 Node 是否 Ready。
     5. `kubectl describe node <node>`: optional，只有 Node NotReady/Unknown 或 describe pod 指向 kubelet/volume 问题时继续。
 
+    ## 现象与根因
+    - Terminating 本身是现象，要回答的是"谁发起了删除"和"什么阻止删除完成"。
+    - 删除过程中出现的 Killing 事件、容器 Exit 137、`stopped_by_pod_deletion=true` 是删除的结果，不是删除的原因。
+    - 就绪探针（Readiness）失败只会把 Pod 标为未就绪、移出 Service 端点，不会杀容器，也不会删除 Pod；存活探针（Liveness）失败只重启容器，同样不会删除 Pod。不能把删除前后的探针失败当成删除原因。
+    - 删除通常来自用户或控制器（滚动更新、缩容、驱逐、Job 清理）。无法从事件确认发起方时如实写"发起方未确认"，根因仍按阻塞条件判断。
+
     ## 典型原因
     - Pod 或其关联资源存在 finalizer，控制器未完成清理。
     - Pod 所在节点 NotReady/Unknown，kubelet 无法完成容器停止和状态回报。
