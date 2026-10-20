@@ -111,3 +111,43 @@ def test_executor_starts_the_dispatched_or_requested_batch(monkeypatch):
     assert batch is None and "未发现需要修复" in note
     assert executor._start_repair_batch("诊断", {}, owner, record) == (None, "")
     assert "session_id" in executor._start_repair_batch("修复", dispatched, {}, None)[1]
+
+
+def test_auto_mode_starts_the_batch_after_a_web_diagnosis_without_a_click(monkeypatch, tmp_path):
+    """Boss (2026-10-20): in auto mode a diagnosis should plan, approve and run by itself;
+    a person is only needed when a command is blocked. The button stays for review mode."""
+    from types import SimpleNamespace
+
+    import app.core.remediation.jobs as jobs_module
+    from app.core.remediation.settings import RepairSettings
+    from app.core.workflow.executor import WorkflowExecutor
+
+    monkeypatch.setattr(
+        "app.core.remediation.settings.repair_settings", RepairSettings(path=tmp_path / "s.json")
+    )
+    started = []
+    monkeypatch.setattr(
+        jobs_module.repair_jobs,
+        "start",
+        lambda service, owner, diagnosis_id, question, group_ids=None: started.append(diagnosis_id)
+        or {"batch_id": f"batch-{diagnosis_id}", "groups": []},
+    )
+    monkeypatch.setattr(WorkflowExecutor, "_record_repairable", staticmethod(lambda r: True))
+    record = {"run_id": "d1", "kind": "diagnosis"}
+    owner = {"_remediation_owner": "o" * 64}
+
+    def executor(mode):
+        service = SimpleNamespace(
+            workflow_config={"remediation": {"enabled": True, "mode": mode}},
+            mcp_tools=[],
+            merged_catalog=None,
+        )
+        return WorkflowExecutor(holmes_service=service)
+
+    batch, note = executor("auto")._start_repair_batch("诊断", {}, owner, record)
+    assert batch["batch_id"] == "batch-d1" and started == ["d1"] and note == ""
+    assert executor("review")._start_repair_batch("诊断", {}, owner, record) == (None, "")
+    healthy = {"run_id": "h", "kind": "diagnosis"}
+    monkeypatch.setattr(WorkflowExecutor, "_record_repairable", staticmethod(lambda r: False))
+    assert executor("auto")._start_repair_batch("诊断", {}, owner, healthy) == (None, "")
+    assert started == ["d1"]

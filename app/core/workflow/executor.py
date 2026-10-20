@@ -1004,6 +1004,15 @@ class WorkflowExecutor:
 
         return bool(repairable_groups(record))
 
+    def _repair_mode_is_auto(self) -> bool:
+        """Effective remediation mode (config plus any runtime override) is auto and enabled."""
+        from app.core.remediation.settings import repair_settings
+
+        wf_config = getattr(self.holmes_service, "workflow_config", None) or {}
+        cfg = wf_config.get("remediation") if isinstance(wf_config, dict) else None
+        effective = repair_settings.effective(cfg if isinstance(cfg, dict) else {})
+        return bool(effective["enabled"]) and effective["mode"] == "auto"
+
     def _start_repair_batch(
         self,
         question: str,
@@ -1028,6 +1037,15 @@ class WorkflowExecutor:
             and repair_record
             and repair_record.get("kind") == "diagnosis"
         ):
+            diagnosis_id, group_ids = repair_record["run_id"], None
+        elif (
+            repair_record
+            and repair_record.get("kind") == "diagnosis"
+            and self._repair_mode_is_auto()
+            and self._record_repairable(repair_record)
+        ):
+            # auto mode: plan, approve and run without a click; only a blocked command
+            # waits for a person (the job ends as blocked and takes feedback).
             diagnosis_id, group_ids = repair_record["run_id"], None
         else:
             return None, ""
