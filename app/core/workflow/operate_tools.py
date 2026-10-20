@@ -109,10 +109,18 @@ def deny_reason(tool_name: str, args: Dict[str, Any], policy: CommandPolicy) -> 
         tokens = _executing_tokens(command)
         if tokens and os.path.basename(tokens[0]) == "kubectl":
             verdict = check_command(command, policy)
+            if verdict.requires_approval:
+                # Chat has no approval step: these run only through a reviewed repair.
+                return (
+                    f"approval_required: {verdict.reason}；对话中不直接执行，"
+                    "请通过修复方案提交，人工审批后执行"
+                )
             if not verdict.allowed:
                 return f"{verdict.rule}: {verdict.reason}"
     if tool_name in {"run_bash_command", "kubectl_run_image"}:
-        blocked = _blocked_executable(command, policy.denied_executables)
+        blocked = _blocked_executable(
+            command, policy.denied_executables | policy.approval_executables
+        )
         if blocked:
             return f"denied_executables: 命令 {blocked} 在高危名单中"
     return ""

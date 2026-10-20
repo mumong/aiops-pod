@@ -12,7 +12,7 @@ from pathlib import Path
 from app.core.remediation.approval import approval_store
 from app.core.remediation.audit import audit_event
 from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
-from app.core.remediation.policy import active_policy, validate_target_command
+from app.core.remediation.policy import active_policy, check_command, validate_target_command
 from app.core.remediation.recovery import RecoveryConfig, RecoveryWatch
 from app.core.workflow.group_runner import group_display_name
 
@@ -217,9 +217,17 @@ class PodRepairExecutor:
                     except Exception as exc:
                         before[target["group_id"]] = {"exists": None, "error": str(exc)[:200]}
             total_actions, done_actions = len(prepared), 0
+            approved_any = False
             verify_failures = []
             for action, target, original, stages in prepared:
                 approval_marker = "auto"
+                # approval_required commands always wait for a person, also in auto mode.
+                high_risk = [
+                    f"{command}：{verdict.reason}"
+                    for _, command, _ in stages
+                    for verdict in [check_command(command, policy)]
+                    if verdict.requires_approval
+                ]
                 if max_duration and time.time() - started_at > max_duration:
                     yield finish(
                         "timeout",
@@ -234,7 +242,7 @@ class PodRepairExecutor:
                 if cancel and cancel.is_set():
                     yield finish("cancelled", "请求已取消，未继续执行")
                     return
-                if mode != "auto":
+                if mode != "auto" or high_risk:
                     if record_store and not record_store.transition(
                         run_id, owner, "awaiting_approval"
                     ):
@@ -244,7 +252,7 @@ class PodRepairExecutor:
                         run_id,
                         "action",
                         action["description"],
-                        {"target": target, **action},
+                        {"target": target, **action, "high_risk": high_risk},
                         timeout_seconds=timeout,
                         owner=owner,
                     )
@@ -259,6 +267,7 @@ class PodRepairExecutor:
                         "expires_at": request.expires_at,
                         "server_time": time.time(),
                         "group_id": action["group_id"],
+                        "high_risk": high_risk,
                     }
                     decision = None
                     while time.time() < request.expires_at and not (cancel and cancel.is_set()):
@@ -432,8 +441,12 @@ class PodRepairExecutor:
                         "result_truncated": len(str(output)) > 6000,
                     }
                 done_actions += 1
+                if approval_marker != "auto":
+                    approved_any = True
             executed_note = (
-                "已按自动执行模式执行全部命令（未经人工审批）"
+                "已按自动执行模式执行，其中高危命令经人工批准"
+                if mode == "auto" and approved_any
+                else "已按自动执行模式执行全部命令（未经人工审批）"
                 if mode == "auto"
                 else "已执行批准的命令"
             )

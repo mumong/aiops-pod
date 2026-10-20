@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.core.remediation.execution_guard import (
@@ -178,6 +178,8 @@ class CommandVerdict:
     rule: str = ""
     reason: str = ""
     argv: Tuple[str, ...] = ()
+    # Allowed only after a person approves this exact command (approval_required).
+    requires_approval: bool = False
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -186,6 +188,7 @@ class CommandVerdict:
             "operation": self.operation,
             "rule": self.rule,
             "reason": self.reason,
+            "requires_approval": self.requires_approval,
         }
 
 
@@ -200,6 +203,11 @@ class CommandPolicy:
     bulk_selector_on_write: bool = True
     denied_executables: frozenset = DEFAULT_DENIED_EXECUTABLES
     allowed_exec_commands: frozenset = DEFAULT_ALLOWED_EXEC_COMMANDS
+    # workflow.remediation.approval_required: denied like the lists above, except a
+    # repair may run them after a person approves the exact command (also in auto mode).
+    approval_operations: frozenset = frozenset()
+    approval_resource_kinds: frozenset = frozenset()
+    approval_executables: frozenset = frozenset()
     extra: Dict[str, Any] = field(default_factory=dict, compare=False)
 
     _LIST_KEYS = (
@@ -230,7 +238,41 @@ class CommandPolicy:
         values["denied_resource_kinds"] = frozenset(
             _normalize_kind(kind) for kind in values["denied_resource_kinds"]
         )
+        approval = config.get("approval_required") or {}
+        if not isinstance(approval, dict):
+            raise ValueError("workflow.remediation.approval_required 必须为映射")
+        for key, field_name in (
+            ("operations", "approval_operations"),
+            ("resource_kinds", "approval_resource_kinds"),
+            ("executables", "approval_executables"),
+        ):
+            items = approval.get(key) or []
+            if not isinstance(items, (list, tuple)) or any(
+                not isinstance(item, str) or not item.strip() for item in items
+            ):
+                raise ValueError(f"workflow.remediation.approval_required.{key} 必须为字符串列表")
+            values[field_name] = frozenset(
+                _normalize_kind(i) if key == "resource_kinds" else i.strip() for i in items
+            )
         return cls(**values)
+
+    def strict(self) -> "CommandPolicy":
+        """The same policy with approval_required treated as denied (chat, no approval)."""
+        return replace(
+            self,
+            denied_operations=self.denied_operations | self.approval_operations,
+            denied_resource_kinds=self.denied_resource_kinds | self.approval_resource_kinds,
+            denied_executables=self.denied_executables | self.approval_executables,
+            approval_operations=frozenset(),
+            approval_resource_kinds=frozenset(),
+            approval_executables=frozenset(),
+        )
+
+    @property
+    def has_approval_rules(self) -> bool:
+        return bool(
+            self.approval_operations or self.approval_resource_kinds or self.approval_executables
+        )
 
     def summary(self) -> Dict[str, Any]:
         """Operator-facing view of every active rule (what the check endpoint reports)."""
@@ -256,6 +298,10 @@ class CommandPolicy:
                 ),
             },
             "shell": sorted(self.denied_executables),
+            "approval_required": {
+                "kubernetes": sorted(self.approval_operations | self.approval_resource_kinds),
+                "shell": sorted(self.approval_executables),
+            },
         }
 
 
@@ -465,10 +511,31 @@ def _pod_spec_mutation_error(args: List[str], operation: str, words: List[str]) 
     return ""
 
 
-def check_command(command: str, policy: Optional[CommandPolicy] = None) -> CommandVerdict:
-    """Evaluate every rule; the first violated rule names the verdict."""
-    policy = policy or active_policy()
+_APPROVAL_RULES = frozenset({"denied_operations", "denied_resource_kinds", "denied_executables"})
 
+
+def check_command(command: str, policy: Optional[CommandPolicy] = None) -> CommandVerdict:
+    """Evaluate every rule; the first violated rule names the verdict.
+
+    A command that passes, but would be denied once approval_required counts as denied,
+    is allowed with ``requires_approval`` and rule ``approval_required``.
+    """
+    policy = policy or active_policy()
+    verdict = _evaluate(command, policy)
+    if not verdict.allowed or not policy.has_approval_rules:
+        return verdict
+    strict = _evaluate(command, policy.strict())
+    if strict.allowed or strict.rule not in _APPROVAL_RULES:
+        return verdict
+    return replace(
+        verdict,
+        rule="approval_required",
+        reason=f"需人工审批的高危命令（{strict.reason}）",
+        requires_approval=True,
+    )
+
+
+def _evaluate(command: str, policy: CommandPolicy) -> CommandVerdict:
     def deny(
         rule: str, reason: str, operation: str = "", argv: Tuple[str, ...] = ()
     ) -> CommandVerdict:

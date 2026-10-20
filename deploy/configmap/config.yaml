@@ -158,7 +158,8 @@ data:
       remediation:
         enabled: true               # false：只出方案，不执行
         executor: pod               # 通用 kubectl 执行器
-        mode: auto                  # review=每个动作人工审批；auto=自动执行（生产慎用）
+        # mode: auto                  # review=每个动作人工审批；auto=自动执行（生产慎用）
+        mode: review
         approval_timeout_seconds: 600   # review 下等待审批的时长，超时不执行
         max_duration_seconds: 900   # 单个任务整体时限（审批等待 + 命令），到时终态 timeout
 
@@ -166,14 +167,20 @@ data:
         # 2026-10-20 收窄为核心危险操作；delete/apply/patch/scale/rollout 等常规修复动作放行，
         # 仍受"只改本组对象及其控制器"的范围校验。容器内命令名单与 mcpstander bash 工具
         # 的 BASH_BLOCKED_COMMANDS 保持一致。
-        denied_operations: [drain, taint, cp, port-forward, proxy, attach, auth, certificate, edit]
+        denied_operations: [taint, cp, port-forward, proxy, attach, auth, certificate, edit]
         denied_flags: [--all, --all-namespaces, -A]          # 批量参数
         bulk_selector_on_write: true    # 写操作带 -l / --selector / --field-selector 视为批量，拒绝
-        denied_resource_kinds: [node, namespace, customresourcedefinition, persistentvolume, storageclass,
+        denied_resource_kinds: [node, customresourcedefinition, persistentvolume, storageclass,
                                 clusterrole, clusterrolebinding,
                                 mutatingwebhookconfiguration, validatingwebhookconfiguration]  # 写这些资源拒绝，读不限
-        denied_executables: [rm, dd, "mkfs*", fdisk, sfdisk, parted, wipefs, blkdiscard, shred,
+        denied_executables: [dd, "mkfs*", fdisk, sfdisk, parted, wipefs, blkdiscard, shred,
                              shutdown, reboot, halt, poweroff]  # kubectl exec/run/debug 内层命令（支持通配符）
+        # 需人工审批的高危命令：对话执行一律拦截；修复方案中可出现，执行前强制人工审批
+        # （自动执行模式也一样），批准只对该条命令生效。MCP bash 工具仍全部拦截。
+        approval_required:
+          operations: [drain]               # kubectl 操作
+          resource_kinds: [namespace]       # 写这些资源（如 delete namespace）
+          executables: [rm]                 # Pod 内命令
         allowed_exec_commands: []   # exec 内层命令白名单，空=不启用
 
         recovery:                   # 执行后的恢复观察（只读）：Pod Running+Ready 且无新增重启，或删除完成
