@@ -47,7 +47,10 @@ class RepairAssessment(BaseModel):
 
 
 class RepairDraft(QueryAnswer):
-    targets: list[RepairTarget] = Field(default_factory=list)
+    targets: list[RepairTarget] = Field(
+        default_factory=list,
+        description="本方案处理的对象（namespace、pod、group_id）；有 actions 时必填，每个动作的 group_id 必须在这里列出",
+    )
     actions: list[RepairAction] = Field(default_factory=list)
     runbook_unavailable_reason: str = ""
     assessments: list[RepairAssessment] = Field(default_factory=list)
@@ -126,7 +129,17 @@ class RepairDraft(QueryAnswer):
             raise ValueError("targets 的 group_id 必须唯一")
         for action in self.actions:
             if action.group_id not in groups:
-                raise ValueError("动作必须绑定已列出的 group_id")
+                # Say what is missing: "group_id not listed" alone sent the model into
+                # re-checking a group_id that was already right (live 5f585d7b51e44b9c).
+                if not groups:
+                    raise ValueError(
+                        f"targets 为空：动作 {action.id} 的 group_id={action.group_id} 必须先在 targets 中列出"
+                        "（namespace、pod、group_id）"
+                    )
+                raise ValueError(
+                    f"动作 {action.id} 的 group_id={action.group_id} 不在 targets 中"
+                    f"（已列出：{', '.join(sorted(groups))}）"
+                )
             target = groups[action.group_id]
             allowed = {(target.namespace, "pod", target.pod)}
             if target.owner_name and target.owner_uid:

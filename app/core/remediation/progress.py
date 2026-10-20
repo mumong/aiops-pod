@@ -24,6 +24,9 @@ class PlanningProgress:
         self._clock = clock
         self.tools: List[Dict[str, Any]] = []
         self.reasoning = ""
+        # One short line on what the run is waiting for (a rejected plan being retried,
+        # a stage stopping); cleared when real work resumes.
+        self.note = ""
         self._flushed_at: float | None = None
 
     @staticmethod
@@ -56,7 +59,13 @@ class PlanningProgress:
                 self._flushed_at = now
                 return True
             return False
-        if kind == "tool_start":
+        if kind in ("runtime_status", "execution_incomplete"):
+            text = str(event.get("content") or event.get("reason") or "").strip()
+            if not text:
+                return False
+            self.note = self._clip(text, self.ARGS_CHARS)
+        elif kind == "tool_start":
+            self.note = ""
             if len(self.tools) < self.MAX_TOOLS:
                 args = event.get("tool_args")
                 self.tools.append(
@@ -88,4 +97,4 @@ class PlanningProgress:
             {**row, "status": "unfinished"} if final and row["status"] == "running" else dict(row)
             for row in self.tools
         ]
-        return {"tools": tools, "reasoning": self.reasoning}
+        return {"tools": tools, "reasoning": self.reasoning, "note": self.note}

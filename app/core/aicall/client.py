@@ -65,6 +65,7 @@ from .errors import (
     IdleRoundReached,
     ModelStreamStalled,
     RepeatLimitReached,
+    StructuredRetryLimitReached,
     public_error_text,
     raise_on_model_disconnect,
 )
@@ -1432,7 +1433,8 @@ class AICall:
 
         session_id = self._normalize_langfuse_session_id(run_id)
         response_format, structured_output_tool_names = self._agent_response_format(
-            response_schema
+            response_schema,
+            retry_limit=getattr(self.agent_guards, "structured_validation_retries", 2),
         )
         input_messages = self._build_agent_input_messages(question)
         config = self._build_agent_run_config(session_id, node_id, max_steps)
@@ -1568,17 +1570,61 @@ class AICall:
         return None
 
     @staticmethod
+    def structured_error_summary(text: str, limit: int = 240) -> str:
+        """The reason inside a pydantic/LangChain validation error, without the noise.
+
+        Keeps "Value error, <reason>" lines and "<field>: <message>" pairs; drops the
+        echoed input, error URLs and the "Please fix your mistakes" boilerplate.
+        """
+        lines = [ln.rstrip() for ln in str(text or "").splitlines()]
+        reasons: List[str] = []
+        field = ""
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("For further information"):
+                continue
+            body = re.sub(r"\s*\[type=.*$", "", stripped)
+            if body.startswith("Value error, "):
+                reasons.append(body[len("Value error, ") :])
+            elif line.startswith("  ") and field and body:
+                reasons.append(f"{field}: {body}")
+                field = ""
+            elif not line.startswith(" ") and re.fullmatch(r"[\w.\[\]]+", stripped):
+                field = stripped
+        summary = "；".join(dict.fromkeys(reasons)) or re.sub(r"\s+", " ", str(text or "")).strip()
+        return summary[:limit]
+
+    @staticmethod
     def _agent_response_format(
         response_schema: Optional[type[BaseModel]],
+        retry_limit: Optional[int] = None,
     ) -> Tuple[Any, Set[str]]:
-        """ToolStrategy response format and the names of its output tools."""
+        """ToolStrategy response format and the names of its output tools.
+
+        ``retry_limit``: rejected structured results fed back to the model before the
+        loop stops (``StructuredRetryLimitReached``); LangChain itself never stops.
+        """
         if response_schema is None:
             return None, set()
         from langchain.agents.structured_output import ToolStrategy
 
+        limit = max(1, int(retry_limit or 2))
+        attempts = {"n": 0}
+
+        def handle_errors(exc: Exception) -> str:
+            attempts["n"] += 1
+            reason = AICall.structured_error_summary(str(exc))
+            if attempts["n"] > limit:
+                raise StructuredRetryLimitReached(attempts["n"], limit, reason)
+            return (
+                f"结构化结果未通过校验（{attempts['n']}/{limit}）：{reason}。"
+                "只修正这一处，其余内容保持不变，重新提交完整结果。"
+            )
+
         response_format = ToolStrategy(
             schema=response_schema,
             tool_message_content="结构化结果已生成。",
+            handle_errors=handle_errors,
         )
         structured_output_tool_names = {
             str(getattr(spec, "name", ""))
@@ -1756,10 +1802,14 @@ class AICall:
             logger.warning("[AICall] agent 达到递归/步数上限 (%d): %s", max_steps, recursion_msg)
             if not run.final_content:
                 run.final_content = f"达到最大工具执行步数限制: {recursion_msg}"
-        except (RepeatLimitReached, IdleRoundReached) as e:
+        except (RepeatLimitReached, IdleRoundReached, StructuredRetryLimitReached) as e:
             logger.warning("[AICall] %s (node=%s)", e, node_id)
             run.incomplete_reason = (
-                "idle_round" if isinstance(e, IdleRoundReached) else "repeat_limit"
+                "idle_round"
+                if isinstance(e, IdleRoundReached)
+                else "structured_retry_limit"
+                if isinstance(e, StructuredRetryLimitReached)
+                else "repeat_limit"
             )
             # An idle round means the model was done (every call repeated an answered
             # one): an info event, not missing work. Repeat limits remain incomplete.
@@ -2365,9 +2415,13 @@ class AICall:
         call_id = str(getattr(msg, "tool_call_id", "") or "")
         content = msg.content if isinstance(msg.content, str) else str(msg.content or "")
         known_call = call_id in run.tool_args_by_call_id
+        head = content.lstrip()
         return (not tool_name and not known_call) or (
             not known_call
-            and content.lstrip().startswith("Error: Failed to parse structured output")
+            and (
+                head.startswith("Error: Failed to parse structured output")
+                or head.startswith("结构化结果未通过校验")
+            )
         )
 
     async def _handle_agent_tool_message(self, run: "_AgentRun", msg: Any) -> None:
@@ -2379,12 +2433,18 @@ class AICall:
             # LangChain's "Failed to parse structured output ... Please fix your mistakes"
             # ToolMessage carries no tool name; it is a retry prompt for the model, not a
             # tool result for people (live 3453c7ecdddc40bf showed it raw in the UI).
+            content = msg.content if isinstance(msg.content, str) else str(msg.content or "")
+            reason = (
+                content.split("。")[0]
+                if content.startswith("结构化结果未通过校验")
+                else ("结构化结果未通过校验：" + self.structured_error_summary(content, limit=120))
+            )
             push_event(
                 run.stream_queue,
                 "runtime_status",
                 node_id,
                 status="running",
-                content="结构化结果未通过校验，正在重试",
+                content=f"{reason}，正在重试",
                 iteration=run.iteration,
             )
             return

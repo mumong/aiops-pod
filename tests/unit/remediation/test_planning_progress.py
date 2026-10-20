@@ -118,3 +118,16 @@ def test_calls_still_running_when_planning_ends_are_marked_unfinished():
     progress.add(_thinking("tool_start", tool_name="t", tool_call_id="a"))
     assert progress.snapshot(final=True)["tools"][0]["status"] == "unfinished"
     assert progress.snapshot()["tools"][0]["status"] == "running"
+
+
+def test_runtime_status_becomes_the_current_note():
+    """A rejected plan shows one short line in the workspace, not only raw reasoning."""
+    progress = PlanningProgress(clock=lambda: 0.0)
+    assert progress.add(
+        _thinking("runtime_status", content="结构化结果未通过校验（1/2）：targets 为空，正在重试")
+    )
+    assert progress.snapshot()["note"] == "结构化结果未通过校验（1/2）：targets 为空，正在重试"
+    progress.add(_thinking("execution_incomplete", reason="结构化结果连续 3 次未通过校验"))
+    assert progress.snapshot()["note"] == "结构化结果连续 3 次未通过校验"
+    progress.add(_thinking("tool_start", tool_name="t", tool_call_id="a"))
+    assert progress.snapshot()["note"] == ""  # new work clears a stale note

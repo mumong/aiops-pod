@@ -123,6 +123,21 @@ class IdleRoundReached(RuntimeError):
         )
 
 
+class StructuredRetryLimitReached(RuntimeError):
+    """The structured result kept failing validation inside the tool loop.
+
+    LangChain's ToolStrategy retries a rejected result without limit (live repair job
+    5f585d7b51e44b9c: six rejections, 11 rounds, 329 s). After
+    ``structured_validation_retries`` the loop ends and the stage finalizes.
+    """
+
+    def __init__(self, attempts: int, limit: int, reason: str):
+        self.attempts, self.limit, self.reason = attempts, limit, reason
+        super().__init__(
+            f"结构化结果连续 {attempts} 次未通过校验（上限 {limit}）：{reason}；停止重试，基于已有结果交付"
+        )
+
+
 def public_error_text(exc: BaseException) -> str:
     """Error text that may reach users and session history.
 

@@ -434,6 +434,7 @@ STRUCTURED_FINALIZATION_HEADERS = {
     "repeat_limit": "# 收卷：本阶段因同一调用反复重复而停止",
     "idle_round": "# 收卷：本阶段最后一轮没有提出任何新查询（全部是已返回过的调用），视为调查已完成",
     "no_structured_output": "# 收卷：本阶段调查已由你自行结束，但尚未提交结构化结果（预算并未耗尽，不要声称预算或工具额度不足）",
+    "structured_retry_limit": "# 收卷：结构化结果多次未通过校验，按下方材料重新完整提交一次，注意上次的校验错误",
 }
 
 
