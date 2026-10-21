@@ -467,3 +467,16 @@ def test_quick_query_exposes_list_clusters():
     from app.core.workflow.nodes.query_answer import QueryCollectNode
 
     assert "list_clusters" in QueryCollectNode.READ_TOOLS
+
+
+@pytest.mark.parametrize(
+    "question", ["各个子集群的状态怎么样？", "所有子集群健康吗", "每个边缘集群有没有问题"]
+)
+def test_health_of_all_clusters_is_grounded_as_all(multi, question):
+    out = route_q(question, {**BASE, "cluster_mode": "multiple", "clusters": ["*"]})
+    assert out["request_route"] == "focused" and len(out["request_contract"]["clusters"]) == 3
+
+
+def test_inventory_prompt_excludes_health_questions(multi):
+    prompt = multicluster.router_prompt()
+    assert "不判断工作负载健康" in prompt and "状态怎么样" in prompt

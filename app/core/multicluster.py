@@ -74,7 +74,9 @@ def router_prompt() -> str:
         "\n\n# 集群范围（多集群部署）\n"
         "可用集群：\n" + "\n".join(lines) + "\n"
         "- cluster_mode：single=一个集群；multiple=多个集群；center=中心集群；"
-        "inventory=询问集群本身（有哪些集群、集群列表、各集群/子集群是否在线、有哪些数据），clusters 留空；"
+        "inventory=只问集群清单与连接（有哪些集群、集群列表、是否接入/在线、有哪些数据源），clusters 留空，"
+        "回答只根据集群清单，不判断工作负载健康；"
+        '问各集群运行情况（“状态怎么样”“健康吗”“有没有问题”）不是 inventory，按 multiple 填 ["*"]；'
         "unspecified=问题和会话都没有说明范围。\n"
         '- clusters：填写用户说的集群名或别名（原样）；“全部/所有集群”填 ["*"]；center 可留空。\n'
         "- 结合会话历史理解指代：上文已明确集群时，追问（“它”“那个集群”“再看看日志”）沿用上文 request_contract.clusters；"
@@ -84,7 +86,8 @@ def router_prompt() -> str:
 
 
 _ALL_CLUSTERS = re.compile(
-    r"(全部|所有|每个|每一个|各个|各)\s*(的)?\s*(边缘)?\s*(集群|cluster)|all\s+clusters", re.I
+    r"(全部|所有|每个|每一个|各个|各)\s*(的)?\s*(边缘|子|成员)?\s*(集群|cluster)|all\s+clusters",
+    re.I,
 )
 _CENTER_WORDS = ("中心", "center", "local")
 
