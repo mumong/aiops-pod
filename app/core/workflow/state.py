@@ -24,6 +24,9 @@ class WorkflowState(TypedDict, total=False):
     2. LLM 分析文本（如 layer_analysis）- 保留完整的 LLM 分析供下游使用
     """
 
+    # multi-cluster deep diagnosis: clusters that could not be checked (stated in the report by code)
+    cluster_failures: List[str]
+
     # ========== 输入 ==========
     question: str
     original_question: str

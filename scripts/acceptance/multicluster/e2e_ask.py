@@ -447,11 +447,94 @@ def phase_p3() -> None:
     )
 
 
+NOISE = ("kube-scheduler", "kube-controller-manager", "controller-manager", "etcd")
+NOISE_CONTEXT = ("采集", "监控配置", "127.0.0.1", "噪声", "抓取", "scrape", "监听地址", "绑定")
+
+
+def phase_p4() -> None:
+    import subprocess
+
+    # A13: one deep diagnosis over two clusters.
+    r = Session().ask("深度诊断 edge-88 和 edge-89 两个集群有什么问题")
+    record(r)
+    text = r["answer"]
+    found = [
+        ns
+        for ns in ("aiops-case-06", "aiops-case-08", "aiops-case-02", "aiops-case-10")
+        if ns in text
+    ]
+    mc.check(
+        "A13-both-clusters-touched",
+        r["route"] == "full_diagnosis"
+        and clusters_of(r) == {EDGE88, EDGE89}
+        and r["runner_hits"]["edge-88"] > 0
+        and r["runner_hits"]["edge-89"] > 0,
+        f"run={r['run_id']} clusters={clusters_of(r)} hits={r['runner_hits']} {r['seconds']}s",
+    )
+    mc.check(
+        "A13-cases-identified",
+        len(found) == 4 and "edge-88" in text and "edge-89" in text,
+        f"found={found}",
+    )
+
+    # P4-1: edge-89's runner down during the run (our component only; restored afterwards).
+    kc = ["kubectl", "--kubeconfig", mc.kubeconfig("edge-89"), "-n", "aiops"]
+    subprocess.run(
+        [*kc, "scale", "deploy/aiops-edge-runner", "--replicas=0"], check=True, capture_output=True
+    )
+    subprocess.run(
+        [*kc, "wait", "--for=delete", "pod", "-l", "app=aiops-edge-runner", "--timeout=60s"],
+        capture_output=True,
+    )
+    try:
+        r = Session().ask("深度诊断 edge-88 和 edge-89 两个集群有什么问题")
+        record(r)
+        text = r["answer"]
+        mc.check(
+            "P4-1-edge-88-completes",
+            "aiops-case-06" in text and "aiops-case-08" in text,
+            f"run={r['run_id']} {r['seconds']}s",
+        )
+        mc.check(
+            "P4-1-edge-89-marked-incomplete",
+            any(
+                w in text
+                for w in ("不可达", "不完整", "未完整", "未完成", "无法访问", "unreachable")
+            ),
+            text[:200].replace("\n", " "),
+        )
+    finally:
+        subprocess.run(
+            [*kc, "scale", "deploy/aiops-edge-runner", "--replicas=1"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [*kc, "rollout", "status", "deploy/aiops-edge-runner", "--timeout=180s"],
+            capture_output=True,
+        )
+
+    # P4-2: all clusters; known collection noise is not reported as a fault.
+    r = Session().ask("所有集群有什么问题")
+    record(r)
+    text = r["answer"]
+    lines = [line for line in text.splitlines() if any(n in line for n in NOISE)]
+    unexplained = [line for line in lines if not any(c in line for c in NOISE_CONTEXT)]
+    mc.check(
+        "P4-2-all-clusters",
+        r["contract"].get("clusters") and len(r["contract"]["clusters"]) == 3,
+        f"run={r['run_id']} route={r['route']} {r['seconds']}s",
+    )
+    mc.check("P4-2-noise-not-a-fault", not unexplained, " | ".join(unexplained)[:300])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phase", choices=["p2", "a5", "quality", "p3"], required=True)
+    parser.add_argument("--phase", choices=["p2", "a5", "quality", "p3", "p4"], required=True)
     args = parser.parse_args()
-    {"p2": phase_p2, "a5": phase_a5, "quality": phase_quality, "p3": phase_p3}[args.phase]()
+    {"p2": phase_p2, "a5": phase_a5, "quality": phase_quality, "p3": phase_p3, "p4": phase_p4}[
+        args.phase
+    ]()
     mc.finish()
 
 

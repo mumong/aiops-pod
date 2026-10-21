@@ -46,28 +46,54 @@ def _run_one(node: Any, state: Dict[str, Any], cluster: str) -> Dict[str, Any]:
     return sub.execute(state)
 
 
-def _cluster_state(state: Dict[str, Any], cluster: str) -> Dict[str, Any]:
+def _cluster_state(
+    state: Dict[str, Any], cluster: str, *, annotate: bool = False
+) -> Dict[str, Any]:
     contract = dict(state.get("request_contract") or {})
-    contract.update(
-        clusters=[cluster], cluster_mode="single", cluster_labels=multicluster.labels([cluster])
-    )
-    return {**state, "request_contract": contract}
+    label = multicluster.labels([cluster])[0]
+    contract.update(clusters=[cluster], cluster_mode="single", cluster_labels=[label])
+    out = {**state, "request_contract": contract}
+    if annotate:
+        # The tools are bound anyway; telling the model avoids it reaching for the other cluster.
+        out["question"] = f"{state.get('question') or ''}（本次只定位集群 {label} 的问题）"
+    return out
+
+
+def _probe(cluster: str) -> Tuple[bool, str]:
+    """Remote clusters must answer through the tunnel before we locate them."""
+    resolved = multicluster.config().resolve(cluster)
+    if resolved is None or not resolved.remote:
+        return True, ""
+    try:
+        from aiops_edge.jobs_client import RemoteJobs
+
+        jobs = RemoteJobs.from_config()
+        return (True, "") if jobs.reachable(resolved) else (False, "cluster_unreachable")
+    except Exception as exc:  # misconfiguration counts as unreachable, with its reason
+        return False, str(exc)[:120]
 
 
 def per_cluster_location(
     node: Any,
     state: Dict[str, Any],
     run_one: Optional[Callable[[Any, Dict[str, Any], str], Dict[str, Any]]] = None,
+    probe: Optional[Callable[[str], Tuple[bool, str]]] = None,
 ) -> Dict[str, Any]:
     run_one = run_one or _run_one
+    probe = probe or _probe
     clusters = multicluster.run_clusters(state)
     inherited = list(state.get("thinking_events") or [])
 
     def task(cluster: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        # An unreachable cluster would "locate" nothing and look healthy; say it was not checked.
+        reachable, reason = probe(cluster)
+        if not reachable:
+            return cluster, None, f"集群当前不可达（{reason}），未能检查"
         try:
-            return cluster, run_one(node, _cluster_state(state, cluster), cluster), ""
+            located = run_one(node, _cluster_state(state, cluster, annotate=True), cluster)
+            return cluster, located, ""
         except Exception as exc:  # one cluster must not take the others down
-            return cluster, None, str(exc)[:300]
+            return cluster, None, f"定位失败（{str(exc)[:240]}）"
 
     with ThreadPoolExecutor(max_workers=max(1, len(clusters))) as pool:
         results = list(pool.map(task, clusters))
@@ -82,7 +108,7 @@ def per_cluster_location(
         label = multicluster.labels([cluster])[0]
         if out is None:
             failures.append(f"{label}：{error}")
-            analyses.append(f"### 集群 {label}\n\n该集群定位未完成（{error}），本次结果不完整。")
+            analyses.append(f"### 集群 {label}\n\n{error}，本次结果不完整。")
             continue
         handoff = out.get("diagnosis_handoff") or {}
         for item in handoff.get("targets") or []:
@@ -128,6 +154,7 @@ def per_cluster_location(
         "diagnosis_events_start": len(events),
     }
     if failures:
+        output["cluster_failures"] = failures
         output["warnings"] = [
             *(state.get("warnings") or []),
             *(f"cluster location failed: {f}" for f in failures),

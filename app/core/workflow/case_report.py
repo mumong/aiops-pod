@@ -156,6 +156,13 @@ def conclude_cases(node, state):
         f"诊断对象：{len(cases)} 组；完整交付：{complete} 组；未完整交付：{len(cases) - complete} 组；"
         f"需要处理：{len(cases) - settled} 组。"
     )
+    if state.get("cluster_failures"):
+        # Written by code: the model's overview must not turn "not checked" into "no anomalies".
+        header += (
+            "\n\n未完成检查的集群："
+            + "；".join(state["cluster_failures"])
+            + "。本次结论不覆盖这些集群。"
+        )
     sections = ["## 诊断总览", header, overview]
     for case in cases:
         entities = (case.get("target") or {}).get("entities") or []

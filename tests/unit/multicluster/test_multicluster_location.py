@@ -73,6 +73,9 @@ def fake_runs(outputs):
     return run_one, seen
 
 
+REACHABLE = lambda cluster: (True, "")  # noqa: E731
+
+
 class Node:
     current_run_id = "run1"
     _event_queue = None
@@ -94,7 +97,7 @@ def test_each_cluster_located_on_its_own_and_merged(multi):
             ),
         }
     )
-    out = per_cluster_location(Node(), STATE, run_one=run_one)
+    out = per_cluster_location(Node(), STATE, run_one=run_one, probe=REACHABLE)
     assert sorted(seen) == [(EDGE88, [EDGE88]), (EDGE89, [EDGE89])]
     ids = [t["target_id"] for t in out["diagnosis_handoff"]["targets"]]
     assert ids == ["edge-88/t1", "edge-88/t2", "edge-89/t1"]
@@ -123,7 +126,7 @@ def test_one_failing_cluster_does_not_block_the_others(multi):
             EDGE89: RuntimeError("cluster_unreachable"),
         }
     )
-    out = per_cluster_location(Node(), STATE, run_one=run_one)
+    out = per_cluster_location(Node(), STATE, run_one=run_one, probe=REACHABLE)
     assert len(out["autonomous_groups"]) == 2
     assert out["diagnosis_handoff"]["coverage"] == "partial"
     assert (
@@ -143,7 +146,7 @@ def test_a_single_group_narrows_the_run_to_its_cluster(multi):
             EDGE89: layer_output([], [], assessment="healthy"),
         }
     )
-    out = per_cluster_location(Node(), STATE, run_one=run_one)
+    out = per_cluster_location(Node(), STATE, run_one=run_one, probe=REACHABLE)
     assert out["request_contract"]["clusters"] == [EDGE88]
     assert out["request_contract"]["cluster_labels"] == ["edge-88"]
     assert after_location({**STATE, **out}) == "evidence"
@@ -153,7 +156,7 @@ def test_all_healthy_goes_to_conclusion(multi):
     run_one, _ = fake_runs(
         {EDGE88: layer_output([], [], "healthy"), EDGE89: layer_output([], [], "healthy")}
     )
-    out = per_cluster_location(Node(), STATE, run_one=run_one)
+    out = per_cluster_location(Node(), STATE, run_one=run_one, probe=REACHABLE)
     assert out["autonomous_groups"] == []
     assert after_location({**STATE, **out}) == "conclusion"
 
@@ -246,3 +249,88 @@ def test_lane_state_built_by_branch_state_binds_the_group_cluster(multi):
     }
     local = branch_state(STATE, group)
     assert multicluster.run_clusters(local) == [EDGE89]
+
+
+def test_unreachable_cluster_is_not_located_and_reported(multi):
+    run_one, seen = fake_runs(
+        {
+            EDGE88: layer_output(
+                [target("t1", "a", "w1"), target("t2", "a", "w2")],
+                [
+                    {"group_id": "g1", "target_id": "t1", "question": "q", "entities": []},
+                    {"group_id": "g2", "target_id": "t2", "question": "q", "entities": []},
+                ],
+            ),
+            EDGE89: layer_output(
+                [], [], "healthy"
+            ),  # would look "healthy" if it ran with failing tools
+        }
+    )
+    out = per_cluster_location(
+        Node(), STATE, run_one=run_one, probe=lambda c: (c != EDGE89, "cluster_unreachable")
+    )
+    assert [c for c, _ in seen] == [EDGE88]
+    assert out["cluster_failures"] == ["edge-89：集群当前不可达（cluster_unreachable），未能检查"]
+    assert out["diagnosis_handoff"]["coverage"] == "partial"
+
+
+def test_sub_runs_are_told_which_cluster_they_locate(multi):
+    run_one, _ = fake_runs(
+        {EDGE88: layer_output([], [], "healthy"), EDGE89: layer_output([], [], "healthy")}
+    )
+    questions = []
+
+    def spy(node, state, cluster):
+        questions.append(state["question"])
+        return run_one(node, state, cluster)
+
+    per_cluster_location(Node(), STATE, run_one=spy, probe=lambda c: (True, ""))
+    assert any("本次只定位集群 edge-88" in q for q in questions)
+    assert any("本次只定位集群 edge-89" in q for q in questions)
+
+
+def test_report_states_unfinished_clusters_in_code_not_by_the_model():
+    from types import SimpleNamespace
+
+    from app.core.workflow.case_report import conclude_cases
+
+    group = {
+        "group_id": "g1",
+        "target_id": "edge-88/t1",
+        "cluster_label": "edge-88",
+        "entities": [{"namespace": "a", "name": "w1"}],
+    }
+    state = {
+        "question": "q",
+        "cluster_failures": ["edge-89：集群当前不可达（cluster_unreachable），未能检查"],
+        "autonomous_groups": [group],
+        "autonomous_group_results": [
+            {
+                "group_id": "g1",
+                "status": "completed",
+                "case_result": {
+                    "group_id": "g1",
+                    "target": group,
+                    "summary": "s",
+                    "report": "r",
+                    "execution_status": "completed",
+                    "outcome": "abnormal",
+                    "certainty": "supported",
+                    "key_facts": [],
+                    "unresolved": [],
+                    "runbook_refs": [],
+                    "result_ref": "x",
+                },
+            }
+        ],
+    }
+    node = SimpleNamespace(
+        _call_llm=lambda *a, **k: (SimpleNamespace(result='{"overview":"edge-89 无异常"}'), []),
+        _archive_node_input=lambda _: None,
+        _archive_node_output=lambda _: None,
+    )
+    out = conclude_cases(node, state)
+    assert (
+        "未完成检查的集群：edge-89：集群当前不可达（cluster_unreachable），未能检查"
+        in out["conclusion"]
+    )
