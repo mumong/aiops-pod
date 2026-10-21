@@ -94,14 +94,14 @@
 
 - [x] T070 R: 测试——layer 按集群并行、异常组 key 带集群、单个集群失败不阻塞（FR-019）
 - [x] T071 R: 实现 layer 按集群并行与合并、结论按集群分段
-- [ ] T072 R: 已知采集噪声的识别说明（视 P4-2 结果决定是否需要；不修改采集）
+- [x] T072 R: 已知采集噪声的识别说明——P4-2 中噪声没有被报告为故障，无需额外处理（不修改采集）
 - [x] T073 F: 异常组标题显示集群
-- [ ] T074 部署，执行 A13、P4-1、P4-2；通过后打 `mc-p4`
+- [x] T074 部署，执行 A13、P4-1、P4-2；通过后打 `mc-p4`
 
 ## Phase 6: 收尾
 
-- [ ] T080 更新 `docs/ARCHITECTURE.md`、README（中英文）中的多集群说明
-- [ ] T081 验收结果写入 `docs/multi-cluster-acceptance.md` §7
+- [x] T080 更新 `docs/ARCHITECTURE.md`、README（中英文）中的多集群说明
+- [x] T081 验收结果写入 `docs/multi-cluster-acceptance.md` §7
 - [ ] T082 由 Boss 决定是否合并回主线
 
 ## 依赖
