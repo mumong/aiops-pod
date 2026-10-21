@@ -90,6 +90,12 @@ class RemoteJobs:
             try:
                 job = self.tunnel.request(cluster, f"/v1/jobs/{job_id}", None, method="GET")
             except EdgeError as exc:
+                if exc.code == "not_found":
+                    # The runner Pod was recreated and its job records went with it.
+                    raise RemoteResultUnknown(
+                        f"集群 {cluster.name} 上任务 {job_id} 的记录已不存在（runner 已重建），"
+                        "命令可能已部分生效，结果未知；请复查资源状态，不会自动重新提交"
+                    ) from None
                 last = f"{exc.code}: {exc.message}"
                 job = None
             if job is not None:

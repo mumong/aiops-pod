@@ -135,3 +135,10 @@ def test_reachable():
     jobs, _, _ = make([EdgeError("cluster_unreachable", "x")])
     assert jobs.reachable(EDGE) is False
     assert jobs.reachable(EDGE) is True
+
+
+def test_job_record_lost_with_the_runner_pod_is_unknown_at_once():
+    jobs, tunnel, clock = make([EdgeError("not_found", "no such job")])
+    with pytest.raises(RemoteResultUnknown, match="记录"):
+        jobs.run(EDGE, ["kubectl", "delete", "pod", "x"], key="k", timeout_s=60, deadline_s=600)
+    assert len(tunnel.submits) == 1 and clock.now < 10
