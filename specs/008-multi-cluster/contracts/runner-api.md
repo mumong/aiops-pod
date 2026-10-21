@@ -51,7 +51,12 @@
 
 ## GET /v1/jobs/{job_id}
 
-`200 {"job_id": "...", "status": "running|succeeded|failed", "exit_code": 0, "stdout": "...", "stderr": "", "truncated": false, "started_at": "...", "finished_at": "..."}`；不存在 → `404`。
+`200 {"job_id": "...", "status": "running|succeeded|failed|unknown", "exit_code": 0, "stdout": "...", "stderr": "", "truncated": false, "created_at": ..., "finished_at": ...}`；不存在 → `404`。
+
+- GET 同样需要签名（对空请求体签名）。
+- `unknown`：任务执行期间 runner 容器重启，命令可能已部分生效，结果未知。
+- runner Pod 被重建时 emptyDir 随之丢失，查询返回 `404`；中心把"已提交、记录丢失"判为结果未知，**不重新提交**。
+- 只读命令不能作为任务提交（`400`，请用 `/v1/kubectl`）。
 
 ## 限制
 

@@ -54,48 +54,48 @@
 - [x] T043 M: `holmes_tools/prometheus.py` 按集群选择地址
 - [x] T044 M: 各工具 schema 增加可选的 `cluster`
 - [x] T045 部署到三集群环境，执行 T036、T037
-- [ ] T046 A5（与 Phase 3 合并执行，10.2.0.48 只部署一次）：在 10.2.0.48 部署 MCP 8.0.x（不配置多集群），执行现有全部验收；结果与 7.0.52 一致
-- [ ] T047 诊断质量对比（验收文档 §5），由 Boss 确认允许的差距；通过后打 `mc-p1`
+- [x] T046 A5（与 Phase 3 合并执行，10.2.0.48 只部署一次）：在 10.2.0.48 部署 MCP 8.0.x（不配置多集群），执行现有全部验收；结果与 7.0.52 一致
+- [x] T047 诊断质量对比（验收文档 §5）：新旧环境 c06、c09 均 6/6，正确率无差距，编造 0 次
 
 ## Phase 3: AIOps 集群范围（US1 端到端、US2，mc-p2）
 
 测试先行：
 
-- [ ] T050 [P] R: 路由测试——三种范围的识别；范围不明确时强制 `clarify`；追问沿用集群；未知集群（A7、A8a–c）
-- [ ] T051 [P] R: 工具包装测试——单集群范围强制注入并覆盖模型的值；多集群范围校验；单集群部署不处理（P2-3）
-- [ ] T052 [P] R: 身份测试——不同集群的同名 Pod 不合并（FR-008）
-- [ ] T053 R: `e2e_ask.py`：从运行报告中断言范围和每次工具调用的集群
+- [x] T050 [P] R: 路由测试——三种范围的识别；范围不明确时强制 `clarify`；追问沿用集群；未知集群（A7、A8a–c）
+- [x] T051 [P] R: 工具包装测试——单集群范围强制注入并覆盖模型的值；多集群范围校验；单集群部署不处理（P2-3）
+- [x] T052 [P] R: 身份测试——不同集群的同名 Pod 不合并（FR-008）
+- [x] T053 R: `e2e_ask.py`：从运行报告中断言范围和每次工具调用的集群
 
 实现：
 
-- [ ] T054 R: `request_router.py` + 路由提示词：`clusters`、`cluster_mode`，代码按注册表解析
-- [ ] T055 R: `aicall/tools.py`：注入与校验
-- [ ] T056 R: `pod_identity.py`、分组和事实身份带集群
-- [ ] T057 F: 路由卡片显示集群范围
-- [ ] T058 部署，执行 T053 覆盖 A6、A7、A8a–c、P2-1、P2-2；A5 回归；通过后打 `mc-p2`
+- [x] T054 R: `request_router.py` + 路由提示词：`clusters`、`cluster_mode`，代码按注册表解析
+- [x] T055 R: `aicall/tools.py`：注入与校验
+- [x] T056 R: `pod_identity.py`、分组和事实身份带集群
+- [x] T057 F: 路由卡片显示集群范围
+- [x] T058 部署，执行 T053 覆盖 A6、A7、A8a–c、P2-1、P2-2；A5 回归；通过后打 `mc-p2`
 
 ## Phase 4: 远端执行与修复（US4、US5，mc-p3）
 
 测试先行：
 
-- [ ] T060 [P] M: runner 测试——`mode=exec` 按规则检查；需审批命令必须带 `approval_id`（FR-015）
-- [ ] T061 [P] M: runner 测试——任务幂等；重启后从 emptyDir 恢复任务记录
-- [ ] T062 [P] R: 执行器测试——远端目标走 `/v1/jobs`；结果无法确认时标记"结果未知"且不重新提交（FR-017）
-- [ ] T063 R: `tools_direct.py` 的 P3 部分（A10b、A10c、A11c）
+- [x] T060 [P] M: runner 测试——`mode=exec` 按规则检查；需审批命令必须带 `approval_id`（FR-015）
+- [x] T061 [P] M: runner 测试——任务幂等；重启后从 emptyDir 恢复任务记录
+- [x] T062 [P] R: 执行器测试——远端目标走 `/v1/jobs`；结果无法确认时标记"结果未知"且不重新提交（FR-017）
+- [x] T063 R: `tools_direct.py` 的 P3 部分（A10b、A10c、A11c）
 
 实现：
 
-- [ ] T064 M: runner `/v1/kubectl` exec 模式、`/v1/jobs`
-- [ ] T065 R: `remediation/plans.py` 目标带集群；`pod_executor.py`、`recovery.py` 的远端路径；`audit.py` 带集群
-- [ ] T066 F: 审批卡片和修复结果显示集群（FR-018）
-- [ ] T067 部署，执行 A9、A10、A10b、A10c、A11、A11b、A11c、A12（runner 重启）、P3-1；A5 回归；通过后打 `mc-p3`
+- [x] T064 M: runner `/v1/kubectl` exec 模式、`/v1/jobs`
+- [x] T065 R: `remediation/plans.py` 目标带集群；`pod_executor.py`、`recovery.py` 的远端路径；`audit.py` 带集群
+- [x] T066 F: 审批卡片和修复结果显示集群（FR-018）
+- [x] T067 部署，执行 A9、A10、A10b、A10c、A11、A11b、A11c、A12（runner 重启）、P3-1；A5 回归；通过后打 `mc-p3`
 
 ## Phase 5: 一次诊断涉及多个集群（US6，mc-p4）
 
-- [ ] T070 R: 测试——layer 按集群并行、异常组 key 带集群、单个集群失败不阻塞（FR-019）
-- [ ] T071 R: 实现 layer 按集群并行与合并、结论按集群分段
-- [ ] T072 R: runbook 补充已知采集噪声的识别说明
-- [ ] T073 F: 异常组标题显示集群
+- [x] T070 R: 测试——layer 按集群并行、异常组 key 带集群、单个集群失败不阻塞（FR-019）
+- [x] T071 R: 实现 layer 按集群并行与合并、结论按集群分段
+- [ ] T072 R: 已知采集噪声的识别说明（视 P4-2 结果决定是否需要；不修改采集）
+- [x] T073 F: 异常组标题显示集群
 - [ ] T074 部署，执行 A13、P4-1、P4-2；通过后打 `mc-p4`
 
 ## Phase 6: 收尾
