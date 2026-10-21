@@ -497,11 +497,11 @@ def phase_p4() -> None:
         )
         mc.check(
             "P4-1-edge-89-marked-incomplete",
-            any(
-                w in text
-                for w in ("不可达", "不完整", "未完整", "未完成", "无法访问", "unreachable")
-            ),
-            text[:200].replace("\n", " "),
+            # The code-written line, not a keyword the model may use for anything.
+            "未完成检查的集群：edge-89" in text
+            and "aiops-case-02" not in text
+            and "aiops-case-10" not in text,
+            text[:240].replace("\n", " "),
         )
     finally:
         subprocess.run(
