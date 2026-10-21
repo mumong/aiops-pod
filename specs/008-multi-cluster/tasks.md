@@ -102,7 +102,7 @@
 
 - [x] T080 更新 `docs/ARCHITECTURE.md`、README（中英文）中的多集群说明
 - [x] T081 验收结果写入 `docs/multi-cluster-acceptance.md` §7
-- [ ] T082 由 Boss 决定是否合并回主线
+- [x] T082 由 Boss 决定是否合并回主线：Boss 于 2026-10-21 决定**暂不合并**，先在三集群环境（http://10.2.5.85:30082）试用后再定；功能保留在 `008-multi-cluster` 分支（标签 mc-p0～mc-p4）
 
 ## 依赖
 
