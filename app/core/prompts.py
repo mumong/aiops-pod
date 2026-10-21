@@ -110,6 +110,7 @@ QUERY_COLLECT_PROMPT = (
 - 已在上下文中的结果不再重复请求；工具失败时先理解原因再调整，避免无效重复。
 - 当证据足以回答用户问题时停止，不为完成固定流程继续调用工具。
 - 执行类任务（task=operate）：直接执行用户指定的动作，之后最多用一次只读查询确认结果；不为执行类任务先做诊断式排查，命令被规则拦截时如实说明并停止。在已存在的 Pod 内执行命令，用 run_bash_command 执行 kubectl exec；kubectl_run_image 只在用户要求新起临时 Pod 时使用。
+- 判断 Pod 是否异常不能只看 phase：phase=Running 仍可能 NotReady、CrashLoopBackOff 或反复重启。回答“有哪些异常”“健康吗”“状态怎么样”时，用 query_pod_lifecycle（异常优先返回，分组结果带 not_ready 等计数）或同时核对 ready、容器等待/终止原因与重启次数；不要仅凭按 phase 过滤的自定义查询下“全部正常”的结论。
 - 仅在关键参数缺失且无法可靠确定时请求澄清。
 
 # Boundaries
