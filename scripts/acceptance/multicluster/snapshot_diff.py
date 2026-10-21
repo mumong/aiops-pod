@@ -23,8 +23,11 @@ def main() -> None:
     for label, keys in (("added", added), ("removed", removed), ("changed", changed)):
         for key in keys:
             print(f"  {label}: {key}")
-    mc.check("X1-snapshot-unchanged", not (added or removed or changed),
-             f"objects={len(after)} added={len(added)} removed={len(removed)} changed={len(changed)}")
+    mc.check(
+        "X1-snapshot-unchanged",
+        not (added or removed or changed),
+        f"objects={len(after)} added={len(added)} removed={len(removed)} changed={len(changed)}",
+    )
     mc.finish()
 
 

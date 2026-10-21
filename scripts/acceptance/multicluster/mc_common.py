@@ -80,7 +80,8 @@ def edge_clusters() -> List[Dict[str, str]]:
         if uuid == "xnet-management":
             continue
         ready = any(
-            c["type"] == "Ready" and c["status"] == "True" for c in node["status"].get("conditions", [])
+            c["type"] == "Ready" and c["status"] == "True"
+            for c in node["status"].get("conditions", [])
         )
         clusters.append({"name": meta["name"], "uuid": uuid, "ready": str(ready)})
     return sorted(clusters, key=lambda c: c["name"])
@@ -98,10 +99,14 @@ def xnet_client_cert() -> Iterator[Tuple[str, str]]:
         yield str(cert), str(key)
 
 
-def tunnel_get(uuid: str, address: str, cert: Optional[Tuple[str, str]], timeout: int = 25) -> Tuple[int, bytes]:
+def tunnel_get(
+    uuid: str, address: str, cert: Optional[Tuple[str, str]], timeout: int = 25
+) -> Tuple[int, bytes]:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE  # xnet serves a CN=localhost cert; we only test reachability here
+    ctx.verify_mode = (
+        ssl.CERT_NONE
+    )  # xnet serves a CN=localhost cert; we only test reachability here
     if cert:
         ctx.load_cert_chain(*cert)
     url = f"{TUNNEL_URL}?{urllib.parse.urlencode({'clientid': uuid, 'address': address})}"

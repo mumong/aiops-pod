@@ -61,11 +61,14 @@ mcpstander/
 ├── servers/holmes_tools/
 │   ├── prometheus.py                 # 按集群选择地址 + extra_label
 │   └── _command_runner.py            # 子进程带 AIOPS_CLUSTER
-├── bin/kubectl                       # 新增：垫片
-├── edge_runner/                      # 新增：runner 服务、镜像、部署清单
+├── servers/aiops_edge/               # 同步自 robusta/aiops_edge（不含 runner）
+├── bin/kubectl                       # 新增：垫片入口（真正的 kubectl 改名为 kubectl.real）
+├── deploy/envs/mc/                   # 新增：测试环境 kustomize overlay（make deploy-mc）
 └── tests/multicluster/               # 新增
 
 robusta/
+├── aiops_edge/                                 # 新增：共享多集群访问库 + runner
+├── Dockerfile.edge-runner、deploy-edge/          # 新增：runner 镜像与边缘部署清单、测试环境集群配置
 ├── app/core/workflow/nodes/request_router.py   # clusters / cluster_mode / 强制澄清
 ├── app/core/aicall/tools.py                    # 注入与校验 cluster
 ├── app/core/workflow/pod_identity.py 等        # 身份带集群
@@ -76,11 +79,12 @@ robusta/
 frountind/src/components/aiops-chat/            # 路由卡、异常组、审批卡显示集群
 ```
 
-**Structure Decision**: runner 放在 mcpstander（复用 `_command_runner` 和规则代码），单独构建镜像 `aiops-edge-runner`；垫片只有一份源码在 mcpstander，robusta 构建时复制，并用测试校验两份一致。
+**Structure Decision**（实现时修订，2026-10-21）：共享的多集群访问代码放在 **robusta 的 `aiops_edge/`**（只依赖标准库）：`signing`、`kubectl_args`、`clusters`、`tunnel`、`streams`、`shim`，以及 `runner/`。原因是 runner 必须复用 robusta 的命令规则（`app/core/remediation/policy.py`、`execution_guard.py`，同样只依赖标准库）。mcpstander 通过 `scripts/sync_aiops_edge.sh` 同步除 `runner/` 外的文件到 `servers/aiops_edge/`，`tests/test_aiops_edge_sync.py` 校验两份一致。runner 镜像由 robusta 的 `Dockerfile.edge-runner` 构建，部署清单在 `deploy-edge/`（不在 `deploy/` 下，避免被 `make deploy` 应用到中心）。
 
 ## 部署与测试方式
 
-- 本地修改，构建镜像并推送到共用的 harbor（`10.2.0.86:8443`）；三套集群都能直接拉取。
+- 本地修改，构建镜像并推送到共用的 harbor（`10.2.0.86:8443`）。
+- **实测更正**：三集群测试环境的 `xnet.registry.io` 解析到它自己的 Harbor（10.2.5.85），我们没有推送权限，按 IP 拉取 10.2.0.86 又因证书不含 IP SAN 失败。测试环境因此用 `deploy-edge/load_image.sh` 经 SSH 把镜像导入节点的 containerd 缓存，清单使用 `IfNotPresent`（每次发版版本号都会加一）。不修改节点的 hosts 或 containerd 配置。
 - 部署和测试通过 SSH 在各主机上执行；为方便操作，本机也可以使用三个集群的 kubeconfig（`~/.kube/aiops-mc/`，不提交）。**这些 kubeconfig 只用于运维和测试，不进入镜像、ConfigMap 或 Secret**，SC-006 的检查脚本负责证明这一点。
 - 不使用防火墙模拟网络隔离；"运行时不依赖中心直连边缘"由 SC-006 的依赖检查和代码路径检查证明。
 - 新版本线：robusta 13.0.x、MCP 8.0.x、runner 1.0.x、frontend 0.2.x，只部署到三集群环境；10.2.0.48 保持现有版本，只用于 A5 回归。

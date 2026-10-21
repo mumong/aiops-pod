@@ -240,3 +240,67 @@ repair-cases-clean:
 
 repair-cases-status:
 	@python3 $(CASES_DIR)/scripts/repair_cases.py status
+
+# ============================================================================
+# 多集群（specs/008-multi-cluster）
+# 运维与测试用的 kubeconfig 只在本机（MC_KUBE_DIR），不进入镜像、ConfigMap 或 Secret。
+# ============================================================================
+MC_KUBE_DIR ?= $(HOME)/.kube/aiops-mc
+MC_KEY_FILE ?= $(MC_KUBE_DIR)/runner.key
+CENTER_KUBECONFIG ?= $(MC_KUBE_DIR)/center
+RUNNER_VERSION ?= $(shell cat deploy-edge/VERSION)
+RUNNER_IMAGE := $(IMAGE_REPOSITORY)/$(PROJECT)/aiops-edge-runner
+# 测试环境用自己的 Harbor（无推送权限），镜像经 SSH 导入节点缓存：MC_PULL_POLICY=IfNotPresent MC_LOAD_HOSTS=10.2.5.88
+MC_PULL_POLICY ?= Always
+MC_LOAD_HOSTS ?=
+.PHONY: runner-build runner-push mc-keygen edge-deploy edge-delete sync-xnet-cert test-multicluster
+
+runner-build:
+	$(DOCKER_BUILD) --build-arg VERSION=$(RUNNER_VERSION) -f Dockerfile.edge-runner -t $(RUNNER_IMAGE):$(RUNNER_VERSION) .
+
+runner-push:
+	docker push $(RUNNER_IMAGE):$(RUNNER_VERSION)
+
+# 中心与边缘共用的 runner 签名密钥，只生成一次，保存在本机运维目录。
+mc-keygen:
+	@test -f $(MC_KEY_FILE) || { umask 077; python3 -c 'import secrets; print(secrets.token_hex(32))' > $(MC_KEY_FILE); echo "generated $(MC_KEY_FILE)"; }
+
+# 在边缘集群本地部署 runner：make edge-deploy EDGE_KUBECONFIG=~/.kube/aiops-mc/edge-88
+edge-deploy: mc-keygen
+	@test -n "$(EDGE_KUBECONFIG)" || { echo "EDGE_KUBECONFIG 未设置" >&2; exit 1; }
+	@KUBECONFIG=$(EDGE_KUBECONFIG) kubectl create namespace aiops --dry-run=client -o yaml | KUBECONFIG=$(EDGE_KUBECONFIG) kubectl apply -f -
+	@$(PYTHON) deploy-edge/render_policy.py deploy/configmap/config.yaml > /tmp/aiops-edge-policy.$$$$.json \
+		&& KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops create configmap aiops-edge-runner-policy \
+			--from-file=policy.json=/tmp/aiops-edge-policy.$$$$.json --dry-run=client -o yaml | KUBECONFIG=$(EDGE_KUBECONFIG) kubectl apply -f - ; \
+		rm -f /tmp/aiops-edge-policy.$$$$.json
+	@KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops create secret generic aiops-edge-key --from-file=key=$(MC_KEY_FILE) \
+		--dry-run=client -o yaml | KUBECONFIG=$(EDGE_KUBECONFIG) kubectl apply -f -
+	@if test -n "$(MC_LOAD_HOSTS)"; then deploy-edge/load_image.sh $(RUNNER_IMAGE):$(RUNNER_VERSION) $(MC_LOAD_HOSTS); fi
+	sed -e 's|image: $(RUNNER_IMAGE):.*|image: $(RUNNER_IMAGE):$(RUNNER_VERSION)|' \
+		-e 's|imagePullPolicy: Always|imagePullPolicy: $(MC_PULL_POLICY)|' deploy-edge/runner.yaml | KUBECONFIG=$(EDGE_KUBECONFIG) kubectl apply -f -
+	KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops rollout restart deployment/aiops-edge-runner
+	KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops rollout status deployment/aiops-edge-runner --timeout=180s
+
+edge-delete:
+	@test -n "$(EDGE_KUBECONFIG)" || { echo "EDGE_KUBECONFIG 未设置" >&2; exit 1; }
+	KUBECONFIG=$(EDGE_KUBECONFIG) kubectl delete -f deploy-edge/runner.yaml --ignore-not-found
+	KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops delete configmap aiops-edge-runner-policy secret aiops-edge-key --ignore-not-found
+
+# 部署时把 xnet 的隧道客户端证书复制到我们的命名空间（只读 xnet，不在 xnet 命名空间创建任何对象），
+# 并下发 runner 签名密钥。make sync-xnet-cert CENTER_KUBECONFIG=...
+sync-xnet-cert: mc-keygen
+	@set -e; d=$$(mktemp -d); trap 'rm -rf $$d' EXIT; \
+	K="kubectl --kubeconfig $(CENTER_KUBECONFIG)"; \
+	$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$d/cert.pem; \
+	$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.key\.pem}' | base64 -d > $$d/key.pem; \
+	$$K -n xnet get secret xnet-ca-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$d/ca.pem; \
+	for ns in mcp aiops; do \
+		$$K create namespace $$ns --dry-run=client -o yaml | $$K apply -f - >/dev/null; \
+		$$K -n $$ns create secret generic aiops-xnet-client-cert --from-file=$$d/cert.pem --from-file=$$d/key.pem \
+			--from-file=$$d/ca.pem --dry-run=client -o yaml | $$K apply -f -; \
+		$$K -n $$ns create secret generic aiops-edge-key --from-file=key=$(MC_KEY_FILE) --dry-run=client -o yaml | $$K apply -f -; \
+	done; \
+	echo "xnet 客户端证书有效期：$$(openssl x509 -noout -enddate -in $$d/cert.pem)"
+
+test-multicluster:
+	$(PYTHON) -m pytest -q tests/unit/multicluster

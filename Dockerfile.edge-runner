@@ -1,0 +1,25 @@
+# aiops-edge-runner: the only AIOps component in an edge cluster (specs/008-multi-cluster).
+# Standard library only, plus kubectl. Reuses the center's command policy files unchanged.
+FROM python:3.12-slim
+
+ARG KUBECTL_VERSION=v1.33.4
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# Only the policy modules from the AIOps app; the empty package files avoid
+# importing the whole service.
+RUN mkdir -p app/core/remediation \
+    && touch app/__init__.py app/core/__init__.py app/core/remediation/__init__.py
+COPY app/core/remediation/policy.py app/core/remediation/execution_guard.py app/core/remediation/
+COPY aiops_edge/ aiops_edge/
+
+ARG VERSION=dev
+ENV VERSION=${VERSION} PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+USER 65532:65532
+EXPOSE 8090
+CMD ["python", "-m", "aiops_edge.runner.server"]

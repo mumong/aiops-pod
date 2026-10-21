@@ -1,0 +1,187 @@
+# aiops-edge-runner (specs/008-multi-cluster). Applied in each EDGE cluster by
+# `make edge-deploy`, never by `make deploy` (this directory is outside deploy/).
+# The ConfigMap aiops-edge-runner-policy and Secret aiops-edge-key are created by
+# the Makefile from the center's workflow.remediation rules and the ops key.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-edge-runner
+  namespace: aiops
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-edge-runner-writer
+  namespace: aiops
+---
+# Long-lived token of the writer identity, mounted only into the runner.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aiops-edge-runner-writer-token
+  namespace: aiops
+  annotations:
+    kubernetes.io/service-account.name: aiops-edge-runner-writer
+type: kubernetes.io/service-account-token
+---
+# reader: built-in "view" (namespaced read, no Secrets) plus cluster-scoped reads.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-edge-runner-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: aiops-edge-runner
+    namespace: aiops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiops-edge-runner-read-cluster
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "persistentvolumes", "componentstatuses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-edge-runner-read-cluster
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiops-edge-runner-read-cluster
+subjects:
+  - kind: ServiceAccount
+    name: aiops-edge-runner
+    namespace: aiops
+---
+# writer: what repairs and in-Pod commands need. Commands are still gated by the
+# same policy as the center before this identity is used.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiops-edge-runner-write
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log", "events", "services", "configmaps", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale", "replicasets/scale"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-edge-runner-write
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiops-edge-runner-write
+subjects:
+  - kind: ServiceAccount
+    name: aiops-edge-runner-writer
+    namespace: aiops
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-edge-runner
+  namespace: aiops
+  labels:
+    app: aiops-edge-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiops-edge-runner
+  template:
+    metadata:
+      labels:
+        app: aiops-edge-runner
+    spec:
+      serviceAccountName: aiops-edge-runner
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: runner
+          image: xnet.registry.io:8443/xnet-cloud/aiops-edge-runner:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8090
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: policy, mountPath: /etc/aiops-edge-runner, readOnly: true}
+            - {name: key, mountPath: /etc/aiops-edge-key, readOnly: true}
+            - {name: writer, mountPath: /etc/aiops-edge-writer, readOnly: true}
+            - {name: state, mountPath: /var/lib/aiops-edge-runner}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: policy
+          configMap: {name: aiops-edge-runner-policy}
+        - name: key
+          secret: {secretName: aiops-edge-key, defaultMode: 0440}
+        - name: writer
+          secret: {secretName: aiops-edge-runner-writer-token, defaultMode: 0440}
+        - name: state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-edge-runner
+  namespace: aiops
+spec:
+  type: ClusterIP
+  selector:
+    app: aiops-edge-runner
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http

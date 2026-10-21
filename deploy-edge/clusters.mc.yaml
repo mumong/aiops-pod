@@ -1,0 +1,36 @@
+# Cluster configuration for the three-cluster test env (specs/008-multi-cluster).
+# Mounted into the center's MCP and AIOps as ConfigMap aiops-clusters.
+# Contains no credentials and no edge API server address (spec FR-016): edge
+# clusters are reached only through the xnet tunnel and our edge runner.
+clusters:
+  default: null                  # multi-cluster: the user must name the scope
+  center: vc-xnet-management     # what "中心集群" refers to; also "local"
+  items:
+    - name: vc-xnet-management
+      aliases: [center, 中心集群, 中心]
+      access: local
+      observability: victoria
+    - name: vc-942nkkozc8o5fyb9q3bznb1ws
+      aliases: [edge-88]
+      access: xnet
+      observability: victoria
+    - name: vc-dluw0jousipr6h5co2bwpyqk2
+      aliases: [edge-89]
+      access: xnet
+      observability: victoria
+  access:
+    xnet:
+      proxy_url: https://xnet-management.xnet.svc:9090/proxy
+      runner_url: http://aiops-edge-runner.aiops.svc:8090
+      cert_file: /etc/aiops-xnet/cert.pem
+      key_file: /etc/aiops-xnet/key.pem
+      ca_file: /etc/aiops-xnet/ca.pem
+      signing_key_file: /etc/aiops-edge-key/key
+      per_cluster_concurrency: 4
+      call_timeout_seconds: 15
+
+observability_profiles:
+  victoria:
+    metrics: {type: victoriametrics, url: "http://vmselect-vm-victoria-metrics-k8s-stack.monitor.svc:8481/select/0/prometheus", cluster_label: cluster}
+    logs: {type: victorialogs_events, url: "http://vlsingle-vm-victoria-metrics-k8s-stack.monitor.svc:9428", cluster_field: cluster}
+    traces: {type: none}

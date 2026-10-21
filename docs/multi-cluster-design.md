@@ -184,7 +184,7 @@ kubectl <argv>
 - **认证**：每个请求带 `X-AIOps-Timestamp` 和 `X-AIOps-Signature`（对时间戳和请求体做 HMAC-SHA256，共享密钥来自双方各自的 Secret）。时间偏差超过 60 秒、或签名重复，一律拒绝。这样只拿到 xnet 客户端证书的人**无法调用 runner**。
 - **规则**：runner 加载和中心同一份命令规则（随部署清单中的 ConfigMap 下发，`/healthz` 返回规则版本）。黑名单命令一律拒绝；需人工审批的命令必须带有效的 `approval_id`；`mode=read` 只允许只读子命令（get、describe、logs、events、top、api-resources、explain）。
 - **权限**：两个 SA。`reader` 为集群范围的 get/list/watch 加 pods/log；`writer` 只有修复需要的最小权限（pods/exec、删除 Pod、patch/update Deployment 等工作负载、scale）。
-- **输出截断**：单个响应最多 256KB，`truncated=true` 时注明截断。
+- **输出截断与压缩**：单个响应原始输出最多 4MB，`truncated=true` 时注明截断；中心请求压缩时用 gzip+base64 传输（实测 edge-88 的 `get pods -A -o json` 超过 256KB，原来的上限会破坏 jq 类工具）。
 - **任务**：按 `idempotency_key` 去重，重复提交返回同一个 `job_id`；任务记录在内存中保留 24 小时，同时写入 emptyDir，runner 容器重启后不丢失（Pod 重建时会丢失，此时中心标记为"结果未知"）。
 - **审计**：runner 本地记录每次执行（集群、argv、审批 ID、结果），中心也照常记录。
 

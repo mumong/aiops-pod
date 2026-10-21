@@ -37,17 +37,29 @@ def main() -> None:
     mc.check("A15-edges-present", len(edges) >= 2, f"edges={len(edges)}")
 
     for edge in edges:
-        mc.check(f"A15-name-uuid-{edge['name']}", uuid_to_name(edge["uuid"]) == edge["name"], edge["uuid"])
+        mc.check(
+            f"A15-name-uuid-{edge['name']}",
+            uuid_to_name(edge["uuid"]) == edge["name"],
+            edge["uuid"],
+        )
 
     with mc.xnet_client_cert() as cert:
         for edge in edges:
             status, body = mc.tunnel_get(edge["uuid"], "http://localhost:7070/k8s/nodes", cert)
-            mc.check(f"A15-proxy-{edge['name']}", status == 200 and b"NodeList" in body, f"http={status}")
-        status, body = mc.tunnel_get("00000000-0000-0000-0000-000000000000", "http://localhost:7070/k8s/nodes", cert)
+            mc.check(
+                f"A15-proxy-{edge['name']}",
+                status == 200 and b"NodeList" in body,
+                f"http={status}",
+            )
+        status, body = mc.tunnel_get(
+            "00000000-0000-0000-0000-000000000000", "http://localhost:7070/k8s/nodes", cert
+        )
         mc.check("A15-proxy-unknown-cluster", status != 200, f"http={status} {body[:60]!r}")
 
     try:
-        status, _ = mc.tunnel_get(edges[0]["uuid"], "http://localhost:7070/k8s/nodes", None, timeout=10)
+        status, _ = mc.tunnel_get(
+            edges[0]["uuid"], "http://localhost:7070/k8s/nodes", None, timeout=10
+        )
         refused = status in (401, 403)
     except (ssl.SSLError, urllib.error.URLError, ConnectionError, OSError):
         refused = True
@@ -56,8 +68,10 @@ def main() -> None:
     labels = set(mc.http_json(f"{mc.VM_URL}/api/v1/label/cluster/values")["data"])
     for edge in edges:
         mc.check(f"A15-cluster-label-{edge['name']}", edge["name"] in labels)
-        ids = mc.http_json(f"{mc.VM_URL}/api/v1/label/cluster_id/values",
-                           {"match[]": f'up{{cluster="{edge["name"]}"}}'})["data"]
+        ids = mc.http_json(
+            f"{mc.VM_URL}/api/v1/label/cluster_id/values",
+            {"match[]": f'up{{cluster="{edge["name"]}"}}'},
+        )["data"]
         mc.check(f"A15-cluster-id-{edge['name']}", ids == [edge["uuid"]], f"cluster_id={ids}")
     mc.finish()
 

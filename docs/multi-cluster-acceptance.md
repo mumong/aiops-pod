@@ -213,3 +213,22 @@
 | A15 `contract_xnet.py` | 11/11 通过 | Node 名与 UUID 互转一致；`/proxy` 到两个边缘 200；未知集群返回 400 "The side client is not online!"；不带证书被拒；`cluster`、`cluster_id` 标签与 Node 名、UUID 一致 |
 | X3 `runtime_dependency_check.py` | 2/2 通过 | 中心尚未部署 aiops、mcp 命名空间，作为基线 |
 | X1 快照 | 已生成 | 119 个对象 |
+
+### P0 链路打通（2026-10-21，runner 1.0.1、MCP 8.0.2）
+
+| 用例 | 结果 | 证据 |
+|---|---|---|
+| P0-1 `make sync-xnet-cert` | 通过 | 证书复制到 `mcp`、`aiops` 命名空间；有效期至 2031-10-20；xnet 命名空间无变化（X1） |
+| P0-2 `make edge-deploy`（edge-88） | 通过 | runner 只有 ClusterIP；镜像经 SSH 导入节点缓存（测试环境 Harbor 无推送权限） |
+| P0-3 远端 `get pods -A` | 通过 | 经隧道约 130ms |
+| P0-4 别名 + 本地 jq 管道 | 通过 | `items=20`。首次因 256KB 截断失败，上限改为 4MB 并启用压缩传输 |
+| P0-5 `-f`、`-w`、`-it` | 通过 | 垫片直接拒绝并说明原因 |
+| P0-6 不带签名、错误密钥、过期、重放 | 通过 | 均为 401 |
+| P0-7 只读接口执行 `delete` | 通过 | 403 `mode_denied` |
+| P0-8 不设集群执行 `kubectl get ns` | 通过 | 返回中心命名空间 |
+| P0-9 未部署 runner 的 edge-89 | 通过 | `cluster_unreachable` |
+| P0-10 未知集群 | 通过 | `cluster_unknown`，并列出可用集群 |
+| X1 快照 / X3 运行时依赖 / A15 契约 | 通过 | 119 个对象无变化；aiops、mcp 中无边缘 kubeconfig 或 API Server 地址；契约 11/11 |
+| 单元测试 | 通过 | robusta `tests/unit/multicluster` 100 个；mcpstander 316 个 |
+
+开发中发现并修复：垫片收到的 `argv[0]` 是绝对路径（单元测试补充了该场景）。

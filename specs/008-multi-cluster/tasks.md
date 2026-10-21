@@ -16,20 +16,20 @@
 
 测试先行：
 
-- [ ] T010 [P] M: 单元测试——签名生成与校验（过期、重放、篡改）
-- [ ] T011 [P] M: 单元测试——垫片参数检查（拒绝 -f/-w/-it/port-forward/proxy/attach；本地集群直通）
-- [ ] T012 [P] M: 单元测试——runner `mode=read` 拒绝写子命令；输出截断
-- [ ] T013 M: `tests/multicluster/test_tunnel_client.py`：错误分类（握手失败、离线、超时、401、403），用本地假隧道
-- [ ] T014 R: `tools_direct.py` 的 P0 部分（P0-3 至 P0-8）
+- [x] T010 [P] M: 单元测试——签名生成与校验（过期、重放、篡改）
+- [x] T011 [P] M: 单元测试——垫片参数检查（拒绝 -f/-w/-it/port-forward/proxy/attach；本地集群直通）
+- [x] T012 [P] R: 单元测试——runner `mode=read` 拒绝写子命令；输出截断与压缩（`tests/unit/multicluster/`）
+- [x] T013 M: `tests/multicluster/test_tunnel_client.py`：错误分类（握手失败、离线、超时、401、403），用本地假隧道
+- [x] T014 R: `tools_direct.py` 的 P0 部分（P0-3 至 P0-8）
 
 实现：
 
-- [ ] T015 M: `servers/cluster/signing.py`
-- [ ] T016 M: `servers/cluster/xnet_tunnel.py`（证书从挂载的 Secret 读取，失效时 `tunnel_auth_failed`）
-- [ ] T017 M: `edge_runner/`：`/healthz`、`/v1/kubectl`（read）、reader/writer SA、部署清单、镜像
-- [ ] T018 M: `bin/kubectl` 垫片；`_command_runner` 传递 `AIOPS_CLUSTER`
-- [ ] T019 M: Makefile 目标 `sync-xnet-cert`、`edge-deploy`、`runner-build`、`runner-push`
-- [ ] T020 部署到中心和 edge-88，执行 T014、T005、T004；通过后打 `mc-p0`
+- [x] T015 M: `servers/cluster/signing.py`
+- [x] T016 M: `servers/cluster/xnet_tunnel.py`（证书从挂载的 Secret 读取，失效时 `tunnel_auth_failed`）
+- [x] T017 R: `aiops_edge/runner/`、`Dockerfile.edge-runner`、`deploy-edge/runner.yaml`：`/healthz`、`/v1/kubectl`（read）、reader/writer SA、部署清单、镜像
+- [x] T018 M: `bin/kubectl` 垫片；`_command_runner` 传递 `AIOPS_CLUSTER`
+- [x] T019 R/M: Makefile 目标 `sync-xnet-cert`、`edge-deploy`、`runner-build`、`runner-push`（R）；`deploy-mc`、`sync-aiops-edge`（M）
+- [x] T020 部署到中心和 edge-88，执行 T014、T005、T004；通过后打 `mc-p0`
 
 ## Phase 2: 可观测适配（US1 工具层、US3，mc-p1）
 

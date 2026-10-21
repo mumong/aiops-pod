@@ -31,9 +31,15 @@ def snapshot(path: str) -> None:
                 except RuntimeError:
                     continue
                 for item in items:
-                    body = {k: item.get(k) for k in ("spec", "data", "stringData") if item.get(k) is not None}
+                    body = {
+                        k: item.get(k)
+                        for k in ("spec", "data", "stringData")
+                        if item.get(k) is not None
+                    }
                     labels = item["metadata"].get("labels") or {}
-                    digest = hashlib.sha256(json.dumps([body, labels], sort_keys=True).encode()).hexdigest()
+                    digest = hashlib.sha256(
+                        json.dumps([body, labels], sort_keys=True).encode()
+                    ).hexdigest()
                     data[f"{name}/{ns}/{kind}/{item['metadata']['name']}"] = digest
         crds = mc.kubectl(name, "get", "crd", "-o", "name").split()
         data[f"{name}/crds"] = hashlib.sha256("\n".join(sorted(crds)).encode()).hexdigest()
@@ -50,25 +56,35 @@ def main() -> None:
         nodes = mc.kubectl_json(name, "get", "nodes")["items"]
         real = [n for n in nodes if not n["metadata"]["name"].startswith("vc-")]
         ready = all(
-            any(c["type"] == "Ready" and c["status"] == "True" for c in n["status"]["conditions"]) for n in real
+            any(c["type"] == "Ready" and c["status"] == "True" for c in n["status"]["conditions"])
+            for n in real
         )
         mc.check(f"ENV-nodes-{name}", ready and bool(real), f"nodes={len(real)}")
 
     edges = mc.edge_clusters()
-    mc.check("ENV-xnet-edges", len(edges) == 2 and all(e["ready"] == "True" for e in edges),
-             " ".join(f"{e['name']}={e['ready']}" for e in edges))
+    mc.check(
+        "ENV-xnet-edges",
+        len(edges) == 2 and all(e["ready"] == "True" for e in edges),
+        " ".join(f"{e['name']}={e['ready']}" for e in edges),
+    )
 
     with mc.xnet_client_cert() as cert:
         for edge in edges:
             status, body = mc.tunnel_get(edge["uuid"], "http://localhost:7070/k8s/nodes", cert)
-            mc.check(f"ENV-tunnel-{edge['name']}", status == 200 and b"NodeList" in body, f"http={status}")
+            mc.check(
+                f"ENV-tunnel-{edge['name']}",
+                status == 200 and b"NodeList" in body,
+                f"http={status}",
+            )
 
     labels = set(mc.http_json(f"{mc.VM_URL}/api/v1/label/cluster/values")["data"])
     expected = {e["name"] for e in edges} | {"vc-xnet-management"}
     mc.check("ENV-vm-clusters", expected <= labels, f"labels={sorted(labels)}")
 
-    hits = mc.http_json(f"{mc.VLOGS_URL}/select/logsql/field_values",
-                        {"query": "*", "field": "cluster", "start": "7d"})["values"]
+    hits = mc.http_json(
+        f"{mc.VLOGS_URL}/select/logsql/field_values",
+        {"query": "*", "field": "cluster", "start": "7d"},
+    )["values"]
     log_clusters = {v["value"] for v in hits}
     mc.check("ENV-vlogs-clusters", expected <= log_clusters, f"clusters={sorted(log_clusters)}")
 
