@@ -47,6 +47,25 @@ class RequestContract(BaseModel):
     clarification: str = ""
 
 
+class MultiClusterRequestContract(RequestContract):
+    """Router contract in multi-cluster deployments only (specs/008-multi-cluster)."""
+
+    cluster_mode: Literal["single", "multiple", "center", "unspecified"] = Field(
+        default="unspecified",
+        description="一个集群 / 多个集群 / 中心集群；问题和会话都没说明时为 unspecified",
+    )
+    clusters: list[str] = Field(
+        default_factory=list,
+        description='用户说的集群名或别名（原样）；全部集群为 ["*"]；追问沿用上文集群',
+    )
+
+
+def _contract_model():
+    from app.core import multicluster
+
+    return MultiClusterRequestContract if multicluster.multi() else RequestContract
+
+
 def router_failure(exc, history_loaded=False):
     """Public, sanitized error presentation; never expose provider bodies or credentials."""
     from app.core.aicall.errors import model_transport_message
@@ -123,7 +142,15 @@ class RequestRouterNode(WorkflowNode):
             context = state.get("repair_context") or {}
             source = context.get("diagnosis") or context.get("previous_plan") or {}
             scope = (source.get("payload") or {}).get("request_contract") or {}
-            contract = RequestContract(
+            cluster_scope = (
+                {
+                    "clusters": scope.get("clusters") or [],
+                    "cluster_mode": scope.get("cluster_mode") or "unspecified",
+                }
+                if _contract_model() is MultiClusterRequestContract
+                else {}
+            )
+            contract = _contract_model()(
                 route="remediation",
                 task="repair",
                 scope=scope.get("scope") or "unspecified",
@@ -131,6 +158,7 @@ class RequestRouterNode(WorkflowNode):
                 pod_names=scope.get("pod_names") or [],
                 requested_outputs=["修复方案与执行审查"],
                 scope_basis="用户通过报告或方案入口明确发起；历史记录已校验归属，修复节点自主核实当前事实。",
+                **cluster_scope,
             )
             output = {"request_route": "remediation", "request_contract": contract.model_dump()}
             self._archive_node_input({"question": question, "source_run_id": source.get("run_id")})
@@ -157,13 +185,19 @@ class RequestRouterNode(WorkflowNode):
         if self.cancel_event is not None and self.cancel_event.is_set():
             raise RuntimeError("请求已取消")
         started = time.monotonic()
+        from app.core import multicluster
+
+        contract_model = _contract_model()
+        system_prompt = REQUEST_ROUTER_PROMPT + (
+            multicluster.router_prompt() if contract_model is MultiClusterRequestContract else ""
+        )
         try:
 
             def classify(material):
                 return self.ai_call.call_structured(
-                    system_prompt=REQUEST_ROUTER_PROMPT,
+                    system_prompt=system_prompt,
                     question=material,
-                    schema=RequestContract,
+                    schema=contract_model,
                     node_id=self.node_id,
                     run_id=getattr(self, "current_run_id", ""),
                     # Classification only: no tools, no user-facing reasoning. As an
@@ -210,7 +244,9 @@ class RequestRouterNode(WorkflowNode):
                 contract, _ = classify(json.dumps(reduced, ensure_ascii=False))
             if contract is None:
                 raise ValueError("任务分类未返回有效结构化结果")
-            contract = RequestContract.model_validate(contract)
+            contract = contract_model.model_validate(
+                contract.model_dump() if isinstance(contract, BaseModel) else contract
+            )
         except Exception as exc:
             from app.core.aicall.errors import raise_on_model_disconnect
 
@@ -266,6 +302,16 @@ class RequestRouterNode(WorkflowNode):
                     + "repair=plan 且会话中尚无诊断：先诊断，再按异常组生成修复方案",
                 }
             )
+        if contract_model is MultiClusterRequestContract and contract.route != "clarify":
+            # The scope is resolved by code against the registry; an unclear or
+            # unknown scope becomes a question, whatever route the model chose.
+            resolved, question_back = multicluster.resolve_contract(
+                contract.model_dump(), evidence=json.dumps(context, ensure_ascii=False)
+            )
+            update = {"clusters": resolved["clusters"], "cluster_mode": resolved["cluster_mode"]}
+            if question_back:
+                update.update(route="clarify", clarification=question_back)
+            contract = contract.model_copy(update=update)
         output = {
             "request_contract": contract.model_dump(),
             "request_route": contract.route,

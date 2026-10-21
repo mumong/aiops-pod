@@ -37,9 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 安装 kubectl
 RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 \
-        -o /usr/local/bin/kubectl \
+        -o /usr/local/bin/kubectl.real \
         "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
-    && chmod +x /usr/local/bin/kubectl
+    && chmod +x /usr/local/bin/kubectl.real
 
 
 # 安装 Helm（二进制本体即可，repo 初始化放到运行时按需执行）
@@ -76,6 +76,11 @@ ARG BUILD_TIME=unknown
 COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser run.py .
 COPY --chown=appuser:appuser VERSION .
+# Multi-cluster access (specs/008-multi-cluster): kubectl is a shim that runs
+# kubectl.real unless AIOPS_CLUSTER names an edge cluster.
+COPY --chown=appuser:appuser aiops_edge/ ./aiops_edge/
+COPY --chmod=755 aiops_edge/kubectl /usr/local/bin/kubectl
+ENV AIOPS_EDGE_LIB=/app
 
 USER appuser
 

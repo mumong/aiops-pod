@@ -22,6 +22,17 @@ from app.core.workflow.state import WorkflowState
 logger = logging.getLogger(__name__)
 
 
+def _bind_cluster_scope(node: Any, state: WorkflowState) -> None:
+    """Multi-cluster deployments: bind cluster-aware tools to this run's scope."""
+    from app.core import multicluster
+
+    if not multicluster.multi() or not hasattr(node, "tools"):
+        return
+    if not hasattr(node, "_unscoped_tools"):
+        node._unscoped_tools = node.tools
+    node.tools = multicluster.scoped_tools(node._unscoped_tools, state)
+
+
 def _wrap_node_execute(node: Any):
     """为节点执行注入生命周期事件，便于 executor 做精确计时。"""
 
@@ -44,6 +55,7 @@ def _wrap_node_execute(node: Any):
 
         try:
             with log_context(node=node.node_id):
+                _bind_cluster_scope(node, state)
                 new_state = node.execute(state)
         except Exception as exc:
             if event_queue is not None:

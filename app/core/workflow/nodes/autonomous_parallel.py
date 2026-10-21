@@ -5,6 +5,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from app.core import multicluster
 from app.core.aicall.errors import ModelStreamInterrupted, raise_on_model_disconnect
 from app.core.context.archive import ContextArchive
 from app.core.log_context import log_context
@@ -12,6 +13,7 @@ from app.core.prompts import (
     PARALLEL_FANIN_INSTRUCTION,
     PARALLEL_LANE_QUESTION_TEMPLATE,
 )
+from app.core.remediation.pod_executor import run_argv
 from app.core.workflow.diagnosis_contract import DiagnosisHandoff, LocationHandoff, scoped_handoff
 from app.core.workflow.group_runner import (
     group_display_name,
@@ -78,10 +80,18 @@ def plan_groups(node, state):
             else DiagnosisHandoff
         )
         handoff = copy.deepcopy(handoff)
+        scope = multicluster.run_clusters(state)
         completed = complete_pod_namespaces(
-            target.get("entity")
-            for target in handoff.get("targets") or []
-            if isinstance(target, dict)
+            (
+                target.get("entity")
+                for target in handoff.get("targets") or []
+                if isinstance(target, dict)
+            ),
+            runner=(
+                (lambda argv, c=scope[0]: run_argv(argv, cluster=c))
+                if multicluster.multi() and len(scope) == 1
+                else None
+            ),
         )
         plan = schema.model_validate(handoff)
         targets = [t for t in plan.targets if t.status == "investigate"]
@@ -205,7 +215,10 @@ class AutonomousParallelNode(WorkflowNode):
                 break
             node = cls(self.holmes_service, self.metrics, self.runbook_catalog)
             node.ai_call = client
-            node.tools = list(getattr(self, "tools", []) or [])
+            node.tools = multicluster.scoped_tools(
+                list(getattr(self, "_unscoped_tools", None) or getattr(self, "tools", []) or []),
+                local,
+            )
             node.current_run_id = lane_run
             node.cancel_event = self.cancel_event
             node.workflow_config_override = getattr(self, "workflow_config_override", None)

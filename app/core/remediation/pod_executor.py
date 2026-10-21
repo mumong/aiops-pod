@@ -22,7 +22,33 @@ COMMAND_TIMEOUT_SECONDS = int(os.getenv("AIOPS_REPAIR_COMMAND_TIMEOUT", "60"))
 _busy: set[tuple[str, str, str]] = set()
 
 
-def run_argv(args):
+def _run_remote(args, env):
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"命令执行超时（{COMMAND_TIMEOUT_SECONDS} 秒），结果未知：命令可能已部分生效，请复查资源状态"
+        ) from exc
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "kubectl failed")[:3000])
+    return result.stdout
+
+
+def run_argv(args, cluster=None):
+    # A remote cluster (multi-cluster deployments) is reached through the kubectl
+    # shim and the edge runner; no credentials of that cluster exist here.
+    from app.core import multicluster
+
+    remote_env = multicluster.kubectl_env(cluster)
+    if remote_env is not None:
+        return _run_remote(args, remote_env)
     # kubectl does not automatically use client-go's in-cluster config here.
     # Use only this Pod's projected ServiceAccount, never host/admin credentials.
     token = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")

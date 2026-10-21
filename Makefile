@@ -253,7 +253,7 @@ RUNNER_IMAGE := $(IMAGE_REPOSITORY)/$(PROJECT)/aiops-edge-runner
 # 测试环境用自己的 Harbor（无推送权限），镜像经 SSH 导入节点缓存：MC_PULL_POLICY=IfNotPresent MC_LOAD_HOSTS=10.2.5.88
 MC_PULL_POLICY ?= Always
 MC_LOAD_HOSTS ?=
-.PHONY: runner-build runner-push mc-keygen edge-deploy edge-delete sync-xnet-cert test-multicluster
+.PHONY: runner-build runner-push mc-keygen edge-deploy edge-delete sync-xnet-cert test-multicluster deploy-mc
 
 runner-build:
 	$(DOCKER_BUILD) --build-arg VERSION=$(RUNNER_VERSION) -f Dockerfile.edge-runner -t $(RUNNER_IMAGE):$(RUNNER_VERSION) .
@@ -304,3 +304,24 @@ sync-xnet-cert: mc-keygen
 
 test-multicluster:
 	$(PYTHON) -m pytest -q tests/unit/multicluster
+
+# 中心部署 AIOps（测试环境）：make deploy-mc MC_LOAD_HOSTS=10.2.5.85
+# 运行时只依赖集群配置、复制的 xnet 证书和 runner 密钥；不含任何边缘 kubeconfig。
+MC_CLUSTERS_FILE ?= deploy-edge/clusters.mc.yaml
+deploy-mc:
+	@if test -n "$(MC_LOAD_HOSTS)"; then \
+		for image in $(DOCKER_NAME):$(DOCKER_TAG) $(A2A_DOCKER_NAME):$(DOCKER_TAG) \
+			xnet.registry.io:8443/caopeng/docker.io/library/busybox:1.36; do \
+			deploy-edge/load_image.sh $$image $(MC_LOAD_HOSTS); done; fi
+	@K="kubectl --kubeconfig $(CENTER_KUBECONFIG)"; set -e; \
+	$$K create namespace aiops --dry-run=client -o yaml | $$K apply -f -; \
+	$$K apply -f deploy/secrets/core.yaml; \
+	$$K -n aiops create configmap aiops-clusters --from-file=clusters.yaml=$(MC_CLUSTERS_FILE) \
+		--dry-run=client -o yaml | $$K apply -f -; \
+	$(PYTHON) deploy-edge/render_center_config.py deploy/configmap/config.yaml deploy-edge/center/overrides.yaml | $$K apply -f -; \
+	kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy-edge/center \
+		| sed -e 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' \
+		      -e 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_IMAGE_NAME):.*|image: $(A2A_DOCKER_NAME):$(DOCKER_TAG)|' \
+		| $$K apply -f -; \
+	$$K -n aiops rollout restart deployment/aiops-copilot; \
+	$$K -n aiops rollout status deployment/aiops-copilot --timeout=600s
