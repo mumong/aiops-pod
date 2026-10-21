@@ -13,19 +13,22 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from aiops_edge import signing
+from aiops_edge import kubectl_args, signing
 from aiops_edge.runner.gate import evaluate
+from aiops_edge.runner.jobs import JobStore
 from aiops_edge.streams import decode_streams, encode_streams  # noqa: F401 (decode re-exported)
 from app.core.remediation.policy import CommandPolicy
 
 API_VERSION = 1
 MAX_SYNC_SECONDS = 15
+MAX_JOB_SECONDS = 600
 MAX_BODY_BYTES = 64 * 1024
 log = logging.getLogger("aiops-edge-runner")
 
@@ -40,6 +43,12 @@ class RunnerConfig:
     max_output: int = 4 * 1024 * 1024
     version: str = "dev"
     nonces: signing.NonceCache = field(default_factory=signing.NonceCache)
+    jobs: Optional[JobStore] = None
+
+    def job_store(self) -> JobStore:
+        if self.jobs is None:
+            self.jobs = JobStore(self.job_dir)
+        return self.jobs
 
     @property
     def policy_version(self) -> str:
@@ -108,9 +117,19 @@ def make_handler(cfg: RunnerConfig):
                         "version": cfg.version,
                         "api": API_VERSION,
                         "policy_version": cfg.policy_version,
-                        "capabilities": ["read", "exec", "write"],
+                        "capabilities": ["read", "exec", "write", "jobs"],
                     },
                 )
+            if self.path.startswith("/v1/jobs/"):
+                reason = signing.verify(
+                    cfg.signing_key, self.headers, "GET", self.path, b"", cache=cfg.nonces
+                )
+                if reason:
+                    return self._send(401, {"error": "runner_auth_failed", "reason": reason})
+                job = cfg.job_store().get(self.path.rsplit("/", 1)[-1])
+                if job is None:
+                    return self._send(404, {"error": "not_found"})
+                return self._send(200, job)
             return self._send(404, {"error": "not_found"})
 
         def _body(self) -> Optional[bytes]:
@@ -139,7 +158,56 @@ def make_handler(cfg: RunnerConfig):
                 return self._send(400, {"error": "bad_request", "reason": str(exc)})
             if self.path == "/v1/kubectl":
                 return self._kubectl(payload)
+            if self.path == "/v1/jobs":
+                return self._submit_job(payload)
             return self._send(404, {"error": "not_found"})
+
+        def _submit_job(self, payload: Dict[str, Any]) -> None:
+            argv = payload.get("argv")
+            key = str(payload.get("idempotency_key") or "").strip()
+            if not key or not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+                return self._send(
+                    400,
+                    {"error": "bad_request", "reason": "idempotency_key and argv are required"},
+                )
+            existing = cfg.job_store().by_key(key)
+            if existing:
+                return self._send(
+                    202, {"job_id": existing["job_id"], "status": existing["status"]}
+                )
+            mode, reason = kubectl_args.classify(argv)
+            if mode == "read":
+                return self._send(
+                    400, {"error": "bad_request", "reason": "read commands use /v1/kubectl"}
+                )
+            approval = str(payload.get("approval_id") or "")
+            decision = evaluate(argv, mode or "write", approval, cfg.policy)
+            audit = {
+                "job": key,
+                "argv": argv,
+                "approval_id": approval,
+                "allowed": decision.ok,
+                "rule": decision.rule,
+            }
+            if not decision.ok:
+                log.warning("AUDIT %s", json.dumps(audit, ensure_ascii=False))
+                return self._send(decision.status, decision.body() | {"command": " ".join(argv)})
+            job = cfg.job_store().create(key, argv, approval)
+            if job.pop("created"):
+                timeout = min(float(payload.get("timeout_s") or MAX_JOB_SECONDS), MAX_JOB_SECONDS)
+
+                def work(job_id=job["job_id"]):
+                    result = run_kubectl(cfg, argv, "write", timeout)
+                    cfg.job_store().finish(job_id, result)
+                    log.info(
+                        "AUDIT %s",
+                        json.dumps(
+                            {**audit, "exit_code": result["exit_code"]}, ensure_ascii=False
+                        ),
+                    )
+
+                threading.Thread(target=work, daemon=True).start()
+            return self._send(202, {"job_id": job["job_id"], "status": job["status"]})
 
         def _kubectl(self, payload: Dict[str, Any]) -> None:
             argv = payload.get("argv")

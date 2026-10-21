@@ -216,10 +216,11 @@ class RepairJobs:
                 return
             record = self.store.load(job_id, owner, "plan")
 
-            def runner(args):
+            def runner(args, cluster=None):
                 if self.cancellations[job_id].is_set() or not self.store.current(job_id, owner):
                     raise RuntimeError("任务已取消或方案已替代，未执行命令")
-                return run_argv(args)
+                # Single-cluster calls stay exactly as before.
+                return run_argv(args, cluster=cluster) if cluster else run_argv(args)
 
             for event in PodRepairExecutor(runner=runner).run(
                 job_id,
@@ -254,6 +255,9 @@ class RepairJobs:
                         payload["events"].append(event)
 
                     self.store.update_payload("job-" + job_id, owner, append)
+                elif kind == "remediation_status":
+                    # e.g. multi-cluster: target cluster unreachable, waiting before executing
+                    self._update(job_id, owner, status_note=event.get("message") or "")
                 elif kind == "remediation_finished":
                     self._update(
                         job_id, owner, status=event["status"], approval=None, result=event

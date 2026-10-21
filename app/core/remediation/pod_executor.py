@@ -9,6 +9,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
+from aiops_edge.jobs_client import RemoteResultUnknown
 from app.core.remediation.approval import approval_store
 from app.core.remediation.audit import audit_event
 from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
@@ -104,9 +105,14 @@ def run_argv(args, cluster=None):
     return result.stdout
 
 
+REMOTE_WAIT_SECONDS = int(os.getenv("AIOPS_REMOTE_WAIT_SECONDS", "600"))
+
+
 class PodRepairExecutor:
-    def __init__(self, store=approval_store, runner=run_argv):
+    def __init__(self, store=approval_store, runner=run_argv, remote_jobs=None):
         self.store, self.runner = store, runner
+        # Multi-cluster: execute stages on an edge cluster run as edge runner jobs.
+        self.remote_jobs = remote_jobs
 
     def run(
         self,
@@ -131,6 +137,24 @@ class PodRepairExecutor:
         policy = policy or active_policy()
         started_at = time.time()
         max_duration = int(max_duration or 0)
+        from app.core import multicluster
+
+        remote = multicluster.job_cluster(request_contract)
+        cluster_label = (
+            multicluster.labels([remote.name])[0]
+            if remote
+            else multicluster.job_label(request_contract)
+        )
+        if remote is not None:
+            # Reads (dry run, verify, recovery) reach the edge through the kubectl shim.
+            read = lambda argv: self.runner(argv, cluster=remote.name)  # noqa: E731
+            jobs = self.remote_jobs
+            if jobs is None:
+                from aiops_edge.jobs_client import RemoteJobs
+
+                jobs = RemoteJobs.from_config()
+        else:
+            read, jobs = self.runner, None
 
         def finish(status, reason, error_code=None, **extra):
             event = {
@@ -233,7 +257,7 @@ class PodRepairExecutor:
             before = {}
             watched = []
             if recovery is not None:
-                watch = (watch_factory or RecoveryWatch)(self.runner, recovery)
+                watch = (watch_factory or RecoveryWatch)(read, recovery)
                 for _, target, _, _ in prepared:
                     if target["group_id"] in before:
                         continue
@@ -278,7 +302,12 @@ class PodRepairExecutor:
                         run_id,
                         "action",
                         action["description"],
-                        {"target": target, **action, "high_risk": high_risk},
+                        {
+                            "target": target,
+                            **action,
+                            "high_risk": high_risk,
+                            **({"cluster": cluster_label} if cluster_label else {}),
+                        },
                         timeout_seconds=timeout,
                         owner=owner,
                     )
@@ -294,6 +323,7 @@ class PodRepairExecutor:
                         "server_time": time.time(),
                         "group_id": action["group_id"],
                         "high_risk": high_risk,
+                        **({"cluster": cluster_label} if cluster_label else {}),
                     }
                     decision = None
                     while time.time() < request.expires_at and not (cancel and cancel.is_set()):
@@ -325,6 +355,27 @@ class PodRepairExecutor:
                         )
                         return
                     approval_marker = request.approval_id
+                if remote is not None:
+                    # Approved (or auto) but the edge must be reachable before anything runs.
+                    waited_from = time.time()
+                    while not jobs.reachable(remote):
+                        if time.time() - waited_from > REMOTE_WAIT_SECONDS or (
+                            cancel and cancel.is_set()
+                        ):
+                            yield finish(
+                                "blocked",
+                                f"集群 {cluster_label} 在 {REMOTE_WAIT_SECONDS} 秒内一直不可达，本动作未执行",
+                                "cluster_unreachable",
+                            )
+                            return
+                        yield {
+                            "type": "remediation_status",
+                            "run_id": run_id,
+                            "group_id": action["group_id"],
+                            "cluster": cluster_label,
+                            "message": f"集群 {cluster_label} 当前不可达，恢复连接后再执行（未执行任何命令）",
+                        }
+                        time.sleep(5)
                 for stage, command, argv in stages:
                     if record_store and not record_store.transition(run_id, owner, "executing"):
                         yield finish("superseded", "方案已被修改请求替代，未执行旧命令")
@@ -346,13 +397,65 @@ class PodRepairExecutor:
                         # otherwise the approval id that authorised this exact command.
                         "approval": approval_marker,
                         "mode": mode,
+                        **({"cluster": cluster_label} if cluster_label else {}),
                     }
                     try:
                         with _command_lock:
                             if cancel and cancel.is_set():
                                 yield finish("cancelled", "请求已取消，未执行排队命令")
                                 return
-                            output = self.runner(argv)
+                            if remote is not None and stage == "execute":
+                                output = jobs.run(
+                                    remote,
+                                    argv,
+                                    key=f"{run_id}:{action['id']}:{stage}",
+                                    approval_id=""
+                                    if approval_marker == "auto"
+                                    else approval_marker,
+                                    timeout_s=COMMAND_TIMEOUT_SECONDS,
+                                    deadline_s=max(COMMAND_TIMEOUT_SECONDS * 3, 300),
+                                )
+                            else:
+                                output = read(argv)
+                    except RemoteResultUnknown as exc:
+                        audit_event(
+                            "command_executed",
+                            run_id=run_id,
+                            action_id=action["id"],
+                            stage=stage,
+                            command=command,
+                            status="unknown",
+                            approval=approval_marker,
+                            mode=mode,
+                            cluster=cluster_label,
+                            error=str(exc)[:300],
+                        )
+                        if record_store:
+                            record_store.transition(
+                                run_id,
+                                owner,
+                                "failed",
+                                {
+                                    "action_id": action["id"],
+                                    "stage": stage,
+                                    "command": command,
+                                    "status": "unknown",
+                                    "result": str(exc)[:6000],
+                                },
+                            )
+                        yield {
+                            "type": "remediation_tool_result",
+                            "run_id": run_id,
+                            "group_id": action["group_id"],
+                            "action_id": action["id"],
+                            "stage": stage,
+                            "command": command,
+                            "status": "unknown",
+                            "result_preview": str(exc)[:6000],
+                            "result_truncated": False,
+                        }
+                        yield finish("failed", f"{exc}；需人工确认", "remote_result_unknown")
+                        return
                     except Exception as exc:
                         audit_event(
                             "command_executed",
@@ -441,6 +544,7 @@ class PodRepairExecutor:
                         status="success",
                         approval=approval_marker,
                         mode=mode,
+                        cluster=cluster_label,
                     )
                     if record_store:
                         record_store.transition(

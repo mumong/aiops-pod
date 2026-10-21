@@ -251,3 +251,21 @@ def kubectl_env(cluster: Optional[str]) -> Optional[Dict[str, str]]:
     if resolved is None or not resolved.remote:
         return None
     return {**os.environ, "AIOPS_CLUSTER": resolved.name}
+
+
+def job_cluster(contract: Optional[Dict[str, Any]]):
+    """The remote cluster a repair job targets, or None (local / single-cluster)."""
+    if not multi() or not contract:
+        return None
+    clusters = contract.get("clusters") or []
+    if len(clusters) != 1:
+        return None
+    cluster = config().resolve(clusters[0])
+    return cluster if cluster is not None and cluster.remote else None
+
+
+def job_label(contract: Optional[Dict[str, Any]]) -> str:
+    """Display label of a job's cluster in multi-cluster mode ('' otherwise)."""
+    if not multi() or not contract or len(contract.get("clusters") or []) != 1:
+        return ""
+    return labels(contract["clusters"])[0]
