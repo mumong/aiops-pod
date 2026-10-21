@@ -232,3 +232,23 @@
 | 单元测试 | 通过 | robusta `tests/unit/multicluster` 100 个；mcpstander 316 个 |
 
 开发中发现并修复：垫片收到的 `argv[0]` 是绝对路径（单元测试补充了该场景）。
+
+### P1 可观测适配（2026-10-21，MCP 8.0.3、runner 1.0.1）
+
+故障 case：edge-88 部署 c06、c08、c09；edge-89 部署 c02、c10，以及与 c06 同命名空间、同名的健康工作负载 `aiops-case-06/workload`。
+
+| 用例 | 结果 | 证据 |
+|---|---|---|
+| A1 edge-88 上 c08 的内存（30 分钟峰值） | 通过 | `backend=victoriametrics`，`cluster` 为 edge-88，有数据。OOM 容器不断重启，此刻没有当前序列，所以用 `max_over_time` |
+| A2 PromQL 显式写 edge-89 的 cluster | 通过 | 结果为空：`extra_label` 优先于查询里的匹配条件 |
+| A2b 在 edge-88 范围内查询 edge-89 的同名 Pod | 通过 | `pod_not_found` |
+| A3 c06 的"日志" | 通过 | 返回 K8s 事件（BackOff、Unhealthy、Started……），`log_source=k8s_events`、`coverage=partial`，正确识别 Warning |
+| A4 链路 | 通过 | `capability_missing` |
+| A4b 拓扑 | 通过 | 经 runner 获取所属工作负载与 Service |
+| A8 `list_clusters` | 通过 | 三个集群，均在线，能力标注正确 |
+| P1-1 edge-89 的 namespace 标签值 | 通过 | 包含 aiops-case-10，不含只在 edge-88 的 aiops-case-08 |
+| P1-required 多集群下不传集群 | 通过 | `cluster_required` |
+| P1-2 edge-88 runner 副本数设为 0 | 通过 | k8s 工具 1.5 秒返回 `cluster_unreachable`；指标工具仍然可用；随后恢复 runner |
+| 后端契约 `contract_backends.py` | 7/7 通过 | `extra_label` 生效；常用指标在三个集群（等待和终止原因指标只在有对应状态的集群上出现）和旧 Prometheus 中都存在；VLogs 事件可以按集群查询和解析 |
+| A5 现有环境回归 | 待执行 | 与 Phase 3 合并执行 |
+| mcpstander 单元测试 | 344 个通过 | 新增 cluster_scope、接线、远端 shell 规则、list_clusters 测试 |

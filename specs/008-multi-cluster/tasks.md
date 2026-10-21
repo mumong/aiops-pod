@@ -35,26 +35,26 @@
 
 测试先行：
 
-- [ ] T030 [P] M: 单元测试——注册表（静态配置 + Node 发现合并、别名解析、未知集群）
-- [ ] T031 [P] M: 单元测试——后端档案选择；未配置档案时回退环境变量（FR-003）
-- [ ] T032 [P] M: 单元测试——VictoriaMetrics 请求带 `extra_label`；模型写错集群时仍被限定（FR-010）
-- [ ] T033 [P] M: 单元测试——事件文本解析（含 `reasoni`、`type: Warning`、`count`），用实测样本
-- [ ] T034 [P] M: 单元测试——victoria 后端的 tracing 返回 `capability_missing`
-- [ ] T035 M: 结果契约测试：现有字段不变，只新增 `cluster`、`backend`（FR-012）
-- [ ] T036 R: `contract_backends.py`：`extra_label` 生效、VLogs 能按集群取事件、常用指标在两套后端都存在
-- [ ] T037 R: `tools_direct.py` 的 P1 部分（A1–A4b、A8、P1-1、P1-2）
+- [x] T030 [P] M: 单元测试——注册表（静态配置 + Node 发现合并、别名解析、未知集群）
+- [x] T031 [P] M: 单元测试——后端档案选择；未配置档案时回退环境变量（FR-003）
+- [x] T032 [P] M: 单元测试——VictoriaMetrics 请求带 `extra_label`；模型写错集群时仍被限定（FR-010）
+- [x] T033 [P] M: 单元测试——事件文本解析（含 `reasoni`、`type: Warning`、`count`），用实测样本
+- [x] T034 [P] M: 单元测试——victoria 后端的 tracing 返回 `capability_missing`
+- [x] T035 M: 结果契约测试：现有字段不变，只新增 `cluster`、`backend`（FR-012）
+- [x] T036 R: `contract_backends.py`：`extra_label` 生效、VLogs 能按集群取事件、常用指标在两套后端都存在
+- [x] T037 R: `tools_direct.py` 的 P1 部分（A1–A4b、A8、P1-1、P1-2）
 
 实现：
 
-- [ ] T038 M: `servers/cluster/registry.py` + `list_clusters` 工具
-- [ ] T039 M: `aiops_observability/config.py` 后端档案
-- [ ] T040 [P] M: `collectors/victoriametrics.py`
-- [ ] T041 [P] M: `collectors/victorialogs_events.py`
-- [ ] T042 M: `query/{metrics,logs,tracing,topology}.py` 按集群选择后端，结果新增字段
-- [ ] T043 M: `holmes_tools/prometheus.py` 按集群选择地址
-- [ ] T044 M: 各工具 schema 增加可选的 `cluster`
-- [ ] T045 部署到三集群环境，执行 T036、T037
-- [ ] T046 A5：在 10.2.0.48 部署 MCP 8.0.x（不配置多集群），执行现有全部验收；结果与 7.0.52 一致
+- [x] T038 M: `servers/cluster/registry.py` + `list_clusters` 工具
+- [x] T039 M: `aiops_observability/config.py` 后端档案
+- [x] T040 [P] M: `collectors/victoriametrics.py`
+- [x] T041 [P] M: `collectors/victorialogs_events.py`
+- [x] T042 M: `query/{metrics,logs,tracing,topology}.py` 按集群选择后端，结果新增字段
+- [x] T043 M: `holmes_tools/prometheus.py` 按集群选择地址
+- [x] T044 M: 各工具 schema 增加可选的 `cluster`
+- [x] T045 部署到三集群环境，执行 T036、T037
+- [ ] T046 A5（与 Phase 3 合并执行，10.2.0.48 只部署一次）：在 10.2.0.48 部署 MCP 8.0.x（不配置多集群），执行现有全部验收；结果与 7.0.52 一致
 - [ ] T047 诊断质量对比（验收文档 §5），由 Boss 确认允许的差距；通过后打 `mc-p1`
 
 ## Phase 3: AIOps 集群范围（US1 端到端、US2，mc-p2）
