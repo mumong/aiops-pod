@@ -42,7 +42,7 @@
 | 10.2.5.89 | 边缘 | `vc-dluw0jousipr6h5co2bwpyqk2` | `edge-89` |
 
 - **部署和测试**：通过 SSH 在各主机上执行；为了方便操作，本机也可以使用三个集群的 kubeconfig（`~/.kube/aiops-mc/`，不提交到仓库）。各 Make 目标都支持 `KUBECONFIG=...`。
-- **运行时**：只经过 xnet 隧道和边缘 runner。上面的 SSH 和 kubeconfig **只用于运维和测试**，不得进入镜像、ConfigMap 或 Secret；用例 X3（`runtime_dependency_check.sh`）每个阶段都检查。
+- **运行时**：只经过 xnet 隧道和边缘 runner。上面的 SSH 和 kubeconfig **只用于运维和测试**，不得进入镜像、ConfigMap 或 Secret；用例 X3（`runtime_dependency_check.py`）每个阶段都检查。
 - 登录凭据由 Boss 提供，**不写进任何文件或文档**。
 - 端口：中心已占用的 NodePort 为 30081（xnet 的 `cloud-mgmt-frontend`）、30808、30909、31400、31500、31600、31700。我们的 AIOps 沿用 30800（A2A 为 30801），**前端改用 30082**（现有环境仍为 30081），通过部署变量设置，不修改现有环境。
 
@@ -75,14 +75,14 @@
 
 | 脚本 | 作用 | 首次需要的阶段 |
 |---|---|---|
-| `env_check.sh` | 环境基线：三个集群在线、xnet 隧道可用、VM/VLogs 有数据、已知噪声清单；输出 `xnet`、`monitor` 命名空间的对象快照（X1 用） | P0 |
-| `contract_xnet.sh` | A15：`/proxy` 可用、不带证书被拒、Node 名与 UUID 可以互相转换、`cluster` 标签与 Node 名一致 | P0 |
+| `env_check.py` | 环境基线：三个集群在线、xnet 隧道可用、VM/VLogs 有数据、已知噪声清单；输出 `xnet`、`monitor` 命名空间的对象快照（X1 用） | P0 |
+| `contract_xnet.py` | A15：`/proxy` 可用、不带证书被拒、Node 名与 UUID 可以互相转换、`cluster` 标签与 Node 名一致 | P0 |
 | `contract_backends.py` | VM 的 `extra_label` 生效；VLogs 能按集群查询事件；常用指标在新旧两套后端上都存在 | P1 |
 | `tools_direct.py` | L2：逐个调用 MCP 工具和 runner 接口并断言结果 | P0 起逐步扩充 |
-| `e2e_ask.sh` | L3：用 `/ask` 提问，从运行报告中取出路由范围、工具调用的集群参数和结论，并做断言 | P2 |
-| `fault_inject.sh` | L4：把指定边缘的 runner 副本数设为 0 或删除 runner Pod，到时自动恢复。只操作我们自己的组件，不加防火墙 | P3 |
-| `runtime_dependency_check.sh` | X3：检查中心 AIOps 和 MCP 的镜像、ConfigMap、Secret、环境变量中没有边缘 kubeconfig 和边缘 API Server 地址 | P0 |
-| `snapshot_diff.sh` | X1：比较前后两次快照 | P0 |
+| `e2e_ask.py` | L3：用 `/ask` 提问，从运行报告中取出路由范围、工具调用的集群参数和结论，并做断言 | P2 |
+| `fault_inject.py` | L4：把指定边缘的 runner 副本数设为 0 或删除 runner Pod，到时自动恢复。只操作我们自己的组件，不加防火墙 | P3 |
+| `runtime_dependency_check.py` | X3：检查中心 AIOps 和 MCP 的镜像、ConfigMap、Secret、环境变量中没有边缘 kubeconfig 和边缘 API Server 地址 | P0 |
+| `snapshot_diff.py` | X1：比较前后两次快照 | P0 |
 
 每个脚本输出 `PASS` 或 `FAIL`、用例编号，以及证据（运行 ID、任务 ID、请求耗时）。
 
@@ -94,9 +94,9 @@
 
 | # | 操作 | 预期 |
 |---|---|---|
-| X1 | 阶段开始前和结束后各执行一次 `env_check.sh`，再执行 `snapshot_diff.sh` | `xnet`、`monitor` 命名空间的 Deployment、Service、ConfigMap、Secret、CRD 和 Helm release 没有变化（Pod 重启和事件除外） |
+| X1 | 阶段开始前和结束后各执行一次 `env_check.py`，再执行 `snapshot_diff.py` | `xnet`、`monitor` 命名空间的 Deployment、Service、ConfigMap、Secret、CRD 和 Helm release 没有变化（Pod 重启和事件除外） |
 | X2 | 现有单元测试 | 全部通过 |
-| X3 | `runtime_dependency_check.sh` | 中心的运行时配置中没有任何边缘 kubeconfig 或边缘 API Server（`<边缘IP>:6443`）地址；访问边缘的唯一配置是 xnet 隧道地址和 runner 地址 |
+| X3 | `runtime_dependency_check.py` | 中心的运行时配置中没有任何边缘 kubeconfig 或边缘 API Server（`<边缘IP>:6443`）地址；访问边缘的唯一配置是 xnet 隧道地址和 runner 地址 |
 
 ### 4.2 P0 打通链路
 
@@ -110,7 +110,7 @@
 | P0-6 | 不带签名、签名错误、时间戳过期、重放同一个签名，直接调用 runner | 全部 401，runner 审计中有记录 |
 | P0-7 | 只读接口执行 `kubectl delete pod ...` | 403，`mode=read` 不允许写操作 |
 | P0-8 | 不设置 `AIOPS_CLUSTER` 执行 `kubectl get ns` | 返回中心结果（行为不变） |
-| A15 | `contract_xnet.sh` | 全部通过 |
+| A15 | `contract_xnet.py` | 全部通过 |
 
 ### 4.3 P1 可观测适配（MCP）
 
@@ -136,7 +136,7 @@
 
 ### 4.4 P2 AIOps 的集群范围
 
-端到端（L3，网页或 `e2e_ask.sh`）：
+端到端（L3，网页或 `e2e_ask.py`）：
 
 | # | 网页输入 | 预期 |
 |---|---|---|
@@ -163,7 +163,7 @@
 
 ### 4.6 P3 故障（L4，不加防火墙）
 
-只操作我们自己的组件（runner），由 `fault_inject.sh` 自动恢复。隧道断线类场景在集成测试中用假隧道模拟。
+只操作我们自己的组件（runner），由 `fault_inject.py` 自动恢复。隧道断线类场景在集成测试中用假隧道模拟。
 
 | # | 操作 | 预期 |
 |---|---|---|
@@ -205,4 +205,11 @@
 
 每个阶段一张表：用例编号、结果、证据（运行 ID、任务 ID、脚本输出）、版本号、日期。
 
-（待开发后填写）
+### Phase 0 基线（2026-10-21，开发前）
+
+| 用例 | 结果 | 证据 |
+|---|---|---|
+| 环境基线 `env_check.py` | 8/8 通过 | 三个集群节点 Ready；两个边缘在 xnet 上 Ready；隧道到两个边缘 200；VM 与 VLogs 都有三个集群的数据；已知噪声 18 条（9 条虚拟 Node kubelet、9 条控制面组件） |
+| A15 `contract_xnet.py` | 11/11 通过 | Node 名与 UUID 互转一致；`/proxy` 到两个边缘 200；未知集群返回 400 "The side client is not online!"；不带证书被拒；`cluster`、`cluster_id` 标签与 Node 名、UUID 一致 |
+| X3 `runtime_dependency_check.py` | 2/2 通过 | 中心尚未部署 aiops、mcp 命名空间，作为基线 |
+| X1 快照 | 已生成 | 119 个对象 |

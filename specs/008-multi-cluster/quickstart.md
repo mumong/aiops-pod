@@ -12,7 +12,7 @@
 1. 本机构建并推送镜像到 harbor。
 2. 中心：`make sync-xnet-cert`，然后部署 MCP、AIOps、前端（前端 NodePort 30082）。
 3. 每个边缘：`make edge-deploy`，在边缘本地执行（SSH 管道或边缘 kubeconfig）。
-4. `scripts/acceptance/multicluster/env_check.sh` → 当前阶段的验收脚本。
+4. `scripts/acceptance/multicluster/env_check.py` → 当前阶段的验收脚本。
 
 ## 每个阶段的出口
 

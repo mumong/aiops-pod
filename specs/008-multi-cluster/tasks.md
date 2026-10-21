@@ -5,12 +5,12 @@
 
 ## Phase 0: 准备（mc-p0 之前）
 
-- [ ] T001 三个仓库创建分支 `008-multi-cluster`；版本号设为 R 13.0.0、M 8.0.0、runner 1.0.0、F 0.2.0
-- [ ] T002 [P] R: `scripts/acceptance/multicluster/env_check.sh`：三个集群在线、隧道可用、VM/VLogs 有数据、噪声清单、`xnet`/`monitor` 对象快照
-- [ ] T003 [P] R: `snapshot_diff.sh`（SC-007）
-- [ ] T004 [P] R: `runtime_dependency_check.sh`（SC-006）：检查中心 AIOps/MCP 的镜像、ConfigMap、Secret、环境变量中没有边缘 kubeconfig 和边缘 API Server 地址
-- [ ] T005 R: `contract_xnet.sh`（A15）：`/proxy` 可用、无证书被拒、Node 名与 UUID 互转、`cluster` 标签与 Node 名一致
-- [ ] T006 执行 T002–T005，记录基线
+- [x] T001 三个仓库创建分支 `008-multi-cluster`；版本号设为 R 13.0.0、M 8.0.0、runner 1.0.0、F 0.2.0
+- [x] T002 [P] R: `scripts/acceptance/multicluster/env_check.py`：三个集群在线、隧道可用、VM/VLogs 有数据、噪声清单、`xnet`/`monitor` 对象快照
+- [x] T003 [P] R: `snapshot_diff.py`（SC-007）
+- [x] T004 [P] R: `runtime_dependency_check.py`（SC-006）：检查中心 AIOps/MCP 的镜像、ConfigMap、Secret、环境变量中没有边缘 kubeconfig 和边缘 API Server 地址
+- [x] T005 R: `contract_xnet.py`（A15）：`/proxy` 可用、无证书被拒、Node 名与 UUID 互转、`cluster` 标签与 Node 名一致
+- [x] T006 执行 T002–T005，记录基线
 
 ## Phase 1: 链路打通（US4 的基础，mc-p0）
 
@@ -64,7 +64,7 @@
 - [ ] T050 [P] R: 路由测试——三种范围的识别；范围不明确时强制 `clarify`；追问沿用集群；未知集群（A7、A8a–c）
 - [ ] T051 [P] R: 工具包装测试——单集群范围强制注入并覆盖模型的值；多集群范围校验；单集群部署不处理（P2-3）
 - [ ] T052 [P] R: 身份测试——不同集群的同名 Pod 不合并（FR-008）
-- [ ] T053 R: `e2e_ask.sh`：从运行报告中断言范围和每次工具调用的集群
+- [ ] T053 R: `e2e_ask.py`：从运行报告中断言范围和每次工具调用的集群
 
 实现：
 
