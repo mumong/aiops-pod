@@ -1234,6 +1234,8 @@ def test_call_with_tools_creates_fresh_chat_model_per_invocation():
         patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model),
         patch("langchain.agents.create_agent", side_effect=_capture_agent),
         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+        # Fake agent emits nothing; keep the blank-start retry out of this test's counts.
+        patch.object(AICall, "_blank_start", return_value=False),
     ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         ai.call("sys", "q1", tools=[tool])
@@ -1594,6 +1596,8 @@ def test_call_with_tools_propagates_langfuse_session_id(monkeypatch):
         patch("app.core.aicall.client.ChatOpenAI", side_effect=_new_model),
         patch("langchain.agents.create_agent", side_effect=_create_agent),
         patch("concurrent.futures.ThreadPoolExecutor", return_value=_Executor()),
+        # Fake agent emits nothing; keep the blank-start retry out of this test's counts.
+        patch.object(AICall, "_blank_start", return_value=False),
     ):
         ai = AICall(model="deepseek/deepseek-chat", api_key="sk-test")
         ai.call("sys", "q", tools=[tool], run_id="run-session-2", node_id="layer", max_steps=3)

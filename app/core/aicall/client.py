@@ -1438,42 +1438,63 @@ class AICall:
         )
         input_messages = self._build_agent_input_messages(question)
         config = self._build_agent_run_config(session_id, node_id, max_steps)
-        run = _AgentRun(
-            node_id=node_id,
-            run_id=run_id,
-            stream_queue=stream_queue,
-            cancel_event=cancel_event,
-            stop_checker=stop_checker,
-            expect_json=expect_json,
-            json_validator=json_validator,
-            json_acceptance_guard=json_acceptance_guard,
-            response_schema=response_schema,
-            structured_output_tool_names=structured_output_tool_names,
-            static_context_components=static_context_components,
-            observation_processor=observation_processor,
-            max_compactions=self._max_runtime_compactions_per_call(),
-            thinking_events=thinking_events,
-            tool_result_sequence=tool_result_sequence,
-        )
-        self._execute_agent_run(
-            run,
-            create_agent=lambda: self._create_call_agent(
-                system_prompt=system_prompt,
-                question=question,
-                tools=tools,
-                session_id=session_id,
+
+        def make_and_execute() -> "_AgentRun":
+            run = _AgentRun(
                 node_id=node_id,
                 run_id=run_id,
                 stream_queue=stream_queue,
+                cancel_event=cancel_event,
+                stop_checker=stop_checker,
+                expect_json=expect_json,
+                json_validator=json_validator,
+                json_acceptance_guard=json_acceptance_guard,
+                response_schema=response_schema,
+                structured_output_tool_names=structured_output_tool_names,
+                static_context_components=static_context_components,
+                observation_processor=observation_processor,
+                max_compactions=self._max_runtime_compactions_per_call(),
                 thinking_events=thinking_events,
-                response_format=response_format,
-                on_waiting=lambda text: setattr(run, "waiting_on", text),
-            ),
-            input_messages=input_messages,
-            config=config,
-            max_steps=max_steps,
-            session_id=session_id,
-        )
+                tool_result_sequence=tool_result_sequence,
+            )
+            self._execute_agent_run(
+                run,
+                create_agent=lambda: self._create_call_agent(
+                    system_prompt=system_prompt,
+                    question=question,
+                    tools=tools,
+                    session_id=session_id,
+                    node_id=node_id,
+                    run_id=run_id,
+                    stream_queue=stream_queue,
+                    thinking_events=thinking_events,
+                    response_format=response_format,
+                    on_waiting=lambda text: setattr(run, "waiting_on", text),
+                ),
+                input_messages=input_messages,
+                config=config,
+                max_steps=max_steps,
+                session_id=session_id,
+            )
+            return run
+
+        run = make_and_execute()
+        if self._blank_start(run):
+            # Run fa69b5a268454d9f: the first round was only whitespace - no tool call,
+            # no analysis, no structured result - so there was nothing to finalize from.
+            # One fresh attempt; a second blank run goes through the normal path.
+            self._push(
+                stream_queue,
+                node_id,
+                thinking_events,
+                type="runtime_status",
+                status="running",
+                content="模型首轮没有给出任何内容，重新开始一次",
+            )
+            logger.warning(
+                "[AICall] blank first round, retrying once | node=%s run=%s", node_id, run_id
+            )
+            run = make_and_execute()
         self._finalize_structured_delivery(run, system_prompt=system_prompt, question=question)
         return self._finish_agent_call(
             run,
@@ -1837,6 +1858,20 @@ class AICall:
             )
             if not run.final_content:
                 run.final_content = f"Agent 执行异常: {public_error_text(e)}"
+
+    @staticmethod
+    def _blank_start(run: "_AgentRun") -> bool:
+        """No structured result, no tool call and no analysis text (thinking excluded)."""
+        cancel = getattr(run, "cancel_event", None)
+        if cancel is not None and cancel.is_set():
+            return False
+        if (
+            run.structured_response is not None
+            or run.tool_call_count
+            or getattr(run, "tool_observation_contents", None)
+        ):
+            return False
+        return all(not _strip_think(text or "").strip() for _, text in run.emitted_ai_messages)
 
     def _finalize_structured_delivery(
         self, run: "_AgentRun", *, system_prompt: str, question: str
