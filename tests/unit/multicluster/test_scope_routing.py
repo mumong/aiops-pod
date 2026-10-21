@@ -414,3 +414,17 @@ def test_answer_to_the_scope_question_is_grounded(multi):
     ]
     out = route_q("edge-89", {**BASE, "cluster_mode": "single", "clusters": ["edge-89"]}, history)
     assert out["request_contract"]["clusters"] == [EDGE89]
+
+
+def test_contract_carries_display_labels_set_by_code(multi):
+    out = route(
+        {
+            **BASE,
+            "cluster_mode": "multiple",
+            "clusters": ["edge-88", EDGE89],
+            "cluster_labels": ["made-up"],
+        }
+    )
+    assert out["request_contract"]["cluster_labels"] == ["edge-88", "edge-89"]
+    out = route({**BASE, "cluster_mode": "center", "clusters": []})
+    assert out["request_contract"]["cluster_labels"] == ["center"]

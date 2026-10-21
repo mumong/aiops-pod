@@ -153,6 +153,16 @@ def resolve_contract(
     return out, None
 
 
+def labels(names: Iterable[str]) -> List[str]:
+    """Short display names (first alias) for canonical cluster names."""
+    cfg = config()
+    out = []
+    for name in names:
+        cluster = cfg.resolve(name)
+        out.append(cluster.aliases[0] if cluster and cluster.aliases else name)
+    return out
+
+
 def run_clusters(state: Dict[str, Any]) -> List[str]:
     """Clusters a node may touch: its lane's group cluster, else the routed scope."""
     group = state.get("group") or {}

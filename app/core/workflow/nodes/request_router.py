@@ -58,6 +58,7 @@ class MultiClusterRequestContract(RequestContract):
         default_factory=list,
         description='用户说的集群名或别名（原样）；全部集群为 ["*"]；追问沿用上文集群',
     )
+    cluster_labels: list[str] = Field(default_factory=list, description="由系统填写，保持为空")
 
 
 def _contract_model():
@@ -308,7 +309,11 @@ class RequestRouterNode(WorkflowNode):
             resolved, question_back = multicluster.resolve_contract(
                 contract.model_dump(), evidence=json.dumps(context, ensure_ascii=False)
             )
-            update = {"clusters": resolved["clusters"], "cluster_mode": resolved["cluster_mode"]}
+            update = {
+                "clusters": resolved["clusters"],
+                "cluster_mode": resolved["cluster_mode"],
+                "cluster_labels": multicluster.labels(resolved["clusters"]),
+            }
             if question_back:
                 update.update(route="clarify", clarification=question_back)
             contract = contract.model_copy(update=update)
