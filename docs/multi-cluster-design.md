@@ -15,7 +15,7 @@
 
 | 边界 | 含义 |
 |---|---|
-| **不修改 xnet-cloud** | 不改代码、不改它的配置和数据（包括虚拟 Node 的注解），只调用它已有的能力 |
+| **不修改 xnet-cloud，也不要求它做任何适配** | 不改代码、不改它的配置和数据（包括虚拟 Node 的注解），**不在 xnet 命名空间创建任何对象，不通过 Vessel 下发我们的组件**。新增的一切都属于 AIOps 自己的服务，只以只读或调用方的身份使用 xnet 已有的能力（隧道 `/proxy`、客户端证书、虚拟 Node 列表） |
 | **不修改可观测组件的采集逻辑** | 不改 vmagent/vlagent/Filebeat 等的采集配置；某个集群没有的数据，就如实返回"未提供"，不补造 |
 | **单集群行为不变** | 不配置多集群时，现有部署（10.2.0.48）的行为、提示词和接口完全不变，现有验收全部通过 |
 | **安全由我们自己保证** | 不依赖 xnet 修复它自身的问题（JWT 密钥硬编码、隧道可以访问任意地址、Agent 拥有集群全部权限） |
@@ -182,7 +182,7 @@ kubectl <argv>
 | `GET /v1/jobs/{id}` | 查询任务状态和输出 | —— |
 
 - **认证**：每个请求带 `X-AIOps-Timestamp` 和 `X-AIOps-Signature`（对时间戳和请求体做 HMAC-SHA256，共享密钥来自双方各自的 Secret）。时间偏差超过 60 秒、或签名重复，一律拒绝。这样只拿到 xnet 客户端证书的人**无法调用 runner**。
-- **规则**：runner 加载和中心同一份命令规则（随 chart 下发，`/healthz` 返回规则版本）。黑名单命令一律拒绝；需人工审批的命令必须带有效的 `approval_id`；`mode=read` 只允许只读子命令（get、describe、logs、events、top、api-resources、explain）。
+- **规则**：runner 加载和中心同一份命令规则（随部署清单中的 ConfigMap 下发，`/healthz` 返回规则版本）。黑名单命令一律拒绝；需人工审批的命令必须带有效的 `approval_id`；`mode=read` 只允许只读子命令（get、describe、logs、events、top、api-resources、explain）。
 - **权限**：两个 SA。`reader` 为集群范围的 get/list/watch 加 pods/log；`writer` 只有修复需要的最小权限（pods/exec、删除 Pod、patch/update Deployment 等工作负载、scale）。
 - **输出截断**：单个响应最多 256KB，`truncated=true` 时注明截断。
 - **任务**：按 `idempotency_key` 去重，重复提交返回同一个 `job_id`；任务记录在内存中保留 24 小时，同时写入 emptyDir，runner 容器重启后不丢失（Pod 重建时会丢失，此时中心标记为"结果未知"）。
@@ -190,7 +190,10 @@ kubectl <argv>
 
 ### 4.5 xnet 隧道客户端（MCP 与 AIOps）
 
-- 证书：读取 `xnet/xnet-client-cert` 和 `xnet/xnet-ca-cert`。通过我们自己的 Role（创建在 xnet 命名空间，`resourceNames` 只限这两个 Secret，`verbs: [get, watch]`）授权读取，**每次 Secret 变化后重新加载**，不在启动时缓存一次就不变。这只是新增一个授权对象，不修改 xnet 的任何东西。如果不允许在 xnet 命名空间创建 Role，备选方案是部署时把证书复制到我们的命名空间，代价是轮换后需要重新复制。
+- 证书：**部署时复制，运行时不访问 xnet 命名空间。** 我们的部署命令（`make sync-xnet-cert`，由有权限的运维人员执行）把 `xnet/xnet-client-cert` 和 `xnet/xnet-ca-cert` 的内容复制成 `mcp/aiops-xnet-client-cert`（AIOps 命名空间同样复制一份），以 Secret 卷挂载。MCP 和 AIOps 的 SA **不需要读取 xnet 命名空间的权限**，也不在 xnet 命名空间创建 Role。
+  - 实测证书有效期为 2026-10-21 至 2031-10-20，复制方案的维护成本很低。
+  - 隧道客户端启动时和每次握手失败时检查证书：已过期或握手被拒，就返回 `tunnel_auth_failed`，提示"xnet 证书失效，请重新执行 make sync-xnet-cert"，不静默重试。
+  - 注意：现有 MCP 的 ClusterRole 含 `*/*/*`（§9），技术上能直接读取 xnet 的 Secret。设计**不依赖**这个过大的权限，权限收缩后仍然可用。
 - 地址：`https://xnet-management.xnet.svc:9090/proxy?clientid=<UUID>&address=<URL 编码后的 runner 地址>`。参数尽量放在请求体里，避免嵌套查询字符串。
 - 错误分类：TLS 握手失败为 `tunnel_auth_failed`；返回 "side client is not online" 为 `cluster_unreachable`；超时为 `timeout`；runner 返回 401/403 为 `runner_auth_failed` 或 `policy_denied`。
 
@@ -198,7 +201,7 @@ kubectl <argv>
 
 ### 5.1 MCP 工具参数
 
-所有可观测工具、k8s-core、`bash_tool` 增加**可选**参数 `cluster`。不传时为默认集群：单集群部署就是 `local`，所以现有调用不受影响。
+所有可观测工具、k8s-core、`bash_tool` 增加**可选**参数 `cluster`。不传时：单集群部署为 `local`，所以现有调用不受影响；多集群部署下由 AIOps 按路由确定的范围注入（§5.2），范围本身必须由用户说明（§6.1）。
 
 ### 5.2 AIOps 注入规则（工程保证，不依赖模型）
 
@@ -231,12 +234,25 @@ kubectl <argv>
 
 ### 6.1 路由
 
-`request_router` 的范围增加 `clusters: List[str]`：
+`request_router` 的范围增加 `clusters: List[str]` 和 `cluster_mode: single | multiple | center | unspecified`。
 
-- 问题里提到的集群名或别名，按注册表解析成规范名称；解析不到就如实回复"没有找到集群 xx"，并列出可用集群。
-- 没有提到集群：默认集群（单集群部署为 `local`，三集群环境可以配置为中心集群）。
-- "所有集群""每个集群"：展开为注册表中所有在线的集群。
-- 路由卡片上显示集群。
+**单集群部署**（注册表里只有 `local`）：不识别集群，行为与现在完全相同。
+
+**多集群部署：用户必须说清楚操作哪个范围。** 有三种合法的意图：
+
+| 意图 | 示例 | 结果 |
+|---|---|---|
+| 一个集群 | "edge-88 上有哪些 Pod 异常" | `single`，`clusters=[vc-942nk…]` |
+| 多个集群 | "edge-88 和 edge-89""所有边缘集群""所有集群" | `multiple`，展开为对应集群；"所有"只展开在线集群，离线的在回答里说明 |
+| 中心集群 | "中心集群的 vmagent 正常吗" | `center`，`clusters=[中心集群]` |
+
+识别和兜底：
+
+1. 路由模型从问题和当前会话的上文中理解意图。上文已经明确过集群时，追问（"那它的日志呢""再看看另一个"）沿用或切换到对应集群，不需要用户重复。
+2. 模型给出的集群名或别名，由工程代码按注册表解析成规范名称。**模型不能自造集群名**；解析不到的，不调用任何工具，回复"没有找到集群 xx"，并列出可用集群。
+3. **没有不可靠的默认值。** 多集群部署下，如果问题和上文都没有说明范围，路由走现有的 `clarify` 分支（`request_router.py` 已经支持），反问："要查看哪个范围：中心集群、某个边缘集群（edge-88、edge-89），还是全部集群？" 这一条由代码强制执行：模型输出 `unspecified` 或者 `clusters` 为空时，即使选择了其他路由，也一律改为澄清。
+4. 用户回答后，下一轮按正常流程执行。
+5. 路由卡片上显示本次的集群范围。
 
 ### 6.2 快速查询
 
@@ -289,14 +305,23 @@ rca → conclusion：按集群分段
 ### 7.1 集群
 
 ```
-接入：xnet join（xnet 现有流程）
-  → 下发 aiops-edge-runner：优先用 xnet Vessel（与可观测组件的下发方式相同），也可以在边缘直接 helm install
+接入：xnet join（xnet 现有流程，与我们无关）
+  → 边缘运维人员在边缘集群上执行我们的部署命令：make edge-deploy（见下）
   → 在 MCP 配置中声明该集群的访问方式、后端档案和别名
   → 注册表发现 Node，探测 runner 的 /healthz 和能力 → 可用
 在线 / 离线：Node Ready + runner 健康检查
-升级：升级 runner chart；中心检查 runner 接口版本和规则版本是否兼容，不兼容就把该集群标为只读
+升级：重新执行 make edge-deploy；中心检查 runner 接口版本和规则版本是否兼容，不兼容就把该集群标为只读
 下线：xnet 删除 Node → 注册表移除；卸载 runner
 ```
+
+**runner 的部署方式**：和现有的 AIOps、MCP 一样，用我们自己的部署清单（YAML）加 Makefile，**不需要 chart 仓库，也不经过 xnet**。
+
+- 部署命令在边缘集群本地执行（使用边缘的 kubeconfig），不需要中心能访问边缘，所以符合"中心连不进边缘"的场景。
+- 边缘只需要能从镜像仓库拉取 runner 镜像。实测 .88 和 .89 都能访问 `10.2.0.86:8443`，并且已经配置了 `xnet.registry.io:8443`。
+- 签名密钥：边缘部署时创建 `aiops/aiops-edge-runner-key`，中心保存同一份密钥（`mcp/aiops-edge-runner-key`）。
+- 命令规则随部署清单下发（ConfigMap），与中心的规则版本一致。
+
+之前考虑过用 xnet Vessel 下发，但 Vessel 的 helm 类型要求提供 chart 仓库地址，而且相当于让 xnet 参与我们的部署，已放弃。
 
 ### 7.2 一次运行
 
@@ -310,7 +335,7 @@ rca → conclusion：按集群分段
 
 ```yaml
 clusters:
-  default: local                 # 不提到集群时使用
+  default: local                 # 单集群部署：不提到集群时使用 local
   discovery: static              # static | xnet_nodes
   items:
     - name: local
@@ -322,7 +347,8 @@ clusters:
 
 ```yaml
 clusters:
-  default: vc-xnet-management
+  default: null                  # 多集群部署不设默认值，没说明范围就澄清（§6.1）
+  center: vc-xnet-management     # "中心集群"指的是哪一个
   discovery: xnet_nodes
   items:
     - name: vc-xnet-management
@@ -340,8 +366,8 @@ clusters:
   access:
     xnet:
       proxy_url: https://xnet-management.xnet.svc:9090/proxy
-      client_cert_secret: xnet/xnet-client-cert
-      ca_secret: xnet/xnet-ca-cert
+      client_cert_secret: mcp/aiops-xnet-client-cert   # 由 make sync-xnet-cert 从 xnet 复制
+      ca_secret: mcp/aiops-xnet-ca-cert
       runner_url: http://aiops-edge-runner.aiops.svc:8090
       runner_key_secret: mcp/aiops-edge-runner-key
       per_cluster_concurrency: 4
@@ -367,7 +393,7 @@ observability_profiles:
 | 持有 xnet 客户端证书的人可以访问边缘任意 Service | runner 要求 HMAC 签名，只有证书没有签名密钥就无法调用 |
 | 中心被绕过，直接调用 runner | runner 本地执行同一套规则；需人工审批的命令必须带有效的审批 ID |
 | runner 被滥用 | reader / writer 两个最小权限 SA；只读接口不能使用 writer |
-| 证书泄露范围 | 只有 MCP 和 AIOps 的 SA 能读取 xnet 的两个 Secret，用 `resourceNames` 限定 |
+| 证书泄露范围 | 证书复制到我们的命名空间，只挂载给 MCP 和 AIOps；我们的 SA 不需要读取 xnet 命名空间 |
 | 跨集群混用数据 | 工具层强制注入集群，VictoriaMetrics 用 `extra_label` 限定 |
 | xnet 自身的问题 | **我们无法解决**：xnet-agent 拥有边缘集群的全部权限，JWT 密钥硬编码。我们只能保证"经过我们系统的操作是受控的" |
 
@@ -393,13 +419,13 @@ observability_profiles:
 
 ### 10.2 新组件 aiops-edge-runner
 
-放在 mcpstander 仓库中（复用 `_command_runner` 和规则代码），以单独的镜像和 Helm chart 发布。
+放在 mcpstander 仓库中（复用 `_command_runner` 和规则代码），以单独的镜像和部署清单（YAML + Makefile）发布。
 
 ### 10.3 robusta（少量改动）
 
 | 模块 | 改动 |
 |---|---|
-| `workflow/nodes/request_router.py` 与路由提示词 | 范围增加 `clusters` |
+| `workflow/nodes/request_router.py` 与路由提示词 | 范围增加 `clusters`、`cluster_mode`；集群名由代码按注册表解析；多集群部署下范围不明确时强制走 `clarify`（§6.1） |
 | `aicall/tools.py:_wrap_mcp_tool_for_transport` | 按 §5.2 注入或校验 `cluster` |
 | `workflow/pod_identity.py`、分组与事实身份 | 身份中加入集群 |
 | `remediation/plans.py`、`pod_executor.py`、`recovery.py`、`audit.py` | 目标带集群；远端集群使用 runner 异步任务；审计带集群 |
@@ -413,7 +439,7 @@ observability_profiles:
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| P0 打通链路 | 隧道客户端、垫片、runner 只读接口；在 .88 手动部署 runner | 中心执行 `AIOPS_CLUSTER=vc-942nk… kubectl get pods -A` 能返回边缘结果；不带签名调用 runner 被拒 |
+| P0 打通链路 | `make sync-xnet-cert`、隧道客户端、垫片、runner 只读接口、`make edge-deploy`；在 .88 部署 runner | 中心执行 `AIOPS_CLUSTER=vc-942nk… kubectl get pods -A` 能返回边缘结果；不带签名调用 runner 被拒 |
 | P1 可观测适配 | 后端档案、VictoriaMetrics/VictoriaLogs 采集器、集群注册表、`cluster` 参数、`list_clusters` | 见 §12 的 A1–A5；**10.2.0.48 上现有验收全部通过** |
 | P2 AIOps 单集群范围 | 路由识别集群、工具层注入、身份带集群 | 见 A6–A8 |
 | P3 远端执行与修复 | runner 的 exec 与异步任务、修复执行器路由、审批卡片显示集群 | 见 A9–A12 |
@@ -440,6 +466,9 @@ observability_profiles:
 | A6 | 两个边缘部署同名 Pod，只问 edge-88 | 结果中没有 edge-89 的对象 |
 | A7 | 问一个不存在的集群 | 回复找不到，并列出可用集群，不调用任何工具 |
 | A8 | 问"我有哪些集群" | 列出三个集群、别名和在线状态 |
+| A8a | 多集群部署下问"有哪些 Pod 异常"（没说集群） | 反问要查看中心集群、某个边缘集群还是全部集群；不调用任何工具 |
+| A8b | 接着回答"edge-89"，再追问"那它的事件呢" | 第一轮只查 edge-89；追问沿用 edge-89，不再反问 |
+| A8c | 分别问"中心集群……""edge-88 和 edge-89……""所有集群……" | 范围分别为 `center`、`multiple`（两个）、`multiple`（全部在线集群），路由卡片显示一致 |
 
 ### 远端执行与修复
 
@@ -471,9 +500,12 @@ observability_profiles:
 | 集群名过长、不便输入 | 使用我们自己配置的别名 |
 | 中心资源（12 核 / 15G）同时承载可观测全套组件和 AIOps | 部署前确认余量；必要时把故障 case 放在边缘 |
 
-## 14. 开工前需要确认的事项
+## 14. 已确认的决策（2026-10-21）
 
-1. 是否允许在 xnet 命名空间创建只读取两个证书 Secret 的 Role（§4.5）。不允许的话，就采用复制证书的方案。
-2. 10.2.5.x 网段能否访问 LLM 网关。
-3. runner chart 通过 xnet Vessel 下发时使用的 chart 仓库地址（边缘需要能访问）。
-4. 三集群环境里，不提到集群时，默认是中心集群，还是要求用户必须指明。
+| 事项 | 决定 |
+|---|---|
+| xnet 的参与程度 | 所有新增内容都属于 AIOps 自己的服务，不要求 xnet 做任何适配；不在 xnet 命名空间创建对象，不使用 Vessel |
+| 证书获取 | 部署时复制（§4.5），不需要 Role |
+| runner 部署 | 我们自己的部署清单加 Makefile，在边缘本地执行，不需要 chart 仓库（§7.1） |
+| LLM 网关 | 10.2.5.x 可以访问 |
+| 没有说明集群时 | 多集群部署下必须澄清：中心集群、一个集群，还是多个集群（§6.1） |
