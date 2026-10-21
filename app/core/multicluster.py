@@ -145,10 +145,10 @@ def resolve_contract(
                 f"没有找到集群：{'、'.join(unknown)}。可用集群：{available}。请重新指定。",
             )
     out = dict(contract, clusters=resolved, cluster_mode="single" if len(resolved) == 1 else mode)
-    if len(resolved) > 1 and contract.get("route") in ("full_diagnosis", "remediation"):
+    if len(resolved) > 1 and contract.get("route") == "remediation":
         return out, (
-            f"深度诊断和修复目前每次只支持一个集群（本次涉及 {len(resolved)} 个）。"
-            "请选择其中一个集群，或者先用快速查询分别查看各集群的状态。"
+            f"修复每次只针对一个集群（本次涉及 {len(resolved)} 个）。"
+            "请先选择其中一个集群；也可以先做跨集群诊断，再分别发起修复。"
         )
     return out, None
 
@@ -165,9 +165,11 @@ def labels(names: Iterable[str]) -> List[str]:
 
 def run_clusters(state: Dict[str, Any]) -> List[str]:
     """Clusters a node may touch: its lane's group cluster, else the routed scope."""
-    group = state.get("group") or {}
-    if isinstance(group, dict) and group.get("cluster"):
-        return [group["cluster"]]
+    # Parallel lanes carry their group as ``diagnosis_target`` (stage_material.branch_state).
+    for key in ("group", "diagnosis_target"):
+        group = state.get(key) or {}
+        if isinstance(group, dict) and group.get("cluster"):
+            return [group["cluster"]]
     contract = state.get("request_contract") or {}
     return list(contract.get("clusters") or [])
 

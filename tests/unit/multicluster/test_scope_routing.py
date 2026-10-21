@@ -140,11 +140,11 @@ def test_unknown_cluster_lists_available(multi):
     assert "edge-99" in result["conclusion"] and "edge-88" in result["conclusion"]
 
 
-def test_deep_diagnosis_over_several_clusters_is_not_yet_supported(multi):
+def test_repair_over_several_clusters_is_not_supported(multi):
     result = route(
         {
-            "route": "full_diagnosis",
-            "task": "diagnose",
+            "route": "remediation",
+            "task": "repair",
             "scope": "cluster",
             "cluster_mode": "multiple",
             "clusters": ["edge-88", "edge-89"],

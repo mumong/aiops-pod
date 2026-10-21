@@ -109,6 +109,19 @@ class DiagnosisStageNode(QueryCollectNode):
         return self.stage_name
 
     def execute(self, state):
+        from app.core import multicluster
+
+        if (
+            self.node_id == "layer"
+            and multicluster.multi()
+            and len(multicluster.run_clusters(state)) > 1
+        ):
+            # One deep diagnosis over several clusters: locate each cluster on its own.
+            from app.core.workflow.multicluster_location import per_cluster_location
+
+            output = per_cluster_location(self, state)
+            self._archive_node_output(output)
+            return output
         _configure_query_runtime(self)
         if getattr(self, "ai_call", None) is not None:
             # History is already in material; do not insert it twice.

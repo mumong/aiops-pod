@@ -164,7 +164,8 @@ def conclude_cases(node, state):
         ) or scope_label(case.get("target") or {})
         sections.extend(
             [
-                f"## {group_display_name(case['group_id'])} · {label}",
+                f"## {cluster + ' · ' if (cluster := (case.get('target') or {}).get('cluster_label')) else ''}"
+                f"{group_display_name(case['group_id'])} · {label}",
                 case.get("report") or "本组未交付报告。",
             ]
         )
