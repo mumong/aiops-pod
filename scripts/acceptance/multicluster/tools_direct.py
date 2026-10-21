@@ -408,11 +408,172 @@ def phase_p1() -> None:
         )
 
 
+def aiops_py(code: str, timeout: int = 300) -> dict:
+    """Run Python inside the center's AIOps Pod (it has the full aiops_edge client and config)."""
+    import subprocess
+
+    out = subprocess.run(
+        [
+            "kubectl",
+            "--kubeconfig",
+            mc.kubeconfig("center"),
+            "-n",
+            "aiops",
+            "exec",
+            "-i",
+            "deploy/aiops-copilot",
+            "-c",
+            "aiops-copilot",
+            "--",
+            "python",
+            "-",
+        ],
+        input=code,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    try:
+        return json.loads(out.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return {"rc": out.returncode, "stdout": out.stdout[-300:], "stderr": out.stderr[-400:]}
+
+
+P3_GATES = r"""
+import json, uuid
+from aiops_edge.clusters import load_config
+from aiops_edge.tunnel import TunnelClient, EdgeError
+cfg = load_config(); edge = cfg.resolve("edge-88"); t = TunnelClient.from_access(cfg.xnet)
+POD, NS = "__POD__", "aiops-case-09"
+def call(path, payload):
+    try:
+        return {"ok": True, **t.request(edge, path, payload)}
+    except EdgeError as e:
+        return {"ok": False, "code": e.code, "rule": e.detail.get("rule")}
+out = {}
+out["A10b"] = call("/v1/kubectl", {"argv": ["kubectl", "exec", POD, "-n", NS, "--", "reboot"], "mode": "exec"})
+out["touch"] = call("/v1/kubectl", {"argv": ["kubectl", "exec", POD, "-n", NS, "--", "touch", "/dev/shm/aiops-mc-a10c"], "mode": "exec"})
+out["A10c-file-before"] = call("/v1/kubectl", {"argv": ["kubectl", "exec", POD, "-n", NS, "--", "ls", "/dev/shm"], "mode": "exec"})
+rm = ["kubectl", "exec", POD, "-n", NS, "--", "rm", "-f", "/dev/shm/aiops-mc-a10c"]
+out["A10c-no-approval"] = call("/v1/kubectl", {"argv": rm, "mode": "exec"})
+out["A10c-with-approval"] = call("/v1/kubectl", {"argv": rm, "mode": "exec", "approval_id": "acceptance-a10c"})
+out["A10c-file-after"] = call("/v1/kubectl", {"argv": ["kubectl", "exec", POD, "-n", NS, "--", "ls", "/dev/shm"], "mode": "exec"})
+key = "acceptance-a11c-" + uuid.uuid4().hex[:8]
+job = {"idempotency_key": key, "argv": ["kubectl", "annotate", "pod", POD, "-n", NS, "aiops-mc-a11c=" + key[-8:], "--overwrite"]}
+out["A11c-1"] = call("/v1/jobs", job)
+out["A11c-2"] = call("/v1/jobs", job)
+out["A11c-key"] = key
+print(json.dumps(out, ensure_ascii=False))
+"""
+
+P3_LOST = r"""
+import json, uuid
+from aiops_edge.clusters import load_config
+from aiops_edge.jobs_client import RemoteJobs, RemoteResultUnknown
+from aiops_edge.tunnel import TunnelClient
+cfg = load_config(); edge = cfg.resolve("edge-88")
+jobs = RemoteJobs(TunnelClient.from_access(cfg.xnet), poll_seconds=2)
+try:
+    jobs.run(edge, ["kubectl", "exec", "__POD__", "-n", "aiops-case-09", "--", "sleep", "45"],
+             key="acceptance-a12d-" + uuid.uuid4().hex[:8], timeout_s=60, deadline_s=240)
+    print(json.dumps({"result": "finished"}))
+except RemoteResultUnknown as e:
+    print(json.dumps({"result": "unknown", "message": str(e)}, ensure_ascii=False))
+except Exception as e:
+    print(json.dumps({"result": "error", "message": str(e)}, ensure_ascii=False))
+"""
+
+
+def phase_p3() -> None:
+    import subprocess
+    import threading
+    import time
+
+    driver = next(
+        p["metadata"]["name"]
+        for p in mc.kubectl_json("edge-88", "get", "pods", "-n", "aiops-case-09")["items"]
+        if p["metadata"]["name"].startswith("traffic-driver")
+    )
+    r = aiops_py(P3_GATES.replace("__POD__", driver))
+    if "A10b" not in r:
+        mc.check("P3-tools-ran", False, str(r)[:400])
+        return
+    mc.check(
+        "A10b-runner-refuses-reboot",
+        r["A10b"].get("code") == "policy_denied" and r["A10b"].get("rule") == "denied_executables",
+        str(r["A10b"]),
+    )
+    mc.check(
+        "A10c-rm-needs-approval",
+        r["A10c-no-approval"].get("rule") == "approval_required",
+        str(r["A10c-no-approval"]),
+    )
+    mc.check(
+        "A10c-rm-with-approval-runs",
+        r["touch"].get("exit_code") == 0
+        and "aiops-mc-a10c" in r["A10c-file-before"].get("stdout", "")
+        and r["A10c-with-approval"].get("exit_code") == 0
+        and "aiops-mc-a10c" not in r["A10c-file-after"].get("stdout", ""),
+        f"touch={r['touch'].get('exit_code')} rm={r['A10c-with-approval'].get('exit_code')}",
+    )
+    same = r["A11c-1"].get("job_id") and r["A11c-1"].get("job_id") == r["A11c-2"].get("job_id")
+    time.sleep(5)
+    logs = subprocess.run(
+        [
+            "kubectl",
+            "--kubeconfig",
+            mc.kubeconfig("edge-88"),
+            "-n",
+            "aiops",
+            "logs",
+            "-l",
+            "app=aiops-edge-runner",
+            "--tail=-1",
+        ],
+        capture_output=True,
+        text=True,
+    ).stdout
+    # unique key: all runner Pods, no time window (Pods get replaced; node clocks skew)
+    executed = sum(
+        1 for line in logs.splitlines() if r["A11c-key"] in line and "exit_code" in line
+    )
+    mc.check(
+        "A11c-idempotent-job",
+        same and executed == 1,
+        f"job={r['A11c-1'].get('job_id')} executions={executed}",
+    )
+
+    # A12d + P3-1: delete the runner Pod while a job runs (our component only).
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.update(aiops_py(P3_LOST.replace("__POD__", driver), 400))
+    )
+    worker.start()
+    time.sleep(12)
+    kc = ["kubectl", "--kubeconfig", mc.kubeconfig("edge-88"), "-n", "aiops"]
+    subprocess.run(
+        [*kc, "delete", "pod", "-l", "app=aiops-edge-runner", "--wait=false"], capture_output=True
+    )
+    worker.join(420)
+    mc.check(
+        "A12d-lost-job-is-unknown",
+        result.get("result") == "unknown" and "不会自动重新提交" in result.get("message", ""),
+        str(result)[:200],
+    )
+    subprocess.run(
+        [*kc, "rollout", "status", "deploy/aiops-edge-runner", "--timeout=180s"],
+        capture_output=True,
+    )
+    rc, out, err = pod_sh(f"AIOPS_CLUSTER={EDGE88} kubectl get pods -n aiops-case-09")
+    mc.check("P3-1-runner-recovers", rc == 0 and "traffic-driver" in out, err.strip()[:120])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phase", choices=["p0", "p1"], required=True)
+    parser.add_argument("--phase", choices=["p0", "p1", "p3"], required=True)
     args = parser.parse_args()
-    {"p0": phase_p0, "p1": phase_p1}[args.phase]()
+    {"p0": phase_p0, "p1": phase_p1, "p3": phase_p3}[args.phase]()
     mc.finish()
 
 
