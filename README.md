@@ -322,6 +322,7 @@ make delete deploy
 | [运行诊断](docs/run-diagnostics.md) | 每次运行的账本、工程异常分类、`/runs/{run_id}` 报告 |
 | [LLM 自身异常记录](docs/llm-model-anomalies.md) | 模型/推理服务自身问题的现象与外部佐证 |
 | [高危命令验收](docs/acceptance-blacklist.md) | 黑名单与需人工审批命令的标准验收步骤 |
+| [多集群设计](docs/multi-cluster-design.md) | 多集群与新旧可观测后端适配的设计稿：边界、架构、改动清单、阶段与验收（未实现） |
 | [修复三个 Sprint](docs/remediation-sprint-design-2026-10.md) | 修复链路需求、设计与验收记录 |
 | [可观测性采集](docs/observability.md) | MCP 工具、PromQL 示例、日志与链路、结果含义 |
 | [A2A](docs/a2a.md) | 标准协议、客户端、鉴权与真实 Agent-to-Agent 测试 |
