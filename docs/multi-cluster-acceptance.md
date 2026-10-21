@@ -1,6 +1,6 @@
 # 多集群验收方案
 
-状态：开发前制定（2026-10-21）。配套设计见 [多集群设计](multi-cluster-design.md)，用例编号与设计 §12 一致，并在此基础上补全。
+状态：开发前制定（2026-10-21）。配套设计见 [多集群设计](multi-cluster-design.md)，SDD 产物（spec、plan、tasks）见 [specs/008-multi-cluster](../specs/008-multi-cluster/spec.md)，用例编号与设计 §12 一致，并在此基础上补全。
 
 每个阶段**先写验收脚本、再开发功能**；脚本跑通、用例全部通过，才进入下一阶段。
 
@@ -12,7 +12,7 @@
 |---|---|---|
 | AIOps、MCP、前端、边缘 runner 的全部代码 | **本机仓库**：`robusta/`、`mcpstander/`、`frountind/` | 提交后推送到 GitHub 和 GitLab 的特性分支 |
 | 镜像 | 本机构建，推送到 `10.2.0.86:8443` | —— |
-| 测试集群上的变化 | 只有部署动作：中心的 `aiops`、`mcp` 命名空间，边缘的 `aiops` 命名空间，测试用的故障 case，以及测试时临时加的防火墙规则 | 都可以撤销，见 §6 |
+| 测试集群上的变化 | 只有部署动作：中心的 `aiops`、`mcp` 命名空间，边缘的 `aiops` 命名空间，以及测试用的故障 case | 都可以撤销，见 §6；**不加防火墙** |
 | 测试机上的 `~/huhu/scp` 副本 | **不修改** | 只是代码副本；需要同步时，在那里 `git pull` 对应的特性分支 |
 | xnet-cloud、可观测组件（`xnet`、`monitor` 命名空间） | **不修改** | 用例 X1 每个阶段都检查 |
 
@@ -24,9 +24,9 @@
 
 | 仓库 | 特性分支（基于） | 新版本线 | 现有环境保持 |
 |---|---|---|---|
-| robusta | `feature/multi-cluster`（`qwen-before-architecture`） | 13.0.x | 12.0.69 |
-| mcpstander（含边缘 runner） | `feature/multi-cluster`（`feature/aiops-observability-mcp-migration`） | MCP 8.0.x；runner 1.0.x（新镜像 `aiops-edge-runner`） | 7.0.52 |
-| frountind | `feature/multi-cluster`（`main`） | 0.2.x | 0.1.71 |
+| robusta | `008-multi-cluster`（`qwen-before-architecture`） | 13.0.x | 12.0.69 |
+| mcpstander（含边缘 runner） | `008-multi-cluster`（`feature/aiops-observability-mcp-migration`） | MCP 8.0.x；runner 1.0.x（新镜像 `aiops-edge-runner`） | 7.0.52 |
+| frountind | `008-multi-cluster`（`main`） | 0.2.x | 0.1.71 |
 
 - 新版本线只部署到三集群环境。每次改动仍然是版本号加一再部署。
 - 每个阶段验收通过后打标签：`mc-p0`、`mc-p1` …… 三个仓库使用同名标签。
@@ -41,7 +41,8 @@
 | 10.2.5.88 | 边缘 | `vc-942nkkozc8o5fyb9q3bznb1ws` | `edge-88` |
 | 10.2.5.89 | 边缘 | `vc-dluw0jousipr6h5co2bwpyqk2` | `edge-89` |
 
-- 本机通过三个集群各自的 kubeconfig 执行部署，kubeconfig 放在本机 `~/.kube/aiops-mc/`，**不提交到仓库**。各 Make 目标都支持 `KUBECONFIG=...`。
+- **部署和测试**：通过 SSH 在各主机上执行；为了方便操作，本机也可以使用三个集群的 kubeconfig（`~/.kube/aiops-mc/`，不提交到仓库）。各 Make 目标都支持 `KUBECONFIG=...`。
+- **运行时**：只经过 xnet 隧道和边缘 runner。上面的 SSH 和 kubeconfig **只用于运维和测试**，不得进入镜像、ConfigMap 或 Secret；用例 X3（`runtime_dependency_check.sh`）每个阶段都检查。
 - 登录凭据由 Boss 提供，**不写进任何文件或文档**。
 - 端口：中心已占用的 NodePort 为 30081（xnet 的 `cloud-mgmt-frontend`）、30808、30909、31400、31500、31600、31700。我们的 AIOps 沿用 30800（A2A 为 30801），**前端改用 30082**（现有环境仍为 30081），通过部署变量设置，不修改现有环境。
 
@@ -63,7 +64,7 @@
 | L1 契约测试 | xnet 隧道、VictoriaMetrics/VictoriaLogs 接口、新旧后端常用指标是否都存在 | 否 | 全部通过 |
 | L2 工具级测试 | 脚本直接调用 MCP 工具和 runner，不经过模型 | 否 | **100% 通过**（行为确定） |
 | L3 端到端测试 | 网页或 `/ask` 接口提问，完整走工作流 | 是 | 范围类断言 100%；诊断质量见 §5 |
-| L4 网络与故障测试 | 隧道断开、防火墙拦截中心入站、runner 重启 | 部分 | 全部通过 |
+| L4 故障测试 | 边缘 runner 停止或重启、隧道断线（用测试用的假隧道模拟） | 部分 | 全部通过 |
 | L5 回归测试 | 现有环境 10.2.0.48 的全部验收 | 是 | 结果与改动前一致 |
 
 范围类断言（集群是否正确、有没有串集群、有没有调用不该调用的工具）由工程代码保证，所以要求 100%。诊断结论的正确率受模型影响，按 §5 单独评估。
@@ -79,7 +80,8 @@
 | `contract_backends.py` | VM 的 `extra_label` 生效；VLogs 能按集群查询事件；常用指标在新旧两套后端上都存在 | P1 |
 | `tools_direct.py` | L2：逐个调用 MCP 工具和 runner 接口并断言结果 | P0 起逐步扩充 |
 | `e2e_ask.sh` | L3：用 `/ask` 提问，从运行报告中取出路由范围、工具调用的集群参数和结论，并做断言 | P2 |
-| `net_fault.sh` | L4：在指定边缘临时加防火墙规则，到时自动撤销 | P3 |
+| `fault_inject.sh` | L4：把指定边缘的 runner 副本数设为 0 或删除 runner Pod，到时自动恢复。只操作我们自己的组件，不加防火墙 | P3 |
+| `runtime_dependency_check.sh` | X3：检查中心 AIOps 和 MCP 的镜像、ConfigMap、Secret、环境变量中没有边缘 kubeconfig 和边缘 API Server 地址 | P0 |
 | `snapshot_diff.sh` | X1：比较前后两次快照 | P0 |
 
 每个脚本输出 `PASS` 或 `FAIL`、用例编号，以及证据（运行 ID、任务 ID、请求耗时）。
@@ -94,6 +96,7 @@
 |---|---|---|
 | X1 | 阶段开始前和结束后各执行一次 `env_check.sh`，再执行 `snapshot_diff.sh` | `xnet`、`monitor` 命名空间的 Deployment、Service、ConfigMap、Secret、CRD 和 Helm release 没有变化（Pod 重启和事件除外） |
 | X2 | 现有单元测试 | 全部通过 |
+| X3 | `runtime_dependency_check.sh` | 中心的运行时配置中没有任何边缘 kubeconfig 或边缘 API Server（`<边缘IP>:6443`）地址；访问边缘的唯一配置是 xnet 隧道地址和 runner 地址 |
 
 ### 4.2 P0 打通链路
 
@@ -158,25 +161,27 @@
 | A11b | 自动执行模式下，方案中包含 `rm` | 仍然停在等待审批（与单集群一致） |
 | A11c | 同一个修复动作被重复提交（模拟中心重试） | runner 返回同一个 `job_id`，只执行一次 |
 
-### 4.6 P3 网络与故障（L4）
+### 4.6 P3 故障（L4，不加防火墙）
 
-所有防火墙规则都带注释标记，并由脚本在指定时间后自动撤销；**不拦截本机到测试机的 SSH（22 端口）**。
+只操作我们自己的组件（runner），由 `fault_inject.sh` 自动恢复。隧道断线类场景在集成测试中用假隧道模拟。
 
 | # | 操作 | 预期 |
 |---|---|---|
-| A12 | 修复执行中，在 .88 上阻断到中心 30909 端口的出站连接 30 秒 | 边缘任务继续执行完；隧道恢复后中心取回结果；没有重复执行 |
-| A12b | 阻断 5 分钟（超过任务查询时限） | 修复结果标记为"结果未知，需人工确认"，不重新提交 |
-| A12c | 审批等待期间阻断 .88 | 审批卡片显示"集群当前不可达"；批准后不执行，恢复后才执行 |
-| A14 | 在 .89 上拦截来自 10.2.5.85 的所有入站连接（保留 22 端口），然后执行 A9、A11、P2-1（换成 edge-89 的 case） | 全部正常（证明不依赖中心直连边缘） |
-| P3-1 | 删除 edge-88 的 runner Pod，让它重建 | 期间 k8s 类工具返回 `cluster_unreachable`；重建后自动恢复 |
+| A12 | 集成测试：修复任务执行中，假隧道断开 30 秒后恢复 | 中心恢复后继续按 `job_id` 查询，取回结果；没有重复提交 |
+| A12b | 集成测试：断开时间超过任务查询时限 | 修复结果标记为"结果未知，需人工确认"，不重新提交 |
+| A12c | 真实环境：审批等待期间把 edge-88 的 runner 副本数设为 0 | 审批卡片显示"集群当前不可达"；批准后不执行；runner 恢复后才执行 |
+| A12d | 真实环境：修复任务执行中删除 edge-88 的 runner Pod | 中心查不到任务结果，标记为"结果未知，需人工确认"，不重新提交 |
+| P3-1 | 真实环境：删除 edge-88 的 runner Pod，让它重建 | 期间 k8s 类工具返回 `cluster_unreachable`（15 秒内）；重建后自动恢复 |
 | P3-2 | 重启 xnet-management 的主副本 | 边缘重连期间快速失败；约 10 秒后恢复，只读调用重试成功（**这是对 xnet 的运维操作，执行前要经过 Boss 确认**） |
+
+"运行时不依赖中心直连边缘"不用防火墙验证，而是由 X3（运行时配置中没有任何访问边缘 API Server 的地址和凭据）和代码路径检查（远端集群的所有访问都经过隧道客户端）共同证明。
 
 ### 4.7 P4 一次诊断涉及多个集群
 
 | # | 网页输入 | 预期 |
 |---|---|---|
 | A13 | `检查 edge-88 和 edge-89 有什么问题` | 两个集群各自做 layer；异常组的 key 带集群；取证并发进行；报告按集群分段；case 全部识别出来 |
-| P4-1 | 执行 A13 期间阻断 .89 | edge-89 段标为"不可达，结果不完整"；edge-88 段正常完成 |
+| P4-1 | 执行 A13 期间把 edge-89 的 runner 副本数设为 0 | edge-89 段标为"不可达，结果不完整"；edge-88 段正常完成 |
 | P4-2 | `所有集群有什么问题` | 中心集群没有 case，结论为"正常"；已知噪声（控制面组件 down、虚拟 Node 采集失败）没有被报告为故障，或者被明确标为采集配置问题 |
 
 ## 5. 诊断质量的评估方式
@@ -191,7 +196,8 @@
 ## 6. 测试环境操作规范
 
 - 只在 `aiops`、`mcp` 命名空间和 case 命名空间里部署和删除资源；不碰 `xnet`、`monitor`、`kube-system`。
-- 每个阶段结束后清理 case（`make case-clean`）和临时 Pod，确认防火墙规则已全部撤销（`iptables -S | grep aiops-mc-test` 为空）。
+- 每个阶段结束后清理 case（`make case-clean`）和临时 Pod，确认 runner 副本数已恢复。
+- 不在测试主机上添加防火墙规则。
 - 正在执行修复、审批或验收时不发版（与现有约定一致）。
 - 对 xnet 或可观测组件的任何运维操作（如 P3-2 的重启），都要先经过 Boss 确认。
 
