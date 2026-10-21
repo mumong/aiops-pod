@@ -313,6 +313,7 @@ The documents below are written in Chinese.
 | [LLM anomalies](docs/llm-model-anomalies.md) | Issues of the model / inference service itself, with external references |
 | [High-risk command acceptance](docs/acceptance-blacklist.md) | Standard acceptance steps for the command blacklist and approval-required commands |
 | [Multi-cluster design](docs/multi-cluster-design.md) (Chinese) | Design draft for multi-cluster support and old/new observability backends: boundaries, architecture, change list, phases, acceptance (not implemented) |
+| [Multi-cluster acceptance plan](docs/multi-cluster-acceptance.md) (Chinese) | Branches and versions, test layers, acceptance scripts and per-phase cases for the multi-cluster feature |
 | [Repair sprints](docs/remediation-sprint-design-2026-10.md) | Repair requirements, design and acceptance records |
 | [Observability collection](docs/observability.md) | MCP tools, PromQL examples, logs and traces, meaning of results |
 | [A2A](docs/a2a.md) | Standard protocol, client, authentication and real agent-to-agent tests |
