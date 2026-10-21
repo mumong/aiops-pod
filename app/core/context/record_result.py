@@ -5,6 +5,32 @@ import json
 CONTRACT_VERSION = "evidence-records.v1"
 
 
+def _bounded_count(value, total):
+    return type(value) is int and 0 <= value <= total
+
+
+def _reason_counts(value, total):
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and type(v) is int and 0 < v <= total for k, v in value.items()
+    )
+
+
+# Counted health facts MCP adds to each Pod/container group (run 97f67069325c471c:
+# group_by=phase showed 26 Running while two were crash-looping). Anything else is
+# still an invalid group.
+GROUP_FACT_CHECKS = {
+    "not_ready": _bounded_count,
+    "ready_unknown": _bounded_count,
+    "terminating": _bounded_count,
+    "restarted_in_window": _bounded_count,
+    "not_ready_examples": lambda v, total: isinstance(v, list)
+    and len(v) <= total
+    and all(isinstance(x, str) for x in v),
+    "waiting_reasons": _reason_counts,
+    "last_termination_reasons": _reason_counts,
+}
+
+
 def parse_record_result(raw):
     """None means another contract. Invalid records are explicit, never empty facts."""
     try:
@@ -85,10 +111,15 @@ def parse_record_result(raw):
             for group in groups:
                 if (
                     not isinstance(group, dict)
-                    or set(group) != {field, "count"}
+                    or not {field, "count"} <= set(group)
+                    or not set(group) - {field, "count"} <= set(GROUP_FACT_CHECKS)
                     or type(group["count"]) is not int
                     or group["count"] < 1
                     or isinstance(group[field], (dict, list))
+                    or not all(
+                        GROUP_FACT_CHECKS[key](group[key], group["count"])
+                        for key in set(group) - {field, "count"}
+                    )
                 ):
                     raise ValueError("invalid group")
                 key = json.dumps(group[field], allow_nan=False)

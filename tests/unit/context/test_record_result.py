@@ -159,3 +159,47 @@ def test_paged_records_keep_source_counts_and_require_consistent_continuation(pa
         broken = copy.deepcopy(packet)
         broken["pagination"].update(change)
         assert parse_record_result(broken)[1] is False
+
+
+def _grouped(packet, groups):
+    packet.update(result_type="groups", groups=groups, executed_query={"group_by": "phase"})
+    packet.pop("rows")
+    packet.pop("columns")
+    return packet
+
+
+def test_groups_with_health_facts_are_valid(packet):
+    # MCP adds counted health facts per group (run 97f67069325c471c).
+    _grouped(
+        packet,
+        [
+            {
+                "phase": "Running",
+                "count": 20,
+                "not_ready": 2,
+                "terminating": 1,
+                "not_ready_examples": ["b/crash-1", "c/oom-1"],
+                "restarted_in_window": 2,
+                "waiting_reasons": {"CrashLoopBackOff": 2},
+                "last_termination_reasons": {"OOMKilled": 1},
+            },
+            {"phase": "Pending", "count": 4, "not_ready": 0, "ready_unknown": 4},
+        ],
+    )
+    parsed, success = parse_record_result(packet)
+    assert success is True
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"unexpected": 1},  # unknown key still rejected
+        {"not_ready": -1},  # counts are non-negative ints
+        {"not_ready": 30},  # never more than the group
+        {"not_ready_examples": "b/crash-1"},  # list of strings
+        {"waiting_reasons": {"CrashLoopBackOff": "2"}},
+    ],
+)
+def test_malformed_health_facts_are_rejected(packet, extra):
+    _grouped(packet, [{"phase": "Running", "count": 24, **extra}])
+    assert parse_record_result(packet)[1] is False
