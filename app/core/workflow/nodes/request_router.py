@@ -50,9 +50,12 @@ class RequestContract(BaseModel):
 class MultiClusterRequestContract(RequestContract):
     """Router contract in multi-cluster deployments only (specs/008-multi-cluster)."""
 
-    cluster_mode: Literal["single", "multiple", "center", "unspecified"] = Field(
+    cluster_mode: Literal["single", "multiple", "center", "inventory", "unspecified"] = Field(
         default="unspecified",
-        description="一个集群 / 多个集群 / 中心集群；问题和会话都没说明时为 unspecified",
+        description=(
+            "一个集群 / 多个集群 / 中心集群 / inventory=询问集群本身（有哪些集群、在线状态）；"
+            "问题和会话都没说明时为 unspecified"
+        ),
     )
     clusters: list[str] = Field(
         default_factory=list,
@@ -312,7 +315,10 @@ class RequestRouterNode(WorkflowNode):
             update = {
                 "clusters": resolved["clusters"],
                 "cluster_mode": resolved["cluster_mode"],
-                "cluster_labels": multicluster.labels(resolved["clusters"]),
+                # Labels only for a resolved scope; a clarification has none.
+                "cluster_labels": []
+                if question_back
+                else multicluster.labels(resolved["clusters"]),
             }
             if question_back:
                 update.update(route="clarify", clarification=question_back)

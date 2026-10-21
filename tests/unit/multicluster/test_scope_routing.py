@@ -428,3 +428,42 @@ def test_contract_carries_display_labels_set_by_code(multi):
     assert out["request_contract"]["cluster_labels"] == ["edge-88", "edge-89"]
     out = route({**BASE, "cluster_mode": "center", "clusters": []})
     assert out["request_contract"]["cluster_labels"] == ["center"]
+
+
+# --- inventory: questions about the clusters themselves (run 6de07c004813430e) -----------
+
+
+def test_cluster_inventory_question_is_answered_not_clarified(multi):
+    out = route_q("我现在有哪些集群？", {**BASE, "cluster_mode": "inventory", "clusters": []})
+    assert out["request_route"] == "focused"
+    assert out["request_contract"]["cluster_mode"] == "inventory"
+    assert out["request_contract"]["clusters"] == [CENTER, EDGE88, EDGE89]
+
+
+def test_inventory_with_status_follow_up_keeps_all_clusters(multi):
+    out = route_q(
+        "各个子集群的状态怎么样", {**BASE, "cluster_mode": "inventory", "clusters": ["*"]}
+    )
+    assert out["request_route"] == "focused" and len(out["request_contract"]["clusters"]) == 3
+
+
+def test_inventory_needs_the_word_cluster(multi):
+    # A Pod question mislabelled as inventory must not silently widen the scope.
+    out = route_q("有哪些 Pod 异常", {**BASE, "cluster_mode": "inventory", "clusters": []})
+    assert out["request_route"] == "clarify"
+
+
+def test_clarification_carries_no_placeholder_labels(multi):
+    out = route_q("有哪些 Pod 异常", {**BASE, "cluster_mode": "multiple", "clusters": ["*"]})
+    assert out["request_route"] == "clarify"
+    assert out["request_contract"]["cluster_labels"] == []
+
+
+def test_router_prompt_describes_inventory(multi):
+    assert "inventory" in multicluster.router_prompt()
+
+
+def test_quick_query_exposes_list_clusters():
+    from app.core.workflow.nodes.query_answer import QueryCollectNode
+
+    assert "list_clusters" in QueryCollectNode.READ_TOOLS

@@ -73,7 +73,9 @@ def router_prompt() -> str:
     return (
         "\n\n# 集群范围（多集群部署）\n"
         "可用集群：\n" + "\n".join(lines) + "\n"
-        "- cluster_mode：single=一个集群；multiple=多个集群；center=中心集群；unspecified=问题和会话都没有说明范围。\n"
+        "- cluster_mode：single=一个集群；multiple=多个集群；center=中心集群；"
+        "inventory=询问集群本身（有哪些集群、集群列表、各集群/子集群是否在线、有哪些数据），clusters 留空；"
+        "unspecified=问题和会话都没有说明范围。\n"
         '- clusters：填写用户说的集群名或别名（原样）；“全部/所有集群”填 ["*"]；center 可留空。\n'
         "- 结合会话历史理解指代：上文已明确集群时，追问（“它”“那个集群”“再看看日志”）沿用上文 request_contract.clusters；"
         "用户换了集群就按新的填写。\n"
@@ -120,6 +122,12 @@ def resolve_contract(
     cfg = config()
     mode = contract.get("cluster_mode") or "unspecified"
     names = [str(n).strip() for n in contract.get("clusters") or [] if str(n).strip()]
+    if mode == "inventory":
+        # About the cluster set itself: every registered cluster, no scope question.
+        # Guard against a mislabelled resource question silently widening the scope.
+        if evidence is not None and not re.search(r"集群|cluster", evidence, re.I):
+            return contract, scope_question()
+        return dict(contract, clusters=list(cfg.clusters), cluster_mode="inventory"), None
     if (
         mode == "unspecified"
         or (not names and mode != "center")

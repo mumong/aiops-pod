@@ -32,6 +32,8 @@ class FocusedResult(BaseModel):
 class FocusedTaskNode(WorkflowNode):
     # Explicit capability allowlist: no arbitrary shell, exec, or mutation tool.
     READ_TOOLS = {
+        # multi-cluster deployments only (the MCP registers it there); cluster inventory and status
+        "list_clusters",
         "query_pod_lifecycle",
         "kubectl_get_by_name",
         "kubectl_get_by_kind_in_namespace",
