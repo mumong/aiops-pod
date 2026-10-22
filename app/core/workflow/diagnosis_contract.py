@@ -33,6 +33,19 @@ class DiagnosisEntity(ContractModel):
 
 class LocationTarget(ContractModel):
     target_id: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="before")
+    @classmethod
+    def identity_from_entity(cls, value):
+        # Shape only (live: "handoff.targets.0.target_id: Field required" cost a retry):
+        # a missing id is the entity's own identity; a given id is never changed.
+        if isinstance(value, dict) and not str(value.get("target_id") or "").strip():
+            entity = value.get("entity") if isinstance(value.get("entity"), dict) else {}
+            if entity.get("name"):
+                parts = [entity.get("namespace") or "", entity["name"]]
+                value = {**value, "target_id": "-".join(p for p in parts if p)[:120]}
+        return value
+
     entity: DiagnosisEntity
     issue: str = Field(min_length=1, max_length=320, description="简短异常现象，不写完整分析")
     status: Literal["investigate", "assessed", "deferred", "excluded"] = "investigate"

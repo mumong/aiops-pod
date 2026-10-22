@@ -221,3 +221,17 @@ def test_object_lists_sent_as_json_text_are_accepted():
         DiagnosisCaseOutput(
             outcome="abnormal", summary="s", certainty="supported", report="r", key_facts="x"
         )
+
+
+def test_missing_target_id_is_the_entity_identity():
+    handoff = LocationHandoff.model_validate(
+        {
+            "targets": [
+                {"entity": {"kind": "Pod", "namespace": "ns", "name": "w"}, "issue": "x"},
+                {"target_id": "kept", "entity": {"kind": "Pod", "name": "v"}, "issue": "y"},
+            ]
+        }
+    )
+    assert [t.target_id for t in handoff.targets] == ["ns-w", "kept"]
+    with pytest.raises(ValueError):
+        LocationHandoff.model_validate({"targets": [{"entity": {"kind": "Pod"}, "issue": "x"}]})
