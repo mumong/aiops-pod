@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import ClassVar, Dict, Literal
+from typing import Callable, ClassVar, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -75,6 +75,9 @@ class RepairDraft(QueryAnswer):
     # Cluster facts bound per planning call (``with_controller_chains``): the Pod's
     # ownerReferences chain, keyed "namespace/pod". Empty = unknown, nothing enforced.
     controller_chains: ClassVar[Dict[str, ControllerChain]] = {}
+    # Planning call only (``with_preflight``): dry-runs the write commands on the plan's
+    # cluster; a failure goes back to the model as a validation error to fix.
+    preflight: ClassVar[Optional[Callable[[list], List[str]]]] = None
 
     @classmethod
     def with_controller_chains(cls, chains: Dict[str, ControllerChain]):
@@ -84,6 +87,26 @@ class RepairDraft(QueryAnswer):
         return type(
             cls.__name__, (cls,), {"controller_chains": dict(chains), "__module__": cls.__module__}
         )
+
+    @classmethod
+    def with_preflight(cls, check):
+        return type(
+            cls.__name__, (cls,), {"preflight": staticmethod(check), "__module__": cls.__module__}
+        )
+
+    @model_validator(mode="after")
+    def commands_pass_dry_run(self):
+        check = type(self).preflight
+        if check is None or not self.actions:
+            return self
+        errors = check(self.actions)
+        if errors:
+            raise ValueError(
+                "命令预检未通过（kubectl --dry-run=client，在本组集群上执行，未做任何修改）："
+                + "；".join(errors)
+                + "。请按 kubectl 的报错修正命令（语法、参数、对象名或命名空间）后重新提交"
+            )
+        return self
 
     @classmethod
     def chain_for(cls, namespace: str, pod: str):
@@ -347,7 +370,12 @@ class RemediationNode(QueryCollectNode):
             "payload"
         ) or {}
         chains = self._controller_chains(diagnosis, state.get("request_contract"))
-        schema = RepairDraft.with_controller_chains(chains)
+        from app.core.remediation.preflight import preflight_errors, runner_for
+
+        run = runner_for(state.get("request_contract"))
+        schema = RepairDraft.with_controller_chains(chains).with_preflight(
+            lambda actions: preflight_errors(actions, run)
+        )
         material = {
             "question": question,
             "request_contract": state.get("request_contract"),

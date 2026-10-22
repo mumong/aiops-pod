@@ -260,6 +260,19 @@ def job_cluster(contract: Optional[Dict[str, Any]]):
     return cluster if cluster is not None and cluster.remote else None
 
 
+def job_scope_error(contract: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Multi-cluster: a repair must name exactly one cluster; never fall back to the center."""
+    if not multi():
+        return None
+    clusters = (contract or {}).get("clusters") or []
+    if len(clusters) != 1 or config().resolve(clusters[0]) is None:
+        return (
+            f"修复必须指定唯一的集群，当前范围是 {labels(clusters) if clusters else '未指定'}；"
+            "未执行任何命令。请针对单个集群的异常组发起修复"
+        )
+    return None
+
+
 def job_label(contract: Optional[Dict[str, Any]]) -> str:
     """Display label of a job's cluster in multi-cluster mode ('' otherwise)."""
     if not multi() or not contract or len(contract.get("clusters") or []) != 1:

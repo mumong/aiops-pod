@@ -174,6 +174,10 @@ class PodRepairExecutor:
         if draft and draft.get("planning_error"):
             yield finish("failed", draft["planning_error"]["message"])
             return
+        scope_error = multicluster.job_scope_error(request_contract)
+        if scope_error and draft and draft.get("actions"):
+            yield finish("blocked", scope_error, error_code="cluster_scope_ambiguous")
+            return
         if not draft or not draft.get("actions"):
             yield finish("skipped", "没有可安全执行的结构化修复动作")
             return

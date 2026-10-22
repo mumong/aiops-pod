@@ -107,4 +107,8 @@ def classify(argv: List[str]) -> Tuple[Optional[str], Optional[str]]:
         return "read", None
     if verb == "exec":
         return "exec", None
+    if "--dry-run=client" in own:
+        # Client-side dry run sends no mutating request (it may read the object), so the
+        # read identity runs it; repair preflight uses it before a plan is approved.
+        return "read", None
     return "write", None

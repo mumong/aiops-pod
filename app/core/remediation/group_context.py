@@ -112,6 +112,15 @@ def scoped_diagnosis(record, group_id):
         contract.update(
             namespaces=namespaces, pod_names=pods, scope="pod" if pods else "namespace"
         )
+    if target.get("cluster"):
+        # The group was diagnosed on one cluster; its repair runs there and nowhere else.
+        # Run 9062db56: groups inherited the diagnosis's two clusters and every command
+        # ran on the center (namespace not found / the center's copy changed instead).
+        contract.update(
+            clusters=[target["cluster"]],
+            cluster_labels=[target.get("cluster_label") or target["cluster"]],
+            cluster_mode="single",
+        )
     if payload.get("contract_version") == "diagnosis-record.v2":
         diagnosis = deepcopy(group.get("diagnosis_result") or {})
         report = diagnosis.pop("report", "本组诊断交付不完整；不得据此推测根因。")
