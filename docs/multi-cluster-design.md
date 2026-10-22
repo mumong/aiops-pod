@@ -227,7 +227,7 @@ xnet 对每个请求最长等 20 秒，我们的同步调用上限是 15 秒。�
 路由契约增加三个字段：`cluster_mode`、`clusters`、`cluster_labels`（`request_router.py`、`app/core/multicluster.py`）。
 
 - 多集群部署下，路由提示词会追加一段说明（`router_prompt`），列出每个集群及其角色（中心集群 / 边缘集群）。
-- **模型按用户意图选择范围**，代码不按字面词语判断。
+- **模型按自己对意图的理解选择范围**，不做任何特判：提示词只列出集群及其角色，说明几种范围的含义和写法，**不放示例原话**（下表的例子只用于说明，不在提示词里）。单元测试 `test_router_prompt_states_principles_not_sample_questions` 保证意图样例里的问题不会出现在提示词中。
 
 | cluster_mode | 何时使用 | 例子 |
 |---|---|---|

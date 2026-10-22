@@ -66,9 +66,9 @@ def scope_question() -> str:
 def router_prompt() -> str:
     """Addendum to REQUEST_ROUTER_PROMPT; only used in multi-cluster deployments.
 
-    The model decides the scope from the user's intent (Boss 2026-10-22: understand
-    intent, do not gate on wording); code only resolves names and asks when the
-    scope is genuinely unspecified.
+    The model decides the scope from its own reading of the user's intent (Boss
+    2026-10-22: no special handling, no sample phrases to match); code only
+    resolves names and asks when the scope is genuinely unspecified.
     """
     cfg = config()
     lines = [
@@ -78,21 +78,14 @@ def router_prompt() -> str:
     return (
         "\n\n# 集群范围（多集群部署）\n"
         "可用集群：\n" + "\n".join(lines) + "\n"
-        "先理解用户意图需不需要某个集群的实际数据，再决定 cluster_mode：\n"
-        "- none：不需要任何集群的数据，例如概念解释、操作方法、通用知识"
-        "（“什么是 CrashLoopBackOff”“探针怎么配置”）。clusters 留空。\n"
-        "- inventory：问的是集群本身的清单与接入情况，例如“我现在有哪些集群”“接入了哪些环境”“哪些集群在线”。"
-        "clusters 留空；回答只依据集群清单，不判断工作负载健康。\n"
-        "- single / multiple / center：需要集群里的实际数据（查询、诊断、执行、修复）。"
-        "single=一个集群；multiple=多个集群；center=中心集群。"
-        "问多个集群的运行情况属于 multiple。范围按用户说的角色填写："
-        '只说边缘集群 / 子集群（“各个子集群的状态怎么样”“所有边缘集群有什么异常”）填 ["*edge"]，不含中心集群；'
-        '说全部集群（“所有集群健康吗”“每个集群都看看”）填 ["*"]，包含中心集群。\n'
-        "- unspecified：需要集群数据，但问题和会话都没说明是哪个集群，例如开局就问“有哪些 Pod 异常”。"
-        "此时由系统反问，不要猜一个集群或默认全部集群。\n"
-        '- clusters：填写用户说的集群名或别名（原样）；全部集群填 ["*"]；全部边缘集群填 ["*edge"]；center 可留空。\n'
-        "- 结合会话历史理解指代：上文已明确集群时，追问（“它”“那个集群”“再看看日志”）沿用上文 request_contract.clusters；"
-        "用户换了集群就按新的填写。\n"
+        "按你对用户意图的理解决定 cluster_mode 和 clusters：\n"
+        "- none：回答不需要任何集群的数据。\n"
+        "- inventory：问的是集群本身（有哪些、接入与在线情况），不是集群里的工作负载。\n"
+        "- single / multiple / center：需要集群里的实际数据；分别是一个集群、多个集群、中心集群。\n"
+        "- unspecified：需要集群数据，但问题和会话都没有说明范围；系统会向用户确认，不要替用户选择。\n"
+        '- clusters：用户说的集群名或别名（原样）；全部集群填 ["*"]（含中心集群）；'
+        '全部边缘集群填 ["*edge"]（不含中心集群）；center 可留空。\n'
+        "- 会话中已经明确的范围，后续指代沿用；用户改了范围就按新的填写。\n"
     )
 
 

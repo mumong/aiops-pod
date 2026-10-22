@@ -475,18 +475,26 @@ def test_unspecified_scope_still_asks(multi):
     assert out["request_route"] == "clarify" and out["request_contract"]["cluster_labels"] == []
 
 
-def test_router_prompt_teaches_the_intents(multi):
+def test_router_prompt_states_principles_not_sample_questions(multi):
+    """Boss 2026-10-22: no special handling; the model reads intent on its own.
+
+    The prompt defines the modes and selectors; it must not quote the questions
+    that the intent measurement asks (that would teach to the test).
+    """
+    import json
+    from pathlib import Path
+
     prompt = multicluster.router_prompt()
-    for text in (
-        "none",
-        "inventory",
-        "unspecified",
-        "什么是 CrashLoopBackOff",
-        "我现在有哪些集群",
-        "各个子集群的状态怎么样",
-        "有哪些 Pod 异常",
-    ):
-        assert text in prompt, text
+    for mode in ("none", "inventory", "single", "multiple", "center", "unspecified"):
+        assert mode in prompt, mode
+    samples = json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "scripts/acceptance/multicluster/intent_cases.json"
+        ).read_text()
+    )["cases"]
+    for case in samples:
+        assert case["question"].rstrip("？?") not in prompt, case["question"]
 
 
 def test_router_prompt_names_roles_and_the_edge_selector(multi):
