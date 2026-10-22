@@ -205,6 +205,17 @@ def build_parallel_evidence_stream_context(
     return context.model_dump(exclude_none=True)
 
 
+def project_cluster_lane(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Multi-cluster location: which cluster's card an event belongs to."""
+    label = str(event.get("cluster_lane") or "").strip()
+    if not label:
+        return {}
+    projected: dict[str, Any] = {"cluster_lane": label}
+    if event.get("tool_call_id") is not None:
+        projected["tool_call_id"] = event.get("tool_call_id")
+    return projected
+
+
 def project_parallel_tool_event(event: Mapping[str, Any]) -> dict[str, Any]:
     """Project parallel-only fields into the public SSE thinking payload."""
     if not _mapping(event.get("parallel_context")):

@@ -39,6 +39,7 @@ from app.core.workflow.reporter import (
 )
 from app.core.workflow.state import WorkflowState
 from app.core.workflow.stream_contract import (
+    project_cluster_lane,
     project_parallel_tool_event,
     project_query_tool_event,
     workflow_outcome,
@@ -392,6 +393,7 @@ class _StreamTranslator:
             "iteration": data.get("iteration"),
             "ts_ms": data.get("ts_ms", int(time.time() * 1000)),
             **project_parallel_tool_event(data),
+            **project_cluster_lane(data),
             **(project_query_tool_event(data) if self.query_mode in {"auto", "direct"} else {}),
         }
 

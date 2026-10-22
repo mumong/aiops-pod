@@ -334,3 +334,51 @@ def test_report_states_unfinished_clusters_in_code_not_by_the_model():
         "未完成检查的集群：edge-89：集群当前不可达（cluster_unreachable），未能检查"
         in out["conclusion"]
     )
+
+
+def test_cluster_events_stay_on_the_location_node(multi):
+    """Run e43e8298: lane-tagged location events were moved to parallel_evidence,
+    which closed the location stage after 1.5s with an empty result."""
+    import queue
+
+    from app.core.workflow.multicluster_location import ClusterLaneQueue
+
+    target_queue = queue.Queue()
+    ClusterLaneQueue(target_queue, label="edge-88").put_nowait(
+        ("thinking", {"type": "ai_reasoning", "node": "layer", "content": "x"})
+    )
+    tag, event = target_queue.get_nowait()
+    assert tag == "thinking" and event["node"] == "layer" and event["cluster_lane"] == "edge-88"
+    assert "parallel_context" not in event
+
+
+def test_each_cluster_reports_its_progress(multi):
+    import queue
+    from types import SimpleNamespace
+
+    events = queue.Queue()
+    node = SimpleNamespace(node_id="layer", _event_queue=events)
+    out = layer_output([target("t1", "a", "p1")], [{"group_id": "g1", "target_id": "t1"}])
+    per_cluster_location(
+        node,
+        STATE,
+        run_one=lambda n, s, c: out,
+        probe=lambda c: (c == EDGE88, "" if c == EDGE88 else "cluster_unreachable"),
+    )
+    seen = {}
+    while not events.empty():
+        _, event = events.get_nowait()
+        assert event["node"] == "layer" and event["type"] == "runtime_status"
+        seen[event["cluster_lane"]] = (event["status"], event["content"])
+    assert seen["edge-88"] == ("complete", "定位完成：1 个待排查目标")
+    assert seen["edge-89"][0] == "failed" and "不可达" in seen["edge-89"][1]
+
+
+def test_cluster_lane_is_projected_to_the_stream():
+    from app.core.workflow.stream_contract import project_cluster_lane
+
+    assert project_cluster_lane({"type": "ai_token"}) == {}
+    assert project_cluster_lane({"cluster_lane": "edge-88", "tool_call_id": "c1"}) == {
+        "cluster_lane": "edge-88",
+        "tool_call_id": "c1",
+    }

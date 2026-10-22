@@ -11,6 +11,10 @@ tools bound to that cluster. Results are merged without changing any contract:
 - a cluster whose location failed is reported as incomplete, the others go on;
 - a single remaining group narrows the run to its cluster, because the serial
   evidence path has no lane group.
+
+Each cluster's events stay on the location node and carry ``cluster_lane`` so
+the UI can show one card per cluster; they must not be re-attributed to the
+evidence stage, or the stream would close the location stage early.
 """
 
 from __future__ import annotations
@@ -24,10 +28,56 @@ from app.core import multicluster
 _ASSESSMENT_ORDER = {"abnormal": 0, "inconclusive": 1, "healthy": 2}
 
 
+class ClusterLaneQueue:
+    """Tag a cluster's thinking events with its label; the node stays the location node."""
+
+    def __init__(self, target: Any, *, label: str):
+        self._target = target
+        self._label = label
+
+    def _decorate(self, item: Any) -> Any:
+        if isinstance(item, tuple) and len(item) == 2 and item[0] == "thinking":
+            if isinstance(item[1], dict):
+                return (item[0], {**item[1], "cluster_lane": self._label})
+        return item
+
+    def put_nowait(self, item: Any) -> None:
+        self._target.put_nowait(self._decorate(item))
+
+    def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
+        self._target.put(self._decorate(item), block=block, timeout=timeout)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+
+def _lane_status(node: Any, label: str, status: str, content: str) -> None:
+    target = getattr(node, "_event_queue", None)
+    if target is None:
+        return
+    from app.core.aicall.streaming import push_event
+
+    push_event(
+        ClusterLaneQueue(target, label=label),
+        "runtime_status",
+        getattr(node, "node_id", "layer"),
+        type="runtime_status",
+        status=status,
+        content=content,
+    )
+
+
+def _outcome_note(out: Dict[str, Any]) -> str:
+    handoff = out.get("diagnosis_handoff") or {}
+    targets = [t for t in handoff.get("targets") or [] if t.get("status") == "investigate"]
+    if targets:
+        return f"定位完成：{len(targets)} 个待排查目标"
+    status = (handoff.get("pod_assessment") or {}).get("status")
+    return "定位完成：未发现异常" if status == "healthy" else "定位完成"
+
+
 def _run_one(node: Any, state: Dict[str, Any], cluster: str) -> Dict[str, Any]:
     """Execute a fresh location node of the same class, bound to one cluster."""
-    from app.core.workflow.nodes.autonomous_parallel import LaneQueue
-
     label = multicluster.labels([cluster])[0]
     sub = type(node)(node.holmes_service, node.metrics, node.runbook_catalog)
     for attr in (
@@ -42,7 +92,7 @@ def _run_one(node: Any, state: Dict[str, Any], cluster: str) -> Dict[str, Any]:
     tools = getattr(node, "_unscoped_tools", None) or getattr(node, "tools", []) or []
     sub.tools = multicluster.scoped_tools(list(tools), state)
     if getattr(node, "_event_queue", None) is not None:
-        sub.set_event_queue(LaneQueue(node._event_queue, group_id=label, entities=[]))
+        sub.set_event_queue(ClusterLaneQueue(node._event_queue, label=label))
     return sub.execute(state)
 
 
@@ -85,15 +135,23 @@ def per_cluster_location(
     inherited = list(state.get("thinking_events") or [])
 
     def task(cluster: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        label = multicluster.labels([cluster])[0]
+        _lane_status(node, label, "running", "正在检查集群连通性")
         # An unreachable cluster would "locate" nothing and look healthy; say it was not checked.
         reachable, reason = probe(cluster)
         if not reachable:
-            return cluster, None, f"集群当前不可达（{reason}），未能检查"
+            note = f"集群当前不可达（{reason}），未能检查"
+            _lane_status(node, label, "failed", note)
+            return cluster, None, note
+        _lane_status(node, label, "running", "正在定位")
         try:
             located = run_one(node, _cluster_state(state, cluster, annotate=True), cluster)
-            return cluster, located, ""
         except Exception as exc:  # one cluster must not take the others down
-            return cluster, None, f"定位失败（{str(exc)[:240]}）"
+            note = f"定位失败（{str(exc)[:240]}）"
+            _lane_status(node, label, "failed", note)
+            return cluster, None, note
+        _lane_status(node, label, "complete", _outcome_note(located))
+        return cluster, located, ""
 
     with ThreadPoolExecutor(max_workers=max(1, len(clusters))) as pool:
         results = list(pool.map(task, clusters))
