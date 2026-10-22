@@ -44,6 +44,7 @@ def target(name, namespace="xnet"):
 def handoff(*targets):
     return {
         "targets": list(targets),
+        "coverage": "complete",
         "pod_assessment": {"status": "abnormal", "scope": "s", "observed_at": "t", "reason": "r"},
     }
 
@@ -152,3 +153,17 @@ def test_default_runner_calls_kubectl_on_the_target_cluster(monkeypatch):
     monkeypatch.setattr(pod_executor, "run_argv", run_argv)
     out, excluded = apply_expected_states(handoff(target("m6h2f")), STATE, items=[RULE])
     assert len(excluded) == 1 and set(seen) == {("kubectl", CENTER)}
+
+
+def test_missing_assessment_after_full_exclusion_ends_the_diagnosis():
+    """Run ffa0fa1e: no pod_assessment, so evidence and RCA ran on excluded standbys."""
+    bare = {"targets": [target("m6h2f")], "coverage": "complete"}
+    out, _ = apply_expected_states(bare, STATE, cluster(), [RULE])
+    assert out["pod_assessment"]["status"] == "healthy"
+    assert out["pod_assessment"]["scope"] == "center"
+    from app.core.workflow.pod_detection import PodAssessment, after_location
+
+    PodAssessment.model_validate(out["pod_assessment"])
+    assert after_location({"diagnosis_handoff": out}) == "conclusion"
+    partial, _ = apply_expected_states({**bare, "coverage": "partial"}, STATE, cluster(), [RULE])
+    assert partial["pod_assessment"]["status"] == "inconclusive"

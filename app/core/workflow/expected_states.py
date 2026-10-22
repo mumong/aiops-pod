@@ -26,6 +26,7 @@ import copy
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -150,11 +151,22 @@ def apply_expected_states(
         t.get("status", "investigate") == "investigate" for t in out.get("targets") or []
     ):
         assessment = dict(out.get("pod_assessment") or {})
-        if assessment.get("status") == "abnormal":
+        if assessment.get("status") in (None, "abnormal"):
             # Every abnormal object is declared and verified: nothing left to diagnose.
-            assessment["status"] = "healthy"
+            # Run ffa0fa1e: the model gave no assessment, so evidence/RCA ran on the
+            # excluded standbys. Healthy only when location covered the whole scope.
+            complete = out.get("coverage") == "complete"
+            assessment.setdefault(
+                "scope", "、".join(multicluster.labels(clusters)) or "本次请求范围"
+            )
+            assessment.setdefault(
+                "observed_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
+            assessment["status"] = "healthy" if complete else "inconclusive"
             assessment["reason"] = (
                 "定位发现的对象均符合运维声明的预期状态：" + "；".join(excluded)
+                if complete
+                else "定位覆盖不完整；已发现的对象均符合运维声明的预期状态：" + "；".join(excluded)
             )[:600]
             out["pod_assessment"] = assessment
     return out, excluded
