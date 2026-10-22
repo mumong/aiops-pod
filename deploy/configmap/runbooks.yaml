@@ -221,7 +221,7 @@ data:
     | df 显示 Use% >= 95% + ENOSPC 错误 | 节点磁盘空间耗尽 | 高 |
     | Inode 使用率 >= 95% | Inode 耗尽 | 高 |
     | container Last State Reason=OOMKilled | 不是 Evicted 根因，应进入 OOMKilled 调查 | 高 |
-    | exitCode=137 但 Reason 非 OOMKilled | 只能确认 SIGKILL，继续比对探针 Killing、人工终止、节点 OOM 和 cgroup OOM 证据 | 待验证 |
+    | exitCode=137 但 Reason 非 OOMKilled | 只能确认 SIGKILL，继续比对删除/替换时宽限期到期、探针 Killing、人工终止、节点 OOM 和 cgroup OOM 证据 | 待验证 |
 
     ## 标准修复建议
     - Pod 级 ephemeral-storage/emptyDir 超限: 优先清理应用临时文件、降低日志落盘量，或提高容器 `ephemeral-storage` limit / emptyDir `sizeLimit` 后重建 Pod；验证 `kubectl describe pod` 不再出现 Evicted Message。
@@ -358,7 +358,7 @@ data:
     | Last State | OOMKilled |
     | 排除项 | 如果 Pod Reason=Evicted，应按 Evicted 处理；OOMKilled 必须来自 containerStatuses/Last State |
 
-    `exitCode=137` 只表示进程收到 SIGKILL。探针失败后 kubelet 强制终止、人工 kill、节点级 OOM 和 cgroup OOM 都可能产生 137；没有 `terminated.reason=OOMKilled` 或明确 cgroup/kernel OOM 事件时，不得单独按 OOM 归因。
+    `exitCode=137` 只表示进程收到 SIGKILL。Pod 被删除或滚动替换时宽限期到期仍未退出（对照 deletionTimestamp、terminationGracePeriodSeconds 与容器 finishedAt）、探针失败后 kubelet 强制终止、人工 kill、节点级 OOM 和 cgroup OOM 都可能产生 137；没有 `terminated.reason=OOMKilled` 或明确 cgroup/kernel OOM 事件时，不得单独按 OOM 归因。
 
     ## 诊断问题
     - 容器是否真实到达 memory limit，还是节点级 OOM、Evicted 或人工终止？
@@ -456,7 +456,7 @@ data:
     | 条件 | 结论 | 置信度 |
     |------|------|--------|
     | terminated.reason=OOMKilled | 容器 OOMKilled 终态 | 高 |
-    | exitCode=137 且 Reason 非 OOMKilled | SIGKILL，需用探针/Killing、cgroup、kernel 或人工终止证据继续区分 | 待验证 |
+    | exitCode=137 且 Reason 非 OOMKilled | SIGKILL，需用删除时间与宽限期、探针/Killing、cgroup、kernel 或人工终止证据继续区分 | 待验证 |
     | 日志含 "Cannot allocate memory" / "Java heap space" | 内存不足 | 高 |
     | OOMKilled + limits.memory 很低或低于历史峰值 | 内存 limit 过低 | 高 |
     | OOMKilled + memory-backed emptyDir 大量写入 | tmpfs/emptyDir 占用内存导致 OOM | 中 |
