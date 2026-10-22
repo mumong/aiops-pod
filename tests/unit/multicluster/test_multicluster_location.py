@@ -382,3 +382,43 @@ def test_cluster_lane_is_projected_to_the_stream():
         "cluster_lane": "edge-88",
         "tool_call_id": "c1",
     }
+
+
+def test_model_disconnect_is_retried_once_per_cluster(multi):
+    from app.core.aicall.errors import ModelStreamInterrupted
+
+    attempts = {EDGE88: 0, EDGE89: 0}
+    out = layer_output([target("t1", "a", "p1")], [{"group_id": "g1", "target_id": "t1"}])
+
+    def run_one(node, state, cluster):
+        attempts[cluster] += 1
+        if cluster == EDGE88 and attempts[cluster] == 1:
+            raise ModelStreamInterrupted("LLM API 服务连接中断")
+        if cluster == EDGE89:
+            raise ModelStreamInterrupted("LLM API 服务连接中断")
+        return out
+
+    merged = per_cluster_location(object(), STATE, run_one=run_one, probe=lambda c: (True, ""))
+    assert attempts == {EDGE88: 2, EDGE89: 2}
+    assert [t["target_id"] for t in merged["diagnosis_handoff"]["targets"]] == ["edge-88/t1"]
+    assert merged["cluster_failures"] == ["edge-89：定位失败（模型连接中断，已重试 1 次）"]
+
+
+def test_unchecked_cluster_turns_healthy_into_inconclusive(multi):
+    healthy = layer_output([], [], assessment="healthy")
+    merged = per_cluster_location(
+        object(),
+        STATE,
+        run_one=lambda n, s, c: healthy,
+        probe=lambda c: (c == EDGE88, "cluster_unreachable"),
+    )
+    assessment = merged["diagnosis_handoff"]["pod_assessment"]
+    assert assessment["status"] == "inconclusive" and "edge-89" in assessment["reason"]
+
+
+def test_declared_exclusions_of_each_cluster_are_merged(multi):
+    out = {**layer_output([], [], assessment="healthy"), "expected_exclusions": ["xnet/a（主备）"]}
+    merged = per_cluster_location(
+        object(), STATE, run_one=lambda n, s, c: out, probe=lambda c: (True, "")
+    )
+    assert merged["expected_exclusions"] == ["xnet/a（主备）", "xnet/a（主备）"]

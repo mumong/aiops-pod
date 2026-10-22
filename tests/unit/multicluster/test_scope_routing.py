@@ -52,7 +52,7 @@ def route(contract_values, history=None, *, capture=None):
     node.ai_call = SimpleNamespace(call_structured=classify)
     # These tests are about resolution; phrase a question that names the scope
     # (grounding has its own tests below).
-    names = [n for n in contract_values.get("clusters") or [] if n != "*"]
+    names = [n for n in contract_values.get("clusters") or [] if not n.startswith("*")]
     state = {"question": f"查看 {' '.join(names)} 全部集群 中心集群 的情况"}
     if history:
         state["query_session_context"] = {"turns": history}
@@ -99,6 +99,8 @@ def test_multi_cluster_router_sees_cluster_list(multi):
         ("single", ["EDGE-89"], [EDGE89]),
         ("multiple", ["edge-88", "edge-89"], [EDGE88, EDGE89]),
         ("multiple", ["*"], [CENTER, EDGE88, EDGE89]),
+        # Run e43e8298: "所有边缘测集群" must not include the center.
+        ("multiple", ["*edge"], [EDGE88, EDGE89]),
         ("center", [], [CENTER]),
         ("center", ["中心集群"], [CENTER]),
     ],
@@ -485,3 +487,10 @@ def test_router_prompt_teaches_the_intents(multi):
         "有哪些 Pod 异常",
     ):
         assert text in prompt, text
+
+
+def test_router_prompt_names_roles_and_the_edge_selector(multi):
+    prompt = multicluster.router_prompt()
+    assert prompt.count("：中心集群") == 1
+    assert prompt.count("边缘集群（子集群）") == 2
+    assert '["*edge"]' in prompt and "不含中心集群" in prompt

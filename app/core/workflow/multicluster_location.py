@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.core import multicluster
+from app.core.aicall.errors import ModelStreamInterrupted
 
 _ASSESSMENT_ORDER = {"abnormal": 0, "inconclusive": 1, "healthy": 2}
 
@@ -70,8 +71,12 @@ def _lane_status(node: Any, label: str, status: str, content: str) -> None:
 def _outcome_note(out: Dict[str, Any]) -> str:
     handoff = out.get("diagnosis_handoff") or {}
     targets = [t for t in handoff.get("targets") or [] if t.get("status") == "investigate"]
+    excluded = len(out.get("expected_exclusions") or [])
+    tail = f"，{excluded} 个按运维声明排除" if excluded else ""
     if targets:
-        return f"定位完成：{len(targets)} 个待排查目标"
+        return f"定位完成：{len(targets)} 个待排查目标{tail}"
+    if excluded:
+        return f"定位完成：未发现异常{tail}"
     status = (handoff.get("pod_assessment") or {}).get("status")
     return "定位完成：未发现异常" if status == "healthy" else "定位完成"
 
@@ -144,10 +149,23 @@ def per_cluster_location(
             _lane_status(node, label, "failed", note)
             return cluster, None, note
         _lane_status(node, label, "running", "正在定位")
-        try:
-            located = run_one(node, _cluster_state(state, cluster, annotate=True), cluster)
-        except Exception as exc:  # one cluster must not take the others down
-            note = f"定位失败（{str(exc)[:240]}）"
+        located, note = None, ""
+        for attempt in range(2):
+            try:
+                located = run_one(node, _cluster_state(state, cluster, annotate=True), cluster)
+                break
+            except ModelStreamInterrupted:
+                # Run e43e8298: one cluster lost its model stream and went unchecked.
+                # A transport drop is transient; one fresh attempt, unless the user stopped.
+                cancel = getattr(node, "cancel_event", None)
+                note = "定位失败（模型连接中断" + ("，已重试 1 次）" if attempt else "）")
+                if attempt or (cancel is not None and cancel.is_set()):
+                    break
+                _lane_status(node, label, "running", "模型连接中断，正在重新定位")
+            except Exception as exc:  # one cluster must not take the others down
+                note = f"定位失败（{str(exc)[:240]}）"
+                break
+        if located is None:
             _lane_status(node, label, "failed", note)
             return cluster, None, note
         _lane_status(node, label, "complete", _outcome_note(located))
@@ -161,6 +179,7 @@ def per_cluster_location(
     analyses: List[str] = []
     events: List[Dict[str, Any]] = list(inherited)
     failures: List[str] = []
+    excluded: List[str] = []
     assessments: List[Dict[str, Any]] = []
     for cluster, out, error in results:
         label = multicluster.labels([cluster])[0]
@@ -173,6 +192,7 @@ def per_cluster_location(
             item = copy.deepcopy(item)
             item["target_id"] = f"{label}/{item['target_id']}"
             targets.append(item)
+        excluded.extend(out.get("expected_exclusions") or [])
         if handoff.get("pod_assessment"):
             assessments.append(handoff["pod_assessment"])
         for group in out.get("autonomous_groups") or []:
@@ -211,6 +231,16 @@ def per_cluster_location(
         "thinking_events": events,
         "diagnosis_events_start": len(events),
     }
+    if excluded:
+        output["expected_exclusions"] = excluded
+    if failures and assessment and assessment.get("status") == "healthy":
+        # A cluster that was not checked cannot be reported as "no Pod anomalies".
+        assessment = {
+            **assessment,
+            "status": "inconclusive",
+            "reason": ("未完成检查的集群：" + "；".join(failures))[:600],
+        }
+        output["diagnosis_handoff"]["pod_assessment"] = assessment
     if failures:
         output["cluster_failures"] = failures
         output["warnings"] = [

@@ -133,6 +133,8 @@ class DiagnosisStageNode(QueryCollectNode):
             )
         material = stage_material(state, self.node_id)
         material["request_contract"] = state.get("request_contract")
+        if multicluster.multi():
+            material["cluster_notes"] = multicluster.virtual_node_note()
         locating = self.node_id == "layer"
         publishing = self.node_id == "rca"
         collecting = self.node_id == "evidence"
@@ -334,6 +336,16 @@ class DiagnosisStageNode(QueryCollectNode):
                 build_working_material({**state, "thinking_events": combined_events}),
             )
             output["diagnosis_events_start"] = len(combined_events)
+            from app.core.workflow.expected_states import apply_expected_states
+
+            output["diagnosis_handoff"], excluded = apply_expected_states(
+                output["diagnosis_handoff"], state
+            )
+            if excluded:
+                output["expected_exclusions"] = [
+                    *(state.get("expected_exclusions") or []),
+                    *excluded,
+                ]
         if self.node_id == "layer" and getattr(self, "autonomous_parallel_enabled", False):
             from app.core.workflow.nodes.autonomous_parallel import plan_groups
 

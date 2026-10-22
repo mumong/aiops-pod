@@ -198,6 +198,12 @@ class QueryConclusionNode(FocusedTaskNode):
         from app.core.workflow.pod_detection import healthy_check_report
 
         text = healthy_check_report(assessment)
+        if state.get("expected_exclusions"):
+            text += (
+                "\n\n已按运维声明排除（不计为异常）："
+                + "；".join(state["expected_exclusions"])
+                + "。"
+            )
         answer = QueryAnswer(
             intent=state.get("original_question") or state.get("question", ""),
             scope=assessment.get("scope") or "本次请求范围",

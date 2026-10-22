@@ -61,7 +61,7 @@ class MultiClusterRequestContract(RequestContract):
     )
     clusters: list[str] = Field(
         default_factory=list,
-        description='用户说的集群名或别名（原样）；全部集群为 ["*"]；追问沿用上文集群',
+        description='用户说的集群名或别名（原样）；全部集群为 ["*"]；全部边缘集群（不含中心）为 ["*edge"]；追问沿用上文集群',
     )
     cluster_labels: list[str] = Field(default_factory=list, description="由系统填写，保持为空")
 

@@ -93,6 +93,7 @@ OVERVIEW_PROMPT = """根据独立诊断结果的索引生成简短中文总览�
 覆盖状态、未解决项和失败不得省略或改称健康。统计由程序展示，无需自行计算。
 不生成修复命令，不调用工具；完整诊断将在总览后由程序逐组展示。
 若输入为分批概览，只整合已有判断和限制，不补造现场事实。输出 overview 字段，尽量简短。
+unchecked_clusters 中的集群未完成检查，不得说成已覆盖或没有异常；excluded_by_declaration 是按运维声明排除的对象，不得列为异常。
 """
 
 
@@ -104,6 +105,8 @@ def conclude_cases(node, state):
         "request_contract": state.get("request_contract"),
         "request_time_utc": state.get("request_time_utc"),
         "coverage": (state.get("diagnosis_handoff") or {}).get("coverage", "unknown"),
+        "unchecked_clusters": list(state.get("cluster_failures") or []),
+        "excluded_by_declaration": list(state.get("expected_exclusions") or []),
     }
     events = list(state.get("thinking_events") or [])
     failed = False
@@ -162,6 +165,11 @@ def conclude_cases(node, state):
             "\n\n未完成检查的集群："
             + "；".join(state["cluster_failures"])
             + "。本次结论不覆盖这些集群。"
+        )
+    if state.get("expected_exclusions"):
+        # Also code: excluded objects are named, so nothing disappears silently.
+        header += (
+            "\n\n已按运维声明排除（不计为异常）：" + "；".join(state["expected_exclusions"]) + "。"
         )
     sections = ["## 诊断总览", header, overview]
     for case in cases:

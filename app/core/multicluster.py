@@ -24,6 +24,7 @@ from aiops_edge.clusters import EdgeConfig, load_config
 logger = logging.getLogger(__name__)
 
 ALL = "*"
+EDGES = "*edge"  # every cluster except the center
 _lock = threading.Lock()
 _config: Optional[EdgeConfig] = None
 
@@ -71,7 +72,7 @@ def router_prompt() -> str:
     """
     cfg = config()
     lines = [
-        f"- {_label(c)}{'：中心集群' if c.name == cfg.center else ''}"
+        f"- {_label(c)}：{'中心集群' if c.name == cfg.center else '边缘集群（子集群）'}"
         for c in cfg.clusters.values()
     ]
     return (
@@ -84,12 +85,23 @@ def router_prompt() -> str:
         "clusters 留空；回答只依据集群清单，不判断工作负载健康。\n"
         "- single / multiple / center：需要集群里的实际数据（查询、诊断、执行、修复）。"
         "single=一个集群；multiple=多个集群；center=中心集群。"
-        '问各集群的运行情况（“各个子集群的状态怎么样”“所有集群健康吗”）属于 multiple，clusters 填 ["*"]。\n'
+        "问多个集群的运行情况属于 multiple。范围按用户说的角色填写："
+        '只说边缘集群 / 子集群（“各个子集群的状态怎么样”“所有边缘集群有什么异常”）填 ["*edge"]，不含中心集群；'
+        '说全部集群（“所有集群健康吗”“每个集群都看看”）填 ["*"]，包含中心集群。\n'
         "- unspecified：需要集群数据，但问题和会话都没说明是哪个集群，例如开局就问“有哪些 Pod 异常”。"
         "此时由系统反问，不要猜一个集群或默认全部集群。\n"
-        '- clusters：填写用户说的集群名或别名（原样）；全部集群填 ["*"]；center 可留空。\n'
+        '- clusters：填写用户说的集群名或别名（原样）；全部集群填 ["*"]；全部边缘集群填 ["*edge"]；center 可留空。\n'
         "- 结合会话历史理解指代：上文已明确集群时，追问（“它”“那个集群”“再看看日志”）沿用上文 request_contract.clusters；"
         "用户换了集群就按新的填写。\n"
+    )
+
+
+def virtual_node_note() -> str:
+    """Nodes named after configured clusters are xnet virtual nodes, not machines."""
+    names = "、".join(config().clusters)
+    return (
+        f"Node {names} 是 xnet 为接入的集群虚拟出的节点，只表示该集群已连接；"
+        "它们不是真实计算节点，不按承载工作负载的节点评估资源、压力或健康。"
     )
 
 
@@ -116,6 +128,9 @@ def resolve_contract(
         names = names or [cfg.center or ""]
     if ALL in names:
         resolved = list(cfg.clusters)
+    elif EDGES in names:
+        center = cfg.resolve(cfg.center) if cfg.center else None
+        resolved = [n for n in cfg.clusters if center is None or n != center.name]
     else:
         resolved, unknown = [], []
         for name in names:

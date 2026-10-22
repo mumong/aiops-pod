@@ -26,6 +26,7 @@ class WorkflowState(TypedDict, total=False):
 
     # multi-cluster deep diagnosis: clusters that could not be checked (stated in the report by code)
     cluster_failures: List[str]
+    expected_exclusions: List[str]
 
     # ========== 输入 ==========
     question: str

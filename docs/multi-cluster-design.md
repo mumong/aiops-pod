@@ -156,12 +156,35 @@ TLS：xnet CA 签发的客户端证书（mTLS，从 xnet 复制来的副本）
 
 需审批的命令（如 Pod 内 `rm`）：审批 ID 随任务交给 runner，runner 看到 ID 才允许执行；ID 的真实性由请求签名保证，只有中心能发出请求。
 
+### 0.6a 运维声明的预期状态
+
+有些平台按设计就会出现"看起来异常"的对象。例如 xnet-management 做主备选举：同一时间只有 1 个副本 Ready，其余副本是 `0/1 Running`。模型无法自己知道这一点，因此由运维在集群配置里声明：
+
+```yaml
+expected_states:
+  - cluster: center
+    namespace: xnet
+    workload: Deployment/xnet-management
+    reason: 主备选举，同一时间只有 1 个副本 Ready
+    healthy_when: {ready_replicas_min: 1}
+```
+
+定位结束后，代码（`app/core/workflow/expected_states.py`）用实时数据逐项核对。必须同时满足以下条件，目标才会标为 `excluded`：
+
+1. Pod 属于声明的工作负载（ReplicaSet → Deployment）；
+2. Pod 处于 Running，且所有容器都在运行，只是未 Ready；
+3. 工作负载满足 `healthy_when`。
+
+任何一条不满足，或者无法核实，都照常诊断。被排除的对象由代码写进报告的"已按运维声明排除"一行，不会悄悄消失。
+
+xnet 虚拟节点（Node 名等于配置中的集群名）的说明，也会由代码写进定位和取证节点的材料：它们只表示集群已连接，不是真实计算节点。
+
 ### 0.7 一个问题从进来到回答
 
 1. **路由**（`request_router.py` + `multicluster.router_prompt`）：模型按意图给出 `cluster_mode`：
    - `none`：不需要集群数据；
    - `inventory`：问集群清单；
-   - `single` / `multiple` / `center`：需要集群数据；
+   - `single` / `multiple` / `center`：需要集群数据。clusters 填 `["*"]` 表示全部集群（含中心），填 `["*edge"]` 表示全部边缘集群（不含中心）；
    - `unspecified`：需要集群数据但没说明是哪个集群。
 
    代码只做三件事：范围不明确时反问，集群名不存在时列出可用集群，修复只针对一个集群。
