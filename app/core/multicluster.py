@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -64,7 +63,12 @@ def scope_question() -> str:
 
 
 def router_prompt() -> str:
-    """Addendum to REQUEST_ROUTER_PROMPT; only used in multi-cluster deployments."""
+    """Addendum to REQUEST_ROUTER_PROMPT; only used in multi-cluster deployments.
+
+    The model decides the scope from the user's intent (Boss 2026-10-22: understand
+    intent, do not gate on wording); code only resolves names and asks when the
+    scope is genuinely unspecified.
+    """
     cfg = config()
     lines = [
         f"- {_label(c)}{'：中心集群' if c.name == cfg.center else ''}"
@@ -73,45 +77,20 @@ def router_prompt() -> str:
     return (
         "\n\n# 集群范围（多集群部署）\n"
         "可用集群：\n" + "\n".join(lines) + "\n"
-        "- cluster_mode：single=一个集群；multiple=多个集群；center=中心集群；"
-        "inventory=只问集群清单与连接（有哪些集群、集群列表、是否接入/在线、有哪些数据源），clusters 留空，"
-        "回答只根据集群清单，不判断工作负载健康；"
-        '问各集群运行情况（“状态怎么样”“健康吗”“有没有问题”）不是 inventory，按 multiple 填 ["*"]；'
-        "unspecified=问题和会话都没有说明范围。\n"
-        '- clusters：填写用户说的集群名或别名（原样）；“全部/所有集群”填 ["*"]；center 可留空。\n'
+        "先理解用户意图需不需要某个集群的实际数据，再决定 cluster_mode：\n"
+        "- none：不需要任何集群的数据，例如概念解释、操作方法、通用知识"
+        "（“什么是 CrashLoopBackOff”“探针怎么配置”）。clusters 留空。\n"
+        "- inventory：问的是集群本身的清单与接入情况，例如“我现在有哪些集群”“接入了哪些环境”“哪些集群在线”。"
+        "clusters 留空；回答只依据集群清单，不判断工作负载健康。\n"
+        "- single / multiple / center：需要集群里的实际数据（查询、诊断、执行、修复）。"
+        "single=一个集群；multiple=多个集群；center=中心集群。"
+        '问各集群的运行情况（“各个子集群的状态怎么样”“所有集群健康吗”）属于 multiple，clusters 填 ["*"]。\n'
+        "- unspecified：需要集群数据，但问题和会话都没说明是哪个集群，例如开局就问“有哪些 Pod 异常”。"
+        "此时由系统反问，不要猜一个集群或默认全部集群。\n"
+        '- clusters：填写用户说的集群名或别名（原样）；全部集群填 ["*"]；center 可留空。\n'
         "- 结合会话历史理解指代：上文已明确集群时，追问（“它”“那个集群”“再看看日志”）沿用上文 request_contract.clusters；"
         "用户换了集群就按新的填写。\n"
-        "- 不要猜默认集群：问题和会话都没有说明范围时，cluster_mode=unspecified。\n"
     )
-
-
-_ALL_CLUSTERS = re.compile(
-    r"(全部|所有|每个|每一个|各个|各)\s*(的)?\s*(边缘|子|成员)?\s*(集群|cluster)|all\s+clusters",
-    re.I,
-)
-_CENTER_WORDS = ("中心", "center", "local")
-
-
-def _grounded(names: List[str], mode: str, evidence: Optional[str]) -> bool:
-    """Every cluster in the scope must come from the user's words or the conversation."""
-    if evidence is None:
-        return True
-    text = evidence.lower()
-    cfg = config()
-    if mode == "center" and not names:
-        center = cfg.resolve(cfg.center) if cfg.center else None
-        words = list(_CENTER_WORDS) + ([center.name, *center.aliases] if center else [])
-        return any(w.lower() in text for w in words)
-    for name in names:
-        if name == ALL:
-            if not _ALL_CLUSTERS.search(evidence):
-                return False
-            continue
-        cluster = cfg.resolve(name)
-        words = [name] + ([cluster.name, *cluster.aliases] if cluster else [])
-        if not any(w.lower() in text for w in words if w):
-            return False
-    return True
 
 
 def resolve_contract(
@@ -119,23 +98,19 @@ def resolve_contract(
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """Canonical clusters for a routed contract, or the clarification to ask instead.
 
-    ``evidence`` is the question plus the conversation the router saw; a scope
-    the model named but the user never did is treated as unspecified.
+    Engineering guarantees only: an unspecified scope is asked about, unknown
+    cluster names are listed, repair stays on one cluster. Whether a question
+    needs cluster data at all is the model's reading of the intent.
     """
+    del evidence  # kept for callers; scope is no longer gated on wording
     cfg = config()
     mode = contract.get("cluster_mode") or "unspecified"
     names = [str(n).strip() for n in contract.get("clusters") or [] if str(n).strip()]
+    if mode == "none":
+        return dict(contract, clusters=[], cluster_mode="none"), None
     if mode == "inventory":
-        # About the cluster set itself: every registered cluster, no scope question.
-        # Guard against a mislabelled resource question silently widening the scope.
-        if evidence is not None and not re.search(r"集群|cluster", evidence, re.I):
-            return contract, scope_question()
         return dict(contract, clusters=list(cfg.clusters), cluster_mode="inventory"), None
-    if (
-        mode == "unspecified"
-        or (not names and mode != "center")
-        or not _grounded(names, mode, evidence)
-    ):
+    if mode == "unspecified" or (not names and mode != "center"):
         return contract, scope_question()
     if mode == "center":
         names = names or [cfg.center or ""]

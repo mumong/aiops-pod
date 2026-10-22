@@ -354,21 +354,6 @@ def route_q(question, contract_values, history=None):
     return node.execute(state)
 
 
-def test_model_cannot_invent_all_clusters(multi):
-    out = route_q("有哪些 Pod 异常", {**BASE, "cluster_mode": "multiple", "clusters": ["*"]})
-    assert out["request_route"] == "clarify" and "全部集群" in out["conclusion"]
-
-
-def test_model_cannot_invent_a_cluster(multi):
-    out = route_q("有哪些 Pod 异常", {**BASE, "cluster_mode": "single", "clusters": ["edge-88"]})
-    assert out["request_route"] == "clarify"
-
-
-def test_model_cannot_invent_the_center(multi):
-    out = route_q("有哪些 Pod 异常", {**BASE, "cluster_mode": "center", "clusters": []})
-    assert out["request_route"] == "clarify"
-
-
 @pytest.mark.parametrize(
     "question,mode,names,expected",
     [
@@ -383,11 +368,6 @@ def test_model_cannot_invent_the_center(multi):
 def test_grounded_scopes_are_accepted(multi, question, mode, names, expected):
     out = route_q(question, {**BASE, "cluster_mode": mode, "clusters": names})
     assert out["request_route"] == "focused" and out["request_contract"]["clusters"] == expected
-
-
-def test_all_pods_is_not_all_clusters(multi):
-    out = route_q("所有 Pod 都正常吗", {**BASE, "cluster_mode": "multiple", "clusters": ["*"]})
-    assert out["request_route"] == "clarify"
 
 
 def test_follow_up_is_grounded_by_history(multi):
@@ -447,18 +427,6 @@ def test_inventory_with_status_follow_up_keeps_all_clusters(multi):
     assert out["request_route"] == "focused" and len(out["request_contract"]["clusters"]) == 3
 
 
-def test_inventory_needs_the_word_cluster(multi):
-    # A Pod question mislabelled as inventory must not silently widen the scope.
-    out = route_q("有哪些 Pod 异常", {**BASE, "cluster_mode": "inventory", "clusters": []})
-    assert out["request_route"] == "clarify"
-
-
-def test_clarification_carries_no_placeholder_labels(multi):
-    out = route_q("有哪些 Pod 异常", {**BASE, "cluster_mode": "multiple", "clusters": ["*"]})
-    assert out["request_route"] == "clarify"
-    assert out["request_contract"]["cluster_labels"] == []
-
-
 def test_router_prompt_describes_inventory(multi):
     assert "inventory" in multicluster.router_prompt()
 
@@ -469,14 +437,51 @@ def test_quick_query_exposes_list_clusters():
     assert "list_clusters" in QueryCollectNode.READ_TOOLS
 
 
-@pytest.mark.parametrize(
-    "question", ["各个子集群的状态怎么样？", "所有子集群健康吗", "每个边缘集群有没有问题"]
-)
-def test_health_of_all_clusters_is_grounded_as_all(multi, question):
-    out = route_q(question, {**BASE, "cluster_mode": "multiple", "clusters": ["*"]})
+# --- intent-based scope (Boss 2026-10-22: understand intent, do not gate on wording) ----
+
+
+def test_questions_needing_no_cluster_are_answered_without_asking(multi):
+    out = route_q(
+        "什么是 CrashLoopBackOff？",
+        {
+            "route": "focused",
+            "task": "explain",
+            "scope": "unspecified",
+            "cluster_mode": "none",
+            "clusters": [],
+        },
+    )
+    assert out["request_route"] == "focused"
+    assert (
+        out["request_contract"]["clusters"] == []
+        and out["request_contract"]["cluster_mode"] == "none"
+    )
+
+
+def test_inventory_is_trusted_from_intent_without_keywords(multi):
+    out = route_q("接入了哪些环境？", {**BASE, "cluster_mode": "inventory", "clusters": []})
     assert out["request_route"] == "focused" and len(out["request_contract"]["clusters"]) == 3
 
 
-def test_inventory_prompt_excludes_health_questions(multi):
+def test_all_clusters_is_trusted_from_intent(multi):
+    out = route_q("整体看一下情况", {**BASE, "cluster_mode": "multiple", "clusters": ["*"]})
+    assert out["request_route"] == "focused" and len(out["request_contract"]["clusters"]) == 3
+
+
+def test_unspecified_scope_still_asks(multi):
+    out = route_q("有哪些 Pod 异常", {**BASE, "cluster_mode": "unspecified", "clusters": []})
+    assert out["request_route"] == "clarify" and out["request_contract"]["cluster_labels"] == []
+
+
+def test_router_prompt_teaches_the_intents(multi):
     prompt = multicluster.router_prompt()
-    assert "不判断工作负载健康" in prompt and "状态怎么样" in prompt
+    for text in (
+        "none",
+        "inventory",
+        "unspecified",
+        "什么是 CrashLoopBackOff",
+        "我现在有哪些集群",
+        "各个子集群的状态怎么样",
+        "有哪些 Pod 异常",
+    ):
+        assert text in prompt, text

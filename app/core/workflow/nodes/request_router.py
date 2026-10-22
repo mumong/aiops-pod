@@ -50,12 +50,14 @@ class RequestContract(BaseModel):
 class MultiClusterRequestContract(RequestContract):
     """Router contract in multi-cluster deployments only (specs/008-multi-cluster)."""
 
-    cluster_mode: Literal["single", "multiple", "center", "inventory", "unspecified"] = Field(
-        default="unspecified",
-        description=(
-            "一个集群 / 多个集群 / 中心集群 / inventory=询问集群本身（有哪些集群、在线状态）；"
-            "问题和会话都没说明时为 unspecified"
-        ),
+    cluster_mode: Literal["single", "multiple", "center", "inventory", "none", "unspecified"] = (
+        Field(
+            default="unspecified",
+            description=(
+                "none=不需要集群数据（概念、方法）/ inventory=集群清单 / single·multiple·center=需要集群数据；"
+                "需要集群数据但没说明是哪个时为 unspecified"
+            ),
+        )
     )
     clusters: list[str] = Field(
         default_factory=list,
