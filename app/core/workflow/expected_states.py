@@ -113,7 +113,7 @@ def apply_expected_states(
         from app.core.remediation.pod_executor import run_argv
 
         def run(argv: List[str]) -> str:
-            return run_argv(argv, cluster=cluster)
+            return run_argv(["kubectl", *argv], cluster=cluster)
 
     out = copy.deepcopy(handoff)
     excluded: List[str] = []

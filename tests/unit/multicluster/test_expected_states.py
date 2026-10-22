@@ -136,3 +136,19 @@ def test_declarations_are_read_from_the_clusters_config(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("AIOPS_CLUSTERS_CONFIG", str(path))
     assert declarations() == [RULE]
+
+
+def test_default_runner_calls_kubectl_on_the_target_cluster(monkeypatch):
+    """Live 13.0.14: run_argv takes the full argv; without "kubectl" nothing was verified."""
+    from app.core.remediation import pod_executor
+
+    seen = []
+    fake = cluster()
+
+    def run_argv(argv, cluster=None):
+        seen.append((argv[0], cluster))
+        return fake(argv[1:])
+
+    monkeypatch.setattr(pod_executor, "run_argv", run_argv)
+    out, excluded = apply_expected_states(handoff(target("m6h2f")), STATE, items=[RULE])
+    assert len(excluded) == 1 and set(seen) == {("kubectl", CENTER)}
