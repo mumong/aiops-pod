@@ -687,9 +687,14 @@ def phase_p5() -> None:
 
 
 def phase_intent() -> None:
-    """Scope from intent against the reviewed oracle (intent_cases.json)."""
+    """Intent accuracy of the router over intent_cases.json: measured, not a gate.
+
+    Boss 2026-10-22: scope comes from the LLM's reading of intent; ambiguous
+    phrasing may be read differently, so results are reported as a rate.
+    """
     spec = json.loads((Path(__file__).resolve().parent / "intent_cases.json").read_text())
     names = {"center": CENTER, "edge-88": EDGE88, "edge-89": EDGE89}
+    hits = 0
     for case in spec["cases"]:
         r = Session().ask(case["question"])
         record(r)
@@ -699,13 +704,13 @@ def phase_intent() -> None:
             ok = (r["route"] == "clarify") if want == "clarify" else mode == want
         else:
             ok = r["contract"].get("clusters") == [names[w] for w in want]
-        mc.check(
-            f"I-{case['id']}",
-            ok,
-            f"run={r['run_id']} route={r['route']} mode={mode} labels={r['contract'].get('cluster_labels')}",
+        hits += ok
+        print(
+            f"{'HIT ' if ok else 'MISS'} I-{case['id']} run={r['run_id']} route={r['route']} "
+            f"mode={mode} labels={r['contract'].get('cluster_labels')} | {case['question']}",
+            flush=True,
         )
-    if not spec.get("confirmed_by"):
-        print("NOTE intent_cases.json is not confirmed yet; results are provisional")
+    print(f"INTENT accuracy {hits}/{len(spec['cases'])} (measurement, not a gate)")
 
 
 def main() -> None:
