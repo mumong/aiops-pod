@@ -71,6 +71,8 @@ class Session:
         result = summarize(question, events, started, before)
         final = next((d for n, d in events if n == "final"), {})
         result["repair_record"] = final.get("repair_record")
+        result["diagnosis_cases"] = final.get("diagnosis_cases") or []
+        result["_events"] = events  # stream checks only; not written to results
         return result
 
 
@@ -101,9 +103,24 @@ def _runner_log_args(edge: str) -> list:
     ]
 
 
+def _aiops_log_args() -> list:
+    target = [] if LEGACY["base"] else ["--kubeconfig", mc.kubeconfig("center")]
+    return [*target, "-n", "aiops", "logs", "deploy/aiops-copilot", "-c", "aiops-copilot"]
+
+
+RUN_START = re.compile(r"工作流开始: run_id=(\w+)")
+
+
+def concurrent_runs(own: str, before: dict) -> list:
+    """Other runs that started during this question. MCP logs carry no run id, so
+    their tool calls cannot be told apart from ours."""
+    new = [line for line in _logs(_aiops_log_args()) if line not in before["aiops"]]
+    return sorted({m.group(1) for line in new for m in [RUN_START.search(line)] if m} - {own})
+
+
 def log_snapshot() -> dict:
     """Log lines before a question; new lines afterwards belong to it (immune to node clock skew)."""
-    snap = {"mcp": set(_logs(_mcp_log_args()))}
+    snap = {"mcp": set(_logs(_mcp_log_args())), "aiops": set(_logs(_aiops_log_args()))}
     if not LEGACY["base"]:
         for edge in ("edge-88", "edge-89"):
             snap[edge] = set(_logs(_runner_log_args(edge)))
@@ -130,6 +147,7 @@ def summarize(question: str, events: list, started: float, before: dict) -> dict
         "answer": answer,
         "tool_calls": calls,
         "runner_hits": {e: runner_hits(e, before) for e in ("edge-88", "edge-89")},
+        "concurrent_runs": concurrent_runs(run_id, before),
         "seconds": round(time.time() - started),
     }
 
@@ -157,8 +175,16 @@ def runner_hits(edge: str, before: dict) -> int:
 def record(result: dict) -> None:
     path = Path(__file__).resolve().parent / "results"
     path.mkdir(exist_ok=True)
+    kept = {k: v for k, v in result.items() if not k.startswith("_")}
     with open(path / "e2e.jsonl", "a") as fh:
-        fh.write(json.dumps(result, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(kept, ensure_ascii=False) + "\n")
+
+
+def scoped_check(case: str, r: dict, ok: bool, evidence: str = "") -> bool:
+    """Checks on tool-call clusters / runner hits, attributed by log window."""
+    others = r.get("concurrent_runs") or []
+    note = f" concurrent={others}" if others else ""
+    return mc.check(case, ok, evidence + note, unsure=bool(others))
 
 
 def clusters_of(result: dict) -> set:
@@ -179,8 +205,9 @@ def phase_p2() -> None:
     )
     r = s.ask("edge-89")
     record(r)
-    mc.check(
+    scoped_check(
         "A8b-answer-scoped",
+        r,
         r["contract"].get("clusters") == [EDGE89]
         and r["tool_calls"]
         and clusters_of(r) == {EDGE89}
@@ -189,8 +216,9 @@ def phase_p2() -> None:
     )
     r = s.ask("那它的事件呢")
     record(r)
-    mc.check(
+    scoped_check(
         "A8b-follow-up-keeps-cluster",
+        r,
         r["route"] != "clarify"
         and r["contract"].get("clusters") == [EDGE89]
         and clusters_of(r) <= {EDGE89},
@@ -204,8 +232,9 @@ def phase_p2() -> None:
     ):
         r = Session().ask(question)
         record(r)
-        mc.check(
+        scoped_check(
             f"A8c-{mode}-{len(expected)}",
+            r,
             r["contract"].get("clusters") == expected and clusters_of(r) <= set(expected),
             f"run={r['run_id']} got={r['contract'].get('clusters')}",
         )
@@ -224,8 +253,9 @@ def phase_p2() -> None:
     # A6: same namespace/name on the other cluster must not leak in.
     r = Session().ask("edge-88 上 aiops-case-06 命名空间的 Pod 为什么异常")
     record(r)
-    mc.check(
+    scoped_check(
         "A6-no-cross-cluster",
+        r,
         clusters_of(r) == {EDGE88} and r["runner_hits"]["edge-89"] == 0,
         f"run={r['run_id']} clusters={clusters_of(r)} hits={r['runner_hits']} {r['seconds']}s",
     )
@@ -234,8 +264,9 @@ def phase_p2() -> None:
     r = Session().ask("深度诊断 edge-88 上 aiops-case-08 命名空间的 Pod")
     record(r)
     text = r["answer"]
-    mc.check(
+    scoped_check(
         "P2-1-deep-diagnosis-scoped",
+        r,
         r["route"] == "full_diagnosis"
         and clusters_of(r) == {EDGE88}
         and r["runner_hits"]["edge-89"] == 0,
@@ -346,8 +377,9 @@ def phase_p3() -> None:
     # A9: a harmless command inside an edge Pod.
     r = Session().ask(f"在 edge-88 的 aiops-case-09 命名空间的 {driver} Pod 里执行 ls /")
     record(r)
-    mc.check(
+    scoped_check(
         "A9-exec-in-edge-pod",
+        r,
         r["runner_hits"]["edge-88"] > 0
         and r["runner_hits"]["edge-89"] == 0
         and ("bin" in r["answer"] or "etc" in r["answer"]),
@@ -463,8 +495,9 @@ def phase_p4() -> None:
         for ns in ("aiops-case-06", "aiops-case-08", "aiops-case-02", "aiops-case-10")
         if ns in text
     ]
-    mc.check(
+    scoped_check(
         "A13-both-clusters-touched",
+        r,
         r["route"] == "full_diagnosis"
         and clusters_of(r) == {EDGE88, EDGE89}
         and r["runner_hits"]["edge-88"] > 0
@@ -528,13 +561,167 @@ def phase_p4() -> None:
     mc.check("P4-2-noise-not-a-fault", not unexplained, " | ".join(unexplained)[:300])
 
 
+def stream_violations(events: list) -> list:
+    """Rules the SSE stream must keep for the UI (run e43e8298 broke all of them).
+
+    - per-cluster location events (``cluster_lane``) belong to the location node;
+    - every cluster lane reaches a terminal status before location completes;
+    - the evidence stage starts only after location completed;
+    - the location result is the real handoff, not the empty legacy summary.
+    """
+    out, order = [], []
+    lane_end: dict = {}
+    for index, (name, data) in enumerate(events):
+        kind = data.get("type") or name
+        if kind in ("node_start", "node_complete"):
+            order.append((index, kind, data.get("node")))
+        lane = data.get("cluster_lane")
+        if lane:
+            if data.get("node") != "layer":
+                out.append(f"lane {lane} event on node {data.get('node')}")
+            if data.get("thinking_type") == "runtime_status" and data.get("status") in (
+                "complete",
+                "failed",
+            ):
+                lane_end[lane] = index
+        if kind == "node_complete" and data.get("node") == "layer":
+            if str(data.get("handoff_summary") or "").startswith("layer=None"):
+                out.append("location result is the empty legacy summary")
+    lanes = {d.get("cluster_lane") for _, d in events if d.get("cluster_lane")}
+    if lanes - set(lane_end):
+        out.append(f"lanes without a terminal status: {sorted(lanes - set(lane_end))}")
+    layer_done = next((i for i, k, n in order if k == "node_complete" and n == "layer"), None)
+    if lanes and layer_done is not None and lane_end and max(lane_end.values()) > layer_done:
+        out.append("location completed before its cluster lanes ended")
+    evidence_start = next(
+        (i for i, k, n in order if k == "node_start" and n in ("parallel_evidence", "evidence")),
+        None,
+    )
+    if evidence_start is not None and (layer_done is None or evidence_start < layer_done):
+        out.append("evidence started before location completed")
+    return out
+
+
+FRONTEND = Path(__file__).resolve().parents[4] / "frountind"
+
+
+def frontend_view(events: list) -> dict:
+    """What the chat UI holds after this stream (frountind scripts/replay-sse.mjs)."""
+    import tempfile
+
+    script = FRONTEND / "scripts" / "replay-sse.mjs"
+    if not script.is_file():
+        return {"skipped": f"no {script}"}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(events, fh, ensure_ascii=False)
+    out = subprocess.run(
+        ["node", str(script), fh.name], capture_output=True, text=True, timeout=120, check=False
+    )
+    Path(fh.name).unlink(missing_ok=True)
+    try:
+        return json.loads(out.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return {"error": (out.stderr or out.stdout)[-300:]}
+
+
+def case_entities(result: dict) -> list:
+    """(cluster label, entity) of every diagnosed object in the final event."""
+    return [
+        ((case.get("target") or {}).get("cluster_label") or "", entity)
+        for case in result["diagnosis_cases"]
+        for entity in (case.get("target") or {}).get("entities") or []
+    ]
+
+
+def phase_p5() -> None:
+    """Seams and precision (after run e43e8298): stream -> UI, scope, declared states."""
+    # P5-1: the user's own question; edges only, and the stream drives the UI correctly.
+    r = Session().ask("我的所有边缘测集群有什么pod异常？")
+    record(r)
+    scoped_check(
+        "P5-1-edges-only",
+        r,
+        r["contract"].get("clusters") == [EDGE88, EDGE89] and clusters_of(r) <= {EDGE88, EDGE89},
+        f"run={r['run_id']} scope={r['contract'].get('cluster_labels')} tools={clusters_of(r)}",
+    )
+    violations = stream_violations(r["_events"])
+    mc.check("P5-1-stream-rules", not violations, "; ".join(violations)[:300])
+    view = frontend_view(r["_events"])
+    layer = next((n for n in view.get("nodes", []) if n["node"] == "layer"), {})
+    evidence = next((n for n in view.get("nodes", []) if n["node"] == "parallel_evidence"), {})
+    mc.check(
+        "P5-1-ui-cluster-cards",
+        sorted(lane["label"] for lane in layer.get("lanes", [])) == ["edge-88", "edge-89"]
+        and all(lane["status"] != "running" and lane["reasoning"] > 0 for lane in layer["lanes"])
+        and (layer.get("duration") or 0) > 5,
+        json.dumps(view if "nodes" not in view else layer, ensure_ascii=False)[:300],
+    )
+    mc.check(
+        "P5-1-ui-groups-name-cluster",
+        not evidence or all(g["cluster"] in ("edge-88", "edge-89") for g in evidence["groups"]),
+        json.dumps(evidence.get("groups", []), ensure_ascii=False)[:300],
+    )
+
+    # P5-2: declared expected states are not anomalies (precision, not recall).
+    r = Session().ask("中心集群有什么 Pod 异常？")
+    record(r)
+    flagged = [
+        f"{c}:{e.get('namespace')}/{e.get('name')}"
+        for c, e in case_entities(r)
+        if any(
+            e.get("namespace") == ns and str(e.get("name", "")).startswith(prefix)
+            for ns, prefix in mc.DECLARED_NORMAL
+        )
+    ]
+    mc.check(
+        "P5-2-declared-standbys-excluded",
+        not flagged and "运维声明" in r["answer"],
+        f"run={r['run_id']} flagged={flagged} {r['seconds']}s",
+    )
+    nodes = [
+        f"{c}:{e.get('name')}"
+        for c, e in case_entities(r)
+        if e.get("kind") == "Node" and str(e.get("name", "")) in mc.CLUSTER_NODES
+    ]
+    mc.check("P5-2-virtual-nodes-not-diagnosed", not nodes, str(nodes))
+
+
+def phase_intent() -> None:
+    """Scope from intent against the reviewed oracle (intent_cases.json)."""
+    spec = json.loads((Path(__file__).resolve().parent / "intent_cases.json").read_text())
+    names = {"center": CENTER, "edge-88": EDGE88, "edge-89": EDGE89}
+    for case in spec["cases"]:
+        r = Session().ask(case["question"])
+        record(r)
+        mode = r["contract"].get("cluster_mode")
+        want = case["want"]
+        if want in ("clarify", "none", "inventory"):
+            ok = (r["route"] == "clarify") if want == "clarify" else mode == want
+        else:
+            ok = r["contract"].get("clusters") == [names[w] for w in want]
+        mc.check(
+            f"I-{case['id']}",
+            ok,
+            f"run={r['run_id']} route={r['route']} mode={mode} labels={r['contract'].get('cluster_labels')}",
+        )
+    if not spec.get("confirmed_by"):
+        print("NOTE intent_cases.json is not confirmed yet; results are provisional")
+
+
 def main() -> None:
+    phases = {
+        "p2": phase_p2,
+        "a5": phase_a5,
+        "quality": phase_quality,
+        "p3": phase_p3,
+        "p4": phase_p4,
+        "p5": phase_p5,
+        "intent": phase_intent,
+    }
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phase", choices=["p2", "a5", "quality", "p3", "p4"], required=True)
+    parser.add_argument("--phase", choices=sorted(phases), required=True)
     args = parser.parse_args()
-    {"p2": phase_p2, "a5": phase_a5, "quality": phase_quality, "p3": phase_p3, "p4": phase_p4}[
-        args.phase
-    ]()
+    phases[args.phase]()
     mc.finish()
 
 

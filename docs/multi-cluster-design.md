@@ -1,90 +1,151 @@
-# 多集群与可观测后端适配设计
+# 多集群设计与实现
 
-状态：已实现并在三集群测试环境验收（2026-10-21，AIOps 13.0.5、MCP 8.0.3、runner 1.0.2、前端 0.2.2）。实现与本文的差异见 §15，验收结果见 [验收方案 §7](multi-cluster-acceptance.md#7-结果记录)。
-适用代码：robusta 12.0.69、mcpstander 7.0.52、frontend 0.1.71。
+本文是多集群功能的**当前**设计与实现说明，内容以代码为准。
 
-## 0. 实现后的运行机制（先读这一节）
+- **当前版本**：AIOps 13.0.18、MCP 8.0.5、edge runner 1.0.2、前端 0.2.4。代码在三个仓库的 `008-multi-cluster` 分支，**尚未合并**到主线。
+- **单集群环境**：现有单集群部署（10.2.0.48，AIOps 12.0.69 / MCP 7.0.52）不挂载集群配置，行为与改造前完全相同。
+- **相关文档**：
+  - 开发前的设计稿：`git show 0b03f423:docs/multi-cluster-design.md`；
+  - 开发过程记录：[specs/008-multi-cluster](../specs/008-multi-cluster/spec.md)；
+  - 验收方法与结果：[多集群验收方案](multi-cluster-acceptance.md)。
 
-本节按已实现的代码说明多集群是怎么跑起来的：集群如何登记、数据从哪里取、命令怎么到达边缘、请求在线路上长什么样、修复如何驱动。后面各节是开发前的设计，与实现的差异见 §15。
+## 1. 目标与边界
 
-### 0.1 组件与部署位置
+**目标**
+
+1. 多集群下使用新的可观测数据：VictoriaMetrics K8s Stack 的中心 / 边缘部署，数据集中在中心，按 `cluster` 标签区分。
+2. 兼容现有可观测组件：Prometheus + Elasticsearch + DeepFlow + Tempo 继续可用，不同集群可以用不同后端。
+3. 使用方式基本不变：仍然是"快速查询"和"深度诊断"两条主线，以及诊断之后发起的修复。改动主要在 MCP 适配层。
+
+**硬边界**
+
+| 边界 | 含义 |
+|---|---|
+| 不修改 xnet-cloud，也不要求它做任何适配 | 不改它的代码、配置和数据，不在 xnet 命名空间创建对象，不使用 Vessel。只以调用方身份使用它已有的能力：隧道 `/proxy`、客户端证书、虚拟 Node |
+| 不修改可观测组件的采集逻辑 | 某个集群没有的数据，如实返回"未提供" |
+| 单集群行为不变 | 没有集群配置时，路由 schema、提示词、工具 schema、工具结果和 kubectl 调用与改造前一致 |
+| 运行时不依赖边缘 kubeconfig | 中心到边缘只经过 xnet 隧道和我们的 runner（验收 X3 检查） |
+| 只在容器内执行 | 与单集群相同，不提供宿主机级别的操作 |
+
+**不做的事**：跨集群迁移和调度（xnet 的职责）；交互式终端、`logs -f`、`--watch` 这类长连接操作；在边缘集群执行 helm。
+
+## 2. 总体架构
 
 ```
-中心集群（10.2.5.85）                                       边缘集群（10.2.5.88 / .89）
+中心集群                                                      边缘集群
 ┌──────────────────────────────────────────┐              ┌──────────────────────────────────┐
-│ 前端（30082）                              │              │ xnet-agent（xnet 的，不改）         │
-│ AIOps 后端（aiops 命名空间）                │              │   主动外连中心隧道 wss://…:30909    │
-│   路由 / 诊断 / 修复执行器                  │              │        ▲                          │
-│   挂载：集群配置、xnet 证书副本、签名密钥     │              │        │ 把中心的 HTTP 请求转成     │
-│ MCP（mcp 命名空间）                        │   xnet 隧道   │        │ 边缘集群内的 HTTP 调用     │
-│   可观测工具 → 本集群 vmselect / vlsingle   │◀────────────▶│        ▼                          │
-│   K8s 工具 → kubectl 垫片                  │  （边缘外连）  │ aiops-edge-runner（我们的，aiops）  │
-│   挂载：同上                               │              │   校验签名 → 规则检查 → kubectl     │
-│ xnet-management（xnet 的，不改）            │              │   reader / writer 两个 SA          │
+│ 前端                                       │              │ xnet-agent（xnet 的，不改）         │
+│ AIOps 后端：路由 / 诊断 / 修复执行器         │              │   主动外连中心隧道（wss）            │
+│ MCP：可观测工具 → 中心 vmselect / vlsingle  │   xnet 隧道   │        │ 把中心的 HTTP 请求转成     │
+│      K8s 工具 → kubectl 垫片               │◀────────────▶│        ▼ 边缘集群内的 HTTP 调用     │
+│ 两者都挂载：集群配置、xnet 证书副本、签名密钥 │  （边缘外连）  │ aiops-edge-runner（我们的）         │
+│ xnet-management（不改）                    │              │   校验签名 → 规则检查 → kubectl     │
 │ VictoriaMetrics / VictoriaLogs（不改）     │              │ vmagent / vlagent（不改，推到中心） │
 └──────────────────────────────────────────┘              └──────────────────────────────────┘
 ```
 
-共享代码 `aiops_edge/`（只依赖标准库，robusta 是唯一源，mcpstander 同步一份）：
+两条原则：
+
+- **数据走中心，操作走隧道。** 指标和事件已经在中心，直接查询；只有 K8s 实时查询、Pod 内执行和修复动作经过隧道。
+- **后端差异和集群差异收在 MCP 里。** AIOps 看到的仍是同样的工具名、参数和结果格式，只多一个可选的 `cluster` 参数。
+
+共享代码 `aiops_edge/` 只依赖标准库。robusta 是唯一源，mcpstander 同步一份（不含 `runner/`），一致性由 mcpstander 的 `test_aiops_edge_sync` 保证。
 
 | 模块 | 作用 |
 |---|---|
 | `clusters.py` | 读取集群配置；别名解析；集群名 ↔ xnet UUID 换算 |
-| `tunnel.py` | 调用 xnet `/proxy` 的客户端：mTLS、签名、超时、错误分类、每集群并发上限 |
+| `tunnel.py` | 调用 xnet `/proxy`：mTLS、签名、超时、错误分类、每集群并发上限 |
 | `signing.py` | 中心与 runner 之间的 HMAC 签名与防重放 |
-| `shim.py`、`kubectl` | kubectl 垫片：本地集群直接执行，远端集群转发给 runner |
-| `kubectl_args.py` | 哪些 kubectl 能远端执行、属于 read / exec / write 哪种模式 |
+| `shim.py`、`kubectl` | kubectl 垫片：本集群直接执行，远端集群转发给 runner |
+| `kubectl_args.py` | 哪些 kubectl 能远端执行，属于 read / exec / write 哪种模式 |
 | `streams.py` | 输出的 gzip+base64 编码 |
 | `jobs_client.py` | 修复用的异步任务客户端：提交、轮询、结果未知判定 |
 | `runner/` | 边缘 runner：HTTP 服务、命令闸门（复用中心的 `policy.py`）、任务存储 |
 
-### 0.2 中心和边缘怎么"注册"
+## 3. 集群登记与配置
 
-**集群登记是静态配置**：`deploy-edge/clusters.mc.yaml` 以 ConfigMap `aiops-clusters` 挂载到 MCP 和 AIOps（环境变量 `AIOPS_CLUSTERS_CONFIG`）。没有这个文件就是单集群模式，行为与改造前完全相同。
+### 3.1 配置文件
+
+集群登记是**静态配置**：`deploy-edge/clusters.mc.yaml` 以 ConfigMap `aiops-clusters` 挂载到 MCP 和 AIOps，路径由环境变量 `AIOPS_CLUSTERS_CONFIG` 指定。没有这个文件时就是单集群模式。
 
 ```yaml
 clusters:
-  center: vc-xnet-management            # "中心集群"指谁
+  default: null                    # 多集群不设默认集群：没说范围就反问
+  center: vc-xnet-management       # "中心集群"指谁；其余集群都是边缘集群
   items:
-    - name: vc-942nkkozc8o5fyb9q3bznb1ws # = xnet 虚拟 Node 名 = 可观测数据的 cluster 标签
-      aliases: [edge-88]                # 我们自己维护的别名，不写入 xnet
-      access: xnet                      # local=本集群直连；xnet=经隧道
-      observability: victoria           # 用哪套可观测后端（见 observability_profiles）
+    - name: vc-942nkkozc8o5fyb9q3bznb1ws   # = xnet 虚拟 Node 名 = 可观测数据的 cluster 标签
+      aliases: [edge-88]                    # 我们自己维护的别名，不写入 xnet
+      access: xnet                          # local = 本集群直连；xnet = 经隧道
+      observability: victoria               # 使用哪套可观测后端（见 observability_profiles）
   access:
-    xnet: {proxy_url, runner_url, cert_file, key_file, ca_file, signing_key_file, ...}
+    xnet:
+      proxy_url: https://xnet-management.xnet.svc:9090/proxy
+      runner_url: http://aiops-edge-runner.aiops.svc:8090
+      cert_file / key_file / ca_file: /etc/aiops-xnet/…     # make sync-xnet-cert 复制来的证书
+      signing_key_file: /etc/aiops-edge-key/key
+      per_cluster_concurrency: 4
+      call_timeout_seconds: 15
+
 observability_profiles:
-  victoria: {metrics: vmselect + cluster_label, logs: vlsingle 事件, traces: none}
+  victoria:
+    metrics: {type: victoriametrics, url: …vmselect…, cluster_label: cluster}
+    logs:    {type: victorialogs_events, url: …vlsingle…, cluster_field: cluster}
+    traces:  {type: none}
+
+expected_states: [...]             # 运维声明的预期状态，见 §11
 ```
 
-- 集群名直接使用 xnet 虚拟 Node 名，因为它同时是可观测数据里的 `cluster` 标签；隧道需要的 UUID 由 Node 名反解（`vc-` + UUID 的 base36），不需要额外配置。
-- **设计中的"自动发现 xnet 虚拟 Node"没有实现**：新增集群需要在这个文件里加一条并重新部署。xnet 虚拟 Node 目前只用于判断集群是否在线。
+- 集群名直接使用 xnet 虚拟 Node 名，因为它同时是可观测数据里的 `cluster` 标签。隧道需要的 UUID 由 Node 名反解（`vc-` + UUID 的 base36），不需要额外配置。
+- 集群角色：`center` 是中心集群，其余都是边缘集群（子集群）。路由提示词按这个角色列出集群（§7）。
+- 没有配置 `legacy` 档案时，MCP 仍读取原有的环境变量（`PROMETHEUS_URL`、`AIOPS_ES_*` 等），所以现有部署不用改配置。
+- **没有实现自动发现**：开发前的设计稿里有"读取 xnet 虚拟 Node 自动登记"（`discovery: xnet_nodes`），实际没有做。新增集群需要在配置里加一条，然后重新部署；xnet 虚拟 Node 只用来判断集群是否在线。
 
-接入一个边缘集群的步骤（全部是我们自己的部署动作，不需要 xnet 做任何事）：
+### 3.2 接入一个边缘集群
+
+以下全部是我们自己的部署动作，不需要 xnet 做任何事：
 
 | 步骤 | 命令 | 作用 |
 |---|---|---|
-| 1 | （xnet 侧已完成 join） | 边缘的 xnet-agent 已经外连中心隧道 |
-| 2 | `make mc-keygen` | 生成中心与 runner 共用的签名密钥（只在本机运维目录） |
-| 3 | `make edge-deploy EDGE_KUBECONFIG=…` | 在边缘本地部署 runner：两个 SA 与 RBAC、命令规则 ConfigMap（从中心 `config.yaml` 的 `workflow.remediation` 渲染）、签名密钥 Secret、Deployment 与 ClusterIP Service |
+| 1 | （xnet 侧完成 join） | 边缘的 xnet-agent 已经外连中心隧道 |
+| 2 | `make mc-keygen` | 生成中心与 runner 共用的签名密钥（只保存在本机运维目录） |
+| 3 | `make edge-deploy EDGE_KUBECONFIG=…` | 在边缘本地部署 runner：两个 SA 与 RBAC、命令规则 ConfigMap（从中心 `config.yaml` 的 `workflow.remediation` 渲染）、签名密钥 Secret、Deployment 和 ClusterIP Service |
 | 4 | `make sync-xnet-cert` | 中心：把 xnet 的隧道客户端证书复制到 `mcp`、`aiops` 命名空间，并下发签名密钥 |
-| 5 | 编辑 `clusters.mc.yaml`，`make deploy-mc`（MCP、AIOps 各一次） | 更新集群配置 |
+| 5 | 编辑 `clusters.mc.yaml`，在 MCP 和 AIOps 各执行一次 `make deploy-mc` | 更新集群配置 |
 
-**在线状态**（`list_clusters` 工具，`servers/cluster_scope.py:_probe`）：xnet 虚拟 Node 为 Ready，且经隧道请求 runner 的 `/healthz` 成功，才算在线；结果缓存 30 秒。
+边缘 kubeconfig 只用于部署和测试，运行时不使用。测试环境的 Harbor 推不了镜像，所以由 `deploy-edge/load_image.sh` 经 SSH 把镜像导入节点，部署清单使用 `IfNotPresent`。
 
-### 0.3 数据怎么取
+### 3.3 在线状态
 
-一次工具调用带着 `cluster` 参数进入 MCP；MCP 入口用 `cluster_scope.activate()` 设置"当前集群"，底层调用点按它决定去哪里取：
+MCP 工具 `list_clusters`（`servers/cluster_scope.py`）返回每个集群的名称、别名、访问方式、后端、在线状态和能力。
 
-| 数据 | 去哪里 | 怎么保证不串集群 |
+- **在线判定**：xnet 虚拟 Node 为 Ready，且经隧道请求 runner 的 `/healthz` 成功；结果缓存 30 秒。
+- **能力**：例如远端集群的 `helm` 为 false。
+
+## 4. 可观测后端
+
+一次工具调用带着 `cluster` 参数进入 MCP。MCP 入口用 `cluster_scope.activate()` 设置当前集群，再按该集群的后端档案决定去哪里取数据。
+
+| 工具 | legacy | victoria |
 |---|---|---|
-| 指标（`execute_pod_promql`、prometheus 工具） | 中心 vmselect，**不经过边缘** | 查询附加 `extra_label=cluster=<名称>`，VM 强制把它加到所有选择器上，模型写错集群也查不到别的集群 |
-| "日志"（`query_pod_logs`） | 中心 vlsingle 里的 K8s 事件，**不经过边缘** | LogsQL 按 `cluster` 字段过滤，再按涉及对象名精确比对；结果标注 `log_source=k8s_events`、`coverage=partial` |
-| 链路 | 新后端没有 | 返回 `capability_missing` |
-| K8s 实时数据（get / describe / logs / events / 拓扑 / Pod 生命周期） | 边缘 API Server，**经隧道** | kubectl 子进程环境变量带 `AIOPS_CLUSTER`，垫片据此转发 |
+| `execute_pod_promql`、prometheus 的 6 个工具 | Prometheus | 中心 vmselect，附加 `extra_label=cluster=<名称>`。VM 会把这个条件强制加到所有选择器上，模型写错集群也查不到别的集群 |
+| `query_pod_logs` | Elasticsearch 容器日志 | 中心 vlsingle 里**该 Pod 相关的 K8s 事件**。查到事件时返回 `query_partial` + `coverage=partial`，没查到时返回 `query_succeeded` + `coverage=empty`；结果标注 `log_source=k8s_events`，并说明"未采集容器日志，请使用 kubectl_logs" |
+| `query_pod_tracing` | DeepFlow + Tempo | `capability_missing` |
+| `query_pod_topology`、Pod 生命周期 | K8s 实时对象 | 同左，经 kubectl 垫片 |
 
-工具的 `cluster` 参数由 AIOps 填，而不是由模型自由决定（`app/core/multicluster.py:scoped_tools`，在节点入口和并行取证通道绑定）：本次只涉及一个集群时强制注入；涉及多个集群时校验必须在范围内；并行通道使用自己异常组的集群。
+- 所有结果顶层增加 `cluster` 和 `backend` 字段，其余格式不变。
+- `query_pod_logs` 复用现有工具而不新增工具，因为 MCP 的工具列表是静态的；新增工具还要改 AIOps 的提示词和各节点的工具清单。
+- 结果必须符合 AIOps 的观测契约（`app/core/context/observation.py`）：`ok=true` 时 `query_succeeded` 不能配 `partial`。MCP 8.0.4 违反了这一条，导致每次日志查询都被判"契约无效"。现在由验收脚本 `contract_mcp_aiops.py` 把每个集群上各工具的真实输出交给 AIOps 解析器校验。
 
-### 0.4 命令怎么到达边缘（kubectl 垫片）
+新后端的事件是非结构化文本，放在 `_msg` 字段里：
+- `level` 恒为 `INFO`，真实类型在文本的 `type:` 里；
+- 字段名有拼写错误 `reasoni`；
+- `kubernetes.pod_name` 是 event-exporter 自己的 Pod，不是事件涉及的对象。
+
+采集器（`collectors/victorialogs_events.py`）先按 `cluster` 字段过滤，再按涉及对象名精确比对。
+
+## 5. 集群访问层：kubectl 垫片与边缘 runner
+
+### 5.1 垫片
 
 MCP 和 AIOps 镜像里，真正的 kubectl 改名为 `kubectl.real`，`/usr/local/bin/kubectl` 是垫片：
 
@@ -99,22 +160,47 @@ kubectl get pods -A | jq …          （现有工具模板，一行不改）
 管道后面的 jq 在中心本地处理 runner 返回的输出
 ```
 
-runner 收到后（`aiops_edge/runner/server.py`、`gate.py`）：
+设置 `AIOPS_CLUSTER` 的调用方有：MCP 的 `_command_runner`，以及 AIOps 的 `run_argv(args, cluster=)`（修复执行、恢复观察、Pod 身份补全、预期状态核实都经过它）。
+
+不直接把 kubeconfig 指向隧道，原因有两点：
+- 隧道的 http 通道不带集群 CA 和 token，也不支持 exec 需要的连接升级；
+- `/proxy?clientid=…&address=…` 这种格式不能作为 kubeconfig 的 `server`。
+
+### 5.2 runner
+
+部署在每个边缘集群的 `aiops` 命名空间：1 个副本，ClusterIP Service，端口 8090，不对外暴露。
+
+| 接口 | 用途 | 身份 |
+|---|---|---|
+| `GET /healthz` | 版本、规则版本、能力 | — |
+| `POST /v1/kubectl` | 同步执行一条 kubectl：`{argv, mode, timeout_s, compress}` | read 用 reader；exec / write 用 writer |
+| `POST /v1/jobs` | 提交异步修复动作：`{idempotency_key, argv, approval_id, timeout_s}`，立即返回 `job_id` | writer |
+| `GET /v1/jobs/{id}` | 查询任务状态和输出 | — |
+
+收到请求后的处理（`aiops_edge/runner/server.py`、`gate.py`）：
 1. 校验签名，失败返回 401；
 2. 再次检查参数规则，并核对声明的模式与命令实际类型一致；
-3. read 只允许只读操作；exec / write 按中心同一份命令规则检查：黑名单一律拒绝，需审批的命令必须带 `approval_id`；
-4. read 用 reader 身份（`view` + 集群级只读），exec / write 用 writer 身份（修复所需的最小写权限）；
-5. 执行 kubectl，输出最多 4MB，按请求 gzip+base64 压缩后返回。
+3. read 只允许只读子命令；exec / write 按中心同一份命令规则检查：黑名单一律拒绝，需审批的命令必须带 `approval_id`；
+4. 执行 kubectl。原始输出最多 4MB，请求压缩时用 gzip+base64 传输；
+5. 写本地审计日志。
 
-对话里"在 edge-88 的某 Pod 里执行命令"，与单集群走同一条路：中心先由 `operate_tools.guard_write_tool` 检查规则，再经 MCP 的 bash 工具；远端集群上的 bash 只允许"kubectl + 文本过滤管道"，其他程序会在中心 MCP Pod 里执行，对边缘没有意义，所以直接拒绝。
+**身份（`deploy-edge/runner.yaml`）**
 
-### 0.5 请求在线路上长什么样（"发送消息"）
+- **reader**：`view` + 集群级只读（nodes、namespaces、pv、storageclasses、events）。
+- **writer**：修复所需的最小写权限。包括 Pod 的 create / delete / patch、`pods/exec`，工作负载（Deployment、StatefulSet、DaemonSet、ReplicaSet）的修改，以及 scale。
+
+**任务**
+
+- 按 `idempotency_key` 去重，重复提交返回同一个 `job_id`。
+- 记录保留 24 小时，并写入 emptyDir：runner 容器重启后仍在，Pod 重建后丢失（中心会把这种情况判为"结果未知"）。
+
+## 6. 中心到边缘的消息
 
 中心到边缘只有一种消息：经 xnet 隧道转发的一次 HTTP 请求。
 
 ```
 POST https://xnet-management.xnet.svc:9090/proxy
-     ?clientid=99eea57d-…（集群 UUID）
+     ?clientid=<集群 UUID>
      &address=http://aiops-edge-runner.aiops.svc:8090/v1/kubectl
 TLS：xnet CA 签发的客户端证书（mTLS，从 xnet 复制来的副本）
 请求头：X-AIOps-Timestamp、X-AIOps-Nonce、
@@ -124,592 +210,222 @@ TLS：xnet CA 签发的客户端证书（mTLS，从 xnet 复制来的副本）
 
 1. xnet 隧道服务端按 `clientid` 找到该边缘外连进来的 websocket，把整个 HTTP 请求序列化后推给边缘；
 2. 边缘的 xnet-agent 在边缘集群内向 `address` 发起请求，响应沿原路返回；
-3. 签名在 runner 端校验：时间偏差超过 60 秒、nonce 5 分钟内重复、签名不对，一律拒绝。只持有 xnet 证书的人调用不了 runner。
+3. runner 校验签名：时间偏差超过 60 秒、nonce 在 5 分钟内重复、签名不对，一律拒绝。只持有 xnet 证书的人调用不了 runner。
 
-隧道每个请求最长 20 秒（xnet 固定），我们的同步调用上限 15 秒。错误分类：
+xnet 对每个请求最长等 20 秒，我们的同步调用上限是 15 秒。错误分类：
 
 | 情况 | 返回码 |
 |---|---|
 | 边缘没连上隧道（xnet 返回 400 "not online"）、runner 不可达（408） | `cluster_unreachable` |
-| 证书失效或握手失败 | `tunnel_auth_failed` |
+| 证书失效或握手失败 | `tunnel_auth_failed`（提示重新执行 `make sync-xnet-cert`） |
 | 超时 | `timeout` |
 | 签名不对 | `runner_auth_failed` |
 | 规则拒绝 | `policy_denied`（带规则名） |
 
-### 0.6 修复怎么驱动
+## 7. 路由与集群范围
+
+路由契约增加三个字段：`cluster_mode`、`clusters`、`cluster_labels`（`request_router.py`、`app/core/multicluster.py`）。
+
+- 多集群部署下，路由提示词会追加一段说明（`router_prompt`），列出每个集群及其角色（中心集群 / 边缘集群）。
+- **模型按用户意图选择范围**，代码不按字面词语判断。
+
+| cluster_mode | 何时使用 | 例子 |
+|---|---|---|
+| `none` | 不需要任何集群的数据 | "什么是 CrashLoopBackOff" |
+| `inventory` | 问集群本身的清单和接入情况 | "我现在有哪些集群" |
+| `single` / `multiple` / `center` | 需要集群里的实际数据 | "edge-88 上有哪些 Pod 异常"、"中心集群有什么 Pod 异常" |
+| `unspecified` | 需要集群数据，但问题和会话都没说是哪个集群 | 开局就问"有哪些 Pod 异常" |
+
+`clusters` 的写法：
+- 用户说的集群名或别名，原样填写；
+- `["*"]` 表示全部集群（含中心）；
+- `["*edge"]` 表示全部边缘集群（不含中心），对应"所有边缘集群""各个子集群"这类说法。
+
+追问时沿用上文的 `request_contract.clusters`。
+
+**代码只做三项与措辞无关的工程保证**（`resolve_contract`）：
+1. 范围不明确时反问："中心集群、某个边缘集群，还是全部集群？"
+2. 集群名不存在时，列出可用集群；
+3. 修复只针对一个集群。
+
+路由卡片显示本次范围（`cluster_labels`）。
+
+## 8. 工具如何带上集群
+
+- **MCP**：多集群部署下，所有可观测工具、k8s-core、bash 和 helm 的 schema 都增加 `cluster` 参数；缺少这个参数时返回 `cluster_required`。单集群部署下 schema 不变。
+- **AIOps 绑定**（`multicluster.scoped_tools`，在 `graph._bind_cluster_scope` 和并行取证通道里调用），由代码保证，不依赖模型：
+
+| 运行范围 | 处理 |
+|---|---|
+| 单集群部署 | 不处理 |
+| 本次只涉及 1 个集群 | 强制注入该集群，覆盖模型传入的值 |
+| 涉及多个集群 | 模型必须填写，且必须在范围内，否则直接返回错误 |
+| 并行取证通道 | 使用该异常组所属的集群 |
+
+**远端集群上各类工具的能力：**
+
+| 工具 | 远端集群 |
+|---|---|
+| 可观测工具 | 由后端档案决定 |
+| k8s-core（get、describe、logs、events、lineage、jq 查询等） | 经垫片 |
+| `run_bash_command` | 只允许以 `kubectl` 开头、后接本地文本处理（jq、grep、awk 等）的命令。其他程序会在中心 MCP Pod 里执行，对边缘没有意义，所以直接拒绝 |
+| helm | `capability_missing`：helm 直接调用 K8s API，不经过 kubectl，垫片覆盖不到 |
+
+**在边缘 Pod 里执行命令**（例如"在 edge-88 的某 Pod 里执行 ls"），路径与单集群相同：中心先由 `operate_tools.guard_write_tool` 检查规则，再经垫片到 runner，runner 再检查一遍。需人工审批的命令在对话中不执行，而是提示通过修复方案提交。
+
+## 9. 快速查询与深度诊断
+
+### 9.1 快速查询
+
+一个 Agent 循环，工具按 §8 绑定。涉及多个集群时，模型对每个集群分别调用工具。
+
+### 9.2 深度诊断：一个集群
+
+layer → evidence / parallel_evidence → rca → conclusion 全部不变，所有工具调用都落在这个集群上。
+
+### 9.3 深度诊断：多个集群
+
+入口在 `autonomous_diagnosis.py` 的定位节点；涉及多个集群时进入 `multicluster_location.per_cluster_location`：
+
+1. **探测**：每个远端集群先确认 runner 可达。不可达的集群不定位，由代码在报告开头写明"未完成检查的集群：…"。
+2. **按集群并行定位**：每个集群新建一个定位节点，工具绑定到该集群。如果定位过程中模型连接中断，该集群自动重试一次（用户主动停止时不重试）；仍然失败，就记为"未完成检查"。
+3. **合并结果**：
+   - 目标 ID 加集群前缀（`edge-88/t1`），同名对象不会冲突；
+   - 异常组带上 `cluster` / `cluster_label`；
+   - 各集群按声明排除的对象（§11）汇总到 `expected_exclusions`。
+4. **整体评估**：合并后如果判为"健康"，但有集群没查完，改判"检查不完整"（inconclusive），不能对外说"没有异常"。
+5. **并发取证**：所有异常组放进同一个并发池；每个通道绑定自己组的集群；只剩一个组时，范围收窄到该集群。
+6. **报告**：各组标题带集群名。总览的输入里有 `unchecked_clusters` 和 `excluded_by_declaration` 两份清单，模型不得把未检查的集群说成"已覆盖"，也不得把已排除的对象列为异常。
+
+**事件流约定**（UI 依赖）：
+- 各集群定位产生的事件仍记在 `layer` 节点下，并带 `cluster_lane=<集群标签>`（`ClusterLaneQueue`）。
+- 每个集群依次上报进度：检查连通性 → 定位中 → 完成 / 不可达 / 失败。
+- 不能借用并发取证的 `LaneQueue`：它会把事件改记到 `parallel_evidence`，导致问题定位阶段提前结束（run `e43e8298`）。
+- `e2e_ask.py --phase p5` 会检查这些规则。
+
+## 10. 修复
 
 ```
 诊断（集群已绑定）→ 生成方案（修复节点的工具同样绑定到该集群）
   → 审批卡片：payload / 事件带 cluster，前端显示"将在集群 edge-88 执行"
   → PodRepairExecutor（app/core/remediation/pod_executor.py）：
-      1. 从 request_contract.clusters 得到目标集群；本地集群走原逻辑
-      2. 执行前确认集群可达（runner /healthz）；不可达就等待并提示"集群当前不可达"，超时未恢复则不执行
-      3. execute 阶段 → POST /v1/jobs {idempotency_key: "<任务ID>:<动作ID>:execute", argv, approval_id}
+      1. 从 request_contract.clusters 得到目标集群；本集群走原逻辑
+      2. 执行前确认集群可达；不可达就等待（最长 AIOPS_REMOTE_WAIT_SECONDS，默认 600 秒），
+         并提示"集群当前不可达"，超时仍未恢复则不执行（cluster_unreachable）
+      3. execute 阶段 → POST /v1/jobs {idempotency_key: "<run_id>:<动作ID>:execute", argv, approval_id}
          runner 立即返回 job_id，在边缘后台执行；同一个键重复提交只执行一次
-      4. 中心轮询 GET /v1/jobs/{id}：隧道报错就继续轮询，直到时限
+      4. 中心轮询 GET /v1/jobs/{id}，隧道报错时继续轮询，直到时限（单条命令时限的 3 倍，至少 300 秒）
          · succeeded / failed：正常记录
-         · unknown（runner 容器重启）或记录丢失（runner Pod 重建）或超出时限：
-           标记"结果未知，需人工确认"，绝不重新提交
-      5. dry-run、verify 和恢复观察只读，经垫片同步执行
-  → 审计记录带集群、审批 ID、任务键
+         · unknown（runner 容器重启）、记录丢失（runner Pod 重建）或超时：
+           标记为 remote_result_unknown（"结果未知，需人工确认"），绝不重新提交
+      5. dry-run、verify 和恢复观察都是只读操作，经垫片同步执行
+  → 审计与进度事件带集群、审批 ID、任务键
 ```
 
-需审批的命令（如 Pod 内 `rm`）：审批 ID 随任务交给 runner，runner 看到 ID 才允许执行；ID 的真实性由请求签名保证，只有中心能发出请求。
+需审批的命令（如 Pod 内 `rm`）：审批 ID 随任务交给 runner，runner 看到 ID 才执行；ID 的真实性由请求签名保证，因为只有中心能发出请求。
 
-### 0.6a 运维声明的预期状态
+## 11. 运维声明的预期状态与虚拟节点
 
-有些平台按设计就会出现"看起来异常"的对象。例如 xnet-management 做主备选举：同一时间只有 1 个副本 Ready，其余副本是 `0/1 Running`。模型无法自己知道这一点，因此由运维在集群配置里声明：
+有些平台按设计就会出现"看起来异常"的对象。例如 xnet-management 做主备选举：同一时间只有 1 个副本 Ready，其余副本是 `0/1 Running`。模型无法自己知道这一点，所以由运维在集群配置里声明：
 
 ```yaml
 expected_states:
-  - cluster: center
+  - cluster: center                       # 可选：集群名或别名；不写表示所有集群
     namespace: xnet
     workload: Deployment/xnet-management
-    reason: 主备选举，同一时间只有 1 个副本 Ready
+    reason: 主备选举，同一时间只有 1 个副本 Ready，其余副本 0/1 Running 属于正常
     healthy_when: {ready_replicas_min: 1}
 ```
 
-定位结束后，代码（`app/core/workflow/expected_states.py`）用实时数据逐项核对。必须同时满足以下条件，目标才会标为 `excluded`：
+定位结束后，代码（`app/core/workflow/expected_states.py`）用实时数据逐个核对待排查的 Pod。必须同时满足以下条件，目标才会标为 `excluded`，原因写明"运维声明：…（1/3 Ready，满足至少 1 个）"：
 
-1. Pod 属于声明的工作负载（ReplicaSet → Deployment）；
+1. Pod 属于声明的工作负载（控制器链 ReplicaSet → Deployment）；
 2. Pod 处于 Running，且所有容器都在运行，只是未 Ready；
 3. 工作负载满足 `healthy_when`。
 
-任何一条不满足，或者无法核实，都照常诊断。被排除的对象由代码写进报告的"已按运维声明排除"一行，不会悄悄消失。
+任何一条不满足，或者无法核实（例如集群不可达），都照常诊断。
 
-xnet 虚拟节点（Node 名等于配置中的集群名）的说明，也会由代码写进定位和取证节点的材料：它们只表示集群已连接，不是真实计算节点。
+- 被排除的对象由代码写进报告："已按运维声明排除（不计为异常）：…"，不会悄悄消失。
+- 如果所有待排查对象都被排除，代码直接给出结论：定位覆盖完整时判"健康"，不完整时判"检查不完整"。不再进入取证和根因分析。
 
-### 0.7 一个问题从进来到回答
+**xnet 虚拟节点**：Node 名等于配置中集群名的节点，是 xnet 为接入的集群虚拟出来的，只表示集群已连接。代码根据配置生成说明（`multicluster.virtual_node_note`），写进定位和取证节点的材料：它们不是真实计算节点，不按承载工作负载的节点评估。代码里没有写死 `vc-` 前缀。
 
-1. **路由**（`request_router.py` + `multicluster.router_prompt`）：模型按意图给出 `cluster_mode`：
-   - `none`：不需要集群数据；
-   - `inventory`：问集群清单；
-   - `single` / `multiple` / `center`：需要集群数据。clusters 填 `["*"]` 表示全部集群（含中心），填 `["*edge"]` 表示全部边缘集群（不含中心）；
-   - `unspecified`：需要集群数据但没说明是哪个集群。
+## 12. 前端
 
-   代码只做三件事：范围不明确时反问，集群名不存在时列出可用集群，修复只针对一个集群。
-2. **快速查询**：一个 Agent 循环，工具绑定到本次范围；涉及多个集群时，模型对每个集群分别调用工具。
-3. **深度诊断**：
-   - 只涉及一个集群时，流程与单集群相同；
-   - 涉及多个集群时（`multicluster_location.py`），先探测每个集群；不可达的集群不定位，由代码在报告里写明"未完成检查"；
-   - 可达的集群各自定位（并行），合并为带集群前缀的目标和带集群的异常组，所有组一起并发取证，报告按集群分段。
-
-## 1. 目标与边界
-
-### 1.1 目标
-
-1. **多集群下使用新的可观测数据**：VictoriaMetrics K8s Stack 的中心/边缘部署（cloud-observability），数据集中在中心，按 `cluster` 标签区分。
-2. **兼容现有可观测组件**：Prometheus + Elasticsearch/Filebeat + DeepFlow + Tempo 继续可用，以后可以切回来，或者两种并存（不同集群用不同后端）。
-3. **使用方式基本不变**：仍然是"快速查询"和"深度诊断"（以及在其后发起的修复）两条主线。AIOps 的工作流基本不动，**主要改动在 MCP 的适配层**。
-
-### 1.2 硬边界
-
-| 边界 | 含义 |
+| 位置 | 显示 |
 |---|---|
-| **不修改 xnet-cloud，也不要求它做任何适配** | 不改代码、不改它的配置和数据（包括虚拟 Node 的注解），**不在 xnet 命名空间创建任何对象，不通过 Vessel 下发我们的组件**。新增的一切都属于 AIOps 自己的服务，只以只读或调用方的身份使用 xnet 已有的能力（隧道 `/proxy`、客户端证书、虚拟 Node 列表） |
-| **不修改可观测组件的采集逻辑** | 不改 vmagent/vlagent/Filebeat 等的采集配置；某个集群没有的数据，就如实返回"未提供"，不补造 |
-| **单集群行为不变** | 不配置多集群时，现有部署（10.2.0.48）的行为、提示词和接口完全不变，现有验收全部通过 |
-| **安全由我们自己保证** | 不依赖 xnet 修复它自身的问题（JWT 密钥硬编码、隧道可以访问任意地址、Agent 拥有集群全部权限） |
-| **只在容器内执行** | 和单集群一样，不提供宿主机级别的操作 |
+| 路由卡片 | 本次集群范围（`routePresentation.ts`） |
+| 问题定位卡片 | **多集群并发定位看板**（`ClusterLaneBoard.tsx`）：顶部是总进度（已结束 x/N、工具调用数、未完成数）。每个集群一张卡片，显示状态、当前进度、该集群的工具调用、模型思考过程和定位分析；集群的工具只列在自己的卡片里 |
+| 并发证据采集 | 每个集群一行进度（"edge-88：1/2 组已结束 · 6 条证据"），异常组标题带集群名 |
+| 审批卡片 / 修复进度 | 目标集群；集群不可达时的等待提示 |
 
-### 1.3 不做的事
+事件处理在 `chatEventTransition.ts` / `clusterLanes.ts`。`frountind/scripts/replay-sse.mjs` 可以把一段真实事件流交给同一份事件处理逻辑，输出 UI 最终的状态，验收脚本会用到它。
 
-- 不做跨集群的应用迁移、调度或编排（这是 xnet 的职责）。
-- 不做交互式终端（`exec -it`）、`logs -f`、`--watch` 这类长连接操作。
-- 第一期不支持在边缘集群执行 helm 操作（见 §5.4）。
-
-## 2. 现状
-
-### 2.1 测试环境（2026-10-21 实测）
-
-| 主机 | 角色 | 组件 |
-|---|---|---|
-| 10.2.5.85 | 中心 | VictoriaMetrics 全套（vmcluster、vlsingle、vmalert、Grafana）、xnet-management |
-| 10.2.5.88 / 10.2.5.89 | 边缘 | vmagent、vlagent（推送到中心）、xnet-agent |
-
-- 每个边缘集群在中心表现为一个 xnet 虚拟 Node：`vc-942nkkozc8o5fyb9q3bznb1ws`、`vc-dluw0jousipr6h5co2bwpyqk2`；中心自身为 `vc-xnet-management`。
-- **可观测数据的 `cluster` 标签值等于虚拟 Node 名**；边缘还带有 `cluster_id`（即 xnet 集群 UUID）。
-- 中心查询入口：指标 `http://10.2.5.85:31500/select/0/prometheus`（集群内为 `vmselect-vm-victoria-metrics-k8s-stack.monitor:8481`），日志 `http://10.2.5.85:31700/select/logsql/*`（集群内为 `vlsingle-vm-victoria-metrics-k8s-stack.monitor:9428`）。
-
-### 2.2 两种可观测后端的能力对比
-
-| 维度 | 旧后端（legacy，当前 10.2.0.48） | 新后端（victoria，三集群环境） |
-|---|---|---|
-| 指标 | Prometheus，单集群，没有 `cluster` 标签 | VictoriaMetrics，多集群，`cluster` 标签；另有 kepler 能耗指标 |
-| 日志 | Elasticsearch/Filebeat，**容器日志** | VictoriaLogs，**只有 K8s 事件**（event-exporter），没有容器日志 |
-| 链路 | DeepFlow L7 流量 + Tempo span | 无 |
-| 拓扑 | 来自 K8s 实时对象（与后端无关） | 同左 |
-
-新后端的事件是一段非结构化文本，放在 `_msg` 里：
-
-```
-event name: ..., count: 412, involvedObject_namespace: xnet, involvedObject_kind: Pod,
-involvedObject_name: xnet-management-..., reasoni: Unhealthy, type: Warning, message: Readiness probe failed ...
-```
-
-注意：`level` 字段恒为 `INFO`，真实类型在文本里的 `type:`；字段名有拼写错误 `reasoni`；`kubernetes.pod_name` 是 event-exporter 自己的 Pod，**不是事件涉及的对象**。
-
-已知噪声（采集配置导致，不是故障）：三个集群的 kube-controller-manager、kube-scheduler、etcd 均为 `up==0`（kubeadm 默认绑定在 127.0.0.1）；中心采集 3 个虚拟 Node 的 kubelet 失败。
-
-### 2.3 现有代码中与集群相关的位置
-
-| 位置 | 现在怎么做 | 多集群下的问题 |
-|---|---|---|
-| mcpstander `aiops-observability-query`（`execute_pod_promql`、`query_pod_logs`、`query_pod_tracing`、`query_pod_topology`） | 后端地址来自环境变量（`servers/aiops_observability/config.py`），固定为旧后端 | 只能连一套后端，也不认识集群 |
-| mcpstander `prometheus_tool`（`holmes_tools/prometheus.py`） | 只有一个 `PROMETHEUS_URL` | 同上 |
-| mcpstander `k8s-core`、`bash_tool`、`helmcharts` | 在 MCP Pod 里起 `kubectl`/`helm` 子进程，使用集群内 SA（`holmes_tools/_command_runner.py`） | 只能访问中心集群 |
-| robusta 修复执行器、恢复观察、Pod 身份补全（`remediation/pod_executor.py:run_argv`、`remediation/recovery.py`、`workflow/pod_identity.py`） | 在 AIOps Pod 里起 `kubectl` 子进程 | 只能操作中心集群 |
-| robusta 路由（`workflow/nodes/request_router.py`） | 范围只有 `scope / namespaces / pod_names` | 没有集群维度 |
-| robusta MCP 工具包装（`aicall/tools.py:_wrap_mcp_tool_for_transport`） | 只清洗参数 | 可以作为注入集群参数的统一位置 |
-
-### 2.4 xnet 能力实测
-
-| 能力 | 结果 |
-|---|---|
-| 中心使用 xnet 自带的客户端证书（Secret `xnet/xnet-client-cert`，CA 为 `xnet/xnet-ca-cert`）调用隧道 `https://<中心>:30909/proxy?clientid=<UUID>&address=<边缘内地址>` | ✅ 200，约 20ms |
-| 通过隧道访问边缘集群里**任意 Service**（两个边缘的 kube-state-metrics，约 260KB） | ✅ 200，约 20ms |
-| 不带客户端证书 | ❌ TLS 握手失败（服务端为 `RequireAndVerifyClientCert`） |
-| 请求头和请求体是否透传 | ✅ 隧道把完整的 HTTP 请求序列化后转发（swarm-tunnel `httpRequestToWebSocketRequest` 使用 `r.Write`） |
-| 隧道的 `exec`、`logs` 协议 | ❌ 只定义了名称，没有实现（`downstream/type.go` 只处理 ws 和 ssh） |
-| 虚拟 Node 的 exec、port-forward、stats | ❌ 打一行日志后直接返回成功，**不能使用** |
-| 每个 http 请求的超时 | 固定 20 秒（`HttpRequestTimeout`），响应整包缓冲 |
-| 集群 UUID 与虚拟 Node 名的对应 | Node 名 = `vc-` + UUID 的 base36 编码，可以反解；Node 上也有 UUID 注解 |
-
-## 3. 总体架构
-
-```
-┌──────────────────────────── 中心集群 ────────────────────────────┐
-│ 前端 ──▶ AIOps 后端（工作流基本不变）                              │
-│            │ 路由识别 clusters；工具调用自动带上 cluster            │
-│            ▼                                                     │
-│ MCP（mcpstander）                                                │
-│   ├─ 集群注册表：xnet 虚拟 Node（只读）+ 我们的配置（别名、后端）   │
-│   ├─ 可观测适配层：按集群选择后端                                  │
-│   │     legacy  ─▶ Prometheus / Elasticsearch / DeepFlow / Tempo   │
-│   │     victoria ─▶ vmselect / vlsingle（带 cluster 过滤）         │
-│   └─ 集群访问层（kubectl 垫片）                                    │
-│         local ─▶ 本集群 kubectl（现有方式）                        │
-│         xnet  ─▶ xnet 隧道 /proxy ──────────────┐                 │
-│ xnet-management（不改）   VictoriaMetrics（不改）│                 │
-└────────────────────────────────────────────────┼─────────────────┘
-                                                 │ 边缘主动建立的 wss 长连接
-┌──────────────────────── 边缘集群 ───────────────┴─────────────────┐
-│ xnet-agent（不改）：在边缘内部转发 HTTP 请求                        │
-│        ▼                                                         │
-│ aiops-edge-runner（新增）：校验签名 → 规则检查 → 本地执行 kubectl    │
-│ vmagent / vlagent（不改）：数据推送到中心                          │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-两条原则：
-
-- **数据走中心，操作走隧道。** 指标和事件已经在中心，直接查询，不经过边缘；只有 K8s 实时查询、Pod 内执行和修复动作才经过隧道。
-- **后端差异和集群差异都收在 MCP 里。** AIOps 看到的仍然是同样的工具名、同样的参数和同样的结果格式，只是多了一个可选的 `cluster` 参数。
-
-## 4. 核心概念
-
-### 4.1 集群注册表（MCP）
-
-每个集群一条记录：
-
-| 字段 | 来源 | 说明 |
-|---|---|---|
-| `name` | xnet 虚拟 Node 名，或配置中的静态名称 | 唯一标识，也是可观测数据的 `cluster` 标签值 |
-| `aliases` | **我们自己的配置** | 例如 `edge-88`。不写入 xnet |
-| `uuid` | Node 名反解，或 Node 注解 | 调用隧道时的 `clientid` |
-| `access` | 配置 | `local`（本集群）或 `xnet`（经隧道） |
-| `observability` | 配置 | 使用哪个后端档案，例如 `legacy` 或 `victoria` |
-| `online` | xnet 虚拟 Node 是否 Ready + runner 健康检查 | 每 30 秒刷新一次 |
-| `capabilities` | 后端档案 + runner 健康检查的结果 | metrics / logs / events / traces / flows / k8s / exec |
-
-发现方式：
-- `static`：只用配置里的集群列表（现有单集群环境，只有一个 `local`）。
-- `xnet_nodes`：读取中心集群里带 `node-role.kubernetes.io/xnet-agent` 标签的 Node，再与配置合并。**只读**，集群的接入和下线以 xnet 为准。
-
-### 4.2 可观测后端档案（observability profile）
-
-同一套工具，根据集群选择不同的后端实现：
-
-| 工具 | legacy | victoria |
-|---|---|---|
-| `execute_pod_promql` | Prometheus（现有实现） | VictoriaMetrics，查询时附加 `extra_label=cluster=<name>`。VM 会把这个条件强制加到所有选择器上，**不需要改写 PromQL**，模型也无法查到别的集群 |
-| `prometheus_tool` 的 6 个工具 | 同上 | 同上（标签、序列、元数据接口都支持 `extra_label`） |
-| `query_pod_logs` | Elasticsearch 容器日志（现有实现） | **返回该 Pod 相关的 K8s 事件**：按 `cluster` 和 `_msg` 中的 `involvedObject_name` 过滤，并把文本解析成字段（type、reason、message、count）。结果明确标注 `log_source=k8s_events`、`coverage=partial`，并说明"该集群未采集容器日志，容器日志请使用 kubectl_logs" |
-| `query_pod_tracing` | DeepFlow + Tempo（现有实现） | 返回 `capability_missing`："该集群未提供链路数据" |
-| `query_pod_topology` | K8s 实时对象 | 同左，经集群访问层查询 |
-
-为什么 `query_pod_logs` 返回事件而不新增工具：MCP 的工具列表是静态的，不能按集群变化；新增工具还要修改 AIOps 的提示词和各节点的工具清单。复用现有工具，并在结果里如实标注数据类型和覆盖范围，AIOps 侧就不需要修改。
-
-结果格式（`facts`、`fact_ledger`、`coverage`、`samples`、`serialization`）保持不变，只在顶层增加 `cluster` 和 `backend` 两个字段。
-
-### 4.3 集群访问层（kubectl 垫片）
-
-现有的 k8s-core 工具用模板拼出 `kubectl ...` 命令，有些还接了 `jq`。为了**不改动这些模板**，在中心的 MCP 和 AIOps 镜像里，用一个垫片替换 PATH 上的 `kubectl`：
-
-```
-kubectl <argv>
-  ├─ 环境变量 AIOPS_CLUSTER 为空或 local → 执行真正的 kubectl（现在的行为）
-  └─ 远端集群 → 签名后经 xnet 隧道 POST 到边缘 runner
-                → 原样输出 stdout/stderr，并返回相同的退出码
-```
-
-- 管道后面的 `jq`、`grep` 等仍然在中心本地执行，处理的是 runner 返回的输出。
-- 垫片拒绝 `-f/--follow`、`-w/--watch`、`-it`、`port-forward`、`proxy`、`attach`，返回明确的错误。
-- 每次调用的超时不超过 15 秒（隧道上限为 20 秒）。
-- 调用方只需要在起子进程时设置 `AIOPS_CLUSTER`：MCP 的 `_command_runner`，以及 AIOps 的 `run_argv`、恢复观察和 Pod 身份补全。
-- 垫片只有一份源码（放在 mcpstander），AIOps 构建镜像时复制进去，用测试保证两份内容一致。
-
-**为什么不直接把 kubeconfig 指向隧道：** 隧道的 http 通道使用 Go 默认客户端，不带集群 CA 和 token，也不支持 exec 需要的连接升级；`/proxy?clientid=…&address=…` 这种格式也不能作为 kubeconfig 的 `server`。
-
-### 4.4 边缘 runner（aiops-edge-runner）
-
-部署在每个边缘集群的 `aiops` 命名空间：1 个 Deployment，1 个副本，ClusterIP Service（端口 8090，不对外暴露），内存约 100MB。
-
-| 接口 | 用途 | 使用的 SA |
-|---|---|---|
-| `GET /healthz` | 版本、规则版本、能力 | —— |
-| `POST /v1/kubectl` | 同步执行一条 kubectl：`{argv, timeout_s, mode}`，返回 `{exit_code, stdout, stderr, truncated, duration_ms}` | `mode=read` 用 reader；`mode=exec` 用 writer |
-| `POST /v1/jobs` | 提交异步修复动作：`{idempotency_key, argv, approval_id, timeout_s}`，立即返回 `job_id` | writer |
-| `GET /v1/jobs/{id}` | 查询任务状态和输出 | —— |
-
-- **认证**：每个请求带 `X-AIOps-Timestamp` 和 `X-AIOps-Signature`（对时间戳和请求体做 HMAC-SHA256，共享密钥来自双方各自的 Secret）。时间偏差超过 60 秒、或签名重复，一律拒绝。这样只拿到 xnet 客户端证书的人**无法调用 runner**。
-- **规则**：runner 加载和中心同一份命令规则（随部署清单中的 ConfigMap 下发，`/healthz` 返回规则版本）。黑名单命令一律拒绝；需人工审批的命令必须带有效的 `approval_id`；`mode=read` 只允许只读子命令（get、describe、logs、events、top、api-resources、explain）。
-- **权限**：两个 SA。`reader` 为集群范围的 get/list/watch 加 pods/log；`writer` 只有修复需要的最小权限（pods/exec、删除 Pod、patch/update Deployment 等工作负载、scale）。
-- **输出截断与压缩**：单个响应原始输出最多 4MB，`truncated=true` 时注明截断；中心请求压缩时用 gzip+base64 传输（实测 edge-88 的 `get pods -A -o json` 超过 256KB，原来的上限会破坏 jq 类工具）。
-- **任务**：按 `idempotency_key` 去重，重复提交返回同一个 `job_id`；任务记录在内存中保留 24 小时，同时写入 emptyDir，runner 容器重启后不丢失（Pod 重建时会丢失，此时中心标记为"结果未知"）。
-- **审计**：runner 本地记录每次执行（集群、argv、审批 ID、结果），中心也照常记录。
-
-### 4.5 xnet 隧道客户端（MCP 与 AIOps）
-
-- 证书：**部署时复制，运行时不访问 xnet 命名空间。** 我们的部署命令（`make sync-xnet-cert`，由有权限的运维人员执行）把 `xnet/xnet-client-cert` 和 `xnet/xnet-ca-cert` 的内容复制成 `mcp/aiops-xnet-client-cert`（AIOps 命名空间同样复制一份），以 Secret 卷挂载。MCP 和 AIOps 的 SA **不需要读取 xnet 命名空间的权限**，也不在 xnet 命名空间创建 Role。
-  - 实测证书有效期为 2026-10-21 至 2031-10-20，复制方案的维护成本很低。
-  - 隧道客户端启动时和每次握手失败时检查证书：已过期或握手被拒，就返回 `tunnel_auth_failed`，提示"xnet 证书失效，请重新执行 make sync-xnet-cert"，不静默重试。
-  - 注意：现有 MCP 的 ClusterRole 含 `*/*/*`（§9），技术上能直接读取 xnet 的 Secret。设计**不依赖**这个过大的权限，权限收缩后仍然可用。
-- 地址：`https://xnet-management.xnet.svc:9090/proxy?clientid=<UUID>&address=<URL 编码后的 runner 地址>`。参数尽量放在请求体里，避免嵌套查询字符串。
-- 错误分类：TLS 握手失败为 `tunnel_auth_failed`；返回 "side client is not online" 为 `cluster_unreachable`；超时为 `timeout`；runner 返回 401/403 为 `runner_auth_failed` 或 `policy_denied`。
-
-## 5. 工具调用如何带上集群
-
-### 5.1 MCP 工具参数
-
-所有可观测工具、k8s-core、`bash_tool` 增加**可选**参数 `cluster`。不传时：单集群部署为 `local`，所以现有调用不受影响；多集群部署下由 AIOps 按路由确定的范围注入（§5.2），范围本身必须由用户说明（§6.1）。
-
-### 5.2 AIOps 注入规则（工程保证，不依赖模型）
-
-在 `aicall/tools.py:_wrap_mcp_tool_for_transport` 这一层统一处理：
-
-| 运行范围 | 处理 |
-|---|---|
-| 没有集群信息（单集群部署） | 不处理，行为与现在相同 |
-| 本次运行只涉及 1 个集群 | **强制注入**这个集群，覆盖模型传入的值 |
-| 涉及多个集群 | 模型必须填写，且必须在范围内；否则直接返回错误，不调用工具 |
-| 深度诊断的取证通道 | 注入该异常组所属的集群 |
-
-这与现有命名空间范围的处理方式一致：范围由路由确定，工具层负责保证，提示词只起说明作用。
-
-### 5.3 结果中的集群信息
-
-所有工具结果的顶层带上 `cluster`；事实的身份从 `namespace/kind/name` 扩展为 `cluster/namespace/kind/name`。不同集群里同名的 Pod 不会被合并。
-
-### 5.4 各类工具在远端集群上的能力
-
-| 工具 | 远端集群 |
-|---|---|
-| 可观测工具 | ✅ 由后端档案决定能力 |
-| k8s-core（get、describe、logs、events、top、lineage、jq 查询等） | ✅ 经 kubectl 垫片 |
-| `bash_tool` 的 `run_bash_command` | 只允许以 `kubectl` 开头、后面接本地文本处理命令（jq、grep、awk、head 等）的命令；其他命令在中心 MCP Pod 里执行，对边缘没有意义，一律拒绝并说明原因 |
-| `kubectl_run_image` | ✅ 经垫片（创建临时 Pod） |
-| `helmcharts` | ❌ 第一期不支持，返回 `capability_missing`（helm 直接调用 K8s API，不经过 kubectl，垫片覆盖不到） |
-
-## 6. 两条主线在多集群下怎么运行
-
-### 6.1 路由
-
-`request_router` 的范围增加 `clusters: List[str]` 和 `cluster_mode: single | multiple | center | unspecified`。
-
-**单集群部署**（注册表里只有 `local`）：不识别集群，行为与现在完全相同。
-
-**多集群部署：用户必须说清楚操作哪个范围。** 有三种合法的意图：
-
-| 意图 | 示例 | 结果 |
-|---|---|---|
-| 一个集群 | "edge-88 上有哪些 Pod 异常" | `single`，`clusters=[vc-942nk…]` |
-| 多个集群 | "edge-88 和 edge-89""所有边缘集群""所有集群" | `multiple`，展开为对应集群；"所有"只展开在线集群，离线的在回答里说明 |
-| 中心集群 | "中心集群的 vmagent 正常吗" | `center`，`clusters=[中心集群]` |
-
-识别和兜底：
-
-1. 路由模型从问题和当前会话的上文中理解意图。上文已经明确过集群时，追问（"那它的日志呢""再看看另一个"）沿用或切换到对应集群，不需要用户重复。
-2. 模型给出的集群名或别名，由工程代码按注册表解析成规范名称。**模型不能自造集群名**；解析不到的，不调用任何工具，回复"没有找到集群 xx"，并列出可用集群。
-3. **没有不可靠的默认值。** 多集群部署下，如果问题和上文都没有说明范围，路由走现有的 `clarify` 分支（`request_router.py` 已经支持），反问："要查看哪个范围：中心集群、某个边缘集群（edge-88、edge-89），还是全部集群？" 这一条由代码强制执行：模型输出 `unspecified` 或者 `clusters` 为空时，即使选择了其他路由，也一律改为澄清。
-4. 用户回答后，下一轮按正常流程执行。
-5. 路由卡片上显示本次的集群范围。
-
-### 6.2 快速查询
-
-> "edge-88 上有哪些 Pod 不正常？"
-
-```
-路由：clusters=[vc-942nk…]
-query_collect（工作流不变）：
-  execute_pod_promql / prometheus_tool  → 中心 VictoriaMetrics（extra_label 限定集群）
-  需要实时信息时 → k8s-core → 垫片 → 隧道 → runner
-回答
-```
-
-在 Pod 内执行命令（`在 edge-88 的 default/xx Pod 里执行 ls /tmp`）：仍然走现有的操作路径（`operate_tools.guard_write_tool` 先做规则检查），垫片把 `kubectl exec` 发给 runner，runner 再检查一遍规则后执行。需人工审批的命令和现在一样：对话中不执行，提示通过修复方案提交。
-
-跨多个集群的快速查询（"各集群分别有几个 Pod"）：仍然是一个 Agent 循环，模型对每个集群分别调用工具，并填写 `cluster`；工具层校验它在范围内。
-
-### 6.3 深度诊断
-
-**第一期：每次诊断只针对一个集群。** 集群由路由强制注入，layer → evidence → rca → conclusion 全部不变，只是所有工具调用都落在这个集群上。
-
-**第二期：一次诊断涉及多个集群。**
-
-```
-layer：每个集群各跑一次（复用现有 layer 节点，按集群并行），得到各自的异常组
-  → 合并异常组，组的 key 从 (namespace, workload) 扩展为 (cluster, namespace, workload)
-parallel_evidence：所有异常组放进同一个并发池（现有逻辑），每组注入自己的集群
-rca → conclusion：按集群分段
-```
-
-并发控制：全局沿用 `max_workers`；集群访问层对每个集群另设并发上限（默认 4 个同时在途的隧道请求）和超时，单个集群慢或离线只影响它自己那一段，报告中标注"该集群不可达，结果不完整"。
-
-### 6.4 修复
-
-方案的 `targets` 增加 `cluster` 字段，审批卡片显示"将在 <集群> 执行"，审计记录带集群。
-
-| 步骤 | 本地集群 | 远端集群 |
-|---|---|---|
-| 规则检查、审批 | 现有逻辑 | 相同 |
-| 执行 | `run_argv` 本地执行 | 执行前确认集群在线 → `POST /v1/jobs`（幂等键 = 修复任务 ID + 动作序号）→ 轮询 `GET /v1/jobs/{id}` |
-| 恢复观察 | `kubectl get` 轮询 | 优先用中心指标（Pod 是否 Ready、重启次数），再经垫片确认 |
-
-**断线处理：**
-- 执行中隧道断开：边缘任务继续执行，中心重连后按 `job_id` 继续查询。
-- 超过时限仍查不到结果：标记为"结果未知，需人工确认"，**绝不重新提交**。
-- 审批等待期间集群离线：卡片显示"集群当前不可达"，批准后也要等到恢复才执行。
-
-## 7. 生命周期
-
-### 7.1 集群
-
-```
-接入：xnet join（xnet 现有流程，与我们无关）
-  → 边缘运维人员在边缘集群上执行我们的部署命令：make edge-deploy（见下）
-  → 在 MCP 配置中声明该集群的访问方式、后端档案和别名
-  → 注册表发现 Node，探测 runner 的 /healthz 和能力 → 可用
-在线 / 离线：Node Ready + runner 健康检查
-升级：重新执行 make edge-deploy；中心检查 runner 接口版本和规则版本是否兼容，不兼容就把该集群标为只读
-下线：xnet 删除 Node → 注册表移除；卸载 runner
-```
-
-**runner 的部署方式**：和现有的 AIOps、MCP 一样，用我们自己的部署清单（YAML）加 Makefile，**不需要 chart 仓库，也不经过 xnet**。
-
-- 部署命令在边缘集群本地执行（使用边缘的 kubeconfig），不需要中心能访问边缘，所以符合"中心连不进边缘"的场景。测试环境中通过 SSH 或本机保存的 kubeconfig 执行；这些只用于运维和测试，**运行时不依赖**（spec FR-016）。
-- 边缘只需要能从镜像仓库拉取 runner 镜像。实测 .88 和 .89 都能访问 `10.2.0.86:8443`，并且已经配置了 `xnet.registry.io:8443`。
-- 签名密钥：边缘部署时创建 `aiops/aiops-edge-runner-key`，中心保存同一份密钥（`mcp/aiops-edge-runner-key`）。
-- 命令规则随部署清单下发（ConfigMap），与中心的规则版本一致。
-
-之前考虑过用 xnet Vessel 下发，但 Vessel 的 helm 类型要求提供 chart 仓库地址，而且相当于让 xnet 参与我们的部署，已放弃。
-
-### 7.2 一次运行
-
-每个集群单独记录结果：完成 / 部分完成 / 不可达，以及原因，并写入运行报告（`run_report`）。
-
-### 7.3 修复任务
-
-生成方案 → 等待审批 → 执行中（远端时带 `job_id`）→ 验证中 → 完成 / 结果未知。状态流转与现在相同，只多了 `job_id` 和"结果未知"状态。
-
-## 8. 配置示例（MCP）
-
-```yaml
-clusters:
-  default: local                 # 单集群部署：不提到集群时使用 local
-  discovery: static              # static | xnet_nodes
-  items:
-    - name: local
-      access: local
-      observability: legacy
-```
-
-三集群环境：
-
-```yaml
-clusters:
-  default: null                  # 多集群部署不设默认值，没说明范围就澄清（§6.1）
-  center: vc-xnet-management     # "中心集群"指的是哪一个
-  discovery: xnet_nodes
-  items:
-    - name: vc-xnet-management
-      aliases: [center]
-      access: local
-      observability: victoria
-    - name: vc-942nkkozc8o5fyb9q3bznb1ws
-      aliases: [edge-88]
-      access: xnet
-      observability: victoria
-    - name: vc-dluw0jousipr6h5co2bwpyqk2
-      aliases: [edge-89]
-      access: xnet
-      observability: victoria
-  access:
-    xnet:
-      proxy_url: https://xnet-management.xnet.svc:9090/proxy
-      client_cert_secret: mcp/aiops-xnet-client-cert   # 由 make sync-xnet-cert 从 xnet 复制
-      ca_secret: mcp/aiops-xnet-ca-cert
-      runner_url: http://aiops-edge-runner.aiops.svc:8090
-      runner_key_secret: mcp/aiops-edge-runner-key
-      per_cluster_concurrency: 4
-      call_timeout_seconds: 15
-
-observability_profiles:
-  legacy:                        # 现有环境变量的值迁移到这里；未配置时继续读环境变量
-    metrics: {type: prometheus, url: "${PROMETHEUS_URL}"}
-    logs:    {type: elasticsearch, mode: kubectl_exec}
-    traces:  {type: deepflow_tempo, mode: kubectl_exec}
-  victoria:
-    metrics: {type: victoriametrics, url: http://vmselect-vm-victoria-metrics-k8s-stack.monitor:8481/select/0/prometheus, cluster_label: cluster}
-    logs:    {type: victorialogs_events, url: http://vlsingle-vm-victoria-metrics-k8s-stack.monitor:9428, cluster_field: cluster}
-    traces:  {type: none}
-```
-
-**兼容规则：** 没有 `clusters` 配置时，等同于上面的单集群示例；`legacy` 档案没有配置时，仍然读取现有的环境变量（`PROMETHEUS_URL`、`AIOPS_ES_*` 等）。所以现有部署不需要修改任何配置。
-
-## 9. 安全
+## 13. 安全
 
 | 威胁 | 措施 |
 |---|---|
-| 持有 xnet 客户端证书的人可以访问边缘任意 Service | runner 要求 HMAC 签名，只有证书没有签名密钥就无法调用 |
-| 中心被绕过，直接调用 runner | runner 本地执行同一套规则；需人工审批的命令必须带有效的审批 ID |
-| runner 被滥用 | reader / writer 两个最小权限 SA；只读接口不能使用 writer |
-| 证书泄露范围 | 证书复制到我们的命名空间，只挂载给 MCP 和 AIOps；我们的 SA 不需要读取 xnet 命名空间 |
-| 跨集群混用数据 | 工具层强制注入集群，VictoriaMetrics 用 `extra_label` 限定 |
+| 持有 xnet 客户端证书的人可以访问边缘任意 Service | runner 要求 HMAC 签名并防重放；只有证书、没有密钥就调用不了 |
+| 中心被绕过，直接调用 runner | runner 本地执行同一套命令规则；需审批的命令必须带审批 ID |
+| runner 被滥用 | reader / writer 两个最小权限身份；只读接口不会使用 writer |
+| 证书泄露范围 | 证书复制到我们自己的命名空间，只挂载给 MCP 和 AIOps；我们的 SA 不需要读取 xnet 命名空间 |
+| 跨集群混用数据 | 工具层强制注入集群；VictoriaMetrics 用 `extra_label` 限定 |
 | xnet 自身的问题 | **我们无法解决**：xnet-agent 拥有边缘集群的全部权限，JWT 密钥硬编码。我们只能保证"经过我们系统的操作是受控的" |
 
-现有 MCP 的 ClusterRole 含 `*/*/*`（`mcpstander/deploy/rbac.yaml`），这是单集群下已有的风险，与本设计无关，但建议一并收缩。
+现有 MCP 的 ClusterRole 含 `*/*/*`，这是单集群下就有的风险，建议一并收缩。
 
-## 10. 改动清单
+## 14. 运维命令（robusta Makefile）
 
-### 10.1 mcpstander（主要改动）
-
-| 模块 | 改动 |
+| 命令 | 作用 |
 |---|---|
-| 新增 `servers/cluster/registry.py` | 集群注册表：静态配置 + xnet Node 发现、别名解析、在线状态、能力 |
-| 新增 `servers/cluster/xnet_tunnel.py` | 隧道客户端：证书加载与热更新、签名、错误分类、每个集群的并发与超时控制 |
-| 新增 `bin/kubectl` 垫片 | 见 §4.3 |
-| `aiops_observability/config.py` | 从后端档案读取配置；没有档案时回退到环境变量 |
-| 新增 `aiops_observability/collectors/victoriametrics.py` | PromQL 查询，附加 `extra_label` |
-| 新增 `aiops_observability/collectors/victorialogs_events.py` | LogsQL 查询，解析事件文本 |
-| `query/metrics.py`、`query/logs.py`、`query/tracing.py`、`query/topology.py` | 按集群选择后端；结果增加 `cluster`、`backend`；不支持的能力返回 `capability_missing` |
-| `holmes_tools/prometheus.py` | 按集群选择地址，附加 `extra_label` |
-| `holmes_tools/_command_runner.py` | 子进程环境变量带上 `AIOPS_CLUSTER` |
-| 各工具 schema | 增加可选的 `cluster` 参数 |
-| 新增工具 `list_clusters` | 返回集群名、别名、在线状态和能力，供"我有哪些集群"类问题使用 |
+| `make runner-build` / `runner-push` | 构建 / 推送 runner 镜像（`Dockerfile.edge-runner`，版本见 `deploy-edge/VERSION`） |
+| `make mc-keygen` | 生成签名密钥 |
+| `make edge-deploy` / `edge-delete EDGE_KUBECONFIG=…` | 在边缘部署 / 卸载 runner |
+| `make sync-xnet-cert` | 中心：复制 xnet 证书、下发签名密钥 |
+| `make deploy-mc MC_LOAD_HOSTS=…` | 中心：部署 AIOps 及集群配置（mcpstander、frountind 各有同名目标） |
+| `make test-multicluster` | 多集群单元测试 |
 
-### 10.2 新组件 aiops-edge-runner
+## 15. 已知限制
 
-放在 mcpstander 仓库中（复用 `_command_runner` 和规则代码），以单独的镜像和部署清单（YAML + Makefile）发布。
+1. 集群登记是静态配置，没有自动发现（§3.1）。
+2. 新后端没有容器日志和链路数据，诊断时只能用 K8s 事件和实时 `kubectl logs`。
+3. 远端集群不支持 helm。
+4. 快速查询还没有接入运维声明的预期状态（§11 目前只作用于深度诊断）。
+5. `["*"]` 会展开为所有已配置的集群，不按在线状态过滤；不可达的集群在深度诊断里写明"未完成检查"，在快速查询里表现为工具返回 `cluster_unreachable`。
+6. 恢复观察经垫片读取实时状态，没有优先使用中心指标。
+7. runner 只有 1 个副本，Pod 重建后任务记录丢失（中心判为"结果未知"）。命令规则随 runner 部署下发，中心规则改了之后要重新执行 `make edge-deploy`。
+8. `run_report` 没有按集群单独记录结果，未完成检查的集群只出现在状态（`cluster_failures`）和报告里。
 
-### 10.3 robusta（少量改动）
+## 16. 代码索引
 
-| 模块 | 改动 |
-|---|---|
-| `workflow/nodes/request_router.py` 与路由提示词 | 范围增加 `clusters`、`cluster_mode`；集群名由代码按注册表解析；多集群部署下范围不明确时强制走 `clarify`（§6.1） |
-| `aicall/tools.py:_wrap_mcp_tool_for_transport` | 按 §5.2 注入或校验 `cluster` |
-| `workflow/pod_identity.py`、分组与事实身份 | 身份中加入集群 |
-| `remediation/plans.py`、`pod_executor.py`、`recovery.py`、`audit.py` | 目标带集群；远端集群使用 runner 异步任务；审计带集群 |
-| 第二期：layer 按集群并行 | 见 §6.3 |
-
-### 10.4 frontend（少量改动）
-
-路由卡片、异常组标题、审批卡片和修复结果中显示集群。
-
-## 11. 实施阶段
-
-| 阶段 | 内容 | 验收 |
+| 功能 | robusta | mcpstander / frountind |
 |---|---|---|
-| P0 打通链路 | `make sync-xnet-cert`、隧道客户端、垫片、runner 只读接口、`make edge-deploy`；在 .88 部署 runner | 中心执行 `AIOPS_CLUSTER=vc-942nk… kubectl get pods -A` 能返回边缘结果；不带签名调用 runner 被拒 |
-| P1 可观测适配 | 后端档案、VictoriaMetrics/VictoriaLogs 采集器、集群注册表、`cluster` 参数、`list_clusters` | 见 §12 的 A1–A5；**10.2.0.48 上现有验收全部通过** |
-| P2 AIOps 单集群范围 | 路由识别集群、工具层注入、身份带集群 | 见 A6–A8 |
-| P3 远端执行与修复 | runner 的 exec 与异步任务、修复执行器路由、审批卡片显示集群 | 见 A9–A12 |
-| P4 一次诊断涉及多个集群 | layer 按集群并行、按集群分段输出 | 见 A13 |
+| 集群配置、别名、UUID | `aiops_edge/clusters.py` | 同步副本 `servers/aiops_edge/` |
+| 路由范围 | `app/core/multicluster.py`、`workflow/nodes/request_router.py` | — |
+| 工具绑定 | `multicluster.scoped_tools`、`workflow/graph.py`、`nodes/autonomous_parallel.py` | `servers/cluster_scope.py`（激活、schema、远端规则、`list_clusters`） |
+| 可观测后端 | — | `servers/aiops_observability/`（metrics extra_label、`collectors/victorialogs_events.py`、tracing） |
+| 垫片与隧道 | `aiops_edge/{shim,kubectl,tunnel,signing,streams}.py` | `bin/kubectl` |
+| 多集群定位 | `workflow/multicluster_location.py` | — |
+| 预期状态 | `workflow/expected_states.py`、`deploy-edge/clusters.mc.yaml` | — |
+| 报告 | `workflow/case_report.py`、`nodes/query_answer.py` | — |
+| 修复 | `remediation/pod_executor.py`、`aiops_edge/jobs_client.py` | — |
+| runner | `aiops_edge/runner/`、`deploy-edge/runner.yaml` | — |
+| 事件流投影 | `workflow/stream_contract.py`（`project_cluster_lane`） | — |
+| 前端 | — | `ClusterLaneBoard.tsx`、`clusterLanes.ts`、`chatEventTransition.ts`、`parallelEvidenceModel.ts`、`routePresentation.ts`、`scripts/replay-sse.mjs` |
+| 测试 | `tests/unit/multicluster/`、`scripts/acceptance/multicluster/` | `tests/test_cluster_scope.py`、`test_multicluster_wiring.py`、`test_aiops_edge_sync.py`；`tests/chat-transition.test.mjs` |
 
-每个阶段完成后都发版，并在两套环境上验证。验收脚本、分支与版本规划、测试环境操作规范见 [多集群验收方案](multi-cluster-acceptance.md)。
+## 17. 与开发前设计的差异
 
-## 12. 验收用例
-
-### 可观测适配
-
-| # | 操作 | 预期 |
+| 开发前的设计 | 实现 | 原因 |
 |---|---|---|
-| A1 | 问"edge-88 上 default 命名空间 xx Pod 的内存使用" | 只返回 edge-88 的数据；结果带 `cluster` 和 `backend=victoria` |
-| A2 | 模型传入的 PromQL 不带集群条件 | 仍然只返回该集群的数据（`extra_label` 生效） |
-| A3 | 在 victoria 集群上查询 Pod 日志 | 返回该 Pod 的 K8s 事件，标明 `log_source=k8s_events`，并说明没有容器日志；Warning 事件被正确识别 |
-| A4 | 在 victoria 集群上查询链路 | `capability_missing`，报告中不出现编造的链路结论 |
-| A5 | 在 10.2.0.48 上运行现有全部验收 | 结果与改动前一致 |
-
-### 集群范围
-
-| # | 操作 | 预期 |
-|---|---|---|
-| A6 | 两个边缘部署同名 Pod，只问 edge-88 | 结果中没有 edge-89 的对象 |
-| A7 | 问一个不存在的集群 | 回复找不到，并列出可用集群，不调用任何工具 |
-| A8 | 问"我有哪些集群" | 列出三个集群、别名和在线状态 |
-| A8a | 多集群部署下问"有哪些 Pod 异常"（没说集群） | 反问要查看中心集群、某个边缘集群还是全部集群；不调用任何工具 |
-| A8b | 接着回答"edge-89"，再追问"那它的事件呢" | 第一轮只查 edge-89；追问沿用 edge-89，不再反问 |
-| A8c | 分别问"中心集群……""edge-88 和 edge-89……""所有集群……" | 范围分别为 `center`、`multiple`（两个）、`multiple`（全部在线集群），路由卡片显示一致 |
-
-### 远端执行与修复
-
-| # | 操作 | 预期 |
-|---|---|---|
-| A9 | 在 edge-88 的 Pod 内执行 `ls /tmp` | 正常返回 |
-| A10 | 在 edge-88 的 Pod 内执行 `rm` 和 `reboot` | 与单集群的黑名单验收结果一致（见 [acceptance-blacklist.md](acceptance-blacklist.md)）；不经过中心、直接调用 runner 也被拒绝 |
-| A11 | edge-88 上的故障 case 生成修复方案并批准 | 审批卡片显示集群；runner 执行；恢复观察判定恢复 |
-| A12 | 修复执行中隧道断开或 runner 被删除（集成测试用假隧道；真实环境只操作 runner，不加防火墙） | 能恢复时取回结果、不重复执行；无法确认时标记"结果未知" |
-| A13 | "检查 edge-88 和 edge-89"，两边各有一个故障 case | 两个集群的异常组并发取证，报告按集群分段 |
-
-### 网络与 xnet 契约
-
-| # | 操作 | 预期 |
-|---|---|---|
-| A14 | 运行时依赖检查（不加防火墙） | 中心的运行时配置中没有边缘 kubeconfig 和边缘 API Server 地址；远端访问只经过隧道客户端 |
-| A15 | 契约测试脚本（每次 xnet 升级后执行） | `/proxy` 可用；Node 名能反解出 UUID；`cluster` 标签与 Node 名一致；不带证书被拒 |
-
-## 13. 风险
-
-| 风险 | 应对 |
-|---|---|
-| xnet 升级后行为改变 | 固定使用验证过的版本；A15 契约测试 |
-| xnet 主副本切换，所有边缘断开约 10 秒 | 快速失败，标记"暂时不可达"；只读调用重试一次 |
-| 隧道 20 秒超时、整包缓冲 | 同步调用不超过 15 秒；修复使用异步任务；runner 截断输出 |
-| 新后端没有容器日志，诊断质量下降 | 如实标注数据缺失，引导使用 `kubectl_logs`（经 runner 实时获取） |
-| 新旧后端的指标名或标签有差异 | P1 编写对照测试，检查常用指标（kube-state-metrics、cadvisor）在两套后端上都存在 |
-| 已知采集噪声（控制面组件 down、虚拟 Node 采集失败）引起误报 | 不改采集配置；在 runbook 中说明这类现象的识别方法 |
-| 集群名过长、不便输入 | 使用我们自己配置的别名 |
-| 中心资源（12 核 / 15G）同时承载可观测全套组件和 AIOps | 部署前确认余量；必要时把故障 case 放在边缘 |
-
-## 14. 已确认的决策（2026-10-21）
-
-| 事项 | 决定 |
-|---|---|
-| xnet 的参与程度 | 所有新增内容都属于 AIOps 自己的服务，不要求 xnet 做任何适配；不在 xnet 命名空间创建对象，不使用 Vessel |
-| 证书获取 | 部署时复制（§4.5），不需要 Role |
-| runner 部署 | 我们自己的部署清单加 Makefile，在边缘本地执行，不需要 chart 仓库（§7.1） |
-| LLM 网关 | 10.2.5.x 可以访问 |
-| 没有说明集群时 | 多集群部署下必须澄清：中心集群、一个集群，还是多个集群（§6.1） |
-
-## 15. 实现与设计的差异
-
-| 设计原文 | 实现 | 原因 |
-|---|---|---|
-| runner 与垫片放在 mcpstander | 共享库 `aiops_edge/`（签名、隧道客户端、垫片、任务客户端、runner）放在 robusta，mcpstander 同步除 runner 外的文件并用测试校验一致 | runner 必须复用 robusta 的命令规则（`policy.py`、`execution_guard.py`），两者都只依赖标准库 |
-| runner 输出上限 256KB | 原始输出上限 4MB，可选 gzip+base64 压缩传输 | 实测 edge-88 的 `get pods -A -o json` 已超过 256KB，截断会破坏 jq 类工具 |
-| 测试环境从共用 harbor 拉取镜像 | 镜像经 SSH 导入节点 containerd 缓存，清单使用 `IfNotPresent` | 测试环境的 `xnet.registry.io` 解析到它自己的 Harbor（10.2.5.85），没有推送权限；按 IP 拉取 10.2.0.86 又因证书不含 IP SAN 失败；不修改节点配置 |
-| 一次诊断涉及多个集群：layer 按集群并行 | 同左；合并时目标 ID 加集群前缀、分组带集群，不改任何交接契约；只剩一个分组时把范围收窄到该集群 | 契约禁止额外字段；同名对象在两个集群里会撞上重复身份检查 |
-| 范围识别依赖模型 | 增加范围溯源检查：模型给出的集群必须出现在用户原话或会话中 | 验收中模型曾把没说集群的问题自行理解为"全部集群" |
-| A10c 伪造审批 ID 被拒 | runner 只要求需审批的命令带审批 ID；ID 的真实性由请求签名保证 | 只有持有签名密钥的中心能发出请求；runner 不持有中心的审批库 |
-| 网络故障用防火墙模拟 | 不加防火墙：运行时依赖检查（X3）+ 只操作 runner 的故障注入 + 集成测试中的假隧道 | Boss 要求 |
-| AIOps 挂载 Secret 0440 | 0444 | AIOps 容器以 uid 1000 运行，0440 的 root 文件读不到（验收发现） |
+| runner 和垫片放在 mcpstander | 共享库 `aiops_edge/` 放在 robusta，mcpstander 同步除 runner 外的文件 | runner 必须复用 robusta 的命令规则（`policy.py`、`execution_guard.py`） |
+| 集群自动发现（`discovery: xnet_nodes`） | 只有静态配置 | 测试环境的集群固定；xnet 虚拟 Node 只用于判断在线 |
+| runner 输出上限 256KB | 4MB，可选压缩 | 实测 edge-88 的 `get pods -A -o json` 超过 256KB，截断会破坏 jq |
+| "所有集群"只展开在线集群 | 展开所有已配置集群，不可达的集群由代码写明"未完成检查" | 不悄悄缩小范围 |
+| 恢复观察优先用中心指标 | 经垫片读取实时状态 | 与单集群共用同一套恢复判定 |
+| 范围识别：模型给出的集群必须出现在用户原话或会话中 | 13.0.12 起删除字面检查，改为按意图判断；13.0.14 增加集群角色和 `["*edge"]` | Boss 要求让 agent 理解意图；字面检查会把知识类问题也逼着选集群 |
+| 多集群定位：每个集群各跑一次 layer | 同左，另加：事件带 `cluster_lane` 记在 layer 下；模型断线重试一次；总览接收未检查与已排除清单；预期状态声明 | run `e43e8298` 暴露的显示、覆盖与误报问题 |
+| 新后端"日志"返回 `query_succeeded` + `partial` | `query_partial` / `empty` | AIOps 契约要求（MCP 8.0.5） |
+| 测试环境从共用 Harbor 拉镜像 | 经 SSH 导入节点缓存，`IfNotPresent` | 测试环境的 Harbor 无推送权限；不修改节点配置 |
+| 网络故障用防火墙模拟 | 不加防火墙：运行时依赖检查 + 只操作 runner 的故障注入 + 集成测试中的假隧道 | Boss 要求 |
+| AIOps 挂载 Secret 用 0440 | 0444 | AIOps 容器以 uid 1000 运行，读不到 0440 的 root 文件 |

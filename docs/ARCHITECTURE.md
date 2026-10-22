@@ -341,15 +341,15 @@ answer:        给人看的方案说明
 
 ## 6. 多集群模式
 
-只在挂载了多集群配置（`AIOPS_CLUSTERS_CONFIG`，见 `deploy-edge/clusters.mc.yaml`）时生效；没有该配置时，路由 schema、提示词、工具 schema、工具结果和 kubectl 调用与单集群完全相同。设计、边界与验收见 [多集群设计](multi-cluster-design.md)、[验收方案](multi-cluster-acceptance.md)，SDD 产物在 [specs/008-multi-cluster](../specs/008-multi-cluster/spec.md)。
+只在挂载了多集群配置（`AIOPS_CLUSTERS_CONFIG`，见 `deploy-edge/clusters.mc.yaml`）时生效；没有该配置时，路由 schema、提示词、工具 schema、工具结果和 kubectl 调用与单集群完全相同。当前设计与实现见 [多集群设计](multi-cluster-design.md)（单一来源），验收方法与结果见 [验收方案](multi-cluster-acceptance.md)，开发过程记录在 [specs/008-multi-cluster](../specs/008-multi-cluster/spec.md)。
 
 | 环节 | 多集群下的行为 | 代码 |
 |---|---|---|
-| ① 路由 | 扩展契约增加 `cluster_mode`、`clusters`、`cluster_labels`；集群名由代码按注册表解析；没说范围、范围不在用户原话或会话中、集群不存在，一律反问；修复只针对一个集群 | `app/core/multicluster.py`、`request_router.py` |
+| ① 路由 | 契约增加 `cluster_mode`（none / inventory / single / multiple / center / unspecified）、`clusters`、`cluster_labels`；模型按意图给出范围（`["*"]` 全部，`["*edge"]` 全部边缘集群），代码只做三件事：没说范围就反问、集群不存在就列出可用集群、修复只针对一个集群 | `app/core/multicluster.py`、`request_router.py` |
 | 工具 | 节点入口与并行通道按本次范围绑定 `cluster`：单个集群强制注入，多个集群校验在范围内；通道用自己组的集群 | `multicluster.scoped_tools`、`graph._bind_cluster_scope`、`autonomous_parallel` |
-| MCP | 每次调用激活集群上下文：VictoriaMetrics 查询附加 `extra_label`；victoria 后端的"日志"是 K8s 事件（标注 `k8s_events`/`partial`），链路为 `capability_missing`；远端 kubectl 经垫片转发 | mcpstander `servers/cluster_scope.py` |
-| ② 定位 | 涉及多个集群时，每个集群各跑一次定位（并行），合并为带集群前缀的目标与带集群的分组；单个集群失败只影响该集群 | `app/core/workflow/multicluster_location.py` |
-| ⑤ 总结 | 各组标题带集群 | `case_report.py` |
+| MCP | 每次调用激活集群上下文：VictoriaMetrics 查询附加 `extra_label`；victoria 后端的"日志"是 K8s 事件（`query_partial` / `empty`），链路为 `capability_missing`；远端 kubectl 经垫片转发 | mcpstander `servers/cluster_scope.py` |
+| ② 定位 | 多个集群时：先探测，再按集群并行定位（模型断线重试一次），事件带 `cluster_lane` 记在 layer 下；合并为带集群前缀的目标与带集群的分组；运维声明的预期状态经实时核对后排除；未检查的集群使"健康"降为"检查不完整" | `workflow/multicluster_location.py`、`workflow/expected_states.py` |
+| ⑤ 总结 | 各组标题带集群；代码写"未完成检查的集群""已按运维声明排除"两行；总览输入带这两份清单 | `case_report.py`、`query_answer.py` |
 | ⑧ 执行 | 远端集群的执行阶段作为 runner 异步任务（幂等键 `run:action:stage`，审批 ID 随任务传给 runner）；读操作与恢复观察经垫片；集群不可达时等待，不执行；结果无法确认时标记"结果未知"，不重新提交 | `pod_executor.py`、`aiops_edge/jobs_client.py` |
 | 边缘 | 唯一的边缘组件 `aiops-edge-runner`：校验签名，用中心同一份命令规则再检查一遍，reader / writer 两个身份 | `aiops_edge/runner/`、`deploy-edge/runner.yaml` |
 

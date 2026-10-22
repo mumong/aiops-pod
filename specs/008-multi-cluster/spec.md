@@ -2,7 +2,7 @@
 
 **Feature Branch**: `008-multi-cluster`
 **Created**: 2026-10-21
-**Status**: Draft
+**Status**: Implemented（开发过程记录，2026-10-21 至 2026-10-22；当前行为以 [docs/multi-cluster-design.md](../../docs/multi-cluster-design.md) 为准）
 **Input**: Boss："在多集群环境中可以使用新的可观测性数据方式；兼容旧的可观测组件；主要使用方式（快速查询、深度诊断）和现在差别不大，AIOps 逻辑改动不大，主要是 MCP 的适配。"
 
 设计说明（对外）：[docs/multi-cluster-design.md](../../docs/multi-cluster-design.md)；验收说明：[docs/multi-cluster-acceptance.md](../../docs/multi-cluster-acceptance.md)。本 spec 只写"要什么"，实现见 [plan.md](plan.md)。

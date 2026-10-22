@@ -24,6 +24,14 @@ KUBE_DIR = Path(os.environ.get("AIOPS_MC_KUBE_DIR", str(Path.home() / ".kube" / 
 CENTER_HOST = os.environ.get("AIOPS_MC_CENTER_HOST", "10.2.5.85")
 VM_URL = os.environ.get("AIOPS_MC_VM_URL", f"http://{CENTER_HOST}:31500/select/0/prometheus")
 VLOGS_URL = os.environ.get("AIOPS_MC_VLOGS_URL", f"http://{CENTER_HOST}:31700")
+# Precision checks (P5-2): objects declared normal in deploy-edge/clusters.mc.yaml
+# expected_states, and the xnet virtual nodes (named after the clusters).
+DECLARED_NORMAL = (("xnet", "xnet-management-"),)
+CLUSTER_NODES = (
+    "vc-xnet-management",
+    "vc-942nkkozc8o5fyb9q3bznb1ws",
+    "vc-dluw0jousipr6h5co2bwpyqk2",
+)
 TUNNEL_URL = os.environ.get("AIOPS_MC_TUNNEL_URL", f"https://{CENTER_HOST}:30909/proxy")
 EDGE_KUBECONFIGS = ("edge-88", "edge-89")
 AGENT_ROLE_LABEL = "node-role.kubernetes.io/xnet-agent"
@@ -117,7 +125,16 @@ def tunnel_get(
         return exc.code, exc.read()
 
 
-def check(case: str, ok: bool, evidence: str = "") -> bool:
+def check(case: str, ok: bool, evidence: str = "", unsure: bool = False) -> bool:
+    """``unsure``: the evidence may include other runs (attribution by log window).
+
+    Other runs can only add tool calls, so a pass stands; a failure is reported
+    as INCONCLUSIVE (re-run when nobody else uses the env) and still not a pass.
+    """
+    if not ok and unsure:
+        _results.append((case, False, "INCONCLUSIVE " + evidence))
+        print(f"INCONCLUSIVE {case} {evidence}".rstrip(), flush=True)
+        return False
     _results.append((case, ok, evidence))
     print(f"{'PASS' if ok else 'FAIL'} {case} {evidence}".rstrip(), flush=True)
     return ok
