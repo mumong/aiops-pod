@@ -93,7 +93,7 @@ OVERVIEW_PROMPT = """根据独立诊断结果的索引生成简短中文总览�
 覆盖状态、未解决项和失败不得省略或改称健康。统计由程序展示，无需自行计算。
 不生成修复命令，不调用工具；完整诊断将在总览后由程序逐组展示。
 若输入为分批概览，只整合已有判断和限制，不补造现场事实。输出 overview 字段，尽量简短。
-unchecked_clusters 中的集群未完成检查，不得说成已覆盖或没有异常；excluded_by_declaration 是按运维声明排除的对象，不得列为异常。
+unchecked_clusters 未检查，不得称已覆盖；excluded_by_declaration 不列为异常。
 """
 
 
