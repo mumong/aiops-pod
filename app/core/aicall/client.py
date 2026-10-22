@@ -129,6 +129,8 @@ class AutoToolChoiceChatOpenAI(ChatOpenAI):
         return super().bind_tools(tools, tool_choice=tool_choice, **kwargs)
 
 
+from app.core.context.secret_redaction import redact_secret_values
+
 from .output_budget import MINIMUM_OUTPUT_TOKENS, OutputBudget
 from .streaming import push_event
 from .structured_transport import normalize_tool_choice, parse_structured_tool_message
@@ -2491,6 +2493,10 @@ class AICall:
             )
             return
         tool_content = msg.content or ""
+        # Secret values never go further than this line (model, archive, stream).
+        tool_content, had_secret = redact_secret_values(tool_content)
+        if had_secret:
+            msg.content = tool_content
         tool_signature = self._tool_result_signature(msg, tool_name, tool_content)
         if tool_signature in run.seen_tool_result_signatures:
             logger.debug(
@@ -3971,6 +3977,9 @@ class AICall:
 
             if not isinstance(result, ToolMessage):
                 return result
+            if isinstance(result.content, str):
+                # Secret values stop here, before the model, the cache and any archive.
+                result.content, _ = redact_secret_values(result.content)
 
             if owner:
                 if getattr(result, "status", "success") == "success":
