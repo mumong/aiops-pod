@@ -34,10 +34,34 @@ def dry_run_argv(command: str) -> Optional[List[str]]:
     return [*argv[:cut], "--dry-run=client", *argv[cut:]]
 
 
-def preflight_errors(actions, run: Runner) -> List[str]:
-    """kubectl's own error for every write command whose dry run fails."""
+def remote_errors(action) -> List[str]:
+    """Commands a remote cluster cannot run (e.g. ``rollout status``, ``-w``), with the reason."""
+    from aiops_edge.kubectl_args import classify
+
+    errors = []
+    for field in ("dry_run_command", "execute_command", "verify_command"):
+        command = getattr(action, field, "") or ""
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            continue
+        if argv[:1] == ["kubectl"] and classify(argv)[0] is None:
+            errors.append(
+                f"{getattr(action, 'id', '?')}.{field}: `{command}` → 远端集群不支持：{classify(argv)[1]}"
+            )
+    return errors
+
+
+def preflight_errors(actions, run: Runner, remote: bool = False) -> List[str]:
+    """kubectl's own error for every write command whose dry run fails.
+
+    On a remote cluster every command must also be runnable there; live run
+    bd48672e verified with ``rollout status``, which the tunnel cannot carry.
+    """
     errors = []
     for action in actions:
+        if remote:
+            errors.extend(remote_errors(action))
         command = getattr(action, "execute_command", "") or ""
         argv = dry_run_argv(command)
         if argv is None:
@@ -60,3 +84,9 @@ def runner_for(contract) -> Runner:
     remote = multicluster.job_cluster(contract)
     cluster = remote.name if remote is not None else None
     return lambda argv: run_argv(argv, cluster=cluster)
+
+
+def is_remote(contract) -> bool:
+    from app.core import multicluster
+
+    return multicluster.job_cluster(contract) is not None

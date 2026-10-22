@@ -450,3 +450,15 @@ Boss 反馈 run `e43e8298`（"我的所有边缘测集群有什么pod异常？"�
 | 13.0.23 | `c544abbd` + `6cc082af` | P5 10/10 | 6 个故障 6 个诊断组，均带集群名；集群卡片和取证组都显示分析正文；中心集群的 xnet 备用副本仍按运维声明排除 |
 
 清单核对的线上路径（AIOps Pod 内直接调用）：edge-89 补出 4 个、edge-88 补出 2 个（经隧道和 runner 读取），center 补出 2 个 xnet 备用副本（随后被运维声明排除），挂在虚拟节点上的 Pod 全部跳过。
+
+
+### 多集群诊断后的分组修复（2026-10-22，AIOps 13.0.26–13.0.27、runner 1.0.4）
+
+起因：run `9062db56` 的 6 个分组修复全部失败（见设计文档 §10 "范围与预检"）。之前的 A11 只测过单集群诊断后的修复，所以没发现这个问题。新增 `e2e_ask.py --phase p6`（A12）。
+
+| 用例 | 结果 | 证据 |
+|---|---|---|
+| A12-two-clusters-diagnosed | ✅ | run `bd48672e`：g1=edge-88/aiops-case-10，g2=edge-89/aiops-case-06 |
+| A12-g1-runs-on-edge-88 / A12-g2-runs-on-edge-89 | ✅ | runner 审计：每组恰好 1 个任务，且都在本组集群；审批卡片显示对应集群 |
+| A12-center-untouched | ✅ | 中心 `aiops-case-*` 的 Deployment generation 前后一致 |
+| A12-recovered | ✅ | 两组都是 recovered；预检拦下了一次 `--remove`（参数不存在），模型改写后执行成功 |

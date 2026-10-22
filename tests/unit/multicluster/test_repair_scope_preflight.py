@@ -202,3 +202,19 @@ def test_client_dry_run_is_a_read_on_remote_clusters():
         None,
     )
     assert classify(["kubectl", "set", "env", "deploy/x", "A-"]) == ("write", None)
+
+
+def test_remote_plans_cannot_use_commands_the_tunnel_cannot_carry():
+    action = RepairAction(
+        id="a1",
+        group_id="g",
+        description="d",
+        risk="low",
+        rollback_advice="r",
+        execute_command="kubectl set env deployment/w -n ns A-",
+        verify_command="kubectl rollout status deployment/w -n ns --timeout=60s",
+    )
+    ok = lambda argv: "ok"  # noqa: E731
+    assert preflight_errors([action], ok) == []  # local: rollout status is fine
+    (error,) = preflight_errors([action], ok, remote=True)
+    assert error.startswith("a1.verify_command") and "远端集群不支持" in error

@@ -772,6 +772,106 @@ def phase_p5() -> None:
     mc.check("P5-2-virtual-nodes-not-diagnosed", not nodes, str(nodes))
 
 
+def _center_generations() -> dict:
+    """Generation of every Deployment in the center's lab namespaces (repairs must not touch them)."""
+    items = mc.kubectl_json("center", "get", "deployments", "-A")["items"]
+    return {
+        f"{d['metadata']['namespace']}/{d['metadata']['name']}": d["metadata"].get("generation")
+        for d in items
+        if d["metadata"]["namespace"].startswith("aiops-case-")
+    }
+
+
+def phase_p6() -> None:
+    """Repair after a two-cluster diagnosis (run 9062db56): each group on its own cluster.
+
+    The earlier A11 only repaired a single-cluster diagnosis; group repairs of a
+    two-cluster diagnosis ran on the center. Repairs edge-88 c10 and edge-89 c06
+    (lab faults; redeploy with make case-deploy).
+    """
+    s = Session()
+    d = s.ask("深度诊断 edge-88 的 aiops-case-10 和 edge-89 的 aiops-case-06 命名空间的 Pod")
+    record(d)
+    groups = {
+        c.get("group_id"): (
+            (c.get("target") or {}).get("cluster_label"),
+            (c.get("target") or {}).get("entities") or [],
+        )
+        for c in d.get("diagnosis_cases") or []
+    }
+    mc.check(
+        "A12-two-clusters-diagnosed",
+        {label for label, _ in groups.values()} == {"edge-88", "edge-89"},
+        f"run={d['run_id']} groups={groups}",
+    )
+    center_before, before = _center_generations(), log_snapshot()
+    batch = s.api(
+        "POST", "/repair/batches", {"diagnosis_run_id": d["run_id"], "question": "修复这些问题"}
+    )
+    batch_id = batch.get("batch_id")
+    terminal = {
+        "recovered",
+        "not_recovered",
+        "timeout",
+        "rejected",
+        "blocked",
+        "failed",
+        "cancelled",
+        "needs_followup",
+        "execution_disabled",
+        "superseded",
+        "interrupted",
+        "skipped",
+    }
+    deadline, finals, cards, approvals = time.time() + 2400, {}, {}, 0
+    while time.time() < deadline:
+        view = s.api("GET", f"/repair/batches/{batch_id}")
+        for group in view.get("groups") or []:
+            gid = group.get("group_id")
+            if group.get("pending_approval_id"):
+                job = s.api("GET", f"/repair/jobs/{group['job_id']}")
+                cards.setdefault(gid, job.get("approval") or {})
+                s.api(
+                    "POST",
+                    f"/repair/jobs/{group['job_id']}/approve",
+                    {
+                        "approval_id": group["pending_approval_id"],
+                        "approved": True,
+                        "reviewer": "acceptance",
+                        "reason": "multi-cluster acceptance A12",
+                    },
+                )
+                approvals += 1
+            elif group.get("status") in terminal:
+                finals[gid] = group.get("status")
+        if view.get("groups") and len(finals) == len(view["groups"]):
+            break
+        time.sleep(5)
+    audit = {
+        edge: [line for line in runner_audit_new(edge, before) if '"job"' in line]
+        for edge in ("edge-88", "edge-89")
+    }
+    for gid, (label, entities) in groups.items():
+        ns = (entities[0] if entities else {}).get("namespace", "")
+        own = [line for line in audit.get(label, []) if ns in line]
+        other = [line for e, lines in audit.items() if e != label for line in lines if ns in line]
+        mc.check(
+            f"A12-{gid}-runs-on-{label}",
+            bool(own) and not other and cards.get(gid, {}).get("cluster") == label,
+            f"ns={ns} own_jobs={len(own)} other_jobs={len(other)} card={cards.get(gid, {}).get('cluster')}",
+        )
+    mc.check(
+        "A12-center-untouched",
+        _center_generations() == center_before,
+        f"before={center_before} after={_center_generations()}",
+    )
+    mc.check(
+        "A12-recovered",
+        finals and all(v == "recovered" for v in finals.values()),
+        f"batch={batch_id} approvals={approvals} finals={finals}",
+    )
+
+
 def phase_intent() -> None:
     """Intent accuracy of the router over intent_cases.json: measured, not a gate.
 
@@ -807,6 +907,7 @@ def main() -> None:
         "p3": phase_p3,
         "p4": phase_p4,
         "p5": phase_p5,
+        "p6": phase_p6,
         "intent": phase_intent,
     }
     parser = argparse.ArgumentParser()

@@ -370,11 +370,12 @@ class RemediationNode(QueryCollectNode):
             "payload"
         ) or {}
         chains = self._controller_chains(diagnosis, state.get("request_contract"))
-        from app.core.remediation.preflight import preflight_errors, runner_for
+        from app.core.remediation.preflight import is_remote, preflight_errors, runner_for
 
         run = runner_for(state.get("request_contract"))
+        remote = is_remote(state.get("request_contract"))
         schema = RepairDraft.with_controller_chains(chains).with_preflight(
-            lambda actions: preflight_errors(actions, run)
+            lambda actions: preflight_errors(actions, run, remote=remote)
         )
         material = {
             "question": question,

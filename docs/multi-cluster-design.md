@@ -326,6 +326,12 @@ layer → evidence / parallel_evidence → rca → conclusion 全部不变，所
 
 需审批的命令（如 Pod 内 `rm`）：审批 ID 随任务交给 runner，runner 看到 ID 才执行；ID 的真实性由请求签名保证，因为只有中心能发出请求。
 
+**范围与预检**（run `9062db56` 之后）：
+
+- **按组修复只在本组集群执行**：多集群诊断的每个异常组带着自己的集群（`target.cluster`），分组修复时把范围收窄到这一个集群（`group_context.scoped_diagnosis`）。那次运行里，各组沿用了诊断的两个集群，执行器把"不是一个集群"当成本集群处理，结果命令全部在中心执行：edge-89 的 namespace 不存在，中心上同名的 `aiops-case-08` 反而被改了。
+- **范围不明确就拒绝**：多集群模式下，修复范围不是恰好一个集群时，执行器直接返回 `blocked`（`cluster_scope_ambiguous`），一条命令都不执行，绝不退回中心执行。
+- **审批前预检**（`remediation/preflight.py`）：方案交付时，对每条 kubectl 写命令在本组集群上执行 `--dry-run=client`，不做任何修改。kubectl 的报错（参数错、对象或命名空间不存在、命令规则禁止）作为校验错误退回给模型修正。远端集群上还会检查每条命令能否经隧道执行（例如 `rollout status` 不行）。运维看到的方案都已经过这一步。runner 把 `--dry-run=client` 当作只读请求处理，命令规则仍然生效。实测：模型两次写出 `kubectl set env --remove=…`（参数不存在），都被预检退回，改写后修复成功。
+
 ## 11. 运维声明的预期状态与虚拟节点
 
 有些平台按设计就会出现"看起来异常"的对象。例如 xnet-management 做主备选举：同一时间只有 1 个副本 Ready，其余副本是 `0/1 Running`。模型无法自己知道这一点，所以由运维在集群配置里声明：
