@@ -387,6 +387,7 @@ expected_states:
 | runner 被滥用 | reader / writer 两个最小权限身份；只读接口不会使用 writer |
 | 证书泄露范围 | 证书复制到我们自己的命名空间，只挂载给 MCP 和 AIOps；我们的 SA 不需要读取 xnet 命名空间 |
 | 跨集群混用数据 | 工具层强制注入集群；VictoriaMetrics 用 `extra_label` 限定 |
+| Secret 值进入模型或归档 | 工具结果进入 AIOps 时统一脱敏（`context/secret_redaction.py`，在工具中间件里执行，早于模型、缓存、归档和事件流）：Secret 对象只保留键名，值替换为 `<redacted: N bytes>`，删除 `last-applied-configuration`；无法解析的 Secret 输出整体替换。起因：run `ef5cbfed`（runner 2 级）里，较短的 Secret YAML 走了原文直通路径，模型看到了 base64 值和注解里的明文。中心集群的 MCP 一直是管理员权限，同样受影响 |
 | xnet 自身的问题 | **我们无法解决**：xnet-agent 拥有边缘集群的全部权限，JWT 密钥硬编码。我们只能保证"经过我们系统的操作是受控的" |
 
 现有 MCP 的 ClusterRole 含 `*/*/*`，这是单集群下就有的风险，建议一并收缩。
