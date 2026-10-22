@@ -93,8 +93,30 @@ OVERVIEW_PROMPT = """根据独立诊断结果的索引生成简短中文总览�
 覆盖状态、未解决项和失败不得省略或改称健康。统计由程序展示，无需自行计算。
 不生成修复命令，不调用工具；完整诊断将在总览后由程序逐组展示。
 若输入为分批概览，只整合已有判断和限制，不补造现场事实。输出 overview 字段，尽量简短。
-unchecked_clusters 未检查，不得称已覆盖；excluded_by_declaration 不列为异常。
+unchecked_clusters 未检查，不得称已覆盖；excluded_by_declaration 不列为异常；located_without_evidence_stage 仍是发现的对象，不得称该集群无异常。
 """
+
+
+def located_only(state):
+    """Location targets that got no evidence lane, with the stage's own reason."""
+    out = []
+    for target in (state.get("diagnosis_handoff") or {}).get("targets") or []:
+        if target.get("status") not in ("assessed", "deferred"):
+            continue
+        entity = target.get("entity") or {}
+        # Multi-cluster merge prefixes target ids with the cluster label.
+        prefix = str(target.get("target_id") or "").split("/", 1)[0]
+        cluster = (
+            prefix
+            if prefix in ((state.get("request_contract") or {}).get("cluster_labels") or [])
+            else ""
+        )
+        name = f"{cluster + ' ' if cluster else ''}{entity.get('namespace', '')}/{entity.get('name', '')}"
+        why = target.get("status_reason") or target.get("issue") or ""
+        out.append(
+            f"{name}（{'暂缓' if target['status'] == 'deferred' else '定位判断'}：{why}）"[:360]
+        )
+    return out
 
 
 def conclude_cases(node, state):
@@ -107,6 +129,7 @@ def conclude_cases(node, state):
         "coverage": (state.get("diagnosis_handoff") or {}).get("coverage", "unknown"),
         "unchecked_clusters": list(state.get("cluster_failures") or []),
         "excluded_by_declaration": list(state.get("expected_exclusions") or []),
+        "located_without_evidence_stage": located_only(state),
     }
     events = list(state.get("thinking_events") or [])
     failed = False
@@ -170,6 +193,14 @@ def conclude_cases(node, state):
         # Also code: excluded objects are named, so nothing disappears silently.
         header += (
             "\n\n已按运维声明排除（不计为异常）：" + "；".join(state["expected_exclusions"]) + "。"
+        )
+    if context["located_without_evidence_stage"]:
+        # Code, like the lines above: a target the location stage settled by itself
+        # (assessed/deferred) still appears; run 51d58579 lost edge-88 this way.
+        header += (
+            "\n\n定位阶段已判断、未单独取证的对象："
+            + "；".join(context["located_without_evidence_stage"])
+            + "。"
         )
     sections = ["## 诊断总览", header, overview]
     for case in cases:

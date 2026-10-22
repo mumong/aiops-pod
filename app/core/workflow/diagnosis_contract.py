@@ -5,10 +5,11 @@ published facts; it does not decide whether an observation is a fault.
 """
 
 from copy import deepcopy
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.workflow.contract_coercion import TextItems
 from app.core.workflow.pod_detection import PodAssessment
 
 
@@ -36,7 +37,7 @@ class LocationTarget(ContractModel):
     issue: str = Field(min_length=1, max_length=320, description="简短异常现象，不写完整分析")
     status: Literal["investigate", "assessed", "deferred", "excluded"] = "investigate"
     status_reason: str = Field(default="", max_length=240)
-    evidence_refs: list[str] = Field(default_factory=list, max_length=3)
+    evidence_refs: Annotated[list[str], TextItems] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")
     def disposition(self):
@@ -92,9 +93,9 @@ class DiagnosisTarget(ContractModel):
     status_reason: str = ""
     facts: list[DiagnosisFact] = Field(default_factory=list)
     findings: list[DiagnosisFinding] = Field(default_factory=list)
-    unknowns: list[str] = Field(default_factory=list)
-    next_questions: list[str] = Field(default_factory=list)
-    runbook_refs: list[str] = Field(default_factory=list)
+    unknowns: Annotated[list[str], TextItems] = Field(default_factory=list)
+    next_questions: Annotated[list[str], TextItems] = Field(default_factory=list)
+    runbook_refs: Annotated[list[str], TextItems] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def valid_identity_and_disposition(self):
@@ -112,7 +113,7 @@ class DiagnosisHandoff(ContractModel):
     summary: str
     targets: list[DiagnosisTarget]
     coverage: Literal["complete", "partial", "unknown"] = "unknown"
-    limitations: list[str] = Field(default_factory=list)
+    limitations: Annotated[list[str], TextItems] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def unique_targets(self):

@@ -171,7 +171,11 @@ def _prometheus_rows(base_url: str, query: str, end: int, start: int | None = No
 
 
 def _pod_matchers(identity: PodIdentity) -> str:
-    return f'namespace="{_safe_prom_value(identity.namespace)}",pod="{_safe_prom_value(identity.name)}"'
+    # PROMETHEUS_EXTRA_MATCHERS narrows a shared store to one cluster, e.g. cluster="vc-..."
+    # on the multi-cluster VictoriaMetrics (Prometheus-compatible query API).
+    extra = os.getenv("PROMETHEUS_EXTRA_MATCHERS", "").strip().strip(",")
+    return (f'namespace="{_safe_prom_value(identity.namespace)}",pod="{_safe_prom_value(identity.name)}"'
+            + (f",{extra}" if extra else ""))
 
 
 def query_prometheus(identity: PodIdentity, base_url: str, start: int, end: int, case_id: str = "") -> CoverageResult:
@@ -385,6 +389,40 @@ def coverage_matches(expected: str, actual: CoverageResult) -> bool:
     return expected == actual.coverage
 
 
+# OBSERVABILITY_PROFILE=victoria: the multi-cluster stack (VictoriaMetrics + VictoriaLogs
+# carrying only Kubernetes events). Container logs, flows and traces do not exist there,
+# so those backends report "not_provided" and are not compared; Kubernetes events in
+# VictoriaLogs are checked instead. The default "legacy" profile is unchanged.
+VICTORIA_BACKENDS = ("kubernetes", "prometheus", "events")
+
+
+def profile() -> str:
+    return os.getenv("OBSERVABILITY_PROFILE", "legacy").strip().lower() or "legacy"
+
+
+def expected_coverage(case: dict[str, Any]) -> dict[str, str]:
+    if profile() != "victoria":
+        return dict(case["coverage"])
+    return {backend: "present" for backend in VICTORIA_BACKENDS}
+
+
+def query_victorialogs_events(identity: PodIdentity, base_url: str, cluster: str, start: int) -> CoverageResult:
+    if not base_url:
+        return CoverageResult("events", "error", "VICTORIALOGS_URL is not configured")
+    name = identity.name.replace('"', '\\"')
+    query = f'_time:>={_iso(start)} "{name}"' + (f' cluster:"{cluster}"' if cluster else "")
+    url = base_url.rstrip("/") + "/select/logsql/query?" + urllib.parse.urlencode({"query": query, "limit": 50})
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=8) as response:
+            lines = [line for line in response.read(2_000_000).decode("utf-8").splitlines() if line.strip()]
+    except Exception as exc:
+        return CoverageResult("events", "error", f"query failed: {type(exc).__name__}")
+    own = re.compile(r"involvedObject_name: " + re.escape(identity.name) + r"(?:,|\"|$)")
+    matched = [line for line in lines if own.search(line)]
+    return CoverageResult("events", "present" if matched else "empty",
+                          f"{len(matched)} Kubernetes events of the Pod in VictoriaLogs", len(matched))
+
+
 def _window(identity: PodIdentity, now: int) -> tuple[int, int]:
     try:
         created = int(dt.datetime.fromisoformat(identity.created_at.replace("Z", "+00:00")).timestamp())
@@ -407,8 +445,18 @@ def verify_case(case: dict[str, Any]) -> tuple[bool, list[CoverageResult]]:
     results = [CoverageResult("kubernetes", "present" if matched else "empty", json.dumps(facts, ensure_ascii=False, separators=(",", ":")), 1)]
     now = int(time.time())
     start, end = _window(identity, now)
-    run_id = resolve_driver_run_id(identity.namespace)
     prom = query_prometheus(identity, os.getenv("PROMETHEUS_URL", ""), start, end, case["id"])
+    if profile() == "victoria":
+        events = query_victorialogs_events(identity, os.getenv("VICTORIALOGS_URL", ""),
+                                           os.getenv("VICTORIALOGS_CLUSTER", ""), start)
+        absent = [CoverageResult(backend, "not_provided", "not part of the victoria profile")
+                  for backend in ("elasticsearch", "deepflow", "tempo")]
+        results.extend([prom, events, *absent])
+        by_backend = {item.backend: item for item in results}
+        ok = all(coverage_matches(expected, by_backend[backend])
+                 for backend, expected in expected_coverage(case).items())
+        return ok, results
+    run_id = resolve_driver_run_id(identity.namespace)
     logs = query_case_elasticsearch(case, identity, run_id, os.getenv("ELASTICSEARCH_URL", ""), start, end,
                                     os.getenv("ELASTICSEARCH_USERNAME", ""), os.getenv("ELASTICSEARCH_PASSWORD", ""),
                                     _env_bool("ELASTICSEARCH_TLS_VERIFY", True), os.getenv("ELASTICSEARCH_CA_CERT", ""))
@@ -438,7 +486,7 @@ def _print_table(cases: list[dict[str, Any]], reports: dict[str, list[CoverageRe
     print("case backend        coverage expected samples summary")
     for case in cases:
         for result in reports.get(case["id"], []):
-            expected = case["coverage"].get(result.backend, "-")
+            expected = expected_coverage(case).get(result.backend, "-")
             summary = result.summary.replace("\n", " ")[:180]
             print(f"{case['id']:<4} {result.backend:<14} {result.coverage:<8} {expected:<8} {result.sample_count:<7} {summary}")
 

@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from app.core.workflow.contract_coercion import JsonItems, TextItems
 from app.core.workflow.fact_contract import tool_dimension
 
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=320)]
@@ -24,7 +25,7 @@ class CaseFact(BaseModel):
 
     statement: ShortText
     observed_at: str = Field(default="", max_length=80)
-    evidence_refs: list[EvidenceRef] = Field(
+    evidence_refs: Annotated[list[EvidenceRef], TextItems] = Field(
         min_length=1,
         max_length=3,
         description="原样使用工具结果中的 raw_ref 或 structured_ref 归档地址；不自编工具描述作为地址",
@@ -37,9 +38,11 @@ class EvidenceStageOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     analysis: str = Field(min_length=1)
-    key_facts: list[CaseFact] = Field(default_factory=list, max_length=8)
-    unresolved: list[ShortText] = Field(default_factory=list, max_length=6)
-    runbook_refs: list[EvidenceRef] = Field(default_factory=list, max_length=6)
+    key_facts: Annotated[list[CaseFact], JsonItems] = Field(default_factory=list, max_length=8)
+    unresolved: Annotated[list[ShortText], TextItems] = Field(default_factory=list, max_length=6)
+    runbook_refs: Annotated[list[EvidenceRef], TextItems] = Field(
+        default_factory=list, max_length=6
+    )
 
 
 class DiagnosisCaseOutput(BaseModel):
@@ -58,9 +61,11 @@ class DiagnosisCaseOutput(BaseModel):
     summary: ShortText
     cause: str = Field(default="", max_length=480)
     certainty: Literal["unknown", "hypothesis", "supported", "confirmed"]
-    key_facts: list[CaseFact] = Field(default_factory=list, max_length=8)
-    unresolved: list[ShortText] = Field(default_factory=list, max_length=6)
-    runbook_refs: list[EvidenceRef] = Field(default_factory=list, max_length=6)
+    key_facts: Annotated[list[CaseFact], JsonItems] = Field(default_factory=list, max_length=8)
+    unresolved: Annotated[list[ShortText], TextItems] = Field(default_factory=list, max_length=6)
+    runbook_refs: Annotated[list[EvidenceRef], TextItems] = Field(
+        default_factory=list, max_length=6
+    )
     report: str = Field(
         min_length=1,
         description="供用户直接阅读的完整 Markdown：诊断结论、异常现象、真实工具证据及来源、原因分析；不是一句摘要。不包含其他组，不生成修复命令",

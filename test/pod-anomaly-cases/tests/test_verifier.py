@@ -191,5 +191,33 @@ class VerifierTests(unittest.TestCase):
         self.assertEqual(slept.call_args_list, [mock.call(1), mock.call(2)])
 
 
+    def test_victoria_profile_checks_metrics_and_events_and_skips_absent_backends(self):
+        case = {"id": "c09", "coverage": {"kubernetes": "present", "prometheus": "present",
+                                          "elasticsearch": "present", "deepflow": "absent", "tempo": "absent"}}
+        with mock.patch.dict("os.environ", {"OBSERVABILITY_PROFILE": "victoria"}):
+            self.assertEqual(self.v.expected_coverage(case),
+                             {"kubernetes": "present", "prometheus": "present", "events": "present"})
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(self.v.expected_coverage(case), case["coverage"])
+
+    def test_extra_matchers_scope_metrics_to_one_cluster(self):
+        identity = self.v.PodIdentity("ns", "pod", "uid", "", "")
+        with mock.patch.dict("os.environ", {"PROMETHEUS_EXTRA_MATCHERS": 'cluster="vc-a",'}):
+            self.assertEqual(self.v._pod_matchers(identity), 'namespace="ns",pod="pod",cluster="vc-a"')
+
+    def test_victorialogs_events_count_only_the_pods_own_events(self):
+        identity = self.v.PodIdentity("ns", "workload-1", "uid", "", "")
+        body = "\n".join([
+            json.dumps({"_msg": "involvedObject_kind: Pod,involvedObject_name: workload-1,reasoni: Unhealthy"}),
+            json.dumps({"_msg": "involvedObject_kind: Pod,involvedObject_name: workload-12,reasoni: Pulled"}),
+        ]).encode()
+        with mock.patch.object(self.v.urllib.request, "urlopen", return_value=Response(body)) as urlopen:
+            result = self.v.query_victorialogs_events(identity, "http://vl", "vc-a", 0)
+        self.assertEqual((result.coverage, result.sample_count), ("present", 1))
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(urlopen.call_args.args[0].full_url).query)["query"][0]
+        self.assertIn('cluster:"vc-a"', query)
+        self.assertEqual(self.v.query_victorialogs_events(identity, "", "", 0).coverage, "error")
+
+
 if __name__ == "__main__":
     unittest.main()

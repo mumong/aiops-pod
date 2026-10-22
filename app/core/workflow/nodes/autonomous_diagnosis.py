@@ -323,6 +323,7 @@ class DiagnosisStageNode(QueryCollectNode):
                     {"type": "execution_incomplete", "node": self.node_id, "reason": reason}
                 )
         output.update({"query_draft": draft, "thinking_events": combined_events})
+        self._publish_stage_text(output, draft)
         # These fields are only stage prose, not verified facts or forced classifications.
         output[
             {"layer": "layer_analysis", "evidence": "evidence_analysis", "rca": "rca_analysis"}[
@@ -330,6 +331,11 @@ class DiagnosisStageNode(QueryCollectNode):
             ]
         ] = draft
         if self.node_id == "layer" and output.get("diagnosis_handoff"):
+            from app.core.workflow.inventory_reconcile import reconcile_inventory
+
+            output["diagnosis_handoff"], _ = reconcile_inventory(
+                output["diagnosis_handoff"], state
+            )
             output["diagnosis_handoff"] = assess_delivery(
                 output["diagnosis_handoff"],
                 combined_events,
@@ -352,6 +358,33 @@ class DiagnosisStageNode(QueryCollectNode):
             output.update(plan_groups(self, {**state, **output}))
         self._archive_node_output(output)
         return output
+
+    def _publish_stage_text(self, output, draft):
+        """Stream the stage's own prose once it is delivered.
+
+        Each stage writes its analysis inside the structured result (a tool call), so
+        the live stream carried reasoning only and the lane/stage cards stayed empty
+        until the final report (cc5f9fc7: 19 visible characters per stage). The same
+        text the stage hands over is shown; RCA shows its conclusion and cause, the
+        full report follows in the final answer.
+        """
+        case = output.get("diagnosis_case_result") or {}
+        if self.node_id == "rca" and case.get("summary"):
+            text = f"**诊断结论**：{case['summary']}"
+            if case.get("cause"):
+                text += f"\n\n**原因**：{case['cause']}"
+        else:
+            text = str(draft or "").strip()
+        if not text or not hasattr(self.ai_call, "_push"):
+            return
+        self.ai_call._push(
+            getattr(self, "_event_queue", None),
+            self.node_id,
+            [],  # display only: the stage events already hold this content
+            type="ai_message",
+            content=text[:500],
+            full_content=text,
+        )
 
 
 class DiagnosisEvidenceNode(DiagnosisStageNode):

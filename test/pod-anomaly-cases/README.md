@@ -114,6 +114,17 @@ cp test/pod-anomaly-cases/config.env.example test/pod-anomaly-cases/config.env
 
 支持 `PROMETHEUS_URL`、`ELASTICSEARCH_URL` 及其用户名/密码/CA、`TEMPO_URL`、`DEEPFLOW_NAMESPACE`、`DEEPFLOW_CLICKHOUSE_SELECTOR`、可选容器和超时。按实际环境填写；不要提交凭据或 CA 私钥。DeepFlow 验证通过已有 ClickHouse Pod 的 exec 读取，无需创建额外查询 Pod。
 
+多集群测试环境（VictoriaMetrics + 只含 K8s 事件的 VictoriaLogs）设 `OBSERVABILITY_PROFILE=victoria`：指标查询加上 `PROMETHEUS_EXTRA_MATCHERS`（如 `cluster="vc-…"`）限定集群，日志维度改为核对 VictoriaLogs 中该 Pod 的 K8s 事件（`VICTORIALOGS_URL`、`VICTORIALOGS_CLUSTER`）；容器日志、DeepFlow、Tempo 在该环境不存在，显示 `not_provided` 且不参与判定。每个集群用它自己的 `KUBECONFIG` 运行，例如：
+
+```bash
+KUBECONFIG=~/.kube/aiops-mc/edge-88 OBSERVABILITY_PROFILE=victoria \
+  PROMETHEUS_URL=http://10.2.5.85:31500/select/0/prometheus PROMETHEUS_EXTRA_MATCHERS='cluster="vc-942nkkozc8o5fyb9q3bznb1ws"' \
+  VICTORIALOGS_URL=http://10.2.5.85:31700 VICTORIALOGS_CLUSTER=vc-942nkkozc8o5fyb9q3bznb1ws \
+  make case-validate CASE=c10
+```
+
+运行时类 Case（c07、c08、c10）靠流量触发，故障周期性出现：刚部署或刚重启时 Pod 可能显示 `1/1 Running`，以 RESTARTS 和最近一次终止原因为准，或用 `--wait` 等待门禁通过。
+
 必要时可在独立终端转发已有服务：
 
 ```bash

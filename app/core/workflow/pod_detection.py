@@ -1,9 +1,11 @@
 """Agent-owned Pod assessment; code checks delivery/coverage, not fault semantics."""
 
 import json
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.workflow.contract_coercion import TextItems
 
 
 class PodAssessment(BaseModel):
@@ -12,8 +14,8 @@ class PodAssessment(BaseModel):
     scope: str = Field(min_length=1, max_length=320)
     observed_at: str = Field(min_length=1, max_length=80)
     recent_signals_reviewed: bool = False
-    unresolved: list[str] = Field(default_factory=list, max_length=20)
-    evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+    unresolved: Annotated[list[str], TextItems] = Field(default_factory=list, max_length=20)
+    evidence_refs: Annotated[list[str], TextItems] = Field(default_factory=list, max_length=20)
     reason: str = Field(min_length=1, max_length=600)
 
 
@@ -33,6 +35,7 @@ Agent 自主选择足以核实线索的证据，不要求固定调用日志、�
 定位 handoff.pod_assessment 填 status、scope、observed_at、recent_signals_reviewed、unresolved、真实 evidence_refs 和 reason。引用只填写实际提供的原文路径或证据来源 ID，不把描述句当引用。不从只查健康对象的筛选子集宣称完整覆盖。
 healthy 要求 coverage=complete、无 investigate/deferred 目标、无 unresolved，且近期线索已核实（无近期线索也明确记录）。
 abnormal 保留所有待调查 Pod；inconclusive 明确缺口，不编造故障或健康。定位没有待调查目标时，不为执行后续节点制造问题。
+targets.status：investigate=需要取证；assessed=定位已用真实证据说明原因，仍是异常，照常写入报告；deferred=本次暂缓并说明原因；excluded 只由系统按运维声明核验后设置，不要自行填写。测试标签、环境变量、命名或注释只解释背景，不能把当前异常判为预期、正常或无需调查。
 后续采证/RCA也遵守此范围；足以回答当前 Pod 问题就结束，不把未检查的无关维度当必须补齐的缺口。
 """
 
