@@ -633,9 +633,54 @@ def case_entities(result: dict) -> list:
     ]
 
 
+def live_faults() -> dict:
+    """Ground truth at test time: deployed lab cases whose catalog status gate holds.
+
+    Independent of the system under test: the case catalog's own gates
+    (test/pod-anomaly-cases), evaluated with each edge's ops kubeconfig.
+    """
+    import importlib.util
+    import os
+
+    script = (
+        Path(__file__).resolve().parents[3]
+        / "test/pod-anomaly-cases/scripts/verify_observability.py"
+    )
+    spec = importlib.util.spec_from_file_location("lab_verifier", script)
+    verifier = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = verifier  # its dataclasses resolve the module by name
+    spec.loader.exec_module(verifier)
+    catalog = verifier.load_catalog()["cases"]
+    out = {}
+    saved = os.environ.get("KUBECONFIG")
+    try:
+        for label in ("edge-88", "edge-89"):
+            os.environ["KUBECONFIG"] = mc.kubeconfig(label)
+            out[label] = set()
+            for case in catalog:
+                try:
+                    pods = verifier.resolve_workload_pods(case)
+                except Exception:
+                    continue  # case not deployed on this cluster
+                if (
+                    pods
+                    and verifier.evaluate_status_gate(
+                        pods[0][1], verifier._events(pods[0][0]), case["status_gate"]
+                    )[0]
+                ):
+                    out[label].add(case["namespace"])
+    finally:
+        if saved is None:
+            os.environ.pop("KUBECONFIG", None)
+        else:
+            os.environ["KUBECONFIG"] = saved
+    return out
+
+
 def phase_p5() -> None:
     """Seams and precision (after run e43e8298): stream -> UI, scope, declared states."""
     # P5-1: the user's own question; edges only, and the stream drives the UI correctly.
+    truth = live_faults()  # before the run: cases restart while it is in progress
     r = Session().ask("我的所有边缘测集群有什么pod异常？")
     record(r)
     scoped_check(
@@ -655,6 +700,47 @@ def phase_p5() -> None:
         and all(lane["status"] != "running" and lane["reasoning"] > 0 for lane in layer["lanes"])
         and (layer.get("duration") or 0) > 5,
         json.dumps(view if "nodes" not in view else layer, ensure_ascii=False)[:300],
+    )
+    # Recall (run 51d58579 lost edge-88 and c09): every live fault is diagnosed or named.
+    reported = {}
+    for case in r.get("diagnosis_cases") or []:
+        target = case.get("target") or {}
+        for entity in target.get("entities") or []:
+            reported.setdefault(target.get("cluster_label"), set()).add(entity.get("namespace"))
+    for label, namespaces in truth.items():
+        missing = sorted(
+            ns
+            for ns in namespaces
+            if ns not in reported.get(label, set()) and ns not in r["answer"]
+        )
+        mc.check(
+            f"P5-1-recall-{label}",
+            not missing,
+            f"run={r['run_id']} live={sorted(namespaces)} missing={missing}",
+        )
+    mc.check(
+        "P5-1-cases-name-cluster",
+        all((c.get("target") or {}).get("cluster_label") for c in r.get("diagnosis_cases") or []),
+        str(
+            [
+                (c.get("group_id"), (c.get("target") or {}).get("cluster_label"))
+                for c in r.get("diagnosis_cases") or []
+            ]
+        ),
+    )
+    # Visible prose, not reasoning only (run cc5f9fc7).
+    mc.check(
+        "P5-1-ui-analysis-visible",
+        all(lane.get("analysis", 0) > 0 for lane in layer.get("lanes", []))
+        and all(
+            g.get("analysis", {}).get("evidence") and g.get("analysis", {}).get("rca")
+            for g in evidence.get("groups", [])
+        ),
+        json.dumps(
+            [[l["label"], l.get("analysis")] for l in layer.get("lanes", [])]
+            + [[g["id"], g.get("analysis")] for g in evidence.get("groups", [])],
+            ensure_ascii=False,
+        )[:300],
     )
     mc.check(
         "P5-1-ui-groups-name-cluster",
