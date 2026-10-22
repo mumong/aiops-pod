@@ -2,6 +2,8 @@
 
 - ``read``: only read-only kubectl operations; write-side rules (bulk flags,
   protected kinds) do not apply to reads, matching the center's read tools.
+  A write command with ``--dry-run=client`` (repair preflight) is read-only in
+  effect: allowed unless the policy denies the command itself.
 - ``exec`` / ``write``: the configured remediation policy. Without an approval
   id the strict policy applies (approval_required counts as denied, as in
   chat); with one, approval_required commands may run. Denylisted commands are
@@ -49,6 +51,12 @@ def evaluate(argv: List[str], mode: str, approval_id: str, policy: CommandPolicy
     command = shlex.join(argv)
     if mode == "read":
         verdict = check_command(command, policy)
+        if "--dry-run=client" in argv:
+            # Repair preflight: a client dry run changes nothing, so it needs no approval;
+            # a denylisted command is still refused, which tells the planner early.
+            if not verdict.allowed:
+                return _deny(403, "policy_denied", verdict.reason, verdict.rule)
+            return Decision(True)
         if verdict.operation not in READ_ONLY_OPERATIONS:
             return _deny(403, "mode_denied", f"{verdict.operation or 'command'} is not read-only")
         return Decision(True)

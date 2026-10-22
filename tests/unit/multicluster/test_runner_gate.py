@@ -72,3 +72,16 @@ def test_argument_rules_apply_on_runner_too(policy):
 
 def test_unknown_mode_refused(policy):
     assert evaluate(K("get pods"), "admin", "", policy).status == 400
+
+
+def test_client_dry_run_preflight_runs_as_read_but_policy_still_applies(policy):
+    # Repair preflight (run 9062db56): dry runs change nothing and need no approval.
+    assert evaluate(K("set env deployment/w -n demo A- --dry-run=client"), "read", "", policy).ok
+    assert evaluate(K("patch deployment w -n demo -p {} --dry-run=client"), "read", "", policy).ok
+    # the real write still needs write mode
+    assert (
+        evaluate(K("set env deployment/w -n demo A-"), "read", "", policy).error == "mode_denied"
+    )
+    # a command the policy denies is denied even as a dry run
+    denied = evaluate(K("taint nodes n1 k=v:NoSchedule --dry-run=client"), "read", "", policy)
+    assert not denied.ok and denied.error == "policy_denied"
