@@ -85,3 +85,20 @@ def test_client_dry_run_preflight_runs_as_read_but_policy_still_applies(policy):
     # a command the policy denies is denied even as a dry run
     denied = evaluate(K("taint nodes n1 k=v:NoSchedule --dry-run=client"), "read", "", policy)
     assert not denied.ok and denied.error == "policy_denied"
+
+
+def test_level_1_is_read_only_whatever_the_rbac(policy):
+    def at(text, mode, level):
+        return evaluate(K(text), mode, "", policy, level)
+
+    assert at("get pods -A", "read", 1).ok
+    assert at("set env deployment/w -n demo A- --dry-run=client", "read", 1).ok
+    for text, mode in (
+        ("delete pod x -n demo", "write"),
+        ("exec x -n demo -- ls", "exec"),
+        ("set env deployment/w -n demo A- --dry-run=server", "read"),
+    ):
+        decision = at(text, mode, 1)
+        assert not decision.ok and decision.error == "level_denied" and "只读" in decision.reason
+    assert at("delete pod x -n demo", "write", 2).ok
+    assert at("set env deployment/w -n demo A- --dry-run=server", "read", 2).ok

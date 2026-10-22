@@ -180,3 +180,21 @@ def test_default_output_cap_is_4mb():
     from aiops_edge.runner.server import RunnerConfig
 
     assert RunnerConfig.__dataclass_fields__["max_output"].default == 4 * 1024 * 1024
+
+
+def test_dry_runs_pick_the_identity_that_would_run_the_change(runner):
+    """Server dry runs are checked as the writer (RBAC, admission) and discarded by the API server."""
+    argv = ["kubectl", "set", "env", "deployment/w", "-n", "d", "A-"]
+    status, body = call(
+        runner, "/v1/kubectl", {"argv": [*argv, "--dry-run=server"], "mode": "read"}
+    )
+    assert status == 200 and "kubeconfig=/cfg/write" in body["stdout"]
+    status, body = call(
+        runner, "/v1/kubectl", {"argv": [*argv, "--dry-run=client"], "mode": "read"}
+    )
+    assert status == 200 and "kubeconfig=/cfg/read" in body["stdout"]
+
+
+def test_healthz_reports_the_level(runner):
+    with urllib.request.urlopen(runner + "/healthz", timeout=5) as resp:
+        assert json.loads(resp.read())["level"] == 2

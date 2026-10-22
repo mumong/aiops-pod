@@ -183,10 +183,19 @@ kubectl get pods -A | jq …          （现有工具模板，一行不改）
 4. 执行 kubectl。原始输出最多 4MB，请求压缩时用 gzip+base64 传输；
 5. 写本地审计日志。
 
-**身份（`deploy-edge/runner.yaml`）**
+**身份与权限等级**（`deploy-edge/rbac/level-<1|2|3>.yaml`，`make edge-deploy RUNNER_LEVEL=…`，不写默认 2）
 
-- **reader**：`view` + 集群级只读（nodes、namespaces、pv、storageclasses、events）。
-- **writer**：修复所需的最小写权限。包括 Pod 的 create / delete / patch、`pods/exec`，工作负载（Deployment、StatefulSet、DaemonSet、ReplicaSet）的修改，以及 scale。
+runner 有两个身份：reader 执行读命令和 client dry run；writer 执行写命令、exec 和 server dry run。等级决定这两个身份的 RBAC：
+
+| 等级 | reader | writer | 能做什么 |
+|---|---|---|---|
+| 1 只读 | `view` + 集群级只读（不含 Secret） | 无权限；runner 还会在网关层直接拒绝写、exec 和 server dry run（`level_denied`） | 只能诊断 |
+| **2 标准（默认）** | 读全部资源（含 Secret；AIOps 把 Secret 处理成只剩键名后才交给模型） | Pod（删除、patch、exec、驱逐）、工作负载与扩缩容、ConfigMap、Service、PVC、HPA、Job/CronJob、Ingress、PDB、节点 patch（cordon） | 覆盖常见的诊断和修复。不能改：Secret、RBAC、Namespace、CRD、准入 Webhook，也不能删除节点 |
+| 3 管理员 | 读全部 | `cluster-admin` | 和中心的 MCP 身份相同 |
+
+按测试 case 核对过 2 级：c06、c08、c09、c10（改 Deployment）、c07、c03（ConfigMap/PVC）、c04（读 Secret 键名 + 改 Deployment）、c05（读 RuntimeClass）、c11（Pod finalizer）、节点压力与失联（删 Pod、cordon）。任何等级下，命令规则、审批前预检、人工审批都照常生效；等级只限定身份的上限。切换等级就是重新执行一次 `edge-deploy`（会先删掉旧的绑定），不需要重新构建镜像。`/healthz` 返回 `level`。
+
+审批前预检使用 `--dry-run=server`：以 writer 身份交给 API Server 校验后丢弃，因此语法错误、对象不存在、权限不足和准入拒绝都能在审批前发现（见 §10）。
 
 **任务**
 
@@ -330,7 +339,7 @@ layer → evidence / parallel_evidence → rca → conclusion 全部不变，所
 
 - **按组修复只在本组集群执行**：多集群诊断的每个异常组带着自己的集群（`target.cluster`），分组修复时把范围收窄到这一个集群（`group_context.scoped_diagnosis`）。那次运行里，各组沿用了诊断的两个集群，执行器把"不是一个集群"当成本集群处理，结果命令全部在中心执行：edge-89 的 namespace 不存在，中心上同名的 `aiops-case-08` 反而被改了。
 - **范围不明确就拒绝**：多集群模式下，修复范围不是恰好一个集群时，执行器直接返回 `blocked`（`cluster_scope_ambiguous`），一条命令都不执行，绝不退回中心执行。
-- **审批前预检**（`remediation/preflight.py`）：方案交付时，对每条 kubectl 写命令在本组集群上执行 `--dry-run=client`，不做任何修改。kubectl 的报错（参数错、对象或命名空间不存在、命令规则禁止）作为校验错误退回给模型修正。远端集群上还会检查每条命令能否经隧道执行（例如 `rollout status` 不行）。运维看到的方案都已经过这一步。runner 把 `--dry-run=client` 当作只读请求处理，命令规则仍然生效。实测：模型两次写出 `kubectl set env --remove=…`（参数不存在），都被预检退回，改写后修复成功。
+- **审批前预检**（`remediation/preflight.py`）：方案交付时，对每条 kubectl 写命令在本组集群上执行 `--dry-run=server`（由 API Server 校验后丢弃，不做任何修改）。kubectl 的报错（参数错、对象或命名空间不存在、权限不足、准入拒绝、命令规则禁止）作为校验错误退回给模型修正。远端集群上还会检查每条命令能否经隧道执行（例如 `rollout status` 不行）。运维看到的方案都已经过这一步。dry run 在 runner 上按只读请求处理（server dry run 以 writer 身份执行），命令规则仍然生效。实测：模型两次写出 `kubectl set env --remove=…`（参数不存在），都被预检退回，改写后修复成功。
 
 ## 11. 运维声明的预期状态与虚拟节点
 

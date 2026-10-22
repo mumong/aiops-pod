@@ -102,9 +102,9 @@ class RepairDraft(QueryAnswer):
         errors = check(self.actions)
         if errors:
             raise ValueError(
-                "命令预检未通过（kubectl --dry-run=client，在本组集群上执行，未做任何修改）："
+                "命令预检未通过（kubectl --dry-run=server，在本组集群上由服务端校验后丢弃，未做任何修改）："
                 + "；".join(errors)
-                + "。请按 kubectl 的报错修正命令（语法、参数、对象名或命名空间）后重新提交"
+                + "。请按 kubectl 的报错修正命令（语法、参数、对象名或命名空间、权限、准入校验）后重新提交；权限不足或集群为只读等级时不要换写法绕过，改为在评估中说明需要人工处理"
             )
         return self
 

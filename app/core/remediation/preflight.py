@@ -1,10 +1,11 @@
-"""Check a repair plan's write commands with ``kubectl --dry-run=client`` before approval.
+"""Check a repair plan's write commands with ``kubectl --dry-run=server`` before approval.
 
 Run 9062db56: an approved plan ran ``kubectl set env ... --remove=env/X`` (unknown
 flag) and others hit "namespace not found" on the wrong cluster; nothing checked a
-command before the operator approved it. A client-side dry run parses the command
-and reads the target object on the plan's own cluster without changing anything,
-so both mistakes surface while the model can still fix them. The check is generic:
+command before the operator approved it. A server-side dry run sends the change to
+the plan's own cluster, where the API server checks it (syntax, object, RBAC of the
+identity that would run it, admission and validation) and discards it, so these
+mistakes surface while the model can still fix them; nothing is changed. The check is generic:
 it reports kubectl's own error, it does not judge what the command should be.
 """
 
@@ -31,7 +32,7 @@ def dry_run_argv(command: str) -> Optional[List[str]]:
     if mode != "write":
         return None  # reads need no check; exec has no dry run
     cut = argv.index("--") if "--" in argv else len(argv)
-    return [*argv[:cut], "--dry-run=client", *argv[cut:]]
+    return [*argv[:cut], "--dry-run=server", *argv[cut:]]
 
 
 def remote_errors(action) -> List[str]:

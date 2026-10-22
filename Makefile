@@ -255,6 +255,10 @@ CENTER_KUBECTL = kubectl $(if $(CENTER_KUBECONFIG),--kubeconfig $(CENTER_KUBECON
 EDGE ?=
 EDGE_KUBECONFIG ?= $(if $(filter-out local,$(EDGE)),$(MC_KUBE_DIR)/$(EDGE))
 EDGE_KUBECTL = kubectl $(if $(EDGE_KUBECONFIG),--kubeconfig $(EDGE_KUBECONFIG))
+# runner 权限等级：1 只读（只诊断）；2 标准（默认，读全部、写常见修复对象）；3 管理员。见 deploy-edge/rbac/
+RUNNER_LEVEL ?= 2
+# 历史版本与各等级用过的绑定名；切换等级前先删除（ClusterRoleBinding 的 roleRef 不能原地修改）
+RUNNER_BINDINGS := aiops-edge-runner-read aiops-edge-runner-read-view aiops-edge-runner-write aiops-edge-runner-view aiops-edge-runner-read-cluster
 MC_CLUSTERS_FILE ?= deploy-edge/clusters.mc.yaml
 # 交付时可由运维提供 AIOps 专用的 xnet 客户端证书：目录内含 cert.pem、key.pem、ca.pem；
 # 不设则从中心 xnet 命名空间复制 xnet-management 的客户端证书（见设计文档 §18.2）
@@ -281,6 +285,7 @@ mc-keygen:
 		else python3 -c 'import secrets; print(secrets.token_hex(32))' > $(MC_KEY_FILE); echo "生成新的签名密钥 → $(MC_KEY_FILE)"; fi; }
 
 edge-target:
+	@case "$(RUNNER_LEVEL)" in 1|2|3) ;; *) echo "RUNNER_LEVEL 只能是 1、2、3（当前：$(RUNNER_LEVEL)）" >&2; exit 1;; esac
 	@test -n "$(EDGE)$(EDGE_KUBECONFIG)" || { echo "请指定边缘：EDGE=edge-88（用 $(MC_KUBE_DIR)/edge-88）或 EDGE=local（当前 kubectl 上下文）" >&2; exit 1; }
 	@test -z "$(EDGE_KUBECONFIG)" || test -f "$(EDGE_KUBECONFIG)" || { echo "找不到 $(EDGE_KUBECONFIG)" >&2; exit 1; }
 	@echo "边缘目标：$$($(EDGE_KUBECTL) config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo '?')（$(if $(EDGE_KUBECONFIG),$(EDGE_KUBECONFIG),当前上下文)）"
@@ -302,12 +307,18 @@ edge-deploy: edge-target
 		--dry-run=client -o yaml | $(EDGE_KUBECTL) apply -f -
 	@if test -n "$(MC_LOAD_HOSTS)"; then deploy-edge/load_image.sh $(RUNNER_IMAGE):$(RUNNER_VERSION) $(MC_LOAD_HOSTS); fi
 	sed -e 's|image: $(RUNNER_IMAGE):.*|image: $(RUNNER_IMAGE):$(RUNNER_VERSION)|' \
-		-e 's|imagePullPolicy: Always|imagePullPolicy: $(MC_PULL_POLICY)|' deploy-edge/runner.yaml | $(EDGE_KUBECTL) apply -f -
+		-e 's|imagePullPolicy: Always|imagePullPolicy: $(MC_PULL_POLICY)|' \
+		-e 's|{name: RUNNER_LEVEL, value: "[0-9]"}|{name: RUNNER_LEVEL, value: "$(RUNNER_LEVEL)"}|' deploy-edge/runner.yaml | $(EDGE_KUBECTL) apply -f -
+	@$(EDGE_KUBECTL) delete clusterrolebinding $(RUNNER_BINDINGS) --ignore-not-found >/dev/null
+	$(EDGE_KUBECTL) apply -f deploy-edge/rbac/level-$(RUNNER_LEVEL).yaml
+	@echo "runner 权限等级：$(RUNNER_LEVEL)"
 	$(EDGE_KUBECTL) -n aiops rollout restart deployment/aiops-edge-runner
 	$(EDGE_KUBECTL) -n aiops rollout status deployment/aiops-edge-runner --timeout=180s
 
 edge-delete: edge-target
 	$(EDGE_KUBECTL) delete -f deploy-edge/runner.yaml --ignore-not-found
+	$(EDGE_KUBECTL) delete clusterrolebinding $(RUNNER_BINDINGS) --ignore-not-found
+	$(EDGE_KUBECTL) delete clusterrole aiops-edge-runner-read-l1 aiops-edge-runner-read-l2 aiops-edge-runner-write-l2 aiops-edge-runner-read-l3 aiops-edge-runner-write aiops-edge-runner-read-cluster --ignore-not-found
 	$(EDGE_KUBECTL) -n aiops delete configmap aiops-edge-runner-policy secret aiops-edge-key --ignore-not-found
 
 # 中心的共享对象，MCP（mcp）和 AIOps（aiops）两个命名空间各一份，可重复执行：

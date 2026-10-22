@@ -284,6 +284,7 @@ Changes later:
 Variables:
 - `CENTER_KUBECONFIG`: defaults to `~/.kube/aiops-mc/center`, or the current context when that file does not exist.
 - `EDGE`: required for `edge-deploy` and `edge-delete`.
+- `RUNNER_LEVEL` (default `2`): the runner's permission level. 1 is read-only (diagnosis only); 2 reads everything and writes common repair targets but not Secrets or RBAC; 3 is administrator.
 - `MC_CLUSTERS_FILE`, `MC_KEY_FILE`, `XNET_CERT_DIR`.
 - `MC_LOAD_HOSTS` / `MC_PULL_POLICY`: test env only.
 

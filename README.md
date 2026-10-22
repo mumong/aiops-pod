@@ -330,6 +330,7 @@ kubectl -n mcp get pods                    # 中心：mcp-server-manager
 |---|---|---|
 | `CENTER_KUBECONFIG` | `~/.kube/aiops-mc/center`，不存在就用当前上下文 | 中心集群 |
 | `EDGE` / `EDGE_KUBECONFIG` | 无（必须指定） | `EDGE=edge-88` 使用 `~/.kube/aiops-mc/edge-88`；`EDGE=local` 使用当前上下文 |
+| `RUNNER_LEVEL` | `2` | runner 权限等级：1 只读（只诊断）；2 标准（读全部，写常见修复对象，不能改 Secret 和 RBAC）；3 管理员。详见设计文档 §5.2 |
 | `MC_CLUSTERS_FILE` | `deploy-edge/clusters.mc.yaml` | 集群配置 |
 | `MC_KEY_FILE` | `~/.kube/aiops-mc/runner.key` | 签名密钥；本机没有就从中心取回 |
 | `XNET_CERT_DIR` | 无 | 运维提供的 xnet 客户端证书目录；不设就从 xnet 复制 |

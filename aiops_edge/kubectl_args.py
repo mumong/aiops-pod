@@ -74,6 +74,14 @@ def _verb(tokens: List[str]) -> Tuple[str, List[str]]:
     return "", []
 
 
+def dry_run(argv: List[str]) -> Optional[str]:
+    """``client`` / ``server`` when the kubectl command is a dry run, else None."""
+    for token in _kubectl_part(argv[1:]):
+        if token in ("--dry-run=client", "--dry-run=server"):
+            return token.split("=", 1)[1]
+    return None
+
+
 def classify(argv: List[str]) -> Tuple[Optional[str], Optional[str]]:
     """Return (mode, None) with mode in read/exec/write, or (None, reason)."""
     if not argv or argv[0] != "kubectl":
@@ -107,8 +115,9 @@ def classify(argv: List[str]) -> Tuple[Optional[str], Optional[str]]:
         return "read", None
     if verb == "exec":
         return "exec", None
-    if "--dry-run=client" in own:
-        # Client-side dry run sends no mutating request (it may read the object), so the
-        # read identity runs it; repair preflight uses it before a plan is approved.
+    if dry_run(argv):
+        # A dry run never persists a change: client dry runs only read, server dry runs
+        # are evaluated (RBAC, admission, validation) and discarded. Repair preflight
+        # uses them before a plan is approved; the runner picks the identity.
         return "read", None
     return "write", None

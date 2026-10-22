@@ -101,7 +101,7 @@ def test_dry_run_form_only_for_kubectl_writes():
         "-n",
         "ns",
         "FAILURE_MODE-",
-        "--dry-run=client",
+        "--dry-run=server",
     ]
     for command in (
         "kubectl get pods -n ns",
@@ -198,7 +198,7 @@ def test_client_dry_run_is_a_read_on_remote_clusters():
         None,
     )
     assert classify(["kubectl", "set", "env", "deploy/x", "A-", "--dry-run=server"]) == (
-        "write",
+        "read",
         None,
     )
     assert classify(["kubectl", "set", "env", "deploy/x", "A-"]) == ("write", None)

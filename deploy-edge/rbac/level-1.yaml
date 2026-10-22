@@ -1,0 +1,43 @@
+# Runner level 1: read-only. Diagnosis only; the writer identity has no permissions,
+# and the runner itself refuses write and exec commands (RUNNER_LEVEL=1).
+# Applied by `make edge-deploy RUNNER_LEVEL=1`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiops-edge-runner-read-l1
+rules:
+  # built-in "view" (namespaced reads, no Secrets) is bound separately below
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "persistentvolumes", "componentstatuses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-edge-runner-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiops-edge-runner-read-l1
+subjects:
+  - {kind: ServiceAccount, name: aiops-edge-runner, namespace: aiops}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-edge-runner-read-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - {kind: ServiceAccount, name: aiops-edge-runner, namespace: aiops}

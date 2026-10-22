@@ -1,0 +1,90 @@
+# Runner level 2 (default): reads everything, writes what common repairs need.
+# Secrets are readable so a plan can see which keys exist; AIOps reduces Secret
+# objects to key names before anything reaches the model. Not writable here:
+# Secrets, RBAC, namespaces, CRDs, admission webhooks, node deletion.
+# Every write still passes the command rules, the pre-approval dry run and approval.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiops-edge-runner-read-l2
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiops-edge-runner-write-l2
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Pods: delete/recreate, finalizer patch (Terminating), exec, eviction
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  # Configuration, service, storage
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims"]
+    verbs: ["create", "update", "patch"]
+  # Nodes: cordon / uncordon / labels (taint and deletion stay with the command rules / level 3)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]
+  # Workloads: image, env, probes, resources, rollout restart / undo, scale
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale", "replicasets/scale"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-edge-runner-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiops-edge-runner-read-l2
+subjects:
+  - {kind: ServiceAccount, name: aiops-edge-runner, namespace: aiops}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-edge-runner-write
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiops-edge-runner-write-l2
+subjects:
+  - {kind: ServiceAccount, name: aiops-edge-runner-writer, namespace: aiops}

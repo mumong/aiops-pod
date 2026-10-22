@@ -42,6 +42,7 @@ class RunnerConfig:
     job_dir: str
     max_output: int = 4 * 1024 * 1024
     version: str = "dev"
+    level: int = 2  # RUNNER_LEVEL: 1 read-only, 2 standard, 3 administrator (deploy-edge/rbac/)
     nonces: signing.NonceCache = field(default_factory=signing.NonceCache)
     jobs: Optional[JobStore] = None
 
@@ -118,6 +119,7 @@ def make_handler(cfg: RunnerConfig):
                         "api": API_VERSION,
                         "policy_version": cfg.policy_version,
                         "capabilities": ["read", "exec", "write", "jobs"],
+                        "level": cfg.level,
                     },
                 )
             if self.path.startswith("/v1/jobs/"):
@@ -181,7 +183,7 @@ def make_handler(cfg: RunnerConfig):
                     400, {"error": "bad_request", "reason": "read commands use /v1/kubectl"}
                 )
             approval = str(payload.get("approval_id") or "")
-            decision = evaluate(argv, mode or "write", approval, cfg.policy)
+            decision = evaluate(argv, mode or "write", approval, cfg.policy, cfg.level)
             audit = {
                 "job": key,
                 "argv": argv,
@@ -217,7 +219,7 @@ def make_handler(cfg: RunnerConfig):
                 )
             mode = str(payload.get("mode") or "")
             approval = str(payload.get("approval_id") or "")
-            decision = evaluate(argv, mode, approval, cfg.policy)
+            decision = evaluate(argv, mode, approval, cfg.policy, cfg.level)
             audit = {
                 "argv": argv,
                 "mode": mode,
@@ -229,7 +231,12 @@ def make_handler(cfg: RunnerConfig):
                 log.warning("AUDIT %s", json.dumps(audit, ensure_ascii=False))
                 return self._send(decision.status, decision.body() | {"command": " ".join(argv)})
             timeout = min(float(payload.get("timeout_s") or MAX_SYNC_SECONDS), MAX_SYNC_SECONDS)
-            result = run_kubectl(cfg, argv, "read" if mode == "read" else "write", timeout)
+            # A server dry run is evaluated as the writer would be (RBAC, admission) and
+            # discarded by the API server; everything else read-mode runs as the reader.
+            identity = (
+                "read" if mode == "read" and kubectl_args.dry_run(argv) != "server" else "write"
+            )
+            result = run_kubectl(cfg, argv, identity, timeout)
             audit["exit_code"] = result["exit_code"]
             log.info("AUDIT %s", json.dumps(audit, ensure_ascii=False))
             return self._send(200, encode_streams(result) if payload.get("compress") else result)
@@ -286,12 +293,17 @@ def main() -> None:
         job_dir=str(state / "jobs"),
         max_output=int(os.environ.get("RUNNER_MAX_OUTPUT_BYTES", 4 * 1024 * 1024)),
         version=os.environ.get("VERSION", "dev"),
+        level=int(os.environ.get("RUNNER_LEVEL", "2")),
     )
     if len(cfg.signing_key) < 32:
         raise SystemExit("runner signing key must be at least 32 bytes")
     port = int(os.environ.get("RUNNER_PORT", "8090"))
     log.info(
-        "aiops-edge-runner %s listening on :%d (policy %s)", cfg.version, port, cfg.policy_version
+        "aiops-edge-runner %s listening on :%d (policy %s, level %d)",
+        cfg.version,
+        port,
+        cfg.policy_version,
+        cfg.level,
     )
     ThreadingHTTPServer(("0.0.0.0", port), make_handler(cfg)).serve_forever()  # noqa: S104 - ClusterIP only
 
