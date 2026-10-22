@@ -118,9 +118,27 @@ def test_accounted_nominal_succeeded_and_virtual_node_pods_are_left_alone():
         pod("job", phase="Succeeded", state={"terminated": {"reason": "Completed"}}),
         pod("proxy", phase="Deployed", node=CENTER),  # bound to a configured cluster's Node
     ]
-    handoff = {"targets": [target("named"), target("settled", status="assessed", reason="r")]}
+    handoff = {"targets": [target("named"), target("settled", status="deferred", reason="r")]}
     out, added = reconcile_inventory(handoff, STATE, run=runner(*pods), now=NOW)
     assert added == [] and out == handoff
+
+
+def test_an_assessed_pod_that_is_still_abnormal_is_investigated():
+    # Run 73f4a1f5: OOM / liveness Pods "assessed" at location got no evidence or RCA.
+    handoff = {
+        "targets": [
+            target("oom", status="assessed", reason="OOMKilled"),
+            target("ok", status="assessed"),
+        ]
+    }
+    out, added = reconcile_inventory(
+        handoff, STATE, run=runner(pod("oom", ready=False), pod("ok")), now=NOW
+    )
+    assert added == ["aiops-case-09/oom"]
+    assert [(t["status"], t["status_reason"]) for t in out["targets"]] == [
+        ("investigate", ""),
+        ("assessed", ""),  # nominal now: the stage's judgement stands
+    ]
 
 
 def test_recent_restart_waiting_and_deleting_pods_are_named_with_raw_facts():
@@ -235,3 +253,19 @@ def test_missing_target_id_is_the_entity_identity():
     assert [t.target_id for t in handoff.targets] == ["ns-w", "kept"]
     with pytest.raises(ValueError):
         LocationHandoff.model_validate({"targets": [{"entity": {"kind": "Pod"}, "issue": "x"}]})
+
+
+def test_unknown_target_status_errs_toward_investigation():
+    handoff = LocationHandoff.model_validate(
+        {
+            "targets": [
+                {
+                    "target_id": "t",
+                    "entity": {"kind": "Pod", "name": "w"},
+                    "issue": "x",
+                    "status": "abnormal",
+                }
+            ]
+        }
+    )
+    assert handoff.targets[0].status == "investigate"

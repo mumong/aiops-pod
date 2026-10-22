@@ -8,7 +8,9 @@ and the model skipped a Pod that its own tool output listed as ``ready: false``.
 After location, code reads the scope's Pods once and compares mechanically, using
 the same nominal criteria as ``lifecycle_core.NOMINAL_CRITERIA``. Every non-nominal
 Pod that no target names is added as an ``investigate`` target whose issue lists the
-raw status facts. Code decides only "not accounted for", never what the fault is;
+raw status facts; one the model set ``assessed`` goes back to ``investigate`` (each
+abnormal Pod gets evidence and a formal RCA). Code decides only "not yet
+investigated", never what the fault is;
 operator declarations (``expected_states``) still apply afterwards. If the read
 fails, the handoff is left unchanged (logged), never guessed.
 """
@@ -99,7 +101,7 @@ def reconcile_inventory(
     run: Optional[Runner] = None,
     now: Optional[datetime] = None,
 ) -> Tuple[Dict[str, Any], List[str]]:
-    """Add every unaccounted non-nominal Pod as an investigate target; name them."""
+    """Every non-nominal Pod is investigated: add unaccounted ones, reopen "assessed" ones."""
     contract = state.get("request_contract") or {}
     if contract.get("pod_names") or not isinstance(handoff.get("targets"), list):
         return handoff, []  # a named Pod is the whole scope; nothing else to account for
@@ -130,6 +132,10 @@ def reconcile_inventory(
     # (same rule as multicluster.virtual_node_note, derived from config).
     virtual = set(multicluster.config().clusters) if multicluster.multi() else set()
     out = copy.deepcopy(handoff)
+    by_key = {
+        ((t.get("entity") or {}).get("namespace") or "", (t.get("entity") or {}).get("name")): t
+        for t in out["targets"]
+    }
     added = []
     for pod in pods:
         meta = pod.get("metadata") or {}
@@ -137,6 +143,14 @@ def reconcile_inventory(
         if (pod.get("spec") or {}).get("nodeName") in virtual:
             continue
         facts = status_facts(pod, now)
+        if facts and by_key.get(key, {}).get("status") == "assessed":
+            # Every currently non-nominal Pod gets its own evidence and formal RCA; the
+            # location stage cannot close it alone (run 73f4a1f5: edge-88 OOM and
+            # liveness Pods were "assessed" and got no diagnosis). deferred/excluded
+            # keep their explicit, reasoned dispositions.
+            by_key[key]["status"], by_key[key]["status_reason"] = "investigate", ""
+            added.append(f"{key[0]}/{key[1]}")
+            continue
         if not facts or key in named:
             continue
         out["targets"].append(
@@ -160,8 +174,8 @@ def reconcile_inventory(
         if isinstance(assessment, dict):
             assessment["status"] = "abnormal"
             assessment["reason"] = (
-                f"{assessment.get('reason') or ''}（代码核对 Pod 清单：补充 {len(added)} 个"
-                f"未列出的非正常状态 Pod：{'、'.join(added)}）"
+                f"{assessment.get('reason') or ''}（代码核对 Pod 清单：{len(added)} 个"
+                f"非正常状态 Pod 需要取证：{'、'.join(added)}）"
             )[:600]
         logger.info("inventory_reconcile: added %s", added)
     return out, added

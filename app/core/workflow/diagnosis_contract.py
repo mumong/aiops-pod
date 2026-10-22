@@ -31,6 +31,9 @@ class DiagnosisEntity(ContractModel):
         return "Pod" if value.strip().casefold() == "pod" else value
 
 
+TARGET_STATUSES = ("investigate", "assessed", "deferred", "excluded")
+
+
 class LocationTarget(ContractModel):
     target_id: str = Field(min_length=1, max_length=120)
 
@@ -39,6 +42,9 @@ class LocationTarget(ContractModel):
     def identity_from_entity(cls, value):
         # Shape only (live: "handoff.targets.0.target_id: Field required" cost a retry):
         # a missing id is the entity's own identity; a given id is never changed.
+        if isinstance(value, dict) and value.get("status") not in (None, *TARGET_STATUSES):
+            # An unknown disposition errs toward investigating, never toward hiding.
+            value = {**value, "status": "investigate"}
         if isinstance(value, dict) and not str(value.get("target_id") or "").strip():
             entity = value.get("entity") if isinstance(value.get("entity"), dict) else {}
             if entity.get("name"):
