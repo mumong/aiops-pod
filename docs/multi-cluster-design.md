@@ -3,6 +3,174 @@
 状态：已实现并在三集群测试环境验收（2026-10-21，AIOps 13.0.5、MCP 8.0.3、runner 1.0.2、前端 0.2.2）。实现与本文的差异见 §15，验收结果见 [验收方案 §7](multi-cluster-acceptance.md#7-结果记录)。
 适用代码：robusta 12.0.69、mcpstander 7.0.52、frontend 0.1.71。
 
+## 0. 实现后的运行机制（先读这一节）
+
+本节按已实现的代码说明多集群是怎么跑起来的：集群如何登记、数据从哪里取、命令怎么到达边缘、请求在线路上长什么样、修复如何驱动。后面各节是开发前的设计，与实现的差异见 §15。
+
+### 0.1 组件与部署位置
+
+```
+中心集群（10.2.5.85）                                       边缘集群（10.2.5.88 / .89）
+┌──────────────────────────────────────────┐              ┌──────────────────────────────────┐
+│ 前端（30082）                              │              │ xnet-agent（xnet 的，不改）         │
+│ AIOps 后端（aiops 命名空间）                │              │   主动外连中心隧道 wss://…:30909    │
+│   路由 / 诊断 / 修复执行器                  │              │        ▲                          │
+│   挂载：集群配置、xnet 证书副本、签名密钥     │              │        │ 把中心的 HTTP 请求转成     │
+│ MCP（mcp 命名空间）                        │   xnet 隧道   │        │ 边缘集群内的 HTTP 调用     │
+│   可观测工具 → 本集群 vmselect / vlsingle   │◀────────────▶│        ▼                          │
+│   K8s 工具 → kubectl 垫片                  │  （边缘外连）  │ aiops-edge-runner（我们的，aiops）  │
+│   挂载：同上                               │              │   校验签名 → 规则检查 → kubectl     │
+│ xnet-management（xnet 的，不改）            │              │   reader / writer 两个 SA          │
+│ VictoriaMetrics / VictoriaLogs（不改）     │              │ vmagent / vlagent（不改，推到中心） │
+└──────────────────────────────────────────┘              └──────────────────────────────────┘
+```
+
+共享代码 `aiops_edge/`（只依赖标准库，robusta 是唯一源，mcpstander 同步一份）：
+
+| 模块 | 作用 |
+|---|---|
+| `clusters.py` | 读取集群配置；别名解析；集群名 ↔ xnet UUID 换算 |
+| `tunnel.py` | 调用 xnet `/proxy` 的客户端：mTLS、签名、超时、错误分类、每集群并发上限 |
+| `signing.py` | 中心与 runner 之间的 HMAC 签名与防重放 |
+| `shim.py`、`kubectl` | kubectl 垫片：本地集群直接执行，远端集群转发给 runner |
+| `kubectl_args.py` | 哪些 kubectl 能远端执行、属于 read / exec / write 哪种模式 |
+| `streams.py` | 输出的 gzip+base64 编码 |
+| `jobs_client.py` | 修复用的异步任务客户端：提交、轮询、结果未知判定 |
+| `runner/` | 边缘 runner：HTTP 服务、命令闸门（复用中心的 `policy.py`）、任务存储 |
+
+### 0.2 中心和边缘怎么"注册"
+
+**集群登记是静态配置**：`deploy-edge/clusters.mc.yaml` 以 ConfigMap `aiops-clusters` 挂载到 MCP 和 AIOps（环境变量 `AIOPS_CLUSTERS_CONFIG`）。没有这个文件就是单集群模式，行为与改造前完全相同。
+
+```yaml
+clusters:
+  center: vc-xnet-management            # "中心集群"指谁
+  items:
+    - name: vc-942nkkozc8o5fyb9q3bznb1ws # = xnet 虚拟 Node 名 = 可观测数据的 cluster 标签
+      aliases: [edge-88]                # 我们自己维护的别名，不写入 xnet
+      access: xnet                      # local=本集群直连；xnet=经隧道
+      observability: victoria           # 用哪套可观测后端（见 observability_profiles）
+  access:
+    xnet: {proxy_url, runner_url, cert_file, key_file, ca_file, signing_key_file, ...}
+observability_profiles:
+  victoria: {metrics: vmselect + cluster_label, logs: vlsingle 事件, traces: none}
+```
+
+- 集群名直接使用 xnet 虚拟 Node 名，因为它同时是可观测数据里的 `cluster` 标签；隧道需要的 UUID 由 Node 名反解（`vc-` + UUID 的 base36），不需要额外配置。
+- **设计中的"自动发现 xnet 虚拟 Node"没有实现**：新增集群需要在这个文件里加一条并重新部署。xnet 虚拟 Node 目前只用于判断集群是否在线。
+
+接入一个边缘集群的步骤（全部是我们自己的部署动作，不需要 xnet 做任何事）：
+
+| 步骤 | 命令 | 作用 |
+|---|---|---|
+| 1 | （xnet 侧已完成 join） | 边缘的 xnet-agent 已经外连中心隧道 |
+| 2 | `make mc-keygen` | 生成中心与 runner 共用的签名密钥（只在本机运维目录） |
+| 3 | `make edge-deploy EDGE_KUBECONFIG=…` | 在边缘本地部署 runner：两个 SA 与 RBAC、命令规则 ConfigMap（从中心 `config.yaml` 的 `workflow.remediation` 渲染）、签名密钥 Secret、Deployment 与 ClusterIP Service |
+| 4 | `make sync-xnet-cert` | 中心：把 xnet 的隧道客户端证书复制到 `mcp`、`aiops` 命名空间，并下发签名密钥 |
+| 5 | 编辑 `clusters.mc.yaml`，`make deploy-mc`（MCP、AIOps 各一次） | 更新集群配置 |
+
+**在线状态**（`list_clusters` 工具，`servers/cluster_scope.py:_probe`）：xnet 虚拟 Node 为 Ready，且经隧道请求 runner 的 `/healthz` 成功，才算在线；结果缓存 30 秒。
+
+### 0.3 数据怎么取
+
+一次工具调用带着 `cluster` 参数进入 MCP；MCP 入口用 `cluster_scope.activate()` 设置"当前集群"，底层调用点按它决定去哪里取：
+
+| 数据 | 去哪里 | 怎么保证不串集群 |
+|---|---|---|
+| 指标（`execute_pod_promql`、prometheus 工具） | 中心 vmselect，**不经过边缘** | 查询附加 `extra_label=cluster=<名称>`，VM 强制把它加到所有选择器上，模型写错集群也查不到别的集群 |
+| "日志"（`query_pod_logs`） | 中心 vlsingle 里的 K8s 事件，**不经过边缘** | LogsQL 按 `cluster` 字段过滤，再按涉及对象名精确比对；结果标注 `log_source=k8s_events`、`coverage=partial` |
+| 链路 | 新后端没有 | 返回 `capability_missing` |
+| K8s 实时数据（get / describe / logs / events / 拓扑 / Pod 生命周期） | 边缘 API Server，**经隧道** | kubectl 子进程环境变量带 `AIOPS_CLUSTER`，垫片据此转发 |
+
+工具的 `cluster` 参数由 AIOps 填，而不是由模型自由决定（`app/core/multicluster.py:scoped_tools`，在节点入口和并行取证通道绑定）：本次只涉及一个集群时强制注入；涉及多个集群时校验必须在范围内；并行通道使用自己异常组的集群。
+
+### 0.4 命令怎么到达边缘（kubectl 垫片）
+
+MCP 和 AIOps 镜像里，真正的 kubectl 改名为 `kubectl.real`，`/usr/local/bin/kubectl` 是垫片：
+
+```
+kubectl get pods -A | jq …          （现有工具模板，一行不改）
+  │ AIOPS_CLUSTER 为空或是本集群 → exec kubectl.real（与改造前完全相同）
+  │ AIOPS_CLUSTER 是边缘集群：
+  │   1. kubectl_args.classify：拒绝 -f/--follow、-w、-it、port-forward、--kubeconfig/--as 等；判定 read/exec/write
+  │   2. TunnelClient.request(cluster, "/v1/kubectl", {argv, mode, timeout_s:15, compress:true})
+  │   3. 原样写回 stdout / stderr，退出码与真实 kubectl 一致
+  ▼
+管道后面的 jq 在中心本地处理 runner 返回的输出
+```
+
+runner 收到后（`aiops_edge/runner/server.py`、`gate.py`）：
+1. 校验签名，失败返回 401；
+2. 再次检查参数规则，并核对声明的模式与命令实际类型一致；
+3. read 只允许只读操作；exec / write 按中心同一份命令规则检查：黑名单一律拒绝，需审批的命令必须带 `approval_id`；
+4. read 用 reader 身份（`view` + 集群级只读），exec / write 用 writer 身份（修复所需的最小写权限）；
+5. 执行 kubectl，输出最多 4MB，按请求 gzip+base64 压缩后返回。
+
+对话里"在 edge-88 的某 Pod 里执行命令"，与单集群走同一条路：中心先由 `operate_tools.guard_write_tool` 检查规则，再经 MCP 的 bash 工具；远端集群上的 bash 只允许"kubectl + 文本过滤管道"，其他程序会在中心 MCP Pod 里执行，对边缘没有意义，所以直接拒绝。
+
+### 0.5 请求在线路上长什么样（"发送消息"）
+
+中心到边缘只有一种消息：经 xnet 隧道转发的一次 HTTP 请求。
+
+```
+POST https://xnet-management.xnet.svc:9090/proxy
+     ?clientid=99eea57d-…（集群 UUID）
+     &address=http://aiops-edge-runner.aiops.svc:8090/v1/kubectl
+TLS：xnet CA 签发的客户端证书（mTLS，从 xnet 复制来的副本）
+请求头：X-AIOps-Timestamp、X-AIOps-Nonce、
+        X-AIOps-Signature = HMAC-SHA256(密钥, 时间戳 + nonce + 方法 + 路径 + sha256(请求体))
+请求体：{"argv": [...], "mode": "read", "timeout_s": 15, "compress": true}
+```
+
+1. xnet 隧道服务端按 `clientid` 找到该边缘外连进来的 websocket，把整个 HTTP 请求序列化后推给边缘；
+2. 边缘的 xnet-agent 在边缘集群内向 `address` 发起请求，响应沿原路返回；
+3. 签名在 runner 端校验：时间偏差超过 60 秒、nonce 5 分钟内重复、签名不对，一律拒绝。只持有 xnet 证书的人调用不了 runner。
+
+隧道每个请求最长 20 秒（xnet 固定），我们的同步调用上限 15 秒。错误分类：
+
+| 情况 | 返回码 |
+|---|---|
+| 边缘没连上隧道（xnet 返回 400 "not online"）、runner 不可达（408） | `cluster_unreachable` |
+| 证书失效或握手失败 | `tunnel_auth_failed` |
+| 超时 | `timeout` |
+| 签名不对 | `runner_auth_failed` |
+| 规则拒绝 | `policy_denied`（带规则名） |
+
+### 0.6 修复怎么驱动
+
+```
+诊断（集群已绑定）→ 生成方案（修复节点的工具同样绑定到该集群）
+  → 审批卡片：payload / 事件带 cluster，前端显示"将在集群 edge-88 执行"
+  → PodRepairExecutor（app/core/remediation/pod_executor.py）：
+      1. 从 request_contract.clusters 得到目标集群；本地集群走原逻辑
+      2. 执行前确认集群可达（runner /healthz）；不可达就等待并提示"集群当前不可达"，超时未恢复则不执行
+      3. execute 阶段 → POST /v1/jobs {idempotency_key: "<任务ID>:<动作ID>:execute", argv, approval_id}
+         runner 立即返回 job_id，在边缘后台执行；同一个键重复提交只执行一次
+      4. 中心轮询 GET /v1/jobs/{id}：隧道报错就继续轮询，直到时限
+         · succeeded / failed：正常记录
+         · unknown（runner 容器重启）或记录丢失（runner Pod 重建）或超出时限：
+           标记"结果未知，需人工确认"，绝不重新提交
+      5. dry-run、verify 和恢复观察只读，经垫片同步执行
+  → 审计记录带集群、审批 ID、任务键
+```
+
+需审批的命令（如 Pod 内 `rm`）：审批 ID 随任务交给 runner，runner 看到 ID 才允许执行；ID 的真实性由请求签名保证，只有中心能发出请求。
+
+### 0.7 一个问题从进来到回答
+
+1. **路由**（`request_router.py` + `multicluster.router_prompt`）：模型按意图给出 `cluster_mode`：
+   - `none`：不需要集群数据；
+   - `inventory`：问集群清单；
+   - `single` / `multiple` / `center`：需要集群数据；
+   - `unspecified`：需要集群数据但没说明是哪个集群。
+
+   代码只做三件事：范围不明确时反问，集群名不存在时列出可用集群，修复只针对一个集群。
+2. **快速查询**：一个 Agent 循环，工具绑定到本次范围；涉及多个集群时，模型对每个集群分别调用工具。
+3. **深度诊断**：
+   - 只涉及一个集群时，流程与单集群相同；
+   - 涉及多个集群时（`multicluster_location.py`），先探测每个集群；不可达的集群不定位，由代码在报告里写明"未完成检查"；
+   - 可达的集群各自定位（并行），合并为带集群前缀的目标和带集群的异常组，所有组一起并发取证，报告按集群分段。
+
 ## 1. 目标与边界
 
 ### 1.1 目标
