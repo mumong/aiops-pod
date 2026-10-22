@@ -81,7 +81,7 @@ clusters:
     xnet:
       proxy_url: https://xnet-management.xnet.svc:9090/proxy
       runner_url: http://aiops-edge-runner.aiops.svc:8090
-      cert_file / key_file / ca_file: /etc/aiops-xnet/…     # make sync-xnet-cert 复制来的证书
+      cert_file / key_file / ca_file: /etc/aiops-xnet/…     # make mc-init 放进来的证书
       signing_key_file: /etc/aiops-edge-key/key
       per_cluster_concurrency: 4
       call_timeout_seconds: 15
@@ -106,12 +106,12 @@ expected_states: [...]             # 运维声明的预期状态，见 §11
 
 | 步骤 | 命令 | 作用 |
 |---|---|---|
-| 1 | （xnet 侧完成 join） | 边缘的 xnet-agent 已经外连中心隧道 |
-| 2 | `make mc-keygen` | 生成中心与 runner 共用的签名密钥（只保存在本机运维目录） |
-| 3 | `make edge-deploy EDGE_KUBECONFIG=…` | 在边缘本地部署 runner：两个 SA 与 RBAC、命令规则 ConfigMap（从中心 `config.yaml` 的 `workflow.remediation` 渲染）、签名密钥 Secret、Deployment 和 ClusterIP Service |
-| 4 | `make sync-xnet-cert` | 中心：把 xnet 的隧道客户端证书复制到 `mcp`、`aiops` 命名空间，并下发签名密钥 |
-| 5 | 编辑 `clusters.mc.yaml`，在 MCP 和 AIOps 各执行一次 `make deploy-mc` | 更新集群配置 |
+| 1 | （xnet 侧完成 join） | 边缘的 xnet-agent 已经外连中心隧道，中心出现该边缘的虚拟 Node |
+| 2 | `make mc-discover` | 读取虚拟 Node，打印可粘贴的集群配置条目（名称、角色、建议别名、在线状态）；只读 |
+| 3 | 更新 `clusters.mc.yaml`，Agent 仓库 `make deploy-mc`，MCP 仓库 `make deploy-mc` | Agent 的 `deploy-mc` 先执行 `mc-init`：把集群配置、xnet 客户端证书、签名密钥写进 `mcp` 和 `aiops` 命名空间（签名密钥本机没有时从中心 Secret 取回，中心也没有才生成） |
+| 4 | `make edge-deploy EDGE=<名字>` | 在边缘部署 runner：两个 SA 与 RBAC、命令规则 ConfigMap（从中心 `config.yaml` 的 `workflow.remediation` 渲染）、签名密钥 Secret、Deployment 和 ClusterIP Service |
 
+完整的部署步骤见 [README 多集群部署](../README.md#多集群部署008-multi-cluster-分支)。
 边缘 kubeconfig 只用于部署和测试，运行时不使用。测试环境的 Harbor 推不了镜像，所以由 `deploy-edge/load_image.sh` 经 SSH 把镜像导入节点，部署清单使用 `IfNotPresent`。
 
 ### 3.3 在线状态
@@ -216,7 +216,7 @@ xnet 对每个请求最长等 20 秒，我们的同步调用上限是 15 秒。�
 | 情况 | 返回码 |
 |---|---|
 | 边缘没连上隧道（xnet 返回 400 "not online"）、runner 不可达（408） | `cluster_unreachable` |
-| 证书失效或握手失败 | `tunnel_auth_failed`（提示重新执行 `make sync-xnet-cert`） |
+| 证书失效或握手失败 | `tunnel_auth_failed`（提示重新执行 `make mc-init` 并重启 MCP、AIOps） |
 | 超时 | `timeout` |
 | 签名不对 | `runner_auth_failed` |
 | 规则拒绝 | `policy_denied`（带规则名） |
@@ -381,11 +381,14 @@ expected_states:
 | 命令 | 作用 |
 |---|---|
 | `make runner-build` / `runner-push` | 构建 / 推送 runner 镜像（`Dockerfile.edge-runner`，版本见 `deploy-edge/VERSION`） |
-| `make mc-keygen` | 生成签名密钥 |
-| `make edge-deploy` / `edge-delete EDGE_KUBECONFIG=…` | 在边缘部署 / 卸载 runner |
-| `make sync-xnet-cert` | 中心：复制 xnet 证书、下发签名密钥 |
-| `make deploy-mc MC_LOAD_HOSTS=…` | 中心：部署 AIOps 及集群配置（mcpstander、frountind 各有同名目标） |
+| `make mc-discover` | 列出 xnet 已接入的集群，输出配置条目（只读） |
+| `make mc-init` | 中心：集群配置、xnet 证书（或 `XNET_CERT_DIR`）、签名密钥写进 `mcp`、`aiops`；可重复执行（旧名 `sync-xnet-cert`） |
+| `make deploy-mc` | 中心：部署 AIOps（先执行 `mc-init`）；mcpstander、frountind 各有同名目标，MCP 的会先检查共享对象是否存在 |
+| `make edge-deploy` / `edge-delete EDGE=…` | 在边缘部署 / 卸载 runner；`EDGE=local` 表示当前上下文；不指定就报错 |
+| `make mc-keygen` | 签名密钥：本机没有时从中心 Secret 取回，中心也没有才生成（`mc-init` 会自动调用） |
 | `make test-multicluster` | 多集群单元测试 |
+
+中心 kubeconfig 默认用 `~/.kube/aiops-mc/center`，这个文件不存在时就用当前 kubectl 上下文（直接在中心节点上执行）。MCP 和前端仓库按 `../holmegpt-agent`（README 的下载名）或 `../robusta` 找 Agent 仓库，只用于测试环境导入镜像。
 
 ## 15. 已知限制
 
@@ -454,10 +457,10 @@ xnet 在这套设计里只承担一件事：**把中心的一次 HTTP 请求送�
 
 ### 18.2 xnet 证书从哪来
 
-- **中心侧**（MCP、AIOps）调用 `/proxy` 需要 xnet CA 签发的客户端证书。`make sync-xnet-cert` 复制的是 xnet-management 自己调用隧道用的 `xnet-client-cert`（CN=localhost，Test CA 签发，有效期到 2031 年），复制到 `mcp`、`aiops` 两个命名空间，只挂载给 MCP 和 AIOps。
+- **中心侧**（MCP、AIOps）调用 `/proxy` 需要 xnet CA 签发的客户端证书。`make mc-init` 默认复制的是 xnet-management 自己调用隧道用的 `xnet-client-cert`（CN=localhost，Test CA 签发，有效期到 2031 年），复制到 `mcp`、`aiops` 两个命名空间，只挂载给 MCP 和 AIOps。
 - **边缘 runner 不使用任何 xnet 证书**。它只认我们自己的 HMAC 签名密钥（`aiops-edge-key`），所以只持有 xnet 证书的人调用不了 runner。
 - **边缘的 xnet-agent** 用的是它加入时由 xnet 签发的证书，跟我们无关。
-- **评价**：复制 xnet 内部使用的客户端身份，是测试环境下的便捷做法。交付时建议由运维提供一张专门给 AIOps 的客户端证书，创建为 Secret `aiops-xnet-client-cert`；`sync-xnet-cert` 只作为"从现有 xnet 部署复制"的一种可选来源。代码只读取 Secret，不关心证书来自哪里。
+- **评价**：复制 xnet 内部使用的客户端身份，是测试环境下的便捷做法。交付时建议由运维提供一张专门给 AIOps 的客户端证书，用 `make mc-init XNET_CERT_DIR=<目录>` 放进 Secret `aiops-xnet-client-cert`；从 xnet 复制只是不设该变量时的默认来源。代码只读取 Secret，不关心证书来自哪里。
 
 ### 18.3 部署方式
 
@@ -469,19 +472,22 @@ xnet 在这套设计里只承担一件事：**把中心的一次 HTTP 请求送�
 | AIOps | robusta `make deploy`（或 `make release`） | Secret `aiops-secret`（LLM 网关地址与密钥）、ConfigMap |
 | 前端 | frountind `make deploy` | — |
 
-**多集群**：
+**多集群**（步骤见 [README](../README.md#多集群部署008-multi-cluster-分支)）：
 
 | 位置 | 命令 | 作用 |
 |---|---|---|
-| 中心 | `make mc-keygen`、`make sync-xnet-cert` | 生成签名密钥；把 xnet 客户端证书和签名密钥放进 `mcp`、`aiops` 命名空间 |
-| 中心 | mcpstander、robusta、frountind 各执行 `make deploy-mc` | 与单集群相同的镜像，额外挂载 ConfigMap `aiops-clusters` 和上述 Secret |
-| 每个边缘 | `make edge-deploy EDGE_KUBECONFIG=…` | 部署 runner（两个 SA 与 RBAC、命令规则、签名密钥、Deployment、ClusterIP Service） |
+| 中心 | Agent 仓库 `make mc-discover`，按输出更新集群配置 | 不用手查虚拟 Node 名 |
+| 中心 | Agent 仓库 `make mc-init` | 把集群配置、xnet 证书、签名密钥放进 `mcp`、`aiops` 两个命名空间；证书不需要手动处理 |
+| 中心 | mcpstander、holmegpt-agent、aiops-frount 依次执行 `make deploy-mc` | 与单集群相同的镜像，额外挂载上述对象 |
+| 每个边缘 | `make edge-deploy EDGE=<名字>` | 部署 runner |
+
+与单集群相比只多两步：`mc-init`（Agent 的 `deploy-mc` 也会自动执行），以及每个边缘一条 `edge-deploy`。
 
 **多集群的前置条件**（缺一项就不能工作）：
 
 1. xnet-cloud 已安装，边缘已加入：中心能看到每个边缘的虚拟 Node，且为 Ready。
 2. 新可观测体系：中心有 VictoriaMetrics 和 VictoriaLogs，边缘的 vmagent / vlagent 把数据推到中心，并且数据的 `cluster` 标签等于该边缘的虚拟 Node 名。
-3. 中心能访问 LLM 网关；边缘能拉到 runner 镜像。
+3. 中心能访问 LLM 网关；边缘能拉到 runner 镜像。部署机需要 `kubectl`、`make`、`python3`（含 PyYAML）、`openssl`。
 4. 部署时需要中心和各边缘的 kubeconfig；**运行时不依赖它们**：中心只用自己 Pod 的 SA，边缘只用 runner 的 SA。
 
 ### 18.4 MCP 和 AIOps 是否自动适配单集群和多集群

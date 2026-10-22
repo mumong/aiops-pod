@@ -237,6 +237,58 @@ make case-clean CASE=c08
 make case-clean CASE=c04
 ```
 
+## Multi-cluster deployment (branch `008-multi-cluster`)
+
+For one center cluster plus edge clusters joined through xnet-cloud. Single-cluster deployment above is unchanged: the images are the same, and without the cluster config mounted everything runs in single-cluster mode. Design: [multi-cluster design](docs/multi-cluster-design.md) §18 (Chinese).
+
+**Prerequisites** (all required):
+
+1. xnet-cloud is installed on the center and the edges have joined: `kubectl get nodes` on the center lists one Ready `vc-…` virtual Node per edge.
+2. New observability stack: VictoriaMetrics and VictoriaLogs on the center; each edge's vmagent / vlagent pushes to them with the `cluster` label equal to the edge's virtual Node name.
+3. Deploy machine: `kubectl`, `make`, `python3` with PyYAML, `openssl`. Running directly on the center node is simplest (the current kubectl context is used by default).
+4. Model config `deploy/secrets/core.yaml`, as for single-cluster.
+5. Images: the center can pull the MCP, Agent and frontend images; every edge can pull the runner image.
+
+You do not handle the xnet certificate or the runner signing key by hand. `make mc-init` copies the certificate from the center's xnet namespace and generates (or recovers) the signing key. It puts both, plus the cluster config, into the `mcp` and `aiops` namespaces, and it is safe to re-run.
+
+```bash
+# 1. on the center node: the three repositories
+mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
+git clone --branch 008-multi-cluster http://10.2.0.86/wanghuhu/mcpstander.git
+git clone --branch 008-multi-cluster ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
+git clone --branch 008-multi-cluster ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
+
+# 2. cluster config: paste the printed clusters block into deploy-edge/clusters.mc.yaml,
+#    adjust aliases, check the VictoriaMetrics / VictoriaLogs URLs
+cd ~/aiops-workspace/holmegpt-agent && make mc-discover
+
+# 3. center: shared objects, then the three services in the usual order
+cd ~/aiops-workspace/holmegpt-agent && make mc-init
+cd ~/aiops-workspace/mcpstander && make deploy-mc
+cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
+cd ~/aiops-workspace/aiops-frount && make deploy-mc        # NodePort 30082 (MC_NODE_PORT)
+
+# 4. each edge: the runner
+make edge-deploy EDGE=edge-88    # from the deploy machine, kubeconfig at ~/.kube/aiops-mc/edge-88
+make edge-deploy EDGE=local      # or on the edge node, after copying ~/.kube/aiops-mc/runner.key there
+```
+
+Verify: `curl http://<center IP>:30800/health`, then ask "我有哪些集群？" in the frontend; every cluster should be online.
+
+Changes later:
+- **Add an edge:** run `make mc-discover`, update the config, then run `make deploy-mc` in the Agent and MCP repositories, then `make edge-deploy EDGE=<new edge>`.
+- **Rotate the certificate:** run the same two `make deploy-mc`.
+- **Use a dedicated certificate:** run `make mc-init XNET_CERT_DIR=<dir with cert.pem, key.pem, ca.pem>`.
+- **Change the command rules:** after changing them on the center, re-run `make edge-deploy` on every edge.
+
+Variables:
+- `CENTER_KUBECONFIG`: defaults to `~/.kube/aiops-mc/center`, or the current context when that file does not exist.
+- `EDGE`: required for `edge-deploy` and `edge-delete`.
+- `MC_CLUSTERS_FILE`, `MC_KEY_FILE`, `XNET_CERT_DIR`.
+- `MC_LOAD_HOSTS` / `MC_PULL_POLICY`: test env only.
+
+Kubeconfigs are used only to deploy. At runtime the center uses its Pods' ServiceAccounts and each edge uses the runner's ServiceAccount.
+
 ## Other ways to use it
 
 ### Running commands and repairing Pods (human approval by default)

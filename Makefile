@@ -11,7 +11,8 @@ A2A_TEST_AGENT_IMAGE_NAME := aiops-a2a-test-agent
 A2A_TEST_AGENT_DOCKER_NAME := $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_TEST_AGENT_IMAGE_NAME)
 
 VERSION ?= $(shell cat VERSION)
-PYTHON ?= .venv/bin/python
+# 开发机用项目虚拟环境；部署机没有 .venv 时用系统 python3（部署脚本只需 PyYAML）
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 RUFF ?= .venv-quality/bin/ruff
 DOCKER_TAG := $(VERSION)
 # pip inside `docker build` needs the host's network/proxy on this build host:
@@ -247,13 +248,23 @@ repair-cases-status:
 # ============================================================================
 MC_KUBE_DIR ?= $(HOME)/.kube/aiops-mc
 MC_KEY_FILE ?= $(MC_KUBE_DIR)/runner.key
-CENTER_KUBECONFIG ?= $(MC_KUBE_DIR)/center
+# 中心：有 $(MC_KUBE_DIR)/center 就用它，否则用当前 kubectl 上下文（直接在中心节点上执行时）
+CENTER_KUBECONFIG ?= $(wildcard $(MC_KUBE_DIR)/center)
+CENTER_KUBECTL = kubectl $(if $(CENTER_KUBECONFIG),--kubeconfig $(CENTER_KUBECONFIG))
+# 边缘：EDGE=edge-88 → $(MC_KUBE_DIR)/edge-88；EDGE=local → 当前上下文（在边缘节点上执行时）
+EDGE ?=
+EDGE_KUBECONFIG ?= $(if $(filter-out local,$(EDGE)),$(MC_KUBE_DIR)/$(EDGE))
+EDGE_KUBECTL = kubectl $(if $(EDGE_KUBECONFIG),--kubeconfig $(EDGE_KUBECONFIG))
+MC_CLUSTERS_FILE ?= deploy-edge/clusters.mc.yaml
+# 交付时可由运维提供 AIOps 专用的 xnet 客户端证书：目录内含 cert.pem、key.pem、ca.pem；
+# 不设则从中心 xnet 命名空间复制 xnet-management 的客户端证书（见设计文档 §18.2）
+XNET_CERT_DIR ?=
 RUNNER_VERSION ?= $(shell cat deploy-edge/VERSION)
 RUNNER_IMAGE := $(IMAGE_REPOSITORY)/$(PROJECT)/aiops-edge-runner
 # 测试环境用自己的 Harbor（无推送权限），镜像经 SSH 导入节点缓存：MC_PULL_POLICY=IfNotPresent MC_LOAD_HOSTS=10.2.5.88
 MC_PULL_POLICY ?= Always
 MC_LOAD_HOSTS ?=
-.PHONY: runner-build runner-push mc-keygen edge-deploy edge-delete sync-xnet-cert test-multicluster deploy-mc
+.PHONY: runner-build runner-push mc-keygen mc-discover mc-init edge-target edge-deploy edge-delete sync-xnet-cert test-multicluster deploy-mc
 
 runner-build:
 	$(DOCKER_BUILD) --build-arg VERSION=$(RUNNER_VERSION) -f Dockerfile.edge-runner -t $(RUNNER_IMAGE):$(RUNNER_VERSION) .
@@ -261,63 +272,85 @@ runner-build:
 runner-push:
 	docker push $(RUNNER_IMAGE):$(RUNNER_VERSION)
 
-# 中心与边缘共用的 runner 签名密钥，只生成一次，保存在本机运维目录。
+# 中心与边缘共用的 runner 签名密钥，保存在本机运维目录。本机没有时先从中心已有的 Secret 取回
+# （换一台机器部署不会生成新密钥、导致边缘 runner 验签失败），中心也没有才新生成。
 mc-keygen:
-	@test -f $(MC_KEY_FILE) || { umask 077; python3 -c 'import secrets; print(secrets.token_hex(32))' > $(MC_KEY_FILE); echo "generated $(MC_KEY_FILE)"; }
+	@test -f $(MC_KEY_FILE) || { set -e; umask 077; mkdir -p $(dir $(MC_KEY_FILE)); \
+		$(CENTER_KUBECTL) -n aiops get secret aiops-edge-key -o jsonpath='{.data.key}' 2>/dev/null | base64 -d > $(MC_KEY_FILE) || true; \
+		if test -s $(MC_KEY_FILE); then echo "从中心 Secret aiops/aiops-edge-key 取回签名密钥 → $(MC_KEY_FILE)"; \
+		else python3 -c 'import secrets; print(secrets.token_hex(32))' > $(MC_KEY_FILE); echo "生成新的签名密钥 → $(MC_KEY_FILE)"; fi; }
 
-# 在边缘集群本地部署 runner：make edge-deploy EDGE_KUBECONFIG=~/.kube/aiops-mc/edge-88
-edge-deploy: mc-keygen
-	@test -n "$(EDGE_KUBECONFIG)" || { echo "EDGE_KUBECONFIG 未设置" >&2; exit 1; }
-	@KUBECONFIG=$(EDGE_KUBECONFIG) kubectl create namespace aiops --dry-run=client -o yaml | KUBECONFIG=$(EDGE_KUBECONFIG) kubectl apply -f -
+edge-target:
+	@test -n "$(EDGE)$(EDGE_KUBECONFIG)" || { echo "请指定边缘：EDGE=edge-88（用 $(MC_KUBE_DIR)/edge-88）或 EDGE=local（当前 kubectl 上下文）" >&2; exit 1; }
+	@test -z "$(EDGE_KUBECONFIG)" || test -f "$(EDGE_KUBECONFIG)" || { echo "找不到 $(EDGE_KUBECONFIG)" >&2; exit 1; }
+	@echo "边缘目标：$$($(EDGE_KUBECTL) config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo '?')（$(if $(EDGE_KUBECONFIG),$(EDGE_KUBECONFIG),当前上下文)）"
+
+# 列出 xnet 已接入的集群（虚拟 Node），输出可直接粘贴进集群配置的条目；只读
+mc-discover:
+	@$(CENTER_KUBECTL) get nodes -l node-role.kubernetes.io/xnet-agent -o json | $(PYTHON) deploy-edge/discover_clusters.py
+
+# 在边缘集群部署 runner：make edge-deploy EDGE=edge-88（用 $(MC_KUBE_DIR)/edge-88）或 EDGE=local（当前上下文）
+# 签名密钥来自本机 $(MC_KEY_FILE)：在边缘节点上执行时，先把中心生成的这个文件拷过去
+edge-deploy: edge-target
+	@test -f $(MC_KEY_FILE) || { echo "缺少签名密钥 $(MC_KEY_FILE)：先在中心执行 make mc-init，再把该文件拷到这台机器" >&2; exit 1; }
+	@$(EDGE_KUBECTL) create namespace aiops --dry-run=client -o yaml | $(EDGE_KUBECTL) apply -f -
 	@$(PYTHON) deploy-edge/render_policy.py deploy/configmap/config.yaml > /tmp/aiops-edge-policy.$$$$.json \
-		&& KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops create configmap aiops-edge-runner-policy \
-			--from-file=policy.json=/tmp/aiops-edge-policy.$$$$.json --dry-run=client -o yaml | KUBECONFIG=$(EDGE_KUBECONFIG) kubectl apply -f - ; \
+		&& $(EDGE_KUBECTL) -n aiops create configmap aiops-edge-runner-policy \
+			--from-file=policy.json=/tmp/aiops-edge-policy.$$$$.json --dry-run=client -o yaml | $(EDGE_KUBECTL) apply -f - ; \
 		rm -f /tmp/aiops-edge-policy.$$$$.json
-	@KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops create secret generic aiops-edge-key --from-file=key=$(MC_KEY_FILE) \
-		--dry-run=client -o yaml | KUBECONFIG=$(EDGE_KUBECONFIG) kubectl apply -f -
+	@$(EDGE_KUBECTL) -n aiops create secret generic aiops-edge-key --from-file=key=$(MC_KEY_FILE) \
+		--dry-run=client -o yaml | $(EDGE_KUBECTL) apply -f -
 	@if test -n "$(MC_LOAD_HOSTS)"; then deploy-edge/load_image.sh $(RUNNER_IMAGE):$(RUNNER_VERSION) $(MC_LOAD_HOSTS); fi
 	sed -e 's|image: $(RUNNER_IMAGE):.*|image: $(RUNNER_IMAGE):$(RUNNER_VERSION)|' \
-		-e 's|imagePullPolicy: Always|imagePullPolicy: $(MC_PULL_POLICY)|' deploy-edge/runner.yaml | KUBECONFIG=$(EDGE_KUBECONFIG) kubectl apply -f -
-	KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops rollout restart deployment/aiops-edge-runner
-	KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops rollout status deployment/aiops-edge-runner --timeout=180s
+		-e 's|imagePullPolicy: Always|imagePullPolicy: $(MC_PULL_POLICY)|' deploy-edge/runner.yaml | $(EDGE_KUBECTL) apply -f -
+	$(EDGE_KUBECTL) -n aiops rollout restart deployment/aiops-edge-runner
+	$(EDGE_KUBECTL) -n aiops rollout status deployment/aiops-edge-runner --timeout=180s
 
-edge-delete:
-	@test -n "$(EDGE_KUBECONFIG)" || { echo "EDGE_KUBECONFIG 未设置" >&2; exit 1; }
-	KUBECONFIG=$(EDGE_KUBECONFIG) kubectl delete -f deploy-edge/runner.yaml --ignore-not-found
-	KUBECONFIG=$(EDGE_KUBECONFIG) kubectl -n aiops delete configmap aiops-edge-runner-policy secret aiops-edge-key --ignore-not-found
+edge-delete: edge-target
+	$(EDGE_KUBECTL) delete -f deploy-edge/runner.yaml --ignore-not-found
+	$(EDGE_KUBECTL) -n aiops delete configmap aiops-edge-runner-policy secret aiops-edge-key --ignore-not-found
 
-# 部署时把 xnet 的隧道客户端证书复制到我们的命名空间（只读 xnet，不在 xnet 命名空间创建任何对象），
-# 并下发 runner 签名密钥。make sync-xnet-cert CENTER_KUBECONFIG=...
-sync-xnet-cert: mc-keygen
-	@set -e; d=$$(mktemp -d); trap 'rm -rf $$d' EXIT; \
-	K="kubectl --kubeconfig $(CENTER_KUBECONFIG)"; \
-	$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$d/cert.pem; \
-	$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.key\.pem}' | base64 -d > $$d/key.pem; \
-	$$K -n xnet get secret xnet-ca-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$d/ca.pem; \
+# 中心的共享对象，MCP（mcp）和 AIOps（aiops）两个命名空间各一份，可重复执行：
+#   Secret aiops-xnet-client-cert（xnet 客户端证书）、Secret aiops-edge-key（runner 签名密钥）、
+#   ConfigMap aiops-clusters（集群配置 $(MC_CLUSTERS_FILE)）
+# 只读 xnet，不在 xnet 命名空间创建任何对象。集群配置或证书变化后重新执行，再重启 MCP 和 AIOps。
+mc-init: mc-keygen
+	@test -f $(MC_CLUSTERS_FILE) || { echo "缺少集群配置 $(MC_CLUSTERS_FILE)（make mc-discover 可列出已接入的集群）" >&2; exit 1; }
+	@set -e; d=$$(mktemp -d); trap 'rm -rf $$d' EXIT; K="$(CENTER_KUBECTL)"; \
+	if test -n "$(XNET_CERT_DIR)"; then \
+		cp $(XNET_CERT_DIR)/cert.pem $(XNET_CERT_DIR)/key.pem $(XNET_CERT_DIR)/ca.pem $$d/; \
+	else \
+		$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$d/cert.pem; \
+		$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.key\.pem}' | base64 -d > $$d/key.pem; \
+		$$K -n xnet get secret xnet-ca-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$d/ca.pem; \
+	fi; \
 	for ns in mcp aiops; do \
 		$$K create namespace $$ns --dry-run=client -o yaml | $$K apply -f - >/dev/null; \
 		$$K -n $$ns create secret generic aiops-xnet-client-cert --from-file=$$d/cert.pem --from-file=$$d/key.pem \
-			--from-file=$$d/ca.pem --dry-run=client -o yaml | $$K apply -f -; \
-		$$K -n $$ns create secret generic aiops-edge-key --from-file=key=$(MC_KEY_FILE) --dry-run=client -o yaml | $$K apply -f -; \
+			--from-file=$$d/ca.pem --dry-run=client -o yaml | $$K apply -f - >/dev/null; \
+		$$K -n $$ns create secret generic aiops-edge-key --from-file=key=$(MC_KEY_FILE) \
+			--dry-run=client -o yaml | $$K apply -f - >/dev/null; \
+		$$K -n $$ns create configmap aiops-clusters --from-file=clusters.yaml=$(MC_CLUSTERS_FILE) \
+			--dry-run=client -o yaml | $$K apply -f - >/dev/null; \
 	done; \
-	echo "xnet 客户端证书有效期：$$(openssl x509 -noout -enddate -in $$d/cert.pem)"
+	echo "mc-init: mcp、aiops 命名空间已更新（xnet 证书、签名密钥、集群配置）；证书有效期至 $$(openssl x509 -noout -enddate -in $$d/cert.pem | cut -d= -f2)"
+
+# 旧名称，等同 mc-init
+sync-xnet-cert: mc-init
 
 test-multicluster:
 	$(PYTHON) -m pytest -q tests/unit/multicluster
 
 # 中心部署 AIOps（测试环境）：make deploy-mc MC_LOAD_HOSTS=10.2.5.85
 # 运行时只依赖集群配置、复制的 xnet 证书和 runner 密钥；不含任何边缘 kubeconfig。
-MC_CLUSTERS_FILE ?= deploy-edge/clusters.mc.yaml
-deploy-mc:
+deploy-mc: mc-init
 	@if test -n "$(MC_LOAD_HOSTS)"; then \
 		for image in $(DOCKER_NAME):$(DOCKER_TAG) $(A2A_DOCKER_NAME):$(DOCKER_TAG) \
 			xnet.registry.io:8443/caopeng/docker.io/library/busybox:1.36; do \
 			deploy-edge/load_image.sh $$image $(MC_LOAD_HOSTS); done; fi
-	@K="kubectl --kubeconfig $(CENTER_KUBECONFIG)"; set -e; \
-	$$K create namespace aiops --dry-run=client -o yaml | $$K apply -f -; \
+	@test -f deploy/secrets/core.yaml || { echo "缺少 deploy/secrets/core.yaml（模型配置，见 docs/GUIDE.md）" >&2; exit 1; }
+	@K="$(CENTER_KUBECTL)"; set -e; \
 	$$K apply -f deploy/secrets/core.yaml; \
-	$$K -n aiops create configmap aiops-clusters --from-file=clusters.yaml=$(MC_CLUSTERS_FILE) \
-		--dry-run=client -o yaml | $$K apply -f -; \
 	$(PYTHON) deploy-edge/render_center_config.py deploy/configmap/config.yaml deploy-edge/center/overrides.yaml | $$K apply -f -; \
 	kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy-edge/center \
 		| sed -e 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' \

@@ -10,7 +10,7 @@
 ## 部署顺序
 
 1. 本机构建并推送镜像到 harbor；测试环境的 Harbor 推不了镜像，部署时加 `MC_LOAD_HOSTS=<节点>` 经 SSH 导入（见设计 §3.2）。
-2. 中心：`make sync-xnet-cert`，然后在 mcpstander、robusta、frountind 各执行 `make deploy-mc`（前端 NodePort 30082）。
+2. 中心：Agent 仓库 `make mc-discover` 更新集群配置、`make mc-init`，然后在 mcpstander、robusta、frountind 依次执行 `make deploy-mc`（前端 NodePort 30082）。完整步骤见 README「多集群部署」。
 3. 每个边缘：`make edge-deploy`，在边缘本地执行（SSH 管道或边缘 kubeconfig）。
 4. `scripts/acceptance/multicluster/env_check.py` → 当前阶段的验收脚本。
 

@@ -247,6 +247,96 @@ make case-clean CASE=c08
 make case-clean CASE=c04
 ```
 
+## 多集群部署（`008-multi-cluster` 分支）
+
+适用于一个中心集群加若干边缘集群、边缘已通过 xnet-cloud 接入的环境。单集群按上文部署，不受影响：同一套镜像，不挂载集群配置时就是单集群。设计与原理见[多集群设计](docs/multi-cluster-design.md)（§18 依赖与部署形态）。
+
+**前提**（缺一项都不能工作）：
+
+1. 中心已安装 xnet-cloud，边缘已加入：在中心执行 `kubectl get nodes` 能看到每个边缘的 `vc-…` 虚拟 Node，且为 Ready。
+2. 新可观测体系：中心有 VictoriaMetrics 和 VictoriaLogs；边缘的 vmagent / vlagent 把数据推到中心，`cluster` 标签等于该边缘的虚拟 Node 名。
+3. 部署机：`kubectl`、`make`、`python3`（含 PyYAML）、`openssl`。直接在中心节点上执行最简单，默认使用当前 kubectl 上下文。
+4. 模型配置 `deploy/secrets/core.yaml`，与单集群相同。
+5. 镜像：中心能拉到 MCP、Agent、前端镜像，每个边缘能拉到 runner 镜像。
+
+xnet 证书和 runner 签名密钥**不需要手动处理**：`make mc-init` 会从中心 xnet 命名空间复制证书，生成或取回签名密钥，连同集群配置一起放进 `mcp`、`aiops` 两个命名空间。可以重复执行。
+
+### 1. 下载三个仓库（在中心节点上）
+
+```bash
+mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
+git clone --branch 008-multi-cluster http://10.2.0.86/wanghuhu/mcpstander.git
+git clone --branch 008-multi-cluster ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
+git clone --branch 008-multi-cluster ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
+```
+
+### 2. 准备集群配置
+
+```bash
+cd ~/aiops-workspace/holmegpt-agent
+make mc-discover
+```
+
+把输出的 `clusters:` 块替换进 `deploy-edge/clusters.mc.yaml`，别名按习惯修改（如 `edge-88`）；核对同一文件中 `observability_profiles` 的 VictoriaMetrics / VictoriaLogs 地址；需要时填写 `expected_states`（运维声明的预期状态，见设计文档 §11）。
+
+### 3. 中心：共享对象与三个服务（顺序同单集群）
+
+```bash
+cd ~/aiops-workspace/holmegpt-agent && make mc-init
+cd ~/aiops-workspace/mcpstander && make deploy-mc
+cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
+cd ~/aiops-workspace/aiops-frount && make deploy-mc
+```
+
+Agent 的 `deploy-mc` 会再执行一次 `mc-init`，所以集群配置改了以后，在 Agent 仓库执行 `make deploy-mc` 即可；MCP 也要执行一次 `make deploy-mc` 才会读到新配置。前端默认 NodePort 为 30082，可用 `MC_NODE_PORT=…` 修改。
+
+### 4. 每个边缘：部署 runner
+
+二选一：
+
+```bash
+# 在部署机上，边缘 kubeconfig 放在 ~/.kube/aiops-mc/<名字>
+cd ~/aiops-workspace/holmegpt-agent && make edge-deploy EDGE=edge-88
+```
+
+```bash
+# 或在边缘节点上：先把中心的 ~/.kube/aiops-mc/runner.key 拷到边缘同一路径
+cd ~/aiops-workspace/holmegpt-agent && make edge-deploy EDGE=local
+```
+
+在边缘节点上执行时，该节点同样需要 `kubectl`、`make`、`python3`（含 PyYAML）和 Agent 仓库。不指定 `EDGE` 会直接报错，避免把 runner 装错集群。
+
+### 5. 验证
+
+```bash
+curl -fsS http://<中心节点 IP>:30800/health
+kubectl -n aiops get pods                  # 中心：aiops-copilot、aiops-copilot-frontend
+kubectl -n mcp get pods                    # 中心：mcp-server-manager
+```
+
+打开前端，问"我有哪些集群？"：各集群应显示为在线。再问"edge-88 有什么 Pod 异常？"，确认能查到边缘数据。
+
+### 日常变更
+
+| 场景 | 操作 |
+|---|---|
+| 新增一个边缘 | xnet 接入后：`make mc-discover` → 更新配置 → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → `make edge-deploy EDGE=<新边缘>` |
+| 证书轮换 | Agent 仓库 `make deploy-mc`（含 mc-init），MCP 仓库 `make deploy-mc` |
+| 交付时使用 AIOps 专用证书 | `make mc-init XNET_CERT_DIR=<目录>`，目录内含 `cert.pem`、`key.pem`、`ca.pem` |
+| 修改命令规则（`config.yaml` 的 `workflow.remediation`） | 中心 `make deploy-mc`；每个边缘重新 `make edge-deploy`（规则随 runner 下发） |
+| 卸载某个边缘的 runner | `make edge-delete EDGE=<名字>` |
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `CENTER_KUBECONFIG` | `~/.kube/aiops-mc/center`，不存在就用当前上下文 | 中心集群 |
+| `EDGE` / `EDGE_KUBECONFIG` | 无（必须指定） | `EDGE=edge-88` 使用 `~/.kube/aiops-mc/edge-88`；`EDGE=local` 使用当前上下文 |
+| `MC_CLUSTERS_FILE` | `deploy-edge/clusters.mc.yaml` | 集群配置 |
+| `MC_KEY_FILE` | `~/.kube/aiops-mc/runner.key` | 签名密钥；本机没有就从中心取回 |
+| `XNET_CERT_DIR` | 无 | 运维提供的 xnet 客户端证书目录；不设就从 xnet 复制 |
+| `MC_LOAD_HOSTS`、`MC_PULL_POLICY` | 无、`Always` | 仅测试环境：镜像仓库推不了时经 SSH 把镜像导入节点 |
+
+kubeconfig 只在部署时使用；运行时中心只用自己 Pod 的 ServiceAccount，边缘只用 runner 的 ServiceAccount。
+
 ## 其他使用方式
 
 ### 执行命令与 Pod 修复（默认人工审批）

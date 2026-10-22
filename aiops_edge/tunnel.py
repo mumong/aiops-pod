@@ -99,7 +99,7 @@ class TunnelClient:
         except (OSError, ssl.SSLError) as exc:
             raise EdgeError(
                 "tunnel_auth_failed",
-                f"xnet client certificate unusable ({exc}); re-run make sync-xnet-cert",
+                f"xnet client certificate unusable ({exc}); re-run make mc-init in the Agent repo, then restart MCP and AIOps",
             ) from exc
         return ctx
 
