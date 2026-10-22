@@ -80,7 +80,7 @@ def router_prompt() -> str:
         "可用集群：\n" + "\n".join(lines) + "\n"
         "按你对用户意图的理解决定 cluster_mode 和 clusters：\n"
         "- none：回答不需要任何集群的数据。\n"
-        "- inventory：问的是集群本身（有哪些、接入与在线情况），不是集群里的工作负载。\n"
+        "- inventory：问的是集群本身（有哪些、角色与在线情况），不是集群里的工作负载。\n"
         "- single / multiple / center：需要集群里的实际数据；分别是一个集群、多个集群、中心集群。\n"
         "- unspecified：需要集群数据，但问题和会话都没有说明范围；系统会向用户确认，不要替用户选择。\n"
         '- clusters：用户说的集群名或别名（原样）；全部集群填 ["*"]（含中心集群）；'
