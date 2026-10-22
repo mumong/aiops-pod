@@ -144,14 +144,14 @@ CASES = {
 EXPECTED_DIGESTS = {
     # Handoff fields + optional shared Runbook guidance; tool contracts unchanged.
     # 2026-10-20: layer/evidence/RCA prompts add symptom-vs-cause and verification rules.
-    "DiagnosisStageNode-False-False": "843cae6b100a59977606ddb7d7924596f37cd3367e33fdc821d5e98386ac2484",
-    "DiagnosisStageNode-False-True": "62d88385ab0b344a943a9d099b752593a79f8f7861ddb4c74f104368f38d2900",
-    "DiagnosisStageNode-True-False": "54678432b6dc501612395c23b029b2870432907c0b6f066a5e7fb4aea69ce4fc",
-    "DiagnosisStageNode-True-True": "1801098a4e246a2f56ecd8e233a3009570f4c0c610d33750a2afb61733a74ecc",
-    "DiagnosisEvidenceNode-False-False": "fae9c96772ebf1ec0ca0859deb012f9f592ffd020ef8af65afac79f843f6d627",
-    "DiagnosisEvidenceNode-False-True": "a2934fd07a5370aaef6429123318c7ed547b9ceb58f8e0ccae00aab6583a3408",
-    "DiagnosisEvidenceNode-True-False": "866859840068523e0b0636b5f4defae5a834ad191c53df82f66b3c904d604eec",
-    "DiagnosisEvidenceNode-True-True": "c80d4fa7cfb8839752064b345f51c0a639da346d51ebe48606868e5f2da784a4",
+    "DiagnosisStageNode-False-False": "655e7f5256d50ed86e799f34ecd0f1054612b903f2c1991f01bae57658dee567",
+    "DiagnosisStageNode-False-True": "a53d602fb9c039b7699bfb661a9e55c85f98c3291f1f878fbb8c1e492814b16b",
+    "DiagnosisStageNode-True-False": "e961e49b59a8e505f2cd4143d2d502892c6ca0e684741b1f58ad033516613a74",
+    "DiagnosisStageNode-True-True": "51d3de2bc0ba3f1b13e660af3deae22963805a13c463979e5fab7b9ddea80eec",
+    "DiagnosisEvidenceNode-False-False": "d5f881227ad49ccc14d4dcab5c72008faa12fcf2c84765f7828c20d51258a050",
+    "DiagnosisEvidenceNode-False-True": "27179cb63fc9e1a84fcc5f55d8c542c7f8533450eecbd8eb95f6fe781e2501fd",
+    "DiagnosisEvidenceNode-True-False": "55e83a9b39ee75b172bf3ade8376535b0fbe63cdb78ef8a09e30f8c652d3b7ca",
+    "DiagnosisEvidenceNode-True-True": "80235de3f933bdefb05b6570cfb429630a8bef41931f3de903c47564a94b9a0a",
     "DiagnosisRootCauseNode-False-False": "9c6ef3577fd075719fb4eeed4d025bd18f5ea78560be8866685c03ad3bc140b9",
     "DiagnosisRootCauseNode-False-True": "9c6ef3577fd075719fb4eeed4d025bd18f5ea78560be8866685c03ad3bc140b9",
     "DiagnosisRootCauseNode-True-False": "0408615dd49061b84f90a461a2409208c5f83ae1fb20532ad690cffc01d77c40",
