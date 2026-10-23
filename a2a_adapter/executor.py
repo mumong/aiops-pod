@@ -27,6 +27,14 @@ _DECISION = re.compile(
 )
 
 
+def clarification_needed(final: dict[str, Any]) -> bool:
+    """The backend asked the caller a question instead of answering (e.g. which cluster)."""
+    answer = final.get("query_answer")
+    return final.get("request_route") == "clarify" or (
+        isinstance(answer, dict) and answer.get("status") == "clarify"
+    )
+
+
 def group_label(group_id: str) -> str:
     match = re.fullmatch(r"g(\d+)", str(group_id or ""))
     return (
@@ -117,15 +125,21 @@ class AiopsAgentExecutor(AgentExecutor):
 
         updater = TaskUpdater(event_queue, task_id, context_id)
         task = context.current_task
-        if task is not None and task.status.state == TaskState.input_required:
-            await self._resume_repair(context, updater)
-            return
         question = context.get_user_input().strip()
+        mode = self._mode(context)
+        if task is not None and task.status.state == TaskState.input_required:
+            asked = self._clarification_of(context)
+            if asked is None:
+                await self._resume_repair(context, updater)
+                return
+            # The reply completes the original request; both go to the backend together,
+            # so the answer does not depend on backend session memory.
+            question = f"{asked['question']}\n（补充说明：{question}）"
+            mode = asked.get("mode") or mode
         if not question:
             await updater.reject(self._message("请求中没有可处理的文本内容。", context))
             return
 
-        mode = self._mode(context)
         session_id = self._session_id(context)
         if mode == "repair" and not session_id:
             await updater.reject(
@@ -183,6 +197,9 @@ class AiopsAgentExecutor(AgentExecutor):
                         await updater.start_work(self._message(content, context))
                 elif event.name == "final":
                     final_answer = str(event.data.get("answer") or "").strip()
+                    if final_answer and clarification_needed(event.data):
+                        await self._ask_to_clarify(context, updater, final_answer, question, mode)
+                        return
                     if isinstance(event.data.get("repair_batch"), dict):
                         repair_batch = event.data["repair_batch"]
                     if final_answer:
@@ -248,6 +265,43 @@ class AiopsAgentExecutor(AgentExecutor):
             )
         )
 
+    # ---- clarification: the backend's question pauses the task in input-required ------
+
+    async def _ask_to_clarify(self, context, updater, text, question, mode) -> None:
+        message = new_agent_parts_message(
+            [
+                Part(root=TextPart(text=text)),
+                Part(
+                    root=DataPart(
+                        data={"aiops_clarification": {"question": question, "mode": mode}}
+                    )
+                ),
+            ],
+            context_id=context.context_id,
+            task_id=context.task_id,
+        )
+        await updater.requires_input(message, final=True)
+
+    @staticmethod
+    def _clarification_of(context: RequestContext) -> dict[str, Any] | None:
+        """The request this paused task asked about, if its latest pause was a question.
+
+        The SDK moves the pausing message into history when the reply arrives; a repair
+        approval pause (batch_id) is newer than any earlier question and wins.
+        """
+        task = context.current_task
+        messages = [*(task.history or []), task.status.message] if task else []
+        for message in reversed([m for m in messages if m is not None]):
+            for part in message.parts or []:
+                data = getattr(part.root, "data", None)
+                if not isinstance(data, dict):
+                    continue
+                if isinstance(data.get("aiops_clarification"), dict):
+                    return data["aiops_clarification"]
+                if data.get("batch_id"):
+                    return None
+        return None
+
     # ---- repair skill: batch progress, human approval via input-required ------------
 
     async def _follow_batch(
@@ -292,6 +346,7 @@ class AiopsAgentExecutor(AgentExecutor):
                 {
                     "job_id": group["job_id"],
                     "group_id": group.get("group_id"),
+                    "cluster": action.get("cluster"),
                     "approval_id": group["pending_approval_id"],
                     "description": action.get("description"),
                     "risk": action.get("risk"),
@@ -304,7 +359,9 @@ class AiopsAgentExecutor(AgentExecutor):
             )
             lines += [
                 "",
-                f"**{group_label(group.get('group_id'))}** · approval_id=`{group['pending_approval_id']}`",
+                f"**{group_label(group.get('group_id'))}**"
+                + (f" · 集群 {action['cluster']}" if action.get("cluster") else "")
+                + f" · approval_id=`{group['pending_approval_id']}`",
                 f"- 动作：{action.get('description') or '—'}（风险：{action.get('risk') or '—'}）",
                 f"- 执行命令：`{action.get('execute_command') or '—'}`",
                 f"- 回滚建议：{action.get('rollback_advice') or '—'}",

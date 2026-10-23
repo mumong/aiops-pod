@@ -380,12 +380,13 @@ def test_roll_back_mode_restores_reader_schema_and_description(monkeypatch):
     ],
 )
 def test_display_mode_preserves_existing_producer_validation(tmp_path, raw):
+    # QUERY keeps small results exact; diagnosis nodes read the lifecycle core (b4070115).
     legacy = ObservationProcessor(archive_root=str(tmp_path), evidence_view_mode="legacy").process(
-        "legacy", "evidence", 1, "query_pod_lifecycle", raw, preserve_raw=True
+        "legacy", "query_collect", 1, "query_pod_lifecycle", raw, preserve_raw=True
     )
     compact = ObservationProcessor(
         archive_root=str(tmp_path), evidence_view_mode="compact"
-    ).process("compact", "evidence", 1, "query_pod_lifecycle", raw, preserve_raw=True)
+    ).process("compact", "query_collect", 1, "query_pod_lifecycle", raw, preserve_raw=True)
     assert compact["semantic_success"] == legacy["semantic_success"]
     assert compact["structured"]["parse_status"] == legacy["structured"]["parse_status"]
     assert compact["summary"] == legacy["summary"] == raw

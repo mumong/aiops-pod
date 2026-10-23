@@ -45,7 +45,10 @@ def build_agent_card(settings: AdapterSettings) -> AgentCard:
         name=settings.agent_name,
         description=(
             "Evidence-driven Kubernetes AIOps agent for Pod anomaly detection, "
-            "metrics queries, root-cause analysis, and Markdown diagnostic reports."
+            "metrics queries, root-cause analysis, and Markdown diagnostic reports. "
+            "Multi-cluster deployments: name the cluster(s) in the request (e.g. "
+            "'edge-88', 'all edge clusters'); when the scope is unclear the task pauses "
+            "in input-required with a question - reply in the same task to continue."
         ),
         url=f"{settings.public_url}/",
         version=settings.agent_version,
