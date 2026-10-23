@@ -14,7 +14,7 @@ Troubleshooting a Kubernetes Pod means combining resource state, events, logs, m
 - **Three observability signals**: Metrics, Logging and Tracing through MCP; PromQL, log filters and trace conditions are combined according to what the investigation needs.
 - **Multi-object analysis**: when a deep diagnosis finds several targets, evidence collection and RCA run per group in parallel and are then summarised; a single target goes straight to evidence and RCA through the same stages.
 - **Traceable evidence**: raw tool responses, structured results and model summaries are archived separately and can be read back by reference.
-- **Integration**: HTTP/SSE, an optional chat frontend, multi-cluster federation and a standard A2A adapter.
+- **Integration**: HTTP/SSE, an optional chat frontend, multi-cluster (one center managing edge clusters through xnet) and a standard A2A adapter.
 - **Self-diagnosing runs**: every run writes a ledger and engineering findings (repeated calls, step/time limits, model service errors, context compaction). `GET /runs/{run_id}` shows within a minute where the time went and which guard fired; see [Run diagnostics](docs/run-diagnostics.md).
 - **Guards for small models**: repeated tool calls are answered with a notice instead of re-running; per-round call counts and repeats are capped; output budgets are set per call type; reasoning is fed back inside the tool loop; the tool loop does not force a tool call every round (`llm.loop_tool_choice`). All of these are configuration, with no special cases per fault type or metric name.
 
@@ -219,7 +219,7 @@ The documents below are written in Chinese.
 |---|---|
 | [Architecture](docs/ARCHITECTURE.md) | Full lifecycle from user input to repair and recovery observation, data contracts, tool result handling, context compaction, boundaries and known limits |
 | [HTTP API](docs/api.md) | Query, deep diagnosis, repair, approval and observation with curl; A2A and API identity backlog |
-| [Deployment and operations](docs/GUIDE.md) | Configuration, releases, permissions, federation and common troubleshooting |
+| [Deployment and operations](docs/GUIDE.md) | Configuration, releases, day-to-day changes and optional variables, permissions and common troubleshooting |
 | [Run diagnostics](docs/run-diagnostics.md) | Per-run ledger, engineering finding types, `/runs/{run_id}` report |
 | [LLM anomalies](docs/llm-model-anomalies.md) | Issues of the model / inference service itself, with external references |
 | [High-risk command acceptance](docs/acceptance-blacklist.md) | Standard acceptance steps for the command blacklist and approval-required commands |

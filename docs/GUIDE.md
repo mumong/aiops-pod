@@ -15,7 +15,7 @@
 | 文件 | 需要核对 |
 |---|---|
 | 本地 deploy/secrets/core.yaml | 模型地址、模型名、API Key、实际上下文容量 |
-| [deploy/configmap/config.yaml](../deploy/configmap/config.yaml) | MCP SSE 地址、工作流、语言、联邦配置 |
+| [deploy/configmap/config.yaml](../deploy/configmap/config.yaml) | MCP SSE 地址、工作流、语言、修复策略 |
 | [deploy/configmap/runbooks.yaml](../deploy/configmap/runbooks.yaml) | 排障知识及目录，挂载后由 fetch_runbook 读取 |
 | [deploy/k8s-simple.yaml](../deploy/k8s-simple.yaml) | 主服务、A2A、initContainer 镜像；PVC、资源、端口 |
 | [deploy/rbac.yaml](../deploy/rbac.yaml) | Agent ServiceAccount 权限 |
@@ -81,7 +81,7 @@ scripts/acceptance/sprint2_policy_and_switch.sh aiops-case-09    # 追加真实�
 scripts/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/c11 → 诊断 → 修复 → 恢复观察 → kubectl 复核
 ```
 
-当前 MCP 默认使用集群 DNS，例如 http://mcp-server-manager.mcp.svc.cluster.local:8100/sse。外部 MCP 要改为可达地址，并核实查询的是目标集群。单集群关闭 federation.enabled，避免向示例子集群地址发请求。
+当前 MCP 默认使用集群 DNS，例如 http://mcp-server-manager.mcp.svc.cluster.local:8100/sse。外部 MCP 要改为可达地址，并核实查询的是目标集群。
 
 清单申请 aiops-reports-pvc，容量 20Gi、ReadWriteOnce；需要默认 StorageClass 或匹配 PV。修改仓库前缀时同步核对 Makefile 与清单：版本替换只匹配 Makefile 当前定义的镜像前缀，initContainer 镜像不会跟随主镜像版本更新。
 
@@ -155,7 +155,6 @@ RBAC 由 Kubernetes API 实时执行，权限变更通常不需要重启 Pod；�
 
 - **多集群**：同一套镜像，挂载集群配置（`make mc-init` 生成的 ConfigMap `aiops-clusters`）就是多集群，不挂载就是单集群。单集群的工具定义、接口和行为不变。部署见 README，设计见[多集群设计](multi-cluster-design.md)。
 - **A2A**：单集群和多集群使用同一个 Agent Card 和同一套调用方式。多集群下，问题没写明集群时，任务会进入 `input-required` 并附上反问，调用方在同一个任务里回复即可继续。详见 [A2A 指南](a2a.md)。
-- **旧联邦接口**（`/federation/*`、`federation.sub_agents`、`make deploy-master/slave`）：多集群方案出现之前的做法，要求每个集群各自部署 Agent 和 MCP，再由主集群广播。前端和 A2A 都不使用它；多集群中心部署时已关闭（`deploy-edge/center/overrides.yaml`）。新环境请使用上面的多集群方案。
 
 ## 7. 排查入口
 

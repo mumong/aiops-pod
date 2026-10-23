@@ -40,8 +40,6 @@ async def root():
         "endpoints": {
             "/ask": "GET/POST - 诊断入口（layer -> evidence -> rca -> conclusion）",
             "/query": "GET/POST - 轻量查询入口（layer -> conclusion）",
-            "/federation/ask": "GET/POST - 多集群诊断广播入口",
-            "/federation/query": "GET/POST - 多集群查询广播入口",
             "/health": "GET - 健康检查",
             "/tools": "GET - 可用工具列表",
             "/runbooks": "GET - 可用 Runbooks",

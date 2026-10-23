@@ -25,7 +25,7 @@ DOCKER_BUILD := docker build --network=$(BUILD_NETWORK) \
 A2A_PUBLIC_HOST ?= $(shell kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)
 A2A_PUBLIC_URL ?= http://$(A2A_PUBLIC_HOST):30801
 
-.PHONY: build release build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy deploy-master deploy-slave delete restart logs sync-version \
+.PHONY: build release build-main build-a2a build-a2a-test-agent build-all push push-main push-a2a push-a2a-test-agent push-all test-a2a deploy delete restart logs sync-version \
 	case-list case-list-variants case-render case-deploy case-validate case-ask case-deploy-errors case-deploy-all case-clean case-clean-variants
 
 .PHONY: help test-unit check check-syntax lint format format-check
@@ -96,7 +96,7 @@ test-a2a:
 	@test -x .venv-a2a/bin/python || (echo "先执行: python3 -m venv .venv-a2a && .venv-a2a/bin/pip install -r requirements.a2a-dev.txt" && exit 1)
 	.venv-a2a/bin/python -m pytest -q tests/a2a
 
-# 通用部署（不修改 federation 配置，直接应用当前 configmap）
+# 单集群部署：应用当前 configmap 并滚动更新
 deploy:
 	@test -n "$(A2A_PUBLIC_HOST)" || (echo "无法自动获取 Node InternalIP；请设置 A2A_PUBLIC_HOST=<可访问IP>" && exit 1)
 	@echo "Deploying AIOps Pod (main container + A2A sidecar) with version $(DOCKER_TAG)..."
@@ -117,20 +117,6 @@ deploy:
 		kubectl rollout restart deployment/aiops-copilot-frontend -n aiops; \
 		kubectl rollout status deployment/aiops-copilot-frontend -n aiops --timeout=300s; \
 	fi
-
-# 主集群部署：federation.enabled = true，然后 deploy
-deploy-master:
-	@echo "Deploying as MASTER cluster (federation enabled)..."
-	@sed -i '/^    federation:/,/^    [^ ]/{s/enabled: false/enabled: true/}' deploy/configmap/config.yaml
-	$(MAKE) deploy
-	@echo "✅ Master cluster deployed successfully!"
-
-# 子集群部署：federation.enabled = false，然后 deploy
-deploy-slave:
-	@echo "Deploying as SLAVE cluster (federation disabled)..."
-	@sed -i '/^    federation:/,/^    [^ ]/{s/enabled: true/enabled: false/}' deploy/configmap/config.yaml
-	$(MAKE) deploy
-	@echo "✅ Slave cluster deployed successfully!"
 
 delete:
 	@echo "Deleting app resources only (keeping namespace, PVC and PV)..."

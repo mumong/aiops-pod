@@ -24,33 +24,12 @@ class _Entry:
         self.link = link
 
 
-class _FakeCoordinator:
-    def __init__(self):
-        self.calls = []
-        self._registry = type("_Registry", (), {"get_enabled_agents": lambda self: [object()]})()
-
-    def ask_stream(self, **kwargs):
-        self.calls.append(kwargs)
-        yield "coordinator-ok"
-
-
-class _FakeAgent:
-    def __init__(self):
-        self.calls = []
-
-    def ask_stream(self, **kwargs):
-        self.calls.append(kwargs)
-        yield "agent-ok"
-
-
 class _FakeService:
     def __init__(self):
         self.stream_calls = []
         self.sync_calls = []
         self.sync_result = {"success": True, "result": "sync-ok"}
         self.merged_catalog = None
-        self.federation_coordinator = _FakeCoordinator()
-        self.federation_agent = _FakeAgent()
 
     def health_check(self):
         return {"status": "healthy"}
@@ -117,14 +96,6 @@ def test_route_table_order_and_names_are_stable(monkeypatch):
         ("/api/v1/mcp/status", ["GET"], "get_mcp_status"),
         ("/reports", ["GET"], "list_reports"),
         ("/reports/{filename}", ["GET"], "get_report"),
-        ("/federation/ask", ["GET"], "federation_ask_get"),
-        ("/federation/ask", ["POST"], "federation_ask_post"),
-        ("/federation/query", ["GET"], "federation_query_get"),
-        ("/federation/query", ["POST"], "federation_query_post"),
-        ("/federation/ask/v2", ["GET"], "federation_ask_v2_get"),
-        ("/federation/ask/v2", ["POST"], "federation_ask_v2_post"),
-        ("/federation/query/v2", ["GET"], "federation_query_v2_get"),
-        ("/federation/query/v2", ["POST"], "federation_query_v2_post"),
     ]
 
 
@@ -284,50 +255,3 @@ def test_reports_routes(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.text == "report one"
     assert client.get("/reports/nope.md").status_code == 404
-
-
-def test_federation_post_routes_forward_form_arguments(monkeypatch):
-    client, service, _app = _build_client(monkeypatch)
-
-    response = client.post(
-        "/federation/query", data={"q": "cpu", "max_steps": "5", "conclusion_max_tokens": "10"}
-    )
-    assert response.status_code == 200
-    assert response.text == "coordinator-ok"
-    assert service.federation_coordinator.calls[-1] == {
-        "question": "cpu",
-        "max_steps": 5,
-        "conclusion_max_tokens": 10,
-        "endpoint_path": "/query",
-    }
-
-    client.post("/federation/ask", data={"q": "why"})
-    assert service.federation_coordinator.calls[-1] == {
-        "question": "why",
-        "max_steps": 30,
-        "conclusion_max_tokens": 8192,
-        "endpoint_path": "/ask",
-    }
-
-    response = client.post("/federation/ask/v2", data={"q": "a2a"})
-    assert response.text == "agent-ok"
-    assert service.federation_agent.calls[-1] == {"question": "a2a", "endpoint_path": "/ask"}
-    client.post("/federation/query/v2", data={"q": "a2a"})
-    assert service.federation_agent.calls[-1] == {"question": "a2a", "endpoint_path": "/query"}
-
-
-def test_federation_disabled_messages(monkeypatch):
-    client, service, _app = _build_client(monkeypatch)
-    service.federation_coordinator = None
-    service.federation_agent = None
-
-    text = client.get("/federation/query", params={"q": "x"}).text
-    assert text.startswith("❌ 联邦查询未启用。")
-    assert "请使用 /query 端点" in text
-    text = client.get("/federation/ask/v2", params={"q": "x"}).text
-    assert text.startswith("❌ Agent-to-Agent 联邦查询未启用。")
-    assert "请使用 /ask 端点" in text
-    assert (
-        client.get("/federation/ask", params={"q": "x", "conclusion_max_tokens": -1}).status_code
-        == 422
-    )

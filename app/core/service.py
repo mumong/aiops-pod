@@ -24,12 +24,6 @@ from app.core.aicall.guards import AgentGuards
 from app.core.aicall.output_budget import OutputBudget
 from app.core.config import AppConfig
 from app.core.environment import get_config_file_path
-from app.core.federation import (
-    FederationAgent,
-    FederationCoordinator,
-    get_federation_agent,
-    get_federation_coordinator,
-)
 from app.core.holmes.config_loader import load_holmes_config_from_yaml
 from app.core.holmes.streaming import create_sse_message_cn, format_duration
 from app.core.paths import get_app_version, get_project_root
@@ -278,8 +272,6 @@ class HolmesService:
         self.config: Optional[AppConfig] = None
         self.runbook_manager = RunbookManager()
         self.merged_catalog: Optional[RunbookCatalog] = None
-        self.federation_coordinator: Optional[FederationCoordinator] = None
-        self.federation_agent: Optional[FederationAgent] = None
         self._init_lock = threading.Lock()
         self._init_finished = (
             threading.Event()
@@ -486,28 +478,6 @@ class HolmesService:
                     len(self.mcp_tools) - len(builtin),
                     len(builtin),
                 )
-
-                # 初始化联邦协调器
-                _federation_cfg = _raw_config.get("federation", {})
-                if _federation_cfg.get("enabled", False):
-                    self.federation_coordinator = get_federation_coordinator(
-                        federation_config=_federation_cfg,
-                        model=final_model,
-                        api_key=final_api_key,
-                        api_base=final_api_base,
-                    )
-                    if self.federation_coordinator:
-                        logger.info("[FEDERATION] 联邦协调器初始化完成")
-                    self.federation_agent = get_federation_agent(
-                        federation_config=_federation_cfg,
-                        model=final_model,
-                        api_key=final_api_key,
-                        api_base=final_api_base,
-                    )
-                    if self.federation_agent:
-                        logger.info("[FEDERATION] FederationAgent 初始化完成")
-                else:
-                    logger.debug("[FEDERATION] federation 未启用，跳过")
 
                 logger.info("服务初始化完成 | 模式=AICall(LangGraph) | 模型=%s", self.config.model)
 

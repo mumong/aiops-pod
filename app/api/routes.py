@@ -10,7 +10,6 @@ API Routes - AIOps Copilot API 端点
 路由按职责拆分：
 - ask_routes:        /ask、/query、/q/{question}、/remediation/approve
 - info_routes:       /、/health、/tools、/runbooks、/artifacts、/api/v1/mcp/status、/reports
-- federation_routes: /federation/{ask,query}[/v2]
 - repair_routes:     /repair/*
 
 API 使用示例：
@@ -26,7 +25,7 @@ API 使用示例：
 
 # get_service 保留在本模块：各路由模块经 app.api.common.current_service 在调用时
 # 从这里解析，测试通过 monkeypatch "app.api.routes.get_service" 替换服务。
-from app.api import ask_routes, federation_routes, info_routes
+from app.api import ask_routes, info_routes
 from app.api.common import fix_double_encoding  # noqa: F401  (向后兼容的导出)
 from app.core.service import get_service  # noqa: F401
 
@@ -39,4 +38,3 @@ def register_routes(app):
 
     app.include_router(ask_routes.router)
     app.include_router(info_routes.router)
-    app.include_router(federation_routes.router)
