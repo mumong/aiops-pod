@@ -133,7 +133,7 @@ To run it on the edge node instead, copy the center's `~/.kube/aiops-mc/runner.k
 
 Check: open `http://<center IP>:30082`, ask "which clusters do I have?" (all should be online), then "what Pods are failing on edge-88?".
 
-Runner levels: 1 diagnoses only; 2 reads everything (Secret values are redacted) and changes common repair objects (Pods, workloads, ConfigMaps, Services, PVCs, HPAs, Jobs, Ingresses, …) but not Secrets or RBAC; 3 is cluster-admin. See the [multi-cluster design](docs/multi-cluster-design.md) §5.2.
+Runner levels: 1 read-only; 2 (default) reads everything and changes common repair objects, not Secrets or RBAC; 3 admin.
 
 ### 3. Upgrading
 
@@ -176,32 +176,7 @@ Under the report, "generate repair plan" plans the fix; after approval it runs a
 | c10 | repeated restarts | liveness endpoint returns 500 |
 | c11 | Terminating | a finalizer blocks deletion |
 
-### 5. Day-to-day changes and removal
-
-| Task | Command |
-|---|---|
-| Changed `config.yaml`, runbooks or `core.yaml` | single cluster `make deploy`; multi-cluster center `make deploy-mc` (agent repository) |
-| Add an edge | center: `make mc-discover` → update `clusters.mc.yaml` → `make deploy-mc` in the agent and MCP repositories → `make edge-deploy EDGE=<new edge>` |
-| Change the high-risk command rules (`workflow.remediation`) | center `make deploy-mc`, then `make edge-deploy` for every edge (the rules ship with the runner) |
-| Rotate the xnet certificate | `make deploy-mc` in the agent and MCP repositories |
-| Use a dedicated xnet certificate from operations | `make mc-init XNET_CERT_DIR=<dir with cert.pem, key.pem, ca.pem>` |
-| Logs | `kubectl -n aiops logs deploy/aiops-copilot -c aiops-copilot -f` |
-| Remove | `make delete` in each repository (keeps the report PVC); `make edge-delete EDGE=<alias>` per edge |
-
-Optional variables (append to the make command, e.g. `make deploy-mc MC_A2A_PUBLIC_URL=https://aiops.example.com`):
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `CENTER_KUBECONFIG` | `~/.kube/aiops-mc/center`, else the current context | center cluster |
-| `EDGE` | none, required | `EDGE=edge-88` uses `~/.kube/aiops-mc/edge-88`; `EDGE=local` the current context |
-| `RUNNER_LEVEL` | `2` | runner permission level 1 / 2 / 3 |
-| `A2A_PUBLIC_HOST` / `MC_A2A_PUBLIC_URL` | the cluster's first node (multi-cluster skips xnet virtual Nodes) | A2A address published in the Agent Card (single cluster / multi-cluster center) |
-| `MC_SECRET_FILE` | `deploy-edge/center/secret.yaml` when present, else `deploy/secrets/core.yaml` | the center's model settings, for one host deploying both a single cluster and a center with different models (not committed) |
-| `MC_CLUSTERS_FILE` | `deploy-edge/clusters.mc.yaml` | cluster config |
-| `MC_KEY_FILE` | `~/.kube/aiops-mc/runner.key` | runner signing key; fetched from the center when missing locally |
-| `MC_LOAD_HOSTS`, `MC_PULL_POLICY` | none, `Always` | test env only: side-load images over SSH when the registry cannot be pushed, e.g. `SSHPASS=… make deploy-mc MC_LOAD_HOSTS=10.2.5.85` |
-
-Kubeconfigs are used only while deploying. At run time the center uses its own Pods' ServiceAccounts and each edge only the runner's. More settings: [Deployment and operations](docs/GUIDE.md) (Chinese).
+Day-to-day changes (adding an edge, certificate rotation, rule changes), removal and optional variables: [Deployment and operations](docs/GUIDE.md#3-发布与验证) (Chinese).
 
 ## Other ways to use it
 

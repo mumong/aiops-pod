@@ -135,7 +135,7 @@ make edge-deploy EDGE=edge-89 RUNNER_LEVEL=1     # 1 只读 / 2 标准 / 3 管�
 
 验证：打开 `http://<中心IP>:30082` 问"我有哪些集群？"，各集群应显示为在线；再问"edge-88 有什么 Pod 异常？"。
 
-runner 权限等级：1 只诊断；2 读全部（Secret 的值会被脱敏），可以改常见修复对象（Pod、工作负载、ConfigMap、Service、PVC、HPA、Job、Ingress 等），不能改 Secret 和 RBAC；3 为 cluster-admin。详见[多集群设计](docs/multi-cluster-design.md) §5.2。
+runner 权限等级：1 只读；2（默认）读全部、可改常见修复对象，不能改 Secret 和 RBAC；3 管理员。
 
 ### 3. 升级
 
@@ -178,32 +178,7 @@ curl -N -G http://<节点IP>:30800/ask --data-urlencode "q=aiops-case-08 的 Pod
 | c10 | 反复重启 | Liveness 返回 500 |
 | c11 | Terminating | finalizer 阻止删除 |
 
-### 5. 日常变更与卸载
-
-| 场景 | 命令 |
-|---|---|
-| 改了 `config.yaml`、Runbook 或 `core.yaml` | 单集群 `make deploy`，多集群中心 `make deploy-mc`（Agent 仓库） |
-| 新增一个边缘 | 中心：`make mc-discover` → 更新 `clusters.mc.yaml` → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → `make edge-deploy EDGE=<新边缘>` |
-| 修改高危命令规则（`workflow.remediation`） | 中心 `make deploy-mc`，并对每个边缘重新执行 `make edge-deploy`（规则随 runner 下发） |
-| xnet 证书轮换 | Agent 仓库和 MCP 仓库各执行 `make deploy-mc` |
-| 使用运维提供的专用 xnet 证书 | `make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>` |
-| 查看日志 | `kubectl -n aiops logs deploy/aiops-copilot -c aiops-copilot -f` |
-| 卸载 | 各仓库执行 `make delete`（保留报告 PVC）；边缘执行 `make edge-delete EDGE=<别名>` |
-
-可选变量（加在 make 命令后面，例如 `make deploy-mc MC_A2A_PUBLIC_URL=https://aiops.example.com`）：
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `CENTER_KUBECONFIG` | `~/.kube/aiops-mc/center`，不存在时用当前上下文 | 中心集群 |
-| `EDGE` | 无，必须指定 | `EDGE=edge-88` 使用 `~/.kube/aiops-mc/edge-88`；`EDGE=local` 使用当前上下文 |
-| `RUNNER_LEVEL` | `2` | runner 权限等级 1 / 2 / 3 |
-| `A2A_PUBLIC_HOST` / `MC_A2A_PUBLIC_URL` | 本集群第一个节点（多集群跳过 xnet 虚拟 Node） | Agent Card 里对外公布的 A2A 地址（单集群 / 多集群中心） |
-| `MC_SECRET_FILE` | 有 `deploy-edge/center/secret.yaml` 就用它，否则用 `deploy/secrets/core.yaml` | 中心的模型配置；同一台机器同时部署单集群和中心、两边模型不同时使用（该文件不入库） |
-| `MC_CLUSTERS_FILE` | `deploy-edge/clusters.mc.yaml` | 集群配置 |
-| `MC_KEY_FILE` | `~/.kube/aiops-mc/runner.key` | runner 签名密钥；本机没有时从中心取回 |
-| `MC_LOAD_HOSTS`、`MC_PULL_POLICY` | 无、`Always` | 仅用于测试环境：镜像仓库推不上去时，经 SSH 把镜像导入节点，例如 `SSHPASS=… make deploy-mc MC_LOAD_HOSTS=10.2.5.85` |
-
-kubeconfig 只在部署时使用。运行时中心只用自己 Pod 的 ServiceAccount，边缘只用 runner 的 ServiceAccount。更多配置项见[部署与运维](docs/GUIDE.md)。
+日常变更（新增边缘、证书轮换、改规则）、卸载、可选变量见[部署与运维](docs/GUIDE.md#3-发布与验证)。
 
 ## 其他使用方式
 
