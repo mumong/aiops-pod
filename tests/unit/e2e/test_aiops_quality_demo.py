@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-DEMO_DIR = Path("test/aiops_quality_e2e").resolve()
+DEMO_DIR = Path("tests/quality").resolve()
 if str(DEMO_DIR) not in sys.path:
     sys.path.insert(0, str(DEMO_DIR))
 

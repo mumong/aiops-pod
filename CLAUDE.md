@@ -9,7 +9,7 @@
 - 观测解析与投影：app/core/context/；模型循环与压缩：app/core/aicall/。
 - Runbook：deploy/configmap/runbooks.yaml；运行配置：deploy/configmap/config.yaml。
 - 部署：Makefile、VERSION、deploy/k8s-simple.yaml。
-- 测试：tests/ 为自动回归；test/ 为故障部署和质量评测工具。
+- 测试：全部在 tests/（unit 单元、a2a、acceptance 验收脚本、cases 故障 Case、quality 质量评测）。
 - MCP、可观测性组件、前端在独立仓库，链接以 README 为准。
 
 ## 维护边界

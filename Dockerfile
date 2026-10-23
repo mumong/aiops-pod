@@ -49,13 +49,13 @@ RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 \
     && rm -rf linux-amd64
     
 # 复制依赖文件
-COPY requirements.runtime.txt .
+COPY requirements/runtime.txt ./requirements/
 
 # 安装运行时依赖。
 # holmesgpt 使用 --no-deps，避免把未使用的多云/数据库 toolset 依赖整体带入镜像。
 RUN pip install --no-cache-dir --no-compile --upgrade pip==26.2.0 \
     && pip install --no-cache-dir --no-compile --no-deps holmesgpt==0.21.0 \
-    && pip install --no-cache-dir --no-compile -r requirements.runtime.txt \
+    && pip install --no-cache-dir --no-compile -r requirements/runtime.txt \
     && find /usr/local/lib/python3.12/site-packages \
         \( -type d \( -name tests -o -name test -o -name __pycache__ \) \
         -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -exec rm -rf '{}' + \
@@ -74,9 +74,8 @@ ARG BUILD_TIME=unknown
 
 # 复制应用代码
 COPY --chown=appuser:appuser app/ ./app/
-COPY --chown=appuser:appuser run.py .
 COPY --chown=appuser:appuser VERSION .
-# Multi-cluster access (specs/008-multi-cluster): kubectl is a shim that runs
+# Multi-cluster access (docs/specs/008-multi-cluster): kubectl is a shim that runs
 # kubectl.real unless AIOPS_CLUSTER names an edge cluster.
 COPY --chown=appuser:appuser aiops_edge/ ./aiops_edge/
 COPY --chmod=755 aiops_edge/kubectl /usr/local/bin/kubectl
@@ -108,4 +107,4 @@ LABEL version="${VERSION}" \
       description="K8s AIOps Copilot - 智能运维助手"
 
 # 启动命令
-CMD ["python", "run.py"]
+CMD ["python", "-m", "app"]

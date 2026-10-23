@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path("test/aiops_quality_e2e").resolve()))
+sys.path.insert(0, str(Path("tests/quality").resolve()))
 import run_quality_demo as q
 from variant_suite import combine_scenarios, score_target_runbooks
 
@@ -145,7 +145,7 @@ def test_per_run_percentage_mean_and_invalid_fixture_exclusion():
 @pytest.mark.parametrize("index,matched", [(1, 4), (2, 5)])
 def test_historical_mixed_reports_agree_with_manual_review(index, matched):
     path = Path(
-        f"testreports/aiops_c01_c03_groups_20260908_183108/01-mixed/run-{index:02d}/report.md"
+        f"tests/quality/reports/aiops_c01_c03_groups_20260908_183108/01-mixed/run-{index:02d}/report.md"
     )
     if not path.is_file():
         pytest.skip("optional local historical archive")

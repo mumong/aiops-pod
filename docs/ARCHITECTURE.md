@@ -341,7 +341,7 @@ answer:        给人看的方案说明
 
 ## 6. 多集群模式
 
-只在挂载了多集群配置（`AIOPS_CLUSTERS_CONFIG`，见 `deploy-edge/clusters.mc.yaml`）时生效；没有该配置时，路由 schema、提示词、工具 schema、工具结果和 kubectl 调用与单集群完全相同。当前设计与实现见 [多集群设计](multi-cluster-design.md)（单一来源），验收方法与结果见 [验收方案](multi-cluster-acceptance.md)，开发过程记录在 [specs/008-multi-cluster](../specs/008-multi-cluster/spec.md)。
+只在挂载了多集群配置（`AIOPS_CLUSTERS_CONFIG`，见 `deploy-edge/clusters.mc.yaml`）时生效；没有该配置时，路由 schema、提示词、工具 schema、工具结果和 kubectl 调用与单集群完全相同。当前设计与实现见 [多集群设计](multi-cluster-design.md)（单一来源），验收方法与结果见 [验收方案](multi-cluster-acceptance.md)，开发过程记录在 [specs/008-multi-cluster](specs/008-multi-cluster/spec.md)。
 
 | 环节 | 多集群下的行为 | 代码 |
 |---|---|---|

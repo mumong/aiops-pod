@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_secret_example_satisfies_deployment_references():
     # Arrange: inspect public artifacts only, never a developer's private Secret.
-    example = yaml.safe_load((ROOT / "config/examples/aiops-secret.yaml").read_text())
+    example = yaml.safe_load((ROOT / "deploy/secrets/core.yaml.example").read_text())
     deployment = next(
         item
         for item in yaml.safe_load_all((ROOT / "deploy/k8s-simple.yaml").read_text())
@@ -32,4 +32,5 @@ def test_secret_example_satisfies_deployment_references():
     assert required | model_keys <= example["stringData"].keys()
     assert example["stringData"]["LLM_API_KEY"] == "<API key>"
     assert example["metadata"]["namespace"] == "aiops"
-    assert (ROOT / "config/examples/aiops-secret.yaml").relative_to(ROOT).parts[0] != "deploy"
+    # kubectl apply -R deploy/ only reads .json/.yaml/.yml, so the placeholders never deploy.
+    assert (ROOT / "deploy/secrets/core.yaml.example").suffix not in {".json", ".yaml", ".yml"}

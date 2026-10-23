@@ -6,7 +6,7 @@
 - **单集群环境**：不挂载集群配置时就是单集群，工具定义、接口、行为与改造前相同（10.2.0.48 已用 13.0.31 实测）。
 - **相关文档**：
   - 开发前的设计稿：`git show 0b03f423:docs/multi-cluster-design.md`；
-  - 开发过程记录：[specs/008-multi-cluster](../specs/008-multi-cluster/spec.md)；
+  - 开发过程记录：[specs/008-multi-cluster](specs/008-multi-cluster/spec.md)；
   - 验收方法与结果：[多集群验收方案](multi-cluster-acceptance.md)。
 
 ## 1. 目标与边界
@@ -439,7 +439,7 @@ expected_states:
 | runner | `aiops_edge/runner/`、`deploy-edge/runner.yaml` | — |
 | 事件流投影 | `workflow/stream_contract.py`（`project_cluster_lane`） | — |
 | 前端 | — | `ClusterLaneBoard.tsx`、`clusterLanes.ts`、`chatEventTransition.ts`、`parallelEvidenceModel.ts`、`routePresentation.ts`、`scripts/replay-sse.mjs` |
-| 测试 | `tests/unit/multicluster/`、`scripts/acceptance/multicluster/` | `tests/test_cluster_scope.py`、`test_multicluster_wiring.py`、`test_aiops_edge_sync.py`；`tests/chat-transition.test.mjs` |
+| 测试 | `tests/unit/multicluster/`、`tests/acceptance/multicluster/` | `tests/test_cluster_scope.py`、`test_multicluster_wiring.py`、`test_aiops_edge_sync.py`；`tests/chat-transition.test.mjs` |
 
 ## 17. 与开发前设计的差异
 

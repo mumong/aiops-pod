@@ -8,7 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 
 pytest.importorskip(
     "a2a",
-    reason="A2A tests run in the isolated requirements.a2a-dev.txt environment",
+    reason="A2A tests run in the isolated requirements/a2a-dev.txt environment",
 )
 
 from a2a_adapter.backend import AiopsBackendClient, BackendError

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path("test/aiops_quality_e2e").resolve()))
+sys.path.insert(0, str(Path("tests/quality").resolve()))
 import run_quality_demo as q
 from variant_suite import fixture_manager
 

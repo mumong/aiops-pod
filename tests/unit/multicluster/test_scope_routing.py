@@ -490,7 +490,7 @@ def test_router_prompt_states_principles_not_sample_questions(multi):
     samples = json.loads(
         (
             Path(__file__).resolve().parents[3]
-            / "scripts/acceptance/multicluster/intent_cases.json"
+            / "tests/acceptance/multicluster/intent_cases.json"
         ).read_text()
     )["cases"]
     for case in samples:

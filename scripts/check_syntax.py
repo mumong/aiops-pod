@@ -6,8 +6,8 @@ from pathlib import Path
 def main() -> None:
     """Compile maintained source to memory; never invoke tools or network."""
     root = Path(__file__).resolve().parents[1]
-    paths = [root / "run.py"]
-    for folder in ("app", "a2a_adapter", "a2a_test_agent", "scripts", "tests", "test"):
+    paths = []
+    for folder in ("app", "a2a_adapter", "aiops_edge", "scripts", "tests"):
         paths.extend(sorted((root / folder).rglob("*.py")))
     for path in paths:
         compile(path.read_bytes(), str(path), "exec")

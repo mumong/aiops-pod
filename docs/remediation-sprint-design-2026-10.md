@@ -13,7 +13,7 @@
 | 命令安全 | 传输层：只允许单条 kubectl、禁管道/重定向、禁切换集群身份、禁 `config`；`denied_operations/allowed_operations` 可配但默认为空；exec 内层命令黑名单默认只有 `rm` | `policy.py`、`execution_guard.py` |
 | 执行结果展示 | 已有：逐动作逐阶段命令与输出；终态 `needs_followup`（"命令已执行，待复查"） | `pod_executor.py`、`RepairWorkspace.tsx` |
 | 超时 | 审批超时（600s → `timeout`）、单条命令 60s；没有恢复观察，没有整体执行时限 | 同上 |
-| 三个场景环境 | 已有 c06（启动脚本/环境变量错）、c09（Readiness 端口错）、c11（finalizer 阻塞）；`repair_cases.py reset` 可一键重置 | `test/pod-anomaly-cases/` |
+| 三个场景环境 | 已有 c06（启动脚本/环境变量错）、c09（Readiness 端口错）、c11（finalizer 阻塞）；`repair_cases.py reset` 可一键重置 | `tests/cases/` |
 
 结论：Sprint 1 功能基本在，缺的是可演示的验收脚本和"异常原因"的直观展示；Sprint 2 的黑名单默认为空、开关不可在线切换、两者都没有让验收者"看得见"的入口；Sprint 3 的恢复判定与超时反馈缺失。
 
@@ -22,7 +22,7 @@
 缺口与方案：
 
 - 方案卡片补一行 **异常原因**：来自本组诊断记录（v2 记录的 `diagnosis_result.root_cause/summary`，旧记录的 `analysis` 首段），由后端在 `repair_jobs.batch/detail` 的 `target` 旁给出 `diagnosis_summary`，前端在"修复对象"下方展示。不改模型输出结构。
-- 验收脚本 `scripts/acceptance/sprint1_repair_plan.sh <case>`：重置用例 → 诊断 → 建批次 → 等待 `planned` → 断言方案含 targets / actions / execute_command / 异常原因 → 提交一条修改意见 → 断言出现 v2 且 v1 进历史。输出一张结果表，非零退出即失败。
+- 验收脚本 `tests/acceptance/sprint1_repair_plan.sh <case>`：重置用例 → 诊断 → 建批次 → 等待 `planned` → 断言方案含 targets / actions / execute_command / 异常原因 → 提交一条修改意见 → 断言出现 v2 且 v1 进历史。输出一张结果表，非零退出即失败。
 
 ## 2. Sprint 2：高危命令黑名单 + 人工审批 / 自动执行开关
 
@@ -58,7 +58,7 @@
 - 新增运行时覆盖 `app/core/remediation/settings.py`：`PUT /repair/policy/mode {mode, reason, ttl_minutes}`，带 `X-AIOps-Admin-Token`（来自 Secret `AIOPS_ADMIN_TOKEN`；未配置则接口 403，开关只能走配置）。覆盖有 TTL（默认 60 分钟，上限 24 小时），到期自动回到配置值；持久化到 `repair_records/settings.json`，重启后仍按 TTL 生效。写审计。
 - 执行层统一通过 `repair_settings.effective(cfg)` 取 `mode/mode_source/approval_timeout_seconds`；任务记录 `mode` 与 `mode_source`；自动模式下每个动作的 `remediation_tool_start` 事件带 `approval: "auto"`，终态 reason 写明"自动执行，未经人工审批"。
 - 前端：修复面板头部显示开关状态徽标（"人工审批" / "自动执行 · 运行时覆盖，剩余 N 分钟"），管理员可输入令牌切换；切换后新建的任务按新模式执行，已在等待审批的任务不受影响（显式说明）。
-- 验收脚本 `scripts/acceptance/sprint2_policy_and_switch.sh`：
+- 验收脚本 `tests/acceptance/sprint2_policy_and_switch.sh`：
   1. 黑名单：对 20 条高危命令调用 `/repair/policy/check`，全部 `allowed=false` 且 rule 非空；对 6 条合规命令全部 `allowed=true`。
   2. 审批：review 模式下建批次 → 出现 `awaiting_approval` 且 `events` 为空（未执行）→ 拒绝 → 终态 `rejected`、仍无执行事件。
   3. 开关：PUT 切 auto → 新批次直接出现 `executing` 且 `approval=null`、事件带 `approval=auto` → PUT 切回 review → 再建批次回到 `awaiting_approval`。审计文件中能看到三条 `mode_changed`。
@@ -92,7 +92,7 @@
 
 ### 3.3 三场景验收
 
-`scripts/acceptance/sprint3_scenarios.sh <c06|c09|c11|all>`：重置用例（`repair_cases.py reset`）→ 诊断 → 建批次 → 自动批准全部审批 → 等待终态 → 断言 `recovered` 且 `kubectl` 复核（c11：Pod 消失；c09：Ready 1/1 且 EndpointSlice 就绪；c06：Running 且 120 秒无新增重启）→ 打印 before/after 表。不替模型选命令，模型选错就如实失败。
+`tests/acceptance/sprint3_scenarios.sh <c06|c09|c11|all>`：重置用例（`repair_cases.py reset`）→ 诊断 → 建批次 → 自动批准全部审批 → 等待终态 → 断言 `recovered` 且 `kubectl` 复核（c11：Pod 消失；c09：Ready 1/1 且 EndpointSlice 就绪；c06：Running 且 120 秒无新增重启）→ 打印 before/after 表。不替模型选命令，模型选错就如实失败。
 
 ## 4. 实施顺序与发布
 
@@ -114,7 +114,7 @@
 | 3.1/3.2 恢复观察 `recovery.py`、`recovered/not_recovered/needs_followup`、整体时限 `timeout`、命令超时文案 | robusta 12.0.34 | 已上线 |
 | 前端：恢复观察进度、执行前后对比表、超时反馈、异常原因行 | frontend 0.1.62 | 已上线 |
 | 1 方案卡片"异常原因（来自诊断）" | robusta 12.0.34 / frontend 0.1.62 | 已上线 |
-| 验收脚本 `scripts/acceptance/` | — | 见本文 §1–§3 与部署指南 |
+| 验收脚本 `tests/acceptance/` | — | 见本文 §1–§3 与部署指南 |
 
 伴随修复：`AgentGuards.finalize_on_idle_round`（12.0.33）。请求轨迹（`requests/<node>-NNN.json`）证明模型在"证据完整、准备输出结构化结果"时发出的是旧调用的复制；一整轮无新查询即收卷交付，不再等到重复上限。
 
@@ -144,7 +144,7 @@ Sprint 2 真实链路（`sprint2_policy_and_switch.sh aiops-case-04`，14/14 通
 
 ### 5.2 最终验收记录（2026-10-16 22:25–22:42，robusta 12.0.40 / mcpstander 7.0.44 / 前端 0.1.62）
 
-`scripts/acceptance/sprint3_scenarios.sh all`（含重置）一次完整运行 **13/13 通过**：c11 `9f76f1917324472d`（finalizer 移除后原 Pod 已删除）、c09 `fa733196969e49a5`（探针端口修正，readyReplicas=1）、c06 `7df6d1fde5064897`（环境变量名修正，重启 0→0）。
+`tests/acceptance/sprint3_scenarios.sh all`（含重置）一次完整运行 **13/13 通过**：c11 `9f76f1917324472d`（finalizer 移除后原 Pod 已删除）、c09 `fa733196969e49a5`（探针端口修正，readyReplicas=1）、c06 `7df6d1fde5064897`（环境变量名修正，重启 0→0）。
 
 真实浏览器端到端（`frountind/tests/live-repair-e2e.browser.py`，Chromium 操作已部署前端，case-04）**9/9 步通过、0 页面错误**：聊天框发起诊断 143 秒完成 → 安全面板显示"人工审批"徽标与拦截规则 → 命令安全检查拦截 `kubectl delete ns demo --force`（高危动词黑名单）并放行 finalizer patch → 管理员切换为自动执行（运行时覆盖）再恢复配置值 → 生成方案（对象/异常原因/命令）→ 点击"批准此动作" → "执行后恢复观察：已恢复"，事件显示实际命令与审批 ID。截图：`live-repair-plan.png`、`live-repair.png`（验收工作目录）。
 
@@ -162,7 +162,7 @@ Sprint 2 真实链路（`sprint2_policy_and_switch.sh aiops-case-04`，14/14 通
 
 处理（12.0.42，`app/core/remediation/ownership.py`，通用）：规划前用只读 `kubectl get -o json` 沿 ownerReferences 把每个目标 Pod 的所有权链走到顶（Pod→ReplicaSet→Deployment、Pod→Job→CronJob、裸 Pod 无 root），作为事实 `controller_chains` 注入规划材料；`RepairDraft.with_controller_chains` 绑定本次事实：目标的 owner 字段以集群事实覆盖模型猜测，对链上受控成员（非 root）的写命令在规划阶段拒绝并指出 root（读命令不受影响，链外对象不判）。不区分工作负载类型，不解析失败时退化为不校验。
 
-12.0.42 复测（`aiops-case-66` 重建后，run `eb5be763130846d0` / job `417b082d615f4e58`）**4/4 通过**：目标 owner 由集群事实填为 `Deployment/workload`，方案为 `kubectl patch deployment workload … /spec/template/spec/containers/0/command`，批准后新 Pod Running/Ready，恢复观察 20 秒判定 `recovered`，60 秒无新增重启，Deployment 模板 command 已是 `/opt/startup/bootstrap.py`。该场景的清单保存在 `scripts/acceptance/fixtures/c06-script-path.yaml`。
+12.0.42 复测（`aiops-case-66` 重建后，run `eb5be763130846d0` / job `417b082d615f4e58`）**4/4 通过**：目标 owner 由集群事实填为 `Deployment/workload`，方案为 `kubectl patch deployment workload … /spec/template/spec/containers/0/command`，批准后新 Pod Running/Ready，恢复观察 20 秒判定 `recovered`，60 秒无新增重启，Deployment 模板 command 已是 `/opt/startup/bootstrap.py`。该场景的清单保存在 `tests/acceptance/fixtures/c06-script-path.yaml`。
 
 完整 Sprint 3 套件在 12.0.42 上重跑（2026-10-19 10:23–10:50，`sprint3_scenarios.sh all`，重置通过后三场景）**13/13 通过**：c11 `715bba7c0d6e4502`（finalizer 移除，原 Pod 已删除）、c09 `60e83ba5f053456a`（readyReplicas=1）、c06 `02414cf1409c4e2c`（重启 0→0）。四个夹具与 `aiops-case-66` 之后均已重置为故障态，供人工验收。
 

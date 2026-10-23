@@ -1,4 +1,4 @@
-from tools.aiops_remediate_chat import parse_approval_hint
+from scripts.aiops_remediate_chat import parse_approval_hint
 
 
 def test_parse_approval_hint_from_stream_line():

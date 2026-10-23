@@ -84,8 +84,7 @@ mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
 git clone --branch main http://10.2.0.86/wanghuhu/mcpstander.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
-mkdir -p holmegpt-agent/deploy/secrets
-cp holmegpt-agent/config/examples/aiops-secret.yaml holmegpt-agent/deploy/secrets/core.yaml
+cp holmegpt-agent/deploy/secrets/core.yaml.example holmegpt-agent/deploy/secrets/core.yaml
 vi holmegpt-agent/deploy/secrets/core.yaml   # 填 LLM_MODEL、LLM_API_BASE、LLM_API_KEY、MODEL_CONTEXT_WINDOW
 ```
 
@@ -231,14 +230,14 @@ curl -N -G "http://10.2.0.48:30800/query"  --data-urlencode 'q=各节点当前 C
 | [可观测性采集](docs/observability.md) | MCP 工具、PromQL 示例、日志与链路、结果含义 |
 | [A2A](docs/a2a.md) | 标准协议、客户端、鉴权与真实 Agent-to-Agent 测试 |
 | [环境变量](docs/configuration-env.md) | 由 `scripts/list_env_vars.py` 生成 |
-| [异常环境](test/pod-anomaly-cases/README.md) | 故障部署、验证和安全清理（`make case-*` / `make repair-cases-*`） |
-| [质量测试](test/aiops_quality_e2e/README.md) | 单场景、多根因、四项指标与报告 |
+| [异常环境](tests/cases/README.md) | 故障部署、验证和安全清理（`make case-*` / `make repair-cases-*`） |
+| [质量测试](tests/quality/README.md) | 单场景、多根因、四项指标与报告 |
 
 历史过程记录、旧交接文档已从仓库移除，可通过 git 历史（标签 `baseline-20261019-run-3c052423` 之前）回溯。
 
 ## 开发
 
-Python 3.12（与镜像一致）。运行时依赖 `requirements.runtime.txt`（HolmesGPT 由 Dockerfile 单独安装），开发工具 `requirements.dev.txt`，A2A 依赖 `requirements.a2a*.txt`（独立虚拟环境 `.venv-a2a`）。
+Python 3.12（与镜像一致）。运行时依赖 `requirements/runtime.txt`（HolmesGPT 由 Dockerfile 单独安装），开发工具 `requirements/dev.txt`，A2A 依赖 `requirements/a2a*.txt`（独立虚拟环境 `.venv-a2a`）。
 
 ```sh
 make check          # 语法 + lint（ruff E9/F/I/B）+ 格式检查 + 单元测试
@@ -247,7 +246,7 @@ make test-a2a       # A2A 测试（需 .venv-a2a）
 make release        # 构建并推送镜像后滚动部署
 ```
 
-目录：`app/` 服务代码，`a2a_adapter/` A2A 适配器，`a2a_test_agent/` A2A 测试 Agent，`deploy/` K8s 清单与配置，`tests/` 自动化回归，`test/` 故障环境与质量评测工具，`scripts/` 运行报告、环境变量文档生成与验收脚本，`tools/` 命令行客户端，`config/examples/` Secret 示例。提示词只从 `app/core/prompts.py` 引入；修改提示词需配套行为测试。
+目录：`app/` 服务代码（`python -m app` 启动），`a2a_adapter/` A2A 适配器，`aiops_edge/` 多集群访问（kubectl 替身与边缘 runner），`deploy/` 单集群清单与配置（Secret 模板 `deploy/secrets/core.yaml.example`），`deploy-edge/` 多集群中心与边缘清单，`tests/` 全部测试（`unit` 单元、`a2a` A2A、`acceptance` 验收脚本、`cases` 故障 Case、`quality` 质量评测），`scripts/` 运行报告、环境变量文档生成与命令行客户端，`docs/` 文档（`docs/specs` 为开发过程记录）。提示词只从 `app/core/prompts.py` 引入；修改提示词需配套行为测试。
 
 报告和工具归档默认写入 Pod 内的 `/tmp/aiops/reports`（PVC）。源码实现与当前线上版本可能不同，历史测试成绩不能直接代表当前部署效果。
 

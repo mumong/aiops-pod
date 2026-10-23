@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip(
     "a2a",
-    reason="A2A tests run in the isolated requirements.a2a-dev.txt environment",
+    reason="A2A tests run in the isolated requirements/a2a-dev.txt environment",
 )
 
 from a2a.client import ClientConfig, ClientFactory, create_text_message_object

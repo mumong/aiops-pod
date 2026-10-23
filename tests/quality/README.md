@@ -1,0 +1,308 @@
+# AIOps 异常 Case E2E 质量测试
+
+本目录用于盲测当前 AIOps 诊断服务的四项核心指标：
+
+1. MTTR（一次诊断请求到最终报告的时间）
+2. 根因准确率
+3. Runbook 覆盖率
+4. 证据完整度
+
+基础 Ground Truth 和固定证据合同位于 `demo_cases.yaml`，变体根因规则位于 `variant_cases.yaml`，只由本地评分器使用，
+不会注入 AIOps Prompt，也不会发送给 Agent。
+
+## 1. 运行方式
+
+### 单个 Case
+
+```bash
+.venv/bin/python tests/quality/run_quality_demo.py --scenario c04 -n 1 -c 1 --timeout 1200 --url http://10.2.0.48:30800
+```
+
+### 多个 Case
+
+```bash
+.venv/bin/python tests/quality/run_quality_demo.py --scenario c02,c08 -n 5 -c 2 --timeout 1200 --url http://10.2.0.48:30800
+```
+
+`-n 5` 表示每个 Case 运行 5 次，`-c 2` 表示同一 Case 内最多并发 2 个
+诊断请求。不同 Case 依次部署，不会把 c02 和 c08 同时注入集群。
+
+### 全量过夜测试
+
+`--scenario all` 依次测试 c01～c11：
+
+```bash
+.venv/bin/python tests/quality/run_quality_demo.py --scenario all -n 50 -c 1 --timeout 1200 --url http://10.2.0.48:30800 --output-dir tests/quality/reports/aiops_quality_overnight
+```
+
+脚本清理基础及变体目录明确声明的测试 namespace；变体必须带有本工具的所有权标签。
+c11 清理前释放指定测试 Pod 的 finalizer。不要在这些 namespace 存放业务资源。
+
+### 场景失败时是否继续
+
+- 部署或故障验收失败：保存 `场景目录/fixture-failure-*.json`（Pod、当前 UID 的 Events、失败原因），标记该场景 `blocked`；清理成功后继续下一个场景，不给 Agent 编造失败分数。
+- `c02-tag` 使用可访问仓库中的不存在 tag。TLS、DNS、鉴权等错误属于环境阻塞，不能冒充 tag 不存在；脚本不会修改节点证书或绕过 TLS。镜像与前置条件见[变体说明](../pod-anomaly-cases/variants/README.md)。
+- 清理失败：仍停止并记录 `cleanup_error`，避免污染后续场景。不要仅为了“跑完”跳过资源隔离检查。
+- 后验收最多等待 60 秒，避免恰逢容器重启过渡状态时因 1 秒窗口误判。UID 改变或原因仍无法确认的样本继续排除，并保存诊断现场。
+- `runner.status.json` / `stats.json` 中 `completed` 表示任务完成，`completed_with_errors` 表示已遍历但仍有阻塞、失败或无效样本，`failed` 表示执行异常退出。有汇总表不等于全量通过，部分结果的质量阈值显示“待复核”。
+
+默认拒绝执行指纹不同的直接续跑；仅经审查确认属于生命周期修复时，可使用下述显式迁移方式，保留旧结果及更新记录。
+
+c02/c10 前置检查超时后，仅在单场景、非 `--reuse-existing` 模式下重新部署该测试场景一次，并重新通过原始故障门槛；不以历史事件替代当前故障。ConfigError 允许当前目标容器的 waiting.message 同时满足全部原因模式，替代已过期 Event。preStop/grace 清理的 exec 非零退出后会复查原 UID 的 Pod；仅确认已终止或不存在才继续清理，仍运行、对象替换及查询错误不会被忽略。
+
+### 同症状、多根因扩展
+
+`all` 保持原有 11 个基础 Case；`variants` 为 17 个新增变体；`expanded` 为全部 28 个。
+每个基础 Case 至少有 1 个变体。一个变体 Pod 只注入一种原因，多个变体可同时诊断。
+
+```bash
+# 扩展全量：28 个 Case 依次部署，每个测试 2 次，共 56 个逻辑请求
+.venv/bin/python tests/quality/run_quality_demo.py --scenario expanded -n 2 -c 1 --timeout 1200
+
+# 轻量单独测试：两个原因依次部署，共 4 个请求
+.venv/bin/python tests/quality/run_quality_demo.py --scenario c03-secret,c03-key -n 2 -c 1 --timeout 1200
+
+# 分组测试：同时存在两个异常 Pod，共 2 个请求，每次应分别诊断两个对象
+.venv/bin/python tests/quality/run_quality_demo.py --scenario c03-secret,c03-key --combine -n 2 -c 1 --timeout 1200
+```
+
+所有请求仍只问 **“我的集群有什么问题？”**，不发送目标清单或根因答案。
+手动部署仍支持 `make case-deploy CASE=c09-port`，完整列表见 [变体说明](../pod-anomaly-cases/variants/README.md)。
+
+扩展评分逻辑：
+
+- 根因只读最终报告。通过概览中的“组 → 对象”绑定根因段，不允许跨 Pod 借用答案；对象归属缺失或含糊不判通过。
+- 每个变体要求具体机制，不能仅凭 Pending、OOMKilled 等症状名称通过。比如 CPU 超大请求不等于集群 CPU 利用率高。
+- 同时部署时，单次根因准确率 = 正确目标根因数 / 期望目标根因数；`passed` 另外记录是否全部通过。额外诊断、漏组与重复对象保留在 `group_audit`，不会被隐藏。
+- 同时部署的 Runbook 按最终报告引用行绑定对象，每个对象算覆盖率后取平均，不能从其他对象借用 Runbook。单独部署沿用原有报告及结构化选用记录口径。
+- 单次证据完整度沿用 `Σlane.plan_collected / Σlane.plan_total`。**多次运行分别算百分比后取算术平均；总体再对选中场景等权平均，不累加项数算总比例。**
+- 扩展全量中的每个变体是独立场景，故变体多的症状类别占更多场景权重；与原 11 场景基线不可不加说明直接对比。
+- 运行前后保留 Pod 快照并核对 UID、具体原因。注入失效单列并排除质量均值，原报告仍保存。有限删除宽限期的 preStop/grace 变体只支持 `-c 1`，每轮重新部署；评分结束后的清理步骤通过该测试 Pod 的 `/state/teardown-requested` 标记释放等待，不改变评分时的故障。
+
+状态、根因及 Runbook 自动评分仍是确定性规则，不是语义裁判模型；低分需要结合原报告人工复核。
+扩展固定证据合同仅作目标 Kubernetes 观测审计，不宣称沿用了基础场景完整遥测合同。
+
+## 2. 断网保护和断点续跑
+
+默认启用 detached worker 保护：
+
+```text
+启动命令
+├─ 后台 worker 执行测试并写 runner.log
+└─ 当前终端实时跟随 runner.log
+```
+
+SSH/网络断开或在当前窗口按 `Ctrl+C` 只会停止日志跟随，不会终止后台
+worker。重新登录后可查看：
+
+```bash
+tail -f tests/quality/reports/<report-dir>/runner.log
+cat tests/quality/reports/<report-dir>/runner.status.json
+```
+
+仅当需要让测试与当前终端绑定时使用 `--foreground`。
+
+`stats.json` 在每次运行完成后更新。中断后使用同一输出目录续跑：
+
+```bash
+.venv/bin/python tests/quality/run_quality_demo.py --scenario all -n 50 -c 1 --timeout 1200 --url http://10.2.0.48:30800 --output-dir tests/quality/reports/aiops_quality_overnight --resume
+```
+
+已写入 `stats.json` 的运行不会重跑；没有完成评分的运行编号会重新执行。
+续跑要求评分脚本与所用 Case 配置的 SHA256 与原任务一致；旧任务没有版本指纹或规则已
+修改时，请新建测试目录，避免一个报告混入不同口径。脚本保留本机防重复启动锁，不提供跨主机调度。
+
+仅当人工确认改动只涉及 `run_quality_demo.py`、`scripts/manage_cases.py` 的部署、校验和清理逻辑，且评分、Case 定义和清单均未改变时，可在原续跑命令后加 `--resume-runtime-update`。这是显式审查入口，不是自动证明 runner 内所有改动都不影响评分。其他文件指纹或评分版本变化仍拒绝迁移。
+
+迁移先保存 `stats-before-runtime-resume-*.json`，在 `runtime_resume_audit` 记录前后指纹；新增结果带 `runtime_revision`。已记录的运行（包括被排除的无效样本）保持原样，只补缺失编号；场景与 `-n` 必须与原任务一致。历史故障归档保留，已恢复的旧错误不再充当当前任务状态。因环境阻塞而无法补齐的场景仍标记不完整。
+
+如果只调整了本地评分规则，可以直接对已落盘的 `report.md/events.json` 重新评分，
+不会调用 AIOps、不会部署或清理 Case：
+
+```bash
+.venv/bin/python tests/quality/run_quality_demo.py --scenario all --rescore-existing --output-dir tests/quality/reports/aiops_quality_overnight
+```
+
+重评分输出至原目录下 `rescores/<timestamp>/`，不覆盖原始 `stats.json`、报告和分数。
+只重新计算根因与 Runbook，证据分数沿用原始采集结果。修订结果记录评分指纹、使用的
+根因规则及源报告路径。缺失/损坏归档或只重评部分 Case 时会标记不完整，不显示完整验收通过。
+
+每个逻辑运行默认最多发起 2 次请求，退避 30 秒。每次尝试都保留独立现场，
+但请求重试不能替代 `--resume`：如果整个 worker 被主动终止，仍需要断点续跑。
+
+## 3. 输出文件
+
+```text
+tests/quality/reports/aiops_quality_<scenarios>_<timestamp>/
+├── runner.log                         # 受保护 worker 的完整日志
+├── runner.status.json                 # PID、运行状态、时间和退出码
+├── summary.md                         # 每轮更新的 Markdown 汇总
+├── readme.md                          # 每轮更新：各 Case 指标表 + 总体指标
+├── overview.txt                       # 与终端一致的质量总览
+├── stats.json                         # 断点和结构化总结果
+├── cXX/readme.md                      # 该 Case 四项指标 + 每次评分 + 原报告链接
+├── cXX/fixture-run-*-before.json       # 诊断前 Pod 快照，用于确认注入和对象身份
+├── cXX/fixture-run-*-after.json        # 诊断后快照，不是报错或修复记录
+├── cXX/fixture-failure-*.json          # 部署/故障门槛未满足时的审计现场
+└── cXX/run-<NN>-<run_id>/
+    ├── report.md                      # AIOps 最终诊断报告
+    ├── score.json                     # 本次评分和命中明细
+    ├── evidence.archive.json           # Evidence lane 真实工具归档
+    ├── events.json                    # 完整 SSE 事件
+    ├── live.log                       # 本轮人工可读日志
+    ├── raw.sse                        # 原始 SSE
+    └── attempt-XX/                    # 每次请求尝试的原始现场
+```
+
+## 4. 指标统计口径
+
+以下“成功运行”均须同时满足样本有效性要求；故障注入失效的样本保留原报告和原分数，
+但排除质量均值。无有效样本的 Case 显示 N/A，不以零分或满分补齐；整体会标记不完整。
+
+先打开报告目录的 `readme.md`，点击 c01～c11 可进入对应 Case 明细。
+这两个层级只展示 `stats.json` 中已有分数，生成报告不会重评分。旧目录也可以只补生成
+README，而不覆盖原始 stats/score/report；人工审查应写入独立的 `manual_review.md`，不能
+把自动生成的分数表标为“人工已确认”。既有启动命令无需增加参数。
+
+### 4.1 MTTR
+
+单次 MTTR 是从发起 `/ask` 到接收 SSE `final` 事件的时间，包括：
+
+```text
+Layer → Evidence/RCA → Conclusion → final
+```
+
+Case 内 MTTR 是成功运行耗时的算术平均值，总体再对各 Case 等权平均。耗时优先采用
+服务端 final 的 `elapsed_seconds`，未提供时使用客户端请求耗时。若发生重试，MTTR
+只计最后成功的一次请求；失败尝试与退避另记为 `retry_elapsed_seconds`，包含请求重试、
+退避和归档的整轮时间记为 `logical_elapsed_seconds`。因此 MTTR 不等同于用户总等待时间。
+请求全部失败的运行不进入 MTTR 分母，单独进入逻辑运行成功率。当前验收阈值为 `< 15m`。
+
+### 4.2 根因准确率
+
+评分器只读取最终报告中每个 `根因结论`，不使用证据表、Runbook 或 Ground Truth
+拼接答案。一次运行通过需要：
+
+- 所有期望根因都被已确认的结论命中；
+- 没有额外发布不属于该 Case 的确定性根因；
+- `证据不足/根因无法确认` 不能通过根因验收。
+
+当前 c01～c11 为单 Case、单主根因，因此明细只展示统一的 `根因准确率`：
+
+```text
+本次根因通过 = 100%
+本次根因失败 = 0%
+```
+
+每个 Case 先独立计算：
+
+```text
+Case 根因准确率 = 本 Case 有效且根因通过的运行数 / 本 Case 有效成功运行数
+总体根因准确率 = Σ各 Case 根因准确率 / Case 数
+```
+
+`demo_cases.yaml` 可以为真实报告中的等价表达声明 aliases，例如：
+
+```text
+OOMKilled ↔ OOM Killer
+64Mi ↔ 64 MiB ↔ 67108864 bytes
+```
+
+aliases 只用于真实同义表达；模糊的“可能 OOM”或根因级“证据不足”仍判定失败。
+评分同时检查必要故障机制与矛盾陈述：例如提及 nodeSelector 但结论是 CPU 不足，或 NAD
+正常而 IPAM 耗尽，不能判为对应注入故障正确。命中词、缺失词、冲突与失败原因均落盘。
+这是确定性的规则评分，不是对整篇报告每条因果解释的事实核验；直接根因命中不代表所有
+附加解释均正确。历史回放分数变化也不能替代独立人工标注。
+
+c09 必须明确 Readiness 异常和 503，支持“返回
+503 状态码”等等价表达，不再强制结论写出 `/ready`。端点候选表述的小瑕疵不单独使整条
+根因失败；明确将错误路径配置、Liveness 或 OOM 判作该 Case 根因仍不通过。c07 中
+“非资源耗尽导致的 OOMKilled”是排除语句，不作为根因冲突。根因评分仍只读取最终报告，
+不读取工具输出补齐结论，也不调用另一个 LLM 裁判。Runbook、证据与统计口径不变。
+
+### 4.3 Runbook 覆盖率
+
+当前 Runbook 指标衡量期望 Runbook 是否实际被诊断 lane 参考：
+
+```text
+Runbook 覆盖率 = 已参考的期望 Runbook 数 / 期望 Runbook 总数
+```
+
+数据只来自最终报告的 `Runbook 参考` 区块，以及 workflow 中
+`matched_runbooks/runbook_id` 等明确的结构化选择字段。评分器不会扫描任意正文或
+`fetch_runbook` 返回的 Runbook 内容，避免把 `pod-template-hash` 标签或正文中的交叉
+引用误判为实际选用的 Runbook。
+该指标本质上是 Runbook 召回/覆盖：额外获取无关 Runbook 不会降低当前覆盖率。
+
+多次运行时先对本 Case 的每次覆盖率做算术平均，再对各 Case 的覆盖率做等权算术
+平均。这样包含两个期望 Runbook 的 Case 不会天然获得双倍权重。
+
+### 4.4 证据完整度
+
+正式证据完整度使用 Evidence Plan 的实际执行完成率。评分器从每个 Evidence lane
+归档读取：
+
+```text
+plan_total
+plan_collected
+```
+
+其中 `plan_total` 是该 lane 计划采集的证据项数，`plan_collected` 是 Agent 归档中标记
+已完成的计划项数，不是工具调用次数。当前评分器读取这些计数，不会逐项独立重建工具与
+计划的对应关系，因此不能宣称已独立验证真实采集完成。空结果在“确认不存在”类计划中
+可以是有效负向观测；查询错误不等同于完成。计数来自 Agent 的限制应与指标一起解读。
+
+单次运行公式：
+
+```text
+证据完整度 = Σ各 Evidence lane 的 plan_collected / Σ各 Evidence lane 的 plan_total
+```
+
+例如同一次诊断包含两个 lane：g1 完成 4/5，g2 完成 6/9，则：
+
+```text
+证据完整度 = (4 + 6) / (5 + 9) = 71.4%
+```
+
+多次成功运行先在 Case 内对每次运行的完整度做算术平均，每次运行等权：
+
+```text
+总证据完整度 = Σ(每次成功运行的证据完整度) / 成功运行数
+```
+
+例如两次运行分别为 4/5=80% 和 6/9=66.7%，总证据完整度为
+`(80% + 66.666…%) / 2 = 73.333…%`。请求失败不进入证据完整度分母，另行统计请求成功率。
+实际使用未四舍五入的单次比例计算。无有效计划或归档与回退
+指标均缺失时显示 N/A，不按 100% 处理，也不进入均值；汇总会提示有效样本数不足。
+
+测试包含多个 Case 时，再对各 Case 的证据完整度做等权算术平均。根因准确率、
+Runbook 覆盖率和 MTTR 使用相同的“先 Case 内、再 Case 间”聚合顺序。
+
+该指标回答的是“Agent 对自己制定的调查计划完成了多少”，不等同于“Case 理想证据是否
+全部覆盖”。`demo_cases.yaml` 中的固定语义证据合同仍会基于真实 `tool_data` 和 canonical
+`fact_ledger.records` 计算，并保存在 `score.json.evidence_contract_audit`，作为独立审计
+结果，不参与正式证据完整度与验收判定。正式值同时保存在 `score.json.evidence`；
+`evidence_plan_audit` 保留为兼容审计副本。
+
+## 5. 验收阈值
+
+| 指标 | 通过阈值 |
+|---|---:|
+| MTTR | `< 15m` |
+| 根因准确率 | `>= 70%` |
+| Runbook 覆盖率 | `>= 70%` |
+| 证据完整度 | `>= 70%` |
+
+请求成功率单独展示，不混入上述四项指标的分母。
+
+## 6. 指标边界
+
+- 根因评分器是可审计的确定性语义合同，能识别已登记的真实同义表达，但不是
+  通用语义裁判模型。评分只读取最终根因结论，并区分确认、否定、待确认和主要根因
+  作用域；关键 Case 仍应抽样人工复核。
+- Runbook 覆盖率只衡量期望 Runbook 是否被参考，不惩罚额外获取的无关
+  Runbook。如需衡量工具选择收敛性，应另行统计 Runbook 选择精确率。
+- 证据完整度衡量 Evidence lane 完成自身 Evidence Plan 的比例，不代表最终 RCA
+  一定正确使用了这些事实。因此可能出现“证据 100%，根因错误”。
+- MTTR 只对成功返回的运行求平均，必须与请求成功率一起解读，避免
+  忽略超时长尾。

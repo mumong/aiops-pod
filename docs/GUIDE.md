@@ -21,9 +21,9 @@
 | [deploy/rbac.yaml](../deploy/rbac.yaml) | Agent ServiceAccount 权限 |
 | [Makefile](../Makefile)、[VERSION](../VERSION) | 镜像仓库与发布版本 |
 
-缺少 Secret 文件时，可复制 [Secret 示例](../config/examples/aiops-secret.yaml) 到
-`deploy/secrets/core.yaml`，将占位内容换成真实配置，勿提交。示例刻意放在 `deploy/`
-之外，避免递归部署时用占位值覆盖真实 Secret；已有本地配置无需覆盖。结构如下：
+缺少 Secret 文件时，可复制 [Secret 示例](../deploy/secrets/core.yaml.example) 到
+`deploy/secrets/core.yaml`，将占位内容换成真实配置，勿提交。模板以 `.example` 结尾，
+`kubectl apply -R` 不会应用它，不会用占位值覆盖真实 Secret；已有本地配置无需覆盖。结构如下：
 
 ~~~yaml
 apiVersion: v1
@@ -75,10 +75,10 @@ A2A 可增加 A2A_API_TOKEN。模型需要支持工具调用；配置中的 llm.
 验收脚本（对运行中的服务执行，打印 PASS/FAIL 表，任一 FAIL 退出非零）：
 
 ```bash
-scripts/acceptance/sprint1_repair_plan.sh aiops-case-09          # 从诊断报告进入修复 → 对象/原因/命令 → 对话修改生成新版本
-scripts/acceptance/sprint2_policy_and_switch.sh                  # 黑名单 24 条高危命令全拦 + 12 条合规放行；开关需令牌、带 TTL、写审计
-scripts/acceptance/sprint2_policy_and_switch.sh aiops-case-09    # 追加真实链路：review 等待审批→拒绝不执行；auto 直接执行并标记
-scripts/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/c11 → 诊断 → 修复 → 恢复观察 → kubectl 复核
+tests/acceptance/sprint1_repair_plan.sh aiops-case-09          # 从诊断报告进入修复 → 对象/原因/命令 → 对话修改生成新版本
+tests/acceptance/sprint2_policy_and_switch.sh                  # 黑名单 24 条高危命令全拦 + 12 条合规放行；开关需令牌、带 TTL、写审计
+tests/acceptance/sprint2_policy_and_switch.sh aiops-case-09    # 追加真实链路：review 等待审批→拒绝不执行；auto 直接执行并标记
+tests/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/c11 → 诊断 → 修复 → 恢复观察 → kubectl 复核
 ```
 
 当前 MCP 默认使用集群 DNS，例如 http://mcp-server-manager.mcp.svc.cluster.local:8100/sse。外部 MCP 要改为可达地址，并核实查询的是目标集群。

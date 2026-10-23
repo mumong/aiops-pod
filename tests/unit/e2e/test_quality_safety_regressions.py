@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-DEMO = Path(__file__).resolve().parents[3] / "test/aiops_quality_e2e"
+DEMO = Path(__file__).resolve().parents[3] / "tests/quality"
 sys.path.insert(0, str(DEMO))
 from evaluator import extract_root_claims, score_root_causes, score_runbooks
 from run_quality_demo import (

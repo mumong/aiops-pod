@@ -118,7 +118,7 @@ curl -s -X POST http://10.2.0.48:30800/repair/policy/check -H 'Content-Type: app
 批量验收脚本，覆盖 19 条绝对禁止、5 条需人工审批和 12 条合规命令，并检查开关和审计：
 
 ```bash
-scripts/acceptance/sprint2_policy_and_switch.sh
+tests/acceptance/sprint2_policy_and_switch.sh
 ```
 
 ## 八、判定标准
@@ -144,7 +144,7 @@ scripts/acceptance/sprint2_policy_and_switch.sh
 
 | 用例 | 结果 | 标识 |
 |---|---|---|
-| 规则检查脚本 | 绝对禁止 19/19 拦截；需审批 5/5 判为"允许但需审批"；合规 12/12 放行；开关与审计全部通过 | `scripts/acceptance/sprint2_policy_and_switch.sh` |
+| 规则检查脚本 | 绝对禁止 19/19 拦截；需审批 5/5 判为"允许但需审批"；合规 12/12 放行；开关与审计全部通过 | `tests/acceptance/sprint2_policy_and_switch.sh` |
 | 对话 Pod 内 rm | 未执行，命中 `approval_required`，提示通过修复方案提交；文件仍在 | 运行 `8e0ef1fa866d4c45` |
 | 自动执行模式 + 方案含 rm，批准 | 停在等待批准，卡片带高危提示；批准后执行，文件删除；执行记录审批 ID `b8f563d97f52` | 任务 `d147dbf70ee445c3` |
 | 自动执行模式 + 方案含 rm，拒绝 | "用户拒绝了该动作，未执行"，文件仍在 | 任务 `4bae80e5b47d41c8` |

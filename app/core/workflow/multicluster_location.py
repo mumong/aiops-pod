@@ -1,4 +1,4 @@
-"""Location over several clusters in one deep diagnosis (specs/008-multi-cluster US6).
+"""Location over several clusters in one deep diagnosis (docs/specs/008-multi-cluster US6).
 
 The existing location (layer) node runs once per cluster, in parallel, with its
 tools bound to that cluster. Results are merged without changing any contract:

@@ -48,7 +48,7 @@ class RequestContract(BaseModel):
 
 
 class MultiClusterRequestContract(RequestContract):
-    """Router contract in multi-cluster deployments only (specs/008-multi-cluster)."""
+    """Router contract in multi-cluster deployments only (docs/specs/008-multi-cluster)."""
 
     cluster_mode: Literal["single", "multiple", "center", "inventory", "none", "unspecified"] = (
         Field(

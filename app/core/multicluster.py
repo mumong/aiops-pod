@@ -1,4 +1,4 @@
-"""Cluster scope of a run (specs/008-multi-cluster).
+"""Cluster scope of a run (docs/specs/008-multi-cluster).
 
 Without a multi-cluster config this module is inert: the router keeps its
 original schema and prompt, tools are not wrapped, kubectl runs in-cluster.
