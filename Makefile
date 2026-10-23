@@ -268,6 +268,9 @@ RUNNER_IMAGE := $(IMAGE_REPOSITORY)/$(PROJECT)/aiops-edge-runner
 # 测试环境用自己的 Harbor（无推送权限），镜像经 SSH 导入节点缓存：MC_PULL_POLICY=IfNotPresent MC_LOAD_HOSTS=10.2.5.88
 MC_PULL_POLICY ?= Always
 MC_A2A_PUBLIC_URL ?=
+# 中心的模型配置：有 deploy-edge/center/secret.yaml（不入库）就用它，否则与单集群共用 deploy/secrets/core.yaml。
+# 同一台机器同时部署单集群和多集群中心、两边模型不同时，把中心的放进前者，不用来回替换。
+MC_SECRET_FILE ?= $(or $(wildcard deploy-edge/center/secret.yaml),deploy/secrets/core.yaml)
 MC_LOAD_HOSTS ?=
 .PHONY: runner-build runner-push mc-keygen mc-discover mc-init edge-target edge-deploy edge-delete sync-xnet-cert test-multicluster deploy-mc
 
@@ -362,12 +365,12 @@ deploy-mc: mc-init
 		for image in $(DOCKER_NAME):$(DOCKER_TAG) $(A2A_DOCKER_NAME):$(DOCKER_TAG) \
 			xnet.registry.io:8443/caopeng/docker.io/library/busybox:1.36; do \
 			deploy-edge/load_image.sh $$image $(MC_LOAD_HOSTS); done; fi
-	@test -f deploy/secrets/core.yaml || { echo "缺少 deploy/secrets/core.yaml（模型配置，见 docs/GUIDE.md）" >&2; exit 1; }
+	@test -f $(MC_SECRET_FILE) || { echo "缺少 $(MC_SECRET_FILE)（模型配置，见 docs/GUIDE.md）" >&2; exit 1; }
 	@K="$(CENTER_KUBECTL)"; set -e; \
 	U="$(MC_A2A_PUBLIC_URL)"; test -n "$$U" || U="http://$$($$K get nodes -l '!node-role.kubernetes.io/xnet-agent' \
 		-o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):30801"; \
 	echo "A2A 对外地址：$$U"; \
-	$$K apply -f deploy/secrets/core.yaml; \
+	echo "模型配置：$(MC_SECRET_FILE)"; $$K apply -f $(MC_SECRET_FILE); \
 	$(PYTHON) deploy-edge/render_center_config.py deploy/configmap/config.yaml deploy-edge/center/overrides.yaml | $$K apply -f -; \
 	kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy-edge/center \
 		| sed -e 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' \

@@ -196,6 +196,7 @@ Optional variables (append to the make command, e.g. `make deploy-mc MC_A2A_PUBL
 | `EDGE` | none, required | `EDGE=edge-88` uses `~/.kube/aiops-mc/edge-88`; `EDGE=local` the current context |
 | `RUNNER_LEVEL` | `2` | runner permission level 1 / 2 / 3 |
 | `A2A_PUBLIC_HOST` / `MC_A2A_PUBLIC_URL` | the cluster's first node (multi-cluster skips xnet virtual Nodes) | A2A address published in the Agent Card (single cluster / multi-cluster center) |
+| `MC_SECRET_FILE` | `deploy-edge/center/secret.yaml` when present, else `deploy/secrets/core.yaml` | the center's model settings, for one host deploying both a single cluster and a center with different models (not committed) |
 | `MC_CLUSTERS_FILE` | `deploy-edge/clusters.mc.yaml` | cluster config |
 | `MC_KEY_FILE` | `~/.kube/aiops-mc/runner.key` | runner signing key; fetched from the center when missing locally |
 | `MC_LOAD_HOSTS`, `MC_PULL_POLICY` | none, `Always` | test env only: side-load images over SSH when the registry cannot be pushed, e.g. `SSHPASS=… make deploy-mc MC_LOAD_HOSTS=10.2.5.85` |

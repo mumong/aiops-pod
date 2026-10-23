@@ -198,6 +198,7 @@ curl -N -G http://<节点IP>:30800/ask --data-urlencode "q=aiops-case-08 的 Pod
 | `EDGE` | 无，必须指定 | `EDGE=edge-88` 使用 `~/.kube/aiops-mc/edge-88`；`EDGE=local` 使用当前上下文 |
 | `RUNNER_LEVEL` | `2` | runner 权限等级 1 / 2 / 3 |
 | `A2A_PUBLIC_HOST` / `MC_A2A_PUBLIC_URL` | 本集群第一个节点（多集群跳过 xnet 虚拟 Node） | Agent Card 里对外公布的 A2A 地址（单集群 / 多集群中心） |
+| `MC_SECRET_FILE` | 有 `deploy-edge/center/secret.yaml` 就用它，否则用 `deploy/secrets/core.yaml` | 中心的模型配置；同一台机器同时部署单集群和中心、两边模型不同时使用（该文件不入库） |
 | `MC_CLUSTERS_FILE` | `deploy-edge/clusters.mc.yaml` | 集群配置 |
 | `MC_KEY_FILE` | `~/.kube/aiops-mc/runner.key` | runner 签名密钥；本机没有时从中心取回 |
 | `MC_LOAD_HOSTS`、`MC_PULL_POLICY` | 无、`Always` | 仅用于测试环境：镜像仓库推不上去时，经 SSH 把镜像导入节点，例如 `SSHPASS=… make deploy-mc MC_LOAD_HOSTS=10.2.5.85` |
