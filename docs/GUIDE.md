@@ -87,45 +87,18 @@ scripts/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c0
 
 ## 3. 发布与验证
 
-~~~bash
-kubectl config current-context
+部署、升级、多集群和边缘 runner 的命令统一见 [README 部署](../README.md#部署复制即用)，这里只补充细节：
 
-# 已有可拉取镜像
-make deploy
-
-# 自行构建或升级：更新 VERSION 后顺序执行
-make build
-make push
-make deploy
-~~~
-
-make build / push 包含主服务和 A2A 两个镜像；不包含前端、MCP 或测试 Delegator。
-
-make deploy 会更新本地清单中的镜像版本和 A2A_PUBLIC_URL、创建 aiops namespace、递归应用 deploy/ 并等待 rollout。若同 namespace 已有 aiops-copilot-frontend，还会重启该前端以刷新后端 DNS。因此不要把临时 YAML 或旧备份放在 deploy/ 中。
-
-A2A 对外地址默认使用首个 Node InternalIP。可显式指定：
+- `make build push` 包含主服务和 A2A 两个镜像，不包含前端和 MCP。
+- `make deploy` 会更新清单里的镜像版本和 `A2A_PUBLIC_URL`，递归应用 `deploy/`，然后等待滚动更新完成；同一命名空间有前端时会顺带重启前端，刷新后端 DNS。所以不要把临时 YAML 或备份放进 `deploy/`。
+- A2A 对外地址默认取第一个 Node 的 InternalIP。需要时显式指定：`make deploy A2A_PUBLIC_HOST=<节点IP>`，或 `A2A_PUBLIC_URL=https://<域名>`。
+- 健康检查可达，不代表可观测后端都正常：
 
 ~~~bash
-make deploy A2A_PUBLIC_HOST=<可访问的节点IP>
-# 或同时指定完整对外 URL
-make deploy A2A_PUBLIC_HOST=<节点IP> A2A_PUBLIC_URL=https://<A2A域名>
+curl -fsS http://<节点IP>:30800/health              # version、mcp_failed_servers
+curl -fsS http://<节点IP>:30800/api/v1/mcp/status   # 各 MCP 服务连接状态
+curl -fsS http://<节点IP>:30801/.well-known/agent-card.json
 ~~~
-
-~~~bash
-kubectl get pods,svc,pvc -n aiops
-kubectl port-forward -n aiops svc/aiops-copilot 8000:8000 8001:8001
-~~~
-
-另一终端：
-
-~~~bash
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/api/v1/mcp/status
-curl -fsS http://127.0.0.1:8000/tools/detail
-curl -fsS http://127.0.0.1:8001/.well-known/agent-card.json
-~~~
-
-主 API NodePort 为 30800，A2A 为 30801。健康接口可达不代表遥测后端全部正常，还需实际调用三维工具验证；工具结果解读见[可观测性采集](observability.md)。
 
 ## 4. 配置更新、日志与卸载
 
@@ -153,12 +126,9 @@ RBAC 由 Kubernetes API 实时执行，权限变更通常不需要重启 Pod；�
 
 ## 6. 多集群与 A2A
 
-联邦查询要求各集群的 Agent/MCP 均可独立使用。在主集群配置 federation.sub_agents 的名称和可达 URL，主集群自身可用 http://localhost:8000。
-
-- make deploy-master：修改本地 federation.enabled 为 true 后部署。
-- make deploy-slave：修改为 false 后部署。
-- /federation/ask/v2、/federation/query/v2：主 Agent 选择子集群。
-- 标准 A2A 的发现、JSON-RPC、SSE 和鉴权见 [A2A 指南](a2a.md)，不要与联邦 HTTP 接口混用。
+- **多集群**：同一套镜像，挂载集群配置（`make mc-init` 生成的 ConfigMap `aiops-clusters`）就是多集群，不挂载就是单集群。单集群的工具定义、接口和行为不变。部署见 README，设计见[多集群设计](multi-cluster-design.md)。
+- **A2A**：单集群和多集群使用同一个 Agent Card 和同一套调用方式。多集群下，问题没写明集群时，任务会进入 `input-required` 并附上反问，调用方在同一个任务里回复即可继续。详见 [A2A 指南](a2a.md)。
+- **旧联邦接口**（`/federation/*`、`federation.sub_agents`、`make deploy-master/slave`）：多集群方案出现之前的做法，要求每个集群各自部署 Agent 和 MCP，再由主集群广播。前端和 A2A 都不使用它；多集群中心部署时已关闭（`deploy-edge/center/overrides.yaml`）。新环境请使用上面的多集群方案。
 
 ## 7. 排查入口
 

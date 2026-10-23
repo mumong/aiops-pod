@@ -2,8 +2,8 @@
 
 本文是多集群功能的**当前**设计与实现说明，内容以代码为准。
 
-- **当前版本**：AIOps 13.0.18、MCP 8.0.5、edge runner 1.0.2、前端 0.2.4。代码在三个仓库的 `008-multi-cluster` 分支，**尚未合并**到主线。
-- **单集群环境**：现有单集群部署（10.2.0.48，AIOps 12.0.69 / MCP 7.0.52）不挂载集群配置，行为与改造前完全相同。
+- **当前版本**：AIOps 13.0.31、MCP 8.0.8、edge runner 1.1.0、前端 0.2.9。已合并到三个仓库的 `main`（2026-10-23；合并前的回溯点为标签 `pre-merge-008-20261023`）。
+- **单集群环境**：不挂载集群配置时就是单集群，工具定义、接口、行为与改造前相同（10.2.0.48 已用 13.0.31 实测）。
 - **相关文档**：
   - 开发前的设计稿：`git show 0b03f423:docs/multi-cluster-design.md`；
   - 开发过程记录：[specs/008-multi-cluster](../specs/008-multi-cluster/spec.md)；
@@ -111,7 +111,7 @@ expected_states: [...]             # 运维声明的预期状态，见 §11
 | 3 | 更新 `clusters.mc.yaml`，Agent 仓库 `make deploy-mc`，MCP 仓库 `make deploy-mc` | Agent 的 `deploy-mc` 先执行 `mc-init`：把集群配置、xnet 客户端证书、签名密钥写进 `mcp` 和 `aiops` 命名空间（签名密钥本机没有时从中心 Secret 取回，中心也没有才生成） |
 | 4 | `make edge-deploy EDGE=<名字>` | 在边缘部署 runner：两个 SA 与 RBAC、命令规则 ConfigMap（从中心 `config.yaml` 的 `workflow.remediation` 渲染）、签名密钥 Secret、Deployment 和 ClusterIP Service |
 
-完整的部署步骤见 [README 多集群部署](../README.md#多集群部署008-multi-cluster-分支)。
+完整的部署步骤见 [README 多集群部署](../README.md#部署复制即用)。
 边缘 kubeconfig 只用于部署和测试，运行时不使用。测试环境的 Harbor 推不了镜像，所以由 `deploy-edge/load_image.sh` 经 SSH 把镜像导入节点，部署清单使用 `IfNotPresent`。
 
 ### 3.3 在线状态
@@ -378,6 +378,10 @@ expected_states:
 
 事件处理在 `chatEventTransition.ts` / `clusterLanes.ts`。`frountind/scripts/replay-sse.mjs` 可以把一段真实事件流交给同一份事件处理逻辑，输出 UI 最终的状态，验收脚本会用到它。
 
+### 12.1 A2A（给其他 Agent 调用）
+
+单集群和多集群共用一个 Agent Card、一套端点和三个技能，调用方不需要区分部署形态。多集群下范围不清楚时，路由返回反问（`request_route=clarify`），A2A 适配器把任务置为标准的 `input-required`，不当作最终答案；调用方在同一任务回复后，适配器把"原问题 + 补充说明"一起交给后端，不依赖后端会话记忆。审批消息标明每个动作所在的集群。实现在 `a2a_adapter/executor.py`（`clarification_needed`、`_ask_to_clarify`），用法见 [A2A](a2a.md) §1.2。
+
 ## 13. 安全
 
 | 威胁 | 措施 |
@@ -410,7 +414,7 @@ expected_states:
 
 1. 集群登记是静态配置，没有自动发现（§3.1）；到达边缘只支持 xnet。演进方案见 §19。
 2. 新后端没有容器日志和链路数据，诊断时只能用 K8s 事件和实时 `kubectl logs`。
-3. 远端集群不支持 helm。
+3. 远端集群只能执行 kubectl：runner 只认 `kubectl`，helm、自研 CLI 都不行。扩展方式是在 runner 上加命令注册表，按子命令声明哪些是只读，未声明的一律按写处理；kubectl 替身也通用化成按命令名分发。未实现。
 4. 快速查询还没有接入运维声明的预期状态（§11 目前只作用于深度诊断）。
 5. `["*"]` 会展开为所有已配置的集群，不按在线状态过滤；不可达的集群在深度诊断里写明"未完成检查"，在快速查询里表现为工具返回 `cluster_unreachable`。
 6. 恢复观察经垫片读取实时状态，没有优先使用中心指标。
@@ -488,7 +492,7 @@ xnet 在这套设计里只承担一件事：**把中心的一次 HTTP 请求送�
 | AIOps | robusta `make deploy`（或 `make release`） | Secret `aiops-secret`（LLM 网关地址与密钥）、ConfigMap |
 | 前端 | frountind `make deploy` | — |
 
-**多集群**（步骤见 [README](../README.md#多集群部署008-multi-cluster-分支)）：
+**多集群**（步骤见 [README](../README.md#部署复制即用)）：
 
 | 位置 | 命令 | 作用 |
 |---|---|---|

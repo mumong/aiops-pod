@@ -71,272 +71,126 @@ Agent 负责规划和解释，MCP 查询真实数据，Runbook 提供排障知�
 
 以上链接为内网仓库，需要相应网络和访问权限。先部署可观测性组件并确认数据入库，再按 MCP 仓库说明配置后端连接。MCP 不负责安装采集器；应用 Span 还需要埋点和链路上下文传播。
 
-## 快速开始：复制命令部署
+## 部署（复制即用）
 
-以下命令用于本文内网环境：节点地址 **10.2.0.48**，三个仓库统一下载到 **~/aiops-workspace**。在同一个 Bash 终端中依次复制执行，每一步成功后再进行下一步。
+三个仓库配合使用：本仓库（Agent）、[MCP 工具服务](http://10.2.0.86/wanghuhu/mcpstander)、[聊天前端](http://10.2.0.86/wanghuhu/aiops-frount)。镜像已发布在 `xnet.registry.io:8443`，直接部署不需要构建。
 
-前提：Git/SSH 权限、kubectl 集群访问、私有镜像拉取和存储已就绪；[可观测性组件](http://10.2.0.86/platform/observability)已部署，MCP 仓库的后端配置与现场一致。其他环境必须先调整地址和连接配置。
+部署机需要 `git`、`make`、`kubectl`（指向目标集群）、`python3`（含 PyYAML）。可观测性组件需要先装好（单集群：Prometheus / Elasticsearch / Tempo，地址在 MCP 仓库配置；多集群：中心的 VictoriaMetrics / VictoriaLogs）。
 
-Agent 的 `make deploy` 会使用 `VERSION` 对应的主服务和 A2A 两个镜像。若该版本尚未完整发布，先执行文末的 `make build`、`make push`；仅发布主服务镜像不满足完整部署的前提。
-
-重部署使用 **make delete deploy**：先删除再部署对应服务，期间服务中断。诊断或测试运行期间禁止重部署。首次部署可使用 make deploy，不加 -j。
-
-### 1. 下载并部署 MCP
-
-```bash
-mkdir -p ~/aiops-workspace
-```
-
-```bash
-cd ~/aiops-workspace
-```
-
-```bash
-git clone http://10.2.0.86/wanghuhu/mcpstander.git
-```
-
-```bash
-cd ~/aiops-workspace/mcpstander
-```
-
-```bash
-make delete deploy
-```
-
-```bash
-kubectl get pods,svc -n mcp
-```
-
-等待 mcp-server-manager 部署完成且 Pod Ready，再继续。镜像、后端和权限配置见 [MCP 仓库](http://10.2.0.86/wanghuhu/mcpstander)。
-
-### 2. 下载并部署 Agent
-
-```bash
-cd ~/aiops-workspace
-```
-
-```bash
-git clone --branch qwen-before-architecture ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
-```
-
-```bash
-cd ~/aiops-workspace/holmegpt-agent
-```
-
-首次部署前，按[模型配置说明](docs/GUIDE.md#2-agent-配置)准备 `deploy/secrets/core.yaml`，填写模型名称、API Base、API Key 和上下文容量；已有配置保留，不提交真实凭据。单集群在 [config.yaml](deploy/configmap/config.yaml) 设置 `federation.enabled: false`，并核对 MCP 地址。
-
-```bash
-make delete deploy A2A_PUBLIC_HOST=10.2.0.48
-```
-
-```bash
-kubectl get pods,svc,pvc -n aiops
-```
-
-```bash
-curl -fsS http://10.2.0.48:30800/health
-```
-
-```bash
-curl -fsS http://10.2.0.48:30800/api/v1/mcp/status
-```
-
-预期 aiops-copilot 为 2/2 Ready，PVC 为 Bound。健康接口可达不代表全部可观测后端正常，需同时检查 MCP 状态。
-
-### 3. 下载并部署前端
-
-```bash
-cd ~/aiops-workspace
-```
-
-```bash
-git clone ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
-```
-
-```bash
-cd ~/aiops-workspace/aiops-frount
-```
-
-```bash
-make delete deploy
-```
-
-```bash
-kubectl get pods,svc -n aiops
-```
-
-部署完成后，浏览器打开 **[http://10.2.0.48:30081](http://10.2.0.48:30081)**。
-
-
-| 入口             | 地址                                                                                                       |
-| -------------- | -------------------------------------------------------------------------------------------------------- |
-| 聊天前端           | [http://10.2.0.48:30081](http://10.2.0.48:30081)                                                         |
-| Agent API      | [http://10.2.0.48:30800](http://10.2.0.48:30800)                                                         |
-| A2A Agent Card | [http://10.2.0.48:30801/.well-known/agent-card.json](http://10.2.0.48:30801/.well-known/agent-card.json) |
-
-
-
-
-### 4. 创建异常测试 Case
-
-回到 Agent 仓库。下面先部署 c08 OOMKilled：
-
-```bash
-cd ~/aiops-workspace/holmegpt-agent
-```
-
-```bash
-make case-deploy CASE=c08
-```
-
-```bash
-kubectl get pods -n aiops-case-08
-```
-
-也可以再部署 c04，体验两个异常 Pod 同时存在时的分组诊断：
-
-```bash
-make case-deploy CASE=c04
-```
-
-```bash
-kubectl get pods -n aiops-case-04
-```
-
-常用基础 Case：
-
-
-| Case | 预期异常状态 / 现象                       | 主要原因                        |
-| ---- | --------------------------------- | --------------------------- |
-| c01  | Pending / FailedScheduling        | 节点选择器无匹配节点                  |
-| c02  | ImagePullBackOff                  | 镜像仓库域名不可解析                  |
-| c03  | FailedMount                       | 卷引用的 ConfigMap 不存在          |
-| c04  | CreateContainerConfigError        | 环境变量引用的 Secret key 缺失       |
-| c05  | FailedCreatePodSandBox            | Multus 网络附件缺失，需要预先安装 Multus |
-| c06  | CrashLoopBackOff / exit 2         | 应用运行时非零退出                   |
-| c07  | 配置错误 / HTTP 500 / Trace / exit 78 | 应用配置缺失后退出                   |
-| c08  | OOMKilled / exit 137              | 应用内存增长超过容器 limit            |
-| c09  | Running、Ready=False / HTTP 503    | Readiness 检查失败              |
-| c10  | Liveness 失败 / 反复重启                | 健康检查端点返回 HTTP 500           |
-| c11  | Terminating                       | finalizer 阻止对象删除            |
-
-
-
-
-### 5. 发起一次诊断
-
-```bash
-curl --no-buffer -G "http://10.2.0.48:30800/ask"  --data-urlencode "q=当前集群有什么问题？"
-```
-
-或打开前端，输入同样的问题。预期先看到问题定位和取证进度，最终报告列出异常 Pod、证据、根因与未知项；多个异常按组展示。具体结果取决于现场数据及模型分析，不保证每次判断都正确。
-
-### 6. 完成体验后清理 Case
-
-仅清理本次部署的测试环境；删除对应 namespace 内资源，不影响 aiops 和 mcp 服务：
-
-```bash
-cd ~/aiops-workspace/holmegpt-agent
-```
-
-```bash
-make case-clean CASE=c08
-```
-
-```bash
-make case-clean CASE=c04
-```
-
-## 多集群部署（`008-multi-cluster` 分支）
-
-适用于一个中心集群加若干边缘集群、边缘已通过 xnet-cloud 接入的环境。单集群按上文部署，不受影响：同一套镜像，不挂载集群配置时就是单集群。设计与原理见[多集群设计](docs/multi-cluster-design.md)（§18 依赖与部署形态）。
-
-**前提**（缺一项都不能工作）：
-
-1. 中心已安装 xnet-cloud，边缘已加入：在中心执行 `kubectl get nodes` 能看到每个边缘的 `vc-…` 虚拟 Node，且为 Ready。
-2. 新可观测体系：中心有 VictoriaMetrics 和 VictoriaLogs；边缘的 vmagent / vlagent 把数据推到中心，`cluster` 标签等于该边缘的虚拟 Node 名。
-3. 部署机：`kubectl`、`make`、`python3`（含 PyYAML）、`openssl`。直接在中心节点上执行最简单，默认使用当前 kubectl 上下文。
-4. 模型配置 `deploy/secrets/core.yaml`，与单集群相同。
-5. 镜像：中心能拉到 MCP、Agent、前端镜像，每个边缘能拉到 runner 镜像。
-
-xnet 证书和 runner 签名密钥**不需要手动处理**：`make mc-init` 会从中心 xnet 命名空间复制证书，生成或取回签名密钥，连同集群配置一起放进 `mcp`、`aiops` 两个命名空间。可以重复执行。
-
-### 1. 下载三个仓库（在中心节点上）
+### 0. 下载代码、填写模型配置（只做一次）
 
 ```bash
 mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
-git clone --branch 008-multi-cluster http://10.2.0.86/wanghuhu/mcpstander.git
-git clone --branch 008-multi-cluster ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
-git clone --branch 008-multi-cluster ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
+git clone --branch main http://10.2.0.86/wanghuhu/mcpstander.git
+git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
+git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
+mkdir -p holmegpt-agent/deploy/secrets
+cp holmegpt-agent/config/examples/aiops-secret.yaml holmegpt-agent/deploy/secrets/core.yaml
+vi holmegpt-agent/deploy/secrets/core.yaml   # 填 LLM_MODEL、LLM_API_BASE、LLM_API_KEY、MODEL_CONTEXT_WINDOW
 ```
 
-### 2. 准备集群配置
+`core.yaml` 已加入 `.gitignore`，不会被提交。每次 `make deploy` 都会用它覆盖集群里的 Secret，所以它必须是真实配置。
+
+### 1. 单集群
+
+```bash
+cd ~/aiops-workspace/mcpstander     && make deploy
+cd ~/aiops-workspace/holmegpt-agent && make deploy
+cd ~/aiops-workspace/aiops-frount   && make deploy
+IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+curl -fsS http://$IP:30800/health && printf "\n前端：http://$IP:30081\n"
+```
+
+| 入口 | 地址 |
+|---|---|
+| 聊天前端 | `http://<节点IP>:30081` |
+| Agent API | `http://<节点IP>:30800` |
+| A2A（给其他 Agent 调用） | `http://<节点IP>:30801/.well-known/agent-card.json`，用法见 [A2A](docs/a2a.md) |
+
+### 2. 多集群（一个中心 + 若干边缘）
+
+前提：边缘已通过 xnet-cloud 接入中心（中心 `kubectl get nodes` 能看到每个边缘的 `vc-…` 虚拟 Node）；边缘的 vmagent / vlagent 把数据推到中心的 VictoriaMetrics / VictoriaLogs。xnet 证书和 runner 签名密钥由 `make mc-init` 自动处理，不需要手动操作。
+
+**中心**（在中心节点上执行，kubectl 指向中心）：
 
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
-make mc-discover
-```
-
-把输出的 `clusters:` 块替换进 `deploy-edge/clusters.mc.yaml`，别名按习惯修改（如 `edge-88`）；核对同一文件中 `observability_profiles` 的 VictoriaMetrics / VictoriaLogs 地址；需要时填写 `expected_states`（运维声明的预期状态，见设计文档 §11）。
-
-### 3. 中心：共享对象与三个服务（顺序同单集群）
-
-```bash
-cd ~/aiops-workspace/holmegpt-agent && make mc-init
-cd ~/aiops-workspace/mcpstander && make deploy-mc
+make mc-discover                      # 列出 xnet 已接入的集群
+vi deploy-edge/clusters.mc.yaml       # 把输出的 clusters: 块贴进去；别名可改（如 edge-88）；核对 VictoriaMetrics/VictoriaLogs 地址
+make mc-init                          # 证书、签名密钥、集群配置 → mcp 和 aiops 命名空间
+cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
-cd ~/aiops-workspace/aiops-frount && make deploy-mc
+cd ~/aiops-workspace/aiops-frount   && make deploy-mc   # 前端端口 30082（30081 被 xnet 占用）
 ```
 
-Agent 的 `deploy-mc` 会再执行一次 `mc-init`，所以集群配置改了以后，在 Agent 仓库执行 `make deploy-mc` 即可；MCP 也要执行一次 `make deploy-mc` 才会读到新配置。前端默认 NodePort 为 30082，可用 `MC_NODE_PORT=…` 修改。
-
-### 4. 每个边缘：部署 runner
-
-二选一：
+**每个边缘**部署一个 runner（边缘 kubeconfig 放在中心的 `~/.kube/aiops-mc/<别名>`）：
 
 ```bash
-# 在部署机上，边缘 kubeconfig 放在 ~/.kube/aiops-mc/<名字>
-cd ~/aiops-workspace/holmegpt-agent && make edge-deploy EDGE=edge-88
+cd ~/aiops-workspace/holmegpt-agent
+make edge-deploy EDGE=edge-88                    # 默认 2 级权限
+make edge-deploy EDGE=edge-89 RUNNER_LEVEL=1     # 1 只读 / 2 标准 / 3 管理员
 ```
+
+不想把边缘 kubeconfig 放到中心时，也可以在边缘节点上执行：先把中心的 `~/.kube/aiops-mc/runner.key` 拷到边缘同一路径，再执行 `make edge-deploy EDGE=local`。
+
+验证：打开 `http://<中心IP>:30082` 问"我有哪些集群？"，各集群应显示为在线；再问"edge-88 有什么 Pod 异常？"。
+
+runner 权限等级：1 只诊断；2 读全部（Secret 的值会被脱敏），可以改常见修复对象（Pod、工作负载、ConfigMap、Service、PVC、HPA、Job、Ingress 等），不能改 Secret 和 RBAC；3 为 cluster-admin。详见[多集群设计](docs/multi-cluster-design.md) §5.2。
+
+### 3. 升级
+
+先确认没有进行中的诊断或修复（发布会中断它们），然后在改过的仓库里执行：
 
 ```bash
-# 或在边缘节点上：先把中心的 ~/.kube/aiops-mc/runner.key 拷到边缘同一路径
-cd ~/aiops-workspace/holmegpt-agent && make edge-deploy EDGE=local
+echo <新版本号> > VERSION
+make build push deploy          # 多集群中心：make build push deploy-mc
 ```
 
-在边缘节点上执行时，该节点同样需要 `kubectl`、`make`、`python3`（含 PyYAML）和 Agent 仓库。不指定 `EDGE` 会直接报错，避免把 runner 装错集群。
+按 MCP → Agent → 前端的顺序发布，只发布改过的仓库。`make deploy` 是滚动更新：新 Pod 就绪后旧 Pod 才退出，失败会自动回滚。
 
-### 5. 验证
+边缘 runner 升级：改 `deploy-edge/VERSION`，然后执行 `make runner-build runner-push edge-deploy EDGE=edge-88`。
+
+### 4. 试用：部署一个异常 Case
 
 ```bash
-curl -fsS http://<中心节点 IP>:30800/health
-kubectl -n aiops get pods                  # 中心：aiops-copilot、aiops-copilot-frontend
-kubectl -n mcp get pods                    # 中心：mcp-server-manager
+cd ~/aiops-workspace/holmegpt-agent
+make case-deploy CASE=c08       # OOMKilled；make case-list 查看全部 Case
 ```
 
-打开前端，问"我有哪些集群？"：各集群应显示为在线。再问"edge-88 有什么 Pod 异常？"，确认能查到边缘数据。
+在前端问"aiops-case-08 的 Pod 为什么一直重启？"，或者用命令行：
 
-### 日常变更
+```bash
+curl -N -G http://<节点IP>:30800/ask --data-urlencode "q=aiops-case-08 的 Pod 为什么一直重启？"
+```
 
-| 场景 | 操作 |
-|---|---|
-| 新增一个边缘 | xnet 接入后：`make mc-discover` → 更新配置 → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → `make edge-deploy EDGE=<新边缘>` |
-| 证书轮换 | Agent 仓库 `make deploy-mc`（含 mc-init），MCP 仓库 `make deploy-mc` |
-| 交付时使用 AIOps 专用证书 | `make mc-init XNET_CERT_DIR=<目录>`，目录内含 `cert.pem`、`key.pem`、`ca.pem` |
-| 修改命令规则（`config.yaml` 的 `workflow.remediation`） | 中心 `make deploy-mc`；每个边缘重新 `make edge-deploy`（规则随 runner 下发） |
-| 卸载某个边缘的 runner | `make edge-delete EDGE=<名字>` |
+报告下方点"生成修复方案"，审批后执行，随后自动观察恢复情况。试用结束清理：`make case-clean CASE=c08`。
 
-| 变量 | 默认 | 说明 |
+| Case | 现象 | 原因 |
 |---|---|---|
-| `CENTER_KUBECONFIG` | `~/.kube/aiops-mc/center`，不存在就用当前上下文 | 中心集群 |
-| `EDGE` / `EDGE_KUBECONFIG` | 无（必须指定） | `EDGE=edge-88` 使用 `~/.kube/aiops-mc/edge-88`；`EDGE=local` 使用当前上下文 |
-| `RUNNER_LEVEL` | `2` | runner 权限等级：1 只读（只诊断）；2 标准（读全部，写常见修复对象，不能改 Secret 和 RBAC）；3 管理员。详见设计文档 §5.2 |
-| `MC_CLUSTERS_FILE` | `deploy-edge/clusters.mc.yaml` | 集群配置 |
-| `MC_KEY_FILE` | `~/.kube/aiops-mc/runner.key` | 签名密钥；本机没有就从中心取回 |
-| `XNET_CERT_DIR` | 无 | 运维提供的 xnet 客户端证书目录；不设就从 xnet 复制 |
-| `MC_LOAD_HOSTS`、`MC_PULL_POLICY` | 无、`Always` | 仅测试环境：镜像仓库推不了时经 SSH 把镜像导入节点 |
+| c01 | Pending | 节点选择器无匹配节点 |
+| c02 | ImagePullBackOff | 镜像仓库域名不可解析 |
+| c03 | FailedMount | 卷引用的 ConfigMap 不存在 |
+| c04 | CreateContainerConfigError | 引用的 Secret key 缺失 |
+| c06 | CrashLoopBackOff | 启动脚本变量名错误 |
+| c07 | 退出码 78、HTTP 500 | 应用配置缺失 |
+| c08 | OOMKilled | 内存超过 limit |
+| c09 | Running、Ready=False | Readiness 端口错误 |
+| c10 | 反复重启 | Liveness 返回 500 |
+| c11 | Terminating | finalizer 阻止删除 |
 
-kubeconfig 只在部署时使用；运行时中心只用自己 Pod 的 ServiceAccount，边缘只用 runner 的 ServiceAccount。
+### 5. 日常变更与卸载
+
+| 场景 | 命令 |
+|---|---|
+| 改了 `config.yaml`、Runbook 或 `core.yaml` | 单集群 `make deploy`，多集群中心 `make deploy-mc`（Agent 仓库） |
+| 新增一个边缘 | 中心：`make mc-discover` → 更新 `clusters.mc.yaml` → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → `make edge-deploy EDGE=<新边缘>` |
+| 修改高危命令规则（`workflow.remediation`） | 中心 `make deploy-mc`，并对每个边缘重新执行 `make edge-deploy`（规则随 runner 下发） |
+| xnet 证书轮换 | Agent 仓库和 MCP 仓库各执行 `make deploy-mc` |
+| 使用运维提供的专用 xnet 证书 | `make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>` |
+| 查看日志 | `kubectl -n aiops logs deploy/aiops-copilot -c aiops-copilot -f` |
+| 卸载 | 各仓库执行 `make delete`（保留报告 PVC）；边缘执行 `make edge-delete EDGE=<别名>` |
+
+kubeconfig 只在部署时使用。运行时中心只用自己 Pod 的 ServiceAccount，边缘只用 runner 的 ServiceAccount。更多配置项见[部署与运维](docs/GUIDE.md)。
 
 ## 其他使用方式
 
@@ -373,36 +227,6 @@ curl -N -G "http://10.2.0.48:30800/query"  --data-urlencode 'q=各节点当前 C
 
 
 
-## 更新与重部署
-
-推荐一条命令完成发布：`VERSION` 加一后执行 `make release`（构建并推送镜像，再滚动更新部署；就绪探针 `/ready` 通过后旧 Pod 才退出，滚动失败自动回滚并打印新 Pod 日志，不再先删后建）。
-
-修改代码时，在对应仓库更新 VERSION，再按顺序执行：
-
-```bash
-make build
-```
-
-```bash
-make push
-```
-
-```bash
-make deploy
-```
-
-make deploy 本身不会构建镜像。Agent、MCP、前端分别构建发布，不能只更新其中一个仓库的 VERSION 就认为三个服务均已升级。
-
-已有测试环境需要先删除服务再部署时，可在对应仓库执行：
-
-```bash
-make delete deploy
-```
-
-注意 make 为小写；此操作会中断对应服务，不是首次部署或常规升级的必需步骤，不要加 -j 并行执行。Agent 的 make delete 保留报告 PVC；MCP、前端删除范围以各自 Makefile 为准。不要在运行诊断或质量测试时重部署。
-
-日志、联邦部署和详细排查见[部署指南](docs/GUIDE.md)；后台质量测试和断点续跑见[质量测试说明](test/aiops_quality_e2e/README.md)。
-
 ## 核心文档
 
 | 文档 | 内容 |
@@ -413,7 +237,7 @@ make delete deploy
 | [运行诊断](docs/run-diagnostics.md) | 每次运行的账本、工程异常分类、`/runs/{run_id}` 报告 |
 | [LLM 自身异常记录](docs/llm-model-anomalies.md) | 模型/推理服务自身问题的现象与外部佐证 |
 | [高危命令验收](docs/acceptance-blacklist.md) | 黑名单与需人工审批命令的标准验收步骤 |
-| [多集群设计](docs/multi-cluster-design.md) | 多集群当前设计与实现：集群登记、数据与执行路径、隧道消息、路由范围、多集群诊断、修复、运维声明的预期状态、前端、已知限制（`008-multi-cluster` 分支，未合并） |
+| [多集群设计](docs/multi-cluster-design.md) | 多集群设计与实现：集群登记、数据与执行路径、隧道、路由范围、诊断、修复、runner 权限等级、预期状态、已知限制 |
 | [多集群验收方案](docs/multi-cluster-acceptance.md) | 测试分层、验收脚本（含衔接处契约、事件流与前端回放、误报、意图准确率统计）、逐阶段用例与结果 |
 | [修复三个 Sprint](docs/remediation-sprint-design-2026-10.md) | 修复链路需求、设计与验收记录 |
 | [可观测性采集](docs/observability.md) | MCP 工具、PromQL 示例、日志与链路、结果含义 |

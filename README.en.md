@@ -69,226 +69,126 @@ After the plan and each action are approved, the verification result is shown. T
 
 These links point to an internal network and need matching access. Deploy the observability stack first and confirm data is being ingested, then configure the backend connections as described in the MCP repository. MCP does not install collectors; application spans also need instrumentation and trace-context propagation.
 
-## Quick start: copy-paste deployment
+## Deployment (copy and paste)
 
-The commands below target the internal reference environment: node address **10.2.0.48**, with all three repositories cloned into **~/aiops-workspace**. Run them in order in one Bash terminal, and only continue when a step succeeds.
+Three repositories work together: this one (the agent), the [MCP tool service](http://10.2.0.86/wanghuhu/mcpstander) and the [chat frontend](http://10.2.0.86/wanghuhu/aiops-frount). Images are published in `xnet.registry.io:8443`, so deploying needs no build.
 
-Prerequisites: Git/SSH access, kubectl access to the cluster, private image pulls and storage are ready; the [observability stack](http://10.2.0.86/platform/observability) is deployed and the MCP backend configuration matches your site. Other environments must adjust addresses and connection settings first.
+The deploy host needs `git`, `make`, `kubectl` (pointing at the target cluster) and `python3` with PyYAML. Install the observability components first (single cluster: Prometheus / Elasticsearch / Tempo, addresses configured in the MCP repository; multi-cluster: VictoriaMetrics / VictoriaLogs on the center).
 
-The agent's `make deploy` uses both the main service image and the A2A image for the current `VERSION`. If that version has not been fully published, run `make build` and `make push` (see the end of this document) first; publishing only the main image is not enough for a full deployment.
-
-Redeploy with **make delete deploy**: it deletes and then redeploys the service, so the service is down meanwhile. Never redeploy while a diagnosis or test run is in progress. A first deployment can use `make deploy`; do not add `-j`.
-
-### 1. Clone and deploy MCP
+### 0. Clone and fill in the model settings (once)
 
 ```bash
-mkdir -p ~/aiops-workspace
-```
-
-```bash
-cd ~/aiops-workspace
-```
-
-```bash
-git clone http://10.2.0.86/wanghuhu/mcpstander.git
-```
-
-```bash
-cd ~/aiops-workspace/mcpstander
-```
-
-```bash
-make delete deploy
-```
-
-```bash
-kubectl get pods,svc -n mcp
-```
-
-Wait until mcp-server-manager is deployed and its Pod is Ready before continuing. Images, backends and permissions are described in the [MCP repository](http://10.2.0.86/wanghuhu/mcpstander).
-
-### 2. Clone and deploy the agent
-
-```bash
-cd ~/aiops-workspace
-```
-
-```bash
-git clone --branch qwen-before-architecture ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
-```
-
-```bash
-cd ~/aiops-workspace/holmegpt-agent
-```
-
-Before the first deployment, prepare `deploy/secrets/core.yaml` as described in [model configuration](docs/GUIDE.md#2-agent-配置): model name, API base, API key and context window. Keep any existing configuration and never commit real credentials. For a single cluster set `federation.enabled: false` in [config.yaml](deploy/configmap/config.yaml) and check the MCP addresses.
-
-```bash
-make delete deploy A2A_PUBLIC_HOST=10.2.0.48
-```
-
-```bash
-kubectl get pods,svc,pvc -n aiops
-```
-
-```bash
-curl -fsS http://10.2.0.48:30800/health
-```
-
-```bash
-curl -fsS http://10.2.0.48:30800/api/v1/mcp/status
-```
-
-Expect aiops-copilot to be 2/2 Ready and the PVC to be Bound. A reachable health endpoint does not mean every observability backend works; check the MCP status as well.
-
-### 3. Clone and deploy the frontend
-
-```bash
-cd ~/aiops-workspace
-```
-
-```bash
-git clone ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
-```
-
-```bash
-cd ~/aiops-workspace/aiops-frount
-```
-
-```bash
-make delete deploy
-```
-
-```bash
-kubectl get pods,svc -n aiops
-```
-
-Then open **[http://10.2.0.48:30081](http://10.2.0.48:30081)** in a browser.
-
-| Entry point | Address |
-|---|---|
-| Chat frontend | [http://10.2.0.48:30081](http://10.2.0.48:30081) |
-| Agent API | [http://10.2.0.48:30800](http://10.2.0.48:30800) |
-| A2A Agent Card | [http://10.2.0.48:30801/.well-known/agent-card.json](http://10.2.0.48:30801/.well-known/agent-card.json) |
-
-### 4. Create fault test cases
-
-Go back to the agent repository and deploy c08 (OOMKilled):
-
-```bash
-cd ~/aiops-workspace/holmegpt-agent
-```
-
-```bash
-make case-deploy CASE=c08
-```
-
-```bash
-kubectl get pods -n aiops-case-08
-```
-
-You can also deploy c04 to try grouped diagnosis with two abnormal Pods at once:
-
-```bash
-make case-deploy CASE=c04
-```
-
-```bash
-kubectl get pods -n aiops-case-04
-```
-
-Common base cases:
-
-| Case | Expected state / symptom | Main cause |
-|---|---|---|
-| c01 | Pending / FailedScheduling | Node selector matches no node |
-| c02 | ImagePullBackOff | Registry hostname does not resolve |
-| c03 | FailedMount | Volume references a missing ConfigMap |
-| c04 | CreateContainerConfigError | Environment variable references a missing Secret key |
-| c05 | FailedCreatePodSandBox | Multus network attachment missing (Multus must be installed) |
-| c06 | CrashLoopBackOff / exit 2 | Application exits non-zero at runtime |
-| c07 | Config error / HTTP 500 / trace / exit 78 | Application exits after missing configuration |
-| c08 | OOMKilled / exit 137 | Application memory grows past the container limit |
-| c09 | Running, Ready=False / HTTP 503 | Readiness check fails |
-| c10 | Liveness failure / repeated restarts | Health endpoint returns HTTP 500 |
-| c11 | Terminating | A finalizer blocks deletion |
-
-### 5. Run a diagnosis
-
-```bash
-curl --no-buffer -G "http://10.2.0.48:30800/ask"  --data-urlencode "q=What is wrong in my cluster?"
-```
-
-Or ask the same question in the frontend. You should first see location and evidence progress; the final report lists abnormal Pods, evidence, root causes and unknowns, grouped when there are several. Results depend on live data and model analysis and are not guaranteed to be correct every time.
-
-### 6. Clean up the cases
-
-This removes only the test environments deployed above (resources in their namespaces); the aiops and mcp services are not affected:
-
-```bash
-cd ~/aiops-workspace/holmegpt-agent
-```
-
-```bash
-make case-clean CASE=c08
-```
-
-```bash
-make case-clean CASE=c04
-```
-
-## Multi-cluster deployment (branch `008-multi-cluster`)
-
-For one center cluster plus edge clusters joined through xnet-cloud. Single-cluster deployment above is unchanged: the images are the same, and without the cluster config mounted everything runs in single-cluster mode. Design: [multi-cluster design](docs/multi-cluster-design.md) §18 (Chinese).
-
-**Prerequisites** (all required):
-
-1. xnet-cloud is installed on the center and the edges have joined: `kubectl get nodes` on the center lists one Ready `vc-…` virtual Node per edge.
-2. New observability stack: VictoriaMetrics and VictoriaLogs on the center; each edge's vmagent / vlagent pushes to them with the `cluster` label equal to the edge's virtual Node name.
-3. Deploy machine: `kubectl`, `make`, `python3` with PyYAML, `openssl`. Running directly on the center node is simplest (the current kubectl context is used by default).
-4. Model config `deploy/secrets/core.yaml`, as for single-cluster.
-5. Images: the center can pull the MCP, Agent and frontend images; every edge can pull the runner image.
-
-You do not handle the xnet certificate or the runner signing key by hand. `make mc-init` copies the certificate from the center's xnet namespace and generates (or recovers) the signing key. It puts both, plus the cluster config, into the `mcp` and `aiops` namespaces, and it is safe to re-run.
-
-```bash
-# 1. on the center node: the three repositories
 mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
-git clone --branch 008-multi-cluster http://10.2.0.86/wanghuhu/mcpstander.git
-git clone --branch 008-multi-cluster ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
-git clone --branch 008-multi-cluster ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
-
-# 2. cluster config: paste the printed clusters block into deploy-edge/clusters.mc.yaml,
-#    adjust aliases, check the VictoriaMetrics / VictoriaLogs URLs
-cd ~/aiops-workspace/holmegpt-agent && make mc-discover
-
-# 3. center: shared objects, then the three services in the usual order
-cd ~/aiops-workspace/holmegpt-agent && make mc-init
-cd ~/aiops-workspace/mcpstander && make deploy-mc
-cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
-cd ~/aiops-workspace/aiops-frount && make deploy-mc        # NodePort 30082 (MC_NODE_PORT)
-
-# 4. each edge: the runner
-make edge-deploy EDGE=edge-88    # from the deploy machine, kubeconfig at ~/.kube/aiops-mc/edge-88
-make edge-deploy EDGE=local      # or on the edge node, after copying ~/.kube/aiops-mc/runner.key there
+git clone --branch main http://10.2.0.86/wanghuhu/mcpstander.git
+git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
+git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
+mkdir -p holmegpt-agent/deploy/secrets
+cp holmegpt-agent/config/examples/aiops-secret.yaml holmegpt-agent/deploy/secrets/core.yaml
+vi holmegpt-agent/deploy/secrets/core.yaml   # LLM_MODEL, LLM_API_BASE, LLM_API_KEY, MODEL_CONTEXT_WINDOW
 ```
 
-Verify: `curl http://<center IP>:30800/health`, then ask "我有哪些集群？" in the frontend; every cluster should be online.
+`core.yaml` is in `.gitignore`. Every `make deploy` writes it to the cluster Secret, so it must hold the real settings.
 
-Changes later:
-- **Add an edge:** run `make mc-discover`, update the config, then run `make deploy-mc` in the Agent and MCP repositories, then `make edge-deploy EDGE=<new edge>`.
-- **Rotate the certificate:** run the same two `make deploy-mc`.
-- **Use a dedicated certificate:** run `make mc-init XNET_CERT_DIR=<dir with cert.pem, key.pem, ca.pem>`.
-- **Change the command rules:** after changing them on the center, re-run `make edge-deploy` on every edge.
+### 1. Single cluster
 
-Variables:
-- `CENTER_KUBECONFIG`: defaults to `~/.kube/aiops-mc/center`, or the current context when that file does not exist.
-- `EDGE`: required for `edge-deploy` and `edge-delete`.
-- `RUNNER_LEVEL` (default `2`): the runner's permission level. 1 is read-only (diagnosis only); 2 reads everything and writes common repair targets but not Secrets or RBAC; 3 is administrator.
-- `MC_CLUSTERS_FILE`, `MC_KEY_FILE`, `XNET_CERT_DIR`.
-- `MC_LOAD_HOSTS` / `MC_PULL_POLICY`: test env only.
+```bash
+cd ~/aiops-workspace/mcpstander     && make deploy
+cd ~/aiops-workspace/holmegpt-agent && make deploy
+cd ~/aiops-workspace/aiops-frount   && make deploy
+IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+curl -fsS http://$IP:30800/health && printf "\nfrontend: http://$IP:30081\n"
+```
 
-Kubeconfigs are used only to deploy. At runtime the center uses its Pods' ServiceAccounts and each edge uses the runner's ServiceAccount.
+| Entry | Address |
+|---|---|
+| Chat frontend | `http://<node IP>:30081` |
+| Agent API | `http://<node IP>:30800` |
+| A2A (for other agents) | `http://<node IP>:30801/.well-known/agent-card.json`, see [A2A](docs/a2a.md) |
+
+### 2. Multi-cluster (one center, several edges)
+
+Prerequisites: the edges are connected to the center through xnet-cloud (`kubectl get nodes` on the center lists a `vc-…` virtual Node per edge), and each edge's vmagent / vlagent pushes to VictoriaMetrics / VictoriaLogs on the center. `make mc-init` handles the xnet certificate and the runner signing key.
+
+**Center** (run on the center node, kubectl pointing at the center):
+
+```bash
+cd ~/aiops-workspace/holmegpt-agent
+make mc-discover                      # lists the clusters connected through xnet
+vi deploy-edge/clusters.mc.yaml       # paste the printed clusters: block; rename aliases (e.g. edge-88); check the VictoriaMetrics/VictoriaLogs URLs
+make mc-init                          # certificate, signing key, cluster config -> mcp and aiops namespaces
+cd ~/aiops-workspace/mcpstander     && make deploy-mc
+cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
+cd ~/aiops-workspace/aiops-frount   && make deploy-mc   # frontend on 30082 (xnet uses 30081)
+```
+
+**Each edge** gets one runner (edge kubeconfigs in `~/.kube/aiops-mc/<alias>` on the center):
+
+```bash
+cd ~/aiops-workspace/holmegpt-agent
+make edge-deploy EDGE=edge-88                    # level 2 by default
+make edge-deploy EDGE=edge-89 RUNNER_LEVEL=1     # 1 read-only / 2 standard / 3 admin
+```
+
+To run it on the edge node instead, copy the center's `~/.kube/aiops-mc/runner.key` to the same path on the edge and run `make edge-deploy EDGE=local`.
+
+Check: open `http://<center IP>:30082`, ask "which clusters do I have?" (all should be online), then "what Pods are failing on edge-88?".
+
+Runner levels: 1 diagnoses only; 2 reads everything (Secret values are redacted) and changes common repair objects (Pods, workloads, ConfigMaps, Services, PVCs, HPAs, Jobs, Ingresses, …) but not Secrets or RBAC; 3 is cluster-admin. See the [multi-cluster design](docs/multi-cluster-design.md) §5.2.
+
+### 3. Upgrading
+
+Make sure no diagnosis or repair is running (a release interrupts it), then in each changed repository:
+
+```bash
+echo <new version> > VERSION
+make build push deploy          # multi-cluster center: make build push deploy-mc
+```
+
+Release in the order MCP → agent → frontend, only the repositories that changed. `make deploy` is a rolling update: the old Pod leaves once the new one is ready, and a failed rollout is undone.
+
+Edge runner: bump `deploy-edge/VERSION`, then `make runner-build runner-push edge-deploy EDGE=edge-88`.
+
+### 4. Try it with a fault case
+
+```bash
+cd ~/aiops-workspace/holmegpt-agent
+make case-deploy CASE=c08       # OOMKilled; make case-list shows all cases
+```
+
+Ask in the frontend "why does the Pod in aiops-case-08 keep restarting?", or:
+
+```bash
+curl -N -G http://<node IP>:30800/ask --data-urlencode "q=why does the Pod in aiops-case-08 keep restarting?"
+```
+
+Under the report, "generate repair plan" plans the fix; after approval it runs and the recovery is observed. Clean up with `make case-clean CASE=c08`.
+
+| Case | Symptom | Cause |
+|---|---|---|
+| c01 | Pending | no node matches the node selector |
+| c02 | ImagePullBackOff | registry host does not resolve |
+| c03 | FailedMount | volume references a missing ConfigMap |
+| c04 | CreateContainerConfigError | referenced Secret key is missing |
+| c06 | CrashLoopBackOff | wrong variable name in the start script |
+| c07 | exit 78, HTTP 500 | missing application config |
+| c08 | OOMKilled | memory above the limit |
+| c09 | Running, Ready=False | wrong readiness port |
+| c10 | repeated restarts | liveness endpoint returns 500 |
+| c11 | Terminating | a finalizer blocks deletion |
+
+### 5. Day-to-day changes and removal
+
+| Task | Command |
+|---|---|
+| Changed `config.yaml`, runbooks or `core.yaml` | single cluster `make deploy`; multi-cluster center `make deploy-mc` (agent repository) |
+| Add an edge | center: `make mc-discover` → update `clusters.mc.yaml` → `make deploy-mc` in the agent and MCP repositories → `make edge-deploy EDGE=<new edge>` |
+| Change the high-risk command rules (`workflow.remediation`) | center `make deploy-mc`, then `make edge-deploy` for every edge (the rules ship with the runner) |
+| Rotate the xnet certificate | `make deploy-mc` in the agent and MCP repositories |
+| Use a dedicated xnet certificate from operations | `make mc-init XNET_CERT_DIR=<dir with cert.pem, key.pem, ca.pem>` |
+| Logs | `kubectl -n aiops logs deploy/aiops-copilot -c aiops-copilot -f` |
+| Remove | `make delete` in each repository (keeps the report PVC); `make edge-delete EDGE=<alias>` per edge |
+
+Kubeconfigs are used only while deploying. At run time the center uses its own Pods' ServiceAccounts and each edge only the runner's. More settings: [Deployment and operations](docs/GUIDE.md) (Chinese).
 
 ## Other ways to use it
 
@@ -323,36 +223,6 @@ curl -N -G "http://10.2.0.48:30800/query" --data-urlencode 'q=Show the logs of a
 curl -N -G "http://10.2.0.48:30800/query"  --data-urlencode 'q=What is the current CPU and memory usage of each node?'
 ```
 
-## Updating and redeploying
-
-The recommended one-step release: increment `VERSION`, then run `make release` (builds and pushes the images, then rolls the deployment; old Pods exit only after the `/ready` probe passes, a failed rollout is rolled back automatically and the new Pod's logs are printed; it no longer deletes before creating).
-
-When you change code, update `VERSION` in that repository and run, in order:
-
-```bash
-make build
-```
-
-```bash
-make push
-```
-
-```bash
-make deploy
-```
-
-`make deploy` does not build images. The agent, MCP and frontend are built and published separately; updating `VERSION` in one repository does not upgrade the other two.
-
-If an existing test environment must be deleted before redeploying, run in the repository concerned:
-
-```bash
-make delete deploy
-```
-
-`make` is lowercase. This interrupts the service and is not needed for a first deployment or a normal upgrade; do not use `-j`. The agent's `make delete` keeps the reports PVC; for MCP and the frontend see their Makefiles. Do not redeploy while a diagnosis or quality test is running.
-
-Logs, federation and detailed troubleshooting are in the [deployment guide](docs/GUIDE.md); background quality tests and resumable runs are in the [quality test notes](test/aiops_quality_e2e/README.md).
-
 ## Documentation
 
 The documents below are written in Chinese.
@@ -365,7 +235,7 @@ The documents below are written in Chinese.
 | [Run diagnostics](docs/run-diagnostics.md) | Per-run ledger, engineering finding types, `/runs/{run_id}` report |
 | [LLM anomalies](docs/llm-model-anomalies.md) | Issues of the model / inference service itself, with external references |
 | [High-risk command acceptance](docs/acceptance-blacklist.md) | Standard acceptance steps for the command blacklist and approval-required commands |
-| [Multi-cluster design](docs/multi-cluster-design.md) (Chinese) | Current multi-cluster design and implementation: cluster registration, data and execution paths, tunnel messages, routing scope, multi-cluster diagnosis, repair, operator-declared expected states, frontend, known limits (branch `008-multi-cluster`, not merged) |
+| [Multi-cluster design](docs/multi-cluster-design.md) (Chinese) | Multi-cluster design and implementation: cluster registration, data and execution paths, tunnel, routing scope, diagnosis, repair, runner permission levels, expected states, known limits |
 | [Multi-cluster acceptance plan](docs/multi-cluster-acceptance.md) (Chinese) | Test layers, acceptance scripts (seam contracts, stream and frontend replay, false positives, intent accuracy measurement), per-phase cases and results |
 | [Repair sprints](docs/remediation-sprint-design-2026-10.md) | Repair requirements, design and acceptance records |
 | [Observability collection](docs/observability.md) | MCP tools, PromQL examples, logs and traces, meaning of results |

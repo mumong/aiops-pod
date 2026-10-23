@@ -29,11 +29,29 @@ A2A Client
 - `tasks/cancel`
 - `tasks/resubscribe`
 
-首版不支持 Push Notification，也不通过 A2A 开放自动修复写操作。
+不支持 Push Notification。写操作只有修复技能一条路径，且每个动作都要人工审批（见 1.1）。
 
 ### 1.1 修复技能（kubernetes-repair）
 
 `metadata.aiops_mode=repair` 时，适配器诊断（或复用同一 contextId 的诊断）并按异常组生成修复方案；有待审批动作时任务进入 `input-required`，调用方在同一任务回复 `{approval_id, approved, reviewer}`（DataPart）或文本"批准/拒绝 <approval_id>"，适配器调用后端审批接口后继续，结束时返回各组恢复结果。需要配置 `A2A_BACKEND_API_TOKEN`（后端 `AIOPS_API_TOKENS` 中的 `a2a` 身份）。完整 curl 示例见 [HTTP API 第 7 节](api.md#7-a2a-调用含修复与人工审批)。
+
+### 1.2 单集群与多集群：调用方式相同
+
+接给其他 Agent 时不需要区分部署形态：Agent Card、端点、三个技能都一样。区别只有一点：
+
+- **单集群**：直接回答。
+- **多集群**：问题里写明集群（如"edge-88 有哪些异常 Pod"、"所有边缘集群"）就直接回答；没写明时，任务进入 `input-required`，状态消息里是反问（例如"要查看哪个集群：edge-88、edge-89，还是所有边缘集群？"）。调用方在**同一个任务**里回复，适配器会把回复和原问题一起交给后端，接着执行：
+
+```bash
+# 回复反问：taskId、contextId 取自上一次返回的 result.id 和 result.contextId
+curl -sS http://<节点IP>:30801/ -H 'Content-Type: application/json' -d '{
+  "jsonrpc": "2.0", "id": "2", "method": "message/send",
+  "params": {"message": {"kind": "message", "role": "user", "messageId": "m-2",
+    "taskId": "<上次的 result.id>", "contextId": "<上次的 result.contextId>",
+    "parts": [{"kind": "text", "text": "edge-88"}]}, "configuration": {"blocking": true}}}'
+```
+
+调用方只需要正确处理 `input-required` 这个标准状态：把状态消息展示给用户或让自己的 LLM 作答，再在同一任务里回复。修复审批走同一种机制，多集群下每个待审批动作都会标明所在集群（文本里的"集群 edge-88"，DataPart 里的 `cluster` 字段）。
 
 ## 2. 本地启动
 
