@@ -188,6 +188,18 @@ Under the report, "generate repair plan" plans the fix; after approval it runs a
 | Logs | `kubectl -n aiops logs deploy/aiops-copilot -c aiops-copilot -f` |
 | Remove | `make delete` in each repository (keeps the report PVC); `make edge-delete EDGE=<alias>` per edge |
 
+Optional variables (append to the make command, e.g. `make deploy-mc MC_A2A_PUBLIC_URL=https://aiops.example.com`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CENTER_KUBECONFIG` | `~/.kube/aiops-mc/center`, else the current context | center cluster |
+| `EDGE` | none, required | `EDGE=edge-88` uses `~/.kube/aiops-mc/edge-88`; `EDGE=local` the current context |
+| `RUNNER_LEVEL` | `2` | runner permission level 1 / 2 / 3 |
+| `A2A_PUBLIC_HOST` / `MC_A2A_PUBLIC_URL` | the cluster's first node (multi-cluster skips xnet virtual Nodes) | A2A address published in the Agent Card (single cluster / multi-cluster center) |
+| `MC_CLUSTERS_FILE` | `deploy-edge/clusters.mc.yaml` | cluster config |
+| `MC_KEY_FILE` | `~/.kube/aiops-mc/runner.key` | runner signing key; fetched from the center when missing locally |
+| `MC_LOAD_HOSTS`, `MC_PULL_POLICY` | none, `Always` | test env only: side-load images over SSH when the registry cannot be pushed, e.g. `SSHPASS=… make deploy-mc MC_LOAD_HOSTS=10.2.5.85` |
+
 Kubeconfigs are used only while deploying. At run time the center uses its own Pods' ServiceAccounts and each edge only the runner's. More settings: [Deployment and operations](docs/GUIDE.md) (Chinese).
 
 ## Other ways to use it

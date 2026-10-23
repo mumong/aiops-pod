@@ -267,6 +267,7 @@ RUNNER_VERSION ?= $(shell cat deploy-edge/VERSION)
 RUNNER_IMAGE := $(IMAGE_REPOSITORY)/$(PROJECT)/aiops-edge-runner
 # 测试环境用自己的 Harbor（无推送权限），镜像经 SSH 导入节点缓存：MC_PULL_POLICY=IfNotPresent MC_LOAD_HOSTS=10.2.5.88
 MC_PULL_POLICY ?= Always
+MC_A2A_PUBLIC_URL ?=
 MC_LOAD_HOSTS ?=
 .PHONY: runner-build runner-push mc-keygen mc-discover mc-init edge-target edge-deploy edge-delete sync-xnet-cert test-multicluster deploy-mc
 
@@ -353,6 +354,8 @@ test-multicluster:
 	$(PYTHON) -m pytest -q tests/unit/multicluster
 
 # 中心部署 AIOps（测试环境）：make deploy-mc MC_LOAD_HOSTS=10.2.5.85
+# A2A 对外地址用中心自己的节点（跳过 xnet 虚拟 Node），不沿用单集群 make deploy 写进清单的地址；
+# 有域名时用 MC_A2A_PUBLIC_URL=https://… 指定。
 # 运行时只依赖集群配置、复制的 xnet 证书和 runner 密钥；不含任何边缘 kubeconfig。
 deploy-mc: mc-init
 	@if test -n "$(MC_LOAD_HOSTS)"; then \
@@ -361,11 +364,15 @@ deploy-mc: mc-init
 			deploy-edge/load_image.sh $$image $(MC_LOAD_HOSTS); done; fi
 	@test -f deploy/secrets/core.yaml || { echo "缺少 deploy/secrets/core.yaml（模型配置，见 docs/GUIDE.md）" >&2; exit 1; }
 	@K="$(CENTER_KUBECTL)"; set -e; \
+	U="$(MC_A2A_PUBLIC_URL)"; test -n "$$U" || U="http://$$($$K get nodes -l '!node-role.kubernetes.io/xnet-agent' \
+		-o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):30801"; \
+	echo "A2A 对外地址：$$U"; \
 	$$K apply -f deploy/secrets/core.yaml; \
 	$(PYTHON) deploy-edge/render_center_config.py deploy/configmap/config.yaml deploy-edge/center/overrides.yaml | $$K apply -f -; \
 	kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy-edge/center \
 		| sed -e 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(IMAGE_NAME):.*|image: $(DOCKER_NAME):$(DOCKER_TAG)|' \
 		      -e 's|image: $(IMAGE_REPOSITORY)/$(PROJECT)/$(A2A_IMAGE_NAME):.*|image: $(A2A_DOCKER_NAME):$(DOCKER_TAG)|' \
+		      -e "/- name: A2A_PUBLIC_URL/{n;s|value:.*|value: $$U|;}" \
 		| $$K apply -f -; \
 	$$K -n aiops rollout restart deployment/aiops-copilot; \
 	$$K -n aiops rollout status deployment/aiops-copilot --timeout=600s
