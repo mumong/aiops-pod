@@ -70,7 +70,9 @@ tests/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/
 
 ## 3. 发布与验证
 
-部署、升级、多集群和边缘 runner 的命令统一见 [README 部署](../README.md#部署复制即用)，这里只补充细节：
+部署、升级、多集群和边缘 runner 的命令统一见 [README 快速开始](../README.md#快速开始)，这里只补充细节：
+
+- 发布前确认没有进行中的诊断或修复（发布会中断它们）；按 MCP → Agent → 前端的顺序，只发布改过的仓库。
 
 - `make build push` 包含主服务和 A2A 两个镜像，不包含前端和 MCP。
 - `make deploy` 会更新清单里的镜像版本和 `A2A_PUBLIC_URL`，递归应用 `deploy/`，再滚动重启（只改了配置时也会生效），等待完成，失败自动回滚；MCP 仓库的 `make deploy` 同样会滚动重启并在失败时回滚；同一命名空间有前端时会顺带重启前端，刷新后端 DNS。所以不要把临时 YAML 或备份放进 `deploy/`。
@@ -94,6 +96,9 @@ curl -fsS http://<节点IP>:30801/.well-known/agent-card.json
 | 使用运维提供的专用 xnet 证书 | `make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>` |
 | 查看日志 | `kubectl -n aiops logs deploy/aiops-copilot -c aiops-copilot -f` |
 | 卸载 | 各仓库执行 `make delete`（保留报告 PVC）；边缘执行 `make edge-delete EDGE=<别名>` |
+| 升级边缘 runner | 改 `deploy-edge/VERSION`，`make runner-build runner-push`，再在每个边缘重新执行 `make edge-deploy` |
+| 切换 runner 权限等级 | 重新执行 `make edge-deploy … RUNNER_LEVEL=1\|2\|3`：1 只读；2（默认）读全部、可改常见修复对象，不能改 Secret 和 RBAC；3 管理员 |
+| 在中心集中部署所有边缘 | 把边缘 kubeconfig 放到中心的 `~/.kube/aiops-mc/<别名>`，执行 `make edge-deploy EDGE=<别名>` |
 
 可选变量（加在 make 命令后面，例如 `make deploy-mc MC_A2A_PUBLIC_URL=https://aiops.example.com`）：
 

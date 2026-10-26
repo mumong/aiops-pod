@@ -20,7 +20,7 @@
 - 单 Pod 与多 Pod 默认复用独立 lane 的 Evidence 和正式 RCA；保留对应回归。
 - 新工具必须同时核对注册 schema、节点暴露范围和权限；关闭修复不代表工具全部只读。
 - 测试用标准答案不注入诊断提示词；评分变化与 Agent 改动分别记录。
-- 不提交 Secret、API Key、测试 config.env；不覆盖用户未提交改动。
+- `deploy/secrets/core.yaml` 按维护者决定入库（内网模型默认值，克隆即可部署）；其他环境的 Secret（如 `deploy-edge/center/secret.yaml`）、测试 config.env 不提交；不覆盖用户未提交改动。
 - 集群部署、故障注入、清理与诊断代码修改是不同动作，先核对授权和 kubectl context。
 - 核心说明只保留一份来源文档，其余位置引用。过程记录不要当作当前使用指南。
 - 更新文档时校验相对链接和示例命令；历史报告保留原分及批次，不随文档更新改写。
