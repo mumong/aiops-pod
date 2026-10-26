@@ -1461,6 +1461,29 @@ class HolmesService:
             "toolsets": [{"name": "AICall(LangGraph)", "tools": [t.name for t in self.mcp_tools]}],
         }
 
+    def mcp_status(self) -> dict:
+        """MCP servers of the running mode: configured, connected or failed, tool count."""
+        self.initialize()
+        from app.core.aicall.builtin_tools import get_builtin_tools
+
+        failed = set(self._mcp_failed_servers)
+        servers = {}
+        for name, cfg in (self._mcp_servers_config or {}).items():
+            cfg = cfg or {}
+            enabled = bool(cfg.get("enabled", False))
+            servers[name] = {
+                "enabled": enabled,
+                "url": (cfg.get("config") or {}).get("url"),
+                "status": "failed" if name in failed else ("connected" if enabled else "disabled"),
+            }
+        builtin = {t.name for t in get_builtin_tools()}
+        return {
+            "success": True,
+            "servers": servers,
+            "failed": sorted(failed),
+            "mcp_tools": sum(1 for t in self.mcp_tools if t.name not in builtin),
+        }
+
     def health_check(self) -> dict:
         """健康检查"""
         initialized = self._is_initialized()

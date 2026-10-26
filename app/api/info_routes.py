@@ -183,32 +183,31 @@ async def get_run_report_markdown(run_id: str):
 
 @router.get("/api/v1/mcp/status")
 async def get_mcp_status():
-    """获取 MCP 服务器状态"""
-    from app.core.mcp import get_mcp_manager
-
-    manager = get_mcp_manager()
-    return {"success": True, "servers": manager.get_status()}
+    """MCP 服务状态：每个配置的服务是否连上，以及加载的 MCP 工具数。"""
+    return current_service().mcp_status()
 
 
 # =========================================================================
-# 报告查看 API：/reports - 查看保存的子集群诊断报告
+# 报告查看 API：/reports - 查看工作流保存的报告（<类型>-<问题摘要>_<时间>.md）
 # =========================================================================
 
 
 @router.get("/reports")
 async def list_reports(
-    cluster: Optional[str] = Query(None, description="按集群名称过滤"),
+    cluster: Optional[str] = Query(
+        None, description="按文件名前缀过滤，如 QUERY、POD（参数名沿用旧接口）"
+    ),
     limit: int = Query(50, description="返回数量限制", ge=1, le=500),
 ):
     """
-    📄 列出已保存的子集群诊断报告
+    📄 列出工作流保存的报告（最新在前）
 
     ```bash
     # 列出所有报告
     curl "http://localhost:8000/reports"
 
-    # 按集群过滤
-    curl "http://localhost:8000/reports?cluster=cluster-24"
+    # 按文件名前缀过滤
+    curl "http://localhost:8000/reports?cluster=QUERY"
 
     # 限制数量
     curl "http://localhost:8000/reports?limit=10"
@@ -245,7 +244,7 @@ async def get_report(filename: str):
     📄 查看具体报告内容
 
     ```bash
-    curl "http://localhost:8000/reports/cluster-24_20260309_143000.md"
+    curl "http://localhost:8000/reports/<列表返回的 filename>"
     ```
     """
     reports_dir = _reports_dir()

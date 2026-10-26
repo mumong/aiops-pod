@@ -218,3 +218,35 @@ def test_remote_plans_cannot_use_commands_the_tunnel_cannot_carry():
     assert preflight_errors([action], ok) == []  # local: rollout status is fine
     (error,) = preflight_errors([action], ok, remote=True)
     assert error.startswith("a1.verify_command") and "远端集群不支持" in error
+
+
+def test_policy_explains_a_refused_command_before_any_dry_run():
+    """Run 2c59783e: "kubectl set env ... && kubectl set resources ..." got kubectl's own
+    "unknown flag: --limits" from the dry run; the model resubmitted it three times.
+    The command rule says what is wrong, and a refused command is never dry-run."""
+    calls = []
+    schema = RepairDraft.with_preflight(lambda actions: calls.append(actions) or [])
+    command = (
+        "kubectl set env deployment/workload -n ns FAILURE_MODE=none && "
+        "kubectl set resources deployment/workload -n ns --limits=memory=128Mi"
+    )
+    data = {
+        "intent": "repair",
+        "scope": "s",
+        "status": "answered",
+        "answer": "a",
+        "targets": [{"namespace": "ns", "pod": "p", "group_id": "g"}],
+        "actions": [
+            {
+                "id": "a1",
+                "group_id": "g",
+                "description": "d",
+                "risk": "low",
+                "execute_command": command,
+                "rollback_advice": "r",
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="transport.no_shell_operators.*拆为可单独审阅的动作"):
+        schema.model_validate(data)
+    assert calls == []

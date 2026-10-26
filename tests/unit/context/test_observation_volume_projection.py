@@ -82,7 +82,7 @@ def test_volume_projection_does_not_invent_optional_or_type():
     assert "type" not in structured["volumes"][1]["source_details"]["hostPath"]
 
 
-def test_configmap_projection_preserves_key_inventory_without_values():
+def test_configmap_projection_keeps_keys_and_values_but_not_binary_data():
     raw = yaml.safe_dump(
         {
             "apiVersion": "v1",
@@ -103,8 +103,29 @@ def test_configmap_projection_preserves_key_inventory_without_values():
     assert structured["uid"] == "uid-one"
     assert structured["resourceVersion"] == "123"
     assert "available-key" in summary and "binary-key" in summary
-    assert "PRIVATE_CONFIG_VALUE" not in json.dumps(structured) + summary
+    # ConfigMaps are configuration, not secrets: repairs need the content (run 9d14643d).
+    assert "PRIVATE_CONFIG_VALUE" in summary
     assert "PRIVATE_BINARY_VALUE" not in json.dumps(structured) + summary
+    assert "content_truncated" not in structured
+
+
+def test_large_configmap_is_cut_with_a_read_back_reference(tmp_path):
+    code = "print('x')\n" * 2000  # 22 KB, like the mounted workload-code
+    raw = yaml.safe_dump(
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "workload-code", "namespace": "ns"},
+            "data": {"server.py": code, "driver.py": "import time\n"},
+        }
+    )
+    processor = ObservationProcessor(archive_root=str(tmp_path))
+    result = processor.process("run", "remediation", 1, "kubectl_get_yaml", raw)
+    summary = result["summary"]
+    assert "driver.py" in summary and "print('x')" in summary
+    assert len(summary) <= processor.max_observation_chars + 300
+    assert result["structured"]["content_truncated"]
+    assert result["raw_ref"] in summary and "read_context_archive" in summary
 
 
 def test_yaml_diagnostic_not_found_is_not_a_failed_invocation():

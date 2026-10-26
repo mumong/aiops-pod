@@ -186,6 +186,8 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
  │   · summary：有预算的模型可见投影
  │   按工具处理：
  │   · query_pod_lifecycle → 核心字段 / 清单视图（字段需由模型点名）
+ │   · kubectl_get_yaml：Secret 只给键名（值在工具中间件已脱敏）；ConfigMap 给键名和内容，
+ │     超出单条预算时截断并附 raw_ref 回读提示；binaryData 只给键名
  │   · Prometheus / 日志 / Tracing → 确定性可观测性投影：按信息量排序、按模式轮换选取，
  │     预算约 3000 字符（observation_summary.max_chars），保留统计、来源、覆盖与遗漏计数
  │     （例：日志 28903 → 3151 字符，12 条中选 4 条，省略 8 条可回读）
@@ -290,6 +292,7 @@ answer:        给人看的方案说明
 | 每个 target 要么有动作，要么在 assessments 中说明原因 | 命令写在正文、动作为空 |
 | ready 必须有动作，其他状态不能带动作 | 状态与动作不一致 |
 | 正文出现 kubectl 写命令而 actions 为空 → 拒绝 | 只有说明、没有可执行方案 |
+| 通过以上规则后才做 `kubectl --dry-run=server` 预检（在本组集群上） | 被规则拒绝的命令（如用 `&&` 连写两条）拿到规则自己的说明，且不会发到集群 |
 
 规划结果以不可变记录（带版本号）保存；前端修复工作区展示修复对象、异常原因、命令、风险与回滚建议。规划过程（每次工具调用的参数、状态、结果摘要，以及模型思考）由 [progress.py](../app/core/remediation/progress.py) 有界记录在任务上（`planning_progress`），工作区按"规划 → 审批 → 执行 → 恢复观察 → 结果"展示当前阶段并实时显示规划过程。
 

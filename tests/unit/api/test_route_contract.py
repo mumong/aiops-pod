@@ -226,11 +226,32 @@ def test_artifact_route(monkeypatch):
 
 
 def test_mcp_status_route(monkeypatch):
-    client, _service, _app = _build_client(monkeypatch)
-    manager = type("_Manager", (), {"get_status": lambda self: {"es": "up"}})()
-    monkeypatch.setattr("app.core.mcp.get_mcp_manager", lambda: manager)
+    client, service, _app = _build_client(monkeypatch)
+    service.mcp_status = lambda: {"success": True, "servers": {"es": {"status": "connected"}}}
 
-    assert client.get("/api/v1/mcp/status").json() == {"success": True, "servers": {"es": "up"}}
+    assert client.get("/api/v1/mcp/status").json()["servers"] == {"es": {"status": "connected"}}
+
+
+def test_mcp_status_reports_the_running_modes_servers(monkeypatch):
+    """It read the legacy MCP manager, which the AICall mode never fills: always {}."""
+    from app.core.service import HolmesService
+
+    service = HolmesService.__new__(HolmesService)
+    service.initialize = lambda: None
+    service._mcp_servers_config = {
+        "k8s": {"enabled": True, "config": {"url": "http://mcp:8093/sse"}},
+        "es": {"enabled": True, "config": {"url": "http://mcp:8088/sse"}},
+        "old": {"enabled": False},
+    }
+    service._mcp_failed_servers = ["es"]
+    service.mcp_tools = [type("T", (), {"name": "kubectl_describe"})()]
+    status = service.mcp_status()
+    assert {k: v["status"] for k, v in status["servers"].items()} == {
+        "k8s": "connected",
+        "es": "failed",
+        "old": "disabled",
+    }
+    assert status["failed"] == ["es"] and status["mcp_tools"] == 1
 
 
 def test_reports_routes(monkeypatch, tmp_path):

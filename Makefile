@@ -91,6 +91,9 @@ deploy:
 	@sed -i '/- name: A2A_PUBLIC_URL/{n;s|^\([[:space:]]*\)value:.*|\1value: "$(A2A_PUBLIC_URL)"|;}' deploy/k8s-simple.yaml
 	@kubectl create namespace aiops --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f deploy/ --recursive
+	@# apply alone does not restart the Pod when only ConfigMaps/Secret changed; the process
+	@# reads them at start-up, so restart (rolling) to make every deploy take effect.
+	kubectl rollout restart deployment/aiops-copilot -n aiops
 	@echo "Waiting for rollout to complete..."
 	@kubectl rollout status deployment/aiops-copilot -n aiops --timeout=300s || { \
 		echo "Rollout failed; rolling back to the previous ReplicaSet..."; \

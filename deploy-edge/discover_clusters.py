@@ -65,7 +65,8 @@ def render(items):
     center = next((e["name"] for e in items if e["center"]), None)
     lines = [
         "# make mc-discover：xnet 已接入的集群。别名是建议值，可按习惯修改；",
-        "# 把下面的 clusters 块替换进集群配置（默认 deploy-edge/clusters.mc.yaml），其余部分沿用。",
+        "# 用下面的 default、center、items 替换集群配置（默认 deploy-edge/clusters.mc.yaml）中 clusters 下的同名三项；",
+        "# 保留 clusters.access（xnet 隧道与证书设置）和文件其余部分，否则 xnet 集群会因缺少 access 无法加载。",
         "clusters:",
         "  default: null",
         f"  center: {center or 'null'}",

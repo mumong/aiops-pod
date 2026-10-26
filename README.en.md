@@ -79,7 +79,7 @@ The deploy host needs `git`, `make`, `kubectl` (pointing at the target cluster) 
 
 ```bash
 mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
-git clone --branch main http://10.2.0.86/wanghuhu/mcpstander.git
+git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/mcpstander.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
 cp holmegpt-agent/deploy/secrets/core.yaml.example holmegpt-agent/deploy/secrets/core.yaml
@@ -113,7 +113,7 @@ Prerequisites: the edges are connected to the center through xnet-cloud (`kubect
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make mc-discover                      # lists the clusters connected through xnet
-vi deploy-edge/clusters.mc.yaml       # paste the printed clusters: block; rename aliases (e.g. edge-88); check the VictoriaMetrics/VictoriaLogs URLs
+vi deploy-edge/clusters.mc.yaml       # replace default, center and items under clusters with the output (keep access); rename aliases; check the VictoriaMetrics/VictoriaLogs URLs
 make mc-init                          # certificate, signing key, cluster config -> mcp and aiops namespaces
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc

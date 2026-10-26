@@ -447,6 +447,17 @@ class ObservationProcessor:
             structured=structured,
             summary=summary,
         )
+        if structured.get("content_truncated"):
+            # The cut values must stay reachable; the path is only known after archiving.
+            summary += f"\n归档原文 raw_ref: {refs.get('raw_ref')}\n需要未展示内容时使用 read_context_archive 回读该路径。"
+            refs = archive.write_tool_artifact(
+                node_id=node_id,
+                sequence=sequence,
+                tool_name=tool,
+                raw=raw,
+                structured=structured,
+                summary=summary,
+            )
         observation_audit: Dict[str, Any] = {}
         if (
             tool in self.OBSERVABILITY_QUERY_TOOLS
@@ -2511,10 +2522,13 @@ class ObservationProcessor:
         return structured, "\n".join(lines), "k8s_yaml"
 
     def _extract_configmap_yaml(self, doc: Dict[str, Any]) -> tuple[Dict[str, Any], str, str]:
-        """Keep the observed key inventory, not potentially sensitive values.
+        """Key inventory plus the values, bounded; binaryData stays keys only.
 
-        A volume's items[].key must be compared against data and binaryData
-        keys. Metadata alone cannot establish whether the requested key exists.
+        A volume's items[].key must be compared against data and binaryData keys.
+        ConfigMaps hold non-secret configuration (Secrets keep key-only summaries and
+        are redacted at ingestion), and repairs need the content: run 9d14643d planned
+        nothing for a workload whose mounted code it could not see. Values beyond the
+        observation budget are cut; the full YAML stays in the archive (raw_ref).
         """
         metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
         data = doc.get("data") if isinstance(doc.get("data"), dict) else {}
@@ -2528,6 +2542,7 @@ class ObservationProcessor:
             "resourceVersion": metadata.get("resourceVersion"),
             "data_keys": sorted(str(key) for key in data),
             "binary_data_keys": sorted(str(key) for key in binary_data),
+            "data_chars": {str(key): len(str(value or "")) for key, value in data.items()},
         }
         lines = [
             "kubectl_get_yaml 关键字段摘要:",
@@ -2537,6 +2552,20 @@ class ObservationProcessor:
             "data_keys: " + (", ".join(structured["data_keys"]) or "<none>"),
             "binary_data_keys: " + (", ".join(structured["binary_data_keys"]) or "<none>"),
         ]
+        budget = max(0, self.max_observation_chars - sum(len(line) + 1 for line in lines) - 200)
+        cut = []
+        for key in structured["data_keys"]:
+            value = str(data.get(key) or "")
+            shown = value[:budget]
+            budget -= len(shown)
+            lines.append(f"--- data.{key}（{len(value)} 字符）---")
+            if shown:
+                lines.append(shown)
+            if len(shown) < len(value):
+                cut.append(key)
+                lines.append(f"…（已截断，本项展示 {len(shown)}/{len(value)} 字符）")
+        if cut:
+            structured["content_truncated"] = cut
         return structured, "\n".join(lines), "k8s_yaml"
 
     def _extract_secret_yaml(self, doc: Dict[str, Any]) -> tuple[Dict[str, Any], str, str]:

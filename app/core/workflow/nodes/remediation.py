@@ -94,20 +94,6 @@ class RepairDraft(QueryAnswer):
             cls.__name__, (cls,), {"preflight": staticmethod(check), "__module__": cls.__module__}
         )
 
-    @model_validator(mode="after")
-    def commands_pass_dry_run(self):
-        check = type(self).preflight
-        if check is None or not self.actions:
-            return self
-        errors = check(self.actions)
-        if errors:
-            raise ValueError(
-                "命令预检未通过（kubectl --dry-run=server，在本组集群上由服务端校验后丢弃，未做任何修改）："
-                + "；".join(errors)
-                + "。请按 kubectl 的报错修正命令（语法、参数、对象名或命名空间、权限、准入校验）后重新提交；权限不足或集群为只读等级时不要换写法绕过，改为在评估中说明需要人工处理"
-            )
-        return self
-
     @classmethod
     def chain_for(cls, namespace: str, pod: str):
         return cls.controller_chains.get(f"{namespace}/{pod}")
@@ -196,7 +182,7 @@ class RepairDraft(QueryAnswer):
                 except RepairCommandDenied as denied:
                     # Tagged so a plan that fails only on policy is reported as such.
                     raise ValueError(
-                        f"高危规则拦截（{denied.rule or 'policy'}）：{command}；"
+                        f"高危规则拦截（{denied.rule or 'policy'}：{denied}）：{command}；"
                         "该命令不能进入方案，请改用不在黑名单中的方式，或不提交该动作并在 answer 说明"
                     ) from None
                 # Write where the controller writes: a managed member of the ownership
@@ -243,6 +229,24 @@ class RepairDraft(QueryAnswer):
         for gid, decision in decisions.items():
             if (decision.status == "ready") != (gid in actionable):
                 raise ValueError("ready 必须有对应动作；其他规划状态不能包含执行动作")
+        return self
+
+    @model_validator(mode="after")
+    def commands_pass_dry_run(self):
+        # Defined after command_contract on purpose: pydantic runs "after" validators in
+        # definition order, so a command the policy refuses (e.g. two commands joined by
+        # "&&") gets the policy's own explanation, and never reaches the cluster even as
+        # a dry run. Run 2c59783e: kubectl's "unknown flag" hid that rule from the model.
+        check = type(self).preflight
+        if check is None or not self.actions:
+            return self
+        errors = check(self.actions)
+        if errors:
+            raise ValueError(
+                "命令预检未通过（kubectl --dry-run=server，在本组集群上由服务端校验后丢弃，未做任何修改）："
+                + "；".join(errors)
+                + "。请按 kubectl 的报错修正命令（语法、参数、对象名或命名空间、权限、准入校验）后重新提交；权限不足或集群为只读等级时不要换写法绕过，改为在评估中说明需要人工处理"
+            )
         return self
 
 

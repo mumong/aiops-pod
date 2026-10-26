@@ -90,13 +90,13 @@ tests/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/
 部署、升级、多集群和边缘 runner 的命令统一见 [README 部署](../README.md#部署复制即用)，这里只补充细节：
 
 - `make build push` 包含主服务和 A2A 两个镜像，不包含前端和 MCP。
-- `make deploy` 会更新清单里的镜像版本和 `A2A_PUBLIC_URL`，递归应用 `deploy/`，然后等待滚动更新完成；同一命名空间有前端时会顺带重启前端，刷新后端 DNS。所以不要把临时 YAML 或备份放进 `deploy/`。
+- `make deploy` 会更新清单里的镜像版本和 `A2A_PUBLIC_URL`，递归应用 `deploy/`，再滚动重启（只改了配置时也会生效），等待完成，失败自动回滚；MCP 仓库的 `make deploy` 同样会滚动重启并在失败时回滚；同一命名空间有前端时会顺带重启前端，刷新后端 DNS。所以不要把临时 YAML 或备份放进 `deploy/`。
 - A2A 对外地址默认取第一个 Node 的 InternalIP。需要时显式指定：`make deploy A2A_PUBLIC_HOST=<节点IP>`，或 `A2A_PUBLIC_URL=https://<域名>`。
 - 健康检查可达，不代表可观测后端都正常：
 
 ~~~bash
 curl -fsS http://<节点IP>:30800/health              # version、mcp_failed_servers
-curl -fsS http://<节点IP>:30800/api/v1/mcp/status   # 各 MCP 服务连接状态
+curl -fsS http://<节点IP>:30800/api/v1/mcp/status   # 每个 MCP 服务 connected / failed / disabled，及 MCP 工具数
 curl -fsS http://<节点IP>:30801/.well-known/agent-card.json
 ~~~
 
@@ -105,7 +105,7 @@ curl -fsS http://<节点IP>:30801/.well-known/agent-card.json
 | 场景 | 命令 |
 |---|---|
 | 改了 `config.yaml`、Runbook 或 `core.yaml` | 单集群 `make deploy`，多集群中心 `make deploy-mc`（Agent 仓库） |
-| 新增一个边缘 | 中心：`make mc-discover` → 更新 `clusters.mc.yaml` → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → `make edge-deploy EDGE=<新边缘>` |
+| 新增一个边缘 | 中心：`make mc-discover` → 用输出更新 `clusters.mc.yaml` 的 `clusters.items`（保留 `access`） → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → `make edge-deploy EDGE=<新边缘>` |
 | 修改高危命令规则（`workflow.remediation`） | 中心 `make deploy-mc`，并对每个边缘重新执行 `make edge-deploy`（规则随 runner 下发） |
 | xnet 证书轮换 | Agent 仓库和 MCP 仓库各执行 `make deploy-mc` |
 | 使用运维提供的专用 xnet 证书 | `make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>` |

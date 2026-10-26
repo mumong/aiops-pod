@@ -81,7 +81,7 @@ Agent 负责规划和解释，MCP 查询真实数据，Runbook 提供排障知�
 
 ```bash
 mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
-git clone --branch main http://10.2.0.86/wanghuhu/mcpstander.git
+git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/mcpstander.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
 cp holmegpt-agent/deploy/secrets/core.yaml.example holmegpt-agent/deploy/secrets/core.yaml
@@ -115,7 +115,7 @@ curl -fsS http://$IP:30800/health && printf "\n前端：http://$IP:30081\n"
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make mc-discover                      # 列出 xnet 已接入的集群
-vi deploy-edge/clusters.mc.yaml       # 把输出的 clusters: 块贴进去；别名可改（如 edge-88）；核对 VictoriaMetrics/VictoriaLogs 地址
+vi deploy-edge/clusters.mc.yaml       # 用输出替换 clusters 下的 default、center、items（保留 access）；别名可改；核对 VictoriaMetrics/VictoriaLogs 地址
 make mc-init                          # 证书、签名密钥、集群配置 → mcp 和 aiops 命名空间
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
