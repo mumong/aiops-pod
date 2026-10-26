@@ -119,7 +119,7 @@ curl -N -G http://<node IP>:30800/ask --data-urlencode "q=我的集群现在有�
 ```
 To continue with a repair, link the calls into one session: pass the same `session_id` and keep the identity cookie with `-c/-b jar.txt` (repair records are visible only to the identity that ran the diagnosis):
 ```bash
-B=http://<node IP>:30800; S=my-session-0001
+B=http://<node IP>:30800; S=my-session-000001
 curl -N -G $B/ask --data-urlencode "q=我的集群现在有什么问题？" -d session_id=$S -c jar.txt -b jar.txt   # diagnose
 curl -N -G $B/ask --data-urlencode "q=修复刚刚的问题" -d session_id=$S -c jar.txt -b jar.txt             # plan a repair
 curl -b jar.txt $B/repair/batches/batch-<diagnosis run_id>                                              # plan and pending approvals

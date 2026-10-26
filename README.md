@@ -119,7 +119,7 @@ curl -N -G http://<节点IP>:30800/ask --data-urlencode "q=我的集群现在有
 ```
 要接着修复，就把几次调用连成一个会话：带同一个 `session_id`，并用 `-c/-b jar.txt` 保存、回传身份 cookie（修复记录只对发起诊断的身份可见）：
 ```bash
-B=http://<节点IP>:30800; S=my-session-0001
+B=http://<节点IP>:30800; S=my-session-000001
 curl -N -G $B/ask --data-urlencode "q=我的集群现在有什么问题？" -d session_id=$S -c jar.txt -b jar.txt   # 诊断
 curl -N -G $B/ask --data-urlencode "q=修复刚刚的问题" -d session_id=$S -c jar.txt -b jar.txt             # 生成修复方案
 curl -b jar.txt $B/repair/batches/batch-<诊断 run_id>                                                   # 查看方案与待审批项
