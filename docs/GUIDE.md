@@ -14,33 +14,16 @@
 
 | 文件 | 需要核对 |
 |---|---|
-| 本地 deploy/secrets/core.yaml | 模型地址、模型名、API Key、实际上下文容量 |
+| [deploy/secrets/core.yaml](../deploy/secrets/core.yaml) | 模型地址、模型名、API Key、实际上下文容量、API token |
 | [deploy/configmap/config.yaml](../deploy/configmap/config.yaml) | MCP SSE 地址、工作流、语言、修复策略 |
 | [deploy/configmap/runbooks.yaml](../deploy/configmap/runbooks.yaml) | 排障知识及目录，挂载后由 fetch_runbook 读取 |
 | [deploy/k8s-simple.yaml](../deploy/k8s-simple.yaml) | 主服务、A2A、initContainer 镜像；PVC、资源、端口 |
 | [deploy/rbac.yaml](../deploy/rbac.yaml) | Agent ServiceAccount 权限 |
 | [Makefile](../Makefile)、[VERSION](../VERSION) | 镜像仓库与发布版本 |
 
-缺少 Secret 文件时，可复制 [Secret 示例](../deploy/secrets/core.yaml.example) 到
-`deploy/secrets/core.yaml`，将占位内容换成真实配置，勿提交。模板以 `.example` 结尾，
-`kubectl apply -R` 不会应用它，不会用占位值覆盖真实 Secret；已有本地配置无需覆盖。结构如下：
+`deploy/secrets/core.yaml` 已填好默认值（内网 Qwen3.6），克隆后可直接部署；换模型或 token 时改这个文件，再 `make deploy`（多集群中心 `make deploy-mc`）。值用 `stringData` 明文书写即可，K8s 会自行编码。A2A 对外调用要鉴权时可增加 A2A_API_TOKEN。
 
-~~~yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: aiops-secret
-  namespace: aiops
-type: Opaque
-stringData:
-  LLM_API_KEY: "<API key>"
-  LLM_MODEL: "<provider/model>"
-  LLM_API_BASE: "<OpenAI-compatible API base>"
-  MODEL_CONTEXT_WINDOW: "<实际上下文 token 数>"
-  LOG_LEVEL: "INFO"
-~~~
-
-A2A 可增加 A2A_API_TOKEN。模型需要支持工具调用；配置中的 llm.extra_body 是模型服务特定参数，不支持 Qwen chat_template_kwargs 的服务应移除或改成对应参数。
+模型需要支持工具调用；配置中的 llm.extra_body 是模型服务特定参数，不支持 Qwen chat_template_kwargs 的服务应移除或改成对应参数。
 
 ### 模型循环的配置旋钮（config.yaml `llm` / `workflow`）
 

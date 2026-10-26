@@ -77,18 +77,16 @@ Agent 负责规划和解释，MCP 查询真实数据，Runbook 提供排障知�
 
 部署机需要 `git`、`make`、`kubectl`（指向目标集群）、`python3`（含 PyYAML）。可观测性组件需要先装好（单集群：Prometheus / Elasticsearch / Tempo，地址在 MCP 仓库配置；多集群：中心的 VictoriaMetrics / VictoriaLogs）。
 
-### 0. 下载代码、填写模型配置（只做一次）
+### 0. 下载代码（只做一次）
 
 ```bash
 mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/mcpstander.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
-cp holmegpt-agent/deploy/secrets/core.yaml.example holmegpt-agent/deploy/secrets/core.yaml
-vi holmegpt-agent/deploy/secrets/core.yaml   # 填 LLM_MODEL、LLM_API_BASE、LLM_API_KEY、MODEL_CONTEXT_WINDOW
 ```
 
-`core.yaml` 已加入 `.gitignore`，不会被提交。每次 `make deploy` 都会用它覆盖集群里的 Secret，所以它必须是真实配置。
+模型配置 `holmegpt-agent/deploy/secrets/core.yaml` 已填好默认值（内网 Qwen3.6），可直接部署；换模型时改这个文件再 `make deploy`。每次 `make deploy` 都会用它覆盖集群里的 Secret。
 
 ### 1. 单集群
 
@@ -246,7 +244,7 @@ make test-a2a       # A2A 测试（需 .venv-a2a）
 make release        # 构建并推送镜像后滚动部署
 ```
 
-目录：`app/` 服务代码（`python -m app` 启动），`a2a_adapter/` A2A 适配器，`aiops_edge/` 多集群访问（kubectl 替身与边缘 runner），`deploy/` 单集群清单与配置（Secret 模板 `deploy/secrets/core.yaml.example`），`deploy-edge/` 多集群中心与边缘清单，`tests/` 全部测试（`unit` 单元、`a2a` A2A、`acceptance` 验收脚本、`cases` 故障 Case、`quality` 质量评测），`scripts/` 运行报告、环境变量文档生成与命令行客户端，`docs/` 文档（`docs/specs` 为开发过程记录）。提示词只从 `app/core/prompts.py` 引入；修改提示词需配套行为测试。
+目录：`app/` 服务代码（`python -m app` 启动），`a2a_adapter/` A2A 适配器，`aiops_edge/` 多集群访问（kubectl 替身与边缘 runner），`deploy/` 单集群清单与配置（模型配置 `deploy/secrets/core.yaml`），`deploy-edge/` 多集群中心与边缘清单，`tests/` 全部测试（`unit` 单元、`a2a` A2A、`acceptance` 验收脚本、`cases` 故障 Case、`quality` 质量评测），`scripts/` 运行报告、环境变量文档生成与命令行客户端，`docs/` 文档（`docs/specs` 为开发过程记录）。提示词只从 `app/core/prompts.py` 引入；修改提示词需配套行为测试。
 
 报告和工具归档默认写入 Pod 内的 `/tmp/aiops/reports`（PVC）。源码实现与当前线上版本可能不同，历史测试成绩不能直接代表当前部署效果。
 

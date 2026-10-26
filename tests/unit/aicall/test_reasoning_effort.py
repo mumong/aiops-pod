@@ -14,7 +14,7 @@ def test_unset_reasoning_effort_preserves_provider_default(monkeypatch):
 
 def test_low_effort_reaches_streaming_and_nonstreaming_models(monkeypatch):
     monkeypatch.setenv("LLM_REASONING_EFFORT", " low ")
-    client = AICall(model="openai/gpt-6-luna", api_key="test")
+    client = AICall(model="openai/example-model", api_key="test")
     with patch("app.core.aicall.client.ChatOpenAI") as model:
         client._create_chat_model(node_id="remediation")
         client._create_chat_model(node_id="context_compaction", disable_streaming=True)

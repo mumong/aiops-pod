@@ -75,18 +75,16 @@ Three repositories work together: this one (the agent), the [MCP tool service](h
 
 The deploy host needs `git`, `make`, `kubectl` (pointing at the target cluster) and `python3` with PyYAML. Install the observability components first (single cluster: Prometheus / Elasticsearch / Tempo, addresses configured in the MCP repository; multi-cluster: VictoriaMetrics / VictoriaLogs on the center).
 
-### 0. Clone and fill in the model settings (once)
+### 0. Clone (once)
 
 ```bash
 mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/mcpstander.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
 git clone --branch main ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
-cp holmegpt-agent/deploy/secrets/core.yaml.example holmegpt-agent/deploy/secrets/core.yaml
-vi holmegpt-agent/deploy/secrets/core.yaml   # LLM_MODEL, LLM_API_BASE, LLM_API_KEY, MODEL_CONTEXT_WINDOW
 ```
 
-`core.yaml` is in `.gitignore`. Every `make deploy` writes it to the cluster Secret, so it must hold the real settings.
+The model settings `holmegpt-agent/deploy/secrets/core.yaml` ship with working defaults (internal Qwen3.6), so you can deploy as-is; to switch models, edit that file and run `make deploy`. Every `make deploy` writes it to the cluster Secret.
 
 ### 1. Single cluster
 
@@ -244,7 +242,7 @@ make test-a2a       # A2A tests (needs .venv-a2a)
 make release        # build and push images, then roll the deployment
 ```
 
-Layout: `app/` service code (`python -m app`), `a2a_adapter/` A2A adapter, `aiops_edge/` multi-cluster access (kubectl shim and edge runner), `deploy/` single-cluster manifests and configuration (Secret template `deploy/secrets/core.yaml.example`), `deploy-edge/` multi-cluster center and edge manifests, `tests/` all tests (`unit`, `a2a`, `acceptance` scripts, `cases` fault cases, `quality` evaluation), `scripts/` run reports, env-var doc generator and command-line clients, `docs/` documentation (`docs/specs` holds development records).
+Layout: `app/` service code (`python -m app`), `a2a_adapter/` A2A adapter, `aiops_edge/` multi-cluster access (kubectl shim and edge runner), `deploy/` single-cluster manifests and configuration (model settings `deploy/secrets/core.yaml`), `deploy-edge/` multi-cluster center and edge manifests, `tests/` all tests (`unit`, `a2a`, `acceptance` scripts, `cases` fault cases, `quality` evaluation), `scripts/` run reports, env-var doc generator and command-line clients, `docs/` documentation (`docs/specs` holds development records).
 
 Reports and tool archives are written to `/tmp/aiops/reports` inside the Pod (PVC). Source code may differ from the version currently deployed, and historical test scores do not represent the current deployment.
 
