@@ -107,11 +107,12 @@ deploy:
 		kubectl rollout status deployment/aiops-copilot-frontend -n aiops --timeout=300s; \
 	fi
 
+# Secret 按名字删：不依赖本地 Secret 文件（多集群中心的 Secret 来自 deploy-edge/center/secret.yaml）
 delete:
 	@echo "Deleting app resources only (keeping namespace, PVC and PV)..."
 	kubectl delete deployment/aiops-copilot service/aiops-copilot -n aiops --ignore-not-found
 	kubectl delete -f deploy/rbac.yaml --ignore-not-found
-	kubectl delete -f deploy/secrets/ --recursive --ignore-not-found
+	kubectl delete secret aiops-secret -n aiops --ignore-not-found
 	kubectl delete -f deploy/configmap/ --recursive --ignore-not-found
 
 restart:
