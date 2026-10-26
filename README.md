@@ -112,23 +112,24 @@ curl -fsS http://$IP:30800/health && printf "\n前端：http://$IP:30081\n"
 
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
-make mc-discover                      # 列出 xnet 已接入的集群
-vi deploy-edge/clusters.mc.yaml       # 用输出替换 clusters 下的 default、center、items（保留 access）；别名可改；核对 VictoriaMetrics/VictoriaLogs 地址
-make mc-init                          # 证书、签名密钥、集群配置 → mcp 和 aiops 命名空间
+make mc-discover WRITE=1              # 把 xnet 已接入的集群写进 deploy-edge/clusters.mc.yaml 的 ### 之间（不加 WRITE=1 只打印）
+make mc-init                          # 证书、签名密钥、集群配置 → mcp 和 aiops 命名空间；最后打印边缘要执行的命令
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
 cd ~/aiops-workspace/aiops-frount   && make deploy-mc   # 前端端口 30082（30081 被 xnet 占用）
 ```
 
-**每个边缘**部署一个 runner（边缘 kubeconfig 放在中心的 `~/.kube/aiops-mc/<别名>`）：
+集群配置里只有 `### 替换开始 ### … ### 替换结束 ###` 之间的集群列表随环境变化，别名可按习惯改；VictoriaMetrics / VictoriaLogs 地址在 `### 核对 ###` 处，不是默认的 helm release `vm` 时才改。
+
+**每个边缘**部署一个 runner。在边缘节点上克隆同一份代码，执行 `make mc-init` 最后打印的那条命令（不需要任何 kubeconfig）：
 
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
-make edge-deploy EDGE=edge-88                    # 默认 2 级权限
-make edge-deploy EDGE=edge-89 RUNNER_LEVEL=1     # 1 只读 / 2 标准 / 3 管理员
+make edge-deploy EDGE=local RUNNER_KEY=<mc-init 打印的值>                    # 默认 2 级权限
+make edge-deploy EDGE=local RUNNER_KEY=<mc-init 打印的值> RUNNER_LEVEL=1     # 1 只读 / 2 标准 / 3 管理员
 ```
 
-不想把边缘 kubeconfig 放到中心时，也可以在边缘节点上执行：先把中心的 `~/.kube/aiops-mc/runner.key` 拷到边缘同一路径，再执行 `make edge-deploy EDGE=local`。
+`RUNNER_KEY` 是中心与 runner 之间的签名密钥（中心签名请求，runner 验签），不是 kubeconfig。kubeconfig 只在部署这一刻用来 `kubectl apply`：在边缘节点上执行就是它本机的 kubectl；运行时中心经 xnet 隧道访问 runner，runner 用自己的 ServiceAccount，都不需要 kubeconfig。如果想在中心一处部署所有边缘，也可以把边缘 kubeconfig 放到中心的 `~/.kube/aiops-mc/<别名>`，再执行 `make edge-deploy EDGE=<别名>`。
 
 验证：打开 `http://<中心IP>:30082` 问"我有哪些集群？"，各集群应显示为在线；再问"edge-88 有什么 Pod 异常？"。
 

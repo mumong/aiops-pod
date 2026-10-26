@@ -106,27 +106,28 @@ curl -fsS http://$IP:30800/health && printf "\nfrontend: http://$IP:30081\n"
 
 Prerequisites: the edges are connected to the center through xnet-cloud (`kubectl get nodes` on the center lists a `vc-…` virtual Node per edge), and each edge's vmagent / vlagent pushes to VictoriaMetrics / VictoriaLogs on the center. `make mc-init` handles the xnet certificate and the runner signing key.
 
-**Center** (run on the center node, kubectl pointing at the center):
+**Center** (run on a center node, kubectl pointing at the center):
 
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
-make mc-discover                      # lists the clusters connected through xnet
-vi deploy-edge/clusters.mc.yaml       # replace default, center and items under clusters with the output (keep access); rename aliases; check the VictoriaMetrics/VictoriaLogs URLs
-make mc-init                          # certificate, signing key, cluster config -> mcp and aiops namespaces
+make mc-discover WRITE=1              # writes the clusters joined through xnet between the ### markers of deploy-edge/clusters.mc.yaml (without WRITE=1 it only prints)
+make mc-init                          # certificate, signing key, cluster config → mcp and aiops namespaces; prints the edge command at the end
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
-cd ~/aiops-workspace/aiops-frount   && make deploy-mc   # frontend on 30082 (xnet uses 30081)
+cd ~/aiops-workspace/aiops-frount   && make deploy-mc   # frontend on port 30082 (30081 is taken by xnet)
 ```
 
-**Each edge** gets one runner (edge kubeconfigs in `~/.kube/aiops-mc/<alias>` on the center):
+Only the cluster list between `### 替换开始 ### … ### 替换结束 ###` changes per environment (aliases may be edited); the VictoriaMetrics / VictoriaLogs addresses sit under `### 核对 ###` and change only if the helm release is not `vm`.
+
+**Each edge** gets one runner. Clone the same code on an edge node and run the command `make mc-init` printed (no kubeconfig needed):
 
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
-make edge-deploy EDGE=edge-88                    # level 2 by default
-make edge-deploy EDGE=edge-89 RUNNER_LEVEL=1     # 1 read-only / 2 standard / 3 admin
+make edge-deploy EDGE=local RUNNER_KEY=<value printed by mc-init>                    # level 2 by default
+make edge-deploy EDGE=local RUNNER_KEY=<value printed by mc-init> RUNNER_LEVEL=1     # 1 read-only / 2 standard / 3 admin
 ```
 
-To run it on the edge node instead, copy the center's `~/.kube/aiops-mc/runner.key` to the same path on the edge and run `make edge-deploy EDGE=local`.
+`RUNNER_KEY` is the signing key between the center and the runner (the center signs, the runner verifies), not a kubeconfig. A kubeconfig is only used at deploy time for `kubectl apply`; on the edge node that is its own kubectl. At runtime the center reaches the runner through the xnet tunnel and the runner uses its own ServiceAccount, so no kubeconfig is involved. To deploy every edge from the center instead, put the edge kubeconfigs under `~/.kube/aiops-mc/<alias>` on the center and run `make edge-deploy EDGE=<alias>`.
 
 Check: open `http://<center IP>:30082`, ask "which clusters do I have?" (all should be online), then "what Pods are failing on edge-88?".
 

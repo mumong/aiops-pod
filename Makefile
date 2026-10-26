@@ -269,14 +269,16 @@ edge-target:
 	@test -z "$(EDGE_KUBECONFIG)" || test -f "$(EDGE_KUBECONFIG)" || { echo "找不到 $(EDGE_KUBECONFIG)" >&2; exit 1; }
 	@echo "边缘目标：$$($(EDGE_KUBECTL) config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo '?')（$(if $(EDGE_KUBECONFIG),$(EDGE_KUBECONFIG),当前上下文)）"
 
-# 列出 xnet 已接入的集群（虚拟 Node），输出可直接粘贴进集群配置的条目；只读
+# 列出 xnet 已接入的集群（虚拟 Node），输出替换集群配置中 ### 之间的部分；WRITE=1 直接写入 $(MC_CLUSTERS_FILE)
 mc-discover:
-	@$(CENTER_KUBECTL) get nodes -l node-role.kubernetes.io/xnet-agent -o json | $(PYTHON) deploy-edge/discover_clusters.py
+	@$(CENTER_KUBECTL) get nodes -l node-role.kubernetes.io/xnet-agent -o json | \
+		$(PYTHON) deploy-edge/discover_clusters.py $(if $(WRITE),$(MC_CLUSTERS_FILE))
 
 # 在边缘集群部署 runner：make edge-deploy EDGE=edge-88（用 $(MC_KUBE_DIR)/edge-88）或 EDGE=local（当前上下文）
-# 签名密钥来自本机 $(MC_KEY_FILE)：在边缘节点上执行时，先把中心生成的这个文件拷过去
+# 签名密钥来自本机 $(MC_KEY_FILE)；在边缘节点上执行时用 RUNNER_KEY=<值> 传入（make mc-init 会打印完整命令）
 edge-deploy: edge-target
-	@test -f $(MC_KEY_FILE) || { echo "缺少签名密钥 $(MC_KEY_FILE)：先在中心执行 make mc-init，再把该文件拷到这台机器" >&2; exit 1; }
+	@if test -n "$(RUNNER_KEY)"; then umask 077; mkdir -p $(dir $(MC_KEY_FILE)); printf '%s\n' "$(RUNNER_KEY)" > $(MC_KEY_FILE); fi
+	@test -f $(MC_KEY_FILE) || { echo "缺少签名密钥：在中心执行 make mc-init，按它打印的命令带上 RUNNER_KEY=…" >&2; exit 1; }
 	@$(EDGE_KUBECTL) create namespace aiops --dry-run=client -o yaml | $(EDGE_KUBECTL) apply -f -
 	@$(PYTHON) deploy-edge/render_policy.py deploy/configmap/config.yaml > /tmp/aiops-edge-policy.$$$$.json \
 		&& $(EDGE_KUBECTL) -n aiops create configmap aiops-edge-runner-policy \
@@ -306,6 +308,8 @@ edge-delete: edge-target
 # 只读 xnet，不在 xnet 命名空间创建任何对象。集群配置或证书变化后重新执行，再重启 MCP 和 AIOps。
 mc-init: mc-keygen
 	@test -f $(MC_CLUSTERS_FILE) || { echo "缺少集群配置 $(MC_CLUSTERS_FILE)（make mc-discover 可列出已接入的集群）" >&2; exit 1; }
+	@! sed -n '/### 替换开始/,/### 替换结束/p' $(MC_CLUSTERS_FILE) | grep -v '^ *#' | grep -q '<' || \
+		{ echo "集群配置 $(MC_CLUSTERS_FILE) 还是模板占位：先执行 make mc-discover WRITE=1（或手动替换 ### 之间的内容）" >&2; exit 1; }
 	@set -e; d=$$(mktemp -d); trap 'rm -rf $$d' EXIT; K="$(CENTER_KUBECTL)"; \
 	if test -n "$(XNET_CERT_DIR)"; then \
 		cp $(XNET_CERT_DIR)/cert.pem $(XNET_CERT_DIR)/key.pem $(XNET_CERT_DIR)/ca.pem $$d/; \
@@ -324,6 +328,8 @@ mc-init: mc-keygen
 			--dry-run=client -o yaml | $$K apply -f - >/dev/null; \
 	done; \
 	echo "mc-init: mcp、aiops 命名空间已更新（xnet 证书、签名密钥、集群配置）；证书有效期至 $$(openssl x509 -noout -enddate -in $$d/cert.pem | cut -d= -f2)"
+	@echo "边缘部署 runner：在每个边缘节点的 holmegpt-agent 目录执行（不需要 kubeconfig）："
+	@echo "  make edge-deploy EDGE=local RUNNER_KEY=$$(cat $(MC_KEY_FILE))"
 
 # 旧名称，等同 mc-init
 sync-xnet-cert: mc-init

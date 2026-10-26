@@ -6,12 +6,17 @@ and the ``cluster`` label of the observability data. The center carries xnet's o
 ``node-role.kubernetes.io/self`` label. Only names, Ready, uuid, alias and the
 panorama IP are read; the join-token annotation is never read or printed.
 
-The output is the ``clusters:`` block of deploy-edge/clusters.mc.yaml; aliases are
-suggestions (xnet alias, else ``edge-<last IP octet>``) to edit before use.
+The output is the part of deploy-edge/clusters.mc.yaml between its ``### 替换开始`` and
+``### 替换结束 ###`` markers, framed by the same markers; aliases are suggestions (xnet
+alias, else ``edge-<last IP octet>``) to edit before use.
 """
 
 import json
 import sys
+
+# The same marker lines frame the replaceable block in deploy-edge/clusters.mc.yaml.
+BEGIN = "### 替换开始：在中心执行 make mc-discover，用输出中两行 ### 之间的内容整段替换这里 ###"
+END = "### 替换结束 ###"
 
 
 def _ip(annotations):
@@ -64,10 +69,9 @@ def entries(nodes):
 def render(items):
     center = next((e["name"] for e in items if e["center"]), None)
     lines = [
-        "# make mc-discover：xnet 已接入的集群。别名是建议值，可按习惯修改；",
-        "# 用下面的 default、center、items 替换集群配置（默认 deploy-edge/clusters.mc.yaml）中 clusters 下的同名三项；",
-        "# 保留 clusters.access（xnet 隧道与证书设置）和文件其余部分，否则 xnet 集群会因缺少 access 无法加载。",
-        "clusters:",
+        "# make mc-discover：xnet 已接入的集群。把下面两行 ### 之间的内容（含这两行）整段替换到",
+        "# deploy-edge/clusters.mc.yaml 中同样两行 ### 之间；别名是建议值，可按习惯修改。",
+        f"  {BEGIN}",
         "  default: null",
         f"  center: {center or 'null'}",
         "  items:",
@@ -82,8 +86,27 @@ def render(items):
         ]
     if not items:
         lines.append("    []   # 没有发现 xnet 虚拟 Node：xnet 未安装，或边缘尚未加入")
+    lines.append(f"  {END}")
     return "\n".join(lines)
 
 
+def replace_block(template, rendered):
+    """The template with its marked block swapped for the marked block of ``rendered``."""
+    begin, end = "  " + BEGIN, "  " + END
+    if begin not in template or end not in template:
+        raise SystemExit("集群配置里找不到 ### 替换开始 / 替换结束 ### 标记，请手动替换")
+    start, stop = template.index(begin), template.index(end) + len(end)
+    return template[:start] + rendered[rendered.index(begin) :].rstrip("\n") + template[stop:]
+
+
 if __name__ == "__main__":
-    print(render(entries(json.load(sys.stdin))))
+    rendered = render(entries(json.load(sys.stdin)))
+    if len(sys.argv) > 1:  # make mc-discover WRITE=1: update the cluster config in place
+        path = sys.argv[1]
+        with open(path, encoding="utf-8") as f:
+            updated = replace_block(f.read(), rendered)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(updated)
+        print(f"已写入 {path}（### 之间的集群列表）；别名可按习惯修改")
+    else:
+        print(rendered)

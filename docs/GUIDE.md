@@ -88,7 +88,7 @@ curl -fsS http://<节点IP>:30801/.well-known/agent-card.json
 | 场景 | 命令 |
 |---|---|
 | 改了 `config.yaml`、Runbook 或 `core.yaml` | 单集群 `make deploy`，多集群中心 `make deploy-mc`（Agent 仓库） |
-| 新增一个边缘 | 中心：`make mc-discover` → 用输出更新 `clusters.mc.yaml` 的 `clusters.items`（保留 `access`） → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → `make edge-deploy EDGE=<新边缘>` |
+| 新增一个边缘 | 中心：`make mc-discover WRITE=1`（更新 `clusters.mc.yaml` 中 ### 之间的集群列表，会覆盖手改的别名） → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → 新边缘节点上执行 `mc-init` 打印的 `make edge-deploy EDGE=local RUNNER_KEY=…` |
 | 修改高危命令规则（`workflow.remediation`） | 中心 `make deploy-mc`，并对每个边缘重新执行 `make edge-deploy`（规则随 runner 下发） |
 | xnet 证书轮换 | Agent 仓库和 MCP 仓库各执行 `make deploy-mc` |
 | 使用运维提供的专用 xnet 证书 | `make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>` |
@@ -100,7 +100,9 @@ curl -fsS http://<节点IP>:30801/.well-known/agent-card.json
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `CENTER_KUBECONFIG` | `~/.kube/aiops-mc/center`，不存在时用当前上下文 | 中心集群 |
-| `EDGE` | 无，必须指定 | `EDGE=edge-88` 使用 `~/.kube/aiops-mc/edge-88`；`EDGE=local` 使用当前上下文 |
+| `EDGE` | 无，必须指定 | `EDGE=local` 使用本机当前上下文（在边缘节点上执行）；`EDGE=edge-88` 使用 `~/.kube/aiops-mc/edge-88`（在中心集中部署） |
+| `RUNNER_KEY` | 空 | runner 签名密钥的值，写入 `MC_KEY_FILE` 后部署；在边缘节点上执行时使用，`make mc-init` 会打印 |
+| `WRITE` | 空 | `make mc-discover WRITE=1` 直接写入集群配置中 ### 之间的部分 |
 | `RUNNER_LEVEL` | `2` | runner 权限等级 1 / 2 / 3 |
 | `A2A_PUBLIC_HOST` / `MC_A2A_PUBLIC_URL` | 本集群第一个节点（多集群跳过 xnet 虚拟 Node） | Agent Card 里对外公布的 A2A 地址（单集群 / 多集群中心） |
 | `MC_SECRET_FILE` | 有 `deploy-edge/center/secret.yaml` 就用它，否则用 `deploy/secrets/core.yaml` | 中心的模型配置；同一台机器同时部署单集群和中心、两边模型不同时使用（该文件不入库） |

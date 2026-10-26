@@ -1,23 +1,16 @@
-# Cluster configuration for the three-cluster test env (docs/specs/008-multi-cluster).
-# Mounted into the center's MCP and AIOps as ConfigMap aiops-clusters.
-# Contains no credentials and no edge API server address (spec FR-016): edge
-# clusters are reached only through the xnet tunnel and our edge runner.
+# 多集群配置（中心的 MCP 和 AIOps 挂载为 ConfigMap aiops-clusters，make mc-init 写入）。
+# 不含任何凭据和边缘 API Server 地址：边缘只经 xnet 隧道和我们的边缘 runner 访问。
+# 每套环境的集群不同，只需改 ### 标出的两处，其余保持不变。
 clusters:
-  default: null                  # multi-cluster: the user must name the scope
-  center: vc-xnet-management     # what "中心集群" refers to; also "local"
+  ### 替换开始：在中心执行 make mc-discover，用输出中两行 ### 之间的内容整段替换这里 ###
+  default: null
+  center: <中心的 xnet 虚拟 Node 名>
   items:
-    - name: vc-xnet-management
-      aliases: [center, 中心集群, 中心]
+    - name: <虚拟 Node 名>
+      aliases: [<别名>]
       access: local
       observability: victoria
-    - name: vc-942nkkozc8o5fyb9q3bznb1ws
-      aliases: [edge-88]
-      access: xnet
-      observability: victoria
-    - name: vc-dluw0jousipr6h5co2bwpyqk2
-      aliases: [edge-89]
-      access: xnet
-      observability: victoria
+  ### 替换结束 ###
   access:
     xnet:
       proxy_url: https://xnet-management.xnet.svc:9090/proxy
@@ -30,14 +23,15 @@ clusters:
       call_timeout_seconds: 15
 
 observability_profiles:
+  ### 核对：中心 VictoriaMetrics / VictoriaLogs 的 Service 地址（下面是 helm release 名为 vm、命名空间 monitor 时的地址）###
   victoria:
     metrics: {type: victoriametrics, url: "http://vmselect-vm-victoria-metrics-k8s-stack.monitor.svc:8481/select/0/prometheus", cluster_label: cluster}
     logs: {type: victorialogs_events, url: "http://vlsingle-vm-victoria-metrics-k8s-stack.monitor.svc:9428", cluster_field: cluster}
     traces: {type: none}
+  ### 核对结束 ###
 
-# Operator-declared expected states (app/core/workflow/expected_states.py). A target is
-# excluded only when live data matches: the Pod belongs to the workload, is Running
-# with all containers running (only readiness failing), and healthy_when holds.
+# 运维声明的「看着异常、实际正常」状态（app/core/workflow/expected_states.py）。只有实时数据吻合时才排除：
+# Pod 属于该工作负载、处于 Running、只是 readiness 不通过，且 healthy_when 成立。下面这条是 xnet 中心固有的，保留即可。
 expected_states:
   - cluster: center
     namespace: xnet
