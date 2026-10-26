@@ -113,13 +113,16 @@ Open `http://<node IP>:30082` (the center IP for multi-cluster) and ask:
 | Run a command | "helm list", "重启 default/nginx" (restart default/nginx) |
 
 ### API (scripts and other systems)
-The same flow over HTTP; `session_id` ties calls into one conversation, a cookie keeps the identity:
+Queries and diagnoses take one command (`/ask` decides whether it is a query, a diagnosis or a command):
 ```bash
-B=http://<node IP>:30800; S=my-session-0001; J=jar.txt
-curl -N -c $J -b $J -X POST $B/query -d 'q=各节点 CPU 和内存使用率是多少？' -d session_id=$S   # query
-curl -N -c $J -b $J -X POST $B/ask   -d 'q=我的集群 Pod 有什么问题？' -d session_id=$S       # diagnose
-curl -N -c $J -b $J -X POST $B/ask   -d 'q=修复刚刚的问题' -d session_id=$S                  # plan a repair
-curl -b $J $B/repair/batches/batch-<diagnosis run_id>                                       # plan and pending approvals
+curl -N -G http://<node IP>:30800/ask --data-urlencode "q=我的集群现在有什么问题？"
+```
+To continue with a repair, link the calls into one session: pass the same `session_id` and keep the identity cookie with `-c/-b jar.txt` (repair records are visible only to the identity that ran the diagnosis):
+```bash
+B=http://<node IP>:30800; S=my-session-0001
+curl -N -G $B/ask --data-urlencode "q=我的集群现在有什么问题？" -d session_id=$S -c jar.txt -b jar.txt   # diagnose
+curl -N -G $B/ask --data-urlencode "q=修复刚刚的问题" -d session_id=$S -c jar.txt -b jar.txt             # plan a repair
+curl -b jar.txt $B/repair/batches/batch-<diagnosis run_id>                                              # plan and pending approvals
 ```
 Approval, plan feedback and cancel are in [HTTP API](docs/api.md); other agents call the standard A2A endpoint (`:30801`), see [A2A](docs/a2a.md).
 

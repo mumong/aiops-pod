@@ -113,13 +113,16 @@ cd ~/aiops-workspace/holmegpt-agent && make edge-delete EDGE=local
 | 执行命令 | "helm list"、"重启 default/nginx" |
 
 ### API（脚本 / 其他系统）
-同一套流程的 HTTP 接口，`session_id` 把多次调用串成一个会话，cookie 保存身份：
+查询和诊断一条命令即可（`/ask` 会自己判断是查询、诊断还是执行）：
 ```bash
-B=http://<节点IP>:30800; S=my-session-0001; J=jar.txt
-curl -N -c $J -b $J -X POST $B/query -d 'q=各节点 CPU 和内存使用率是多少？' -d session_id=$S   # 查询
-curl -N -c $J -b $J -X POST $B/ask   -d 'q=我的集群 Pod 有什么问题？' -d session_id=$S       # 诊断
-curl -N -c $J -b $J -X POST $B/ask   -d 'q=修复刚刚的问题' -d session_id=$S                  # 生成修复方案
-curl -b $J $B/repair/batches/batch-<诊断 run_id>                                             # 查看方案与待审批项
+curl -N -G http://<节点IP>:30800/ask --data-urlencode "q=我的集群现在有什么问题？"
+```
+要接着修复，就把几次调用连成一个会话：带同一个 `session_id`，并用 `-c/-b jar.txt` 保存、回传身份 cookie（修复记录只对发起诊断的身份可见）：
+```bash
+B=http://<节点IP>:30800; S=my-session-0001
+curl -N -G $B/ask --data-urlencode "q=我的集群现在有什么问题？" -d session_id=$S -c jar.txt -b jar.txt   # 诊断
+curl -N -G $B/ask --data-urlencode "q=修复刚刚的问题" -d session_id=$S -c jar.txt -b jar.txt             # 生成修复方案
+curl -b jar.txt $B/repair/batches/batch-<诊断 run_id>                                                   # 查看方案与待审批项
 ```
 审批、修改方案、取消等接口见 [HTTP API](docs/api.md)；其他 Agent 用标准 A2A 调用（`:30801`），见 [A2A](docs/a2a.md)。
 
