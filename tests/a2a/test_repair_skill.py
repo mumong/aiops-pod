@@ -86,6 +86,11 @@ class RepairBackend:
         }
 
     async def approve(self, job_id, approval_id, approved, reviewer="", reason=""):
+        if self.status != "awaiting_approval":
+            # Like the backend: a decided approval is gone (HTTP 404).
+            raise RuntimeError(
+                'AIOps backend returned HTTP 404: {"detail":"审批请求不存在或已失效"}'
+            )
         self.approvals.append((job_id, approval_id, approved, reviewer))
         self.status = "recovered" if approved else "rejected"
         return {"job_id": job_id, "status": self.status}
@@ -118,6 +123,11 @@ def _settings():
     [
         {"data": {"approval_id": "appr-123456", "approved": True, "reviewer": "ops-bot"}},
         {"text": "批准 appr-123456"},
+        # LLM hosts often send both forms of one decision; it must be submitted once.
+        {
+            "text": "批准 appr-123456",
+            "data": {"approval_id": "appr-123456", "approved": True, "reviewer": "ops-bot"},
+        },
     ],
 )
 async def test_repair_pauses_for_approval_and_resumes_in_the_same_task(reply):
@@ -152,7 +162,7 @@ async def test_repair_pauses_for_approval_and_resumes_in_the_same_task(reply):
             )
         ).json()["result"]
     assert second["status"]["state"] == "completed"
-    assert backend.approvals[0][:3] == ("job-1", "appr-123456", True)
+    assert [a[:3] for a in backend.approvals] == [("job-1", "appr-123456", True)]
     repair = [a for a in second["artifacts"] if a["name"] == "kubernetes-aiops-repair.md"][0]
     assert "recovered" in repair["parts"][0]["text"]
 

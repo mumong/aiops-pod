@@ -414,7 +414,13 @@ class AiopsAgentExecutor(AgentExecutor):
                     "approved": verb.lower() in {"批准", "同意", "approve"},
                 }
             )
-        return decisions
+        # One decision per approval: callers often send the text and the DataPart form of
+        # the same answer, and a second submission of a decided approval is a backend 404.
+        # The first (DataPart, then text order) wins.
+        unique: dict[str, dict[str, Any]] = {}
+        for decision in decisions:
+            unique.setdefault(str(decision["approval_id"]), decision)
+        return list(unique.values())
 
     async def _resume_repair(self, context: RequestContext, updater: TaskUpdater) -> None:
         batch_id = self._batch_of(context)
