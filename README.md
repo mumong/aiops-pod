@@ -1,16 +1,17 @@
 # K8s AIOps Copilot
+![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-[English](README.en.md) | **中文**
+[English](README.en.md) | 简体中文
 
 ## 目录
-- [简介](#简介)
-- [核心能力](#核心能力)
+- [项目概述](#项目概述)
+- [核心功能](#核心功能)
 - [快速开始](#快速开始)
-- [架构](#架构)
+- [架构设计](#架构设计)
 - [文档](#文档)
-- [License](#license)
+- [许可证](#许可证)
 
-## 简介
+## 项目概述
 面向 Kubernetes 的智能运维助手：用自然语言查询集群、诊断异常 Pod、生成并执行修复方案。
 - 结论附带证据：现象、根因、依据和未知项
 - 修复默认人工审批，高危命令一律拦截
@@ -18,12 +19,16 @@
 
 ![异常诊断与分组证据](docs/screenshots/pod-diagnosis-evidence.png)
 
-## 核心能力
+## 核心功能
+### 诊断与修复
 ✔️ 异常诊断：调度、镜像、挂载、配置、CrashLoop、OOM、探针、删除阻塞等  
-✔️ 指标、日志、链路三类数据经 MCP 实时查询，多个异常 Pod 并行分析  
+✔️ 指标、日志、链路经 MCP 实时查询，多个异常 Pod 并行分析  
 ✔️ 修复闭环：方案 → 审批 → 执行 → 恢复观察，全程审计  
-✔️ 多集群：中心统一查询和修复，边缘只部署一个 runner  
-✔️ 对外接入：HTTP/SSE、聊天前端、标准 A2A（供其他 Agent 调用）  
+
+### 多集群与接入
+⚡ 中心统一查询和修复，边缘只部署一个 runner  
+⚡ 经 xnet 隧道访问边缘，不需要边缘 kubeconfig  
+⚡ HTTP/SSE、聊天前端、标准 A2A（供其他 Agent 调用）  
 
 ## 快速开始
 ### 环境要求
@@ -50,7 +55,7 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 ### 多集群
 前提：边缘已经通过 xnet 接入中心（在中心执行 `kubectl get nodes`，能看到 `vc-…` 虚拟 Node）。
 
-**中心**（在中心节点执行）：
+#### 安装中心（在中心节点执行）
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make mc-discover WRITE=1     # 已接入的集群写入 deploy-edge/clusters.mc.yaml（### 之间）
@@ -60,7 +65,7 @@ cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
 cd ~/aiops-workspace/aiops-frount   && make deploy-mc
 ```
 
-**每个边缘**（在边缘节点执行，不需要 kubeconfig）：
+#### 加入边缘（在每个边缘节点执行，不需要 kubeconfig）
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make edge-deploy EDGE=local RUNNER_KEY=<mc-init 打印的值>   # RUNNER_LEVEL=1|2|3，默认 2
@@ -78,7 +83,7 @@ make case-deploy CASE=c08    # OOMKilled，全部 Case：make case-list
 echo <新版本号> > VERSION && make build push deploy   # 多集群中心把 deploy 换成 deploy-mc
 ```
 
-## 架构
+## 架构设计
 ```
 用户 / 前端 / A2A ──> AIOps Agent ──> MCP 工具 ──> K8s API、指标、日志、链路
                          │                └─(多集群) xnet 隧道 ──> 边缘 runner ──> 边缘 K8s
@@ -96,5 +101,5 @@ echo <新版本号> > VERSION && make build push deploy   # 多集群中心把 d
 
 开发：Python 3.12，`make check` 运行 lint 和单元测试。
 
-## License
+## 许可证
 [Apache License 2.0](LICENSE)。第三方代码保留各自的许可证。

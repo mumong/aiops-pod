@@ -1,6 +1,7 @@
 # K8s AIOps Copilot
+![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-**English** | [中文](README.md)
+English | [简体中文](README.md)
 
 ## Table of contents
 - [Overview](#overview)
@@ -19,11 +20,15 @@ An AIOps assistant for Kubernetes: query clusters in natural language, diagnose 
 ![Diagnosis with grouped evidence](docs/screenshots/pod-diagnosis-evidence.png)
 
 ## Key features
+### Diagnosis and repair
 ✔️ Diagnosis: scheduling, image, mount, config, CrashLoop, OOM, probes, stuck deletion and more  
 ✔️ Live metrics, logs and traces through MCP; several failing Pods analysed in parallel  
 ✔️ Repair loop: plan → approve → execute → recovery watch, all audited  
-✔️ Multi-cluster: query and repair from the center; each edge runs only one runner  
-✔️ Integration: HTTP/SSE, chat frontend, standard A2A for other agents  
+
+### Multi-cluster and integration
+⚡ Query and repair from the center; each edge runs only one runner  
+⚡ Edges reached through the xnet tunnel, no edge kubeconfig needed  
+⚡ HTTP/SSE, chat frontend, standard A2A for other agents  
 
 ## Quick start
 ### Requirements
@@ -50,7 +55,7 @@ Open `http://<node IP>:30082`. API: `:30800`; A2A: `:30801` (see [A2A](docs/a2a.
 ### Multi-cluster
 Prerequisite: the edges have joined the center through xnet (`kubectl get nodes` on the center shows `vc-…` virtual Nodes).
 
-**Center** (run on a center node):
+#### Install the center (run on a center node)
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make mc-discover WRITE=1     # writes the joined clusters into deploy-edge/clusters.mc.yaml (between ###)
@@ -60,7 +65,7 @@ cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
 cd ~/aiops-workspace/aiops-frount   && make deploy-mc
 ```
 
-**Each edge** (run on an edge node, no kubeconfig needed):
+#### Join an edge (run on each edge node, no kubeconfig needed)
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make edge-deploy EDGE=local RUNNER_KEY=<value printed by mc-init>   # RUNNER_LEVEL=1|2|3, default 2
