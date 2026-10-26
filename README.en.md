@@ -7,6 +7,7 @@ English | [简体中文](README.md)
 - [Overview](#overview)
 - [Key features](#key-features)
 - [Quick start](#quick-start)
+- [Usage](#usage)
 - [Architecture](#architecture)
 - [Documentation](#documentation)
 - [License](#license)
@@ -76,7 +77,7 @@ Open `http://<center IP>:30082` and ask "which clusters do I have?".
 ```bash
 make case-deploy CASE=c08    # OOMKilled; all cases: make case-list
 ```
-Ask in the frontend "why does the Pod in aiops-case-08 keep restarting?", then click "生成修复方案" (generate repair plan) under the report. Clean up with `make case-clean CASE=c08`.
+Ask in the frontend "why does the Pod in aiops-case-08 keep restarting?", then click "生成自动修复方案" (generate repair plan) under the report. Clean up with `make case-clean CASE=c08`.
 
 ### Upgrade
 ```bash
@@ -97,6 +98,29 @@ cd ~/aiops-workspace/mcpstander     && make delete
 cd ~/aiops-workspace/holmegpt-agent && make edge-delete EDGE=local
 ```
 `make delete` keeps the namespaces and the run history (PVC); to remove the history too: `kubectl delete namespace aiops mcp`.
+
+## Usage
+### Web (recommended)
+Open `http://<node IP>:30082` (the center IP for multi-cluster) and ask:
+
+| Goal | Example |
+|---|---|
+| Query | "各节点 CPU 和内存使用率是多少？" (CPU and memory usage per node) |
+| Diagnose | "我的集群 Pod 有什么问题？" (what is wrong with my Pods), "aiops-case-08 的 Pod 为什么一直重启？" |
+| Multi-cluster | "我有哪些集群？" (which clusters), "edge-88 有什么 Pod 异常？" (it asks which cluster when none is named) |
+| Repair | Click "生成自动修复方案" under the report → approve each action → recovery is watched automatically |
+| Run a command | "helm list", "重启 default/nginx" (restart default/nginx) |
+
+### API (scripts and other systems)
+The same flow over HTTP; `session_id` ties calls into one conversation, a cookie keeps the identity:
+```bash
+B=http://<node IP>:30800; S=my-session-0001; J=jar.txt
+curl -N -c $J -b $J -X POST $B/query -d 'q=各节点 CPU 和内存使用率是多少？' -d session_id=$S   # query
+curl -N -c $J -b $J -X POST $B/ask   -d 'q=我的集群 Pod 有什么问题？' -d session_id=$S       # diagnose
+curl -N -c $J -b $J -X POST $B/ask   -d 'q=修复刚刚的问题' -d session_id=$S                  # plan a repair
+curl -b $J $B/repair/batches/batch-<diagnosis run_id>                                       # plan and pending approvals
+```
+Approval, plan feedback and cancel are in [HTTP API](docs/api.md); other agents call the standard A2A endpoint (`:30801`), see [A2A](docs/a2a.md).
 
 ## Architecture
 ```

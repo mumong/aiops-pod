@@ -7,6 +7,7 @@
 - [项目概述](#项目概述)
 - [核心功能](#核心功能)
 - [快速开始](#快速开始)
+- [使用方式](#使用方式)
 - [架构设计](#架构设计)
 - [文档](#文档)
 - [许可证](#许可证)
@@ -76,7 +77,7 @@ make edge-deploy EDGE=local RUNNER_KEY=<mc-init 打印的值>   # RUNNER_LEVEL=1
 ```bash
 make case-deploy CASE=c08    # OOMKilled，全部 Case：make case-list
 ```
-在前端问"aiops-case-08 的 Pod 为什么一直重启？"，然后在报告下点"生成修复方案"。用完执行 `make case-clean CASE=c08` 清理。
+在前端问"aiops-case-08 的 Pod 为什么一直重启？"，然后在报告下点"生成自动修复方案"。用完执行 `make case-clean CASE=c08` 清理。
 
 ### 升级
 ```bash
@@ -97,6 +98,29 @@ cd ~/aiops-workspace/mcpstander     && make delete
 cd ~/aiops-workspace/holmegpt-agent && make edge-delete EDGE=local
 ```
 `make delete` 保留命名空间和运行历史（PVC）；要连历史一起删：`kubectl delete namespace aiops mcp`。
+
+## 使用方式
+### 网页（推荐）
+打开 `http://<节点IP>:30082`（多集群用中心 IP），直接提问：
+
+| 想做什么 | 示例 |
+|---|---|
+| 查询 | "各节点 CPU 和内存使用率是多少？" |
+| 诊断 | "我的集群 Pod 有什么问题？"、"aiops-case-08 的 Pod 为什么一直重启？" |
+| 多集群 | "我有哪些集群？"、"edge-88 有什么 Pod 异常？"（没说集群时会先问你查哪个） |
+| 修复 | 诊断报告下点"生成自动修复方案" → 逐个动作批准 → 自动观察是否恢复 |
+| 执行命令 | "helm list"、"重启 default/nginx" |
+
+### API（脚本 / 其他系统）
+同一套流程的 HTTP 接口，`session_id` 把多次调用串成一个会话，cookie 保存身份：
+```bash
+B=http://<节点IP>:30800; S=my-session-0001; J=jar.txt
+curl -N -c $J -b $J -X POST $B/query -d 'q=各节点 CPU 和内存使用率是多少？' -d session_id=$S   # 查询
+curl -N -c $J -b $J -X POST $B/ask   -d 'q=我的集群 Pod 有什么问题？' -d session_id=$S       # 诊断
+curl -N -c $J -b $J -X POST $B/ask   -d 'q=修复刚刚的问题' -d session_id=$S                  # 生成修复方案
+curl -b $J $B/repair/batches/batch-<诊断 run_id>                                             # 查看方案与待审批项
+```
+审批、修改方案、取消等接口见 [HTTP API](docs/api.md)；其他 Agent 用标准 A2A 调用（`:30801`），见 [A2A](docs/a2a.md)。
 
 ## 架构设计
 ```
