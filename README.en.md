@@ -83,6 +83,21 @@ Ask in the frontend "why does the Pod in aiops-case-08 keep restarting?", then c
 echo <new version> > VERSION && make build push deploy   # on a multi-cluster center use deploy-mc instead of deploy
 ```
 
+### Uninstall and clean up
+```bash
+# Failure cases: run on the cluster that has them (on the edge node for edge cases)
+cd ~/aiops-workspace/holmegpt-agent && make case-clean   # every case; just one: make case-clean CASE=c08
+
+# Single cluster; on a multi-cluster center run the same three
+cd ~/aiops-workspace/aiops-frount   && make delete
+cd ~/aiops-workspace/holmegpt-agent && make delete
+cd ~/aiops-workspace/mcpstander     && make delete
+
+# Multi-cluster: on each edge node
+cd ~/aiops-workspace/holmegpt-agent && make edge-delete EDGE=local
+```
+`make delete` keeps the namespaces and the run history (PVC); to remove the history too: `kubectl delete namespace aiops mcp`.
+
 ## Architecture
 ```
 user / frontend / A2A ──> AIOps Agent ──> MCP tools ──> K8s API, metrics, logs, traces

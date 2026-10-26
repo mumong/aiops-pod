@@ -83,6 +83,21 @@ make case-deploy CASE=c08    # OOMKilled，全部 Case：make case-list
 echo <新版本号> > VERSION && make build push deploy   # 多集群中心把 deploy 换成 deploy-mc
 ```
 
+### 卸载与清理
+```bash
+# 异常 Case：在 Case 所在集群执行（边缘的 Case 就在边缘节点执行）
+cd ~/aiops-workspace/holmegpt-agent && make case-clean   # 清理全部 Case；只清一个：make case-clean CASE=c08
+
+# 单集群；多集群时在中心执行同样三条
+cd ~/aiops-workspace/aiops-frount   && make delete
+cd ~/aiops-workspace/holmegpt-agent && make delete
+cd ~/aiops-workspace/mcpstander     && make delete
+
+# 多集群：每个边缘节点执行
+cd ~/aiops-workspace/holmegpt-agent && make edge-delete EDGE=local
+```
+`make delete` 保留命名空间和运行历史（PVC）；要连历史一起删：`kubectl delete namespace aiops mcp`。
+
 ## 架构设计
 ```
 用户 / 前端 / A2A ──> AIOps Agent ──> MCP 工具 ──> K8s API、指标、日志、链路
