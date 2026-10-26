@@ -8,6 +8,7 @@
 - [核心功能](#核心功能)
 - [快速开始](#快速开始)
 - [使用方式](#使用方式)
+- [核心配置](#核心配置)
 - [架构设计](#架构设计)
 - [文档](#文档)
 - [许可证](#许可证)
@@ -121,6 +122,21 @@ curl -N -c $J -b $J -X POST $B/ask   -d 'q=修复刚刚的问题' -d session_id=
 curl -b $J $B/repair/batches/batch-<诊断 run_id>                                             # 查看方案与待审批项
 ```
 审批、修改方案、取消等接口见 [HTTP API](docs/api.md)；其他 Agent 用标准 A2A 调用（`:30801`），见 [A2A](docs/a2a.md)。
+
+## 核心配置
+默认值可直接使用，需要时只改下面几处；改完在对应仓库执行 `make deploy`（多集群中心 `make deploy-mc`）。
+
+| 想改什么 | 位置 | 说明 |
+|---|---|---|
+| **人工审批 / 自动修复** | `deploy/configmap/config.yaml` → `workflow.remediation.mode` | `review`（默认）每个动作人工审批；`auto` 自动执行（生产慎用）。`enabled: false` 只出方案不执行 |
+| 临时切换修复方式 | `PUT /repair/policy/mode`（带 `AIOPS_ADMIN_TOKEN`） | 例 `{"mode":"auto","ttl_minutes":30}`，到期自动回到配置值，不用重新部署；见 [HTTP API](docs/api.md#6-策略与审计) |
+| 高危命令规则 | 同上 `workflow.remediation` 下的 `denied_*`、`approval_required` | 命中禁止规则一律不执行；`approval_required` 即使 auto 也强制人工审批。多集群改完后各边缘重新 `make edge-deploy` |
+| 模型 | `deploy/secrets/core.yaml` | 模型地址、名称、Key、上下文容量 |
+| 指标 / 日志地址 | MCP 仓库 `deploy/configmap.yaml`（`PROMETHEUS_URL`、`ES_URL`）；多集群在 `deploy-edge/clusters.mc.yaml` 的 `### 核对 ###` | 可观测组件换了 namespace 或服务名时改 |
+| 集群列表与别名 | `deploy-edge/clusters.mc.yaml` 的 `### 替换开始 ###` 之间 | 仅多集群；`make mc-discover WRITE=1` 自动生成 |
+| 边缘权限等级 | `make edge-deploy … RUNNER_LEVEL=1\|2\|3` | 1 只读；2（默认）常见修复；3 管理员 |
+
+全部配置项见 [部署与运维](docs/GUIDE.md)。
 
 ## 架构设计
 ```
