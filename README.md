@@ -126,17 +126,19 @@ curl -b jar.txt $B/repair/batches/batch-<诊断 run_id>                         
 ```
 审批、修改方案、取消等接口见 [HTTP API](docs/api.md)；其他 Agent 用标准 A2A 调用（`:30801`），见 [A2A](docs/a2a.md)。
 
-### A2A（像其他 Agent 一样对话测试）
-```bash
-python3 scripts/a2a_chat.py                          # 本节点；其他集群：python3 scripts/a2a_chat.py http://<IP>:30801
-```
-直接提问；需要审批时输入 `y` 全部批准、`n` 全部拒绝；反问时直接回答（如"所有边缘集群"）；`/new` 新对话，`exit` 退出。
+### 接入其他 Agent 系统（A2A）
+A2A 服务是 AIOps Pod 里的 `a2a-adapter` 边车，部署后即可用，对外端口 `30801`。给对方以下信息，在对方的 A2A 系统里登记即可：
 
-### 接入其他 Agent 系统（对外提供 A2A）
-把 Agent Card 地址给对方，在对方的 A2A 系统里登记即可：`http://<节点IP>:30801/.well-known/agent-card.json`（多集群给中心的 IP）。
-- 对方访问不到内网 IP 时，部署时指定对外地址：`make deploy A2A_PUBLIC_URL=https://<域名>`（多集群 `make deploy-mc MC_A2A_PUBLIC_URL=…`）。
-- 需要鉴权时，在 `deploy/secrets/core.yaml` 加 `A2A_API_TOKEN: "<随机串>"` 后 `make deploy`，对方请求带 `Authorization: Bearer <随机串>`。
-- 告诉对方：直接用文字提问；任务停在 `input-required`（反问或审批）时在同一任务回复，审批回复 `批准 <approval_id>`；诊断需要几分钟，建议用 `message/stream`。
+| 给对方 | 内容 |
+|---|---|
+| Agent Card 地址 | `http://<节点IP>:30801/.well-known/agent-card.json`（多集群给中心的 IP） |
+| Token（可选） | 开启鉴权后的 `A2A_API_TOKEN`，对方请求头带 `Authorization: Bearer <token>` |
+
+我方配置（改完 `make deploy`，多集群中心 `make deploy-mc`）：
+- 对外地址：Agent Card 里的调用地址默认是节点 IP；对方访问不到时指定 `A2A_PUBLIC_URL=https://<域名>`（多集群 `MC_A2A_PUBLIC_URL`）。
+- 鉴权：`deploy/secrets/core.yaml` 加 `A2A_API_TOKEN: "<随机串>"`；不配则不鉴权。
+
+对方调用时：直接用文字提问；任务停在 `input-required`（反问或审批）时在同一任务回复，审批回复 `批准 <approval_id>`；诊断需要几分钟，建议用 `message/stream`。
 
 ## 核心配置
 默认值可直接使用，需要时只改下面几处；改完在对应仓库执行 `make deploy`（多集群中心 `make deploy-mc`）。

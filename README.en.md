@@ -126,17 +126,19 @@ curl -b jar.txt $B/repair/batches/batch-<diagnosis run_id>                      
 ```
 Approval, plan feedback and cancel are in [HTTP API](docs/api.md); other agents call the standard A2A endpoint (`:30801`), see [A2A](docs/a2a.md).
 
-### A2A (chat the way another agent would)
-```bash
-python3 scripts/a2a_chat.py                          # this node; another cluster: python3 scripts/a2a_chat.py http://<IP>:30801
-```
-Ask anything; at an approval type `y` to approve all or `n` to reject all; answer a clarifying question directly (e.g. "所有边缘集群"); `/new` starts a new conversation, `exit` quits.
+### Plug into another agent system (A2A)
+A2A is served by the `a2a-adapter` sidecar in the AIOps Pod, ready after deployment on port `30801`. Give the other side the following to register in their A2A system:
 
-### Plug into another agent system (serve A2A)
-Give the other side the Agent Card URL to register in their A2A system: `http://<node IP>:30801/.well-known/agent-card.json` (the center's IP for multi-cluster).
-- If they cannot reach the internal IP, set the public address at deploy time: `make deploy A2A_PUBLIC_URL=https://<domain>` (multi-cluster: `make deploy-mc MC_A2A_PUBLIC_URL=…`).
-- To require auth, add `A2A_API_TOKEN: "<random>"` to `deploy/secrets/core.yaml`, run `make deploy`, and have callers send `Authorization: Bearer <random>`.
-- Tell them: ask in plain text; when a task pauses in `input-required` (a question or an approval), reply in the same task, approvals as `批准 <approval_id>`; a diagnosis takes minutes, so prefer `message/stream`.
+| Give them | Value |
+|---|---|
+| Agent Card URL | `http://<node IP>:30801/.well-known/agent-card.json` (the center's IP for multi-cluster) |
+| Token (optional) | `A2A_API_TOKEN` once auth is on; callers send `Authorization: Bearer <token>` |
+
+Our side (then `make deploy`, or `make deploy-mc` on a multi-cluster center):
+- Public address: the call URL in the Agent Card defaults to the node IP; if they cannot reach it, set `A2A_PUBLIC_URL=https://<domain>` (multi-cluster: `MC_A2A_PUBLIC_URL`).
+- Auth: add `A2A_API_TOKEN: "<random>"` to `deploy/secrets/core.yaml`; without it there is no auth.
+
+When they call: ask in plain text; when a task pauses in `input-required` (a question or an approval), reply in the same task, approvals as `批准 <approval_id>`; a diagnosis takes minutes, so prefer `message/stream`.
 
 ## Core settings
 Defaults work as-is; change only these when needed, then run `make deploy` in that repository (`make deploy-mc` on a multi-cluster center).
