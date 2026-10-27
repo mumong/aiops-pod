@@ -33,7 +33,7 @@ A2A Client
 
 ### 1.1 修复技能（kubernetes-repair）
 
-`metadata.aiops_mode=repair` 时，适配器诊断（或复用同一 contextId 的诊断）并按异常组生成修复方案；有待审批动作时任务进入 `input-required`，调用方在同一任务回复 `{approval_id, approved, reviewer}`（DataPart）或文本"批准/拒绝 <approval_id>"，适配器调用后端审批接口后继续，结束时返回各组恢复结果。需要配置 `A2A_BACKEND_API_TOKEN`（后端 `AIOPS_API_TOKENS` 中的 `a2a` 身份）。完整 curl 示例见 [HTTP API 第 7 节](api.md#7-a2a-调用含修复与人工审批)。
+调用方**直接用文字提出修复**即可（如"帮我修复 aiops-case-10 的异常 Pod"），不需要 metadata：适配器每次调用都带 `repair=on_request`，由后端按意图判断；是修复请求时，诊断（或复用同一 contextId 的诊断）并按异常组生成修复方案。`metadata.aiops_mode=repair` 仍可用，含义是"诊断完后总是生成修复方案"。有待审批动作时任务进入 `input-required`，调用方在同一任务回复 `{approval_id, approved, reviewer}`（DataPart）或文本"批准/拒绝 <approval_id>"（每个动作一行，同一决定两种形式都发时只提交一次），适配器调用后端审批接口后继续，结束时返回各组恢复结果。需要配置 `A2A_BACKEND_API_TOKEN`（后端 `AIOPS_API_TOKENS` 中的 `a2a` 身份）。完整 curl 示例见 [HTTP API 第 7 节](api.md#7-a2a-调用含修复与人工审批)。
 
 ### 1.2 单集群与多集群：调用方式相同
 

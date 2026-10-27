@@ -184,3 +184,23 @@ def test_root_usage_does_not_advertise_legacy_remediate_gate(monkeypatch):
     assert response.status_code == 200
     assert "remediate=true" not in response.text
     assert "/ask" in response.text
+
+
+def test_repair_on_request_is_accepted_on_ask_and_query_and_needs_a_session(monkeypatch):
+    # The A2A adapter sends repair=on_request on every call (query or diagnosis mode).
+    client, service = _build_client(monkeypatch)
+    session = {"session_id": "a" * 32}
+    for path in ("/ask", "/query"):
+        assert client.get(path, params={"q": "修复", "repair": "on_request"}).status_code == 400
+        assert (
+            client.get(path, params={"q": "修复", "repair": "on_request", **session}).status_code
+            == 200
+        )
+        overrides = service.stream_calls[-1]["workflow_overrides"]
+        assert overrides["_repair_on_request"] is True and "_auto_repair_plan" not in overrides
+        client.post(path, data={"q": "修复", "repair": "on_request", **session})
+        assert service.stream_calls[-1]["workflow_overrides"]["_repair_on_request"] is True
+    assert client.get("/query", params={"q": "x", "repair": "plan", **session}).status_code == 422
+    plain = client.get("/ask", params={"q": "集群有什么问题", **session})
+    assert plain.status_code == 200
+    assert "_repair_on_request" not in service.stream_calls[-1]["workflow_overrides"]

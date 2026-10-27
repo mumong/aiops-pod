@@ -41,6 +41,8 @@ class WorkflowState(TypedDict, total=False):
     repair_context: Optional[Dict[str, Any]]
     repair_entry_requested: bool
     repair_auto_plan: bool  # /ask repair=plan: diagnose first when no diagnosis exists
+    repair_on_request: bool  # repair=on_request: the same, but only for a repair request
+    repair_requested: bool  # router: this diagnosis stands in for a repair request
     diagnosis_target: Optional[Dict[str, Any]]
     autonomous_groups: List[Dict[str, Any]]
     diagnosis_handoff: Optional[Dict[str, Any]]  # stage-owned targets and cited facts

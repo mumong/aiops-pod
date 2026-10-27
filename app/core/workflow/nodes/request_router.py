@@ -292,14 +292,16 @@ class RequestRouterNode(WorkflowNode):
             }
             self._archive_node_output(output)
             return output
+        rerouted_repair = False
         if (
             contract.route == "remediation"
-            and state.get("repair_auto_plan")
+            and (state.get("repair_auto_plan") or state.get("repair_on_request"))
             and not (state.get("repair_context") or {}).get("diagnosis")
         ):
-            # repair=plan (API / A2A) with no diagnosis in the session: diagnose first;
-            # the executor then starts the per-group batch, whose approvals API callers
-            # can see. The web chat never sets repair=plan and keeps its route.
+            # repair=plan / repair=on_request (API / A2A) with no diagnosis in the session:
+            # diagnose first; the executor then starts the per-group batch, whose approvals
+            # API callers can see. The web chat sets neither and keeps its route.
+            rerouted_repair = True
             contract = contract.model_copy(
                 update={
                     "route": "full_diagnosis",
@@ -329,6 +331,8 @@ class RequestRouterNode(WorkflowNode):
             "request_contract": contract.model_dump(),
             "request_route": contract.route,
         }
+        if rerouted_repair and contract.route == "full_diagnosis":
+            output["repair_requested"] = True
         if contract.route == "clarify":
             output["conclusion"] = contract.clarification
             output["query_session_memory"] = {

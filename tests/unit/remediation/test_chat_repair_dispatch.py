@@ -113,6 +113,29 @@ def test_executor_starts_the_dispatched_or_requested_batch(monkeypatch):
     assert "session_id" in executor._start_repair_batch("修复", dispatched, {}, None)[1]
 
 
+def test_on_request_starts_the_batch_only_for_a_rerouted_repair(monkeypatch):
+    from app.core.remediation import jobs as jobs_module
+    from app.core.workflow.executor import WorkflowExecutor
+
+    started = []
+    monkeypatch.setattr(
+        jobs_module.repair_jobs,
+        "start",
+        lambda service, owner, diagnosis_id, question, group_ids=None: started.append(diagnosis_id)
+        or {"batch_id": f"batch-{diagnosis_id}", "groups": []},
+    )
+    executor = WorkflowExecutor(holmes_service=None)
+    on_request = {"_remediation_owner": "o" * 64, "_repair_on_request": True}
+    record = {"run_id": "d1", "kind": "diagnosis"}
+    # A plain diagnosis asked by an A2A caller: no batch, no approvals to answer.
+    assert executor._start_repair_batch("集群有什么问题", {}, on_request, record) == (None, "")
+    # The router turned "修复 …" into diagnose-first: the diagnosis is planned per group.
+    batch, note = executor._start_repair_batch(
+        "修复 …", {"repair_requested": True}, on_request, record
+    )
+    assert batch["batch_id"] == "batch-d1" and note == "" and started == ["d1"]
+
+
 def test_auto_mode_starts_the_batch_after_a_web_diagnosis_without_a_click(monkeypatch, tmp_path):
     """Boss (2026-10-20): in auto mode a diagnosis should plan, approve and run by itself;
     a person is only needed when a command is blocked. The button stays for review mode."""

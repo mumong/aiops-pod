@@ -89,12 +89,14 @@ def build_agent_card(settings: AdapterSettings) -> AgentCard:
                 id="kubernetes-repair",
                 name="Kubernetes Pod repair with human approval",
                 description=(
-                    "Set metadata aiops_mode=repair. Diagnoses (or reuses this context's "
+                    "Just ask for the repair in plain text (metadata aiops_mode=repair also "
+                    "plans repairs after any diagnosis). Diagnoses (or reuses this context's "
                     "diagnosis), plans one repair job per abnormal group, and pauses in "
                     "input-required with each action and its approval_id. Reply in the same "
-                    "task with a DataPart {approval_id, approved, reviewer} or text "
-                    "'批准 <approval_id>' / '拒绝 <approval_id>'. High-risk command rules run "
-                    "before any approval; results include the recovery verdict."
+                    "task with ONE of: a DataPart {approval_id, approved, reviewer} or text "
+                    "'批准 <approval_id>' / '拒绝 <approval_id>' (one line per action). "
+                    "High-risk command rules run before any approval; results include the "
+                    "recovery verdict."
                 ),
                 tags=["kubernetes", "aiops", "remediation", "human-in-the-loop"],
                 examples=[

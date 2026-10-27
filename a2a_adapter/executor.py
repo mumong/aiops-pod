@@ -172,6 +172,10 @@ class AiopsAgentExecutor(AgentExecutor):
                 extra["session_id"] = session_id
             if mode == "repair":
                 extra["repair_plan"] = True
+            elif session_id:
+                # Repair intent is the backend's call, not the caller's metadata: a repair
+                # request in query/diagnosis mode also becomes a batch we can pause on.
+                extra["repair_on_request"] = True
             async for event in self.backend.stream(
                 question,
                 mode=mode,
@@ -222,7 +226,7 @@ class AiopsAgentExecutor(AgentExecutor):
                 return
             if not final_answer:
                 raise BackendError("AIOps backend ended without a final answer")
-            if mode == "repair" and repair_batch and repair_batch.get("batch_id"):
+            if repair_batch and repair_batch.get("batch_id"):
                 await self._follow_batch(context, updater, repair_batch["batch_id"], cancel_event)
                 return
             await updater.complete(

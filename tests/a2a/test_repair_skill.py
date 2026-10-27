@@ -23,27 +23,35 @@ class RepairBackend:
         self.settings = SimpleNamespace(backend_api_token="tok-a2a")
         self.calls, self.approvals = [], []
         self.status = "awaiting_approval"
+        self.plans_a_batch = True  # the backend decided this request is a repair
 
     async def health(self):
         return {"status": "healthy"}
 
-    async def stream(self, question, *, mode, cancel_event, session_id=None, repair_plan=False):
+    async def stream(
+        self,
+        question,
+        *,
+        mode,
+        cancel_event,
+        session_id=None,
+        repair_plan=False,
+        repair_on_request=False,
+    ):
         self.calls.append(
             {
                 "question": question,
                 "mode": mode,
                 "session_id": session_id,
                 "repair_plan": repair_plan,
+                "repair_on_request": repair_on_request,
             }
         )
         yield BackendEvent("run_start", {"run_id": "diag-1"})
-        yield BackendEvent(
-            "final",
-            {
-                "answer": "# 诊断\n\n异常组 1：探针端口错误",
-                "repair_batch": {"batch_id": "batch-diag-1", "diagnosis_run_id": "diag-1"},
-            },
-        )
+        final = {"answer": "# 诊断\n\n异常组 1：探针端口错误"}
+        if self.plans_a_batch:
+            final["repair_batch"] = {"batch_id": "batch-diag-1", "diagnosis_run_id": "diag-1"}
+        yield BackendEvent("final", final)
 
     def _groups(self):
         return [
@@ -199,3 +207,40 @@ async def test_repair_without_backend_identity_is_rejected():
         ).json()
     assert result["result"]["status"]["state"] == "rejected"
     assert not backend.calls
+
+
+@pytest.mark.asyncio
+async def test_a_repair_request_without_metadata_still_pauses_for_approval():
+    # Live 2026-10-26 (run d52a2280): an A2A host asked "帮我修复 …" without
+    # aiops_mode; the backend waited 600 s for an approval the caller never saw.
+    backend = RepairBackend()
+    app = create_app(_settings(), backend_client=backend)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://a2a.test"
+    ) as client:
+        first = (await client.post("/", json=_send("帮我修复 ns 的异常 Pod"))).json()["result"]
+        assert first["status"]["state"] == "input-required"
+        call = backend.calls[0]
+        assert call["mode"] == "query" and call["repair_on_request"] is True
+        assert call["repair_plan"] is False
+        second = (
+            await client.post(
+                "/",
+                json=_send("批准 appr-123456", task_id=first["id"], context_id=first["contextId"]),
+            )
+        ).json()["result"]
+    assert second["status"]["state"] == "completed"
+    assert [a[:3] for a in backend.approvals] == [("job-1", "appr-123456", True)]
+
+
+@pytest.mark.asyncio
+async def test_a_plain_question_completes_without_any_approval():
+    backend = RepairBackend()
+    backend.plans_a_batch = False  # a query or diagnosis: the backend starts no batch
+    app = create_app(_settings(), backend_client=backend)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://a2a.test"
+    ) as client:
+        result = (await client.post("/", json=_send("集群有什么问题"))).json()["result"]
+    assert result["status"]["state"] == "completed"
+    assert backend.calls[0]["repair_on_request"] is True and not backend.approvals

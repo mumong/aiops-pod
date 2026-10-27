@@ -280,6 +280,37 @@ def test_repair_plan_with_a_diagnosis_or_without_the_flag_keeps_remediation():
     assert _repair_router().execute({"question": "修复"})["request_route"] == "remediation"
 
 
+def test_repair_on_request_reroutes_only_a_repair_and_marks_it():
+    # Live 2026-10-26 (A2A run d52a2280): an A2A host sent "帮我修复 …" without metadata;
+    # it went to single-agent planning and its inline approval timed out after 600 s.
+    # repair=on_request (always sent by the adapter) diagnoses first and marks the request
+    # so the executor starts the per-group batch whose approvals A2A callers can answer.
+    result = _repair_router().execute(
+        {"question": "帮我修复 aiops-case-10 的异常 Pod", "repair_on_request": True}
+    )
+    assert result["request_route"] == "full_diagnosis"
+    assert result["repair_requested"] is True
+    with_diagnosis = {
+        "question": "修复刚刚的问题",
+        "repair_on_request": True,
+        "repair_context": {"diagnosis": {"run_id": "d"}},
+    }
+    kept = _repair_router().execute(with_diagnosis)
+    assert kept["request_route"] == "remediation" and not kept.get("repair_requested")
+
+
+def test_repair_on_request_leaves_a_plain_diagnosis_unmarked():
+    node = RequestRouterNode()
+    node.ai_call = SimpleNamespace(
+        call_structured=lambda **kw: (
+            RequestContract(route="full_diagnosis", task="diagnose", scope="cluster"),
+            "",
+        )
+    )
+    result = node.execute({"question": "集群有什么问题", "repair_on_request": True})
+    assert result["request_route"] == "full_diagnosis" and not result.get("repair_requested")
+
+
 def test_unsupported_request_stops_with_a_clear_reason_not_a_format_error():
     """Live 02cf7ca2a72948c6: "执行 rm /tmp/x" on the host → the model answered
     route=unsupported (a refusal), the schema rejected it and the person saw

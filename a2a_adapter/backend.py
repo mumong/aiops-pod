@@ -48,8 +48,13 @@ class AiopsBackendClient:
         cancel_event: asyncio.Event,
         session_id: str | None = None,
         repair_plan: bool = False,
+        repair_on_request: bool = False,
     ) -> AsyncIterator[BackendEvent]:
-        """``mode`` query -> /query; diagnosis / repair -> /ask (repair adds repair=plan)."""
+        """``mode`` query -> /query; diagnosis / repair -> /ask.
+
+        ``repair_plan`` (repair mode) adds repair=plan; ``repair_on_request`` adds
+        repair=on_request, so a repair request in any mode becomes a per-group batch.
+        """
         endpoint = "/query" if mode == "query" else "/ask"
         url = f"{self.settings.backend_url}{endpoint}"
         form = {
@@ -62,6 +67,8 @@ class AiopsBackendClient:
             form["session_id"] = session_id
         if repair_plan:
             form["repair"] = "plan"
+        elif repair_on_request:
+            form["repair"] = "on_request"
         timeout = httpx.Timeout(
             self.settings.request_timeout_seconds,
             connect=self.settings.connect_timeout_seconds,

@@ -759,6 +759,7 @@ class WorkflowExecutor:
             "repair_context": overrides.get("_repair_context"),
             "repair_entry_requested": bool(overrides.get("_repair_entry_requested")),
             "repair_auto_plan": bool(overrides.get("_auto_repair_plan")),
+            "repair_on_request": bool(overrides.get("_repair_on_request")),
             "question": question,
             "original_question": question,
             "request_time_utc": datetime.now(timezone.utc).isoformat(),
@@ -1024,8 +1025,9 @@ class WorkflowExecutor:
     ) -> Tuple[Optional[Dict[str, Any]], str]:
         """Start the per-group repair batch a request asked for; ``(batch, note)``.
 
-        Two entries share the button's batch: a chat repair request the remediation node
-        dispatched, and ``/ask ... repair=plan`` after a deep diagnosis. Planning only:
+        Three entries share the button's batch: a chat repair request the remediation node
+        dispatched, ``/ask ... repair=plan`` after a deep diagnosis, and ``repair=on_request``
+        when the router turned a repair request into diagnose-first. Planning only:
         every command still goes through policy, approval or auto mode, and recovery.
         """
         dispatch = final_state.get("remediation_dispatch")
@@ -1035,7 +1037,10 @@ class WorkflowExecutor:
             if not group_ids:
                 return None, ""
         elif (
-            overrides.get("_auto_repair_plan")
+            (
+                overrides.get("_auto_repair_plan")
+                or (overrides.get("_repair_on_request") and final_state.get("repair_requested"))
+            )
             and repair_record
             and repair_record.get("kind") == "diagnosis"
         ):

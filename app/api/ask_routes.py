@@ -35,18 +35,35 @@ def _diagnosis_workflow_overrides() -> dict:
     }
 
 
-def _diagnosis_overrides_with_repair(repair: Optional[str], session_id: Optional[str]) -> dict:
-    """``repair=plan`` starts the per-group repair batch after a deep diagnosis."""
-    overrides = _diagnosis_workflow_overrides()
-    if repair == "plan":
+REPAIR_PARAM_HELP = (
+    "repair=plan：深度诊断完成后自动按异常组生成修复方案；repair=on_request：只有请求本身是修复时，"
+    "才先诊断再按异常组生成修复方案（A2A 适配器使用）。均需要 session_id"
+)
+
+
+def _with_repair(overrides: dict, repair: Optional[str], session_id: Optional[str]) -> dict:
+    """``repair=plan`` plans after every deep diagnosis; ``on_request`` only for repairs.
+
+    Both route a repair request without a session diagnosis through diagnose-first and the
+    per-group batch, whose approvals API and A2A callers can answer (the inline approval of
+    single-agent planning is only answerable from the web stream).
+    """
+    if repair in {"plan", "on_request"}:
         if not session_id:
-            raise HTTPException(status_code=400, detail="repair=plan 需要 session_id")
-        overrides["_auto_repair_plan"] = True
+            raise HTTPException(status_code=400, detail=f"repair={repair} 需要 session_id")
+        key = "_auto_repair_plan" if repair == "plan" else "_repair_on_request"
+        overrides[key] = True
     return overrides
 
 
-def _query_workflow_overrides() -> dict:
-    return {"query_mode": "auto"}
+def _diagnosis_overrides_with_repair(repair: Optional[str], session_id: Optional[str]) -> dict:
+    return _with_repair(_diagnosis_workflow_overrides(), repair, session_id)
+
+
+def _query_workflow_overrides(
+    repair: Optional[str] = None, session_id: Optional[str] = None
+) -> dict:
+    return _with_repair({"query_mode": "auto"}, repair, session_id)
 
 
 def _query_session_owner(request, session_id, overrides):
@@ -191,9 +208,7 @@ async def ask_get(
         None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
     ),
     repair: Optional[str] = Query(
-        None,
-        pattern="^plan$",
-        description="repair=plan：深度诊断完成后自动按异常组生成修复方案（需要 session_id）",
+        None, pattern="^(plan|on_request)$", description=REPAIR_PARAM_HELP
     ),
 ):
     """
@@ -239,9 +254,7 @@ async def ask_post(
         None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
     ),
     repair: Optional[str] = Form(
-        None,
-        pattern="^plan$",
-        description="repair=plan：深度诊断完成后自动按异常组生成修复方案（需要 session_id）",
+        None, pattern="^(plan|on_request)$", description=REPAIR_PARAM_HELP
     ),
 ):
     """
@@ -285,6 +298,7 @@ async def query_get(
     session_id: Optional[str] = Query(
         None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
     ),
+    repair: Optional[str] = Query(None, pattern="^on_request$", description=REPAIR_PARAM_HELP),
 ):
     return await _handle_session_query(
         request,
@@ -293,7 +307,7 @@ async def query_get(
         format,
         max_steps,
         session_id,
-        _query_workflow_overrides(),
+        _query_workflow_overrides(repair, session_id),
         QUERY_TITLE,
         "收到轻量查询: %s...",
     )
@@ -309,6 +323,7 @@ async def query_post(
     session_id: Optional[str] = Form(
         None, min_length=16, max_length=128, pattern=SESSION_ID_PATTERN
     ),
+    repair: Optional[str] = Form(None, pattern="^on_request$", description=REPAIR_PARAM_HELP),
 ):
     return await _handle_session_query(
         request,
@@ -317,7 +332,7 @@ async def query_post(
         format,
         max_steps,
         session_id,
-        _query_workflow_overrides(),
+        _query_workflow_overrides(repair, session_id),
         QUERY_TITLE,
         "收到轻量查询 (POST): %s...",
     )
