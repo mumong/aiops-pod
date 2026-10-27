@@ -117,6 +117,30 @@ def router_failure(exc, history_loaded=False):
     }
 
 
+def _session_diagnosis_covers(state: dict, contract: dict) -> bool:
+    """Whether the session's diagnosis can serve this repair request as a batch.
+
+    False without a diagnosis, or when a grouped diagnosis has no group for the Pods /
+    namespaces the request names (the remediation node would plan that inline). Older
+    record shapes keep the remediation route as before.
+    """
+    from app.core.remediation.group_context import diagnosis_groups, select_groups
+    from app.core.remediation.records import RecordUnavailable
+
+    record = (state.get("repair_context") or {}).get("diagnosis")
+    if not isinstance(record, dict):
+        return False
+    payload = record.get("payload") or {}
+    if payload.get("contract_version") != "diagnosis-record.v2" or payload.get("group_id"):
+        return True
+    if not (contract.get("pod_names") or contract.get("namespaces")):
+        return True  # "修复刚刚的问题": the last diagnosis, even one that found nothing
+    try:
+        return bool(select_groups(diagnosis_groups(record), contract))
+    except RecordUnavailable:
+        return True
+
+
 class RequestRouterNode(WorkflowNode):
     def __init__(
         self, holmes_service: Any = None, metrics: Any = None, runbook_catalog: Any = None
@@ -296,11 +320,12 @@ class RequestRouterNode(WorkflowNode):
         if (
             contract.route == "remediation"
             and (state.get("repair_auto_plan") or state.get("repair_on_request"))
-            and not (state.get("repair_context") or {}).get("diagnosis")
+            and not _session_diagnosis_covers(state, contract.model_dump())
         ):
-            # repair=plan / repair=on_request (API / A2A) with no diagnosis in the session:
-            # diagnose first; the executor then starts the per-group batch, whose approvals
-            # API callers can see. The web chat sets neither and keeps its route.
+            # repair=plan / repair=on_request (API / A2A) with no session diagnosis of what
+            # the request names: diagnose first; the executor then starts the per-group
+            # batch, whose approvals API callers can see. The web chat sets neither flag
+            # and keeps its route.
             rerouted_repair = True
             contract = contract.model_copy(
                 update={

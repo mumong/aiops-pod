@@ -299,6 +299,53 @@ def test_repair_on_request_reroutes_only_a_repair_and_marks_it():
     assert kept["request_route"] == "remediation" and not kept.get("repair_requested")
 
 
+def _diagnosis_of(namespace):
+    return {
+        "run_id": "d10",
+        "kind": "diagnosis",
+        "payload": {
+            "contract_version": "diagnosis-record.v2",
+            "groups": [
+                {
+                    "group_id": "g1",
+                    "target": {"entities": [{"kind": "Pod", "namespace": namespace, "name": "p"}]},
+                    "diagnosis_result": {"outcome": "abnormal"},
+                }
+            ],
+        },
+    }
+
+
+def test_repair_on_request_diagnoses_a_target_the_session_diagnosis_lacks():
+    # Same A2A context: c10 was diagnosed, then "修复 aiops-case-09 …" — the old
+    # diagnosis does not cover it, which used to fall back to inline planning.
+    other = {
+        "question": "再帮我修复 aiops-case-09 命名空间里的异常 Pod",
+        "repair_on_request": True,
+        "repair_context": {"diagnosis": _diagnosis_of("aiops-case-10")},
+    }
+    result = _repair_router().execute(other)
+    assert result["request_route"] == "full_diagnosis" and result["repair_requested"] is True
+    covered = {**other, "repair_context": {"diagnosis": _diagnosis_of("aiops-case-09")}}
+    assert _repair_router().execute(covered)["request_route"] == "remediation"
+    web = {**other, "repair_on_request": False}  # the web sends neither flag
+    assert _repair_router().execute(web)["request_route"] == "remediation"
+    healthy = {"payload": {"contract_version": "diagnosis-record.v2", "groups": []}}
+    unscoped = RequestRouterNode()
+    unscoped.ai_call = SimpleNamespace(
+        call_structured=lambda **kw: (
+            RequestContract(route="remediation", task="repair", scope="cluster"),
+            "",
+        )
+    )
+    last = {
+        "question": "修复刚刚的问题",
+        "repair_on_request": True,
+        "repair_context": {"diagnosis": healthy},
+    }
+    assert unscoped.execute(last)["request_route"] == "remediation"
+
+
 def test_repair_on_request_leaves_a_plain_diagnosis_unmarked():
     node = RequestRouterNode()
     node.ai_call = SimpleNamespace(
