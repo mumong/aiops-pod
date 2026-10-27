@@ -24,6 +24,7 @@ class RepairBackend:
         self.calls, self.approvals = [], []
         self.status = "awaiting_approval"
         self.plans_a_batch = True  # the backend decided this request is a repair
+        self.stale_snapshot = False
 
     async def health(self):
         return {"status": "healthy"}
@@ -66,6 +67,19 @@ class RepairBackend:
         ]
 
     async def batch_events(self, batch_id, cancel_event):
+        if self.stale_snapshot and self.approvals:
+            # Right after an approval the backend can still list it as pending.
+            yield {
+                "batch_id": batch_id,
+                "groups": [
+                    {
+                        "job_id": "job-1",
+                        "group_id": "g1",
+                        "status": "awaiting_approval",
+                        "pending_approval_id": "appr-123456",
+                    }
+                ],
+            }
         yield {"batch_id": batch_id, "groups": self._groups()}
 
     async def batch(self, batch_id):
@@ -244,3 +258,24 @@ async def test_a_plain_question_completes_without_any_approval():
         result = (await client.post("/", json=_send("集群有什么问题"))).json()["result"]
     assert result["status"]["state"] == "completed"
     assert backend.calls[0]["repair_on_request"] is True and not backend.approvals
+
+
+@pytest.mark.asyncio
+async def test_a_just_answered_approval_is_not_asked_again():
+    # Live 2026-10-27 (batch-e4ea959e): the snapshot right after an approval still listed
+    # it as pending and the caller was asked to approve the same action twice.
+    backend = RepairBackend()
+    backend.stale_snapshot = True
+    app = create_app(_settings(), backend_client=backend)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://a2a.test"
+    ) as client:
+        first = (await client.post("/", json=_send("帮我修复 ns 的异常 Pod"))).json()["result"]
+        second = (
+            await client.post(
+                "/",
+                json=_send("批准 appr-123456", task_id=first["id"], context_id=first["contextId"]),
+            )
+        ).json()["result"]
+    assert second["status"]["state"] == "completed"
+    assert len(backend.approvals) == 1

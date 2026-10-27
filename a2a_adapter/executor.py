@@ -314,8 +314,13 @@ class AiopsAgentExecutor(AgentExecutor):
         updater: TaskUpdater,
         batch_id: str,
         cancel_event: asyncio.Event,
+        decided: frozenset[str] = frozenset(),
     ) -> None:
-        """Push batch progress; pause for approval (input-required); finish with results."""
+        """Push batch progress; pause for approval (input-required); finish with results.
+
+        ``decided``: approval ids answered in this turn; a snapshot taken right after the
+        decision may still list them as pending, so they never cause a second question.
+        """
         last = ""
         async for snapshot in self.backend.batch_events(batch_id, cancel_event):
             groups = snapshot.get("groups") or []
@@ -328,7 +333,9 @@ class AiopsAgentExecutor(AgentExecutor):
             pending = [
                 g
                 for g in groups
-                if g.get("status") == "awaiting_approval" and g.get("pending_approval_id")
+                if g.get("status") == "awaiting_approval"
+                and g.get("pending_approval_id")
+                and g.get("pending_approval_id") not in decided
             ]
             if pending:
                 await self._ask_for_approval(context, updater, batch_id, pending)
@@ -468,7 +475,13 @@ class AiopsAgentExecutor(AgentExecutor):
                 await updater.start_work(
                     self._message(f"已{verdict} {decision['approval_id']}，继续执行。", context)
                 )
-            await self._follow_batch(context, updater, batch_id, cancel_event)
+            await self._follow_batch(
+                context,
+                updater,
+                batch_id,
+                cancel_event,
+                frozenset(str(d["approval_id"]) for d in decisions),
+            )
         except Exception as exc:
             logger.exception("A2A repair task %s failed", context.task_id)
             await updater.failed(self._message(f"修复流程失败：{exc}", context))
