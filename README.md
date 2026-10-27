@@ -126,6 +126,12 @@ curl -b jar.txt $B/repair/batches/batch-<诊断 run_id>                         
 ```
 审批、修改方案、取消等接口见 [HTTP API](docs/api.md)；其他 Agent 用标准 A2A 调用（`:30801`），见 [A2A](docs/a2a.md)。
 
+### A2A（像其他 Agent 一样对话测试）
+```bash
+python3 scripts/a2a_chat.py                          # 本节点；其他集群：python3 scripts/a2a_chat.py http://<IP>:30801
+```
+直接提问；需要审批时输入 `y` 全部批准、`n` 全部拒绝；反问时直接回答（如"所有边缘集群"）；`/new` 新对话，`exit` 退出。
+
 ## 核心配置
 默认值可直接使用，需要时只改下面几处；改完在对应仓库执行 `make deploy`（多集群中心 `make deploy-mc`）。
 

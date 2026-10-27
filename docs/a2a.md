@@ -53,6 +53,14 @@ curl -sS http://<节点IP>:30801/ -H 'Content-Type: application/json' -d '{
 
 调用方只需要正确处理 `input-required` 这个标准状态：把状态消息展示给用户或让自己的 LLM 作答，再在同一任务里回复。修复审批走同一种机制，多集群下每个待审批动作都会标明所在集群（文本里的"集群 edge-88"，DataPart 里的 `cluster` 字段）。
 
+## 1.3 最快的测试方式：终端对话
+
+```bash
+python3 scripts/a2a_chat.py http://<节点IP>:30801     # 只依赖 python3
+```
+
+脚本用标准 `message/stream` 调用，和外部 Agent 走同一条路径：实时显示进度；`input-required` 时列出待审批动作（`y` 全部批准 / `n` 全部拒绝）或显示反问（直接回答）；同一窗口内的问题共用一个 contextId（`/new` 重新开始）。`-q "问题"` 只问一次。
+
 ## 2. 本地启动
 
 A2A Adapter 必须使用独立虚拟环境。不要把它安装到 HolmesGPT 的 `.venv`：

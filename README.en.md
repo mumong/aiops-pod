@@ -126,6 +126,12 @@ curl -b jar.txt $B/repair/batches/batch-<diagnosis run_id>                      
 ```
 Approval, plan feedback and cancel are in [HTTP API](docs/api.md); other agents call the standard A2A endpoint (`:30801`), see [A2A](docs/a2a.md).
 
+### A2A (chat the way another agent would)
+```bash
+python3 scripts/a2a_chat.py                          # this node; another cluster: python3 scripts/a2a_chat.py http://<IP>:30801
+```
+Ask anything; at an approval type `y` to approve all or `n` to reject all; answer a clarifying question directly (e.g. "所有边缘集群"); `/new` starts a new conversation, `exit` quits.
+
 ## Core settings
 Defaults work as-is; change only these when needed, then run `make deploy` in that repository (`make deploy-mc` on a multi-cluster center).
 
