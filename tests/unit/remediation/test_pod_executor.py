@@ -292,3 +292,21 @@ def test_two_groups_keep_separate_targets_commands_and_approvals():
             store.resolve("groups", event["approval_id"], True, owner="alice")
     assert seen == [("g1", "api-1"), ("g2", "worker-1")]
     assert [args[3] for args in writes] == ["deployment/api", "deployment/worker"]
+
+
+def test_scope_block_says_which_target_and_what_was_requested():
+    draft, _, writes, runner = fixture()
+    draft["targets"][0]["pod"] = ""
+    result = list(
+        PodRepairExecutor(runner=runner).run(
+            "r",
+            draft,
+            mode="auto",
+            request_contract={
+                "namespaces": [draft["targets"][0]["namespace"]],
+                "pod_names": ["api-1"],
+            },
+        )
+    )
+    assert result[-1]["status"] == "blocked" and writes == []
+    assert "pod 为空" in result[-1]["reason"] and "api-1" in result[-1]["reason"]

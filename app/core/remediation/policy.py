@@ -634,3 +634,22 @@ def validate_target_command(command, targets=(), policy=None):
     if not verdict.allowed:
         raise RepairCommandDenied(verdict.reason, rule=verdict.rule)
     return list(verdict.argv), verdict.operation
+
+
+def request_scope_error(namespace, pod, contract) -> Optional[str]:
+    """Why a repair target lies outside the user's request, or None.
+
+    One rule for planning and execution. The text names the offending value and the
+    requested one; each caller adds the next step for its reader (model or user).
+    """
+    contract = contract or {}
+    namespaces = contract.get("namespaces") or []
+    pods = contract.get("pod_names") or []
+    requested = f"本次请求的 Pod：{', '.join(pods)}"
+    if namespaces and namespace not in namespaces:
+        return f"修复目标 namespace={namespace or '（空）'} 不在本次请求的命名空间 {', '.join(namespaces)} 内"
+    if pods and not pod:
+        return f"修复目标（namespace={namespace}）的 pod 为空；{requested}"
+    if pods and pod not in pods:
+        return f"修复目标 Pod {pod} 不在本次请求范围内；{requested}"
+    return None

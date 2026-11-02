@@ -13,7 +13,12 @@ from aiops_edge.jobs_client import RemoteResultUnknown
 from app.core.remediation.approval import approval_store
 from app.core.remediation.audit import audit_event
 from app.core.remediation.execution_guard import RepairCommandDenied, check_repair_execution
-from app.core.remediation.policy import active_policy, check_command, validate_target_command
+from app.core.remediation.policy import (
+    active_policy,
+    check_command,
+    request_scope_error,
+    validate_target_command,
+)
 from app.core.remediation.recovery import RecoveryConfig, RecoveryWatch
 from app.core.workflow.group_runner import group_display_name
 
@@ -193,12 +198,11 @@ class PodRepairExecutor:
             prepared = []
             for action in draft["actions"]:
                 target = targets[action["group_id"]]
-                contract = request_contract or {}
-                if (
-                    contract.get("namespaces")
-                    and target["namespace"] not in contract["namespaces"]
-                ) or (contract.get("pod_names") and target["pod"] not in contract["pod_names"]):
-                    raise ValueError("修复目标超出用户请求范围")
+                out_of_scope = request_scope_error(
+                    target["namespace"], target["pod"], request_contract
+                )
+                if out_of_scope:
+                    raise ValueError(f"{out_of_scope}。未执行任何命令，可重新生成本组方案")
                 # Group locks avoid simultaneous approved plans. They do not
                 # prescribe evidence collection or infer allowed resource types.
                 objects = {(target["namespace"], "pod", target["pod"])}

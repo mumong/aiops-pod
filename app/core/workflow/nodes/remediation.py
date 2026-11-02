@@ -78,6 +78,9 @@ class RepairDraft(QueryAnswer):
     # Planning call only (``with_preflight``): dry-runs the write commands on the plan's
     # cluster; a failure goes back to the model as a validation error to fix.
     preflight: ClassVar[Optional[Callable[[list], List[str]]]] = None
+    # Planning call only (``with_request_scope``): the user's request, so a target the
+    # executor would refuse goes back to the model while it can still fix it.
+    request_scope: ClassVar[Dict] = {}
 
     @classmethod
     def with_controller_chains(cls, chains: Dict[str, ControllerChain]):
@@ -92,6 +95,14 @@ class RepairDraft(QueryAnswer):
     def with_preflight(cls, check):
         return type(
             cls.__name__, (cls,), {"preflight": staticmethod(check), "__module__": cls.__module__}
+        )
+
+    @classmethod
+    def with_request_scope(cls, contract):
+        return type(
+            cls.__name__,
+            (cls,),
+            {"request_scope": dict(contract or {}), "__module__": cls.__module__},
         )
 
     @classmethod
@@ -148,7 +159,11 @@ class RepairDraft(QueryAnswer):
     @model_validator(mode="after")
     def command_contract(self):
         # Validate transport/schema only; the agent chooses the repair strategy.
-        from app.core.remediation.policy import named_resources, validate_target_command
+        from app.core.remediation.policy import (
+            named_resources,
+            request_scope_error,
+            validate_target_command,
+        )
 
         groups = {target.group_id: target for target in self.targets}
         if len(groups) != len(self.targets):
@@ -167,6 +182,14 @@ class RepairDraft(QueryAnswer):
                     f"（已列出：{', '.join(sorted(groups))}）"
                 )
             target = groups[action.group_id]
+            out_of_scope = request_scope_error(
+                target.namespace, target.pod, type(self).request_scope
+            )
+            if out_of_scope:
+                raise ValueError(
+                    f"{out_of_scope}。命令尚未执行；请把 targets 中的 namespace/pod 改成请求中的对象后重新提交，"
+                    "若确实需要处理其他对象，不提交该动作并在 answer 说明"
+                )
             allowed = {(target.namespace, "pod", target.pod)}
             if target.owner_name and target.owner_uid:
                 allowed.add((target.namespace, target.owner_kind.lower(), target.owner_name))
@@ -378,8 +401,10 @@ class RemediationNode(QueryCollectNode):
 
         run = runner_for(state.get("request_contract"))
         remote = is_remote(state.get("request_contract"))
-        schema = RepairDraft.with_controller_chains(chains).with_preflight(
-            lambda actions: preflight_errors(actions, run, remote=remote)
+        schema = (
+            RepairDraft.with_controller_chains(chains)
+            .with_preflight(lambda actions: preflight_errors(actions, run, remote=remote))
+            .with_request_scope(state.get("request_contract"))
         )
         material = {
             "question": question,
