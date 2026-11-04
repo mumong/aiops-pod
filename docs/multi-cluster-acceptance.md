@@ -464,3 +464,18 @@ Boss 反馈 run `e43e8298`（"我的所有边缘测集群有什么pod异常？"�
 | A12-g1-runs-on-edge-88 / A12-g2-runs-on-edge-89 | ✅ | runner 审计：每组恰好 1 个任务，且都在本组集群；审批卡片显示对应集群 |
 | A12-center-untouched | ✅ | 中心 `aiops-case-*` 的 Deployment generation 前后一致 |
 | A12-recovered | ✅ | 两组都是 recovered；预检拦下了一次 `--remove`（参数不存在），模型改写后执行成功 |
+
+### 隧道证书改为 AIOps 专用（2026-11-04，robusta 744edd2b，镜像不变）
+
+`make mc-cert` 经 xnet `POST /api/v1/registry/certificate` 申请 AIOps 自己的客户端证书（clientid `6e1f5609`，至 2031-11-03），`mc-init` 写入 `mcp`、`aiops` 并拒绝 xnet-management 自己的证书；之后重启 MCP 和 AIOps。签发前后中心 Node 与 xnet 命名空间对象不变；签名密钥、集群配置哈希不变。
+
+| 检查 | 结果 |
+|---|---|
+| 单元测试 `tests/unit/multicluster/test_xnet_cert.py` | 18 通过（全部单元测试 1725 通过） |
+| A16 `contract_xnet_cert.py` | 切换前 11/13（来源两项按预期失败），切换后 14/14 |
+| A15 `contract_xnet.py` / `env_check.py` | 11/11 / 8/8 |
+| L2 `tools_direct.py --phase p0` / `p1` | 13/13 / 12/12 |
+| L3 `e2e_ask.py --phase p2` | 9/9（A6 命中 edge-88 runner 13 次、edge-89 0 次；P2-1 识别 OOMKilled） |
+
+脚本随环境变化更新：P0-9 不再假设 edge-89 没有 runner，用 `mc_common.runner_down` 临时缩容我们的 runner 再恢复；A8 按 MCP 8.0.6 起的 `data` 字段断言；P1-1 按当前各边缘实际的 case 命名空间推出期望。运行前在 edge-88 重新部署 c06、c08（`make case-clean` 后 `make case-deploy`）。
+

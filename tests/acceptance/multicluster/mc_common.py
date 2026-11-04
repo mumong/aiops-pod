@@ -133,6 +133,31 @@ def tunnel_get(
         return exc.code, exc.read()
 
 
+@contextmanager
+def runner_down(edge: str) -> Iterator[None]:
+    """Our runner on ``edge`` scaled to 0 for the block, then back to 1 and rolled out."""
+    kc = ["kubectl", "--kubeconfig", kubeconfig(edge), "-n", "aiops"]
+    subprocess.run(
+        [*kc, "scale", "deploy/aiops-edge-runner", "--replicas=0"], check=True, capture_output=True
+    )
+    subprocess.run(
+        [*kc, "wait", "--for=delete", "pod", "-l", "app=aiops-edge-runner", "--timeout=60s"],
+        capture_output=True,
+    )
+    try:
+        yield
+    finally:
+        subprocess.run(
+            [*kc, "scale", "deploy/aiops-edge-runner", "--replicas=1"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [*kc, "rollout", "status", "deploy/aiops-edge-runner", "--timeout=120s"],
+            capture_output=True,
+        )
+
+
 def check(case: str, ok: bool, evidence: str = "", unsure: bool = False) -> bool:
     """``unsure``: the evidence may include other runs (attribution by log window).
 

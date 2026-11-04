@@ -129,7 +129,9 @@ def phase_p0() -> None:
         "P0-8-local-unchanged", rc == 0 and "namespace/xnet" in out and "namespace/mcp" in out
     )
 
-    rc, out, err = pod_sh(f"AIOPS_CLUSTER={EDGE89} kubectl get pods", timeout=40)
+    # Edge-89 runs a runner now; take it away for this case only (our component, restored after).
+    with mc.runner_down("edge-89"):
+        rc, out, err = pod_sh(f"AIOPS_CLUSTER={EDGE89} kubectl get pods", timeout=40)
     mc.check(
         "P0-9-edge-without-runner-unreachable",
         rc == 1 and "cluster_unreachable" in err,
@@ -340,14 +342,26 @@ def phase_p1() -> None:
         len(a8) == 3
         and a8[EDGE88]["online"]
         and a8[EDGE89]["online"]
-        and a8[EDGE88]["capabilities"]["logs"] == "k8s_events",
+        and a8[EDGE88]["data"]["logs"] == "k8s_events",  # key "data" since MCP 8.0.6
         " ".join(f"{n[:12]}={c['online']}" for n, c in a8.items()),
     )
-    p11 = r["P1-1"]
+    # Expected from the live placement (cases move between runs): a case namespace only on
+    # edge-89 must be listed, one only on edge-88 must not.
+    case_ns = {
+        edge: {
+            n["metadata"]["name"]
+            for n in mc.kubectl_json(edge, "get", "namespaces")["items"]
+            if n["metadata"]["name"].startswith("aiops-case-")
+        }
+        for edge in ("edge-88", "edge-89")
+    }
+    only89 = sorted(case_ns["edge-89"] - case_ns["edge-88"])
+    only88 = sorted(case_ns["edge-88"] - case_ns["edge-89"])
+    values = set(json.loads(r["P1-1"]).get("data") or [])
     mc.check(
         "P1-1-label-values-scoped",
-        "aiops-case-10" in p11 and "aiops-case-08" not in p11,
-        p11[:160],
+        bool(only89) and bool(only88) and set(only89) <= values and not values & set(only88),
+        f"edge-89 only={only89} edge-88 only={only88} returned={sorted(v for v in values if v.startswith('aiops-case-'))}",
     )
     mc.check(
         "P1-1b-center-scoped",
@@ -357,18 +371,9 @@ def phase_p1() -> None:
     mc.check("P1-required", (r["P1-req"].get("error") or {}).get("code") == "cluster_required")
 
     # P1-2: our runner down (fault injection on our own component only).
-    import subprocess
     import time
 
-    kc = ["kubectl", "--kubeconfig", mc.kubeconfig("edge-88"), "-n", "aiops"]
-    subprocess.run(
-        [*kc, "scale", "deploy/aiops-edge-runner", "--replicas=0"], check=True, capture_output=True
-    )
-    subprocess.run(
-        [*kc, "wait", "--for=delete", "pod", "-l", "app=aiops-edge-runner", "--timeout=60s"],
-        capture_output=True,
-    )
-    try:
+    with mc.runner_down("edge-88"):
         started = time.monotonic()
         down = run_tools(
             [
@@ -395,16 +400,6 @@ def phase_p1() -> None:
         mc.check(
             "P1-2-metrics-still-available",
             '"status":"success"' in down.get("prom", "").replace(" ", ""),
-        )
-    finally:
-        subprocess.run(
-            [*kc, "scale", "deploy/aiops-edge-runner", "--replicas=1"],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            [*kc, "rollout", "status", "deploy/aiops-edge-runner", "--timeout=120s"],
-            capture_output=True,
         )
 
 
